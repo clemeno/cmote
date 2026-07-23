@@ -150,8 +150,9 @@ cmote/
 ├── PLAN.md
 ├── README.md
 ├── assets/
-│   ├── FiraMono-Medium.ttf   monospace font embedded in the exe (§9, §11)
-│   └── FiraMono-LICENSE.txt  its OFL 1.1 license (required for redistribution)
+│   ├── FiraMono-Medium.ttf   monospace font (normal weight) embedded in the exe (§9, §11)
+│   ├── FiraMono-Bold.ttf     its bold weight, for bold cells (§11)
+│   └── FiraMono-LICENSE.txt  the family's OFL 1.1 license (required for redistribution)
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"]; spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
@@ -276,9 +277,11 @@ Turning a raw byte stream into a screen.
   monospace font (**Fira Mono**, embedded in the exe — OFL 1.1), one styled span per
   run of same-attribute cells. Bundling the font (rather than `Font::MONOSPACE`) makes
   the grid look identical on every machine and gives an **exact** cell advance
-  (600/1000 em = 0.6), which the resize math depends on. `ponytail:` only the Medium
-  weight is embedded, so "bold" cells are not visually heavier in v1; a straightforward
-  cell/row render first, custom canvas / GPU atlas only if scrolling actually lags.
+  (600/1000 em = 0.6), which the resize math depends on. Both the **Medium (500)** and
+  **Bold (700)** weights are embedded (same Fira Mono release, same OFL licence), so a
+  bold cell resolves to a real heavier face; every weight shares the 0.6 advance, so
+  bold does not disturb the cell metric. A straightforward cell/row render first, custom
+  canvas / GPU atlas only if scrolling actually lags.
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
   sequences). Sent as `SshCommand::Input`.

@@ -278,6 +278,10 @@ fn xterm_256(index: u8) -> Color {
 
 /// Build a styled span for one run of same-styled cells.
 fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
+	// Ask for the bold weight on bold cells. Both Fira Mono weights are bundled
+	// (`app::MONO_FONT` / `MONO_FONT_BOLD`), so this resolves to the real 700 face
+	// rather than falling back to the normal one — and since every Fira Mono weight
+	// shares the same advance, bold cells still occupy exactly `CELL_WIDTH` (§11).
 	let font = Font {
 		weight: if style.bold {
 			Weight::Bold

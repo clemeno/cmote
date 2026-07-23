@@ -28,6 +28,17 @@ use crate::ui::connect::AuthKind;
 /// `ui::terminal`.
 const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 
+/// The bold weight of the same family (Fira Mono Bold, weight 700 — same OFL
+/// licence, same Mozilla Fira release as `MONO_FONT`). Bundled so a cell the shell
+/// marks bold renders in a genuinely heavier face rather than the normal one:
+/// `ui::terminal` asks for `Weight::Bold`, and with only the medium weight loaded
+/// iced had no 700 face to resolve to, so bold text looked identical (§11). Every
+/// Fira Mono weight shares the exact 600/1000-em advance, so bundling bold does not
+/// disturb the fixed cell metric the resize math depends on. Both faces share the
+/// family name "Fira Mono"; iced picks the medium (500) for normal cells and the
+/// bold (700) for bold ones purely by the requested weight.
+const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -37,6 +48,7 @@ pub fn run() -> iced::Result {
 	iced::application(App::new, App::update, App::view)
 		.title("cmote")
 		.font(MONO_FONT)
+		.font(MONO_FONT_BOLD)
 		.subscription(App::subscription)
 		.run()
 }
