@@ -82,6 +82,12 @@ pub struct App {
 	/// than in the form so it never lingers there; it is moved into a `Secret` on
 	/// submit and the field is cleared (§12).
 	passphrase_input: String,
+	/// Whether a passphrase has already been submitted this connection. The SSH task
+	/// re-emits `NeedPassphrase` for both the first ask and a wrong-passphrase re-ask,
+	/// so this flag is how the passphrase screen knows to show its "incorrect" hint:
+	/// if it is set when the prompt appears, the previous attempt was rejected (§7).
+	/// Reset at the start of each connection attempt.
+	passphrase_failed: bool,
 	/// The `user@host:port` of the current session, shown in the terminal's status
 	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
 	/// secret, so it is safe in `Debug`.
@@ -179,6 +185,10 @@ impl App {
 			}
 		};
 
+		// Fresh attempt: no passphrase has been tried yet, so any upcoming prompt is
+		// a first ask (no "incorrect" hint) until the user submits one (§7).
+		self.passphrase_failed = false;
+
 		let status = format!("connecting to {}:{}…", params.host, params.port);
 		// The label the terminal status bar will show once the shell is open (§10);
 		// capture it now, before `params` moves into the command.
@@ -206,6 +216,9 @@ impl App {
 	fn on_passphrase_submitted(&mut self) {
 		let secret = Secret::new(std::mem::take(&mut self.passphrase_input));
 		if self.send_command(SshCommand::Passphrase(secret)) {
+			// An attempt is now in flight. If the key does not unlock, the SSH task
+			// re-asks and this flag makes the next prompt show its "incorrect" hint (§7).
+			self.passphrase_failed = true;
 			self.screen = Screen::Connecting {
 				status: "authenticating…".to_string(),
 			};
@@ -343,7 +356,9 @@ impl App {
 			Screen::Connect => ui::connect::view(&self.form),
 			Screen::Connecting { status } => text(status).into(),
 			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
-			Screen::NeedPassphrase => ui::passphrase_view(&self.passphrase_input),
+			Screen::NeedPassphrase => {
+				ui::passphrase_view(&self.passphrase_input, self.passphrase_failed)
+			}
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => {
 					ui::terminal::view(terminal, self.connection.as_deref().unwrap_or(""))

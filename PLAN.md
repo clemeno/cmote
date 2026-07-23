@@ -317,9 +317,12 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
 - **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
   key is encrypted (§7). A masked field with Unlock / Cancel; the field is auto-focused
   when the screen opens (a `text_input::focus` task keyed to a shared id, refocused on
-  every re-ask) so the user can type at once. A wrong passphrase simply re-shows the
-  prompt (the session re-asks, bounded), and the typed text is moved into a `Secret` and
-  cleared on submit.
+  every re-ask) so the user can type at once. A wrong passphrase re-shows the prompt
+  (the session re-asks, bounded) with an "incorrect" hint — the app tracks whether an
+  attempt was already made this connection, since the bridge emits the same
+  `NeedPassphrase` for a first ask and a re-ask. The typed text is moved into a `Secret`
+  and cleared on submit. This is a local key-file passphrase, not remote auth, so the
+  hint is not a credential oracle (§12).
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar shows the live
   session's `user@host:port` on the left and a **Disconnect** button on the right; the
   vt100 grid fills the rest, and keyboard focus goes there. Disconnect sends

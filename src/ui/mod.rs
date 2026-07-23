@@ -7,8 +7,8 @@
 pub mod connect; // the connection form
 pub mod terminal; // the live shell grid
 
-use iced::Element;
 use iced::widget::{button, column, row, text, text_input};
+use iced::{Color, Element};
 
 use crate::app::Message;
 
@@ -18,6 +18,12 @@ use crate::app::Message;
 /// type immediately without first clicking it (§7). A plain `&'static str` is enough
 /// because iced's widget `Id` is `From<&'static str>`.
 pub const PASSPHRASE_INPUT_ID: &str = "passphrase-input";
+
+/// The colour of the "wrong passphrase" hint (§7). A muted red that reads clearly on
+/// the default light theme. This is about a *local* key-file passphrase, not remote
+/// auth, so it is not a credential oracle (§12) — the key is decrypted and MAC-checked
+/// on this machine, and telling the user their local passphrase was wrong is expected.
+const PASSPHRASE_ERROR: Color = Color::from_rgb8(0xb0, 0x00, 0x00);
 
 /// The error screen (§10): a generic message plus a Back button to the form.
 /// Detail is logged, not shown, so nothing sensitive leaks to the UI (§12).
@@ -57,25 +63,41 @@ pub fn host_key_view(fingerprint: &str) -> Element<'_, Message> {
 /// the field submits too. The typed value is owned by `App` and passed in for
 /// display — this view stays pure. A wrong passphrase simply brings the prompt
 /// back (the session re-asks), so no separate error state is needed here.
-pub fn passphrase_view(value: &str) -> Element<'_, Message> {
-	column![
+pub fn passphrase_view(value: &str, failed: bool) -> Element<'_, Message> {
+	// The title, copy, field, and buttons are always shown; the "incorrect" hint
+	// is added only on a re-ask (`failed`), so the first prompt stays clean.
+	// Building the column with `push` lets us insert the hint conditionally without
+	// duplicating the whole layout.
+	let mut content = column![
 		text("Encrypted key").size(20),
 		text(
 			"This private key is protected by a passphrase. Enter it to unlock the key and continue."
 		),
-		text_input("Passphrase", value)
-			.id(PASSPHRASE_INPUT_ID)
-			.secure(true)
-			.on_input(Message::PassphraseChanged)
-			.on_submit(Message::PassphraseSubmitted),
-		row![
-			button("Unlock").on_press(Message::PassphraseSubmitted),
-			button("Cancel").on_press(Message::PassphraseCancelled),
-		]
-		.spacing(10),
-	]
-	.spacing(12)
-	.padding(20)
-	.max_width(480)
-	.into()
+	];
+
+	if failed {
+		content = content.push(
+			text("That passphrase was not correct. Please try again.").color(PASSPHRASE_ERROR),
+		);
+	}
+
+	content
+		.push(
+			text_input("Passphrase", value)
+				.id(PASSPHRASE_INPUT_ID)
+				.secure(true)
+				.on_input(Message::PassphraseChanged)
+				.on_submit(Message::PassphraseSubmitted),
+		)
+		.push(
+			row![
+				button("Unlock").on_press(Message::PassphraseSubmitted),
+				button("Cancel").on_press(Message::PassphraseCancelled),
+			]
+			.spacing(10),
+		)
+		.spacing(12)
+		.padding(20)
+		.max_width(480)
+		.into()
 }
