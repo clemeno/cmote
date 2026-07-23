@@ -1,6 +1,7 @@
 # cmote — Design Plan
 
-A **native, portable Windows 11 SSH client** written in Rust. A single window: fill
+A **native, portable SSH client** written in Rust for **Windows 11 and macOS Sequoia
+(Intel, `x86_64`)**. A single window: fill
 in host / port / user, choose an auth method (password and/or a private key — PEM or
 PuTTY `.ppk`), connect. On success the SSH server gives us a shell and we render a
 **full VT terminal** inside the window — a working interactive prompt.
@@ -10,10 +11,15 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **design only — nothing built yet**. The Rust toolchain is verified working
-on this machine (`rustc`/`cargo` 1.91.0, `x86_64-pc-windows-msvc`, VS 2019 BuildTools
-VC x64 tools present; a hello-world compiled, linked, and ran). This document is the
-reference to build against.
+Status: **design only — nothing built yet**. Both targets are supported first-class,
+and each has a verified toolchain on its host (a hello-world compiled, linked, and ran):
+
+- **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
+  `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
+- **Windows 11** — a Windows host: `rustc`/`cargo` 1.91.0, `x86_64-pc-windows-msvc`,
+  VS 2019 BuildTools VC x64 tools.
+
+This document is the reference to build against.
 
 ---
 
@@ -21,9 +27,9 @@ reference to build against.
 
 | Area | Decision |
 |---|---|
-| Language | Rust, stable channel (1.91.0 verified) |
-| Target | `x86_64-pc-windows-msvc` (native Win11, MSVC linker) |
-| Distribution | **Portable**: one self-contained `.exe`, no installer, no registry writes, no external runtime |
+| Language | Rust, stable channel (verified: 1.97.1 on `x86_64-apple-darwin`, 1.91.0 on `x86_64-pc-windows-msvc`) |
+| Target | `x86_64-pc-windows-msvc` (native Win11, MSVC linker) **and** `x86_64-apple-darwin` (macOS Sequoia, Intel; `clang` linker via Xcode CLT) |
+| Distribution | **Portable**: one self-contained binary (`.exe` on Windows, a bare Mach-O on macOS — optionally wrapped in a `.app`), no installer, no registry/`plist` writes, no external runtime |
 | GUI | **iced 0.14** — pure-Rust, Elm architecture (state / `Message` / `update` / `view`) |
 | SSH | **russh 0.62** — pure-Rust async SSH client (no C deps → clean static build) |
 | Async runtime | **tokio** (multi-thread) on a background thread; bridged to the GUI by channels |
@@ -32,9 +38,9 @@ reference to build against.
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | **Session-only** — held in memory, `zeroize`d on drop, never written to disk |
 | Auth order | Offer `publickey` first (if a key is given), then `password`; driven by what the server accepts |
-| File picker | `rfd` — native Windows open-file dialog for the key file |
+| File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
 | Errors | `anyhow` at the app boundary; typed `thiserror` enums deferred until a real API needs them |
-| Config location | `known_hosts` beside the exe (`./cmote-data/`), falling back to `%LOCALAPPDATA%\cmote` if that dir is read-only |
+| Config location | `known_hosts` beside the exe (`./cmote-data/`), falling back to `%LOCALAPPDATA%\cmote` (Windows) or `~/Library/Application Support/cmote` (macOS) if that dir is read-only |
 
 ---
 
@@ -58,7 +64,9 @@ Each decision below is a thing to learn from, not just a dependency.
   C-free. Its default `aws-lc-rs` backend needs a C toolchain **and NASM** to build,
   which breaks the portable build. We select the `ring` backend instead — it ships
   pre-generated assembly for `x86_64-pc-windows-msvc`, so it builds with no NASM and
-  no external SSH library. See §3 / Cargo.toml.)*
+  no external SSH library. On `x86_64-apple-darwin`, `ring` builds the same assembly
+  with the Xcode Command Line Tools' `clang` — no NASM, still no SSH library (§12 records
+  this target difference). See §3 / Cargo.toml.)*
 - **tokio on a background thread** — iced's event loop is synchronous; SSH I/O is
   async and must never block the UI. The idiomatic bridge is a dedicated tokio runtime
   on its own thread, talking to the GUI over channels (§4). This is *the* pattern for
@@ -80,7 +88,7 @@ Each decision below is a thing to learn from, not just a dependency.
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
 | `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime |
-| `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM) |
+| `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM; `ring` builds on both targets — prebuilt asm on Windows, via Xcode CLT `clang` on macOS) |
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `sync`, `macros`, `time` |
 | `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io) |
@@ -154,7 +162,7 @@ cmote/
 │   ├── FiraMono-Bold.ttf     its bold weight, for bold cells (§11)
 │   └── FiraMono-LICENSE.txt  the family's OFL 1.1 license (required for redistribution)
 └── src/
-    ├── main.rs           entry; #![windows_subsystem = "windows"]; spawns runtime + iced::run
+    ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── ui/
     │   ├── mod.rs
@@ -351,20 +359,29 @@ in `update`. No mutable global state, no `unsafe`.
 "Portable" is a hard requirement: copy one `.exe`, run it anywhere, leave no trace in
 the registry.
 
-- **No console window**: `#![windows_subsystem = "windows"]` in `main.rs` so launching
-  the exe doesn't pop a black cmd window (we render our own terminal).
+- **No stray console window**: `#![windows_subsystem = "windows"]` in `main.rs` so
+  launching the exe doesn't pop a black cmd window (we render our own terminal). The
+  attribute is inert on macOS, where a GUI binary spawns no console. A bare binary
+  double-clicked in Finder opens through Terminal; wrap it in a minimal `.app` bundle
+  (`Contents/MacOS/` + `Info.plist`) for a proper Finder/Dock launch. `ponytail:` the
+  bundle is a packaging step, not code — add it only when a double-clickable app is
+  actually wanted; `cargo run` and terminal launch need nothing.
 - **Config path resolution** (in this order):
   1. `./cmote-data/` next to the executable (`std::env::current_exe()`), if writable —
      true portable mode (USB stick, any folder).
-  2. else `%LOCALAPPDATA%\cmote\` — fallback when the exe sits in a read-only location
-     (e.g. `Program Files`).
-  `ponytail:` plain `std` for path + a write-probe; no `directories` crate needed for
-  two paths.
+  2. else the per-user data dir — `%LOCALAPPDATA%\cmote\` on Windows,
+     `~/Library/Application Support/cmote/` on macOS — a fallback when the exe sits in a
+     read-only location (`Program Files`, `/Applications`, inside a `.app`).
+  `ponytail:` plain `std` (`current_exe` + a write-probe + `%LOCALAPPDATA%`/`$HOME`) for
+  these paths; no `directories` crate needed.
 - **Only file written**: `known_hosts`. No secrets on disk in v1 (§1, §12).
 - **Release profile** (`Cargo.toml`): `opt-level = "z"` or `3`, `lto = true`,
   `codegen-units = 1`, `strip = true`, `panic = "abort"` — smaller, faster, single
-  self-contained exe (the MSVC CRT links statically enough for portability on Win11).
-- **Build/run**: `cargo run` (dev), `cargo build --release` → `target/release/cmote.exe`.
+  self-contained binary (the MSVC CRT links statically enough for portability on Win11;
+  on macOS the binary links only `libSystem`, present on every Sequoia install, so it
+  stays self-contained without bundling).
+- **Build/run**: `cargo run` (dev), `cargo build --release` → `target/release/cmote.exe`
+  on Windows, `target/release/cmote` on macOS.
 
 ---
 
@@ -396,9 +413,13 @@ for free; the rest is deliberate.
 - **Dependency purity vs. security (decided)** — the project is **not 100% Rust
   source**, and that is an accepted, deliberate trade: **security outranks purity**.
   Audited findings for `x86_64-pc-windows-msvc`:
-  - **No C/C++ is compiled during our build** — `cc`, `cmake`, `bindgen`, `nasm`,
-    `pkg-config` are all absent from the build-dependency tree. The build uses only
-    `cargo` + `rustc`; no C toolchain is invoked.
+  - **On `x86_64-pc-windows-msvc`, no C/C++ is compiled during our build** — `cc`,
+    `cmake`, `bindgen`, `nasm`, `pkg-config` are all absent from the invoked build; only
+    `cargo` + `rustc` run. **On `x86_64-apple-darwin` this differs:** `ring` compiles its
+    C + assembly with `clang` from the **Xcode Command Line Tools**, so a C toolchain
+    *is* invoked at build time on macOS. That is an accepted, target-specific cost of the
+    same audited `ring` crypto core — not a new dependency we own — and the CLT is the
+    standard prerequisite for building any Rust binary on macOS.
   - **Exactly one non-Rust-source dependency: `ring`** (crypto), pulled in by russh.
     Its source is C + assembly but ships **pre-built** for this target (hence no C
     compiler / NASM at build). We keep it on purpose: ring is BoringSSL-derived and
@@ -470,8 +491,8 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 ## 15. Deferred (with upgrade paths)
 
 - **Saved connection profiles + credential persistence** — encrypt secrets at rest
-  with **Windows DPAPI** (user-bound, portable-friendly) or an OS keyring; adds a real
-  secret-at-rest threat model. v1 is session-only.
+  with **Windows DPAPI** / the **macOS Keychain** (both user-bound) or an OS keyring;
+  adds a real secret-at-rest threat model. v1 is session-only.
 - **Multiple sessions / tabs** — the channel-per-session design (§4) already allows it;
   v1 ships one session for simplicity.
 - **Broader auth** — `keyboard-interactive` (2FA / OTP prompts), SSH agent / Pageant
@@ -488,5 +509,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 - **Host-key mismatch override UI** — a guarded "the key changed, here's the old vs new
   fingerprint" flow, if ever needed (kept out of v1 on purpose).
 - **Code signing + auto-update** — sign the exe (Authenticode) so Win11 SmartScreen
-  trusts it; add a signed update channel.
+  trusts it, and `codesign` + notarize the macOS binary/`.app` so Gatekeeper allows it;
+  add a signed update channel.
 - **GNU toolchain build** — only if a fully MSVC-CRT-free static exe is ever required.
+- **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
+  architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
+  Mac needs it. v1 targets Intel Sequoia as asked.
