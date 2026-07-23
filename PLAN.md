@@ -28,7 +28,7 @@ reference to build against.
 | SSH | **russh 0.62** — pure-Rust async SSH client (no C deps → clean static build) |
 | Async runtime | **tokio** (multi-thread) on a background thread; bridged to the GUI by channels |
 | Terminal | **Full VT emulator** — `vt100` maintains the screen grid; iced renders the cells |
-| Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` converted** with `puttykeys` |
+| Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | **Session-only** — held in memory, `zeroize`d on drop, never written to disk |
 | Auth order | Offer `publickey` first (if a key is given), then `password`; driven by what the server accepts |
@@ -84,7 +84,7 @@ Each decision below is a thing to learn from, not just a dependency.
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `sync`, `macros`, `time` |
 | `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io) |
-| *(ppk crate)* | **TBD** | convert `.ppk` → OpenSSH | **`puttykeys` from §7 is NOT published on crates.io.** Decision pending — see §7 |
+| `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
 | `anyhow` | 1.0 | app-level error handling (`Result<_, anyhow::Error>`) | context-rich errors, `?` everywhere |
@@ -161,8 +161,7 @@ cmote/
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
     │   ├── auth.rs        method selection + attempts (publickey, password)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
-    │   ├── keyfile.rs     load PEM/OpenSSH; passphrase handling; zeroize; dispatch .ppk
-    │   └── ppk.rs         in-house PuTTY .ppk parser: header, MAC, KDF, decrypt (§7)
+    │   └── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     ├── term/
     │   └── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
@@ -212,32 +211,34 @@ Two format families; only one is native to the SSH ecosystem.
   `decode_secret_key` for in-memory bytes). If the key is encrypted and no passphrase
   was given, russh errors → we emit `SshEvent::NeedPassphrase`, the GUI prompts, we
   retry. The passphrase lives in a `Zeroizing<String>` and is wiped after use.
-- **PuTTY `.ppk` (in-house parser — DECIDED)** — **no SSH library reads `.ppk`
-  natively** and **no usable crate exists** (the `puttykeys` name originally planned
-  is not published on crates.io; the only PuTTY crates wrap the C `ssh2` lib or are
-  OpenSSH-only). Decision: **we parse `.ppk` ourselves** in `ssh/keyfile/ppk.rs`.
-  This is the most didactic path (binary-format parsing, MAC verification, KDF) and
-  keeps the build pure-Rust and portable. Flow:
-  1. Read the text container: header line (`PuTTY-User-Key-File-2` or `-3`), key
-     algorithm, `Public-Lines` (base64), `Private-Lines` (base64), `Private-MAC`.
-  2. **Verify the MAC** (HMAC-SHA-256 for v3; HMAC-SHA-1 for v2) before trusting any
-     bytes — reject a tampered file.
-  3. If encrypted (`Encryption: aes256-cbc`), derive the key — **Argon2** for v3
-     (params are in the header), a SHA-1 construction for v2 — from a `Zeroizing`
-     passphrase, then AES-256-CBC decrypt the private blob.
-  4. Re-encode the inner key into an OpenSSH private key string and hand it to
-     `russh::keys::decode_secret_key(openssh_str, None)` for the actual crypto.
-  - **Scope for v1:** **RSA and Ed25519** inner keys (the common cases). ECDSA `.ppk`
-    is detected and reported with a clear "unsupported key type — export as OpenSSH
-    in PuTTYgen" message rather than failing cryptically. Broader types → §15.
-  - Passphrase, derived key, decrypted bytes, and the re-encoded OpenSSH string are
-    all secret → held in `Zeroizing`, never logged, never written to disk.
-  - Pure-Rust deps for this (RustCrypto): `base64`, `hmac`, `sha1`, `sha2`, `aes`,
-    `cbc`, `argon2`. Added when `ppk.rs` is implemented.
+- **PuTTY `.ppk` (via `ssh-key`'s parser — DECISION REVISED)** — the original plan
+  was to hand-roll a `.ppk` parser because "no usable crate exists". **That premise
+  was false.** The exact `ssh-key` version russh 0.62.4 pins (`=0.7.0-rc.11`) ships a
+  complete PuTTY parser, and **russh enables its `ppk` feature unconditionally** — so
+  `russh::keys::PrivateKey::from_ppk(text, passphrase)` is already compiled into our
+  binary, with **no new dependency**. It reads PPK **v2 and v3**, verifies the MAC in
+  constant time before trusting any bytes (HMAC-SHA-256 for v3, HMAC-SHA-1 for v2),
+  derives the key (Argon2id/i/d for v3, a SHA-1 construction for v2) and AES-256-CBC
+  decrypts the private blob — RSA, Ed25519, ECDSA **and** DSA inner keys. We reuse it.
+  Flow (`ssh/keyfile.rs`):
+  1. Read the file once; sniff the format by *content* (the `PuTTY-User-Key-File-`
+     header line), not the extension, which a user can rename freely.
+  2. `.ppk` → `PrivateKey::from_ppk`; OpenSSH/PEM → `decode_secret_key`. Both yield
+     the same `russh::keys::PrivateKey` the auth step consumes.
+  - **Why reuse, not hand-roll** — MAC verification and key decryption are a
+    security-sensitive path, and PLAN §12 puts *security over purity*. An audited
+    RustCrypto implementation already in the tree beats our own crypto glue; the
+    didactic loss (binary-format parsing) is real but outweighed here. A standalone
+    "parse a binary format by hand" exercise can live outside the security path if
+    wanted.
+  - Passphrases stay in `Secret`/`Zeroizing`. `ponytail:` `from_ppk` takes an owned
+    `String` by value, so the copy handed to it is a plain, non-zeroized `String`
+    dropped inside the crate — a small, API-imposed secret-hygiene gap, noted in
+    `keyfile.rs`.
 
-`ponytail:` v1 targets the two common inner-key types (RSA, Ed25519) and the current
-PPK v2/v3 containers; anything exotic gets a clear error, not a silent failure.
-Broader key-type support noted in §15.
+`ponytail:` `from_ppk` covers the current PPK v2/v3 containers and RSA/Ed25519/
+ECDSA/DSA inner keys; a genuinely exotic container surfaces a clear error, not a
+silent failure.
 
 ---
 
