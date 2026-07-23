@@ -1,13 +1,19 @@
 // ui/terminal.rs — render the vt100 `Screen` grid as iced widgets (PLAN §9-§10).
 //
-// The emulator gives us a grid of cells; this draws it. Each screen row becomes
-// one `rich_text` line, and within a row we coalesce runs of same-styled cells
-// into a single `span` (fewer, wider text runs render faster and keep a
-// monospace font perfectly aligned). Colors, bold, and underline come straight
-// from each cell; the cursor cell is drawn inverted so it is visible.
+// The emulator gives us a grid of cells; this draws it. Each screen row is a
+// `row` of fixed-width boxes: consecutive same-styled *narrow* cells coalesce
+// into one box (its width is exactly `n × CELL_WIDTH`), while a *wide* cell (CJK,
+// emoji — §11) gets its own box two cells across. Pinning each box to an exact
+// multiple of the cell width is what keeps columns aligned: a wide glyph our
+// bundled font can't draw falls back to a system font whose advance we don't
+// control, so free-flowing text would shift everything after it — the fixed box
+// reserves the two columns regardless of how wide the fallback glyph actually is.
+// Background fills the whole box (so a narrow glyph in a wide box still tiles);
+// foreground, bold, and underline come from each cell; the cursor cell is drawn
+// inverted so it is visible.
 
 use iced::font::Weight;
-use iced::widget::text::{LineHeight, Span};
+use iced::widget::text::{LineHeight, Span, Wrapping};
 use iced::widget::{button, column, container, rich_text, row, span, text};
 use iced::{Color, Element, Font, Length, Size};
 
@@ -170,29 +176,44 @@ pub fn grid_size(area: Size) -> (u16, u16) {
 	(rows, cols)
 }
 
-/// Build one screen row as a `rich_text` line, coalescing equal-styled cells.
-fn render_row(
+/// One box's worth of the grid: a string of glyphs, the look they share, and how
+/// many grid columns the box spans. A narrow run spans its glyph count; a single
+/// wide cell spans two. Split out from rendering so the column-packing logic can
+/// be unit-tested without building any widgets.
+struct Run {
+	content: String,
+	style: CellStyle,
+	cols: u16,
+}
+
+/// Pack one screen row into boxes (§11). Walks the row left to right, growing a
+/// run while cells are narrow and share a style, and sealing a wide cell into its
+/// own two-column run so a following cell can never merge into it (which would
+/// mis-size the box). Wide *continuation* cells are skipped — the lead already
+/// reserves their column.
+fn plan_runs(
 	screen: &vt100::Screen,
 	row: u16,
 	cols: u16,
 	on_cursor_row: bool,
 	cursor_col: u16,
-) -> Element<'static, Message> {
-	let mut spans: Vec<Span<'static, ()>> = Vec::new();
-	let mut run = String::new();
-	let mut run_style: Option<CellStyle> = None;
+) -> Vec<Run> {
+	let mut runs: Vec<Run> = Vec::new();
+	let mut content = String::new();
+	// The open run: its style, its column span so far, and whether it is a (sealed)
+	// wide run. `None` means no run is open yet.
+	let mut current: Option<(CellStyle, u16, bool)> = None;
 
 	for col in 0..cols {
 		let cell = screen.cell(row, col);
 
-		// A wide glyph (e.g. CJK) occupies two columns: the lead cell holds it and
-		// the next is a continuation. `ponytail:` skip the continuation — the lead
-		// glyph may not span two monospace cells, so wide text can misalign. Rare
-		// for a shell prompt; proper wide-cell handling is a later refinement.
+		// The trailing half of a wide glyph: its column was already claimed by the
+		// lead cell's two-column box, so emit nothing for it.
 		if cell.is_some_and(vt100::Cell::is_wide_continuation) {
 			continue;
 		}
 
+		let is_wide = cell.is_some_and(vt100::Cell::is_wide);
 		let glyph = match cell {
 			Some(cell) if cell.has_contents() => cell.contents().to_string(),
 			_ => " ".to_string(),
@@ -200,24 +221,75 @@ fn render_row(
 		let is_cursor = on_cursor_row && col == cursor_col;
 		let style = cell_style(cell, is_cursor);
 
-		// Extend the current run while the style matches; otherwise flush it.
-		if run_style == Some(style) {
-			run.push_str(&glyph);
-		} else {
-			if let Some(previous) = run_style.take() {
-				spans.push(make_span(std::mem::take(&mut run), previous));
+		// Extend only when this cell is narrow AND the open run is a narrow run of
+		// the same style; a wide cell (or a wide open run) always breaks the run.
+		let extend =
+			matches!(current, Some((run_style, _, false)) if !is_wide && run_style == style);
+		if extend {
+			content.push_str(&glyph);
+			if let Some((_, span_cols, _)) = current.as_mut() {
+				*span_cols += 1;
 			}
-			run.push_str(&glyph);
-			run_style = Some(style);
+		} else {
+			if let Some((run_style, span_cols, _)) = current.take() {
+				runs.push(Run {
+					content: std::mem::take(&mut content),
+					style: run_style,
+					cols: span_cols,
+				});
+			}
+			content.push_str(&glyph);
+			current = Some((style, if is_wide { 2 } else { 1 }, is_wide));
 		}
 	}
-	if let Some(previous) = run_style {
-		spans.push(make_span(run, previous));
+	if let Some((run_style, span_cols, _)) = current {
+		runs.push(Run {
+			content,
+			style: run_style,
+			cols: span_cols,
+		});
 	}
+	runs
+}
 
-	rich_text(spans)
+/// Build one screen row as a `row` of fixed-width boxes (§11), one per packed run.
+fn render_row(
+	screen: &vt100::Screen,
+	row: u16,
+	cols: u16,
+	on_cursor_row: bool,
+	cursor_col: u16,
+) -> Element<'static, Message> {
+	let boxes: Vec<Element<'static, Message>> =
+		plan_runs(screen, row, cols, on_cursor_row, cursor_col)
+			.into_iter()
+			.map(|run| cell_box(run.content, run.style, run.cols))
+			.collect();
+
+	// Fully qualified: the `row` parameter above shadows the `row` widget helper.
+	iced::widget::row(boxes).spacing(0).into()
+}
+
+/// One fixed-width cell box: the glyph(s) drawn in a container pinned to exactly
+/// `span_cols × CELL_WIDTH` (§11). The container carries the background so it fills
+/// the whole box — including any slack a fallback wide glyph leaves — and clips so
+/// an over-wide fallback glyph can't spill past its columns and shove the next box.
+fn cell_box(content: String, style: CellStyle, span_cols: u16) -> Element<'static, Message> {
+	// One span holds the run's glyphs; `Wrapping::None` keeps it on a single line
+	// even when the text's measured width grazes the box width.
+	let glyphs = rich_text(vec![make_span(content, style)])
 		.size(FONT_SIZE)
 		.line_height(LineHeight::Relative(LINE_HEIGHT))
+		.wrapping(Wrapping::None);
+
+	container(glyphs)
+		.width(Length::Fixed(f32::from(span_cols) * CELL_WIDTH))
+		.height(Length::Fixed(CELL_HEIGHT))
+		.clip(true)
+		.style(move |_theme| container::Style {
+			background: Some(style.bg.into()),
+			..container::Style::default()
+		})
 		.into()
 }
 
@@ -276,7 +348,9 @@ fn xterm_256(index: u8) -> Color {
 	Color::from_rgb8(level, level, level)
 }
 
-/// Build a styled span for one run of same-styled cells.
+/// Build a styled span for one run of same-styled cells. Foreground, weight, and
+/// underline live here; the background is painted by the enclosing `cell_box` so it
+/// fills the whole fixed-width box rather than only the glyphs' advance (§11).
 fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
 	// Ask for the bold weight on bold cells. Both Fira Mono weights are bundled
 	// (`app::MONO_FONT` / `MONO_FONT_BOLD`), so this resolves to the real 700 face
@@ -294,13 +368,13 @@ fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
 		.font(font)
 		.size(FONT_SIZE)
 		.color(style.fg)
-		.background(style.bg)
 		.underline(style.underline)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::term::Terminal;
 
 	#[test]
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
@@ -314,5 +388,47 @@ mod tests {
 	fn tiny_area_clamps_to_at_least_one_cell() {
 		// Smaller than the padding would give a negative count; clamp to 1×1.
 		assert_eq!(grid_size(Size::new(1.0, 1.0)), (1, 1));
+	}
+
+	// Pack row 0 of a grid after feeding `input` to a fresh emulator. The cursor is
+	// left out (`on_cursor_row = false`) so the tests exercise the column packing
+	// alone, not the cursor's inverse-video split.
+	fn row_runs(input: &str, cols: u16) -> Vec<Run> {
+		let mut terminal = Terminal::new(1, cols);
+		terminal.process(input.as_bytes());
+		plan_runs(terminal.screen(), 0, cols, false, 0)
+	}
+
+	#[test]
+	fn narrow_cells_of_one_style_coalesce_into_a_single_box() {
+		// "hello" plus trailing spaces are all the default style, so the whole row is
+		// one box spanning every column.
+		let runs = row_runs("hello", 20);
+		assert_eq!(runs.len(), 1);
+		assert!(runs[0].content.starts_with("hello"));
+		assert_eq!(runs[0].cols, 20);
+	}
+
+	#[test]
+	fn a_wide_glyph_gets_its_own_two_column_box() {
+		// 世 is East-Asian-wide: it must be sealed into a two-column box, with the
+		// narrow cells on either side kept in their own boxes.
+		let cols = 10;
+		let runs = row_runs("a世b", cols);
+		assert_eq!(runs.len(), 3);
+		assert_eq!((runs[0].content.as_str(), runs[0].cols), ("a", 1));
+		assert_eq!((runs[1].content.as_str(), runs[1].cols), ("世", 2));
+		assert!(runs[2].content.starts_with('b'));
+		assert_eq!(runs[2].cols, cols - 3); // b + trailing spaces
+	}
+
+	#[test]
+	fn packed_runs_cover_every_grid_column_exactly_once() {
+		// The box widths must sum to the grid width — each wide glyph claims two
+		// columns and each continuation claims none, so nothing is lost or doubled.
+		let cols = 12;
+		let runs = row_runs("x世y世z", cols);
+		let total: u16 = runs.iter().map(|run| run.cols).sum();
+		assert_eq!(total, cols);
 	}
 }

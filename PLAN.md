@@ -274,14 +274,20 @@ Turning a raw byte stream into a screen.
   escapes and maintains a `Screen`: a grid of cells, each with a glyph, fg/bg color,
   and attributes (bold, underline, inverse), plus cursor position.
 - **Render** (`ui/terminal.rs`): draw the `Screen` in iced using a **bundled**
-  monospace font (**Fira Mono**, embedded in the exe — OFL 1.1), one styled span per
-  run of same-attribute cells. Bundling the font (rather than `Font::MONOSPACE`) makes
-  the grid look identical on every machine and gives an **exact** cell advance
-  (600/1000 em = 0.6), which the resize math depends on. Both the **Medium (500)** and
-  **Bold (700)** weights are embedded (same Fira Mono release, same OFL licence), so a
-  bold cell resolves to a real heavier face; every weight shares the 0.6 advance, so
-  bold does not disturb the cell metric. A straightforward cell/row render first, custom
-  canvas / GPU atlas only if scrolling actually lags.
+  monospace font (**Fira Mono**, embedded in the exe — OFL 1.1). Each row is a `row`
+  of **fixed-width boxes**: consecutive same-attribute *narrow* cells coalesce into one
+  box (width `n × cell`), and a *wide* cell (CJK/emoji) gets its own box **two** cells
+  across. Pinning every box to an exact multiple of the cell width keeps columns aligned
+  even when a wide glyph falls back to a system font whose advance we don't control
+  (free-flowing text would shift the rest of the line). Bundling the font (rather than
+  `Font::MONOSPACE`) makes the grid look identical on every machine and gives an
+  **exact** cell advance (600/1000 em = 0.6), which the resize math depends on. Both the
+  **Medium (500)** and **Bold (700)** weights are embedded (same Fira Mono release, same
+  OFL licence), so a bold cell resolves to a real heavier face; every weight shares the
+  0.6 advance, so bold does not disturb the cell metric. `ponytail:` a *narrow* glyph the
+  bundled font lacks can still drift within its coalesced box, but the drift is clipped
+  at the box edge and resets at the next box, so it never desyncs the whole line — a full
+  canvas / GPU atlas stays the escape hatch only if this ever matters.
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
   sequences). Sent as `SshCommand::Input`.
@@ -474,8 +480,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
 - **SFTP / file transfer, port forwarding (local/remote/dynamic)** — russh supports the
   channels; each is a feature, not a v1 need.
-- **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need wide-char /
-  advanced modes / higher throughput; GPU-accelerated glyph rendering if scrolling lags.
+- **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
+  / higher throughput; GPU-accelerated glyph rendering if scrolling lags. (Wide-char
+  cells now lay out correctly on the `vt100` grid — see the render note in §11.)
 - **Bracketed paste + clipboard integration** — with the safety review that OSC 52
   and paste injection require.
 - **Host-key mismatch override UI** — a guarded "the key changed, here's the old vs new

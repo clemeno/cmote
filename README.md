@@ -104,9 +104,11 @@ port `2222`, user `tester`, choose **Password**, type `testpass`, connect. Expec
 **3. Terminal behaviour.** In the shell: run `ls`, `echo hi`, an interactive program
 (`top`, then `q`), and **Ctrl-C** to interrupt. Print bold text
 (`printf '\033[1mBOLD\033[0m normal\n'`) and confirm the bold run is visibly heavier
-than the normal one (both weights are bundled — §11). Resize the window and run `tput
-cols; tput lines` (or `stty size`) — the reported size should track the window. Click
-**Disconnect** → you return to the form immediately.
+than the normal one (both weights are bundled — §11). Print wide glyphs over aligned
+columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
+stays in its column — a wide glyph reserves two cells (§11). Resize the window and run
+`tput cols; tput lines` (or `stty size`) — the reported size should track the window.
+Click **Disconnect** → you return to the form immediately.
 
 **4. Key auth.** Generate a test key and authorize it:
 
