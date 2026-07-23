@@ -14,18 +14,19 @@
 // Accept/Reject. That answer arrives as another SshCommand — so `run()` has to
 // stay free to receive it. Spawning the session keeps the command loop live.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use russh::client;
-use russh::keys::PublicKey;
+use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey, load_secret_key};
 use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::bridge::{ConnectParams, SshCommand, SshEvent};
+use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
+use crate::secret::Secret;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::term;
 
@@ -171,13 +172,35 @@ async fn connect_and_run(
 	.context("connection timed out")?
 	.context("could not connect")?;
 
-	// Password authentication (§7). A failure is deliberately generic — we never
-	// reveal whether the user or the password was wrong (no credential oracle).
-	let auth = session
-		.authenticate_password(params.user.as_str(), params.password.expose())
-		.await
-		.context("authentication request failed")?;
-	if !auth.success() {
+	// Authenticate with the method the user chose (§7). A failure is deliberately
+	// generic — we never reveal whether the user, the password, or the key was
+	// wrong (no credential oracle).
+	let authenticated = match &params.auth {
+		AuthMethod::Password(password) => session
+			.authenticate_password(params.user.as_str(), password.expose())
+			.await
+			.context("authentication request failed")?
+			.success(),
+
+		AuthMethod::Key { path, passphrase } => {
+			let key = load_private_key(path, passphrase.as_ref())?;
+			// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
+			// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which
+			// it accepts and use the strongest; other key types ignore this.
+			let hash_alg = if key.algorithm().is_rsa() {
+				session.best_supported_rsa_hash().await?.flatten()
+			} else {
+				None
+			};
+			let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+			session
+				.authenticate_publickey(params.user.as_str(), key)
+				.await
+				.context("authentication request failed")?
+				.success()
+		}
+	};
+	if !authenticated {
 		bail!("authentication failed");
 	}
 
@@ -201,6 +224,22 @@ async fn connect_and_run(
 	channel.request_shell(true).await?;
 
 	stream(channel, events, to_session_rx).await
+}
+
+/// Load and decode a private key from disk (§7). Supports the OpenSSH and PEM
+/// formats russh understands (Ed25519, ECDSA, RSA). `passphrase` decrypts an
+/// encrypted key; the "encrypted but no passphrase given" case is mapped to a
+/// clear message so the reason is obvious in the logs. `ponytail:` the reading
+/// is blocking file I/O on the async runtime — fine for a one-shot read of a
+/// small key file, but a candidate for `spawn_blocking` if it ever grows.
+fn load_private_key(path: &Path, passphrase: Option<&Secret>) -> Result<PrivateKey> {
+	let passphrase = passphrase.map(Secret::expose);
+	load_secret_key(path, passphrase).map_err(|error| match error {
+		russh::keys::Error::KeyIsEncrypted => {
+			anyhow!("the key is encrypted; a passphrase is required")
+		}
+		other => anyhow::Error::new(other).context("could not load the private key"),
+	})
 }
 
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.

@@ -5,24 +5,45 @@
 // strings into a typed `ConnectParams` (or a clear error) before anything is
 // sent to the network — "validate at the boundary" (§12).
 
+use std::path::{Path, PathBuf};
+
 use iced::Element;
-use iced::widget::{button, column, row, text, text_input};
+use iced::widget::{button, column, radio, row, text, text_input};
 
 use crate::app::Message;
-use crate::bridge::ConnectParams;
+use crate::bridge::{AuthMethod, ConnectParams};
 use crate::secret::Secret;
 
 /// The default SSH port, used when the user leaves the port field blank.
 const DEFAULT_SSH_PORT: u16 = 22;
 
-/// The connect form's editable fields. Plain owned `String`s: text inputs work
-/// with strings, and validation converts them to typed values on submit.
+/// Which authentication method the form is set to. A tiny `Copy` enum so the
+/// radio buttons can compare it by value and select the current one; `Password`
+/// is the default. This is the UI-side mirror of `bridge::AuthMethod` — the form
+/// holds a choice, `validate` turns it into the real method with its secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AuthKind {
+	#[default]
+	Password,
+	Key,
+}
+
+/// The connect form's editable fields. Plain owned values that mirror the
+/// widgets: text inputs work with `String`s, the file picker yields a `PathBuf`,
+/// and validation converts them to typed values on submit.
 #[derive(Debug, Default)]
 pub struct ConnectForm {
 	pub host: String,
 	pub port: String,
 	pub user: String,
+	/// Which method is selected; decides which credential fields are read.
+	pub auth_kind: AuthKind,
+	/// Password for `Password` auth.
 	pub password: String,
+	/// Chosen private-key file for `Key` auth (set by the file picker).
+	pub key_path: Option<PathBuf>,
+	/// Optional passphrase for an encrypted key; empty means "unencrypted".
+	pub key_passphrase: String,
 }
 
 impl ConnectForm {
@@ -50,15 +71,37 @@ impl ConnectForm {
 			return Err("User is required.".to_string());
 		}
 
+		let auth = self.validate_auth()?;
+
 		Ok(ConnectParams {
 			host: host.to_string(),
 			port,
 			user: user.to_string(),
-			// The password is wrapped so it is redacted in logs and wiped on
-			// drop (§12). An empty password is allowed here — the server decides
-			// whether it is acceptable.
-			password: Secret::new(self.password.clone()),
+			auth,
 		})
+	}
+
+	/// Turn the selected auth kind and its fields into a typed `AuthMethod`.
+	/// Secrets are wrapped so they are redacted in logs and wiped on drop (§12);
+	/// an empty password/passphrase is allowed here — the server (or the key
+	/// loader) decides whether it is acceptable.
+	fn validate_auth(&self) -> Result<AuthMethod, String> {
+		match self.auth_kind {
+			AuthKind::Password => Ok(AuthMethod::Password(Secret::new(self.password.clone()))),
+			AuthKind::Key => {
+				let path = self
+					.key_path
+					.clone()
+					.ok_or_else(|| "Choose a private-key file.".to_string())?;
+				// Empty passphrase => the key is unencrypted; otherwise wrap it.
+				let passphrase = if self.key_passphrase.is_empty() {
+					None
+				} else {
+					Some(Secret::new(self.key_passphrase.clone()))
+				};
+				Ok(AuthMethod::Key { path, passphrase })
+			}
+		}
 	}
 }
 
@@ -70,19 +113,72 @@ pub fn view(form: &ConnectForm) -> Element<'_, Message> {
 		labeled_input("Host", "example.com", &form.host, Message::HostChanged),
 		labeled_input("Port", "22", &form.port, Message::PortChanged),
 		labeled_input("User", "root", &form.user, Message::UserChanged),
-		// `.secure(true)` masks the characters — a password field, not plain text.
-		row![
-			text("Password").width(90),
-			text_input("", &form.password)
-				.secure(true)
-				.on_input(Message::PasswordChanged),
-		]
-		.spacing(10),
+		auth_selector(form.auth_kind),
+		// The credential fields depend on the selected method — only the relevant
+		// ones are shown, so the form stays uncluttered.
+		auth_fields(form),
 		button("Connect").on_press(Message::ConnectPressed),
 	]
 	.spacing(12)
 	.padding(20)
 	.max_width(420)
+	.into()
+}
+
+/// The two radio buttons that choose the authentication method. `radio` needs a
+/// `Copy + Eq` value; passing `Some(selected)` marks the current one as chosen.
+fn auth_selector(selected: AuthKind) -> Element<'static, Message> {
+	row![
+		text("Auth").width(90),
+		radio(
+			"Password",
+			AuthKind::Password,
+			Some(selected),
+			Message::AuthKindChanged
+		),
+		radio(
+			"Key",
+			AuthKind::Key,
+			Some(selected),
+			Message::AuthKindChanged
+		),
+	]
+	.spacing(10)
+	.into()
+}
+
+/// The credential fields for the selected method: a password box, or a key-file
+/// chooser plus an optional passphrase box.
+fn auth_fields(form: &ConnectForm) -> Element<'_, Message> {
+	match form.auth_kind {
+		AuthKind::Password => secure_input("Password", &form.password, Message::PasswordChanged),
+		AuthKind::Key => column![
+			key_file_row(form.key_path.as_deref()),
+			secure_input(
+				"Passphrase",
+				&form.key_passphrase,
+				Message::KeyPassphraseChanged
+			),
+		]
+		.spacing(12)
+		.into(),
+	}
+}
+
+/// The key-file chooser: the chosen path (or a prompt) and a Browse button that
+/// opens the native file picker. Returns an owned (`'static`) element — the path
+/// is copied into a label, so nothing is borrowed from the form.
+fn key_file_row(path: Option<&Path>) -> Element<'static, Message> {
+	let label = match path {
+		Some(path) => path.display().to_string(),
+		None => "No key file selected".to_string(),
+	};
+	row![
+		text("Key file").width(90),
+		text(label),
+		button("Browse…").on_press(Message::BrowseKeyPressed),
+	]
+	.spacing(10)
 	.into()
 }
 
@@ -100,4 +196,90 @@ fn labeled_input<'a>(
 	]
 	.spacing(10)
 	.into()
+}
+
+/// A masked (password-style) input with a label. `.secure(true)` hides the
+/// characters — used for both the password and the key passphrase.
+fn secure_input<'a>(
+	label: &'a str,
+	value: &'a str,
+	on_input: impl Fn(String) -> Message + 'a,
+) -> Element<'a, Message> {
+	row![
+		text(label).width(90),
+		text_input("", value).secure(true).on_input(on_input),
+	]
+	.spacing(10)
+	.into()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// A form with the required non-auth fields filled, so tests vary only auth.
+	fn base_form() -> ConnectForm {
+		ConnectForm {
+			host: "example.com".to_string(),
+			user: "root".to_string(),
+			..ConnectForm::default()
+		}
+	}
+
+	#[test]
+	fn password_auth_wraps_the_password() {
+		let form = ConnectForm {
+			auth_kind: AuthKind::Password,
+			password: "hunter2".to_string(),
+			..base_form()
+		};
+		let params = form.validate().expect("valid password form");
+		match params.auth {
+			AuthMethod::Password(secret) => assert_eq!(secret.expose(), "hunter2"),
+			other => panic!("expected password auth, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn key_auth_without_a_file_is_rejected() {
+		let form = ConnectForm {
+			auth_kind: AuthKind::Key,
+			..base_form()
+		};
+		assert!(form.validate().is_err());
+	}
+
+	#[test]
+	fn key_auth_with_empty_passphrase_is_unencrypted() {
+		let form = ConnectForm {
+			auth_kind: AuthKind::Key,
+			key_path: Some(PathBuf::from("/keys/id_ed25519")),
+			..base_form()
+		};
+		let params = form.validate().expect("valid key form");
+		match params.auth {
+			AuthMethod::Key { path, passphrase } => {
+				assert_eq!(path, PathBuf::from("/keys/id_ed25519"));
+				assert!(passphrase.is_none());
+			}
+			other => panic!("expected key auth, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn key_auth_keeps_a_non_empty_passphrase() {
+		let form = ConnectForm {
+			auth_kind: AuthKind::Key,
+			key_path: Some(PathBuf::from("/keys/id_rsa")),
+			key_passphrase: "open sesame".to_string(),
+			..base_form()
+		};
+		let params = form.validate().expect("valid key form");
+		match params.auth {
+			AuthMethod::Key { passphrase, .. } => {
+				assert_eq!(passphrase.expect("passphrase kept").expose(), "open sesame");
+			}
+			other => panic!("expected key auth, got {other:?}"),
+		}
+	}
 }

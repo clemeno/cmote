@@ -9,6 +9,8 @@
 // There is no hidden widget tree and no global mutable state. Every change
 // flows through `update`, and the compiler forces us to handle each `Message`.
 
+use std::path::PathBuf;
+
 use iced::Element;
 use iced::widget::text;
 use tokio::sync::mpsc;
@@ -16,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::bridge::{self, SshCommand, SshEvent};
 use crate::term;
 use crate::ui;
+use crate::ui::connect::AuthKind;
 
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
@@ -74,6 +77,15 @@ pub enum Message {
 	PortChanged(String),
 	UserChanged(String),
 	PasswordChanged(String),
+	// --- auth method selection (§7) ---
+	/// The user switched between password and key auth.
+	AuthKindChanged(AuthKind),
+	/// The user edited the key passphrase field.
+	KeyPassphraseChanged(String),
+	/// The user clicked "Browse…" — open the native key-file picker.
+	BrowseKeyPressed,
+	/// The picker closed: `Some(path)` if a file was chosen, `None` if cancelled.
+	KeyFilePicked(Option<PathBuf>),
 	// --- form actions ---
 	ConnectPressed,
 	BackPressed,
@@ -102,6 +114,17 @@ impl App {
 			Message::PortChanged(value) => self.form.port = value,
 			Message::UserChanged(value) => self.form.user = value,
 			Message::PasswordChanged(value) => self.form.password = value,
+			Message::AuthKindChanged(kind) => self.form.auth_kind = kind,
+			Message::KeyPassphraseChanged(value) => self.form.key_passphrase = value,
+			// Opening the picker is async work, so it returns a `Task` and we
+			// short-circuit the default `Task::none()` below.
+			Message::BrowseKeyPressed => return browse_key(),
+			// A cancelled picker (`None`) keeps whatever was already chosen.
+			Message::KeyFilePicked(path) => {
+				if path.is_some() {
+					self.form.key_path = path;
+				}
+			}
 			Message::ConnectPressed => self.on_connect_pressed(),
 			Message::BackPressed => self.screen = Screen::Connect,
 			Message::AcceptHostKey => self.on_host_key_decision(true),
@@ -246,4 +269,17 @@ impl App {
 			_ => ssh,
 		}
 	}
+}
+
+/// Open the native file picker for a private-key file (§7). The dialog is modal
+/// and would block the GUI thread, so it runs as an async `Task` instead; its
+/// result arrives back through the Elm loop as `Message::KeyFilePicked`. We keep
+/// only the path — the `FileHandle` itself is not needed past selection.
+fn browse_key() -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Select a private key")
+			.pick_file(),
+		|handle| Message::KeyFilePicked(handle.map(|handle| handle.path().to_path_buf())),
+	)
 }

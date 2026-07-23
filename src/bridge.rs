@@ -17,6 +17,8 @@
 // is temporary scaffolding — drop it once the client constructs every variant.
 #![allow(dead_code)]
 
+use std::path::PathBuf;
+
 use iced::Subscription;
 use iced::futures::SinkExt; // brings `.send()` onto the futures mpsc Sender
 use iced::futures::Stream;
@@ -30,6 +32,22 @@ use crate::ssh;
 /// (backpressure, §4). `ponytail:` a generous fixed bound; tune only if needed.
 const CHANNEL_BOUND: usize = 256;
 
+/// How the user proves who they are (§7). Exactly one method per connection, so
+/// a sum type is the right shape: "password OR key, never both and never
+/// neither" becomes impossible to represent wrongly. Both variants carry their
+/// secret material in `Secret`, so it is redacted in `Debug` and wiped on drop.
+#[derive(Debug, Clone)]
+pub enum AuthMethod {
+	/// A password typed into the form.
+	Password(Secret),
+	/// A private-key file (PEM / OpenSSH). `passphrase` decrypts an encrypted
+	/// key; `None` means the key is stored unencrypted.
+	Key {
+		path: PathBuf,
+		passphrase: Option<Secret>,
+	},
+}
+
 /// Parameters the user fills in on the connect form, handed to the SSH task once
 /// to start a session. A plain owned struct so it moves across the channel
 /// without borrowing GUI state.
@@ -38,9 +56,8 @@ pub struct ConnectParams {
 	pub host: String,
 	pub port: u16,
 	pub user: String,
-	/// Password for `password` auth. Redacted in `Debug`, wiped on drop (§12).
-	/// Key-based auth material is added in the next slice (§7).
-	pub password: Secret,
+	/// The chosen authentication method and its secret material (§7).
+	pub auth: AuthMethod,
 }
 
 /// GUI -> SSH task. Everything the user can ask the connection to do.
