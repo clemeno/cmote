@@ -8,7 +8,7 @@ pub mod connect; // the connection form
 pub mod terminal; // the live shell grid
 
 use iced::Element;
-use iced::widget::{button, column, row, text};
+use iced::widget::{button, column, row, text, text_input};
 
 use crate::app::Message;
 
@@ -42,5 +42,32 @@ pub fn host_key_view(fingerprint: &str) -> Element<'_, Message> {
 	.spacing(12)
 	.padding(20)
 	.max_width(560)
+	.into()
+}
+
+/// The key-passphrase prompt (§7), shown only when the chosen private key turns
+/// out to be encrypted. A masked field plus Unlock / Cancel; pressing Enter in
+/// the field submits too. The typed value is owned by `App` and passed in for
+/// display — this view stays pure. A wrong passphrase simply brings the prompt
+/// back (the session re-asks), so no separate error state is needed here.
+pub fn passphrase_view(value: &str) -> Element<'_, Message> {
+	column![
+		text("Encrypted key").size(20),
+		text(
+			"This private key is protected by a passphrase. Enter it to unlock the key and continue."
+		),
+		text_input("Passphrase", value)
+			.secure(true)
+			.on_input(Message::PassphraseChanged)
+			.on_submit(Message::PassphraseSubmitted),
+		row![
+			button("Unlock").on_press(Message::PassphraseSubmitted),
+			button("Cancel").on_press(Message::PassphraseCancelled),
+		]
+		.spacing(10),
+	]
+	.spacing(12)
+	.padding(20)
+	.max_width(480)
 	.into()
 }

@@ -16,6 +16,7 @@ use iced::widget::text;
 use tokio::sync::mpsc;
 
 use crate::bridge::{self, SshCommand, SshEvent};
+use crate::secret::Secret;
 use crate::term;
 use crate::ui;
 use crate::ui::connect::AuthKind;
@@ -45,6 +46,9 @@ pub enum Screen {
 	/// First contact with an unknown host: the server's key fingerprint is shown
 	/// and the user must accept or reject before the handshake continues (§8).
 	ConfirmHostKey { fingerprint: String },
+	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
+	/// text the user types lives in `App::passphrase_input`.
+	NeedPassphrase,
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
 	/// A terminal failure. The message is generic and never leaks secrets (§12).
@@ -66,6 +70,10 @@ pub struct App {
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
 	terminal: Option<term::Terminal>,
+	/// The passphrase being typed on the `NeedPassphrase` screen. Kept here rather
+	/// than in the form so it never lingers there; it is moved into a `Secret` on
+	/// submit and the field is cleared (§12).
+	passphrase_input: String,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -80,8 +88,6 @@ pub enum Message {
 	// --- auth method selection (§7) ---
 	/// The user switched between password and key auth.
 	AuthKindChanged(AuthKind),
-	/// The user edited the key passphrase field.
-	KeyPassphraseChanged(String),
 	/// The user clicked "Browse…" — open the native key-file picker.
 	BrowseKeyPressed,
 	/// The picker closed: `Some(path)` if a file was chosen, `None` if cancelled.
@@ -92,6 +98,13 @@ pub enum Message {
 	// --- host-key confirmation (§8) ---
 	AcceptHostKey,
 	RejectHostKey,
+	// --- key passphrase prompt (§7), shown only when the key is encrypted ---
+	/// The user edited the passphrase prompt field.
+	PassphraseChanged(String),
+	/// The user submitted the typed passphrase.
+	PassphraseSubmitted,
+	/// The user dismissed the prompt — abort the connection.
+	PassphraseCancelled,
 	// --- terminal input: a raw key press, forwarded only while a shell is open (§9) ---
 	Key(iced::keyboard::Event),
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
@@ -115,7 +128,6 @@ impl App {
 			Message::UserChanged(value) => self.form.user = value,
 			Message::PasswordChanged(value) => self.form.password = value,
 			Message::AuthKindChanged(kind) => self.form.auth_kind = kind,
-			Message::KeyPassphraseChanged(value) => self.form.key_passphrase = value,
 			// Opening the picker is async work, so it returns a `Task` and we
 			// short-circuit the default `Task::none()` below.
 			Message::BrowseKeyPressed => return browse_key(),
@@ -129,6 +141,9 @@ impl App {
 			Message::BackPressed => self.screen = Screen::Connect,
 			Message::AcceptHostKey => self.on_host_key_decision(true),
 			Message::RejectHostKey => self.on_host_key_decision(false),
+			Message::PassphraseChanged(value) => self.passphrase_input = value,
+			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
+			Message::PassphraseCancelled => self.on_passphrase_cancelled(),
 			Message::Key(event) => self.on_key(event),
 			Message::Ssh(event) => self.on_ssh_event(event),
 		}
@@ -163,6 +178,26 @@ impl App {
 		}
 	}
 
+	/// Send the typed passphrase to the SSH task (§7) and return to a connecting
+	/// status. The text is moved straight into a `Secret` and the input field
+	/// cleared, so no plain copy of the passphrase lingers in app state (§12).
+	fn on_passphrase_submitted(&mut self) {
+		let secret = Secret::new(std::mem::take(&mut self.passphrase_input));
+		if self.send_command(SshCommand::Passphrase(secret)) {
+			self.screen = Screen::Connecting {
+				status: "authenticating…".to_string(),
+			};
+		}
+	}
+
+	/// Dismiss the passphrase prompt: tell the task to tear down and go back to
+	/// the form. Clearing the field first means the discarded text does not linger.
+	fn on_passphrase_cancelled(&mut self) {
+		self.passphrase_input.clear();
+		self.send_command(SshCommand::Disconnect);
+		self.screen = Screen::Connect;
+	}
+
 	/// Send one command to the SSH task. Returns whether it was sent; a
 	/// missing/closed channel becomes a visible error rather than a silent drop.
 	/// `try_send` is non-blocking, so it is safe on the synchronous GUI thread.
@@ -194,9 +229,10 @@ impl App {
 			}
 			SshEvent::HostKey(fingerprint) => self.screen = Screen::ConfirmHostKey { fingerprint },
 			SshEvent::NeedPassphrase => {
-				self.screen = Screen::Connecting {
-					status: "key needs a passphrase".to_string(),
-				}
+				// Start from an empty field each time we ask (including a re-ask
+				// after a wrong passphrase), so a stale attempt is never resent.
+				self.passphrase_input.clear();
+				self.screen = Screen::NeedPassphrase;
 			}
 			SshEvent::Connected => {
 				// A shell is open: spin up an emulator sized to the pty we asked
@@ -247,6 +283,7 @@ impl App {
 			Screen::Connect => ui::connect::view(&self.form),
 			Screen::Connecting { status } => text(status).into(),
 			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
+			Screen::NeedPassphrase => ui::passphrase_view(&self.passphrase_input),
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => ui::terminal::view(terminal),
 				None => text("terminal starting…").into(),

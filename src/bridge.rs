@@ -40,12 +40,11 @@ const CHANNEL_BOUND: usize = 256;
 pub enum AuthMethod {
 	/// A password typed into the form.
 	Password(Secret),
-	/// A private-key file (PEM / OpenSSH). `passphrase` decrypts an encrypted
-	/// key; `None` means the key is stored unencrypted.
-	Key {
-		path: PathBuf,
-		passphrase: Option<Secret>,
-	},
+	/// A private-key file (PEM / OpenSSH / PuTTY `.ppk`). No passphrase is carried
+	/// here: if the key turns out to be encrypted, the session asks for it
+	/// interactively (§7) — `SshEvent::NeedPassphrase` out, `SshCommand::Passphrase`
+	/// back — so an unencrypted key is never made to prompt.
+	Key { path: PathBuf },
 }
 
 /// Parameters the user fills in on the connect form, handed to the SSH task once
@@ -68,6 +67,9 @@ pub enum SshCommand {
 	/// The user's answer to an unknown-host-key prompt (§8): accept (pin it and
 	/// continue) or reject (refuse the connection). `true` = accept.
 	HostKeyResponse(bool),
+	/// The passphrase the user typed after a `NeedPassphrase` prompt, to decrypt
+	/// the chosen private key (§7).
+	Passphrase(Secret),
 	/// Raw keyboard bytes to send down the channel (keystroke, escape seq, ...).
 	Input(Vec<u8>),
 	/// The terminal view changed size; reflow the remote pty.

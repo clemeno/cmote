@@ -14,24 +14,28 @@
 // Accept/Reject. That answer arrives as another SshCommand — so `run()` has to
 // stay free to receive it. Spawning the session keeps the command loop live.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use russh::client;
-use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
 use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
 use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
+use crate::secret::Secret;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
-use crate::ssh::keyfile;
+use crate::ssh::keyfile::{self, Loaded};
 use crate::term;
 
 /// How long to wait for the TCP connect + SSH handshake before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many times to re-prompt for a private-key passphrase before giving up.
+const MAX_PASSPHRASE_ATTEMPTS: u32 = 3;
 
 /// The SSH task loop. Owns the channels to the one live session (v1 is single-
 /// session) and routes commands to it. Returns when the GUI drops its command
@@ -49,6 +53,11 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 			SshCommand::HostKeyResponse(accept) => {
 				if let Some(link) = session.as_mut() {
 					link.send_decision(accept);
+				}
+			}
+			SshCommand::Passphrase(secret) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::Passphrase(secret)).await;
 				}
 			}
 			SshCommand::Input(bytes) => {
@@ -79,6 +88,8 @@ enum SessionMsg {
 	Data(Vec<u8>),
 	/// Terminal resized; reflow the remote pty.
 	Resize { cols: u16, rows: u16 },
+	/// A passphrase the user typed to unlock an encrypted key (§7).
+	Passphrase(Secret),
 	/// Tear the session down.
 	Disconnect,
 }
@@ -144,7 +155,7 @@ async fn session_task(
 async fn connect_and_run(
 	params: ConnectParams,
 	events: &mpsc::Sender<SshEvent>,
-	to_session_rx: mpsc::Receiver<SessionMsg>,
+	mut to_session_rx: mpsc::Receiver<SessionMsg>,
 	decision_rx: oneshot::Receiver<bool>,
 ) -> Result<()> {
 	let config = Arc::new(client::Config {
@@ -182,8 +193,9 @@ async fn connect_and_run(
 			.context("authentication request failed")?
 			.success(),
 
-		AuthMethod::Key { path, passphrase } => {
-			let key = keyfile::load_private_key(path, passphrase.as_ref())?;
+		AuthMethod::Key { path } => {
+			// Load the key, prompting for a passphrase only if it is encrypted.
+			let key = resolve_key(path, events, &mut to_session_rx).await?;
 			// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
 			// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which
 			// it accepts and use the strongest; other key types ignore this.
@@ -226,6 +238,54 @@ async fn connect_and_run(
 	stream(channel, events, to_session_rx).await
 }
 
+/// Load the chosen private key (§7), prompting for a passphrase only when the
+/// key is actually encrypted. An unencrypted key returns at once with no prompt.
+/// For an encrypted key we ask the GUI (`NeedPassphrase`), wait for the reply,
+/// and retry — up to `MAX_PASSPHRASE_ATTEMPTS`. A wrong passphrase is treated the
+/// same as "none yet": both just ask again. A genuinely malformed key (a failure
+/// while we hold no passphrase to blame) is a hard error.
+async fn resolve_key(
+	path: &Path,
+	events: &mpsc::Sender<SshEvent>,
+	to_session_rx: &mut mpsc::Receiver<SessionMsg>,
+) -> Result<PrivateKey> {
+	let mut passphrase: Option<Secret> = None;
+	let mut attempts = 0u32;
+
+	loop {
+		match keyfile::load_private_key(path, passphrase.as_ref()) {
+			Ok(Loaded::Key(key)) => return Ok(*key),
+			Err(error) if passphrase.is_none() => return Err(error),
+			// Encrypted (no/means-insufficient passphrase), or a failure with a
+			// passphrase in hand (assume it was wrong): ask and try again.
+			Ok(Loaded::NeedsPassphrase) | Err(_) => {}
+		}
+
+		if attempts >= MAX_PASSPHRASE_ATTEMPTS {
+			bail!("too many incorrect passphrase attempts");
+		}
+		attempts += 1;
+
+		let _ = events.send(SshEvent::NeedPassphrase).await;
+		passphrase = Some(recv_passphrase(to_session_rx).await?);
+	}
+}
+
+/// Await the user's passphrase from the GUI, ignoring any stray input/resize
+/// that could arrive before the shell is open. A disconnect or a dropped channel
+/// means the user gave up on the prompt.
+async fn recv_passphrase(to_session_rx: &mut mpsc::Receiver<SessionMsg>) -> Result<Secret> {
+	loop {
+		match to_session_rx.recv().await {
+			Some(SessionMsg::Passphrase(secret)) => return Ok(secret),
+			Some(SessionMsg::Disconnect) | None => {
+				bail!("cancelled before a passphrase was entered")
+			}
+			Some(_) => {} // ignore keystrokes/resize until the shell exists
+		}
+	}
+}
+
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.
 /// Runs until either side closes.
 async fn stream(
@@ -258,6 +318,8 @@ async fn stream(
 					Some(SessionMsg::Resize { cols, rows }) => {
 						channel.window_change(cols as u32, rows as u32, 0, 0).await?;
 					}
+					// A passphrase only matters during auth; ignore a late one.
+					Some(SessionMsg::Passphrase(_)) => {}
 					// Explicit disconnect, or run() dropped the link.
 					Some(SessionMsg::Disconnect) | None => {
 						let _ = channel.eof().await;

@@ -12,10 +12,15 @@
 //     (Argon2 for v3, a SHA-1 construction for v2) and AES-256-CBC-decrypts the
 //     private blob. We only sniff the format and route to it.
 //
-// Why reuse it rather than hand-roll the parser (as an earlier plan intended):
-// this is a security-sensitive path — MAC verification and key decryption — and
-// PLAN §12 puts "security outranks purity": leaning on the audited RustCrypto
-// implementation that is *already compiled into our binary* beats shipping our
+// Encrypted keys are handled interactively (§7): rather than demand a passphrase
+// up front, `load_private_key` reports `Loaded::NeedsPassphrase` when a file is
+// an encrypted key it could not unlock, and the session prompts the user and
+// retries. So an *unencrypted* key never triggers a passphrase prompt.
+//
+// Why reuse the crate's parser rather than hand-roll one (as an earlier plan
+// intended): MAC verification and key decryption are a security-sensitive path,
+// and PLAN §12 puts "security outranks purity" — leaning on the audited
+// RustCrypto implementation already compiled into our binary beats shipping our
 // own crypto glue. See the PLAN §7 note for the reversed decision.
 
 use std::fs;
@@ -30,14 +35,28 @@ use crate::secret::Secret;
 /// version (`PuTTY-User-Key-File-2:` or `-3:`). We sniff on the stable prefix.
 const PPK_MAGIC: &str = "PuTTY-User-Key-File-";
 
+/// The result of one load attempt (§7): either the decoded key, or a signal
+/// that the file is an *encrypted* key we could not unlock with the passphrase
+/// we had (none, or a wrong one). Separating these lets the caller prompt only
+/// when it truly must, and retry without re-reading the file's role.
+pub enum Loaded {
+	/// A fully decoded private key, ready to authenticate with. Boxed because a
+	/// `PrivateKey` is large (hundreds of bytes) while the other variant is empty
+	/// — boxing keeps the enum small and satisfies `clippy::large_enum_variant`.
+	Key(Box<PrivateKey>),
+	/// The file is an encrypted key; ask the user for a passphrase and retry.
+	NeedsPassphrase,
+}
+
 /// Load and decode a private key from disk (§7). The file is read once, its
 /// format is detected by *content* (not the extension, which can lie), and the
 /// bytes are routed to the matching decoder. `passphrase` decrypts an encrypted
-/// key; `None` means "the key is stored unencrypted".
+/// key; `None` means "try as an unencrypted key". A genuinely malformed key is
+/// an `Err`; an encrypted key we could not unlock is `Ok(Loaded::NeedsPassphrase)`.
 ///
 /// `ponytail:` the read is blocking file I/O on the async runtime — fine for a
 /// one-shot read of a small key file, a `spawn_blocking` candidate if it grows.
-pub fn load_private_key(path: &Path, passphrase: Option<&Secret>) -> Result<PrivateKey> {
+pub fn load_private_key(path: &Path, passphrase: Option<&Secret>) -> Result<Loaded> {
 	let text = fs::read_to_string(path).context("could not read the key file")?;
 	let passphrase = passphrase.map(Secret::expose);
 
@@ -55,28 +74,49 @@ fn is_ppk(text: &str) -> bool {
 	text.trim_start().starts_with(PPK_MAGIC)
 }
 
-/// Decode a PuTTY `.ppk` via `ssh-key`'s parser. It verifies the MAC and
-/// decrypts (if needed) before returning the key.
+/// Does the `.ppk` header declare encryption? PuTTY writes an `Encryption:` line;
+/// any value other than `none` means a passphrase is required. Reading the plain
+/// header ourselves lets us classify "needs a passphrase" without depending on
+/// the crate's (private) error variants.
+fn ppk_is_encrypted(text: &str) -> bool {
+	text.lines()
+		.find_map(|line| line.trim().strip_prefix("Encryption:"))
+		.map(str::trim)
+		.is_some_and(|value| value != "none")
+}
+
+/// Decode a PuTTY `.ppk` via `ssh-key`'s parser (which verifies the MAC and
+/// decrypts as needed). A failure on an *encrypted* file means the passphrase
+/// was missing or wrong (the MAC won't verify) → recoverable, ask again. A
+/// failure on an unencrypted file is a real, hard error.
 ///
 /// `ponytail:` `from_ppk` takes the passphrase as an owned `String` by value, so
 /// we must copy it out of `Secret` for the call. That copy is a plain `String`
 /// dropped inside the crate — not zeroized — a small secret-hygiene gap the
 /// crate's API forces on us (§12). Acceptable for now; noted honestly.
-fn load_ppk(text: &str, passphrase: Option<&str>) -> Result<PrivateKey> {
-	PrivateKey::from_ppk(text, passphrase.map(str::to_owned))
-		.map_err(|error| anyhow::Error::new(error).context("could not load the PuTTY key"))
+fn load_ppk(text: &str, passphrase: Option<&str>) -> Result<Loaded> {
+	match PrivateKey::from_ppk(text, passphrase.map(str::to_owned)) {
+		Ok(key) => Ok(Loaded::Key(Box::new(key))),
+		Err(error) => {
+			if ppk_is_encrypted(text) {
+				Ok(Loaded::NeedsPassphrase)
+			} else {
+				Err(anyhow::Error::new(error).context("could not load the PuTTY key"))
+			}
+		}
+	}
 }
 
-/// Decode an OpenSSH/PEM key. The "encrypted but no passphrase given" case gets
-/// a clear message so the reason is obvious in the logs (the user still sees the
-/// generic session error — no credential oracle, §12).
-fn load_openssh(text: &str, passphrase: Option<&str>) -> Result<PrivateKey> {
-	decode_secret_key(text, passphrase).map_err(|error| match error {
-		russh::keys::Error::KeyIsEncrypted => {
-			anyhow::anyhow!("the key is encrypted; a passphrase is required")
-		}
-		other => anyhow::Error::new(other).context("could not load the private key"),
-	})
+/// Decode an OpenSSH/PEM key. russh reports an encrypted key it could not unlock
+/// (no passphrase given) as `KeyIsEncrypted`; we turn that into a request for a
+/// passphrase. A wrong passphrase surfaces as a different decode error, which the
+/// caller — already knowing the key is encrypted — treats as "ask again".
+fn load_openssh(text: &str, passphrase: Option<&str>) -> Result<Loaded> {
+	match decode_secret_key(text, passphrase) {
+		Ok(key) => Ok(Loaded::Key(Box::new(key))),
+		Err(russh::keys::Error::KeyIsEncrypted) => Ok(Loaded::NeedsPassphrase),
+		Err(other) => Err(anyhow::Error::new(other).context("could not load the private key")),
+	}
 }
 
 #[cfg(test)]
@@ -101,6 +141,14 @@ mod tests {
 		file
 	}
 
+	// Assert we got a decoded key of the expected algorithm.
+	fn assert_key(loaded: Loaded, algorithm: Algorithm) {
+		match loaded {
+			Loaded::Key(key) => assert_eq!(key.algorithm(), algorithm),
+			Loaded::NeedsPassphrase => panic!("expected a decoded key, got NeedsPassphrase"),
+		}
+	}
+
 	#[test]
 	fn detects_ppk_by_header() {
 		assert!(is_ppk(PPK_ED25519));
@@ -110,31 +158,39 @@ mod tests {
 	}
 
 	#[test]
-	fn loads_unencrypted_ed25519_ppk() {
-		let file = temp_key(PPK_ED25519);
-		let key = load_private_key(file.path(), None).expect("valid unencrypted ppk");
-		assert_eq!(key.algorithm(), Algorithm::Ed25519);
+	fn reads_the_encryption_header() {
+		assert!(!ppk_is_encrypted(PPK_ED25519));
+		assert!(ppk_is_encrypted(PPK_ED25519_ENC));
 	}
 
 	#[test]
-	fn loads_encrypted_ed25519_ppk_with_passphrase() {
+	fn loads_unencrypted_ed25519_ppk_without_prompting() {
+		let file = temp_key(PPK_ED25519);
+		let loaded = load_private_key(file.path(), None).expect("valid unencrypted ppk");
+		assert_key(loaded, Algorithm::Ed25519);
+	}
+
+	#[test]
+	fn loads_encrypted_ed25519_ppk_with_the_right_passphrase() {
 		let file = temp_key(PPK_ED25519_ENC);
 		let secret = Secret::new(ENC_PASSPHRASE.to_string());
-		let key = load_private_key(file.path(), Some(&secret)).expect("valid encrypted ppk");
-		assert_eq!(key.algorithm(), Algorithm::Ed25519);
+		let loaded = load_private_key(file.path(), Some(&secret)).expect("valid encrypted ppk");
+		assert_key(loaded, Algorithm::Ed25519);
 	}
 
 	#[test]
-	fn encrypted_ppk_without_passphrase_is_rejected() {
+	fn encrypted_ppk_without_a_passphrase_asks_for_one() {
 		let file = temp_key(PPK_ED25519_ENC);
-		assert!(load_private_key(file.path(), None).is_err());
+		let loaded = load_private_key(file.path(), None).expect("classified, not errored");
+		assert!(matches!(loaded, Loaded::NeedsPassphrase));
 	}
 
 	#[test]
-	fn wrong_passphrase_is_rejected() {
+	fn encrypted_ppk_with_a_wrong_passphrase_asks_again() {
 		let file = temp_key(PPK_ED25519_ENC);
 		let secret = Secret::new("wrong".to_string());
-		assert!(load_private_key(file.path(), Some(&secret)).is_err());
+		let loaded = load_private_key(file.path(), Some(&secret)).expect("classified, not errored");
+		assert!(matches!(loaded, Loaded::NeedsPassphrase));
 	}
 
 	#[test]

@@ -40,10 +40,10 @@ pub struct ConnectForm {
 	pub auth_kind: AuthKind,
 	/// Password for `Password` auth.
 	pub password: String,
-	/// Chosen private-key file for `Key` auth (set by the file picker).
+	/// Chosen private-key file for `Key` auth (set by the file picker). Any
+	/// passphrase for an encrypted key is asked for interactively at connect time
+	/// (§7), so it is not kept in the form.
 	pub key_path: Option<PathBuf>,
-	/// Optional passphrase for an encrypted key; empty means "unencrypted".
-	pub key_passphrase: String,
 }
 
 impl ConnectForm {
@@ -81,10 +81,10 @@ impl ConnectForm {
 		})
 	}
 
-	/// Turn the selected auth kind and its fields into a typed `AuthMethod`.
-	/// Secrets are wrapped so they are redacted in logs and wiped on drop (§12);
-	/// an empty password/passphrase is allowed here — the server (or the key
-	/// loader) decides whether it is acceptable.
+	/// Turn the selected auth kind and its fields into a typed `AuthMethod`. The
+	/// password is wrapped in `Secret` so it is redacted in logs and wiped on drop
+	/// (§12); an empty password is allowed here — the server decides. A key needs
+	/// a chosen file; its passphrase (if any) is collected interactively later.
 	fn validate_auth(&self) -> Result<AuthMethod, String> {
 		match self.auth_kind {
 			AuthKind::Password => Ok(AuthMethod::Password(Secret::new(self.password.clone()))),
@@ -93,13 +93,7 @@ impl ConnectForm {
 					.key_path
 					.clone()
 					.ok_or_else(|| "Choose a private-key file.".to_string())?;
-				// Empty passphrase => the key is unencrypted; otherwise wrap it.
-				let passphrase = if self.key_passphrase.is_empty() {
-					None
-				} else {
-					Some(Secret::new(self.key_passphrase.clone()))
-				};
-				Ok(AuthMethod::Key { path, passphrase })
+				Ok(AuthMethod::Key { path })
 			}
 		}
 	}
@@ -152,16 +146,8 @@ fn auth_selector(selected: AuthKind) -> Element<'static, Message> {
 fn auth_fields(form: &ConnectForm) -> Element<'_, Message> {
 	match form.auth_kind {
 		AuthKind::Password => secure_input("Password", &form.password, Message::PasswordChanged),
-		AuthKind::Key => column![
-			key_file_row(form.key_path.as_deref()),
-			secure_input(
-				"Passphrase",
-				&form.key_passphrase,
-				Message::KeyPassphraseChanged
-			),
-		]
-		.spacing(12)
-		.into(),
+		// No passphrase box here — an encrypted key prompts for it at connect time.
+		AuthKind::Key => key_file_row(form.key_path.as_deref()),
 	}
 }
 
@@ -250,7 +236,7 @@ mod tests {
 	}
 
 	#[test]
-	fn key_auth_with_empty_passphrase_is_unencrypted() {
+	fn key_auth_carries_the_chosen_file() {
 		let form = ConnectForm {
 			auth_kind: AuthKind::Key,
 			key_path: Some(PathBuf::from("/keys/id_ed25519")),
@@ -258,27 +244,7 @@ mod tests {
 		};
 		let params = form.validate().expect("valid key form");
 		match params.auth {
-			AuthMethod::Key { path, passphrase } => {
-				assert_eq!(path, PathBuf::from("/keys/id_ed25519"));
-				assert!(passphrase.is_none());
-			}
-			other => panic!("expected key auth, got {other:?}"),
-		}
-	}
-
-	#[test]
-	fn key_auth_keeps_a_non_empty_passphrase() {
-		let form = ConnectForm {
-			auth_kind: AuthKind::Key,
-			key_path: Some(PathBuf::from("/keys/id_rsa")),
-			key_passphrase: "open sesame".to_string(),
-			..base_form()
-		};
-		let params = form.validate().expect("valid key form");
-		match params.auth {
-			AuthMethod::Key { passphrase, .. } => {
-				assert_eq!(passphrase.expect("passphrase kept").expose(), "open sesame");
-			}
+			AuthMethod::Key { path } => assert_eq!(path, PathBuf::from("/keys/id_ed25519")),
 			other => panic!("expected key auth, got {other:?}"),
 		}
 	}

@@ -289,17 +289,23 @@ Turning a raw byte stream into a screen.
 A small state machine drives the single window.
 
 ```
-enum Screen { Connect, Connecting, Terminal, Error(String) }
+enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Error(String) }
 ```
 
-- **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio /
-  segmented control for auth method (Password / Key / Both); a "Browse…" button
-  (`rfd`) for the key file; a passphrase field (shown when a key is chosen or when the
-  backend requests it); a Connect button. Live validation disables Connect until
-  inputs are sane (§6.0).
+- **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio for
+  the auth method (Password **or** Key — a sum type, never both, §7); a "Browse…"
+  button (`rfd`) for the key file; a password field for password auth. There is **no**
+  passphrase field: a key's passphrase is asked for on its own screen, and only if the
+  key turns out to be encrypted (see below). A Connect button; validation fails fast to
+  the Error screen (§6.0).
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
-  *connecting → verifying host key → authenticating*. If a host key needs accepting,
-  an inline panel shows the fingerprint with Accept / Reject.
+  *connecting → verifying host key → authenticating*.
+- **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
+  Accept / Reject (§8).
+- **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
+  key is encrypted (§7). A masked field with Unlock / Cancel; a wrong passphrase simply
+  re-shows the prompt (the session re-asks, bounded), and the typed text is moved into a
+  `Secret` and cleared on submit.
 - **Terminal** (`Screen::Terminal`): the vt100 grid fills the window; keyboard focus
   goes here; a thin status bar shows user@host and a Disconnect button.
 - **Error** (`Screen::Error`): a generic, non-leaking message plus a "Back" button to
