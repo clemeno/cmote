@@ -13,6 +13,7 @@
 // under `src/`. See PLAN.md §5 for the responsibility of each module.
 mod app; // iced application: State, Message, update, view, subscription
 mod bridge; // channel message types that cross the GUI <-> tokio boundary (§4)
+mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases (§12)
 mod ssh; // SSH client, auth, host-key verification, key loading (§6-§8)
 mod term; // VT/ANSI terminal emulator wrapper around vt100 (§9)
 mod ui; // view helpers: the connect form and the terminal grid (§10)

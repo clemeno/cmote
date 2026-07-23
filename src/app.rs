@@ -38,6 +38,9 @@ pub enum Screen {
 	/// Handshake and authentication in progress; `status` is a human-readable
 	/// step for the UI ("connecting", "verifying host key", "authenticating").
 	Connecting { status: String },
+	/// First contact with an unknown host: the server's key fingerprint is shown
+	/// and the user must accept or reject before the handshake continues (§8).
+	ConfirmHostKey { fingerprint: String },
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
 	/// A terminal failure. The message is generic and never leaks secrets (§12).
@@ -69,7 +72,10 @@ pub enum Message {
 	// --- form actions ---
 	ConnectPressed,
 	BackPressed,
-	// --- events bubbled up from the SSH task (wired in a later step) ---
+	// --- host-key confirmation (§8) ---
+	AcceptHostKey,
+	RejectHostKey,
+	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
 
@@ -91,14 +97,15 @@ impl App {
 			Message::PasswordChanged(value) => self.form.password = value,
 			Message::ConnectPressed => self.on_connect_pressed(),
 			Message::BackPressed => self.screen = Screen::Connect,
+			Message::AcceptHostKey => self.on_host_key_decision(true),
+			Message::RejectHostKey => self.on_host_key_decision(false),
 			Message::Ssh(event) => self.on_ssh_event(event),
 		}
 		iced::Task::none()
 	}
 
 	/// Validate the form, then send a `Connect` command to the SSH task. Cheap
-	/// validation fails fast to the error screen; a missing/closed channel is
-	/// also surfaced rather than silently dropped.
+	/// validation fails fast to the error screen.
 	fn on_connect_pressed(&mut self) {
 		let params = match self.form.validate() {
 			Ok(params) => params,
@@ -109,18 +116,38 @@ impl App {
 		};
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
+		if self.send_command(SshCommand::Connect(params)) {
+			self.screen = Screen::Connecting { status };
+		}
+	}
+
+	/// Relay the user's host-key accept/reject to the SSH task (§8). On accept we
+	/// go back to a connecting status; on reject the refused handshake will
+	/// surface its own error.
+	fn on_host_key_decision(&mut self, accept: bool) {
+		if self.send_command(SshCommand::HostKeyResponse(accept)) && accept {
+			self.screen = Screen::Connecting {
+				status: "authenticating…".to_string(),
+			};
+		}
+	}
+
+	/// Send one command to the SSH task. Returns whether it was sent; a
+	/// missing/closed channel becomes a visible error rather than a silent drop.
+	/// `try_send` is non-blocking, so it is safe on the synchronous GUI thread.
+	fn send_command(&mut self, command: SshCommand) -> bool {
 		match &self.command_tx {
-			Some(sender) => {
-				// `try_send` is non-blocking — safe to call from the synchronous
-				// GUI thread (no tokio runtime needed here). A full or closed
-				// channel becomes a visible error, never a silent no-op.
-				if let Err(error) = sender.try_send(SshCommand::Connect(params)) {
-					self.screen = Screen::Error(format!("Could not start connection: {error}"));
-					return;
+			Some(sender) => match sender.try_send(command) {
+				Ok(()) => true,
+				Err(error) => {
+					self.screen = Screen::Error(format!("Could not reach the SSH worker: {error}"));
+					false
 				}
-				self.screen = Screen::Connecting { status };
+			},
+			None => {
+				self.screen = Screen::Error("SSH worker is not ready yet.".to_string());
+				false
 			}
-			None => self.screen = Screen::Error("SSH worker is not ready yet.".to_string()),
 		}
 	}
 
@@ -134,11 +161,7 @@ impl App {
 					status: "connecting…".to_string(),
 				}
 			}
-			SshEvent::HostKey(fingerprint) => {
-				self.screen = Screen::Connecting {
-					status: format!("verify host key: {fingerprint}"),
-				}
-			}
+			SshEvent::HostKey(fingerprint) => self.screen = Screen::ConfirmHostKey { fingerprint },
 			SshEvent::NeedPassphrase => {
 				self.screen = Screen::Connecting {
 					status: "key needs a passphrase".to_string(),
@@ -156,6 +179,7 @@ impl App {
 		match &self.screen {
 			Screen::Connect => ui::connect::view(&self.form),
 			Screen::Connecting { status } => text(status).into(),
+			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
 			Screen::Terminal => ui::terminal::view(),
 			Screen::Error(message) => ui::error_view(message),
 		}

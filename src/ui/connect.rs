@@ -10,6 +10,7 @@ use iced::widget::{button, column, row, text, text_input};
 
 use crate::app::Message;
 use crate::bridge::ConnectParams;
+use crate::secret::Secret;
 
 /// The default SSH port, used when the user leaves the port field blank.
 const DEFAULT_SSH_PORT: u16 = 22;
@@ -53,6 +54,10 @@ impl ConnectForm {
 			host: host.to_string(),
 			port,
 			user: user.to_string(),
+			// The password is wrapped so it is redacted in logs and wiped on
+			// drop (§12). An empty password is allowed here — the server decides
+			// whether it is acceptable.
+			password: Secret::new(self.password.clone()),
 		})
 	}
 }

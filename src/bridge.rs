@@ -22,6 +22,7 @@ use iced::futures::SinkExt; // brings `.send()` onto the futures mpsc Sender
 use iced::futures::Stream;
 use tokio::sync::mpsc;
 
+use crate::secret::Secret;
 use crate::ssh;
 
 /// Bounded-channel capacity. Bounded so a flood of terminal output can't grow
@@ -37,7 +38,9 @@ pub struct ConnectParams {
 	pub host: String,
 	pub port: u16,
 	pub user: String,
-	// Auth material is added when the auth module lands (§7).
+	/// Password for `password` auth. Redacted in `Debug`, wiped on drop (§12).
+	/// Key-based auth material is added in the next slice (§7).
+	pub password: Secret,
 }
 
 /// GUI -> SSH task. Everything the user can ask the connection to do.
@@ -45,6 +48,9 @@ pub struct ConnectParams {
 pub enum SshCommand {
 	/// Open a new connection with these parameters.
 	Connect(ConnectParams),
+	/// The user's answer to an unknown-host-key prompt (§8): accept (pin it and
+	/// continue) or reject (refuse the connection). `true` = accept.
+	HostKeyResponse(bool),
 	/// Raw keyboard bytes to send down the channel (keystroke, escape seq, ...).
 	Input(Vec<u8>),
 	/// The terminal view changed size; reflow the remote pty.
