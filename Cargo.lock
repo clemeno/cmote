@@ -637,6 +637,7 @@ dependencies = [
  "iced",
  "rfd",
  "russh",
+ "tempfile",
  "tokio",
  "vt100",
  "zeroize",

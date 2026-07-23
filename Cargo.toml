@@ -16,6 +16,10 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "
 vt100 = "0.16.2"
 zeroize = "1.9.0"
 
+[dev-dependencies]
+# Temporary directories for tests that write known_hosts fixtures (§13).
+tempfile = "3"
+
 # Release profile (PLAN §11): a small, fast, self-contained portable exe.
 #   lto            — link-time optimization across crates
 #   codegen-units  — one unit trades build time for better optimization
