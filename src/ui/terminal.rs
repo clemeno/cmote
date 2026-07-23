@@ -352,15 +352,19 @@ fn xterm_256(index: u8) -> Color {
 /// underline live here; the background is painted by the enclosing `cell_box` so it
 /// fills the whole fixed-width box rather than only the glyphs' advance (§11).
 fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
-	// Ask for the bold weight on bold cells. Both Fira Mono weights are bundled
-	// (`app::MONO_FONT` / `MONO_FONT_BOLD`), so this resolves to the real 700 face
-	// rather than falling back to the normal one — and since every Fira Mono weight
-	// shares the same advance, bold cells still occupy exactly `CELL_WIDTH` (§11).
+	// Pick the weight we actually bundled: Medium (500) for normal cells, Bold (700)
+	// for bold. This MUST match a bundled weight exactly. We ship Fira Mono only at
+	// 500 and 700 (no 400 "Regular"), and cosmic-text — with the whole system font
+	// DB present at runtime — does NOT nearest-weight-match within a named family:
+	// asking for `Weight::Normal` (400) finds no "Fira Mono" at 400 and silently
+	// falls back to the platform default (a *proportional* font, e.g. Segoe UI),
+	// which breaks the monospace grid. Medium/Bold both resolve to our real faces,
+	// and every Fira Mono weight shares the 0.6 advance, so cells stay `CELL_WIDTH`.
 	let font = Font {
 		weight: if style.bold {
 			Weight::Bold
 		} else {
-			Weight::Normal
+			Weight::Medium
 		},
 		..TERMINAL_FONT
 	};
