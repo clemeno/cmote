@@ -27,13 +27,10 @@ use tokio::time::timeout;
 
 use crate::bridge::{ConnectParams, SshCommand, SshEvent};
 use crate::ssh::hostkey::{self, HostKeyVerdict};
+use crate::term;
 
 /// How long to wait for the TCP connect + SSH handshake before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Initial pty size; the GUI sends a real size via `Resize` once it knows the
-/// terminal view's dimensions (§9).
-const DEFAULT_COLS: u32 = 80;
-const DEFAULT_ROWS: u32 = 24;
 
 /// The SSH task loop. Owns the channels to the one live session (v1 is single-
 /// session) and routes commands to it. Returns when the GUI drops its command
@@ -188,12 +185,14 @@ async fn connect_and_run(
 
 	// Open a shell channel with a pty so interactive programs render correctly.
 	let channel = session.channel_open_session().await?;
+	// Match the pty to the emulator's initial grid (§9): the single source of
+	// truth lives in `term`, so the remote pty and our local view agree.
 	channel
 		.request_pty(
 			false,
 			"xterm-256color",
-			DEFAULT_COLS,
-			DEFAULT_ROWS,
+			u32::from(term::DEFAULT_COLS),
+			u32::from(term::DEFAULT_ROWS),
 			0,
 			0,
 			&[],

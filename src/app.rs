@@ -14,6 +14,7 @@ use iced::widget::text;
 use tokio::sync::mpsc;
 
 use crate::bridge::{self, SshCommand, SshEvent};
+use crate::term;
 use crate::ui;
 
 /// Build and start the iced runtime. Called from `main`.
@@ -58,6 +59,10 @@ pub struct App {
 	/// Channel to the SSH task. `None` until the worker starts and delivers it
 	/// via `SshEvent::Ready`; `update` sends `SshCommand`s through it.
 	command_tx: Option<mpsc::Sender<SshCommand>>,
+	/// The terminal emulator, alive only while a shell is open. `Some` from
+	/// `Connected` until `Disconnected`; output bytes are fed into it and the
+	/// Terminal screen renders its grid.
+	terminal: Option<term::Terminal>,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -75,6 +80,8 @@ pub enum Message {
 	// --- host-key confirmation (§8) ---
 	AcceptHostKey,
 	RejectHostKey,
+	// --- terminal input: a raw key press, forwarded only while a shell is open (§9) ---
+	Key(iced::keyboard::Event),
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -99,6 +106,7 @@ impl App {
 			Message::BackPressed => self.screen = Screen::Connect,
 			Message::AcceptHostKey => self.on_host_key_decision(true),
 			Message::RejectHostKey => self.on_host_key_decision(false),
+			Message::Key(event) => self.on_key(event),
 			Message::Ssh(event) => self.on_ssh_event(event),
 		}
 		iced::Task::none()
@@ -167,10 +175,46 @@ impl App {
 					status: "key needs a passphrase".to_string(),
 				}
 			}
-			SshEvent::Connected => self.screen = Screen::Terminal,
-			SshEvent::Output(_bytes) => { /* fed to the vt100 parser in §9 */ }
-			SshEvent::Disconnected => self.screen = Screen::Connect,
-			SshEvent::Error(message) => self.screen = Screen::Error(message),
+			SshEvent::Connected => {
+				// A shell is open: spin up an emulator sized to the pty we asked
+				// for, then show the terminal.
+				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
+				self.screen = Screen::Terminal;
+			}
+			SshEvent::Output(bytes) => {
+				// Feed raw shell output into the emulator; the next render draws it.
+				if let Some(terminal) = self.terminal.as_mut() {
+					terminal.process(&bytes);
+				}
+			}
+			SshEvent::Disconnected => {
+				self.terminal = None;
+				self.screen = Screen::Connect;
+			}
+			SshEvent::Error(message) => {
+				self.terminal = None;
+				self.screen = Screen::Error(message);
+			}
+		}
+	}
+
+	/// Forward a key press to the shell, but only while the terminal is open.
+	/// Non-input keys (bare modifiers, unmapped keys) encode to nothing and are
+	/// dropped. Keyboard events only reach here on the Terminal screen (the
+	/// subscription is added only there), so no extra screen check is needed.
+	fn on_key(&mut self, event: iced::keyboard::Event) {
+		let iced::keyboard::Event::KeyPressed {
+			key,
+			text,
+			modifiers,
+			..
+		} = event
+		else {
+			return; // ignore key releases and other keyboard events
+		};
+
+		if let Some(bytes) = term::keymap::encode(&key, text.as_deref(), modifiers) {
+			self.send_command(SshCommand::Input(bytes));
 		}
 	}
 
@@ -180,14 +224,26 @@ impl App {
 			Screen::Connect => ui::connect::view(&self.form),
 			Screen::Connecting { status } => text(status).into(),
 			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
-			Screen::Terminal => ui::terminal::view(),
+			Screen::Terminal => match &self.terminal {
+				Some(terminal) => ui::terminal::view(terminal),
+				None => text("terminal starting…").into(),
+			},
 			Screen::Error(message) => ui::error_view(message),
 		}
 	}
 
 	/// Streams the app listens to. The SSH worker's outbound events (§4) are
-	/// mapped into `Message::Ssh(..)` so `update` handles them like any other.
+	/// always mapped into `Message::Ssh(..)`. While a shell is open we also listen
+	/// for key presses (§9) and turn them into `Message::Key(..)`; limiting that
+	/// subscription to the Terminal screen means the connect form's text inputs
+	/// keep the keyboard to themselves.
 	fn subscription(&self) -> iced::Subscription<Message> {
-		bridge::subscription().map(Message::Ssh)
+		let ssh = bridge::subscription().map(Message::Ssh);
+		match self.screen {
+			Screen::Terminal => {
+				iced::Subscription::batch([ssh, iced::keyboard::listen().map(Message::Key)])
+			}
+			_ => ssh,
+		}
 	}
 }
