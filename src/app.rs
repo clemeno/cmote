@@ -82,6 +82,10 @@ pub struct App {
 	/// than in the form so it never lingers there; it is moved into a `Secret` on
 	/// submit and the field is cleared (§12).
 	passphrase_input: String,
+	/// The `user@host:port` of the current session, shown in the terminal's status
+	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
+	/// secret, so it is safe in `Debug`.
+	connection: Option<String>,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -117,6 +121,8 @@ pub enum Message {
 	Key(iced::keyboard::Event),
 	/// The window changed size — refit the terminal grid to it (§9).
 	WindowResized(iced::Size),
+	/// The user clicked Disconnect in the terminal status bar (§10).
+	DisconnectPressed,
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -156,6 +162,7 @@ impl App {
 			Message::PassphraseCancelled => self.on_passphrase_cancelled(),
 			Message::Key(event) => self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
+			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::Ssh(event) => return self.on_ssh_event(event),
 		}
 		iced::Task::none()
@@ -173,7 +180,11 @@ impl App {
 		};
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
+		// The label the terminal status bar will show once the shell is open (§10);
+		// capture it now, before `params` moves into the command.
+		let endpoint = format!("{}@{}:{}", params.user, params.host, params.port);
 		if self.send_command(SshCommand::Connect(params)) {
+			self.connection = Some(endpoint);
 			self.screen = Screen::Connecting { status };
 		}
 	}
@@ -262,10 +273,12 @@ impl App {
 			}
 			SshEvent::Disconnected => {
 				self.terminal = None;
+				self.connection = None;
 				self.screen = Screen::Connect;
 			}
 			SshEvent::Error(message) => {
 				self.terminal = None;
+				self.connection = None;
 				self.screen = Screen::Error(message);
 			}
 		}
@@ -288,6 +301,17 @@ impl App {
 		if changed {
 			self.send_command(SshCommand::Resize { cols, rows });
 		}
+	}
+
+	/// Leave the live shell (§10). Tell the SSH task to tear down, then drop the
+	/// local emulator and go back to the form right away — the `Disconnected` event
+	/// that follows just confirms what we have already done. Mirrors the
+	/// passphrase-cancel path, which also acts immediately rather than waiting.
+	fn on_disconnect_pressed(&mut self) {
+		self.send_command(SshCommand::Disconnect);
+		self.terminal = None;
+		self.connection = None;
+		self.screen = Screen::Connect;
 	}
 
 	/// Forward a key press to the shell, but only while the terminal is open.
@@ -318,7 +342,9 @@ impl App {
 			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
 			Screen::NeedPassphrase => ui::passphrase_view(&self.passphrase_input),
 			Screen::Terminal => match &self.terminal {
-				Some(terminal) => ui::terminal::view(terminal),
+				Some(terminal) => {
+					ui::terminal::view(terminal, self.connection.as_deref().unwrap_or(""))
+				}
 				None => text("terminal starting…").into(),
 			},
 			Screen::Error(message) => ui::error_view(message),

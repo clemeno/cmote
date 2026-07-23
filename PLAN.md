@@ -318,8 +318,12 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   key is encrypted (§7). A masked field with Unlock / Cancel; a wrong passphrase simply
   re-shows the prompt (the session re-asks, bounded), and the typed text is moved into a
   `Secret` and cleared on submit.
-- **Terminal** (`Screen::Terminal`): the vt100 grid fills the window; keyboard focus
-  goes here; a thin status bar shows user@host and a Disconnect button.
+- **Terminal** (`Screen::Terminal`, done): a fixed-height status bar shows the live
+  session's `user@host:port` on the left and a **Disconnect** button on the right; the
+  vt100 grid fills the rest, and keyboard focus goes there. Disconnect sends
+  `SshCommand::Disconnect` and returns to the form immediately (the `Disconnected` event
+  that follows just confirms it). The bar's fixed height is subtracted in
+  `ui::terminal::grid_size`, so the reflow math (§9) still fits the grid exactly.
 - **Error** (`Screen::Error`): a generic, non-leaking message plus a "Back" button to
   the form. Detail is logged, not shown (§12).
 

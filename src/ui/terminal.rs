@@ -8,7 +8,7 @@
 
 use iced::font::Weight;
 use iced::widget::text::{LineHeight, Span};
-use iced::widget::{column, container, rich_text, span};
+use iced::widget::{button, column, container, rich_text, row, span, text};
 use iced::{Color, Element, Font, Length, Size};
 
 use crate::app::Message;
@@ -34,6 +34,22 @@ const CELL_HEIGHT: f32 = FONT_SIZE * LINE_HEIGHT;
 /// Padding between the grid and its container edge. Named so `view` (which draws
 /// it) and `grid_size` (which subtracts it) can never drift apart.
 const GRID_PADDING: f32 = 6.0;
+
+/// The status bar above the grid (§10): a fixed height plus its colors, text
+/// size, and side padding. The fixed height matters twice — `view` renders the
+/// bar at exactly this height AND `grid_size` subtracts it, so the reflow math
+/// accounts for the space the bar takes and the two can never drift (the same
+/// discipline as `GRID_PADDING`).
+const STATUS_BAR_HEIGHT: f32 = 34.0;
+const STATUS_BAR_TEXT: f32 = 13.0;
+const STATUS_BAR_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
+const STATUS_BAR_FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
+const STATUS_BAR_PADDING: iced::Padding = iced::Padding {
+	top: 0.0,
+	right: 10.0,
+	bottom: 0.0,
+	left: 10.0,
+};
 
 /// The default foreground/background when a cell asks for the "default" color —
 /// a light-on-dark scheme, and the window's backdrop behind the whole grid.
@@ -74,9 +90,11 @@ struct CellStyle {
 	underline: bool,
 }
 
-/// Render the whole terminal grid. Owns its output (glyph strings are copied out
-/// of the grid), so the returned element borrows nothing and is `'static`.
-pub fn view(terminal: &Terminal) -> Element<'static, Message> {
+/// Render the whole terminal screen (§10): a status bar on top, the vt100 grid
+/// filling the rest. `endpoint` is the `user@host:port` shown in the bar. Owns
+/// its output (glyph strings and the label are copied out), so the returned
+/// element borrows nothing and is `'static`.
+pub fn view(terminal: &Terminal, endpoint: &str) -> Element<'static, Message> {
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
 	let (cursor_row, cursor_col) = screen.cursor_position();
@@ -88,26 +106,61 @@ pub fn view(terminal: &Terminal) -> Element<'static, Message> {
 		lines.push(render_row(screen, row, cols, on_cursor_row, cursor_col));
 	}
 
-	// The grid, on the dark backdrop, filling the window.
-	container(column(lines).spacing(0))
+	// The grid, on the dark backdrop, filling the space left under the status bar.
+	let grid = container(column(lines).spacing(0))
 		.style(|_theme| container::Style {
 			background: Some(DEFAULT_BG.into()),
 			..container::Style::default()
 		})
 		.width(Length::Fill)
 		.height(Length::Fill)
-		.padding(GRID_PADDING)
+		.padding(GRID_PADDING);
+
+	// Bar on top (fixed height), grid below it filling the remaining window.
+	column![status_bar(endpoint), grid]
+		.spacing(0)
+		.width(Length::Fill)
+		.height(Length::Fill)
 		.into()
 }
 
+/// The status bar (§10): the `user@host:port` of the live session on the left, a
+/// Disconnect button on the right. Its height is fixed to `STATUS_BAR_HEIGHT` so
+/// `grid_size` can subtract it exactly. The label is copied in, so the returned
+/// element owns its text and stays `'static` like the grid.
+fn status_bar(endpoint: &str) -> Element<'static, Message> {
+	// `width(Fill)` on the label pushes the button to the right edge.
+	let info = text(endpoint.to_owned())
+		.size(STATUS_BAR_TEXT)
+		.color(STATUS_BAR_FG)
+		.width(Length::Fill);
+	let disconnect =
+		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
+
+	container(
+		row![info, disconnect]
+			.spacing(10)
+			.align_y(iced::alignment::Vertical::Center),
+	)
+	.style(|_theme| container::Style {
+		background: Some(STATUS_BAR_BG.into()),
+		..container::Style::default()
+	})
+	.width(Length::Fill)
+	.height(Length::Fixed(STATUS_BAR_HEIGHT))
+	.padding(STATUS_BAR_PADDING)
+	.into()
+}
+
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
-/// `view` draws it (same padding, same cell metrics). Rounds down so the last
+/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top, then
+/// the grid's own padding is subtracted on both axes. Rounds down so the last
 /// cell is never clipped, and clamps to at least 1×1 so the emulator always has
 /// a valid size. The app calls this on a window resize to reflow both the local
 /// emulator and the remote pty (§9).
 pub fn grid_size(area: Size) -> (u16, u16) {
 	let usable_width = area.width - 2.0 * GRID_PADDING;
-	let usable_height = area.height - 2.0 * GRID_PADDING;
+	let usable_height = area.height - STATUS_BAR_HEIGHT - 2.0 * GRID_PADDING;
 	let cols = (usable_width / CELL_WIDTH)
 		.floor()
 		.clamp(1.0, f32::from(u16::MAX)) as u16;
@@ -246,11 +299,11 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn grid_fits_area_minus_padding_rounding_down() {
-		// width:  (812 - 12) / 8.4  = 95.2  -> 95 cols
-		// height: (500 - 12) / 16.8 = 29.05 -> 29 rows
+	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
+		// width:  (812 - 12)      / 8.4  = 95.2  -> 95 cols
+		// height: (500 - 34 - 12) / 16.8 = 27.02 -> 27 rows  (34 = status bar)
 		let (rows, cols) = grid_size(Size::new(812.0, 500.0));
-		assert_eq!((rows, cols), (29, 95));
+		assert_eq!((rows, cols), (27, 95));
 	}
 
 	#[test]
