@@ -418,7 +418,9 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   clear-screen) → assert the resulting `Screen` grid. Deterministic, no network.
 - **Input mapping**: key events → correct byte sequences (Enter, Ctrl-C, arrows).
 - **Deferred / manual**: end-to-end connect against a local `sshd` (or a container).
-  `ponytail:` no CI SSH server in v1; document the manual smoke test in the README.
+  `ponytail:` no CI SSH server in v1; the manual smoke test is documented in the
+  README (password + key + `.ppk` auth, TOFU first-contact, terminal I/O and resize,
+  disconnect, and the host-key-mismatch hard stop).
 
 Tests use Rust's built-in `#[test]` / `#[cfg(test)]` — no framework dependency.
 
