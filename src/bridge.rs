@@ -12,11 +12,6 @@
 // iced pattern for a two-way "worker" (the GUI can't pull a value out of a
 // subscription, so the subscription pushes the sender to it).
 
-// ponytail: a few event/command variants are declared from the design but not
-// emitted until the real SSH client lands, so they'd warn as unused. The allow
-// is temporary scaffolding — drop it once the client constructs every variant.
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 
 use iced::Subscription;
