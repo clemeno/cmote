@@ -21,6 +21,13 @@ use crate::term;
 use crate::ui;
 use crate::ui::connect::AuthKind;
 
+/// The monospace font embedded in the binary (Fira Mono, OFL 1.1 — see
+/// assets/FiraMono-LICENSE.txt). Bundling it keeps the terminal identical on
+/// every machine and gives the grid a known cell advance, which the resize math
+/// relies on (§9, §11). Registered with iced in `run` and selected by name in
+/// `ui::terminal`.
+const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -29,6 +36,7 @@ pub fn run() -> iced::Result {
 	// methods, and `.run()` starts the event loop.
 	iced::application(App::new, App::update, App::view)
 		.title("cmote")
+		.font(MONO_FONT)
 		.subscription(App::subscription)
 		.run()
 }
@@ -107,6 +115,8 @@ pub enum Message {
 	PassphraseCancelled,
 	// --- terminal input: a raw key press, forwarded only while a shell is open (§9) ---
 	Key(iced::keyboard::Event),
+	/// The window changed size — refit the terminal grid to it (§9).
+	WindowResized(iced::Size),
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -145,7 +155,8 @@ impl App {
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => self.on_passphrase_cancelled(),
 			Message::Key(event) => self.on_key(event),
-			Message::Ssh(event) => self.on_ssh_event(event),
+			Message::WindowResized(size) => self.on_window_resized(size),
+			Message::Ssh(event) => return self.on_ssh_event(event),
 		}
 		iced::Task::none()
 	}
@@ -217,9 +228,10 @@ impl App {
 		}
 	}
 
-	/// React to an event from the SSH task. Only the shape is here for now; the
-	/// task that produces these events is added in a later step.
-	fn on_ssh_event(&mut self, event: SshEvent) {
+	/// React to an event from the SSH task. Returns a `Task` for any follow-up
+	/// work — most events have none, but a freshly opened shell fetches the window
+	/// size to fit its grid right away (§9).
+	fn on_ssh_event(&mut self, event: SshEvent) -> iced::Task<Message> {
 		match event {
 			SshEvent::Ready(sender) => self.command_tx = Some(sender),
 			SshEvent::Connecting => {
@@ -235,10 +247,12 @@ impl App {
 				self.screen = Screen::NeedPassphrase;
 			}
 			SshEvent::Connected => {
-				// A shell is open: spin up an emulator sized to the pty we asked
-				// for, then show the terminal.
+				// A shell is open: spin up an emulator at the pty size we asked for,
+				// show the terminal, then immediately refit it to the real window
+				// rather than waiting for the first resize event.
 				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
 				self.screen = Screen::Terminal;
+				return fit_terminal();
 			}
 			SshEvent::Output(bytes) => {
 				// Feed raw shell output into the emulator; the next render draws it.
@@ -254,6 +268,25 @@ impl App {
 				self.terminal = None;
 				self.screen = Screen::Error(message);
 			}
+		}
+		iced::Task::none()
+	}
+
+	/// Refit the terminal grid after the window changed size (§9). Acts only on
+	/// the Terminal screen with a live emulator, and only when the cell dimensions
+	/// actually change — so dragging the window doesn't spam identical resizes.
+	/// Reflows the local view and tells the remote pty to match.
+	fn on_window_resized(&mut self, size: iced::Size) {
+		let (rows, cols) = ui::terminal::grid_size(size);
+		let changed = match self.terminal.as_mut() {
+			Some(terminal) if terminal.screen().size() != (rows, cols) => {
+				terminal.resize(rows, cols);
+				true
+			}
+			_ => false,
+		};
+		if changed {
+			self.send_command(SshCommand::Resize { cols, rows });
 		}
 	}
 
@@ -294,18 +327,29 @@ impl App {
 
 	/// Streams the app listens to. The SSH worker's outbound events (§4) are
 	/// always mapped into `Message::Ssh(..)`. While a shell is open we also listen
-	/// for key presses (§9) and turn them into `Message::Key(..)`; limiting that
-	/// subscription to the Terminal screen means the connect form's text inputs
-	/// keep the keyboard to themselves.
+	/// for key presses and window resizes (§9) — turned into `Message::Key(..)` and
+	/// `Message::WindowResized(..)`; limiting those to the Terminal screen means the
+	/// connect form's text inputs keep the keyboard to themselves and the form does
+	/// not react to resizes it does not care about.
 	fn subscription(&self) -> iced::Subscription<Message> {
 		let ssh = bridge::subscription().map(Message::Ssh);
 		match self.screen {
-			Screen::Terminal => {
-				iced::Subscription::batch([ssh, iced::keyboard::listen().map(Message::Key)])
-			}
+			Screen::Terminal => iced::Subscription::batch([
+				ssh,
+				iced::keyboard::listen().map(Message::Key),
+				iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
+			]),
 			_ => ssh,
 		}
 	}
+}
+
+/// Fetch the current window size and turn it into a `WindowResized`, so a newly
+/// opened terminal fits the window immediately instead of waiting for the first
+/// resize event (§9). `latest()` yields the most-recently-opened window and
+/// `and_then` unwraps it — if there is somehow no window, this is a no-op.
+fn fit_terminal() -> iced::Task<Message> {
+	iced::window::latest().and_then(|id| iced::window::size(id).map(Message::WindowResized))
 }
 
 /// Open the native file picker for a private-key file (§7). The dialog is modal

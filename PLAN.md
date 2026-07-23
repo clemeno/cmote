@@ -149,19 +149,23 @@ cmote/
 ├── Cargo.lock            (committed — reproducible, auditable builds)
 ├── PLAN.md
 ├── README.md
+├── assets/
+│   ├── FiraMono-Medium.ttf   monospace font embedded in the exe (§9, §11)
+│   └── FiraMono-LICENSE.txt  its OFL 1.1 license (required for redistribution)
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"]; spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── ui/
     │   ├── mod.rs
-    │   ├── connect.rs     the connection form (host/port/user/auth/key/passphrase)
-    │   └── terminal.rs    render the vt100 Screen grid as iced widgets
+    │   ├── connect.rs     the connection form (host/port/user/auth/key)
+    │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
     │   ├── auth.rs        method selection + attempts (publickey, password)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
-    │   └── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
+    │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
+    │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   └── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
@@ -268,15 +272,23 @@ Turning a raw byte stream into a screen.
 - **Parser**: `vt100::Parser` fed every `SshEvent::Output` chunk. It interprets ANSI
   escapes and maintains a `Screen`: a grid of cells, each with a glyph, fg/bg color,
   and attributes (bold, underline, inverse), plus cursor position.
-- **Render** (`ui/terminal.rs`): draw the `Screen` in iced using a **monospace** font,
-  one styled span per run of same-attribute cells. `ponytail:` a straightforward
-  cell/row render first; only reach for a custom canvas or GPU glyph atlas if scrolling
-  large output actually lags.
+- **Render** (`ui/terminal.rs`): draw the `Screen` in iced using a **bundled**
+  monospace font (**Fira Mono**, embedded in the exe — OFL 1.1), one styled span per
+  run of same-attribute cells. Bundling the font (rather than `Font::MONOSPACE`) makes
+  the grid look identical on every machine and gives an **exact** cell advance
+  (600/1000 em = 0.6), which the resize math depends on. `ponytail:` only the Medium
+  weight is embedded, so "bold" cells are not visually heavier in v1; a straightforward
+  cell/row render first, custom canvas / GPU atlas only if scrolling actually lags.
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
   sequences). Sent as `SshCommand::Input`.
-- **Resize**: when the terminal view's cell dimensions change, resize the `vt100`
-  parser *and* send `SshCommand::Resize{cols,rows}` so the server reflows (`window_change`).
+- **Resize** (done): a `window::resize_events()` subscription (Terminal screen only)
+  gives the window's logical size; `ui::terminal::grid_size` converts it to `(rows,
+  cols)` using the known cell metrics (minus padding, rounded down so nothing clips,
+  clamped ≥ 1×1). On a *change*, `App` resizes the `vt100` parser **and** sends
+  `SshCommand::Resize{cols,rows}` so the server reflows (`window_change`). A fresh shell
+  fits immediately by fetching the current size once (`window::latest` → `window::size`)
+  instead of waiting for the first resize event.
 - **Scrollback**: `vt100` keeps a bounded scrollback; expose it read-only in v1.
 - **Security note**: rendering untrusted server bytes is safe here — the vt100 parser
   *interprets* escapes into grid state; it never executes anything. We deliberately do

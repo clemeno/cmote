@@ -12,10 +12,11 @@
 
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 
-/// The pty size the client requests and the emulator starts at. Kept here as the
-/// single source of truth so the ssh client (which requests the pty) and the
-/// emulator (which lays out the grid) can never disagree. `ponytail:` fixed size
-/// for v1 — dynamic resize from the real window dimensions is a later slice.
+/// The pty size the client requests and the emulator starts at, before the first
+/// window measurement arrives (§9). Kept here as the single source of truth so
+/// the ssh client (which requests the initial pty) and the emulator (which lays
+/// out the grid) can never disagree; the grid is then reflowed to the real window
+/// size via `resize` + `SshCommand::Resize`.
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 
@@ -43,10 +44,9 @@ impl Terminal {
 		self.parser.process(bytes);
 	}
 
-	/// Resize the grid (e.g. the window changed). The remote pty must be told
-	/// separately via `SshCommand::Resize`; this only reflows our local view.
-	/// Unused until dynamic resize is wired, but kept so the two stay symmetric.
-	#[allow(dead_code)]
+	/// Resize the grid when the window changes (§9). This only reflows our local
+	/// view; the remote pty is told separately via `SshCommand::Resize`, so the
+	/// two are kept in step by the caller (`app::on_window_resized`).
 	pub fn resize(&mut self, rows: u16, cols: u16) {
 		self.parser.screen_mut().set_size(rows, cols);
 	}

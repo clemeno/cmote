@@ -9,7 +9,7 @@
 use iced::font::Weight;
 use iced::widget::text::{LineHeight, Span};
 use iced::widget::{column, container, rich_text, span};
-use iced::{Color, Element, Font, Length};
+use iced::{Color, Element, Font, Length, Size};
 
 use crate::app::Message;
 use crate::term::Terminal;
@@ -18,6 +18,22 @@ use crate::term::Terminal;
 /// it, so columns line up and rows tile without gaps.
 const FONT_SIZE: f32 = 14.0;
 const LINE_HEIGHT: f32 = 1.2;
+
+/// The bundled monospace font (Fira Mono, embedded in the binary — see
+/// `app::MONO_FONT`). Naming it explicitly instead of `Font::MONOSPACE` means the
+/// grid looks identical on every machine AND its cell advance is known exactly,
+/// which is what makes the pixel↔cell resize math below correct (§9, §11).
+const TERMINAL_FONT: Font = Font::with_name("Fira Mono");
+
+/// One monospace cell in logical pixels. Height is the line box; width uses Fira
+/// Mono's exact advance ratio (600/1000 em = 0.6), so both axes are precise —
+/// no per-font guesswork, which is why we bundle a known font.
+const CELL_WIDTH: f32 = FONT_SIZE * 0.6;
+const CELL_HEIGHT: f32 = FONT_SIZE * LINE_HEIGHT;
+
+/// Padding between the grid and its container edge. Named so `view` (which draws
+/// it) and `grid_size` (which subtracts it) can never drift apart.
+const GRID_PADDING: f32 = 6.0;
 
 /// The default foreground/background when a cell asks for the "default" color —
 /// a light-on-dark scheme, and the window's backdrop behind the whole grid.
@@ -80,8 +96,25 @@ pub fn view(terminal: &Terminal) -> Element<'static, Message> {
 		})
 		.width(Length::Fill)
 		.height(Length::Fill)
-		.padding(6)
+		.padding(GRID_PADDING)
 		.into()
+}
+
+/// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
+/// `view` draws it (same padding, same cell metrics). Rounds down so the last
+/// cell is never clipped, and clamps to at least 1×1 so the emulator always has
+/// a valid size. The app calls this on a window resize to reflow both the local
+/// emulator and the remote pty (§9).
+pub fn grid_size(area: Size) -> (u16, u16) {
+	let usable_width = area.width - 2.0 * GRID_PADDING;
+	let usable_height = area.height - 2.0 * GRID_PADDING;
+	let cols = (usable_width / CELL_WIDTH)
+		.floor()
+		.clamp(1.0, f32::from(u16::MAX)) as u16;
+	let rows = (usable_height / CELL_HEIGHT)
+		.floor()
+		.clamp(1.0, f32::from(u16::MAX)) as u16;
+	(rows, cols)
 }
 
 /// Build one screen row as a `rich_text` line, coalescing equal-styled cells.
@@ -198,7 +231,7 @@ fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
 		} else {
 			Weight::Normal
 		},
-		..Font::MONOSPACE
+		..TERMINAL_FONT
 	};
 	span(content)
 		.font(font)
@@ -206,4 +239,23 @@ fn make_span(content: String, style: CellStyle) -> Span<'static, ()> {
 		.color(style.fg)
 		.background(style.bg)
 		.underline(style.underline)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn grid_fits_area_minus_padding_rounding_down() {
+		// width:  (812 - 12) / 8.4  = 95.2  -> 95 cols
+		// height: (500 - 12) / 16.8 = 29.05 -> 29 rows
+		let (rows, cols) = grid_size(Size::new(812.0, 500.0));
+		assert_eq!((rows, cols), (29, 95));
+	}
+
+	#[test]
+	fn tiny_area_clamps_to_at_least_one_cell() {
+		// Smaller than the padding would give a negative count; clamp to 1×1.
+		assert_eq!(grid_size(Size::new(1.0, 1.0)), (1, 1));
+	}
 }
