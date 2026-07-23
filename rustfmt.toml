@@ -1,0 +1,8 @@
+# rustfmt configuration.
+#
+# We use rustfmt's idiomatic defaults (PLAN §14) with one deliberate exception:
+# `hard_tabs = true` honors the organization "indent with tabs" rule while still
+# letting rustfmt own all other formatting. Everything else is stock rustfmt, so
+# the code matches the style in the Rust docs/examples the project learns from.
+edition = "2024"
+hard_tabs = true

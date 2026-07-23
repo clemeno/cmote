@@ -1,0 +1,30 @@
+[package]
+name = "cmote"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+iced = "0.14.0"
+rfd = "0.17.2"
+# default-features=false drops russh's default `aws-lc-rs` crypto backend (needs
+# a C toolchain + NASM to build). We use `ring` instead: it ships pre-generated
+# assembly for x86_64-pc-windows-msvc, so it builds without NASM and keeps the
+# portable single-exe goal (PLAN §11). `flate2` = compression, `rsa` = RSA keys.
+russh = { version = "0.62.4", default-features = false, features = ["ring", "flate2", "rsa"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros", "time"] }
+vt100 = "0.16.2"
+zeroize = "1.9.0"
+
+# Release profile (PLAN §11): a small, fast, self-contained portable exe.
+#   lto            — link-time optimization across crates
+#   codegen-units  — one unit trades build time for better optimization
+#   strip          — drop symbols to shrink the binary
+#   panic = abort  — no unwinding: smaller code, and a crash aborts instead of
+#                    limping on (acceptable for a GUI app)
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

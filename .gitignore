@@ -1,0 +1,9 @@
+# Rust build output.
+/target
+
+# Portable runtime data written beside the exe (known_hosts, etc.). Never commit
+# host keys or any per-user data.
+/cmote-data/
+
+# Note: Cargo.lock IS committed (this is a binary crate) for reproducible,
+# auditable builds — see PLAN §12.
