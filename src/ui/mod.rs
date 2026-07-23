@@ -12,6 +12,13 @@ use iced::widget::{button, column, row, text, text_input};
 
 use crate::app::Message;
 
+/// The widget id of the passphrase field. It is stable and shared: `passphrase_view`
+/// tags the field with it, and `app` hands the same id to `text_input`'s focus
+/// operation so the field is focused the instant the prompt appears — the user can
+/// type immediately without first clicking it (§7). A plain `&'static str` is enough
+/// because iced's widget `Id` is `From<&'static str>`.
+pub const PASSPHRASE_INPUT_ID: &str = "passphrase-input";
+
 /// The error screen (§10): a generic message plus a Back button to the form.
 /// Detail is logged, not shown, so nothing sensitive leaks to the UI (§12).
 pub fn error_view(message: &str) -> Element<'_, Message> {
@@ -57,6 +64,7 @@ pub fn passphrase_view(value: &str) -> Element<'_, Message> {
 			"This private key is protected by a passphrase. Enter it to unlock the key and continue."
 		),
 		text_input("Passphrase", value)
+			.id(PASSPHRASE_INPUT_ID)
 			.secure(true)
 			.on_input(Message::PassphraseChanged)
 			.on_submit(Message::PassphraseSubmitted),

@@ -256,6 +256,9 @@ impl App {
 				// after a wrong passphrase), so a stale attempt is never resent.
 				self.passphrase_input.clear();
 				self.screen = Screen::NeedPassphrase;
+				// Focus the field so the user can type at once — the re-ask path
+				// lands here too, refocusing on every prompt (§7).
+				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
 			}
 			SshEvent::Connected => {
 				// A shell is open: spin up an emulator at the pty size we asked for,
