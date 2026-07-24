@@ -1,0 +1,96 @@
+# Continuous integration — the quality gate for every push and pull request
+# (PLAN §12/§13). It enforces on CI exactly the checks the README asks a developer
+# to run locally (`cargo fmt`, `cargo clippy -D warnings`, `cargo test`) and adds
+# the supply-chain audit (`cargo deny` + `cargo audit`) that guards the dependency
+# tree. Nothing here builds a release artifact — this is about keeping `main` green,
+# on *both* supported targets, not about publishing.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# One in-flight run per branch/PR: a new push cancels the previous, still-running
+# job for the same ref so we don't burn minutes on superseded commits.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the jobs only read the repo. No token write scope is needed.
+permissions:
+  contents: read
+
+jobs:
+  # ── Formatting ────────────────────────────────────────────────────────────
+  # rustfmt is platform-independent, so it runs once on the cheapest runner.
+  # `--check` fails (rather than rewrites) if anything is mis-formatted.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  # ── Windows (the primary target) ────────────────────────────────────────────
+  # windows-latest is x86_64, i.e. our native `x86_64-pc-windows-msvc` target, so
+  # clippy and the tests run without a cross-compile. This is the build the
+  # portable cmote.exe ships from.
+  windows:
+    name: clippy + test (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Cache the cargo registry and target dir keyed on the lockfile, so a run
+      # that doesn't touch dependencies re-uses the previous compile.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+
+  # ── macOS (the second target) ─────────────────────────────────────────────
+  # GitHub's macOS runners are Apple Silicon (aarch64), but cmote ships for Intel
+  # (`x86_64-apple-darwin`, PLAN §1). So we clippy *against the Intel target*
+  # (cross-compile — proves the shipped target builds clean, ring included) and
+  # run the tests natively on the aarch64 host (the logic under test is
+  # architecture-agnostic, PLAN §15, so a native run validates it without needing
+  # Rosetta to execute an x86_64 test binary).
+  macos:
+    name: clippy (x86_64-apple-darwin) + test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
+      - run: cargo test
+
+  # ── Supply chain ────────────────────────────────────────────────────────────
+  # The dependency tree is audited from the committed Cargo.lock, which is
+  # platform-independent, so this runs once on Linux. The two tools split the work:
+  #   * cargo-deny — licenses (allow-list in deny.toml), banned crates (no aws-lc,
+  #     PLAN §12), and unknown sources. NOT advisories — see below.
+  #   * cargo-audit — the RustSec advisory scan (known vulnerabilities). Owning
+  #     advisories here keeps deny.toml focused on policy and avoids scanning the
+  #     same database twice.
+  supply-chain:
+    name: cargo-deny + cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check bans licenses sources
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit

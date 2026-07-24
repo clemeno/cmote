@@ -1,0 +1,60 @@
+# cargo-deny configuration — the supply-chain gate (PLAN §12).
+#
+# `cargo deny` audits the *dependency tree*, which is where a Rust app's real risk
+# lives (our own code is memory-safe by construction). CI runs
+# `cargo deny check bans licenses sources` (advisories are handled by `cargo audit`
+# in the same job — the two tools split the work so neither scan is run twice).
+#
+# The schema is cargo-deny's v2 (`version = 2` in each section); older keys such as
+# `[licenses].unlicensed` or `[advisories].vulnerability` were folded into sane
+# defaults and no longer exist.
+
+# ── Advisories ────────────────────────────────────────────────────────────────
+# RustSec advisory database. CI gates advisories through `cargo audit`, so this
+# section only matters if someone runs a bare `cargo deny check` locally; the
+# defaults (deny known vulnerabilities, warn on unmaintained) are what we want.
+[advisories]
+version = 2
+yanked = "deny"       # refuse a build pinned to a yanked crate version
+ignore = []           # no advisory exceptions — keep the list empty and honest
+
+# ── Licenses ────────────────────────────────────────────────────────────────
+# Every crate we ship must carry a license we can legally redistribute. The allow
+# list below is the exact set the current tree resolves to (generated from
+# `cargo metadata`): each entry is required by at least one standalone dependency,
+# and every OR/AND expression in the tree is satisfied by these alone. A new
+# dependency dragging in an unlisted license fails CI on purpose — that is a
+# licensing decision a human should make, not a silent default.
+[licenses]
+version = 2
+allow = [
+	"MIT",           # the bulk of the tree (and cmote itself)
+	"Apache-2.0",    # the other half of the usual `MIT OR Apache-2.0` dual license
+	"ISC",           # e.g. ring's second license (`Apache-2.0 AND ISC`)
+	"BSD-2-Clause",
+	"BSD-3-Clause",
+	"BSL-1.0",       # Boost Software License
+	"CC0-1.0",       # public-domain dedication
+	"Unicode-3.0",   # unicode-ident's data tables
+	"Zlib",
+]
+
+# ── Bans ────────────────────────────────────────────────────────────────────
+# The security-critical rule (PLAN §12): never re-introduce the `aws-lc` crypto
+# backend. It needs a C toolchain + NASM to build, which breaks the portable
+# single-binary goal — we deliberately chose the pre-built `ring` backend instead.
+# Banning it here means a stray `default-features = true` on russh fails CI loudly
+# rather than silently changing the build's requirements.
+[bans]
+multiple-versions = "warn"   # duplicate versions are reported, not fatal (common, low-risk)
+deny = [
+	{ name = "aws-lc-rs" },
+	{ name = "aws-lc-sys" },
+]
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+# Only crates.io (the default registry) is trusted. An unknown registry or a raw
+# git dependency has to be added deliberately — it will not slip in unnoticed.
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -11,8 +11,9 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **design only — nothing built yet**. Both targets are supported first-class,
-and each has a verified toolchain on its host (a hello-world compiled, linked, and ran):
+Status: **shipping — v1.2.0** (v1 feature set complete; this release adds the CI
+supply-chain/quality gate, §12/§13). Both targets are supported first-class, and each
+has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -489,8 +490,11 @@ for free; the rest is deliberate.
   (current ciphers/KEX/MACs); do not hand-enable legacy/weak algorithms.
 - **Supply chain** — keep the dependency tree small, **commit `Cargo.lock`** (caret
   requirements + a committed lockfile give reproducible, auditable builds; §3), and
-  run `cargo audit` (RustSec advisory DB) + `cargo deny` (licenses + duplicate/banned
-  deps) in CI. This is where a Rust app's real risk lives — the dependency tree.
+  audit that tree in CI (done, v1.2 — `.github/workflows/ci.yml`): `cargo audit`
+  (RustSec advisory DB) scans for known vulnerabilities, and `cargo deny` (config in
+  `deny.toml`) enforces the license allow-list, the banned-crate list, and trusted
+  sources. The two tools split the concerns so the advisory database is not scanned
+  twice. This is where a Rust app's real risk lives — the dependency tree.
 - **Dependency purity vs. security (decided)** — the project is **not 100% Rust
   source**, and that is an accepted, deliberate trade: **security outranks purity**.
   Audited findings for `x86_64-pc-windows-msvc`:
@@ -512,7 +516,8 @@ for free; the rest is deliberate.
     the platform, not a C dependency we own.
   - **Policy going forward:** prefer pure-Rust crates; do **not** add a new C/`-sys`
     dependency (or anything that compiles C at build) without a security-grade
-    justification recorded here. `cargo deny` bans re-introducing `aws-lc-sys`.
+    justification recorded here. `deny.toml` bans re-introducing `aws-lc-rs` /
+    `aws-lc-sys`, so a stray `default-features = true` on russh fails CI (§13).
 - **No telemetry / no network beyond the SSH target.**
 - **Least authority on disk** — the only writable artifact is `known_hosts`; portable
   mode keeps even that beside the exe.
@@ -537,6 +542,17 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   disconnect, and the host-key-mismatch hard stop).
 
 Tests use Rust's built-in `#[test]` / `#[cfg(test)]` — no framework dependency.
+
+**CI (done, v1.2 — `.github/workflows/ci.yml`).** Every push and pull request to
+`main` runs the same gates the README asks for locally, so `main` stays green on both
+targets: `cargo fmt --check` (once, platform-independent), `cargo clippy -D warnings`
++ `cargo test` on **Windows** (native `x86_64-pc-windows-msvc`) and on **macOS**
+(clippy cross-compiled against the shipped `x86_64-apple-darwin` target — proving it
+builds, ring included — with the tests run natively on the aarch64 runner, valid
+because the logic under test is architecture-agnostic, §15), plus the supply-chain
+audit (§12). Only the live-SSH end-to-end path stays manual — there is still no CI SSH
+server. CI builds no release artifact; publishing the portable binaries stays a manual
+step (§15, code signing / release automation).
 
 ---
 

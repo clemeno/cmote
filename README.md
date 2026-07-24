@@ -1,5 +1,7 @@
 # cmote
 
+[![CI](https://github.com/clemeno/cmote/actions/workflows/ci.yml/badge.svg)](https://github.com/clemeno/cmote/actions/workflows/ci.yml)
+
 A **native, portable SSH client for Windows 11 and macOS** written in Rust. One
 window: fill in host / port / user, pick an auth method (password or a private key —
 PEM or PuTTY `.ppk`), connect. On success the server hands us a shell and cmote
@@ -99,6 +101,14 @@ cargo test          # run the unit tests
 cargo fmt           # format (rustfmt, hard tabs — see rustfmt.toml)
 cargo clippy --all-targets -- -D warnings
 ```
+
+**CI** (`.github/workflows/ci.yml`) runs these same gates on every push and pull
+request to `main`, on **both** targets — `cargo fmt --check` plus `cargo clippy -D
+warnings` and `cargo test` on Windows (`x86_64-pc-windows-msvc`) and macOS
+(clippy against the Intel target `x86_64-apple-darwin`, tests native on the runner).
+It also audits the dependency tree: `cargo audit` for RustSec advisories and
+`cargo deny` (see `deny.toml`) for the license allow-list, banned crates (no
+`aws-lc-*` — keeps the NASM-free portable build, §12), and trusted sources.
 
 Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
