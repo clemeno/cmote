@@ -93,4 +93,19 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      - run: cargo audit
+      # Three advisories are ignored, each with a reason — this list is the audit
+      # trail, so a NEW advisory still fails the build:
+      #   RUSTSEC-2023-0071  rsa "Marvin" timing side-channel. No fixed version
+      #     exists upstream; the `rsa` crate comes from russh's `rsa` feature, which
+      #     we need for RSA key auth (PLAN §7). Accepted risk: the attack requires an
+      #     attacker to time our RSA private-key operations precisely, and there is
+      #     no patch to take. Revisit when `rsa` ships a fix, or drop RSA key support.
+      #   RUSTSEC-2024-0436  paste — unmaintained (warning). Transitive via iced; no
+      #     replacement we control. Not a vulnerability.
+      #   RUSTSEC-2026-0192  ttf-parser — unmaintained (warning). Transitive via iced;
+      #     same rationale.
+      - run: >
+          cargo audit
+          --ignore RUSTSEC-2023-0071
+          --ignore RUSTSEC-2024-0436
+          --ignore RUSTSEC-2026-0192

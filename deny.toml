@@ -9,6 +9,19 @@
 # `[licenses].unlicensed` or `[advisories].vulnerability` were folded into sane
 # defaults and no longer exist.
 
+# ── Graph ─────────────────────────────────────────────────────────────────────
+# Only evaluate the dependency graph for the two platforms we actually ship
+# (PLAN §1). Without this, cargo-deny walks *every* target's crates — the full
+# tree is ~500 packages, but Windows uses ~300 and macOS ~310; the rest are
+# Linux/Android/wasm windowing crates iced can pull elsewhere (wayland, x11, …)
+# that we never build. Checking their licenses/sources would fail the build on
+# crates we don't ship, so we prune to our real targets and audit only those.
+[graph]
+targets = [
+	"x86_64-pc-windows-msvc",
+	"x86_64-apple-darwin",
+]
+
 # ── Advisories ────────────────────────────────────────────────────────────────
 # RustSec advisory database. CI gates advisories through `cargo audit`, so this
 # section only matters if someone runs a bare `cargo deny check` locally; the

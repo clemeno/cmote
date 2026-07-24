@@ -493,8 +493,18 @@ for free; the rest is deliberate.
   audit that tree in CI (done, v1.2 — `.github/workflows/ci.yml`): `cargo audit`
   (RustSec advisory DB) scans for known vulnerabilities, and `cargo deny` (config in
   `deny.toml`) enforces the license allow-list, the banned-crate list, and trusted
-  sources. The two tools split the concerns so the advisory database is not scanned
-  twice. This is where a Rust app's real risk lives — the dependency tree.
+  sources (scoped by `deny.toml`'s `[graph] targets` to the two platforms we ship, so
+  crates for targets we don't build are not judged). The two tools split the concerns so
+  the advisory database is not scanned twice. This is where a Rust app's real risk lives
+  — the dependency tree.
+  - **Accepted advisories** (audit trail — CI ignores exactly these, so a *new* one still
+    fails): **RUSTSEC-2023-0071** — the `rsa` "Marvin" timing side-channel, pulled by
+    russh's `rsa` feature for RSA key auth (§7). No fixed version exists upstream; the
+    attack needs precise timing of our RSA private-key operations, and there is no patch
+    to take, so the risk is accepted until `rsa` ships a fix (or RSA key support is
+    dropped). **RUSTSEC-2024-0436** (`paste`) and **RUSTSEC-2026-0192** (`ttf-parser`) —
+    both *unmaintained* warnings on transitive iced dependencies we don't control; neither
+    is a vulnerability.
 - **Dependency purity vs. security (decided)** — the project is **not 100% Rust
   source**, and that is an accepted, deliberate trade: **security outranks purity**.
   Audited findings for `x86_64-pc-windows-msvc`:
