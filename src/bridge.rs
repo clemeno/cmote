@@ -35,11 +35,20 @@ const CHANNEL_BOUND: usize = 256;
 pub enum AuthMethod {
 	/// A password typed into the form.
 	Password(Secret),
-	/// A private-key file (PEM / OpenSSH / PuTTY `.ppk`). No passphrase is carried
-	/// here: if the key turns out to be encrypted, the session asks for it
-	/// interactively (§7) — `SshEvent::NeedPassphrase` out, `SshCommand::Passphrase`
-	/// back — so an unencrypted key is never made to prompt.
-	Key { path: PathBuf },
+	/// A private-key file (PEM / OpenSSH / PuTTY `.ppk`), with an OPTIONAL passphrase
+	/// pre-seeded from the form (§7, §14). `passphrase`:
+	///   * `None` — the field was left empty: keep the original behavior. An encrypted
+	///     key prompts interactively (`SshEvent::NeedPassphrase` out,
+	///     `SshCommand::Passphrase` back); an unencrypted key never prompts.
+	///   * `Some(..)` — try this passphrase first, so a known passphrase unlocks the
+	///     key without a prompt; if it is wrong we fall back to prompting.
+	///
+	/// The passphrase is session-only — it rides in a `Secret` (redacted, wiped on
+	/// drop) and is never persisted with the saved target (§12).
+	Key {
+		path: PathBuf,
+		passphrase: Option<Secret>,
+	},
 }
 
 /// Parameters the user fills in on the connect form, handed to the SSH task once

@@ -193,9 +193,11 @@ async fn connect_and_run(
 			.context("authentication request failed")?
 			.success(),
 
-		AuthMethod::Key { path } => {
-			// Load the key, prompting for a passphrase only if it is encrypted.
-			let key = resolve_key(path, events, &mut to_session_rx).await?;
+		AuthMethod::Key { path, passphrase } => {
+			// Load the key. A passphrase pre-seeded from the form (§14) is tried first;
+			// otherwise an encrypted key prompts interactively (§7). `clone` because the
+			// passphrase is borrowed from `params` and `resolve_key` needs to own it.
+			let key = resolve_key(path, passphrase.clone(), events, &mut to_session_rx).await?;
 			// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
 			// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which
 			// it accepts and use the strongest; other key types ignore this.
@@ -238,27 +240,41 @@ async fn connect_and_run(
 	stream(channel, events, to_session_rx).await
 }
 
-/// Load the chosen private key (§7), prompting for a passphrase only when the
-/// key is actually encrypted. An unencrypted key returns at once with no prompt.
-/// For an encrypted key we ask the GUI (`NeedPassphrase`), wait for the reply,
-/// and retry — up to `MAX_PASSPHRASE_ATTEMPTS`. A wrong passphrase is treated the
-/// same as "none yet": both just ask again. A genuinely malformed key (a failure
-/// while we hold no passphrase to blame) is a hard error.
+/// Load the chosen private key (§7, §14), prompting for a passphrase only when the
+/// key is actually encrypted. `initial` is the optional passphrase pre-seeded from
+/// the form: `Some` is tried before any prompt (so a known passphrase unlocks the
+/// key silently), `None` keeps the original interactive-only behavior.
+///
+/// The load happens in two stages. First we probe with NO passphrase, which cleanly
+/// classifies the file: an unencrypted key loads here (any typed passphrase is
+/// meaningless for it and is correctly ignored); an unencrypted but malformed key is
+/// a hard error; an encrypted key reports `NeedsPassphrase` and drops to the retry
+/// loop. There we try the pre-seed (if any), then ask the GUI and retry — up to
+/// `MAX_PASSPHRASE_ATTEMPTS` prompts. A wrong passphrase (pre-seeded or typed) just
+/// asks again.
 async fn resolve_key(
 	path: &Path,
+	initial: Option<Secret>,
 	events: &mpsc::Sender<SshEvent>,
 	to_session_rx: &mut mpsc::Receiver<SessionMsg>,
 ) -> Result<PrivateKey> {
-	let mut passphrase: Option<Secret> = None;
+	// Stage one: classify the file with no passphrase.
+	match keyfile::load_private_key(path, None)? {
+		Loaded::Key(key) => return Ok(*key),
+		// Encrypted: fall through to the passphrase loop below.
+		Loaded::NeedsPassphrase => {}
+	}
+
+	// Stage two: the key is encrypted. Try the pre-seed first, then prompt and retry.
+	let mut passphrase = initial;
 	let mut attempts = 0u32;
 
 	loop {
-		match keyfile::load_private_key(path, passphrase.as_ref()) {
-			Ok(Loaded::Key(key)) => return Ok(*key),
-			Err(error) if passphrase.is_none() => return Err(error),
-			// Encrypted (no/means-insufficient passphrase), or a failure with a
-			// passphrase in hand (assume it was wrong): ask and try again.
-			Ok(Loaded::NeedsPassphrase) | Err(_) => {}
+		// A passphrase in hand (pre-seed or typed) that unlocks the key wins immediately.
+		if let Some(secret) = passphrase.as_ref()
+			&& let Ok(Loaded::Key(key)) = keyfile::load_private_key(path, Some(secret))
+		{
+			return Ok(*key);
 		}
 
 		if attempts >= MAX_PASSPHRASE_ATTEMPTS {

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use iced::widget::{button, column, container, radio, row, text, text_input};
 use iced::{Border, Color, Element};
+use serde::{Deserialize, Serialize};
 
 use crate::app::Message;
 use crate::bridge::{AuthMethod, ConnectParams};
@@ -24,6 +25,10 @@ pub const HOST_INPUT_ID: &str = "connect-host";
 pub const PORT_INPUT_ID: &str = "connect-port";
 pub const USER_INPUT_ID: &str = "connect-user";
 pub const PASSWORD_INPUT_ID: &str = "connect-password";
+/// The optional key-passphrase field shown under key auth (§14). Distinct from
+/// `ui::PASSPHRASE_INPUT_ID`, which is the *interactive* prompt's field — this one
+/// lives on the form and only pre-seeds the passphrase.
+pub const KEY_PASSPHRASE_INPUT_ID: &str = "connect-key-passphrase";
 
 /// An id that matches no widget on purpose: focusing it unfocuses every input (iced's
 /// focus operation unfocuses all non-matching focusables). `app` uses it when the
@@ -51,29 +56,57 @@ pub enum FormStop {
 	/// The credential control: the password field under password auth, the Browse
 	/// button under key auth (§7).
 	Credential,
+	/// The optional key-passphrase field. Only exists under key auth (§14); Tab skips
+	/// it entirely under password auth (see `is_applicable`).
+	KeyPassphrase,
 	Connect,
 }
 
 impl FormStop {
-	/// The stops in Tab order; `next`/`previous` cycle through it.
-	const ORDER: [FormStop; 7] = [
+	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
+	/// do not apply to the current auth method.
+	const ORDER: [FormStop; 8] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
 		FormStop::AuthPassword,
 		FormStop::AuthKey,
 		FormStop::Credential,
+		FormStop::KeyPassphrase,
 		FormStop::Connect,
 	];
 
-	/// The next stop in Tab order, wrapping around at the end.
-	pub fn next(self) -> Self {
-		Self::ORDER[(self.index() + 1) % Self::ORDER.len()]
+	/// Whether this stop is reachable under `auth`. Every stop is except the
+	/// key-passphrase field, which is present only when key auth is selected. This is
+	/// what lets Tab skip the passphrase stop under password auth so it never lands on
+	/// a control that is not on screen.
+	fn is_applicable(self, auth: AuthKind) -> bool {
+		match self {
+			FormStop::KeyPassphrase => auth == AuthKind::Key,
+			_ => true,
+		}
 	}
 
-	/// The previous stop in Tab order, wrapping around at the start.
-	pub fn previous(self) -> Self {
-		Self::ORDER[(self.index() + Self::ORDER.len() - 1) % Self::ORDER.len()]
+	/// The next applicable stop in Tab order, wrapping around at the end.
+	pub fn next(self, auth: AuthKind) -> Self {
+		let mut stop = self;
+		loop {
+			stop = Self::ORDER[(stop.index() + 1) % Self::ORDER.len()];
+			if stop.is_applicable(auth) {
+				return stop;
+			}
+		}
+	}
+
+	/// The previous applicable stop in Tab order, wrapping around at the start.
+	pub fn previous(self, auth: AuthKind) -> Self {
+		let mut stop = self;
+		loop {
+			stop = Self::ORDER[(stop.index() + Self::ORDER.len() - 1) % Self::ORDER.len()];
+			if stop.is_applicable(auth) {
+				return stop;
+			}
+		}
 	}
 
 	/// This stop's position in `ORDER`.
@@ -86,13 +119,14 @@ impl FormStop {
 
 	/// The text-input id to focus natively at this stop, or `None` when the stop is a
 	/// radio or button (which iced cannot focus). Under key auth the Credential stop is
-	/// the Browse button, so it has no input id.
+	/// the Browse button, so it has no input id; the KeyPassphrase stop is a text field.
 	pub fn input_id(self, auth: AuthKind) -> Option<&'static str> {
 		match self {
 			FormStop::Host => Some(HOST_INPUT_ID),
 			FormStop::Port => Some(PORT_INPUT_ID),
 			FormStop::User => Some(USER_INPUT_ID),
 			FormStop::Credential if auth == AuthKind::Password => Some(PASSWORD_INPUT_ID),
+			FormStop::KeyPassphrase if auth == AuthKind::Key => Some(KEY_PASSPHRASE_INPUT_ID),
 			_ => None,
 		}
 	}
@@ -114,7 +148,12 @@ impl FormStop {
 /// radio buttons can compare it by value and select the current one; `Password`
 /// is the default. This is the UI-side mirror of `bridge::AuthMethod` — the form
 /// holds a choice, `validate` turns it into the real method with its secrets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// It is also what a saved target records (§14), hence the serde derives; the
+/// `lowercase` rename keeps the JSON tidy (`"password"` / `"key"`) and stable if the
+/// Rust variant names ever change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum AuthKind {
 	#[default]
 	Password,
@@ -133,10 +172,13 @@ pub struct ConnectForm {
 	pub auth_kind: AuthKind,
 	/// Password for `Password` auth.
 	pub password: String,
-	/// Chosen private-key file for `Key` auth (set by the file picker). Any
-	/// passphrase for an encrypted key is asked for interactively at connect time
-	/// (§7), so it is not kept in the form.
+	/// Chosen private-key file for `Key` auth (set by the file picker).
 	pub key_path: Option<PathBuf>,
+	/// Optional passphrase for an encrypted key (§14). Left empty, the connect flow
+	/// keeps its original behavior — an encrypted key prompts interactively (§7).
+	/// Filled, it is tried first so the key unlocks without a prompt. Session-only:
+	/// it is moved into a `Secret` on submit and never saved with the target (§12).
+	pub passphrase: String,
 }
 
 impl ConnectForm {
@@ -177,7 +219,9 @@ impl ConnectForm {
 	/// Turn the selected auth kind and its fields into a typed `AuthMethod`. The
 	/// password is wrapped in `Secret` so it is redacted in logs and wiped on drop
 	/// (§12); an empty password is allowed here — the server decides. A key needs
-	/// a chosen file; its passphrase (if any) is collected interactively later.
+	/// a chosen file; an entered passphrase is pre-seeded (§14), an empty one is
+	/// `None` so an encrypted key still prompts interactively (§7). Both secrets ride
+	/// in `Secret` and are never persisted.
 	fn validate_auth(&self) -> Result<AuthMethod, String> {
 		match self.auth_kind {
 			AuthKind::Password => Ok(AuthMethod::Password(Secret::new(self.password.clone()))),
@@ -186,7 +230,14 @@ impl ConnectForm {
 					.key_path
 					.clone()
 					.ok_or_else(|| "Choose a private-key file.".to_string())?;
-				Ok(AuthMethod::Key { path })
+				// An empty passphrase field means "prompt me if needed" — send `None`
+				// rather than an empty `Secret`, so the interactive path is unchanged.
+				let passphrase = if self.passphrase.is_empty() {
+					None
+				} else {
+					Some(Secret::new(self.passphrase.clone()))
+				};
+				Ok(AuthMethod::Key { path, passphrase })
 			}
 		}
 	}
@@ -198,7 +249,14 @@ impl ConnectForm {
 /// (text inputs show iced's own focus outline instead) (§10).
 pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 	column![
-		text("cmote — SSH connect").size(24),
+		// A back affordance to the home list (§14). Not part of the Tab ring — it is a
+		// navigation escape, also reachable with Esc (see `app::on_form_key`).
+		row![
+			button(text("← Targets")).on_press(Message::HomePressed),
+			text("cmote — SSH connect").size(24),
+		]
+		.spacing(12)
+		.align_y(iced::alignment::Vertical::Center),
 		labeled_input(
 			"Host",
 			"example.com",
@@ -287,7 +345,8 @@ fn auth_selector(selected: AuthKind, focus: FormStop) -> Element<'static, Messag
 }
 
 /// The credential fields for the selected method: a password box, or a key-file
-/// chooser. `focus` marks the Browse button when key auth's Credential stop is active.
+/// chooser plus an optional passphrase (§14). `focus` marks the Browse button when key
+/// auth's Credential stop is active.
 fn auth_fields(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 	match form.auth_kind {
 		AuthKind::Password => secure_input(
@@ -296,9 +355,30 @@ fn auth_fields(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 			PASSWORD_INPUT_ID,
 			Message::PasswordChanged,
 		),
-		// No passphrase box here — an encrypted key prompts for it at connect time.
-		AuthKind::Key => key_file_row(form.key_path.as_deref(), focus == FormStop::Credential),
+		// The key file plus an optional passphrase. Leaving the passphrase empty keeps
+		// the interactive-prompt behavior (§7); filling it pre-seeds the unlock (§14).
+		AuthKind::Key => column![
+			key_file_row(form.key_path.as_deref(), focus == FormStop::Credential),
+			passphrase_field(&form.passphrase),
+		]
+		.spacing(12)
+		.into(),
 	}
+}
+
+/// The optional key-passphrase field (§14). Masked like any secret; its placeholder
+/// spells out that leaving it empty falls back to the interactive prompt. It takes a
+/// Tab stop (`FormStop::KeyPassphrase`) so keyboard navigation reaches it under key auth.
+fn passphrase_field(value: &str) -> Element<'_, Message> {
+	row![
+		text("Passphrase").width(90),
+		text_input("optional — leave empty to be prompted", value)
+			.id(KEY_PASSPHRASE_INPUT_ID)
+			.secure(true)
+			.on_input(Message::KeyPassphraseChanged),
+	]
+	.spacing(10)
+	.into()
 }
 
 /// The key-file chooser: the chosen path (or a prompt) and a Browse button that
@@ -401,7 +481,30 @@ mod tests {
 		};
 		let params = form.validate().expect("valid key form");
 		match params.auth {
-			AuthMethod::Key { path } => assert_eq!(path, PathBuf::from("/keys/id_ed25519")),
+			AuthMethod::Key { path, passphrase } => {
+				assert_eq!(path, PathBuf::from("/keys/id_ed25519"));
+				// An empty passphrase field must not become an empty secret — it stays
+				// `None` so the interactive prompt still fires for an encrypted key (§7).
+				assert!(passphrase.is_none());
+			}
+			other => panic!("expected key auth, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn key_auth_pre_seeds_a_typed_passphrase() {
+		let form = ConnectForm {
+			auth_kind: AuthKind::Key,
+			key_path: Some(PathBuf::from("/keys/id_ed25519")),
+			passphrase: "hunter2".to_string(),
+			..base_form()
+		};
+		let params = form.validate().expect("valid key form");
+		match params.auth {
+			AuthMethod::Key { passphrase, .. } => {
+				let secret = passphrase.expect("passphrase pre-seeded");
+				assert_eq!(secret.expose(), "hunter2");
+			}
 			other => panic!("expected key auth, got {other:?}"),
 		}
 	}

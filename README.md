@@ -2,10 +2,11 @@
 
 [![CI](https://github.com/clemeno/cmote/actions/workflows/ci.yml/badge.svg)](https://github.com/clemeno/cmote/actions/workflows/ci.yml)
 
-A **native, portable SSH client for Windows 11 and macOS** written in Rust. One
-window: fill in host / port / user, pick an auth method (password or a private key —
-PEM or PuTTY `.ppk`), connect. On success the server hands us a shell and cmote
-renders a **full VT terminal** inside the window — a working interactive prompt.
+A **native, portable SSH client for Windows 11 and macOS** written in Rust. A home
+screen lists your saved connection targets; pick one (or start a new connection), fill
+in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
+`.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
+terminal** inside the window — a working interactive prompt.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -15,10 +16,18 @@ references below (§n) point into it.
 
 ## Features
 
-- Single-window connection form: host, port, user, and an auth method.
+- **Home screen of saved targets** — every successful connection is remembered as a
+  named target and listed alphabetically. Profiles only: **no passwords or passphrases
+  are ever written to disk** (only host / port / user / auth method / key path). Click a
+  target to select it, then click it again (or press **Enter**) to open it and pre-fill
+  the form; **rename** it in place with **F2** or right-click → **Rename** (the list
+  re-sorts); right-click also offers **Open** and **Delete**; **New connection** opens a
+  blank form.
+- Connection form: host, port, user, and an auth method.
 - **Password** auth, or **private-key** auth with a native file picker (`rfd`).
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
-  `ssh-key`'s `from_ppk`). Encrypted keys prompt for a passphrase on their own screen.
+  `ssh-key`'s `from_ppk`). Encrypted keys prompt for a passphrase on their own screen —
+  or pre-fill an optional passphrase field on the form (leave it empty to be prompted).
 - **Trust-on-first-use** host-key verification against a portable `known_hosts`:
   first contact shows the fingerprint for explicit accept/reject; a later key change
   is a hard stop, not a warning (§8).
@@ -35,8 +44,9 @@ references below (§n) point into it.
   card never dismisses it (only a click outside does); the body message is **selectable and
   copyable** — drag to select, `Ctrl+C` to copy (handy for the host-key fingerprint or an
   error message); and the dialog is **draggable** by its header, clamped to the window (§10).
-- Session-only credentials, held in memory and `zeroize`d on drop — never written to
-  disk (§12).
+- Session-only **secrets** — passwords and key passphrases are held in memory and
+  `zeroize`d on drop, never written to disk (§12). Only non-secret connection *profiles*
+  are persisted, for the home list (§14).
 
 ## Requirements
 
@@ -79,17 +89,19 @@ right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
 
 ## Data and portability
 
-The only file cmote writes is `known_hosts`. It is resolved at runtime (§11,
-`ssh::hostkey::known_hosts_path`):
+cmote writes two files — `known_hosts` (pinned host keys) and `targets.json` (saved
+connection profiles — **no secrets**). Both live in the same directory, resolved at
+runtime (§11, `paths::data_dir`):
 
 1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
-   is writable. This keeps the host-key store travelling with the app — on macOS the
-   binary lives in `cmote.app/Contents/MacOS/`, so the store sits inside the bundle.
+   is writable. This keeps the data travelling with the app — on macOS the binary lives
+   in `cmote.app/Contents/MacOS/`, so the store sits inside the bundle.
 2. **Fallback (Windows):** `%LOCALAPPDATA%\cmote\` when the exe sits in a read-only
-   location (e.g. `Program Files`).
+   location (e.g. `Program Files`); on macOS `~/Library/Application Support/cmote/`.
 
 To reset trust for a host, delete the offending line (or the whole file) from
-whichever location is in use.
+`known_hosts`. To drop a saved target, use right-click → Delete in the app (or delete
+its entry from `targets.json`).
 
 ## Testing
 

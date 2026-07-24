@@ -6,6 +6,7 @@
 
 pub mod connect; // the connection form
 pub mod dialog; // shared modal-dialog chrome (header / body / footer)
+pub mod home; // the home screen: saved connection targets (§14)
 pub mod selection; // mouse text selection over the grid
 pub mod terminal; // the live shell grid
 

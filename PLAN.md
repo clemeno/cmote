@@ -11,9 +11,10 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v1.2.0** (v1 feature set complete; this release adds the CI
-supply-chain/quality gate, §12/§13). Both targets are supported first-class, and each
-has a verified toolchain on its host:
+Status: **shipping — v1.3.0** (v1 feature set complete; this release adds saved
+connection targets on a home screen — profiles only, no secrets — plus an optional
+key-passphrase field, §14). Both targets are supported first-class, and each has a
+verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -37,11 +38,11 @@ This document is the reference to build against.
 | Terminal | **Full VT emulator** — `vt100` maintains the screen grid; iced renders the cells |
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
-| Credentials | **Session-only** — held in memory, `zeroize`d on drop, never written to disk |
+| Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
 | Auth order | Offer `publickey` first (if a key is given), then `password`; driven by what the server accepts |
 | File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
 | Errors | `anyhow` at the app boundary; typed `thiserror` enums deferred until a real API needs them |
-| Config location | `known_hosts` beside the exe (`./cmote-data/`), falling back to `%LOCALAPPDATA%\cmote` (Windows) or `~/Library/Application Support/cmote` (macOS) if that dir is read-only |
+| Config location | `known_hosts` **and** `targets.json` in `./cmote-data/` beside the exe, falling back to `%LOCALAPPDATA%\cmote` (Windows) or `~/Library/Application Support/cmote` (macOS) if that dir is read-only |
 
 ---
 
@@ -76,11 +77,12 @@ Each decision below is a thing to learn from, not just a dependency.
   sequences (colors, cursor moves, clears). `vt100` parses a byte stream into a simple
   `Screen` grid of cells we can render directly in iced — small, readable, enough for
   v1. `alacritty_terminal` is more complete but heavier and its API tracks Alacritty's
-  needs, not ours. `ponytail:` start with vt100; upgrade path noted in §15.
-- **Session-only credentials** — the safest secret is the one never persisted. v1
-  holds passwords / decrypted keys only for the session and wipes them with `zeroize`.
-  Saved profiles (encrypted at rest) are a deliberate later feature (§15), not a v1
-  gap.
+  needs, not ours. `ponytail:` start with vt100; upgrade path noted in §16.
+- **Session-only *secrets*** — the safest secret is the one never persisted. Passwords
+  and decrypted keys live only for the session and are wiped with `zeroize`. As of v1.3
+  connection *profiles* (host / port / user / auth kind / key path — no secret) ARE
+  saved so the home screen can list targets (§14); persisting the secrets themselves,
+  encrypted at rest, stays a deliberate later feature (§16), not a v1 gap.
 
 ---
 
@@ -559,14 +561,49 @@ targets: `cargo fmt --check` (once, platform-independent), `cargo clippy -D warn
 + `cargo test` on **Windows** (native `x86_64-pc-windows-msvc`) and on **macOS**
 (clippy cross-compiled against the shipped `x86_64-apple-darwin` target — proving it
 builds, ring included — with the tests run natively on the aarch64 runner, valid
-because the logic under test is architecture-agnostic, §15), plus the supply-chain
+because the logic under test is architecture-agnostic, §16), plus the supply-chain
 audit (§12). Only the live-SSH end-to-end path stays manual — there is still no CI SSH
 server. CI builds no release artifact; publishing the portable binaries stays a manual
-step (§15, code signing / release automation).
+step (§16, code signing / release automation).
 
 ---
 
-## 14. Coding conventions — DECIDED: idiomatic Rust
+## 14. Saved connection targets (v1.3)
+
+The home screen (`ui/home.rs`) is the landing screen: a list of previously used
+connection **targets**, so reconnecting is a click instead of re-typing the form.
+
+- **What persists — profiles only, never secrets (§12).** A target records `name`,
+  `host`, `port`, `user`, `auth_kind`, and (for key auth) `key_path`. No password and no
+  key passphrase is ever written. This keeps the §12 "the safest secret is the one never
+  persisted" guarantee **and** keeps the store fully portable — a `targets.json` copied
+  to another machine leaks nothing. The user still enters the secret on the form each
+  time. *(Opt-in, encrypted-at-rest secret persistence — Windows DPAPI / macOS Keychain
+  — is deliberately deferred to a later investigation; see §16.)*
+- **Store** (`profiles.rs`): `targets.json` in the shared data directory
+  (`paths::data_dir`, the same portable-or-fallback resolution `known_hosts` uses, §11),
+  serialized with `serde` / `serde_json`. A missing file means "no targets yet"; a
+  corrupt file is logged and treated as empty — a broken store never blocks connecting.
+- **Identity + ordering.** A target's identity is its endpoint `user@host:port`; the
+  store keeps at most one target per endpoint. The list is sorted by `name`
+  (case-insensitively, endpoint as the tie-breaker) and re-sorted whenever a name changes.
+- **Save-on-connect.** A target is written only once a session actually opens
+  (`SshEvent::Connected`), never on a mere attempt. `upsert_on_connect` adds a new target
+  (named after the endpoint) or refreshes an existing endpoint's auth/key while keeping
+  its custom name — so reconnecting never spawns a duplicate and never clobbers a rename.
+- **Interactions** (`app.rs` + `ui/home.rs`): pick a row to **pre-fill the form**
+  (host / port / user / auth / key; the secret fields start empty); **New connection**
+  opens a blank form; **rename** in place via **F2** or the right-click menu (Enter
+  commits and re-sorts, Esc cancels); the right-click menu also offers **Open** and
+  **Delete**. `Esc` on the form returns to the list.
+- **Optional key-passphrase pre-seed (§7).** The form gained an optional passphrase
+  field under key auth. Left empty it keeps the original behavior (an encrypted key
+  prompts interactively); filled, it is tried first so a known passphrase unlocks the key
+  without a prompt. It is session-only — a `Secret`, never saved with the target.
+
+---
+
+## 15. Coding conventions — DECIDED: idiomatic Rust
 
 **Decision (locked):** this project uses **idiomatic Rust** — `snake_case` items,
 `SCREAMING_SNAKE_CASE` constants, no Hungarian prefixes, `rustfmt` defaults, and a
@@ -595,11 +632,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 
 ---
 
-## 15. Deferred (with upgrade paths)
+## 16. Deferred (with upgrade paths)
 
-- **Saved connection profiles + credential persistence** — encrypt secrets at rest
-  with **Windows DPAPI** / the **macOS Keychain** (both user-bound) or an OS keyring;
-  adds a real secret-at-rest threat model. v1 is session-only.
+- **Credential persistence (secrets at rest)** — saved connection *profiles* shipped in
+  v1.3 (§14), but only the non-secret metadata. Persisting the password / passphrase
+  themselves — encrypted with **Windows DPAPI** / the **macOS Keychain** (both
+  user-bound) or an OS keyring, as an opt-in per target — is the remaining piece. It
+  adds a real secret-at-rest threat model and, being machine-bound, trades against the
+  portable store, so it is a deliberate later investigation.
 - **Multiple sessions / tabs** — the channel-per-session design (§4) already allows it;
   v1 ships one session for simplicity.
 - **Broader auth** — `keyboard-interactive` (2FA / OTP prompts), SSH agent / Pageant

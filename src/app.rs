@@ -69,8 +69,12 @@ pub fn run() -> iced::Result {
 /// machine from PLAN §10 — every transition happens in `update`.
 #[derive(Debug, Default)]
 pub enum Screen {
-	/// The connection form (host / port / user / auth). This is where we start.
+	/// The home screen: the list of saved connection targets (§14). This is where we
+	/// start; picking a target pre-fills the connect form, "New connection" opens a
+	/// blank one.
 	#[default]
+	Home,
+	/// The connection form (host / port / user / auth), reached from the home screen.
 	Connect,
 	/// Handshake and authentication in progress; `status` is a human-readable
 	/// step for the UI ("connecting", "verifying host key", "authenticating").
@@ -96,6 +100,22 @@ pub enum Screen {
 pub struct App {
 	/// Which screen is visible.
 	pub screen: Screen,
+	/// The saved connection targets shown on the home screen (§14). Loaded from disk
+	/// at startup, kept sorted, and re-saved whenever it changes (a rename, a delete,
+	/// or a successful connect). Profiles only — never any secret material (§12).
+	targets: crate::profiles::Targets,
+	/// The endpoint key (`user@host:port`) of the highlighted target on the home
+	/// screen, if any. Drives the row highlight and is what the right-click menu and
+	/// the F2/Enter/Delete shortcuts act on.
+	home_selected: Option<String>,
+	/// Whether the home screen's right-click menu is open (it acts on `home_selected`).
+	home_menu_open: bool,
+	/// The in-progress inline rename on the home screen, if any (§14).
+	home_rename: Option<ui::home::RenameState>,
+	/// The profile (no secret) captured when a connect is dialed, saved to `targets`
+	/// once the session actually opens (§14). `None` between attempts so a failed or
+	/// abandoned connect never persists a target.
+	pending_target: Option<crate::profiles::Target>,
 	/// The connect form's field contents. Lives here so it survives navigating
 	/// to an error screen and back without losing what the user typed.
 	pub form: ui::connect::ConnectForm,
@@ -169,11 +189,36 @@ pub struct App {
 /// are surfaced from the background tokio task via a subscription (§4).
 #[derive(Debug, Clone)]
 pub enum Message {
+	// --- home screen: saved targets (§14) ---
+	/// Open a blank connect form for a brand-new connection.
+	HomeNewPressed,
+	/// A target row was left-clicked — select it (payload: its endpoint key).
+	HomeTargetClicked(String),
+	/// A target row was right-clicked — select it and open the context menu.
+	HomeTargetRightClicked(String),
+	/// Dismiss the home context menu without choosing an item.
+	HomeMenuDismissed,
+	/// Context-menu "Open": pre-fill the form with the selected target and go there.
+	HomeMenuOpen,
+	/// Context-menu "Rename" (or F2): begin the inline rename of the selected target.
+	HomeMenuRename,
+	/// Context-menu "Delete": remove the selected target from the store.
+	HomeMenuDelete,
+	/// The inline rename field changed.
+	HomeRenameEdited(String),
+	/// The inline rename was submitted (Enter) — commit it and re-sort.
+	HomeRenameCommitted,
+	/// A key press on the home screen (F2 rename, Enter open, Delete remove, Esc cancel).
+	HomeKey(iced::keyboard::Event),
+	/// Leave the connect form and return to the home list (the form's Back / Esc).
+	HomePressed,
 	// --- connect form field edits ---
 	HostChanged(String),
 	PortChanged(String),
 	UserChanged(String),
 	PasswordChanged(String),
+	/// The optional key-passphrase field on the form changed (§14).
+	KeyPassphraseChanged(String),
 	// --- auth method selection (§7) ---
 	/// The user switched between password and key auth.
 	AuthKindChanged(AuthKind),
@@ -248,25 +293,57 @@ impl App {
 	/// startup. We start on the Connect screen with no work to do, so the task
 	/// is empty.
 	fn new() -> (Self, iced::Task<Message>) {
-		// Start with the first form field focused so the user can type immediately, and
-		// its keyboard-navigation ring aligned to that field (§10). Also fetch the window
-		// size right away so a dialog opened before the first resize event can still be
-		// centred and clamped (§10).
-		let app = Self::default();
-		let focus = app.apply_form_focus();
+		// Load the saved targets so the home list is populated on the first paint (§14).
+		// We start on the home screen, not the form, so there is no field to focus yet.
+		// Fetch the window size right away so a dialog opened before the first resize
+		// event can still be centred and clamped (§10).
+		let app = Self {
+			targets: crate::profiles::Targets::load(),
+			..Self::default()
+		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
-		(app, iced::Task::batch([focus, size]))
+		(app, size)
 	}
 
 	/// The heart of the Elm loop: apply one `Message` to the state. Returns a
 	/// `Task` for any async follow-up work (none yet in the skeleton).
 	fn update(&mut self, message: Message) -> iced::Task<Message> {
 		match message {
+			// --- home screen (§14) ---
+			Message::HomeNewPressed => return self.open_form_new(),
+			Message::HomeTargetClicked(key) => {
+				self.home_menu_open = false;
+				// First click selects (so F2 / rename / delete have a target); clicking
+				// the already-selected row again opens it — the "pick pre-fills the form"
+				// action, kept distinct from selection so both can coexist (§14).
+				if self.home_selected.as_deref() == Some(key.as_str()) {
+					return self.open_selected_target();
+				}
+				self.home_selected = Some(key);
+			}
+			Message::HomeTargetRightClicked(key) => {
+				self.home_selected = Some(key);
+				self.home_menu_open = true;
+			}
+			Message::HomeMenuDismissed => self.home_menu_open = false,
+			Message::HomeMenuOpen => return self.open_selected_target(),
+			Message::HomeMenuRename => return self.start_rename(),
+			Message::HomeMenuDelete => self.delete_selected_target(),
+			Message::HomeRenameEdited(value) => {
+				if let Some(rename) = self.home_rename.as_mut() {
+					rename.text = value;
+				}
+			}
+			Message::HomeRenameCommitted => self.commit_rename(),
+			Message::HomeKey(event) => return self.on_home_key(event),
+			Message::HomePressed => return self.go_home(),
+			// --- connect form field edits ---
 			Message::HostChanged(value) => self.form.host = value,
 			Message::PortChanged(value) => self.form.port = value,
 			Message::UserChanged(value) => self.form.user = value,
 			Message::PasswordChanged(value) => self.form.password = value,
+			Message::KeyPassphraseChanged(value) => self.form.passphrase = value,
 			Message::AuthKindChanged(kind) => self.form.auth_kind = kind,
 			// Opening the picker is async work, so it returns a `Task` and we
 			// short-circuit the default `Task::none()` below.
@@ -278,7 +355,7 @@ impl App {
 				}
 			}
 			Message::ConnectPressed => self.on_connect_pressed(),
-			Message::BackPressed => return self.go_to_connect(),
+			Message::BackPressed => return self.go_to_form(),
 			Message::FormKey(event) => return self.on_form_key(event),
 			Message::AcceptHostKey => self.on_host_key_decision(true),
 			Message::RejectHostKey => self.on_host_key_decision(false),
@@ -337,6 +414,23 @@ impl App {
 		// a first ask (no "incorrect" hint) until the user submits one (§7).
 		self.passphrase_failed = false;
 
+		// Capture the profile (no secret) to save if this connect succeeds (§14). The
+		// key path is only meaningful for key auth; the name here is a placeholder —
+		// `upsert_on_connect` keeps an existing target's custom name.
+		let key_path = if self.form.auth_kind == ui::connect::AuthKind::Key {
+			self.form.key_path.clone()
+		} else {
+			None
+		};
+		self.pending_target = Some(crate::profiles::Target {
+			name: crate::profiles::endpoint_of(&params.user, &params.host, params.port),
+			host: params.host.clone(),
+			port: params.port,
+			user: params.user.clone(),
+			auth_kind: self.form.auth_kind,
+			key_path,
+		});
+
 		let status = format!("connecting to {}:{}…", params.host, params.port);
 		// The label the terminal status bar will show once the shell is open (§10);
 		// capture it now, before `params` moves into the command.
@@ -344,6 +438,9 @@ impl App {
 		if self.send_command(SshCommand::Connect(params)) {
 			self.connection = Some(endpoint);
 			self.screen = Screen::Connecting { status };
+		} else {
+			// The command never left: do not leave a pending target to save later.
+			self.pending_target = None;
 		}
 	}
 
@@ -378,7 +475,7 @@ impl App {
 	fn on_passphrase_cancelled(&mut self) -> iced::Task<Message> {
 		self.passphrase_input.clear();
 		self.send_command(SshCommand::Disconnect);
-		self.go_to_connect()
+		self.go_to_form()
 	}
 
 	/// Send one command to the SSH task. Returns whether it was sent; a
@@ -483,6 +580,23 @@ impl App {
 				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
 			}
 			SshEvent::Connected => {
+				// The session is real: persist the target now (§14) — profiles only, no
+				// secret. `upsert_on_connect` adds it (or refreshes an existing endpoint,
+				// keeping its custom name) and returns its key so we pre-select the row
+				// for when the user returns to the home list.
+				if let Some(target) = self.pending_target.take() {
+					let key = self.targets.upsert_on_connect(
+						&target.host,
+						target.port,
+						&target.user,
+						target.auth_kind,
+						target.key_path,
+					);
+					self.home_selected = Some(key);
+					if let Err(error) = self.targets.save() {
+						eprintln!("could not save targets: {error:#}");
+					}
+				}
 				// A shell is open: spin up an emulator at the pty size we asked for,
 				// show the terminal, then immediately refit it to the real window
 				// rather than waiting for the first resize event.
@@ -501,7 +615,7 @@ impl App {
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
-				return self.go_to_connect();
+				return self.go_home();
 			}
 			SshEvent::Error(message) => {
 				self.terminal = None;
@@ -553,16 +667,132 @@ impl App {
 		self.terminal = None;
 		self.connection = None;
 		self.clear_grid_interaction();
-		self.go_to_connect()
+		self.go_home()
 	}
 
 	/// Return to the connect form: reset the keyboard focus to the first field and
 	/// focus it natively, so the form is ready for typing and its highlight ring is
-	/// aligned (§10). Used by every path back to the form (Back, disconnect, cancel).
-	fn go_to_connect(&mut self) -> iced::Task<Message> {
+	/// aligned (§10). Used by the paths that keep the user on the form to retry
+	/// (error Back, passphrase cancel) — a full return to the list uses `go_home`.
+	fn go_to_form(&mut self) -> iced::Task<Message> {
 		self.screen = Screen::Connect;
 		self.form_focus = ui::connect::FormStop::Host;
 		self.apply_form_focus()
+	}
+
+	/// Return to the home screen (§14). Closes any open menu / rename, drops a pending
+	/// (unsaved) target, and clears the typed secrets out of the form so they do not
+	/// linger once we leave it (§12). The saved-target selection is kept so the list
+	/// re-opens on the last-used row.
+	fn go_home(&mut self) -> iced::Task<Message> {
+		self.screen = Screen::Home;
+		self.home_menu_open = false;
+		self.home_rename = None;
+		self.pending_target = None;
+		self.form.password.clear();
+		self.form.passphrase.clear();
+		iced::Task::none()
+	}
+
+	/// Open a blank connect form for a brand-new connection (§14): reset every field,
+	/// focus the first, and switch to the form.
+	fn open_form_new(&mut self) -> iced::Task<Message> {
+		self.home_menu_open = false;
+		self.form = ui::connect::ConnectForm::default();
+		self.go_to_form()
+	}
+
+	/// Open the connect form pre-filled from the selected target (§14): its host / port
+	/// / user / auth / key path are copied in; the secret fields start empty so the user
+	/// enters them here (never persisted, §12). A stale/missing selection is a no-op.
+	fn open_selected_target(&mut self) -> iced::Task<Message> {
+		self.home_menu_open = false;
+		let Some(key) = self.home_selected.clone() else {
+			return iced::Task::none();
+		};
+		let Some(target) = self.targets.find(&key) else {
+			return iced::Task::none();
+		};
+		self.form = ui::connect::ConnectForm {
+			host: target.host.clone(),
+			port: target.port.to_string(),
+			user: target.user.clone(),
+			auth_kind: target.auth_kind,
+			password: String::new(),
+			key_path: target.key_path.clone(),
+			passphrase: String::new(),
+		};
+		self.go_to_form()
+	}
+
+	/// Begin an inline rename of the selected target (§14): seed the edit with its
+	/// current name and focus the field so the user types straight away. No selection
+	/// (or a stale one) is a no-op.
+	fn start_rename(&mut self) -> iced::Task<Message> {
+		self.home_menu_open = false;
+		let Some(key) = self.home_selected.clone() else {
+			return iced::Task::none();
+		};
+		let Some(target) = self.targets.find(&key) else {
+			return iced::Task::none();
+		};
+		self.home_rename = Some(ui::home::RenameState {
+			key,
+			text: target.name.clone(),
+		});
+		iced::widget::operation::focus(ui::home::RENAME_INPUT_ID)
+	}
+
+	/// Commit the in-progress rename (§14): apply it (which re-sorts the list) and save.
+	/// A blank name is rejected by the store, so committing one just discards the edit.
+	fn commit_rename(&mut self) {
+		if let Some(rename) = self.home_rename.take()
+			&& self.targets.rename(&rename.key, &rename.text)
+			&& let Err(error) = self.targets.save()
+		{
+			eprintln!("could not save targets: {error:#}");
+		}
+	}
+
+	/// Delete the selected target (§14) and save. Clears the selection so the menu and
+	/// the shortcuts no longer point at a gone row.
+	fn delete_selected_target(&mut self) {
+		self.home_menu_open = false;
+		if let Some(key) = self.home_selected.take()
+			&& self.targets.remove(&key)
+			&& let Err(error) = self.targets.save()
+		{
+			eprintln!("could not save targets: {error:#}");
+		}
+	}
+
+	/// Handle a key on the home screen (§14). While renaming, only Esc (cancel) is
+	/// handled here — the field's own `on_submit` commits on Enter. Otherwise F2 renames
+	/// the selection, Enter opens it, Delete removes it; all are no-ops without a
+	/// selection. Other keys fall through.
+	fn on_home_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
+		use iced::keyboard::key::Named;
+
+		let iced::keyboard::Event::KeyPressed { key, .. } = event else {
+			return iced::Task::none();
+		};
+
+		if self.home_rename.is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.home_rename = None;
+			}
+			return iced::Task::none();
+		}
+
+		match key {
+			iced::keyboard::Key::Named(Named::F2) => self.start_rename(),
+			iced::keyboard::Key::Named(Named::Enter) => self.open_selected_target(),
+			iced::keyboard::Key::Named(Named::Delete) => {
+				self.delete_selected_target();
+				iced::Task::none()
+			}
+			_ => iced::Task::none(),
+		}
 	}
 
 	/// Move native focus to match the current form stop: focus the stop's text input,
@@ -576,10 +806,12 @@ impl App {
 		iced::widget::operation::focus(id)
 	}
 
-	/// Handle a key on the connect form (§10): Tab / Shift+Tab move the focus ring, and
-	/// Enter / Space activate the current stop when it is a radio or button. On a text
-	/// stop, Enter/Space are left to the focused field (typing/submit). Anything else is
-	/// ignored here; the focused input still receives it through the widget tree.
+	/// Handle a key on the connect form (§10): Tab / Shift+Tab move the focus ring
+	/// (skipping stops that do not apply to the current auth method, §14), Enter / Space
+	/// activate the current stop when it is a radio or button, and Esc returns to the
+	/// home list. On a text stop, Enter/Space are left to the focused field
+	/// (typing/submit). Anything else is ignored here; the focused input still receives
+	/// it through the widget tree.
 	fn on_form_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
@@ -589,10 +821,11 @@ impl App {
 
 		match key {
 			iced::keyboard::Key::Named(Named::Tab) => {
+				let auth = self.form.auth_kind;
 				self.form_focus = if modifiers.shift() {
-					self.form_focus.previous()
+					self.form_focus.previous(auth)
 				} else {
-					self.form_focus.next()
+					self.form_focus.next(auth)
 				};
 				self.apply_form_focus()
 			}
@@ -607,6 +840,8 @@ impl App {
 					iced::Task::none()
 				}
 			}
+			// Esc backs out of the form to the home list (matches the "← Targets" button).
+			iced::keyboard::Key::Named(Named::Escape) => self.go_home(),
 			_ => iced::Task::none(),
 		}
 	}
@@ -743,6 +978,12 @@ impl App {
 			dragging: self.dialog_dragging,
 		};
 		match &self.screen {
+			Screen::Home => ui::home::view(
+				self.targets.items(),
+				self.home_selected.as_deref(),
+				self.home_rename.as_ref(),
+				self.home_menu_open,
+			),
 			Screen::Connect => ui::connect::view(&self.form, self.form_focus),
 			Screen::Connecting { status } => text(status).into(),
 			// The connect-flow dialogs float over the (dimmed) form rather than replacing
@@ -823,6 +1064,13 @@ impl App {
 				ssh,
 				resizes,
 				iced::keyboard::listen().map(Message::FormKey),
+			]),
+			// On the home screen, listen for the F2 / Enter / Delete / Esc shortcuts (§14);
+			// the rename field still receives its own typing through the widget tree.
+			Screen::Home => iced::Subscription::batch([
+				ssh,
+				resizes,
+				iced::keyboard::listen().map(Message::HomeKey),
 			]),
 			_ => iced::Subscription::batch([ssh, resizes]),
 		}
