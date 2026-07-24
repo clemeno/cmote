@@ -302,37 +302,30 @@ fn dim_backdrop(on_dismiss: Message) -> Element<'static, Message> {
 	.into()
 }
 
-/// The Disconnect confirmation modal's panel (§10): a centered prompt with Cancel
-/// and Disconnect. Sits above `dim_backdrop` in the stack; because Disconnect drops
-/// a live session, it takes an explicit second click here rather than acting on the
-/// status-bar button directly.
+/// The Disconnect confirmation modal (§10): the shared dialog chrome
+/// (`ui::dialog`) with the question in the header, a line explaining what confirming
+/// does, and Cancel / Disconnect in the footer. Sits above `dim_backdrop` in the
+/// stack; because Disconnect drops a live session, it takes an explicit confirm here
+/// rather than acting on the status-bar button directly. The header's close (✕) and
+/// the backdrop both emit `DisconnectCancelled`, so dismissing never disconnects.
 fn confirm_disconnect_panel() -> Element<'static, Message> {
-	let prompt = text("Disconnect from this session?")
-		.size(STATUS_BAR_TEXT + 2.0)
-		.color(DEFAULT_FG);
-	let cancel =
-		button(text("Cancel").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectCancelled);
-	let confirm =
-		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectConfirmed);
-
-	let panel = container(
-		column![prompt, row![cancel, confirm].spacing(10)]
-			.spacing(14)
-			.align_x(iced::alignment::Horizontal::Center),
+	crate::ui::dialog::dialog(
+		"Disconnect from this session?".to_owned(),
+		Message::DisconnectCancelled,
+		crate::ui::dialog::body_text(
+			"Ends this shell and returns to the connect form. The remote program is signalled \
+			 to close; what happens to any unsaved work there is up to that program."
+				.to_owned(),
+		),
+		vec![
+			button("Cancel")
+				.on_press(Message::DisconnectCancelled)
+				.into(),
+			button("Disconnect")
+				.on_press(Message::DisconnectConfirmed)
+				.into(),
+		],
 	)
-	.style(|_theme| container::Style {
-		background: Some(MENU_BG.into()),
-		..container::Style::default()
-	})
-	.padding(20);
-
-	// Center the panel in the window, over the scrim.
-	container(panel)
-		.width(Length::Fill)
-		.height(Length::Fill)
-		.align_x(iced::alignment::Horizontal::Center)
-		.align_y(iced::alignment::Vertical::Center)
-		.into()
 }
 
 /// Map a pointer position (local to the grid, as `mouse_area::on_move` reports it)

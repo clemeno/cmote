@@ -25,6 +25,10 @@ references below (§n) point into it.
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
+- **Consistent dialogs** — the disconnect confirmation, host-key prompt, passphrase
+  prompt, and error notice share one chrome: a header bar (question on the left, close ✕
+  on the right, wired to the safe action), an explanatory body, and evenly-spaced footer
+  buttons (§10).
 - Session-only credentials, held in memory and `zeroize`d on drop — never written to
   disk (§12).
 
@@ -95,7 +99,8 @@ cargo clippy --all-targets -- -D warnings
 Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
-mapping, the grid-resize math, mouse-selection geometry and text extraction (wide
+mapping (including application-cursor-mode arrow keys, CSI vs SS3), the grid-resize
+math, mouse-selection geometry and text extraction (wide
 glyphs, trailing-blank trimming, multi-row joins), and paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub).
 
@@ -162,6 +167,11 @@ shell's cursor. Paste into a bracketed-paste-aware shell (bash/zsh with readline
 confirm a multi-line clipboard does **not** auto-run each line (bracketed paste frames
 it). Right-click anywhere to confirm the context menu opens at the cursor and dismisses
 on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
+
+**7. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
+should render, and the **arrow keys** should move the cursor — this exercises
+application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
+to the SS3 form so they register. In `vim`, `:q!` to exit.
 
 **Cleanup:**
 

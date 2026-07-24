@@ -165,8 +165,10 @@ cmote/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── ui/
-    │   ├── mod.rs
+    │   ├── mod.rs         view helpers; host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
+    │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
+    │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs
@@ -298,7 +300,13 @@ Turning a raw byte stream into a screen.
   canvas / GPU atlas stays the escape hatch only if this ever matters.
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
-  sequences). Sent as `SshCommand::Input`.
+  sequences). Sent as `SshCommand::Input`. The cursor and Home/End keys honour
+  **application cursor mode** (DECCKM — read from `Screen::application_cursor()`):
+  when a full-screen app such as vim/less/nano sets it (`ESC[?1h`), `term::keymap`
+  emits the **SS3** form (`ESC O A`) instead of the default **CSI** form (`ESC [ A`),
+  which is what those apps bind their arrow keys to — without it the arrows are
+  ignored and the cursor cannot move (fixed in v1.1.1). PageUp/Down/Insert/Delete
+  are `~` sequences DECCKM does not alter, so they are the same in both modes.
 - **Paste** (done, v1.1): `term::keymap::encode_paste` turns clipboard text into input
   bytes. When the remote enabled **bracketed paste** (DECSET 2004 — read from
   `Screen::bracketed_paste()`) the text is framed by `ESC[200~`…`ESC[201~` so the shell
@@ -338,7 +346,8 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
   *connecting → verifying host key → authenticating*.
 - **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
-  Accept / Reject (§8).
+  Accept / Reject (§8), in the shared dialog chrome (below). Closing (✕) rejects — the
+  safe default, so dismissing never trusts an unverified host.
 - **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
   key is encrypted (§7). A masked field with Unlock / Cancel; the field is auto-focused
   when the screen opens (a `text_input::focus` task keyed to a shared id, refocused on
@@ -347,13 +356,20 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   attempt was already made this connection, since the bridge emits the same
   `NeedPassphrase` for a first ask and a re-ask. The typed text is moved into a `Secret`
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
-  hint is not a credential oracle (§12).
+  hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below).
+- **Dialogs** (`ui::dialog`, done): the disconnect confirmation, the host-key prompt, the
+  passphrase prompt, and the error notice all wear one chrome — a **header bar** with the
+  question as a title on the left and a **close ✕** on the right (wired to the safe action:
+  cancel / reject / cancel / back, so dismissing is never the destructive choice), a
+  **body** explaining what confirming will do, and a **footer** of evenly-spaced buttons.
+  A single builder — `dialog(title, on_close, body, footer)` — centres the card in the
+  window, so the frame changes in one place and every prompt stays consistent.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
   centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard
   focus goes there. Disconnect opens a
-  **confirmation modal** (a centered Cancel / Disconnect panel over a dimming, click-away
-  scrim) so an accidental click cannot drop a live session; confirming sends
+  **confirmation modal** (the shared dialog chrome — Cancel / Disconnect footer — over a
+  dimming, click-away scrim) so an accidental click cannot drop a live session; confirming sends
   `SshCommand::Disconnect` and returns to the form immediately (the `Disconnected` event
   that follows just confirms it). The bar's fixed height is subtracted in
   `ui::terminal::grid_size`, so the reflow math (§9) still fits the grid exactly.
