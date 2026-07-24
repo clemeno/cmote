@@ -348,9 +348,12 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   `NeedPassphrase` for a first ask and a re-ask. The typed text is moved into a `Secret`
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12).
-- **Terminal** (`Screen::Terminal`, done): a fixed-height status bar shows the live
-  session's `user@host:port` on the left and **Copy / Paste / Disconnect** buttons on the
-  right; the vt100 grid fills the rest, and keyboard focus goes there. Disconnect sends
+- **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
+  equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
+  centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard
+  focus goes there. Disconnect opens a
+  **confirmation modal** (a centered Cancel / Disconnect panel over a dimming, click-away
+  scrim) so an accidental click cannot drop a live session; confirming sends
   `SshCommand::Disconnect` and returns to the form immediately (the `Disconnected` event
   that follows just confirms it). The bar's fixed height is subtracted in
   `ui::terminal::grid_size`, so the reflow math (§9) still fits the grid exactly.

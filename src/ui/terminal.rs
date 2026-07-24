@@ -117,6 +117,7 @@ pub fn view(
 	endpoint: &str,
 	selection: Option<&Selection>,
 	menu: Option<Point>,
+	confirm_disconnect: bool,
 ) -> Element<'static, Message> {
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
@@ -164,35 +165,36 @@ pub fn view(
 		.width(Length::Fill)
 		.height(Length::Fill);
 
-	// With the menu open, layer it (and a click-to-dismiss backdrop) over the base.
-	match menu {
-		Some(point) => {
-			let layers: Vec<Element<'static, Message>> = vec![
-				base.into(),
-				dismiss_layer(),
-				context_menu(point, has_selection),
-			];
-			stack(layers)
-				.width(Length::Fill)
-				.height(Length::Fill)
-				.into()
-		}
-		None => base.into(),
+	// Overlays stack on top of the base, bottom-to-top: the right-click menu (with a
+	// click-away dismiss layer), then the Disconnect confirmation modal.
+	let mut layers: Vec<Element<'static, Message>> = vec![base.into()];
+	if let Some(point) = menu {
+		layers.push(dismiss_layer());
+		layers.push(context_menu(point, has_selection));
+	}
+	if confirm_disconnect {
+		layers.push(dim_backdrop(Message::DisconnectCancelled));
+		layers.push(confirm_disconnect_panel());
+	}
+
+	// A lone base needs no stack; otherwise layer the overlays over it.
+	if layers.len() == 1 {
+		layers.pop().expect("layers holds the base element")
+	} else {
+		stack(layers)
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.into()
 	}
 }
 
-/// The status bar (§10): the `user@host:port` of the live session on the left,
-/// then Copy / Paste / Disconnect buttons on the right. Its height is fixed to
+/// The status bar (§10): three zones — Copy / Paste on the left, the live session's
+/// `user@host:port` centered, and Disconnect on the right. Its height is fixed to
 /// `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly. `has_selection`
 /// enables Copy — with nothing selected the button has no `on_press` and iced
 /// renders it disabled. The label is copied in, so the returned element owns its
 /// text and stays `'static` like the grid.
 fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> {
-	// `width(Fill)` on the label pushes the buttons to the right edge.
-	let info = text(endpoint.to_owned())
-		.size(STATUS_BAR_TEXT)
-		.color(STATUS_BAR_FG)
-		.width(Length::Fill);
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
 		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
@@ -200,8 +202,25 @@ fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> 
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
+	// Three equal-width zones. Because each takes the same `Fill` share, the middle
+	// zone's centered label is centered in the *window*, not merely between the side
+	// groups — so the host info stays put no matter how wide Copy/Paste/Disconnect are.
+	let left = container(row![copy, paste].spacing(10))
+		.width(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Left);
+	let center = container(
+		text(endpoint.to_owned())
+			.size(STATUS_BAR_TEXT)
+			.color(STATUS_BAR_FG),
+	)
+	.width(Length::Fill)
+	.align_x(iced::alignment::Horizontal::Center);
+	let right = container(disconnect)
+		.width(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Right);
+
 	container(
-		row![info, copy, paste, disconnect]
+		row![left, center, right]
 			.spacing(10)
 			.align_y(iced::alignment::Vertical::Center),
 	)
@@ -211,6 +230,9 @@ fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> 
 	})
 	.width(Length::Fill)
 	.height(Length::Fixed(STATUS_BAR_HEIGHT))
+	// Centre the row within the fixed-height bar; the row's own `align_y` only aligns
+	// its children to each other, not the row inside this taller container.
+	.align_y(iced::alignment::Vertical::Center)
 	.padding(STATUS_BAR_PADDING)
 	.into()
 }
@@ -254,6 +276,62 @@ fn dismiss_layer() -> Element<'static, Message> {
 	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
 		.on_press(Message::MenuDismissed)
 		.on_right_press(Message::MenuDismissed)
+		.into()
+}
+
+/// A dimming full-window scrim behind a modal (§10): fills the view with
+/// translucent black and emits `on_dismiss` when clicked, so a click outside the
+/// modal's panel cancels it. Also darkens the shell so the modal reads as focused.
+fn dim_backdrop(on_dismiss: Message) -> Element<'static, Message> {
+	mouse_area(
+		container(text(""))
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.style(|_theme| container::Style {
+				background: Some(
+					Color {
+						a: 0.55,
+						..Color::BLACK
+					}
+					.into(),
+				),
+				..container::Style::default()
+			}),
+	)
+	.on_press(on_dismiss)
+	.into()
+}
+
+/// The Disconnect confirmation modal's panel (§10): a centered prompt with Cancel
+/// and Disconnect. Sits above `dim_backdrop` in the stack; because Disconnect drops
+/// a live session, it takes an explicit second click here rather than acting on the
+/// status-bar button directly.
+fn confirm_disconnect_panel() -> Element<'static, Message> {
+	let prompt = text("Disconnect from this session?")
+		.size(STATUS_BAR_TEXT + 2.0)
+		.color(DEFAULT_FG);
+	let cancel =
+		button(text("Cancel").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectCancelled);
+	let confirm =
+		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectConfirmed);
+
+	let panel = container(
+		column![prompt, row![cancel, confirm].spacing(10)]
+			.spacing(14)
+			.align_x(iced::alignment::Horizontal::Center),
+	)
+	.style(|_theme| container::Style {
+		background: Some(MENU_BG.into()),
+		..container::Style::default()
+	})
+	.padding(20);
+
+	// Center the panel in the window, over the scrim.
+	container(panel)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Center)
+		.align_y(iced::alignment::Vertical::Center)
 		.into()
 }
 

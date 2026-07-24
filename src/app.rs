@@ -120,6 +120,10 @@ pub struct App {
 	pointer: iced::Point,
 	/// The context menu's anchor when it is open, `None` when closed (§10).
 	menu: Option<iced::Point>,
+	/// Whether the Disconnect confirmation modal is open (§10). Set by the Disconnect
+	/// button and cleared on confirm or cancel — it guards a live session against an
+	/// accidental click.
+	confirm_disconnect: bool,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -155,8 +159,12 @@ pub enum Message {
 	Key(iced::keyboard::Event),
 	/// The window changed size — refit the terminal grid to it (§9).
 	WindowResized(iced::Size),
-	/// The user clicked Disconnect in the terminal status bar (§10).
+	/// The user clicked Disconnect in the terminal status bar — ask to confirm (§10).
 	DisconnectPressed,
+	/// The user confirmed Disconnect in the modal — tear the session down.
+	DisconnectConfirmed,
+	/// The user cancelled the Disconnect modal — keep the session.
+	DisconnectCancelled,
 	// --- terminal mouse: text selection + clipboard (§10) ---
 	/// The pointer moved over the grid; the payload is its grid-local position.
 	GridMoved(iced::Point),
@@ -214,6 +222,8 @@ impl App {
 			Message::Key(event) => self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
+			Message::DisconnectConfirmed => self.on_disconnect_confirmed(),
+			Message::DisconnectCancelled => self.confirm_disconnect = false,
 			Message::GridMoved(point) => self.on_grid_moved(point),
 			Message::GridPressed => self.on_grid_pressed(),
 			Message::GridReleased => self.on_grid_released(),
@@ -375,11 +385,20 @@ impl App {
 		}
 	}
 
-	/// Leave the live shell (§10). Tell the SSH task to tear down, then drop the
-	/// local emulator and go back to the form right away — the `Disconnected` event
-	/// that follows just confirms what we have already done. Mirrors the
-	/// passphrase-cancel path, which also acts immediately rather than waiting.
+	/// The Disconnect button (§10): open the confirmation modal instead of dropping
+	/// the session immediately, so an accidental click cannot end a live shell. Also
+	/// closes any open context menu so only the modal is shown. The teardown happens
+	/// in `on_disconnect_confirmed` once the user confirms.
 	fn on_disconnect_pressed(&mut self) {
+		self.menu = None;
+		self.confirm_disconnect = true;
+	}
+
+	/// Confirmed Disconnect (§10): tell the SSH task to tear down, then drop the local
+	/// emulator and return to the form right away — the `Disconnected` event that
+	/// follows just confirms what we have already done. Mirrors the passphrase-cancel
+	/// path, which also acts immediately rather than waiting.
+	fn on_disconnect_confirmed(&mut self) {
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
 		self.connection = None;
@@ -480,13 +499,15 @@ impl App {
 		self.send_command(SshCommand::Input(bytes));
 	}
 
-	/// Drop all grid-interaction state — the selection, any in-progress drag, and an
-	/// open context menu. Called whenever a shell opens or closes so nothing (a stale
-	/// highlight, a half-finished drag) carries across sessions (§10).
+	/// Drop all grid-interaction state — the selection, any in-progress drag, an open
+	/// context menu, and the Disconnect modal. Called whenever a shell opens or closes
+	/// so nothing (a stale highlight, a half-finished drag, an open overlay) carries
+	/// across sessions (§10).
 	fn clear_grid_interaction(&mut self) {
 		self.selection = None;
 		self.selecting = false;
 		self.menu = None;
+		self.confirm_disconnect = false;
 	}
 
 	/// Render the current screen. Pure: it only reads state and returns widgets.
@@ -504,6 +525,7 @@ impl App {
 					self.connection.as_deref().unwrap_or(""),
 					self.selection.as_ref(),
 					self.menu,
+					self.confirm_disconnect,
 				),
 				None => text("terminal starting…").into(),
 			},
