@@ -62,19 +62,47 @@ pub fn learn(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<(
 }
 
 /// Resolve the portable known_hosts path (§11): prefer `cmote-data/` beside the
-/// executable (true portable mode), else fall back to `%LOCALAPPDATA%\cmote\`.
+/// executable (true portable mode), else fall back to the per-user data directory
+/// (`%LOCALAPPDATA%\cmote\` on Windows, `~/Library/Application Support/cmote/` on
+/// macOS) — used only when the exe sits somewhere read-only (`Program Files`,
+/// `/Applications`).
 pub fn known_hosts_path() -> Result<PathBuf> {
 	if let Some(dir) = writable_portable_dir() {
 		return Ok(dir.join("known_hosts"));
 	}
 
-	let local_app_data = std::env::var_os("LOCALAPPDATA")
-		.map(PathBuf::from)
-		.context("no writable data directory (LOCALAPPDATA is not set)")?;
-	let dir = local_app_data.join("cmote");
+	let dir = user_data_dir()?;
 	std::fs::create_dir_all(&dir).context("failed to create the fallback data directory")?;
 	Ok(dir.join("known_hosts"))
 }
+
+// The per-user data directory is resolved with plain `std` per OS — no `dirs`
+// crate (`ponytail:` §11). Only the two supported targets have a branch; any other
+// target fails to compile with the message below rather than silently misbehaving.
+
+/// Windows fallback: `%LOCALAPPDATA%\cmote` (e.g. `C:\Users\<user>\AppData\Local\cmote`).
+#[cfg(windows)]
+fn user_data_dir() -> Result<PathBuf> {
+	let base = std::env::var_os("LOCALAPPDATA")
+		.map(PathBuf::from)
+		.context("no writable data directory (LOCALAPPDATA is not set)")?;
+	Ok(base.join("cmote"))
+}
+
+/// macOS fallback: `~/Library/Application Support/cmote` — Apple's convention for
+/// app-managed data, resolved from `$HOME`.
+#[cfg(target_os = "macos")]
+fn user_data_dir() -> Result<PathBuf> {
+	let home = std::env::var_os("HOME")
+		.map(PathBuf::from)
+		.context("no writable data directory (HOME is not set)")?;
+	Ok(home.join("Library/Application Support/cmote"))
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!(
+	"cmote supports only Windows and macOS (PLAN §2); no known_hosts fallback is defined for this target"
+);
 
 /// Return `cmote-data/` beside the exe if we can actually write there, else
 /// `None`. `ponytail:` a create-dir + write-probe is enough to tell portable
