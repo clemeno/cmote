@@ -1,9 +1,9 @@
 # cmote
 
-A **native, portable Windows 11 SSH client** written in Rust. One window: fill in
-host / port / user, pick an auth method (password and/or a private key — PEM or
-PuTTY `.ppk`), connect. On success the server hands us a shell and cmote renders a
-**full VT terminal** inside the window — a working interactive prompt.
+A **native, portable SSH client for Windows 11 and macOS** written in Rust. One
+window: fill in host / port / user, pick an auth method (password or a private key —
+PEM or PuTTY `.ppk`), connect. On success the server hands us a shell and cmote
+renders a **full VT terminal** inside the window — a working interactive prompt.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -27,11 +27,14 @@ references below (§n) point into it.
 
 ## Requirements
 
-- **Rust** stable (developed against 1.91.0), target `x86_64-pc-windows-msvc`.
-- The **MSVC** toolchain — Visual Studio Build Tools with the VC++ x64 tools and the
-  Windows SDK (the default MSVC linker). No NASM or C compiler is required: the SSH
-  crypto uses the `ring` backend, which ships pre-generated assembly for this target
-  (§2).
+- **Rust** stable (developed against 1.91.0 on Windows, 1.97.1 on macOS).
+- **Windows 11** — target `x86_64-pc-windows-msvc` and the **MSVC** toolchain (Visual
+  Studio Build Tools with the VC++ x64 tools and the Windows SDK — the default MSVC
+  linker). No NASM or C compiler: the `ring` crypto backend ships pre-generated
+  assembly for this target (§2).
+- **macOS Sequoia (Intel)** — target `x86_64-apple-darwin` and the **Xcode Command
+  Line Tools** (`clang`), which compile `ring`'s crypto from source. No NASM (§2).
+- No external SSH library on either target — the SSH stack is pure Rust (§12).
 
 ## Build and run
 
@@ -39,23 +42,38 @@ references below (§n) point into it.
 # Debug build and run
 cargo run
 
-# Optimized, self-contained portable exe
+# Optimized, self-contained portable binary
 cargo build --release
-# → target/release/cmote.exe
+# Windows → target/release/cmote.exe
+# macOS   → target/release/cmote
 ```
 
-The release binary is portable: copy `cmote.exe` anywhere (including a USB stick) and
-run it — no installer, no registry writes, no external runtime.
+On **Windows** the release `cmote.exe` is portable: copy it anywhere (including a USB
+stick) and run it — no installer, no registry writes, no external runtime.
+
+On **macOS** wrap the binary in a minimal app bundle so Finder launches it as a GUI
+app (double-clicking a bare Unix binary would open a Terminal window instead):
+
+```sh
+cargo build --release
+./bundle-macos.sh        # → target/release/cmote.app
+open target/release/cmote.app
+```
+
+`cmote.app` is self-contained and relocatable — no installer or external runtime. It
+is not code-signed or notarized yet (deferred — §12), so the first launch needs a
+right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
 
 ## Data and portability
 
 The only file cmote writes is `known_hosts`. It is resolved at runtime (§11,
 `ssh::hostkey::known_hosts_path`):
 
-1. **Portable mode (preferred):** `cmote-data/` beside the executable, when that
-   directory is writable. This keeps the host-key store travelling with the exe.
-2. **Fallback:** `%LOCALAPPDATA%\cmote\` when the exe sits in a read-only location
-   (e.g. `Program Files`).
+1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
+   is writable. This keeps the host-key store travelling with the app — on macOS the
+   binary lives in `cmote.app/Contents/MacOS/`, so the store sits inside the bundle.
+2. **Fallback (Windows):** `%LOCALAPPDATA%\cmote\` when the exe sits in a read-only
+   location (e.g. `Program Files`).
 
 To reset trust for a host, delete the offending line (or the whole file) from
 whichever location is in use.
