@@ -10,11 +10,6 @@
 // format (which includes hashed hostnames): `check_known_hosts_path` and
 // `known_hosts::learn_known_hosts_path`.
 
-// ponytail: these items are exercised by the unit tests below and wired into the
-// russh Handler in the next slice, so the non-test build sees them as unused for
-// now. Temporary scaffolding allow — remove once client.rs calls them.
-#![allow(dead_code)]
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
