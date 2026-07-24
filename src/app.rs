@@ -40,9 +40,9 @@ const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
 
 /// The terminal size the main window opens sized for (§10, §11): wide enough for a
-/// 160-column grid, with a comfortable default height. `run` converts this to a window
+/// 180-column grid, with a comfortable default height. `run` converts this to a window
 /// size via `ui::terminal::window_size` so it tracks the grid metrics.
-const INITIAL_COLS: u16 = 160;
+const INITIAL_COLS: u16 = 180;
 const INITIAL_ROWS: u16 = 40;
 
 /// Build and start the iced runtime. Called from `main`.
@@ -55,7 +55,7 @@ pub fn run() -> iced::Result {
 		.title("cmote")
 		.font(MONO_FONT)
 		.font(MONO_FONT_BOLD)
-		// Open wide enough for a 160-column terminal (the size is derived from the grid
+		// Open wide enough for a 180-column terminal (the size is derived from the grid
 		// metrics so it stays in step with `grid_size`).
 		.window(iced::window::Settings {
 			size: ui::terminal::window_size(INITIAL_COLS, INITIAL_ROWS),
@@ -862,6 +862,7 @@ impl App {
 
 		let iced::keyboard::Event::KeyPressed {
 			key,
+			physical_key,
 			text,
 			modifiers,
 			..
@@ -879,9 +880,13 @@ impl App {
 			.as_ref()
 			.is_some_and(|terminal| terminal.screen().application_cursor());
 
-		if let Some(bytes) =
-			term::keymap::encode(&key, text.as_deref(), modifiers, application_cursor)
-		{
+		if let Some(bytes) = term::keymap::encode(
+			&key,
+			physical_key,
+			text.as_deref(),
+			modifiers,
+			application_cursor,
+		) {
 			self.send_command(SshCommand::Input(bytes));
 		}
 	}

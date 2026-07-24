@@ -11,9 +11,10 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v1.3.0** (v1 feature set complete; this release adds saved
-connection targets on a home screen — profiles only, no secrets — plus an optional
-key-passphrase field, §14). Both targets are supported first-class, and each has a
+Status: **shipping — v1.3.1** (v1 feature set complete; v1.3 adds saved connection
+targets on a home screen — profiles only, no secrets — plus an optional
+key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
+instead of their digits, §9). Both targets are supported first-class, and each has a
 verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -309,7 +310,14 @@ Turning a raw byte stream into a screen.
   emits the **SS3** form (`ESC O A`) instead of the default **CSI** form (`ESC [ A`),
   which is what those apps bind their arrow keys to — without it the arrows are
   ignored and the cursor cannot move (fixed in v1.1.1). PageUp/Down/Insert/Delete
-  are `~` sequences DECCKM does not alter, so they are the same in both modes.
+  are `~` sequences DECCKM does not alter, so they are the same in both modes. The
+  **numpad number keys** (0-9 and the decimal) get special handling (fixed in
+  v1.3.1): they mean a digit with NumLock on but navigation with it off, and winit
+  reports the *navigation* logical key either way while filling `text` only when a
+  digit was typed. iced does not surface NumLock, so `term::keymap::encode` keys off
+  the **physical** code plus the presence of `text` — a numpad number key that
+  produced text sends that character; otherwise it falls through to the navigation
+  mapping. Without this, typing e.g. `pm2` on the numpad emitted arrow keys.
 - **Paste** (done, v1.1): `term::keymap::encode_paste` turns clipboard text into input
   bytes. When the remote enabled **bracketed paste** (DECSET 2004 — read from
   `Screen::bracketed_paste()`) the text is framed by `ESC[200~`…`ESC[201~` so the shell
@@ -439,7 +447,7 @@ in `update`. No mutable global state, no `unsafe`.
 "Portable" is a hard requirement: copy one `.exe`, run it anywhere, leave no trace in
 the registry.
 
-- **Initial window size**: `run` opens the window sized for a **160×40** terminal via
+- **Initial window size**: `run` opens the window sized for a **180×40** terminal via
   `ui::terminal::window_size(cols, rows)` — the inverse of `grid_size`, built from the
   same cell metrics + padding + status-bar height so the two never drift (a round-trip
   test locks it). The user can still resize freely afterwards (§9).

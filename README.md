@@ -166,7 +166,10 @@ than the normal one (both weights are bundled — §11). Print wide glyphs over 
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§11). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.
-Click **Disconnect** → you return to the form immediately.
+With **NumLock on**, type a command using the **numpad** digits (e.g. `echo 2` /
+`pm2 ls`) and confirm the digits appear; with **NumLock off**, the numpad arrows
+(2/4/6/8) should move the cursor instead of typing digits (§9). Click **Disconnect**
+→ you return to the form immediately.
 
 **4. Key auth.** Generate a test key and authorize it:
 

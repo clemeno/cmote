@@ -9,7 +9,7 @@
 // The remote pty and the shell agree on these conventions (the "xterm" model we
 // asked for when opening the pty), so we emit exactly what a real xterm would.
 
-use iced::keyboard::key::Named;
+use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 
 /// ASCII escape (`ESC`), the lead byte of every CSI sequence and the meta prefix.
@@ -23,15 +23,17 @@ const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
 /// Turn one key press into the bytes to send, or `None` if the key produces no
-/// input (a bare modifier, an unmapped named key). `text` is the OS-produced
-/// string for the key (already honoring layout and Shift); we prefer it for
-/// printable input and fall back to the logical key only when it is absent.
-/// `application_cursor` is the emulator's DECCKM state (read from
+/// input (a bare modifier, an unmapped named key). `physical` is the key's physical
+/// location on the keyboard (used only to single out the numpad — see below). `text`
+/// is the OS-produced string for the key (already honoring layout and Shift); we
+/// prefer it for printable input and fall back to the logical key only when it is
+/// absent. `application_cursor` is the emulator's DECCKM state (read from
 /// `screen.application_cursor()`): full-screen apps such as vim, less, and nano
 /// turn it on and then expect the SS3 arrow-key form, so it is threaded down to
 /// `named_bytes` to pick the matching cursor-key encoding.
 pub fn encode(
 	key: &Key,
+	physical: Physical,
 	text: Option<&str>,
 	modifiers: Modifiers,
 	application_cursor: bool,
@@ -44,6 +46,27 @@ pub fn encode(
 		&& let Some(byte) = control_byte(character)
 	{
 		return Some(vec![byte]);
+	}
+
+	// The numpad number keys (0-9 and the decimal) have a dual identity that the
+	// logical `key` alone hides. With NumLock on they type a digit; with NumLock off
+	// the same physical key is navigation (arrow / Home / PageUp / …). winit reports
+	// the logical `key` for the *navigation* role — so a NumLock-on digit can arrive
+	// as `Named(ArrowDown)` and, matched on `key`, would send an arrow instead of "2"
+	// (the `pm2 ls` bug). iced does not expose NumLock state, but the OS-produced
+	// `text` is the tell: it is present exactly when a character was typed. So for a
+	// numpad number key with printable text (and no Ctrl/Alt/Logo turning it into a
+	// combo), send that text. NumLock-off presses carry no text and fall through to
+	// the navigation mapping below. Scoped to numpad physical codes so it can never
+	// disturb Backspace or the main-row keys.
+	if is_numpad_number(physical)
+		&& !modifiers.control()
+		&& !modifiers.alt()
+		&& !modifiers.logo()
+		&& let Some(typed) = text
+		&& !typed.is_empty()
+	{
+		return Some(typed.as_bytes().to_vec());
 	}
 
 	match key {
@@ -132,6 +155,30 @@ fn control_byte(character: &str) -> Option<u8> {
 	Some(byte)
 }
 
+/// Whether `physical` is one of the numpad number keys — the digits `0`-`9` or the
+/// decimal `.`. These are the keys whose meaning flips with NumLock (digit vs.
+/// navigation), so `encode` treats them specially; every other key (including the
+/// numpad operators `+ - * / Enter`, which never navigate) is left to the normal
+/// logical-key path.
+fn is_numpad_number(physical: Physical) -> bool {
+	matches!(
+		physical,
+		Physical::Code(
+			Code::Numpad0
+				| Code::Numpad1
+				| Code::Numpad2
+				| Code::Numpad3
+				| Code::Numpad4
+				| Code::Numpad5
+				| Code::Numpad6
+				| Code::Numpad7
+				| Code::Numpad8
+				| Code::Numpad9
+				| Code::NumpadDecimal
+		)
+	)
+}
+
 /// The bytes for a named (non-character) key. Returns `None` for named keys we
 /// do not forward (bare modifiers, function keys we have not mapped yet). The
 /// cursor and Home/End keys depend on `application_cursor`: see `cursor_key`.
@@ -175,17 +222,31 @@ fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use iced::keyboard::key::Named;
+	use iced::keyboard::key::{Code, Named, Physical};
 
 	// A convenience: no modifiers held.
 	fn none() -> Modifiers {
 		Modifiers::empty()
 	}
 
+	// Wrap a physical `Code` as the `Physical` `encode` expects. Most tests are about
+	// the logical key, so they pass a neutral non-numpad code via `main` below.
+	fn phys(code: Code) -> Physical {
+		Physical::Code(code)
+	}
+
+	// A neutral, non-numpad physical key for tests that do not exercise the numpad.
+	fn main_key() -> Physical {
+		phys(Code::KeyA)
+	}
+
 	#[test]
 	fn plain_character_sends_its_text() {
 		let key = Key::Character("a".into());
-		assert_eq!(encode(&key, Some("a"), none(), false), Some(b"a".to_vec()));
+		assert_eq!(
+			encode(&key, main_key(), Some("a"), none(), false),
+			Some(b"a".to_vec())
+		);
 	}
 
 	#[test]
@@ -193,7 +254,7 @@ mod tests {
 		// The OS reports the logical key as "a" but the produced text as "A".
 		let key = Key::Character("a".into());
 		assert_eq!(
-			encode(&key, Some("A"), Modifiers::SHIFT, false),
+			encode(&key, main_key(), Some("A"), Modifiers::SHIFT, false),
 			Some(b"A".to_vec())
 		);
 	}
@@ -201,14 +262,17 @@ mod tests {
 	#[test]
 	fn ctrl_c_is_etx() {
 		let key = Key::Character("c".into());
-		assert_eq!(encode(&key, None, Modifiers::CTRL, false), Some(vec![0x03]));
+		assert_eq!(
+			encode(&key, main_key(), None, Modifiers::CTRL, false),
+			Some(vec![0x03])
+		);
 	}
 
 	#[test]
 	fn enter_is_carriage_return() {
 		let key = Key::Named(Named::Enter);
 		assert_eq!(
-			encode(&key, Some("\r"), none(), false),
+			encode(&key, phys(Code::Enter), Some("\r"), none(), false),
 			Some(b"\r".to_vec())
 		);
 	}
@@ -217,7 +281,10 @@ mod tests {
 	fn arrow_up_is_csi_sequence_in_normal_mode() {
 		// DECCKM reset (the shell's default): arrows are the CSI form ESC[A.
 		let key = Key::Named(Named::ArrowUp);
-		assert_eq!(encode(&key, None, none(), false), Some(b"\x1b[A".to_vec()));
+		assert_eq!(
+			encode(&key, phys(Code::ArrowUp), None, none(), false),
+			Some(b"\x1b[A".to_vec())
+		);
 	}
 
 	#[test]
@@ -225,7 +292,10 @@ mod tests {
 		// DECCKM set (vim/less/nano): arrows switch to the SS3 form ESC O A, which is
 		// what those apps bind their arrow keys to — the fix for "arrows do nothing".
 		let key = Key::Named(Named::ArrowUp);
-		assert_eq!(encode(&key, None, none(), true), Some(b"\x1bOA".to_vec()));
+		assert_eq!(
+			encode(&key, phys(Code::ArrowUp), None, none(), true),
+			Some(b"\x1bOA".to_vec())
+		);
 	}
 
 	#[test]
@@ -233,10 +303,22 @@ mod tests {
 		// Home/End share the DECCKM behaviour: CSI when reset, SS3 when set.
 		let home = Key::Named(Named::Home);
 		let end = Key::Named(Named::End);
-		assert_eq!(encode(&home, None, none(), false), Some(b"\x1b[H".to_vec()));
-		assert_eq!(encode(&home, None, none(), true), Some(b"\x1bOH".to_vec()));
-		assert_eq!(encode(&end, None, none(), false), Some(b"\x1b[F".to_vec()));
-		assert_eq!(encode(&end, None, none(), true), Some(b"\x1bOF".to_vec()));
+		assert_eq!(
+			encode(&home, phys(Code::Home), None, none(), false),
+			Some(b"\x1b[H".to_vec())
+		);
+		assert_eq!(
+			encode(&home, phys(Code::Home), None, none(), true),
+			Some(b"\x1bOH".to_vec())
+		);
+		assert_eq!(
+			encode(&end, phys(Code::End), None, none(), false),
+			Some(b"\x1b[F".to_vec())
+		);
+		assert_eq!(
+			encode(&end, phys(Code::End), None, none(), true),
+			Some(b"\x1bOF".to_vec())
+		);
 	}
 
 	#[test]
@@ -245,11 +327,11 @@ mod tests {
 		// application mode leaves them unchanged.
 		let page_up = Key::Named(Named::PageUp);
 		assert_eq!(
-			encode(&page_up, None, none(), false),
-			encode(&page_up, None, none(), true)
+			encode(&page_up, phys(Code::PageUp), None, none(), false),
+			encode(&page_up, phys(Code::PageUp), None, none(), true)
 		);
 		assert_eq!(
-			encode(&page_up, None, none(), true),
+			encode(&page_up, phys(Code::PageUp), None, none(), true),
 			Some(b"\x1b[5~".to_vec())
 		);
 	}
@@ -258,7 +340,7 @@ mod tests {
 	fn alt_character_gets_esc_prefix() {
 		let key = Key::Character("x".into());
 		assert_eq!(
-			encode(&key, Some("x"), Modifiers::ALT, false),
+			encode(&key, main_key(), Some("x"), Modifiers::ALT, false),
 			Some(b"\x1bx".to_vec())
 		);
 	}
@@ -266,7 +348,55 @@ mod tests {
 	#[test]
 	fn bare_modifier_key_sends_nothing() {
 		let key = Key::Named(Named::Shift);
-		assert_eq!(encode(&key, None, none(), false), None);
+		assert_eq!(
+			encode(&key, phys(Code::ShiftLeft), None, none(), false),
+			None
+		);
+	}
+
+	#[test]
+	fn numpad_digit_with_numlock_sends_the_digit() {
+		// The `pm2 ls` bug: with NumLock on, winit still reports the numpad's logical
+		// key as its navigation role (here Down), but fills `text` with the digit. We
+		// must send the digit, not an arrow. Physical code Numpad2 + text "2" => "2".
+		let key = Key::Named(Named::ArrowDown);
+		assert_eq!(
+			encode(&key, phys(Code::Numpad2), Some("2"), none(), false),
+			Some(b"2".to_vec())
+		);
+	}
+
+	#[test]
+	fn numpad_digit_without_numlock_still_navigates() {
+		// NumLock off: the OS produces no text and the logical key is the navigation
+		// role, so numpad 2 keeps acting as Down (CSI ESC[B) — unchanged behaviour.
+		let key = Key::Named(Named::ArrowDown);
+		assert_eq!(
+			encode(&key, phys(Code::Numpad2), None, none(), false),
+			Some(b"\x1b[B".to_vec())
+		);
+	}
+
+	#[test]
+	fn numpad_decimal_with_numlock_sends_its_character() {
+		// The decimal key has the same dual identity (Delete vs "."). With NumLock on
+		// the OS produces the locale's separator as text; send it verbatim.
+		let key = Key::Named(Named::Delete);
+		assert_eq!(
+			encode(&key, phys(Code::NumpadDecimal), Some("."), none(), false),
+			Some(b".".to_vec())
+		);
+	}
+
+	#[test]
+	fn numpad_enter_is_left_to_the_normal_path() {
+		// NumpadEnter is not a "number" key (it never navigates), so the numpad
+		// shortcut ignores it and the logical Enter mapping applies: carriage return.
+		let key = Key::Named(Named::Enter);
+		assert_eq!(
+			encode(&key, phys(Code::NumpadEnter), Some("\r"), none(), false),
+			Some(b"\r".to_vec())
+		);
 	}
 
 	#[test]
