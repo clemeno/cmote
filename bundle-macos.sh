@@ -5,7 +5,7 @@ set -eu
 
 BIN="target/release/cmote"
 APP="target/release/cmote.app"
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 [ -x "$BIN" ] || { echo "missing $BIN — run: cargo build --release" >&2; exit 1; }
 
