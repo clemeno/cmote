@@ -11,8 +11,8 @@
 // error notice — consistent, and means a change to the chrome touches one function.
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, mouse_area, row, text, text_editor};
-use iced::{Background, Border, Color, Element, Length};
+use iced::widget::{button, column, container, mouse_area, row, stack, text, text_editor};
+use iced::{Background, Border, Color, Element, Length, Padding, Point};
 
 use crate::app::Message;
 
@@ -36,35 +36,55 @@ const BODY_SIZE: f32 = 14.0;
 /// sits dead-centre in the header instead of riding high on its own text baseline.
 const CLOSE_BUTTON_SIZE: f32 = 24.0;
 
-/// The card's maximum width, so a wide window does not stretch a short message
-/// across the whole screen; the card centres within the leftover space.
-const MAX_WIDTH: f32 = 480.0;
+/// The card's fixed width and an estimate of its height (§10). Width is fixed, so
+/// horizontal dragging is clamped exactly. Height varies with the message and iced does
+/// not expose the laid-out size, so the estimate is used only to *centre* the card when
+/// it opens; vertical dragging is bounded by `DIALOG_DRAG_MIN_VISIBLE` instead.
+pub const DIALOG_WIDTH: f32 = 460.0;
+pub const DIALOG_HEIGHT_ESTIMATE: f32 = 220.0;
 
-/// The card's rounded-corner radius, matched by the header bar via clipping so the
-/// header's square top corners do not poke past the rounded card.
+/// How much of the card must stay on screen when dragging down (§10). Roughly the
+/// header height, so the drag handle and ✕ remain reachable to move the dialog back.
+/// Using this (rather than the full card height, which we cannot measure) means the
+/// dialog can be dragged all the way to the window's bottom instead of stopping short.
+pub const DIALOG_DRAG_MIN_VISIBLE: f32 = 44.0;
+
+/// The card's rounded-corner radius, matched by the header bar (which rounds its own
+/// top corners) so the header does not square off over the card's rounded border.
 const CORNER_RADIUS: f32 = 6.0;
+
+/// Where the dialog card sits and whether it is mid-drag (§10). `pos` is the card's
+/// top-left in window coordinates (seeded to centre and clamped by `app`); `dragging`
+/// switches on the pointer-capture layer that follows the drag.
+#[derive(Debug, Clone, Copy)]
+pub struct Drag {
+	pub pos: Point,
+	pub dragging: bool,
+}
 
 /// Assemble a dialog card. `title` is the question shown in the header; `on_close`
 /// is emitted by the ✕ button (wire it to the safe/cancel action); `body` explains
 /// what the action does; `footer` holds the action buttons, laid out evenly across
-/// the width. The result fills the window and centres the card, so a caller
-/// overlaying a live view stacks it straight over a dimming backdrop, while a
-/// standalone screen renders it on the plain window background.
+/// the width. `drag` places the card (its top-left) and, while dragging, adds a
+/// pointer-capture layer. The result fills the window, so a caller overlaying a live
+/// view stacks it over a dimming backdrop, while a standalone screen renders it on the
+/// plain window background.
 pub fn dialog<'a>(
 	title: String,
 	on_close: Message,
 	body: Element<'a, Message>,
 	footer: Vec<Element<'a, Message>>,
+	drag: Drag,
 ) -> Element<'a, Message> {
 	// Header / body / footer stacked with no gaps: each band paints its own region,
-	// so the seams line up flush and the header colour meets the body cleanly.
+	// so the seams line up flush and the header colour meets the body cleanly. The
+	// width is fixed so `app` can clamp horizontal dragging exactly.
 	let card = container(column![
 		header_bar(title, on_close),
 		body_band(body),
 		footer_bar(footer)
 	])
-	.width(Length::Fill)
-	.max_width(MAX_WIDTH)
+	.width(Length::Fixed(DIALOG_WIDTH))
 	// Clip so the header respects the card's rounded corners (see CORNER_RADIUS).
 	.clip(true)
 	.style(|_theme| container::Style {
@@ -86,13 +106,62 @@ pub fn dialog<'a>(
 		.on_press(Message::Ignored)
 		.on_right_press(Message::Ignored);
 
-	// Centre the card in the window over whatever the caller placed behind it.
-	container(card)
+	// Place the card's top-left at `drag.pos`. The window-filling container is
+	// top-left aligned by default, so its padding acts as an absolute offset.
+	let positioned = container(card)
 		.width(Length::Fill)
 		.height(Length::Fill)
-		.align_x(Horizontal::Center)
-		.align_y(Vertical::Center)
-		.padding(20)
+		.padding(Padding {
+			top: drag.pos.y,
+			right: 0.0,
+			bottom: 0.0,
+			left: drag.pos.x,
+		});
+
+	// While dragging, a transparent full-window layer on top captures every pointer
+	// move and the release, so tracking continues even when the pointer leaves the card
+	// (its coordinates are window-local because the layer fills the window from origin).
+	if drag.dragging {
+		stack![positioned, drag_capture_layer()]
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.into()
+	} else {
+		positioned.into()
+	}
+}
+
+/// A dimming full-window scrim behind a modal (§10): translucent black that darkens
+/// whatever sits behind it so the dialog reads as focused, and emits `on_dismiss` when
+/// clicked so a click outside the card cancels. Shared by the disconnect modal (over the
+/// shell) and the connect-flow dialogs (over the form).
+pub fn backdrop(on_dismiss: Message) -> Element<'static, Message> {
+	mouse_area(
+		container(text(""))
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.style(|_theme| container::Style {
+				background: Some(
+					Color {
+						a: 0.55,
+						..Color::BLACK
+					}
+					.into(),
+				),
+				..container::Style::default()
+			}),
+	)
+	.on_press(on_dismiss)
+	.into()
+}
+
+/// A transparent full-window layer that reports pointer moves and the release while a
+/// dialog is being dragged (§10). Present only mid-drag, so it never blocks the card's
+/// buttons or text at rest.
+fn drag_capture_layer() -> Element<'static, Message> {
+	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+		.on_move(Message::DialogDragged)
+		.on_release(Message::DialogReleased)
 		.into()
 }
 
@@ -145,7 +214,7 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 			..button::Style::default()
 		});
 
-	container(row![label, close].spacing(10).align_y(Vertical::Center))
+	let bar = container(row![label, close].spacing(10).align_y(Vertical::Center))
 		.width(Length::Fill)
 		.padding(10)
 		.style(|_theme| container::Style {
@@ -158,7 +227,15 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 				..Border::default()
 			},
 			..container::Style::default()
-		})
+		});
+
+	// The header background is the drag handle: pressing it starts a drag, releasing
+	// ends one (§10). The ✕ button inside captures its own press, so closing still
+	// works and does not begin a drag. The release is normally caught by the capture
+	// layer, but handling it here too ends a click that never moved.
+	mouse_area(bar)
+		.on_press(Message::DialogGrabbed)
+		.on_release(Message::DialogReleased)
 		.into()
 }
 

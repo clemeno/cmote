@@ -126,6 +126,7 @@ pub fn view<'a>(
 	menu: Option<Point>,
 	confirm_disconnect: bool,
 	dialog_body: &'a text_editor::Content,
+	drag: crate::ui::dialog::Drag,
 ) -> Element<'a, Message> {
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
@@ -183,8 +184,8 @@ pub fn view<'a>(
 		layers.push(context_menu(point, has_selection));
 	}
 	if confirm_disconnect {
-		layers.push(dim_backdrop(Message::DisconnectCancelled));
-		layers.push(confirm_disconnect_panel(dialog_body));
+		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
+		layers.push(confirm_disconnect_panel(dialog_body, drag));
 	}
 
 	// A lone base needs no stack; otherwise layer the overlays over it.
@@ -289,36 +290,16 @@ fn dismiss_layer() -> Element<'static, Message> {
 		.into()
 }
 
-/// A dimming full-window scrim behind a modal (§10): fills the view with
-/// translucent black and emits `on_dismiss` when clicked, so a click outside the
-/// modal's panel cancels it. Also darkens the shell so the modal reads as focused.
-fn dim_backdrop(on_dismiss: Message) -> Element<'static, Message> {
-	mouse_area(
-		container(text(""))
-			.width(Length::Fill)
-			.height(Length::Fill)
-			.style(|_theme| container::Style {
-				background: Some(
-					Color {
-						a: 0.55,
-						..Color::BLACK
-					}
-					.into(),
-				),
-				..container::Style::default()
-			}),
-	)
-	.on_press(on_dismiss)
-	.into()
-}
-
 /// The Disconnect confirmation modal (§10): the shared dialog chrome
 /// (`ui::dialog`) with the question in the header, a line explaining what confirming
 /// does, and Cancel / Disconnect in the footer. Sits above `dim_backdrop` in the
 /// stack; because Disconnect drops a live session, it takes an explicit confirm here
 /// rather than acting on the status-bar button directly. The header's close (✕) and
 /// the backdrop both emit `DisconnectCancelled`, so dismissing never disconnects.
-fn confirm_disconnect_panel(dialog_body: &text_editor::Content) -> Element<'_, Message> {
+fn confirm_disconnect_panel(
+	dialog_body: &text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Disconnect from this session?".to_owned(),
 		Message::DisconnectCancelled,
@@ -331,6 +312,7 @@ fn confirm_disconnect_panel(dialog_body: &text_editor::Content) -> Element<'_, M
 				.on_press(Message::DisconnectConfirmed)
 				.into(),
 		],
+		drag,
 	)
 }
 

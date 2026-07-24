@@ -87,6 +87,11 @@ pub struct App {
 	/// The connect form's field contents. Lives here so it survives navigating
 	/// to an error screen and back without losing what the user typed.
 	pub form: ui::connect::ConnectForm,
+	/// The connect form's current keyboard-focus stop (§10). iced can only focus text
+	/// inputs, so this bespoke ring also covers the radios and the Connect button: Tab /
+	/// Shift+Tab move it, Enter/Space activate it, and the view highlights the active
+	/// radio/button. Text stops additionally take native focus so typing lands there.
+	form_focus: ui::connect::FormStop,
 	/// Channel to the SSH task. `None` until the worker starts and delivers it
 	/// via `SshEvent::Ready`; `update` sends `SshCommand`s through it.
 	command_tx: Option<mpsc::Sender<SshCommand>>,
@@ -134,6 +139,18 @@ pub struct App {
 	/// reseeded each time a dialog opens. Only one dialog is ever visible, so a single
 	/// buffer serves all four (disconnect, host-key, passphrase, error).
 	dialog_body: text_editor::Content,
+	/// The open dialog card's top-left position in the window (§10). Seeded to centre
+	/// when a dialog opens and updated as the user drags the header, clamped so the card
+	/// stays within the window.
+	dialog_pos: iced::Point,
+	/// Whether the open dialog is currently being dragged by its header (§10).
+	dialog_dragging: bool,
+	/// The pointer position at the previous drag update (§10), so successive positions
+	/// become movement deltas. `None` between drags and before a drag's first move.
+	dialog_drag_last: Option<iced::Point>,
+	/// The last known window size (§10), tracked from resize events so a dragged dialog
+	/// can be centred and clamped within the window bounds.
+	window_size: iced::Size,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -204,6 +221,12 @@ pub enum Message {
 	/// read-only — every action but an edit — so the message can be selected and
 	/// copied yet never changed.
 	DialogAction(text_editor::Action),
+	/// The dialog header was pressed — begin dragging the dialog (§10).
+	DialogGrabbed,
+	/// The pointer moved while dragging a dialog; the payload is its window position.
+	DialogDragged(iced::Point),
+	/// The drag ended (pointer released) (§10).
+	DialogReleased,
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -213,7 +236,15 @@ impl App {
 	/// startup. We start on the Connect screen with no work to do, so the task
 	/// is empty.
 	fn new() -> (Self, iced::Task<Message>) {
-		(Self::default(), iced::Task::none())
+		// Start with the first form field focused so the user can type immediately, and
+		// its keyboard-navigation ring aligned to that field (§10). Also fetch the window
+		// size right away so a dialog opened before the first resize event can still be
+		// centred and clamped (§10).
+		let app = Self::default();
+		let focus = app.apply_form_focus();
+		let size = iced::window::latest()
+			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
+		(app, iced::Task::batch([focus, size]))
 	}
 
 	/// The heart of the Elm loop: apply one `Message` to the state. Returns a
@@ -235,17 +266,17 @@ impl App {
 				}
 			}
 			Message::ConnectPressed => self.on_connect_pressed(),
-			Message::BackPressed => self.screen = Screen::Connect,
-			Message::FormKey(event) => return Self::on_form_key(&event),
+			Message::BackPressed => return self.go_to_connect(),
+			Message::FormKey(event) => return self.on_form_key(event),
 			Message::AcceptHostKey => self.on_host_key_decision(true),
 			Message::RejectHostKey => self.on_host_key_decision(false),
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
-			Message::PassphraseCancelled => self.on_passphrase_cancelled(),
+			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
 			Message::Key(event) => self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
-			Message::DisconnectConfirmed => self.on_disconnect_confirmed(),
+			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
 			Message::DisconnectCancelled => self.confirm_disconnect = false,
 			Message::GridMoved(point) => self.on_grid_moved(point),
 			Message::GridPressed => self.on_grid_pressed(),
@@ -264,6 +295,15 @@ impl App {
 				if !action.is_edit() {
 					self.dialog_body.perform(action);
 				}
+			}
+			Message::DialogGrabbed => {
+				self.dialog_dragging = true;
+				self.dialog_drag_last = None;
+			}
+			Message::DialogDragged(pointer) => self.on_dialog_dragged(pointer),
+			Message::DialogReleased => {
+				self.dialog_dragging = false;
+				self.dialog_drag_last = None;
 			}
 			Message::Ssh(event) => return self.on_ssh_event(event),
 		}
@@ -323,10 +363,10 @@ impl App {
 
 	/// Dismiss the passphrase prompt: tell the task to tear down and go back to
 	/// the form. Clearing the field first means the discarded text does not linger.
-	fn on_passphrase_cancelled(&mut self) {
+	fn on_passphrase_cancelled(&mut self) -> iced::Task<Message> {
 		self.passphrase_input.clear();
 		self.send_command(SshCommand::Disconnect);
-		self.screen = Screen::Connect;
+		self.go_to_connect()
 	}
 
 	/// Send one command to the SSH task. Returns whether it was sent; a
@@ -353,6 +393,45 @@ impl App {
 	/// fresh `Content` also resets any selection left from a previous dialog.
 	fn set_dialog_body(&mut self, text: &str) {
 		self.dialog_body = text_editor::Content::with_text(text);
+		// A freshly opened dialog starts centred and not being dragged, so a position
+		// left over from a previous dialog never carries across (§10).
+		self.dialog_pos = self.centered_dialog_pos();
+		self.dialog_dragging = false;
+		self.dialog_drag_last = None;
+	}
+
+	/// The card's centred top-left for the current window size (§10). Uses the dialog's
+	/// fixed width and estimated height; clamped to non-negative so a tiny window keeps
+	/// the card at the origin rather than off-screen.
+	fn centered_dialog_pos(&self) -> iced::Point {
+		iced::Point::new(
+			((self.window_size.width - ui::dialog::DIALOG_WIDTH) / 2.0).max(0.0),
+			((self.window_size.height - ui::dialog::DIALOG_HEIGHT_ESTIMATE) / 2.0).max(0.0),
+		)
+	}
+
+	/// Clamp a proposed card top-left so the dialog stays reachable (§10). Horizontal is
+	/// exact — the fixed width keeps the card fully between the side edges. Vertical only
+	/// keeps the header on screen (`DIALOG_DRAG_MIN_VISIBLE`) rather than the whole card,
+	/// because iced does not expose the card's real height; this lets the dialog be
+	/// dragged right down to the window's bottom instead of being blocked short of it.
+	fn clamp_dialog_pos(&self, pos: iced::Point) -> iced::Point {
+		let max_x = (self.window_size.width - ui::dialog::DIALOG_WIDTH).max(0.0);
+		let max_y = (self.window_size.height - ui::dialog::DIALOG_DRAG_MIN_VISIBLE).max(0.0);
+		iced::Point::new(pos.x.clamp(0.0, max_x), pos.y.clamp(0.0, max_y))
+	}
+
+	/// Update the dragged dialog's position from a new pointer location (§10). The first
+	/// move of a drag only records the anchor; later moves apply the delta so the card
+	/// tracks the pointer without jumping, then clamp it into the window.
+	fn on_dialog_dragged(&mut self, pointer: iced::Point) {
+		if !self.dialog_dragging {
+			return;
+		}
+		if let Some(last) = self.dialog_drag_last {
+			self.dialog_pos = self.clamp_dialog_pos(self.dialog_pos + (pointer - last));
+		}
+		self.dialog_drag_last = Some(pointer);
 	}
 
 	/// Show the error screen with `message`, also seeding it as the dialog's selectable
@@ -410,7 +489,7 @@ impl App {
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
-				self.screen = Screen::Connect;
+				return self.go_to_connect();
 			}
 			SshEvent::Error(message) => {
 				self.terminal = None;
@@ -427,6 +506,9 @@ impl App {
 	/// actually change — so dragging the window doesn't spam identical resizes.
 	/// Reflows the local view and tells the remote pty to match.
 	fn on_window_resized(&mut self, size: iced::Size) {
+		// Remember the window size on every screen so a dialog (which can appear before a
+		// terminal exists) can be centred and its dragging clamped (§10).
+		self.window_size = size;
 		let (rows, cols) = ui::terminal::grid_size(size);
 		let changed = match self.terminal.as_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
@@ -454,30 +536,67 @@ impl App {
 	/// emulator and return to the form right away — the `Disconnected` event that
 	/// follows just confirms what we have already done. Mirrors the passphrase-cancel
 	/// path, which also acts immediately rather than waiting.
-	fn on_disconnect_confirmed(&mut self) {
+	fn on_disconnect_confirmed(&mut self) -> iced::Task<Message> {
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
 		self.connection = None;
 		self.clear_grid_interaction();
-		self.screen = Screen::Connect;
+		self.go_to_connect()
 	}
 
-	/// Move focus between the connect form's inputs (§10): Tab to the next focusable
-	/// widget, Shift+Tab to the previous. Any other key is left alone — the focused
-	/// input receives it through the widget tree. Static: it reads no state, only turns
-	/// a Tab press into a focus operation.
-	fn on_form_key(event: &iced::keyboard::Event) -> iced::Task<Message> {
+	/// Return to the connect form: reset the keyboard focus to the first field and
+	/// focus it natively, so the form is ready for typing and its highlight ring is
+	/// aligned (§10). Used by every path back to the form (Back, disconnect, cancel).
+	fn go_to_connect(&mut self) -> iced::Task<Message> {
+		self.screen = Screen::Connect;
+		self.form_focus = ui::connect::FormStop::Host;
+		self.apply_form_focus()
+	}
+
+	/// Move native focus to match the current form stop: focus the stop's text input,
+	/// or — for a radio/button stop — focus a non-existent id, which unfocuses every
+	/// input so no field keeps the caret behind the highlight ring (§10).
+	fn apply_form_focus(&self) -> iced::Task<Message> {
+		let id = self
+			.form_focus
+			.input_id(self.form.auth_kind)
+			.unwrap_or(ui::connect::NO_FOCUS_ID);
+		iced::widget::operation::focus(id)
+	}
+
+	/// Handle a key on the connect form (§10): Tab / Shift+Tab move the focus ring, and
+	/// Enter / Space activate the current stop when it is a radio or button. On a text
+	/// stop, Enter/Space are left to the focused field (typing/submit). Anything else is
+	/// ignored here; the focused input still receives it through the widget tree.
+	fn on_form_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
+		use iced::keyboard::key::Named;
+
 		let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
 			return iced::Task::none();
 		};
-		if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) = key {
-			return if modifiers.shift() {
-				iced::widget::operation::focus_previous()
-			} else {
-				iced::widget::operation::focus_next()
-			};
+
+		match key {
+			iced::keyboard::Key::Named(Named::Tab) => {
+				self.form_focus = if modifiers.shift() {
+					self.form_focus.previous()
+				} else {
+					self.form_focus.next()
+				};
+				self.apply_form_focus()
+			}
+			iced::keyboard::Key::Named(Named::Enter | Named::Space) => {
+				// A text stop keeps these keys (space types, Enter is the field's own);
+				// a radio/button stop turns them into its activation message.
+				if self.form_focus.input_id(self.form.auth_kind).is_some() {
+					iced::Task::none()
+				} else if let Some(message) = self.form_focus.activation(self.form.auth_kind) {
+					iced::Task::done(message)
+				} else {
+					iced::Task::none()
+				}
+			}
+			_ => iced::Task::none(),
 		}
-		iced::Task::none()
 	}
 
 	/// Forward a key press to the shell, but only while the terminal is open.
@@ -606,14 +725,29 @@ impl App {
 
 	/// Render the current screen. Pure: it only reads state and returns widgets.
 	fn view(&self) -> Element<'_, Message> {
+		// Position/drag state shared by every dialog (§10); only the dialog arms use it.
+		let drag = ui::dialog::Drag {
+			pos: self.dialog_pos,
+			dragging: self.dialog_dragging,
+		};
 		match &self.screen {
-			Screen::Connect => ui::connect::view(&self.form),
+			Screen::Connect => ui::connect::view(&self.form, self.form_focus),
 			Screen::Connecting { status } => text(status).into(),
-			Screen::ConfirmHostKey => ui::host_key_view(&self.dialog_body),
-			Screen::NeedPassphrase => ui::passphrase_view(
-				&self.passphrase_input,
-				self.passphrase_failed,
-				&self.dialog_body,
+			// The connect-flow dialogs float over the (dimmed) form rather than replacing
+			// it, so the page stays in view behind them (§10). A click on the backdrop
+			// dismisses with the dialog's own safe action (reject / cancel / back).
+			Screen::ConfirmHostKey => self.form_with_dialog(
+				ui::host_key_view(&self.dialog_body, drag),
+				Message::RejectHostKey,
+			),
+			Screen::NeedPassphrase => self.form_with_dialog(
+				ui::passphrase_view(
+					&self.passphrase_input,
+					self.passphrase_failed,
+					&self.dialog_body,
+					drag,
+				),
+				Message::PassphraseCancelled,
 			),
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => ui::terminal::view(
@@ -623,11 +757,34 @@ impl App {
 					self.menu,
 					self.confirm_disconnect,
 					&self.dialog_body,
+					drag,
 				),
 				None => text("terminal starting…").into(),
 			},
-			Screen::Error => ui::error_view(&self.dialog_body),
+			Screen::Error => self.form_with_dialog(
+				ui::error_view(&self.dialog_body, drag),
+				Message::BackPressed,
+			),
 		}
+	}
+
+	/// Overlay a connect-flow dialog on the (dimmed) connect form (§10): the form as the
+	/// base, a dimming backdrop that dismisses with `on_dismiss` on a click-away, then the
+	/// dialog card on top. The form stays visible behind the dialog rather than being
+	/// replaced, so the prompt reads as a modal over the page.
+	fn form_with_dialog<'a>(
+		&'a self,
+		dialog: Element<'a, Message>,
+		on_dismiss: Message,
+	) -> Element<'a, Message> {
+		iced::widget::stack![
+			ui::connect::view(&self.form, self.form_focus),
+			ui::dialog::backdrop(on_dismiss),
+			dialog,
+		]
+		.width(iced::Length::Fill)
+		.height(iced::Length::Fill)
+		.into()
 	}
 
 	/// Streams the app listens to. The SSH worker's outbound events (§4) are
@@ -638,19 +795,24 @@ impl App {
 	/// not react to resizes it does not care about.
 	fn subscription(&self) -> iced::Subscription<Message> {
 		let ssh = bridge::subscription().map(Message::Ssh);
+		// Track window size on every screen so a dialog can be centred/clamped even
+		// before a terminal exists (§10).
+		let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
 		match self.screen {
 			Screen::Terminal => iced::Subscription::batch([
 				ssh,
+				resizes,
 				iced::keyboard::listen().map(Message::Key),
-				iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
 			]),
 			// On the connect form, listen for key presses so Tab / Shift+Tab can move
 			// focus between the inputs (`on_form_key`); typing still reaches the fields
 			// through the widget tree, so this only adds the focus shortcuts.
-			Screen::Connect => {
-				iced::Subscription::batch([ssh, iced::keyboard::listen().map(Message::FormKey)])
-			}
-			_ => ssh,
+			Screen::Connect => iced::Subscription::batch([
+				ssh,
+				resizes,
+				iced::keyboard::listen().map(Message::FormKey),
+			]),
+			_ => iced::Subscription::batch([ssh, resizes]),
 		}
 	}
 }

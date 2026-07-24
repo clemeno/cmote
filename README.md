@@ -28,9 +28,11 @@ references below (§n) point into it.
 - **Consistent dialogs** — the disconnect confirmation, host-key prompt, passphrase
   prompt, and error notice share one chrome: a header bar (question on the left, close ✕
   on the right, wired to the safe action), an explanatory body, and evenly-spaced footer
-  buttons. Clicking the card never dismisses it (only a click outside does), and the body
-  message is **selectable and copyable** — drag to select, `Ctrl+C` to copy (handy for the
-  host-key fingerprint or an error message) (§10).
+  buttons. Each **floats over the page it belongs to** (the connect-flow dialogs over the
+  connect form, the disconnect modal over the shell) behind a dim backdrop; clicking the
+  card never dismisses it (only a click outside does); the body message is **selectable and
+  copyable** — drag to select, `Ctrl+C` to copy (handy for the host-key fingerprint or an
+  error message); and the dialog is **draggable** by its header, clamped to the window (§10).
 - Session-only credentials, held in memory and `zeroize`d on drop — never written to
   disk (§12).
 
@@ -125,11 +127,14 @@ docker run --rm -d --name cmote-sshd -p 2222:22 \
 `localhost:22`.)
 
 **2. Password auth + first-contact host key.** Run `cargo run`, enter `localhost`,
-port `2222`, user `tester`, choose **Password**, type `testpass`, connect. **Tab** should
-move focus from one field to the next and **Shift+Tab** back. Expect:
+port `2222`, user `tester`, choose **Password**, type `testpass`, connect. **Tab** /
+**Shift+Tab** should move focus across every control — the fields, both auth radios, and
+the Connect button (the active radio/button shows a highlight ring); **Enter/Space**
+activates the focused radio or button. Expect:
 
-- The **Unknown host key** screen appears once, showing a SHA-256 fingerprint.
-  Accept → the shell opens; the fingerprint is now pinned in `known_hosts`.
+- The **Unknown host key** dialog appears once, showing a SHA-256 fingerprint. You can
+  drag it by its header, select the fingerprint and copy it (`Ctrl+C`), and closing (✕)
+  rejects. Accept → the shell opens; the fingerprint is now pinned in `known_hosts`.
 - Reconnecting no longer prompts (the key matches the pinned one).
 
 **3. Terminal behaviour.** In the shell: run `ls`, `echo hi`, an interactive program

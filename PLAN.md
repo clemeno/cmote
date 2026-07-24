@@ -342,15 +342,20 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   button (`rfd`) for the key file; a password field for password auth. There is **no**
   passphrase field: a key's passphrase is asked for on its own screen, and only if the
   key turns out to be encrypted (see below). A Connect button; validation fails fast to
-  the Error screen (§6.0). **Tab / Shift+Tab** move focus between the inputs: a
-  Connect-screen `keyboard::listen` subscription maps a Tab press to `FormKey`, and
-  `update` turns it into `focus_next()` / `focus_previous()`; other keys still reach the
-  focused field through the widget tree.
+  the Error screen (§6.0). **Full keyboard navigation** (§10): iced can only focus text
+  inputs, so a bespoke focus ring (`ui::connect::FormStop`) also covers the radios and
+  the Connect button. `App::form_focus` tracks the current stop; a Connect-screen
+  `keyboard::listen` subscription feeds `FormKey`, where **Tab / Shift+Tab** move the
+  stop (`next`/`previous`), **Enter / Space** activate a radio/button stop
+  (`activation`), and a text stop takes native focus (`focus(id)`) while a
+  radio/button stop unfocuses all (`focus(NO_FOCUS_ID)`) and gets a highlight ring in
+  the view. On a text stop, Enter/Space are left to the field.
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
   *connecting → verifying host key → authenticating*.
 - **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
-  Accept / Reject (§8), in the shared dialog chrome (below). Closing (✕) rejects — the
-  safe default, so dismissing never trusts an unverified host.
+  Accept / Reject (§8), in the shared dialog chrome floating over the dimmed connect form
+  (below). Closing (✕) or a backdrop click rejects — the safe default, so dismissing never
+  trusts an unverified host.
 - **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
   key is encrypted (§7). A masked field with Unlock / Cancel; the field is auto-focused
   when the screen opens (a `text_input::focus` task keyed to a shared id, refocused on
@@ -359,7 +364,8 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   attempt was already made this connection, since the bridge emits the same
   `NeedPassphrase` for a first ask and a re-ask. The typed text is moved into a `Secret`
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
-  hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below).
+  hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below),
+  floating over the dimmed connect form.
 - **Dialogs** (`ui::dialog`, done): the disconnect confirmation, the host-key prompt, the
   passphrase prompt, and the error notice all wear one chrome — a **header bar** with the
   question as a title on the left and a transparent **close ✕** on the right (wired to the
@@ -369,6 +375,11 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   the window, so the frame changes in one place and every prompt stays consistent. The card
   has a rounded border and the header bar rounds its own top corners to match (the card's
   clip is rectangular, so a square header would otherwise poke past the radius).
+  - **Placement over a backdrop**: every dialog floats over the page it belongs to, dimmed
+    by the shared `dialog::backdrop` — the connect-flow dialogs (host-key, passphrase,
+    error) over the connect form (`App::form_with_dialog` stacks form + backdrop + card),
+    the disconnect modal over the live shell. A click on the backdrop dismisses with the
+    dialog's safe action (reject / cancel / back / cancel), the same as its ✕.
   - **Card swallows its own clicks**: the card is wrapped in a `mouse_area` that captures
     presses (a no-op `Message::Ignored`), so clicking the dialog does not fall through to
     the dimming backdrop and dismiss it; only a click *outside* the card reaches the
@@ -381,6 +392,15 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     stops forwarding keys to the shell so Ctrl+C copies rather than sending ETX to the
     remote. The `Screen::ConfirmHostKey` / `Screen::Error` variants carry no text anymore —
     the message lives in `dialog_body`, so they are bare markers.
+  - **Draggable by the header** (§10): pressing the header background starts a drag
+    (`DialogGrabbed`), and while dragging a transparent full-window capture layer reports
+    every pointer move (`DialogDragged`) and the release (`DialogReleased`) — so tracking
+    survives the pointer leaving the card. `App` moves the card by the pointer delta and
+    clamps it (`dialog_pos`, `window_size`): horizontally exact via the fixed width, and
+    vertically only far enough to keep the header on screen (`DIALOG_DRAG_MIN_VISIBLE`) —
+    iced does not expose the card's real height, so this keeps the dialog draggable to the
+    window's bottom (and grabbable back) rather than stopping short of it. The ✕ button
+    captures its own press, so closing never starts a drag.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
   centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard
@@ -402,8 +422,9 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     paste always goes to the remote's stdin at its own cursor — a terminal cannot
     "replace" a selection the way an editor can — and the highlight is kept after a paste.
     Paste wrapping/injection safety lives in `term::keymap::encode_paste` (§9).
-- **Error** (`Screen::Error`): a generic, non-leaking message plus a "Back" button to
-  the form. Detail is logged, not shown (§12).
+- **Error** (`Screen::Error`): a generic, non-leaking message (selectable/copyable) plus
+  a "Back" button, in the shared dialog chrome floating over the dimmed connect form.
+  Closing (✕) or a backdrop click goes Back. Detail is logged, not shown (§12).
 
 All state is owned in the iced `State` struct; every transition is a `Message` handled
 in `update`. No mutable global state, no `unsafe`.
