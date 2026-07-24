@@ -421,7 +421,18 @@ impl App {
 			return; // ignore key releases and other keyboard events
 		};
 
-		if let Some(bytes) = term::keymap::encode(&key, text.as_deref(), modifiers) {
+		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
+		// form; read that mode off the emulator so `encode` sends the sequences the
+		// remote program actually listens for. No terminal means no session — treat
+		// it as the default (CSI) mode, though this path only runs on the Terminal screen.
+		let application_cursor = self
+			.terminal
+			.as_ref()
+			.is_some_and(|terminal| terminal.screen().application_cursor());
+
+		if let Some(bytes) =
+			term::keymap::encode(&key, text.as_deref(), modifiers, application_cursor)
+		{
 			self.send_command(SshCommand::Input(bytes));
 		}
 	}

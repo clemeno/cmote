@@ -26,7 +26,16 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// input (a bare modifier, an unmapped named key). `text` is the OS-produced
 /// string for the key (already honoring layout and Shift); we prefer it for
 /// printable input and fall back to the logical key only when it is absent.
-pub fn encode(key: &Key, text: Option<&str>, modifiers: Modifiers) -> Option<Vec<u8>> {
+/// `application_cursor` is the emulator's DECCKM state (read from
+/// `screen.application_cursor()`): full-screen apps such as vim, less, and nano
+/// turn it on and then expect the SS3 arrow-key form, so it is threaded down to
+/// `named_bytes` to pick the matching cursor-key encoding.
+pub fn encode(
+	key: &Key,
+	text: Option<&str>,
+	modifiers: Modifiers,
+	application_cursor: bool,
+) -> Option<Vec<u8>> {
 	// Control combos first, so Ctrl-C beats the plain 'c' it would otherwise be.
 	// (Alt is excluded here; Alt+Ctrl combos are rare and left to the OS.)
 	if modifiers.control()
@@ -39,7 +48,7 @@ pub fn encode(key: &Key, text: Option<&str>, modifiers: Modifiers) -> Option<Vec
 
 	match key {
 		// Named keys map to their fixed control byte or escape sequence.
-		Key::Named(named) => named_bytes(named),
+		Key::Named(named) => named_bytes(named, application_cursor),
 
 		// A printable key: send its produced text. Alt acts as "meta", which the
 		// xterm convention encodes as an ESC prefix before the character.
@@ -124,21 +133,25 @@ fn control_byte(character: &str) -> Option<u8> {
 }
 
 /// The bytes for a named (non-character) key. Returns `None` for named keys we
-/// do not forward (bare modifiers, function keys we have not mapped yet).
-fn named_bytes(named: &Named) -> Option<Vec<u8>> {
+/// do not forward (bare modifiers, function keys we have not mapped yet). The
+/// cursor and Home/End keys depend on `application_cursor`: see `cursor_key`.
+fn named_bytes(named: &Named, application_cursor: bool) -> Option<Vec<u8>> {
 	let sequence: &[u8] = match named {
 		Named::Enter => b"\r",
 		Named::Tab => b"\t",
 		Named::Space => b" ",
 		Named::Backspace => &[0x7f],
 		Named::Escape => &[ESC],
-		// CSI cursor and navigation sequences, as an xterm would send them.
-		Named::ArrowUp => b"\x1b[A",
-		Named::ArrowDown => b"\x1b[B",
-		Named::ArrowRight => b"\x1b[C",
-		Named::ArrowLeft => b"\x1b[D",
-		Named::Home => b"\x1b[H",
-		Named::End => b"\x1b[F",
+		// Cursor and Home/End keys carry the DECCKM-dependent prefix, so they build
+		// their bytes through `cursor_key` and return directly.
+		Named::ArrowUp => return Some(cursor_key(b'A', application_cursor)),
+		Named::ArrowDown => return Some(cursor_key(b'B', application_cursor)),
+		Named::ArrowRight => return Some(cursor_key(b'C', application_cursor)),
+		Named::ArrowLeft => return Some(cursor_key(b'D', application_cursor)),
+		Named::Home => return Some(cursor_key(b'H', application_cursor)),
+		Named::End => return Some(cursor_key(b'F', application_cursor)),
+		// The remaining navigation keys are the "~" CSI sequences, which DECCKM does
+		// not change, so they are the same in both modes.
 		Named::Insert => b"\x1b[2~",
 		Named::Delete => b"\x1b[3~",
 		Named::PageUp => b"\x1b[5~",
@@ -146,6 +159,17 @@ fn named_bytes(named: &Named) -> Option<Vec<u8>> {
 		_ => return None,
 	};
 	Some(sequence.to_vec())
+}
+
+/// Encode one cursor/navigation key given its final byte (`A`=Up, `B`=Down,
+/// `C`=Right, `D`=Left, `H`=Home, `F`=End). Only the prefix differs by mode: in
+/// application cursor mode (DECCKM set) a real xterm sends the SS3 form `ESC O <b>`,
+/// otherwise the CSI form `ESC [ <b>`. The two share the final byte, so we pick the
+/// second byte and reuse the rest. Getting this wrong is exactly why full-screen
+/// apps ignore the arrow keys: vim binds them to the SS3 form once it enables DECCKM.
+fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
+	let prefix = if application_cursor { b'O' } else { b'[' };
+	vec![ESC, prefix, final_byte]
 }
 
 #[cfg(test)]
@@ -161,7 +185,7 @@ mod tests {
 	#[test]
 	fn plain_character_sends_its_text() {
 		let key = Key::Character("a".into());
-		assert_eq!(encode(&key, Some("a"), none()), Some(b"a".to_vec()));
+		assert_eq!(encode(&key, Some("a"), none(), false), Some(b"a".to_vec()));
 	}
 
 	#[test]
@@ -169,7 +193,7 @@ mod tests {
 		// The OS reports the logical key as "a" but the produced text as "A".
 		let key = Key::Character("a".into());
 		assert_eq!(
-			encode(&key, Some("A"), Modifiers::SHIFT),
+			encode(&key, Some("A"), Modifiers::SHIFT, false),
 			Some(b"A".to_vec())
 		);
 	}
@@ -177,26 +201,64 @@ mod tests {
 	#[test]
 	fn ctrl_c_is_etx() {
 		let key = Key::Character("c".into());
-		assert_eq!(encode(&key, None, Modifiers::CTRL), Some(vec![0x03]));
+		assert_eq!(encode(&key, None, Modifiers::CTRL, false), Some(vec![0x03]));
 	}
 
 	#[test]
 	fn enter_is_carriage_return() {
 		let key = Key::Named(Named::Enter);
-		assert_eq!(encode(&key, Some("\r"), none()), Some(b"\r".to_vec()));
+		assert_eq!(
+			encode(&key, Some("\r"), none(), false),
+			Some(b"\r".to_vec())
+		);
 	}
 
 	#[test]
-	fn arrow_up_is_csi_sequence() {
+	fn arrow_up_is_csi_sequence_in_normal_mode() {
+		// DECCKM reset (the shell's default): arrows are the CSI form ESC[A.
 		let key = Key::Named(Named::ArrowUp);
-		assert_eq!(encode(&key, None, none()), Some(b"\x1b[A".to_vec()));
+		assert_eq!(encode(&key, None, none(), false), Some(b"\x1b[A".to_vec()));
+	}
+
+	#[test]
+	fn arrow_up_is_ss3_sequence_in_application_mode() {
+		// DECCKM set (vim/less/nano): arrows switch to the SS3 form ESC O A, which is
+		// what those apps bind their arrow keys to — the fix for "arrows do nothing".
+		let key = Key::Named(Named::ArrowUp);
+		assert_eq!(encode(&key, None, none(), true), Some(b"\x1bOA".to_vec()));
+	}
+
+	#[test]
+	fn home_and_end_follow_the_cursor_mode_too() {
+		// Home/End share the DECCKM behaviour: CSI when reset, SS3 when set.
+		let home = Key::Named(Named::Home);
+		let end = Key::Named(Named::End);
+		assert_eq!(encode(&home, None, none(), false), Some(b"\x1b[H".to_vec()));
+		assert_eq!(encode(&home, None, none(), true), Some(b"\x1bOH".to_vec()));
+		assert_eq!(encode(&end, None, none(), false), Some(b"\x1b[F".to_vec()));
+		assert_eq!(encode(&end, None, none(), true), Some(b"\x1bOF".to_vec()));
+	}
+
+	#[test]
+	fn tilde_navigation_keys_ignore_cursor_mode() {
+		// PageUp/PageDown/Insert/Delete are "~" sequences DECCKM does not touch, so
+		// application mode leaves them unchanged.
+		let page_up = Key::Named(Named::PageUp);
+		assert_eq!(
+			encode(&page_up, None, none(), false),
+			encode(&page_up, None, none(), true)
+		);
+		assert_eq!(
+			encode(&page_up, None, none(), true),
+			Some(b"\x1b[5~".to_vec())
+		);
 	}
 
 	#[test]
 	fn alt_character_gets_esc_prefix() {
 		let key = Key::Character("x".into());
 		assert_eq!(
-			encode(&key, Some("x"), Modifiers::ALT),
+			encode(&key, Some("x"), Modifiers::ALT, false),
 			Some(b"\x1bx".to_vec())
 		);
 	}
@@ -204,7 +266,7 @@ mod tests {
 	#[test]
 	fn bare_modifier_key_sends_nothing() {
 		let key = Key::Named(Named::Shift);
-		assert_eq!(encode(&key, None, none()), None);
+		assert_eq!(encode(&key, None, none(), false), None);
 	}
 
 	#[test]
