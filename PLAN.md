@@ -299,6 +299,14 @@ Turning a raw byte stream into a screen.
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
   sequences). Sent as `SshCommand::Input`.
+- **Paste** (done, v1.1): `term::keymap::encode_paste` turns clipboard text into input
+  bytes. When the remote enabled **bracketed paste** (DECSET 2004 — read from
+  `Screen::bracketed_paste()`) the text is framed by `ESC[200~`…`ESC[201~` so the shell
+  inserts it literally instead of running embedded newlines. **Security**: a hostile
+  clipboard could embed the `ESC[201~` terminator to close the bracket early and inject a
+  command, so every occurrence is stripped from the payload before wrapping (xterm does
+  the same). Without bracketing the bytes go raw — the classic terminal behaviour, where
+  embedded newlines execute; bracketed paste, which modern shells enable, is the fix.
 - **Resize** (done): a `window::resize_events()` subscription (Terminal screen only)
   gives the window's logical size; `ui::terminal::grid_size` converts it to `(rows,
   cols)` using the known cell metrics (minus padding, rounded down so nothing clips,
@@ -341,11 +349,23 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12).
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar shows the live
-  session's `user@host:port` on the left and a **Disconnect** button on the right; the
-  vt100 grid fills the rest, and keyboard focus goes there. Disconnect sends
+  session's `user@host:port` on the left and **Copy / Paste / Disconnect** buttons on the
+  right; the vt100 grid fills the rest, and keyboard focus goes there. Disconnect sends
   `SshCommand::Disconnect` and returns to the form immediately (the `Disconnected` event
   that follows just confirms it). The bar's fixed height is subtracted in
   `ui::terminal::grid_size`, so the reflow math (§9) still fits the grid exactly.
+  - **Text selection + clipboard** (done, v1.1): a `mouse_area` over the grid turns
+    press-drag-release into a *stream* selection (`ui::selection`), highlighted in place;
+    `on_move` reports a grid-local point that `ui::terminal::cell_at` maps to a cell.
+    **Copy** (button, right-click item, enabled only with a selection) extracts the
+    selected cells — wide glyphs once, trailing blanks trimmed, rows joined by `\n` — and
+    writes them via `iced::clipboard::write`. **Paste** (button, right-click item) reads
+    `iced::clipboard::read` and sends the text to the shell. A **right-click** opens a
+    small context menu (an iced `stack` overlay with a click-away dismiss layer) at the
+    pointer. The selection is a *local* view over rendered cells and drives copy only:
+    paste always goes to the remote's stdin at its own cursor — a terminal cannot
+    "replace" a selection the way an editor can — and the highlight is kept after a paste.
+    Paste wrapping/injection safety lives in `term::keymap::encode_paste` (§9).
 - **Error** (`Screen::Error`): a generic, non-leaking message plus a "Back" button to
   the form. Detail is logged, not shown (§12).
 
@@ -504,8 +524,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
   / higher throughput; GPU-accelerated glyph rendering if scrolling lags. (Wide-char
   cells now lay out correctly on the `vt100` grid — see the render note in §11.)
-- **Bracketed paste + clipboard integration** — with the safety review that OSC 52
-  and paste injection require.
+- **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
+  selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
+  Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on
+  purpose — we only touch the clipboard on explicit local action), keyboard shortcuts for
+  copy/paste (v1.1 is button- and menu-driven), and rectangular/block selection.
 - **Host-key mismatch override UI** — a guarded "the key changed, here's the old vs new
   fingerprint" flow, if ever needed (kept out of v1 on purpose).
 - **Code signing + auto-update** — sign the exe (Authenticode) so Win11 SmartScreen

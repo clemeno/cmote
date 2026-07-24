@@ -104,6 +104,22 @@ pub struct App {
 	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
 	/// secret, so it is safe in `Debug`.
 	connection: Option<String>,
+	/// The active text selection over the terminal grid, if any (§10). Drives both
+	/// the on-screen highlight and what Copy puts on the clipboard; `None` when
+	/// nothing is selected.
+	selection: Option<ui::selection::Selection>,
+	/// True while the left mouse button is held on the grid — a drag in progress.
+	/// `on_move` fires on any hover, so this flag is how a drag is told from a plain
+	/// move (only a drag extends the selection).
+	selecting: bool,
+	/// The grid cell currently under the pointer (§10). Updated on every pointer
+	/// move so a press can anchor the selection here.
+	hover_cell: ui::selection::Cell,
+	/// The last pointer position, local to the grid, used to place the right-click
+	/// context menu — a right-press carries no coordinates of its own (§10).
+	pointer: iced::Point,
+	/// The context menu's anchor when it is open, `None` when closed (§10).
+	menu: Option<iced::Point>,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -141,6 +157,23 @@ pub enum Message {
 	WindowResized(iced::Size),
 	/// The user clicked Disconnect in the terminal status bar (§10).
 	DisconnectPressed,
+	// --- terminal mouse: text selection + clipboard (§10) ---
+	/// The pointer moved over the grid; the payload is its grid-local position.
+	GridMoved(iced::Point),
+	/// The left button went down on the grid — begin a selection at the hovered cell.
+	GridPressed,
+	/// The left button came back up — finish the selection (a bare click clears it).
+	GridReleased,
+	/// The right button went down on the grid — open the context menu at the pointer.
+	GridRightPressed,
+	/// Copy the current selection to the system clipboard.
+	CopyPressed,
+	/// Read the system clipboard, then paste it into the shell.
+	PastePressed,
+	/// The async clipboard read finished: `Some(text)` to paste, `None` if empty.
+	Pasted(Option<String>),
+	/// Dismiss the open context menu without choosing an item.
+	MenuDismissed,
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -181,6 +214,14 @@ impl App {
 			Message::Key(event) => self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
+			Message::GridMoved(point) => self.on_grid_moved(point),
+			Message::GridPressed => self.on_grid_pressed(),
+			Message::GridReleased => self.on_grid_released(),
+			Message::GridRightPressed => self.menu = Some(self.pointer),
+			Message::CopyPressed => return self.on_copy(),
+			Message::PastePressed => return self.on_paste(),
+			Message::Pasted(text) => self.on_pasted(text),
+			Message::MenuDismissed => self.menu = None,
 			Message::Ssh(event) => return self.on_ssh_event(event),
 		}
 		iced::Task::none()
@@ -290,6 +331,7 @@ impl App {
 				// show the terminal, then immediately refit it to the real window
 				// rather than waiting for the first resize event.
 				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
+				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
 				return fit_terminal();
 			}
@@ -302,11 +344,13 @@ impl App {
 			SshEvent::Disconnected => {
 				self.terminal = None;
 				self.connection = None;
+				self.clear_grid_interaction();
 				self.screen = Screen::Connect;
 			}
 			SshEvent::Error(message) => {
 				self.terminal = None;
 				self.connection = None;
+				self.clear_grid_interaction();
 				self.screen = Screen::Error(message);
 			}
 		}
@@ -339,6 +383,7 @@ impl App {
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
 		self.connection = None;
+		self.clear_grid_interaction();
 		self.screen = Screen::Connect;
 	}
 
@@ -362,6 +407,88 @@ impl App {
 		}
 	}
 
+	/// Track the pointer over the grid (§10): remember its position (so the context
+	/// menu can anchor there) and the cell under it, and — while a drag is in
+	/// progress — extend the selection's head to that cell.
+	fn on_grid_moved(&mut self, point: iced::Point) {
+		self.pointer = point;
+		let Some(terminal) = self.terminal.as_ref() else {
+			return;
+		};
+		let (rows, cols) = terminal.screen().size();
+		self.hover_cell = ui::terminal::cell_at(point, rows, cols);
+		if self.selecting
+			&& let Some(selection) = self.selection
+		{
+			self.selection = Some(selection.with_head(self.hover_cell));
+		}
+	}
+
+	/// Begin a selection at the hovered cell (§10). Also closes any open context
+	/// menu — a fresh press on the grid dismisses it.
+	fn on_grid_pressed(&mut self) {
+		self.menu = None;
+		if self.terminal.is_some() {
+			self.selection = Some(ui::selection::Selection::new(self.hover_cell));
+			self.selecting = true;
+		}
+	}
+
+	/// Finish a drag (§10). A press-release with no movement leaves an empty
+	/// selection (anchor == head), which we clear so a plain click deselects.
+	fn on_grid_released(&mut self) {
+		self.selecting = false;
+		if self.selection.is_some_and(|selection| selection.is_empty()) {
+			self.selection = None;
+		}
+	}
+
+	/// Copy the current selection to the system clipboard (§10). Extracts the
+	/// selected cells' text and hands it to iced's async clipboard write. The
+	/// highlight is left in place — copying does not deselect. Nothing selected (or
+	/// an empty extract) is a no-op.
+	fn on_copy(&mut self) -> iced::Task<Message> {
+		self.menu = None;
+		let (Some(selection), Some(terminal)) = (self.selection, self.terminal.as_ref()) else {
+			return iced::Task::none();
+		};
+		let text = selection.extract(terminal.screen());
+		if text.is_empty() {
+			return iced::Task::none();
+		}
+		iced::clipboard::write(text)
+	}
+
+	/// Start a paste (§10): read the system clipboard. The read is async, so this
+	/// returns a task whose result comes back as `Message::Pasted`.
+	fn on_paste(&mut self) -> iced::Task<Message> {
+		self.menu = None;
+		iced::clipboard::read().map(Message::Pasted)
+	}
+
+	/// Send pasted clipboard text to the shell (§9, §10). Wraps it for bracketed
+	/// paste when the remote enabled that mode (the encoder also strips any embedded
+	/// terminator, the paste-injection guard). An empty clipboard (`None`) sends
+	/// nothing. The selection/highlight is deliberately kept — pasting does not clear
+	/// it, so the user can still copy what they had selected.
+	fn on_pasted(&mut self, text: Option<String>) {
+		let (Some(text), Some(terminal)) = (text, self.terminal.as_ref()) else {
+			return;
+		};
+		let bracketed = terminal.screen().bracketed_paste();
+		let bytes = term::keymap::encode_paste(&text, bracketed);
+		self.send_command(SshCommand::Input(bytes));
+	}
+
+	/// Drop all grid-interaction state — the selection, any in-progress drag, and an
+	/// open context menu. Called whenever a shell opens or closes so nothing (a stale
+	/// highlight, a half-finished drag) carries across sessions (§10).
+	fn clear_grid_interaction(&mut self) {
+		self.selection = None;
+		self.selecting = false;
+		self.menu = None;
+	}
+
 	/// Render the current screen. Pure: it only reads state and returns widgets.
 	fn view(&self) -> Element<'_, Message> {
 		match &self.screen {
@@ -372,9 +499,12 @@ impl App {
 				ui::passphrase_view(&self.passphrase_input, self.passphrase_failed)
 			}
 			Screen::Terminal => match &self.terminal {
-				Some(terminal) => {
-					ui::terminal::view(terminal, self.connection.as_deref().unwrap_or(""))
-				}
+				Some(terminal) => ui::terminal::view(
+					terminal,
+					self.connection.as_deref().unwrap_or(""),
+					self.selection.as_ref(),
+					self.menu,
+				),
 				None => text("terminal starting…").into(),
 			},
 			Screen::Error(message) => ui::error_view(message),

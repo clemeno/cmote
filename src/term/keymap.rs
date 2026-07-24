@@ -15,6 +15,13 @@ use iced::keyboard::{Key, Modifiers};
 /// ASCII escape (`ESC`), the lead byte of every CSI sequence and the meta prefix.
 const ESC: u8 = 0x1b;
 
+/// Bracketed-paste markers (DECSET 2004). When the remote program enables the
+/// mode it wants pasted text framed by these so it can tell a paste from typed
+/// input — readline/editors then insert the whole block literally instead of
+/// acting on embedded newlines and control characters (§9).
+const PASTE_START: &[u8] = b"\x1b[200~";
+const PASTE_END: &[u8] = b"\x1b[201~";
+
 /// Turn one key press into the bytes to send, or `None` if the key produces no
 /// input (a bare modifier, an unmapped named key). `text` is the OS-produced
 /// string for the key (already honoring layout and Shift); we prefer it for
@@ -48,6 +55,51 @@ pub fn encode(key: &Key, text: Option<&str>, modifiers: Modifiers) -> Option<Vec
 
 		// Unknown key: forward whatever text the OS produced, if any.
 		Key::Unidentified => text.map(|value| value.as_bytes().to_vec()),
+	}
+}
+
+/// Encode clipboard text for a paste into the shell (§9). When `bracketed` is
+/// true — the remote enabled DECSET 2004, which the caller reads from the
+/// emulator's `bracketed_paste()` state — wrap the text in the paste markers so
+/// the shell treats it as one literal block; otherwise send the bytes as they are.
+///
+/// SECURITY: a hostile clipboard could embed the end marker `ESC[201~` in its
+/// payload to close the bracket early and have whatever follows run as typed
+/// commands — a paste-injection. Legitimate pasted text never contains that
+/// marker, so we strip every occurrence before wrapping (this mirrors what xterm
+/// does). Without bracketing there is nothing to break out of, so the raw bytes
+/// go through unchanged.
+///
+/// `ponytail:` in the non-bracketed case, embedded newlines in the paste execute
+/// immediately — that is how a plain terminal has always behaved, and bracketed
+/// paste (which most modern shells enable) is the fix. We do not second-guess it
+/// with our own confirmation prompt in v1.
+pub fn encode_paste(text: &str, bracketed: bool) -> Vec<u8> {
+	if !bracketed {
+		return text.as_bytes().to_vec();
+	}
+	let bytes = text.as_bytes();
+	let mut out = Vec::with_capacity(bytes.len() + PASTE_START.len() + PASTE_END.len());
+	out.extend_from_slice(PASTE_START);
+	scrub_end_marker(bytes, &mut out);
+	out.extend_from_slice(PASTE_END);
+	out
+}
+
+/// Copy `bytes` into `out`, dropping every embedded `ESC[201~` end marker. A
+/// single left-to-right pass: at each position, if the end marker starts here skip
+/// past it, otherwise keep the byte. Stripping (rather than escaping) is enough —
+/// the terminator is meaningless in pasted content, so losing it changes nothing a
+/// user intended.
+fn scrub_end_marker(bytes: &[u8], out: &mut Vec<u8>) {
+	let mut index = 0;
+	while index < bytes.len() {
+		if bytes[index..].starts_with(PASTE_END) {
+			index += PASTE_END.len();
+		} else {
+			out.push(bytes[index]);
+			index += 1;
+		}
 	}
 }
 
@@ -153,5 +205,40 @@ mod tests {
 	fn bare_modifier_key_sends_nothing() {
 		let key = Key::Named(Named::Shift);
 		assert_eq!(encode(&key, None, none()), None);
+	}
+
+	#[test]
+	fn paste_without_bracketing_is_raw() {
+		assert_eq!(encode_paste("ls -la\n", false), b"ls -la\n".to_vec());
+	}
+
+	#[test]
+	fn paste_with_bracketing_is_wrapped() {
+		// The text is framed by ESC[200~ … ESC[201~ so the shell inserts it literally.
+		let out = encode_paste("hi", true);
+		assert_eq!(out, b"\x1b[200~hi\x1b[201~".to_vec());
+	}
+
+	#[test]
+	fn paste_strips_embedded_end_marker() {
+		// A hostile clipboard tries to close the bracket early and inject a command.
+		// The embedded ESC[201~ must be removed so only one real terminator remains.
+		let payload = "safe\x1b[201~rm -rf /";
+		let out = encode_paste(payload, true);
+		assert_eq!(out, b"\x1b[200~saferm -rf /\x1b[201~".to_vec());
+		// Exactly one terminator survives: the one we appended.
+		let terminators = out
+			.windows(PASTE_END.len())
+			.filter(|window| *window == PASTE_END)
+			.count();
+		assert_eq!(terminators, 1);
+	}
+
+	#[test]
+	fn paste_keeps_the_start_marker_since_it_cannot_break_out() {
+		// Only the end marker enables injection; an embedded start marker is harmless
+		// and left in place (matching xterm, which filters just the terminator).
+		let out = encode_paste("a\x1b[200~b", true);
+		assert_eq!(out, b"\x1b[200~a\x1b[200~b\x1b[201~".to_vec());
 	}
 }

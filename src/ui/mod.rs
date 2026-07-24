@@ -5,6 +5,7 @@
 // by screen. Each submodule owns one screen's layout.
 
 pub mod connect; // the connection form
+pub mod selection; // mouse text selection over the grid
 pub mod terminal; // the live shell grid
 
 use iced::widget::{button, column, row, text, text_input};

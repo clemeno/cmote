@@ -22,6 +22,9 @@ references below (§n) point into it.
   is a hard stop, not a warning (§8).
 - A full **VT terminal** (`vt100` grid rendered by iced) that reflows to the window
   size, forwarding the new pty size to the remote (§9).
+- **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
+  **Paste** — from the status-bar buttons or a right-click menu. Paste is
+  **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
 - Session-only credentials, held in memory and `zeroize`d on drop — never written to
   disk (§12).
 
@@ -92,7 +95,9 @@ cargo clippy --all-targets -- -D warnings
 Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
-mapping, and the grid-resize math.
+mapping, the grid-resize math, mouse-selection geometry and text extraction (wide
+glyphs, trailing-blank trimming, multi-row joins), and paste encoding (bracketed-paste
+wrapping and the injection-terminator scrub).
 
 ### Manual smoke test (live SSH)
 
@@ -149,6 +154,14 @@ ssh-keygen -t ed25519 -f ./smoke_key_enc -N "hunter2"      # encrypted
 one (new host key) on the same port, then reconnect. Expect a hard failure that names
 the changed key and does **not** offer to continue — remove the stale `known_hosts`
 line to proceed intentionally.
+
+**6. Selection, copy, and paste.** In the shell, run `echo hello world`, then drag
+across the output to select it — the selection should highlight and **Copy** (status
+bar or right-click menu) should enable. Copy, then **Paste**: the text lands at the
+shell's cursor. Paste into a bracketed-paste-aware shell (bash/zsh with readline) and
+confirm a multi-line clipboard does **not** auto-run each line (bracketed paste frames
+it). Right-click anywhere to confirm the context menu opens at the cursor and dismisses
+on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
 
 **Cleanup:**
 

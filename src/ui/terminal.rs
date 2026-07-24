@@ -14,11 +14,12 @@
 
 use iced::font::Weight;
 use iced::widget::text::{LineHeight, Span, Wrapping};
-use iced::widget::{button, column, container, rich_text, row, span, text};
-use iced::{Color, Element, Font, Length, Size};
+use iced::widget::{button, column, container, mouse_area, rich_text, row, span, stack, text};
+use iced::{Color, Element, Font, Length, Point, Size};
 
 use crate::app::Message;
 use crate::term::Terminal;
+use crate::ui::selection::{Cell, Selection};
 
 /// Glyph size and line spacing. A fixed monospace metric — the whole grid shares
 /// it, so columns line up and rows tile without gaps.
@@ -62,6 +63,15 @@ const STATUS_BAR_PADDING: iced::Padding = iced::Padding {
 const DEFAULT_FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
 const DEFAULT_BG: Color = Color::from_rgb8(0x1e, 0x1e, 0x1e);
 
+/// The background of a selected cell (§10). A muted blue that reads clearly under
+/// the default light foreground; selected cells keep their own fg, only the fill
+/// changes, so text stays legible while the region is obviously highlighted.
+const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
+
+/// The right-click context menu's panel background (§10) — slightly lighter than
+/// the status bar so it stands out as a floating surface over the grid.
+const MENU_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
+
 /// The 16 base ANSI colors (indices 0-15): the 8 standard colors then their
 /// bright variants. Values follow the common xterm palette.
 const ANSI_16: [(u8, u8, u8); 16] = [
@@ -97,10 +107,17 @@ struct CellStyle {
 }
 
 /// Render the whole terminal screen (§10): a status bar on top, the vt100 grid
-/// filling the rest. `endpoint` is the `user@host:port` shown in the bar. Owns
-/// its output (glyph strings and the label are copied out), so the returned
-/// element borrows nothing and is `'static`.
-pub fn view(terminal: &Terminal, endpoint: &str) -> Element<'static, Message> {
+/// filling the rest. `endpoint` is the `user@host:port` shown in the bar,
+/// `selection` the active text selection to highlight (if any), and `menu` the
+/// right-click context menu's anchor when it is open. Owns its output (glyph
+/// strings and the label are copied out), so the returned element borrows nothing
+/// and is `'static`.
+pub fn view(
+	terminal: &Terminal,
+	endpoint: &str,
+	selection: Option<&Selection>,
+	menu: Option<Point>,
+) -> Element<'static, Message> {
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
 	let (cursor_row, cursor_col) = screen.cursor_position();
@@ -109,7 +126,14 @@ pub fn view(terminal: &Terminal, endpoint: &str) -> Element<'static, Message> {
 	let mut lines: Vec<Element<'static, Message>> = Vec::with_capacity(rows as usize);
 	for row in 0..rows {
 		let on_cursor_row = cursor_visible && row == cursor_row;
-		lines.push(render_row(screen, row, cols, on_cursor_row, cursor_col));
+		lines.push(render_row(
+			screen,
+			row,
+			cols,
+			on_cursor_row,
+			cursor_col,
+			selection,
+		));
 	}
 
 	// The grid, on the dark backdrop, filling the space left under the status bar.
@@ -122,29 +146,62 @@ pub fn view(terminal: &Terminal, endpoint: &str) -> Element<'static, Message> {
 		.height(Length::Fill)
 		.padding(GRID_PADDING);
 
+	// The grid reacts to the mouse (§10): press-drag-release drives the text
+	// selection and a right-press opens the context menu. `on_move` reports a point
+	// local to the grid, which `app` maps to a cell via `cell_at`.
+	let interactive_grid = mouse_area(grid)
+		.on_press(Message::GridPressed)
+		.on_move(Message::GridMoved)
+		.on_release(Message::GridReleased)
+		.on_right_press(Message::GridRightPressed);
+
+	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
+	let has_selection = selection.is_some_and(|selection| !selection.is_empty());
+
 	// Bar on top (fixed height), grid below it filling the remaining window.
-	column![status_bar(endpoint), grid]
+	let base = column![status_bar(endpoint, has_selection), interactive_grid]
 		.spacing(0)
 		.width(Length::Fill)
-		.height(Length::Fill)
-		.into()
+		.height(Length::Fill);
+
+	// With the menu open, layer it (and a click-to-dismiss backdrop) over the base.
+	match menu {
+		Some(point) => {
+			let layers: Vec<Element<'static, Message>> = vec![
+				base.into(),
+				dismiss_layer(),
+				context_menu(point, has_selection),
+			];
+			stack(layers)
+				.width(Length::Fill)
+				.height(Length::Fill)
+				.into()
+		}
+		None => base.into(),
+	}
 }
 
-/// The status bar (§10): the `user@host:port` of the live session on the left, a
-/// Disconnect button on the right. Its height is fixed to `STATUS_BAR_HEIGHT` so
-/// `grid_size` can subtract it exactly. The label is copied in, so the returned
-/// element owns its text and stays `'static` like the grid.
-fn status_bar(endpoint: &str) -> Element<'static, Message> {
-	// `width(Fill)` on the label pushes the button to the right edge.
+/// The status bar (§10): the `user@host:port` of the live session on the left,
+/// then Copy / Paste / Disconnect buttons on the right. Its height is fixed to
+/// `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly. `has_selection`
+/// enables Copy — with nothing selected the button has no `on_press` and iced
+/// renders it disabled. The label is copied in, so the returned element owns its
+/// text and stays `'static` like the grid.
+fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> {
+	// `width(Fill)` on the label pushes the buttons to the right edge.
 	let info = text(endpoint.to_owned())
 		.size(STATUS_BAR_TEXT)
 		.color(STATUS_BAR_FG)
 		.width(Length::Fill);
+	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
+	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
+		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
+	let paste = button(text("Paste").size(STATUS_BAR_TEXT)).on_press(Message::PastePressed);
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
 	container(
-		row![info, disconnect]
+		row![info, copy, paste, disconnect]
 			.spacing(10)
 			.align_y(iced::alignment::Vertical::Center),
 	)
@@ -156,6 +213,64 @@ fn status_bar(endpoint: &str) -> Element<'static, Message> {
 	.height(Length::Fixed(STATUS_BAR_HEIGHT))
 	.padding(STATUS_BAR_PADDING)
 	.into()
+}
+
+/// The right-click context menu (§10): a small floating panel with Copy selection
+/// and Paste, anchored at the click. Copy is disabled without a selection (same
+/// rule as the status bar). `point` is local to the grid, which sits below the
+/// status bar in the stack, so shift it down by the bar height to place the panel
+/// under the cursor. `ponytail:` no edge clamping — near the window's right/bottom
+/// the panel can run past the edge; good enough for v1.
+fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> {
+	let copy = button(text("Copy selection").size(STATUS_BAR_TEXT))
+		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
+	let paste = button(text("Paste").size(STATUS_BAR_TEXT)).on_press(Message::PastePressed);
+
+	let panel = container(column![copy, paste].spacing(2))
+		.style(|_theme| container::Style {
+			background: Some(MENU_BG.into()),
+			..container::Style::default()
+		})
+		.padding(4);
+
+	// A full-size transparent container whose padding positions the panel at the
+	// click point (top-left aligned by default).
+	container(panel)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.padding(iced::Padding {
+			top: point.y + STATUS_BAR_HEIGHT,
+			right: 0.0,
+			bottom: 0.0,
+			left: point.x,
+		})
+		.into()
+}
+
+/// A full-window invisible layer that sits under the context menu (§10): any click
+/// that misses the menu lands here and dismisses it. Right-press dismisses too, so
+/// a second right-click never stacks two menus.
+fn dismiss_layer() -> Element<'static, Message> {
+	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+		.on_press(Message::MenuDismissed)
+		.on_right_press(Message::MenuDismissed)
+		.into()
+}
+
+/// Map a pointer position (local to the grid, as `mouse_area::on_move` reports it)
+/// to the grid cell under it (§10). Subtracts the grid padding, divides by the cell
+/// metrics, and clamps into the grid so a drag past an edge selects the edge cell
+/// rather than a phantom one off the grid.
+pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
+	let x = (point.x - GRID_PADDING).max(0.0);
+	let y = (point.y - GRID_PADDING).max(0.0);
+	// `as u16` truncates toward zero; x/y are non-negative, so this floors.
+	let col = (x / CELL_WIDTH) as u16;
+	let row = (y / CELL_HEIGHT) as u16;
+	Cell {
+		row: row.min(rows.saturating_sub(1)),
+		col: col.min(cols.saturating_sub(1)),
+	}
 }
 
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
@@ -197,6 +312,7 @@ fn plan_runs(
 	cols: u16,
 	on_cursor_row: bool,
 	cursor_col: u16,
+	selection: Option<&Selection>,
 ) -> Vec<Run> {
 	let mut runs: Vec<Run> = Vec::new();
 	let mut content = String::new();
@@ -219,7 +335,8 @@ fn plan_runs(
 			_ => " ".to_string(),
 		};
 		let is_cursor = on_cursor_row && col == cursor_col;
-		let style = cell_style(cell, is_cursor);
+		let is_selected = selection.is_some_and(|selection| selection.contains(row, col));
+		let style = cell_style(cell, is_cursor, is_selected);
 
 		// Extend only when this cell is narrow AND the open run is a narrow run of
 		// the same style; a wide cell (or a wide open run) always breaks the run.
@@ -259,9 +376,10 @@ fn render_row(
 	cols: u16,
 	on_cursor_row: bool,
 	cursor_col: u16,
+	selection: Option<&Selection>,
 ) -> Element<'static, Message> {
 	let boxes: Vec<Element<'static, Message>> =
-		plan_runs(screen, row, cols, on_cursor_row, cursor_col)
+		plan_runs(screen, row, cols, on_cursor_row, cursor_col, selection)
 			.into_iter()
 			.map(|run| cell_box(run.content, run.style, run.cols))
 			.collect();
@@ -295,8 +413,11 @@ fn cell_box(content: String, style: CellStyle, span_cols: u16) -> Element<'stati
 
 /// Resolve a cell's colors and attributes into a `CellStyle`, applying inverse
 /// video and the cursor highlight (each swaps fg/bg; together they cancel, which
-/// matches how a real terminal draws the cursor over already-inverted text).
-fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool) -> CellStyle {
+/// matches how a real terminal draws the cursor over already-inverted text). A
+/// selected cell then takes the selection fill, keeping its foreground so the text
+/// stays legible; because `CellStyle` is the run-grouping key, this also breaks the
+/// selected span off from its neighbours automatically (§10).
+fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool, is_selected: bool) -> CellStyle {
 	let (mut fg, mut bg, bold, underline) = match cell {
 		Some(cell) => (
 			resolve(cell.fgcolor(), DEFAULT_FG),
@@ -310,6 +431,12 @@ fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool) -> CellStyle {
 	let inverse = cell.is_some_and(vt100::Cell::inverse);
 	if inverse ^ is_cursor {
 		std::mem::swap(&mut fg, &mut bg);
+	}
+
+	// The selection fill wins over the resolved background so the highlight reads
+	// uniformly across the run regardless of the cells' own colors.
+	if is_selected {
+		bg = SELECTION_BG;
 	}
 
 	CellStyle {
@@ -400,7 +527,7 @@ mod tests {
 	fn row_runs(input: &str, cols: u16) -> Vec<Run> {
 		let mut terminal = Terminal::new(1, cols);
 		terminal.process(input.as_bytes());
-		plan_runs(terminal.screen(), 0, cols, false, 0)
+		plan_runs(terminal.screen(), 0, cols, false, 0, None)
 	}
 
 	#[test]
@@ -434,5 +561,45 @@ mod tests {
 		let runs = row_runs("x世y世z", cols);
 		let total: u16 = runs.iter().map(|run| run.cols).sum();
 		assert_eq!(total, cols);
+	}
+
+	#[test]
+	fn cell_at_maps_pixels_to_cells_and_clamps() {
+		// Just inside the padded top-left is cell (0, 0).
+		let origin = cell_at(Point::new(GRID_PADDING + 1.0, GRID_PADDING + 1.0), 24, 80);
+		assert_eq!((origin.row, origin.col), (0, 0));
+
+		// One cell right and one cell down.
+		let next = cell_at(
+			Point::new(
+				GRID_PADDING + CELL_WIDTH + 0.5,
+				GRID_PADDING + CELL_HEIGHT + 0.5,
+			),
+			24,
+			80,
+		);
+		assert_eq!((next.row, next.col), (1, 1));
+
+		// Far past the grid clamps to the last cell, never off the grid.
+		let clamped = cell_at(Point::new(100_000.0, 100_000.0), 24, 80);
+		assert_eq!((clamped.row, clamped.col), (23, 79));
+	}
+
+	#[test]
+	fn a_selection_breaks_into_its_own_highlighted_run() {
+		// Selecting columns 1-2 of an all-default row splits it into three runs
+		// (before / selected / after); only the middle carries the selection fill —
+		// proof the highlight is both applied and isolated to the selection.
+		let mut terminal = Terminal::new(1, 5);
+		terminal.process(b"abcde");
+		let selection = Selection::new(Cell { row: 0, col: 1 }).with_head(Cell { row: 0, col: 2 });
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, Some(&selection));
+
+		// "a" | "bc" (selected) | "de"
+		assert_eq!(runs.len(), 3);
+		assert_eq!(runs[1].content, "bc");
+		assert_eq!(runs[1].style.bg, SELECTION_BG);
+		assert_ne!(runs[0].style.bg, SELECTION_BG);
+		assert_ne!(runs[2].style.bg, SELECTION_BG);
 	}
 }
