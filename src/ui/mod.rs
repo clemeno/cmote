@@ -9,10 +9,20 @@ pub mod dialog; // shared modal-dialog chrome (header / body / footer)
 pub mod selection; // mouse text selection over the grid
 pub mod terminal; // the live shell grid
 
-use iced::widget::{button, column, text, text_input};
+use iced::widget::{button, column, text, text_editor, text_input};
 use iced::{Color, Element};
 
 use crate::app::Message;
+
+/// The body copy for the host-key dialog (§8). The fingerprint is appended (on its own
+/// line) when the dialog opens, so the whole message — fingerprint included — is one
+/// selectable block. Public so `app` can seed it into the dialog buffer.
+pub const HOST_KEY_DIALOG_BODY: &str = "This is the first connection to this server. Verify the fingerprint below matches the server you expect before trusting it.";
+
+/// The body copy for the passphrase dialog (§7). Public so `app` can seed it into the
+/// dialog buffer when the encrypted-key prompt opens.
+pub const PASSPHRASE_DIALOG_BODY: &str =
+	"This private key is protected by a passphrase. Enter it to unlock the key and continue.";
 
 /// The widget id of the passphrase field. It is stable and shared: `passphrase_view`
 /// tags the field with it, and `app` hands the same id to `text_input`'s focus
@@ -29,12 +39,14 @@ const PASSPHRASE_ERROR: Color = Color::from_rgb8(0xb0, 0x00, 0x00);
 
 /// The error notice (§10): a generic message in the shared dialog chrome, with a
 /// single Back button to the form. Its detail is logged, not shown, so nothing
-/// sensitive leaks to the UI (§12). The close (✕) does the same as Back.
-pub fn error_view(message: &str) -> Element<'_, Message> {
+/// sensitive leaks to the UI (§12). The message is a selectable body so it can be
+/// copied; the close (✕) does the same as Back. `body` is `App::dialog_body`, seeded
+/// with the error text when the screen opens.
+pub fn error_view(body: &text_editor::Content) -> Element<'_, Message> {
 	dialog::dialog(
 		"Connection failed".to_owned(),
 		Message::BackPressed,
-		dialog::body_text(message.to_owned()),
+		dialog::selectable_body(body),
 		vec![button("Back").on_press(Message::BackPressed).into()],
 	)
 }
@@ -43,20 +55,14 @@ pub fn error_view(message: &str) -> Element<'_, Message> {
 /// fingerprint and make the user explicitly accept or reject. There is intentionally
 /// no "always trust" shortcut — accepting pins this exact key, and any later change
 /// is refused. Closing (✕) rejects, the safe default: an unverified host is not
-/// trusted just because the dialog was dismissed.
-pub fn host_key_view(fingerprint: &str) -> Element<'_, Message> {
-	let body = column![
-		dialog::body_text(
-			"This is the first connection to this server. Verify the fingerprint below matches the server you expect before trusting it.".to_owned()
-		),
-		dialog::body_text(fingerprint.to_owned()),
-	]
-	.spacing(12);
-
+/// trusted just because the dialog was dismissed. `body` (`App::dialog_body`) holds the
+/// explanation plus the fingerprint as one selectable block, so the fingerprint can be
+/// copied for out-of-band comparison.
+pub fn host_key_view(body: &text_editor::Content) -> Element<'_, Message> {
 	dialog::dialog(
 		"Trust this host key?".to_owned(),
 		Message::RejectHostKey,
-		body.into(),
+		dialog::selectable_body(body),
 		vec![
 			button("Reject").on_press(Message::RejectHostKey).into(),
 			button("Accept").on_press(Message::AcceptHostKey).into(),
@@ -69,26 +75,26 @@ pub fn host_key_view(fingerprint: &str) -> Element<'_, Message> {
 /// the field submits too. The typed value is owned by `App` and passed in for
 /// display — this view stays pure. A wrong passphrase simply brings the prompt
 /// back (the session re-asks), so no separate error state is needed here.
-pub fn passphrase_view(value: &str, failed: bool) -> Element<'_, Message> {
-	// The copy, field, and buttons are always shown; the "incorrect" hint is added
-	// only on a re-ask (`failed`), so the first prompt stays clean. Building the body
-	// column with `push` lets us insert the hint conditionally without duplicating the
-	// whole layout, then the shared chrome wraps it as a dialog.
-	let mut body = column![dialog::body_text(
-		"This private key is protected by a passphrase. Enter it to unlock the key and continue."
-			.to_owned()
-	)]
-	.spacing(12);
+pub fn passphrase_view<'a>(
+	value: &'a str,
+	failed: bool,
+	body: &'a text_editor::Content,
+) -> Element<'a, Message> {
+	// Only the message (`body`) is selectable; the field and the "incorrect" hint are
+	// their own widgets. The hint is added only on a re-ask (`failed`), so the first
+	// prompt stays clean. Building the column with `push` inserts it conditionally
+	// without duplicating the layout; the shared chrome then wraps it as a dialog.
+	let mut content = column![dialog::selectable_body(body)].spacing(12);
 
 	if failed {
-		body = body.push(
+		content = content.push(
 			text("That passphrase was not correct. Please try again.")
 				.size(14)
 				.color(PASSPHRASE_ERROR),
 		);
 	}
 
-	body = body.push(
+	content = content.push(
 		text_input("Passphrase", value)
 			.id(PASSPHRASE_INPUT_ID)
 			.secure(true)
@@ -99,7 +105,7 @@ pub fn passphrase_view(value: &str, failed: bool) -> Element<'_, Message> {
 	dialog::dialog(
 		"Unlock encrypted key?".to_owned(),
 		Message::PassphraseCancelled,
-		body.into(),
+		content.into(),
 		vec![
 			button("Unlock")
 				.on_press(Message::PassphraseSubmitted)

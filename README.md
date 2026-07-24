@@ -28,7 +28,9 @@ references below (§n) point into it.
 - **Consistent dialogs** — the disconnect confirmation, host-key prompt, passphrase
   prompt, and error notice share one chrome: a header bar (question on the left, close ✕
   on the right, wired to the safe action), an explanatory body, and evenly-spaced footer
-  buttons (§10).
+  buttons. Clicking the card never dismisses it (only a click outside does), and the body
+  message is **selectable and copyable** — drag to select, `Ctrl+C` to copy (handy for the
+  host-key fingerprint or an error message) (§10).
 - Session-only credentials, held in memory and `zeroize`d on drop — never written to
   disk (§12).
 

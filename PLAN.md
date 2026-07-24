@@ -359,11 +359,23 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below).
 - **Dialogs** (`ui::dialog`, done): the disconnect confirmation, the host-key prompt, the
   passphrase prompt, and the error notice all wear one chrome — a **header bar** with the
-  question as a title on the left and a **close ✕** on the right (wired to the safe action:
-  cancel / reject / cancel / back, so dismissing is never the destructive choice), a
-  **body** explaining what confirming will do, and a **footer** of evenly-spaced buttons.
-  A single builder — `dialog(title, on_close, body, footer)` — centres the card in the
-  window, so the frame changes in one place and every prompt stays consistent.
+  question as a title on the left and a transparent **close ✕** on the right (wired to the
+  safe action: cancel / reject / cancel / back, so dismissing is never the destructive
+  choice), a **body** explaining what confirming will do, and a **footer** of evenly-spaced
+  buttons. A single builder — `dialog(title, on_close, body, footer)` — centres the card in
+  the window, so the frame changes in one place and every prompt stays consistent.
+  - **Card swallows its own clicks**: the card is wrapped in a `mouse_area` that captures
+    presses (a no-op `Message::Ignored`), so clicking the dialog does not fall through to
+    the dimming backdrop and dismiss it; only a click *outside* the card reaches the
+    backdrop and cancels.
+  - **Selectable, copyable body**: the body message is a **read-only** `text_editor` bound
+    to `App::dialog_body`, seeded when the dialog opens (the host-key body includes the
+    fingerprint on its own line). The user can drag to select and copy the selection
+    (Ctrl+C); `update` applies every `text_editor::Action` except an edit (`!is_edit()`), so
+    the text is selectable yet never mutable. While the disconnect modal is open, `on_key`
+    stops forwarding keys to the shell so Ctrl+C copies rather than sending ETX to the
+    remote. The `Screen::ConfirmHostKey` / `Screen::Error` variants carry no text anymore —
+    the message lives in `dialog_body`, so they are bare markers.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
   centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard

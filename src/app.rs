@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 
 use iced::Element;
-use iced::widget::text;
+use iced::widget::{text, text_editor};
 use tokio::sync::mpsc;
 
 use crate::bridge::{self, SshCommand, SshEvent};
@@ -64,15 +64,19 @@ pub enum Screen {
 	/// step for the UI ("connecting", "verifying host key", "authenticating").
 	Connecting { status: String },
 	/// First contact with an unknown host: the server's key fingerprint is shown
-	/// and the user must accept or reject before the handshake continues (§8).
-	ConfirmHostKey { fingerprint: String },
+	/// and the user must accept or reject before the handshake continues (§8). The
+	/// fingerprint text itself lives in `App::dialog_body` (the selectable message),
+	/// seeded when this state is entered — the variant is just the marker.
+	ConfirmHostKey,
 	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
 	/// text the user types lives in `App::passphrase_input`.
 	NeedPassphrase,
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
-	/// A terminal failure. The message is generic and never leaks secrets (§12).
-	Error(String),
+	/// A terminal failure. The generic, non-leaking message (§12) lives in
+	/// `App::dialog_body` so it can be selected and copied; this variant just marks
+	/// that the error screen is showing.
+	Error,
 }
 
 /// The whole application state. Owned in one place; nothing else mutates it.
@@ -124,6 +128,12 @@ pub struct App {
 	/// button and cleared on confirm or cancel — it guards a live session against an
 	/// accidental click.
 	confirm_disconnect: bool,
+	/// The body message of whatever dialog is currently open, held as `text_editor`
+	/// content so the user can *select* it and copy the selection (§10). It is
+	/// read-only in practice — `update` performs every action except an edit — and is
+	/// reseeded each time a dialog opens. Only one dialog is ever visible, so a single
+	/// buffer serves all four (disconnect, host-key, passphrase, error).
+	dialog_body: text_editor::Content,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -182,6 +192,14 @@ pub enum Message {
 	Pasted(Option<String>),
 	/// Dismiss the open context menu without choosing an item.
 	MenuDismissed,
+	/// A click that landed on a dialog card itself (not a button, not the backdrop).
+	/// It carries no intent — its only job is to be *captured* so the click does not
+	/// fall through to the dimming backdrop below and dismiss the dialog (§10).
+	Ignored,
+	/// A text-selection action inside the open dialog's body message (§10). Applied
+	/// read-only — every action but an edit — so the message can be selected and
+	/// copied yet never changed.
+	DialogAction(text_editor::Action),
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
 	Ssh(SshEvent),
 }
@@ -232,6 +250,16 @@ impl App {
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::MenuDismissed => self.menu = None,
+			// A click swallowed by a dialog card: nothing to do — capturing it is the
+			// whole point (it stops the click reaching the backdrop, §10).
+			Message::Ignored => {}
+			// Apply a selection/cursor action to the dialog body, but never an edit:
+			// that keeps the message read-only while still selectable and copyable (§10).
+			Message::DialogAction(action) => {
+				if !action.is_edit() {
+					self.dialog_body.perform(action);
+				}
+			}
 			Message::Ssh(event) => return self.on_ssh_event(event),
 		}
 		iced::Task::none()
@@ -243,7 +271,7 @@ impl App {
 		let params = match self.form.validate() {
 			Ok(params) => params,
 			Err(reason) => {
-				self.screen = Screen::Error(reason);
+				self.show_error(&reason);
 				return;
 			}
 		};
@@ -304,15 +332,30 @@ impl App {
 			Some(sender) => match sender.try_send(command) {
 				Ok(()) => true,
 				Err(error) => {
-					self.screen = Screen::Error(format!("Could not reach the SSH worker: {error}"));
+					self.show_error(&format!("Could not reach the SSH worker: {error}"));
 					false
 				}
 			},
 			None => {
-				self.screen = Screen::Error("SSH worker is not ready yet.".to_string());
+				self.show_error("SSH worker is not ready yet.");
 				false
 			}
 		}
+	}
+
+	/// Load `text` into the dialog body buffer so the dialog about to open shows it as
+	/// selectable, copyable content (§10). Called at each dialog-open transition; a
+	/// fresh `Content` also resets any selection left from a previous dialog.
+	fn set_dialog_body(&mut self, text: &str) {
+		self.dialog_body = text_editor::Content::with_text(text);
+	}
+
+	/// Show the error screen with `message`, also seeding it as the dialog's selectable
+	/// body so the user can copy the failure text (§10, §12). Central so every error
+	/// path (validation, a dead worker channel, a session failure) stays consistent.
+	fn show_error(&mut self, message: &str) {
+		self.set_dialog_body(message);
+		self.screen = Screen::Error;
 	}
 
 	/// React to an event from the SSH task. Returns a `Task` for any follow-up
@@ -326,11 +369,18 @@ impl App {
 					status: "connecting…".to_string(),
 				}
 			}
-			SshEvent::HostKey(fingerprint) => self.screen = Screen::ConfirmHostKey { fingerprint },
+			SshEvent::HostKey(fingerprint) => {
+				// Seed the selectable body with the explanation plus the fingerprint on
+				// its own line, so the whole message — the fingerprint included — can be
+				// selected and copied for out-of-band comparison (§8, §10).
+				self.set_dialog_body(&format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY));
+				self.screen = Screen::ConfirmHostKey;
+			}
 			SshEvent::NeedPassphrase => {
 				// Start from an empty field each time we ask (including a re-ask
 				// after a wrong passphrase), so a stale attempt is never resent.
 				self.passphrase_input.clear();
+				self.set_dialog_body(ui::PASSPHRASE_DIALOG_BODY);
 				self.screen = Screen::NeedPassphrase;
 				// Focus the field so the user can type at once — the re-ask path
 				// lands here too, refocusing on every prompt (§7).
@@ -361,7 +411,7 @@ impl App {
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
-				self.screen = Screen::Error(message);
+				self.show_error(&message);
 			}
 		}
 		iced::Task::none()
@@ -391,6 +441,7 @@ impl App {
 	/// in `on_disconnect_confirmed` once the user confirms.
 	fn on_disconnect_pressed(&mut self) {
 		self.menu = None;
+		self.set_dialog_body(ui::terminal::DISCONNECT_DIALOG_BODY);
 		self.confirm_disconnect = true;
 	}
 
@@ -411,6 +462,15 @@ impl App {
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
 	/// subscription is added only there), so no extra screen check is needed.
 	fn on_key(&mut self, event: iced::keyboard::Event) {
+		// While the Disconnect confirmation modal is open, keystrokes belong to the
+		// dialog (notably Ctrl+C to copy the selected message text), not the remote
+		// shell — the `keyboard::listen` subscription fires independently of widget
+		// focus, so without this guard Ctrl+C would also send ETX to the session. The
+		// dialog's own widgets still receive the keys through the widget tree (§10).
+		if self.confirm_disconnect {
+			return;
+		}
+
 		let iced::keyboard::Event::KeyPressed {
 			key,
 			text,
@@ -526,10 +586,12 @@ impl App {
 		match &self.screen {
 			Screen::Connect => ui::connect::view(&self.form),
 			Screen::Connecting { status } => text(status).into(),
-			Screen::ConfirmHostKey { fingerprint } => ui::host_key_view(fingerprint),
-			Screen::NeedPassphrase => {
-				ui::passphrase_view(&self.passphrase_input, self.passphrase_failed)
-			}
+			Screen::ConfirmHostKey => ui::host_key_view(&self.dialog_body),
+			Screen::NeedPassphrase => ui::passphrase_view(
+				&self.passphrase_input,
+				self.passphrase_failed,
+				&self.dialog_body,
+			),
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => ui::terminal::view(
 					terminal,
@@ -537,10 +599,11 @@ impl App {
 					self.selection.as_ref(),
 					self.menu,
 					self.confirm_disconnect,
+					&self.dialog_body,
 				),
 				None => text("terminal starting…").into(),
 			},
-			Screen::Error(message) => ui::error_view(message),
+			Screen::Error => ui::error_view(&self.dialog_body),
 		}
 	}
 

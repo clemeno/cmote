@@ -14,7 +14,9 @@
 
 use iced::font::Weight;
 use iced::widget::text::{LineHeight, Span, Wrapping};
-use iced::widget::{button, column, container, mouse_area, rich_text, row, span, stack, text};
+use iced::widget::{
+	button, column, container, mouse_area, rich_text, row, span, stack, text, text_editor,
+};
 use iced::{Color, Element, Font, Length, Point, Size};
 
 use crate::app::Message;
@@ -72,6 +74,10 @@ const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
 /// the status bar so it stands out as a floating surface over the grid.
 const MENU_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 
+/// The body copy for the disconnect confirmation dialog (§10). Public so `app` can
+/// seed it into the selectable dialog buffer when the modal opens.
+pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
+
 /// The 16 base ANSI colors (indices 0-15): the 8 standard colors then their
 /// bright variants. Values follow the common xterm palette.
 const ANSI_16: [(u8, u8, u8); 16] = [
@@ -108,17 +114,19 @@ struct CellStyle {
 
 /// Render the whole terminal screen (§10): a status bar on top, the vt100 grid
 /// filling the rest. `endpoint` is the `user@host:port` shown in the bar,
-/// `selection` the active text selection to highlight (if any), and `menu` the
-/// right-click context menu's anchor when it is open. Owns its output (glyph
-/// strings and the label are copied out), so the returned element borrows nothing
-/// and is `'static`.
-pub fn view(
+/// `selection` the active text selection to highlight (if any), `menu` the
+/// right-click context menu's anchor when it is open, and `dialog_body` the
+/// selectable message buffer for the disconnect confirmation. The grid's own output
+/// (glyph strings, the label) is copied out and so is `'static`; the returned element
+/// borrows only `dialog_body`, so its lifetime is tied to that.
+pub fn view<'a>(
 	terminal: &Terminal,
 	endpoint: &str,
 	selection: Option<&Selection>,
 	menu: Option<Point>,
 	confirm_disconnect: bool,
-) -> Element<'static, Message> {
+	dialog_body: &'a text_editor::Content,
+) -> Element<'a, Message> {
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
 	let (cursor_row, cursor_col) = screen.cursor_position();
@@ -166,15 +174,17 @@ pub fn view(
 		.height(Length::Fill);
 
 	// Overlays stack on top of the base, bottom-to-top: the right-click menu (with a
-	// click-away dismiss layer), then the Disconnect confirmation modal.
-	let mut layers: Vec<Element<'static, Message>> = vec![base.into()];
+	// click-away dismiss layer), then the Disconnect confirmation modal. The base and
+	// overlay layers are `'static`; the confirmation panel borrows `dialog_body`, so the
+	// vector — and the whole view — takes that `'a` lifetime.
+	let mut layers: Vec<Element<'a, Message>> = vec![base.into()];
 	if let Some(point) = menu {
 		layers.push(dismiss_layer());
 		layers.push(context_menu(point, has_selection));
 	}
 	if confirm_disconnect {
 		layers.push(dim_backdrop(Message::DisconnectCancelled));
-		layers.push(confirm_disconnect_panel());
+		layers.push(confirm_disconnect_panel(dialog_body));
 	}
 
 	// A lone base needs no stack; otherwise layer the overlays over it.
@@ -308,15 +318,11 @@ fn dim_backdrop(on_dismiss: Message) -> Element<'static, Message> {
 /// stack; because Disconnect drops a live session, it takes an explicit confirm here
 /// rather than acting on the status-bar button directly. The header's close (✕) and
 /// the backdrop both emit `DisconnectCancelled`, so dismissing never disconnects.
-fn confirm_disconnect_panel() -> Element<'static, Message> {
+fn confirm_disconnect_panel(dialog_body: &text_editor::Content) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Disconnect from this session?".to_owned(),
 		Message::DisconnectCancelled,
-		crate::ui::dialog::body_text(
-			"Ends this shell and returns to the connect form. The remote program is signalled \
-			 to close; what happens to any unsaved work there is up to that program."
-				.to_owned(),
-		),
+		crate::ui::dialog::selectable_body(dialog_body),
 		vec![
 			button("Cancel")
 				.on_press(Message::DisconnectCancelled)

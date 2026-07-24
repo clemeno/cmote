@@ -11,8 +11,8 @@
 // error notice — consistent, and means a change to the chrome touches one function.
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::{button, column, container, row, text};
-use iced::{Border, Color, Element, Length};
+use iced::widget::{button, column, container, mouse_area, row, text, text_editor};
+use iced::{Background, Border, Color, Element, Length};
 
 use crate::app::Message;
 
@@ -24,9 +24,17 @@ const HEADER_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 const BORDER_FG: Color = Color::from_rgb8(0x50, 0x50, 0x50);
 const FG: Color = Color::from_rgb8(0xe0, 0xe0, 0xe0);
 
+/// The fill painted behind selected body text (§10) — a muted blue that reads under
+/// the light body colour, matching the terminal grid's own selection highlight.
+const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
+
 // Type sizes for the header title and the body copy.
 const TITLE_SIZE: f32 = 16.0;
 const BODY_SIZE: f32 = 14.0;
+
+/// The close (✕) button's square hit area. The glyph is centred in this box so it
+/// sits dead-centre in the header instead of riding high on its own text baseline.
+const CLOSE_BUTTON_SIZE: f32 = 24.0;
 
 /// The card's maximum width, so a wide window does not stretch a short message
 /// across the whole screen; the card centres within the leftover space.
@@ -69,6 +77,15 @@ pub fn dialog<'a>(
 		..container::Style::default()
 	});
 
+	// Swallow clicks that land on the card so they do not fall through to a dimming
+	// backdrop below and dismiss the dialog. Clicks OUTSIDE the card still reach the
+	// backdrop, so clicking away can still cancel. A selectable widget inside the card
+	// receives its own press first (children handle events before this wrapper), so
+	// this does not block selecting the body text.
+	let card = mouse_area(card)
+		.on_press(Message::Ignored)
+		.on_right_press(Message::Ignored);
+
 	// Centre the card in the window over whatever the caller placed behind it.
 	container(card)
 		.width(Length::Fill)
@@ -79,12 +96,27 @@ pub fn dialog<'a>(
 		.into()
 }
 
-/// A body paragraph in the dialog's shared size and colour. Callers that need more
-/// than a line (a fingerprint line, a passphrase field, a "wrong passphrase" hint)
-/// build their own body column and pass it to `dialog` directly; this helper is the
-/// common one-message case.
-pub fn body_text(content: String) -> Element<'static, Message> {
-	text(content).size(BODY_SIZE).color(FG).into()
+/// The body message as a **read-only, selectable** editor (§10). The user can drag to
+/// select the text and copy it (Ctrl+C), but not edit it — `app` performs every
+/// `text_editor` action except an edit, so the buffer never changes. It is styled
+/// transparent and borderless in the shared body size/colour, so it reads like the
+/// plain label it replaces while gaining selection. `content` is `App::dialog_body`,
+/// seeded with this dialog's message when the dialog opens. Callers needing more than
+/// the message (the passphrase field, a "wrong passphrase" hint) wrap this in their
+/// own column and pass that as the body.
+pub fn selectable_body(content: &text_editor::Content) -> Element<'_, Message> {
+	text_editor(content)
+		.on_action(Message::DialogAction)
+		.size(BODY_SIZE)
+		.padding(0)
+		.style(|_theme, _status| text_editor::Style {
+			background: Background::Color(Color::TRANSPARENT),
+			border: Border::default(),
+			placeholder: FG,
+			value: FG,
+			selection: SELECTION_BG,
+		})
+		.into()
 }
 
 /// The header bar: the title filling the width on the left, a square close (✕) button
@@ -94,7 +126,24 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 	let label = container(text(title).size(TITLE_SIZE).color(FG))
 		.width(Length::Fill)
 		.align_x(Horizontal::Left);
-	let close = button(text("✕").size(TITLE_SIZE)).on_press(on_close);
+
+	// Transparent so only the ✕ shows (no raised-button chrome), with the glyph
+	// centred in a fixed square so it aligns to the middle of the header row. The
+	// style ignores theme and status — always no fill, our foreground glyph — so it
+	// reads as a plain icon.
+	let glyph = container(text("✕").size(TITLE_SIZE))
+		.width(Length::Fixed(CLOSE_BUTTON_SIZE))
+		.height(Length::Fixed(CLOSE_BUTTON_SIZE))
+		.align_x(Horizontal::Center)
+		.align_y(Vertical::Center);
+	let close = button(glyph)
+		.padding(0)
+		.on_press(on_close)
+		.style(|_theme, _status| button::Style {
+			background: None,
+			text_color: FG,
+			..button::Style::default()
+		});
 
 	container(row![label, close].spacing(10).align_y(Vertical::Center))
 		.width(Length::Fill)
