@@ -150,6 +150,13 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 		.padding(10)
 		.style(|_theme| container::Style {
 			background: Some(HEADER_BG.into()),
+			// Round the header's top corners to match the card, so its fill does not
+			// square off over the card's rounded border (the card's `clip` only clips a
+			// rectangle, not the radius). Bottom corners stay square — the body meets it flush.
+			border: Border {
+				radius: iced::border::Radius::from(0.0).top(CORNER_RADIUS),
+				..Border::default()
+			},
 			..container::Style::default()
 		})
 		.into()

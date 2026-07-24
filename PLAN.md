@@ -342,7 +342,10 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   button (`rfd`) for the key file; a password field for password auth. There is **no**
   passphrase field: a key's passphrase is asked for on its own screen, and only if the
   key turns out to be encrypted (see below). A Connect button; validation fails fast to
-  the Error screen (§6.0).
+  the Error screen (§6.0). **Tab / Shift+Tab** move focus between the inputs: a
+  Connect-screen `keyboard::listen` subscription maps a Tab press to `FormKey`, and
+  `update` turns it into `focus_next()` / `focus_previous()`; other keys still reach the
+  focused field through the widget tree.
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
   *connecting → verifying host key → authenticating*.
 - **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
@@ -363,7 +366,9 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   safe action: cancel / reject / cancel / back, so dismissing is never the destructive
   choice), a **body** explaining what confirming will do, and a **footer** of evenly-spaced
   buttons. A single builder — `dialog(title, on_close, body, footer)` — centres the card in
-  the window, so the frame changes in one place and every prompt stays consistent.
+  the window, so the frame changes in one place and every prompt stays consistent. The card
+  has a rounded border and the header bar rounds its own top corners to match (the card's
+  clip is rectangular, so a square header would otherwise poke past the radius).
   - **Card swallows its own clicks**: the card is wrapped in a `mouse_area` that captures
     presses (a no-op `Message::Ignored`), so clicking the dialog does not fall through to
     the dimming backdrop and dismiss it; only a click *outside* the card reaches the

@@ -155,6 +155,10 @@ pub enum Message {
 	// --- form actions ---
 	ConnectPressed,
 	BackPressed,
+	/// A key press on the connect form, used to move focus between inputs with
+	/// Tab / Shift+Tab (§10). Wired only on the Connect screen; non-Tab keys are
+	/// ignored here and still reach the focused input through the widget tree.
+	FormKey(iced::keyboard::Event),
 	// --- host-key confirmation (§8) ---
 	AcceptHostKey,
 	RejectHostKey,
@@ -232,6 +236,7 @@ impl App {
 			}
 			Message::ConnectPressed => self.on_connect_pressed(),
 			Message::BackPressed => self.screen = Screen::Connect,
+			Message::FormKey(event) => return Self::on_form_key(&event),
 			Message::AcceptHostKey => self.on_host_key_decision(true),
 			Message::RejectHostKey => self.on_host_key_decision(false),
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
@@ -457,6 +462,24 @@ impl App {
 		self.screen = Screen::Connect;
 	}
 
+	/// Move focus between the connect form's inputs (§10): Tab to the next focusable
+	/// widget, Shift+Tab to the previous. Any other key is left alone — the focused
+	/// input receives it through the widget tree. Static: it reads no state, only turns
+	/// a Tab press into a focus operation.
+	fn on_form_key(event: &iced::keyboard::Event) -> iced::Task<Message> {
+		let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+			return iced::Task::none();
+		};
+		if let iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab) = key {
+			return if modifiers.shift() {
+				iced::widget::operation::focus_previous()
+			} else {
+				iced::widget::operation::focus_next()
+			};
+		}
+		iced::Task::none()
+	}
+
 	/// Forward a key press to the shell, but only while the terminal is open.
 	/// Non-input keys (bare modifiers, unmapped keys) encode to nothing and are
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
@@ -621,6 +644,12 @@ impl App {
 				iced::keyboard::listen().map(Message::Key),
 				iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)),
 			]),
+			// On the connect form, listen for key presses so Tab / Shift+Tab can move
+			// focus between the inputs (`on_form_key`); typing still reaches the fields
+			// through the widget tree, so this only adds the focus shortcuts.
+			Screen::Connect => {
+				iced::Subscription::batch([ssh, iced::keyboard::listen().map(Message::FormKey)])
+			}
 			_ => ssh,
 		}
 	}

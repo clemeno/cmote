@@ -125,7 +125,8 @@ docker run --rm -d --name cmote-sshd -p 2222:22 \
 `localhost:22`.)
 
 **2. Password auth + first-contact host key.** Run `cargo run`, enter `localhost`,
-port `2222`, user `tester`, choose **Password**, type `testpass`, connect. Expect:
+port `2222`, user `tester`, choose **Password**, type `testpass`, connect. **Tab** should
+move focus from one field to the next and **Shift+Tab** back. Expect:
 
 - The **Unknown host key** screen appears once, showing a SHA-256 fingerprint.
   Accept → the shell opens; the fingerprint is now pinned in `known_hosts`.
