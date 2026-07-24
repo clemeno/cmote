@@ -436,6 +436,10 @@ in `update`. No mutable global state, no `unsafe`.
 "Portable" is a hard requirement: copy one `.exe`, run it anywhere, leave no trace in
 the registry.
 
+- **Initial window size**: `run` opens the window sized for a **160×40** terminal via
+  `ui::terminal::window_size(cols, rows)` — the inverse of `grid_size`, built from the
+  same cell metrics + padding + status-bar height so the two never drift (a round-trip
+  test locks it). The user can still resize freely afterwards (§9).
 - **No stray console window**: `#![windows_subsystem = "windows"]` in `main.rs` so
   launching the exe doesn't pop a black cmd window (we render our own terminal). The
   attribute is inert on macOS, where a GUI binary spawns no console. A bare binary

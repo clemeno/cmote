@@ -39,16 +39,28 @@ const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 /// bold (700) for bold ones purely by the requested weight.
 const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
 
+/// The terminal size the main window opens sized for (§10, §11): wide enough for a
+/// 160-column grid, with a comfortable default height. `run` converts this to a window
+/// size via `ui::terminal::window_size` so it tracks the grid metrics.
+const INITIAL_COLS: u16 = 160;
+const INITIAL_ROWS: u16 = 40;
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
 	// function that produces the initial `(State, Task)` — here `App::new`. Then
-	// the update and view functions. `.title` / `.subscription` are builder
+	// the update and view functions. `.title` / `.window` / `.subscription` are builder
 	// methods, and `.run()` starts the event loop.
 	iced::application(App::new, App::update, App::view)
 		.title("cmote")
 		.font(MONO_FONT)
 		.font(MONO_FONT_BOLD)
+		// Open wide enough for a 160-column terminal (the size is derived from the grid
+		// metrics so it stays in step with `grid_size`).
+		.window(iced::window::Settings {
+			size: ui::terminal::window_size(INITIAL_COLS, INITIAL_ROWS),
+			..iced::window::Settings::default()
+		})
 		.subscription(App::subscription)
 		.run()
 }

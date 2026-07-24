@@ -350,6 +350,18 @@ pub fn grid_size(area: Size) -> (u16, u16) {
 	(rows, cols)
 }
 
+/// The window (logical) size whose content fits exactly a `cols`×`rows` grid — the
+/// inverse of `grid_size`, built from the same metrics so the two never drift. Adds the
+/// grid padding on both axes and the status-bar height, plus half a cell of slack so
+/// float rounding in `grid_size` cannot come back a row/column short. `run` uses it to
+/// open the window sized for a chosen terminal size (§10, §11).
+pub fn window_size(cols: u16, rows: u16) -> Size {
+	let width = f32::from(cols) * CELL_WIDTH + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
+	let height =
+		f32::from(rows) * CELL_HEIGHT + STATUS_BAR_HEIGHT + 2.0 * GRID_PADDING + CELL_HEIGHT / 2.0;
+	Size::new(width, height)
+}
+
 /// One box's worth of the grid: a string of glyphs, the look they share, and how
 /// many grid columns the box spans. A narrow run spans its glyph count; a single
 /// wide cell spans two. Split out from rendering so the column-packing logic can
@@ -578,6 +590,13 @@ mod tests {
 	fn tiny_area_clamps_to_at_least_one_cell() {
 		// Smaller than the padding would give a negative count; clamp to 1×1.
 		assert_eq!(grid_size(Size::new(1.0, 1.0)), (1, 1));
+	}
+
+	#[test]
+	fn window_size_fits_the_requested_grid() {
+		// A window opened via `window_size` must reflow back to exactly that grid, so the
+		// initial window is wide enough for the intended column count (§11).
+		assert_eq!(grid_size(window_size(160, 40)), (40, 160));
 	}
 
 	// Pack row 0 of a grid after feeding `input` to a fresh emulator. The cursor is
