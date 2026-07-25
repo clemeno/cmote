@@ -5,10 +5,10 @@
 //   auth    — method selection and attempts: publickey then password (§7)
 //   hostkey — TOFU host-key verification against a portable known_hosts (§8)
 //   keyfile — load PEM/OpenSSH keys and PuTTY .ppk, handle passphrases (§7)
-//
-// These are stubs for the walking skeleton; each is filled in its own step.
+//   upload  — send a local file to the remote over an sftp channel (§17)
 
 pub mod auth;
 pub mod client;
 pub mod hostkey;
 pub mod keyfile;
+pub mod upload;

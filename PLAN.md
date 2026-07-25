@@ -11,11 +11,12 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v1.3.2** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v1.4.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
-light/dark theme so the target list stays readable, §14). Both targets are supported
+light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
+working directory and uploads a local file into it over SFTP, §17). Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -95,7 +96,8 @@ Each decision below is a thing to learn from, not just a dependency.
 | `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime |
 | `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM; `ring` builds on both targets — prebuilt asm on Windows, via Xcode CLT `clang` on macOS) |
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
-| `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `sync`, `macros`, `time` |
+| `russh-sftp` | 2.3.0 | the sftp subsystem, for file upload (§17) | rides russh's `ChannelStream` — a protocol on the existing SSH stack, not a second one. Pure Rust, no C |
+| `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `fs` (streaming an upload off disk, §17), `sync`, `macros`, `time` |
 | `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io) |
 | `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
@@ -181,9 +183,11 @@ cmote/
     │   ├── auth.rs        method selection + attempts (publickey, password)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
+    │   ├── upload.rs      file upload over an sftp channel: exists-check, stream, progress (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
-    │   └── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
+    │   ├── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
+    │   └── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -675,8 +679,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   support, certificate auth.
 - **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
-- **SFTP / file transfer, port forwarding (local/remote/dynamic)** — russh supports the
-  channels; each is a feature, not a v1 need.
+- **SFTP / file transfer** — *partly done (v1.4)*: a one-way **upload** of a chosen local
+  file into the shell's current directory (§17). Still deferred: download, a remote file
+  browser, directory (recursive) transfers, cancelling a transfer in flight, resuming an
+  interrupted one, and preserving the local file's mode/timestamps.
+- **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
+  not a v1 need.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
   / higher throughput; GPU-accelerated glyph rendering if scrolling lags. (Wide-char
   cells now lay out correctly on the `vt100` grid — see the render note in §11.)
@@ -694,3 +702,78 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 - **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
   architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
   Mac needs it. v1 targets Intel Sequoia as asked.
+
+---
+
+## 17. Remote working directory + file upload (v1.4)
+
+Two features that only make sense together: the status bar gained a **file picker** and
+an **Upload** button, and the upload's default destination is *the directory the shell is
+currently in*. SSH does not offer that directory, so cmote has to learn it.
+
+### Tracking the remote cwd (`term/cwd.rs`)
+
+The cwd belongs to a process on the far side; the protocol carries bytes, not state. Every
+terminal that displays the remote directory (VS Code, iTerm2, WezTerm, Windows Terminal)
+solves it the same way, and so does cmote: **the shell announces its directory in an OSC
+escape sequence on each prompt, and the terminal reads it out of the output stream.**
+
+- **Two conventions, both read.** `OSC 7` — `ESC ] 7 ; file://host/path ST` — is the POSIX
+  one (fish emits it out of the box; zsh/bash do with shell integration). `OSC 9;9` —
+  `ESC ] 9 ; 9 ; C:\path ST` — is the Windows one. Reading both is what makes the tracker
+  OS-agnostic. The OSC 7 URI is percent-decoded, its authority dropped, and a Windows
+  `/C:/…` loses its URI slash.
+- **A scanner, not a buffer + regex.** Output arrives in arbitrary chunks and a sequence
+  can be split anywhere — including between the `ESC` and the `]`. `Cwd` is therefore a
+  four-state machine fed every byte, carrying its state across chunks. A payload longer
+  than 4 KiB is abandoned rather than buffered, so a hostile stream cannot grow our memory
+  (§12). Non-cwd OSC sequences (titles, clipboard writes) pass through and leave the last
+  known path alone.
+- **Where it runs.** `Terminal::process` feeds the same bytes to the tracker and to
+  `vt100`, which ignores OSC codes it does not know — so nothing is stripped and the two
+  never disagree. The path is exposed as `Terminal::cwd`.
+- **The shell hook** (`ssh::client::CWD_HOOK`). Passive reading alone leaves a plain
+  bash/zsh remote silent, so right after the shell opens cmote sends **one line** that
+  defines `cmote_cwd` (a `printf` of OSC 7) and hooks it into `PROMPT_COMMAND` (bash) and
+  `precmd_functions` (zsh), then calls it once for the starting directory. It is sent as
+  ordinary shell input, so it is echoed once like any typed command; every later
+  announcement is invisible. `ponytail:` bash and zsh only — fish and OSC 9;9 shells are
+  already covered passively, and any other shell prints one syntax error and leaves the
+  cwd unknown. Upgrade path: probe the shell (`echo $0`) and send the matching snippet.
+- **Shown in the window title.** `App::title` is a function of the state:
+  `cmote — user@host:port — /current/dir` while connected, dropping the directory when the
+  shell never announces one. The title costs no grid space, which the status bar would.
+
+### Uploading (`ssh/upload.rs`)
+
+- **Its own channel, not the pty.** The shell channel is for keystrokes: everything sent
+  is echoed, binary needs encoding, and the terminal would have to render the transfer.
+  The upload therefore opens a **second channel running the sftp subsystem** (`russh-sftp`
+  over russh's `ChannelStream`), which is real file transfer — the shell keeps running
+  untouched beside it. Opening happens inline in the session loop (a borrow of the session
+  handle); the transfer itself is **spawned**, so a large file never stalls the shell pump.
+- **Ask before sending, ask before replacing.** Upload opens a confirmation showing the
+  local file and an **editable destination path**, prefilled with the tracked cwd joined to
+  the file's name — and with the bare name when the cwd is unknown, which the server
+  resolves against the login directory. The destination is then checked **before** the file
+  is created (SFTP's create truncates, so a late failure would already have destroyed the
+  old contents): an occupied path stops the transfer and raises the overwrite prompt
+  instead. Both prompts use the shared dialog chrome (§10), and every dismissal route
+  cancels.
+- **Progress.** The copy loop streams 32 KiB chunks and emits `UploadProgress` every
+  256 KiB — enough for a smooth bar, far below the flood that per-chunk events would be.
+  The status bar's centre zone becomes a progress bar plus a byte readout while a transfer
+  runs, then shows the outcome until the next upload.
+- **Failures stay in the bar.** A failed upload shows its reason in the status bar and
+  keeps the file selected for a retry; it must not route to the error *screen*, which
+  would tear down a perfectly healthy shell over a file that never left. Unlike an auth
+  failure (§12), the detail here is the user's own path — showing it is what makes the
+  error actionable.
+- **Success deselects.** A completed upload clears the picked file, which disables the
+  Upload button again, so a stray second click cannot re-send what just landed. The
+  reported destination is the server's `canonicalize` of the path, so the user sees where
+  the bytes actually went rather than what they typed.
+- **Keyboard.** While an upload dialog is open the terminal's key listener swallows keys
+  (as it already does for the Disconnect modal), so typing goes to the path field and not
+  to the remote shell; `Esc` cancels a confirmation and a running transfer ignores it —
+  there is no cancel to give it (deferred, §16).

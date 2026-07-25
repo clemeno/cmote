@@ -10,6 +10,7 @@
 // surface (`process`, `resize`, `screen`) instead of the parser's full API, and
 // so the emulator can be swapped later without touching the GUI.
 
+pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 
 /// The pty size the client requests and the emulator starts at, before the first
@@ -27,6 +28,10 @@ const SCROLLBACK: usize = 0;
 /// The terminal emulator: a `vt100::Parser` plus the small API the app needs.
 pub struct Terminal {
 	parser: vt100::Parser,
+	/// The remote working directory, learned from the OSC sequences the shell emits on
+	/// each prompt (§17). vt100 ignores those codes, so the same bytes are scanned here
+	/// before they reach the parser.
+	cwd: cwd::Cwd,
 }
 
 impl Terminal {
@@ -34,14 +39,25 @@ impl Terminal {
 	pub fn new(rows: u16, cols: u16) -> Self {
 		Self {
 			parser: vt100::Parser::new(rows, cols, SCROLLBACK),
+			cwd: cwd::Cwd::default(),
 		}
 	}
 
 	/// Feed a chunk of raw output from the shell. The parser applies every escape
 	/// sequence and glyph in `bytes` to the grid; partial sequences split across
-	/// chunks are buffered internally, so any chunk boundary is safe.
+	/// chunks are buffered internally, so any chunk boundary is safe. The same bytes
+	/// also go to the cwd tracker (§17), which both tolerate being handed the other's
+	/// sequences.
 	pub fn process(&mut self, bytes: &[u8]) {
+		self.cwd.feed(bytes);
 		self.parser.process(bytes);
+	}
+
+	/// The remote shell's working directory, if it has announced one (§17). `None`
+	/// until the first announcement — and on a shell that emits neither OSC 7 nor
+	/// OSC 9;9, forever.
+	pub fn cwd(&self) -> Option<&str> {
+		self.cwd.path()
 	}
 
 	/// Resize the grid when the window changes (§9). This only reflows our local

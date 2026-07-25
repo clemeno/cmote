@@ -52,7 +52,9 @@ pub fn run() -> iced::Result {
 	// the update and view functions. `.title` / `.window` / `.subscription` are builder
 	// methods, and `.run()` starts the event loop.
 	iced::application(App::new, App::update, App::view)
-		.title("cmote")
+		// The title is a function of the state, not a constant: while a shell is open it
+		// shows the session and the remote working directory it is sitting in (§17).
+		.title(App::title)
 		.font(MONO_FONT)
 		.font(MONO_FONT_BOLD)
 		// Open wide enough for a 180-column terminal (the size is derived from the grid
@@ -173,7 +175,8 @@ pub struct App {
 	/// content so the user can *select* it and copy the selection (§10). It is
 	/// read-only in practice — `update` performs every action except an edit — and is
 	/// reseeded each time a dialog opens. Only one dialog is ever visible, so a single
-	/// buffer serves all five (delete-target, disconnect, host-key, passphrase, error).
+	/// buffer serves all seven (delete-target, disconnect, upload, overwrite, host-key,
+	/// passphrase, error).
 	dialog_body: text_editor::Content,
 	/// The open dialog card's top-left position in the window (§10). Seeded to centre
 	/// when a dialog opens and updated as the user drags the header, clamped so the card
@@ -187,6 +190,33 @@ pub struct App {
 	/// The last known window size (§10), tracked from resize events so a dragged dialog
 	/// can be centred and clamped within the window bounds.
 	window_size: iced::Size,
+	/// The local file picked for upload (§17), or `None` when nothing is selected —
+	/// which is also what disables the Upload button. Cleared on a successful upload, so
+	/// the same file is never sent twice by a stray second click.
+	upload_file: Option<PathBuf>,
+	/// Where the upload is in its little flow (§17): confirming the path, confirming an
+	/// overwrite, or transferring. `None` when no upload is in progress.
+	upload: Option<UploadState>,
+	/// The destination path being confirmed (§17). Seeded from the remote working
+	/// directory plus the file's name, and editable — that is what makes the feature
+	/// work on a shell that never announces its directory.
+	upload_dest: String,
+	/// The last upload outcome, shown in the status bar until the next upload starts
+	/// (§17). `ponytail:` no timed fade — that would need a timer subscription for a
+	/// line of text.
+	upload_notice: Option<String>,
+}
+
+/// Where an upload has got to (§17). Only one upload runs at a time, so this is a plain
+/// state, not a queue.
+#[derive(Debug, Clone, Copy)]
+pub enum UploadState {
+	/// Showing the destination path for confirmation, before anything is sent.
+	ConfirmPath,
+	/// The destination already holds a file; asking whether to overwrite it.
+	ConfirmOverwrite,
+	/// Transferring, with the bytes written so far out of the file's size.
+	Running { sent: u64, total: u64 },
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -279,6 +309,22 @@ pub enum Message {
 	Pasted(Option<String>),
 	/// Dismiss the open context menu without choosing an item.
 	MenuDismissed,
+	// --- file upload to the remote (§17) ---
+	/// The user clicked the file button in the status bar — open the native picker.
+	UploadPickPressed,
+	/// The picker closed: `Some(path)` selects that file, `None` (cancelled) keeps the
+	/// current selection.
+	UploadFilePicked(Option<PathBuf>),
+	/// The user clicked Upload — show the destination confirmation.
+	UploadPressed,
+	/// The destination path field in the confirmation changed.
+	UploadDestChanged(String),
+	/// The destination was confirmed — start the transfer.
+	UploadConfirmed,
+	/// The destination already holds a file and the user chose to replace it.
+	UploadOverwriteConfirmed,
+	/// The user backed out of an upload confirmation (Cancel / ✕ / backdrop / Esc).
+	UploadCancelled,
 	/// A click that landed on a dialog card itself (not a button, not the backdrop).
 	/// It carries no intent — its only job is to be *captured* so the click does not
 	/// fall through to the dimming backdrop below and dismiss the dialog (§10).
@@ -386,6 +432,20 @@ impl App {
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::MenuDismissed => self.menu = None,
+			Message::UploadPickPressed => return browse_upload(),
+			// A cancelled picker (`None`) keeps whatever was already chosen — same rule
+			// as the key-file picker on the form.
+			Message::UploadFilePicked(path) => {
+				if path.is_some() {
+					self.upload_file = path;
+					self.upload_notice = None;
+				}
+			}
+			Message::UploadPressed => return self.on_upload_pressed(),
+			Message::UploadDestChanged(value) => self.upload_dest = value,
+			Message::UploadConfirmed => self.start_upload(false),
+			Message::UploadOverwriteConfirmed => self.start_upload(true),
+			Message::UploadCancelled => self.upload = None,
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
 			Message::Ignored => {}
@@ -621,6 +681,33 @@ impl App {
 				if let Some(terminal) = self.terminal.as_mut() {
 					terminal.process(&bytes);
 				}
+			}
+			SshEvent::UploadExists(path) => {
+				// Nothing has been written yet: the task checked first and stopped. Ask,
+				// and only a confirmed answer re-sends with `overwrite` set (§17).
+				self.set_dialog_body(&format!("{}\n\n{path}", ui::terminal::UPLOAD_EXISTS_BODY));
+				self.upload = Some(UploadState::ConfirmOverwrite);
+			}
+			// Progress only means something while a transfer is running; a late event
+			// after a failure must not revive the bar.
+			SshEvent::UploadProgress { sent, total } => {
+				if matches!(self.upload, Some(UploadState::Running { .. })) {
+					self.upload = Some(UploadState::Running { sent, total });
+				}
+			}
+			SshEvent::UploadDone(path) => {
+				// Success deselects the file, which disables the Upload button again —
+				// so a stray second click cannot re-send what just landed (§17).
+				self.upload = None;
+				self.upload_file = None;
+				self.upload_notice = Some(format!("Uploaded to {path}"));
+			}
+			SshEvent::UploadFailed(message) => {
+				// The file stays selected so the user can fix the path and retry. The
+				// failure shows in the status bar rather than the error screen — that
+				// screen would tear down the shell for a file that never left (§17).
+				self.upload = None;
+				self.upload_notice = Some(message);
 			}
 			SshEvent::Disconnected => {
 				self.terminal = None;
@@ -893,6 +980,8 @@ impl App {
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
 	/// subscription is added only there), so no extra screen check is needed.
 	fn on_key(&mut self, event: iced::keyboard::Event) {
+		use iced::keyboard::key::Named;
+
 		// While the Disconnect confirmation modal is open, keystrokes belong to the
 		// dialog (notably Ctrl+C to copy the selected message text), not the remote
 		// shell — the `keyboard::listen` subscription fires independently of widget
@@ -912,6 +1001,21 @@ impl App {
 		else {
 			return; // ignore key releases and other keyboard events
 		};
+
+		// Same rule for the upload dialogs (§17): while one is open the keyboard belongs
+		// to it — the destination field types through the widget tree — so nothing here
+		// reaches the shell. Esc backs out of a confirmation; a running transfer has
+		// nothing to back out of, so it just swallows the key.
+		if let Some(state) = self.upload {
+			if matches!(
+				state,
+				UploadState::ConfirmPath | UploadState::ConfirmOverwrite
+			) && matches!(key, iced::keyboard::Key::Named(Named::Escape))
+			{
+				self.upload = None;
+			}
+			return;
+		}
 
 		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
 		// form; read that mode off the emulator so `encode` sends the sequences the
@@ -1007,14 +1111,94 @@ impl App {
 	}
 
 	/// Drop all grid-interaction state — the selection, any in-progress drag, an open
-	/// context menu, and the Disconnect modal. Called whenever a shell opens or closes
-	/// so nothing (a stale highlight, a half-finished drag, an open overlay) carries
-	/// across sessions (§10).
+	/// context menu, the Disconnect modal, and the upload flow. Called whenever a shell
+	/// opens or closes so nothing (a stale highlight, a half-finished drag, an open
+	/// overlay, a file picked for the previous session) carries across sessions (§10,
+	/// §17).
 	fn clear_grid_interaction(&mut self) {
 		self.selection = None;
 		self.selecting = false;
 		self.menu = None;
 		self.confirm_disconnect = false;
+		self.upload = None;
+		self.upload_file = None;
+		self.upload_dest.clear();
+		self.upload_notice = None;
+	}
+
+	/// The Upload button (§17): show the destination before sending anything. The path
+	/// is the remote working directory (tracked from the shell's own announcements)
+	/// joined with the file's name — and it is editable, so a shell that never announces
+	/// its directory still works: the field then holds the bare file name, which the
+	/// server resolves against the login directory.
+	fn on_upload_pressed(&mut self) -> iced::Task<Message> {
+		self.menu = None;
+		let Some(local) = self.upload_file.clone() else {
+			return iced::Task::none();
+		};
+		let name = file_name_of(&local).to_owned();
+		let cwd = self.terminal.as_ref().and_then(term::Terminal::cwd);
+		self.upload_dest = match cwd {
+			Some(directory) => term::cwd::join(directory, &name),
+			None => name.clone(),
+		};
+
+		let size = std::fs::metadata(&local)
+			.map(|meta| ui::terminal::human_bytes(meta.len()))
+			.unwrap_or_else(|_| "unknown size".to_owned());
+		let where_to = match cwd {
+			Some(_) => ui::terminal::UPLOAD_DIALOG_BODY,
+			None => ui::terminal::UPLOAD_DIALOG_BODY_NO_CWD,
+		};
+		let body = format!("{where_to}\n\n{}  ({size})", local.display());
+		self.set_dialog_body(&body);
+		self.upload = Some(UploadState::ConfirmPath);
+		// Focus the destination field, so the path can be corrected — or simply
+		// confirmed with Enter — without reaching for the mouse.
+		iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID)
+	}
+
+	/// Send the upload command and switch the status bar over to its progress bar (§17).
+	/// `overwrite` is false for the first attempt — the SSH task answers with
+	/// `UploadExists` rather than replacing a file — and true only after the user has
+	/// confirmed that prompt. An empty destination keeps the dialog open.
+	fn start_upload(&mut self, overwrite: bool) {
+		let Some(local) = self.upload_file.clone() else {
+			self.upload = None;
+			return;
+		};
+		let remote = self.upload_dest.trim().to_owned();
+		if remote.is_empty() {
+			return;
+		}
+		let total = std::fs::metadata(&local)
+			.map(|meta| meta.len())
+			.unwrap_or(0);
+
+		if self.send_command(SshCommand::Upload {
+			local,
+			remote,
+			overwrite,
+		}) {
+			self.upload_notice = None;
+			self.upload = Some(UploadState::Running { sent: 0, total });
+		} else {
+			self.upload = None;
+		}
+	}
+
+	/// The window title (§17). Off-session it is just the app name; with a shell open it
+	/// carries the session and — as soon as the shell announces one — the remote working
+	/// directory, so the directory is visible without stealing room from the grid.
+	fn title(&self) -> String {
+		let connected = matches!(self.screen, Screen::Terminal);
+		match (connected, self.connection.as_deref()) {
+			(true, Some(endpoint)) => match self.terminal.as_ref().and_then(term::Terminal::cwd) {
+				Some(cwd) => format!("cmote — {endpoint} — {cwd}"),
+				None => format!("cmote — {endpoint}"),
+			},
+			_ => "cmote".to_owned(),
+		}
 	}
 
 	/// Render the current screen. Pure: it only reads state and returns widgets.
@@ -1058,9 +1242,17 @@ impl App {
 					self.connection.as_deref().unwrap_or(""),
 					self.selection.as_ref(),
 					self.menu,
-					self.confirm_disconnect,
-					&self.dialog_body,
-					drag,
+					ui::terminal::Modals {
+						confirm_disconnect: self.confirm_disconnect,
+						body: &self.dialog_body,
+						drag,
+					},
+					ui::terminal::UploadView {
+						file: self.upload_file.as_deref().map(file_name_of),
+						dest: &self.upload_dest,
+						state: self.upload,
+						notice: self.upload_notice.as_deref(),
+					},
 				),
 				None => text("terminal starting…").into(),
 			},
@@ -1146,4 +1338,24 @@ fn browse_key() -> iced::Task<Message> {
 			.pick_file(),
 		|handle| Message::KeyFilePicked(handle.map(|handle| handle.path().to_path_buf())),
 	)
+}
+
+/// Open the native file picker for a file to upload (§17). Same async-`Task` shape as
+/// `browse_key` — the dialog is modal and would otherwise block the GUI thread.
+fn browse_upload() -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Select a file to upload")
+			.pick_file(),
+		|handle| Message::UploadFilePicked(handle.map(|handle| handle.path().to_path_buf())),
+	)
+}
+
+/// A path's own file name, which is what the status bar shows and what the remote
+/// destination is built from (§17). A path with no final component (a bare root) falls
+/// back to a placeholder rather than an empty label.
+fn file_name_of(path: &std::path::Path) -> &str {
+	path.file_name()
+		.and_then(std::ffi::OsStr::to_str)
+		.unwrap_or("file")
 }

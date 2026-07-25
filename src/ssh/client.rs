@@ -29,6 +29,7 @@ use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
 use crate::secret::Secret;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::ssh::keyfile::{self, Loaded};
+use crate::ssh::upload;
 use crate::term;
 
 /// How long to wait for the TCP connect + SSH handshake before giving up.
@@ -36,6 +37,28 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How many times to re-prompt for a private-key passphrase before giving up.
 const MAX_PASSPHRASE_ATTEMPTS: u32 = 3;
+
+/// The shell integration cmote installs once, right after the shell opens (§17).
+///
+/// SSH never tells a client where the remote shell *is*, so — like every terminal that
+/// shows the remote directory — we have the shell announce it. `cmote_cwd` prints an
+/// **OSC 7** sequence (`ESC ] 7 ; file://host/path ESC \`), which is invisible in the
+/// terminal and picked up by `term::cwd`; hooking it into `PROMPT_COMMAND` (bash) and
+/// `precmd_functions` (zsh) makes it fire on every prompt, so the directory follows
+/// `cd` with no further typing. The trailing call reports the starting directory
+/// immediately instead of waiting for the next prompt.
+///
+/// `ponytail:` bash and zsh only. fish already emits OSC 7 on its own, and a Windows
+/// shell that emits OSC 9;9 is read too, so the passive tracker covers those; any other
+/// shell simply prints a syntax error on this one line and leaves the cwd unknown — the
+/// upload dialog then asks for the path. Upgrade path: detect the shell first (`echo
+/// $0`) and send the matching snippet.
+const CWD_HOOK: &str = concat!(
+	r#"cmote_cwd() { printf '\033]7;file://%s%s\033\\' "${HOSTNAME-}" "$PWD"; }; "#,
+	r#"PROMPT_COMMAND="cmote_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; "#,
+	r#"precmd_functions+=(cmote_cwd); cmote_cwd"#,
+	"\n",
+);
 
 /// The SSH task loop. Owns the channels to the one live session (v1 is single-
 /// session) and routes commands to it. Returns when the GUI drops its command
@@ -73,6 +96,22 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::Upload {
+				local,
+				remote,
+				overwrite,
+			} => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::Upload {
+							local,
+							remote,
+							overwrite,
+						})
+						.await;
+				}
+			}
 			SshCommand::Disconnect => {
 				if let Some(link) = session.take() {
 					let _ = link.to_session.send(SessionMsg::Disconnect).await;
@@ -90,6 +129,12 @@ enum SessionMsg {
 	Resize { cols: u16, rows: u16 },
 	/// A passphrase the user typed to unlock an encrypted key (§7).
 	Passphrase(Secret),
+	/// Send a local file to the remote over a second, sftp channel (§17).
+	Upload {
+		local: PathBuf,
+		remote: String,
+		overwrite: bool,
+	},
 	/// Tear the session down.
 	Disconnect,
 }
@@ -237,7 +282,12 @@ async fn connect_and_run(
 		.await?;
 	channel.request_shell(true).await?;
 
-	stream(channel, events, to_session_rx).await
+	// Install the cwd announcer before the user can type (§17). Sent as ordinary shell
+	// input, so it is echoed once like any typed command; from then on the directory
+	// arrives invisibly on every prompt.
+	channel.data(CWD_HOOK.as_bytes()).await?;
+
+	stream(channel, &session, events, to_session_rx).await
 }
 
 /// Load the chosen private key (§7, §14), prompting for a passphrase only when the
@@ -303,9 +353,11 @@ async fn recv_passphrase(to_session_rx: &mut mpsc::Receiver<SessionMsg>) -> Resu
 }
 
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.
-/// Runs until either side closes.
+/// Runs until either side closes. `session` is borrowed alongside the shell channel so
+/// an upload can open its own sftp channel on the same connection (§17).
 async fn stream(
 	mut channel: Channel<client::Msg>,
+	session: &client::Handle<Handler>,
 	events: &mpsc::Sender<SshEvent>,
 	mut to_session_rx: mpsc::Receiver<SessionMsg>,
 ) -> Result<()> {
@@ -336,6 +388,11 @@ async fn stream(
 					}
 					// A passphrase only matters during auth; ignore a late one.
 					Some(SessionMsg::Passphrase(_)) => {}
+					// The transfer runs on its own channel and its own task, so the
+					// shell keeps flowing while a big file goes across (§17).
+					Some(SessionMsg::Upload { local, remote, overwrite }) => {
+						upload::start(session, events, local, remote, overwrite).await;
+					}
 					// Explicit disconnect, or run() dropped the link.
 					Some(SessionMsg::Disconnect) | None => {
 						let _ = channel.eof().await;

@@ -6,7 +6,8 @@ A **native, portable SSH client for Windows 11 and macOS** written in Rust. A ho
 screen lists your saved connection targets; pick one (or start a new connection), fill
 in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
 `.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
-terminal** inside the window — a working interactive prompt.
+terminal** inside the window — a working interactive prompt, with the remote working
+directory in the title bar and one-click file upload into it.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -36,8 +37,19 @@ references below (§n) point into it.
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
-- **Consistent dialogs** — the disconnect confirmation, host-key prompt, passphrase
-  prompt, and error notice share one chrome: a header bar (question on the left, close ✕
+- **File upload into the shell's current directory** — pick a local file with **File…**,
+  send it with **Upload**, and it goes over **SFTP** (its own channel, so the shell keeps
+  running) into the directory the remote shell is sitting in. The destination is shown
+  before anything is sent and is editable; an existing file is never replaced without a
+  second confirmation. A progress bar with the byte count runs in the status bar, and a
+  finished upload deselects the file (§17).
+- **The remote working directory in the window title** — cmote reads the `OSC 7` /
+  `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
+  Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and
+  Windows Terminal-style prompts already announce it themselves (§17).
+- **Consistent dialogs** — the delete-target, disconnect, upload and overwrite
+  confirmations, the host-key prompt, the passphrase prompt, and the error notice share
+  one chrome: a header bar (question on the left, close ✕
   on the right, wired to the safe action), an explanatory body, and evenly-spaced footer
   buttons. Each **floats over the page it belongs to** (the connect-flow dialogs over the
   connect form, the disconnect modal over the shell) behind a dim backdrop; clicking the
@@ -127,8 +139,9 @@ Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
 mapping (including application-cursor-mode arrow keys, CSI vs SS3), the grid-resize
 math, mouse-selection geometry and text extraction (wide
-glyphs, trailing-blank trimming, multi-row joins), and paste encoding (bracketed-paste
-wrapping and the injection-terminator scrub).
+glyphs, trailing-blank trimming, multi-row joins), paste encoding (bracketed-paste
+wrapping and the injection-terminator scrub), and the remote-cwd scanner (OSC 7 and
+OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads).
 
 ### Manual smoke test (live SSH)
 
@@ -201,7 +214,26 @@ confirm a multi-line clipboard does **not** auto-run each line (bracketed paste 
 it). Right-click anywhere to confirm the context menu opens at the cursor and dismisses
 on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
 
-**7. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
+**7. Remote directory + upload.** On connect, one setup line is echoed into the shell
+(the cwd hook, §17) and the window title should read
+`cmote — tester@localhost:2222 — /config` (or wherever the shell starts). `cd /tmp` and
+the title should follow within a prompt. Then:
+
+- Click **File…**, pick a local file — its name appears next to the buttons and **Upload**
+  becomes enabled. Click **Upload**: the dialog shows the file and a destination path
+  ending in `/tmp/<name>`. Confirm → a progress bar with the byte count runs in the status
+  bar, then `Uploaded to /tmp/<name>`, and the file is deselected (Upload disabled again).
+  `ls -l /tmp` on the remote should show it, byte-for-byte identical (`sha256sum` both
+  ends for a binary file).
+- Upload the **same file again** → the **Replace the file on the server?** prompt appears
+  and Cancel leaves the remote file untouched (check its `mtime`); Replace overwrites it.
+- Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
+  status bar shows the failure, the shell stays open, and the file stays selected.
+- Start a shell that does **not** announce its directory (`docker exec … sh`, or unset the
+  hook with `unset PROMPT_COMMAND; unset -f cmote_cwd`) → the title drops the directory
+  and the upload dialog offers the bare file name, which lands in the login directory.
+
+**8. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
 should render, and the **arrow keys** should move the cursor — this exercises
 application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
 to the SS3 form so they register. In `vim`, `:q!` to exit.

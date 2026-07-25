@@ -15,11 +15,12 @@
 use iced::font::Weight;
 use iced::widget::text::{LineHeight, Span, Wrapping};
 use iced::widget::{
-	button, column, container, mouse_area, rich_text, row, span, stack, text, text_editor,
+	button, column, container, mouse_area, progress_bar, rich_text, row, span, stack, text,
+	text_editor, text_input,
 };
 use iced::{Color, Element, Font, Length, Point, Size};
 
-use crate::app::Message;
+use crate::app::{Message, UploadState};
 use crate::term::Terminal;
 use crate::ui::selection::{Cell, Selection};
 
@@ -78,6 +79,25 @@ const MENU_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
 
+/// The body copy for the upload confirmation (§17), used when the remote working
+/// directory is known — the destination below is that directory. `app` appends the local
+/// file and its size.
+pub const UPLOAD_DIALOG_BODY: &str = "Sends this file to the directory the shell is currently in, over SFTP. Check the destination below — you can edit it before sending.";
+
+/// The same confirmation when the shell has never announced its directory (§17): the
+/// destination is then a bare file name, which the server resolves against the login
+/// directory, so the user is told to make it explicit if that is not what they want.
+pub const UPLOAD_DIALOG_BODY_NO_CWD: &str = "This shell does not report its working directory, so cmote cannot tell where it is. The file goes to the path below — a bare name lands in your login directory. Edit it to send the file somewhere else.";
+
+/// The widget id of the upload dialog's destination field, so `app` can focus it as the
+/// dialog opens (§17) — the path is the one thing the user may want to change, and
+/// Enter in the field sends. Same trick as the passphrase prompt (§7).
+pub const UPLOAD_INPUT_ID: &str = "upload-dest";
+
+/// The body copy for the overwrite confirmation (§17). `app` appends the remote path.
+/// Nothing has been written when this appears: the transfer stopped at the check.
+pub const UPLOAD_EXISTS_BODY: &str = "A file already exists at this path on the server. Uploading replaces its contents — the old file is not recoverable. Nothing has been sent yet.";
+
 /// The 16 base ANSI colors (indices 0-15): the 8 standard colors then their
 /// bright variants. Values follow the common xterm palette.
 const ANSI_16: [(u8, u8, u8); 16] = [
@@ -102,6 +122,18 @@ const ANSI_16: [(u8, u8, u8); 16] = [
 /// The six intensity steps of the 6×6×6 color cube (indices 16-231).
 const CUBE_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 
+/// Everything the status bar and the modals need to know about the upload feature
+/// (§17), grouped so `view` keeps a readable signature. `file` is the selected local
+/// file's name (`None` disables Upload), `dest` the destination path being confirmed,
+/// `state` the flow's current step, and `notice` the last outcome to show in the bar.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadView<'a> {
+	pub file: Option<&'a str>,
+	pub dest: &'a str,
+	pub state: Option<UploadState>,
+	pub notice: Option<&'a str>,
+}
+
 /// The resolved look of one cell: everything a span needs. Grouping key too —
 /// consecutive cells with an equal `CellStyle` become one span.
 #[derive(Clone, Copy, PartialEq)]
@@ -112,22 +144,37 @@ struct CellStyle {
 	underline: bool,
 }
 
+/// What every modal on this screen needs (§10): whether the Disconnect confirmation is
+/// open, the shared selectable body buffer whichever dialog is showing, and where the
+/// card sits. Grouped because they always travel together — and because each dialog
+/// added to this screen would otherwise widen `view`'s signature again.
+#[derive(Debug, Clone, Copy)]
+pub struct Modals<'a> {
+	pub confirm_disconnect: bool,
+	pub body: &'a text_editor::Content,
+	pub drag: crate::ui::dialog::Drag,
+}
+
 /// Render the whole terminal screen (§10): a status bar on top, the vt100 grid
 /// filling the rest. `endpoint` is the `user@host:port` shown in the bar,
 /// `selection` the active text selection to highlight (if any), `menu` the
-/// right-click context menu's anchor when it is open, and `dialog_body` the
-/// selectable message buffer for the disconnect confirmation. The grid's own output
-/// (glyph strings, the label) is copied out and so is `'static`; the returned element
-/// borrows only `dialog_body`, so its lifetime is tied to that.
+/// right-click context menu's anchor when it is open, `modals` whichever dialog is over
+/// the shell, and `upload` the file-transfer state the bar and its dialogs show (§17).
+/// The grid's own output (glyph strings, the label) is copied out and so is `'static`;
+/// the returned element borrows the dialog body, so its lifetime is tied to that.
 pub fn view<'a>(
 	terminal: &Terminal,
 	endpoint: &str,
 	selection: Option<&Selection>,
 	menu: Option<Point>,
-	confirm_disconnect: bool,
-	dialog_body: &'a text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	modals: Modals<'a>,
+	upload: UploadView<'a>,
 ) -> Element<'a, Message> {
+	let Modals {
+		confirm_disconnect,
+		body: dialog_body,
+		drag,
+	} = modals;
 	let screen = terminal.screen();
 	let (rows, cols) = screen.size();
 	let (cursor_row, cursor_col) = screen.cursor_position();
@@ -168,17 +215,22 @@ pub fn view<'a>(
 	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
 	let has_selection = selection.is_some_and(|selection| !selection.is_empty());
 
-	// Bar on top (fixed height), grid below it filling the remaining window.
-	let base = column![status_bar(endpoint, has_selection), interactive_grid]
-		.spacing(0)
-		.width(Length::Fill)
-		.height(Length::Fill);
+	// Bar on top (fixed height), grid below it filling the remaining window. The bar
+	// borrows the upload labels, which is why the base takes the view's `'a` lifetime.
+	let base: Element<'a, Message> = column![
+		status_bar(endpoint, has_selection, upload),
+		interactive_grid
+	]
+	.spacing(0)
+	.width(Length::Fill)
+	.height(Length::Fill)
+	.into();
 
 	// Overlays stack on top of the base, bottom-to-top: the right-click menu (with a
 	// click-away dismiss layer), then the Disconnect confirmation modal. The base and
 	// overlay layers are `'static`; the confirmation panel borrows `dialog_body`, so the
 	// vector — and the whole view — takes that `'a` lifetime.
-	let mut layers: Vec<Element<'a, Message>> = vec![base.into()];
+	let mut layers: Vec<Element<'a, Message>> = vec![base];
 	if let Some(point) = menu {
 		layers.push(dismiss_layer());
 		layers.push(context_menu(point, has_selection));
@@ -186,6 +238,19 @@ pub fn view<'a>(
 	if confirm_disconnect {
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
 		layers.push(confirm_disconnect_panel(dialog_body, drag));
+	}
+	// The upload confirmations (§17) use the same chrome. A running transfer shows no
+	// modal — its progress lives in the status bar, so the shell stays usable.
+	match upload.state {
+		Some(UploadState::ConfirmPath) => {
+			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
+			layers.push(confirm_upload_panel(dialog_body, upload.dest, drag));
+		}
+		Some(UploadState::ConfirmOverwrite) => {
+			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
+			layers.push(confirm_overwrite_panel(dialog_body, drag));
+		}
+		Some(UploadState::Running { .. }) | None => {}
 	}
 
 	// A lone base needs no stack; otherwise layer the overlays over it.
@@ -199,33 +264,51 @@ pub fn view<'a>(
 	}
 }
 
-/// The status bar (§10): three zones — Copy / Paste on the left, the live session's
-/// `user@host:port` centered, and Disconnect on the right. Its height is fixed to
-/// `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly. `has_selection`
-/// enables Copy — with nothing selected the button has no `on_press` and iced
-/// renders it disabled. The label is copied in, so the returned element owns its
-/// text and stays `'static` like the grid.
-fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> {
+/// The status bar (§10, §17): three zones — Copy / Paste / File… / Upload on the left,
+/// the live session's `user@host:port` centered, and Disconnect on the right. Its height
+/// is fixed to `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly.
+/// `has_selection` enables Copy and a picked file enables Upload — a button with no
+/// `on_press` is rendered disabled by iced. While a transfer runs the centre zone shows
+/// its progress instead of the endpoint, and afterwards the outcome notice until the next
+/// upload.
+fn status_bar<'a>(
+	endpoint: &str,
+	has_selection: bool,
+	upload: UploadView<'a>,
+) -> Element<'a, Message> {
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
 		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
 	let paste = button(text("Paste").size(STATUS_BAR_TEXT)).on_press(Message::PastePressed);
+	// Picking a file is always available (it also replaces an earlier pick); sending it
+	// needs both a file and no transfer already in flight (§17).
+	let pick = button(text("File…").size(STATUS_BAR_TEXT)).on_press(Message::UploadPickPressed);
+	let idle = upload.state.is_none();
+	let send = button(text("Upload").size(STATUS_BAR_TEXT))
+		.on_press_maybe((idle && upload.file.is_some()).then_some(Message::UploadPressed));
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
 	// Three equal-width zones. Because each takes the same `Fill` share, the middle
 	// zone's centered label is centered in the *window*, not merely between the side
-	// groups — so the host info stays put no matter how wide Copy/Paste/Disconnect are.
-	let left = container(row![copy, paste].spacing(10))
+	// groups — so the host info stays put no matter how wide the buttons are.
+	let mut buttons = row![copy, paste, pick, send].spacing(10);
+	// Name the picked file next to the buttons, so Upload never sends a mystery.
+	if let Some(name) = upload.file {
+		buttons = buttons.push(
+			text(name)
+				.size(STATUS_BAR_TEXT)
+				.color(STATUS_BAR_FG)
+				.align_y(iced::alignment::Vertical::Center)
+				.height(Length::Fill),
+		);
+	}
+	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
-	let center = container(
-		text(endpoint.to_owned())
-			.size(STATUS_BAR_TEXT)
-			.color(STATUS_BAR_FG),
-	)
-	.width(Length::Fill)
-	.align_x(iced::alignment::Horizontal::Center);
+	let center = container(center_zone(endpoint, upload))
+		.width(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Center);
 	let right = container(disconnect)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right);
@@ -246,6 +329,60 @@ fn status_bar(endpoint: &str, has_selection: bool) -> Element<'static, Message> 
 	.align_y(iced::alignment::Vertical::Center)
 	.padding(STATUS_BAR_PADDING)
 	.into()
+}
+
+/// What the middle of the status bar shows (§17). A running transfer takes priority — a
+/// progress bar with the byte count — then the last upload's outcome, and otherwise the
+/// session's `user@host:port`, which is what the bar shows all the rest of the time.
+fn center_zone<'a>(endpoint: &str, upload: UploadView<'a>) -> Element<'a, Message> {
+	if let Some(UploadState::Running { sent, total }) = upload.state {
+		// A zero-byte file (or an unknown size) would divide by zero; show it as full,
+		// since there is nothing left to send.
+		let fraction = if total == 0 {
+			1.0
+		} else {
+			sent as f32 / total as f32
+		};
+		let label = format!("{} / {}", human_bytes(sent), human_bytes(total));
+		return row![
+			// `length` is the bar's long axis and `girth` its thickness — a horizontal
+			// bar's width and height respectively.
+			progress_bar(0.0..=1.0, fraction)
+				.length(Length::Fixed(160.0))
+				.girth(Length::Fixed(10.0)),
+			text(label).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG),
+		]
+		.spacing(10)
+		.align_y(iced::alignment::Vertical::Center)
+		.into();
+	}
+
+	let label = upload.notice.unwrap_or(endpoint).to_owned();
+	text(label)
+		.size(STATUS_BAR_TEXT)
+		.color(STATUS_BAR_FG)
+		.into()
+}
+
+/// A byte count in the units a person reads (§17). Binary units, one decimal above a
+/// kibibyte — enough precision for a progress readout, no rounding surprises at the
+/// boundaries.
+pub fn human_bytes(bytes: u64) -> String {
+	const KIB: f64 = 1024.0;
+	let value = bytes as f64;
+	if value < KIB {
+		return format!("{bytes} B");
+	}
+	for (limit, unit) in [
+		(KIB * KIB, "KiB"),
+		(KIB * KIB * KIB, "MiB"),
+		(KIB * KIB * KIB * KIB, "GiB"),
+	] {
+		if value < limit {
+			return format!("{:.1} {unit}", value / (limit / KIB));
+		}
+	}
+	format!("{:.1} TiB", value / (KIB * KIB * KIB * KIB))
 }
 
 /// The right-click context menu (§10): a small floating panel with Copy selection
@@ -310,6 +447,57 @@ fn confirm_disconnect_panel(
 				.into(),
 			button("Disconnect")
 				.on_press(Message::DisconnectConfirmed)
+				.into(),
+		],
+		drag,
+	)
+}
+
+/// The upload confirmation (§17), in the shared dialog chrome: what the upload does and
+/// which local file it sends in the (selectable) body, then the destination path in an
+/// editable field — Enter in the field sends, as does the Upload button. Every dismissal
+/// route emits `UploadCancelled`, so backing out never sends anything.
+fn confirm_upload_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	dest: &'a str,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	let content = column![
+		crate::ui::dialog::selectable_body(dialog_body),
+		text_input("Remote path", dest)
+			.id(UPLOAD_INPUT_ID)
+			.on_input(Message::UploadDestChanged)
+			.on_submit(Message::UploadConfirmed),
+	]
+	.spacing(12);
+
+	crate::ui::dialog::dialog(
+		"Upload this file?".to_owned(),
+		Message::UploadCancelled,
+		content.into(),
+		vec![
+			button("Cancel").on_press(Message::UploadCancelled).into(),
+			button("Upload").on_press(Message::UploadConfirmed).into(),
+		],
+		drag,
+	)
+}
+
+/// The overwrite confirmation (§17): the destination already holds a file. Reached only
+/// after the SSH task checked and stopped, so cancelling here leaves the remote file
+/// exactly as it was — nothing has been written.
+fn confirm_overwrite_panel(
+	dialog_body: &text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'_, Message> {
+	crate::ui::dialog::dialog(
+		"Replace the file on the server?".to_owned(),
+		Message::UploadCancelled,
+		crate::ui::dialog::selectable_body(dialog_body),
+		vec![
+			button("Cancel").on_press(Message::UploadCancelled).into(),
+			button("Replace")
+				.on_press(Message::UploadOverwriteConfirmed)
 				.into(),
 		],
 		drag,
@@ -661,6 +849,18 @@ mod tests {
 		// Far past the grid clamps to the last cell, never off the grid.
 		let clamped = cell_at(Point::new(100_000.0, 100_000.0), 24, 80);
 		assert_eq!((clamped.row, clamped.col), (23, 79));
+	}
+
+	#[test]
+	fn byte_counts_read_in_binary_units() {
+		// Under a kibibyte stays exact; above it switches unit at each 1024 boundary,
+		// which is what the upload progress readout shows (§17).
+		assert_eq!(human_bytes(0), "0 B");
+		assert_eq!(human_bytes(1023), "1023 B");
+		assert_eq!(human_bytes(1024), "1.0 KiB");
+		assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+		assert_eq!(human_bytes(3 * 1024 * 1024 / 2), "1.5 MiB");
+		assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GiB");
 	}
 
 	#[test]

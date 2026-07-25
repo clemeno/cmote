@@ -78,6 +78,16 @@ pub enum SshCommand {
 	Input(Vec<u8>),
 	/// The terminal view changed size; reflow the remote pty.
 	Resize { cols: u16, rows: u16 },
+	/// Upload a local file to the remote over SFTP (§17). `remote` is the destination
+	/// path the user confirmed — absolute when the shell's cwd is known, otherwise
+	/// relative, which the server resolves against the login directory. `overwrite` is
+	/// false on the first attempt: the task then reports `UploadExists` instead of
+	/// clobbering a file, and the GUI re-sends with `true` only if the user confirms.
+	Upload {
+		local: PathBuf,
+		remote: String,
+		overwrite: bool,
+	},
 	/// Close the channel and tear down the connection.
 	Disconnect,
 }
@@ -100,6 +110,16 @@ pub enum SshEvent {
 	Connected,
 	/// A chunk of terminal output to feed the vt100 parser (§9).
 	Output(Vec<u8>),
+	/// The upload's destination already holds a file (§17). Carries the path, so the
+	/// GUI can name it in the overwrite confirmation; nothing has been written.
+	UploadExists(String),
+	/// Bytes written so far, out of the local file's size (§17). Sent at intervals,
+	/// not per chunk, so a big transfer does not flood the GUI with redraws.
+	UploadProgress { sent: u64, total: u64 },
+	/// The upload finished; carries the destination path as the server resolved it.
+	UploadDone(String),
+	/// The upload failed; carries a short reason to show in the status bar (§17).
+	UploadFailed(String),
 	/// The session ended (server closed, or user disconnected).
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).
