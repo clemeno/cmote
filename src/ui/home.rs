@@ -18,7 +18,7 @@ use iced::alignment::Vertical;
 use iced::widget::{
 	button, column, container, mouse_area, row, scrollable, stack, text, text_input,
 };
-use iced::{Border, Color, Element, Length, Padding};
+use iced::{Border, Element, Length, Padding, Theme};
 
 use crate::app::Message;
 use crate::profiles::Target;
@@ -28,12 +28,12 @@ use crate::profiles::Target;
 /// prompt, §7).
 pub const RENAME_INPUT_ID: &str = "home-rename";
 
-// A selected row is tinted a light blue that reads on the default (light) theme the
-// connect form uses; the endpoint sits in a muted grey beside the bold-ish name.
-const ROW_SELECTED_BG: Color = Color::from_rgb8(0xcf, 0xdd, 0xf6);
-const ENDPOINT_FG: Color = Color::from_rgb8(0x70, 0x70, 0x70);
-const MENU_BG: Color = Color::from_rgb8(0xf0, 0xf0, 0xf0);
-const MENU_BORDER: Color = Color::from_rgb8(0xb0, 0xb0, 0xb0);
+// This screen has no hard-coded colours on purpose. The app sets no theme, so iced
+// follows the system light/dark preference — a fixed light palette here put dark-mode's
+// near-white text on a light background and made the list unreadable. Every colour comes
+// from the active theme instead: `text::secondary` for muted text, `container::
+// bordered_box` / `button::text` for the menu, and the palette's `primary.weak` pair for
+// the selected row (its `text` is guaranteed readable on its `color`).
 
 // The list geometry. Each row is a FIXED height so the right-click menu can be placed
 // from the selected row's index without measuring the laid-out widgets (iced does not
@@ -72,7 +72,7 @@ pub fn view<'a>(
 	// A one-line hint so the (deliberately terse) interactions are discoverable.
 	let hint = text("Click to select · click again or Enter to open · F2 or right-click to rename")
 		.size(12)
-		.color(ENDPOINT_FG);
+		.style(text::secondary);
 
 	let base: Element<'a, Message> = column![header, hint, target_list(targets, selected, rename)]
 		.spacing(12)
@@ -102,7 +102,7 @@ fn target_list<'a>(
 ) -> Element<'a, Message> {
 	if targets.is_empty() {
 		return text("No saved targets yet — “New connection” to add one.")
-			.color(ENDPOINT_FG)
+			.style(text::secondary)
 			.into();
 	}
 
@@ -128,7 +128,7 @@ fn target_list<'a>(
 fn target_row(target: &Target, key: String, selected: bool) -> Element<'_, Message> {
 	let label = row![
 		text(target.name.clone()).width(Length::Fill),
-		text(key.clone()).size(12).color(ENDPOINT_FG),
+		text(key.clone()).size(12).style(text::secondary),
 	]
 	.spacing(10)
 	.align_y(Vertical::Center);
@@ -138,7 +138,7 @@ fn target_row(target: &Target, key: String, selected: bool) -> Element<'_, Messa
 		.height(Length::Fixed(ROW_HEIGHT))
 		.padding(Padding::from([0.0, 8.0]))
 		.align_y(Vertical::Center)
-		.style(move |_theme| {
+		.style(move |theme: &Theme| {
 			let mut style = container::Style {
 				border: Border {
 					radius: 4.0.into(),
@@ -147,7 +147,11 @@ fn target_row(target: &Target, key: String, selected: bool) -> Element<'_, Messa
 				..container::Style::default()
 			};
 			if selected {
-				style.background = Some(ROW_SELECTED_BG.into());
+				// The palette pair carries both halves, so the label stays readable on
+				// the tint in light *and* dark themes.
+				let pair = theme.extended_palette().primary.weak;
+				style.background = Some(pair.color.into());
+				style.text_color = Some(pair.text);
 			}
 			style
 		});
@@ -184,11 +188,7 @@ fn context_menu(index: usize) -> Element<'static, Message> {
 		button(text(label).size(14))
 			.width(Length::Fill)
 			.on_press(message)
-			.style(|_theme, _status| button::Style {
-				background: None,
-				text_color: Color::BLACK,
-				..button::Style::default()
-			})
+			.style(button::text)
 	};
 
 	let panel = container(
@@ -201,15 +201,7 @@ fn context_menu(index: usize) -> Element<'static, Message> {
 	)
 	.width(Length::Fixed(140.0))
 	.padding(4)
-	.style(|_theme| container::Style {
-		background: Some(MENU_BG.into()),
-		border: Border {
-			color: MENU_BORDER,
-			width: 1.0,
-			radius: 4.0.into(),
-		},
-		..container::Style::default()
-	});
+	.style(container::bordered_box);
 
 	let top = LIST_TOP + (index as f32) * ROW_HEIGHT + ROW_HEIGHT;
 	container(panel)

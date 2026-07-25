@@ -11,11 +11,12 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v1.3.1** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v1.3.2** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
-instead of their digits, §9). Both targets are supported first-class, and each has a
-verified toolchain on its host:
+instead of their digits, §9; v1.3.2 makes the home screen follow the system
+light/dark theme so the target list stays readable, §14). Both targets are supported
+first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -604,6 +605,16 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   opens a blank form; **rename** in place via **F2** or the right-click menu (Enter
   commits and re-sorts, Esc cancels); the right-click menu also offers **Open** and
   **Delete**. `Esc` on the form returns to the list.
+- **Colours come from the theme, not constants (fixed in v1.3.2).** The app pins no
+  theme, so iced resolves `Theme::default` from the **system** light/dark preference.
+  This screen originally hard-coded a light palette, so under Windows dark mode the
+  theme's near-white default text landed on a fixed light-blue selected row and the list
+  was unreadable. It now takes every colour from the active theme: `text::secondary` for
+  muted text, `container::bordered_box` / `button::text` for the right-click menu, and
+  the extended palette's `primary.weak` **pair** for the selected row — a pair carries
+  both the background and a `text` colour guaranteed readable on it, in either mode. The
+  other screens keep hard-coded colours because they always set background *and*
+  foreground together, so their contrast does not depend on the system theme.
 - **Optional key-passphrase pre-seed (§7).** The form gained an optional passphrase
   field under key auth. Left empty it keeps the original behavior (an encrypted key
   prompts interactively); filled, it is tried first so a known passphrase unlocks the key
