@@ -5,7 +5,7 @@ set -eu
 
 BIN="target/release/cmote"
 APP="target/release/cmote.app"
-VERSION="1.3.1"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
 [ -x "$BIN" ] || { echo "missing $BIN — run: cargo build --release" >&2; exit 1; }
 
