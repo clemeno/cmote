@@ -6,9 +6,10 @@
 //   * a body — copy explaining what confirming the action will do (plus, for the
 //     passphrase prompt, its input field);
 //   * a footer — the action buttons spread EVENLY across the width.
-// Assembling that frame here (rather than in each view) keeps the four call sites —
-// the disconnect confirmation, the host-key prompt, the passphrase prompt, and the
-// error notice — consistent, and means a change to the chrome touches one function.
+// Assembling that frame here (rather than in each view) keeps the five call sites —
+// the delete-target confirmation, the disconnect confirmation, the host-key prompt, the
+// passphrase prompt, and the error notice — consistent, and means a change to the
+// chrome touches one function.
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, mouse_area, row, stack, text, text_editor};

@@ -605,6 +605,13 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   opens a blank form; **rename** in place via **F2** or the right-click menu (Enter
   commits and re-sorts, Esc cancels); the right-click menu also offers **Open** and
   **Delete**. `Esc` on the form returns to the list.
+- **Delete asks first.** Removing a target is not undoable, so the menu item and the
+  **Delete** key only open a confirmation in the shared dialog chrome (§10) — the same
+  treatment Disconnect gets. Its body names the target being removed, since the list is
+  one click away from the wrong row. Cancel, the header's ✕, a click on the backdrop and
+  `Esc` all emit the same cancel message, so *every* dismissal keeps the target; only the
+  Delete button removes it. While the prompt is up the list's own shortcuts are inert, so
+  a stray Enter cannot open a connection behind the modal.
 - **Colours come from the theme, not constants (fixed in v1.3.2).** The app pins no
   theme, so iced resolves `Theme::default` from the **system** light/dark preference.
   This screen originally hard-coded a light palette, so under Windows dark mode the
@@ -613,6 +620,9 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   muted text, `container::bordered_box` / `button::text` for the right-click menu, and
   the extended palette's `primary.weak` **pair** for the selected row — a pair carries
   both the background and a `text` colour guaranteed readable on it, in either mode. The
+  muted endpoint label is the one exception: `text::secondary` pins an absolute grey that
+  ignores the row tint, so on the *selected* row the text style is left at its default
+  (`color: None`) and inherits the pair's `text` from the row container instead. The
   other screens keep hard-coded colours because they always set background *and*
   foreground together, so their contrast does not depend on the system theme.
 - **Optional key-passphrase pre-seed (§7).** The form gained an optional passphrase

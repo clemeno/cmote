@@ -6,7 +6,9 @@
 //     return visit is one click (the secret is still entered on the form, §12);
 //   * rename one — F2 on the selected row, or right-click → Rename; the row becomes
 //     an inline text field, and committing re-sorts the list by the new name;
-//   * open / delete one — from the same right-click menu;
+//   * open / delete one — from the same right-click menu; deleting is not undoable, so
+//     it goes through a confirmation dialog (Cancel, ✕, the backdrop and Esc all keep
+//     the target) rather than removing the row on the click;
 //   * start a fresh connection — the "New connection" button opens a blank form.
 //
 // The view is pure (state in, `Element` out); every action is a `Message` handled
@@ -16,17 +18,23 @@
 
 use iced::alignment::Vertical;
 use iced::widget::{
-	button, column, container, mouse_area, row, scrollable, stack, text, text_input,
+	button, column, container, mouse_area, row, scrollable, stack, text, text_editor, text_input,
 };
 use iced::{Border, Element, Length, Padding, Theme};
 
 use crate::app::Message;
 use crate::profiles::Target;
+use crate::ui::dialog;
 
 /// The widget id of the inline rename field, so `app` can focus it the instant a
 /// rename starts (the user types straight away, no click needed — like the passphrase
 /// prompt, §7).
 pub const RENAME_INPUT_ID: &str = "home-rename";
+
+/// The body copy for the delete confirmation (§14). `app` appends the target being
+/// deleted (its name and endpoint) and seeds the whole thing into the dialog buffer, so
+/// the user confirms against the row they actually picked.
+pub const DELETE_DIALOG_BODY: &str = "Removes this target from the saved list. Nothing on the server changes and its host key stays trusted — only the saved profile is forgotten. This cannot be undone.";
 
 // This screen has no hard-coded colours on purpose. The app sets no theme, so iced
 // follows the system light/dark preference — a fixed light palette here put dark-mode's
@@ -55,12 +63,17 @@ pub struct RenameState {
 /// Render the home screen. `targets` are already in display order (`profiles` keeps
 /// them sorted); `selected` is the endpoint key of the highlighted row, if any;
 /// `rename` is the in-progress inline edit, if any; `menu_open` shows the right-click
-/// menu anchored at the selected row.
+/// menu anchored at the selected row; `confirm_delete` overlays the delete confirmation
+/// on top of everything, with `dialog_body` as its selectable message and `drag` its
+/// position.
 pub fn view<'a>(
 	targets: &'a [Target],
 	selected: Option<&str>,
 	rename: Option<&'a RenameState>,
 	menu_open: bool,
+	confirm_delete: bool,
+	dialog_body: &'a text_editor::Content,
+	drag: dialog::Drag,
 ) -> Element<'a, Message> {
 	let header = row![
 		text("cmote — targets").size(24).width(Length::Fill),
@@ -85,13 +98,54 @@ pub fn view<'a>(
 		.then(|| selected.and_then(|key| index_of(targets, key)))
 		.flatten();
 
-	match menu_index {
+	let screen: Element<'a, Message> = match menu_index {
 		Some(index) => stack![base, dismiss_layer(), context_menu(index)]
 			.width(Length::Fill)
 			.height(Length::Fill)
 			.into(),
 		None => base,
+	};
+
+	// Deleting a target cannot be undone, so it goes through the same confirmation
+	// chrome as Disconnect (§10) rather than acting on the menu click. The list stays
+	// visible (dimmed) behind the card, so the row being removed is still in view.
+	if confirm_delete {
+		stack![
+			screen,
+			dialog::backdrop(Message::HomeDeleteCancelled),
+			confirm_delete_panel(dialog_body, drag),
+		]
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.into()
+	} else {
+		screen
 	}
+}
+
+/// The delete confirmation modal (§14), in the shared dialog chrome: the question in
+/// the header, what deleting does plus which target it hits in the body, Cancel /
+/// Delete in the footer. Every dismissal route — Cancel, the header's ✕, a click on the
+/// backdrop, Esc — emits `HomeDeleteCancelled`, so backing out always keeps the target;
+/// only the Delete button removes it.
+fn confirm_delete_panel(
+	dialog_body: &text_editor::Content,
+	drag: dialog::Drag,
+) -> Element<'_, Message> {
+	dialog::dialog(
+		"Delete this target?".to_owned(),
+		Message::HomeDeleteCancelled,
+		dialog::selectable_body(dialog_body),
+		vec![
+			button("Cancel")
+				.on_press(Message::HomeDeleteCancelled)
+				.into(),
+			button("Delete")
+				.on_press(Message::HomeDeleteConfirmed)
+				.into(),
+		],
+		drag,
+	)
 }
 
 /// The scrollable list of target rows, or an empty-state hint when there are none.
@@ -126,9 +180,22 @@ fn target_list<'a>(
 /// context menu (both carry the endpoint key). Fixed height so the menu placement math
 /// (see `context_menu`) lines up.
 fn target_row(target: &Target, key: String, selected: bool) -> Element<'_, Message> {
+	// The endpoint is muted grey — but ONLY on an unselected row. `text::secondary`
+	// pins an absolute colour (`secondary.base.color`), which ignores the selected row's
+	// tint and stays dark grey on it. On the selected row the style is left at its
+	// default (`color: None`) so the text inherits the container's `text_color` — the
+	// half of the palette pair guaranteed readable on that tint.
+	let endpoint = move |theme: &Theme| {
+		if selected {
+			text::Style::default()
+		} else {
+			text::secondary(theme)
+		}
+	};
+
 	let label = row![
 		text(target.name.clone()).width(Length::Fill),
-		text(key.clone()).size(12).style(text::secondary),
+		text(key.clone()).size(12).style(endpoint),
 	]
 	.spacing(10)
 	.align_y(Vertical::Center);

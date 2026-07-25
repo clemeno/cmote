@@ -21,8 +21,8 @@ references below (§n) point into it.
   are ever written to disk** (only host / port / user / auth method / key path). Click a
   target to select it, then click it again (or press **Enter**) to open it and pre-fill
   the form; **rename** it in place with **F2** or right-click → **Rename** (the list
-  re-sorts); right-click also offers **Open** and **Delete**; **New connection** opens a
-  blank form.
+  re-sorts); right-click also offers **Open** and **Delete** (deleting asks to confirm —
+  cancelling keeps the target); **New connection** opens a blank form.
 - Connection form: host, port, user, and an auth method.
 - **Password** auth, or **private-key** auth with a native file picker (`rfd`).
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
@@ -100,8 +100,8 @@ runtime (§11, `paths::data_dir`):
    location (e.g. `Program Files`); on macOS `~/Library/Application Support/cmote/`.
 
 To reset trust for a host, delete the offending line (or the whole file) from
-`known_hosts`. To drop a saved target, use right-click → Delete in the app (or delete
-its entry from `targets.json`).
+`known_hosts`. To drop a saved target, use right-click → Delete in the app and confirm
+the prompt (or delete its entry from `targets.json`).
 
 ## Testing
 

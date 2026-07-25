@@ -110,6 +110,10 @@ pub struct App {
 	home_selected: Option<String>,
 	/// Whether the home screen's right-click menu is open (it acts on `home_selected`).
 	home_menu_open: bool,
+	/// Whether the delete confirmation is open for `home_selected` (§14). Deleting a
+	/// target is not undoable, so — like Disconnect — the menu item and the Delete key
+	/// only raise this prompt; the removal happens on an explicit confirm.
+	confirm_delete: bool,
 	/// The in-progress inline rename on the home screen, if any (§14).
 	home_rename: Option<ui::home::RenameState>,
 	/// The profile (no secret) captured when a connect is dialed, saved to `targets`
@@ -169,7 +173,7 @@ pub struct App {
 	/// content so the user can *select* it and copy the selection (§10). It is
 	/// read-only in practice — `update` performs every action except an edit — and is
 	/// reseeded each time a dialog opens. Only one dialog is ever visible, so a single
-	/// buffer serves all four (disconnect, host-key, passphrase, error).
+	/// buffer serves all five (delete-target, disconnect, host-key, passphrase, error).
 	dialog_body: text_editor::Content,
 	/// The open dialog card's top-left position in the window (§10). Seeded to centre
 	/// when a dialog opens and updated as the user drags the header, clamped so the card
@@ -202,8 +206,13 @@ pub enum Message {
 	HomeMenuOpen,
 	/// Context-menu "Rename" (or F2): begin the inline rename of the selected target.
 	HomeMenuRename,
-	/// Context-menu "Delete": remove the selected target from the store.
+	/// Context-menu "Delete" (or the Delete key): ask whether to remove the selected
+	/// target — the confirmation, not the removal (§14).
 	HomeMenuDelete,
+	/// The user confirmed the delete prompt — remove the target from the store.
+	HomeDeleteConfirmed,
+	/// The user backed out of the delete prompt (Cancel / ✕ / backdrop / Esc) — keep it.
+	HomeDeleteCancelled,
 	/// The inline rename field changed.
 	HomeRenameEdited(String),
 	/// The inline rename was submitted (Enter) — commit it and re-sort.
@@ -329,7 +338,9 @@ impl App {
 			Message::HomeMenuDismissed => self.home_menu_open = false,
 			Message::HomeMenuOpen => return self.open_selected_target(),
 			Message::HomeMenuRename => return self.start_rename(),
-			Message::HomeMenuDelete => self.delete_selected_target(),
+			Message::HomeMenuDelete => self.ask_delete_selected_target(),
+			Message::HomeDeleteConfirmed => self.delete_selected_target(),
+			Message::HomeDeleteCancelled => self.confirm_delete = false,
 			Message::HomeRenameEdited(value) => {
 				if let Some(rename) = self.home_rename.as_mut() {
 					rename.text = value;
@@ -688,6 +699,7 @@ impl App {
 		self.screen = Screen::Home;
 		self.home_menu_open = false;
 		self.home_rename = None;
+		self.confirm_delete = false;
 		self.pending_target = None;
 		self.form.password.clear();
 		self.form.passphrase.clear();
@@ -754,10 +766,31 @@ impl App {
 		}
 	}
 
-	/// Delete the selected target (§14) and save. Clears the selection so the menu and
-	/// the shortcuts no longer point at a gone row.
+	/// Ask before deleting the selected target (§14). Seeds the dialog body with what
+	/// deleting does *and* which target it hits — the list is only a click away from the
+	/// wrong row — then opens the confirmation. No selection (or a stale one) is a no-op.
+	fn ask_delete_selected_target(&mut self) {
+		self.home_menu_open = false;
+		let Some(key) = self.home_selected.clone() else {
+			return;
+		};
+		let Some(target) = self.targets.find(&key) else {
+			return;
+		};
+		let body = format!(
+			"{}\n\n{}  ({key})",
+			ui::home::DELETE_DIALOG_BODY,
+			target.name
+		);
+		self.set_dialog_body(&body);
+		self.confirm_delete = true;
+	}
+
+	/// Delete the selected target (§14) and save — only reached from a confirmed prompt.
+	/// Clears the selection so the menu and the shortcuts no longer point at a gone row.
 	fn delete_selected_target(&mut self) {
 		self.home_menu_open = false;
+		self.confirm_delete = false;
 		if let Some(key) = self.home_selected.take()
 			&& self.targets.remove(&key)
 			&& let Err(error) = self.targets.save()
@@ -766,16 +799,25 @@ impl App {
 		}
 	}
 
-	/// Handle a key on the home screen (§14). While renaming, only Esc (cancel) is
-	/// handled here — the field's own `on_submit` commits on Enter. Otherwise F2 renames
-	/// the selection, Enter opens it, Delete removes it; all are no-ops without a
-	/// selection. Other keys fall through.
+	/// Handle a key on the home screen (§14). While the delete prompt is up the list
+	/// shortcuts are inert and only Esc is handled (it cancels, keeping the target) — a
+	/// stray Enter must not open a connection behind the modal. While renaming, only Esc
+	/// (cancel) is handled here — the field's own `on_submit` commits on Enter. Otherwise
+	/// F2 renames the selection, Enter opens it, Delete asks to remove it; all are no-ops
+	/// without a selection. Other keys fall through.
 	fn on_home_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
 		let iced::keyboard::Event::KeyPressed { key, .. } = event else {
 			return iced::Task::none();
 		};
+
+		if self.confirm_delete {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.confirm_delete = false;
+			}
+			return iced::Task::none();
+		}
 
 		if self.home_rename.is_some() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
@@ -788,7 +830,7 @@ impl App {
 			iced::keyboard::Key::Named(Named::F2) => self.start_rename(),
 			iced::keyboard::Key::Named(Named::Enter) => self.open_selected_target(),
 			iced::keyboard::Key::Named(Named::Delete) => {
-				self.delete_selected_target();
+				self.ask_delete_selected_target();
 				iced::Task::none()
 			}
 			_ => iced::Task::none(),
@@ -988,6 +1030,9 @@ impl App {
 				self.home_selected.as_deref(),
 				self.home_rename.as_ref(),
 				self.home_menu_open,
+				self.confirm_delete,
+				&self.dialog_body,
+				drag,
 			),
 			Screen::Connect => ui::connect::view(&self.form, self.form_focus),
 			Screen::Connecting { status } => text(status).into(),
