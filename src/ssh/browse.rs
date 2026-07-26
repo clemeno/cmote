@@ -25,6 +25,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
 use crate::explorer::shell_quote;
+use crate::files::{self, Entry, Kind};
 
 /// The most `ls` output the fallback will hold. A directory with a million entries (or a
 /// server answering with something that is not a listing at all) must not grow our
@@ -93,6 +94,35 @@ pub async fn list<H: client::Handler>(
 	}
 }
 
+/// List EVERY entry inside `path` — files included — for the files pane (§19), and
+/// report them as batches of `files::BATCH`. `request` identifies the listing so the
+/// pane can drop batches for a directory it has already left.
+pub async fn list_all<H: client::Handler>(
+	session: &client::Handle<H>,
+	sftp: &mut Sftp,
+	events: &mpsc::Sender<SshEvent>,
+	path: String,
+	request: u64,
+) {
+	if let Some(handle) = sftp.get(session).await {
+		tokio::spawn(all_sftp(handle, path, request, events.clone()));
+		return;
+	}
+	match session.channel_open_session().await {
+		Ok(channel) => {
+			tokio::spawn(all_exec(channel, path, request, events.clone()));
+		}
+		Err(error) => {
+			fail_files(
+				events,
+				request,
+				format!("Could not ask the server: {error}"),
+			)
+			.await;
+		}
+	}
+}
+
 /// Rename a folder on the server, reporting `RenameDone` or `RenameFailed`. Same
 /// channel choice as `list`.
 pub async fn rename<H: client::Handler>(
@@ -156,6 +186,123 @@ async fn read_dirs(sftp: &SftpSession, path: &str) -> Result<Vec<String>> {
 		}
 	}
 	Ok(dirs)
+}
+
+/// The SFTP listing for the files pane: every entry, sorted, then cut into batches.
+///
+/// `ponytail:` the batching bounds the MESSAGE size and the relayout, not the fetch —
+/// russh-sftp's `read_dir` runs the whole readdir loop before it returns. That costs
+/// nothing extra in round trips (SFTP sends a name's attributes along with the name, so
+/// there is no per-file stat either way) but it does hold the whole listing in memory
+/// once. Upgrade path: drive `RawSftpSession::opendir`/`readdir` directly and emit a
+/// batch per protocol packet.
+async fn all_sftp(
+	sftp: Arc<SftpSession>,
+	path: String,
+	request: u64,
+	events: mpsc::Sender<SshEvent>,
+) {
+	match read_entries(&sftp, &path).await {
+		Ok(mut entries) => {
+			files::sort(&mut entries);
+			send_batches(&events, request, entries).await;
+		}
+		Err(error) => fail_files(&events, request, format!("{error}")).await,
+	}
+}
+
+/// Every entry inside `path`, with the kind the server reported. A symlink keeps its own
+/// kind rather than being followed: resolving each one costs a round trip, and a crowded
+/// directory is exactly where that adds up (§19).
+async fn read_entries(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>> {
+	let entries = sftp
+		.read_dir(path.to_owned())
+		.await
+		.with_context(|| format!("Could not list {path}"))?;
+
+	Ok(entries
+		.map(|entry| {
+			let kind = entry.file_type();
+			Entry {
+				name: entry.file_name(),
+				kind: if kind.is_dir() {
+					Kind::Dir
+				} else if kind.is_symlink() {
+					Kind::Link
+				} else {
+					Kind::File
+				},
+			}
+		})
+		.collect())
+}
+
+/// Send a listing as `FilesChunk` batches, the last one flagged `done`. An empty
+/// directory still sends one empty batch — that is what tells the pane to stop waiting.
+async fn send_batches(events: &mpsc::Sender<SshEvent>, request: u64, entries: Vec<Entry>) {
+	let total = entries.len();
+	let mut sent = 0;
+	loop {
+		let batch = entries[sent..(sent + files::BATCH).min(total)].to_vec();
+		sent += batch.len();
+		let done = sent == total;
+		let delivered = events
+			.send(SshEvent::FilesChunk {
+				request,
+				entries: batch,
+				done,
+			})
+			.await
+			.is_ok();
+		// Stop on the last batch — or the moment the GUI stops listening.
+		if done || !delivered {
+			return;
+		}
+	}
+}
+
+/// The `ls` fallback for the files pane. `-F` appends a type indicator — `/` directory,
+/// `@` symlink, and `*`/`|`/`=` for executables, fifos and sockets, which are all files
+/// as far as this pane is concerned.
+///
+/// `ponytail:` same caveat as `list_exec` — this is text, so a name containing a newline
+/// is read as two entries, and a name genuinely ending in one of the indicator characters
+/// loses it. Correct on the SFTP path, which is what runs unless the server refuses the
+/// subsystem.
+async fn all_exec(
+	channel: Channel<client::Msg>,
+	path: String,
+	request: u64,
+	events: mpsc::Sender<SshEvent>,
+) {
+	let command = format!("ls -1AF -- {}", shell_quote(&path));
+	match exec(channel, command).await {
+		Ok(output) => {
+			let mut entries: Vec<Entry> = output
+				.lines()
+				.filter(|line| !line.is_empty())
+				.map(|line| match line.strip_suffix('/') {
+					Some(name) => Entry {
+						name: name.to_owned(),
+						kind: Kind::Dir,
+					},
+					None => match line.strip_suffix('@') {
+						Some(name) => Entry {
+							name: name.to_owned(),
+							kind: Kind::Link,
+						},
+						None => Entry {
+							name: line.trim_end_matches(['*', '|', '=']).to_owned(),
+							kind: Kind::File,
+						},
+					},
+				})
+				.collect();
+			files::sort(&mut entries);
+			send_batches(&events, request, entries).await;
+		}
+		Err(error) => fail_files(&events, request, format!("Could not list {error}")).await,
+	}
 }
 
 /// The SFTP rename. The destination is checked **first**: SFTP's own rename refuses an
@@ -277,4 +424,11 @@ async fn exec(mut channel: Channel<client::Msg>, command: String) -> Result<Stri
 async fn fail_dir(events: &mpsc::Sender<SshEvent>, path: String, reason: String) {
 	eprintln!("listing {path} failed: {reason}");
 	let _ = events.send(SshEvent::DirFailed { path, reason }).await;
+}
+
+/// The same, for a files-pane listing (§19). Carries the request number so a failure
+/// arriving after the user has moved on is dropped rather than shown.
+async fn fail_files(events: &mpsc::Sender<SshEvent>, request: u64, reason: String) {
+	eprintln!("files listing failed: {reason}");
+	let _ = events.send(SshEvent::FilesFailed { request, reason }).await;
 }

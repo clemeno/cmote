@@ -91,6 +91,12 @@ pub enum SshCommand {
 	/// List the folders inside a remote directory, for the explorer tree (§18). One
 	/// command per folder the user opens — the tree is lazy, so nothing is walked.
 	ListDir(String),
+	/// List EVERY entry inside a remote directory, for the files pane (§19). `request`
+	/// comes back on each batch so the pane can tell a listing it still wants from one
+	/// for a directory it has already left.
+	ListFiles { path: String, request: u64 },
+	/// Fetch a remote file to a local path the user picked in the save dialog (§19).
+	Download { remote: String, local: PathBuf },
 	/// Rename a remote folder (§18). `to` is the same directory with a new last
 	/// component; the task refuses to replace an occupied path.
 	RenameDir { from: String, to: String },
@@ -119,16 +125,32 @@ pub enum SshEvent {
 	/// The upload's destination already holds a file (§17). Carries the path, so the
 	/// GUI can name it in the overwrite confirmation; nothing has been written.
 	UploadExists(String),
-	/// Bytes written so far, out of the local file's size (§17). Sent at intervals,
-	/// not per chunk, so a big transfer does not flood the GUI with redraws.
-	UploadProgress { sent: u64, total: u64 },
+	/// Bytes moved so far, out of the file's size (§17, §19). Sent at intervals, not per
+	/// chunk, so a big transfer does not flood the GUI with redraws. Shared by uploads
+	/// and downloads — only one transfer runs at a time, and the bar reads the same
+	/// either way.
+	TransferProgress { sent: u64, total: u64 },
 	/// The upload finished; carries the destination path as the server resolved it.
 	UploadDone(String),
 	/// The upload failed; carries a short reason to show in the status bar (§17).
 	UploadFailed(String),
+	/// The file landed on this machine (§19); carries the local path it was saved to.
+	DownloadDone(String),
+	/// The download failed; carries a short reason for the status bar (§19).
+	DownloadFailed(String),
 	/// The folders inside `path`, for the explorer tree (§18). Names only, not paths —
 	/// the tree already knows the parent it asked about.
 	DirListed { path: String, dirs: Vec<String> },
+	/// One batch of a files-pane listing (§19), in display order. `done` marks the last
+	/// batch — including for an empty directory, which sends exactly one empty batch.
+	FilesChunk {
+		request: u64,
+		entries: Vec<crate::files::Entry>,
+		done: bool,
+	},
+	/// A files-pane listing failed (no permission, gone, the server refused). Carries the
+	/// request number so a failure for a directory the user has left is dropped (§19).
+	FilesFailed { request: u64, reason: String },
 	/// A directory could not be listed (no permission, gone, the server refused). Carries
 	/// the path so the tree can stop waiting on that folder, and a reason for its notice
 	/// line — the path is the user's own, so naming it is what makes it actionable (§17).

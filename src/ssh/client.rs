@@ -28,6 +28,7 @@ use tokio::time::timeout;
 use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
 use crate::secret::Secret;
 use crate::ssh::browse;
+use crate::ssh::download;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::ssh::keyfile::{self, Loaded};
 use crate::ssh::upload;
@@ -118,6 +119,22 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 					let _ = link.to_session.send(SessionMsg::ListDir(path)).await;
 				}
 			}
+			SshCommand::ListFiles { path, request } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::ListFiles { path, request })
+						.await;
+				}
+			}
+			SshCommand::Download { remote, local } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::Download { remote, local })
+						.await;
+				}
+			}
 			SshCommand::RenameDir { from, to } => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -151,6 +168,10 @@ enum SessionMsg {
 	},
 	/// List the folders inside a remote directory, for the explorer tree (§18).
 	ListDir(String),
+	/// List every entry inside a remote directory, for the files pane (§19).
+	ListFiles { path: String, request: u64 },
+	/// Fetch a remote file to a local path (§19).
+	Download { remote: String, local: PathBuf },
 	/// Rename a remote folder (§18).
 	RenameDir { from: String, to: String },
 	/// Tear the session down.
@@ -415,10 +436,17 @@ async fn stream(
 					Some(SessionMsg::Upload { local, remote, overwrite }) => {
 						upload::start(session, events, local, remote, overwrite).await;
 					}
-						// Listings and renames also run on their own channel and their own
-						// task, so a slow directory never holds up the terminal (§18).
-						Some(SessionMsg::ListDir(path)) => {
+					// Listings, renames and downloads also run on their own channel and
+					// their own task, so a slow directory or a big file never holds up
+					// the terminal (§18, §19).
+					Some(SessionMsg::ListDir(path)) => {
 						browse::list(session, &mut sftp, events, path).await;
+					}
+					Some(SessionMsg::ListFiles { path, request }) => {
+						browse::list_all(session, &mut sftp, events, path, request).await;
+					}
+					Some(SessionMsg::Download { remote, local }) => {
+						download::start(session, events, remote, local).await;
 					}
 					Some(SessionMsg::RenameDir { from, to }) => {
 						browse::rename(session, &mut sftp, events, from, to).await;

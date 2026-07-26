@@ -11,6 +11,7 @@
 pub mod auth;
 pub mod browse;
 pub mod client;
+pub mod download;
 pub mod hostkey;
 pub mod keyfile;
 pub mod upload;

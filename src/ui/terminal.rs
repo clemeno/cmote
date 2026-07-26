@@ -20,8 +20,9 @@ use iced::widget::{
 };
 use iced::{Color, Element, Font, Length, Point, Size};
 
-use crate::app::{Message, UploadState};
+use crate::app::{Message, TransferState};
 use crate::explorer::Explorer;
+use crate::files::Files;
 use crate::term::Terminal;
 use crate::ui::selection::{Cell, Selection};
 
@@ -127,7 +128,7 @@ const CUBE_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 pub struct UploadView<'a> {
 	pub file: Option<&'a str>,
 	pub dest: &'a str,
-	pub state: Option<UploadState>,
+	pub state: Option<TransferState>,
 	pub notice: Option<&'a str>,
 }
 
@@ -139,6 +140,16 @@ struct CellStyle {
 	bg: Color,
 	bold: bool,
 	underline: bool,
+}
+
+/// The two browser panels beside and under the grid (§18, §19), grouped so `view` keeps
+/// a readable signature — the same reason `Modals` and `UploadView` exist. They travel
+/// together: both take room from the grid, both draw overlays, and the tree owns the
+/// dot-entry toggle that filters the pane.
+#[derive(Debug, Clone, Copy)]
+pub struct Panels<'a> {
+	pub explorer: &'a Explorer,
+	pub files: &'a Files,
 }
 
 /// What every modal on this screen needs (§10): whether the Disconnect confirmation is
@@ -166,8 +177,9 @@ pub fn view<'a>(
 	menu: Option<Point>,
 	modals: Modals<'a>,
 	upload: UploadView<'a>,
-	explorer: &'a Explorer,
+	panels: Panels<'a>,
 ) -> Element<'a, Message> {
+	let Panels { explorer, files } = panels;
 	let Modals {
 		confirm_disconnect,
 		body: dialog_body,
@@ -231,17 +243,26 @@ pub fn view<'a>(
 		interactive_grid.into()
 	};
 
-	// Bar on top (fixed height), the grid + panel below it filling the remaining window.
-	// The bar borrows the upload labels, which is why the base takes the view's `'a`
-	// lifetime.
-	let base: Element<'a, Message> = column![
-		status_bar(endpoint, has_selection, upload, explorer.visible()),
+	// Bar on top (fixed height), then the terminal row, then — full width, under both —
+	// the files pane and its own horizontal splitter (§19). The bar borrows the upload
+	// labels, which is why the base takes the view's `'a` lifetime.
+	let mut stacked = column![
+		status_bar(
+			endpoint,
+			has_selection,
+			upload,
+			explorer.visible(),
+			files.visible()
+		),
 		body
 	]
-	.spacing(0)
-	.width(Length::Fill)
-	.height(Length::Fill)
-	.into();
+	.spacing(0);
+	if files.visible() {
+		stacked = stacked
+			.push(crate::ui::files::splitter())
+			.push(crate::ui::files::panel(files, explorer.show_hidden()));
+	}
+	let base: Element<'a, Message> = stacked.width(Length::Fill).height(Length::Fill).into();
 
 	// Overlays stack on top of the base, bottom-to-top: the right-click menu (with a
 	// click-away dismiss layer), then the Disconnect confirmation modal. The base and
@@ -260,10 +281,18 @@ pub fn view<'a>(
 		layers.push(crate::ui::explorer::dismiss_layer());
 		layers.push(panel_menu);
 	}
-	// While the splitter is being dragged, a transparent layer on top follows the
-	// pointer everywhere — so the resize keeps tracking outside the bar (§18).
+	// The files pane's own right-click menu (§19), anchored the same way.
+	if let Some(pane_menu) = crate::ui::files::context_menu(files, terminal.cwd()) {
+		layers.push(crate::ui::files::dismiss_layer());
+		layers.push(pane_menu);
+	}
+	// While a splitter is being dragged, a transparent layer on top follows the pointer
+	// everywhere — so the resize keeps tracking outside the bar (§18, §19).
 	if explorer.dragging() {
 		layers.push(crate::ui::explorer::drag_layer());
+	}
+	if files.dragging() {
+		layers.push(crate::ui::files::drag_layer());
 	}
 	if confirm_disconnect {
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
@@ -272,15 +301,15 @@ pub fn view<'a>(
 	// The upload confirmations (§17) use the same chrome. A running transfer shows no
 	// modal — its progress lives in the status bar, so the shell stays usable.
 	match upload.state {
-		Some(UploadState::ConfirmPath) => {
+		Some(TransferState::ConfirmPath) => {
 			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
 			layers.push(confirm_upload_panel(dialog_body, upload.dest, drag));
 		}
-		Some(UploadState::ConfirmOverwrite) => {
+		Some(TransferState::ConfirmOverwrite) => {
 			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
 			layers.push(confirm_overwrite_panel(dialog_body, drag));
 		}
-		Some(UploadState::Running { .. }) | None => {}
+		Some(TransferState::Running { .. }) | None => {}
 	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
@@ -307,6 +336,7 @@ fn status_bar<'a>(
 	has_selection: bool,
 	upload: UploadView<'a>,
 	explorer_visible: bool,
+	files_visible: bool,
 ) -> Element<'a, Message> {
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
@@ -329,6 +359,17 @@ fn status_bar<'a>(
 		.size(STATUS_BAR_TEXT),
 	)
 	.on_press(Message::Explorer(crate::explorer::ExplorerMessage::Toggled));
+	// The files pane's toggle (§19), reading the same way: the arrow says which way it
+	// would move.
+	let pane = button(
+		text(if files_visible {
+			"Files ▾"
+		} else {
+			"Files ▴"
+		})
+		.size(STATUS_BAR_TEXT),
+	)
+	.on_press(Message::Files(crate::files::FilesMessage::Toggled));
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
@@ -352,7 +393,7 @@ fn status_bar<'a>(
 	let center = container(center_zone(endpoint, upload))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
-	let right = container(row![tree, disconnect].spacing(10))
+	let right = container(row![tree, pane, disconnect].spacing(10))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right);
 
@@ -378,15 +419,18 @@ fn status_bar<'a>(
 /// progress bar with the byte count — then the last upload's outcome, and otherwise the
 /// session's `user@host:port`, which is what the bar shows all the rest of the time.
 fn center_zone<'a>(endpoint: &str, upload: UploadView<'a>) -> Element<'a, Message> {
-	if let Some(UploadState::Running { sent, total }) = upload.state {
-		// A zero-byte file (or an unknown size) would divide by zero; show it as full,
-		// since there is nothing left to send.
-		let fraction = if total == 0 {
-			1.0
+	if let Some(TransferState::Running { sent, total }) = upload.state {
+		// A total of zero has nothing to divide by. That is a download that has not yet
+		// heard the file's size (§19) — or a zero-byte file — so the bar stays empty and
+		// the label shows only what has actually moved.
+		let (fraction, label) = if total == 0 {
+			(0.0, human_bytes(sent))
 		} else {
-			sent as f32 / total as f32
+			(
+				sent as f32 / total as f32,
+				format!("{} / {}", human_bytes(sent), human_bytes(total)),
+			)
 		};
-		let label = format!("{} / {}", human_bytes(sent), human_bytes(total));
 		return row![
 			// `length` is the bar's long axis and `girth` its thickness — a horizontal
 			// bar's width and height respectively.
@@ -552,14 +596,15 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
 
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
 /// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top, the explorer
-/// panel and its splitter take `reserved` off the width (zero when the panel is hidden,
-/// §18), then the grid's own padding is subtracted on both axes. Rounds down so the last
+/// panel and its splitter take `reserved_width` off the width (§18), the files pane and
+/// its splitter take `reserved_height` off the height (§19) — each zero when that panel
+/// is hidden — then the grid's own padding is subtracted on both axes. Rounds down so the last
 /// cell is never clipped, and clamps to at least 1×1 so the emulator always has
 /// a valid size. The app calls this on a window resize — and on a panel resize — to
 /// reflow both the local emulator and the remote pty (§9).
-pub fn grid_size(area: Size, reserved: f32) -> (u16, u16) {
-	let usable_width = area.width - reserved - 2.0 * GRID_PADDING;
-	let usable_height = area.height - STATUS_BAR_HEIGHT - 2.0 * GRID_PADDING;
+pub fn grid_size(area: Size, reserved_width: f32, reserved_height: f32) -> (u16, u16) {
+	let usable_width = area.width - reserved_width - 2.0 * GRID_PADDING;
+	let usable_height = area.height - STATUS_BAR_HEIGHT - reserved_height - 2.0 * GRID_PADDING;
 	let cols = (usable_width / CELL_WIDTH)
 		.floor()
 		.clamp(1.0, f32::from(u16::MAX)) as u16;
@@ -575,10 +620,14 @@ pub fn grid_size(area: Size, reserved: f32) -> (u16, u16) {
 /// reserves (§18), plus half a cell of slack so float rounding in `grid_size` cannot come
 /// back a row/column short. `run` uses it to open the window sized for a chosen terminal
 /// size *and* the panel beside it (§10, §11).
-pub fn window_size(cols: u16, rows: u16, reserved: f32) -> Size {
-	let width = f32::from(cols) * CELL_WIDTH + reserved + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
-	let height =
-		f32::from(rows) * CELL_HEIGHT + STATUS_BAR_HEIGHT + 2.0 * GRID_PADDING + CELL_HEIGHT / 2.0;
+pub fn window_size(cols: u16, rows: u16, reserved_width: f32, reserved_height: f32) -> Size {
+	let width =
+		f32::from(cols) * CELL_WIDTH + reserved_width + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
+	let height = f32::from(rows) * CELL_HEIGHT
+		+ STATUS_BAR_HEIGHT
+		+ reserved_height
+		+ 2.0 * GRID_PADDING
+		+ CELL_HEIGHT / 2.0;
 	Size::new(width, height)
 }
 
@@ -802,7 +851,7 @@ mod tests {
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
 		// width:  (812 - 12)      / 8.4  = 95.2  -> 95 cols
 		// height: (500 - 34 - 12) / 16.8 = 27.02 -> 27 rows  (34 = status bar)
-		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0);
+		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0, 0.0);
 		assert_eq!((rows, cols), (27, 95));
 	}
 
@@ -812,31 +861,45 @@ mod tests {
 		// the same arithmetic the reflow uses — otherwise the pty and the view disagree
 		// by exactly the panel's width (§18).
 		let area = Size::new(812.0, 500.0);
-		let (_, wide) = grid_size(area, 0.0);
-		let (_, narrow) = grid_size(area, 168.0); // 168 / 8.4 = 20 columns exactly
+		let (_, wide) = grid_size(area, 0.0, 0.0);
+		let (_, narrow) = grid_size(area, 168.0, 0.0); // 168 / 8.4 = 20 columns exactly
 		assert_eq!(wide - narrow, 20);
+	}
+
+	#[test]
+	fn the_files_pane_takes_its_height_off_the_grid() {
+		// Same discipline on the other axis (§19): the rows the pane costs must come out
+		// of the arithmetic the reflow uses, or the pty and the view disagree by exactly
+		// the pane's height.
+		let area = Size::new(812.0, 500.0);
+		let (tall, _) = grid_size(area, 0.0, 0.0);
+		let (short, _) = grid_size(area, 0.0, 168.0); // 168 / 16.8 = 10 rows exactly
+		assert_eq!(tall - short, 10);
 	}
 
 	#[test]
 	fn tiny_area_clamps_to_at_least_one_cell() {
 		// Smaller than the padding would give a negative count; clamp to 1×1.
-		assert_eq!(grid_size(Size::new(1.0, 1.0), 0.0), (1, 1));
+		assert_eq!(grid_size(Size::new(1.0, 1.0), 0.0, 0.0), (1, 1));
 		// A panel dragged wider than the window itself must not produce a zero or
 		// negative column count — only the width is squeezed, so the rows still fit.
-		let (rows, cols) = grid_size(Size::new(200.0, 200.0), 400.0);
-		assert_eq!(cols, 1);
-		assert!(rows >= 1);
+		let (rows, cols) = grid_size(Size::new(200.0, 200.0), 400.0, 400.0);
+		assert_eq!((rows, cols), (1, 1));
 	}
 
 	#[test]
 	fn window_size_fits_the_requested_grid() {
 		// A window opened via `window_size` must reflow back to exactly that grid, so the
-		// initial window is wide enough for the intended column count (§11) — with and
-		// without the explorer panel beside it (§18).
-		assert_eq!(grid_size(window_size(160, 40, 0.0), 0.0), (40, 160));
-		let reserved = crate::explorer::DEFAULT_WIDTH + crate::explorer::SPLITTER_WIDTH;
+		// initial window is big enough for the intended cell count (§11) — with and
+		// without the two browser panels around it (§18, §19).
 		assert_eq!(
-			grid_size(window_size(160, 40, reserved), reserved),
+			grid_size(window_size(160, 40, 0.0, 0.0), 0.0, 0.0),
+			(40, 160)
+		);
+		let wide = crate::explorer::DEFAULT_WIDTH + crate::explorer::SPLITTER_WIDTH;
+		let tall = crate::files::DEFAULT_HEIGHT + crate::files::SPLITTER_HEIGHT;
+		assert_eq!(
+			grid_size(window_size(160, 40, wide, tall), wide, tall),
 			(40, 160)
 		);
 	}

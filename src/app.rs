@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{self, SshCommand, SshEvent};
 use crate::explorer::{self, ExplorerMessage};
+use crate::files::{self, FilesMessage};
 use crate::secret::Secret;
 use crate::term;
 use crate::ui;
@@ -40,15 +41,22 @@ const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 /// bold (700) for bold ones purely by the requested weight.
 const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
 
+/// The icon face the files pane draws with (Material Icons, Apache-2.0 — see
+/// assets/MaterialIcons-LICENSE.txt). Bundled for the same reason the monospace face is:
+/// a folder glyph that is there on every machine. It is only ever asked for by name
+/// (`ui::files::ICON_FONT`), so it never touches the terminal grid's metrics (§19).
+const ICON_FONT: &[u8] = include_bytes!("../assets/MaterialIcons-Regular.ttf");
+
 /// The terminal size the main window opens sized for (§10, §11): wide enough for a
 /// 180-column grid, with a comfortable default height. `run` converts this to a window
 /// size via `ui::terminal::window_size` so it tracks the grid metrics.
 const INITIAL_COLS: u16 = 180;
 const INITIAL_ROWS: u16 = 40;
 
-/// The most of the window the explorer panel may be dragged to (§18). A splitter with
-/// no ceiling can push the terminal grid down to a single column, which is a state the
-/// user then has to drag their way back out of.
+/// The most of the window the explorer panel — and, on the other axis, the files pane —
+/// may be dragged to (§18, §19). A splitter with no ceiling can push the terminal grid
+/// down to a single cell, which is a state the user then has to drag their way back out
+/// of.
 const MAX_PANEL_FRACTION: f32 = 0.6;
 
 /// Build and start the iced runtime. Called from `main`.
@@ -63,6 +71,7 @@ pub fn run() -> iced::Result {
 		.title(App::title)
 		.font(MONO_FONT)
 		.font(MONO_FONT_BOLD)
+		.font(ICON_FONT)
 		// Open wide enough for a 180-column terminal *and* the explorer panel beside it
 		// (the size is derived from the grid metrics so it stays in step with
 		// `grid_size`, §18).
@@ -71,6 +80,7 @@ pub fn run() -> iced::Result {
 				INITIAL_COLS,
 				INITIAL_ROWS,
 				explorer::DEFAULT_WIDTH + explorer::SPLITTER_WIDTH,
+				files::DEFAULT_HEIGHT + files::SPLITTER_HEIGHT,
 			),
 			..iced::window::Settings::default()
 		})
@@ -205,27 +215,34 @@ pub struct App {
 	/// which is also what disables the Upload button. Cleared on a successful upload, so
 	/// the same file is never sent twice by a stray second click.
 	upload_file: Option<PathBuf>,
-	/// Where the upload is in its little flow (§17): confirming the path, confirming an
-	/// overwrite, or transferring. `None` when no upload is in progress.
-	upload: Option<UploadState>,
+	/// Where the file transfer in progress has got to (§17, §19): confirming the path,
+	/// confirming an overwrite, or moving bytes. `None` when nothing is being transferred.
+	/// One state for both directions — only one transfer runs at a time, and an upload's
+	/// progress bar and a download's read the same.
+	transfer: Option<TransferState>,
 	/// The destination path being confirmed (§17). Seeded from the remote working
 	/// directory plus the file's name, and editable — that is what makes the feature
 	/// work on a shell that never announces its directory.
 	upload_dest: String,
-	/// The last upload outcome, shown in the status bar until the next upload starts
-	/// (§17). `ponytail:` no timed fade — that would need a timer subscription for a
+	/// The last transfer outcome, shown in the status bar until the next one starts
+	/// (§17, §19). `ponytail:` no timed fade — that would need a timer subscription for a
 	/// line of text.
-	upload_notice: Option<String>,
+	transfer_notice: Option<String>,
 	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
 	/// width, expansion state and selection; `app` only relays its events and turns the
 	/// paths it asks for into `SshCommand::ListDir`.
 	explorer: explorer::Explorer,
+	/// The remote file grid shown under the grid and the tree (§19). Same division of
+	/// labour: it owns what it shows, `app` turns its requests into `SshCommand::ListFiles`
+	/// / `Download` and follows the shell's directory into it.
+	files: files::Files,
 }
 
-/// Where an upload has got to (§17). Only one upload runs at a time, so this is a plain
-/// state, not a queue.
+/// Where a file transfer has got to (§17, §19). Only one runs at a time, so this is a
+/// plain state, not a queue. The two confirmations are upload-only: a download's
+/// destination comes from the native save dialog, which asks its own overwrite question.
 #[derive(Debug, Clone, Copy)]
-pub enum UploadState {
+pub enum TransferState {
 	/// Showing the destination path for confirmation, before anything is sent.
 	ConfirmPath,
 	/// The destination already holds a file; asking whether to overwrite it.
@@ -340,6 +357,15 @@ pub enum Message {
 	UploadOverwriteConfirmed,
 	/// The user backed out of an upload confirmation (Cancel / ✕ / backdrop / Esc).
 	UploadCancelled,
+	/// Something happened in the files pane (§19). Nested for the same reason the tree's
+	/// messages are.
+	Files(FilesMessage),
+	/// The save dialog for a download closed: `local` is where to put the file, or `None`
+	/// if the user cancelled (§19). `remote` is what they asked to download.
+	DownloadTargetPicked {
+		remote: String,
+		local: Option<PathBuf>,
+	},
 	/// Something happened in the remote folder tree (§18). Nested rather than flattened
 	/// — the panel has a dozen interactions of its own, and burying them in this enum
 	/// would drown the screens that only have two or three.
@@ -457,15 +483,17 @@ impl App {
 			Message::UploadFilePicked(path) => {
 				if path.is_some() {
 					self.upload_file = path;
-					self.upload_notice = None;
+					self.transfer_notice = None;
 				}
 			}
 			Message::UploadPressed => return self.on_upload_pressed(),
 			Message::UploadDestChanged(value) => self.upload_dest = value,
 			Message::UploadConfirmed => self.start_upload(false),
 			Message::UploadOverwriteConfirmed => self.start_upload(true),
-			Message::UploadCancelled => self.upload = None,
+			Message::UploadCancelled => self.transfer = None,
 			Message::Explorer(message) => return self.on_explorer(message),
+			Message::Files(message) => return self.on_files(message),
+			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
 			Message::Ignored => {}
@@ -694,10 +722,13 @@ impl App {
 				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
 				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
-				// Open the tree at the root so the panel has something in it before the
-				// shell has said anything (§18).
+				// Open the tree and the files pane at the root, so both have something in
+				// them before the shell has said anything (§18, §19).
 				if let Some(path) = self.explorer.expand(explorer::ROOT, false) {
 					self.send_command(SshCommand::ListDir(path));
+				}
+				if let Some(request) = self.files.show(explorer::ROOT) {
+					self.list_files(request);
 				}
 				return fit_terminal();
 			}
@@ -715,44 +746,71 @@ impl App {
 				if let Some(cwd) = cwd {
 					let needed = self.explorer.reveal_if_new(&cwd);
 					self.list_dirs(needed);
+					// The files pane follows the shell too (§19) — but only when the shell
+					// has actually moved, so the per-prompt announcement neither re-lists
+					// the directory nor drags the pane back from wherever a tree click
+					// pointed it.
+					if let Some(request) = self.files.follow(&cwd) {
+						self.list_files(request);
+					}
 				}
+			}
+			SshEvent::FilesChunk {
+				request,
+				entries,
+				done,
+			} => self.files.chunk(request, entries, done),
+			SshEvent::FilesFailed { request, reason } => self.files.failed(request, reason),
+			SshEvent::DownloadDone(path) => {
+				self.transfer = None;
+				self.transfer_notice = Some(format!("Saved to {path}"));
+			}
+			SshEvent::DownloadFailed(message) => {
+				self.transfer = None;
+				self.transfer_notice = Some(message);
 			}
 			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
 			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
 			SshEvent::RenameDone { from, to } => {
-				// The folder moved: re-list its parent so the row reappears under the new
-				// name, in the right sort position.
+				// The entry moved: re-list its parent so the row reappears under the new
+				// name, in the right sort position. Both panels may be showing it (§19).
 				if let Some(parent) = self.explorer.renamed(&from, &to) {
 					self.send_command(SshCommand::ListDir(parent));
 				}
+				if let Some(request) = self.files.renamed(&from) {
+					self.list_files(request);
+				}
 			}
-			SshEvent::RenameFailed(reason) => self.explorer.set_notice(reason),
+			SshEvent::RenameFailed(reason) => {
+				self.explorer.set_notice(reason.clone());
+				self.files.set_notice(reason);
+			}
 			SshEvent::UploadExists(path) => {
 				// Nothing has been written yet: the task checked first and stopped. Ask,
 				// and only a confirmed answer re-sends with `overwrite` set (§17).
 				self.set_dialog_body(&format!("{}\n\n{path}", ui::terminal::UPLOAD_EXISTS_BODY));
-				self.upload = Some(UploadState::ConfirmOverwrite);
+				self.transfer = Some(TransferState::ConfirmOverwrite);
 			}
 			// Progress only means something while a transfer is running; a late event
 			// after a failure must not revive the bar.
-			SshEvent::UploadProgress { sent, total } => {
-				if matches!(self.upload, Some(UploadState::Running { .. })) {
-					self.upload = Some(UploadState::Running { sent, total });
+			SshEvent::TransferProgress { sent, total } => {
+				if matches!(self.transfer, Some(TransferState::Running { .. })) {
+					self.transfer = Some(TransferState::Running { sent, total });
 				}
 			}
 			SshEvent::UploadDone(path) => {
 				// Success deselects the file, which disables the Upload button again —
 				// so a stray second click cannot re-send what just landed (§17).
-				self.upload = None;
+				self.transfer = None;
 				self.upload_file = None;
-				self.upload_notice = Some(format!("Uploaded to {path}"));
+				self.transfer_notice = Some(format!("Uploaded to {path}"));
 			}
 			SshEvent::UploadFailed(message) => {
 				// The file stays selected so the user can fix the path and retry. The
 				// failure shows in the status bar rather than the error screen — that
 				// screen would tear down the shell for a file that never left (§17).
-				self.upload = None;
-				self.upload_notice = Some(message);
+				self.transfer = None;
+				self.transfer_notice = Some(message);
 			}
 			SshEvent::Disconnected => {
 				self.terminal = None;
@@ -778,9 +836,10 @@ impl App {
 		// Remember the window size on every screen so a dialog (which can appear before a
 		// terminal exists) can be centred and its dragging clamped (§10).
 		self.window_size = size;
-		// The explorer panel takes its width out of the grid, so the same call serves a
-		// window resize and a panel resize (§18).
-		let (rows, cols) = ui::terminal::grid_size(size, self.explorer.reserved());
+		// The explorer panel takes its width out of the grid and the files pane its height,
+		// so the same call serves a window resize and either panel's resize (§18, §19).
+		let (rows, cols) =
+			ui::terminal::grid_size(size, self.explorer.reserved(), self.files.reserved());
 		let changed = match self.terminal.as_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
 				terminal.resize(rows, cols);
@@ -1053,13 +1112,13 @@ impl App {
 		// to it — the destination field types through the widget tree — so nothing here
 		// reaches the shell. Esc backs out of a confirmation; a running transfer has
 		// nothing to back out of, so it just swallows the key.
-		if let Some(state) = self.upload {
+		if let Some(state) = self.transfer {
 			if matches!(
 				state,
-				UploadState::ConfirmPath | UploadState::ConfirmOverwrite
+				TransferState::ConfirmPath | TransferState::ConfirmOverwrite
 			) && matches!(key, iced::keyboard::Key::Named(Named::Escape))
 			{
-				self.upload = None;
+				self.transfer = None;
 			}
 			return;
 		}
@@ -1070,6 +1129,14 @@ impl App {
 		if self.explorer.editing().is_some() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.explorer.cancel_rename();
+			}
+			return;
+		}
+
+		// And the files pane's inline rename (§19), for the same reason.
+		if self.files.editing().is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.files.cancel_rename();
 			}
 			return;
 		}
@@ -1177,13 +1244,14 @@ impl App {
 		self.selecting = false;
 		self.menu = None;
 		self.confirm_disconnect = false;
-		self.upload = None;
+		self.transfer = None;
 		self.upload_file = None;
 		self.upload_dest.clear();
-		self.upload_notice = None;
-		// The panel's own width and visibility are user preferences, not session state,
-		// so `reset` deliberately leaves them alone.
+		self.transfer_notice = None;
+		// The panels' own size and visibility are user preferences, not session state,
+		// so `reset` deliberately leaves those alone.
 		self.explorer.reset();
+		self.files.reset();
 	}
 
 	/// The Upload button (§17): show the destination before sending anything. The path
@@ -1212,7 +1280,7 @@ impl App {
 		};
 		let body = format!("{where_to}\n\n{}  ({size})", local.display());
 		self.set_dialog_body(&body);
-		self.upload = Some(UploadState::ConfirmPath);
+		self.transfer = Some(TransferState::ConfirmPath);
 		// Focus the destination field, so the path can be corrected — or simply
 		// confirmed with Enter — without reaching for the mouse.
 		iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID)
@@ -1224,7 +1292,7 @@ impl App {
 	/// confirmed that prompt. An empty destination keeps the dialog open.
 	fn start_upload(&mut self, overwrite: bool) {
 		let Some(local) = self.upload_file.clone() else {
-			self.upload = None;
+			self.transfer = None;
 			return;
 		};
 		let remote = self.upload_dest.trim().to_owned();
@@ -1240,10 +1308,10 @@ impl App {
 			remote,
 			overwrite,
 		}) {
-			self.upload_notice = None;
-			self.upload = Some(UploadState::Running { sent: 0, total });
+			self.transfer_notice = None;
+			self.transfer = Some(TransferState::Running { sent: 0, total });
 		} else {
-			self.upload = None;
+			self.transfer = None;
 		}
 	}
 
@@ -1263,6 +1331,12 @@ impl App {
 			ExplorerMessage::RowClicked(path) => {
 				if let Some(fetch) = self.explorer.toggle_node(&path) {
 					self.send_command(SshCommand::ListDir(fetch));
+				}
+				// Clicking a folder in the tree also points the files pane at it, WITHOUT
+				// moving the shell — that is what makes the pane usable to look inside a
+				// folder you are not in (§19).
+				if let Some(request) = self.files.show(&path) {
+					self.list_files(request);
 				}
 			}
 			ExplorerMessage::RowRightClicked(path) => {
@@ -1341,6 +1415,120 @@ impl App {
 		iced::Task::none()
 	}
 
+	/// Handle one event from the files pane (§19). Same division of labour as the tree's
+	/// handler: the model decides what an action means, this relays the network side of
+	/// it — the listings, the `cd`, the clipboard writes, the download — and refits the
+	/// grid when the pane's footprint changes.
+	fn on_files(&mut self, message: FilesMessage) -> iced::Task<Message> {
+		match message {
+			FilesMessage::Toggled => {
+				self.files.toggle();
+				// The pane's height just moved between it and the grid: reflow both the
+				// local emulator and the remote pty to the new row count.
+				self.refit_grid();
+			}
+			FilesMessage::EntryClicked(path) => {
+				self.files.close_menu();
+				self.files.select(&path);
+			}
+			FilesMessage::EntryOpened(path) => {
+				self.files.close_menu();
+				// Only a directory can be entered. Doing it means moving the SHELL there —
+				// the pane, the tree and the title all follow the shell's directory, so
+				// there is one "where am I" in the window rather than three (§19). The
+				// pane is retargeted right away instead of waiting for the next prompt.
+				if self.files.kind_of(&path) != Some(files::Kind::Dir) {
+					return iced::Task::none();
+				}
+				let line = format!(
+					"cd {}
+",
+					explorer::shell_quote(&path)
+				);
+				self.send_command(SshCommand::Input(line.into_bytes()));
+				if let Some(request) = self.files.show(&path) {
+					self.list_files(request);
+				}
+			}
+			FilesMessage::EntryRightClicked(path) => {
+				self.files.select(&path);
+				self.files.open_menu(path);
+			}
+			FilesMessage::PointerMoved(point) => self.files.set_pointer(point),
+			FilesMessage::MenuDismissed => self.files.close_menu(),
+			FilesMessage::Refresh => {
+				self.files.close_menu();
+				if let Some(request) = self.files.refresh() {
+					self.list_files(request);
+				}
+			}
+			FilesMessage::CopyName(path) => {
+				self.files.close_menu();
+				return iced::clipboard::write(explorer::name(&path).to_owned());
+			}
+			FilesMessage::CopyRelative(path) => {
+				self.files.close_menu();
+				// The menu disables this item without a cwd, so this is belt and braces.
+				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
+					return iced::Task::none();
+				};
+				return iced::clipboard::write(explorer::relative(cwd, &path));
+			}
+			FilesMessage::CopyPath(path) => {
+				self.files.close_menu();
+				return iced::clipboard::write(path);
+			}
+			FilesMessage::RenameStarted(path) => {
+				self.files.start_rename(path);
+				return iced::widget::operation::focus(ui::files::RENAME_INPUT_ID);
+			}
+			FilesMessage::RenameEdited(text) => self.files.edit_rename(text),
+			FilesMessage::RenameCommitted => {
+				if let Some((from, to)) = self.files.commit_rename() {
+					self.send_command(SshCommand::RenameDir { from, to });
+				}
+			}
+			FilesMessage::Download(path) => {
+				self.files.close_menu();
+				// One transfer at a time — the status bar has one progress bar, and two
+				// concurrent transfers would fight over it (§17).
+				if self.transfer.is_some() {
+					self.files
+						.set_notice("A transfer is already running.".to_owned());
+					return iced::Task::none();
+				}
+				return pick_download_target(path);
+			}
+			FilesMessage::SplitterGrabbed => self.files.set_dragging(true),
+			FilesMessage::SplitterDragged(pointer) => {
+				if self.files.dragging() {
+					// The splitter sits at the pane's top edge and the pane runs to the
+					// window's bottom edge, so the pointer's distance from that edge IS the
+					// height — no drag anchor to track.
+					let max = self.window_size.height * MAX_PANEL_FRACTION;
+					self.files
+						.set_height(self.window_size.height - pointer.y, max);
+					self.refit_grid();
+				}
+			}
+			FilesMessage::SplitterReleased => self.files.set_dragging(false),
+		}
+		iced::Task::none()
+	}
+
+	/// Start the download the save dialog just picked a destination for (§19). A
+	/// cancelled dialog (`None`) sends nothing. The progress bar starts at zero of an
+	/// unknown total; the first progress event from the task fills the real size in.
+	fn start_download(&mut self, remote: String, local: Option<PathBuf>) {
+		let Some(local) = local else {
+			return;
+		};
+		if self.send_command(SshCommand::Download { remote, local }) {
+			self.transfer_notice = None;
+			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		}
+	}
+
 	/// Reflow the terminal to the current window *and* panel footprint (§18). The panel
 	/// takes its width out of the grid, so showing, hiding or resizing it changes the
 	/// column count exactly as a window resize would — and goes through the same path.
@@ -1356,6 +1544,15 @@ impl App {
 				return;
 			}
 		}
+	}
+
+	/// Ask the SSH task for the directory the files pane wants (§19). One command per
+	/// listing; the batches come back tagged with this same request number.
+	fn list_files(&mut self, request: u64) {
+		let Some(path) = self.files.path().map(str::to_owned) else {
+			return;
+		};
+		self.send_command(SshCommand::ListFiles { path, request });
 	}
 
 	/// The window title (§17). Off-session it is just the app name; with a shell open it
@@ -1421,10 +1618,13 @@ impl App {
 					ui::terminal::UploadView {
 						file: self.upload_file.as_deref().map(file_name_of),
 						dest: &self.upload_dest,
-						state: self.upload,
-						notice: self.upload_notice.as_deref(),
+						state: self.transfer,
+						notice: self.transfer_notice.as_deref(),
 					},
-					&self.explorer,
+					ui::terminal::Panels {
+						explorer: &self.explorer,
+						files: &self.files,
+					},
 				),
 				None => text("terminal starting…").into(),
 			},
@@ -1520,6 +1720,24 @@ fn browse_upload() -> iced::Task<Message> {
 			.set_title("Select a file to upload")
 			.pick_file(),
 		|handle| Message::UploadFilePicked(handle.map(|handle| handle.path().to_path_buf())),
+	)
+}
+
+/// Open the native save dialog for a file being downloaded (§19), pre-filled with the
+/// remote name. Async, like the other pickers, so the modal dialog never blocks the GUI
+/// thread. The dialog is also what asks about replacing an existing local file, which is
+/// why `download` itself has no overwrite prompt.
+fn pick_download_target(remote: String) -> iced::Task<Message> {
+	let name = explorer::name(&remote).to_owned();
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Save the remote file as")
+			.set_file_name(name)
+			.save_file(),
+		move |handle| Message::DownloadTargetPicked {
+			remote: remote.clone(),
+			local: handle.map(|handle| handle.path().to_path_buf()),
+		},
 	)
 }
 

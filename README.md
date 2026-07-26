@@ -7,8 +7,8 @@ screen lists your saved connection targets; pick one (or start a new connection)
 in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
 `.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
-remote filesystem beside it, the remote working directory in the title bar, and one-click
-file upload into it.
+remote filesystem beside it, an icon grid of the current directory's files under it, the
+remote working directory in the title bar, and file transfer both ways.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -45,8 +45,20 @@ references below (§n) point into it.
   terminal** (types a quoted `cd`), **Rename…** (inline, like F2 on the home list), **Copy
   name / relative path / full path**, **Expand** (which also refreshes) and **Collapse**.
   Drag the splitter to resize the panel — the terminal reflows to match — or hide it with
-  the status bar's **Folders** button; the `[x] .*` toggle in its header hides dot-folders
+  the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
   (§18).
+- **Remote files pane** — an icon grid of **every entry** in one directory, full width
+  under the terminal. It follows the shell (`cd` and the grid follows), or a click in the
+  folder tree points it somewhere else without moving the shell; **double-click a folder**
+  to enter it. A big directory streams in batches of 1000 and the header counts as they
+  land. Icons come from a bundled icon font, by category (folder, image, code, archive,
+  document, audio, video, link, plain). Right-click an entry for **Open in terminal**,
+  **Download…**, **Rename…**, **Copy name / relative path / full path** and **Refresh**.
+  Drag the splitter to resize the pane, or hide it with the status bar's **Files** button;
+  the same `.*` checkbox hides dot-files here too (§19).
+- **File download** — right-click a file in the pane → **Download…**, pick where to save
+  it in the native dialog, and it comes down over **SFTP** on its own channel with a
+  progress bar in the status bar (§19).
 - **File upload into the shell's current directory** — pick a local file with **File…**,
   send it with **Upload**, and it goes over **SFTP** (its own channel, so the shell keeps
   running) into the directory the remote shell is sitting in. The destination is shown
@@ -155,7 +167,10 @@ OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads
 the folder tree's model (row flattening and indentation, the hidden-folder filter,
 subtree collapse, `cd` reveal and its no-op on a repeat, rename validation and the
 post-rename refresh, relative-path arithmetic, shell quoting, and the panel's width
-clamps).
+clamps), and the files pane's model (batch accumulation and the dropping of batches for a
+directory already left, the cwd-follow rule that a repeated announcement is not a move,
+the folders-first sort, icon categories from kind and extension, rename validation, and
+the pane's height clamps).
 
 ### Manual smoke test (live SSH)
 
@@ -255,7 +270,7 @@ the title should follow within a prompt. Then:
 - `cd /etc/ssh` in the shell → the tree opens `/` → `/etc` → `/etc/ssh` on its own and
   highlights it. `cd` back and forth: the tree only ever expands, never closes what you
   opened.
-- Toggle `[x] .*` in the panel header → dot-folders (`.ssh`, `.config`) disappear and
+- Toggle the `.*` checkbox in the panel header → dot-folders (`.ssh`, `.config`) disappear and
   reappear with no round trip.
 - Right-click a folder: **Open in terminal** should run a quoted `cd` in the shell (make a
   folder with a space and a quote in its name — `mkdir "/tmp/it's here"` — and confirm the
@@ -272,7 +287,30 @@ the title should follow within a prompt. Then:
 - Against a server with the sftp subsystem disabled (`Subsystem sftp` commented out in
   `sshd_config`), the tree should still list folders — the `ls` fallback (§18).
 
-**9. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
+**9. Remote files pane.** The grid across the bottom should fill with `/` on connect,
+then follow the shell. Then:
+
+- `cd /etc` → the grid shows every entry in `/etc` with an icon per type; the header names
+  the directory and counts the entries. Create a directory with thousands of files
+  (`mkdir /tmp/many && cd /tmp/many && seq 1 5000 | xargs touch`) and re-enter it: the
+  count should climb in steps of 1000 as the batches land, and the window stays responsive
+  throughout.
+- Double-click a folder in the grid → the shell `cd`s into it, the tree reveals it and the
+  grid retargets.
+- Click a folder in the **tree** → the grid shows that folder while the shell stays where
+  it is, and it must NOT snap back on the next prompt.
+- Toggle the `.*` checkbox → dot-files disappear from the grid and the tree together.
+- Right-click a file → **Download…** opens the save dialog; pick a path and the status bar
+  runs a progress bar, then reports where it landed. Downloading onto an existing local
+  file goes through the OS dialog's own replace prompt. **Open in terminal** is greyed out
+  on a file, **Download…** on a folder.
+- **Rename…** edits the label in place; Enter commits and the grid re-lists so the entry
+  lands in its new sort position. **Refresh** picks up a file created from the shell.
+- Drag the horizontal splitter: the grid reflows (`tput lines` should follow) and stops at
+  the minimum and at 60% of the window. The **Files** button hides the pane and gives its
+  rows back to the terminal.
+
+**10. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
 should render, and the **arrow keys** should move the cursor — this exercises
 application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
 to the SS3 form so they register. In `vim`, `:q!` to exit.

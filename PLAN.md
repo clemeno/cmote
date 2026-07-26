@@ -18,7 +18,9 @@ instead of their digits, §9; v1.3.2 makes the home screen follow the system
 light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
 working directory and uploads a local file into it over SFTP, §17; **v2.0.0** puts a
 2D folder tree of the remote filesystem beside the terminal — browse, jump, rename,
-copy paths, §18). Both targets are supported
+copy paths, §18). The icon grid of files under the terminal — every entry in one
+directory, streamed in batches, with rename and download (§19) — is built and unreleased;
+it ships under whatever version comes next. Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -169,24 +171,29 @@ cmote/
 ├── assets/
 │   ├── FiraMono-Medium.ttf   monospace font (normal weight) embedded in the exe (§9, §11)
 │   ├── FiraMono-Bold.ttf     its bold weight, for bold cells (§11)
-│   └── FiraMono-LICENSE.txt  the family's OFL 1.1 license (required for redistribution)
+│   ├── FiraMono-LICENSE.txt  the family's OFL 1.1 license (required for redistribution)
+│   ├── MaterialIcons-Regular.ttf  the file-type icons the files pane draws with (§19)
+│   └── MaterialIcons-LICENSE.txt  its Apache-2.0 license (required for redistribution)
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
+    ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── ui/
     │   ├── mod.rs         view helpers; host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
+    │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
     ├── ssh/
-    │   ├── mod.rs         module tree + `open_sftp`, shared by upload and browse (§17, §18)
+    │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
     │   ├── auth.rs        method selection + attempts (publickey, password)
-    │   ├── browse.rs      list + rename remote folders over sftp, falling back to `ls`/`mv` (§18)
+    │   ├── browse.rs      list + rename remote folders and files over sftp, falling back to `ls`/`mv` (§18, §19)
+    │   ├── download.rs    file download over an sftp channel: stream, progress (§19)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     │   ├── upload.rs      file upload over an sftp channel: exists-check, stream, progress (§17)
@@ -388,9 +395,9 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below),
   floating over the dimmed connect form.
-- **Context menus** (`ui::menu`, done — v2.0): the three right-click menus — the grid's
-  Copy/Paste (§10), the home list's Open/Rename/Delete (§14) and the folder tree's seven
-  items (§18) — share one chrome, the way the dialogs share `ui::dialog`. They had drifted
+- **Context menus** (`ui::menu`, done — v2.0): the four right-click menus — the grid's
+  Copy/Paste (§10), the home list's Open/Rename/Delete (§14), the folder tree's seven
+  items (§18) and the files pane's (§19) — share one chrome, the way the dialogs share `ui::dialog`. They had drifted
   into three looks (raised buttons, flat themed buttons, transparent ones; three paddings,
   three widths, three copies of the click-away layer), so the definition now lives in one
   place: a dark rounded panel of a fixed width (set by the longest item any of them
@@ -714,12 +721,13 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   support, certificate auth.
 - **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
-- **SFTP / file transfer** — *partly done (v1.4, v2.0)*: a one-way **upload** of a chosen
-  local file into the shell's current directory (§17), and a **folder tree** of the remote
-  filesystem that browses and renames (§18). Still deferred: download, listing *files*
-  (the tree shows folders), creating and deleting remote directories, directory
-  (recursive) transfers, cancelling a transfer in flight, resuming an interrupted one,
-  drag-and-drop onto a tree folder, and preserving the local file's mode/timestamps.
+- **SFTP / file transfer** — *partly done (v1.4, v2.0, unreleased)*: **upload** of a chosen
+  local file into the shell's current directory (§17), a **folder tree** of the remote
+  filesystem that browses and renames (§18), and a **files pane** that lists one whole
+  directory and **downloads** a file from it (§19). Still deferred: creating and deleting
+  remote entries, directory (recursive) transfers, cancelling a transfer in flight,
+  resuming an interrupted one, drag-and-drop onto a folder, more than one transfer at a
+  time, and preserving file modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
@@ -843,7 +851,7 @@ paths, what collapsing does, which folders a `cd` reveals) unit-testable with no
   re-opening shows one clean level again — which matches the menu's Expand, which opens
   exactly one level. Nothing is discarded, so re-expanding costs no round trip.
 - **Hidden folders are a filter, not a fetch.** Listings always include dot-prefixed
-  entries; the panel's `[x] .*` toggle only decides whether the rows are drawn, so
+  entries; the panel's `.*` checkbox only decides whether the rows are drawn, so
   flipping it is free. They are shown by default — on a server, `.ssh` / `.config` are
   usually the reason the tree was opened.
 
@@ -940,3 +948,97 @@ announced path carries one.
   of letting it hang off. Placing from the pointer rather than from a row index (what the
   home screen does, §14) is also what makes it correct on a scrolled tree — iced does not
   expose the scrollable's offset, but the pointer needs no such correction.
+
+---
+
+## 19. Remote files pane (unreleased)
+
+An **icon grid of every entry in one directory**, full width under
+the terminal and the folder tree. The tree (§18) answers "where am I in the filesystem";
+this answers "what is actually in here". Same three-way split — a pure model
+(`files.rs`), a pure view (`ui/files.rs`), and the network calls (`ssh/browse.rs`,
+`ssh/download.rs`) — so the rules that matter are unit-testable with no server.
+
+The layout is now two rows under the status bar: `terminal | tree` on top, the files pane
+across the bottom, with a draggable splitter on each seam. `grid_size` subtracts the
+tree's width AND the pane's height, so the pty reflows for either drag exactly as it does
+for a window resize.
+
+### One directory at a time, in batches
+
+- **Flat, not recursive.** One listing per directory shown. A crowded folder therefore
+  costs exactly one request and can never fan out into thousands, which is the failure
+  mode a recursive view invites.
+- **Batches of 1000.** The server task sends the listing as `FilesChunk` messages of
+  `files::BATCH` entries, the last one flagged `done`; the grid grows as they land and the
+  header counts "N so far…". An empty directory still sends one empty final batch — that
+  is what tells the pane to stop waiting. `ponytail:` the batching bounds the *message*
+  size and the relayout, not the fetch: russh-sftp's `read_dir` runs the whole readdir
+  loop before returning. It costs no extra round trips (SFTP sends a name's attributes
+  with the name, so there is no per-file stat either way), but it does hold the listing in
+  memory once. Upgrade path: drive `RawSftpSession::opendir`/`readdir` and emit a batch
+  per protocol packet.
+- **Every batch carries its request number.** Leaving a directory bumps the number, so
+  batches still in flight for the folder just left are dropped instead of being mixed into
+  the new one — the bug this design exists to prevent. Failures carry it too.
+- **Sorted by the server task, appended by the model.** Directories first, then everything
+  else, each case-insensitively. Sorting once, before the cut into batches, is what lets
+  the model simply append and still hold a stable order across batches; sorting per batch
+  in the model would either break the order or re-sort the whole listing on every one.
+- **Symlinks keep their own kind.** Resolving one costs a round trip *per link*, and a
+  crowded directory is exactly where that adds up — so a link gets the link icon and is
+  not followed. (The tree does resolve them, §18: it sees far fewer entries and needs to
+  know whether the link is expandable.)
+- **No sizes, no timestamps.** The grid shows neither, so it asks for neither.
+
+### Two sources for "which directory", last one wins
+
+- The shell's working directory (OSC 7, §17) drives it: `cd` in the terminal and the pane
+  follows, exactly as the tree's auto-reveal does.
+- A click on a tree row points the pane at that folder **without moving the shell**, which
+  is what makes it usable to look inside a folder you are not in.
+- The catch those two create: the shell re-announces its directory at *every prompt*, so a
+  naive "follow the cwd" would drag the pane back from the tree click on the next
+  keystroke. `Files::follow` therefore acts only when the announced directory differs from
+  the last one followed — a repeat is not a move — while `Files::show` (the tree click,
+  entering a folder) is unconditional.
+- Double-clicking a directory in the grid **moves the shell** (`cd`, quoted as §18 does)
+  and retargets the pane immediately rather than waiting for the prompt. That keeps one
+  "where am I" in the window instead of three.
+
+### Icons
+
+- **A bundled icon font** (Material Icons, Apache-2.0, ~349 KB, in `assets/`). The
+  monospace face has no folder glyph and emoji are neither guaranteed nor monochrome; a
+  font gives glyphs that scale and colour like text. Drawing them on a `canvas` instead
+  would mean one canvas widget per cell — hundreds in a crowded directory.
+- **Nine categories, not per-extension.** folder / link / image / code / archive /
+  document / audio / video / plain, from one small extension table. An unknown type gets
+  the neutral file icon rather than a wrong one, and the table is a one-line change to
+  extend. A leading dot is not an extension: `.bashrc` is a name.
+- Colours are per category and fixed, like everything else in these panels (§18).
+
+### Actions
+
+- The right-click menu uses the shared chrome (§10): **Open in terminal** (directories
+  only), **Download…** (files only), **Rename…**, **Copy name / relative path / full
+  path**, **Refresh**. Each inapplicable item is *disabled*, not hidden, so the menu keeps
+  one shape.
+- **Rename** reuses the tree's rules and the same `RenameDir` command — SFTP's rename does
+  not care whether it is moving a directory — with the same guards: no blank name, no `/`
+  (that would be a move, not a rename), and a destination that already exists is refused
+  rather than replaced. Both panels react to `RenameDone`.
+- **Download** is the mirror of the upload (§17): its own sftp channel, its own spawned
+  task, progress in the status bar through the shared `TransferProgress`. The destination
+  comes from the native **save dialog**, which is also what asks about replacing a local
+  file — a second prompt in our own chrome would only be a second chance to answer it
+  wrong. One transfer at a time: starting a download while one runs is refused with a
+  notice rather than fighting over the one progress bar.
+- **The menu opens upwards.** Same frozen-anchor construction as the tree's (§18), but
+  bottom-aligned: this pane is at the bottom of the window, so a menu dropping downwards
+  would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor.
+  `ponytail:` no clamping at the right edge — the pane is full width, so a menu opened in
+  the last ~180 px can run past it. Upgrade path: pass the window width into the view.
+- **The `.*` toggle is the tree's.** One flag (`Explorer::show_hidden`) filters both
+  panels, and each header carries a checkbox that shows and flips it — so hiding dot-files
+  hides them everywhere, and the pane still has the control when the tree is collapsed.

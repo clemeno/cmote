@@ -13,8 +13,8 @@
 // the system light/dark preference (the trap §14 documents).
 
 use iced::alignment::Vertical;
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
-use iced::{Color, Element, Length, Padding};
+use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, text, text_input};
+use iced::{Border, Color, Element, Length, Padding};
 
 use crate::app::Message;
 use crate::explorer::{Explorer, ExplorerMessage, Rename, Row};
@@ -25,27 +25,30 @@ use crate::ui::menu;
 pub const RENAME_INPUT_ID: &str = "explorer-rename";
 
 /// Panel surfaces: a touch darker than the status bar so the tree reads as its own
-/// region, with the selected row taking the same blue the grid's selection uses.
-const PANEL_BG: Color = Color::from_rgb8(0x25, 0x25, 0x25);
-const HEADER_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
-const SPLITTER_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
-const FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
-const MUTED_FG: Color = Color::from_rgb8(0x90, 0x90, 0x90);
-const SELECTED_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
+/// region, with the selected row taking the same blue the grid's selection uses. Shared
+/// with the files pane below (§19) — the two panels are one region visually, so the
+/// palette has exactly one definition.
+pub(crate) const PANEL_BG: Color = Color::from_rgb8(0x25, 0x25, 0x25);
+pub(crate) const HEADER_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
+pub(crate) const SPLITTER_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
+pub(crate) const FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
+pub(crate) const MUTED_FG: Color = Color::from_rgb8(0x90, 0x90, 0x90);
+pub(crate) const SELECTED_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
 /// The notice line's colour — a warm red that stays readable on the panel's dark fill.
-const NOTICE_FG: Color = Color::from_rgb8(0xe0, 0x80, 0x70);
+pub(crate) const NOTICE_FG: Color = Color::from_rgb8(0xe0, 0x80, 0x70);
 
 /// Type size and row geometry. `ROW_HEIGHT` is fixed for the same reason the home
 /// screen's is (§14): the context menu is placed from a row *index*, because iced does
 /// not expose where a laid-out widget ended up.
-const TEXT_SIZE: f32 = 13.0;
+pub(crate) const TEXT_SIZE: f32 = 13.0;
 const ROW_HEIGHT: f32 = 22.0;
 const HEADER_HEIGHT: f32 = 28.0;
 const INDENT: f32 = 12.0;
 
-/// How close to the window's right edge the context menu may come when the pointer sits
-/// too far right for it to fit. Its width is the shared one (`ui::menu::WIDTH`).
-const MENU_INSET: f32 = 8.0;
+/// How close to the window's edge a context menu may come when the pointer sits too
+/// close to it to fit. Its width is the shared one (`ui::menu::WIDTH`). Shared with the
+/// files pane (§19).
+pub(crate) const MENU_INSET: f32 = 8.0;
 
 /// The tree panel: a header (title plus the hidden-folder toggle), the rows, and — when
 /// something went wrong — a notice line pinned under them. Fixed to the model's current
@@ -78,27 +81,40 @@ pub fn panel(explorer: &Explorer) -> Element<'_, Message> {
 	.into()
 }
 
-/// The panel header: a label and the dot-folder toggle. The toggle is a plain button
-/// whose label carries its own state (`[x]` / `[ ]`) — ASCII, so it renders in the
-/// bundled font on both platforms without hunting for a checkbox glyph.
-fn header(explorer: &Explorer) -> Element<'_, Message> {
-	let mark = if explorer.show_hidden() { "[x]" } else { "[ ]" };
-	let toggle = button(text(format!("{mark} .*")).size(TEXT_SIZE).color(FG))
-		.padding(Padding::from([1.0, 6.0]))
-		.style(|_theme, _status| button::Style {
-			background: None,
-			text_color: FG,
-			..button::Style::default()
+/// The dot-entry toggle, shared by this panel's header and the files pane's (§19) —
+/// there is ONE flag (`Explorer::show_hidden`) and it filters both, so both checkboxes
+/// show and flip the same state. A real `checkbox`: its tick comes from iced's built-in
+/// icon font, so it needs no glyph from the system fonts. Its colours are spelled out
+/// rather than themed, like everything else here.
+pub(crate) fn hidden_toggle(shown: bool) -> Element<'static, Message> {
+	checkbox(shown)
+		.label(".*")
+		.size(TEXT_SIZE)
+		.text_size(TEXT_SIZE)
+		.spacing(6.0)
+		.style(move |_theme, _status| checkbox::Style {
+			background: if shown { SELECTED_BG } else { PANEL_BG }.into(),
+			icon_color: FG,
+			border: Border {
+				width: 1.0,
+				radius: 3.0.into(),
+				color: MUTED_FG,
+			},
+			text_color: Some(FG),
 		})
-		.on_press(Message::Explorer(ExplorerMessage::HiddenToggled));
+		.on_toggle(|_| Message::Explorer(ExplorerMessage::HiddenToggled))
+		.into()
+}
 
+/// The panel header: a label and the dot-folder toggle.
+fn header(explorer: &Explorer) -> Element<'_, Message> {
 	container(
 		row![
 			text("Remote folders")
 				.size(TEXT_SIZE)
 				.color(MUTED_FG)
 				.width(Length::Fill),
-			toggle,
+			hidden_toggle(explorer.show_hidden()),
 		]
 		.align_y(Vertical::Center),
 	)

@@ -154,13 +154,17 @@ async fn copy(
 		sent += read as u64;
 		if sent - reported >= PROGRESS_STEP {
 			reported = sent;
-			let _ = events.send(SshEvent::UploadProgress { sent, total }).await;
+			let _ = events
+				.send(SshEvent::TransferProgress { sent, total })
+				.await;
 		}
 	}
 
 	// `shutdown` flushes and closes the remote handle; without it the last writes can
 	// still be in flight when we report success.
 	destination.shutdown().await.context("close failed")?;
-	let _ = events.send(SshEvent::UploadProgress { sent, total }).await;
+	let _ = events
+		.send(SshEvent::TransferProgress { sent, total })
+		.await;
 	Ok(())
 }
