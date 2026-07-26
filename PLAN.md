@@ -1046,6 +1046,16 @@ for a window resize.
   would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor.
   `ponytail:` no clamping at the right edge — the pane is full width, so a menu opened in
   the last ~180 px can run past it. Upgrade path: pass the window width into the view.
+- **"Up" is the header's first item.** A button at the left of the toolbar enters the
+  directory above the one on show, where every file manager puts it. It goes through the
+  same `cd` as a double-clicked folder (one "where am I" in the window), and it is
+  *disabled* — not hidden — at the root and before the first listing, the two cases with
+  no parent. The message carries no path: the pane's own is read when the press lands.
 - **The `.*` toggle is the tree's.** One flag (`Explorer::show_hidden`) filters both
   panels, and each header carries a checkbox that shows and flips it — so hiding dot-files
   hides them everywhere, and the pane still has the control when the tree is collapsed.
+  Toggled on, it hides *nothing*: every name the server reported is shown, dot-prefixed or
+  not, whatever attribute the far side considers hidden or system. The two exceptions are
+  `.` and `..`, dropped at ingest (`explorer::is_dot_link`) because they are this folder
+  and the one above it rather than entries in it — a tree row for `..` would walk back up
+  itself. SFTP omits them and `ls -A` leaves them out; the guard makes it true regardless.

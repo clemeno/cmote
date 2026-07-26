@@ -19,7 +19,7 @@
 
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::text::Wrapping;
-use iced::widget::{column, container, mouse_area, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{Color, Element, Font, Length, Padding};
 
 use crate::app::Message;
@@ -51,6 +51,11 @@ const LABEL_SIZE: f32 = 11.0;
 
 /// The pane header's height, matching the tree's so the two headers line up.
 const HEADER_HEIGHT: f32 = 28.0;
+
+/// The "up one folder" button in the header: Material Icons' `arrow_upward`, sized to sit
+/// with the header text rather than with the grid's icons.
+const UP_GLYPH: char = '\u{e5d8}';
+const UP_ICON_SIZE: f32 = 16.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark panel, distinct
 /// enough that a directory of mixed content is scannable.
@@ -109,6 +114,7 @@ fn header(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 
 	container(
 		row![
+			up_button(files.path().and_then(explorer::parent).is_some()),
 			text(path).size(TEXT_SIZE).color(FG),
 			text(status)
 				.size(TEXT_SIZE)
@@ -128,6 +134,29 @@ fn header(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 		background: Some(HEADER_BG.into()),
 		..container::Style::default()
 	})
+	.into()
+}
+
+/// The toolbar's "up" button, first in the header so it sits where every file manager
+/// puts it. `on_press_maybe(None)` is what disables it — iced dims and deadens a button
+/// with no message — which is the state at the root and before the first listing, the two
+/// cases with no directory above the one on show.
+fn up_button(enabled: bool) -> Element<'static, Message> {
+	button(
+		text(UP_GLYPH.to_string())
+			.font(ICON_FONT)
+			.size(UP_ICON_SIZE)
+			.color(if enabled { FG } else { MUTED_FG }),
+	)
+	.padding(Padding::from([0.0, 4.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press_maybe(enabled.then_some(Message::Files(FilesMessage::ParentOpened)))
 	.into()
 }
 

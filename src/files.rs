@@ -97,6 +97,10 @@ pub enum FilesMessage {
 	EntryClicked(String),
 	/// An entry was double-clicked: enter it, if it is a directory.
 	EntryOpened(String),
+	/// The toolbar's "up" button: enter the directory above the one on show. Carries no
+	/// path — the pane's own is the only thing it can mean, and reading it when the press
+	/// arrives is what keeps it from being a path the pane has since left.
+	ParentOpened,
 	/// An entry was right-clicked: select it and open the context menu on it.
 	EntryRightClicked(String),
 	/// The pointer moved over the pane; the payload is its pane-local position. Tracked
@@ -354,12 +358,17 @@ impl Files {
 
 	/// A batch of entries came back. Already sorted by the server task (which has the
 	/// whole listing in hand), so batches simply append and the order holds across them.
-	/// A batch for a directory we have left is dropped.
+	/// A batch for a directory we have left is dropped, and so are `.` and `..` — every
+	/// other name lands, whatever it starts with, because the toggle is what hides things.
 	pub fn chunk(&mut self, request: u64, entries: Vec<Entry>, done: bool) {
 		if request != self.request {
 			return;
 		}
-		self.entries.extend(entries);
+		self.entries.extend(
+			entries
+				.into_iter()
+				.filter(|entry| !crate::explorer::is_dot_link(&entry.name)),
+		);
 		if done {
 			self.loading = false;
 		}
@@ -591,6 +600,46 @@ mod tests {
 		let shown = files.rows(false);
 		assert_eq!(shown.len(), 1);
 		assert_eq!(shown[0].name, "notes");
+	}
+
+	#[test]
+	fn the_toggle_hides_nothing_but_dot_names_and_never_shows_the_dot_links() {
+		let (files, _) = pane(&[
+			entry(".", Kind::Dir),
+			entry("..", Kind::Dir),
+			entry(".hidden", Kind::File),
+			entry("...odd", Kind::File),
+			entry("normal", Kind::File),
+			entry("link", Kind::Link),
+		]);
+		// Everything the server listed is here except the self and parent links.
+		let names: Vec<&str> = files
+			.rows(true)
+			.iter()
+			.map(|entry| entry.name.as_str())
+			.collect();
+		assert_eq!(names, vec![".hidden", "...odd", "normal", "link"]);
+		assert_eq!(files.count(), 4, "the links are dropped, not just unshown");
+	}
+
+	#[test]
+	fn the_up_button_has_somewhere_to_go_unless_the_pane_is_at_the_root() {
+		// The one question behind both halves of the button: the toolbar asks it to decide
+		// whether to enable, and the handler asks it again when the press arrives.
+		let mut files = Files::default();
+		let parent = |files: &Files| {
+			files
+				.path()
+				.and_then(crate::explorer::parent)
+				.map(str::to_owned)
+		};
+		assert_eq!(parent(&files), None, "nothing listed yet");
+
+		let _ = files.show("/home/user");
+		assert_eq!(parent(&files).as_deref(), Some("/home"));
+
+		let _ = files.show(crate::explorer::ROOT);
+		assert_eq!(parent(&files), None, "the root has nowhere above it");
 	}
 
 	#[test]

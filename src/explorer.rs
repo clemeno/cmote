@@ -318,6 +318,7 @@ impl Explorer {
 
 	/// A listing came back: record the child folders and stop the spinner.
 	pub fn listed(&mut self, path: &str, mut children: Vec<String>) {
+		children.retain(|child| !is_dot_link(child));
 		children.sort_unstable();
 		let node = self.nodes.entry(path.to_owned()).or_default();
 		node.children = Some(children);
@@ -485,6 +486,16 @@ pub fn parent(path: &str) -> Option<&str> {
 	}
 }
 
+/// Whether a listed name is the `.` self-link or the `..` parent link. Both panels drop
+/// these two at ingest and keep everything else — dot-prefixed, "hidden", whatever the
+/// server considers a system file — because the `.*` toggle (§18, §19) is what decides
+/// visibility, and these are not hidden entries: they are this folder and the one above
+/// it, neither of which is a place to go from here. SFTP omits them today and `ls -A`
+/// leaves them out, so this is the guard that makes it true of any listing source.
+pub fn is_dot_link(name: &str) -> bool {
+	matches!(name, "." | "..")
+}
+
 /// Every folder from the root down to `path`, inclusive — the chain `reveal_if_new`
 /// opens. `/home/user` yields `/`, `/home`, `/home/user`.
 pub fn ancestors(path: &str) -> Vec<String> {
@@ -577,6 +588,15 @@ mod tests {
 		// The listing itself is untouched, so flipping back needs no re-fetch.
 		explorer.toggle_hidden();
 		assert!(explorer.rows().iter().any(|row| row.name == ".ssh"));
+	}
+
+	#[test]
+	fn the_self_and_parent_links_never_become_rows() {
+		// A server that reports `.` and `..` (SFTP omits them, `ls -A` leaves them out —
+		// neither is guaranteed) must not grow two rows that walk back up the tree.
+		let explorer = tree(&[".", "..", ".ssh", "etc"]);
+		let names: Vec<String> = explorer.rows().into_iter().map(|row| row.name).collect();
+		assert_eq!(names, vec!["/", ".ssh", "etc"]);
 	}
 
 	#[test]

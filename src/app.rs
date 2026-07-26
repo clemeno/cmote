@@ -1442,6 +1442,19 @@ impl App {
 		iced::Task::none()
 	}
 
+	/// Move into a directory from the files pane (§19): a double-clicked folder, or the
+	/// toolbar's "up" button. Entering means moving the SHELL there — the pane, the tree
+	/// and the title all follow the shell's directory, so there is one "where am I" in the
+	/// window rather than three. The pane is retargeted right away instead of waiting for
+	/// the next prompt.
+	fn enter_dir(&mut self, path: &str) {
+		let line = format!("cd {}\n", explorer::shell_quote(path));
+		self.send_command(SshCommand::Input(line.into_bytes()));
+		if let Some(request) = self.files.show(path) {
+			self.list_files(request);
+		}
+	}
+
 	/// Handle one event from the files pane (§19). Same division of labour as the tree's
 	/// handler: the model decides what an action means, this relays the network side of
 	/// it — the listings, the `cd`, the clipboard writes, the download — and refits the
@@ -1467,15 +1480,18 @@ impl App {
 				if self.files.kind_of(&path) != Some(files::Kind::Dir) {
 					return iced::Task::none();
 				}
-				let line = format!(
-					"cd {}
-",
-					explorer::shell_quote(&path)
-				);
-				self.send_command(SshCommand::Input(line.into_bytes()));
-				if let Some(request) = self.files.show(&path) {
-					self.list_files(request);
-				}
+				self.enter_dir(&path);
+			}
+			FilesMessage::ParentOpened => {
+				self.files.close_menu();
+				// The toolbar disables the button at the root and before the first listing,
+				// so this is belt and braces — and the parent is read HERE, from the
+				// directory actually on show, rather than carried in the message.
+				let Some(parent) = self.files.path().and_then(explorer::parent) else {
+					return iced::Task::none();
+				};
+				let parent = parent.to_owned();
+				self.enter_dir(&parent);
 			}
 			FilesMessage::EntryRightClicked(path) => {
 				self.files.select(&path);
