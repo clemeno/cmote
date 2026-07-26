@@ -548,6 +548,9 @@ impl App {
 			user: params.user.clone(),
 			auth_kind: self.form.auth_kind,
 			key_path,
+			// Placeholder like `name`: the stored preference wins on connect, and a
+			// brand-new target takes the default `upsert_on_connect` gives it (§14).
+			show_hidden: self.explorer.show_hidden(),
 		});
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
@@ -711,6 +714,11 @@ impl App {
 						target.auth_kind,
 						target.key_path,
 					);
+					// Restore this target's `.*` preference before the panels list anything,
+					// so the first listing is already filtered the way the user left it (§14).
+					if let Some(saved) = self.targets.find(&key) {
+						self.explorer.set_hidden(saved.show_hidden);
+					}
 					self.home_selected = Some(key);
 					if let Err(error) = self.targets.save() {
 						eprintln!("could not save targets: {error:#}");
@@ -1315,6 +1323,22 @@ impl App {
 		}
 	}
 
+	/// Write the `.*` toggle back to the connected target (§14). `connection` holds the
+	/// endpoint key, which is what the store is keyed by; there is nothing to remember
+	/// before a session exists, and nothing to write when the value has not moved.
+	fn remember_hidden(&mut self) {
+		let Some(endpoint) = self.connection.clone() else {
+			return;
+		};
+		if self
+			.targets
+			.set_show_hidden(&endpoint, self.explorer.show_hidden())
+			&& let Err(error) = self.targets.save()
+		{
+			eprintln!("could not save targets: {error:#}");
+		}
+	}
+
 	/// Handle one event from the remote folder tree (§18). The model decides what the
 	/// action means; this only relays the network side of it — the listings it asks for,
 	/// the `cd` it types into the shell, the clipboard writes — and refits the grid when
@@ -1327,7 +1351,10 @@ impl App {
 				// local emulator and the remote pty to the new column count.
 				self.refit_grid();
 			}
-			ExplorerMessage::HiddenToggled => self.explorer.toggle_hidden(),
+			ExplorerMessage::HiddenToggled => {
+				self.explorer.toggle_hidden();
+				self.remember_hidden();
+			}
 			ExplorerMessage::RowClicked(path) => {
 				if let Some(fetch) = self.explorer.toggle_node(&path) {
 					self.send_command(SshCommand::ListDir(fetch));

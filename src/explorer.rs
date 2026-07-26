@@ -230,6 +230,12 @@ impl Explorer {
 		self.menu = None;
 	}
 
+	/// Apply the dotfile preference remembered with the target we just connected to
+	/// (§14). Same display filter as `toggle_hidden`, set rather than flipped.
+	pub fn set_hidden(&mut self, show_hidden: bool) {
+		self.show_hidden = show_hidden;
+	}
+
 	/// Resize the panel from a splitter drag, clamped between `MIN_WIDTH` and `max`
 	/// (the app passes a fraction of the window, so the grid can never be squeezed out).
 	pub fn set_width(&mut self, width: f32, max: f32) {

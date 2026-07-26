@@ -629,7 +629,8 @@ The home screen (`ui/home.rs`) is the landing screen: a list of previously used
 connection **targets**, so reconnecting is a click instead of re-typing the form.
 
 - **What persists — profiles only, never secrets (§12).** A target records `name`,
-  `host`, `port`, `user`, `auth_kind`, and (for key auth) `key_path`. No password and no
+  `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path`, and the panels'
+  `show_hidden` preference. No password and no
   key passphrase is ever written. This keeps the §12 "the safest secret is the one never
   persisted" guarantee **and** keeps the store fully portable — a `targets.json` copied
   to another machine leaks nothing. The user still enters the secret on the form each
@@ -646,6 +647,12 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   (`SshEvent::Connected`), never on a mere attempt. `upsert_on_connect` adds a new target
   (named after the endpoint) or refreshes an existing endpoint's auth/key while keeping
   its custom name — so reconnecting never spawns a duplicate and never clobbers a rename.
+- **Per-target display preference.** The `.*` toggle shared by the folder tree and the
+  files pane (§18, §19) is remembered with the target: whether a server's dotfiles are
+  the point or the noise is a property of that server, not of the app. It is applied on
+  `Connected` — before the first listing, so nothing flashes — and written back only when
+  the toggle actually moves. A `targets.json` written before the field existed defaults
+  to *shown*, which is what those installs already did.
 - **Interactions** (`app.rs` + `ui/home.rs`): pick a row to **pre-fill the form**
   (host / port / user / auth / key; the secret fields start empty); **New connection**
   opens a blank form; **rename** in place via **F2** or the right-click menu (Enter

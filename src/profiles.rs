@@ -38,6 +38,18 @@ pub struct Target {
 	/// password auth; omitted from the JSON when `None` to keep the file tidy.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub key_path: Option<PathBuf>,
+	/// Whether the folder tree and the files pane list dot-prefixed entries (§18, §19).
+	/// A per-target display preference, not a secret: which server this is decides
+	/// whether its dotfiles are the point or the noise, so the `.*` toggle is
+	/// remembered here rather than globally.
+	#[serde(default = "shown_by_default")]
+	pub show_hidden: bool,
+}
+
+/// Serde default for `show_hidden` — matches the panels' own default (shown), so a
+/// `targets.json` written before this field existed keeps behaving as it did.
+fn shown_by_default() -> bool {
+	true
 }
 
 impl Target {
@@ -107,6 +119,7 @@ impl Targets {
 					user: user.to_string(),
 					auth_kind,
 					key_path,
+					show_hidden: shown_by_default(),
 				});
 			}
 		}
@@ -131,6 +144,20 @@ impl Targets {
 		}
 		target.name = new_name.to_string();
 		self.sort();
+		true
+	}
+
+	/// Remember whether this target's panels list dot-prefixed entries (§18, §19).
+	/// Returns whether anything changed, so the caller only rewrites the file when the
+	/// preference actually moved — the toggle is cheap, the disk write need not be.
+	pub fn set_show_hidden(&mut self, endpoint: &str, show_hidden: bool) -> bool {
+		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
+			return false;
+		};
+		if target.show_hidden == show_hidden {
+			return false;
+		}
+		target.show_hidden = show_hidden;
 		true
 	}
 
@@ -227,6 +254,7 @@ mod tests {
 			user: user.to_string(),
 			auth_kind: AuthKind::Password,
 			key_path: None,
+			show_hidden: true,
 		}
 	}
 
@@ -333,6 +361,37 @@ mod tests {
 
 		// Assert
 		assert_eq!(loaded.items(), targets.items());
+	}
+
+	#[test]
+	fn the_hidden_toggle_is_remembered_per_target() {
+		// Arrange: two targets, both starting from the default (shown).
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None);
+
+		// Act: hide dotfiles on the first one only.
+		assert!(targets.set_show_hidden("u@h:1", false));
+
+		// Assert: it stuck, its neighbour is untouched, and setting the same value again
+		// reports "nothing changed" so the caller skips the write.
+		assert!(!targets.find("u@h:1").unwrap().show_hidden);
+		assert!(targets.find("u@h:2").unwrap().show_hidden);
+		assert!(!targets.set_show_hidden("u@h:1", false));
+		assert!(!targets.set_show_hidden("nobody@nowhere:22", false));
+	}
+
+	#[test]
+	fn a_targets_file_without_the_hidden_field_still_shows_dotfiles() {
+		// A store written before the preference existed must keep its old behaviour.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(
+			&path,
+			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"password"}]"#,
+		)
+		.unwrap();
+		assert!(Targets::load_from(&path).items()[0].show_hidden);
 	}
 
 	#[test]
