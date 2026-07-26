@@ -16,6 +16,7 @@ use iced::widget::{text, text_editor};
 use tokio::sync::mpsc;
 
 use crate::bridge::{self, SshCommand, SshEvent};
+use crate::explorer::{self, ExplorerMessage};
 use crate::secret::Secret;
 use crate::term;
 use crate::ui;
@@ -45,6 +46,11 @@ const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
 const INITIAL_COLS: u16 = 180;
 const INITIAL_ROWS: u16 = 40;
 
+/// The most of the window the explorer panel may be dragged to (§18). A splitter with
+/// no ceiling can push the terminal grid down to a single column, which is a state the
+/// user then has to drag their way back out of.
+const MAX_PANEL_FRACTION: f32 = 0.6;
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -57,10 +63,15 @@ pub fn run() -> iced::Result {
 		.title(App::title)
 		.font(MONO_FONT)
 		.font(MONO_FONT_BOLD)
-		// Open wide enough for a 180-column terminal (the size is derived from the grid
-		// metrics so it stays in step with `grid_size`).
+		// Open wide enough for a 180-column terminal *and* the explorer panel beside it
+		// (the size is derived from the grid metrics so it stays in step with
+		// `grid_size`, §18).
 		.window(iced::window::Settings {
-			size: ui::terminal::window_size(INITIAL_COLS, INITIAL_ROWS),
+			size: ui::terminal::window_size(
+				INITIAL_COLS,
+				INITIAL_ROWS,
+				explorer::DEFAULT_WIDTH + explorer::SPLITTER_WIDTH,
+			),
 			..iced::window::Settings::default()
 		})
 		.subscription(App::subscription)
@@ -205,6 +216,10 @@ pub struct App {
 	/// (§17). `ponytail:` no timed fade — that would need a timer subscription for a
 	/// line of text.
 	upload_notice: Option<String>,
+	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
+	/// width, expansion state and selection; `app` only relays its events and turns the
+	/// paths it asks for into `SshCommand::ListDir`.
+	explorer: explorer::Explorer,
 }
 
 /// Where an upload has got to (§17). Only one upload runs at a time, so this is a plain
@@ -325,6 +340,10 @@ pub enum Message {
 	UploadOverwriteConfirmed,
 	/// The user backed out of an upload confirmation (Cancel / ✕ / backdrop / Esc).
 	UploadCancelled,
+	/// Something happened in the remote folder tree (§18). Nested rather than flattened
+	/// — the panel has a dozen interactions of its own, and burying them in this enum
+	/// would drown the screens that only have two or three.
+	Explorer(ExplorerMessage),
 	/// A click that landed on a dialog card itself (not a button, not the backdrop).
 	/// It carries no intent — its only job is to be *captured* so the click does not
 	/// fall through to the dimming backdrop below and dismiss the dialog (§10).
@@ -446,6 +465,7 @@ impl App {
 			Message::UploadConfirmed => self.start_upload(false),
 			Message::UploadOverwriteConfirmed => self.start_upload(true),
 			Message::UploadCancelled => self.upload = None,
+			Message::Explorer(message) => return self.on_explorer(message),
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
 			Message::Ignored => {}
@@ -674,14 +694,39 @@ impl App {
 				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
 				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
+				// Open the tree at the root so the panel has something in it before the
+				// shell has said anything (§18).
+				if let Some(path) = self.explorer.expand(explorer::ROOT, false) {
+					self.send_command(SshCommand::ListDir(path));
+				}
 				return fit_terminal();
 			}
 			SshEvent::Output(bytes) => {
-				// Feed raw shell output into the emulator; the next render draws it.
-				if let Some(terminal) = self.terminal.as_mut() {
-					terminal.process(&bytes);
+				// Feed raw shell output into the emulator; the next render draws it. The
+				// same bytes may carry a cwd announcement, so read the (possibly new)
+				// directory out before the borrow ends and let the tree follow it (§18).
+				let cwd = match self.terminal.as_mut() {
+					Some(terminal) => {
+						terminal.process(&bytes);
+						terminal.cwd().map(str::to_owned)
+					}
+					None => None,
+				};
+				if let Some(cwd) = cwd {
+					let needed = self.explorer.reveal_if_new(&cwd);
+					self.list_dirs(needed);
 				}
 			}
+			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
+			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
+			SshEvent::RenameDone { from, to } => {
+				// The folder moved: re-list its parent so the row reappears under the new
+				// name, in the right sort position.
+				if let Some(parent) = self.explorer.renamed(&from, &to) {
+					self.send_command(SshCommand::ListDir(parent));
+				}
+			}
+			SshEvent::RenameFailed(reason) => self.explorer.set_notice(reason),
 			SshEvent::UploadExists(path) => {
 				// Nothing has been written yet: the task checked first and stopped. Ask,
 				// and only a confirmed answer re-sends with `overwrite` set (§17).
@@ -733,7 +778,9 @@ impl App {
 		// Remember the window size on every screen so a dialog (which can appear before a
 		// terminal exists) can be centred and its dragging clamped (§10).
 		self.window_size = size;
-		let (rows, cols) = ui::terminal::grid_size(size);
+		// The explorer panel takes its width out of the grid, so the same call serves a
+		// window resize and a panel resize (§18).
+		let (rows, cols) = ui::terminal::grid_size(size, self.explorer.reserved());
 		let changed = match self.terminal.as_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
 				terminal.resize(rows, cols);
@@ -1017,6 +1064,16 @@ impl App {
 			return;
 		}
 
+		// And the same for the folder tree's inline rename (§18): the field types through
+		// the widget tree, Esc abandons the edit, and nothing reaches the shell meanwhile
+		// — otherwise renaming a folder would also be typing at the remote prompt.
+		if self.explorer.editing().is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.explorer.cancel_rename();
+			}
+			return;
+		}
+
 		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
 		// form; read that mode off the emulator so `encode` sends the sequences the
 		// remote program actually listens for. No terminal means no session — treat
@@ -1111,10 +1168,10 @@ impl App {
 	}
 
 	/// Drop all grid-interaction state — the selection, any in-progress drag, an open
-	/// context menu, the Disconnect modal, and the upload flow. Called whenever a shell
-	/// opens or closes so nothing (a stale highlight, a half-finished drag, an open
-	/// overlay, a file picked for the previous session) carries across sessions (§10,
-	/// §17).
+	/// context menu, the Disconnect modal, the upload flow, and everything the folder
+	/// tree learned. Called whenever a shell opens or closes so nothing (a stale
+	/// highlight, a half-finished drag, an open overlay, a file picked for the previous
+	/// session, one server's directories) carries across sessions (§10, §17, §18).
 	fn clear_grid_interaction(&mut self) {
 		self.selection = None;
 		self.selecting = false;
@@ -1124,6 +1181,9 @@ impl App {
 		self.upload_file = None;
 		self.upload_dest.clear();
 		self.upload_notice = None;
+		// The panel's own width and visibility are user preferences, not session state,
+		// so `reset` deliberately leaves them alone.
+		self.explorer.reset();
 	}
 
 	/// The Upload button (§17): show the destination before sending anything. The path
@@ -1184,6 +1244,117 @@ impl App {
 			self.upload = Some(UploadState::Running { sent: 0, total });
 		} else {
 			self.upload = None;
+		}
+	}
+
+	/// Handle one event from the remote folder tree (§18). The model decides what the
+	/// action means; this only relays the network side of it — the listings it asks for,
+	/// the `cd` it types into the shell, the clipboard writes — and refits the grid when
+	/// the panel's footprint changes.
+	fn on_explorer(&mut self, message: ExplorerMessage) -> iced::Task<Message> {
+		match message {
+			ExplorerMessage::Toggled => {
+				self.explorer.toggle();
+				// The panel's width just moved between it and the grid: reflow both the
+				// local emulator and the remote pty to the new column count.
+				self.refit_grid();
+			}
+			ExplorerMessage::HiddenToggled => self.explorer.toggle_hidden(),
+			ExplorerMessage::RowClicked(path) => {
+				if let Some(fetch) = self.explorer.toggle_node(&path) {
+					self.send_command(SshCommand::ListDir(fetch));
+				}
+			}
+			ExplorerMessage::RowRightClicked(path) => {
+				self.explorer.select(&path);
+				self.explorer.open_menu(path);
+			}
+			ExplorerMessage::PointerMoved(point) => self.explorer.set_pointer(point),
+			ExplorerMessage::MenuDismissed => self.explorer.close_menu(),
+			ExplorerMessage::Expand(path) => {
+				self.explorer.close_menu();
+				// Forced, so the menu item doubles as the refresh for a directory that
+				// changed under us (a `mkdir` typed in the shell).
+				if let Some(fetch) = self.explorer.expand(&path, true) {
+					self.send_command(SshCommand::ListDir(fetch));
+				}
+			}
+			ExplorerMessage::Collapse(path) => {
+				self.explorer.close_menu();
+				self.explorer.collapse(&path);
+			}
+			ExplorerMessage::Cd(path) => {
+				self.explorer.close_menu();
+				// Typed into the shell exactly as the user would type it, quoted so a
+				// folder name carrying a quote stays one argument (§18). `ponytail:` a
+				// POSIX shell is assumed, and if a full-screen program (vim, less) is
+				// running these characters go to that program instead — cmote cannot tell
+				// a prompt from an editor. Upgrade path: only offer this between prompts,
+				// which the OSC announcements could mark.
+				let line = format!("cd {}\r", explorer::shell_quote(&path));
+				self.send_command(SshCommand::Input(line.into_bytes()));
+			}
+			ExplorerMessage::RenameStarted(path) => {
+				self.explorer.start_rename(path);
+				// The root has no parent, so it declines to be renamed; only focus the
+				// field when an edit actually opened.
+				if self.explorer.editing().is_some() {
+					return iced::widget::operation::focus(ui::explorer::RENAME_INPUT_ID);
+				}
+			}
+			ExplorerMessage::RenameEdited(text) => self.explorer.edit_rename(text),
+			ExplorerMessage::RenameCommitted => {
+				if let Some((from, to)) = self.explorer.commit_rename() {
+					self.send_command(SshCommand::RenameDir { from, to });
+				}
+			}
+			ExplorerMessage::CopyName(path) => {
+				self.explorer.close_menu();
+				return iced::clipboard::write(explorer::name(&path).to_owned());
+			}
+			ExplorerMessage::CopyRelative(path) => {
+				self.explorer.close_menu();
+				// The menu disables this item without a cwd, so this is belt and braces.
+				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
+					return iced::Task::none();
+				};
+				return iced::clipboard::write(explorer::relative(cwd, &path));
+			}
+			ExplorerMessage::CopyPath(path) => {
+				self.explorer.close_menu();
+				return iced::clipboard::write(path);
+			}
+			ExplorerMessage::SplitterGrabbed => self.explorer.set_dragging(true),
+			ExplorerMessage::SplitterDragged(pointer) => {
+				if self.explorer.dragging() {
+					// The splitter sits at the panel's left edge and the panel runs to the
+					// window's right edge, so the pointer's distance from that edge IS the
+					// width — no drag anchor to track.
+					let max = self.window_size.width * MAX_PANEL_FRACTION;
+					self.explorer
+						.set_width(self.window_size.width - pointer.x, max);
+					self.refit_grid();
+				}
+			}
+			ExplorerMessage::SplitterReleased => self.explorer.set_dragging(false),
+		}
+		iced::Task::none()
+	}
+
+	/// Reflow the terminal to the current window *and* panel footprint (§18). The panel
+	/// takes its width out of the grid, so showing, hiding or resizing it changes the
+	/// column count exactly as a window resize would — and goes through the same path.
+	fn refit_grid(&mut self) {
+		self.on_window_resized(self.window_size);
+	}
+
+	/// Ask the SSH task for each folder listing the tree still needs (§18). Stops at the
+	/// first send failure, which has already surfaced its own error.
+	fn list_dirs(&mut self, paths: Vec<String>) {
+		for path in paths {
+			if !self.send_command(SshCommand::ListDir(path)) {
+				return;
+			}
 		}
 	}
 
@@ -1253,6 +1424,7 @@ impl App {
 						state: self.upload,
 						notice: self.upload_notice.as_deref(),
 					},
+					&self.explorer,
 				),
 				None => text("terminal starting…").into(),
 			},

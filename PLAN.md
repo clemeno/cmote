@@ -11,12 +11,14 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v1.4.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v2.0.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
 light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
-working directory and uploads a local file into it over SFTP, §17). Both targets are supported
+working directory and uploads a local file into it over SFTP, §17; **v2.0.0** puts a
+2D folder tree of the remote filesystem beside the terminal — browse, jump, rename,
+copy paths, §18). Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -171,16 +173,20 @@ cmote/
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
+    ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── ui/
     │   ├── mod.rs         view helpers; host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
+    │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
+    │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
     ├── ssh/
-    │   ├── mod.rs
+    │   ├── mod.rs         module tree + `open_sftp`, shared by upload and browse (§17, §18)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
     │   ├── auth.rs        method selection + attempts (publickey, password)
+    │   ├── browse.rs      list + rename remote folders over sftp, falling back to `ls`/`mv` (§18)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     │   ├── upload.rs      file upload over an sftp channel: exists-check, stream, progress (§17)
@@ -382,6 +388,22 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below),
   floating over the dimmed connect form.
+- **Context menus** (`ui::menu`, done — v2.0): the three right-click menus — the grid's
+  Copy/Paste (§10), the home list's Open/Rename/Delete (§14) and the folder tree's seven
+  items (§18) — share one chrome, the way the dialogs share `ui::dialog`. They had drifted
+  into three looks (raised buttons, flat themed buttons, transparent ones; three paddings,
+  three widths, three copies of the click-away layer), so the definition now lives in one
+  place: a dark rounded panel of a fixed width (set by the longest item any of them
+  carries), full-width items that highlight on hover, a **dimmed** label for a disabled
+  item (a transparent button gives no other signal — the folder tree's "Copy relative
+  path" is disabled without a cwd), and one `dismiss_layer` taking the caller's cancel
+  message. Positioning stays per-screen, because the three anchor differently: the
+  pointer, a row index, the panel's right edge.
+  - The home screen's menu is the one place this **deliberately overrides** that screen's
+    "take every colour from the theme" rule (§14). The rule exists to stop a surface that
+    themes its background but not its foreground; this panel sets *both*, so it stays
+    readable in light and dark alike — and one menu that looks the same everywhere beats
+    one that changes identity per screen.
 - **Dialogs** (`ui::dialog`, done): the disconnect confirmation, the host-key prompt, the
   passphrase prompt, and the error notice all wear one chrome — a **header bar** with the
   question as a title on the left and a transparent **close ✕** on the right (wired to the
@@ -396,6 +418,15 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     error) over the connect form (`App::form_with_dialog` stacks form + backdrop + card),
     the disconnect modal over the live shell. A click on the backdrop dismisses with the
     dialog's safe action (reject / cancel / back / cancel), the same as its ✕.
+  - **Overlays are always a `stack`, never a conditional root** (fixed in v2.0): a screen
+    that can show overlays builds a `Vec` of layers with the page at index 0 and *always*
+    wraps it in a `stack`, even when nothing is over it. iced keys each widget's internal
+    state to its position in the widget tree, and `Tree::diff` discards the whole subtree
+    when the root's type changes — so returning the bare page when there is no overlay and
+    a `stack` when there is one reset every stateful widget underneath. It showed up as
+    the folder tree (§18) and the target list (§14) scrolling back to the top whenever a
+    menu or a dialog opened. Appending layers keeps the page at index 0, where
+    `diff_children` preserves its state.
   - **Card swallows its own clicks**: the card is wrapped in a `mouse_area` that captures
     presses (a no-op `Message::Ignored`), so clicking the dialog does not fall through to
     the dimming backdrop and dismiss it; only a click *outside* the card reaches the
@@ -438,6 +469,10 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     paste always goes to the remote's stdin at its own cursor — a terminal cannot
     "replace" a selection the way an editor can — and the highlight is kept after a paste.
     Paste wrapping/injection safety lives in `term::keymap::encode_paste` (§9).
+  - **Folder tree beside the grid** (done, v2.0): the right of the screen holds the remote
+    folder explorer, with a draggable splitter between it and the grid and a status-bar
+    button that hides it. Its width comes out of the grid's own width, so the same
+    `grid_size` call reflows the pty for a panel resize and a window resize alike (§18).
 - **Error** (`Screen::Error`): a generic, non-leaking message (selectable/copyable) plus
   a "Back" button, in the shared dialog chrome floating over the dimmed connect form.
   Closing (✕) or a backdrop click goes Back. Detail is logged, not shown (§12).
@@ -679,10 +714,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   support, certificate auth.
 - **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
-- **SFTP / file transfer** — *partly done (v1.4)*: a one-way **upload** of a chosen local
-  file into the shell's current directory (§17). Still deferred: download, a remote file
-  browser, directory (recursive) transfers, cancelling a transfer in flight, resuming an
-  interrupted one, and preserving the local file's mode/timestamps.
+- **SFTP / file transfer** — *partly done (v1.4, v2.0)*: a one-way **upload** of a chosen
+  local file into the shell's current directory (§17), and a **folder tree** of the remote
+  filesystem that browses and renames (§18). Still deferred: download, listing *files*
+  (the tree shows folders), creating and deleting remote directories, directory
+  (recursive) transfers, cancelling a transfer in flight, resuming an interrupted one,
+  drag-and-drop onto a tree folder, and preserving the local file's mode/timestamps.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
@@ -777,3 +814,129 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   (as it already does for the Disconnect modal), so typing goes to the path field and not
   to the remote shell; `Esc` cancels a confirmation and a running transfer ignores it —
   there is no cancel to give it (deferred, §16).
+
+---
+
+## 18. Remote folder explorer (v2.0)
+
+The headline of v2: a **2D tree of the remote filesystem** to the right of the terminal,
+so the far side can be navigated with the mouse instead of `cd` and `ls`. It is split
+three ways — a pure model (`explorer.rs`), a pure view (`ui/explorer.rs`), and the
+network calls (`ssh/browse.rs`) — which is what keeps the interesting rules (relative
+paths, what collapsing does, which folders a `cd` reveals) unit-testable with no server.
+
+### The model (`explorer.rs`)
+
+- **Folders only, POSIX paths.** The tree lists directories, not files: files have no
+  action attached to them yet (download is still deferred, §16), and leaving them out
+  keeps both the row count and the traffic down. Paths are `/`-separated because that is
+  what SFTP puts on the wire whatever the server runs on — one dialect, no guessing.
+- **Lazy, because a filesystem is not a list.** A folder's children are unknown until
+  something asks. `expand` and `reveal_if_new` therefore *return the paths that still need
+  fetching* rather than fetching anything, and `app` turns each into one
+  `SshCommand::ListDir`. Walking eagerly would be unbounded work against someone else's
+  disk.
+- **`children: Option<Vec<String>>`.** `None` means never listed, `Some(vec![])` means
+  listed and empty. Collapsing that distinction is what would make a refused directory
+  re-request itself on every redraw.
+- **Collapse takes the subtree with it.** Closing a folder closes everything under it, so
+  re-opening shows one clean level again — which matches the menu's Expand, which opens
+  exactly one level. Nothing is discarded, so re-expanding costs no round trip.
+- **Hidden folders are a filter, not a fetch.** Listings always include dot-prefixed
+  entries; the panel's `[x] .*` toggle only decides whether the rows are drawn, so
+  flipping it is free. They are shown by default — on a server, `.ssh` / `.config` are
+  usually the reason the tree was opened.
+
+### Following the shell
+
+The cwd tracker from v1.4 (§17) already reports the remote directory on every prompt, so
+the tree follows it for free: `reveal_if_new` opens the whole chain from `/` down to the
+directory, opens the directory itself (so its contents are visible, not just its row),
+selects it, and returns the ancestors still needing a listing. It compares against the
+last revealed path first, because the shell re-announces the same directory at *every*
+prompt and this runs on every chunk of output. It only ever expands — a folder the user
+opened is never closed behind their back.
+
+`ponytail:` POSIX paths only. A remote that announces a native Windows directory
+(`C:\Users\…`, OSC 9;9) does not sit anywhere on this `/`-rooted tree, so it is left alone
+rather than revealed at a made-up place. Upgrade path: root the tree at the drive when the
+announced path carries one.
+
+### Reading the server (`ssh/browse.rs`)
+
+- **SFTP first.** `read_dir` returns typed entries, so a directory is a directory because
+  the server said so — no text to parse, and names with spaces, quotes or newlines survive
+  intact. The channel is opened on the first listing and **kept for the session**: a tree
+  asks many small questions, and paying channel setup for each would be felt. The upload
+  path keeps its own short-lived channel on purpose — it closes the session when the
+  transfer ends, which would take a shared one down with it. Only the *opening* is shared
+  (`ssh::open_sftp`), so the two cannot disagree about how the subsystem is requested.
+- **A symlink is stat'ed, not assumed.** An entry's own type says nothing about what a
+  symlink points at, so a symlink is followed with one `metadata` call and kept only if
+  the target is a directory. `||` short-circuits, so a real directory pays nothing.
+- **`ls` as the fallback.** A server with the sftp subsystem switched off still gets a
+  tree: an exec channel runs `ls -1Ap -- '<path>'` and the lines ending in `/` are the
+  folders; rename becomes `if [ -e to ]; then exit 1; fi; mv -- from to`, one command so
+  nothing can slip into the destination between the test and the move. `ponytail:` this is
+  text, and text lies — a folder whose name contains a newline reads as two entries, and a
+  symlink to a directory is missed. Both are correct on the SFTP path, which is what runs
+  unless the server refuses. Upgrade path: `find -maxdepth 1 -type d -print0`.
+- **Off the shell pump.** Only the channel opening happens inline (it borrows the session
+  handle); the listing itself is spawned, so a slow directory never stalls terminal
+  output. Output is capped at 1 MiB — an enormous or non-listing answer fails cleanly
+  instead of growing our memory (§12).
+- **Renaming checks first.** SFTP's rename refuses an occupied destination on most servers
+  but not all, and a folder quietly replaced cannot be undone, so `try_exists` gates it and
+  a server that will not answer is treated as a failure rather than as "the path is free".
+
+### The panel (`ui/explorer.rs`)
+
+- **Layout.** A fixed-width column to the right of the grid with a draggable splitter
+  between them, and a status-bar button that hides the whole thing. The panel's width is
+  taken out of the grid's, so `grid_size` subtracts `Explorer::reserved` and a splitter
+  drag reflows the remote pty exactly as a window resize does — one code path, and a
+  round-trip test locks `window_size`/`grid_size` together with the panel included. The
+  drag is clamped to 60% of the window, because a splitter with no ceiling can leave the
+  terminal one column wide and the user dragging their way back out.
+- **Right-click menu**, on the folder under the pointer: *Open in terminal*, *Rename…*,
+  *Copy name*, *Copy relative path*, *Copy full path*, *Expand (refresh)*, *Collapse*.
+  "Copy relative path" is disabled when the shell has never announced a cwd — there is
+  nothing to be relative to. "Expand" force-refetches, which is also the refresh for a
+  directory changed from the shell (a `mkdir` typed at the prompt).
+- **Relative paths walk both ways.** `relative` emits `..` for every level the two paths do
+  not share, so the result is usable from the shell's current directory even when the
+  folder sits on another branch (`/home/user` → `/var/log` gives `../../var/log`).
+- **"Open in terminal" types `cd`.** The path is single-quote escaped, so a folder called
+  `'; rm -rf ~` reaches `cd` as a name and not as commands — this string goes straight into
+  a live shell, which is exactly why it is quoted. `ponytail:` a POSIX shell is assumed,
+  and if a full-screen program (vim, less) is running, those characters go to *it* — cmote
+  cannot tell a prompt from an editor. Upgrade path: only offer the item between prompts,
+  which the OSC announcements could mark.
+- **Rename is inline**, the same interaction as the home screen's F2 rename (§14): the row
+  becomes a field, Enter commits, Esc abandons. A blank name, a name containing `/` (that
+  would *move* the folder, not rename it) and an unchanged name all just close the edit.
+  While the field is open the terminal's key listener swallows keys, so renaming a folder
+  is not also typing at the remote prompt. On success the tree forgets the old subtree and
+  re-lists the parent, so the row reappears under its new name in sort order. **The shell's
+  own cwd is not updated** — a shell sitting inside a renamed folder is left on a stale
+  path, which is the server's semantics, not something cmote can fix from outside.
+- **Failures are a notice line**, under the tree, not the error screen: a directory the
+  user may not read must not tear down a working shell (the same call as an upload
+  failure, §17). The path is the user's own, so naming it is what makes it actionable.
+- **Fixed colours, like the grid.** Every surface in the panel sets background *and*
+  foreground together, so contrast does not depend on the system light/dark preference —
+  the trap §14 documents.
+- **The menu opens under the cursor.** A right-press carries no coordinates, so the panel
+  is wrapped in a `mouse_area` that tracks the pointer — the same trick the terminal grid
+  uses (§10). A child `mouse_area` only captures *presses*, so the rows' own click
+  handlers do not swallow the moves. The anchor is **frozen into the open menu** rather
+  than read live: the panel keeps reporting moves while the menu is up (the dismiss layer
+  above it handles no moves, so they fall straight through), and a menu that tracked them
+  would slide out from under the cursor before an item could be reached. The menu is laid
+  out right-aligned with a
+  padding of `panel width − pointer.x − menu width`: since the panel's right edge is the
+  window's right edge, that puts the menu's left edge under the cursor, and clamping the
+  padding at a minimum slides a menu opened near the edge back inside the window instead
+  of letting it hang off. Placing from the pointer rather than from a row index (what the
+  home screen does, §14) is also what makes it correct on a scrolled tree — iced does not
+  expose the scrollable's offset, but the pointer needs no such correction.

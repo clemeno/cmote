@@ -21,6 +21,7 @@ use iced::widget::{
 use iced::{Color, Element, Font, Length, Point, Size};
 
 use crate::app::{Message, UploadState};
+use crate::explorer::Explorer;
 use crate::term::Terminal;
 use crate::ui::selection::{Cell, Selection};
 
@@ -70,10 +71,6 @@ const DEFAULT_BG: Color = Color::from_rgb8(0x1e, 0x1e, 0x1e);
 /// the default light foreground; selected cells keep their own fg, only the fill
 /// changes, so text stays legible while the region is obviously highlighted.
 const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
-
-/// The right-click context menu's panel background (§10) — slightly lighter than
-/// the status bar so it stands out as a floating surface over the grid.
-const MENU_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 
 /// The body copy for the disconnect confirmation dialog (§10). Public so `app` can
 /// seed it into the selectable dialog buffer when the modal opens.
@@ -169,6 +166,7 @@ pub fn view<'a>(
 	menu: Option<Point>,
 	modals: Modals<'a>,
 	upload: UploadView<'a>,
+	explorer: &'a Explorer,
 ) -> Element<'a, Message> {
 	let Modals {
 		confirm_disconnect,
@@ -215,11 +213,30 @@ pub fn view<'a>(
 	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
 	let has_selection = selection.is_some_and(|selection| !selection.is_empty());
 
-	// Bar on top (fixed height), grid below it filling the remaining window. The bar
-	// borrows the upload labels, which is why the base takes the view's `'a` lifetime.
+	// Under the bar: the grid takes what is left after the explorer panel and its
+	// splitter (§18). The grid is `Fill`, so hiding the panel hands its width straight
+	// back — `grid_size` subtracts the same `Explorer::reserved`, which is what keeps the
+	// reflow math in step with this layout.
+	let body: Element<'a, Message> = if explorer.visible() {
+		iced::widget::row![
+			interactive_grid,
+			crate::ui::explorer::splitter(),
+			crate::ui::explorer::panel(explorer),
+		]
+		.spacing(0)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.into()
+	} else {
+		interactive_grid.into()
+	};
+
+	// Bar on top (fixed height), the grid + panel below it filling the remaining window.
+	// The bar borrows the upload labels, which is why the base takes the view's `'a`
+	// lifetime.
 	let base: Element<'a, Message> = column![
-		status_bar(endpoint, has_selection, upload),
-		interactive_grid
+		status_bar(endpoint, has_selection, upload, explorer.visible()),
+		body
 	]
 	.spacing(0)
 	.width(Length::Fill)
@@ -232,8 +249,21 @@ pub fn view<'a>(
 	// vector — and the whole view — takes that `'a` lifetime.
 	let mut layers: Vec<Element<'a, Message>> = vec![base];
 	if let Some(point) = menu {
-		layers.push(dismiss_layer());
+		layers.push(crate::ui::menu::dismiss_layer(Message::MenuDismissed));
 		layers.push(context_menu(point, has_selection));
+	}
+	// The explorer's own right-click menu (§18), placed against the panel rather than
+	// the pointer, and its click-away dismiss layer.
+	if let Some(panel_menu) =
+		crate::ui::explorer::context_menu(explorer, terminal.cwd(), STATUS_BAR_HEIGHT)
+	{
+		layers.push(crate::ui::explorer::dismiss_layer());
+		layers.push(panel_menu);
+	}
+	// While the splitter is being dragged, a transparent layer on top follows the
+	// pointer everywhere — so the resize keeps tracking outside the bar (§18).
+	if explorer.dragging() {
+		layers.push(crate::ui::explorer::drag_layer());
 	}
 	if confirm_disconnect {
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
@@ -253,15 +283,16 @@ pub fn view<'a>(
 		Some(UploadState::Running { .. }) | None => {}
 	}
 
-	// A lone base needs no stack; otherwise layer the overlays over it.
-	if layers.len() == 1 {
-		layers.pop().expect("layers holds the base element")
-	} else {
-		stack(layers)
-			.width(Length::Fill)
-			.height(Length::Fill)
-			.into()
-	}
+	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
+	// (a scrollable's offset, here the folder tree's) against its position in the widget
+	// tree, so returning the bare base when there are no overlays and a `stack` when
+	// there is one changes the tree's shape — and the tree scrolled itself back to the
+	// top every time a menu or a dialog opened. A one-child stack costs a layout node
+	// and keeps the base at the same position throughout (§18).
+	stack(layers)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.into()
 }
 
 /// The status bar (§10, §17): three zones — Copy / Paste / File… / Upload on the left,
@@ -275,6 +306,7 @@ fn status_bar<'a>(
 	endpoint: &str,
 	has_selection: bool,
 	upload: UploadView<'a>,
+	explorer_visible: bool,
 ) -> Element<'a, Message> {
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
@@ -286,6 +318,17 @@ fn status_bar<'a>(
 	let idle = upload.state.is_none();
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
 		.on_press_maybe((idle && upload.file.is_some()).then_some(Message::UploadPressed));
+	// The explorer toggle (§18): its label says what the panel currently is, so the
+	// button reads as a state rather than a command.
+	let tree = button(
+		text(if explorer_visible {
+			"Folders ▸"
+		} else {
+			"Folders ◂"
+		})
+		.size(STATUS_BAR_TEXT),
+	)
+	.on_press(Message::Explorer(crate::explorer::ExplorerMessage::Toggled));
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
@@ -309,7 +352,7 @@ fn status_bar<'a>(
 	let center = container(center_zone(endpoint, upload))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
-	let right = container(disconnect)
+	let right = container(row![tree, disconnect].spacing(10))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right);
 
@@ -385,23 +428,20 @@ pub fn human_bytes(bytes: u64) -> String {
 	format!("{:.1} TiB", value / (KIB * KIB * KIB * KIB))
 }
 
-/// The right-click context menu (§10): a small floating panel with Copy selection
-/// and Paste, anchored at the click. Copy is disabled without a selection (same
-/// rule as the status bar). `point` is local to the grid, which sits below the
-/// status bar in the stack, so shift it down by the bar height to place the panel
-/// under the cursor. `ponytail:` no edge clamping — near the window's right/bottom
+/// The right-click context menu (§10): Copy selection and Paste in the shared menu
+/// chrome (`ui::menu`), anchored at the click. Copy is disabled without a selection (same
+/// rule as the status bar), which the chrome dims. `point` is local to the grid, which
+/// sits below the status bar in the stack, so shift it down by the bar height to place the
+/// panel under the cursor. `ponytail:` no edge clamping — near the window's right/bottom
 /// the panel can run past the edge; good enough for v1.
 fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> {
-	let copy = button(text("Copy selection").size(STATUS_BAR_TEXT))
-		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
-	let paste = button(text("Paste").size(STATUS_BAR_TEXT)).on_press(Message::PastePressed);
-
-	let panel = container(column![copy, paste].spacing(2))
-		.style(|_theme| container::Style {
-			background: Some(MENU_BG.into()),
-			..container::Style::default()
-		})
-		.padding(4);
+	let panel = crate::ui::menu::panel(vec![
+		crate::ui::menu::item(
+			"Copy selection".to_owned(),
+			has_selection.then_some(Message::CopyPressed),
+		),
+		crate::ui::menu::item("Paste".to_owned(), Some(Message::PastePressed)),
+	]);
 
 	// A full-size transparent container whose padding positions the panel at the
 	// click point (top-left aligned by default).
@@ -414,16 +454,6 @@ fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> 
 			bottom: 0.0,
 			left: point.x,
 		})
-		.into()
-}
-
-/// A full-window invisible layer that sits under the context menu (§10): any click
-/// that misses the menu lands here and dismisses it. Right-press dismisses too, so
-/// a second right-click never stacks two menus.
-fn dismiss_layer() -> Element<'static, Message> {
-	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
-		.on_press(Message::MenuDismissed)
-		.on_right_press(Message::MenuDismissed)
 		.into()
 }
 
@@ -521,13 +551,14 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
 }
 
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
-/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top, then
-/// the grid's own padding is subtracted on both axes. Rounds down so the last
+/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top, the explorer
+/// panel and its splitter take `reserved` off the width (zero when the panel is hidden,
+/// §18), then the grid's own padding is subtracted on both axes. Rounds down so the last
 /// cell is never clipped, and clamps to at least 1×1 so the emulator always has
-/// a valid size. The app calls this on a window resize to reflow both the local
-/// emulator and the remote pty (§9).
-pub fn grid_size(area: Size) -> (u16, u16) {
-	let usable_width = area.width - 2.0 * GRID_PADDING;
+/// a valid size. The app calls this on a window resize — and on a panel resize — to
+/// reflow both the local emulator and the remote pty (§9).
+pub fn grid_size(area: Size, reserved: f32) -> (u16, u16) {
+	let usable_width = area.width - reserved - 2.0 * GRID_PADDING;
 	let usable_height = area.height - STATUS_BAR_HEIGHT - 2.0 * GRID_PADDING;
 	let cols = (usable_width / CELL_WIDTH)
 		.floor()
@@ -540,11 +571,12 @@ pub fn grid_size(area: Size) -> (u16, u16) {
 
 /// The window (logical) size whose content fits exactly a `cols`×`rows` grid — the
 /// inverse of `grid_size`, built from the same metrics so the two never drift. Adds the
-/// grid padding on both axes and the status-bar height, plus half a cell of slack so
-/// float rounding in `grid_size` cannot come back a row/column short. `run` uses it to
-/// open the window sized for a chosen terminal size (§10, §11).
-pub fn window_size(cols: u16, rows: u16) -> Size {
-	let width = f32::from(cols) * CELL_WIDTH + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
+/// grid padding on both axes, the status-bar height and the space the explorer panel
+/// reserves (§18), plus half a cell of slack so float rounding in `grid_size` cannot come
+/// back a row/column short. `run` uses it to open the window sized for a chosen terminal
+/// size *and* the panel beside it (§10, §11).
+pub fn window_size(cols: u16, rows: u16, reserved: f32) -> Size {
+	let width = f32::from(cols) * CELL_WIDTH + reserved + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
 	let height =
 		f32::from(rows) * CELL_HEIGHT + STATUS_BAR_HEIGHT + 2.0 * GRID_PADDING + CELL_HEIGHT / 2.0;
 	Size::new(width, height)
@@ -770,21 +802,43 @@ mod tests {
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
 		// width:  (812 - 12)      / 8.4  = 95.2  -> 95 cols
 		// height: (500 - 34 - 12) / 16.8 = 27.02 -> 27 rows  (34 = status bar)
-		let (rows, cols) = grid_size(Size::new(812.0, 500.0));
+		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0);
 		assert_eq!((rows, cols), (27, 95));
+	}
+
+	#[test]
+	fn the_explorer_panel_takes_its_width_off_the_grid() {
+		// The panel is laid out beside the grid, so the columns it costs must come out of
+		// the same arithmetic the reflow uses — otherwise the pty and the view disagree
+		// by exactly the panel's width (§18).
+		let area = Size::new(812.0, 500.0);
+		let (_, wide) = grid_size(area, 0.0);
+		let (_, narrow) = grid_size(area, 168.0); // 168 / 8.4 = 20 columns exactly
+		assert_eq!(wide - narrow, 20);
 	}
 
 	#[test]
 	fn tiny_area_clamps_to_at_least_one_cell() {
 		// Smaller than the padding would give a negative count; clamp to 1×1.
-		assert_eq!(grid_size(Size::new(1.0, 1.0)), (1, 1));
+		assert_eq!(grid_size(Size::new(1.0, 1.0), 0.0), (1, 1));
+		// A panel dragged wider than the window itself must not produce a zero or
+		// negative column count — only the width is squeezed, so the rows still fit.
+		let (rows, cols) = grid_size(Size::new(200.0, 200.0), 400.0);
+		assert_eq!(cols, 1);
+		assert!(rows >= 1);
 	}
 
 	#[test]
 	fn window_size_fits_the_requested_grid() {
 		// A window opened via `window_size` must reflow back to exactly that grid, so the
-		// initial window is wide enough for the intended column count (§11).
-		assert_eq!(grid_size(window_size(160, 40)), (40, 160));
+		// initial window is wide enough for the intended column count (§11) — with and
+		// without the explorer panel beside it (§18).
+		assert_eq!(grid_size(window_size(160, 40, 0.0), 0.0), (40, 160));
+		let reserved = crate::explorer::DEFAULT_WIDTH + crate::explorer::SPLITTER_WIDTH;
+		assert_eq!(
+			grid_size(window_size(160, 40, reserved), reserved),
+			(40, 160)
+		);
 	}
 
 	// Pack row 0 of a grid after feeding `input` to a fresh emulator. The cursor is

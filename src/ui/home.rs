@@ -24,7 +24,7 @@ use iced::{Border, Element, Length, Padding, Theme};
 
 use crate::app::Message;
 use crate::profiles::Target;
-use crate::ui::dialog;
+use crate::ui::{dialog, menu};
 
 /// The widget id of the inline rename field, so `app` can focus it the instant a
 /// rename starts (the user types straight away, no click needed — like the passphrase
@@ -98,29 +98,29 @@ pub fn view<'a>(
 		.then(|| selected.and_then(|key| index_of(targets, key)))
 		.flatten();
 
-	let screen: Element<'a, Message> = match menu_index {
-		Some(index) => stack![base, dismiss_layer(), context_menu(index)]
-			.width(Length::Fill)
-			.height(Length::Fill)
-			.into(),
-		None => base,
-	};
-
+	let mut layers: Vec<Element<'a, Message>> = vec![base];
+	if let Some(index) = menu_index {
+		layers.push(menu::dismiss_layer(Message::HomeMenuDismissed));
+		layers.push(context_menu(index));
+	}
 	// Deleting a target cannot be undone, so it goes through the same confirmation
 	// chrome as Disconnect (§10) rather than acting on the menu click. The list stays
 	// visible (dimmed) behind the card, so the row being removed is still in view.
 	if confirm_delete {
-		stack![
-			screen,
-			dialog::backdrop(Message::HomeDeleteCancelled),
-			confirm_delete_panel(dialog_body, drag),
-		]
+		layers.push(dialog::backdrop(Message::HomeDeleteCancelled));
+		layers.push(confirm_delete_panel(dialog_body, drag));
+	}
+
+	// One stack, always — even with nothing over the list. iced keys a widget's internal
+	// state (here the target list's scroll offset) to its position in the widget tree,
+	// and `Tree::diff` throws the whole subtree away when the root's type changes. So
+	// swapping between the bare list and a `stack` reset the scroll every time a menu or
+	// the delete prompt opened. Layers are only ever appended, so the list stays at
+	// index 0 and keeps its state (§10, §14).
+	stack(layers)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.into()
-	} else {
-		screen
-	}
 }
 
 /// The delete confirmation modal (§14), in the shared dialog chrome: the question in
@@ -246,29 +246,17 @@ fn rename_row(value: &str) -> Element<'_, Message> {
 }
 
 /// The right-click context menu (§14): Open / Rename / Delete for the selected target,
-/// as a small floating panel. It is anchored just below the selected row, whose y is
-/// derived from its `index` and the fixed `ROW_HEIGHT` (iced does not expose the laid-out
-/// position, so we compute it). `ponytail:` no scroll-offset or edge clamping — fine for
-/// the short lists this screen holds.
+/// in the shared menu chrome (`ui::menu`, §10) so it matches the terminal's and the folder
+/// tree's. It is anchored just below the selected row, whose y is derived from its `index`
+/// and the fixed `ROW_HEIGHT` (iced does not expose the laid-out position, so we compute
+/// it). `ponytail:` no scroll-offset or edge clamping — fine for the short lists this
+/// screen holds.
 fn context_menu(index: usize) -> Element<'static, Message> {
-	let item = |label: &'static str, message: Message| {
-		button(text(label).size(14))
-			.width(Length::Fill)
-			.on_press(message)
-			.style(button::text)
-	};
-
-	let panel = container(
-		column![
-			item("Open", Message::HomeMenuOpen),
-			item("Rename", Message::HomeMenuRename),
-			item("Delete", Message::HomeMenuDelete),
-		]
-		.spacing(2),
-	)
-	.width(Length::Fixed(140.0))
-	.padding(4)
-	.style(container::bordered_box);
+	let panel = menu::panel(vec![
+		menu::item("Open".to_owned(), Some(Message::HomeMenuOpen)),
+		menu::item("Rename".to_owned(), Some(Message::HomeMenuRename)),
+		menu::item("Delete".to_owned(), Some(Message::HomeMenuDelete)),
+	]);
 
 	let top = LIST_TOP + (index as f32) * ROW_HEIGHT + ROW_HEIGHT;
 	container(panel)
@@ -280,15 +268,6 @@ fn context_menu(index: usize) -> Element<'static, Message> {
 			bottom: 0.0,
 			left: MENU_LEFT,
 		})
-		.into()
-}
-
-/// A full-window invisible layer under the menu: any click that misses the menu lands
-/// here and dismisses it (mirrors the terminal's context menu, §10).
-fn dismiss_layer() -> Element<'static, Message> {
-	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
-		.on_press(Message::HomeMenuDismissed)
-		.on_right_press(Message::HomeMenuDismissed)
 		.into()
 }
 

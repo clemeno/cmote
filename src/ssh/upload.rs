@@ -45,7 +45,7 @@ pub async fn start<H: client::Handler>(
 	remote: String,
 	overwrite: bool,
 ) {
-	match open(session).await {
+	match super::open_sftp(session).await {
 		Ok(sftp) => {
 			tokio::spawn(transfer(sftp, local, remote, overwrite, events.clone()));
 		}
@@ -60,21 +60,6 @@ pub async fn start<H: client::Handler>(
 				.await;
 		}
 	}
-}
-
-/// Open a second channel on the live session and start its sftp subsystem.
-async fn open<H: client::Handler>(session: &client::Handle<H>) -> Result<SftpSession> {
-	let channel = session
-		.channel_open_session()
-		.await
-		.context("could not open a channel for sftp")?;
-	channel
-		.request_subsystem(true, "sftp")
-		.await
-		.context("the server refused the sftp subsystem")?;
-	SftpSession::new(channel.into_stream())
-		.await
-		.context("the sftp handshake failed")
 }
 
 /// Stream the file to the remote, reporting progress as it goes. Runs to completion in

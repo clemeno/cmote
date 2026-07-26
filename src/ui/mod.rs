@@ -6,7 +6,9 @@
 
 pub mod connect; // the connection form
 pub mod dialog; // shared modal-dialog chrome (header / body / footer)
+pub mod explorer; // the remote folder tree beside the terminal (§18)
 pub mod home; // the home screen: saved connection targets (§14)
+pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss layer (§10)
 pub mod selection; // mouse text selection over the grid
 pub mod terminal; // the live shell grid
 

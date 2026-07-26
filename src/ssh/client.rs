@@ -27,6 +27,7 @@ use tokio::time::timeout;
 
 use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
 use crate::secret::Secret;
+use crate::ssh::browse;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::ssh::keyfile::{self, Loaded};
 use crate::ssh::upload;
@@ -112,6 +113,19 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::ListDir(path) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::ListDir(path)).await;
+				}
+			}
+			SshCommand::RenameDir { from, to } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::RenameDir { from, to })
+						.await;
+				}
+			}
 			SshCommand::Disconnect => {
 				if let Some(link) = session.take() {
 					let _ = link.to_session.send(SessionMsg::Disconnect).await;
@@ -135,6 +149,10 @@ enum SessionMsg {
 		remote: String,
 		overwrite: bool,
 	},
+	/// List the folders inside a remote directory, for the explorer tree (§18).
+	ListDir(String),
+	/// Rename a remote folder (§18).
+	RenameDir { from: String, to: String },
 	/// Tear the session down.
 	Disconnect,
 }
@@ -361,6 +379,10 @@ async fn stream(
 	events: &mpsc::Sender<SshEvent>,
 	mut to_session_rx: mpsc::Receiver<SessionMsg>,
 ) -> Result<()> {
+	// The explorer's SFTP channel (§18): opened on the first listing and kept for the
+	// rest of the session, since a tree asks many small questions.
+	let mut sftp = browse::Sftp::default();
+
 	loop {
 		tokio::select! {
 			// Something arrived from the server on the channel.
@@ -392,6 +414,14 @@ async fn stream(
 					// shell keeps flowing while a big file goes across (§17).
 					Some(SessionMsg::Upload { local, remote, overwrite }) => {
 						upload::start(session, events, local, remote, overwrite).await;
+					}
+						// Listings and renames also run on their own channel and their own
+						// task, so a slow directory never holds up the terminal (§18).
+						Some(SessionMsg::ListDir(path)) => {
+						browse::list(session, &mut sftp, events, path).await;
+					}
+					Some(SessionMsg::RenameDir { from, to }) => {
+						browse::rename(session, &mut sftp, events, from, to).await;
 					}
 					// Explicit disconnect, or run() dropped the link.
 					Some(SessionMsg::Disconnect) | None => {

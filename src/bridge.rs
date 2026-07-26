@@ -88,6 +88,12 @@ pub enum SshCommand {
 		remote: String,
 		overwrite: bool,
 	},
+	/// List the folders inside a remote directory, for the explorer tree (§18). One
+	/// command per folder the user opens — the tree is lazy, so nothing is walked.
+	ListDir(String),
+	/// Rename a remote folder (§18). `to` is the same directory with a new last
+	/// component; the task refuses to replace an occupied path.
+	RenameDir { from: String, to: String },
 	/// Close the channel and tear down the connection.
 	Disconnect,
 }
@@ -120,6 +126,17 @@ pub enum SshEvent {
 	UploadDone(String),
 	/// The upload failed; carries a short reason to show in the status bar (§17).
 	UploadFailed(String),
+	/// The folders inside `path`, for the explorer tree (§18). Names only, not paths —
+	/// the tree already knows the parent it asked about.
+	DirListed { path: String, dirs: Vec<String> },
+	/// A directory could not be listed (no permission, gone, the server refused). Carries
+	/// the path so the tree can stop waiting on that folder, and a reason for its notice
+	/// line — the path is the user's own, so naming it is what makes it actionable (§17).
+	DirFailed { path: String, reason: String },
+	/// A folder was renamed (§18); the tree re-lists the parent and follows the new path.
+	RenameDone { from: String, to: String },
+	/// The rename did not happen, with the reason for the panel's notice line.
+	RenameFailed(String),
 	/// The session ended (server closed, or user disconnected).
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).

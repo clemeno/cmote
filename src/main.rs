@@ -13,6 +13,7 @@
 // under `src/`. See PLAN.md §5 for the responsibility of each module.
 mod app; // iced application: State, Message, update, view, subscription
 mod bridge; // channel message types that cross the GUI <-> tokio boundary (§4)
+mod explorer; // the remote folder tree's model: nodes, expansion, path arithmetic (§18)
 mod paths; // where on-disk data lives: known_hosts + saved targets (§11, §14)
 mod profiles; // saved connection targets, persisted as profiles only — no secrets (§14)
 mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases (§12)

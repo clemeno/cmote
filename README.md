@@ -6,8 +6,9 @@ A **native, portable SSH client for Windows 11 and macOS** written in Rust. A ho
 screen lists your saved connection targets; pick one (or start a new connection), fill
 in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
 `.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
-terminal** inside the window — a working interactive prompt, with the remote working
-directory in the title bar and one-click file upload into it.
+terminal** inside the window — a working interactive prompt, with a browsable tree of the
+remote filesystem beside it, the remote working directory in the title bar, and one-click
+file upload into it.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -37,6 +38,15 @@ references below (§n) point into it.
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
+- **Remote folder tree** — a 2D explorer of the remote filesystem to the right of the
+  terminal, over **SFTP** (falling back to `ls` on a server with the subsystem disabled).
+  Click a folder to expand or collapse it; the tree **follows the shell**, opening the
+  whole chain from `/` down to wherever you `cd`. Right-click a folder for **Open in
+  terminal** (types a quoted `cd`), **Rename…** (inline, like F2 on the home list), **Copy
+  name / relative path / full path**, **Expand** (which also refreshes) and **Collapse**.
+  Drag the splitter to resize the panel — the terminal reflows to match — or hide it with
+  the status bar's **Folders** button; the `[x] .*` toggle in its header hides dot-folders
+  (§18).
 - **File upload into the shell's current directory** — pick a local file with **File…**,
   send it with **Upload**, and it goes over **SFTP** (its own channel, so the shell keeps
   running) into the directory the remote shell is sitting in. The destination is shown
@@ -140,8 +150,12 @@ fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequen
 mapping (including application-cursor-mode arrow keys, CSI vs SS3), the grid-resize
 math, mouse-selection geometry and text extraction (wide
 glyphs, trailing-blank trimming, multi-row joins), paste encoding (bracketed-paste
-wrapping and the injection-terminator scrub), and the remote-cwd scanner (OSC 7 and
-OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads).
+wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
+OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
+the folder tree's model (row flattening and indentation, the hidden-folder filter,
+subtree collapse, `cd` reveal and its no-op on a repeat, rename validation and the
+post-rename refresh, relative-path arithmetic, shell quoting, and the panel's width
+clamps).
 
 ### Manual smoke test (live SSH)
 
@@ -233,7 +247,32 @@ the title should follow within a prompt. Then:
   hook with `unset PROMPT_COMMAND; unset -f cmote_cwd`) → the title drops the directory
   and the upload dialog offers the bare file name, which lands in the login directory.
 
-**8. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
+**8. Remote folder tree.** The panel on the right should list `/` on connect. Then:
+
+- Click folders to expand and collapse them; a slow directory shows `·` until its listing
+  arrives. Expand a few levels, collapse the top one, re-open it — it should show exactly
+  one level again, instantly (nothing is re-fetched).
+- `cd /etc/ssh` in the shell → the tree opens `/` → `/etc` → `/etc/ssh` on its own and
+  highlights it. `cd` back and forth: the tree only ever expands, never closes what you
+  opened.
+- Toggle `[x] .*` in the panel header → dot-folders (`.ssh`, `.config`) disappear and
+  reappear with no round trip.
+- Right-click a folder: **Open in terminal** should run a quoted `cd` in the shell (make a
+  folder with a space and a quote in its name — `mkdir "/tmp/it's here"` — and confirm the
+  `cd` still lands in it). **Copy full path** / **Copy relative path** / **Copy name**
+  should put the right text on the clipboard (paste into the shell to check; the relative
+  item is greyed out on a shell that never announces its directory).
+- **Rename…** turns the row into a field: Esc abandons, Enter commits and the row
+  reappears sorted under its new name. Rename onto an existing name → the notice line
+  under the tree says it already exists and nothing changed. Rename a folder you cannot
+  write → the notice shows the refusal and the shell stays open.
+- Drag the splitter left and right: the grid reflows (`tput cols` should follow) and the
+  panel stops at its minimum and at 60% of the window. The **Folders** button hides the
+  panel and gives its columns back to the grid.
+- Against a server with the sftp subsystem disabled (`Subsystem sftp` commented out in
+  `sshd_config`), the tree should still list folders — the `ls` fallback (§18).
+
+**9. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
 should render, and the **arrow keys** should move the cursor — this exercises
 application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
 to the SS3 form so they register. In `vim`, `:q!` to exit.
