@@ -47,6 +47,11 @@ pub enum ExplorerMessage {
 	PointerMoved(iced::Point),
 	/// Dismiss the context menu without choosing an item.
 	MenuDismissed,
+	/// A press landed anywhere in the panel — give it the keyboard (§20).
+	PanelPressed,
+	/// The tree was scrolled; the payload is its absolute vertical offset. Tracked so
+	/// arrow-key navigation can tell whether the row it moved to is already on screen (§20).
+	Scrolled(f32),
 	/// Menu "Expand": open the folder and re-fetch its children — which doubles as
 	/// the refresh for a directory changed from the shell.
 	Expand(String),
@@ -129,6 +134,8 @@ pub struct Explorer {
 	pointer: iced::Point,
 	rename: Option<Rename>,
 	notice: Option<String>,
+	/// How far the tree is scrolled, in pixels (§20).
+	scroll: f32,
 	/// The last working directory that was revealed, so the shell announcing the same
 	/// directory on every prompt does not re-open the chain (or re-fetch it) each time.
 	revealed: Option<String>,
@@ -151,6 +158,7 @@ impl Default for Explorer {
 			pointer: iced::Point::ORIGIN,
 			rename: None,
 			notice: None,
+			scroll: 0.0,
 			revealed: None,
 		}
 	}
@@ -192,6 +200,42 @@ impl Explorer {
 	/// The selected folder's path, if any.
 	pub fn selected(&self) -> Option<&str> {
 		self.selected.as_deref()
+	}
+
+	/// Which visible row the selection is on (§20), for the arrow keys to step from and
+	/// for the app to scroll back into view. `None` when nothing is selected, or when the
+	/// selected folder is inside a branch that has since been collapsed.
+	pub fn selected_index(&self) -> Option<usize> {
+		let selected = self.selected.as_deref()?;
+		self.rows().iter().position(|row| row.path == selected)
+	}
+
+	/// Move the selection `delta` visible rows (§20). Clamped at both ends, and with
+	/// nothing selected a forward step starts at the root — the same rule the files pane
+	/// follows, because it is the same key doing it.
+	pub fn step(&mut self, delta: isize) {
+		let rows = self.rows();
+		let Some(last) = rows.len().checked_sub(1) else {
+			return;
+		};
+		let last = last as isize;
+		let next = match self.selected_index() {
+			Some(index) => (index as isize).saturating_add(delta),
+			None if delta >= 0 => 0,
+			None => last,
+		};
+		self.selected = Some(rows[next.clamp(0, last) as usize].path.clone());
+	}
+
+	/// How far the tree is scrolled (§20).
+	pub fn scroll(&self) -> f32 {
+		self.scroll
+	}
+
+	/// Remember the tree's scroll offset — reported by the scrollable, and set by the app
+	/// when it scrolls a keyboard-moved row back into view.
+	pub fn set_scroll(&mut self, scroll: f32) {
+		self.scroll = scroll.max(0.0);
 	}
 
 	/// The open context menu — the folder it acts on and where it is drawn — if any.
@@ -277,6 +321,7 @@ impl Explorer {
 		self.notice = None;
 		self.revealed = None;
 		self.dragging = false;
+		self.scroll = 0.0;
 	}
 
 	/// Open a folder, returning the path to list when its children are still needed.
@@ -597,6 +642,37 @@ mod tests {
 		let explorer = tree(&[".", "..", ".ssh", "etc"]);
 		let names: Vec<String> = explorer.rows().into_iter().map(|row| row.name).collect();
 		assert_eq!(names, vec!["/", ".ssh", "etc"]);
+	}
+
+	#[test]
+	fn the_arrow_keys_walk_the_visible_rows_only() {
+		let mut explorer = tree(&["etc", "home"]);
+		explorer.expand("/home", false);
+		explorer.listed("/home", vec!["user".to_owned()]);
+		// Rows: / , etc , home , home/user
+		let selected = |explorer: &Explorer| explorer.selected().unwrap_or("none").to_owned();
+
+		explorer.step(1);
+		assert_eq!(
+			selected(&explorer),
+			ROOT,
+			"nothing selected starts at the root"
+		);
+		explorer.step(2);
+		assert_eq!(selected(&explorer), "/home");
+		explorer.step(1);
+		assert_eq!(selected(&explorer), "/home/user");
+		// The last row is the end of the road, however hard the key is held.
+		explorer.step(9);
+		assert_eq!(selected(&explorer), "/home/user");
+		assert_eq!(explorer.selected_index(), Some(3));
+
+		// A collapsed branch is not somewhere the keyboard can be: the row is gone, so
+		// the selection has no index and a step restarts from the top.
+		explorer.collapse("/home");
+		assert_eq!(explorer.selected_index(), None);
+		explorer.step(1);
+		assert_eq!(selected(&explorer), ROOT);
 	}
 
 	#[test]

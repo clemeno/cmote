@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 // Aliased: this module already has a `client` submodule of its own, and the two names
 // would collide in the type namespace.
 use russh::client as russh_client;
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 
 /// Open a second channel on a live session and start its sftp subsystem (§17, §18).
 ///
@@ -43,4 +43,28 @@ pub async fn open_sftp<H: russh_client::Handler>(
 	SftpSession::new(channel.into_stream())
 		.await
 		.context("the sftp handshake failed")
+}
+
+/// The same channel, but driven at the packet level (§20).
+///
+/// `browse` needs one thing the friendly `SftpSession` throws away: each entry's
+/// `longname`, the `ls -l` line the server builds with the owner and group *names* it
+/// resolved itself. `SftpSession::read_dir` keeps only the filename and the numeric
+/// attributes, and its raw session is private — so the listing paths open the subsystem
+/// this way instead and run `opendir`/`readdir`/`close` themselves. Same channel, same
+/// handshake, same round trips; only the parsing layer differs.
+pub async fn open_raw_sftp<H: russh_client::Handler>(
+	session: &russh_client::Handle<H>,
+) -> Result<RawSftpSession> {
+	let channel = session
+		.channel_open_session()
+		.await
+		.context("could not open a channel for sftp")?;
+	channel
+		.request_subsystem(true, "sftp")
+		.await
+		.context("the server refused the sftp subsystem")?;
+	let raw = RawSftpSession::new(channel.into_stream());
+	raw.init().await.context("the sftp handshake failed")?;
+	Ok(raw)
 }

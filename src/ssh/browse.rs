@@ -3,11 +3,14 @@
 // The tree needs one thing from the server: "what folders are inside this one?".
 // Two ways to ask, tried in that order:
 //
-//   * **SFTP** — `read_dir` returns typed entries, so a directory is a directory
-//     because the server said so, not because we recognised a character in some text.
-//     Names containing spaces, quotes or newlines survive intact. The channel is opened
-//     once and kept for the whole session (`Sftp` below), because a tree does many small
-//     listings and paying two round trips of channel setup for each would be felt.
+//   * **SFTP** — the listing is typed, so a directory is a directory because the server
+//     said so, not because we recognised a character in some text. Names containing
+//     spaces, quotes or newlines survive intact. The channel is opened once and kept for
+//     the whole session (`Sftp` below), because a tree does many small listings and
+//     paying two round trips of channel setup for each would be felt. It is a
+//     `RawSftpSession` rather than the friendly `SftpSession`: the details popup wants the
+//     owner and group *names*, which live only in each entry's `longname` — the `ls -l`
+//     line the server resolved itself — and `read_dir` discards it (§20).
 //   * **`ls` over an exec channel** — the fallback for a server with the sftp subsystem
 //     switched off. It is text, so it is a guess; see the `ponytail:` note on `list_exec`.
 //
@@ -20,12 +23,14 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use russh::{Channel, ChannelMsg, client};
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::RawSftpSession;
+use russh_sftp::client::error::Error as SftpError;
+use russh_sftp::protocol::{File, StatusCode};
 use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
-use crate::explorer::shell_quote;
-use crate::files::{self, Entry, Kind};
+use crate::explorer::{join, shell_quote};
+use crate::files::{self, Entry, Kind, Meta};
 
 /// The most `ls` output the fallback will hold. A directory with a million entries (or a
 /// server answering with something that is not a listing at all) must not grow our
@@ -41,8 +46,11 @@ const MAX_OUTPUT: usize = 1024 * 1024;
 /// session when the transfer ends, which would take this one down with it.
 #[derive(Default)]
 pub struct Sftp {
-	session: Option<Arc<SftpSession>>,
+	session: Option<Arc<RawSftpSession>>,
 	refused: bool,
+	/// Whether the timezone probe has been sent for this session (§20). Asked once, on
+	/// the first files-pane listing — every mtime in the pane is rendered against it.
+	zone_asked: bool,
 }
 
 impl Sftp {
@@ -51,14 +59,14 @@ impl Sftp {
 	async fn get<H: client::Handler>(
 		&mut self,
 		session: &client::Handle<H>,
-	) -> Option<Arc<SftpSession>> {
+	) -> Option<Arc<RawSftpSession>> {
 		if self.refused {
 			return None;
 		}
 		if let Some(sftp) = self.session.as_ref() {
 			return Some(sftp.clone());
 		}
-		match super::open_sftp(session).await {
+		match super::open_raw_sftp(session).await {
 			Ok(sftp) => {
 				let sftp = Arc::new(sftp);
 				self.session = Some(sftp.clone());
@@ -104,6 +112,9 @@ pub async fn list_all<H: client::Handler>(
 	path: String,
 	request: u64,
 ) {
+	// The pane shows modification times, and a time needs the server's zone to be read
+	// as the server's own clock (§20). Asked once, alongside the first listing.
+	probe_zone(session, sftp, events).await;
 	if let Some(handle) = sftp.get(session).await {
 		tokio::spawn(all_sftp(handle, path, request, events.clone()));
 		return;
@@ -151,7 +162,7 @@ pub async fn rename<H: client::Handler>(
 }
 
 /// The SFTP listing: ask for the directory's entries and keep the ones that are folders.
-async fn list_sftp(sftp: Arc<SftpSession>, path: String, events: mpsc::Sender<SshEvent>) {
+async fn list_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Sender<SshEvent>) {
 	match read_dirs(&sftp, &path).await {
 		Ok(dirs) => {
 			let _ = events.send(SshEvent::DirListed { path, dirs }).await;
@@ -160,29 +171,54 @@ async fn list_sftp(sftp: Arc<SftpSession>, path: String, events: mpsc::Sender<Ss
 	}
 }
 
+/// Every name the server lists inside `path`, with its attributes and its `longname`
+/// (§20) — `opendir`, then `readdir` until the server answers EOF, then `close`.
+///
+/// This is what `SftpSession::read_dir` does, minus the two things it discards: the
+/// `longname` line the owner and group names live in, and `.`/`..`, which the model
+/// drops at ingest anyway (`explorer::is_dot_link`, §19).
+async fn read_names(sftp: &RawSftpSession, path: &str) -> Result<Vec<File>> {
+	let handle = sftp
+		.opendir(path.to_owned())
+		.await
+		.with_context(|| format!("Could not list {path}"))?
+		.handle;
+
+	let mut files = Vec::new();
+	loop {
+		match sftp.readdir(handle.as_str()).await {
+			Ok(name) => files.extend(name.files),
+			// The end of the directory, not a failure: the server says EOF once it has
+			// handed over every name.
+			Err(SftpError::Status(status)) if status.status_code == StatusCode::Eof => break,
+			Err(error) => {
+				// Give the handle back before leaving; a server has a finite number.
+				let _ = sftp.close(handle).await;
+				return Err(error).with_context(|| format!("Could not list {path}"));
+			}
+		}
+	}
+	let _ = sftp.close(handle).await;
+	Ok(files)
+}
+
 /// The folder names inside `path`. A symlink's own type says nothing about what it
 /// points at, so each one is stat'ed (which follows it) and kept only if the target is a
 /// directory — that costs a round trip per symlink, and only per symlink.
-async fn read_dirs(sftp: &SftpSession, path: &str) -> Result<Vec<String>> {
-	let entries = sftp
-		.read_dir(path.to_owned())
-		.await
-		.with_context(|| format!("Could not list {path}"))?;
-
+async fn read_dirs(sftp: &RawSftpSession, path: &str) -> Result<Vec<String>> {
 	let mut dirs = Vec::new();
-	for entry in entries {
-		let kind = entry.file_type();
+	for file in read_names(sftp, path).await? {
 		// `||` short-circuits, so a real directory costs nothing extra; only a symlink
 		// pays the stat. A broken link errors there and is simply left out, which is
 		// what it is.
-		let is_dir = kind.is_dir()
-			|| (kind.is_symlink()
+		let is_dir = file.attrs.is_dir()
+			|| (file.attrs.is_symlink()
 				&& sftp
-					.metadata(entry.path())
+					.stat(join(path, &file.filename))
 					.await
-					.is_ok_and(|metadata| metadata.file_type().is_dir()));
+					.is_ok_and(|attrs| attrs.attrs.is_dir()));
 		if is_dir {
-			dirs.push(entry.file_name());
+			dirs.push(file.filename);
 		}
 	}
 	Ok(dirs)
@@ -197,7 +233,7 @@ async fn read_dirs(sftp: &SftpSession, path: &str) -> Result<Vec<String>> {
 /// once. Upgrade path: drive `RawSftpSession::opendir`/`readdir` directly and emit a
 /// batch per protocol packet.
 async fn all_sftp(
-	sftp: Arc<SftpSession>,
+	sftp: Arc<RawSftpSession>,
 	path: String,
 	request: u64,
 	events: mpsc::Sender<SshEvent>,
@@ -211,30 +247,54 @@ async fn all_sftp(
 	}
 }
 
-/// Every entry inside `path`, with the kind the server reported. A symlink keeps its own
-/// kind rather than being followed: resolving each one costs a round trip, and a crowded
-/// directory is exactly where that adds up (§19).
-async fn read_entries(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>> {
-	let entries = sftp
-		.read_dir(path.to_owned())
-		.await
-		.with_context(|| format!("Could not list {path}"))?;
-
-	Ok(entries
-		.map(|entry| {
-			let kind = entry.file_type();
-			Entry {
-				name: entry.file_name(),
-				kind: if kind.is_dir() {
-					Kind::Dir
-				} else if kind.is_symlink() {
-					Kind::Link
-				} else {
-					Kind::File
-				},
-			}
-		})
+/// Every entry inside `path`, with the kind and the details the server reported (§19,
+/// §20). A symlink keeps its own kind rather than being followed: resolving each one
+/// costs a round trip, and a crowded directory is exactly where that adds up — the pane
+/// asks for the one link the user selects instead (`read_link`).
+async fn read_entries(sftp: &RawSftpSession, path: &str) -> Result<Vec<Entry>> {
+	Ok(read_names(sftp, path)
+		.await?
+		.into_iter()
+		.map(entry_of)
 		.collect())
+}
+
+/// Turn one listed name into a pane entry (§20). The size, time and ids ride along with
+/// the name — SFTP sends a directory's attributes with its listing, so none of this costs
+/// an extra round trip.
+fn entry_of(file: File) -> Entry {
+	let kind = if file.attrs.is_dir() {
+		Kind::Dir
+	} else if file.attrs.is_symlink() {
+		Kind::Link
+	} else {
+		Kind::File
+	};
+	// Names first, from the server's own `ls -l` line; the numeric ids are the fallback
+	// for a server that sends no longname (SFTP v3 carries no names in the attributes).
+	let (owner, group) = match files::parse_longname(&file.longname) {
+		Some((owner, group)) => (Some(owner), Some(group)),
+		None => (
+			file.attrs
+				.user
+				.clone()
+				.or_else(|| file.attrs.uid.map(|uid| uid.to_string())),
+			file.attrs
+				.group
+				.clone()
+				.or_else(|| file.attrs.gid.map(|gid| gid.to_string())),
+		),
+	};
+	Entry {
+		name: file.filename,
+		kind,
+		meta: Meta {
+			size: file.attrs.size,
+			mtime: file.attrs.mtime,
+			owner,
+			group,
+		},
+	}
 }
 
 /// Send a listing as `FilesChunk` batches, the last one flagged `done`. An empty
@@ -281,19 +341,25 @@ async fn all_exec(
 			let mut entries: Vec<Entry> = output
 				.lines()
 				.filter(|line| !line.is_empty())
+				// No size, time or owner on this path: `ls -1AF` reports none of it, and
+				// asking for them would be a second, differently-shaped listing to parse.
+				// The details popup shows the type and leaves the rest blank (§20).
 				.map(|line| match line.strip_suffix('/') {
 					Some(name) => Entry {
 						name: name.to_owned(),
 						kind: Kind::Dir,
+						meta: Meta::default(),
 					},
 					None => match line.strip_suffix('@') {
 						Some(name) => Entry {
 							name: name.to_owned(),
 							kind: Kind::Link,
+							meta: Meta::default(),
 						},
 						None => Entry {
 							name: line.trim_end_matches(['*', '|', '=']).to_owned(),
 							kind: Kind::File,
+							meta: Meta::default(),
 						},
 					},
 				})
@@ -309,22 +375,84 @@ async fn all_exec(
 /// occupied path on most servers but not all, and a folder quietly replaced is not
 /// something the user can undo.
 async fn rename_sftp(
-	sftp: Arc<SftpSession>,
+	sftp: Arc<RawSftpSession>,
 	from: String,
 	to: String,
 	events: mpsc::Sender<SshEvent>,
 ) {
-	let event = match sftp.try_exists(to.clone()).await {
-		Ok(true) => SshEvent::RenameFailed(format!("{to} already exists — nothing was renamed.")),
-		// The server would not say whether the path is free; assuming it is could
-		// destroy whatever is there.
+	// A `stat` that comes back "no such file" is the only answer that means the
+	// destination is free. Anything else — it exists, or the server would not say — must
+	// not lead to a rename: a folder quietly replaced is not something the user can undo.
+	let event = match sftp.stat(to.clone()).await {
+		Ok(_) => SshEvent::RenameFailed(format!("{to} already exists — nothing was renamed.")),
+		Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+			match sftp.rename(from.clone(), to.clone()).await {
+				Ok(_) => SshEvent::RenameDone { from, to },
+				Err(error) => SshEvent::RenameFailed(format!("Could not rename: {error}")),
+			}
+		}
 		Err(error) => SshEvent::RenameFailed(format!("Could not check {to}: {error}")),
-		Ok(false) => match sftp.rename(from.clone(), to.clone()).await {
-			Ok(()) => SshEvent::RenameDone { from, to },
-			Err(error) => SshEvent::RenameFailed(format!("Could not rename: {error}")),
-		},
 	};
 	let _ = events.send(event).await;
+}
+
+/// Resolve one symlink for the details popup (§20), reporting `LinkTarget` — or nothing
+/// at all, since a link that will not resolve (a broken one, a server that refuses)
+/// simply leaves the popup without that line.
+///
+/// One link at a time, on the user's selection: doing it for every entry in a listing is
+/// a round trip per link, which is the cost the pane exists to avoid (§19). No `ls`
+/// fallback either — `readlink` is SFTP's own, and the text fallback has no metadata to
+/// show this beside.
+pub async fn read_link<H: client::Handler>(
+	session: &client::Handle<H>,
+	sftp: &mut Sftp,
+	events: &mpsc::Sender<SshEvent>,
+	path: String,
+) {
+	let Some(handle) = sftp.get(session).await else {
+		return;
+	};
+	let events = events.clone();
+	tokio::spawn(async move {
+		let Ok(name) = handle.readlink(path.clone()).await else {
+			return;
+		};
+		if let Some(file) = name.files.first() {
+			let _ = events
+				.send(SshEvent::LinkTarget {
+					path,
+					target: file.filename.clone(),
+				})
+				.await;
+		}
+	});
+}
+
+/// Ask the server what timezone it is in, once per session (§20): `date +'%z %Z'` on an
+/// exec channel. Nothing is reported when the probe fails — the pane then renders its
+/// times as UTC, which is right about the instant if not about the wall clock.
+async fn probe_zone<H: client::Handler>(
+	session: &client::Handle<H>,
+	sftp: &mut Sftp,
+	events: &mpsc::Sender<SshEvent>,
+) {
+	if sftp.zone_asked {
+		return;
+	}
+	sftp.zone_asked = true;
+	let Ok(channel) = session.channel_open_session().await else {
+		return;
+	};
+	let events = events.clone();
+	tokio::spawn(async move {
+		let Ok(output) = exec(channel, "date +'%z %Z'".to_owned()).await else {
+			return;
+		};
+		if let Some(zone) = files::parse_zone(&output) {
+			let _ = events.send(SshEvent::Zone(zone)).await;
+		}
+	});
 }
 
 /// The `ls` fallback: one line per entry, with `/` appended to directories (`-p`),

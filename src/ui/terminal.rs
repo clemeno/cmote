@@ -52,7 +52,7 @@ const GRID_PADDING: f32 = 6.0;
 /// bar at exactly this height AND `grid_size` subtracts it, so the reflow math
 /// accounts for the space the bar takes and the two can never drift (the same
 /// discipline as `GRID_PADDING`).
-const STATUS_BAR_HEIGHT: f32 = 34.0;
+pub(crate) const STATUS_BAR_HEIGHT: f32 = 34.0;
 const STATUS_BAR_TEXT: f32 = 13.0;
 const STATUS_BAR_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
 const STATUS_BAR_FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
@@ -95,6 +95,11 @@ pub const UPLOAD_INPUT_ID: &str = "upload-dest";
 /// The body copy for the overwrite confirmation (§17). `app` appends the remote path.
 /// Nothing has been written when this appears: the transfer stopped at the check.
 pub const UPLOAD_EXISTS_BODY: &str = "A file already exists at this path on the server. Uploading replaces its contents — the old file is not recoverable. Nothing has been sent yet.";
+
+/// The body of the multi-file download's collision question (§21), followed by the names
+/// that clash. Nothing has been downloaded when it is asked, so every answer is safe to
+/// give — including cancelling the batch outright.
+pub const DOWNLOAD_EXISTS_BODY: &str = "These files are already in the folder you picked. Skipping leaves the local copies alone, saving alongside adds a -1 to the name, and replacing overwrites them — replaced files are not recoverable. Nothing has been downloaded yet.";
 
 /// The 16 base ANSI colors (indices 0-15): the 8 standard colors then their
 /// bright variants. Values follow the common xterm palette.
@@ -150,6 +155,10 @@ struct CellStyle {
 pub struct Panels<'a> {
 	pub explorer: &'a Explorer,
 	pub files: &'a Files,
+	/// Which of the three the keyboard belongs to (§20): the panels draw a ring when it is
+	/// theirs, and the files pane places its details popup from the window's width.
+	pub focus: crate::app::Focus,
+	pub width: f32,
 }
 
 /// What every modal on this screen needs (§10): whether the Disconnect confirmation is
@@ -159,6 +168,8 @@ pub struct Panels<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct Modals<'a> {
 	pub confirm_disconnect: bool,
+	/// Whether the "some of these files are already there" question is open (§21).
+	pub clash: bool,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -179,9 +190,15 @@ pub fn view<'a>(
 	upload: UploadView<'a>,
 	panels: Panels<'a>,
 ) -> Element<'a, Message> {
-	let Panels { explorer, files } = panels;
+	let Panels {
+		explorer,
+		files,
+		focus,
+		width,
+	} = panels;
 	let Modals {
 		confirm_disconnect,
+		clash,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -233,7 +250,7 @@ pub fn view<'a>(
 		iced::widget::row![
 			interactive_grid,
 			crate::ui::explorer::splitter(),
-			crate::ui::explorer::panel(explorer),
+			crate::ui::explorer::panel(explorer, focus == crate::app::Focus::Tree),
 		]
 		.spacing(0)
 		.width(Length::Fill)
@@ -260,7 +277,12 @@ pub fn view<'a>(
 	if files.visible() {
 		stacked = stacked
 			.push(crate::ui::files::splitter())
-			.push(crate::ui::files::panel(files, explorer.show_hidden()));
+			.push(crate::ui::files::panel(
+				files,
+				explorer.show_hidden(),
+				width,
+				focus == crate::app::Focus::Files,
+			));
 	}
 	let base: Element<'a, Message> = stacked.width(Length::Fill).height(Length::Fill).into();
 
@@ -294,6 +316,10 @@ pub fn view<'a>(
 	if files.dragging() {
 		layers.push(crate::ui::files::drag_layer());
 	}
+	// And while a rubber band is being pulled, for the same reason (§21).
+	if files.band().is_some() {
+		layers.push(crate::ui::files::band_drag_layer());
+	}
 	if confirm_disconnect {
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
 		layers.push(confirm_disconnect_panel(dialog_body, drag));
@@ -310,6 +336,14 @@ pub fn view<'a>(
 			layers.push(confirm_overwrite_panel(dialog_body, drag));
 		}
 		Some(TransferState::Running { .. }) | None => {}
+	}
+	// The multi-file download's name-collision question (§21), same chrome again. Nothing
+	// has been written when it opens: the whole batch is waiting on the answer.
+	if clash {
+		layers.push(crate::ui::dialog::backdrop(Message::DownloadClash(
+			crate::app::ClashChoice::Cancel,
+		)));
+		layers.push(download_clash_panel(dialog_body, drag));
 	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
@@ -572,6 +606,38 @@ fn confirm_overwrite_panel(
 			button("Cancel").on_press(Message::UploadCancelled).into(),
 			button("Replace")
 				.on_press(Message::UploadOverwriteConfirmed)
+				.into(),
+		],
+		drag,
+	)
+}
+
+/// The multi-file download's collision question (§21): the batch is going into one folder
+/// and some of those names are already in it. Asked once for the whole batch rather than
+/// once per file — twenty files with twenty collisions is one decision, not twenty. Every
+/// dismissal route cancels, so backing out downloads nothing.
+fn download_clash_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	use crate::app::ClashChoice;
+
+	crate::ui::dialog::dialog(
+		"Some of these files are already there".to_owned(),
+		Message::DownloadClash(ClashChoice::Cancel),
+		crate::ui::dialog::selectable_body(dialog_body),
+		vec![
+			button("Cancel")
+				.on_press(Message::DownloadClash(ClashChoice::Cancel))
+				.into(),
+			button("Skip them")
+				.on_press(Message::DownloadClash(ClashChoice::Skip))
+				.into(),
+			button("Save alongside")
+				.on_press(Message::DownloadClash(ClashChoice::KeepBoth))
+				.into(),
+			button("Replace")
+				.on_press(Message::DownloadClash(ClashChoice::Replace))
 				.into(),
 		],
 		drag,

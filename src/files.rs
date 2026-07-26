@@ -18,7 +18,9 @@
 // belongs to. Leaving a directory bumps that number, so chunks still in flight for
 // the folder we just left are dropped instead of being mixed into the new one.
 
-use iced::Point;
+use std::collections::HashSet;
+
+use iced::{Point, Rectangle};
 
 /// The pane's starting height, the shortest the splitter may drag it to, and the
 /// grab bar's own height (§19). `ui::terminal` subtracts the pane plus the bar from
@@ -43,12 +45,56 @@ pub enum Kind {
 	Link,
 }
 
-/// One directory entry. Names only — no size, no timestamps: the grid shows neither,
-/// and asking for them is what makes a big directory slow.
+/// One directory entry: its name, its kind, and what else the server volunteered about
+/// it (§20). The extras cost nothing to collect — SFTP sends a name's attributes along
+/// with the name — so they ride along with the listing rather than being asked for
+/// per entry, which is what would make a big directory slow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
 	pub name: String,
 	pub kind: Kind,
+	pub meta: Meta,
+}
+
+/// What the server said about an entry beyond its name and kind (§20), shown in the
+/// details popup beside the selection. Every field is optional because every source is
+/// partial: SFTP v3 gives size, time and numeric ids; the owner and group *names* come
+/// from the listing's `longname` line, which not every server fills in; and the `ls`
+/// fallback (§19) reports none of it, leaving this at its default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Meta {
+	pub size: Option<u64>,
+	/// Last modification, in seconds since the epoch — the same instant everywhere, so
+	/// it is the *display* that needs the server's timezone, not this (`Zone`).
+	pub mtime: Option<u32>,
+	/// The owner and group as the server names them, falling back to the numeric id when
+	/// it gave only that.
+	pub owner: Option<String>,
+	pub group: Option<String>,
+}
+
+/// The remote machine's timezone (§20), asked for once per session (`date +'%z %Z'`).
+///
+/// An mtime is an instant, not a wall clock: rendering it needs a zone, and the honest
+/// one here is the SERVER's — the files being listed are its own, and `ls` on that
+/// machine would say the same thing. Until the answer comes back (or when the server has
+/// no `date`), this default renders as UTC, which is at least never wrong about the
+/// instant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Zone {
+	/// Minutes east of UTC.
+	pub offset: i32,
+	/// What the server calls it ("CEST", "UTC"), empty when it would not say.
+	pub label: String,
+}
+
+impl Default for Zone {
+	fn default() -> Self {
+		Self {
+			offset: 0,
+			label: "UTC".to_owned(),
+		}
+	}
 }
 
 /// The icon an entry gets (§19). Derived from its kind and its extension, so the grid
@@ -103,6 +149,19 @@ pub enum FilesMessage {
 	ParentOpened,
 	/// An entry was right-clicked: select it and open the context menu on it.
 	EntryRightClicked(String),
+	/// A press landed anywhere in the pane — give it the keyboard (§20). Sent by the
+	/// pane's own `mouse_area`, so an empty patch of grid focuses it just as a cell does.
+	/// A press on the grid's empty space also starts a rubber band (§21).
+	PanelPressed,
+	/// The button came up: the rubber band, if one was being dragged, is finished (§21).
+	PanelReleased,
+	/// The pointer moved while a band is being dragged, reported by the full-window capture
+	/// layer, so the payload is in WINDOW coordinates rather than the pane's (§21).
+	BandMoved(Point),
+	/// The grid was scrolled; the payload is its absolute vertical offset. Tracked because
+	/// the details popup is placed from the selected cell's position, which moves with the
+	/// scroll, and because arrow-key navigation has to know what is already on screen (§20).
+	Scrolled(f32),
 	/// The pointer moved over the pane; the payload is its pane-local position. Tracked
 	/// because a right-press carries no coordinates of its own (§18).
 	PointerMoved(Point),
@@ -128,6 +187,28 @@ pub enum FilesMessage {
 	SplitterDragged(Point),
 	/// The resize ended (pointer released).
 	SplitterReleased,
+}
+
+/// A rubber band being dragged over the grid (§21): where the press landed and where the
+/// pointer is now, both in pane coordinates. Either corner can be the top-left, which is
+/// what `rect` sorts out — a band dragged up and to the left is as ordinary as one dragged
+/// down and to the right.
+#[derive(Debug, Clone, Copy)]
+pub struct Band {
+	pub from: Point,
+	pub to: Point,
+}
+
+impl Band {
+	/// The band as a rectangle, whichever way round it was dragged.
+	pub fn rect(&self) -> Rectangle {
+		Rectangle {
+			x: self.from.x.min(self.to.x),
+			y: self.from.y.min(self.to.y),
+			width: (self.to.x - self.from.x).abs(),
+			height: (self.to.y - self.from.y).abs(),
+		}
+	}
 }
 
 /// An open context menu: the entry it acts on, that entry's kind (Download makes no
@@ -166,11 +247,34 @@ pub struct Files {
 	/// Which listing the pane is currently interested in. Bumped on every new request so
 	/// a batch from the directory we just left is recognised and dropped.
 	request: u64,
-	selected: Option<String>,
+	/// Every selected entry, by full path (§21). A click selects one; a rubber band,
+	/// Ctrl+click, Shift+click and Ctrl+A build a set out of many.
+	selected: HashSet<String>,
+	/// The entry the keyboard is on: what the arrows step from, what the details popup sits
+	/// beside, and what Enter, F2 and the single-target menu items act on. One of
+	/// `selected` whenever anything is selected.
+	cursor: Option<String>,
+	/// The fixed end of a Shift-extended range, set by the last plain or Ctrl+click. Range
+	/// selection needs two ends, and the moving one is the cursor.
+	anchor: Option<String>,
+	/// The rubber band being dragged right now (§21), and the selection it started from —
+	/// empty unless the drag is additive, in which case the band adds to it rather than
+	/// replacing it.
+	band: Option<Band>,
+	band_base: HashSet<String>,
 	menu: Option<Menu>,
 	pointer: Point,
 	rename: Option<Rename>,
 	notice: Option<String>,
+	/// How far the grid is scrolled, in pixels (§20).
+	scroll: f32,
+	/// The remote machine's timezone, as `date` reported it (§20).
+	zone: Zone,
+	/// Where the selected symlink points, once the server has been asked (§20). Keyed by
+	/// the link's own path, so an answer that arrives after the selection moved on is
+	/// recognisable as stale. Resolving a link costs a round trip, which is why it is
+	/// asked for one selection at a time rather than for every link in the listing (§19).
+	link_target: Option<(String, String)>,
 }
 
 impl Default for Files {
@@ -186,11 +290,18 @@ impl Default for Files {
 			entries: Vec::new(),
 			loading: false,
 			request: 0,
-			selected: None,
+			selected: HashSet::new(),
+			cursor: None,
+			anchor: None,
+			band: None,
+			band_base: HashSet::new(),
 			menu: None,
 			pointer: Point::ORIGIN,
 			rename: None,
 			notice: None,
+			scroll: 0.0,
+			zone: Zone::default(),
+			link_target: None,
 		}
 	}
 }
@@ -237,9 +348,153 @@ impl Files {
 		self.entries.len()
 	}
 
-	/// The selected entry's full path, if any.
-	pub fn selected(&self) -> Option<&str> {
-		self.selected.as_deref()
+	/// The entry the keyboard is on (§20): the one the popup describes and the one a
+	/// single-target action acts on. `None` when nothing is selected.
+	pub fn cursor(&self) -> Option<&str> {
+		self.cursor.as_deref()
+	}
+
+	/// Whether an entry is part of the selection (§21) — what the grid asks of every cell
+	/// it draws.
+	pub fn is_selected(&self, path: &str) -> bool {
+		self.selected.contains(path)
+	}
+
+	/// How many entries are selected.
+	pub fn selected_count(&self) -> usize {
+		self.selected.len()
+	}
+
+	/// The selected entries in GRID order, with their paths (§21). Order matters to every
+	/// batch action — a list of copied names coming out in hash order would be nonsense —
+	/// and the rows are the only place that order exists.
+	pub fn selected_rows(&self, show_hidden: bool) -> Vec<(String, &Entry)> {
+		let Some(directory) = self.path.as_deref() else {
+			return Vec::new();
+		};
+		self.rows(show_hidden)
+			.into_iter()
+			.map(|entry| (crate::explorer::join(directory, &entry.name), entry))
+			.filter(|(path, _)| self.selected.contains(path))
+			.collect()
+	}
+
+	/// Where the cursor sits among the rows on show (§20) — the one number both the details
+	/// popup (to place itself beside the cell) and the arrow keys (to step from it) are
+	/// asking for. `None` when nothing is selected, or when the cursor is currently
+	/// filtered out by the `.*` toggle.
+	pub fn selected_index(&self, show_hidden: bool) -> Option<usize> {
+		self.index_of(show_hidden, self.cursor.as_deref()?)
+	}
+
+	/// Where a path sits among the rows on show, if it is among them at all.
+	fn index_of(&self, show_hidden: bool, path: &str) -> Option<usize> {
+		let directory = self.path.as_deref()?;
+		self.rows(show_hidden)
+			.iter()
+			.position(|entry| crate::explorer::join(directory, &entry.name) == path)
+	}
+
+	/// Move the cursor `delta` rows through the grid (§20): ±1 for Tab and the left/right
+	/// arrows, ±(a row's worth of columns) for up and down. Clamped at both ends rather
+	/// than wrapping — a grid has a first and a last item, and jumping from one to the
+	/// other is never what the key meant. With nothing selected yet, a forward step starts
+	/// at the top and a backward one at the bottom.
+	///
+	/// `extend` is Shift held down (§21): the selection then runs from the anchor to wherever
+	/// the cursor lands, instead of being just the cell walked onto.
+	pub fn step(&mut self, show_hidden: bool, delta: isize, extend: bool) {
+		let rows = self.rows(show_hidden);
+		// An empty grid has nowhere to step to, and `last` below would underflow.
+		let Some(last) = rows.len().checked_sub(1) else {
+			return;
+		};
+		let last = last as isize;
+		let next = match self.selected_index(show_hidden) {
+			Some(index) => (index as isize).saturating_add(delta),
+			None if delta >= 0 => 0,
+			None => last,
+		};
+		let next = next.clamp(0, last) as usize;
+		if extend {
+			self.select_range(show_hidden, next);
+		} else {
+			self.select_only(show_hidden, next);
+		}
+	}
+
+	/// Select every row from the anchor to `index`, inclusive, and put the cursor on
+	/// `index`. With no anchor — nothing has been clicked yet — the range is that one row.
+	fn select_range(&mut self, show_hidden: bool, index: usize) {
+		let Some(directory) = self.path.clone() else {
+			return;
+		};
+		let anchor = self
+			.anchor
+			.clone()
+			.and_then(|path| self.index_of(show_hidden, &path))
+			.unwrap_or(index);
+		let rows = self.rows(show_hidden);
+		let (from, to) = (anchor.min(index), anchor.max(index).min(rows.len() - 1));
+		let selected: HashSet<String> = rows[from..=to]
+			.iter()
+			.map(|entry| crate::explorer::join(&directory, &entry.name))
+			.collect();
+		let cursor = crate::explorer::join(&directory, &rows[index].name);
+		self.selected = selected;
+		self.cursor = Some(cursor);
+		if self.anchor.is_none() {
+			self.anchor = self.cursor.clone();
+		}
+	}
+
+	/// Select the row at `index` and nothing else, anchor included — the plain click, and
+	/// the plain arrow key.
+	fn select_only(&mut self, show_hidden: bool, index: usize) {
+		let Some(directory) = self.path.clone() else {
+			return;
+		};
+		let rows = self.rows(show_hidden);
+		let Some(entry) = rows.get(index) else {
+			return;
+		};
+		let path = crate::explorer::join(&directory, &entry.name);
+		self.select(&path);
+	}
+
+	/// How far the grid is scrolled (§20).
+	pub fn scroll(&self) -> f32 {
+		self.scroll
+	}
+
+	/// Remember the grid's scroll offset — from the scrollable's own report, and from the
+	/// app when it scrolls a keyboard-moved selection back into view.
+	pub fn set_scroll(&mut self, scroll: f32) {
+		self.scroll = scroll.max(0.0);
+	}
+
+	/// The remote machine's timezone, used to render every mtime in the pane (§20).
+	pub fn zone(&self) -> &Zone {
+		&self.zone
+	}
+
+	/// The server answered the timezone probe.
+	pub fn set_zone(&mut self, zone: Zone) {
+		self.zone = zone;
+	}
+
+	/// Where the selected symlink points, if that is what is selected and the answer has
+	/// arrived. Anything else — a file, a folder, a link still being resolved, an answer
+	/// for a link the user has since moved off — reads as `None`.
+	pub fn link_target(&self) -> Option<&str> {
+		let (path, target) = self.link_target.as_ref()?;
+		(Some(path.as_str()) == self.cursor.as_deref()).then_some(target.as_str())
+	}
+
+	/// A `readlink` came back. Kept whatever the selection is now — `link_target` is what
+	/// decides whether it is still the interesting one.
+	pub fn set_link_target(&mut self, path: String, target: String) {
+		self.link_target = Some((path, target));
 	}
 
 	/// The open context menu, if any.
@@ -281,9 +536,105 @@ impl Files {
 		self.pointer = pointer;
 	}
 
-	/// Select an entry.
+	/// Where the pointer last was, in pane coordinates (§21) — the rubber band starts from
+	/// it, since a press carries no position of its own.
+	pub fn pointer(&self) -> Point {
+		self.pointer
+	}
+
+	/// Select one entry and nothing else — the plain click.
 	pub fn select(&mut self, path: &str) {
-		self.selected = Some(path.to_owned());
+		self.selected.clear();
+		self.selected.insert(path.to_owned());
+		self.cursor = Some(path.to_owned());
+		self.anchor = Some(path.to_owned());
+	}
+
+	/// Add an entry to the selection, or take it out again — Ctrl+click (§21). The rest of
+	/// the selection is left alone, and the entry becomes the new anchor either way: the
+	/// next Shift+click ranges from where the user last pointed.
+	pub fn toggle_selection(&mut self, path: &str) {
+		let added = !self.selected.remove(path);
+		if added {
+			self.selected.insert(path.to_owned());
+		}
+		self.cursor = added.then(|| path.to_owned());
+		self.anchor = Some(path.to_owned());
+	}
+
+	/// Select everything from the anchor to this entry — Shift+click (§21).
+	pub fn extend_selection(&mut self, show_hidden: bool, path: &str) {
+		if let Some(index) = self.index_of(show_hidden, path) {
+			self.select_range(show_hidden, index);
+		}
+	}
+
+	/// Select every entry on show — Ctrl+A (§21). The cursor goes to the first, so the
+	/// popup has a cell to sit beside and an arrow key has somewhere to step from.
+	pub fn select_all(&mut self, show_hidden: bool) {
+		let Some(directory) = self.path.clone() else {
+			return;
+		};
+		let rows = self.rows(show_hidden);
+		let paths: Vec<String> = rows
+			.iter()
+			.map(|entry| crate::explorer::join(&directory, &entry.name))
+			.collect();
+		self.cursor = paths.first().cloned();
+		self.anchor = paths.first().cloned();
+		self.selected = paths.into_iter().collect();
+	}
+
+	/// Drop the selection, and with it the details popup — a press that reached the pane
+	/// itself landed on empty space, beside every cell (§20).
+	pub fn deselect(&mut self) {
+		self.selected.clear();
+		self.cursor = None;
+		self.anchor = None;
+	}
+
+	/// Start a rubber band where the pointer is (§21). An additive drag (Ctrl held) keeps
+	/// the current selection as the band's floor — the band can only add to it — while a
+	/// plain one starts from nothing, which is also what makes a press on empty space
+	/// clear the selection.
+	pub fn begin_band(&mut self, at: Point, additive: bool) {
+		self.band = Some(Band { from: at, to: at });
+		if !additive {
+			self.deselect();
+		}
+		self.band_base = self.selected.clone();
+		self.menu = None;
+	}
+
+	/// The band being dragged, if one is.
+	pub fn band(&self) -> Option<&Band> {
+		self.band.as_ref()
+	}
+
+	/// The pointer moved: stretch the band to it. `false` when no band is being dragged,
+	/// which is how the caller knows an ordinary pointer move from a banding one.
+	pub fn drag_band(&mut self, to: Point) -> bool {
+		let Some(band) = self.band.as_mut() else {
+			return false;
+		};
+		band.to = to;
+		true
+	}
+
+	/// The band now covers these entries, in grid order (§21). The cursor follows the last
+	/// one it reached and the anchor stays on the first, so the details popup has a cell to
+	/// sit beside and a following Shift+click extends from where the band began.
+	pub fn set_band_selection(&mut self, paths: Vec<String>) {
+		self.cursor = paths.last().cloned();
+		self.anchor = paths.first().cloned().or_else(|| self.anchor.clone());
+		let banded: HashSet<String> = paths.into_iter().collect();
+		self.selected = self.band_base.union(&banded).cloned().collect();
+	}
+
+	/// The drag ended (the button came up).
+	pub fn end_band(&mut self) {
+		self.band = None;
+		self.band_base.clear();
 	}
 
 	/// Open the context menu on an entry, anchored where the pointer is right now.
@@ -348,10 +699,15 @@ impl Files {
 	fn begin(&mut self) -> u64 {
 		self.entries.clear();
 		self.loading = true;
-		self.selected = None;
+		self.deselect();
+		self.end_band();
 		self.menu = None;
 		self.rename = None;
 		self.notice = None;
+		// A new directory starts at the top, and whatever link was resolved belonged to
+		// the old one's selection.
+		self.scroll = 0.0;
+		self.link_target = None;
 		self.request += 1;
 		self.request
 	}
@@ -397,11 +753,16 @@ impl Files {
 		self.followed = None;
 		self.entries.clear();
 		self.loading = false;
-		self.selected = None;
+		self.deselect();
+		self.end_band();
 		self.menu = None;
 		self.rename = None;
 		self.notice = None;
 		self.dragging = false;
+		self.scroll = 0.0;
+		self.link_target = None;
+		// The next session is a different machine: its clock is not this one's (§20).
+		self.zone = Zone::default();
 		// Not `begin()`: bumping the request here too is what stops a batch from the
 		// previous session landing in the next one.
 		self.request += 1;
@@ -477,6 +838,139 @@ pub fn sort(entries: &mut [Entry]) {
 	});
 }
 
+/// Render an mtime in the server's own timezone (§20), as `YYYY-MM-DD HH:MM:SS ZONE`.
+///
+/// A fixed, ISO-ordered format rather than the machine's locale: the alternative is a
+/// dependency (or an OS call) to learn what "24/07" means to this user, and an ordering
+/// that is unambiguous everywhere costs neither. The zone tag is the server's own, so the
+/// reading matches what `ls -l` on that machine would show.
+pub fn format_mtime(epoch: u32, zone: &Zone) -> String {
+	// The epoch is UTC; shifting by the offset gives the server's wall clock, and
+	// `div_euclid`/`rem_euclid` keep that correct for the negative offsets west of
+	// Greenwich, where a plain division would round towards zero and land a day out.
+	let local = i64::from(epoch) + i64::from(zone.offset) * 60;
+	let (year, month, day) = civil_from_days(local.div_euclid(86_400));
+	let seconds = local.rem_euclid(86_400);
+	let stamp = format!(
+		"{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
+		seconds / 3600,
+		seconds % 3600 / 60,
+		seconds % 60,
+	);
+	match (zone.label.is_empty(), zone.offset) {
+		(true, 0) => stamp,
+		(true, offset) => format!("{stamp} {}", format_offset(offset)),
+		(false, 0) => format!("{stamp} {}", zone.label),
+		(false, offset) => format!("{stamp} {} ({})", zone.label, format_offset(offset)),
+	}
+}
+
+/// A UTC offset in minutes as `+HH:MM`.
+fn format_offset(offset: i32) -> String {
+	let sign = if offset < 0 { '-' } else { '+' };
+	let offset = offset.abs();
+	format!("{sign}{:02}:{:02}", offset / 60, offset % 60)
+}
+
+/// The civil date `days` days after 1970-01-01, as `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days`, the standard closed-form conversion: it shifts the
+/// epoch to 0000-03-01 so leap days land at the END of the 400-year era, which is what
+/// lets the whole calendar — including the 100/400-year exceptions — fall out of integer
+/// arithmetic with no table and no loop.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+	let shifted = days + 719_468;
+	let era = shifted.div_euclid(146_097);
+	let day_of_era = shifted.rem_euclid(146_097); // [0, 146096]
+	let year_of_era =
+		(day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+	let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+	let march_month = (5 * day_of_year + 2) / 153; // [0, 11], 0 = March
+	let day = day_of_year - (153 * march_month + 2) / 5 + 1;
+	let month = if march_month < 10 {
+		march_month + 3
+	} else {
+		march_month - 9
+	};
+	(year_of_era + era * 400 + i64::from(month <= 2), month, day)
+}
+
+/// Read `date +'%z %Z'` back off the server (§20): `+0200 CEST`. The label is optional —
+/// some shells answer with the offset alone — but an unparseable offset means we do not
+/// know the zone at all, and rendering times in a guessed one would be worse than UTC.
+pub fn parse_zone(output: &str) -> Option<Zone> {
+	let mut fields = output.split_whitespace();
+	let offset = fields.next()?;
+	let label = fields.next().unwrap_or_default().to_owned();
+	let sign = match offset.as_bytes().first()? {
+		b'+' => 1,
+		b'-' => -1,
+		_ => return None,
+	};
+	if offset.len() != 5 {
+		return None;
+	}
+	let digits = offset.get(1..5)?;
+	if !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+		return None;
+	}
+	let hours: i32 = digits[..2].parse().ok()?;
+	let minutes: i32 = digits[2..].parse().ok()?;
+	Some(Zone {
+		offset: sign * (hours * 60 + minutes),
+		label,
+	})
+}
+
+/// Pull the owner and group *names* out of an SFTP listing's `longname` (§20) — the
+/// `ls -l` line the server builds for each entry:
+///
+/// ```text
+/// -rw-r--r--    1 cme      staff        4311 Jul 24 18:03 notes.txt
+/// ```
+///
+/// SFTP v3 carries only numeric ids in the attributes, so this line is the one place a
+/// server that resolved `cme` and `staff` for itself actually says so. `None` when the
+/// line is missing or is not that shape, and the caller then falls back to the numbers.
+///
+/// `ponytail:` a column split, and columns are a guess — a *group* name containing a
+/// space would shift the fields. Requiring the mode column to be mode-shaped and the
+/// fifth column to be a number is what rejects the shapes we would otherwise misread;
+/// nothing here is trusted enough to act on, it is text shown beside a file.
+pub fn parse_longname(longname: &str) -> Option<(String, String)> {
+	let mut fields = longname.split_whitespace();
+	let mode = fields.next()?;
+	if mode.len() < 10 || !mode.starts_with(['-', 'd', 'l', 'b', 'c', 'p', 's']) {
+		return None;
+	}
+	let _links = fields.next()?;
+	let owner = fields.next()?;
+	let group = fields.next()?;
+	// The column after the group is the size on every ls-style line; if it is not a
+	// number, the fields are not where we think they are.
+	fields.next()?.parse::<u64>().ok()?;
+	Some((owner.to_owned(), group.to_owned()))
+}
+
+/// The owner and group of an entry as one `owner:group` field (§20), each falling back to
+/// `?` on its own — a server that names the user but not the group still says something
+/// useful. `None` when it reported neither, which is the `ls` fallback's answer (§19).
+pub fn owner_group(meta: &Meta) -> Option<String> {
+	let owner = meta.owner.as_deref();
+	let group = meta.group.as_deref();
+	if owner.is_none() && group.is_none() {
+		return None;
+	}
+	Some(format!("{}:{}", owner.unwrap_or("?"), group.unwrap_or("?")))
+}
+
+/// A name's lower-cased extension, if it has one. A dot-file with no other dot
+/// (`.bashrc`) has none — that dot opens the name, it does not close a stem.
+fn extension(name: &str) -> Option<String> {
+	let (stem, extension) = name.rsplit_once('.')?;
+	(!stem.is_empty()).then(|| extension.to_lowercase())
+}
+
 /// Which icon an entry gets (§19). Directories and symlinks go by kind; everything else
 /// by its lower-cased extension, falling back to the neutral file icon.
 pub fn category(entry: &Entry) -> Category {
@@ -486,16 +980,9 @@ pub fn category(entry: &Entry) -> Category {
 		Kind::File => {}
 	}
 
-	// A dot-file with no other dot (`.bashrc`) has no extension — it IS the name — so
-	// `rsplit_once` on a name whose only dot is the leading one must not match.
-	let Some((stem, extension)) = entry.name.rsplit_once('.') else {
+	let Some(extension) = extension(&entry.name) else {
 		return Category::Plain;
 	};
-	if stem.is_empty() {
-		return Category::Plain;
-	}
-
-	let extension = extension.to_lowercase();
 	let extension = extension.as_str();
 	for (table, category) in [
 		(IMAGE, Category::Image),
@@ -512,6 +999,145 @@ pub fn category(entry: &Entry) -> Category {
 	Category::Plain
 }
 
+/// The type line of the details popup (§20): the file's MIME type, read off its extension.
+/// Anything unlisted is `application/octet-stream`, which is what "some bytes" is called —
+/// the same answer `file --mime-type` gives when it recognises nothing.
+///
+/// A table rather than a probe: asking the server would be a round trip per selection, and
+/// the extension is already in hand. It is the guess every browser and web server makes.
+pub fn mime(name: &str) -> &'static str {
+	let Some(extension) = extension(name) else {
+		return OCTET_STREAM;
+	};
+	MIME.iter()
+		.find(|(known, _)| *known == extension)
+		.map_or(OCTET_STREAM, |(_, mime)| mime)
+}
+
+/// The fallback type: bytes of unknown meaning.
+const OCTET_STREAM: &str = "application/octet-stream";
+
+/// Extension to MIME type, lower-case and without the dot — the extensions `category`
+/// knows, plus the handful whose type is worth naming even though they share its neutral
+/// icon. Registered names where IANA has one, the conventional `text/x-*` otherwise.
+const MIME: &[(&str, &str)] = &[
+	// Images.
+	("png", "image/png"),
+	("jpg", "image/jpeg"),
+	("jpeg", "image/jpeg"),
+	("gif", "image/gif"),
+	("bmp", "image/bmp"),
+	("webp", "image/webp"),
+	("svg", "image/svg+xml"),
+	("ico", "image/vnd.microsoft.icon"),
+	("tif", "image/tiff"),
+	("tiff", "image/tiff"),
+	("heic", "image/heic"),
+	// Code and configuration.
+	("rs", "text/rust"),
+	("c", "text/x-c"),
+	("h", "text/x-c"),
+	("cpp", "text/x-c++"),
+	("hpp", "text/x-c++"),
+	("cc", "text/x-c++"),
+	("java", "text/x-java"),
+	("py", "text/x-python"),
+	("js", "text/javascript"),
+	("jsx", "text/javascript"),
+	("ts", "text/x-typescript"),
+	("tsx", "text/x-typescript"),
+	("go", "text/x-go"),
+	("rb", "text/x-ruby"),
+	("php", "application/x-httpd-php"),
+	("sh", "application/x-shellscript"),
+	("bash", "application/x-shellscript"),
+	("zsh", "application/x-shellscript"),
+	("fish", "application/x-shellscript"),
+	("pl", "text/x-perl"),
+	("lua", "text/x-lua"),
+	("sql", "application/sql"),
+	("html", "text/html"),
+	("css", "text/css"),
+	("scss", "text/x-scss"),
+	("json", "application/json"),
+	("yaml", "application/yaml"),
+	("yml", "application/yaml"),
+	("toml", "application/toml"),
+	("xml", "application/xml"),
+	("ini", "text/plain"),
+	("conf", "text/plain"),
+	("cfg", "text/plain"),
+	("kt", "text/x-kotlin"),
+	("swift", "text/x-swift"),
+	("cs", "text/x-csharp"),
+	("vim", "text/x-vim"),
+	("mk", "text/x-makefile"),
+	("cmake", "text/x-cmake"),
+	// Archives and packages.
+	("zip", "application/zip"),
+	("gz", "application/gzip"),
+	("tgz", "application/gzip"),
+	("bz2", "application/x-bzip2"),
+	("xz", "application/x-xz"),
+	("zst", "application/zstd"),
+	("tar", "application/x-tar"),
+	("7z", "application/x-7z-compressed"),
+	("rar", "application/vnd.rar"),
+	("jar", "application/java-archive"),
+	("deb", "application/vnd.debian.binary-package"),
+	("rpm", "application/x-rpm"),
+	("iso", "application/x-iso9660-image"),
+	// Documents.
+	("pdf", "application/pdf"),
+	("doc", "application/msword"),
+	(
+		"docx",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+	),
+	("odt", "application/vnd.oasis.opendocument.text"),
+	("rtf", "application/rtf"),
+	("md", "text/markdown"),
+	("txt", "text/plain"),
+	("log", "text/plain"),
+	("csv", "text/csv"),
+	("xls", "application/vnd.ms-excel"),
+	(
+		"xlsx",
+		"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	),
+	("ods", "application/vnd.oasis.opendocument.spreadsheet"),
+	("ppt", "application/vnd.ms-powerpoint"),
+	(
+		"pptx",
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+	),
+	// Audio.
+	("mp3", "audio/mpeg"),
+	("wav", "audio/wav"),
+	("flac", "audio/flac"),
+	("ogg", "audio/ogg"),
+	("m4a", "audio/mp4"),
+	("aac", "audio/aac"),
+	("opus", "audio/opus"),
+	("wma", "audio/x-ms-wma"),
+	// Video.
+	("mp4", "video/mp4"),
+	("mkv", "video/x-matroska"),
+	("avi", "video/x-msvideo"),
+	("mov", "video/quicktime"),
+	("webm", "video/webm"),
+	("wmv", "video/x-ms-wmv"),
+	("flv", "video/x-flv"),
+	("m4v", "video/x-m4v"),
+	// Executables and libraries, which the grid draws as plain files.
+	("exe", "application/vnd.microsoft.portable-executable"),
+	("dll", "application/vnd.microsoft.portable-executable"),
+	("so", "application/x-sharedlib"),
+	("o", "application/x-object"),
+	("a", "application/x-archive"),
+	("wasm", "application/wasm"),
+];
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -520,6 +1146,7 @@ mod tests {
 		Entry {
 			name: name.to_owned(),
 			kind,
+			meta: Meta::default(),
 		}
 	}
 
@@ -643,6 +1270,213 @@ mod tests {
 	}
 
 	#[test]
+	fn the_arrow_keys_walk_the_grid_and_stop_at_both_ends() {
+		let (mut files, _) = pane(&[
+			entry("a", Kind::File),
+			entry("b", Kind::File),
+			entry("c", Kind::File),
+			entry("d", Kind::File),
+			entry("e", Kind::File),
+		]);
+		let selected = |files: &Files| files.cursor().unwrap_or("none").to_owned();
+
+		// Nothing selected: forward starts at the top, backward at the bottom.
+		files.step(true, 1, false);
+		assert_eq!(selected(&files), "/home/a");
+		files.step(true, 2, false); // a row down, on a two-column grid
+		assert_eq!(selected(&files), "/home/c");
+		files.step(true, -1, false);
+		assert_eq!(selected(&files), "/home/b");
+
+		// Both ends clamp rather than wrap: past the last row is the last row.
+		files.step(true, 99, false);
+		assert_eq!(selected(&files), "/home/e");
+		files.step(true, -99, false);
+		assert_eq!(selected(&files), "/home/a");
+		assert_eq!(files.selected_index(true), Some(0));
+
+		// A hidden name is not a step the keyboard can land on with the toggle off.
+		let (mut hidden, _) = pane(&[entry(".ssh", Kind::Dir), entry("notes", Kind::File)]);
+		hidden.step(false, 1, false);
+		assert_eq!(selected(&hidden), "/home/notes");
+		assert_eq!(hidden.selected_index(false), Some(0));
+
+		// An empty directory has nowhere to go, and must not panic trying.
+		let mut empty = Files::default();
+		let request = empty.show("/home").expect("a new directory needs listing");
+		empty.chunk(request, Vec::new(), true);
+		empty.step(true, 1, false);
+		assert_eq!(empty.cursor(), None);
+	}
+
+	#[test]
+	fn a_set_of_entries_can_be_built_by_range_by_toggle_and_by_band() {
+		let (mut files, _) = pane(&[
+			entry("a", Kind::File),
+			entry("b", Kind::File),
+			entry("c", Kind::File),
+			entry("d", Kind::File),
+		]);
+		let chosen = |files: &Files| {
+			files
+				.selected_rows(true)
+				.into_iter()
+				.map(|(path, _)| path)
+				.collect::<Vec<_>>()
+		};
+
+		// A plain click is exclusive; Shift+click runs from it to the new end, either way.
+		files.select("/home/b");
+		files.extend_selection(true, "/home/d");
+		assert_eq!(chosen(&files), ["/home/b", "/home/c", "/home/d"]);
+		files.extend_selection(true, "/home/a");
+		assert_eq!(
+			chosen(&files),
+			["/home/a", "/home/b"],
+			"back past the anchor"
+		);
+
+		// Shift+arrow keeps extending from that same anchor — the cursor is on `a` after
+		// that last Shift+click, so two forward lands on `c` and the range is `b`..`c`.
+		files.step(true, 2, true);
+		assert_eq!(chosen(&files), ["/home/b", "/home/c"]);
+		assert_eq!(files.cursor(), Some("/home/c"));
+
+		// Ctrl+click adds one, then takes the same one back out.
+		files.toggle_selection("/home/a");
+		assert_eq!(chosen(&files), ["/home/a", "/home/b", "/home/c"]);
+		files.toggle_selection("/home/a");
+		assert_eq!(chosen(&files), ["/home/b", "/home/c"]);
+
+		// A plain band replaces the selection; an additive one adds to what was there.
+		files.begin_band(Point::new(0.0, 40.0), false);
+		files.set_band_selection(vec!["/home/a".to_owned()]);
+		assert_eq!(chosen(&files), ["/home/a"]);
+		files.end_band();
+		files.begin_band(Point::new(0.0, 40.0), true);
+		files.set_band_selection(vec!["/home/c".to_owned(), "/home/d".to_owned()]);
+		assert_eq!(chosen(&files), ["/home/a", "/home/c", "/home/d"]);
+		assert_eq!(
+			files.cursor(),
+			Some("/home/d"),
+			"the last cell the band reached"
+		);
+		files.end_band();
+
+		files.deselect();
+		assert_eq!(files.selected_count(), 0);
+	}
+
+	#[test]
+	fn a_link_target_belongs_to_the_selection_that_asked_for_it() {
+		let (mut files, _) = pane(&[entry("latest", Kind::Link), entry("notes", Kind::File)]);
+		files.select("/home/latest");
+		assert_eq!(files.link_target(), None, "not resolved yet");
+
+		files.set_link_target("/home/latest".to_owned(), "/srv/build-42".to_owned());
+		assert_eq!(files.link_target(), Some("/srv/build-42"));
+
+		// The answer is for a link the user has moved off: it is not this entry's target.
+		files.select("/home/notes");
+		assert_eq!(files.link_target(), None);
+	}
+
+	#[test]
+	fn an_mtime_reads_as_the_servers_own_wall_clock() {
+		let utc = Zone::default();
+		assert_eq!(format_mtime(1_774_000_000, &utc), "2026-03-20 09:46:40 UTC");
+		// East of Greenwich the same instant is later in the day…
+		let paris = Zone {
+			offset: 120,
+			label: "CEST".to_owned(),
+		};
+		assert_eq!(
+			format_mtime(1_774_000_000, &paris),
+			"2026-03-20 11:46:40 CEST (+02:00)"
+		);
+		// …and west of it, earlier — here far enough to be the previous day, which is
+		// what the euclidean division is for.
+		let honolulu = Zone {
+			offset: -600,
+			label: "HST".to_owned(),
+		};
+		assert_eq!(
+			format_mtime(1_774_000_000, &honolulu),
+			"2026-03-19 23:46:40 HST (-10:00)"
+		);
+		// The epoch itself, and a leap day, pin the calendar arithmetic.
+		assert_eq!(format_mtime(0, &utc), "1970-01-01 00:00:00 UTC");
+		assert_eq!(format_mtime(1_709_164_800, &utc), "2024-02-29 00:00:00 UTC");
+	}
+
+	#[test]
+	fn the_zone_probe_reads_dates_own_answer() {
+		assert_eq!(
+			parse_zone("+0200 CEST\n"),
+			Some(Zone {
+				offset: 120,
+				label: "CEST".to_owned()
+			})
+		);
+		assert_eq!(
+			parse_zone("-0930 MART"),
+			Some(Zone {
+				offset: -570,
+				label: "MART".to_owned()
+			})
+		);
+		// No label is still a usable answer; anything that is not an offset is not.
+		assert_eq!(parse_zone("+0000").map(|zone| zone.offset), Some(0));
+		for junk in ["", "CEST", "0200", "+02", "+02:00", "+abcd"] {
+			assert_eq!(parse_zone(junk), None, "{junk} is not an offset");
+		}
+	}
+
+	#[test]
+	fn the_owner_and_group_names_come_out_of_the_listings_own_ls_line() {
+		assert_eq!(
+			parse_longname("-rw-r--r--    1 cme      staff        4311 Jul 24 18:03 notes.txt")
+				.as_ref()
+				.map(|(owner, group)| (owner.as_str(), group.as_str())),
+			Some(("cme", "staff"))
+		);
+		// A directory line, and one whose file name carries spaces — the name is past
+		// every column we read, so it cannot disturb them.
+		assert_eq!(
+			parse_longname("drwxr-xr-x 2 root root 4096 Jan  1  2026 my old notes")
+				.as_ref()
+				.map(|(owner, group)| (owner.as_str(), group.as_str())),
+			Some(("root", "root"))
+		);
+		// Not an ls line: the server said nothing usable, so the caller keeps the numbers.
+		for junk in [
+			"",
+			"notes.txt",
+			"rw-r--r-- 1 cme staff 4311 Jul 24 18:03 x",
+			"d 1 a b c",
+		] {
+			assert_eq!(parse_longname(junk), None, "{junk:?} is not an ls line");
+		}
+	}
+
+	#[test]
+	fn owner_and_group_survive_a_server_that_only_half_answers() {
+		let named = Meta {
+			owner: Some("cme".to_owned()),
+			group: Some("staff".to_owned()),
+			..Meta::default()
+		};
+		assert_eq!(owner_group(&named).as_deref(), Some("cme:staff"));
+		let half = Meta {
+			owner: Some("1000".to_owned()),
+			..Meta::default()
+		};
+		assert_eq!(owner_group(&half).as_deref(), Some("1000:?"));
+		// The `ls` fallback reports neither, and the popup then shows no owner line.
+		assert_eq!(owner_group(&Meta::default()), None);
+	}
+
+	#[test]
 	fn folders_sort_before_files_case_insensitively() {
 		let mut entries = vec![
 			entry("zebra", Kind::File),
@@ -701,6 +1535,21 @@ mod tests {
 		];
 		for (name, kind, expected) in cases {
 			assert_eq!(category(&entry(name, kind)), expected, "{name}");
+		}
+	}
+
+	#[test]
+	fn a_type_comes_out_of_the_extension_and_lands_on_octet_stream_when_it_cannot() {
+		let cases = [
+			("logo.PNG", "image/png"), // case-insensitive, like the icons
+			("backup.tar.gz", "application/gzip"),
+			("notes.md", "text/markdown"),
+			("mystery.qqq", OCTET_STREAM),
+			("README", OCTET_STREAM),
+			(".bashrc", OCTET_STREAM), // a name, not a "bashrc" file
+		];
+		for (name, expected) in cases {
+			assert_eq!(mime(name), expected, "{name}");
 		}
 	}
 

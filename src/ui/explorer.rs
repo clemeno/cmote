@@ -24,6 +24,10 @@ use crate::ui::menu;
 /// rename starts — the user types straight away, no click needed (§14, §18).
 pub const RENAME_INPUT_ID: &str = "explorer-rename";
 
+/// The widget id of the tree's scrollable, so `app` can scroll a keyboard-moved selection
+/// back into view (§20).
+pub const TREE_ID: &str = "explorer-tree";
+
 /// Panel surfaces: a touch darker than the status bar so the tree reads as its own
 /// region, with the selected row taking the same blue the grid's selection uses. Shared
 /// with the files pane below (§19) — the two panels are one region visually, so the
@@ -36,14 +40,20 @@ pub(crate) const MUTED_FG: Color = Color::from_rgb8(0x90, 0x90, 0x90);
 pub(crate) const SELECTED_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
 /// The notice line's colour — a warm red that stays readable on the panel's dark fill.
 pub(crate) const NOTICE_FG: Color = Color::from_rgb8(0xe0, 0x80, 0x70);
+/// The ring drawn round whichever panel currently owns the keyboard (§20).
+pub(crate) const FOCUS_FG: Color = Color::from_rgb8(0x5a, 0x8a, 0xd0);
 
 /// Type size and row geometry. `ROW_HEIGHT` is fixed for the same reason the home
 /// screen's is (§14): the context menu is placed from a row *index*, because iced does
-/// not expose where a laid-out widget ended up.
+/// not expose where a laid-out widget ended up — and, for the same reason, so is the
+/// keyboard's scroll-into-view (§20).
 pub(crate) const TEXT_SIZE: f32 = 13.0;
-const ROW_HEIGHT: f32 = 22.0;
+pub const ROW_HEIGHT: f32 = 22.0;
 const HEADER_HEIGHT: f32 = 28.0;
 const INDENT: f32 = 12.0;
+/// The notice line's height, fixed so both panels can subtract it from their scrollable
+/// area exactly rather than guessing at a padded line of text (§20).
+pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
 
 /// How close to the window's edge a context menu may come when the pointer sits too
 /// close to it to fit. Its width is the shared one (`ui::menu::WIDTH`). Shared with the
@@ -58,13 +68,15 @@ pub(crate) const MENU_INSET: f32 = 8.0;
 /// right-press carries no coordinates of its own — the same trick the terminal grid uses
 /// to place its own menu (§10). The rows inside handle their own presses, so this only
 /// picks up the moves they ignore.
-pub fn panel(explorer: &Explorer) -> Element<'_, Message> {
+/// `focused` draws the ring that says the keyboard is here (§20).
+pub fn panel(explorer: &Explorer, focused: bool) -> Element<'_, Message> {
 	let mut content = column![header(explorer), tree(explorer)].spacing(0);
 	if let Some(notice) = explorer.notice() {
 		content = content.push(
 			container(text(notice.to_owned()).size(TEXT_SIZE).color(NOTICE_FG))
 				.width(Length::Fill)
-				.padding(Padding::from([4.0, 8.0])),
+				.height(Length::Fixed(NOTICE_HEIGHT))
+				.padding(Padding::from([0.0, 8.0])),
 		);
 	}
 
@@ -72,13 +84,43 @@ pub fn panel(explorer: &Explorer) -> Element<'_, Message> {
 		container(content)
 			.width(Length::Fixed(explorer.width()))
 			.height(Length::Fill)
-			.style(|_theme| container::Style {
+			.style(move |_theme| container::Style {
 				background: Some(PANEL_BG.into()),
+				border: focus_border(focused),
 				..container::Style::default()
 			}),
 	)
 	.on_move(|point| Message::Explorer(ExplorerMessage::PointerMoved(point)))
+	// A press anywhere in the panel gives it the keyboard (§20).
+	.on_press(Message::Explorer(ExplorerMessage::PanelPressed))
 	.into()
+}
+
+/// The border a panel wears while it owns the keyboard (§20) — and no border at all
+/// otherwise, so the two panels only ever differ by the one that has the focus. Shared
+/// with the files pane, which is the other end of the same Ctrl+Tab ring.
+pub(crate) fn focus_border(focused: bool) -> Border {
+	Border {
+		width: if focused { 1.0 } else { 0.0 },
+		radius: 0.0.into(),
+		color: if focused {
+			FOCUS_FG
+		} else {
+			Color::TRANSPARENT
+		},
+	}
+}
+
+/// How tall the scrollable part of the tree is (§20): the window, less the status bar
+/// above it and whatever the files pane takes below. What "on screen" means when the app
+/// scrolls a keyboard-moved row back into view.
+///
+/// `ponytail:` the notice line, when one is showing, is not subtracted — the estimate is
+/// then one line generous and the tree scrolls very slightly further than it had to. The
+/// pane's own `grid_height` is exact because it owns its height; this one is derived.
+pub fn tree_height(window_height: f32, files_reserved: f32) -> f32 {
+	(window_height - crate::ui::terminal::STATUS_BAR_HEIGHT - files_reserved - HEADER_HEIGHT)
+		.max(0.0)
 }
 
 /// The dot-entry toggle, shared by this panel's header and the files pane's (§19) —
@@ -139,6 +181,11 @@ fn tree(explorer: &Explorer) -> Element<'_, Message> {
 		.map(|row| row_view(row, selected, editing));
 
 	scrollable(column(rows).spacing(0))
+		.id(TREE_ID)
+		// Reported so keyboard navigation knows which rows are already on screen (§20).
+		.on_scroll(|viewport| {
+			Message::Explorer(ExplorerMessage::Scrolled(viewport.absolute_offset().y))
+		})
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.into()

@@ -97,6 +97,10 @@ pub enum SshCommand {
 	ListFiles { path: String, request: u64 },
 	/// Fetch a remote file to a local path the user picked in the save dialog (§19).
 	Download { remote: String, local: PathBuf },
+	/// Resolve one symlink for the files pane's details popup (§20). Sent when a link is
+	/// selected — one round trip for the entry being looked at, rather than one per link
+	/// in the listing.
+	ReadLink(String),
 	/// Rename a remote folder (§18). `to` is the same directory with a new last
 	/// component; the task refuses to replace an occupied path.
 	RenameDir { from: String, to: String },
@@ -151,6 +155,12 @@ pub enum SshEvent {
 	/// A files-pane listing failed (no permission, gone, the server refused). Carries the
 	/// request number so a failure for a directory the user has left is dropped (§19).
 	FilesFailed { request: u64, reason: String },
+	/// The remote machine's timezone (§20), from one `date` probe per session. Every mtime
+	/// in the pane is rendered against it, so it arrives once and applies to all of them.
+	Zone(crate::files::Zone),
+	/// Where a selected symlink points (§20). Carries the link's own path so an answer for
+	/// a link the selection has moved off is recognisable.
+	LinkTarget { path: String, target: String },
 	/// A directory could not be listed (no permission, gone, the server refused). Carries
 	/// the path so the tree can stop waiting on that folder, and a reason for its notice
 	/// line — the path is the user's own, so naming it is what makes it actionable (§17).

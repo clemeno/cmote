@@ -7,8 +7,9 @@ screen lists your saved connection targets; pick one (or start a new connection)
 in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
 `.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
-remote filesystem beside it, an icon grid of the current directory's files under it, the
-remote working directory in the title bar, and file transfer both ways.
+remote filesystem beside it, an icon grid of the current directory's files under it (keyboard
+navigable, with a details popup and rubber-band multi-selection), the remote working
+directory in the title bar, and file transfer both ways.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -56,9 +57,34 @@ references below (§n) point into it.
   **Download…**, **Rename…**, **Copy name / relative path / full path** and **Refresh**.
   Drag the splitter to resize the pane, or hide it with the status bar's **Files** button;
   the same `.*` checkbox hides dot-files here too (§19).
+- **Keyboard focus across the three regions** — the shell, the folder tree and the files
+  pane each take the keyboard. A session starts at the shell; a click focuses whatever was
+  clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
+  skipped), and the focused panel wears a ring so it is never a guess. In a panel the
+  **arrow keys** walk the rows (in the grid, left/right move one cell and up/down a whole
+  row), **Tab / Shift+Tab** step next/previous, **Enter** opens, **F2** renames and **Esc**
+  hands the keyboard back to the shell. A keyboard-moved selection scrolls itself into view,
+  only at the edges (§20).
+- **A details popup beside the selection** — the entry's **full name** (the grid's label is
+  narrow and may clip it), where a **symlink points**, the file's **MIME type**, its
+  **modification time in the server's own timezone** (`2026-03-20 11:46:40 CEST (+02:00)` —
+  the zone is read off the server once per session), its **size** (human, with the exact
+  byte count behind it) and its **`owner:group`** as names, not numbers. Anything the server
+  would not say reads as a dash (§20).
+- **Selecting many entries at once** — drag a **rubber band** over the grid's empty space,
+  **Ctrl+click** to add or remove one, **Shift+click** or **Shift+arrow** to take the run
+  between two ends, **Ctrl+A** to take the lot; **Ctrl+drag** adds a band to what is already
+  selected. The popup then summarises the set (how many, folders versus files, total size).
+  A right-click *inside* the selection acts on all of it — the copy items join their results
+  one per line and say how many they will take — while a right-click outside collapses onto
+  that one entry first (§21).
 - **File download** — right-click a file in the pane → **Download…**, pick where to save
   it in the native dialog, and it comes down over **SFTP** on its own channel with a
-  progress bar in the status bar (§19).
+  progress bar in the status bar. Downloading a **multiple selection** asks for one
+  destination folder instead of a dialog per file, queues the transfers (one at a time, one
+  progress bar) and leaves any folders in the selection behind. If some of those names are
+  already in the folder, one dialog asks about the whole batch before anything is written:
+  **Skip them**, **Save alongside** (`notes-1.txt`), **Replace**, or **Cancel** (§19, §21).
 - **File upload into the shell's current directory** — pick a local file with **File…**,
   send it with **Upload**, and it goes over **SFTP** (its own channel, so the shell keeps
   running) into the directory the remote shell is sitting in. The destination is shown
@@ -81,6 +107,73 @@ references below (§n) point into it.
 - Session-only **secrets** — passwords and key passphrases are held in memory and
   `zeroize`d on drop, never written to disk (§12). Only non-secret connection *profiles*
   are persisted, for the home list (§14).
+
+## Gestures and shortcuts
+
+Everything the mouse and the keyboard do, by region. The **focused** region is the one that
+gets a keystroke; a click focuses what it lands on, and the ring shows where the keyboard is.
+
+**Anywhere in the window**
+
+| Gesture | What it does |
+|---|---|
+| **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous region — shell, folder tree, files pane (hidden panels are skipped) |
+| Click a region | Focus it |
+| Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |
+| Drag inside a dialog's body | Select its text; **Ctrl+C** copies it |
+
+**Terminal (the shell)**
+
+| Gesture | What it does |
+|---|---|
+| Drag across the grid | Select text (highlighted in place) |
+| Right-click | Context menu: Copy / Paste |
+| **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
+| Any other key | Goes to the remote shell, arrows included (SS3 form in application-cursor mode) |
+| Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
+
+**Folder tree** (right of the terminal — the status bar's **Folders** button hides it)
+
+| Gesture | What it does |
+|---|---|
+| Click a folder | Expand or collapse it, and select it |
+| Right-click a folder | Open in terminal / Rename… / Copy name / Copy relative path / Copy full path / Expand / Collapse |
+| **↑** / **↓**, **Tab** / **Shift+Tab** | Walk the visible rows |
+| **→** / **←** | Open / close the selected folder |
+| **Enter** | `cd` the shell into it |
+| **F2** | Rename in place (**Enter** commits, **Esc** abandons) |
+| **Esc** | Give the keyboard back to the shell |
+| `.*` checkbox | Hide or show dot-entries (shared with the files pane) |
+
+**Files pane** (under everything — the status bar's **Files** button hides it)
+
+| Gesture | What it does |
+|---|---|
+| Click an entry | Select it (and show its details popup) |
+| Double-click a folder | `cd` the shell into it; the tree and the pane follow |
+| Click empty space | Clear the selection |
+| **Drag** from empty space | Rubber-band selection; **Ctrl+drag** adds to what is selected |
+| **Ctrl+click** | Add or remove one entry |
+| **Shift+click** | Select everything between the anchor and here |
+| **Ctrl+A** | Select every entry on show |
+| Right-click | The entry's menu — on a multiple selection it acts on all of it |
+| **←** / **→** | Move one cell; **↑** / **↓** move a whole row |
+| **Shift** + those arrows | Extend the selection instead of moving it |
+| **Tab** / **Shift+Tab** | Next / previous entry |
+| **Enter** | Enter the selected folder |
+| **F2** | Rename in place |
+| **Esc** | Give the keyboard back to the shell |
+| ↑ button in the header | Go to the parent directory |
+
+**Home screen**
+
+| Gesture | What it does |
+|---|---|
+| Click a target | Select it; click again (or **Enter**) to open it |
+| Right-click a target | Open / Rename / Delete (deleting asks first) |
+| **F2** | Rename the selected target (**Enter** commits, **Esc** abandons) |
+| **Delete** | Delete the selected target, after the confirmation (**Esc** cancels it) |
+| **Tab** / **Shift+Tab** on the connect form | Move focus across the fields, the auth radios and Connect; **Enter** / **Space** activates the focused radio or button |
 
 ## Requirements
 
@@ -170,7 +263,17 @@ post-rename refresh, relative-path arithmetic, shell quoting, and the panel's wi
 clamps), and the files pane's model (batch accumulation and the dropping of batches for a
 directory already left, the cwd-follow rule that a repeated announcement is not a move,
 the folders-first sort, icon categories from kind and extension, rename validation, and
-the pane's height clamps).
+the pane's height clamps). The keyboard and selection work adds: the arrow walk across both
+panels (clamping at both ends, skipping hidden entries, and not panicking on an empty
+directory), the keep-it-visible scroll rule (including an item taller than its viewport),
+MIME types from extensions and their `application/octet-stream` fallback, mtime rendering in
+a server timezone (the epoch, a leap day and both sides of Greenwich), the `date +'%z %Z'`
+and `ls -l` `longname` parsers with their half-answer fallbacks, the link target belonging
+to the selection that asked for it, the selection gestures (range from an anchor, toggle,
+plain and additive band), the rubber band's hit-testing against the grid geometry (scrolled,
+past the end of the listing, and in the gap between two rows), and — through the app's own
+handlers rather than the model's — Shift+click and Shift+arrow, which is what proves the
+modifier state reaches a mouse press.
 
 ### Manual smoke test (live SSH)
 
@@ -310,7 +413,42 @@ then follow the shell. Then:
   the minimum and at 60% of the window. The **Files** button hides the pane and gives its
   rows back to the terminal.
 
-**10. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
+**10. Keyboard focus and the details popup.** Press **Ctrl+Tab** repeatedly: the focus ring
+should go shell → tree → files pane → shell. Hide one panel with its status-bar button and
+cycle again — the hidden stop is skipped. Then, in the files pane:
+
+- Walk with the **arrows**: left/right move one cell, up/down a whole row, and both ends
+  clamp instead of wrapping. Keep going past the bottom of the pane — the grid should scroll
+  only when the selection reaches an edge, never re-centre. **Tab** / **Shift+Tab** step
+  next and previous. **Esc** hands the keyboard back to the shell (type at the prompt to
+  confirm).
+- With an entry selected, the popup beside it should name the entry in full, and show the
+  MIME type (`text/x-python` on a `.py`, `application/octet-stream` on something unknown),
+  the time, the size and `owner:group`. Compare the time and the owner against `ls -l` on
+  the remote — they should agree, including the timezone. Select a symlink
+  (`ln -s /etc /tmp/link-to-etc`) → the popup adds `→ /etc` a moment later.
+- **Enter** on a folder enters it; **F2** renames in place.
+
+**11. Selecting many entries.** In a directory with a dozen or so entries:
+
+- Drag from **empty space** across several cells — a translucent rectangle follows the
+  pointer and everything it touches highlights. Release outside the pane (over the terminal)
+  and the band should end there, not keep selecting when the pointer comes back.
+- **Ctrl+drag** a second band: it adds to the first selection instead of replacing it.
+  **Ctrl+click** toggles one entry, **Shift+click** takes the run between two, **Shift+←/→/↑/↓**
+  extends from the anchor, **Ctrl+A** takes them all. The popup should switch to
+  `N items selected` with the folders/files split and the total size.
+- Right-click **inside** the selection → the copy items carry the count; **Copy full path**
+  should paste one path per line into the shell. **Rename…** and **Open in terminal** are
+  greyed out. Right-click **outside** the selection → it collapses to that one entry first.
+- Select several files (a folder among them is fine) → **Download… (N)** asks for a
+  destination folder, downloads them one at a time with the progress bar, skips the folder,
+  and finishes with `Saved N files`. Run it again into the same folder → the
+  **Some of these files are already there** dialog lists the names: **Cancel** downloads
+  nothing, **Skip them** leaves the local copies untouched, **Save alongside** writes
+  `name-1.ext`, **Replace** overwrites. Check the results with `ls -l` locally.
+
+**12. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
 should render, and the **arrow keys** should move the cursor — this exercises
 application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
 to the SS3 form so they register. In `vim`, `:q!` to exit.

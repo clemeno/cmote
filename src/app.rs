@@ -9,7 +9,7 @@
 // There is no hidden widget tree and no global mutable state. Every change
 // flows through `update`, and the compiler forces us to handle each `Message`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use iced::Element;
 use iced::widget::{text, text_editor};
@@ -116,6 +116,25 @@ pub enum Screen {
 	/// `App::dialog_body` so it can be selected and copied; this variant just marks
 	/// that the error screen is showing.
 	Error,
+}
+
+/// Which part of the terminal screen the keyboard is talking to (§20).
+///
+/// The shell is not the only thing on this screen any more: two panels sit beside it, and
+/// both want the arrow keys. Rather than guess from the pointer, the window has one focus
+/// at a time — the terminal to begin with, a click moves it to whatever was clicked, and
+/// Ctrl+Tab cycles. While a panel holds it, no key reaches the shell: a panel that
+/// swallowed only the arrows would still leave Tab completing paths at a prompt the user
+/// is not looking at.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Focus {
+	/// The remote shell: every key is encoded and sent down the channel (§9).
+	#[default]
+	Terminal,
+	/// The folder tree (§18).
+	Tree,
+	/// The files pane (§19).
+	Files,
 }
 
 /// The whole application state. Owned in one place; nothing else mutates it.
@@ -236,6 +255,42 @@ pub struct App {
 	/// labour: it owns what it shows, `app` turns its requests into `SshCommand::ListFiles`
 	/// / `Download` and follows the shell's directory into it.
 	files: files::Files,
+	/// Which of the three — shell, tree, files pane — the keyboard belongs to (§20).
+	focus: Focus,
+	/// Which modifier keys are down right now (§21). Tracked from the keyboard
+	/// subscription because a mouse press reports none of its own, and Ctrl+click,
+	/// Shift+click and Ctrl+drag all need to know.
+	modifiers: iced::keyboard::Modifiers,
+	/// Downloads waiting their turn (§21) — remote path and where it is being saved. One
+	/// transfer runs at a time, so a multi-file download queues here and each completion
+	/// starts the next.
+	downloads: std::collections::VecDeque<(String, PathBuf)>,
+	/// How many of the current batch have landed, for its closing notice.
+	downloaded: usize,
+	/// A multi-file download held at the "some of these are already there" question (§21).
+	clash: Option<Clash>,
+}
+
+/// A queued batch of downloads waiting on the name-collision answer (§21). The names that
+/// collide are not kept: the answer is applied by looking again, so a folder that changed
+/// while the dialog was open is still handled correctly.
+#[derive(Debug, Clone)]
+struct Clash {
+	remotes: Vec<String>,
+	dir: PathBuf,
+}
+
+/// What to do about local files a multi-file download would land on top of (§21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClashChoice {
+	/// Leave the local copies alone and download only the rest.
+	Skip,
+	/// Overwrite them.
+	Replace,
+	/// Save alongside, as `name-1.ext`.
+	KeepBoth,
+	/// Download nothing at all.
+	Cancel,
 }
 
 /// Where a file transfer has got to (§17, §19). Only one runs at a time, so this is a
@@ -366,6 +421,14 @@ pub enum Message {
 		remote: String,
 		local: Option<PathBuf>,
 	},
+	/// The folder picker for a multi-file download closed (§21): `dir` is where the batch
+	/// is going, or `None` if the user cancelled.
+	DownloadFolderPicked {
+		remotes: Vec<String>,
+		dir: Option<PathBuf>,
+	},
+	/// The answer to "some of these files are already there" (§21).
+	DownloadClash(ClashChoice),
 	/// Something happened in the remote folder tree (§18). Nested rather than flattened
 	/// — the panel has a dozen interactions of its own, and burying them in this enum
 	/// would drown the screens that only have two or three.
@@ -464,7 +527,7 @@ impl App {
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
-			Message::Key(event) => self.on_key(event),
+			Message::Key(event) => return self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
@@ -494,6 +557,15 @@ impl App {
 			Message::Explorer(message) => return self.on_explorer(message),
 			Message::Files(message) => return self.on_files(message),
 			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
+			Message::DownloadFolderPicked { remotes, dir } => self.on_download_folder(remotes, dir),
+			Message::DownloadClash(choice) => {
+				// Taking it closes the dialog whichever way the question was answered.
+				if let Some(clash) = self.clash.take()
+					&& choice != ClashChoice::Cancel
+				{
+					self.queue_downloads(&clash.remotes, &clash.dir, choice);
+				}
+			}
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
 			Message::Ignored => {}
@@ -769,13 +841,26 @@ impl App {
 				done,
 			} => self.files.chunk(request, entries, done),
 			SshEvent::FilesFailed { request, reason } => self.files.failed(request, reason),
+			// The server's own timezone and one resolved symlink, both for the details
+			// popup beside the selection (§20).
+			SshEvent::Zone(zone) => self.files.set_zone(zone),
+			SshEvent::LinkTarget { path, target } => self.files.set_link_target(path, target),
 			SshEvent::DownloadDone(path) => {
 				self.transfer = None;
+				self.downloaded += 1;
 				self.transfer_notice = Some(format!("Saved to {path}"));
+				// A batch keeps going, and says how it went once the last file lands (§21).
+				self.pump_downloads();
+				if self.transfer.is_none() && self.downloaded > 1 {
+					self.transfer_notice = Some(format!("Saved {} files", self.downloaded));
+				}
 			}
 			SshEvent::DownloadFailed(message) => {
 				self.transfer = None;
 				self.transfer_notice = Some(message);
+				// One file failing does not abandon the rest of the batch — the notice says
+				// which one it was, and the queue moves on.
+				self.pump_downloads();
 			}
 			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
 			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
@@ -1089,11 +1174,12 @@ impl App {
 		}
 	}
 
-	/// Forward a key press to the shell, but only while the terminal is open.
+	/// Route a key press on the terminal screen (§20): to the focused panel, or — when the
+	/// shell has the focus, which is where every session starts — down the channel.
 	/// Non-input keys (bare modifiers, unmapped keys) encode to nothing and are
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
 	/// subscription is added only there), so no extra screen check is needed.
-	fn on_key(&mut self, event: iced::keyboard::Event) {
+	fn on_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
 		// While the Disconnect confirmation modal is open, keystrokes belong to the
@@ -1102,7 +1188,14 @@ impl App {
 		// focus, so without this guard Ctrl+C would also send ETX to the session. The
 		// dialog's own widgets still receive the keys through the widget tree (§10).
 		if self.confirm_disconnect {
-			return;
+			return iced::Task::none();
+		}
+
+		// The one place the modifier state is kept (§21): a mouse press carries none of its
+		// own, so Ctrl+click, Shift+click and Ctrl+drag all read it from here.
+		if let iced::keyboard::Event::ModifiersChanged(modifiers) = event {
+			self.modifiers = modifiers;
+			return iced::Task::none();
 		}
 
 		let iced::keyboard::Event::KeyPressed {
@@ -1113,8 +1206,18 @@ impl App {
 			..
 		} = event
 		else {
-			return; // ignore key releases and other keyboard events
+			return iced::Task::none(); // ignore key releases and other keyboard events
 		};
+		self.modifiers = modifiers;
+
+		// The download collision question (§21) is modal like the upload ones: Esc backs
+		// out of the whole batch, everything else waits for a button.
+		if self.clash.is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.clash = None;
+			}
+			return iced::Task::none();
+		}
 
 		// Same rule for the upload dialogs (§17): while one is open the keyboard belongs
 		// to it — the destination field types through the widget tree — so nothing here
@@ -1128,7 +1231,7 @@ impl App {
 			{
 				self.transfer = None;
 			}
-			return;
+			return iced::Task::none();
 		}
 
 		// And the same for the folder tree's inline rename (§18): the field types through
@@ -1138,7 +1241,7 @@ impl App {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.explorer.cancel_rename();
 			}
-			return;
+			return iced::Task::none();
 		}
 
 		// And the files pane's inline rename (§19), for the same reason.
@@ -1146,7 +1249,22 @@ impl App {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.files.cancel_rename();
 			}
-			return;
+			return iced::Task::none();
+		}
+
+		// Ctrl+Tab hands the keyboard on to the next panel, Ctrl+Shift+Tab to the previous
+		// one (§20). Taken before anything else on this screen: it is the way *out* of a
+		// panel that is swallowing keys, so nothing may shadow it.
+		if modifiers.control() && matches!(key, iced::keyboard::Key::Named(Named::Tab)) {
+			self.cycle_focus(modifiers.shift());
+			return iced::Task::none();
+		}
+
+		// A focused panel keeps the key; only the shell's own focus reaches the channel.
+		match self.focus {
+			Focus::Tree => return self.on_tree_key(&key),
+			Focus::Files => return self.on_files_key(&key, modifiers),
+			Focus::Terminal => {}
 		}
 
 		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
@@ -1167,6 +1285,242 @@ impl App {
 		) {
 			self.send_command(SshCommand::Input(bytes));
 		}
+		iced::Task::none()
+	}
+
+	/// The focus ring (§20): shell, tree, files pane, and round again — skipping whichever
+	/// panels are hidden, since a stop you cannot see is a dead press of Ctrl+Tab. The
+	/// shell is always in the ring; it is the one thing always on this screen.
+	fn cycle_focus(&mut self, backwards: bool) {
+		let mut ring = vec![Focus::Terminal];
+		if self.explorer.visible() {
+			ring.push(Focus::Tree);
+		}
+		if self.files.visible() {
+			ring.push(Focus::Files);
+		}
+		let at = ring
+			.iter()
+			.position(|stop| *stop == self.focus)
+			.unwrap_or(0);
+		// Backwards is a forward step of len-1, which keeps the wrap-around in one place.
+		let step = if backwards { ring.len() - 1 } else { 1 };
+		self.focus = ring[(at + step) % ring.len()];
+	}
+
+	/// Give the keyboard to a panel because it was clicked (§20). Also closes the OTHER
+	/// panel's context menu — clicking into a panel is as much a click-away from the menu
+	/// next door as clicking the grid is.
+	fn focus_pane(&mut self, focus: Focus) {
+		self.focus = focus;
+		self.menu = None;
+	}
+
+	/// Keys while the folder tree has the focus (§20). Up/Down walk the visible rows,
+	/// Right opens a folder and Left shuts it, Tab/Shift+Tab step like the arrows, Enter
+	/// sends the shell there, F2 renames, and Esc hands the keyboard back to the shell.
+	fn on_tree_key(&mut self, key: &iced::keyboard::Key) -> iced::Task<Message> {
+		use iced::keyboard::key::Named;
+		let iced::keyboard::Key::Named(named) = key else {
+			return iced::Task::none();
+		};
+
+		let step = match named {
+			Named::ArrowDown | Named::Tab => 1,
+			Named::ArrowUp => -1,
+			Named::ArrowRight => {
+				// Open the folder — the same call the row click makes, so a folder never
+				// listed is fetched here too.
+				if let Some(path) = self.explorer.selected().map(str::to_owned)
+					&& let Some(fetch) = self.explorer.expand(&path, false)
+				{
+					self.send_command(SshCommand::ListDir(fetch));
+				}
+				return iced::Task::none();
+			}
+			Named::ArrowLeft => {
+				if let Some(path) = self.explorer.selected().map(str::to_owned) {
+					self.explorer.collapse(&path);
+				}
+				return iced::Task::none();
+			}
+			Named::Enter => {
+				let Some(path) = self.explorer.selected().map(str::to_owned) else {
+					return iced::Task::none();
+				};
+				return self.on_explorer(ExplorerMessage::Cd(path));
+			}
+			Named::F2 => {
+				let Some(path) = self.explorer.selected().map(str::to_owned) else {
+					return iced::Task::none();
+				};
+				return self.on_explorer(ExplorerMessage::RenameStarted(path));
+			}
+			Named::Escape => {
+				self.focus = Focus::Terminal;
+				return iced::Task::none();
+			}
+			_ => return iced::Task::none(),
+		};
+
+		self.explorer.step(step);
+		self.scroll_tree_into_view()
+	}
+
+	/// Keys while the files pane has the focus (§20). Left/Right step one cell and Up/Down
+	/// a whole row — the grid wraps at the window's width, so how many cells that is comes
+	/// from the same arithmetic the layout uses. Tab/Shift+Tab are next/previous, Enter
+	/// opens a folder, F2 renames, and Esc hands the keyboard back to the shell.
+	fn on_files_key(
+		&mut self,
+		key: &iced::keyboard::Key,
+		modifiers: iced::keyboard::Modifiers,
+	) -> iced::Task<Message> {
+		use iced::keyboard::key::Named;
+
+		// Ctrl+A takes the whole listing (§21). Checked before the named-key gate below,
+		// since it is the pane's only shortcut on a character key.
+		if modifiers.control()
+			&& matches!(key, iced::keyboard::Key::Character(character)
+				if character.as_str().eq_ignore_ascii_case("a"))
+		{
+			self.files.select_all(self.explorer.show_hidden());
+			return iced::Task::none();
+		}
+
+		let iced::keyboard::Key::Named(named) = key else {
+			return iced::Task::none();
+		};
+
+		let columns = ui::files::columns(self.window_size.width) as isize;
+		// Shift held on an arrow extends the selection instead of moving it (§21). Not on
+		// Tab: there, Shift already means "the other way".
+		let extend = modifiers.shift();
+		let (step, extend) = match named {
+			Named::ArrowRight => (1, extend),
+			Named::ArrowLeft => (-1, extend),
+			Named::ArrowDown => (columns, extend),
+			Named::ArrowUp => (-columns, extend),
+			Named::Tab if modifiers.shift() => (-1, false),
+			Named::Tab => (1, false),
+			Named::Enter => {
+				let Some(path) = self.files.cursor().map(str::to_owned) else {
+					return iced::Task::none();
+				};
+				// Straight through the double-click's own handler, which is where "only a
+				// directory can be entered" is decided.
+				return self.on_files(FilesMessage::EntryOpened(path));
+			}
+			Named::F2 => {
+				let Some(path) = self.files.cursor().map(str::to_owned) else {
+					return iced::Task::none();
+				};
+				return self.on_files(FilesMessage::RenameStarted(path));
+			}
+			Named::Escape => {
+				self.focus = Focus::Terminal;
+				return iced::Task::none();
+			}
+			_ => return iced::Task::none(),
+		};
+
+		self.files.step(self.explorer.show_hidden(), step, extend);
+		self.resolve_selected_link();
+		// Only the keyboard scrolls: a click is already on a cell the user can see, and
+		// scrolling under their cursor would move the thing they just aimed at.
+		self.scroll_files_into_view()
+	}
+
+	/// Select whatever the rubber band now covers (§21). The grid's geometry belongs to the
+	/// view, so the band is turned into cell indices there and back into paths here — the
+	/// same split the arrow keys already use.
+	fn apply_band(&mut self) {
+		let Some(rect) = self.files.band().map(files::Band::rect) else {
+			return;
+		};
+		let Some(directory) = self.files.path().map(str::to_owned) else {
+			return;
+		};
+		let rows = self.files.rows(self.explorer.show_hidden());
+		let paths: Vec<String> = ui::files::band_hits(
+			rect,
+			ui::files::columns(self.window_size.width),
+			rows.len(),
+			self.files.scroll(),
+		)
+		.into_iter()
+		.filter_map(|index| Some(explorer::join(&directory, &rows.get(index)?.name)))
+		.collect();
+		self.files.set_band_selection(paths);
+	}
+
+	/// Which entries a context-menu item acts on (§21): the whole selection when the menu
+	/// was opened on part of it, that one entry otherwise. In grid order, since that is the
+	/// order a list of copied names should come out in.
+	fn action_targets(&self, path: &str) -> Vec<String> {
+		if self.files.selected_count() > 1 && self.files.is_selected(path) {
+			self.files
+				.selected_rows(self.explorer.show_hidden())
+				.into_iter()
+				.map(|(path, _)| path)
+				.collect()
+		} else {
+			vec![path.to_owned()]
+		}
+	}
+
+	/// Ask the server where the selected entry points, when it is a symlink (§20) — the
+	/// details popup shows a link's target, and only the server can resolve it.
+	///
+	/// One `readlink` per *selected* link, not one per link in the listing: resolving them
+	/// all is the round-trip-per-entry cost the pane is built to avoid (§19).
+	fn resolve_selected_link(&mut self) {
+		if let Some(path) = self.files.cursor().map(str::to_owned)
+			&& self.files.kind_of(&path) == Some(files::Kind::Link)
+			&& self.files.link_target().is_none()
+		{
+			self.send_command(SshCommand::ReadLink(path));
+		}
+	}
+
+	/// Scroll the files pane so the selected cell is on screen (§20). The grid's geometry
+	/// is the view's (`ui::files`), so the same arithmetic that lays the cells out is what
+	/// works out where the selected one sits. The model is told the new offset as well as
+	/// the widget, because the details popup is placed against it on this very frame.
+	fn scroll_files_into_view(&mut self) -> iced::Task<Message> {
+		let Some(index) = self.files.selected_index(self.explorer.show_hidden()) else {
+			return iced::Task::none();
+		};
+		let row = index / ui::files::columns(self.window_size.width);
+		let offset = keep_visible(
+			self.files.scroll(),
+			ui::files::grid_height(&self.files),
+			ui::files::row_top(row),
+			ui::files::CELL_HEIGHT,
+		);
+		self.files.set_scroll(offset);
+		iced::widget::operation::scroll_to(
+			ui::files::GRID_ID,
+			iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
+		)
+	}
+
+	/// The same, for the folder tree — one fixed-height row rather than a wrapping grid.
+	fn scroll_tree_into_view(&mut self) -> iced::Task<Message> {
+		let Some(index) = self.explorer.selected_index() else {
+			return iced::Task::none();
+		};
+		let offset = keep_visible(
+			self.explorer.scroll(),
+			ui::explorer::tree_height(self.window_size.height, self.files.reserved()),
+			index as f32 * ui::explorer::ROW_HEIGHT,
+			ui::explorer::ROW_HEIGHT,
+		);
+		self.explorer.set_scroll(offset);
+		iced::widget::operation::scroll_to(
+			ui::explorer::TREE_ID,
+			iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
+		)
 	}
 
 	/// Track the pointer over the grid (§10): remember its position (so the context
@@ -1190,6 +1544,8 @@ impl App {
 	/// menu — a fresh press on the grid dismisses it.
 	fn on_grid_pressed(&mut self) {
 		self.menu = None;
+		// A click on the grid is also how the keyboard comes back to the shell (§20).
+		self.focus = Focus::Terminal;
 		if self.terminal.is_some() {
 			self.selection = Some(ui::selection::Selection::new(self.hover_cell));
 			self.selecting = true;
@@ -1256,6 +1612,12 @@ impl App {
 		self.upload_file = None;
 		self.upload_dest.clear();
 		self.transfer_notice = None;
+		// A queued batch belongs to the session that asked for it (§21).
+		self.downloads.clear();
+		self.downloaded = 0;
+		self.clash = None;
+		// Every session starts with the keyboard at the shell (§20).
+		self.focus = Focus::Terminal;
 		// The panels' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
 		self.explorer.reset();
@@ -1347,6 +1709,10 @@ impl App {
 		match message {
 			ExplorerMessage::Toggled => {
 				self.explorer.toggle();
+				// A hidden panel cannot hold the keyboard: hand it back to the shell (§20).
+				if !self.explorer.visible() && self.focus == Focus::Tree {
+					self.focus = Focus::Terminal;
+				}
 				// The panel's width just moved between it and the grid: reflow both the
 				// local emulator and the remote pty to the new column count.
 				self.refit_grid();
@@ -1355,7 +1721,10 @@ impl App {
 				self.explorer.toggle_hidden();
 				self.remember_hidden();
 			}
+			ExplorerMessage::PanelPressed => self.focus_pane(Focus::Tree),
+			ExplorerMessage::Scrolled(offset) => self.explorer.set_scroll(offset),
 			ExplorerMessage::RowClicked(path) => {
+				self.focus_pane(Focus::Tree);
 				if let Some(fetch) = self.explorer.toggle_node(&path) {
 					self.send_command(SshCommand::ListDir(fetch));
 				}
@@ -1367,6 +1736,7 @@ impl App {
 				}
 			}
 			ExplorerMessage::RowRightClicked(path) => {
+				self.focus_pane(Focus::Tree);
 				self.explorer.select(&path);
 				self.explorer.open_menu(path);
 			}
@@ -1463,13 +1833,58 @@ impl App {
 		match message {
 			FilesMessage::Toggled => {
 				self.files.toggle();
+				// A hidden pane cannot hold the keyboard: hand it back to the shell (§20).
+				if !self.files.visible() && self.focus == Focus::Files {
+					self.focus = Focus::Terminal;
+				}
 				// The pane's height just moved between it and the grid: reflow both the
 				// local emulator and the remote pty to the new row count.
 				self.refit_grid();
 			}
+			FilesMessage::PanelPressed => {
+				self.focus_pane(Focus::Files);
+				// A cell's own `mouse_area` swallows the press that lands on it, so one that
+				// reaches the pane missed them all. On the grid that starts a rubber band
+				// (§21) — which also clears the selection, as every file manager's empty
+				// space does; on the header or the notice line it only clears it.
+				let pointer = self.files.pointer();
+				let grid = pointer.y >= ui::files::HEADER_HEIGHT
+					&& pointer.y <= ui::files::HEADER_HEIGHT + ui::files::grid_height(&self.files);
+				if grid {
+					self.files.begin_band(pointer, self.modifiers.control());
+				} else if !self.modifiers.control() {
+					self.files.deselect();
+				}
+			}
+			FilesMessage::PanelReleased => self.files.end_band(),
+			FilesMessage::BandMoved(point) => {
+				// Window coordinates from the capture layer: the pane is full width along the
+				// bottom of the window, so only the vertical origin has to come off.
+				let local = iced::Point::new(
+					point.x,
+					point.y - (self.window_size.height - self.files.height()),
+				);
+				self.files.set_pointer(local);
+				if self.files.drag_band(local) {
+					self.apply_band();
+				}
+			}
+			FilesMessage::Scrolled(offset) => self.files.set_scroll(offset),
 			FilesMessage::EntryClicked(path) => {
+				self.focus_pane(Focus::Files);
 				self.files.close_menu();
-				self.files.select(&path);
+				let show_hidden = self.explorer.show_hidden();
+				// Shift runs a range from the anchor, Ctrl adds or removes this one, a plain
+				// click takes it alone (§21).
+				if self.modifiers.shift() {
+					self.files.extend_selection(show_hidden, &path);
+				} else if self.modifiers.control() {
+					self.files.toggle_selection(&path);
+				} else {
+					self.files.select(&path);
+				}
+				// A clicked link is resolved the same way a walked-to one is (§20).
+				self.resolve_selected_link();
 			}
 			FilesMessage::EntryOpened(path) => {
 				self.files.close_menu();
@@ -1494,10 +1909,23 @@ impl App {
 				self.enter_dir(&parent);
 			}
 			FilesMessage::EntryRightClicked(path) => {
-				self.files.select(&path);
+				self.focus_pane(Focus::Files);
+				// A right-click INSIDE the selection keeps it — that is how a menu comes to
+				// act on all of it (§21); one outside collapses onto the entry clicked, so
+				// the menu never acts on entries the user has looked away from.
+				if !self.files.is_selected(&path) {
+					self.files.select(&path);
+				}
 				self.files.open_menu(path);
+				self.resolve_selected_link();
 			}
-			FilesMessage::PointerMoved(point) => self.files.set_pointer(point),
+			FilesMessage::PointerMoved(point) => {
+				self.files.set_pointer(point);
+				// A move with the button down is a band being stretched (§21).
+				if self.files.drag_band(point) {
+					self.apply_band();
+				}
+			}
 			FilesMessage::MenuDismissed => self.files.close_menu(),
 			FilesMessage::Refresh => {
 				self.files.close_menu();
@@ -1507,7 +1935,10 @@ impl App {
 			}
 			FilesMessage::CopyName(path) => {
 				self.files.close_menu();
-				return iced::clipboard::write(explorer::name(&path).to_owned());
+				let names = self.action_targets(&path);
+				return iced::clipboard::write(join_lines(
+					names.iter().map(|path| explorer::name(path).to_owned()),
+				));
 			}
 			FilesMessage::CopyRelative(path) => {
 				self.files.close_menu();
@@ -1515,11 +1946,15 @@ impl App {
 				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
 				};
-				return iced::clipboard::write(explorer::relative(cwd, &path));
+				let cwd = cwd.to_owned();
+				let targets = self.action_targets(&path);
+				return iced::clipboard::write(join_lines(
+					targets.iter().map(|path| explorer::relative(&cwd, path)),
+				));
 			}
 			FilesMessage::CopyPath(path) => {
 				self.files.close_menu();
-				return iced::clipboard::write(path);
+				return iced::clipboard::write(join_lines(self.action_targets(&path)));
 			}
 			FilesMessage::RenameStarted(path) => {
 				self.files.start_rename(path);
@@ -1534,13 +1969,23 @@ impl App {
 			FilesMessage::Download(path) => {
 				self.files.close_menu();
 				// One transfer at a time — the status bar has one progress bar, and two
-				// concurrent transfers would fight over it (§17).
+				// concurrent transfers would fight over it (§17). A batch respects that by
+				// queueing; a batch started while something else runs still has to wait.
 				if self.transfer.is_some() {
 					self.files
 						.set_notice("A transfer is already running.".to_owned());
 					return iced::Task::none();
 				}
-				return pick_download_target(path);
+				// Folders are dropped rather than refused: a band that swept up a directory
+				// alongside nine files should still fetch the nine (§21).
+				let mut targets = self.action_targets(&path);
+				targets.retain(|path| self.files.kind_of(path) != Some(files::Kind::Dir));
+				return match targets.len() {
+					0 => iced::Task::none(),
+					// One file keeps the save dialog, which asks its own overwrite question.
+					1 => pick_download_target(targets.remove(0)),
+					_ => pick_download_folder(targets),
+				};
 			}
 			FilesMessage::SplitterGrabbed => self.files.set_dragging(true),
 			FilesMessage::SplitterDragged(pointer) => {
@@ -1569,6 +2014,63 @@ impl App {
 		if self.send_command(SshCommand::Download { remote, local }) {
 			self.transfer_notice = None;
 			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		}
+	}
+
+	/// The folder picker for a multi-file download closed (§21). Nothing is written yet:
+	/// the local names that are already taken are looked up first, and if there are any the
+	/// batch waits on the dialog that asks what to do about them.
+	fn on_download_folder(&mut self, remotes: Vec<String>, dir: Option<PathBuf>) {
+		let Some(dir) = dir else {
+			return;
+		};
+		let taken: Vec<String> = remotes
+			.iter()
+			.map(|remote| explorer::name(remote).to_owned())
+			.filter(|name| dir.join(name).exists())
+			.collect();
+		if taken.is_empty() {
+			// Nothing to lose: the choice cannot apply to anything, so any of them will do.
+			self.queue_downloads(&remotes, &dir, ClashChoice::Skip);
+			return;
+		}
+		self.set_dialog_body(&format!(
+			"{}\n\n{}",
+			ui::terminal::DOWNLOAD_EXISTS_BODY,
+			taken.join("\n")
+		));
+		self.clash = Some(Clash { remotes, dir });
+	}
+
+	/// Turn a picked folder and a batch of remote files into the download queue (§21),
+	/// applying the answer to the "already there" question. Only the queue is built here;
+	/// `pump_downloads` is what starts them, one at a time.
+	fn queue_downloads(&mut self, remotes: &[String], dir: &Path, choice: ClashChoice) {
+		self.downloads.clear();
+		self.downloaded = 0;
+		for remote in remotes {
+			let name = explorer::name(remote);
+			let local = dir.join(name);
+			let local = match choice {
+				_ if !local.exists() => local,
+				ClashChoice::Replace => local,
+				ClashChoice::KeepBoth => free_name(dir, name),
+				// Cancel never gets this far — `DownloadClash` drops the batch instead.
+				ClashChoice::Skip | ClashChoice::Cancel => continue,
+			};
+			self.downloads.push_back((remote.clone(), local));
+		}
+		self.pump_downloads();
+	}
+
+	/// Start the next queued download, if the one transfer slot is free (§21). Called when
+	/// a batch begins and again as each file finishes, which is what walks the queue.
+	fn pump_downloads(&mut self) {
+		if self.transfer.is_some() {
+			return;
+		}
+		if let Some((remote, local)) = self.downloads.pop_front() {
+			self.start_download(remote, Some(local));
 		}
 	}
 
@@ -1655,6 +2157,7 @@ impl App {
 					self.menu,
 					ui::terminal::Modals {
 						confirm_disconnect: self.confirm_disconnect,
+						clash: self.clash.is_some(),
 						body: &self.dialog_body,
 						drag,
 					},
@@ -1667,6 +2170,8 @@ impl App {
 					ui::terminal::Panels {
 						explorer: &self.explorer,
 						files: &self.files,
+						focus: self.focus,
+						width: self.window_size.width,
 					},
 				),
 				None => text("terminal starting…").into(),
@@ -1784,6 +2289,47 @@ fn pick_download_target(remote: String) -> iced::Task<Message> {
 	)
 }
 
+/// One clipboard write out of many entries (§21): one per line, which is what a shell, an
+/// editor and every other file manager expect a multi-selection paste to be.
+fn join_lines(items: impl IntoIterator<Item = String>) -> String {
+	items.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+/// Open the native folder picker for a multi-file download (§21). One folder for the whole
+/// batch: a save dialog per file would be a dialog storm, and the names are the remote
+/// ones anyway.
+fn pick_download_folder(remotes: Vec<String>) -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Save the remote files into")
+			.pick_folder(),
+		move |handle| Message::DownloadFolderPicked {
+			remotes: remotes.clone(),
+			dir: handle.map(|handle| handle.path().to_path_buf()),
+		},
+	)
+}
+
+/// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§21) —
+/// the "save alongside" answer to the collision question. Bounded: after a hundred tries
+/// the folder is telling us something, and the last candidate is returned rather than
+/// spinning. Writing it is the download's problem, not this function's.
+fn free_name(dir: &Path, name: &str) -> PathBuf {
+	let (stem, extension) = match name.rsplit_once('.') {
+		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
+		_ => (name, String::new()),
+	};
+	let mut candidate = dir.join(format!("{stem}-1{extension}"));
+	for attempt in 2..=100 {
+		if !candidate.exists() {
+			break;
+		}
+		candidate = dir.join(format!("{stem}-{attempt}{extension}"));
+	}
+	candidate
+}
+
 /// A path's own file name, which is what the status bar shows and what the remote
 /// destination is built from (§17). A path with no final component (a bare root) falls
 /// back to a placeholder rather than an empty label.
@@ -1791,4 +2337,101 @@ fn file_name_of(path: &std::path::Path) -> &str {
 	path.file_name()
 		.and_then(std::ffi::OsStr::to_str)
 		.unwrap_or("file")
+}
+
+/// The scroll offset that brings the band `top..top + height` into a `view`-tall window
+/// currently scrolled to `offset` (§20) — shared by both panels, since "keep the thing
+/// the arrow keys just selected on screen" is the same question for a row and a cell.
+///
+/// Already visible means *do not move*: a keyboard walk across a screenful of entries
+/// should scroll only when it reaches an edge, not re-centre on every press.
+fn keep_visible(offset: f32, view: f32, top: f32, height: f32) -> f32 {
+	if top < offset {
+		top
+	} else if top + height > offset + view {
+		// Park it against the bottom edge — but never past its own top, or an item taller
+		// than the window (a cell in a pane dragged short) would be shown headless.
+		(top + height - view).max(0.0).min(top)
+	} else {
+		offset
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn scrolling_a_selection_into_view_moves_only_at_the_edges() {
+		// A 100-tall window over 20-tall rows, scrolled to the top.
+		assert_eq!(keep_visible(0.0, 100.0, 40.0, 20.0), 0.0, "already visible");
+		// Off the bottom: scroll just far enough that its bottom edge lands on the
+		// window's, not far enough to re-centre it.
+		assert_eq!(keep_visible(0.0, 100.0, 120.0, 20.0), 40.0);
+		// Off the top: its own top becomes the offset.
+		assert_eq!(keep_visible(200.0, 100.0, 60.0, 20.0), 60.0);
+		// A row taller than the window is shown from its top rather than its bottom.
+		assert_eq!(keep_visible(0.0, 30.0, 10.0, 50.0), 10.0);
+		assert_eq!(keep_visible(0.0, 30.0, 0.0, 50.0), 0.0);
+	}
+
+	/// Shift+click and Shift+arrow through the app's own handlers (§21) — the model's rules
+	/// are tested next door in `files`, but only this path proves the wiring: the modifier
+	/// state comes off the keyboard subscription, and a mouse press carries none of its own.
+	#[test]
+	fn shift_click_and_shift_arrow_reach_the_selection() {
+		use iced::keyboard::{Event, Modifiers};
+
+		let mut app = App::default();
+		let request = app
+			.files
+			.show("/home")
+			.expect("a new directory needs listing");
+		app.files.chunk(
+			request,
+			["a", "b", "c", "d"]
+				.into_iter()
+				.map(|name| files::Entry {
+					name: name.to_owned(),
+					kind: files::Kind::File,
+					meta: files::Meta::default(),
+				})
+				.collect(),
+			true,
+		);
+		let chosen = |app: &App| {
+			app.files
+				.selected_rows(app.explorer.show_hidden())
+				.into_iter()
+				.map(|(path, _)| path)
+				.collect::<Vec<_>>()
+		};
+
+		let _ = app.on_files(FilesMessage::EntryClicked("/home/a".to_owned()));
+		assert_eq!(chosen(&app), ["/home/a"]);
+
+		// Shift goes down, then the second click lands: everything between comes with it.
+		let _ = app.on_key(Event::ModifiersChanged(Modifiers::SHIFT));
+		let _ = app.on_files(FilesMessage::EntryClicked("/home/c".to_owned()));
+		assert_eq!(chosen(&app), ["/home/a", "/home/b", "/home/c"]);
+
+		// Still held: the arrow key extends rather than moving.
+		let _ = app.on_key(Event::KeyPressed {
+			key: iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowRight),
+			modified_key: iced::keyboard::Key::Named(iced::keyboard::key::Named::ArrowRight),
+			physical_key: iced::keyboard::key::Physical::Code(
+				iced::keyboard::key::Code::ArrowRight,
+			),
+			location: iced::keyboard::Location::Standard,
+			modifiers: Modifiers::SHIFT,
+			text: None,
+			repeat: false,
+		});
+		assert_eq!(chosen(&app), ["/home/a", "/home/b", "/home/c", "/home/d"]);
+
+		// Shift released, plain click: back to one.
+		let _ = app.on_key(Event::ModifiersChanged(Modifiers::empty()));
+		let _ = app.on_files(FilesMessage::EntryClicked("/home/b".to_owned()));
+		assert_eq!(chosen(&app), ["/home/b"]);
+	}
 }

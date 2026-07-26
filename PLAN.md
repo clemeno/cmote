@@ -11,16 +11,18 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v2.0.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v2.1.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
 light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
-working directory and uploads a local file into it over SFTP, §17; **v2.0.0** puts a
+working directory and uploads a local file into it over SFTP, §17; v2.0.0 puts a
 2D folder tree of the remote filesystem beside the terminal — browse, jump, rename,
-copy paths, §18). The icon grid of files under the terminal — every entry in one
-directory, streamed in batches, with rename and download (§19) — is built and unreleased;
-it ships under whatever version comes next. Both targets are supported
+copy paths, §18; **v2.1.0** adds the icon grid of files under the terminal — every entry
+in one directory, streamed in batches, with rename and download, §19 — makes it and the
+tree keyboard-navigable with a details popup beside the selection, §20, and lets a rubber
+band, Ctrl/Shift click or Ctrl+A select many entries at once for a batch copy or
+download, §21). Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -728,13 +730,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   support, certificate auth.
 - **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
-- **SFTP / file transfer** — *partly done (v1.4, v2.0, unreleased)*: **upload** of a chosen
+- **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1)*: **upload** of a chosen
   local file into the shell's current directory (§17), a **folder tree** of the remote
   filesystem that browses and renames (§18), and a **files pane** that lists one whole
-  directory and **downloads** a file from it (§19). Still deferred: creating and deleting
-  remote entries, directory (recursive) transfers, cancelling a transfer in flight,
-  resuming an interrupted one, drag-and-drop onto a folder, more than one transfer at a
-  time, and preserving file modes/timestamps in either direction.
+  directory and **downloads** files from it, one or a whole selection at a time (§19, §21).
+  Still deferred: creating and deleting remote entries, directory (recursive) transfers,
+  cancelling a transfer in flight, resuming an interrupted one, drag-and-drop onto a folder,
+  two transfers at once (a batch queues instead, §21), and preserving file
+  modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
@@ -958,7 +961,7 @@ announced path carries one.
 
 ---
 
-## 19. Remote files pane (unreleased)
+## 19. Remote files pane (v2.1)
 
 An **icon grid of every entry in one directory**, full width under
 the terminal and the folder tree. The tree (§18) answers "where am I in the filesystem";
@@ -980,11 +983,10 @@ for a window resize.
   `files::BATCH` entries, the last one flagged `done`; the grid grows as they land and the
   header counts "N so far…". An empty directory still sends one empty final batch — that
   is what tells the pane to stop waiting. `ponytail:` the batching bounds the *message*
-  size and the relayout, not the fetch: russh-sftp's `read_dir` runs the whole readdir
-  loop before returning. It costs no extra round trips (SFTP sends a name's attributes
-  with the name, so there is no per-file stat either way), but it does hold the listing in
-  memory once. Upgrade path: drive `RawSftpSession::opendir`/`readdir` and emit a batch
-  per protocol packet.
+  size and the relayout, not the fetch: `read_names` runs the whole readdir loop before
+  returning. It costs no extra round trips (SFTP sends a name's attributes with the name,
+  so there is no per-file stat either way), but it does hold the listing in memory once.
+  Upgrade path: emit a batch per `readdir` packet rather than per 1000 collected names.
 - **Every batch carries its request number.** Leaving a directory bumps the number, so
   batches still in flight for the folder just left are dropped instead of being mixed into
   the new one — the bug this design exists to prevent. Failures carry it too.
@@ -995,8 +997,11 @@ for a window resize.
 - **Symlinks keep their own kind.** Resolving one costs a round trip *per link*, and a
   crowded directory is exactly where that adds up — so a link gets the link icon and is
   not followed. (The tree does resolve them, §18: it sees far fewer entries and needs to
-  know whether the link is expandable.)
-- **No sizes, no timestamps.** The grid shows neither, so it asks for neither.
+  know whether the link is expandable. The pane resolves the *selected* one, §20 — one
+  link, when the user asks by looking at it.)
+- **Sizes, times and owners ride along.** SFTP sends a name's attributes *with* the name,
+  so collecting them costs nothing extra and they travel on the entry (§20). The grid
+  still shows only the icon and the name; the details popup is what reads them.
 
 ### Two sources for "which directory", last one wins
 
@@ -1030,7 +1035,8 @@ for a window resize.
 - The right-click menu uses the shared chrome (§10): **Open in terminal** (directories
   only), **Download…** (files only), **Rename…**, **Copy name / relative path / full
   path**, **Refresh**. Each inapplicable item is *disabled*, not hidden, so the menu keeps
-  one shape.
+  one shape. Opened on a multiple selection it acts on all of it, which is what disables
+  Rename and Open in terminal there and puts the count on the rest (§21).
 - **Rename** reuses the tree's rules and the same `RenameDir` command — SFTP's rename does
   not care whether it is moving a directory — with the same guards: no blank name, no `/`
   (that would be a move, not a rename), and a destination that already exists is refused
@@ -1040,7 +1046,8 @@ for a window resize.
   comes from the native **save dialog**, which is also what asks about replacing a local
   file — a second prompt in our own chrome would only be a second chance to answer it
   wrong. One transfer at a time: starting a download while one runs is refused with a
-  notice rather than fighting over the one progress bar.
+  notice rather than fighting over the one progress bar — which is why a batch of them
+  queues instead (§21).
 - **The menu opens upwards.** Same frozen-anchor construction as the tree's (§18), but
   bottom-aligned: this pane is at the bottom of the window, so a menu dropping downwards
   would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor.
@@ -1059,3 +1066,160 @@ for a window resize.
   `.` and `..`, dropped at ingest (`explorer::is_dot_link`) because they are this folder
   and the one above it rather than entries in it — a tree row for `..` would walk back up
   itself. SFTP omits them and `ls -A` leaves them out; the guard makes it true regardless.
+
+---
+
+## 20. Keyboard focus and entry details (v2.1)
+
+Two panels now sit beside the shell, and both want the arrow keys. This section is the
+answer to "who gets the keystroke", plus what the files pane shows about the entry the
+keyboard just landed on.
+
+### One focus for the window
+
+- **Three stops: shell, tree, files pane** (`app::Focus`). A session opens with the
+  **shell** focused — that is what a terminal is for — and `clear_grid_interaction` puts it
+  back there whenever a session starts or ends.
+- **A click focuses what was clicked.** Each panel's own `mouse_area` reports a
+  `PanelPressed`, so an empty patch of panel focuses it just as a row or a cell does, and a
+  press on the grid hands the keyboard back to the shell. In the files pane that press also
+  **clears the selection** — a cell's own `mouse_area` swallows the press that lands on it,
+  so one that reaches the pane missed every cell, which is the click-away every file
+  manager deselects on.
+- **Ctrl+Tab cycles**, Ctrl+Shift+Tab the other way, skipping panels that are hidden — a
+  stop you cannot see is a dead press. It is read *before* anything else on the terminal
+  screen, because it is the way out of a panel that is swallowing keys.
+- **A focused panel keeps every key**, not just the ones it uses. A panel that swallowed
+  only the arrows would leave Tab completing paths at a prompt the user is not looking at.
+  **Esc** hands the keyboard back to the shell from either panel.
+- The focused panel wears a one-pixel ring (`ui::explorer::focus_border`, shared by both),
+  which is the only thing that tells the two panels apart at a glance.
+
+### Walking the panels
+
+- **Files pane:** Left/Right step one cell, Up/Down a whole row, Tab/Shift+Tab
+  next/previous, **Enter** enters a folder (through the double-click's own handler, so
+  "only a directory can be entered" is decided in one place), **F2** renames. Both ends
+  clamp instead of wrapping.
+- A row is `ui::files::columns(window width)` cells, computed with the same arithmetic
+  `Row::wrap` breaks lines with — iced never reports where a laid-out cell ended up, so the
+  view and the app both derive it rather than either one guessing.
+- **Tree:** Up/Down walk the visible rows, Right expands (fetching the folder if it has
+  never been listed), Left collapses, Tab/Shift+Tab step, **Enter** sends the shell there,
+  **F2** renames.
+- **The selection is scrolled back into view**, and only by the keyboard: a click is
+  already on something visible, and scrolling under the cursor would move what was just
+  aimed at. Both panels report their scroll offset (`Scrolled`) and share one rule,
+  `app::keep_visible` — already visible means *do not move*, so a walk across a screenful
+  scrolls at the edges rather than re-centring on every press.
+
+### The details popup
+
+- Shown **beside the selected cell** for every kind of entry — folder, file or symlink —
+  because the "type" line only earns its place if the type can vary. It leads with the
+  entry's **full name** (the cell's label is 96px wide and may have clipped it) and, for a
+  symlink, **where it points**; then the type, the modification time, the size (human, with
+  the exact byte count once the two differ) and `owner:group`.
+- **The type of a file is its MIME type**, from `files::mime` — an extension table, because
+  asking the server would be a round trip per selection and the extension is already in
+  hand; unlisted extensions read `application/octet-stream`, the same answer
+  `file --mime-type` gives when it recognises nothing. Folders and symlinks keep their
+  plain names: there is no MIME type worth showing for either.
+- **Names and targets wrap**, and the card grows by whole lines to fit them, because its
+  height is what keeps it inside the pane. `ponytail:` the row count is estimated from an
+  average glyph advance (`ui::files::wrapped_rows`), not measured — iced shapes text only
+  during layout, too late to place the card.
+- **Placed by arithmetic**, from the selection's index, the column count and the scroll
+  offset, and flipped to the cell's left when the card would hang off the right edge —
+  the same "iced does not expose layout positions" constraint the context menus work
+  around (§18, §19). It floats in a `stack` over the grid: a card in the flow would
+  reshuffle the cells every time the selection moved.
+- **Absent facts show as a dash** rather than vanishing. The `ls` fallback (§19) reports
+  none of them, and a card that changed shape per entry would be harder to read.
+
+### Where the details come from
+
+- **Owner and group as names**, not numbers: SFTP v3 carries only numeric ids in a
+  listing's attributes, but it also carries a `longname` — the `ls -l` line the *server*
+  built, having resolved the names itself. `SftpSession::read_dir` throws that away and
+  keeps its raw session private, so the browse channel is opened as a `RawSftpSession`
+  (`ssh::open_raw_sftp`) and drives `opendir`/`readdir`/`close` itself. Same channel, same
+  handshake, same round trips — only the parsing layer differs. `ponytail:`
+  `files::parse_longname` is a column split, guarded by requiring the mode column to be
+  mode-shaped and the size column to be a number; numeric ids are the fallback.
+- **Times in the server's own timezone.** An mtime is an instant; reading it as a wall
+  clock needs a zone, and the honest one is the machine the files live on — `ls -l` there
+  says the same thing. One `date +'%z %Z'` per session on an exec channel
+  (`browse::probe_zone`) answers it; until it comes back, and on a server with no `date`,
+  times render as UTC, which is at least never wrong about the instant.
+- **A fixed `YYYY-MM-DD HH:MM:SS ZONE` format**, not the user's locale. Rust's std has no
+  locale lookup, so localising means a dependency (`chrono` + `sys-locale`) or an OS call
+  (`GetDateFormatEx`, and the first `unsafe` in this codebase) — and an ordering that is
+  unambiguous everywhere costs neither. The calendar arithmetic is Hinnant's
+  `civil_from_days`: closed-form, no table, no loop, and unit-tested against the epoch, a
+  leap day and both sides of Greenwich.
+- **One `readlink` per selected link.** Resolving every link in a listing is the
+  round-trip-per-entry cost the pane exists to avoid (§19), so the target is fetched when a
+  link is selected and keyed by the link's own path — an answer that arrives after the
+  selection moved on is recognisable as stale and is not shown.
+
+---
+
+## 21. Selecting many entries at once (v2.1)
+
+§20 gave the files pane one selected entry. This section makes it a *set*: a rubber band
+pulled over the grid, Ctrl+click, Shift+click, Shift+arrow and Ctrl+A, and what the menu
+does when an action has nine targets instead of one.
+
+### The selection is a set with two ends
+
+- **`Files` keeps a `HashSet` of paths, a cursor and an anchor.** The cursor is the entry
+  the keyboard is on — what the arrows step from, what the popup describes, what Enter, F2
+  and a single-target menu item act on; the anchor is the fixed end a Shift-extended range
+  runs from. `selected_rows` hands them back in GRID order, because that is the order a
+  list of copied names has to come out in.
+- **The gestures**: a plain click takes one; Ctrl+click adds or removes one; Shift+click
+  and Shift+arrow run a range from the anchor; Ctrl+A takes the whole listing; a press on
+  the grid's empty space clears it and starts a band; Ctrl+drag makes the band additive,
+  keeping what was already selected as its floor.
+- **A press carries no modifiers of its own**, so `App::modifiers` is tracked from the
+  keyboard subscription (`Event::ModifiersChanged`) and read by every mouse handler. Bare
+  modifier changes are never captured by a widget, so `keyboard::listen` always sees them.
+
+### The band
+
+- **Only the grid's empty space starts one.** A cell's own `mouse_area` swallows the press
+  that lands on it, so a press reaching the pane missed every cell — and a band from a cell
+  would take press-drag away from a future drag-and-drop.
+- **Hit-testing is the grid's own arithmetic** (`ui::files::band_hits`), the same geometry
+  the popup and the arrow keys use: the header height and the scroll offset come off the
+  pane-local rectangle, and only the rows the band actually spans are walked, so a band in a
+  directory of thousands costs what one in a directory of ten costs. Touching counts — a
+  cell is in as soon as the rectangle overlaps it at all.
+- **A full-window capture layer** (`band_drag_layer`) carries the moves and the release,
+  the same trick the splitters use: `mouse_area` reports a release only while the pointer is
+  over it, so a band dragged out of the pane and let go over the terminal would otherwise
+  never end. Its points are window coordinates; the pane is full width along the bottom, so
+  only the vertical origin has to come off.
+- `ponytail:` **no auto-scroll** at the pane's edges — a band cannot reach past what is on
+  screen. Add a scroll-on-edge timer if selecting more than a screenful becomes routine.
+
+### What a batch action does
+
+- **The menu acts on the whole selection** when it was opened on part of it; a right-click
+  outside the selection collapses onto that one entry first, so an action never reaches
+  entries the user has looked away from. The copy items carry the count in their label,
+  Rename and Open in terminal are disabled on a multi-selection, and the three copy items
+  join their results one per line.
+- **Download takes the files and leaves the folders**, then asks for ONE destination folder
+  rather than a save dialog per file. The transfers queue (`App::downloads`) and run one at
+  a time, because the status bar has one progress bar (§17); a failure notes itself and the
+  queue carries on.
+- **Local names already taken are one question, not one per file**: before anything is
+  written, the batch stops on a dialog offering Skip / Save alongside (`name-1.ext`) /
+  Replace / Cancel. Nothing has been downloaded when it is asked, so every answer is safe —
+  including cancelling the batch outright.
+- **The popup summarises a multi-selection**: how many entries, how they split between
+  folders and files, and what the files come to. A folder's size is the size of its
+  directory entry rather than of its contents, so it is left out of the total instead of
+  making it wrong.

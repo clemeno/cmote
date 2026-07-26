@@ -127,6 +127,11 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::ReadLink(path) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::ReadLink(path)).await;
+				}
+			}
 			SshCommand::Download { remote, local } => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -172,6 +177,8 @@ enum SessionMsg {
 	ListFiles { path: String, request: u64 },
 	/// Fetch a remote file to a local path (§19).
 	Download { remote: String, local: PathBuf },
+	/// Resolve one symlink for the files pane's details popup (§20).
+	ReadLink(String),
 	/// Rename a remote folder (§18).
 	RenameDir { from: String, to: String },
 	/// Tear the session down.
@@ -444,6 +451,9 @@ async fn stream(
 					}
 					Some(SessionMsg::ListFiles { path, request }) => {
 						browse::list_all(session, &mut sftp, events, path, request).await;
+					}
+					Some(SessionMsg::ReadLink(path)) => {
+						browse::read_link(session, &mut sftp, events, path).await;
 					}
 					Some(SessionMsg::Download { remote, local }) => {
 						download::start(session, events, remote, local).await;
