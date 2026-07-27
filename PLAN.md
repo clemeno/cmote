@@ -1017,6 +1017,15 @@ for a window resize.
 - Double-clicking a directory in the grid **moves the shell** (`cd`, quoted as §18 does)
   and retargets the pane immediately rather than waiting for the prompt. That keeps one
   "where am I" in the window instead of three.
+- **A "Sync" button in the status bar closes the gap the other way.** When a tree click has
+  left the pane somewhere the shell is not, Sync types the same quoted `cd` a grid
+  double-click would (it reuses `enter_dir`), bringing the shell — and with it the tree and
+  the title — to the folder the pane shows. It carries no path: `app` reads `Files::path`
+  when the press lands, so it can never move the shell somewhere the pane has since left. It
+  sits in the left button group after Upload, and is **disabled** whenever there is nothing
+  to do — no directory on show, or the pane and the shell's announced cwd already agree
+  (an exact string compare, so an un-announced cwd leaves it live and the `cd` is a harmless
+  no-op). Dimmed, it doubles as a tell that the two are already in step.
 
 ### Icons
 

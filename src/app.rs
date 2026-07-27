@@ -418,6 +418,11 @@ pub enum Message {
 	PastePressed,
 	/// The async clipboard read finished: `Some(text)` to paste, `None` if empty.
 	Pasted(Option<String>),
+	/// The status bar's "Sync" button (§19): move the shell into the directory the files
+	/// pane is showing. Carries no path — the pane's own is the only thing it can mean, and
+	/// reading it when the press arrives keeps it from being a directory the pane has since
+	/// left (same discipline as `Files(CopyCurrentPath)` and `Files(ParentOpened)`).
+	SyncPressed,
 	/// Dismiss the open context menu without choosing an item.
 	MenuDismissed,
 	/// A window-frame tick while a copy-confirmation toast is showing (§10). Carries no
@@ -567,6 +572,7 @@ impl App {
 			Message::CopyPressed => return self.on_copy(),
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
+			Message::SyncPressed => self.on_sync(),
 			Message::MenuDismissed => self.menu = None,
 			// A frame tick while the toast is up (§10): drop it once it has outlived its
 			// dwell. Clearing it removes the `frames()` subscription next diff, so the
@@ -1986,6 +1992,20 @@ impl App {
 			ExplorerMessage::SplitterReleased => self.explorer.set_dragging(false),
 		}
 		iced::Task::none()
+	}
+
+	/// The status bar's "Sync" button (§19): move the shell into the directory the files
+	/// pane is showing. The pane can be pointed where the shell is not — a tree click browses
+	/// a folder without moving the shell (§18) — and this closes that gap on demand, typing
+	/// the very `cd` a pane double-click would (`enter_dir`) so the shell, and with it the
+	/// tree and the title, comes to the pane rather than the other way round. A no-op with no
+	/// shell or no directory on show; the button dims in those cases and when the two already
+	/// agree, so pressing it always has something to do.
+	fn on_sync(&mut self) {
+		let Some(path) = self.files.path().map(str::to_owned) else {
+			return;
+		};
+		self.enter_dir(&path);
 	}
 
 	/// Move into a directory from the files pane (§19): a double-clicked folder, or the

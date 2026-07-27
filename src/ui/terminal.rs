@@ -242,6 +242,12 @@ pub fn view<'a>(
 	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
 	let has_selection = selection.is_some_and(|selection| !selection.is_empty());
 
+	// Sync (§19) has something to do only when the pane names a directory the shell is not
+	// already in. An exact string compare is deliberately conservative: an unknown cwd
+	// (`None`, the shell never announced) never matches, so Sync stays live and a redundant
+	// `cd` is a harmless no-op — far better than dimming a button that would in fact move.
+	let can_sync = files.path().is_some() && files.path() != terminal.cwd();
+
 	// Under the bar: the grid takes what is left after the explorer panel and its
 	// splitter (§18). The grid is `Fill`, so hiding the panel hands its width straight
 	// back — `grid_size` subtracts the same `Explorer::reserved`, which is what keeps the
@@ -267,6 +273,7 @@ pub fn view<'a>(
 		status_bar(
 			endpoint,
 			has_selection,
+			can_sync,
 			upload,
 			explorer.visible(),
 			files.visible()
@@ -358,16 +365,17 @@ pub fn view<'a>(
 		.into()
 }
 
-/// The status bar (§10, §17): three zones — Copy / Paste / File… / Upload on the left,
-/// the live session's `user@host:port` centered, and Disconnect on the right. Its height
-/// is fixed to `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly.
-/// `has_selection` enables Copy and a picked file enables Upload — a button with no
-/// `on_press` is rendered disabled by iced. While a transfer runs the centre zone shows
-/// its progress instead of the endpoint, and afterwards the outcome notice until the next
-/// upload.
+/// The status bar (§10, §17, §19): three zones — Copy / Paste / File… / Upload / Sync on
+/// the left, the live session's `user@host:port` centered, and Disconnect on the right. Its
+/// height is fixed to `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly.
+/// `has_selection` enables Copy, a picked file enables Upload, and `can_sync` enables Sync —
+/// a button with no `on_press` is rendered disabled by iced. While a transfer runs the centre
+/// zone shows its progress instead of the endpoint, and afterwards the outcome notice until
+/// the next upload.
 fn status_bar<'a>(
 	endpoint: &str,
 	has_selection: bool,
+	can_sync: bool,
 	upload: UploadView<'a>,
 	explorer_visible: bool,
 	files_visible: bool,
@@ -382,6 +390,12 @@ fn status_bar<'a>(
 	let idle = upload.state.is_none();
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
 		.on_press_maybe((idle && upload.file.is_some()).then_some(Message::UploadPressed));
+	// Sync (§19): type a `cd` into the shell so it follows the pane. Disabled until the pane
+	// names a directory the shell is not already in — dimmed, it doubles as a tell that the
+	// two are in step. It carries no path; `app` reads `Files::path` live when the press
+	// arrives, so the button can never move the shell somewhere the pane has since left.
+	let sync = button(text("Sync").size(STATUS_BAR_TEXT))
+		.on_press_maybe(can_sync.then_some(Message::SyncPressed));
 	// The explorer toggle (§18): its label says what the panel currently is, so the
 	// button reads as a state rather than a command.
 	let tree = button(
@@ -411,7 +425,8 @@ fn status_bar<'a>(
 	// zone's centered label is centered in the *window*, not merely between the side
 	// groups — so the host info stays put no matter how wide the buttons are.
 	let mut buttons = row![copy, paste, pick, send].spacing(10);
-	// Name the picked file next to the buttons, so Upload never sends a mystery.
+	// Name the picked file right after Upload — the button it belongs to — so Upload never
+	// sends a mystery and the label does not drift off to sit past Sync.
 	if let Some(name) = upload.file {
 		buttons = buttons.push(
 			text(name)
@@ -421,6 +436,8 @@ fn status_bar<'a>(
 				.height(Length::Fill),
 		);
 	}
+	// Sync closes the left group, after the upload controls it is unrelated to.
+	buttons = buttons.push(sync);
 	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
