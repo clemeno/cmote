@@ -77,24 +77,21 @@ const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
 
-/// The body copy for the upload confirmation (§17), used when the remote working
-/// directory is known — the destination below is that directory. `app` appends the local
-/// file and its size.
-pub const UPLOAD_DIALOG_BODY: &str = "Sends this file to the directory the shell is currently in, over SFTP. Check the destination below — you can edit it before sending.";
-
-/// The same confirmation when the shell has never announced its directory (§17): the
-/// destination is then a bare file name, which the server resolves against the login
-/// directory, so the user is told to make it explicit if that is not what they want.
-pub const UPLOAD_DIALOG_BODY_NO_CWD: &str = "This shell does not report its working directory, so cmote cannot tell where it is. The file goes to the path below — a bare name lands in your login directory. Edit it to send the file somewhere else.";
+/// The body copy for the upload confirmation (§17). `app` appends the names of the files
+/// being sent. The destination below is a FOLDER — each file keeps its own name inside it —
+/// so one file or many read the same, and the batch is confirmed once for the whole lot.
+pub const UPLOAD_DIALOG_BODY: &str = "These files are sent over SFTP into the remote folder below. Edit the folder to send them somewhere else; leave it empty to use your login directory. Each file keeps its own name.";
 
 /// The widget id of the upload dialog's destination field, so `app` can focus it as the
-/// dialog opens (§17) — the path is the one thing the user may want to change, and
-/// Enter in the field sends. Same trick as the passphrase prompt (§7).
+/// dialog opens (§17) — the folder is the one thing the user may want to change, and Enter
+/// in the field sends. Same trick as the passphrase prompt (§7).
 pub const UPLOAD_INPUT_ID: &str = "upload-dest";
 
-/// The body copy for the overwrite confirmation (§17). `app` appends the remote path.
-/// Nothing has been written when this appears: the transfer stopped at the check.
-pub const UPLOAD_EXISTS_BODY: &str = "A file already exists at this path on the server. Uploading replaces its contents — the old file is not recoverable. Nothing has been sent yet.";
+/// The body of the upload batch's collision question (§17), followed by the names already in
+/// the folder. Asked once for the whole batch after the server pre-scan, never per file — the
+/// mirror of the download side (§21). Nothing has been sent when it appears, so every answer,
+/// cancelling included, is safe to give.
+pub const UPLOAD_CLASH_BODY: &str = "Some of these files are already in the destination folder. Skipping leaves those on the server as they are, keeping both adds a -1 to the name, and replacing overwrites them — replaced files are not recoverable. Nothing has been sent yet.";
 
 /// The body of the multi-file download's collision question (§21), followed by the names
 /// that clash. Nothing has been downloaded when it is asked, so every answer is safe to
@@ -126,12 +123,14 @@ const ANSI_16: [(u8, u8, u8); 16] = [
 const CUBE_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 
 /// Everything the status bar and the modals need to know about the upload feature
-/// (§17), grouped so `view` keeps a readable signature. `file` is the selected local
-/// file's name (`None` disables Upload), `dest` the destination path being confirmed,
-/// `state` the flow's current step, and `notice` the last outcome to show in the bar.
+/// (§17), grouped so `view` keeps a readable signature. `file_count` is how many local
+/// files are picked (zero disables Upload) and `first_file` the first one's name, so the
+/// bar can label a lone pick by name and a batch by count; `dest` is the destination folder
+/// being confirmed, `state` the flow's current step, and `notice` the last outcome.
 #[derive(Debug, Clone, Copy)]
 pub struct UploadView<'a> {
-	pub file: Option<&'a str>,
+	pub file_count: usize,
+	pub first_file: Option<&'a str>,
 	pub dest: &'a str,
 	pub state: Option<TransferState>,
 	pub notice: Option<&'a str>,
@@ -168,8 +167,11 @@ pub struct Panels<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct Modals<'a> {
 	pub confirm_disconnect: bool,
-	/// Whether the "some of these files are already there" question is open (§21).
+	/// Whether a download's "some of these files are already there" question is open (§21).
 	pub clash: bool,
+	/// The same, for an upload batch (§17). Separate flag because the two dialogs word the
+	/// question and wire their answers differently, even though the chrome is shared.
+	pub upload_clash: bool,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -199,6 +201,7 @@ pub fn view<'a>(
 	let Modals {
 		confirm_disconnect,
 		clash,
+		upload_clash,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -310,8 +313,9 @@ pub fn view<'a>(
 		layers.push(crate::ui::explorer::dismiss_layer());
 		layers.push(panel_menu);
 	}
-	// The files pane's own right-click menu (§19), anchored the same way.
-	if let Some(pane_menu) = crate::ui::files::context_menu(files, terminal.cwd()) {
+	// The files pane's own right-click menu (§19), anchored the same way — `width` so a menu
+	// near the right edge slides back inside instead of spilling off it.
+	if let Some(pane_menu) = crate::ui::files::context_menu(files, terminal.cwd(), width) {
 		layers.push(crate::ui::files::dismiss_layer());
 		layers.push(pane_menu);
 	}
@@ -331,26 +335,25 @@ pub fn view<'a>(
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
 		layers.push(confirm_disconnect_panel(dialog_body, drag));
 	}
-	// The upload confirmations (§17) use the same chrome. A running transfer shows no
+	// The upload confirmation (§17) uses the same chrome. A running transfer shows no
 	// modal — its progress lives in the status bar, so the shell stays usable.
-	match upload.state {
-		Some(TransferState::ConfirmPath) => {
-			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
-			layers.push(confirm_upload_panel(dialog_body, upload.dest, drag));
-		}
-		Some(TransferState::ConfirmOverwrite) => {
-			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
-			layers.push(confirm_overwrite_panel(dialog_body, drag));
-		}
-		Some(TransferState::Running { .. }) | None => {}
+	if let Some(TransferState::ConfirmPath) = upload.state {
+		layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
+		layers.push(confirm_upload_panel(dialog_body, upload.dest, drag));
 	}
-	// The multi-file download's name-collision question (§21), same chrome again. Nothing
-	// has been written when it opens: the whole batch is waiting on the answer.
+	// The batch collision questions, same chrome again — a download's (§21) and an upload's
+	// (§17). Nothing has been written when either opens: the whole batch waits on the answer.
 	if clash {
 		layers.push(crate::ui::dialog::backdrop(Message::DownloadClash(
 			crate::app::ClashChoice::Cancel,
 		)));
 		layers.push(download_clash_panel(dialog_body, drag));
+	}
+	if upload_clash {
+		layers.push(crate::ui::dialog::backdrop(Message::UploadClashResolved(
+			crate::app::ClashChoice::Cancel,
+		)));
+		layers.push(upload_clash_panel(dialog_body, drag));
 	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
@@ -386,10 +389,10 @@ fn status_bar<'a>(
 	let paste = button(text("Paste").size(STATUS_BAR_TEXT)).on_press(Message::PastePressed);
 	// Picking a file is always available (it also replaces an earlier pick); sending it
 	// needs both a file and no transfer already in flight (§17).
-	let pick = button(text("File…").size(STATUS_BAR_TEXT)).on_press(Message::UploadPickPressed);
+	let pick = button(text("Files…").size(STATUS_BAR_TEXT)).on_press(Message::UploadPickPressed);
 	let idle = upload.state.is_none();
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
-		.on_press_maybe((idle && upload.file.is_some()).then_some(Message::UploadPressed));
+		.on_press_maybe((idle && upload.file_count > 0).then_some(Message::UploadPressed));
 	// Sync (§19): type a `cd` into the shell so it follows the pane. Disabled until the pane
 	// names a directory the shell is not already in — dimmed, it doubles as a tell that the
 	// two are in step. It carries no path; `app` reads `Files::path` live when the press
@@ -425,11 +428,16 @@ fn status_bar<'a>(
 	// zone's centered label is centered in the *window*, not merely between the side
 	// groups — so the host info stays put no matter how wide the buttons are.
 	let mut buttons = row![copy, paste, pick, send].spacing(10);
-	// Name the picked file right after Upload — the button it belongs to — so Upload never
-	// sends a mystery and the label does not drift off to sit past Sync.
-	if let Some(name) = upload.file {
+	// Say what is picked right after Upload — the button it belongs to — so Upload never
+	// sends a mystery: a lone file by name, a batch by count, and nothing when none is picked.
+	let picked = match upload.file_count {
+		0 => None,
+		1 => upload.first_file.map(str::to_owned),
+		count => Some(format!("{count} files")),
+	};
+	if let Some(picked) = picked {
 		buttons = buttons.push(
-			text(name)
+			text(picked)
 				.size(STATUS_BAR_TEXT)
 				.color(STATUS_BAR_FG)
 				.align_y(iced::alignment::Vertical::Center)
@@ -536,6 +544,9 @@ fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> 
 			has_selection.then_some(Message::CopyPressed),
 		),
 		crate::ui::menu::item("Paste".to_owned(), Some(Message::PastePressed)),
+		// Send local files into the shell's own working directory (§17): the picker opens,
+		// then the confirmation with that folder already filled in.
+		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
 	]);
 
 	// A full-size transparent container whose padding positions the panel at the
@@ -578,10 +589,11 @@ fn confirm_disconnect_panel(
 	)
 }
 
-/// The upload confirmation (§17), in the shared dialog chrome: what the upload does and
-/// which local file it sends in the (selectable) body, then the destination path in an
-/// editable field — Enter in the field sends, as does the Upload button. Every dismissal
-/// route emits `UploadCancelled`, so backing out never sends anything.
+/// The upload confirmation (§17), in the shared dialog chrome: what the upload does and the
+/// files it sends in the (selectable) body, then the destination FOLDER in an editable field
+/// — Enter in the field sends, as does the Upload button. Every dismissal route emits
+/// `UploadCancelled`, so backing out never sends anything. One file or many read the same:
+/// the folder is the destination and each file keeps its own name inside it.
 fn confirm_upload_panel<'a>(
 	dialog_body: &'a text_editor::Content,
 	dest: &'a str,
@@ -589,7 +601,7 @@ fn confirm_upload_panel<'a>(
 ) -> Element<'a, Message> {
 	let content = column![
 		crate::ui::dialog::selectable_body(dialog_body),
-		text_input("Remote path", dest)
+		text_input("Remote folder", dest)
 			.id(UPLOAD_INPUT_ID)
 			.on_input(Message::UploadDestChanged)
 			.on_submit(Message::UploadConfirmed),
@@ -597,7 +609,7 @@ fn confirm_upload_panel<'a>(
 	.spacing(12);
 
 	crate::ui::dialog::dialog(
-		"Upload this file?".to_owned(),
+		"Upload these files?".to_owned(),
 		Message::UploadCancelled,
 		content.into(),
 		vec![
@@ -608,21 +620,33 @@ fn confirm_upload_panel<'a>(
 	)
 }
 
-/// The overwrite confirmation (§17): the destination already holds a file. Reached only
-/// after the SSH task checked and stopped, so cancelling here leaves the remote file
-/// exactly as it was — nothing has been written.
-fn confirm_overwrite_panel(
-	dialog_body: &text_editor::Content,
+/// The upload batch's collision question (§17): the batch is going into one folder and some
+/// of those names are already in it, found by the server pre-scan. Asked once for the whole
+/// batch, the twin of the download's `download_clash_panel` (§21) — same chrome and same four
+/// answers, but each wired to `UploadClashResolved`. Every dismissal route cancels, so backing
+/// out sends nothing.
+fn upload_clash_panel<'a>(
+	dialog_body: &'a text_editor::Content,
 	drag: crate::ui::dialog::Drag,
-) -> Element<'_, Message> {
+) -> Element<'a, Message> {
+	use crate::app::ClashChoice;
+
 	crate::ui::dialog::dialog(
-		"Replace the file on the server?".to_owned(),
-		Message::UploadCancelled,
+		"Some of these files are already there".to_owned(),
+		Message::UploadClashResolved(ClashChoice::Cancel),
 		crate::ui::dialog::selectable_body(dialog_body),
 		vec![
-			button("Cancel").on_press(Message::UploadCancelled).into(),
+			button("Cancel")
+				.on_press(Message::UploadClashResolved(ClashChoice::Cancel))
+				.into(),
+			button("Skip them")
+				.on_press(Message::UploadClashResolved(ClashChoice::Skip))
+				.into(),
+			button("Keep both")
+				.on_press(Message::UploadClashResolved(ClashChoice::KeepBoth))
+				.into(),
 			button("Replace")
-				.on_press(Message::UploadOverwriteConfirmed)
+				.on_press(Message::UploadClashResolved(ClashChoice::Replace))
 				.into(),
 		],
 		drag,

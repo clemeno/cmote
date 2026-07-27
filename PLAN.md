@@ -807,31 +807,45 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   over russh's `ChannelStream`), which is real file transfer — the shell keeps running
   untouched beside it. Opening happens inline in the session loop (a borrow of the session
   handle); the transfer itself is **spawned**, so a large file never stalls the shell pump.
-- **Ask before sending, ask before replacing.** Upload opens a confirmation showing the
-  local file and an **editable destination path**, prefilled with the tracked cwd joined to
-  the file's name — and with the bare name when the cwd is unknown, which the server
-  resolves against the login directory. The destination is then checked **before** the file
-  is created (SFTP's create truncates, so a late failure would already have destroyed the
-  old contents): an occupied path stops the transfer and raises the overwrite prompt
-  instead. Both prompts use the shared dialog chrome (§10), and every dismissal route
-  cancels.
-- **Progress.** The copy loop streams 32 KiB chunks and emits `UploadProgress` every
+- **One file or many, into a folder.** The picker is multi-select (`pick_files`), and the
+  confirmation shows an **editable destination FOLDER** with the picked files listed under
+  it — each keeps its own name inside that folder. An empty folder normalises to `.`, which
+  the server resolves against the login directory, so a shell that never announced its cwd
+  still has somewhere to send to. One dialog, one shape, whether one file or twenty.
+- **Four ways in, one flow (v2.2).** Upload starts from the status bar (File… picks, Upload
+  confirms into the shell's cwd) or from a right-click **Upload…** on any of three surfaces,
+  each seeding the destination folder before the picker even opens: the **terminal grid**
+  (the shell's cwd), the **files pane's empty space** (the directory it is showing), and a
+  **folder in the tree** (that folder itself). All converge on the same confirm-then-send
+  flow — the surface only decides the starting folder.
+- **Pre-scan, ask once (v2.2).** Before a byte is sent the batch is checked against the
+  destination with `CheckUploads` → `UploadPrescan`: the server stats every name and, for
+  each that already exists, proposes a free `name-1` path. If any clash, one dialog asks the
+  whole-batch question — **Replace / Skip / Keep both / Cancel** — the mirror of the
+  multi-file download's collision model (§21), not a prompt per file. `Replace` overwrites in
+  place, `Skip` drops the clashing files, `Keep both` writes them to the proposed `-1` path,
+  `Cancel` sends nothing. Checking before creating matters because SFTP's create truncates
+  (§21): a late failure would already have destroyed the old contents.
+- **A queue, one transfer at a time.** The confirmed batch becomes a `VecDeque` (`plan_uploads`
+  builds it — pure, so the collision-answer logic is unit-tested without a server), and each
+  `UploadDone` pumps the next, exactly as the download queue does (§21). The status bar's
+  centre zone is a progress bar per file; the closing notice is `Uploaded N files` for a
+  batch, `Uploaded to <path>` for a lone one. A race — a file that appears on the server
+  after the pre-scan — is skipped rather than reopening the question mid-batch.
+- **Progress.** The copy loop streams 32 KiB chunks and emits `TransferProgress` every
   256 KiB — enough for a smooth bar, far below the flood that per-chunk events would be.
-  The status bar's centre zone becomes a progress bar plus a byte readout while a transfer
-  runs, then shows the outcome until the next upload.
-- **Failures stay in the bar.** A failed upload shows its reason in the status bar and
-  keeps the file selected for a retry; it must not route to the error *screen*, which
-  would tear down a perfectly healthy shell over a file that never left. Unlike an auth
-  failure (§12), the detail here is the user's own path — showing it is what makes the
-  error actionable.
-- **Success deselects.** A completed upload clears the picked file, which disables the
-  Upload button again, so a stray second click cannot re-send what just landed. The
-  reported destination is the server's `canonicalize` of the path, so the user sees where
-  the bytes actually went rather than what they typed.
-- **Keyboard.** While an upload dialog is open the terminal's key listener swallows keys
-  (as it already does for the Disconnect modal), so typing goes to the path field and not
-  to the remote shell; `Esc` cancels a confirmation and a running transfer ignores it —
-  there is no cancel to give it (deferred, §16).
+- **Failures stay in the bar, and the batch goes on.** A failed file shows its reason in the
+  status bar and the queue moves to the next; it must not route to the error *screen*, which
+  would tear down a healthy shell over a file that never left. Unlike an auth failure (§12),
+  the detail here is the user's own path — showing it is what makes the error actionable.
+- **Success clears the batch.** Once the queue drains, the picked files are cleared, which
+  disables the Upload button, so a stray click cannot re-send what just landed. The reported
+  destination is the server's `canonicalize` of the path, so the user sees where the bytes
+  actually went rather than what they typed.
+- **Keyboard.** While a confirmation or the collision question is open the terminal's key
+  listener swallows keys (as it does for the Disconnect modal), so typing goes to the folder
+  field and not the remote shell; `Esc` cancels, and a running transfer ignores it — there is
+  no cancel to give it (deferred, §16).
 
 ---
 

@@ -88,6 +88,13 @@ pub enum SshCommand {
 		remote: String,
 		overwrite: bool,
 	},
+	/// Check, before an upload batch sends a single byte, which of `names` already exist
+	/// in the remote directory `dir` (§17). The task answers with `UploadPrescan`, so the
+	/// GUI can ask the "some are already there" question once for the whole batch — the
+	/// same up-front collision model the multi-file download uses (§21). For each name that
+	/// clashes the task also proposes a free `name-1` alternative, so the "keep both" answer
+	/// has a server-checked destination to write to.
+	CheckUploads { dir: String, names: Vec<String> },
 	/// List the folders inside a remote directory, for the explorer tree (§18). One
 	/// command per folder the user opens — the tree is lazy, so nothing is walked.
 	ListDir(String),
@@ -129,6 +136,11 @@ pub enum SshEvent {
 	/// The upload's destination already holds a file (§17). Carries the path, so the
 	/// GUI can name it in the overwrite confirmation; nothing has been written.
 	UploadExists(String),
+	/// The answer to a `CheckUploads` (§17): the entries of the batch that already exist in
+	/// the destination, each paired with a free `name-1`-style path to write to if the user
+	/// chooses "keep both". Empty when nothing clashes — the batch then starts straight away.
+	/// The names not listed here are free, so the GUI needs no per-file reply for them.
+	UploadPrescan { collisions: Vec<(String, String)> },
 	/// Bytes moved so far, out of the file's size (§17, §19). Sent at intervals, not per
 	/// chunk, so a big transfer does not flood the GUI with redraws. Shared by uploads
 	/// and downloads — only one transfer runs at a time, and the bar reads the same

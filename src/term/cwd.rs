@@ -115,19 +115,6 @@ impl Cwd {
 	}
 }
 
-/// Join a remote directory and a file name into one destination path (§17). The
-/// separator follows the directory it is joining: a Windows path (backslashes, no
-/// forward slash) keeps backslashes, anything else uses `/`. A directory that already
-/// ends in a separator does not get a second one.
-pub fn join(directory: &str, name: &str) -> String {
-	if directory.ends_with(['/', '\\']) {
-		return format!("{directory}{name}");
-	}
-	let windows = directory.contains('\\') && !directory.contains('/');
-	let separator = if windows { '\\' } else { '/' };
-	format!("{directory}{separator}{name}")
-}
-
 /// Pull the directory out of an OSC payload, or `None` if this OSC is not a cwd
 /// announcement. OSC 7 carries a `file://` URI (percent-encoded); OSC 9;9 carries a
 /// bare path, sometimes quoted.
@@ -268,18 +255,5 @@ mod tests {
 
 		cwd.feed(b"\x1b]7;file://host/tmp\x07");
 		assert_eq!(cwd.path(), Some("/tmp"));
-	}
-
-	#[test]
-	fn join_uses_the_directory_own_separator() {
-		assert_eq!(join("/home/user", "notes.txt"), "/home/user/notes.txt");
-		// An existing trailing separator is not doubled — including at a root.
-		assert_eq!(join("/", "notes.txt"), "/notes.txt");
-		// A native Windows directory keeps backslashes.
-		assert_eq!(
-			join("C:\\Users\\CLEm", "notes.txt"),
-			"C:\\Users\\CLEm\\notes.txt"
-		);
-		assert_eq!(join("C:\\", "notes.txt"), "C:\\notes.txt");
 	}
 }

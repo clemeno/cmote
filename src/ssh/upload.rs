@@ -62,6 +62,87 @@ pub async fn start<H: client::Handler>(
 	}
 }
 
+/// How far to probe for a free `name-1`, `name-2`… when a batch upload's "keep both" answer
+/// needs a destination that is not already taken (§17). Bounded like the download side's
+/// local `free_name`: after a hundred the folder is telling us something.
+const FREE_NAME_TRIES: u32 = 100;
+
+/// Check which of `names` already exist under `dir` before an upload batch starts (§17), and
+/// answer with `UploadPrescan`. This is what lets the GUI ask the "some are already there"
+/// question once for the whole batch rather than once per file, the up-front collision model
+/// the multi-file download uses (§21). For each clashing name a free `name-1` alternative is
+/// found too, so a "keep both" answer has a server-checked path to write to.
+///
+/// Opens its own SFTP channel, like `start`, so the pre-scan never contends with the shared
+/// listing session. A server that will not answer an existence check fails the whole scan
+/// rather than guessing a path is free — guessing would let the batch overwrite silently, the
+/// same caution the transfer itself takes (§17).
+pub async fn precheck<H: client::Handler>(
+	session: &client::Handle<H>,
+	events: &mpsc::Sender<SshEvent>,
+	dir: String,
+	names: Vec<String>,
+) {
+	let sftp = match super::open_sftp(session).await {
+		Ok(sftp) => sftp,
+		Err(error) => {
+			eprintln!("sftp channel failed: {error:#}");
+			let _ = events
+				.send(SshEvent::UploadFailed(
+					"Could not open an SFTP channel to check the destination.".to_string(),
+				))
+				.await;
+			return;
+		}
+	};
+
+	let mut collisions: Vec<(String, String)> = Vec::new();
+	for name in &names {
+		let remote = crate::explorer::join(&dir, name);
+		match sftp.try_exists(&remote).await {
+			Ok(true) => {
+				let free = free_remote(&sftp, &dir, name).await;
+				collisions.push((name.clone(), free));
+			}
+			Ok(false) => {}
+			Err(error) => {
+				eprintln!("sftp exists check failed: {error}");
+				let _ = events
+					.send(SshEvent::UploadFailed(format!(
+						"Could not check {remote}: {error}"
+					)))
+					.await;
+				let _ = sftp.close().await;
+				return;
+			}
+		}
+	}
+
+	let _ = events.send(SshEvent::UploadPrescan { collisions }).await;
+	let _ = sftp.close().await;
+}
+
+/// The first free `name-1.ext`, `name-2.ext`… under `dir` on the server — the "keep both"
+/// destination for a name already taken (§17). The twin of the download side's local
+/// `free_name`, but each probe is a round trip, so it is bounded to `FREE_NAME_TRIES`. An
+/// existence check that errors is treated as "free" and stops the probe rather than spinning:
+/// the transfer re-checks before it creates the file (§17), so a wrong guess is skipped, never
+/// overwritten.
+async fn free_remote(sftp: &SftpSession, dir: &str, name: &str) -> String {
+	let (stem, extension) = match name.rsplit_once('.') {
+		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
+		_ => (name, String::new()),
+	};
+	for attempt in 1..=FREE_NAME_TRIES {
+		let candidate = crate::explorer::join(dir, &format!("{stem}-{attempt}{extension}"));
+		if !sftp.try_exists(&candidate).await.unwrap_or(false) {
+			return candidate;
+		}
+	}
+	crate::explorer::join(dir, &format!("{stem}-{FREE_NAME_TRIES}{extension}"))
+}
+
 /// Stream the file to the remote, reporting progress as it goes. Runs to completion in
 /// its own task; every outcome is reported as exactly one terminal event.
 async fn transfer(

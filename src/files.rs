@@ -160,6 +160,12 @@ pub enum FilesMessage {
 	PanelPressed,
 	/// The button came up: the rubber band, if one was being dragged, is finished (§21).
 	PanelReleased,
+	/// A right-press landed on the grid's empty space — not on any cell (§17). Opens the
+	/// empty-space menu, whose one item uploads local files into the directory on show.
+	PanelRightPressed,
+	/// The empty-space menu's "Upload… here" (§17): pick local files to send into the pane's
+	/// current directory. Carries no path — the pane's own is read when the press arrives.
+	PaneUploadHere,
 	/// The pointer moved while a band is being dragged, reported by the full-window capture
 	/// layer, so the payload is in WINDOW coordinates rather than the pane's (§21).
 	BandMoved(Point),
@@ -276,6 +282,10 @@ pub struct Files {
 	band: Option<Band>,
 	band_base: HashSet<String>,
 	menu: Option<Menu>,
+	/// The empty-space menu's anchor when it is open (§17): a right-click on the grid's
+	/// blank area, not on a cell. Kept apart from `menu` because it acts on the pane's own
+	/// directory ("Upload… here"), not on any one entry — only one of the two is ever up.
+	pane_menu: Option<Point>,
 	pointer: Point,
 	rename: Option<Rename>,
 	notice: Option<String>,
@@ -309,6 +319,7 @@ impl Default for Files {
 			band: None,
 			band_base: HashSet::new(),
 			menu: None,
+			pane_menu: None,
 			pointer: Point::ORIGIN,
 			rename: None,
 			notice: None,
@@ -515,6 +526,19 @@ impl Files {
 		self.menu.as_ref()
 	}
 
+	/// The open empty-space menu's anchor, if one is showing (§17). Its only item uploads
+	/// into the pane's current directory; the entry menu (`menu`) acts on one entry instead.
+	pub fn pane_menu(&self) -> Option<Point> {
+		self.pane_menu
+	}
+
+	/// Open the empty-space menu where the pointer is (§17), for a right-click on the grid's
+	/// blank area. Closes any entry menu first, so only one menu is ever up.
+	pub fn open_pane_menu(&mut self) {
+		self.menu = None;
+		self.pane_menu = Some(self.pointer);
+	}
+
 	/// The in-progress inline rename, if any.
 	pub fn editing(&self) -> Option<&Rename> {
 		self.rename.as_ref()
@@ -650,9 +674,11 @@ impl Files {
 		self.band_base.clear();
 	}
 
-	/// Open the context menu on an entry, anchored where the pointer is right now.
+	/// Open the context menu on an entry, anchored where the pointer is right now. Closes any
+	/// empty-space menu first, so only one is ever up and the view's priority check is moot.
 	pub fn open_menu(&mut self, path: String) {
 		let kind = self.kind_of(&path).unwrap_or(Kind::File);
+		self.pane_menu = None;
 		self.menu = Some(Menu {
 			path,
 			kind,
@@ -660,9 +686,10 @@ impl Files {
 		});
 	}
 
-	/// Close the context menu.
+	/// Close whichever context menu is open — the entry menu or the empty-space one (§17).
 	pub fn close_menu(&mut self) {
 		self.menu = None;
+		self.pane_menu = None;
 	}
 
 	/// An entry's kind, by full path. `None` when it is not in the directory on show.

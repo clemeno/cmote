@@ -201,6 +201,9 @@ pub fn panel(files: &Files, show_hidden: bool, width: f32, focused: bool) -> Ele
 	// gives it the keyboard (§20); one on the grid's empty space also starts a band (§21).
 	.on_press(Message::Files(FilesMessage::PanelPressed))
 	.on_release(Message::Files(FilesMessage::PanelReleased))
+	// A right-press on the empty space opens the pane's own menu (§17). A cell's own
+	// `mouse_area` catches a right-press over it first, so this only fires off the cells.
+	.on_right_press(Message::Files(FilesMessage::PanelRightPressed))
 	.into()
 }
 
@@ -802,7 +805,27 @@ pub fn band_drag_layer() -> Element<'static, Message> {
 /// *to*, so the item is disabled without it (§17). "Open in terminal" is for directories
 /// and "Download" for files — each is disabled on the other, rather than hidden, so the
 /// menu keeps one shape.
-pub fn context_menu<'a>(files: &'a Files, cwd: Option<&str>) -> Option<Element<'a, Message>> {
+pub fn context_menu<'a>(
+	files: &'a Files,
+	cwd: Option<&str>,
+	width: f32,
+) -> Option<Element<'a, Message>> {
+	// The empty-space menu is checked first — only one menu is ever open, and this one needs
+	// no entry. Its items act on the directory on show, not on any cell (§17).
+	if let Some(anchor) = files.pane_menu() {
+		let panel = menu::panel(vec![
+			menu::item(
+				"Upload… here".to_owned(),
+				Some(Message::Files(FilesMessage::PaneUploadHere)),
+			),
+			menu::item(
+				"Refresh".to_owned(),
+				Some(Message::Files(FilesMessage::Refresh)),
+			),
+		]);
+		return Some(place_menu(panel, anchor, files.height(), width));
+	}
+
 	let open = files.menu()?;
 	// Frozen when the menu opened, so it stays put while the pointer travels to an item.
 	let anchor = open.at;
@@ -850,26 +873,39 @@ pub fn context_menu<'a>(files: &'a Files, cwd: Option<&str>) -> Option<Element<'
 		item("Refresh", FilesMessage::Refresh),
 	]);
 
-	// Placed from the pointer, anchored to the window's BOTTOM edge — which is also the
-	// pane's. `pane height - pointer.y` is the pointer's distance from that edge, so the
-	// menu's bottom lands under the cursor and the panel grows *upwards*. That is the
-	// right direction here: this pane sits at the bottom of the window, and a menu
-	// dropping downwards would fall off it. Aligning to the bottom also means the view
-	// never needs to know how tall the window is.
-	let bottom = (files.height() - anchor.y).max(MENU_INSET);
-	Some(
-		container(panel)
-			.width(Length::Fill)
-			.height(Length::Fill)
-			.align_y(Vertical::Bottom)
-			.padding(Padding {
-				top: 0.0,
-				right: 0.0,
-				bottom,
-				left: anchor.x,
-			})
-			.into(),
-	)
+	Some(place_menu(panel, anchor, files.height(), width))
+}
+
+/// Place a context-menu panel over the pane, anchored to the window's BOTTOM edge — which is
+/// also the pane's (§19). `pane height - pointer.y` is the pointer's distance from that edge,
+/// so the menu's bottom lands under the cursor and the panel grows *upwards*: this pane sits
+/// at the bottom of the window, and a menu dropping downwards would fall off it. Aligning to
+/// the bottom also means the view never needs to know how tall the window is. Shared by the
+/// entry menu and the empty-space one, so both open the same way.
+///
+/// The left edge is clamped so a menu opened near the RIGHT of the window slides back inside
+/// rather than spilling off it — the panel is a fixed `menu::WIDTH` wide, so once `anchor.x`
+/// would push its right edge past `width`, it is pinned `MENU_INSET` in from that edge. `width`
+/// is the pane's, which is the window's.
+fn place_menu<'a>(
+	panel: Element<'a, Message>,
+	anchor: iced::Point,
+	height: f32,
+	width: f32,
+) -> Element<'a, Message> {
+	let bottom = (height - anchor.y).max(MENU_INSET);
+	let left = anchor.x.min((width - menu::WIDTH - MENU_INSET).max(0.0));
+	container(panel)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.align_y(Vertical::Bottom)
+		.padding(Padding {
+			top: 0.0,
+			right: 0.0,
+			bottom,
+			left,
+		})
+		.into()
 }
 
 /// The click-away layer that sits under this menu (shared chrome, §10).

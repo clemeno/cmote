@@ -59,6 +59,9 @@ pub enum ExplorerMessage {
 	Collapse(String),
 	/// Menu "Open in terminal": send a `cd` for this folder to the shell.
 	Cd(String),
+	/// Menu "Upload…": pick local files to send into this folder (§17). Carries the folder's
+	/// path, so the files land in the one that was right-clicked, not wherever the shell sits.
+	UploadHere(String),
 	/// Menu "Rename": turn the row into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.

@@ -234,19 +234,35 @@ pub struct App {
 	/// The last known window size (§10), tracked from resize events so a dragged dialog
 	/// can be centred and clamped within the window bounds.
 	window_size: iced::Size,
-	/// The local file picked for upload (§17), or `None` when nothing is selected —
-	/// which is also what disables the Upload button. Cleared on a successful upload, so
-	/// the same file is never sent twice by a stray second click.
-	upload_file: Option<PathBuf>,
-	/// Where the file transfer in progress has got to (§17, §19): confirming the path,
-	/// confirming an overwrite, or moving bytes. `None` when nothing is being transferred.
-	/// One state for both directions — only one transfer runs at a time, and an upload's
-	/// progress bar and a download's read the same.
+	/// The local files picked for the current upload batch (§17), empty when none is
+	/// pending — which is also what disables the status bar's Upload button. Cleared once
+	/// the batch drains, so the same files are never re-sent by a stray click. One file or
+	/// many: the flow is the same, and the confirmation lists them.
+	upload_files: Vec<PathBuf>,
+	/// Where the file transfer in progress has got to (§17, §19): confirming the path or
+	/// moving bytes. `None` when nothing is being transferred. One state for both directions
+	/// — only one transfer runs at a time, and an upload's progress bar and a download's read
+	/// the same.
 	transfer: Option<TransferState>,
-	/// The destination path being confirmed (§17). Seeded from the remote working
-	/// directory plus the file's name, and editable — that is what makes the feature
-	/// work on a shell that never announces its directory.
-	upload_dest: String,
+	/// The destination FOLDER the batch goes into (§17), editable in the confirmation.
+	/// Seeded from wherever the upload was started — the shell's cwd, the files pane's
+	/// directory, or a folder right-clicked in the tree — and normalised to `.` (the login
+	/// directory) when left empty. Each file keeps its own name inside it.
+	upload_dir: String,
+	/// The batch waiting to send, a (local file, remote path) pair each (§17). One transfer
+	/// runs at a time, so the files queue here and every `UploadDone` starts the next — the
+	/// mirror of the download queue (§21).
+	uploads: std::collections::VecDeque<(PathBuf, String)>,
+	/// How many of the batch have landed, for its closing notice (§17).
+	uploaded: usize,
+	/// Whether the batch sends with overwrite set — true only when the user answered the
+	/// collision question with "replace" (§17). Decided once, applied to every file; a
+	/// free or "keep both" destination is written with it off and its own name.
+	upload_overwrite: bool,
+	/// A batch held at the "some are already there" question (§17): the clashing names the
+	/// server found, each paired with a free `name-1` path for the "keep both" answer.
+	/// `Some` while the question is open, which is what draws the dialog; `None` otherwise.
+	upload_clash: Option<Vec<(String, String)>>,
 	/// The last transfer outcome, shown in the status bar until the next one starts
 	/// (§17, §19). `ponytail:` no timed fade — that would need a timer subscription for a
 	/// line of text.
@@ -318,14 +334,13 @@ pub enum ClashChoice {
 }
 
 /// Where a file transfer has got to (§17, §19). Only one runs at a time, so this is a
-/// plain state, not a queue. The two confirmations are upload-only: a download's
-/// destination comes from the native save dialog, which asks its own overwrite question.
+/// plain state, not a queue. `ConfirmPath` is upload-only: a download's destination comes
+/// from the native save dialog, which asks its own overwrite question, and an upload's
+/// overwrite question is settled up front by the batch pre-scan (§17), not by a per-file state.
 #[derive(Debug, Clone, Copy)]
 pub enum TransferState {
-	/// Showing the destination path for confirmation, before anything is sent.
+	/// Showing the destination folder for confirmation, before anything is sent.
 	ConfirmPath,
-	/// The destination already holds a file; asking whether to overwrite it.
-	ConfirmOverwrite,
 	/// Transferring, with the bytes written so far out of the file's size.
 	Running { sent: u64, total: u64 },
 }
@@ -430,20 +445,30 @@ pub enum Message {
 	/// Only subscribed to while a toast is up, so it costs nothing the rest of the time.
 	SnackbarTick,
 	// --- file upload to the remote (§17) ---
-	/// The user clicked the file button in the status bar — open the native picker.
+	/// The status bar's File… button — open the native multi-file picker.
 	UploadPickPressed,
-	/// The picker closed: `Some(path)` selects that file, `None` (cancelled) keeps the
-	/// current selection.
-	UploadFilePicked(Option<PathBuf>),
-	/// The user clicked Upload — show the destination confirmation.
+	/// The picker closed on the status-bar path: the files to send, empty if cancelled. The
+	/// destination is chosen later, on the Upload button, from the shell's working directory.
+	UploadFilesPicked(Vec<PathBuf>),
+	/// The picker closed for an "Upload…" started from a right-click surface: the files plus
+	/// the folder they go into — the shell cwd (terminal menu), the pane's directory (files
+	/// pane), or the folder itself (tree). Opens the confirmation straight away.
+	UploadFilesPickedInto {
+		files: Vec<PathBuf>,
+		dir: String,
+	},
+	/// The status bar's Upload button — confirm the picked batch into the shell's cwd.
 	UploadPressed,
-	/// The destination path field in the confirmation changed.
+	/// The terminal grid's right-click "Upload…" — pick files to send into the shell's cwd.
+	TerminalUploadPressed,
+	/// The destination folder field in the confirmation changed.
 	UploadDestChanged(String),
-	/// The destination was confirmed — start the transfer.
+	/// The destination folder was confirmed — pre-scan the server for collisions (§17).
 	UploadConfirmed,
-	/// The destination already holds a file and the user chose to replace it.
-	UploadOverwriteConfirmed,
-	/// The user backed out of an upload confirmation (Cancel / ✕ / backdrop / Esc).
+	/// The answer to "some of these are already there" for an upload batch (§17).
+	UploadClashResolved(ClashChoice),
+	/// The user backed out of an upload confirmation or its collision question (Cancel / ✕ /
+	/// backdrop / Esc) — nothing is sent.
 	UploadCancelled,
 	/// Something happened in the files pane (§19). Nested for the same reason the tree's
 	/// messages are.
@@ -587,19 +612,48 @@ impl App {
 				}
 			}
 			Message::UploadPickPressed => return browse_upload(),
-			// A cancelled picker (`None`) keeps whatever was already chosen — same rule
-			// as the key-file picker on the form.
-			Message::UploadFilePicked(path) => {
-				if path.is_some() {
-					self.upload_file = path;
+			// A cancelled picker yields no files, which keeps whatever was already chosen —
+			// the same rule the key-file picker on the form uses.
+			Message::UploadFilesPicked(files) => {
+				if !files.is_empty() {
+					self.upload_files = files;
 					self.transfer_notice = None;
 				}
 			}
-			Message::UploadPressed => return self.on_upload_pressed(),
-			Message::UploadDestChanged(value) => self.upload_dest = value,
-			Message::UploadConfirmed => self.start_upload(false),
-			Message::UploadOverwriteConfirmed => self.start_upload(true),
-			Message::UploadCancelled => self.transfer = None,
+			// Started from a right-click surface: the folder is already known, so pick the
+			// files and go straight to the confirmation.
+			Message::UploadFilesPickedInto { files, dir } => {
+				if !files.is_empty() {
+					self.upload_files = files;
+					self.upload_dir = dir;
+					self.transfer_notice = None;
+					return self.open_upload_confirm();
+				}
+			}
+			Message::UploadPressed => {
+				self.upload_dir = self
+					.terminal
+					.as_ref()
+					.and_then(term::Terminal::cwd)
+					.unwrap_or_default()
+					.to_owned();
+				return self.open_upload_confirm();
+			}
+			Message::TerminalUploadPressed => {
+				// The grid's right-click "Upload…": pick files for the shell's own directory.
+				self.menu = None;
+				let dir = self
+					.terminal
+					.as_ref()
+					.and_then(term::Terminal::cwd)
+					.unwrap_or_default()
+					.to_owned();
+				return browse_upload_into(dir);
+			}
+			Message::UploadDestChanged(value) => self.upload_dir = value,
+			Message::UploadConfirmed => return self.on_upload_confirmed(),
+			Message::UploadClashResolved(choice) => self.on_upload_clash(choice),
+			Message::UploadCancelled => self.cancel_upload(),
 			Message::Explorer(message) => return self.on_explorer(message),
 			Message::Files(message) => return self.on_files(message),
 			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
@@ -966,11 +1020,18 @@ impl App {
 				self.files.set_notice(reason);
 			}
 			SshEvent::UploadExists(path) => {
-				// Nothing has been written yet: the task checked first and stopped. Ask,
-				// and only a confirmed answer re-sends with `overwrite` set (§17).
-				self.set_dialog_body(&format!("{}\n\n{path}", ui::terminal::UPLOAD_EXISTS_BODY));
-				self.transfer = Some(TransferState::ConfirmOverwrite);
+				// The batch pre-scan already settled every collision it knew about (§17), so
+				// reaching here means this file appeared on the server AFTER the scan. Skip it
+				// rather than reopening the question mid-batch, and move the queue on.
+				self.transfer = None;
+				self.transfer_notice = Some(format!(
+					"Skipped {} — it appeared on the server",
+					explorer::name(&path)
+				));
+				self.pump_uploads();
+				self.finish_batch_if_drained();
 			}
+			SshEvent::UploadPrescan { collisions } => self.on_upload_prescan(collisions),
 			// Progress only means something while a transfer is running; a late event
 			// after a failure must not revive the bar.
 			SshEvent::TransferProgress { sent, total } => {
@@ -979,18 +1040,29 @@ impl App {
 				}
 			}
 			SshEvent::UploadDone(path) => {
-				// Success deselects the file, which disables the Upload button again —
-				// so a stray second click cannot re-send what just landed (§17).
+				// One file landed; count it and start the next. The closing notice, and
+				// clearing the picked files, wait until the whole batch has drained (§17).
 				self.transfer = None;
-				self.upload_file = None;
-				self.transfer_notice = Some(format!("Uploaded to {path}"));
+				self.uploaded += 1;
+				self.pump_uploads();
+				if self.transfer.is_none() && self.uploads.is_empty() {
+					self.transfer_notice = Some(if self.uploaded > 1 {
+						format!("Uploaded {} files", self.uploaded)
+					} else {
+						format!("Uploaded to {path}")
+					});
+					self.finish_batch();
+				}
 			}
 			SshEvent::UploadFailed(message) => {
-				// The file stays selected so the user can fix the path and retry. The
-				// failure shows in the status bar rather than the error screen — that
-				// screen would tear down the shell for a file that never left (§17).
+				// One file failing does not abandon the rest of the batch — the notice says
+				// what went wrong, and the queue moves on (§17). The failure shows in the
+				// status bar rather than the error screen, which would tear the shell down for
+				// a file that never left.
 				self.transfer = None;
 				self.transfer_notice = Some(message);
+				self.pump_uploads();
+				self.finish_batch_if_drained();
 			}
 			SshEvent::Disconnected => {
 				// A remote hangup ends a live session too: remember where it was (§22).
@@ -1310,26 +1382,30 @@ impl App {
 		};
 		self.modifiers = modifiers;
 
-		// The download collision question (§21) is modal like the upload ones: Esc backs
-		// out of the whole batch, everything else waits for a button.
+		// The collision questions (§17, §21) are modal: Esc backs out of the whole batch,
+		// everything else waits for a button. The download's and the upload's read the same.
 		if self.clash.is_some() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.clash = None;
 			}
 			return iced::Task::none();
 		}
+		if self.upload_clash.is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.cancel_upload();
+			}
+			return iced::Task::none();
+		}
 
-		// Same rule for the upload dialogs (§17): while one is open the keyboard belongs
+		// Same rule for the upload confirmation (§17): while it is open the keyboard belongs
 		// to it — the destination field types through the widget tree — so nothing here
-		// reaches the shell. Esc backs out of a confirmation; a running transfer has
-		// nothing to back out of, so it just swallows the key.
+		// reaches the shell. Esc backs out; a running transfer has nothing to back out of, so
+		// it just swallows the key.
 		if let Some(state) = self.transfer {
-			if matches!(
-				state,
-				TransferState::ConfirmPath | TransferState::ConfirmOverwrite
-			) && matches!(key, iced::keyboard::Key::Named(Named::Escape))
+			if matches!(state, TransferState::ConfirmPath)
+				&& matches!(key, iced::keyboard::Key::Named(Named::Escape))
 			{
-				self.transfer = None;
+				self.cancel_upload();
 			}
 			return iced::Task::none();
 		}
@@ -1725,10 +1801,14 @@ impl App {
 		self.menu = None;
 		self.confirm_disconnect = false;
 		self.transfer = None;
-		self.upload_file = None;
-		self.upload_dest.clear();
+		self.upload_files.clear();
+		self.upload_dir.clear();
+		self.uploads.clear();
+		self.uploaded = 0;
+		self.upload_overwrite = false;
+		self.upload_clash = None;
 		self.transfer_notice = None;
-		// A queued batch belongs to the session that asked for it (§21).
+		// A queued batch belongs to the session that asked for it (§17, §21).
 		self.downloads.clear();
 		self.downloaded = 0;
 		self.clash = None;
@@ -1743,63 +1823,178 @@ impl App {
 		self.files.reset();
 	}
 
-	/// The Upload button (§17): show the destination before sending anything. The path
-	/// is the remote working directory (tracked from the shell's own announcements)
-	/// joined with the file's name — and it is editable, so a shell that never announces
-	/// its directory still works: the field then holds the bare file name, which the
-	/// server resolves against the login directory.
-	fn on_upload_pressed(&mut self) -> iced::Task<Message> {
+	/// Open the upload confirmation for the picked batch (§17): list the files in the body,
+	/// show the destination folder in the editable field, and focus it so the folder can be
+	/// corrected — or the batch confirmed with Enter — without reaching for the mouse. No-op
+	/// with nothing picked, and refused while another transfer is running, since the status
+	/// bar has one progress bar and two transfers would fight over it.
+	fn open_upload_confirm(&mut self) -> iced::Task<Message> {
 		self.menu = None;
-		let Some(local) = self.upload_file.clone() else {
+		if self.upload_files.is_empty() {
 			return iced::Task::none();
-		};
-		let name = file_name_of(&local).to_owned();
-		let cwd = self.terminal.as_ref().and_then(term::Terminal::cwd);
-		self.upload_dest = match cwd {
-			Some(directory) => term::cwd::join(directory, &name),
-			None => name.clone(),
-		};
-
-		let size = std::fs::metadata(&local)
-			.map(|meta| ui::terminal::human_bytes(meta.len()))
-			.unwrap_or_else(|_| "unknown size".to_owned());
-		let where_to = match cwd {
-			Some(_) => ui::terminal::UPLOAD_DIALOG_BODY,
-			None => ui::terminal::UPLOAD_DIALOG_BODY_NO_CWD,
-		};
-		let body = format!("{where_to}\n\n{}  ({size})", local.display());
+		}
+		if self.transfer.is_some() || !self.uploads.is_empty() {
+			self.transfer_notice = Some("A transfer is already running.".to_owned());
+			return iced::Task::none();
+		}
+		let names: Vec<String> = self
+			.upload_files
+			.iter()
+			.map(|local| file_name_of(local).to_owned())
+			.collect();
+		let body = format!(
+			"{}\n\n{}",
+			ui::terminal::UPLOAD_DIALOG_BODY,
+			names.join("\n")
+		);
 		self.set_dialog_body(&body);
 		self.transfer = Some(TransferState::ConfirmPath);
-		// Focus the destination field, so the path can be corrected — or simply
-		// confirmed with Enter — without reaching for the mouse.
 		iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID)
 	}
 
-	/// Send the upload command and switch the status bar over to its progress bar (§17).
-	/// `overwrite` is false for the first attempt — the SSH task answers with
-	/// `UploadExists` rather than replacing a file — and true only after the user has
-	/// confirmed that prompt. An empty destination keeps the dialog open.
-	fn start_upload(&mut self, overwrite: bool) {
-		let Some(local) = self.upload_file.clone() else {
-			self.transfer = None;
-			return;
+	/// The destination folder was confirmed (§17): pre-scan the server for names already in
+	/// it, so the "some are already there" question is asked once for the whole batch before
+	/// a single byte is sent. An empty folder normalises to `.` — the login directory — so a
+	/// shell that never announced its cwd still has somewhere to send to. The confirmation
+	/// closes while the scan runs; `UploadPrescan` reopens as either the collision question
+	/// or the transfer itself.
+	fn on_upload_confirmed(&mut self) -> iced::Task<Message> {
+		if self.upload_files.is_empty() {
+			self.cancel_upload();
+			return iced::Task::none();
+		}
+		let dir = self.upload_dir.trim();
+		// A relative `.` resolves against the login directory server-side, and `join` keeps
+		// it in front rather than turning a bare name into an absolute `/name`.
+		self.upload_dir = if dir.is_empty() {
+			".".to_owned()
+		} else {
+			dir.to_owned()
 		};
-		let remote = self.upload_dest.trim().to_owned();
-		if remote.is_empty() {
+		let names: Vec<String> = self
+			.upload_files
+			.iter()
+			.map(|local| file_name_of(local).to_owned())
+			.collect();
+		self.transfer = None;
+		self.transfer_notice = Some("Checking the destination…".to_owned());
+		if !self.send_command(SshCommand::CheckUploads {
+			dir: self.upload_dir.clone(),
+			names,
+		}) {
+			self.cancel_upload();
+		}
+		iced::Task::none()
+	}
+
+	/// The batch pre-scan came back (§17). Nothing clashing → queue every file and start
+	/// sending. Some clashing → hold the batch on the collision question, the names it found
+	/// listed in the (shared) dialog body. A batch cancelled while the scan was in flight
+	/// leaves nothing to do.
+	fn on_upload_prescan(&mut self, collisions: Vec<(String, String)>) {
+		self.transfer_notice = None;
+		if self.upload_files.is_empty() {
 			return;
 		}
-		let total = std::fs::metadata(&local)
-			.map(|meta| meta.len())
-			.unwrap_or(0);
+		if collisions.is_empty() {
+			// The choice is irrelevant when nothing collides — every file writes to its own
+			// free name — so `Skip` (which touches only clashing names) does for all of them.
+			self.queue_uploads(&[], ClashChoice::Skip);
+			return;
+		}
+		let names: Vec<String> = collisions.iter().map(|(name, _)| name.clone()).collect();
+		self.set_dialog_body(&format!(
+			"{}\n\n{}",
+			ui::terminal::UPLOAD_CLASH_BODY,
+			names.join("\n")
+		));
+		self.upload_clash = Some(collisions);
+	}
 
-		if self.send_command(SshCommand::Upload {
-			local,
-			remote,
-			overwrite,
-		}) {
-			self.transfer_notice = None;
-			self.transfer = Some(TransferState::Running { sent: 0, total });
-		} else {
+	/// The collision question was answered (§17): build the queue under that choice and start
+	/// it, or drop the whole batch on Cancel. `Replace` sends every file with overwrite set;
+	/// `Skip` drops the clashing ones; `KeepBoth` sends them to the server-checked `name-1`
+	/// path the pre-scan proposed. The non-clashing files always go, whatever the answer.
+	fn on_upload_clash(&mut self, choice: ClashChoice) {
+		let Some(collisions) = self.upload_clash.take() else {
+			return;
+		};
+		if choice == ClashChoice::Cancel {
+			self.cancel_upload();
+			return;
+		}
+		self.queue_uploads(&collisions, choice);
+	}
+
+	/// Turn the picked files, the destination folder and the collision answer into the upload
+	/// queue (§17), then start it. The mapping is `plan_uploads` (pure, so it is tested on its
+	/// own); this only records the batch-wide overwrite flag and pumps the queue, one file at a
+	/// time, the way the download side does (§21).
+	fn queue_uploads(&mut self, collisions: &[(String, String)], choice: ClashChoice) {
+		self.uploads =
+			plan_uploads(&self.upload_files, &self.upload_dir, collisions, choice).into();
+		self.uploaded = 0;
+		self.upload_overwrite = choice == ClashChoice::Replace;
+		self.pump_uploads();
+		// Every file may have been skipped — a Skip answer to an all-clashing batch — so there
+		// is nothing to send and nothing to wait for. Close it out rather than leaving the
+		// picked files hanging.
+		self.finish_batch_if_drained();
+	}
+
+	/// Start the next queued upload if the one transfer slot is free (§17). Called when a
+	/// batch begins and again as each file finishes, which is what walks the queue — the
+	/// mirror of `pump_downloads` (§21).
+	fn pump_uploads(&mut self) {
+		if self.transfer.is_some() {
+			return;
+		}
+		if let Some((local, remote)) = self.uploads.pop_front() {
+			let total = std::fs::metadata(&local)
+				.map(|meta| meta.len())
+				.unwrap_or(0);
+			if self.send_command(SshCommand::Upload {
+				local,
+				remote,
+				overwrite: self.upload_overwrite,
+			}) {
+				self.transfer = Some(TransferState::Running { sent: 0, total });
+			} else {
+				self.transfer = None;
+			}
+		}
+	}
+
+	/// Close a batch once it has fully drained (§17): no transfer running and nothing left in
+	/// the queue. Clears the picked files (which disables the Upload button) and the folder,
+	/// so a stray click cannot re-send what just landed. The closing notice is set by the
+	/// caller that noticed the last file land.
+	fn finish_batch_if_drained(&mut self) {
+		if self.transfer.is_none() && self.uploads.is_empty() {
+			self.finish_batch();
+		}
+	}
+
+	/// Drop the finished batch's leftovers (§17), keeping whatever notice is showing.
+	fn finish_batch(&mut self) {
+		self.upload_files.clear();
+		self.upload_dir.clear();
+		self.uploads.clear();
+		self.uploaded = 0;
+		self.upload_overwrite = false;
+	}
+
+	/// Back out of the upload flow before or during a batch (§17): a cancelled confirmation
+	/// or collision question, or Esc. Drops everything pending so nothing is sent; a transfer
+	/// already in flight is left to finish, since its bytes are already on the wire.
+	fn cancel_upload(&mut self) {
+		self.upload_clash = None;
+		self.uploads.clear();
+		self.uploaded = 0;
+		self.upload_overwrite = false;
+		self.upload_files.clear();
+		self.upload_dir.clear();
+		if matches!(self.transfer, Some(TransferState::ConfirmPath)) {
 			self.transfer = None;
 		}
 	}
@@ -1936,6 +2131,12 @@ impl App {
 				self.explorer.close_menu();
 				self.move_shell_to(&path);
 			}
+			ExplorerMessage::UploadHere(path) => {
+				// The tree's "Upload…": pick local files to send into this folder (§17),
+				// whichever directory the shell itself is in.
+				self.explorer.close_menu();
+				return browse_upload_into(path);
+			}
 			ExplorerMessage::RenameStarted(path) => {
 				self.explorer.start_rename(path);
 				// The root has no parent, so it declines to be renamed; only focus the
@@ -2069,6 +2270,19 @@ impl App {
 				}
 			}
 			FilesMessage::PanelReleased => self.files.end_band(),
+			FilesMessage::PanelRightPressed => {
+				// A right-press that reached the pane missed every cell, so it landed on the
+				// empty grid: open the pane's own menu there (§17). The keyboard follows too,
+				// as a left-press would.
+				self.focus_pane(Focus::Files);
+				self.files.open_pane_menu();
+			}
+			FilesMessage::PaneUploadHere => {
+				// "Upload… here": send local files into the directory the pane is showing.
+				self.files.close_menu();
+				let dir = self.files.path().unwrap_or("").to_owned();
+				return browse_upload_into(dir);
+			}
 			FilesMessage::BandMoved(point) => {
 				// Window coordinates from the capture layer: the pane is full width along the
 				// bottom of the window, so only the vertical origin has to come off.
@@ -2389,12 +2603,14 @@ impl App {
 						ui::terminal::Modals {
 							confirm_disconnect: self.confirm_disconnect,
 							clash: self.clash.is_some(),
+							upload_clash: self.upload_clash.is_some(),
 							body: &self.dialog_body,
 							drag,
 						},
 						ui::terminal::UploadView {
-							file: self.upload_file.as_deref().map(file_name_of),
-							dest: &self.upload_dest,
+							file_count: self.upload_files.len(),
+							first_file: self.upload_files.first().map(|local| file_name_of(local)),
+							dest: &self.upload_dir,
 							state: self.transfer,
 							notice: self.transfer_notice.as_deref(),
 						},
@@ -2503,15 +2719,42 @@ fn browse_key() -> iced::Task<Message> {
 	)
 }
 
-/// Open the native file picker for a file to upload (§17). Same async-`Task` shape as
-/// `browse_key` — the dialog is modal and would otherwise block the GUI thread.
+/// Open the native picker for the files to upload (§17), from the status bar's File… button.
+/// Multi-select: one file or many, the flow is the same. Same async-`Task` shape as
+/// `browse_key` — the dialog is modal and would otherwise block the GUI thread. The
+/// destination is chosen afterwards, on the Upload button, from the shell's cwd.
 fn browse_upload() -> iced::Task<Message> {
 	iced::Task::perform(
 		rfd::AsyncFileDialog::new()
-			.set_title("Select a file to upload")
-			.pick_file(),
-		|handle| Message::UploadFilePicked(handle.map(|handle| handle.path().to_path_buf())),
+			.set_title("Select files to upload")
+			.pick_files(),
+		|handles| Message::UploadFilesPicked(handles_to_paths(handles)),
 	)
+}
+
+/// The same picker, but for an "Upload…" started from a right-click surface (§17): the
+/// destination folder — the shell cwd, the files pane's directory, or a tree folder — is
+/// already known, so the picked files go straight to the confirmation with it filled in.
+fn browse_upload_into(dir: String) -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Select files to upload")
+			.pick_files(),
+		move |handles| Message::UploadFilesPickedInto {
+			files: handles_to_paths(handles),
+			dir: dir.clone(),
+		},
+	)
+}
+
+/// Flatten the multi-file picker's result into owned paths (§17): a cancelled dialog
+/// (`None`) becomes an empty list, which every caller reads as "nothing picked".
+fn handles_to_paths(handles: Option<Vec<rfd::FileHandle>>) -> Vec<PathBuf> {
+	handles
+		.unwrap_or_default()
+		.iter()
+		.map(|handle| handle.path().to_path_buf())
+		.collect()
 }
 
 /// Open the native save dialog for a file being downloaded (§19), pre-filled with the
@@ -2580,6 +2823,35 @@ fn file_name_of(path: &std::path::Path) -> &str {
 	path.file_name()
 		.and_then(std::ffi::OsStr::to_str)
 		.unwrap_or("file")
+}
+
+/// Build an upload batch's queue from the picked files, the destination folder and the
+/// answer to the collision question (§17). `collisions` maps a name already in the folder to
+/// the free `name-1` path the server pre-scan proposed; a file not in it is free and takes its
+/// own name. `Replace` overwrites in place, `KeepBoth` writes to the free path, `Skip` drops
+/// the clashing file (`Cancel` never reaches here — the batch is dropped before this). Pure, so
+/// the collision logic is tested without an `App` or a server.
+fn plan_uploads(
+	files: &[PathBuf],
+	dir: &str,
+	collisions: &[(String, String)],
+	choice: ClashChoice,
+) -> Vec<(PathBuf, String)> {
+	let mut queue = Vec::new();
+	for local in files {
+		let name = file_name_of(local).to_owned();
+		let remote = match collisions.iter().find(|(clash, _)| *clash == name) {
+			// Free: its own name in the folder.
+			None => explorer::join(dir, &name),
+			Some((_, free)) => match choice {
+				ClashChoice::Replace => explorer::join(dir, &name),
+				ClashChoice::KeepBoth => free.clone(),
+				ClashChoice::Skip | ClashChoice::Cancel => continue,
+			},
+		};
+		queue.push((local.clone(), remote));
+	}
+	queue
 }
 
 /// The scroll offset that brings the band `top..top + height` into a `view`-tall window
@@ -2748,5 +3020,94 @@ mod tests {
 		let _ = app.on_key(Event::ModifiersChanged(Modifiers::empty()));
 		let _ = app.on_files(FilesMessage::EntryClicked("/home/b".to_owned()));
 		assert_eq!(chosen(&app), ["/home/b"]);
+	}
+
+	#[test]
+	fn an_upload_batch_with_no_collisions_queues_every_file_by_name() {
+		// Arrange: two files, an empty collision list — nothing is already there.
+		let files = vec![PathBuf::from("/local/a.txt"), PathBuf::from("/local/b.txt")];
+
+		// Act: the choice is irrelevant with no collisions, so any of them plans the same.
+		let queue = plan_uploads(&files, "/remote/dir", &[], ClashChoice::Skip);
+
+		// Assert: each file goes to the folder under its own name.
+		assert_eq!(
+			queue,
+			vec![
+				(
+					PathBuf::from("/local/a.txt"),
+					"/remote/dir/a.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/b.txt"),
+					"/remote/dir/b.txt".to_owned()
+				),
+			]
+		);
+	}
+
+	#[test]
+	fn the_collision_answer_decides_each_clashing_file() {
+		// Arrange: three files; `b.txt` already exists, and the server proposed `b-1.txt` for
+		// "keep both". `a.txt` is free, so it is unaffected by the answer.
+		let files = vec![
+			PathBuf::from("/local/a.txt"),
+			PathBuf::from("/local/b.txt"),
+			PathBuf::from("/local/c.txt"),
+		];
+		let clashing = [("b.txt".to_owned(), "/remote/dir/b-1.txt".to_owned())];
+
+		// Replace: the clashing file keeps its name (it is overwritten in place).
+		assert_eq!(
+			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::Replace),
+			vec![
+				(
+					PathBuf::from("/local/a.txt"),
+					"/remote/dir/a.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/b.txt"),
+					"/remote/dir/b.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/c.txt"),
+					"/remote/dir/c.txt".to_owned()
+				),
+			]
+		);
+
+		// Keep both: the clashing file takes the free `-1` path; the others are untouched.
+		assert_eq!(
+			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::KeepBoth),
+			vec![
+				(
+					PathBuf::from("/local/a.txt"),
+					"/remote/dir/a.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/b.txt"),
+					"/remote/dir/b-1.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/c.txt"),
+					"/remote/dir/c.txt".to_owned()
+				),
+			]
+		);
+
+		// Skip: the clashing file is dropped from the queue; the free ones still go.
+		assert_eq!(
+			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::Skip),
+			vec![
+				(
+					PathBuf::from("/local/a.txt"),
+					"/remote/dir/a.txt".to_owned()
+				),
+				(
+					PathBuf::from("/local/c.txt"),
+					"/remote/dir/c.txt".to_owned()
+				),
+			]
+		);
 	}
 }

@@ -114,6 +114,14 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::CheckUploads { dir, names } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::CheckUploads { dir, names })
+						.await;
+				}
+			}
 			SshCommand::ListDir(path) => {
 				if let Some(link) = session.as_ref() {
 					let _ = link.to_session.send(SessionMsg::ListDir(path)).await;
@@ -171,6 +179,8 @@ enum SessionMsg {
 		remote: String,
 		overwrite: bool,
 	},
+	/// Check which of an upload batch's names already exist before it sends (§17).
+	CheckUploads { dir: String, names: Vec<String> },
 	/// List the folders inside a remote directory, for the explorer tree (§18).
 	ListDir(String),
 	/// List every entry inside a remote directory, for the files pane (§19).
@@ -442,6 +452,12 @@ async fn stream(
 					// shell keeps flowing while a big file goes across (§17).
 					Some(SessionMsg::Upload { local, remote, overwrite }) => {
 						upload::start(session, events, local, remote, overwrite).await;
+					}
+					// The batch collision pre-scan (§17): a couple of round trips on its own
+					// channel before the first byte, so the "some are already there" question
+					// is asked once for the whole batch.
+					Some(SessionMsg::CheckUploads { dir, names }) => {
+						upload::precheck(session, events, dir, names).await;
 					}
 					// Listings, renames and downloads also run on their own channel and
 					// their own task, so a slow directory or a big file never holds up
