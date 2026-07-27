@@ -1924,18 +1924,11 @@ impl App {
 				self.explorer.collapse(&path);
 			}
 			ExplorerMessage::Cd(path) => {
+				// The tree's "Open in terminal" and its Enter key: a deliberate console move,
+				// quoted so a folder name carrying a quote stays one argument (§18). The pane
+				// then follows the `cd` it can see, the same as any other console move.
 				self.explorer.close_menu();
-				// An explicit move ends any reconnect resume (§22), so the pane follows this
-				// `cd` rather than staying pinned to its resumed directory.
-				self.resume_cwd = None;
-				// Typed into the shell exactly as the user would type it, quoted so a
-				// folder name carrying a quote stays one argument (§18). `ponytail:` a
-				// POSIX shell is assumed, and if a full-screen program (vim, less) is
-				// running these characters go to that program instead — cmote cannot tell
-				// a prompt from an editor. Upgrade path: only offer this between prompts,
-				// which the OSC announcements could mark.
-				let line = format!("cd {}\r", explorer::shell_quote(&path));
-				self.send_command(SshCommand::Input(line.into_bytes()));
+				self.move_shell_to(&path);
 			}
 			ExplorerMessage::RenameStarted(path) => {
 				self.explorer.start_rename(path);
@@ -1994,32 +1987,45 @@ impl App {
 		iced::Task::none()
 	}
 
-	/// The status bar's "Sync" button (§19): move the shell into the directory the files
-	/// pane is showing. The pane can be pointed where the shell is not — a tree click browses
-	/// a folder without moving the shell (§18) — and this closes that gap on demand, typing
-	/// the very `cd` a pane double-click would (`enter_dir`) so the shell, and with it the
-	/// tree and the title, comes to the pane rather than the other way round. A no-op with no
-	/// shell or no directory on show; the button dims in those cases and when the two already
-	/// agree, so pressing it always has something to do.
+	/// Type a quoted `cd` into the shell so the console moves to `path` (§19). The single
+	/// way cmote moves the console on the user's behalf: the Sync button, the tree's and the
+	/// pane's "Open in terminal" items, and the tree's Enter key all land here. Browsing —
+	/// a pane double-click, the "up" button, a tree row click — no longer drags the console;
+	/// it only ever follows a `cd` it can see (its own, or one of these), which is what keeps
+	/// "who moved the console" answerable. An explicit move also ends any reconnect resume
+	/// (§22): the pin that held the pane against the shell's login announcements has done its
+	/// job, so the pane is free to follow this move and later ones again.
+	///
+	/// `ponytail:` a POSIX shell is assumed and the line is typed blind — if a full-screen
+	/// program (vim, less) is running these bytes go to it instead, since cmote cannot tell a
+	/// prompt from an editor. Upgrade path: only offer it between prompts, which the OSC
+	/// announcements could mark.
+	fn move_shell_to(&mut self, path: &str) {
+		self.resume_cwd = None;
+		let line = format!("cd {}\r", explorer::shell_quote(path));
+		self.send_command(SshCommand::Input(line.into_bytes()));
+	}
+
+	/// The status bar's "Sync" button (§19): move the console into the directory the files
+	/// pane is showing. Browsing the pane or the tree leaves the console where it is, so the
+	/// two drift apart on purpose; this is the deliberate, manual way to bring the console
+	/// (and with it the tree and the title, which follow it) to the folder on show. A no-op
+	/// with no shell or no directory on show; the button dims in those cases and when the two
+	/// already agree, so pressing it always has something to do.
 	fn on_sync(&mut self) {
 		let Some(path) = self.files.path().map(str::to_owned) else {
 			return;
 		};
-		self.enter_dir(&path);
+		self.move_shell_to(&path);
 	}
 
-	/// Move into a directory from the files pane (§19): a double-clicked folder, or the
-	/// toolbar's "up" button. Entering means moving the SHELL there — the pane, the tree
-	/// and the title all follow the shell's directory, so there is one "where am I" in the
-	/// window rather than three. The pane is retargeted right away instead of waiting for
-	/// the next prompt.
-	fn enter_dir(&mut self, path: &str) {
-		// An explicit move ends any reconnect resume (§22): the pane is being pointed by the
-		// user now, so the pin that was holding it against the shell's resume announcements
-		// has done its job and must not block the follow of this or later moves.
-		self.resume_cwd = None;
-		let line = format!("cd {}\n", explorer::shell_quote(path));
-		self.send_command(SshCommand::Input(line.into_bytes()));
+	/// Browse the files pane into a directory (§19): a double-clicked folder, the toolbar's
+	/// "up" button, or Enter on the keyboard. This points the PANE only — the console stays
+	/// put, so you can look inside a folder you are not in without disturbing the shell. The
+	/// console is moved separately and on purpose, by Sync or "Open in terminal"
+	/// (`move_shell_to`); a real `cd` there is what brings the pane back into step, via the
+	/// shell-follow (§19 "last one wins").
+	fn browse_to(&mut self, path: &str) {
 		if let Some(request) = self.files.show(path) {
 			self.list_files(request);
 		}
@@ -2088,25 +2094,31 @@ impl App {
 			}
 			FilesMessage::EntryOpened(path) => {
 				self.files.close_menu();
-				// Only a directory can be entered. Doing it means moving the SHELL there —
-				// the pane, the tree and the title all follow the shell's directory, so
-				// there is one "where am I" in the window rather than three (§19). The
-				// pane is retargeted right away instead of waiting for the next prompt.
+				// Only a directory can be entered, and entering it browses the PANE there —
+				// the console stays put (§19). The console is moved on purpose, by Sync or
+				// "Open in terminal", not as a side effect of looking in a folder.
 				if self.files.kind_of(&path) != Some(files::Kind::Dir) {
 					return iced::Task::none();
 				}
-				self.enter_dir(&path);
+				self.browse_to(&path);
+			}
+			FilesMessage::OpenInTerminal(path) => {
+				// The pane's own "Open in terminal": the deliberate console move that a
+				// double-click no longer is (§19). Same landing as the tree's item.
+				self.files.close_menu();
+				self.move_shell_to(&path);
 			}
 			FilesMessage::ParentOpened => {
 				self.files.close_menu();
 				// The toolbar disables the button at the root and before the first listing,
 				// so this is belt and braces — and the parent is read HERE, from the
-				// directory actually on show, rather than carried in the message.
+				// directory actually on show, rather than carried in the message. Browses the
+				// PANE up; the console is left where it is (§19).
 				let Some(parent) = self.files.path().and_then(explorer::parent) else {
 					return iced::Task::none();
 				};
 				let parent = parent.to_owned();
-				self.enter_dir(&parent);
+				self.browse_to(&parent);
 			}
 			FilesMessage::EntryRightClicked(path) => {
 				self.focus_pane(Focus::Files);

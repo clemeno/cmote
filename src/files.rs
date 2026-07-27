@@ -141,11 +141,16 @@ pub enum FilesMessage {
 	Toggled,
 	/// An entry was left-clicked: select it.
 	EntryClicked(String),
-	/// An entry was double-clicked: enter it, if it is a directory.
+	/// An entry was double-clicked (or Enter pressed): browse the PANE into it, if it is a
+	/// directory. This no longer moves the console — that is Sync or "Open in terminal" (§19).
 	EntryOpened(String),
-	/// The toolbar's "up" button: enter the directory above the one on show. Carries no
-	/// path — the pane's own is the only thing it can mean, and reading it when the press
-	/// arrives is what keeps it from being a path the pane has since left.
+	/// Menu "Open in terminal": move the console into this directory (§19). Split off from
+	/// `EntryOpened` so a double-click browses the pane while this deliberately moves the
+	/// console — the two used to be one action.
+	OpenInTerminal(String),
+	/// The toolbar's "up" button: browse the pane to the directory above the one on show.
+	/// Carries no path — the pane's own is the only thing it can mean, and reading it when the
+	/// press arrives is what keeps it from being a path the pane has since left.
 	ParentOpened,
 	/// An entry was right-clicked: select it and open the context menu on it.
 	EntryRightClicked(String),

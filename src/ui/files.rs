@@ -736,7 +736,7 @@ pub fn context_menu<'a>(files: &'a Files, cwd: Option<&str>) -> Option<Element<'
 	let panel = menu::panel(vec![
 		menu::item(
 			"Open in terminal".to_owned(),
-			(is_dir && !many).then(|| Message::Files(FilesMessage::EntryOpened(path.clone()))),
+			(is_dir && !many).then(|| Message::Files(FilesMessage::OpenInTerminal(path.clone()))),
 		),
 		menu::item(
 			suffix("Download…"),

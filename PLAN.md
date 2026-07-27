@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v2.1.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v2.2.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -1007,20 +1007,24 @@ for a window resize.
 
 - The shell's working directory (OSC 7, §17) drives it: `cd` in the terminal and the pane
   follows, exactly as the tree's auto-reveal does.
-- A click on a tree row points the pane at that folder **without moving the shell**, which
-  is what makes it usable to look inside a folder you are not in.
-- The catch those two create: the shell re-announces its directory at *every prompt*, so a
-  naive "follow the cwd" would drag the pane back from the tree click on the next
-  keystroke. `Files::follow` therefore acts only when the announced directory differs from
-  the last one followed — a repeat is not a move — while `Files::show` (the tree click,
-  entering a folder) is unconditional.
-- Double-clicking a directory in the grid **moves the shell** (`cd`, quoted as §18 does)
-  and retargets the pane immediately rather than waiting for the prompt. That keeps one
-  "where am I" in the window instead of three.
-- **A "Sync" button in the status bar closes the gap the other way.** When a tree click has
-  left the pane somewhere the shell is not, Sync types the same quoted `cd` a grid
-  double-click would (it reuses `enter_dir`), bringing the shell — and with it the tree and
-  the title — to the folder the pane shows. It carries no path: `app` reads `Files::path`
+- **Browsing never moves the console.** A tree row click, a pane double-click, the "up"
+  button and Enter all point the *pane* at a folder (`Files::show`) and leave the shell
+  where it is — so you can look inside a folder you are not in without disturbing what is
+  running. This is the change from the first cut, where a double-click also `cd`'d the
+  shell: the two directions were coupled and the console kept getting dragged around.
+- **The console moves only on a `cd` it can see** (`App::move_shell_to`): one you type, the
+  **Sync** button, either panel's **"Open in terminal"**, the tree's Enter, or the replay a
+  reconnect does (§22). Every one of those is a deliberate act, never a side effect of
+  browsing.
+- The catch the two sources create: the shell re-announces its directory at *every prompt*,
+  so a naive "follow the cwd" would drag the pane back from a browse on the next keystroke.
+  `Files::follow` therefore acts only when the announced directory differs from the last one
+  followed — a repeat is not a move — while `Files::show` (a browse) is unconditional. Last
+  one wins: browse and the pane moves; move the console and the pane follows the `cd`.
+- **The "Sync" button brings the console to the pane.** Since browsing no longer moves the
+  shell, the pane and the console drift apart on purpose; Sync is the manual way to close
+  that gap, typing a quoted `cd` (via `move_shell_to`) so the shell — and with it the tree
+  and the title — comes to the folder on show. It carries no path: `app` reads `Files::path`
   when the press lands, so it can never move the shell somewhere the pane has since left. It
   sits in the left button group after Upload, and is **disabled** whenever there is nothing
   to do — no directory on show, or the pane and the shell's announced cwd already agree
@@ -1062,9 +1066,9 @@ for a window resize.
   would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor.
   `ponytail:` no clamping at the right edge — the pane is full width, so a menu opened in
   the last ~180 px can run past it. Upgrade path: pass the window width into the view.
-- **"Up" is the header's first item.** A button at the left of the toolbar enters the
+- **"Up" is the header's first item.** A button at the left of the toolbar browses to the
   directory above the one on show, where every file manager puts it. It goes through the
-  same `cd` as a double-clicked folder (one "where am I" in the window), and it is
+  same pane-only `browse_to` as a double-clicked folder — the console stays put — and it is
   *disabled* — not hidden — at the root and before the first listing, the two cases with
   no parent. The message carries no path: the pane's own is read when the press lands.
 - **The `.*` toggle is the tree's.** One flag (`Explorer::show_hidden`) filters both
