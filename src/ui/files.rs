@@ -61,7 +61,7 @@ const ICON_FONT: Font = Font::with_name("Material Icons");
 /// height on purpose: the selection, keyboard row-nav and popup placement all step by a
 /// uniform pitch (`row_top`, `band_hits`), which a per-name height would break.
 const CELL_WIDTH: f32 = 350.0;
-pub const CELL_HEIGHT: f32 = 40.0;
+pub const CELL_HEIGHT: f32 = 56.0;
 const CELL_SPACING: f32 = 4.0;
 /// The padding inside a cell, kept as a constant because the name-fitting estimate below has
 /// to subtract the very same value the container lays the cell out with.
@@ -70,6 +70,11 @@ const CELL_PADDING: f32 = 4.0;
 const ICON_LABEL_GAP: f32 = 6.0;
 const ICON_SIZE: f32 = 18.0;
 const LABEL_SIZE: f32 = 11.0;
+/// The cell's second line — a file's size and modified date under its name (§19). Smaller and
+/// (via `MUTED_FG`) dimmer than the name, so the name still reads first; `META_GAP` is the
+/// space between the two lines.
+const META_SIZE: f32 = 10.0;
+const META_GAP: f32 = 2.0;
 
 /// Sizing the middle-ellipsis so a name always fits the cell's two lines (§19). The label
 /// sits to the right of the icon, so its width is the cell minus the padding, the icon and
@@ -632,10 +637,20 @@ fn cell<'a>(
 	};
 
 	let is_selected = files.is_selected(&path);
+	let name_row = row![icon, label]
+		.spacing(ICON_LABEL_GAP)
+		.align_y(Vertical::Center)
+		.width(Length::Fill);
+	// The second line, under the name: the file's size and when it was last modified (§19).
+	// Muted so the name still reads first; it wraps nothing, and the cell clips it if a wide
+	// date and zone ever outrun the column.
+	let meta = text(meta_line(entry, files))
+		.size(META_SIZE)
+		.color(MUTED_FG)
+		.width(Length::Fill);
 	let cell = container(
-		row![icon, label]
-			.spacing(ICON_LABEL_GAP)
-			.align_y(Vertical::Center)
+		column![name_row, meta]
+			.spacing(META_GAP)
 			.width(Length::Fill),
 	)
 	.width(Length::Fixed(CELL_WIDTH))
@@ -683,6 +698,26 @@ fn elide_middle(name: &str) -> String {
 	let start: String = chars[..head].iter().collect();
 	let end: String = chars[chars.len() - tail..].iter().collect();
 	format!("{start}…{end}")
+}
+
+/// A cell's second line: a file's size and its last-modified date, compact, under the name
+/// (§19). A folder shows only the date — a directory entry's own size is not the size of what
+/// is inside it (§21), so a number there would mislead. Facts the `ls` fallback never learns
+/// (§19) show as a dash rather than leaving the line lopsided; the details popup carries the
+/// exact size and the full timestamp (§20).
+fn meta_line(entry: &Entry, files: &Files) -> String {
+	let date = entry.meta.mtime.map_or_else(
+		|| "—".to_owned(),
+		|mtime| crate::files::format_mtime_short(mtime, files.zone()),
+	);
+	if entry.kind == Kind::Dir {
+		return date;
+	}
+	let size = entry
+		.meta
+		.size
+		.map_or_else(|| "—".to_owned(), crate::ui::terminal::human_bytes);
+	format!("{size} · {date}")
 }
 
 /// The Material Icons code point for a category (§19). The names are the font's own:

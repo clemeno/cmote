@@ -867,24 +867,52 @@ pub fn sort(entries: &mut [Entry]) {
 /// that is unambiguous everywhere costs neither. The zone tag is the server's own, so the
 /// reading matches what `ls -l` on that machine would show.
 pub fn format_mtime(epoch: u32, zone: &Zone) -> String {
-	// The epoch is UTC; shifting by the offset gives the server's wall clock, and
-	// `div_euclid`/`rem_euclid` keep that correct for the negative offsets west of
-	// Greenwich, where a plain division would round towards zero and land a day out.
-	let local = i64::from(epoch) + i64::from(zone.offset) * 60;
-	let (year, month, day) = civil_from_days(local.div_euclid(86_400));
-	let seconds = local.rem_euclid(86_400);
+	let (year, month, day, seconds) = local_parts(epoch, zone);
 	let stamp = format!(
 		"{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
 		seconds / 3600,
 		seconds % 3600 / 60,
 		seconds % 60,
 	);
+	with_zone(stamp, zone)
+}
+
+/// A compact mtime for the file grid's cells (§19): `YYYY-MM-DD HH:MM ZONE`, without the
+/// seconds `format_mtime` carries but still tagged with the server's zone. A cell has room to
+/// say the day, the minute and the zone at a glance, not the exact second — that stays the
+/// details popup's job (§20), which still calls `format_mtime` for the full reading.
+pub fn format_mtime_short(epoch: u32, zone: &Zone) -> String {
+	let (year, month, day, seconds) = local_parts(epoch, zone);
+	let stamp = format!(
+		"{year:04}-{month:02}-{day:02} {:02}:{:02}",
+		seconds / 3600,
+		seconds % 3600 / 60,
+	);
+	with_zone(stamp, zone)
+}
+
+/// Tag a formatted `stamp` with the server's zone (§20): its label, its `+HH:MM` offset, or
+/// both — and nothing at all for plain UTC with no label. Shared by the full and the short
+/// mtime formats so a time is tagged the same way wherever it is shown.
+fn with_zone(stamp: String, zone: &Zone) -> String {
 	match (zone.label.is_empty(), zone.offset) {
 		(true, 0) => stamp,
 		(true, offset) => format!("{stamp} {}", format_offset(offset)),
 		(false, 0) => format!("{stamp} {}", zone.label),
 		(false, offset) => format!("{stamp} {} ({})", zone.label, format_offset(offset)),
 	}
+}
+
+/// The server-local calendar parts of a UTC `epoch`, shifted by the zone offset: the
+/// `(year, month, day, seconds-into-day)` both mtime formats above build their string from.
+///
+/// The epoch is UTC; shifting by the offset gives the server's wall clock, and
+/// `div_euclid`/`rem_euclid` keep that correct for the negative offsets west of Greenwich,
+/// where a plain division would round towards zero and land a day out.
+fn local_parts(epoch: u32, zone: &Zone) -> (i64, i64, i64, i64) {
+	let local = i64::from(epoch) + i64::from(zone.offset) * 60;
+	let (year, month, day) = civil_from_days(local.div_euclid(86_400));
+	(year, month, day, local.rem_euclid(86_400))
 }
 
 /// A UTC offset in minutes as `+HH:MM`.
@@ -1429,6 +1457,25 @@ mod tests {
 		// The epoch itself, and a leap day, pin the calendar arithmetic.
 		assert_eq!(format_mtime(0, &utc), "1970-01-01 00:00:00 UTC");
 		assert_eq!(format_mtime(1_709_164_800, &utc), "2024-02-29 00:00:00 UTC");
+	}
+
+	#[test]
+	fn the_short_mtime_drops_the_seconds_but_keeps_the_zone() {
+		// The grid cell's compact form: same instant, same zone shift and same zone tag as the
+		// full format, but trimmed to the day and the minute — the seconds go, the zone stays.
+		let utc = Zone::default();
+		assert_eq!(
+			format_mtime_short(1_774_000_000, &utc),
+			"2026-03-20 09:46 UTC"
+		);
+		let paris = Zone {
+			offset: 120,
+			label: "CEST".to_owned(),
+		};
+		assert_eq!(
+			format_mtime_short(1_774_000_000, &paris),
+			"2026-03-20 11:46 CEST (+02:00)"
+		);
 	}
 
 	#[test]
