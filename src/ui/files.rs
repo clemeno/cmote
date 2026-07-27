@@ -95,6 +95,21 @@ const LABEL_LINES: usize = 2;
 /// the grid — and so whether it starts a rubber band (§21).
 pub const HEADER_HEIGHT: f32 = 28.0;
 
+/// Sizing the header path's middle-ellipsis (§22). Unlike the narrow tree beside it, this
+/// header is the window's full width and one busy toolbar row — the up and copy buttons, the
+/// item count and the `.*` toggle share it — so the path stays on ONE line (a line this wide
+/// holds a long path) and is trimmed with `…` to fit rather than wrapping and shoving those
+/// controls around. `HEADER_CONTROLS_WIDTH` is the room those controls and their gaps take
+/// beside the path; `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
+///
+/// Both are deliberately PESSIMISTIC — a fatter glyph and more control room than the face and
+/// toolbar truly take — so the char budget lands under what the line really holds and the `…`
+/// always trims the path with margin to spare, never a hair too late. The trade is a path cut
+/// a little sooner than strictly needed; containment wins. (The same all-wide-glyph tolerance
+/// the grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
+const HEADER_CONTROLS_WIDTH: f32 = 200.0;
+const HEADER_CHAR: f32 = 8.0;
+
 /// The rubber band's fill and edge (§21). Translucent, so the cells it is being dragged
 /// over stay readable underneath it.
 const BAND_BG: Color = Color::from_rgba(0.38, 0.56, 0.82, 0.25);
@@ -150,7 +165,8 @@ const PLAIN_COLOR: Color = Color::from_rgb8(0xa8, 0xa8, 0xa8);
 /// details popup beside it — sit (§20). `focused` draws the ring that says the keyboard
 /// is here.
 pub fn panel(files: &Files, show_hidden: bool, width: f32, focused: bool) -> Element<'_, Message> {
-	let mut content = column![header(files, show_hidden), grid(files, show_hidden)].spacing(0);
+	let mut content =
+		column![header(files, show_hidden, width), grid(files, show_hidden)].spacing(0);
 	if let Some(notice) = files.notice() {
 		content = content.push(
 			container(text(notice.to_owned()).size(TEXT_SIZE).color(NOTICE_FG))
@@ -287,8 +303,14 @@ pub fn grid_height(files: &Files) -> f32 {
 /// The pane header: which directory is on show, how it is getting on, and the shared
 /// dot-entry toggle. The count is the pane's only progress indicator while a big listing
 /// streams in — it climbs a batch at a time (§19).
-fn header(files: &Files, show_hidden: bool) -> Element<'_, Message> {
-	let path = files.path().unwrap_or("no directory yet").to_owned();
+fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> {
+	// Trimmed to one line's worth of glyphs so a deep path never overflows the toolbar (§22);
+	// the copy button beside it puts the whole path on the clipboard, and the tree header
+	// names the same location across two lines.
+	let per_line = ((width - HEADER_CONTROLS_WIDTH) / HEADER_CHAR)
+		.floor()
+		.max(1.0) as usize;
+	let path = crate::ui::elide_middle(files.path().unwrap_or("no directory yet"), per_line);
 	let status = if files.loading() {
 		format!("{} so far…", files.count())
 	} else {
@@ -616,9 +638,9 @@ fn cell<'a>(
 
 	// The label wraps by GLYPH, not by word: file names rarely contain spaces, so
 	// word wrapping would leave `some_very_long_name.tar.gz` as one unbreakable line
-	// running out of its cell. `elide_middle` has already trimmed a name to the two lines
-	// the cell shows; `clip(true)` is only a backstop for that estimate, and the details
-	// popup is where the whole name always shows (§20).
+	// running out of its cell. The shared middle-ellipsis (§22) has already trimmed a name
+	// to the two lines the cell shows (`label_budget`); `clip(true)` is only a backstop for
+	// that estimate, and the details popup is where the whole name always shows (§20).
 	let label: Element<'a, Message> = match editing.filter(|rename| rename.path == path) {
 		Some(rename) => text_input("Name", &rename.text)
 			.id(RENAME_INPUT_ID)
@@ -627,7 +649,7 @@ fn cell<'a>(
 			.on_input(|value| Message::Files(FilesMessage::RenameEdited(value)))
 			.on_submit(Message::Files(FilesMessage::RenameCommitted))
 			.into(),
-		None => text(elide_middle(&entry.name))
+		None => text(crate::ui::elide_middle(&entry.name, label_budget()))
 			.size(LABEL_SIZE)
 			.color(FG)
 			.wrapping(Wrapping::Glyph)
@@ -674,30 +696,13 @@ fn cell<'a>(
 		.into()
 }
 
-/// Shorten a name to the two lines a cell shows, dropping the MIDDLE and marking the cut with
-/// `…`, so a name too long to fit keeps both its start and its extension rather than being
-/// clipped mid-word (§19). A name that already fits passes through untouched. The details
-/// popup still holds the whole name (§20); this only spares the grid a name it cannot draw.
-///
-/// Splits by CHARACTERS, not bytes, so a multi-byte name is never cut through a glyph. The
-/// tail keeps the odd character when the budget is uneven, since the extension is usually the
-/// end and the more worth-showing half.
-fn elide_middle(name: &str) -> String {
+/// How many characters of a name the cell can draw before the shared middle-ellipsis (§22)
+/// has to trim it: the label's two lines' worth, from its width and an average glyph advance.
+/// The actual cut lives in `crate::ui::elide_middle` — this only owns the cell's "how many
+/// fit" estimate, the same split of concerns the panel headers and the connect form use.
+fn label_budget() -> usize {
 	let per_line = (LABEL_WIDTH / LABEL_CHAR).floor().max(1.0) as usize;
-	let max = per_line * LABEL_LINES;
-
-	let chars: Vec<char> = name.chars().collect();
-	if chars.len() <= max {
-		return name.to_owned();
-	}
-
-	// One glyph goes to the `…`; the rest is split head/tail.
-	let budget = max.saturating_sub(1);
-	let head = budget / 2;
-	let tail = budget - head;
-	let start: String = chars[..head].iter().collect();
-	let end: String = chars[chars.len() - tail..].iter().collect();
-	format!("{start}…{end}")
+	per_line * LABEL_LINES
 }
 
 /// A cell's second line: a file's size and its last-modified date, compact, under the name
@@ -877,36 +882,19 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn a_long_name_is_shortened_in_the_middle_to_fit_the_cell() {
+	fn a_name_past_the_cell_budget_is_elided_to_two_lines() {
 		// Arrange: a name well past the two lines a cell can draw — sized off the cell's own
-		// budget so it stays "too long" whatever the cell width is set to — with a distinct
-		// head and tail so the split is checkable.
-		let max = (LABEL_WIDTH / LABEL_CHAR).floor() as usize * LABEL_LINES;
-		let len = max + 20;
-		let half = len / 2;
-		let name = format!("{}{}", "a".repeat(half), "b".repeat(len - half));
+		// budget so it stays "too long" whatever the cell width is set to. The cut itself is
+		// exercised in `crate::ui`'s tests; this pins the cell's budget wiring to it.
+		let max = label_budget();
+		let name = "a".repeat(max + 20);
 
 		// Act
-		let shown = elide_middle(&name);
+		let shown = crate::ui::elide_middle(&name, max);
 
-		// Assert: the middle is gone, both ends survive, and it now fits the cell's budget.
+		// Assert: it now fits the cell's two-line budget, marked with the ellipsis.
 		assert!(shown.contains('…'));
-		assert!(shown.starts_with('a'));
-		assert!(shown.ends_with('b'));
 		assert_eq!(shown.chars().count(), max);
-	}
-
-	#[test]
-	fn a_short_name_is_left_untouched() {
-		// Arrange
-		let name = "notes.txt";
-
-		// Act
-		let shown = elide_middle(name);
-
-		// Assert
-		assert_eq!(shown, name);
-		assert!(!shown.contains('…'));
 	}
 
 	/// A band in pane coordinates: the same numbers `mouse_area::on_move` reports.

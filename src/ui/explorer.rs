@@ -59,13 +59,19 @@ const INDENT: f32 = 12.0;
 const HEADER_PAD_V: f32 = 6.0;
 const HEADER_PAD_H: f32 = 8.0;
 const PATH_LINE_HEIGHT: f32 = 16.0;
-/// The room the copy button and the `.*` toggle take along the header's first line, and an
-/// average glyph advance at `TEXT_SIZE`. All feed only the wrapped-line ESTIMATE
-/// `header_height` makes for the scroll math, so a rough proportional-font guess is all they
-/// need to be.
+/// The most lines the path is allowed to wrap to before the shared middle-ellipsis (§22)
+/// trims it — kept to the same two the file grid's names use, so a deep path can no longer
+/// grow the header without bound and crowd the tree beneath it.
+const PATH_LINES: usize = 2;
+/// The room the copy button and the `.*` toggle take along the header's first line, and a
+/// glyph advance at `TEXT_SIZE`. These size the path's middle-ellipsis (`path_per_line`) as
+/// well as the wrapped-line count `header_height` feeds the scroll math, so they are
+/// deliberately PESSIMISTIC — a fatter glyph and more control room than the face and buttons
+/// truly take — so the char budget lands under what two lines really hold and the `…` trims a
+/// deep path with margin to spare rather than letting it spill onto a third line.
 const TOGGLE_WIDTH: f32 = 44.0;
 const COPY_BUTTON_WIDTH: f32 = 28.0;
-const AVG_CHAR_WIDTH: f32 = 6.5;
+const AVG_CHAR_WIDTH: f32 = 8.0;
 /// The notice line's height, fixed so both panels can subtract it from their scrollable
 /// area exactly rather than guessing at a padded line of text (§20).
 pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
@@ -147,20 +153,27 @@ pub fn tree_height(window_height: f32, files_reserved: f32, path: Option<&str>, 
 	.max(0.0)
 }
 
+/// How many characters of the path fit on one header line in a panel `width` wide — the
+/// usable width (less the `.*` toggle, the copy button and the padding) over an average glyph
+/// advance. Shared by `header`, which middle-ellipsises the path to `PATH_LINES` of these, and
+/// `header_height`, which counts the wrapped lines, so the two agree on what "a line" holds.
+fn path_per_line(width: f32) -> f32 {
+	let usable = (width - TOGGLE_WIDTH - COPY_BUTTON_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
+	(usable / AVG_CHAR_WIDTH).floor().max(1.0)
+}
+
 /// Roughly how tall the header is for `path` in a panel `width` wide (§20, §22). The path
-/// wraps across as many lines as it needs, so the header is not a fixed height any more:
-/// this estimates its wrapped line count from the usable width and an average glyph advance,
-/// and `tree_height` subtracts the result.
+/// wraps a line at a time but no further than `PATH_LINES` — beyond that `header` trims it with
+/// a middle `…` — so the header grows to at most two lines and `tree_height` subtracts that.
 ///
 /// `ponytail:` the average-advance guess makes this approximate for a proportional font — a
-/// very long path may make the tree scroll a line or two more than it strictly must, the
-/// same tolerance the notice line already carries. The *layout* never clips regardless: the
-/// header itself is `Shrink`, so it always grows to fit the real wrapped text.
+/// long path may make the tree scroll a line more than it strictly must, the same tolerance
+/// the notice line already carries. The clamp mirrors the cap `header` draws to; the header is
+/// still `Shrink`, so a short path shrinks it back to one line.
 pub fn header_height(path: Option<&str>, width: f32) -> f32 {
-	let usable = (width - TOGGLE_WIDTH - COPY_BUTTON_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
-	let per_line = (usable / AVG_CHAR_WIDTH).floor().max(1.0);
+	let per_line = path_per_line(width);
 	let chars = path.map_or(0, |path| path.chars().count()) as f32;
-	let lines = (chars / per_line).ceil().max(1.0);
+	let lines = (chars / per_line).ceil().clamp(1.0, PATH_LINES as f32);
 	2.0 * HEADER_PAD_V + lines * PATH_LINE_HEIGHT
 }
 
@@ -198,7 +211,10 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 	// The button reads live from `Files::path` (§22), so it needs nothing but whether one
 	// exists yet — before the first listing there is nothing to copy and it dims.
 	let has_path = path.is_some();
-	let path = path.unwrap_or("no directory yet").to_owned();
+	// Trimmed to two lines' worth of glyphs so a deep path stays legible in this narrow column
+	// without pushing the tree off the bottom (§22); the copy button holds the whole path.
+	let per_line = path_per_line(explorer.width()) as usize;
+	let path = crate::ui::elide_middle(path.unwrap_or("no directory yet"), per_line * PATH_LINES);
 	container(
 		row![
 			text(path)

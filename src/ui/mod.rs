@@ -42,6 +42,34 @@ pub const PASSPHRASE_INPUT_ID: &str = "passphrase-input";
 /// on this machine, and telling the user their local passphrase was wrong is expected.
 const PASSPHRASE_ERROR: Color = Color::from_rgb8(0xb0, 0x00, 0x00);
 
+/// Shorten `text` to at most `max_chars`, dropping the MIDDLE and marking the cut with a
+/// single `…`, so both the start and the end survive rather than the tail being lost to a
+/// hard clip. `text` already short enough passes through untouched.
+///
+/// Splits by CHARACTERS, not bytes, so a multi-byte string is never cut through a glyph;
+/// the tail keeps the odd character on an uneven budget, since the end — a file's
+/// extension, a path's leaf folder — is usually the more worth-showing half.
+///
+/// Shared by every place that shows a name or a path in a fixed number of lines: the file
+/// grid's cells (§19), the panel headers' current directory (§22) and the connect form's
+/// key file (§14). Each caller passes the char budget its own width and line count come to
+/// — this owns only the cut, not the "how many fit" estimate, so one rule keeps them all
+/// consistent.
+pub(crate) fn elide_middle(text: &str, max_chars: usize) -> String {
+	let chars: Vec<char> = text.chars().collect();
+	if chars.len() <= max_chars {
+		return text.to_owned();
+	}
+
+	// One glyph goes to the `…`; the rest is split head/tail, the tail taking the odd one.
+	let budget = max_chars.saturating_sub(1);
+	let head = budget / 2;
+	let tail = budget - head;
+	let start: String = chars[..head].iter().collect();
+	let end: String = chars[chars.len() - tail..].iter().collect();
+	format!("{start}…{end}")
+}
+
 /// The error notice (§10): a generic message in the shared dialog chrome, with a
 /// single Back button to the form. Its detail is logged, not shown, so nothing
 /// sensitive leaks to the UI (§12). The message is a selectable body so it can be
@@ -124,4 +152,47 @@ pub fn passphrase_view<'a>(
 		],
 		drag,
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_string_within_budget_is_left_untouched() {
+		// Arrange: shorter than the budget, and exactly at it — both fit.
+		// Act / Assert
+		assert_eq!(elide_middle("notes.txt", 20), "notes.txt");
+		assert_eq!(elide_middle("exactly-ten", 11), "exactly-ten");
+		assert!(!elide_middle("notes.txt", 20).contains('…'));
+	}
+
+	#[test]
+	fn a_long_string_keeps_both_ends_and_fits_the_budget() {
+		// Arrange: distinct head and tail so the cut is checkable, well past the budget.
+		let text = format!("{}{}", "a".repeat(40), "b".repeat(40));
+
+		// Act
+		let shown = elide_middle(&text, 21);
+
+		// Assert: the middle is gone, both ends survive, and it lands on the budget.
+		assert!(shown.contains('…'));
+		assert!(shown.starts_with('a'));
+		assert!(shown.ends_with('b'));
+		assert_eq!(shown.chars().count(), 21);
+	}
+
+	#[test]
+	fn the_cut_falls_on_a_character_never_inside_a_glyph() {
+		// Arrange: multi-byte characters, so a byte-wise cut would split one and panic.
+		let text = "日本語のとても長いファイル名前.txt";
+
+		// Act
+		let shown = elide_middle(text, 8);
+
+		// Assert: it fits the budget and is still valid UTF-8 (it is a `String`, so a cut
+		// through a glyph would have panicked building it).
+		assert!(shown.contains('…'));
+		assert_eq!(shown.chars().count(), 8);
+	}
 }

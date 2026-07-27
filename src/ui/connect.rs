@@ -7,8 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, radio, row, text, text_input};
-use iced::{Border, Color, Element};
+use iced::{Border, Color, Element, Length};
 use serde::{Deserialize, Serialize};
 
 use crate::app::Message;
@@ -39,6 +40,20 @@ pub const NO_FOCUS_ID: &str = "connect-none";
 /// The highlight-ring colour drawn around the focused radio or button (§10) — iced
 /// cannot give those widgets a native focus outline, so the form draws its own.
 const FOCUS_RING: Color = Color::from_rgb8(0x5a, 0x9c, 0xff);
+
+/// Sizing the chosen key file's middle-ellipsis (§14, §22). The path sits between the row's
+/// "Key file" label and the Browse button inside the form's ~420px column, so a long path is
+/// trimmed with `…` to two lines' worth and wraps within `KEY_PATH_WIDTH` rather than shoving
+/// Browse off the row. `KEY_PATH_CHAR` is a glyph advance; `KEY_PATH_LINES` is the same two
+/// the file grid's names wrap to.
+///
+/// `KEY_PATH_CHAR` is deliberately PESSIMISTIC — fatter than the face truly is — so the char
+/// budget lands under what two lines of `KEY_PATH_WIDTH` really hold and the `…` trims the
+/// path with margin rather than letting it spill onto a third line, the same discipline the
+/// panel headers use.
+const KEY_PATH_WIDTH: f32 = 210.0;
+const KEY_PATH_CHAR: f32 = 8.0;
+const KEY_PATH_LINES: usize = 2;
 
 /// The connect form's keyboard-focus stops, in Tab order (§10). iced can only focus
 /// text inputs, so the radios and Connect button are navigated by this bespoke ring:
@@ -386,13 +401,20 @@ fn passphrase_field(value: &str) -> Element<'_, Message> {
 /// is copied into a label, so nothing is borrowed from the form. `focused` rings the
 /// Browse button when the Credential stop is active under key auth.
 fn key_file_row(path: Option<&Path>, focused: bool) -> Element<'static, Message> {
+	// A chosen path can be long, so it is middle-ellipsised to the row's two lines (§22) — the
+	// whole path is still what `validate` reads, this only keeps the Browse button on the row.
 	let label = match path {
-		Some(path) => path.display().to_string(),
+		Some(path) => {
+			let per_line = (KEY_PATH_WIDTH / KEY_PATH_CHAR).floor().max(1.0) as usize;
+			crate::ui::elide_middle(&path.display().to_string(), per_line * KEY_PATH_LINES)
+		}
 		None => "No key file selected".to_string(),
 	};
 	row![
 		text("Key file").width(90),
-		text(label),
+		text(label)
+			.width(Length::Fixed(KEY_PATH_WIDTH))
+			.wrapping(Wrapping::WordOrGlyph),
 		focus_ring(
 			button("Browse…").on_press(Message::BrowseKeyPressed),
 			focused,

@@ -1289,12 +1289,21 @@ header so both panels name the same place.
 - **The tree panel's header now shows the current directory**, the same `Files::path` the
   files pane shows — the two views are synchronised, even though the tree's selection can
   sit elsewhere.
-- **It wraps across as many lines as the path needs**, because the panel is narrow and a
-  deep path would otherwise overflow. The header is `Shrink`, so it always grows to fit and
-  never clips; `ponytail:` the keyboard scroll-into-view math subtracts an *estimated*
-  header height (`header_height`), a rough proportional-font guess, so a very long path may
-  scroll the tree a line or two more than strictly needed — the same tolerance the notice
+- **It wraps across up to two lines**, because the panel is narrow and a deep path would
+  otherwise overflow. A path too long for those two lines is middle-ellipsised (`…`) to fit,
+  the same cut the file grid's names use (`crate::ui::elide_middle`) — so both the start of
+  the path and its leaf folder survive, and the header can no longer grow without bound and
+  crowd the tree beneath it. The header is `Shrink`, so a short path still shrinks it back to
+  one line; `ponytail:` the keyboard scroll-into-view math subtracts an *estimated* header
+  height (`header_height`, capped at those two lines), a rough proportional-font guess, so a
+  path may scroll the tree a line more than strictly needed — the same tolerance the notice
   line already carries.
+- **The files pane's own header trims its path the same way, but to one line** — that header
+  is the window's full width and a busy toolbar row (up · path · copy · item count · `.*`),
+  so the path stays on one line (a line that wide holds a long path) and is middle-ellipsised
+  to fit rather than wrapping and shoving those controls around. The connect form's chosen
+  key-file path is trimmed the same way, to two lines. One `elide_middle` rule keeps every
+  name and path in the app cut alike; each caller only owns its own "how many fit" estimate.
 - **A copy button sits right after the path**, the twin of the files pane's own (§20): it
   copies the same directory verbatim and raises the shared "Copied to clipboard" toast.
   Both headers wear one drawn by a single message-agnostic `ui::files::copy_button` — the
