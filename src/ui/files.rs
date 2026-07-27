@@ -270,7 +270,10 @@ fn header(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 		row![
 			up_button(files.path().and_then(explorer::parent).is_some()),
 			text(path).size(TEXT_SIZE).color(FG),
-			copy_path_button(files.path().is_some()),
+			copy_button(
+				files.path().is_some(),
+				Message::Files(FilesMessage::CopyCurrentPath),
+			),
 			text(status)
 				.size(TEXT_SIZE)
 				.color(MUTED_FG)
@@ -315,11 +318,14 @@ fn up_button(enabled: bool) -> Element<'static, Message> {
 	.into()
 }
 
-/// The header's "copy path" button, sitting right after the directory it copies. Styled
-/// like the up button beside it so the two read as one toolbar; `on_press_maybe(None)`
-/// dims and deadens it before the first listing, when there is no path to put on the
-/// clipboard.
-fn copy_path_button(enabled: bool) -> Element<'static, Message> {
+/// A header "copy path" button, sitting right after the directory it copies. Styled like
+/// the up button beside it so the two read as one toolbar; `on_press_maybe(None)` dims and
+/// deadens it before the first listing, when there is no path to put on the clipboard.
+///
+/// `pub(crate)` and message-agnostic because both panel headers wear one — the pane below
+/// and the tree beside it (§22) — each copying its own path. The face is the same one the
+/// file icons use, so the two panels' chrome stays of a piece.
+pub(crate) fn copy_button(enabled: bool, message: Message) -> Element<'static, Message> {
 	button(
 		text(COPY_GLYPH.to_string())
 			.font(ICON_FONT)
@@ -334,7 +340,7 @@ fn copy_path_button(enabled: bool) -> Element<'static, Message> {
 		},
 		..button::Style::default()
 	})
-	.on_press_maybe(enabled.then_some(Message::Files(FilesMessage::CopyCurrentPath)))
+	.on_press_maybe(enabled.then_some(message))
 	.into()
 }
 

@@ -1963,6 +1963,14 @@ impl App {
 				self.explorer.close_menu();
 				return self.copy_to_clipboard(path);
 			}
+			ExplorerMessage::CopyCurrentPath => {
+				// The header path, not a tree selection: copy the one directory the header
+				// names — the files view's — verbatim, the twin of the pane's own button.
+				if let Some(path) = self.files.path() {
+					let text = path.to_owned();
+					return self.copy_to_clipboard(text);
+				}
+			}
 			ExplorerMessage::SplitterGrabbed => self.explorer.set_dragging(true),
 			ExplorerMessage::SplitterDragged(pointer) => {
 				if self.explorer.dragging() {

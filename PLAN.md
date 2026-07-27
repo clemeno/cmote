@@ -1282,3 +1282,10 @@ header so both panels name the same place.
   header height (`header_height`), a rough proportional-font guess, so a very long path may
   scroll the tree a line or two more than strictly needed — the same tolerance the notice
   line already carries.
+- **A copy button sits right after the path**, the twin of the files pane's own (§20): it
+  copies the same directory verbatim and raises the shared "Copied to clipboard" toast.
+  Both headers wear one drawn by a single message-agnostic `ui::files::copy_button` — the
+  caller passes the message, so each header copies its own path with no duplicated chrome.
+  It reads `Files::path` live (`ExplorerMessage::CopyCurrentPath` carries no path), so the
+  button and the header can never name different directories, and it dims before the first
+  listing when there is nothing to copy.

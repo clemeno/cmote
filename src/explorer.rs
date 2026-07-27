@@ -69,6 +69,10 @@ pub enum ExplorerMessage {
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),
+	/// The header's "copy path" button (§22): copy the directory on show — the files
+	/// view's path, the one this header names — verbatim. Carries no path of its own;
+	/// `app` reads it live, so the button and the header can never name different dirs.
+	CopyCurrentPath,
 	/// The splitter was pressed — begin resizing the panel.
 	SplitterGrabbed,
 	/// The pointer moved while resizing; the payload is its window position.

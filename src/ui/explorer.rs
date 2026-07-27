@@ -59,10 +59,12 @@ const INDENT: f32 = 12.0;
 const HEADER_PAD_V: f32 = 6.0;
 const HEADER_PAD_H: f32 = 8.0;
 const PATH_LINE_HEIGHT: f32 = 16.0;
-/// The room the `.*` toggle takes along the header's first line, and an average glyph advance
-/// at `TEXT_SIZE`. Both feed only the wrapped-line ESTIMATE `header_height` makes for the
-/// scroll math, so a rough proportional-font guess is all they need to be.
+/// The room the copy button and the `.*` toggle take along the header's first line, and an
+/// average glyph advance at `TEXT_SIZE`. All feed only the wrapped-line ESTIMATE
+/// `header_height` makes for the scroll math, so a rough proportional-font guess is all they
+/// need to be.
 const TOGGLE_WIDTH: f32 = 44.0;
+const COPY_BUTTON_WIDTH: f32 = 28.0;
 const AVG_CHAR_WIDTH: f32 = 6.5;
 /// The notice line's height, fixed so both panels can subtract it from their scrollable
 /// area exactly rather than guessing at a padded line of text (§20).
@@ -155,7 +157,7 @@ pub fn tree_height(window_height: f32, files_reserved: f32, path: Option<&str>, 
 /// same tolerance the notice line already carries. The *layout* never clips regardless: the
 /// header itself is `Shrink`, so it always grows to fit the real wrapped text.
 pub fn header_height(path: Option<&str>, width: f32) -> f32 {
-	let usable = (width - TOGGLE_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
+	let usable = (width - TOGGLE_WIDTH - COPY_BUTTON_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
 	let per_line = (usable / AVG_CHAR_WIDTH).floor().max(1.0);
 	let chars = path.map_or(0, |path| path.chars().count()) as f32;
 	let lines = (chars / per_line).ceil().max(1.0);
@@ -193,6 +195,9 @@ pub(crate) fn hidden_toggle(shown: bool) -> Element<'static, Message> {
 /// the SAME location — the tree can be scrolled or its selection can sit elsewhere, but this
 /// header tracks the pane beneath it. Empty before the first listing, like the pane's own.
 fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> {
+	// The button reads live from `Files::path` (§22), so it needs nothing but whether one
+	// exists yet — before the first listing there is nothing to copy and it dims.
+	let has_path = path.is_some();
 	let path = path.unwrap_or("no directory yet").to_owned();
 	container(
 		row![
@@ -203,6 +208,11 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 				// Break inside a long run too: a path is mostly one unbroken string with no
 				// spaces to wrap at, so word-wrapping alone would just overflow the column.
 				.wrapping(Wrapping::WordOrGlyph),
+			// Right after the path it copies, the twin of the files pane's own button (§22).
+			crate::ui::files::copy_button(
+				has_path,
+				Message::Explorer(ExplorerMessage::CopyCurrentPath),
+			),
 			hidden_toggle(explorer.show_hidden()),
 		]
 		.spacing(6)
