@@ -25,7 +25,7 @@ use iced::{Point, Rectangle};
 /// The pane's starting height, the shortest the splitter may drag it to, and the
 /// grab bar's own height (§19). `ui::terminal` subtracts the pane plus the bar from
 /// the grid, so these three are the single source of truth for that arithmetic.
-pub const DEFAULT_HEIGHT: f32 = 220.0;
+pub const DEFAULT_HEIGHT: f32 = 330.0;
 pub const MIN_HEIGHT: f32 = 90.0;
 pub const SPLITTER_HEIGHT: f32 = 6.0;
 
