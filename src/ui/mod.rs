@@ -11,6 +11,7 @@ pub mod files; // the remote file grid under the terminal (§19)
 pub mod home; // the home screen: saved connection targets (§14)
 pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss layer (§10)
 pub mod selection; // mouse text selection over the grid
+pub mod snackbar; // the copy-confirmation toast (§10)
 pub mod terminal; // the live shell grid
 
 use iced::widget::{button, column, text, text_editor, text_input};

@@ -59,6 +59,10 @@ const INITIAL_ROWS: u16 = 40;
 /// of.
 const MAX_PANEL_FRACTION: f32 = 0.6;
 
+/// How long a copy-confirmation toast stays before it clears itself (§10). Long enough to
+/// register, short enough not to linger over the shell.
+const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -269,6 +273,20 @@ pub struct App {
 	downloaded: usize,
 	/// A multi-file download held at the "some of these are already there" question (§21).
 	clash: Option<Clash>,
+	/// The copy-confirmation toast currently showing, if any (§10). Set on every clipboard
+	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
+	/// inside it is the dwell clock — see `Snackbar`.
+	snackbar: Option<Snackbar>,
+}
+
+/// A copy-confirmation toast (§10): the message it shows and when it appeared. The
+/// timestamp is the whole timer — `update` compares its age against `SNACKBAR_DWELL` on
+/// each frame tick and clears the toast once it is older, so a fresh copy that overwrites
+/// this always gets its full dwell rather than inheriting the previous one's remaining time.
+#[derive(Debug, Clone)]
+struct Snackbar {
+	message: String,
+	shown_at: std::time::Instant,
 }
 
 /// A queued batch of downloads waiting on the name-collision answer (§21). The names that
@@ -396,6 +414,10 @@ pub enum Message {
 	Pasted(Option<String>),
 	/// Dismiss the open context menu without choosing an item.
 	MenuDismissed,
+	/// A window-frame tick while a copy-confirmation toast is showing (§10). Carries no
+	/// payload: `update` reads the toast's own age to decide whether its dwell has elapsed.
+	/// Only subscribed to while a toast is up, so it costs nothing the rest of the time.
+	SnackbarTick,
 	// --- file upload to the remote (§17) ---
 	/// The user clicked the file button in the status bar — open the native picker.
 	UploadPickPressed,
@@ -540,6 +562,18 @@ impl App {
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::MenuDismissed => self.menu = None,
+			// A frame tick while the toast is up (§10): drop it once it has outlived its
+			// dwell. Clearing it removes the `frames()` subscription next diff, so the
+			// ticking stops on its own — no timer to cancel.
+			Message::SnackbarTick => {
+				if self
+					.snackbar
+					.as_ref()
+					.is_some_and(|snackbar| snackbar.shown_at.elapsed() >= SNACKBAR_DWELL)
+				{
+					self.snackbar = None;
+				}
+			}
 			Message::UploadPickPressed => return browse_upload(),
 			// A cancelled picker (`None`) keeps whatever was already chosen — same rule
 			// as the key-file picker on the form.
@@ -1574,6 +1608,17 @@ impl App {
 		if text.is_empty() {
 			return iced::Task::none();
 		}
+		self.copy_to_clipboard(text)
+	}
+
+	/// Put `text` on the system clipboard and raise the copy-confirmation toast (§10).
+	/// Every copy action funnels through here, so the confirmation and the write can never
+	/// drift apart, and each copy resets the dwell by stamping the toast afresh.
+	fn copy_to_clipboard(&mut self, text: String) -> iced::Task<Message> {
+		self.snackbar = Some(Snackbar {
+			message: "Copied to clipboard.".to_owned(),
+			shown_at: std::time::Instant::now(),
+		});
 		iced::clipboard::write(text)
 	}
 
@@ -1781,7 +1826,8 @@ impl App {
 			}
 			ExplorerMessage::CopyName(path) => {
 				self.explorer.close_menu();
-				return iced::clipboard::write(explorer::name(&path).to_owned());
+				let text = explorer::name(&path).to_owned();
+				return self.copy_to_clipboard(text);
 			}
 			ExplorerMessage::CopyRelative(path) => {
 				self.explorer.close_menu();
@@ -1789,11 +1835,12 @@ impl App {
 				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
 				};
-				return iced::clipboard::write(explorer::relative(cwd, &path));
+				let text = explorer::relative(cwd, &path);
+				return self.copy_to_clipboard(text);
 			}
 			ExplorerMessage::CopyPath(path) => {
 				self.explorer.close_menu();
-				return iced::clipboard::write(path);
+				return self.copy_to_clipboard(path);
 			}
 			ExplorerMessage::SplitterGrabbed => self.explorer.set_dragging(true),
 			ExplorerMessage::SplitterDragged(pointer) => {
@@ -1936,9 +1983,8 @@ impl App {
 			FilesMessage::CopyName(path) => {
 				self.files.close_menu();
 				let names = self.action_targets(&path);
-				return iced::clipboard::write(join_lines(
-					names.iter().map(|path| explorer::name(path).to_owned()),
-				));
+				let text = join_lines(names.iter().map(|path| explorer::name(path).to_owned()));
+				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyRelative(path) => {
 				self.files.close_menu();
@@ -1948,19 +1994,20 @@ impl App {
 				};
 				let cwd = cwd.to_owned();
 				let targets = self.action_targets(&path);
-				return iced::clipboard::write(join_lines(
-					targets.iter().map(|path| explorer::relative(&cwd, path)),
-				));
+				let text = join_lines(targets.iter().map(|path| explorer::relative(&cwd, path)));
+				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyPath(path) => {
 				self.files.close_menu();
-				return iced::clipboard::write(join_lines(self.action_targets(&path)));
+				let text = join_lines(self.action_targets(&path));
+				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyCurrentPath => {
 				// The header path, not a selection: copy the one directory verbatim, with no
 				// `action_targets` detour and no line-joining — there is only ever the one.
 				if let Some(path) = self.files.path() {
-					return iced::clipboard::write(path.to_owned());
+					let text = path.to_owned();
+					return self.copy_to_clipboard(text);
 				}
 			}
 			FilesMessage::RenameStarted(path) => {
@@ -2157,30 +2204,43 @@ impl App {
 				Message::PassphraseCancelled,
 			),
 			Screen::Terminal => match &self.terminal {
-				Some(terminal) => ui::terminal::view(
-					terminal,
-					self.connection.as_deref().unwrap_or(""),
-					self.selection.as_ref(),
-					self.menu,
-					ui::terminal::Modals {
-						confirm_disconnect: self.confirm_disconnect,
-						clash: self.clash.is_some(),
-						body: &self.dialog_body,
-						drag,
-					},
-					ui::terminal::UploadView {
-						file: self.upload_file.as_deref().map(file_name_of),
-						dest: &self.upload_dest,
-						state: self.transfer,
-						notice: self.transfer_notice.as_deref(),
-					},
-					ui::terminal::Panels {
-						explorer: &self.explorer,
-						files: &self.files,
-						focus: self.focus,
-						width: self.window_size.width,
-					},
-				),
+				Some(terminal) => {
+					let base = ui::terminal::view(
+						terminal,
+						self.connection.as_deref().unwrap_or(""),
+						self.selection.as_ref(),
+						self.menu,
+						ui::terminal::Modals {
+							confirm_disconnect: self.confirm_disconnect,
+							clash: self.clash.is_some(),
+							body: &self.dialog_body,
+							drag,
+						},
+						ui::terminal::UploadView {
+							file: self.upload_file.as_deref().map(file_name_of),
+							dest: &self.upload_dest,
+							state: self.transfer,
+							notice: self.transfer_notice.as_deref(),
+						},
+						ui::terminal::Panels {
+							explorer: &self.explorer,
+							files: &self.files,
+							focus: self.focus,
+							width: self.window_size.width,
+						},
+					);
+					// The copy toast floats over the whole terminal screen as the top layer
+					// (§10). It is added only while showing, so the common case pays nothing.
+					match &self.snackbar {
+						Some(snackbar) => {
+							iced::widget::stack![base, ui::snackbar::view(&snackbar.message)]
+								.width(iced::Length::Fill)
+								.height(iced::Length::Fill)
+								.into()
+						}
+						None => base,
+					}
+				}
 				None => text("terminal starting…").into(),
 			},
 			Screen::Error => self.form_with_dialog(
@@ -2220,29 +2280,29 @@ impl App {
 		// Track window size on every screen so a dialog can be centred/clamped even
 		// before a terminal exists (§10).
 		let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
-		match self.screen {
-			Screen::Terminal => iced::Subscription::batch([
-				ssh,
-				resizes,
-				iced::keyboard::listen().map(Message::Key),
-			]),
-			// On the connect form, listen for key presses so Tab / Shift+Tab can move
-			// focus between the inputs (`on_form_key`); typing still reaches the fields
-			// through the widget tree, so this only adds the focus shortcuts.
-			Screen::Connect => iced::Subscription::batch([
-				ssh,
-				resizes,
-				iced::keyboard::listen().map(Message::FormKey),
-			]),
-			// On the home screen, listen for the F2 / Enter / Delete / Esc shortcuts (§14);
-			// the rename field still receives its own typing through the widget tree.
-			Screen::Home => iced::Subscription::batch([
-				ssh,
-				resizes,
-				iced::keyboard::listen().map(Message::HomeKey),
-			]),
-			_ => iced::Subscription::batch([ssh, resizes]),
+		let mut subs = vec![ssh, resizes];
+
+		// While a copy toast is up, ride the window's frame clock so it can dismiss itself
+		// once its dwell elapses (§10). This build's iced executor is the thread-pool
+		// backend, which has no `time::every`; `frames()` needs no async runtime — it
+		// listens for the redraws the runtime already keeps requesting while a message is
+		// flowing, so the tick self-sustains and stops the moment the toast clears.
+		if self.snackbar.is_some() {
+			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
 		}
+
+		// Per-screen keyboard listeners. On the terminal every key is forwarded to the
+		// shell; on the connect form Tab / Shift+Tab move focus (typing still reaches the
+		// fields through the widget tree); on the home screen the F2 / Enter / Delete / Esc
+		// shortcuts (§14). Other screens need no keyboard subscription.
+		match self.screen {
+			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
+			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
+			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			_ => {}
+		}
+
+		iced::Subscription::batch(subs)
 	}
 }
 
