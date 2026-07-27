@@ -1230,10 +1230,11 @@ impl App {
 
 	/// Handle a key on the connect form (§10): Tab / Shift+Tab move the focus ring
 	/// (skipping stops that do not apply to the current auth method, §14), Enter / Space
-	/// activate the current stop when it is a radio or button, and Esc returns to the
-	/// home list. On a text stop, Enter/Space are left to the focused field
-	/// (typing/submit). Anything else is ignored here; the focused input still receives
-	/// it through the widget tree.
+	/// activate the current stop, and Esc returns to the home list. What "activate" means
+	/// depends on the stop: a radio/button runs its own callback (switch auth, Browse, or —
+	/// on the Connect stop — submit); a TEXT stop has no callback of its own, so Enter there
+	/// submits the whole form while Space is left to type a space in the field. Anything else
+	/// is ignored here; the focused input still receives it through the widget tree.
 	fn on_form_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
@@ -1251,12 +1252,17 @@ impl App {
 				};
 				self.apply_form_focus()
 			}
-			iced::keyboard::Key::Named(Named::Enter | Named::Space) => {
-				// A text stop keeps these keys (space types, Enter is the field's own);
-				// a radio/button stop turns them into its activation message.
+			iced::keyboard::Key::Named(named @ (Named::Enter | Named::Space)) => {
 				if self.form_focus.input_id(self.form.auth_kind).is_some() {
-					iced::Task::none()
+					// A text stop: Enter submits the form (the field has no submit of its
+					// own), Space types a space and is left to the field.
+					if named == Named::Enter {
+						iced::Task::done(Message::ConnectPressed)
+					} else {
+						iced::Task::none()
+					}
 				} else if let Some(message) = self.form_focus.activation(self.form.auth_kind) {
+					// A radio/button stop turns the key into its own activation message.
 					iced::Task::done(message)
 				} else {
 					iced::Task::none()
