@@ -7,9 +7,10 @@ screen lists your saved connection targets; pick one (or start a new connection)
 in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
 `.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
-remote filesystem beside it, an icon grid of the current directory's files under it (keyboard
+remote filesystem beside it, a grid of the current directory's files under it (keyboard
 navigable, with a details popup and rubber-band multi-selection), the remote working
-directory in the title bar, and file transfer both ways.
+directory in the title bar, and file transfer both ways. Reconnect to a saved target and
+the shell and both panels come back to the directories you left them in.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -43,20 +44,32 @@ references below (§n) point into it.
   terminal, over **SFTP** (falling back to `ls` on a server with the subsystem disabled).
   Click a folder to expand or collapse it; the tree **follows the shell**, opening the
   whole chain from `/` down to wherever you `cd`. Right-click a folder for **Open in
-  terminal** (types a quoted `cd`), **Rename…** (inline, like F2 on the home list), **Copy
-  name / relative path / full path**, **Expand** (which also refreshes) and **Collapse**.
-  Drag the splitter to resize the panel — the terminal reflows to match — or hide it with
-  the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
-  (§18).
-- **Remote files pane** — an icon grid of **every entry** in one directory, full width
-  under the terminal. It follows the shell (`cd` and the grid follows), or a click in the
-  folder tree points it somewhere else without moving the shell; **double-click a folder**
-  to enter it. A big directory streams in batches of 1000 and the header counts as they
-  land. Icons come from a bundled icon font, by category (folder, image, code, archive,
-  document, audio, video, link, plain). Right-click an entry for **Open in terminal**,
-  **Download…**, **Rename…**, **Copy name / relative path / full path** and **Refresh**.
-  Drag the splitter to resize the pane, or hide it with the status bar's **Files** button;
-  the same `.*` checkbox hides dot-files here too (§19).
+  terminal** (types a quoted `cd`), **Upload…** (sends local files into that folder),
+  **Rename…** (inline, like F2 on the home list), **Copy name / relative path / full path**,
+  **Expand** (which also refreshes) and **Collapse**. Its header names the folder on show —
+  middle-ellipsised and capped at two lines, with a **copy button** beside it. Drag the
+  splitter to resize the panel — the terminal reflows to match — or hide it with the status
+  bar's **Folders** button; the `.*` checkbox in its header hides dot-folders (§18, §22).
+- **Remote files pane** — a grid of **every entry** in one directory, full width under the
+  terminal. Each cell is a wide row: a small icon in front of the name, with the **size and
+  the modified date** on a second, muted line underneath (`2026-03-20 11:46 CEST`; a folder
+  shows only the date, and anything the listing never learned reads as a dash). A name too
+  long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
+  directory streams in batches of 1000 and the header counts as they land. Icons come from a
+  bundled icon font, by category (folder, image, code, archive, document, audio, video, link,
+  plain). Right-click an entry for **Open in terminal**, **Download…**, **Rename…**, **Copy
+  name / relative path / full path** and **Refresh**; right-click **empty space** for
+  **Upload… here** and **Refresh**. The header carries an **up** button, the directory's path
+  (middle-ellipsised to one line) and a **copy button** for it. Drag the splitter to resize
+  the pane, or hide it with the status bar's **Files** button; the same `.*` checkbox hides
+  dot-files here too (§19).
+- **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
+  folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
+  else and leave the shell where it is, so you can look inside a directory without disturbing
+  what is running. The shell moves only on a `cd` it can see: one you type, either panel's
+  **Open in terminal**, or the status bar's **Sync**, which brings the shell (and with it the
+  tree and the title) to the folder the pane is showing. Sync is disabled when the two already
+  agree (§19).
 - **Keyboard focus across the three regions** — the shell, the folder tree and the files
   pane each take the keyboard. A session starts at the shell; a click focuses whatever was
   clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
@@ -70,7 +83,8 @@ references below (§n) point into it.
   **modification time in the server's own timezone** (`2026-03-20 11:46:40 CEST (+02:00)` —
   the zone is read off the server once per session), its **size** (human, with the exact
   byte count behind it) and its **`owner:group`** as names, not numbers. Anything the server
-  would not say reads as a dash (§20).
+  would not say reads as a dash, and a button on the card copies **the whole thing** at once
+  (§20, §22).
 - **Selecting many entries at once** — drag a **rubber band** over the grid's empty space,
   **Ctrl+click** to add or remove one, **Shift+click** or **Shift+arrow** to take the run
   between two ends, **Ctrl+A** to take the lot; **Ctrl+drag** adds a band to what is already
@@ -85,12 +99,18 @@ references below (§n) point into it.
   progress bar) and leaves any folders in the selection behind. If some of those names are
   already in the folder, one dialog asks about the whole batch before anything is written:
   **Skip them**, **Save alongside** (`notes-1.txt`), **Replace**, or **Cancel** (§19, §21).
-- **File upload into the shell's current directory** — pick a local file with **File…**,
-  send it with **Upload**, and it goes over **SFTP** (its own channel, so the shell keeps
-  running) into the directory the remote shell is sitting in. The destination is shown
-  before anything is sent and is editable; an existing file is never replaced without a
-  second confirmation. A progress bar with the byte count runs in the status bar, and a
-  finished upload deselects the file (§17).
+- **File upload, one or many, into a folder** — pick local files with **Files…** (the
+  picker is multi-select) and send them with **Upload**, over **SFTP** on its own channel so
+  the shell keeps running. The confirmation lists what you picked under an **editable
+  destination folder** — each file keeps its own name inside it, and an empty folder means
+  the login directory. Upload starts from four places, each seeding that folder: the status
+  bar (the shell's directory), the terminal's right-click **Upload…** (the shell's
+  directory), the files pane's empty-space **Upload… here** (the pane's directory), and a
+  folder's **Upload…** in the tree. Before a byte is sent, every destination name is checked
+  on the server; if some are already there, **one dialog asks about the whole batch** —
+  **Replace**, **Skip**, **Keep both** (`name-1.txt`) or **Cancel**. The files then go one at
+  a time behind the status bar's progress bar, closing with `Uploaded N files`, and a failure
+  names its reason and moves on to the next (§17).
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
   Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and
@@ -104,6 +124,15 @@ references below (§n) point into it.
   card never dismisses it (only a click outside does); the body message is **selectable and
   copyable** — drag to select, `Ctrl+C` to copy (handy for the host-key fingerprint or an
   error message); and the dialog is **draggable** by its header, clamped to the window (§10).
+- **Every copy says so** — any **Copy** (a menu item, a header's copy button, the details
+  card's) raises a short toast at the bottom of the window that fades itself after three
+  seconds, so a copy is never a silent no-op you have to test by pasting (§10).
+- **Resuming where you left off** — a saved target remembers, per target, the **shell's
+  directory**, the **files pane's directory**, the `.*` toggle and both **panel sizes**. On
+  the next connection the pane reopens there, the tree reveals the chain down to it, and the
+  shell is put back with a visible `cd`. The snapshot is written at every teardown — a clean
+  Disconnect, a remote hangup, an error — and a value this session never learned never erases
+  the one already saved. Profile metadata only: still **no secrets on disk** (§22).
 - Session-only **secrets** — passwords and key passphrases are held in memory and
   `zeroize`d on drop, never written to disk (§12). Only non-secret connection *profiles*
   are persisted, for the home list (§14).
@@ -127,22 +156,25 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Drag across the grid | Select text (highlighted in place) |
-| Right-click | Context menu: Copy / Paste |
+| Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory) |
 | **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
 | Any other key | Goes to the remote shell, arrows included (SS3 form in application-cursor mode) |
 | Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
+| **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
+| **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
 
 **Folder tree** (right of the terminal — the status bar's **Folders** button hides it)
 
 | Gesture | What it does |
 |---|---|
 | Click a folder | Expand or collapse it, and select it |
-| Right-click a folder | Open in terminal / Rename… / Copy name / Copy relative path / Copy full path / Expand / Collapse |
+| Right-click a folder | Open in terminal / Upload… / Rename… / Copy name / Copy relative path / Copy full path / Expand / Collapse |
 | **↑** / **↓**, **Tab** / **Shift+Tab** | Walk the visible rows |
 | **→** / **←** | Open / close the selected folder |
 | **Enter** | `cd` the shell into it |
 | **F2** | Rename in place (**Enter** commits, **Esc** abandons) |
 | **Esc** | Give the keyboard back to the shell |
+| Copy button in the header | Copy the path of the folder on show |
 | `.*` checkbox | Hide or show dot-entries (shared with the files pane) |
 
 **Files pane** (under everything — the status bar's **Files** button hides it)
@@ -150,20 +182,23 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Click an entry | Select it (and show its details popup) |
-| Double-click a folder | `cd` the shell into it; the tree and the pane follow |
+| Double-click a folder | Show it in the pane; the shell stays where it is |
 | Click empty space | Clear the selection |
 | **Drag** from empty space | Rubber-band selection; **Ctrl+drag** adds to what is selected |
 | **Ctrl+click** | Add or remove one entry |
 | **Shift+click** | Select everything between the anchor and here |
 | **Ctrl+A** | Select every entry on show |
-| Right-click | The entry's menu — on a multiple selection it acts on all of it |
+| Right-click an entry | The entry's menu — on a multiple selection it acts on all of it |
+| Right-click empty space | Upload… here / Refresh |
+| Copy button in the details popup | Copy the whole details card |
 | **←** / **→** | Move one cell; **↑** / **↓** move a whole row |
 | **Shift** + those arrows | Extend the selection instead of moving it |
 | **Tab** / **Shift+Tab** | Next / previous entry |
-| **Enter** | Enter the selected folder |
+| **Enter** | Show the selected folder in the pane |
 | **F2** | Rename in place |
 | **Esc** | Give the keyboard back to the shell |
-| ↑ button in the header | Go to the parent directory |
+| ↑ button in the header | Show the parent directory |
+| Copy button in the header | Copy the path of the directory on show |
 
 **Home screen**
 
@@ -217,7 +252,8 @@ right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
 ## Data and portability
 
 cmote writes two files — `known_hosts` (pinned host keys) and `targets.json` (saved
-connection profiles — **no secrets**). Both live in the same directory, resolved at
+connection profiles plus where each session left off: the two directories, the `.*` toggle
+and the panel sizes — **no secrets**). Both live in the same directory, resolved at
 runtime (§11, `paths::data_dir`):
 
 1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
@@ -273,7 +309,15 @@ to the selection that asked for it, the selection gestures (range from an anchor
 plain and additive band), the rubber band's hit-testing against the grid geometry (scrolled,
 past the end of the listing, and in the gap between two rows), and — through the app's own
 handlers rather than the model's — Shift+click and Shift+arrow, which is what proves the
-modifier state reaches a mouse press.
+modifier state reaches a mouse press. The upload, path-eliding and resume work adds: the
+upload batch planner (every file queued under its own name when nothing clashes, and each
+collision answer — Replace, Skip, Keep both — deciding what happens to each clashing file,
+all without an App or a server), the middle-ellipsis cut (a short string left alone, a long
+one keeping both ends inside its budget, and the cut never landing inside a glyph) and the
+grid cell's two-line version of it, the short mtime that drops the seconds but keeps the
+zone, the session snapshot's round trip through `targets.json` (including a pre-v2.2 file
+with no session fields at all), and — again through the app's own handlers — a reconnect
+that resumes both paths and pins the pane until the shell has caught up.
 
 ### Manual smoke test (live SSH)
 
@@ -351,19 +395,27 @@ on a click away. Copy is disabled with nothing selected; pasting keeps the highl
 `cmote — tester@localhost:2222 — /config` (or wherever the shell starts). `cd /tmp` and
 the title should follow within a prompt. Then:
 
-- Click **File…**, pick a local file — its name appears next to the buttons and **Upload**
-  becomes enabled. Click **Upload**: the dialog shows the file and a destination path
-  ending in `/tmp/<name>`. Confirm → a progress bar with the byte count runs in the status
-  bar, then `Uploaded to /tmp/<name>`, and the file is deselected (Upload disabled again).
-  `ls -l /tmp` on the remote should show it, byte-for-byte identical (`sha256sum` both
-  ends for a binary file).
-- Upload the **same file again** → the **Replace the file on the server?** prompt appears
-  and Cancel leaves the remote file untouched (check its `mtime`); Replace overwrites it.
+- Click **Files…**, pick a local file — its name appears next to the buttons and **Upload**
+  becomes enabled. Click **Upload**: the dialog lists the file under an editable destination
+  folder of `/tmp`. Confirm → a progress bar with the byte count runs in the status bar, then
+  `Uploaded to /tmp/<name>`, and the pick is cleared (Upload disabled again). `ls -l /tmp` on
+  the remote should show it, byte-for-byte identical (`sha256sum` both ends for a binary
+  file).
+- Pick **several files at once** and upload them → they go one at a time, each with its own
+  progress bar, and the closing notice reads `Uploaded N files`.
+- Upload the **same batch again** → the collision dialog names the files that are already
+  there: **Cancel** sends nothing (check the remote `mtime`s), **Skip** leaves them alone,
+  **Keep both** writes `name-1.ext` beside them, **Replace** overwrites.
+- Try the other three ways in — right-click the **terminal** → **Upload…** (destination is
+  the shell's directory), right-click the files pane's **empty space** → **Upload… here**
+  (the pane's directory, so point the pane elsewhere with the tree first and confirm the
+  destination follows the *pane*, not the shell), and right-click a **folder in the tree** →
+  **Upload…** (that folder).
 - Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
-  status bar shows the failure, the shell stays open, and the file stays selected.
+  status bar shows the failure and the shell stays open.
 - Start a shell that does **not** announce its directory (`docker exec … sh`, or unset the
   hook with `unset PROMPT_COMMAND; unset -f cmote_cwd`) → the title drops the directory
-  and the upload dialog offers the bare file name, which lands in the login directory.
+  and the upload dialog offers an empty folder, which lands in the login directory.
 
 **8. Remote folder tree.** The panel on the right should list `/` on connect. Then:
 
@@ -398,10 +450,17 @@ then follow the shell. Then:
   (`mkdir /tmp/many && cd /tmp/many && seq 1 5000 | xargs touch`) and re-enter it: the
   count should climb in steps of 1000 as the batches land, and the window stays responsive
   throughout.
-- Double-click a folder in the grid → the shell `cd`s into it, the tree reveals it and the
-  grid retargets.
+- Each cell should read as a row: icon, name, and under it the size and the modified date
+  in the server's zone (a folder shows only the date). Compare a few against `ls -l` on the
+  remote. A very long name should be cut in the middle (`report-fin…-draft.pdf`), never at
+  the extension.
+- Double-click a folder in the grid → the grid enters it and **the shell stays put** (the
+  prompt's directory does not change, and the pane must NOT snap back on the next prompt).
+  Same for the header's **up** button and **Enter**.
 - Click a folder in the **tree** → the grid shows that folder while the shell stays where
-  it is, and it must NOT snap back on the next prompt.
+  it is, and it must NOT snap back on the next prompt. Click **Sync** in the status bar →
+  now the shell `cd`s there, the tree reveals it and the title follows; Sync greys out once
+  the two agree.
 - Toggle the `.*` checkbox → dot-files disappear from the grid and the tree together.
 - Right-click a file → **Download…** opens the save dialog; pick a path and the status bar
   runs a progress bar, then reports where it landed. Downloading onto an existing local
@@ -452,6 +511,24 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
 should render, and the **arrow keys** should move the cursor — this exercises
 application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
 to the SS3 form so they register. In `vim`, `:q!` to exit.
+
+**13. Copying, confirmed.** Click the copy button in the **files pane header**, then in the
+**folder-tree header**, then the one on a selected entry's **details popup**. Each should
+raise a toast at the bottom of the window that fades on its own after about three seconds,
+and each should paste back what it promised — the pane's directory, the tree's folder, and
+the whole details card (name, target, type, time, size, owner). The context menus' **Copy…**
+items should raise the same toast.
+
+**14. Resuming where you left off.** With a session open, `cd /etc/ssh` in the shell, point
+the **pane** at a different directory (`/tmp` via the tree), toggle `.*` on, and drag both
+splitters to unusual sizes. Then **Disconnect** and reconnect to the same target from the
+home screen. Expect: the shell replays a visible `cd /etc/ssh`, the pane reopens on `/tmp`
+(and does **not** get dragged to `/etc/ssh` by the shell's first announcement), the tree has
+revealed the chain down to it, `.*` is still on, and both panels are the size you left them.
+Kill the connection the hard way too (`docker stop cmote-sshd`, or `pkill sshd` on the
+remote) and reconnect — the snapshot should survive a hangup, not just a clean disconnect.
+Finally, connect to a target saved by an older build (or delete the session fields from
+`targets.json` by hand): it should open at the login directory with default panels, no error.
 
 **Cleanup:**
 

@@ -22,7 +22,11 @@ copy paths, §18; **v2.1.0** adds the icon grid of files under the terminal — 
 in one directory, streamed in batches, with rename and download, §19 — makes it and the
 tree keyboard-navigable with a details popup beside the selection, §20, and lets a rubber
 band, Ctrl/Shift click or Ctrl+A select many entries at once for a batch copy or
-download, §21). Both targets are supported
+download, §21; **v2.2.0** turns upload into a multi-file, folder-destination batch reachable
+from four surfaces with one collision question, §17, lays the grid's cells out as rows
+carrying each entry's size and date, §19, confirms every copy with a self-dismissing toast,
+§10, and remembers per target where the shell and both panels were so a reconnect resumes
+there, §22). Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -182,13 +186,14 @@ cmote/
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── ui/
-    │   ├── mod.rs         view helpers; host-key / passphrase / error dialogs (§8, §7, §6)
+    │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
+    │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
     │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
@@ -198,7 +203,7 @@ cmote/
     │   ├── download.rs    file download over an sftp channel: stream, progress (§19)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
-    │   ├── upload.rs      file upload over an sftp channel: exists-check, stream, progress (§17)
+    │   ├── upload.rs      file upload over an sftp channel: batch pre-scan, stream, progress (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   ├── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
@@ -380,7 +385,10 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   stop (`next`/`previous`), **Enter / Space** activate a radio/button stop
   (`activation`), and a text stop takes native focus (`focus(id)`) while a
   radio/button stop unfocuses all (`focus(NO_FOCUS_ID)`) and gets a highlight ring in
-  the view. On a text stop, Enter/Space are left to the field.
+  the view. **Enter on a text stop submits the form** (v2.2) — iced's `text_input` has a
+  submit callback only if one is wired, and none was, so Enter in a field did nothing at all
+  where every other form on every platform connects. Space on a text stop is still a space:
+  it is a character, and a host or user name can contain one.
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
   *connecting → verifying host key → authenticating*.
 - **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
@@ -457,6 +465,21 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     iced does not expose the card's real height, so this keeps the dialog draggable to the
     window's bottom (and grabbable back) rather than stopping short of it. The ✕ button
     captures its own press, so closing never starts a drag.
+- **The copy toast** (`ui::snackbar`, v2.2): `iced::clipboard::write` is silent, and by v2.2
+  a dozen surfaces write to the clipboard — both panel headers, the details card, four
+  context menus. A copy that quietly did nothing looked exactly like a copy that worked, so
+  every one of them now goes through `App::copy_to_clipboard`, which writes the text *and*
+  raises one small card at the bottom-centre of the window: "Copied to clipboard." One
+  funnel, so a new copy item cannot forget the confirmation.
+  - **It dismisses itself after `SNACKBAR_DWELL` (3 s).** The state is the message plus the
+    `Instant` it appeared; a `window::frames` subscription — added *only* while a toast is up
+    — ticks `SnackbarTick`, and `update` clears it once the age passes the dwell. No timer
+    task to cancel, no reset bug on a second copy: writing a new `Snackbar` restarts the
+    clock by construction.
+  - **It never takes a click.** The card is a plain `container` in a `stack` layer over the
+    page, bottom-aligned with a margin, with no `mouse_area` under it — so it floats over the
+    panels without swallowing a press aimed at what it covers, and it needs no dismiss button
+    to get out of the way.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
   centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard
@@ -730,14 +753,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   support, certificate auth.
 - **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
   v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
-- **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1)*: **upload** of a chosen
-  local file into the shell's current directory (§17), a **folder tree** of the remote
-  filesystem that browses and renames (§18), and a **files pane** that lists one whole
-  directory and **downloads** files from it, one or a whole selection at a time (§19, §21).
-  Still deferred: creating and deleting remote entries, directory (recursive) transfers,
-  cancelling a transfer in flight, resuming an interrupted one, drag-and-drop onto a folder,
-  two transfers at once (a batch queues instead, §21), and preserving file
-  modes/timestamps in either direction.
+- **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1, v2.2)*: **upload** of one or
+  many local files into a chosen remote folder, from four surfaces, with the collisions
+  settled up front (§17), a **folder tree** of the remote filesystem that browses and
+  renames (§18), and a **files pane** that lists one whole directory and **downloads** files
+  from it, one or a whole selection at a time (§19, §21). Still deferred: creating and
+  deleting remote entries, directory (recursive) transfers, cancelling a transfer in flight,
+  resuming an interrupted one, drag-and-drop onto a folder, two transfers at once (a batch
+  queues instead, §17, §21), and preserving file modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
 - **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
@@ -764,7 +787,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 
 Two features that only make sense together: the status bar gained a **file picker** and
 an **Upload** button, and the upload's default destination is *the directory the shell is
-currently in*. SSH does not offer that directory, so cmote has to learn it.
+currently in*. SSH does not offer that directory, so cmote has to learn it. (v2.2 turns the
+upload itself into a multi-file batch into a chosen folder, startable from four surfaces —
+see "One file or many" below; the cwd tracking here is unchanged.)
 
 ### Tracking the remote cwd (`term/cwd.rs`)
 
@@ -1014,8 +1039,33 @@ for a window resize.
   know whether the link is expandable. The pane resolves the *selected* one, §20 — one
   link, when the user asks by looking at it.)
 - **Sizes, times and owners ride along.** SFTP sends a name's attributes *with* the name,
-  so collecting them costs nothing extra and they travel on the entry (§20). The grid
-  still shows only the icon and the name; the details popup is what reads them.
+  so collecting them costs nothing extra and they travel on the entry (§20). The grid shows
+  the size and the date (below); the owner, the exact byte count and the seconds are the
+  details popup's job.
+
+### What a cell looks like (v2.2)
+
+- **A row, not a portrait box.** The first cut was a big icon centred above a centred name,
+  which reads as a photo album; a file manager reads as a list. A cell is now a wide, short
+  row — a small icon in front of a left-aligned name — and the grid still wraps into columns,
+  so a wide window shows several of them per line rather than one long column.
+- **A name too long for its two lines is middle-ellipsised** (`crate::ui::elide_middle`,
+  §22): the start *and* the extension survive, which is what tells two similar names apart —
+  a tail-clipped `report-2026-q1-fin…` and `report-2026-q1-dra…` do not. The full name is
+  always one selection away in the popup (§20).
+- **A second, muted line carries the size and the modified date** (`2026-03-20 11:46 CEST`).
+  A directory shows only the date — a directory entry's own size is not the size of its
+  contents, and printing 4096 for every folder would be noise that reads as data. Any fact
+  the `ls` fallback never learned shows as a dash, the same convention the popup uses.
+- **One zone-tagging helper, two forms.** The cell's compact `format_mtime_short` (day and
+  minute) and the popup's full form share the date computation and the zone tag (§20), so
+  the two can never disagree about the instant or the timezone.
+- **Every cell keeps a uniform height.** Band hit-testing, row-wise arrow navigation and
+  popup placement are all arithmetic over `CELL_HEIGHT` (§20, §21) — a cell that grew with
+  its content would break all three at once.
+- **The pane opens at 330 px** (`DEFAULT_HEIGHT`), tall enough for several rows of the new
+  cells. `window_size` folds the pane's reserved height into the initial window, so the
+  window opens taller with it and the terminal keeps its 40 rows rather than shrinking.
 
 ### Two sources for "which directory", last one wins
 
@@ -1077,9 +1127,15 @@ for a window resize.
   queues instead (§21).
 - **The menu opens upwards.** Same frozen-anchor construction as the tree's (§18), but
   bottom-aligned: this pane is at the bottom of the window, so a menu dropping downwards
-  would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor.
-  `ponytail:` no clamping at the right edge — the pane is full width, so a menu opened in
-  the last ~180 px can run past it. Upgrade path: pass the window width into the view.
+  would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor, and
+  the left edge is **clamped against the window width** (v2.2) — the panel is a fixed
+  `menu::WIDTH`, so once the anchor would push its right edge past the window, it is pinned
+  `MENU_INSET` in from that edge instead of spilling off. The pane is full width, so the
+  pane's width *is* the window's; the tree's menu already did this (§18), and `place_menu`
+  now does it for both of this pane's menus — the entry's and the empty-space one.
+- **Empty space has its own menu (v2.2).** A right-click that lands on no cell opens a short
+  menu of the things that are about the *directory* rather than an entry: **Upload… here**
+  (§17) and **Refresh**. It shares the chrome, the frozen anchor and the placement above.
 - **"Up" is the header's first item.** A button at the left of the toolbar browses to the
   directory above the one on show, where every file manager puts it. It goes through the
   same pane-only `browse_to` as a double-clicked folder — the console stays put — and it is
@@ -1163,6 +1219,16 @@ keyboard just landed on.
   reshuffle the cells every time the selection moved.
 - **Absent facts show as a dash** rather than vanishing. The `ls` fallback (§19) reports
   none of them, and a card that changed shape per entry would be harder to read.
+- **A copy button takes the whole card (v2.2).** The facts on it — a full name, a link
+  target, an exact byte count, an owner — are exactly what gets pasted into a shell, a ticket
+  or a message, and copying them one line at a time is six gestures for one thought. The
+  button carries the already-rendered lines (`FilesMessage::CopyDetails(String)`), joined one
+  per line: the view builds the text once, for the eye and the clipboard both, so the two can
+  never drift. It confirms with the shared toast (§10). It sits on **its own bar at the top,
+  pinned right**, rather than floating over the card — an overlay would paint across the
+  first line, and showing the full name is the whole reason the card exists; the card grows
+  by `POPUP_BUTTON_ROW` to pay for the bar. The summary card of a multiple selection (§21)
+  wears the same button, so a "12 items selected, 3 folders…" reading copies too.
 
 ### Where the details come from
 
