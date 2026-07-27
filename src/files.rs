@@ -177,6 +177,10 @@ pub enum FilesMessage {
 	/// path — like `ParentOpened`, the pane's own is the only thing it can mean, and reading
 	/// it when the press arrives keeps it from being a directory the pane has since left.
 	CopyCurrentPath,
+	/// The details popup's copy button (§20): put its whole description — every line the
+	/// card shows — onto the clipboard. Carries the already-joined text, built in the view
+	/// from the same lines it draws, so the model side does not recompute it.
+	CopyDetails(String),
 	/// Menu "Rename": turn the cell's label into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.

@@ -82,6 +82,11 @@ const POPUP_LINE: f32 = 15.0;
 const POPUP_PADDING: f32 = 6.0;
 const POPUP_CHAR: f32 = 6.6;
 const POPUP_BG: Color = Color::from_rgb8(0x1c, 0x1c, 0x1c);
+/// The copy button pinned to the popup's top-right corner (§20): the size of its glyph and
+/// the height of the bar it sits on. The bar is added to the card's computed height so a
+/// button row never eats into the lines below it.
+const POPUP_ICON_SIZE: f32 = 14.0;
+const POPUP_BUTTON_ROW: f32 = 16.0;
 
 /// The header buttons: Material Icons' `arrow_upward` (up one folder) and `content_copy`
 /// (copy the path on show), both sized to sit with the header text rather than with the
@@ -333,6 +338,29 @@ fn copy_path_button(enabled: bool) -> Element<'static, Message> {
 	.into()
 }
 
+/// The details popup's copy button (§20): copies the card's whole description in one press.
+/// `'static` because it owns everything it needs — the joined `description` moves into its
+/// message, and the glyph and styling are constants — so it outlives the borrow of `files`
+/// the surrounding popup holds.
+fn copy_details_button(description: String) -> Element<'static, Message> {
+	button(
+		text(COPY_GLYPH.to_string())
+			.font(ICON_FONT)
+			.size(POPUP_ICON_SIZE)
+			.color(MUTED_FG),
+	)
+	.padding(Padding::from([0.0, 2.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press(Message::Files(FilesMessage::CopyDetails(description)))
+	.into()
+}
+
 /// The scrollable icon grid. `Row::wrap` flows the cells and breaks the line whenever
 /// the next one would not fit, so the column count follows the window's width without
 /// this view ever being told what that width is.
@@ -394,30 +422,42 @@ fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Elemen
 	// iced's text shaper for the real extent if that ever shows.
 	let rows: usize = lines.iter().map(|line| wrapped_rows(line)).sum();
 	let height = rows as f32 * POPUP_LINE + 2.0 * POPUP_PADDING;
-	let card = container(
-		column(lines.into_iter().map(|line| {
-			text(line)
-				.size(TEXT_SIZE - 1.0)
-				.color(FG)
-				.line_height(iced::widget::text::LineHeight::Absolute(POPUP_LINE.into()))
-				.wrapping(Wrapping::Glyph)
-				.into()
-		}))
-		.spacing(0),
-	)
-	.width(Length::Fixed(POPUP_WIDTH))
-	.height(Length::Fixed(height))
-	.padding(POPUP_PADDING)
-	.clip(true)
-	.style(|_theme| container::Style {
-		background: Some(POPUP_BG.into()),
-		border: iced::Border {
-			width: 1.0,
-			radius: 4.0.into(),
-			color: SELECTED_BG,
-		},
-		..container::Style::default()
-	});
+
+	// One press copies the whole card. The text is joined here, from the same lines drawn
+	// below, so the model never has to rebuild what the view already has (§20).
+	let description = lines.join("\n");
+	let body = column(lines.into_iter().map(|line| {
+		text(line)
+			.size(TEXT_SIZE - 1.0)
+			.color(FG)
+			.line_height(iced::widget::text::LineHeight::Absolute(POPUP_LINE.into()))
+			.wrapping(Wrapping::Glyph)
+			.into()
+	}))
+	.spacing(0);
+
+	// The copy button sits on its own bar at the top, pinned right. A dedicated row rather
+	// than an overlay so it never paints over a long name's first line — showing that name
+	// in full is the whole reason the card exists.
+	let top_bar = container(copy_details_button(description))
+		.width(Length::Fill)
+		.align_x(Horizontal::Right);
+
+	let card_height = height + POPUP_BUTTON_ROW;
+	let card = container(column![top_bar, body].spacing(0))
+		.width(Length::Fixed(POPUP_WIDTH))
+		.height(Length::Fixed(card_height))
+		.padding(POPUP_PADDING)
+		.clip(true)
+		.style(|_theme| container::Style {
+			background: Some(POPUP_BG.into()),
+			border: iced::Border {
+				width: 1.0,
+				radius: 4.0.into(),
+				color: SELECTED_BG,
+			},
+			..container::Style::default()
+		});
 
 	let columns = columns(width);
 	let cell_x = CELL_SPACING + (index % columns) as f32 * (CELL_WIDTH + CELL_SPACING);
@@ -429,7 +469,7 @@ fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Elemen
 		(cell_x - POPUP_GAP - POPUP_WIDTH).max(MENU_INSET)
 	};
 	// Kept inside the pane: a cell near the bottom would otherwise hang its card off it.
-	let top = cell_y.clamp(HEADER_HEIGHT, (files.height() - height).max(HEADER_HEIGHT));
+	let top = cell_y.clamp(HEADER_HEIGHT, (files.height() - card_height).max(HEADER_HEIGHT));
 
 	Some(
 		container(card)

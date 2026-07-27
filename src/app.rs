@@ -2010,6 +2010,11 @@ impl App {
 					return self.copy_to_clipboard(text);
 				}
 			}
+			FilesMessage::CopyDetails(text) => {
+				// Already joined in the view (§20): the popup owns the exact lines shown, so
+				// this just writes them and raises the shared confirmation toast.
+				return self.copy_to_clipboard(text);
+			}
 			FilesMessage::RenameStarted(path) => {
 				self.files.start_rename(path);
 				return iced::widget::operation::focus(ui::files::RENAME_INPUT_ID);
