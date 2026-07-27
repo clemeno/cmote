@@ -277,6 +277,12 @@ pub struct App {
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
 	snackbar: Option<Snackbar>,
+	/// The shell cwd a reconnect is waiting to settle at (§22), or `None` when not resuming.
+	/// Set on connect when a remembered terminal path is replayed as a `cd`: until the shell
+	/// announces this exact directory, the files pane is pinned to its own remembered path so
+	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
+	/// reaches it, or when the user moves the shell themselves.
+	resume_cwd: Option<String>,
 }
 
 /// A copy-confirmation toast (§10): the message it shows and when it appeared. The
@@ -657,6 +663,13 @@ impl App {
 			// Placeholder like `name`: the stored preference wins on connect, and a
 			// brand-new target takes the default `upsert_on_connect` gives it (§14).
 			show_hidden: self.explorer.show_hidden(),
+			// The pending target only carries auth into `upsert_on_connect`; the remembered
+			// session (§22) lives with the *stored* target, which the upsert leaves untouched,
+			// so these placeholders are never read.
+			terminal_path: None,
+			files_path: None,
+			explorer_width: None,
+			files_height: None,
 		});
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
@@ -812,6 +825,8 @@ impl App {
 				// secret. `upsert_on_connect` adds it (or refreshes an existing endpoint,
 				// keeping its custom name) and returns its key so we pre-select the row
 				// for when the user returns to the home list.
+				let mut resume_terminal = None;
+				let mut resume_files = None;
 				if let Some(target) = self.pending_target.take() {
 					let key = self.targets.upsert_on_connect(
 						&target.host,
@@ -820,10 +835,17 @@ impl App {
 						target.auth_kind,
 						target.key_path,
 					);
-					// Restore this target's `.*` preference before the panels list anything,
-					// so the first listing is already filtered the way the user left it (§14).
-					if let Some(saved) = self.targets.find(&key) {
-						self.explorer.set_hidden(saved.show_hidden);
+					// Restore this target's remembered session before the panels list anything
+					// (§22): the `.*` filter and panel sizes go on now, and the resume paths
+					// come back to drive the cd / pane / tree restore below. `upsert_on_connect`
+					// leaves a known endpoint's saved state untouched, so it is still here to
+					// read; taking an owned snapshot ends the borrow before the panels change.
+					if let Some(session) = self
+						.targets
+						.find(&key)
+						.map(crate::profiles::Target::session)
+					{
+						(resume_terminal, resume_files) = self.restore_session(session);
 					}
 					self.home_selected = Some(key);
 					if let Err(error) = self.targets.save() {
@@ -836,13 +858,27 @@ impl App {
 				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
 				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
-				// Open the tree and the files pane at the root, so both have something in
-				// them before the shell has said anything (§18, §19).
-				if let Some(path) = self.explorer.expand(explorer::ROOT, false) {
-					self.send_command(SshCommand::ListDir(path));
-				}
-				if let Some(request) = self.files.show(explorer::ROOT) {
+
+				// Resume where the last session left off (§22), falling back to the root for a
+				// first connection or a shell that never announced a cwd — the previous
+				// behaviour. The pane opens at its own remembered directory; the tree opens the
+				// chain down to it and selects it, so both panels start on the resume point.
+				let files_start = resume_files.unwrap_or_else(|| explorer::ROOT.to_owned());
+				let needed = self.explorer.reveal_if_new(&files_start);
+				self.list_dirs(needed);
+				if let Some(request) = self.files.show(&files_start) {
 					self.list_files(request);
+				}
+
+				// Replay the remembered shell directory as a `cd` so the shell itself resumes
+				// there, and pin the pane against the resulting announcements until the shell
+				// settles (§22) — otherwise its login-then-`cd` prompts would drag the pane off
+				// a *different* remembered files directory. Nothing to replay leaves the shell
+				// at its login directory, exactly as before.
+				if let Some(cwd) = resume_terminal {
+					let line = format!("cd {}\r", explorer::shell_quote(&cwd));
+					self.send_command(SshCommand::Input(line.into_bytes()));
+					self.resume_cwd = Some(cwd);
 				}
 				return fit_terminal();
 			}
@@ -860,12 +896,23 @@ impl App {
 				if let Some(cwd) = cwd {
 					let needed = self.explorer.reveal_if_new(&cwd);
 					self.list_dirs(needed);
-					// The files pane follows the shell too (§19) — but only when the shell
-					// has actually moved, so the per-prompt announcement neither re-lists
-					// the directory nor drags the pane back from wherever a tree click
-					// pointed it.
-					if let Some(request) = self.files.follow(&cwd) {
-						self.list_files(request);
+					// While a reconnect is resuming (§22) the pane is pinned to its own
+					// remembered directory: the shell's login-then-`cd` announcements must not
+					// drag it off until the shell has settled at the cwd we replayed. Once it
+					// has, seed the follow-guard — so the pane does not jump now but *does*
+					// follow the next real `cd` — and stop pinning. Off the resume path the
+					// pane follows the shell as usual (§19): only a real move re-lists.
+					match self.resume_cwd.as_deref() {
+						Some(target) if target == cwd.as_str() => {
+							self.files.set_followed(&cwd);
+							self.resume_cwd = None;
+						}
+						Some(_) => {}
+						None => {
+							if let Some(request) = self.files.follow(&cwd) {
+								self.list_files(request);
+							}
+						}
 					}
 				}
 			}
@@ -940,12 +987,17 @@ impl App {
 				self.transfer_notice = Some(message);
 			}
 			SshEvent::Disconnected => {
+				// A remote hangup ends a live session too: remember where it was (§22).
+				self.persist_session();
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
 				return self.go_home();
 			}
 			SshEvent::Error(message) => {
+				// Only saves when a shell had actually opened — an auth/handshake failure
+				// reaches here with no terminal, and `persist_session` then does nothing (§22).
+				self.persist_session();
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
@@ -994,6 +1046,8 @@ impl App {
 	/// follows just confirms what we have already done. Mirrors the passphrase-cancel
 	/// path, which also acts immediately rather than waiting.
 	fn on_disconnect_confirmed(&mut self) -> iced::Task<Message> {
+		// Save where the shell and pane were before any of it is torn down (§22).
+		self.persist_session();
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
 		self.connection = None;
@@ -1546,7 +1600,12 @@ impl App {
 		};
 		let offset = keep_visible(
 			self.explorer.scroll(),
-			ui::explorer::tree_height(self.window_size.height, self.files.reserved()),
+			ui::explorer::tree_height(
+				self.window_size.height,
+				self.files.reserved(),
+				self.files.path(),
+				self.explorer.width(),
+			),
 			index as f32 * ui::explorer::ROW_HEIGHT,
 			ui::explorer::ROW_HEIGHT,
 		);
@@ -1661,8 +1720,11 @@ impl App {
 		self.downloads.clear();
 		self.downloaded = 0;
 		self.clash = None;
-		// Every session starts with the keyboard at the shell (§20).
+		// Every session starts with the keyboard at the shell (§20), and none is mid-resume:
+		// a torn-down session has nothing to settle, and a fresh one sets this itself once it
+		// knows whether it has a shell directory to replay (§22).
 		self.focus = Focus::Terminal;
+		self.resume_cwd = None;
 		// The panels' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
 		self.explorer.reset();
@@ -1730,20 +1792,74 @@ impl App {
 		}
 	}
 
-	/// Write the `.*` toggle back to the connected target (§14). `connection` holds the
-	/// endpoint key, which is what the store is keyed by; there is nothing to remember
-	/// before a session exists, and nothing to write when the value has not moved.
-	fn remember_hidden(&mut self) {
+	/// A snapshot of this session's per-target UI state (§22): where the shell and files pane
+	/// are, the `.*` filter, and the two panel sizes. One place names everything worth
+	/// remembering — `persist_session` writes it, `restore_session` reads it back — so adding
+	/// another value is one field here (and one on `Target`). The shell cwd is `None` on a
+	/// server that announces none (§17); `set_session` treats a `None` as "leave it", so a
+	/// silent session never erases what an earlier one recorded.
+	fn capture_session(&self) -> crate::profiles::SessionState {
+		crate::profiles::SessionState {
+			terminal_path: self
+				.terminal
+				.as_ref()
+				.and_then(term::Terminal::cwd)
+				.map(str::to_owned),
+			files_path: self.files.path().map(str::to_owned),
+			show_hidden: Some(self.explorer.show_hidden()),
+			explorer_width: Some(self.explorer.width()),
+			files_height: Some(self.files.height()),
+		}
+	}
+
+	/// Fold the current session snapshot into the connected target and save (§22). Called at
+	/// every teardown of a live session — clean disconnect, remote hangup, error — and again
+	/// whenever a remembered value changes mid-session (the `.*` toggle), so a later hard exit
+	/// still keeps what was set. Guarded on a live terminal so a connect that failed before a
+	/// shell opened writes nothing: `connection` is set at dial time, so it alone would not
+	/// tell an aborted attempt from a real session. `set_session` reports whether anything
+	/// actually moved, so an unchanged snapshot skips the disk write.
+	fn persist_session(&mut self) {
+		if self.terminal.is_none() {
+			return;
+		}
 		let Some(endpoint) = self.connection.clone() else {
 			return;
 		};
-		if self
-			.targets
-			.set_show_hidden(&endpoint, self.explorer.show_hidden())
+		let session = self.capture_session();
+		if self.targets.set_session(&endpoint, session)
 			&& let Err(error) = self.targets.save()
 		{
 			eprintln!("could not save targets: {error:#}");
 		}
+	}
+
+	/// Apply a target's remembered session state to the panels before the first listing (§22):
+	/// the `.*` filter and the two panel sizes go straight onto the models, and the resume
+	/// paths (shell, pane) are handed back for the caller to drive the `cd` / pane / tree
+	/// restore — coordination that belongs in `update`, not here. Each size is clamped to the
+	/// same window fraction a splitter drag is, and applied only once the window size is known,
+	/// so a restore before the first resize event cannot shrink a panel to its minimum.
+	fn restore_session(
+		&mut self,
+		session: crate::profiles::SessionState,
+	) -> (Option<String>, Option<String>) {
+		if let Some(show_hidden) = session.show_hidden {
+			self.explorer.set_hidden(show_hidden);
+		}
+		if let Some(width) = session.explorer_width
+			&& self.window_size.width > 1.0
+		{
+			self.explorer
+				.set_width(width, self.window_size.width * MAX_PANEL_FRACTION);
+		}
+		if let Some(height) = session.files_height
+			&& self.window_size.height > 1.0
+		{
+			self.files
+				.set_height(height, self.window_size.height * MAX_PANEL_FRACTION);
+		}
+		(session.terminal_path, session.files_path)
 	}
 
 	/// Handle one event from the remote folder tree (§18). The model decides what the
@@ -1764,7 +1880,9 @@ impl App {
 			}
 			ExplorerMessage::HiddenToggled => {
 				self.explorer.toggle_hidden();
-				self.remember_hidden();
+				// Persist the flip now (§14, §22): the toggle folds into the same per-target
+				// snapshot as the paths and panel sizes, so it survives even a later hard exit.
+				self.persist_session();
 			}
 			ExplorerMessage::PanelPressed => self.focus_pane(Focus::Tree),
 			ExplorerMessage::Scrolled(offset) => self.explorer.set_scroll(offset),
@@ -1801,6 +1919,9 @@ impl App {
 			}
 			ExplorerMessage::Cd(path) => {
 				self.explorer.close_menu();
+				// An explicit move ends any reconnect resume (§22), so the pane follows this
+				// `cd` rather than staying pinned to its resumed directory.
+				self.resume_cwd = None;
 				// Typed into the shell exactly as the user would type it, quoted so a
 				// folder name carrying a quote stays one argument (§18). `ponytail:` a
 				// POSIX shell is assumed, and if a full-screen program (vim, less) is
@@ -1865,6 +1986,10 @@ impl App {
 	/// window rather than three. The pane is retargeted right away instead of waiting for
 	/// the next prompt.
 	fn enter_dir(&mut self, path: &str) {
+		// An explicit move ends any reconnect resume (§22): the pane is being pointed by the
+		// user now, so the pin that was holding it against the shell's resume announcements
+		// has done its job and must not block the follow of this or later moves.
+		self.resume_cwd = None;
 		let line = format!("cd {}\n", explorer::shell_quote(path));
 		self.send_command(SshCommand::Input(line.into_bytes()));
 		if let Some(request) = self.files.show(path) {
@@ -2445,6 +2570,78 @@ mod tests {
 		// A row taller than the window is shown from its top rather than its bottom.
 		assert_eq!(keep_visible(0.0, 30.0, 10.0, 50.0), 10.0);
 		assert_eq!(keep_visible(0.0, 30.0, 0.0, 50.0), 0.0);
+	}
+
+	/// A reconnect resumes the shell and the pane where the last session left them (§22), and
+	/// — crucially — the pane stays on its OWN remembered directory through the shell's
+	/// login-then-`cd` announcements, following the shell again only once it has settled. This
+	/// walks that whole lifecycle through `on_ssh_event`, the one path that wires the pin.
+	#[test]
+	fn a_reconnect_resumes_both_paths_and_pins_the_pane_until_the_shell_settles() {
+		use crate::ui::connect::AuthKind;
+
+		// A command channel so `send_command` (the `cd` and the listings) succeeds rather
+		// than tripping the "worker not ready" error; the receiver is kept alive so the
+		// channel stays open.
+		let (tx, _rx) = mpsc::channel(64);
+		let mut app = App {
+			command_tx: Some(tx),
+			..App::default()
+		};
+
+		// A target connected to before, remembered at a shell directory and a *different*
+		// pane directory — the divergent case a tree-click peek leaves behind.
+		app.targets
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+		app.targets.set_session(
+			"u@h:22",
+			crate::profiles::SessionState {
+				terminal_path: Some("/var/log".to_owned()),
+				files_path: Some("/etc".to_owned()),
+				..crate::profiles::SessionState::default()
+			},
+		);
+		app.connection = Some("u@h:22".to_owned());
+		app.pending_target = Some(app.targets.find("u@h:22").unwrap().clone());
+
+		// One OSC 7 cwd announcement, as the shell emits on each prompt (§17).
+		let announce =
+			|dir: &str| SshEvent::Output(format!("\x1b]7;file://host{dir}\x07").into_bytes());
+
+		// Connect: the pane opens at its remembered directory, and the shell is set to resume
+		// at its own — so the pane is pinned to `/etc` until the shell reaches `/var/log`.
+		let _ = app.on_ssh_event(SshEvent::Connected);
+		assert!(matches!(app.screen, Screen::Terminal));
+		assert_eq!(app.files.path(), Some("/etc"));
+		assert_eq!(app.resume_cwd.as_deref(), Some("/var/log"));
+
+		// The login prompt announces the login directory first. The pane must NOT follow it
+		// off `/etc` while the resume is still pending.
+		let _ = app.on_ssh_event(announce("/home/u"));
+		assert_eq!(
+			app.files.path(),
+			Some("/etc"),
+			"pinned through the login prompt"
+		);
+		assert_eq!(
+			app.resume_cwd.as_deref(),
+			Some("/var/log"),
+			"still settling"
+		);
+
+		// The replayed `cd` lands: the shell has settled, so the pin lifts — but the pane is
+		// left where the restore put it rather than dragged onto the shell's cwd.
+		let _ = app.on_ssh_event(announce("/var/log"));
+		assert_eq!(app.files.path(), Some("/etc"), "kept, not clobbered");
+		assert_eq!(app.resume_cwd, None, "no longer pinned");
+
+		// A real move afterwards follows normally: the pane tracks the shell again.
+		let _ = app.on_ssh_event(announce("/var/log/nginx"));
+		assert_eq!(
+			app.files.path(),
+			Some("/var/log/nginx"),
+			"following resumed"
+		);
 	}
 
 	/// Shift+click and Shift+arrow through the app's own handlers (§21) — the model's rules

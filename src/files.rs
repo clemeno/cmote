@@ -695,6 +695,15 @@ impl Files {
 		self.show(cwd)
 	}
 
+	/// Seed the shell-follow guard without moving the pane (§22). Used on reconnect: the
+	/// pane is pointed at its own remembered directory, and once the shell has settled at the
+	/// cwd we replayed with a `cd`, this marks that cwd as "already followed" — so it does not
+	/// drag the pane off a *different* remembered files directory now, yet the next real `cd`
+	/// (a move to somewhere else) still counts as a move and is followed.
+	pub fn set_followed(&mut self, cwd: &str) {
+		self.followed = Some(cwd.to_owned());
+	}
+
 	/// Re-list the directory on show (the Refresh item, and what a rename triggers).
 	/// `None` when no directory has been shown yet.
 	pub fn refresh(&mut self) -> Option<u64> {

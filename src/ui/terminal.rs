@@ -250,7 +250,7 @@ pub fn view<'a>(
 		iced::widget::row![
 			interactive_grid,
 			crate::ui::explorer::splitter(),
-			crate::ui::explorer::panel(explorer, focus == crate::app::Focus::Tree),
+			crate::ui::explorer::panel(explorer, files.path(), focus == crate::app::Focus::Tree),
 		]
 		.spacing(0)
 		.width(Length::Fill)

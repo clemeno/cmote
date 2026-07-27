@@ -13,6 +13,7 @@
 // the system light/dark preference (the trap §14 documents).
 
 use iced::alignment::Vertical;
+use iced::widget::text::Wrapping;
 use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, text, text_input};
 use iced::{Border, Color, Element, Length, Padding};
 
@@ -49,8 +50,20 @@ pub(crate) const FOCUS_FG: Color = Color::from_rgb8(0x5a, 0x8a, 0xd0);
 /// keyboard's scroll-into-view (§20).
 pub(crate) const TEXT_SIZE: f32 = 13.0;
 pub const ROW_HEIGHT: f32 = 22.0;
-const HEADER_HEIGHT: f32 = 28.0;
 const INDENT: f32 = 12.0;
+
+/// The header's padding and the height of one wrapped line of the path (§22). The path can
+/// be any length, so the header is no longer a fixed height — it grows a line at a time as
+/// the path wraps. At a single line it still comes to the tree row's own height, so a short
+/// path lines the two panels' headers up as before.
+const HEADER_PAD_V: f32 = 6.0;
+const HEADER_PAD_H: f32 = 8.0;
+const PATH_LINE_HEIGHT: f32 = 16.0;
+/// The room the `.*` toggle takes along the header's first line, and an average glyph advance
+/// at `TEXT_SIZE`. Both feed only the wrapped-line ESTIMATE `header_height` makes for the
+/// scroll math, so a rough proportional-font guess is all they need to be.
+const TOGGLE_WIDTH: f32 = 44.0;
+const AVG_CHAR_WIDTH: f32 = 6.5;
 /// The notice line's height, fixed so both panels can subtract it from their scrollable
 /// area exactly rather than guessing at a padded line of text (§20).
 pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
@@ -68,9 +81,15 @@ pub(crate) const MENU_INSET: f32 = 8.0;
 /// right-press carries no coordinates of its own — the same trick the terminal grid uses
 /// to place its own menu (§10). The rows inside handle their own presses, so this only
 /// picks up the moves they ignore.
-/// `focused` draws the ring that says the keyboard is here (§20).
-pub fn panel(explorer: &Explorer, focused: bool) -> Element<'_, Message> {
-	let mut content = column![header(explorer), tree(explorer)].spacing(0);
+/// `focused` draws the ring that says the keyboard is here (§20). `path` is the files
+/// view's directory (`Files::path`), shown in the header so this panel names the same
+/// location as the pane beneath it (§22).
+pub fn panel<'a>(
+	explorer: &'a Explorer,
+	path: Option<&str>,
+	focused: bool,
+) -> Element<'a, Message> {
+	let mut content = column![header(explorer, path), tree(explorer)].spacing(0);
 	if let Some(notice) = explorer.notice() {
 		content = content.push(
 			container(text(notice.to_owned()).size(TEXT_SIZE).color(NOTICE_FG))
@@ -118,9 +137,29 @@ pub(crate) fn focus_border(focused: bool) -> Border {
 /// `ponytail:` the notice line, when one is showing, is not subtracted — the estimate is
 /// then one line generous and the tree scrolls very slightly further than it had to. The
 /// pane's own `grid_height` is exact because it owns its height; this one is derived.
-pub fn tree_height(window_height: f32, files_reserved: f32) -> f32 {
-	(window_height - crate::ui::terminal::STATUS_BAR_HEIGHT - files_reserved - HEADER_HEIGHT)
-		.max(0.0)
+pub fn tree_height(window_height: f32, files_reserved: f32, path: Option<&str>, width: f32) -> f32 {
+	(window_height
+		- crate::ui::terminal::STATUS_BAR_HEIGHT
+		- files_reserved
+		- header_height(path, width))
+	.max(0.0)
+}
+
+/// Roughly how tall the header is for `path` in a panel `width` wide (§20, §22). The path
+/// wraps across as many lines as it needs, so the header is not a fixed height any more:
+/// this estimates its wrapped line count from the usable width and an average glyph advance,
+/// and `tree_height` subtracts the result.
+///
+/// `ponytail:` the average-advance guess makes this approximate for a proportional font — a
+/// very long path may make the tree scroll a line or two more than it strictly must, the
+/// same tolerance the notice line already carries. The *layout* never clips regardless: the
+/// header itself is `Shrink`, so it always grows to fit the real wrapped text.
+pub fn header_height(path: Option<&str>, width: f32) -> f32 {
+	let usable = (width - TOGGLE_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
+	let per_line = (usable / AVG_CHAR_WIDTH).floor().max(1.0);
+	let chars = path.map_or(0, |path| path.chars().count()) as f32;
+	let lines = (chars / per_line).ceil().max(1.0);
+	2.0 * HEADER_PAD_V + lines * PATH_LINE_HEIGHT
 }
 
 /// The dot-entry toggle, shared by this panel's header and the files pane's (§19) —
@@ -148,22 +187,32 @@ pub(crate) fn hidden_toggle(shown: bool) -> Element<'static, Message> {
 		.into()
 }
 
-/// The panel header: a label and the dot-folder toggle.
-fn header(explorer: &Explorer) -> Element<'_, Message> {
+/// The panel header: the current directory (§22), wrapped across as many lines as it needs
+/// so the whole path stays legible in this narrow column, with the dot-folder toggle pinned
+/// to its top-right. `path` is the files view's directory, passed in so the two views name
+/// the SAME location — the tree can be scrolled or its selection can sit elsewhere, but this
+/// header tracks the pane beneath it. Empty before the first listing, like the pane's own.
+fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> {
+	let path = path.unwrap_or("no directory yet").to_owned();
 	container(
 		row![
-			text("Remote folders")
+			text(path)
 				.size(TEXT_SIZE)
-				.color(MUTED_FG)
-				.width(Length::Fill),
+				.color(FG)
+				.width(Length::Fill)
+				// Break inside a long run too: a path is mostly one unbroken string with no
+				// spaces to wrap at, so word-wrapping alone would just overflow the column.
+				.wrapping(Wrapping::WordOrGlyph),
 			hidden_toggle(explorer.show_hidden()),
 		]
-		.align_y(Vertical::Center),
+		.spacing(6)
+		// The toggle sits with the path's first line; the wrapped continuation lines fall
+		// below it, so both align to the top rather than to a growing block's centre.
+		.align_y(Vertical::Top),
 	)
 	.width(Length::Fill)
-	.height(Length::Fixed(HEADER_HEIGHT))
-	.align_y(Vertical::Center)
-	.padding(Padding::from([0.0, 8.0]))
+	.height(Length::Shrink)
+	.padding(Padding::from([HEADER_PAD_V, HEADER_PAD_H]))
 	.style(|_theme| container::Style {
 		background: Some(HEADER_BG.into()),
 		..container::Style::default()

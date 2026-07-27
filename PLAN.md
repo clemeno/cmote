@@ -1223,3 +1223,62 @@ does when an action has nine targets instead of one.
   folders and files, and what the files come to. A folder's size is the size of its
   directory entry rather than of its contents, so it is left out of the total instead of
   making it wrong.
+
+## 22. Resuming where you left off (v2.2)
+
+A reconnect to a saved target used to drop you at the shell's login directory with both
+panels at the root. This section remembers where the last session was — the shell and the
+files pane, each on its own — and puts you back there, and gives the folder tree a path
+header so both panels name the same place.
+
+### One snapshot, remembered per target
+
+- **`SessionState` is the one place that names what persists per target** (§14): the two
+  paths (`terminal_path`, `files_path`), the `.*` filter, and the two panel sizes
+  (`explorer_width`, `files_height`). It is a transfer struct; `Target` keeps the fields flat
+  (so the JSON stays flat and a pre-v2.2 `targets.json` loads unchanged), all optional and
+  omitted when absent. Profile metadata, never a secret — §12 is untouched. Adding another
+  remembered value is one field on `SessionState` and `Target`, one line each in capture /
+  restore / `set_session`.
+- **`App::capture_session` reads the snapshot, `persist_session` folds it in and saves.** It
+  runs at every teardown of a *live* session — clean Disconnect, remote hangup, error — and
+  again the moment a value changes mid-session (the `.*` toggle), so a later hard exit still
+  keeps what was set. Guarded on a live terminal, so a connect that fails before a shell
+  opens writes nothing.
+- **A `None` never wipes a good value.** `Targets::set_session` treats each `None` field as
+  "leave it": a shell that announced no cwd this session (§17) must not erase a resume point
+  an earlier session recorded.
+- **Not the shell's `Cwd` scanner.** The terminal path is *sourced* from `term::cwd::Cwd`
+  (the OSC scanner, §17), but the pane path and panel sizes are GUI state the app owns — they
+  never appear in the byte stream, so the scanner stays a scanner and the snapshot lives with
+  the target.
+
+### Putting you back
+
+- **`App::restore_session` applies the snapshot before the first listing**: the `.*` filter
+  and the two panel sizes go straight onto the panels (a size clamped to the same window
+  fraction a splitter drag is, and only once the window size is known), and the two resume
+  paths come back for the caller to drive the rest.
+- **The pane reopens at `files_path`** (root as the fallback) and the tree reveals the
+  chain down to it, so both panels start on the resume point.
+- **The shell is resumed with a `cd`** typed in exactly as the tree's "Open in terminal"
+  does (§18) — quoted, POSIX-assumed, visible in the scrollback. Nothing to replay leaves
+  the shell at its login directory, the previous behaviour.
+- **The pane is pinned while the shell settles.** The shell announces its login directory
+  *before* the replayed `cd` runs, so without a guard that announcement would drag the pane
+  off a divergent `files_path`. `App::resume_cwd` holds the cwd we are waiting for: until the
+  shell reaches it, `SshEvent::Output` does not let the pane follow; once it does, the
+  follow-guard is seeded (so the pane stays put now but follows the next real `cd`) and the
+  pin lifts. An explicit move by the user lifts it early.
+
+### The folder tree shows the path too
+
+- **The tree panel's header now shows the current directory**, the same `Files::path` the
+  files pane shows — the two views are synchronised, even though the tree's selection can
+  sit elsewhere.
+- **It wraps across as many lines as the path needs**, because the panel is narrow and a
+  deep path would otherwise overflow. The header is `Shrink`, so it always grows to fit and
+  never clips; `ponytail:` the keyboard scroll-into-view math subtracts an *estimated*
+  header height (`header_height`), a rough proportional-font guess, so a very long path may
+  scroll the tree a line or two more than strictly needed — the same tolerance the notice
+  line already carries.

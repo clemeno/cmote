@@ -25,7 +25,9 @@ use crate::ui::connect::AuthKind;
 /// One saved connection target — profile metadata only, no secret material (§12).
 /// `name` is a free display label (defaults to the endpoint, renamed by the user);
 /// the rest is exactly what the connect form needs to be pre-filled.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `Eq` is deliberately not derived: the panel sizes are `f32`, which is `PartialEq` but not
+// `Eq` (NaN). `PartialEq` is all the tests and the change-detection in `set_session` need.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Target {
 	/// The display label shown in the home list and used for the alphabetical sort.
 	pub name: String,
@@ -44,6 +46,43 @@ pub struct Target {
 	/// remembered here rather than globally.
 	#[serde(default = "shown_by_default")]
 	pub show_hidden: bool,
+	/// Where the remote shell's working directory was when the session last ended (§22),
+	/// replayed as a `cd` on the next connection so the shell resumes where it was. Absent
+	/// until a session that actually announced a cwd has ended (a shell that emits no OSC
+	/// directory sequence never fills it), and a plain resume point — not a secret — so it
+	/// rides here beside `show_hidden`. Omitted from the JSON when `None`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub terminal_path: Option<String>,
+	/// Where the files pane was pointed when the session last ended (§22), reopened in the
+	/// pane on the next connection. Kept apart from `terminal_path` because a tree click can
+	/// point the pane somewhere the shell is not, so the two can legitimately differ.
+	/// Omitted from the JSON when `None`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub files_path: Option<String>,
+	/// The explorer panel's width and the files pane's height when the session last ended
+	/// (§22), so the layout reopens as it was left. Absent until a session has closed;
+	/// omitted from the JSON when `None`, so the panels then take their built-in defaults.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub explorer_width: Option<f32>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub files_height: Option<f32>,
+}
+
+/// The slice of a target's state that one session updates and the next restores (§22): where
+/// the shell and files pane were, the `.*` filter, and the two panel sizes. A transfer
+/// struct, not stored directly — `Target` keeps these as flat fields (so the JSON stays flat
+/// and older files still load), and this is what `capture` fills, `restore` reads and
+/// `set_session` writes. Every field is optional and means "leave what is stored" when
+/// `None`, so a value a session could not determine (a shell that announced no cwd) never
+/// erases a good one an earlier session recorded. Adding another remembered value is one
+/// field here, one on `Target`, and one line each in capture / restore / `set_session`.
+#[derive(Debug, Default, Clone)]
+pub struct SessionState {
+	pub terminal_path: Option<String>,
+	pub files_path: Option<String>,
+	pub show_hidden: Option<bool>,
+	pub explorer_width: Option<f32>,
+	pub files_height: Option<f32>,
 }
 
 /// Serde default for `show_hidden` — matches the panels' own default (shown), so a
@@ -59,6 +98,19 @@ impl Target {
 	/// changes under a rename (which only touches `name`).
 	pub fn endpoint(&self) -> String {
 		endpoint_of(&self.user, &self.host, self.port)
+	}
+
+	/// This target's remembered session state (§22), read out for the next connection to
+	/// restore. `show_hidden` is always known (it is a plain flag), so it comes back as
+	/// `Some`; the rest are as absent or present as they were stored.
+	pub fn session(&self) -> SessionState {
+		SessionState {
+			terminal_path: self.terminal_path.clone(),
+			files_path: self.files_path.clone(),
+			show_hidden: Some(self.show_hidden),
+			explorer_width: self.explorer_width,
+			files_height: self.files_height,
+		}
 	}
 }
 
@@ -120,6 +172,13 @@ impl Targets {
 					auth_kind,
 					key_path,
 					show_hidden: shown_by_default(),
+					// A brand-new target has no session behind it yet, so there is nowhere to
+					// resume to — the first connect uses the fallbacks (root / login dir, and
+					// the panels' default sizes).
+					terminal_path: None,
+					files_path: None,
+					explorer_width: None,
+					files_height: None,
 				});
 			}
 		}
@@ -147,18 +206,48 @@ impl Targets {
 		true
 	}
 
-	/// Remember whether this target's panels list dot-prefixed entries (§18, §19).
-	/// Returns whether anything changed, so the caller only rewrites the file when the
-	/// preference actually moved — the toggle is cheap, the disk write need not be.
-	pub fn set_show_hidden(&mut self, endpoint: &str, show_hidden: bool) -> bool {
+	/// Fold a session's snapshot into the stored target (§22) — the write side of
+	/// `Target::session`, and the one place every remembered per-target value lands. Each
+	/// `Some` field overwrites, each `None` leaves the stored value alone, so a snapshot that
+	/// could not determine a value (a shell that announced no cwd) preserves whatever an
+	/// earlier session wrote rather than clearing it. Returns whether anything actually moved,
+	/// so the caller only rewrites the file when it did.
+	pub fn set_session(&mut self, endpoint: &str, session: SessionState) -> bool {
 		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
 			return false;
 		};
-		if target.show_hidden == show_hidden {
-			return false;
+		let mut changed = false;
+		if let Some(path) = session.terminal_path
+			&& target.terminal_path.as_deref() != Some(path.as_str())
+		{
+			target.terminal_path = Some(path);
+			changed = true;
 		}
-		target.show_hidden = show_hidden;
-		true
+		if let Some(path) = session.files_path
+			&& target.files_path.as_deref() != Some(path.as_str())
+		{
+			target.files_path = Some(path);
+			changed = true;
+		}
+		if let Some(show_hidden) = session.show_hidden
+			&& target.show_hidden != show_hidden
+		{
+			target.show_hidden = show_hidden;
+			changed = true;
+		}
+		if let Some(width) = session.explorer_width
+			&& target.explorer_width != Some(width)
+		{
+			target.explorer_width = Some(width);
+			changed = true;
+		}
+		if let Some(height) = session.files_height
+			&& target.files_height != Some(height)
+		{
+			target.files_height = Some(height);
+			changed = true;
+		}
+		changed
 	}
 
 	/// Remove the target with this endpoint key. Returns whether one was removed.
@@ -255,6 +344,19 @@ mod tests {
 			auth_kind: AuthKind::Password,
 			key_path: None,
 			show_hidden: true,
+			terminal_path: None,
+			files_path: None,
+			explorer_width: None,
+			files_height: None,
+		}
+	}
+
+	// A snapshot carrying just the two paths, the common capture.
+	fn paths(terminal: &str, files: &str) -> SessionState {
+		SessionState {
+			terminal_path: Some(terminal.to_owned()),
+			files_path: Some(files.to_owned()),
+			..SessionState::default()
 		}
 	}
 
@@ -364,21 +466,112 @@ mod tests {
 	}
 
 	#[test]
+	fn the_resume_paths_are_remembered_and_never_wiped_by_a_silent_session() {
+		// Arrange: one target, no session behind it yet.
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+
+		// A session ends knowing both where the shell and the pane were.
+		assert!(targets.set_session("u@h:1", paths("/var/log", "/etc")));
+		let target = targets.find("u@h:1").unwrap();
+		assert_eq!(target.terminal_path.as_deref(), Some("/var/log"));
+		assert_eq!(target.files_path.as_deref(), Some("/etc"));
+
+		// A later session whose shell never announced a cwd (`None`) moves only the pane —
+		// the known-good terminal path must survive rather than be cleared.
+		let only_pane = SessionState {
+			files_path: Some("/tmp".to_owned()),
+			..SessionState::default()
+		};
+		assert!(targets.set_session("u@h:1", only_pane.clone()));
+		let target = targets.find("u@h:1").unwrap();
+		assert_eq!(
+			target.terminal_path.as_deref(),
+			Some("/var/log"),
+			"kept, not wiped"
+		);
+		assert_eq!(target.files_path.as_deref(), Some("/tmp"));
+
+		// Setting the same values again reports "nothing changed" so the caller skips the
+		// write, and an unknown endpoint is simply ignored.
+		assert!(!targets.set_session("u@h:1", only_pane));
+		assert!(!targets.set_session("nobody@nowhere:22", paths("/", "/")));
+	}
+
+	#[test]
+	fn a_targets_file_without_the_session_fields_round_trips() {
+		// A store written before the resume fields existed must load (all absent) and keep
+		// working — the round trip is what proves the serde defaults hold.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None);
+		targets.set_session(
+			"root@example.com:22",
+			SessionState {
+				terminal_path: Some("/srv".to_owned()),
+				files_path: Some("/srv/www".to_owned()),
+				explorer_width: Some(320.0),
+				files_height: Some(260.0),
+				..SessionState::default()
+			},
+		);
+
+		targets.save_to(&path).expect("save");
+		let loaded = Targets::load_from(&path);
+		assert_eq!(loaded.items(), targets.items());
+		let target = &loaded.items()[0];
+		assert_eq!(target.terminal_path.as_deref(), Some("/srv"));
+		assert_eq!(target.files_path.as_deref(), Some("/srv/www"));
+		assert_eq!(target.explorer_width, Some(320.0));
+		assert_eq!(target.files_height, Some(260.0));
+	}
+
+	#[test]
+	fn a_whole_snapshot_writes_and_reads_back_through_session() {
+		// The full snapshot round-trips through `set_session` and back out of `session`.
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.set_session(
+			"u@h:1",
+			SessionState {
+				terminal_path: Some("/opt".to_owned()),
+				files_path: Some("/opt/app".to_owned()),
+				show_hidden: Some(false),
+				explorer_width: Some(300.0),
+				files_height: Some(240.0),
+			},
+		);
+		let session = targets.find("u@h:1").unwrap().session();
+		assert_eq!(session.terminal_path.as_deref(), Some("/opt"));
+		assert_eq!(session.files_path.as_deref(), Some("/opt/app"));
+		assert_eq!(session.show_hidden, Some(false));
+		assert_eq!(session.explorer_width, Some(300.0));
+		assert_eq!(session.files_height, Some(240.0));
+
+		// An all-`None` snapshot changes nothing and skips the write.
+		assert!(!targets.set_session("u@h:1", SessionState::default()));
+	}
+
+	#[test]
 	fn the_hidden_toggle_is_remembered_per_target() {
 		// Arrange: two targets, both starting from the default (shown).
 		let mut targets = Targets::default();
 		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
 		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None);
 
-		// Act: hide dotfiles on the first one only.
-		assert!(targets.set_show_hidden("u@h:1", false));
+		// Act: hide dotfiles on the first one only, through the one snapshot setter.
+		let hide = SessionState {
+			show_hidden: Some(false),
+			..SessionState::default()
+		};
+		assert!(targets.set_session("u@h:1", hide.clone()));
 
 		// Assert: it stuck, its neighbour is untouched, and setting the same value again
 		// reports "nothing changed" so the caller skips the write.
 		assert!(!targets.find("u@h:1").unwrap().show_hidden);
 		assert!(targets.find("u@h:2").unwrap().show_hidden);
-		assert!(!targets.set_show_hidden("u@h:1", false));
-		assert!(!targets.set_show_hidden("nobody@nowhere:22", false));
+		assert!(!targets.set_session("u@h:1", hide));
 	}
 
 	#[test]

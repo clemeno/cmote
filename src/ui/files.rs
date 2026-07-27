@@ -469,7 +469,10 @@ fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Elemen
 		(cell_x - POPUP_GAP - POPUP_WIDTH).max(MENU_INSET)
 	};
 	// Kept inside the pane: a cell near the bottom would otherwise hang its card off it.
-	let top = cell_y.clamp(HEADER_HEIGHT, (files.height() - card_height).max(HEADER_HEIGHT));
+	let top = cell_y.clamp(
+		HEADER_HEIGHT,
+		(files.height() - card_height).max(HEADER_HEIGHT),
+	);
 
 	Some(
 		container(card)
