@@ -83,10 +83,12 @@ const POPUP_PADDING: f32 = 6.0;
 const POPUP_CHAR: f32 = 6.6;
 const POPUP_BG: Color = Color::from_rgb8(0x1c, 0x1c, 0x1c);
 
-/// The "up one folder" button in the header: Material Icons' `arrow_upward`, sized to sit
-/// with the header text rather than with the grid's icons.
+/// The header buttons: Material Icons' `arrow_upward` (up one folder) and `content_copy`
+/// (copy the path on show), both sized to sit with the header text rather than with the
+/// grid's icons.
 const UP_GLYPH: char = '\u{e5d8}';
-const UP_ICON_SIZE: f32 = 16.0;
+const COPY_GLYPH: char = '\u{e14d}';
+const HEADER_ICON_SIZE: f32 = 16.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark panel, distinct
 /// enough that a directory of mixed content is scannable.
@@ -263,6 +265,7 @@ fn header(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 		row![
 			up_button(files.path().and_then(explorer::parent).is_some()),
 			text(path).size(TEXT_SIZE).color(FG),
+			copy_path_button(files.path().is_some()),
 			text(status)
 				.size(TEXT_SIZE)
 				.color(MUTED_FG)
@@ -292,7 +295,7 @@ fn up_button(enabled: bool) -> Element<'static, Message> {
 	button(
 		text(UP_GLYPH.to_string())
 			.font(ICON_FONT)
-			.size(UP_ICON_SIZE)
+			.size(HEADER_ICON_SIZE)
 			.color(if enabled { FG } else { MUTED_FG }),
 	)
 	.padding(Padding::from([0.0, 4.0]))
@@ -304,6 +307,29 @@ fn up_button(enabled: bool) -> Element<'static, Message> {
 		..button::Style::default()
 	})
 	.on_press_maybe(enabled.then_some(Message::Files(FilesMessage::ParentOpened)))
+	.into()
+}
+
+/// The header's "copy path" button, sitting right after the directory it copies. Styled
+/// like the up button beside it so the two read as one toolbar; `on_press_maybe(None)`
+/// dims and deadens it before the first listing, when there is no path to put on the
+/// clipboard.
+fn copy_path_button(enabled: bool) -> Element<'static, Message> {
+	button(
+		text(COPY_GLYPH.to_string())
+			.font(ICON_FONT)
+			.size(HEADER_ICON_SIZE)
+			.color(if enabled { FG } else { MUTED_FG }),
+	)
+	.padding(Padding::from([0.0, 4.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press_maybe(enabled.then_some(Message::Files(FilesMessage::CopyCurrentPath)))
 	.into()
 }
 

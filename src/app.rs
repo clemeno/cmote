@@ -1956,6 +1956,13 @@ impl App {
 				self.files.close_menu();
 				return iced::clipboard::write(join_lines(self.action_targets(&path)));
 			}
+			FilesMessage::CopyCurrentPath => {
+				// The header path, not a selection: copy the one directory verbatim, with no
+				// `action_targets` detour and no line-joining — there is only ever the one.
+				if let Some(path) = self.files.path() {
+					return iced::clipboard::write(path.to_owned());
+				}
+			}
 			FilesMessage::RenameStarted(path) => {
 				self.files.start_rename(path);
 				return iced::widget::operation::focus(ui::files::RENAME_INPUT_ID);

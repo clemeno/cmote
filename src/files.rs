@@ -173,6 +173,10 @@ pub enum FilesMessage {
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),
+	/// The header's copy button: put the directory on show onto the clipboard. Carries no
+	/// path — like `ParentOpened`, the pane's own is the only thing it can mean, and reading
+	/// it when the press arrives keeps it from being a directory the pane has since left.
+	CopyCurrentPath,
 	/// Menu "Rename": turn the cell's label into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
