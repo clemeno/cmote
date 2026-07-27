@@ -26,7 +26,7 @@ use crate::ui::connect::AuthKind;
 /// The monospace font embedded in the binary (Fira Mono, OFL 1.1 — see
 /// assets/FiraMono-LICENSE.txt). Bundling it keeps the terminal identical on
 /// every machine and gives the grid a known cell advance, which the resize math
-/// relies on (§9, §11). Registered with iced in `run` and selected by name in
+/// relies on (§9). Registered with iced in `run` and selected by name in
 /// `ui::terminal`.
 const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 
@@ -34,7 +34,7 @@ const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 /// licence, same Mozilla Fira release as `MONO_FONT`). Bundled so a cell the shell
 /// marks bold renders in a genuinely heavier face rather than the normal one:
 /// `ui::terminal` asks for `Weight::Bold`, and with only the medium weight loaded
-/// iced had no 700 face to resolve to, so bold text looked identical (§11). Every
+/// iced had no 700 face to resolve to, so bold text looked identical (§9). Every
 /// Fira Mono weight shares the exact 600/1000-em advance, so bundling bold does not
 /// disturb the fixed cell metric the resize math depends on. Both faces share the
 /// family name "Fira Mono"; iced picks the medium (500) for normal cells and the
@@ -427,6 +427,10 @@ pub enum Message {
 	GridReleased,
 	/// The right button went down on the grid — open the context menu at the pointer.
 	GridRightPressed,
+	/// A pointer event a full-screen program asked to hear about (§9), already encoded as
+	/// the report it expects. Only raised while the remote has a mouse protocol on and the
+	/// user is not holding Shift, so it never competes with the selection above.
+	MouseReport(Vec<u8>),
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
 	/// Read the system clipboard, then paste it into the shell.
@@ -594,6 +598,7 @@ impl App {
 			Message::GridPressed => self.on_grid_pressed(),
 			Message::GridReleased => self.on_grid_released(),
 			Message::GridRightPressed => self.menu = Some(self.pointer),
+			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::CopyPressed => return self.on_copy(),
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
@@ -1731,6 +1736,17 @@ impl App {
 			self.selection = Some(ui::selection::Selection::new(self.hover_cell));
 			self.selecting = true;
 		}
+	}
+
+	/// Forward a pointer report to a full-screen program that asked for the mouse (§9).
+	/// The grid widget has already decided the event is the program's — it encodes and
+	/// captures it, so nothing here competes with the local selection. A click into such a
+	/// program is still a click into the shell, so it takes the keyboard the way a click on
+	/// the grid does (§20) and dismisses any menu left open.
+	fn on_mouse_report(&mut self, bytes: Vec<u8>) {
+		self.menu = None;
+		self.focus = Focus::Terminal;
+		self.send_command(SshCommand::Input(bytes));
 	}
 
 	/// Finish a drag (§10). A press-release with no movement leaves an empty

@@ -26,7 +26,10 @@ download, §21; **v2.2.0** turns upload into a multi-file, folder-destination ba
 from four surfaces with one collision question, §17, lays the grid's cells out as rows
 carrying each entry's size and date, §19, confirms every copy with a self-dismissing toast,
 §10, and remembers per target where the shell and both panels were so a reconnect resumes
-there, §22). Both targets are supported
+there, §22; **v2.3.0** makes full-screen programs work — the cursor-move spellings the parser
+lacked are rewritten on the way in, §9, the grid became one widget that draws every cell at
+an exact pixel and every glyph the bundled font lacks itself, §11, the mouse is forwarded to
+programs that ask for it, §9, and F1-F12 are mapped, §9). Both targets are supported
 first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -48,7 +51,7 @@ This document is the reference to build against.
 | GUI | **iced 0.14** — pure-Rust, Elm architecture (state / `Message` / `update` / `view`) |
 | SSH | **russh 0.62** — pure-Rust async SSH client (no C deps → clean static build) |
 | Async runtime | **tokio** (multi-thread) on a background thread; bridged to the GUI by channels |
-| Terminal | **Full VT emulator** — `vt100` maintains the screen grid; iced renders the cells |
+| Terminal | **Full VT emulator** — `vt100` maintains the screen grid, with `term::compat` rewriting the sequences it has no arm for (§9); the grid is drawn by one custom iced widget, cell-exact (§9) |
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
@@ -103,12 +106,12 @@ Each decision below is a thing to learn from, not just a dependency.
 
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
-| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime |
+| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime. **`features = ["advanced"]`** since v2.3 — it unlocks the `Widget` trait, which the terminal grid is one of (§9) |
 | `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM; `ring` builds on both targets — prebuilt asm on Windows, via Xcode CLT `clang` on macOS) |
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `russh-sftp` | 2.3.0 | the sftp subsystem, for file upload (§17) | rides russh's `ChannelStream` — a protocol on the existing SSH stack, not a second one. Pure Rust, no C |
 | `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `fs` (streaming an upload off disk, §17), `sync`, `macros`, `time` |
-| `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io) |
+| `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io). It has no arm for a handful of standard sequences; `term::compat` rewrites those on the way in rather than forking the crate (§9) |
 | `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
@@ -191,10 +194,11 @@ cmote/
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
+    │   ├── grid.rs        the vt100 Screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
-    │   └── terminal.rs    render the vt100 Screen grid; pixel→cell resize math (§9)
+    │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
@@ -207,7 +211,10 @@ cmote/
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   ├── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
-    │   └── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
+    │   ├── compat.rs      rewrite the escape sequences vt100 has no arm for into the ones it has (§9)
+    │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
+    │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
+    │   └── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -312,24 +319,92 @@ Turning a raw byte stream into a screen.
 - **Parser**: `vt100::Parser` fed every `SshEvent::Output` chunk. It interprets ANSI
   escapes and maintains a `Screen`: a grid of cells, each with a glyph, fg/bg color,
   and attributes (bold, underline, inverse), plus cursor position.
-- **Render** (`ui/terminal.rs`): draw the `Screen` in iced using a **bundled**
-  monospace font (**Fira Mono**, embedded in the exe — OFL 1.1). Each row is a `row`
-  of **fixed-width boxes**: consecutive same-attribute *narrow* cells coalesce into one
-  box (width `n × cell`), and a *wide* cell (CJK/emoji) gets its own box **two** cells
-  across. Pinning every box to an exact multiple of the cell width keeps columns aligned
-  even when a wide glyph falls back to a system font whose advance we don't control
-  (free-flowing text would shift the rest of the line). Bundling the font (rather than
-  `Font::MONOSPACE`) makes the grid look identical on every machine and gives an
-  **exact** cell advance (600/1000 em = 0.6), which the resize math depends on. Both the
-  **Medium (500)** and **Bold (700)** weights are embedded (same Fira Mono release, same
-  OFL licence), so a bold cell resolves to a real heavier face; every weight shares the
-  0.6 advance, so bold does not disturb the cell metric. `ponytail:` a *narrow* glyph the
-  bundled font lacks can still drift within its coalesced box, but the drift is clipped
-  at the box edge and resets at the next box, so it never desyncs the whole line — a full
-  canvas / GPU atlas stays the escape hatch only if this ever matters.
+- **The sequences the parser has no arm for** (`term/compat.rs`, v2.3): ECMA-48 gives
+  several cursor movements **two spellings**, and `vt100` implements only one of each. A
+  program that picks the other has every move **silently dropped** — its output then
+  streams out as plain text, wraps at the right edge and scrolls, which looks like a
+  corrupted screen rather than a missing feature. btop is exactly that program: its
+  `Mv::to` positions every panel with `CSI y;x f`, the one spelling with no arm. So the
+  byte stream is rewritten on the way to the parser:
+
+  | dropped | rewritten to | meaning |
+  |---|---|---|
+  | `CSI y;x f` (HVP) | `CSI y;x H` (CUP) | move to row, column |
+  | ``CSI n ` `` (HPA) | `CSI n G` (CHA) | move to column |
+  | `CSI n a` (HPR) | `CSI n C` (CUF) | move right |
+  | `CSI n e` (VPR) | `CSI n B` (CUD) | move down |
+  | `CSI s` / `CSI u` | `ESC 7` / `ESC 8` | save / restore cursor |
+
+  The rewriter is a state machine, not a search over a buffer, because output arrives in
+  arbitrary chunks and a sequence can split anywhere — including between the `ESC` and the
+  `[`. It holds a sequence back until its final byte, since a rewrite can change the
+  length (`CSI s` is three bytes, `ESC 7` is two). A **private** sequence (`CSI ? … f`) or
+  one carrying an intermediate byte is never touched: those mean something else. A
+  malformed one is passed through verbatim rather than swallowed, and one longer than any
+  real sequence stops being buffered at all (§12). The alternative — vendoring a patched
+  `vt100` — is a fork to maintain for five match arms.
+- **Render** (`ui/grid.rs`, rewritten v2.3): the `Screen` is drawn by **one custom
+  widget** (`iced`'s `advanced` feature), not by a widget per cell. It paints quads and
+  text at absolute pixel positions, using a **bundled** monospace font (**Fira Mono**,
+  embedded in the exe — OFL 1.1). Bundling it (rather than `Font::MONOSPACE`) makes the
+  grid look identical on every machine and gives an **exact** cell advance (600/1000 em =
+  0.6), which the resize math depends on. Both the **Medium (500)** and **Bold (700)**
+  weights are embedded (same release, same OFL licence), so a bold cell resolves to a real
+  heavier face; every weight shares the 0.6 advance, so bold does not disturb the metric.
+  Two rules make the drawing what it is:
+  - **Every glyph starts at the exact pixel its column starts at.** A run of consecutive
+    same-styled **ASCII** cells is still drawn as one cached string — that is the common
+    case and the cheap one — but anything non-ASCII is sealed into a run of its own (a
+    *wide* CJK cell claims two columns, anything else one). A glyph the bundled font lacks
+    falls back to a system font whose advance we do not control; laid out as flowing text
+    it drags the rest of the line sideways, and the row stops lining up with the screen.
+    Sealed and positioned, a fallback glyph can only be the wrong *shape*, never in the
+    wrong *place*. Text is clipped to its **row**, not its cell, so a glyph a shade too
+    wide leans on its neighbour instead of losing a slice of itself.
+  - **What no bundled font has, we draw.** **Braille** (U+2800-U+28FF — btop's default
+    graph symbol, and absent from every monospace font we looked at, including DejaVu Sans
+    Mono, Consolas and Liberation Mono) *is* a 2x4 dot bitmap in the low byte of its code
+    point, so eight rounded quads at exact sub-cell positions render it better than any
+    font could and cost no asset. The four **rounded box corners** (U+256D-U+2570, which
+    Fira Mono lacks while having all 148 other box-drawing glyphs) are a quarter arc: a
+    circular quad whose *border* is the stroke and whose fill is transparent, clipped with
+    `with_layer` to the one quadrant the arc lives in, plus straight tails to the cell
+    edges. The radius is half the cell's short side and the centre sits that far toward
+    the corner the two lines leave by, which puts both arc ends exactly on the cell's
+    centre lines — where the `─` and `│` in the neighbouring cells run. The join is
+    seamless by construction, not by tuning.
+
+  The widget also earns its keep on cost: a truecolor full-screen program gives nearly
+  every cell its own color, so nothing coalesces and the old renderer built tens of
+  thousands of layout nodes per frame. Backgrounds are now one backdrop quad plus one per
+  non-default run, underline rules are quads, and ASCII runs skip shaping and font
+  fallback entirely (`Shaping::Basic`). It owns the pointer too (§9, the mouse): it
+  encodes and **captures** the clicks a mouse-aware program asked for, and leaves
+  everything else — including every bare move — to the selection layer above it.
+- **The mouse, for programs that ask for it** (`term/mouse.rs`, v2.3): a full-screen
+  program turns a mouse protocol on (`ESC[?1000h` and friends) and then expects every
+  click, release and — in the motion modes — every move between cells to come back as a
+  short report on the input channel. `vt100` tracks which mode and encoding was asked for
+  (`Screen::mouse_protocol_mode` / `mouse_protocol_encoding`); `term::mouse::encode` turns
+  one pointer event plus that state into the bytes. Both encodings are covered: **SGR**
+  (`ESC[<b;col;row M|m` — what everything modern asks for, no coordinate ceiling) and the
+  classic single-byte form (`ESC[M` + three bytes biased by 32, so it cannot name a cell
+  past 223 — clamped rather than wrapped), plus the UTF-8 variant in between. X10 (`?9`)
+  hears presses only and predates modifier reporting, so its reports carry no modifier
+  bits. The wheel is a button in this protocol: a scroll is a press of button 64/65 and is
+  never released. **Holding Shift takes the pointer back** — the xterm convention — so
+  text selection and cmote's own context menu are always one modifier away; a button
+  already down is the exception, since its press went to the program and its release must
+  too. The grid widget decides all this and **captures** a click it forwarded, which is
+  what stops the selection layer above from also acting on it (§11).
 - **Input**: iced keyboard events → the bytes a terminal sends (printable chars
   direct; Enter → `\r`; Ctrl-C → `0x03`; arrows/Home/End/F-keys → their escape
-  sequences). Sent as `SshCommand::Input`. The cursor and Home/End keys honour
+  sequences). Sent as `SshCommand::Input`. **F1-F12** (v2.3) follow the terminfo entry for
+  the pty we request (`xterm-256color`), which is where a remote program looks them up:
+  F1-F4 keep the VT100 keypad's **SS3** form (`ESC O P/Q/R/S`), F5 onward the CSI `~` form
+  with its historical gaps — 15, 17, 18, 19, 20, 21, 23, 24, never 16 or 22. One wrong
+  byte is a key that does nothing in every full-screen program (btop's options menu is F2,
+  midnight commander lives on F1-F10). The cursor and Home/End keys honour
   **application cursor mode** (DECCKM — read from `Screen::application_cursor()`):
   when a full-screen app such as vim/less/nano sets it (`ESC[?1h`), `term::keymap`
   emits the **SS3** form (`ESC O A`) instead of the default **CSI** form (`ESC [ A`),
@@ -358,7 +433,10 @@ Turning a raw byte stream into a screen.
   `SshCommand::Resize{cols,rows}` so the server reflows (`window_change`). A fresh shell
   fits immediately by fetching the current size once (`window::latest` → `window::size`)
   instead of waiting for the first resize event.
-- **Scrollback**: `vt100` keeps a bounded scrollback; expose it read-only in v1.
+- **Scrollback**: `vt100` can keep a bounded scrollback, but `term::SCROLLBACK` is **0** —
+  only the visible screen exists, so nothing scrolls back and the wheel does nothing
+  except in a program that asked for the mouse (§9). Raising it is a constant; a scrollbar
+  and a way to select across it are the work (§16).
 - **Security note**: rendering untrusted server bytes is safe here — the vt100 parser
   *interprets* escapes into grid state; it never executes anything. We deliberately do
   **not** honor dangerous sequences (e.g. clipboard-write OSC 52) in v1.
@@ -500,7 +578,13 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     pointer. The selection is a *local* view over rendered cells and drives copy only:
     paste always goes to the remote's stdin at its own cursor — a terminal cannot
     "replace" a selection the way an editor can — and the highlight is kept after a paste.
-    Paste wrapping/injection safety lives in `term::keymap::encode_paste` (§9).
+    Paste wrapping/injection safety lives in `term::keymap::encode_paste` (§9). Since v2.3
+    the `mouse_area` shares the pointer with the grid widget underneath it: when a remote
+    program has asked for the mouse, that widget encodes the click and **captures** the
+    event, and `mouse_area` — which skips a captured event — never sees it, so no selection
+    starts and no menu opens. **Shift** hands the pointer back to this layer. A click that
+    went to the program still moves the keyboard focus to the shell (§20) and closes any
+    open menu, exactly as a click on the grid does.
   - **Folder tree beside the grid** (done, v2.0): the right of the screen holds the remote
     folder explorer, with a draggable splitter between it and the grid and a status-bar
     button that hides it. Its width comes out of the grid's own width, so the same
@@ -626,8 +710,21 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
 - **Host key** (`ssh/hostkey.rs`): known-match → accept; unknown → prompt path;
   known-mismatch → refuse. Fingerprint formatting is stable.
 - **Terminal** (`term/`): feed byte fixtures (plain text, color SGR, cursor moves,
-  clear-screen) → assert the resulting `Screen` grid. Deterministic, no network.
-- **Input mapping**: key events → correct byte sequences (Enter, Ctrl-C, arrows).
+  clear-screen) → assert the resulting `Screen` grid. Deterministic, no network. The
+  alias rewrite (§9) is tested both ways: `term/compat.rs` on the byte stream (each
+  translation, the private and intermediate sequences that must *not* be touched, a
+  malformed one that must come back out, a sequence split across three chunks) and
+  `term/mod.rs` end to end — position with the `f` spelling, write, position again, and
+  assert each word landed in its own cell with nothing spilled on the way.
+- **Input mapping**: key events → correct byte sequences (Enter, Ctrl-C, arrows, and every
+  F1-F12 in both cursor modes). Pointer events likewise (`term/mouse.rs`): each encoding,
+  each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
+  bits X10 must not carry.
+- **Grid geometry** (`ui/grid.rs`): the run packing (a wide glyph sealed into two columns,
+  a non-ASCII one into one, runs covering every column exactly once and each starting
+  where the last ended) and the drawn glyphs' maths — a braille cell read back as its dot
+  pattern, a rounded corner's arc and tails measured against a real cell. No renderer
+  needed for either; the part that can be wrong is the arithmetic.
 - **Deferred / manual**: end-to-end connect against a local `sshd` (or a container).
   `ponytail:` no CI SSH server in v1; the manual smoke test is documented in the
   README (password + key + `.ppk` auth, TOFU first-contact, terminal I/O and resize,
@@ -763,9 +860,15 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   queues instead, §17, §21), and preserving file modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
-- **Richer terminal** — swap `vt100` for `alacritty_terminal` if we need advanced modes
-  / higher throughput; GPU-accelerated glyph rendering if scrolling lags. (Wide-char
-  cells now lay out correctly on the `vt100` grid — see the render note in §11.)
+- **Richer terminal** — *the gap `vt100` left is now papered over rather than open* (v2.3):
+  the cursor-move spellings it has no arm for are rewritten on the way in and the grid
+  draws the glyphs no bundled font carries, so a full-screen program renders (§9). What
+  the parser still does not do: **answer** a query — `CSI 6 n` (report cursor position) and
+  the other DSR/DA probes get no reply, so a program that waits on one stalls until it
+  times out; **scrollback** is off (`SCROLLBACK = 0`), so there is no scrolling back over
+  what left the screen and no wheel scrolling outside a program that asked for the mouse;
+  autowrap (`?7l`) is always on. Swapping in `alacritty_terminal` answers all three at
+  once and stays the upgrade path if the rewriter ever grows past a handful of arms.
 - **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
   selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
   Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on

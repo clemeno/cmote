@@ -10,8 +10,10 @@
 // surface (`process`, `resize`, `screen`) instead of the parser's full API, and
 // so the emulator can be swapped later without touching the GUI.
 
+pub mod compat; // rewrites escape sequences the parser lacks into the ones it has (§9)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
+pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 
 /// The pty size the client requests and the emulator starts at, before the first
 /// window measurement arrives (§9). Kept here as the single source of truth so
@@ -32,6 +34,13 @@ pub struct Terminal {
 	/// each prompt (§17). vt100 ignores those codes, so the same bytes are scanned here
 	/// before they reach the parser.
 	cwd: cwd::Cwd,
+	/// Rewrites the escape sequences vt100 has no arm for into the equivalent ones it does
+	/// (§9) — without this a program that spells its cursor moves the other way, btop
+	/// among them, has every move dropped and its output streams out as plain text.
+	compat: compat::Aliases,
+	/// The rewritten chunk, reused between calls so a busy full-screen program does not
+	/// allocate a fresh buffer for every packet of output.
+	rewritten: Vec<u8>,
 }
 
 impl Terminal {
@@ -40,6 +49,8 @@ impl Terminal {
 		Self {
 			parser: vt100::Parser::new(rows, cols, SCROLLBACK),
 			cwd: cwd::Cwd::default(),
+			compat: compat::Aliases::default(),
+			rewritten: Vec::new(),
 		}
 	}
 
@@ -47,10 +58,13 @@ impl Terminal {
 	/// sequence and glyph in `bytes` to the grid; partial sequences split across
 	/// chunks are buffered internally, so any chunk boundary is safe. The same bytes
 	/// also go to the cwd tracker (§17), which both tolerate being handed the other's
-	/// sequences.
+	/// sequences — the tracker reads the stream as it came off the wire, before the
+	/// alias rewrite (§9), which touches no OSC sequence anyway.
 	pub fn process(&mut self, bytes: &[u8]) {
 		self.cwd.feed(bytes);
-		self.parser.process(bytes);
+		self.rewritten.clear();
+		self.compat.rewrite(bytes, &mut self.rewritten);
+		self.parser.process(&self.rewritten);
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -79,5 +93,31 @@ impl std::fmt::Debug for Terminal {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		let (rows, cols) = self.screen().size();
 		write!(formatter, "Terminal({rows}x{cols})")
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn a_full_screen_program_lands_where_it_aims() {
+		// The btop shape: position with the `f` spelling, write, position again. Before the
+		// rewrite (§9) vt100 dropped both moves and the two words ran together on row 0,
+		// which is what wrapped and scrolled the whole screen. Each must now land in its
+		// own cell.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[3;5fleft\x1b[7;20fright");
+		let screen = terminal.screen();
+		let read = |row: u16, col: u16, len: u16| -> String {
+			(col..col + len)
+				.filter_map(|col| screen.cell(row, col))
+				.map(|cell| cell.contents())
+				.collect()
+		};
+		assert_eq!(read(2, 4, 4), "left");
+		assert_eq!(read(6, 19, 5), "right");
+		// Nothing spilled onto the first row on the way.
+		assert_eq!(read(0, 0, 10).trim(), "");
 	}
 }

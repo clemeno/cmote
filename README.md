@@ -9,8 +9,9 @@ in host / port / user, pick an auth method (password or a private key — PEM or
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
 remote filesystem beside it, a grid of the current directory's files under it (keyboard
 navigable, with a details popup and rubber-band multi-selection), the remote working
-directory in the title bar, and file transfer both ways. Reconnect to a saved target and
-the shell and both panels come back to the directories you left them in.
+directory in the title bar, and file transfer both ways. Full-screen programs — btop,
+vim, htop, midnight commander — draw properly and take the mouse. Reconnect to a saved
+target and the shell and both panels come back to the directories you left them in.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -37,9 +38,22 @@ references below (§n) point into it.
   is a hard stop, not a warning (§8).
 - A full **VT terminal** (`vt100` grid rendered by iced) that reflows to the window
   size, forwarding the new pty size to the remote (§9).
+- **Full-screen programs draw properly** — btop, htop, vim, midnight commander. The screen
+  is one widget that puts every glyph at the exact pixel its column starts at, so nothing a
+  program prints can shift the line it is on; **braille** graphs and **rounded box corners**
+  — glyphs no monospace font we could bundle actually carries — are drawn from their own
+  geometry rather than borrowed from whatever font the system offers. The escape sequences
+  `vt100` has no arm for are rewritten on the way in (a program that spells "move the cursor
+  to row 12, column 40" the other legal way used to have every move dropped, and its screen
+  came out as wrapped, scrolling gibberish). **F1-F12** are mapped as the pty's terminfo
+  entry describes them (§9).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
+- **The mouse reaches the program that asked for it** — click a process in btop, a tab in
+  tmux, a line in vim; the wheel scrolls what is under it. cmote forwards clicks, releases,
+  drags and scrolls in the xterm protocols a program enables, and **holding Shift takes the
+  pointer back** for text selection and cmote's own right-click menu (§9).
 - **Remote folder tree** — a 2D explorer of the remote filesystem to the right of the
   terminal, over **SFTP** (falling back to `ls` on a server with the subsystem disabled).
   Click a folder to expand or collapse it; the tree **follows the shell**, opening the
@@ -158,7 +172,9 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Drag across the grid | Select text (highlighted in place) |
 | Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory) |
 | **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
-| Any other key | Goes to the remote shell, arrows included (SS3 form in application-cursor mode) |
+| Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
+| **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
+| Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode) and **F1-F12** included |
 | Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
@@ -288,7 +304,15 @@ It also audits the dependency tree: `cargo audit` for RustSec advisories and
 Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
-mapping (including application-cursor-mode arrow keys, CSI vs SS3), the grid-resize
+mapping (including application-cursor-mode arrow keys, CSI vs SS3, and every F1-F12
+against the terminfo entry), the escape-sequence rewrite (each translation, the private
+and intermediate sequences that must *not* be touched, a malformed one that must come back
+out, a sequence split across three chunks, and an end-to-end check that two positioned
+writes land in their own cells), pointer-event → mouse-report encoding (each encoding, each
+mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits X10 must
+not carry), the grid's run packing and the geometry of the glyphs it draws itself (a braille
+cell read back as its dot pattern, a rounded corner's arc and tails measured against a real
+cell), the grid-resize
 math, mouse-selection geometry and text extraction (wide
 glyphs, trailing-blank trimming, multi-row joins), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
@@ -351,9 +375,9 @@ activates the focused radio or button. Expect:
 **3. Terminal behaviour.** In the shell: run `ls`, `echo hi`, an interactive program
 (`top`, then `q`), and **Ctrl-C** to interrupt. Print bold text
 (`printf '\033[1mBOLD\033[0m normal\n'`) and confirm the bold run is visibly heavier
-than the normal one (both weights are bundled — §11). Print wide glyphs over aligned
+than the normal one (both weights are bundled — §9). Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
-stays in its column — a wide glyph reserves two cells (§11). Resize the window and run
+stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.
 With **NumLock on**, type a command using the **numpad** digits (e.g. `echo 2` /
 `pm2 ls`) and confirm the digits appear; with **NumLock off**, the numpad arrows
@@ -507,10 +531,27 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
   nothing, **Skip them** leaves the local copies untouched, **Save alongside** writes
   `name-1.ext`, **Replace** overwrites. Check the results with `ls -l` locally.
 
-**12. Full-screen apps (arrow keys).** Run `vim` (or `less` on a long file). The file
-should render, and the **arrow keys** should move the cursor — this exercises
-application cursor mode (DECCKM): the app enables it and cmote switches its arrow keys
-to the SS3 form so they register. In `vim`, `:q!` to exit.
+**12. Full-screen apps.** Run `vim` (or `less` on a long file). The file should render, and
+the **arrow keys** should move the cursor — this exercises application cursor mode (DECCKM):
+the app enables it and cmote switches its arrow keys to the SS3 form so they register. In
+`vim`, `:q!` to exit. Then the harder cases:
+
+- Run **btop** (`brew install btop` on a mac remote). Every panel should sit in its own box
+  where it belongs — no line running on into the next, no frame drawn twice down the screen.
+  That is the escape-sequence rewrite: btop positions its whole UI with the one spelling the
+  parser has no arm for, and without the rewrite its output degenerates into wrapped,
+  scrolling text (§9).
+- Its **graphs** should be dot patterns, evenly spaced inside their cells, and its **box
+  corners** should be rounded and meet the straight lines cleanly. Both are drawn from
+  geometry, not shaped from a font — no monospace font we could bundle has braille at all.
+- Press **F2**: btop's options menu should open. **Esc** closes it. (F1-F12 are mapped to
+  the `xterm-256color` terminfo entry.)
+- **Click** a process row — btop selects it. **Scroll** over the process list. Drag one of
+  its sliders. Then hold **Shift** and drag across the screen: you should get cmote's own
+  text selection instead, and Shift+right-click should open cmote's menu. Release Shift and
+  the pointer belongs to btop again. Quit with `q`.
+- Run **htop** and **mc** (midnight commander) for a second opinion on both — mc lives on
+  F1-F10 and is entirely mouse-driven.
 
 **13. Copying, confirmed.** Click the copy button in the **files pane header**, then in the
 **folder-tree header**, then the one on a selected entry's **details popup**. Each should

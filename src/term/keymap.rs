@@ -203,6 +203,24 @@ fn named_bytes(named: &Named, application_cursor: bool) -> Option<Vec<u8>> {
 		Named::Delete => b"\x1b[3~",
 		Named::PageUp => b"\x1b[5~",
 		Named::PageDown => b"\x1b[6~",
+		// The function keys, exactly as the terminfo entry for the pty we asked for
+		// (`xterm-256color`) describes them — which is what a remote program looks them up
+		// in. The split is historical, not arbitrary: F1-F4 inherited the VT100 keypad's
+		// SS3 form (`kf1=\EOP`), F5 onwards are the later CSI "~" form with a gap in the
+		// numbering at 16 and 22. Getting one wrong means a dead key in every full-screen
+		// program — btop's options menu is F2, midnight commander lives on F1-F10.
+		Named::F1 => b"\x1bOP",
+		Named::F2 => b"\x1bOQ",
+		Named::F3 => b"\x1bOR",
+		Named::F4 => b"\x1bOS",
+		Named::F5 => b"\x1b[15~",
+		Named::F6 => b"\x1b[17~",
+		Named::F7 => b"\x1b[18~",
+		Named::F8 => b"\x1b[19~",
+		Named::F9 => b"\x1b[20~",
+		Named::F10 => b"\x1b[21~",
+		Named::F11 => b"\x1b[23~",
+		Named::F12 => b"\x1b[24~",
 		_ => return None,
 	};
 	Some(sequence.to_vec())
@@ -334,6 +352,39 @@ mod tests {
 			encode(&page_up, phys(Code::PageUp), None, none(), true),
 			Some(b"\x1b[5~".to_vec())
 		);
+	}
+
+	#[test]
+	fn the_function_keys_follow_the_terminfo_entry_for_our_pty() {
+		// F1-F4 are the SS3 form, F5 onwards the CSI "~" form with its historical gaps —
+		// 15,17,18,19,20,21,23,24, never 16 or 22. A remote program reads these out of
+		// terminfo, so a single wrong byte is a key that does nothing.
+		let expected: [(Named, &[u8]); 12] = [
+			(Named::F1, b"\x1bOP"),
+			(Named::F2, b"\x1bOQ"),
+			(Named::F3, b"\x1bOR"),
+			(Named::F4, b"\x1bOS"),
+			(Named::F5, b"\x1b[15~"),
+			(Named::F6, b"\x1b[17~"),
+			(Named::F7, b"\x1b[18~"),
+			(Named::F8, b"\x1b[19~"),
+			(Named::F9, b"\x1b[20~"),
+			(Named::F10, b"\x1b[21~"),
+			(Named::F11, b"\x1b[23~"),
+			(Named::F12, b"\x1b[24~"),
+		];
+		for (named, bytes) in expected {
+			let key = Key::Named(named);
+			// The form does not change with the cursor-key mode, so both must match.
+			assert_eq!(
+				encode(&key, main_key(), None, none(), false).as_deref(),
+				Some(bytes)
+			);
+			assert_eq!(
+				encode(&key, main_key(), None, none(), true).as_deref(),
+				Some(bytes)
+			);
+		}
 	}
 
 	#[test]
