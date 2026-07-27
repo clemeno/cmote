@@ -53,13 +53,37 @@ pub const GRID_ID: &str = "files-grid";
 /// font that has none of these glyphs.
 const ICON_FONT: Font = Font::with_name("Material Icons");
 
-/// One cell of the grid, and the pieces inside it. Fixed so the wrapping layout tiles
-/// evenly and a long name cannot push its neighbours around.
-const CELL_WIDTH: f32 = 96.0;
-pub const CELL_HEIGHT: f32 = 78.0;
+/// One cell of the grid, and the pieces inside it. The cell is a wide, short row — a small
+/// icon in front of a left-aligned name — so it reads like a list line while the grid still
+/// wraps into columns. Fixed so the wrapping layout tiles evenly and a long name cannot push
+/// its neighbours around; the height fits two wrapped lines and the cell clips a name that
+/// runs longer (the details popup always shows it in full, §20). Every cell is the same
+/// height on purpose: the selection, keyboard row-nav and popup placement all step by a
+/// uniform pitch (`row_top`, `band_hits`), which a per-name height would break.
+const CELL_WIDTH: f32 = 350.0;
+pub const CELL_HEIGHT: f32 = 40.0;
 const CELL_SPACING: f32 = 4.0;
-const ICON_SIZE: f32 = 30.0;
+/// The padding inside a cell, kept as a constant because the name-fitting estimate below has
+/// to subtract the very same value the container lays the cell out with.
+const CELL_PADDING: f32 = 4.0;
+/// The gap between a cell's icon and the name that follows it.
+const ICON_LABEL_GAP: f32 = 6.0;
+const ICON_SIZE: f32 = 18.0;
 const LABEL_SIZE: f32 = 11.0;
+
+/// Sizing the middle-ellipsis so a name always fits the cell's two lines (§19). The label
+/// sits to the right of the icon, so its width is the cell minus the padding, the icon and
+/// the gap; `LABEL_CHAR` is the average advance of the interface face at `LABEL_SIZE` — the
+/// same kind of estimate the details popup wraps with. A name longer than two lines' worth of
+/// glyphs is shortened with `…` in its MIDDLE, so both the start of the name and its extension
+/// survive the cut.
+///
+/// `ponytail:` an estimate, not a measurement, and deliberately a touch pessimistic (a fatter
+/// `LABEL_CHAR` than the face truly has) so a name never spills past the two lines the cell
+/// clips at. Ask iced's text shaper for the real extent if a name ever wraps to a third line.
+const LABEL_WIDTH: f32 = CELL_WIDTH - 2.0 * CELL_PADDING - ICON_SIZE - ICON_LABEL_GAP;
+const LABEL_CHAR: f32 = 6.2;
+const LABEL_LINES: usize = 2;
 
 /// The pane header's height, matching the tree's so the two headers line up. Public
 /// because it is also the grid's top edge, which is what says whether a press landed in
@@ -496,8 +520,9 @@ fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Elemen
 
 /// The popup's lines for a single entry (§20).
 fn entry_lines(files: &Files, entry: &Entry) -> Vec<String> {
-	// The name heads the card because it is the one thing the cell below may have clipped:
-	// the grid's label is 96px wide, this is what the entry is actually called.
+	// The name heads the card because it is the one thing the cell below may have shortened:
+	// the grid middle-ellipsises a name too long for its two lines, this is what the entry
+	// is actually called.
 	let mut lines = vec![entry.name.clone()];
 	if entry.kind == Kind::Link {
 		// The target costs a round trip, so it lands a moment after the rest (§20).
@@ -567,7 +592,7 @@ fn human_size(size: u64) -> String {
 	}
 }
 
-/// One entry: its icon with its name under it. A left click selects, a double click
+/// One entry: a small icon in front of its name. A left click selects, a double click
 /// enters a directory, a right click opens the menu on it. An entry being renamed shows
 /// its edit field in place of the label.
 fn cell<'a>(
@@ -586,7 +611,9 @@ fn cell<'a>(
 
 	// The label wraps by GLYPH, not by word: file names rarely contain spaces, so
 	// word wrapping would leave `some_very_long_name.tar.gz` as one unbreakable line
-	// running out of its cell. The cell clips whatever still does not fit.
+	// running out of its cell. `elide_middle` has already trimmed a name to the two lines
+	// the cell shows; `clip(true)` is only a backstop for that estimate, and the details
+	// popup is where the whole name always shows (§20).
 	let label: Element<'a, Message> = match editing.filter(|rename| rename.path == path) {
 		Some(rename) => text_input("Name", &rename.text)
 			.id(RENAME_INPUT_ID)
@@ -595,26 +622,26 @@ fn cell<'a>(
 			.on_input(|value| Message::Files(FilesMessage::RenameEdited(value)))
 			.on_submit(Message::Files(FilesMessage::RenameCommitted))
 			.into(),
-		None => text(entry.name.clone())
+		None => text(elide_middle(&entry.name))
 			.size(LABEL_SIZE)
 			.color(FG)
 			.wrapping(Wrapping::Glyph)
-			.align_x(Horizontal::Center)
+			.align_x(Horizontal::Left)
 			.width(Length::Fill)
 			.into(),
 	};
 
 	let is_selected = files.is_selected(&path);
 	let cell = container(
-		column![icon, label]
-			.spacing(2)
-			.align_x(Horizontal::Center)
+		row![icon, label]
+			.spacing(ICON_LABEL_GAP)
+			.align_y(Vertical::Center)
 			.width(Length::Fill),
 	)
 	.width(Length::Fixed(CELL_WIDTH))
 	.height(Length::Fixed(CELL_HEIGHT))
-	.padding(4)
-	.align_x(Horizontal::Center)
+	.padding(CELL_PADDING)
+	.align_y(Vertical::Center)
 	.clip(true)
 	.style(move |_theme| container::Style {
 		background: is_selected.then(|| SELECTED_BG.into()),
@@ -630,6 +657,32 @@ fn cell<'a>(
 		.on_double_click(Message::Files(FilesMessage::EntryOpened(path.clone())))
 		.on_right_press(Message::Files(FilesMessage::EntryRightClicked(path)))
 		.into()
+}
+
+/// Shorten a name to the two lines a cell shows, dropping the MIDDLE and marking the cut with
+/// `…`, so a name too long to fit keeps both its start and its extension rather than being
+/// clipped mid-word (§19). A name that already fits passes through untouched. The details
+/// popup still holds the whole name (§20); this only spares the grid a name it cannot draw.
+///
+/// Splits by CHARACTERS, not bytes, so a multi-byte name is never cut through a glyph. The
+/// tail keeps the odd character when the budget is uneven, since the extension is usually the
+/// end and the more worth-showing half.
+fn elide_middle(name: &str) -> String {
+	let per_line = (LABEL_WIDTH / LABEL_CHAR).floor().max(1.0) as usize;
+	let max = per_line * LABEL_LINES;
+
+	let chars: Vec<char> = name.chars().collect();
+	if chars.len() <= max {
+		return name.to_owned();
+	}
+
+	// One glyph goes to the `…`; the rest is split head/tail.
+	let budget = max.saturating_sub(1);
+	let head = budget / 2;
+	let tail = budget - head;
+	let start: String = chars[..head].iter().collect();
+	let end: String = chars[chars.len() - tail..].iter().collect();
+	format!("{start}…{end}")
 }
 
 /// The Material Icons code point for a category (§19). The names are the font's own:
@@ -787,6 +840,39 @@ pub fn dismiss_layer() -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn a_long_name_is_shortened_in_the_middle_to_fit_the_cell() {
+		// Arrange: a name well past the two lines a cell can draw — sized off the cell's own
+		// budget so it stays "too long" whatever the cell width is set to — with a distinct
+		// head and tail so the split is checkable.
+		let max = (LABEL_WIDTH / LABEL_CHAR).floor() as usize * LABEL_LINES;
+		let len = max + 20;
+		let half = len / 2;
+		let name = format!("{}{}", "a".repeat(half), "b".repeat(len - half));
+
+		// Act
+		let shown = elide_middle(&name);
+
+		// Assert: the middle is gone, both ends survive, and it now fits the cell's budget.
+		assert!(shown.contains('…'));
+		assert!(shown.starts_with('a'));
+		assert!(shown.ends_with('b'));
+		assert_eq!(shown.chars().count(), max);
+	}
+
+	#[test]
+	fn a_short_name_is_left_untouched() {
+		// Arrange
+		let name = "notes.txt";
+
+		// Act
+		let shown = elide_middle(name);
+
+		// Assert
+		assert_eq!(shown, name);
+		assert!(!shown.contains('…'));
+	}
 
 	/// A band in pane coordinates: the same numbers `mouse_area::on_move` reports.
 	fn band(x: f32, y: f32, width: f32, height: f32) -> iced::Rectangle {

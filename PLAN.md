@@ -1130,7 +1130,7 @@ keyboard just landed on.
 
 - Shown **beside the selected cell** for every kind of entry — folder, file or symlink —
   because the "type" line only earns its place if the type can vary. It leads with the
-  entry's **full name** (the cell's label is 96px wide and may have clipped it) and, for a
+  entry's **full name** (the grid cell middle-ellipsises a name too long for its two lines) and, for a
   symlink, **where it points**; then the type, the modification time, the size (human, with
   the exact byte count once the two differ) and `owner:group`.
 - **The type of a file is its MIME type**, from `files::mime` — an extension table, because
