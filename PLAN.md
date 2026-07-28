@@ -913,7 +913,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   asked for the mouse; **origin mode** (DECOM) is not tracked, so a cursor report under a
   scroll-region origin is absolute (§9); autowrap (`?7l`) is always on. Swapping in
   `alacritty_terminal` answers all of these at once and stays the upgrade path if the
-  rewriter/answerer ever grows past a handful of arms.
+  rewriter/answerer ever grows past a handful of arms. The full audited inventory of what
+  the terminal still lacks to drive *any* documented app UX — every gap tagged **[bolt-on]**
+  (addable beside `vt100`, like `compat.rs`/`answer.rs`) or **[engine]** (needs the
+  `alacritty_terminal` swap), each grounded in ECMA-48 / the DEC VT manuals / xterm
+  `ctlseqs`, with a `file:line` evidence appendix — lives in
+  [`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md). It is the reference for
+  sequencing this work: a ranked bolt-on backlog (OSC 11 background query first) plus the
+  engine swap.
 - **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
   selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
   Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on
