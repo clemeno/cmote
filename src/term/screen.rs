@@ -45,6 +45,19 @@ pub enum MouseEncoding {
 	Sgr,
 }
 
+/// The underline a cell asks for (§9, §23). A remote turns these on through the extended SGR
+/// underline sub-parameters (`CSI 4 : n m`), and the engine tracks all five as distinct flags;
+/// the grid draws each as its own rule, since no font we bundle carries any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnderlineStyle {
+	None,
+	Single,
+	Double,
+	Dotted,
+	Dashed,
+	Curly,
+}
+
 /// One cell's glyph and the attributes the renderer reads (§9). Owned rather than borrowed,
 /// so the type never exposes the engine's own cell representation — the glyph is
 /// materialised once when the cell is read. `text` is empty for a blank cell, so it costs
@@ -55,7 +68,12 @@ pub struct Cell {
 	fg: Color,
 	bg: Color,
 	bold: bool,
-	underline: bool,
+	dim: bool,
+	italic: bool,
+	hidden: bool,
+	strikeout: bool,
+	underline: UnderlineStyle,
+	underline_color: Option<Color>,
 	inverse: bool,
 	wide: bool,
 	wide_continuation: bool,
@@ -98,10 +116,37 @@ impl Cell {
 		self.bold
 	}
 
-	/// Any underline style — the grid draws a single rule for all of them until §23's
-	/// enrich stage teaches it the distinct styles.
-	pub fn underline(&self) -> bool {
+	/// Faint intensity (SGR 2) — the renderer fades the foreground toward the background.
+	pub fn dim(&self) -> bool {
+		self.dim
+	}
+
+	/// Italic (SGR 3) — the renderer draws the glyph from a slanted face. Fira Mono has none,
+	/// so the grid pulls italic cells from a bundled italic family instead (§23).
+	pub fn italic(&self) -> bool {
+		self.italic
+	}
+
+	/// Concealed (SGR 8) — the glyph is painted in its own background, so it holds its cell
+	/// but shows nothing. Its `contents` are untouched, so a copy still yields the real text.
+	pub fn hidden(&self) -> bool {
+		self.hidden
+	}
+
+	/// Crossed out (SGR 9) — a rule through the cell's middle.
+	pub fn strikeout(&self) -> bool {
+		self.strikeout
+	}
+
+	/// Which underline style the cell carries, if any (§9, §23).
+	pub fn underline(&self) -> UnderlineStyle {
 		self.underline
+	}
+
+	/// The underline's own colour (SGR 58), or `None` when the cell set none — in which case
+	/// the renderer draws the rule in the foreground colour.
+	pub fn underline_color(&self) -> Option<Color> {
+		self.underline_color
 	}
 
 	/// Reverse video — foreground and background swapped.
@@ -213,10 +258,35 @@ fn build_cell(cell: &EngineCell) -> Cell {
 		fg: color(cell.fg),
 		bg: color(cell.bg),
 		bold: cell.flags.contains(Flags::BOLD),
-		underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+		dim: cell.flags.contains(Flags::DIM),
+		italic: cell.flags.contains(Flags::ITALIC),
+		hidden: cell.flags.contains(Flags::HIDDEN),
+		strikeout: cell.flags.contains(Flags::STRIKEOUT),
+		underline: underline(cell.flags),
+		underline_color: cell.underline_color().map(color),
 		inverse: cell.flags.contains(Flags::INVERSE),
 		wide: cell.flags.contains(Flags::WIDE_CHAR),
 		wide_continuation: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+	}
+}
+
+/// Read the underline style out of a cell's flags. The engine keeps each style as its own
+/// flag and sets at most one at a time (turning an underline on clears the others first), but
+/// a specific style is preferred over the plain one if both were somehow present, so exactly
+/// one style is ever returned.
+fn underline(flags: Flags) -> UnderlineStyle {
+	if flags.contains(Flags::DOUBLE_UNDERLINE) {
+		UnderlineStyle::Double
+	} else if flags.contains(Flags::UNDERCURL) {
+		UnderlineStyle::Curly
+	} else if flags.contains(Flags::DOTTED_UNDERLINE) {
+		UnderlineStyle::Dotted
+	} else if flags.contains(Flags::DASHED_UNDERLINE) {
+		UnderlineStyle::Dashed
+	} else if flags.contains(Flags::UNDERLINE) {
+		UnderlineStyle::Single
+	} else {
+		UnderlineStyle::None
 	}
 }
 
@@ -248,3 +318,61 @@ const _: () = {
 	assert!(NamedColor::BrightWhite as usize == 15);
 	assert!(NamedColor::DimBlack as usize == 259);
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::term::Terminal;
+
+	// The cell at (0,0) after feeding `input` to a fresh 1-row emulator — the standard way to
+	// probe how one SGR sequence lands, read back through the view the app actually sees.
+	fn cell0(input: &str) -> Cell {
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(input.as_bytes());
+		terminal
+			.screen()
+			.cell(0, 0)
+			.expect("cell (0,0) is in bounds")
+	}
+
+	#[test]
+	fn plain_text_carries_no_attributes() {
+		let cell = cell0("x");
+		assert!(!cell.dim());
+		assert!(!cell.italic());
+		assert!(!cell.hidden());
+		assert!(!cell.strikeout());
+		assert_eq!(cell.underline(), UnderlineStyle::None);
+		assert_eq!(cell.underline_color(), None);
+	}
+
+	#[test]
+	fn intensity_and_line_attributes_map_from_their_sgr_codes() {
+		// SGR 2 faint, 3 italic, 8 conceal, 9 crossed-out — each its own flag on the cell.
+		assert!(cell0("\x1b[2mx").dim());
+		assert!(cell0("\x1b[3mx").italic());
+		assert!(cell0("\x1b[8mx").hidden());
+		assert!(cell0("\x1b[9mx").strikeout());
+	}
+
+	#[test]
+	fn every_underline_style_maps_from_its_sub_parameter() {
+		// The plain form and the four extended sub-parameters (`CSI 4 : n m`) the engine knows.
+		assert_eq!(cell0("\x1b[4mx").underline(), UnderlineStyle::Single);
+		assert_eq!(cell0("\x1b[4:2mx").underline(), UnderlineStyle::Double);
+		assert_eq!(cell0("\x1b[4:3mx").underline(), UnderlineStyle::Curly);
+		assert_eq!(cell0("\x1b[4:4mx").underline(), UnderlineStyle::Dotted);
+		assert_eq!(cell0("\x1b[4:5mx").underline(), UnderlineStyle::Dashed);
+		// And SGR 24 turns any of them back off.
+		assert_eq!(cell0("\x1b[4m\x1b[24mx").underline(), UnderlineStyle::None);
+	}
+
+	#[test]
+	fn a_separate_underline_colour_is_read_back() {
+		// SGR 58:5:n sets the underline's own colour to a palette slot, independent of the
+		// foreground; the view hands it back as an indexed colour for the grid to resolve.
+		let cell = cell0("\x1b[4;58:5:9mx");
+		assert_eq!(cell.underline(), UnderlineStyle::Single);
+		assert_eq!(cell.underline_color(), Some(Color::Indexed(9)));
+	}
+}

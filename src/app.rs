@@ -23,23 +23,26 @@ use crate::term;
 use crate::ui;
 use crate::ui::connect::AuthKind;
 
-/// The monospace font embedded in the binary (Fira Mono, OFL 1.1 — see
-/// assets/FiraMono-LICENSE.txt). Bundling it keeps the terminal identical on
-/// every machine and gives the grid a known cell advance, which the resize math
-/// relies on (§9). Registered with iced in `run` and selected by name in
-/// `ui::terminal`.
-const MONO_FONT: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
-
-/// The bold weight of the same family (Fira Mono Bold, weight 700 — same OFL
-/// licence, same Mozilla Fira release as `MONO_FONT`). Bundled so a cell the shell
-/// marks bold renders in a genuinely heavier face rather than the normal one:
-/// `ui::terminal` asks for `Weight::Bold`, and with only the medium weight loaded
-/// iced had no 700 face to resolve to, so bold text looked identical (§9). Every
-/// Fira Mono weight shares the exact 600/1000-em advance, so bundling bold does not
-/// disturb the fixed cell metric the resize math depends on. Both faces share the
-/// family name "Fira Mono"; iced picks the medium (500) for normal cells and the
-/// bold (700) for bold ones purely by the requested weight.
+/// Fira Mono, the terminal's monospace family (OFL 1.1 — see assets/FiraMono-LICENSE.txt),
+/// bundled in every weight Mozilla ships so the terminal looks identical on every machine and
+/// the grid has a known cell advance the resize math relies on (§9). All three weights share
+/// the exact 600/1000-em advance, so which one a cell uses never disturbs the fixed metric.
+/// They share the family name "Fira Mono"; `ui::grid` picks a weight by name, drawing normal
+/// cells in Regular (400) and bold cells in Bold (700). Medium (500) is bundled for family
+/// completeness — Fira Mono ships it, so it is here to be resolved to if ever asked for.
+/// Registered with iced in `run`.
+const MONO_FONT_REGULAR: &[u8] = include_bytes!("../assets/FiraMono-Regular.ttf");
+const MONO_FONT_MEDIUM: &[u8] = include_bytes!("../assets/FiraMono-Medium.ttf");
 const MONO_FONT_BOLD: &[u8] = include_bytes!("../assets/FiraMono-Bold.ttf");
+
+/// The italic faces Fira Mono lacks — it ships no italic at all — supplied by IBM Plex Mono
+/// (OFL 1.1 — see assets/IBMPlexMono-LICENSE.txt), the closest humanist monospace whose advance
+/// is the same 600/1000 em, so an italic cell keeps the grid's pixel↔cell contract exactly
+/// (§9, §23). Only italic (and bold-italic) cells use this family; upright and bold stay Fira
+/// Mono. `ui::grid` asks for the family "IBM Plex Mono" with `Style::Italic` at weight 400 or
+/// 700, which resolve to these two faces.
+const ITALIC_FONT: &[u8] = include_bytes!("../assets/IBMPlexMono-Italic.ttf");
+const ITALIC_FONT_BOLD: &[u8] = include_bytes!("../assets/IBMPlexMono-BoldItalic.ttf");
 
 /// The icon face the files pane draws with (Material Icons, Apache-2.0 — see
 /// assets/MaterialIcons-LICENSE.txt). Bundled for the same reason the monospace face is:
@@ -73,8 +76,11 @@ pub fn run() -> iced::Result {
 		// The title is a function of the state, not a constant: while a shell is open it
 		// shows the session and the remote working directory it is sitting in (§17).
 		.title(App::title)
-		.font(MONO_FONT)
+		.font(MONO_FONT_REGULAR)
+		.font(MONO_FONT_MEDIUM)
 		.font(MONO_FONT_BOLD)
+		.font(ITALIC_FONT)
+		.font(ITALIC_FONT_BOLD)
 		.font(ICON_FONT)
 		// Open wide enough for a 180-column terminal *and* the explorer panel beside it
 		// (the size is derived from the grid metrics so it stays in step with

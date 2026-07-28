@@ -186,9 +186,13 @@ cmote/
 ├── PLAN.md
 ├── README.md
 ├── assets/
-│   ├── FiraMono-Medium.ttf   monospace font (normal weight) embedded in the exe (§9, §11)
-│   ├── FiraMono-Bold.ttf     its bold weight, for bold cells (§11)
+│   ├── FiraMono-Regular.ttf  monospace font (normal weight, 400) embedded in the exe (§9, §11)
+│   ├── FiraMono-Medium.ttf   its medium weight (500), bundled for family completeness (§9)
+│   ├── FiraMono-Bold.ttf     its bold weight (700), for bold cells (§11)
 │   ├── FiraMono-LICENSE.txt  the family's OFL 1.1 license (required for redistribution)
+│   ├── IBMPlexMono-Italic.ttf      the italic face Fira Mono lacks, for italic cells (§9, §23)
+│   ├── IBMPlexMono-BoldItalic.ttf  its bold-italic, for bold+italic cells (§23)
+│   ├── IBMPlexMono-LICENSE.txt     IBM Plex's OFL 1.1 license (required for redistribution)
 │   ├── MaterialIcons-Regular.ttf  the file-type icons the files pane draws with (§19)
 │   └── MaterialIcons-LICENSE.txt  its Apache-2.0 license (required for redistribution)
 └── src/
@@ -355,9 +359,14 @@ Turning a raw byte stream into a screen.
   text at absolute pixel positions, using a **bundled** monospace font (**Fira Mono**,
   embedded in the exe — OFL 1.1). Bundling it (rather than `Font::MONOSPACE`) makes the
   grid look identical on every machine and gives an **exact** cell advance (600/1000 em =
-  0.6), which the resize math depends on. Both the **Medium (500)** and **Bold (700)**
-  weights are embedded (same release, same OFL licence), so a bold cell resolves to a real
-  heavier face; every weight shares the 0.6 advance, so bold does not disturb the metric.
+  0.6), which the resize math depends on. The **Regular (400)**, **Medium (500)** and
+  **Bold (700)** weights are all embedded (same release, same OFL licence): normal cells draw
+  in Regular, bold cells in Bold, and every weight shares the 0.6 advance so the choice never
+  disturbs the metric. Fira Mono ships **no italic**, so italic cells draw from **IBM Plex
+  Mono** (OFL 1.1) instead — the closest humanist monospace whose advance is the same 0.6, so
+  an italic run stays on the grid (§23). The engine picks the exact bundled face by
+  family + weight + style, because `cosmic-text` does not nearest-match within a family: an
+  unbundled combination would fall back to a proportional system font and break the grid.
   Two rules make the drawing what it is:
   - **Every glyph starts at the exact pixel its column starts at.** A run of consecutive
     same-styled **ASCII** cells is still drawn as one cached string — that is the common
@@ -384,8 +393,9 @@ Turning a raw byte stream into a screen.
   The widget also earns its keep on cost: a truecolor full-screen program gives nearly
   every cell its own color, so nothing coalesces and the old renderer built tens of
   thousands of layout nodes per frame. Backgrounds are now one backdrop quad plus one per
-  non-default run, underline rules are quads, and ASCII runs skip shaping and font
-  fallback entirely (`Shaping::Basic`). It owns the pointer too (§9, the mouse): it
+  non-default run, every rule the SGR set asks for — underline (single / double / dotted /
+  dashed / curly), strikeout — is a quad, and ASCII runs skip shaping and font fallback
+  entirely (`Shaping::Basic`). It owns the pointer too (§9, the mouse): it
   encodes and **captures** the clicks a mouse-aware program asked for, and leaves
   everything else — including every bare move — to the selection layer above it.
 - **The mouse, for programs that ask for it** (`term/mouse.rs`, v2.3): a full-screen
@@ -872,9 +882,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
   cursor reports, custom tab stops, the autowrap toggle and the host's status/identity
   queries (DSR/DA/DECRQM) are handled by the engine, not papered over — a full-screen program
-  renders and no longer stalls on a probe. Still deferred (the §23 follow-ups): **rendering**
-  the rich attributes the engine now tracks — dim, italic, strikethrough, conceal, the
-  underline styles and underline colour (Stage 3); **scrollback** is still off
+  renders and no longer stalls on a probe. All of the rich SGR attributes the engine tracks
+  are **rendered** as of v3.0 (§23 Stage 3): dim, italic, strikethrough, conceal, the underline
+  *styles* (double / dotted / dashed / curly) and underline colour — italic drawn from a
+  bundled IBM Plex Mono face, since Fira Mono ships none (Stage 3b). Still deferred (the §23
+  follow-ups): **scrollback** is still off
   (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel scrolling
   outside a program that asked for the mouse; the **OSC-colour** (`ColorRequest`) and
   **window-size** (`TextAreaSizeRequest`) query replies are not wired; **cursor shape**
@@ -1582,10 +1594,25 @@ leak that would spread the swap across the GUI. So the work is staged:
   because answering them correctly needs the render palette and the cell pixel metrics, which
   live in `ui/`; leaving them silent is no worse than the old engine, which never answered
   them either.
-- **Stage 3 — enrich the view.** Extend `term::screen::Cell` and the grid to render dim,
-  italic, strikethrough, conceal and the underline *styles* (double / curly / dotted /
-  dashed) plus underline colour — the attributes vt100 could not represent. Italic needs a
-  bundled italic face (Fira Mono ships none), so it arrives with a font.
+- **Stage 3a — enrich the view, no new font (done).** `term::screen::Cell` now carries
+  `dim`, `hidden` (conceal), `strikeout`, an `UnderlineStyle` (none / single / double / dotted
+  / dashed / curly, read from the engine's distinct flags) and `underline_color` (SGR 58); the
+  grid renders each — dim fades the foreground toward its background, conceal paints it *in*
+  the background (the glyph stays for copy), strikeout and every underline style are quads we
+  place ourselves (a font gives us none of them). All of these were attributes vt100 could not
+  represent. No font asset needed, so no metric risk to the pixel↔cell grid.
+- **Stage 3b — italic, from a bundled face (done).** iced draws glyphs from a named face and
+  Fira Mono ships **no italic**, so italic needed one. The official Mozilla Fira release
+  confirms it: Fira Mono is Regular / Medium / Bold only (Fira Sans has italics but is
+  proportional). So italic and bold-italic cells draw from **IBM Plex Mono** (OFL 1.1), the
+  closest humanist monospace whose advance is **verified identical** — 600/1000 em = 0.6, unit
+  for unit with Fira Mono — so an italic run coalesces and lands on the same pixel grid as the
+  upright text, no per-cell sealing needed. `term::screen::Cell` gained `italic`; `ui/grid`
+  swaps the family (Fira Mono → IBM Plex Mono) and sets `Style::Italic` for italic runs, which
+  are their own runs because the family is part of the run-grouping key. Bundled the real Fira
+  Mono **Regular (400)** at the same time and made it the body weight (the terminal previously
+  used Medium (500) as a stand-in only because Regular was not bundled). Each face is picked by
+  exact family + weight + style, since `cosmic-text` does not nearest-match within a family.
 - **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
   UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), the window title from OSC 0/2,
   and focus reporting (`?1004`).

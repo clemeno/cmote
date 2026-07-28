@@ -28,7 +28,9 @@
 
 use crate::app::Message;
 use crate::term::mouse as report;
-use crate::term::screen::{Cell as ScreenCell, Color as CellColor, MouseMode, Screen};
+use crate::term::screen::{
+	Cell as ScreenCell, Color as CellColor, MouseMode, Screen, UnderlineStyle,
+};
 use crate::ui::selection::{Cell, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
 use iced::advanced::Renderer as _;
@@ -43,11 +45,16 @@ use iced::{
 	alignment, mouse,
 };
 
-/// The bundled monospace font (Fira Mono, embedded in the binary — see `app::MONO_FONT`).
+/// The bundled monospace font (Fira Mono, embedded in the binary — see `app::MONO_FONT_REGULAR`).
 /// Naming it explicitly instead of `Font::MONOSPACE` means the grid looks identical on
 /// every machine AND its cell advance is known exactly, which is what makes the pixel↔cell
-/// math correct (§9).
+/// math correct (§9). Upright cells (normal and bold) draw from this family.
 const TERMINAL_FONT: Font = Font::with_name("Fira Mono");
+
+/// The italic family (IBM Plex Mono — see `app::ITALIC_FONT`), used only for italic cells,
+/// because Fira Mono ships no italic (§23). Its advance is the same 600/1000 em as Fira Mono,
+/// so an italic run stays on the same pixel grid as the upright text around it.
+const TERMINAL_FONT_ITALIC: Font = Font::with_name("IBM Plex Mono");
 
 /// The default foreground/background when a cell asks for the "default" color — a
 /// light-on-dark scheme, and the window's backdrop behind the whole grid.
@@ -62,6 +69,29 @@ const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
 /// How thick an underlined cell's rule is, and how far above the cell's bottom edge it
 /// sits. `fill_text` draws glyphs only, so the rule is a quad of our own.
 const UNDERLINE_THICKNESS: f32 = 1.0;
+
+/// The gap between the two rules of a double underline.
+const UNDERLINE_GAP: f32 = 1.0;
+
+/// A dotted underline's dot length and the gap after it, then a dashed one's dash and gap:
+/// both are the same repeated-segment rule, only the segment and gap sizes differ.
+const DOT_LEN: f32 = 1.0;
+const DOT_GAP: f32 = 2.0;
+const DASH_LEN: f32 = 3.0;
+const DASH_GAP: f32 = 2.0;
+
+/// A curly underline is approximated as a triangle wave: a segment this long, stepped this
+/// far up on every other segment. A true sine is invisibly small at this cell size; a
+/// two-level zigzag reads unmistakably as "curly" while staying quads we place exactly.
+const CURL_STEP: f32 = 2.0;
+const CURL_AMPLITUDE: f32 = 2.0;
+
+/// How thick the crossed-out (strikeout) rule is; it sits on the cell's vertical middle.
+const STRIKEOUT_THICKNESS: f32 = 1.0;
+
+/// How far a faint (dim) cell's foreground is pulled from its background toward its full
+/// colour — below 1.0 so the text reads as reduced intensity but stays legible.
+const DIM_STRENGTH: f32 = 0.55;
 
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
@@ -339,11 +369,17 @@ fn draw_run(
 	if run.style.bg != DEFAULT_BG {
 		renderer.fill_quad(fill(bounds), Background::Color(run.style.bg));
 	}
-	if run.style.underline {
+	draw_underline(
+		renderer,
+		run.style.underline,
+		bounds,
+		run.style.underline_color,
+	);
+	if run.style.strikeout {
 		renderer.fill_quad(
 			fill(Rectangle {
-				y: top + CELL_HEIGHT - UNDERLINE_THICKNESS,
-				height: UNDERLINE_THICKNESS,
+				y: top + (CELL_HEIGHT - STRIKEOUT_THICKNESS) / 2.0,
+				height: STRIKEOUT_THICKNESS,
 				..bounds
 			}),
 			Background::Color(run.style.fg),
@@ -377,21 +413,29 @@ fn draw_run(
 			bounds: Size::new(width, CELL_HEIGHT),
 			size: Pixels(FONT_SIZE),
 			line_height: text::LineHeight::Absolute(Pixels(CELL_HEIGHT)),
+			// The face for this run. Upright cells draw from Fira Mono, italic cells from IBM
+			// Plex Mono (Fira Mono has none, §23); the weight and style pick the exact face.
+			// Each MUST match a bundled face, because cosmic-text — with the whole system font
+			// DB present at runtime — does NOT nearest-match within a named family: an unbundled
+			// weight/style silently falls back to a *proportional* system font, breaking the
+			// grid. We bundle Fira Mono at 400/700 and IBM Plex Mono italic at 400/700, which is
+			// every combination this asks for.
 			font: Font {
 				weight: if run.style.bold {
 					iced::font::Weight::Bold
 				} else {
-					// Pick the weight we actually bundled: Medium (500) for normal cells,
-					// Bold (700) for bold. This MUST match a bundled weight exactly. We ship
-					// Fira Mono only at 500 and 700 (no 400 "Regular"), and cosmic-text — with
-					// the whole system font DB present at runtime — does NOT nearest-weight-
-					// match within a named family: asking for `Weight::Normal` (400) finds no
-					// "Fira Mono" at 400 and silently falls back to the platform default (a
-					// *proportional* font), which breaks the grid. Medium/Bold both resolve to
-					// our real faces, and every Fira Mono weight shares the 0.6 advance.
-					iced::font::Weight::Medium
+					iced::font::Weight::Normal
 				},
-				..TERMINAL_FONT
+				style: if run.style.italic {
+					iced::font::Style::Italic
+				} else {
+					iced::font::Style::Normal
+				},
+				..if run.style.italic {
+					TERMINAL_FONT_ITALIC
+				} else {
+					TERMINAL_FONT
+				}
 			},
 			align_x: text::Alignment::Left,
 			align_y: alignment::Vertical::Top,
@@ -402,6 +446,104 @@ fn draw_run(
 		run.style.fg,
 		row_bounds,
 	);
+}
+
+/// Draw a run's underline in the requested style (§9, §23). `fill_text` draws glyphs only,
+/// so every rule here is quads of our own — which is what lets the engine's five distinct
+/// underlines reach the screen at all. All sit on the same baseline, one line above the
+/// cell's bottom edge; `color` is the underline's own colour (SGR 58) or the foreground.
+fn draw_underline(
+	renderer: &mut iced::Renderer,
+	style: UnderlineStyle,
+	bounds: Rectangle,
+	color: Color,
+) {
+	let base = bounds.y + CELL_HEIGHT - UNDERLINE_THICKNESS;
+	match style {
+		UnderlineStyle::None => {}
+		UnderlineStyle::Single => rule(renderer, bounds.x, base, bounds.width, color),
+		UnderlineStyle::Double => {
+			rule(renderer, bounds.x, base, bounds.width, color);
+			rule(
+				renderer,
+				bounds.x,
+				base - UNDERLINE_GAP - UNDERLINE_THICKNESS,
+				bounds.width,
+				color,
+			);
+		}
+		UnderlineStyle::Dotted => dashes(
+			renderer,
+			bounds.x,
+			base,
+			bounds.width,
+			DOT_LEN,
+			DOT_GAP,
+			color,
+		),
+		UnderlineStyle::Dashed => dashes(
+			renderer,
+			bounds.x,
+			base,
+			bounds.width,
+			DASH_LEN,
+			DASH_GAP,
+			color,
+		),
+		UnderlineStyle::Curly => curl(renderer, bounds.x, base, bounds.width, color),
+	}
+}
+
+/// One solid horizontal rule, `UNDERLINE_THICKNESS` tall, from `x` across `width` at `y`.
+fn rule(renderer: &mut iced::Renderer, x: f32, y: f32, width: f32, color: Color) {
+	renderer.fill_quad(
+		fill(Rectangle {
+			x,
+			y,
+			width,
+			height: UNDERLINE_THICKNESS,
+		}),
+		Background::Color(color),
+	);
+}
+
+/// A run of `segment`-long marks separated by `gap`, across `width`. Dotted and dashed
+/// underlines are the same shape at different sizes. The last mark is clipped to the run so
+/// it never spills past the cells it belongs to.
+fn dashes(
+	renderer: &mut iced::Renderer,
+	x: f32,
+	y: f32,
+	width: f32,
+	segment: f32,
+	gap: f32,
+	color: Color,
+) {
+	let mut offset = 0.0;
+	while offset < width {
+		rule(renderer, x + offset, y, segment.min(width - offset), color);
+		offset += segment + gap;
+	}
+}
+
+/// A curly underline as a triangle wave: `CURL_STEP`-long marks whose baseline alternates
+/// between the underline row and `CURL_AMPLITUDE` above it. Two levels, not a real sine —
+/// enough to read as wavy at a 14px cell (see `CURL_STEP`).
+fn curl(renderer: &mut iced::Renderer, x: f32, y: f32, width: f32, color: Color) {
+	let mut offset = 0.0;
+	let mut raised = false;
+	while offset < width {
+		let lift = if raised { CURL_AMPLITUDE } else { 0.0 };
+		rule(
+			renderer,
+			x + offset,
+			y - lift,
+			CURL_STEP.min(width - offset),
+			color,
+		);
+		offset += CURL_STEP;
+		raised = !raised;
+	}
 }
 
 /// Draw a braille cell as its dots. No monospace font we could bundle carries the braille
@@ -618,7 +760,12 @@ struct CellStyle {
 	fg: Color,
 	bg: Color,
 	bold: bool,
-	underline: bool,
+	italic: bool,
+	strikeout: bool,
+	underline: UnderlineStyle,
+	/// The underline's colour, already resolved (SGR 58, or the foreground when the cell set
+	/// none). Part of the key so a cell that recolours only its underline still breaks its run.
+	underline_color: Color,
 }
 
 /// One draw's worth of the grid: a string of glyphs, the look they share, the column they
@@ -705,40 +852,73 @@ fn plan_runs(
 	runs
 }
 
-/// Resolve a cell's colors and attributes into a `CellStyle`, applying inverse video and
-/// the cursor highlight (each swaps fg/bg; together they cancel, which matches how a real
-/// terminal draws the cursor over already-inverted text). A selected cell then takes the
-/// selection fill, keeping its foreground so the text stays legible; because `CellStyle`
-/// is the run-grouping key, this also breaks the selected run off from its neighbours
-/// automatically (§10).
+/// Resolve a cell's colors and attributes into a `CellStyle` (§9, §23). The order matters:
+/// faint fades the ink toward its own background first; then inverse video and the cursor
+/// each swap fg/bg (together they cancel, matching how a real terminal draws the cursor over
+/// already-inverted text); then a selection takes the fill, keeping the foreground so text
+/// stays legible; and conceal last, painting the glyph and its rules in the final background
+/// so it holds its cell but shows nothing. Because `CellStyle` is the run-grouping key, the
+/// selection (and any per-cell attribute) breaks its run off from its neighbours (§10).
 fn cell_style(cell: Option<&ScreenCell>, is_cursor: bool, is_selected: bool) -> CellStyle {
-	let (mut fg, mut bg, bold, underline) = match cell {
-		Some(cell) => (
-			resolve(cell.fgcolor(), DEFAULT_FG),
-			resolve(cell.bgcolor(), DEFAULT_BG),
-			cell.bold(),
-			cell.underline(),
-		),
-		None => (DEFAULT_FG, DEFAULT_BG, false, false),
+	let Some(cell) = cell else {
+		return CellStyle {
+			fg: DEFAULT_FG,
+			bg: DEFAULT_BG,
+			bold: false,
+			italic: false,
+			strikeout: false,
+			underline: UnderlineStyle::None,
+			underline_color: DEFAULT_FG,
+		};
 	};
 
-	let inverse = cell.is_some_and(|cell| cell.inverse());
-	if inverse ^ is_cursor {
+	let mut fg = resolve(cell.fgcolor(), DEFAULT_FG);
+	let mut bg = resolve(cell.bgcolor(), DEFAULT_BG);
+	// Faint is a property of the ink, so fade it toward the background before any swap.
+	if cell.dim() {
+		fg = blend(bg, fg, DIM_STRENGTH);
+	}
+	// The underline's explicit colour (SGR 58), resolved now so it tracks the ink; the
+	// fallback to the foreground is applied after the swap, below, so it follows inverse too.
+	let explicit_underline = cell.underline_color().map(|color| resolve(color, fg));
+
+	if cell.inverse() ^ is_cursor {
 		std::mem::swap(&mut fg, &mut bg);
 	}
-
-	// The selection fill wins over the resolved background so the highlight reads
-	// uniformly across the run regardless of the cells' own colors.
 	if is_selected {
 		bg = SELECTION_BG;
 	}
+	if cell.hidden() {
+		fg = bg;
+	}
+	// A concealed cell shows nothing, so its underline vanishes into the background too;
+	// otherwise the rule takes its explicit colour, or the (post-swap) foreground.
+	let underline_color = if cell.hidden() {
+		bg
+	} else {
+		explicit_underline.unwrap_or(fg)
+	};
 
 	CellStyle {
 		fg,
 		bg,
-		bold,
-		underline,
+		bold: cell.bold(),
+		italic: cell.italic(),
+		strikeout: cell.strikeout(),
+		underline: cell.underline(),
+		underline_color,
 	}
+}
+
+/// Blend `from` toward `to` by `t` (0 keeps `from`, 1 reaches `to`), one channel at a time.
+/// Used to fade a faint cell's foreground toward its background.
+fn blend(from: Color, to: Color, t: f32) -> Color {
+	Color::from_rgba(
+		from.r + (to.r - from.r) * t,
+		from.g + (to.g - from.g) * t,
+		from.b + (to.b - from.b) * t,
+		from.a + (to.a - from.a) * t,
+	)
 }
 
 /// Map a cell color to an iced color. `Default` becomes the caller's default (different
@@ -930,5 +1110,54 @@ mod tests {
 		assert_eq!(runs[1].style.bg, SELECTION_BG);
 		assert_ne!(runs[0].style.bg, SELECTION_BG);
 		assert_ne!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	#[test]
+	fn a_faint_cell_fades_its_foreground_toward_the_background() {
+		// SGR 2 dims: the resolved foreground moves from the default toward the dark
+		// background, so each channel lands below the plain default — fainter, still on screen.
+		let plain = row_runs("x", 1)[0].style.fg;
+		let faint = row_runs("\x1b[2mx", 1)[0].style.fg;
+		assert!(faint.r < plain.r && faint.g < plain.g && faint.b < plain.b);
+	}
+
+	#[test]
+	fn a_concealed_cell_paints_its_glyph_in_its_background() {
+		// SGR 8 conceal: foreground equals background, so the glyph draws invisibly while the
+		// cell keeps its place (and its text is still there to be copied).
+		let style = row_runs("\x1b[8mx", 1)[0].style;
+		assert_eq!(style.fg, style.bg);
+	}
+
+	#[test]
+	fn a_strikeout_cell_is_marked_and_breaks_its_run() {
+		// SGR 9 crosses out: the flag reaches the run's style, and — being part of the
+		// grouping key — a struck cell never merges with a plain neighbour.
+		let runs = row_runs("a\x1b[9mb", 5);
+		let struck: Vec<_> = runs.iter().filter(|run| run.style.strikeout).collect();
+		assert_eq!(struck.len(), 1);
+		assert!(struck[0].content.starts_with('b'));
+		assert!(runs.len() >= 2);
+	}
+
+	#[test]
+	fn an_underline_style_reaches_the_run_style() {
+		// The engine's distinct underline flags survive resolution: a curly underline arrives
+		// at the run as Curly, so the draw can pick the matching rule.
+		assert_eq!(
+			row_runs("\x1b[4:3mx", 1)[0].style.underline,
+			UnderlineStyle::Curly
+		);
+	}
+
+	#[test]
+	fn an_italic_cell_is_marked_and_breaks_its_run() {
+		// SGR 3 italic: the flag reaches the run's style (so the draw can pick the italic
+		// face), and — being part of the grouping key — an italic cell never merges with an
+		// upright neighbour, since the two draw from different font families.
+		let runs = row_runs("a\x1b[3mb", 5);
+		let italic: Vec<_> = runs.iter().filter(|run| run.style.italic).collect();
+		assert_eq!(italic.len(), 1);
+		assert!(italic[0].content.starts_with('b'));
 	}
 }

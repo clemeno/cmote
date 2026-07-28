@@ -50,6 +50,11 @@ references below (§n) point into it.
   blocks on** — "where is the cursor?" (`CSI 6n`), "what terminal are you?" (`CSI c`) — that
   otherwise stall vim, tmux and less on a startup timeout; cmote sends the replies straight
   back (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
+- **Text styling comes through** — colour (256-colour and truecolor), bold, faint, reverse
+  video, concealed text, strikethrough, and every underline style a program reaches for:
+  single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
+  each in its own colour when the program sets one, plus **italic** — drawn from a bundled
+  IBM Plex Mono face, since Fira Mono ships no italic of its own (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -379,7 +384,10 @@ activates the focused radio or button. Expect:
 **3. Terminal behaviour.** In the shell: run `ls`, `echo hi`, an interactive program
 (`top`, then `q`), and **Ctrl-C** to interrupt. Print bold text
 (`printf '\033[1mBOLD\033[0m normal\n'`) and confirm the bold run is visibly heavier
-than the normal one (both weights are bundled — §9). Print wide glyphs over aligned
+than the normal one (both weights are bundled — §9). Print the other styles
+(`printf '\033[2mfaint\033[0m \033[3mitalic\033[0m \033[9mstruck\033[0m \033[4munder\033[0m \033[4:3mcurly\033[0m\n'`)
+and confirm faint reads dimmer, italic slants (in IBM Plex Mono, §23), struck has a line
+through it, and the two underlines differ — one straight, one wavy (§23). Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.
@@ -593,3 +601,7 @@ rm -f smoke_key smoke_key.pub smoke_key_enc smoke_key_enc.pub
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+Bundled fonts keep their own licenses (redistributed under them): **Fira Mono** and
+**IBM Plex Mono** under the SIL Open Font License 1.1, and **Material Icons** under
+Apache-2.0 — each with its license text in [assets/](assets/).
