@@ -138,7 +138,9 @@ references below (§n) point into it.
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
   Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and
-  Windows Terminal-style prompts already announce it themselves (§17).
+  Windows Terminal-style prompts already announce it themselves (§17). When a program sets its
+  own title (`OSC 0` / `OSC 2` — `vim` naming the file it is editing, say), that shows in the
+  title bar instead; the host is always kept alongside so the window stays identifiable (§23).
 - **Consistent dialogs** — the delete-target, disconnect, upload and overwrite
   confirmations, the host-key prompt, the passphrase prompt, and the error notice share
   one chrome: a header bar (question on the left, close ✕
@@ -433,7 +435,9 @@ on a click away. Copy is disabled with nothing selected; pasting keeps the highl
 **7. Remote directory + upload.** On connect, one setup line is echoed into the shell
 (the cwd hook, §17) and the window title should read
 `cmote — tester@localhost:2222 — /config` (or wherever the shell starts). `cd /tmp` and
-the title should follow within a prompt. Then:
+the title should follow within a prompt. Set a title from a program
+(`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
+— my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:
 
 - Click **Files…**, pick a local file — its name appears next to the buttons and **Upload**
   becomes enabled. Click **Upload**: the dialog lists the file under an editable destination

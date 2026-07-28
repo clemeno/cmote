@@ -8,7 +8,7 @@
 // draws it (see ui/terminal.rs).
 //
 // This wrapper exists so the rest of the app depends on a tiny, intention-named surface
-// (`process`, `resize`, `screen`, `cwd`) instead of the engine's full API, and so the
+// (`process`, `resize`, `screen`, `cwd`, `title`) instead of the engine's full API, and so the
 // engine stays swappable (§23 replaced `vt100` with `alacritty_terminal` behind exactly
 // this surface). The engine also answers the host's queries itself — the status/identity ones
 // (DSR, DA, DECRQM, cursor-position reports) it formats whole, and the ones about the terminal's
@@ -103,6 +103,18 @@ impl Terminal {
 		self.cwd.path()
 	}
 
+	/// The window title the remote program last set (OSC 0/2), if any (§23). `None` until a
+	/// program sets one — and again after a full reset clears it; a shell that sets none, forever.
+	/// The GUI shows it in the title bar. Cloned out from behind the reply lock — a title is
+	/// short and read at most once per frame.
+	pub fn title(&self) -> Option<String> {
+		self.replies
+			.lock()
+			.expect("reply buffer mutex poisoned")
+			.title
+			.clone()
+	}
+
 	/// Resize the grid when the window changes (§9). This only reflows our local
 	/// view; the remote pty is told separately via `SshCommand::Resize`, so the
 	/// two are kept in step by the caller (`app::on_window_resized`).
@@ -155,7 +167,8 @@ pub struct Terminal {
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
 /// numbers a colour or size answer needs — the grid size and one cell's pixel size — so the
 /// listener can resolve every query the instant it arrives, in the exact order the host sent
-/// them, without reaching back into the engine.
+/// them, without reaching back into the engine. It also keeps the window title the remote set,
+/// which is not a reply but state the GUI reads.
 #[derive(Default)]
 struct ReplyBuffer {
 	bytes: Vec<u8>,
@@ -163,6 +176,7 @@ struct ReplyBuffer {
 	cols: u16,
 	cell_width: u16,
 	cell_height: u16,
+	title: Option<String>,
 }
 
 /// The engine's event sink. The engine reports everything the emulation layer cannot handle
@@ -200,11 +214,27 @@ impl EventListener for Replies {
 				});
 				buffer.bytes.extend_from_slice(reply.as_bytes());
 			}
-			// Everything else — the clipboard pair, the bell, the title, colour *sets* — needs
-			// no reply and is dropped.
+			// The window title the remote set (OSC 0/2), or a reset to none. Not a reply —
+			// stored for the GUI to show in the title bar (§23). Control characters are
+			// stripped: the title bar is chrome cmote owns, so a remote must not be able to
+			// smuggle newlines or escapes into it.
+			Event::Title(title) => buffer.title = Some(sanitize_title(&title)),
+			Event::ResetTitle => buffer.title = None,
+			// Everything else — the clipboard pair, the bell, a colour *set* — needs no reply
+			// and carries nothing we surface, so it is dropped.
 			_ => {}
 		}
 	}
+}
+
+/// A remote-set window title, reduced to one line of printable text. The title bar is chrome
+/// cmote owns (§23), so control characters — newlines, escapes, tabs — are dropped rather than
+/// passed through where they could disrupt or spoof it.
+fn sanitize_title(title: &str) -> String {
+	title
+		.chars()
+		.filter(|character| !character.is_control())
+		.collect()
 }
 
 /// The RGB cmote reports for a colour-query slot. A palette index (0-255) resolves through the
@@ -392,5 +422,34 @@ mod tests {
 		// report; it must keep working alongside the queries we resolve. 10 rows by 40 columns.
 		let mut terminal = Terminal::new(10, 40);
 		assert_eq!(terminal.process(b"\x1b[18t"), b"\x1b[8;10;40t".to_vec());
+	}
+
+	#[test]
+	fn a_window_title_is_captured_and_emptied() {
+		// OSC 2 sets the window title; the GUI reads it back through `title`. None until a
+		// program sets one, then whatever it set, and empty once it clears the text.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.title(), None);
+		terminal.process(b"\x1b]2;build\x07");
+		assert_eq!(terminal.title().as_deref(), Some("build"));
+		terminal.process(b"\x1b]2;\x07");
+		assert_eq!(terminal.title().as_deref(), Some(""));
+	}
+
+	#[test]
+	fn a_title_is_reduced_to_one_line_of_plain_text() {
+		// A remote must not smuggle control characters into cmote's own title bar: an embedded
+		// tab is stripped, leaving only the printable text.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]2;a\tb\x07");
+		assert_eq!(terminal.title().as_deref(), Some("ab"));
+	}
+
+	#[test]
+	fn setting_a_title_is_not_mistaken_for_a_reply() {
+		// A title is state, not a host reply, so `process` must return no bytes for it — the
+		// input channel is for keystrokes and query answers only.
+		let mut terminal = Terminal::new(10, 40);
+		assert!(terminal.process(b"\x1b]2;build\x07").is_empty());
 	}
 }

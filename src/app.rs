@@ -2585,12 +2585,21 @@ impl App {
 	/// directory, so the directory is visible without stealing room from the grid.
 	fn title(&self) -> String {
 		let connected = matches!(self.screen, Screen::Terminal);
-		match (connected, self.connection.as_deref()) {
-			(true, Some(endpoint)) => match self.terminal.as_ref().and_then(term::Terminal::cwd) {
-				Some(cwd) => format!("cmote — {endpoint} — {cwd}"),
-				None => format!("cmote — {endpoint}"),
-			},
-			_ => "cmote".to_owned(),
+		let (true, Some(endpoint)) = (connected, self.connection.as_deref()) else {
+			return "cmote".to_owned();
+		};
+		// The third slot describes what the shell is doing: the remote-set window title if a
+		// program set one (§23), otherwise the working directory it announced (§17). The endpoint
+		// always stays, so a window is identifiable by host even while a program owns the title.
+		// An empty title (a program cleared it) counts as none, so the cwd shows through again.
+		let terminal = self.terminal.as_ref();
+		let detail = terminal
+			.and_then(term::Terminal::title)
+			.filter(|title| !title.is_empty())
+			.or_else(|| terminal.and_then(term::Terminal::cwd).map(str::to_owned));
+		match detail {
+			Some(detail) => format!("cmote — {endpoint} — {detail}"),
+			None => format!("cmote — {endpoint}"),
 		}
 	}
 

@@ -893,10 +893,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   bundled IBM Plex Mono face, since Fira Mono ships none (Stage 3b). The terminal also now
   **answers the host's colour and pixel-size queries** (OSC 10/11/12/4, CSI 14t) from its own
   colour scheme and cell metrics (§23), so a program that probes the background to pick a theme
-  is answered rather than left guessing. Still deferred (the §23 follow-ups): **scrollback** is
+  is answered rather than left guessing, and the **window title** a program sets (OSC 0/2) is
+  shown in the title bar (§23). Still deferred (the §23 follow-ups): **scrollback** is
   still off (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel
-  scrolling outside a program that asked for the mouse; **cursor shape** (DECSCUSR) and the
-  window **title** from OSC 0/2 are not surfaced. The full audited
+  scrolling outside a program that asked for the mouse; **cursor shape** (DECSCUSR) is not
+  surfaced (the cursor is always a block). The full audited
   inventory of what the terminal still lacks to drive *any* documented app UX — every gap
   tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
   **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
@@ -957,8 +958,11 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   already covered passively, and any other shell prints one syntax error and leaves the
   cwd unknown. Upgrade path: probe the shell (`echo $0`) and send the matching snippet.
 - **Shown in the window title.** `App::title` is a function of the state:
-  `cmote — user@host:port — /current/dir` while connected, dropping the directory when the
-  shell never announces one. The title costs no grid space, which the status bar would.
+  `cmote — user@host:port — /current/dir` while connected, dropping the third part when the
+  shell never announces one. When a program sets its own window title (OSC 0/2, §23) that takes
+  the third slot instead of the cwd — the endpoint always stays, so the window is still
+  identifiable by host even while a program owns the title. The title costs no grid space,
+  which the status bar would.
 
 ### Uploading (`ssh/upload.rs`)
 
@@ -1628,9 +1632,14 @@ leak that would spread the swap across the GUI. So the work is staged:
   detection the query exists for). The character-size query (CSI 18t) the engine already
   answered itself as a plain report; that still works. The GUI passes the cell pixel size down
   to the emulator once (`set_cell_pixels`), keeping the render metrics out of `term/`.
+- **Stage 5 — show the window title the remote sets (done).** A program sets its title with
+  OSC 0/2 (`vim README.md`, an ssh prompt's `user@host:cwd`); the engine parses it but has no
+  public getter, so the reply listener captures `Event::Title` / `ResetTitle` into the same
+  shared buffer, stripped of control characters (the title bar is chrome cmote owns — a remote
+  must not smuggle newlines or escapes into it). `Terminal::title` hands it to `App::title`,
+  which shows it in the third slot of the bar in place of the cwd, keeping the endpoint (§17).
 - **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
-  UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), the window title from OSC 0/2,
-  and focus reporting (`?1004`).
+  UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), and focus reporting (`?1004`).
 
 ### Security stays put
 
