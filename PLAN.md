@@ -460,9 +460,11 @@ Turning a raw byte stream into a screen.
   display offset, and `Terminal::scroll` (a cmote-owned `ScrollMotion`) moves the viewport. The
   wheel scrolls it whenever no mouse-aware program wants the wheel, Shift+PageUp/PageDown page and
   Shift+Home/End jump to the ends, and every keystroke snaps back to the live bottom; new output
-  leaves a scrolled-back view stationary. Still to do: a scroll **indicator** (a thin auto-hiding
-  scrollbar) — chunk 2 (§16). Selecting across the scrolled view already works (extract reads the
-  same offset the grid draws).
+  leaves a scrolled-back view stationary. A thin, read-only **scroll indicator** rides the grid's
+  right padding gutter while the view is scrolled up and vanishes at the live bottom; its thumb
+  reports position and history depth (`screen::history_size`), sized as the viewport's share of
+  the whole document with a floor so a deep history still shows a mark. Selecting across the
+  scrolled view already works (extract reads the same offset the grid draws). §23 is complete.
 - **Security note**: rendering untrusted server bytes is safe here — the engine
   *interprets* escapes into grid state; it never executes anything. We deliberately do
   **not** honor dangerous sequences (e.g. clipboard-write OSC 52) in v1.
@@ -904,8 +906,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   blink is dropped. Focus reporting (DECSET `?1004`) is answered too (§23 Stage 7): a program that
   turns it on hears `CSI I` / `CSI O` when the shell gains or loses focus. And **scrollback** is now
   on (§23 Stage 8): `SCROLLBACK = 10 000`, the wheel and Shift+PageUp/PageDown/Home/End scroll the
-  history, and typing snaps back to the live bottom. Still deferred (the one §23 follow-up left): the
-  scroll **indicator UI** — a thin auto-hiding scrollbar (chunk 2 of scrollback). The full audited
+  history, typing snaps back to the live bottom, and a thin, read-only **scroll indicator** in the
+  grid's right gutter shows position and depth while the view is scrolled up. That was the last §23
+  follow-up, so §23 (the engine swap and everything it unblocked) is complete. The full audited
   inventory of what the terminal still lacks to drive *any* documented app UX — every gap
   tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
   **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
@@ -1663,7 +1666,7 @@ leak that would spread the swap across the GUI. So the work is staged:
   about either. Every internal focus move funnels through one `set_focus`, and only a real change
   from the last reported state reaches the wire (a steady state is never re-sent); the state is
   reconciled after each output chunk, so a program toggling `?1004` mid-session is never stranded.
-- **Stage 8 — scroll back over what left the screen (done, chunk 1 of 2).** `SCROLLBACK` is now
+- **Stage 8 — scroll back over what left the screen (done).** `SCROLLBACK` is now
   **10 000** lines, so the engine keeps a bounded history. Because the viewport can sit above the
   live screen, `term::screen` exposes `display_offset()` and offsets every `cell` read by it (a
   viewport row maps to grid line `row − offset`, walking into the negative lines history lives on);
@@ -1676,10 +1679,15 @@ leak that would spread the swap across the GUI. So the work is staged:
   view back to the live bottom so what is typed lands where it echoes. New output leaves a
   scrolled-back viewport stationary in content — the engine grows the offset underneath, so reading
   is not yanked to the bottom by activity. The alternate screen keeps no history (vim/tmux/less
-  manage their own pages), so scrolling is inert there by construction.
-- **Follow-ups (independent commits):** the scroll **indicator UI** — chunk 2 of scrollback: a
-  thin, auto-hiding scrollbar on the grid's right edge, shown only while scrolled up, its thumb
-  giving position and depth (§16). The last §23 item once it lands.
+  manage their own pages), so scrolling is inert there by construction. The **scroll indicator**
+  (chunk 2) closes the stage: `screen::history_size()` reports the retained depth, and the grid
+  draws a thin, read-only thumb in its right padding gutter while the view is scrolled up (gone at
+  the live bottom — "auto-hiding" without an animation timer, which cmote does not run). The thumb
+  is the viewport's share of the whole document (`rows / (history + rows)`) with a floor so a deep
+  history still shows a mark, and it slides from the track's top at the oldest line down toward the
+  live tail. Scrolling stays on the wheel and keys — the thumb reports, it does not control. The
+  geometry is a pure `scrollbar_thumb` (testable without a renderer, as with `corner_parts`).
+- **§23 is complete:** the engine swap and every capability it unblocked (Stages 1–8) have landed.
 
 ### Security stays put
 

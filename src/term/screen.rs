@@ -213,6 +213,16 @@ impl<'a> Screen<'a> {
 		self.engine.grid().display_offset() as u16
 	}
 
+	/// How many scrolled-off lines the engine is currently retaining — the depth the scroll
+	/// indicator sizes its thumb against (§23). The engine grows this lazily up to the configured
+	/// cap (`SCROLLBACK`) as output scrolls off the top, and it is zero on the alternate screen,
+	/// which keeps no history. Paired with `display_offset`: the viewport can be scrolled back from
+	/// 0 (the live bottom) up to this many lines, so `history_size + screen rows` is the whole
+	/// document the indicator maps the thumb onto.
+	pub fn history_size(&self) -> u16 {
+		self.engine.grid().history_size() as u16
+	}
+
 	/// Whether the cursor is hidden (DECTCEM off).
 	pub fn hide_cursor(&self) -> bool {
 		!self.engine.mode().contains(TermMode::SHOW_CURSOR)
@@ -468,5 +478,18 @@ mod tests {
 		assert!(terminal.screen().focus_reporting());
 		terminal.process(b"\x1b[?1004l");
 		assert!(!terminal.screen().focus_reporting());
+	}
+
+	#[test]
+	fn history_grows_as_output_scrolls_off_the_top() {
+		// A two-row screen starts with no history; feeding five lines pushes three off the top,
+		// and the retained depth is what the scroll indicator measures itself against (§23). The
+		// alternate screen keeps none, so a full-screen program shows no indicator at all.
+		let mut terminal = Terminal::new(2, 8);
+		assert_eq!(terminal.screen().history_size(), 0);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+		assert_eq!(terminal.screen().history_size(), 3);
+		terminal.process(b"\x1b[?1049h");
+		assert_eq!(terminal.screen().history_size(), 0);
 	}
 }

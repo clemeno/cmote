@@ -113,6 +113,19 @@ const CURSOR_OUTLINE_THICKNESS: f32 = 1.0;
 /// delta is converted by the cell height instead, so it scrolls a line per cell of travel.
 const WHEEL_LINES: f32 = 3.0;
 
+/// The scroll indicator (§23): a thin thumb hugging the grid's right edge, drawn only while the
+/// viewport is scrolled back into history and gone the moment it returns to the live bottom —
+/// "auto-hiding" without an animation timer, which cmote does not run. It is a read-only mark,
+/// not a control: scrolling stays on the wheel and the Shift+PageUp/PageDown/Home/End keys. The
+/// bar is `SCROLLBAR_WIDTH` wide, inset `SCROLLBAR_INSET` from the right edge so it sits in the grid's
+/// own padding gutter and never over a cell; its thumb is never shorter than `SCROLLBAR_MIN_THUMB`
+/// so a deep history still shows a visible mark, and it draws in a translucent light so the text
+/// underneath stays readable.
+const SCROLLBAR_WIDTH: f32 = 4.0;
+const SCROLLBAR_INSET: f32 = 1.0;
+const SCROLLBAR_MIN_THUMB: f32 = 16.0;
+const SCROLLBAR_THUMB_COLOR: Color = Color::from_rgba(0.82, 0.82, 0.82, 0.55);
+
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
 /// a drawn corner joins a shaped line without a step.
@@ -260,6 +273,27 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				);
 			}
 		});
+
+		// The scroll indicator on top of everything (§23): a thin thumb in the right padding
+		// gutter while the viewport is scrolled back, and nothing at the live bottom. Read-only —
+		// it reports where the view sits and how deep the history is, but the wheel and keys do the
+		// moving. Drawn outside the clip above: it lives in the padding, not among the cells.
+		if let Some(thumb) = scrollbar_thumb(
+			bounds,
+			rows,
+			self.screen.history_size(),
+			self.screen.display_offset(),
+		) {
+			renderer.fill_quad(
+				Quad {
+					bounds: thumb,
+					border: Border::default().rounded(SCROLLBAR_WIDTH / 2.0),
+					shadow: iced::Shadow::default(),
+					snap: false,
+				},
+				Background::Color(SCROLLBAR_THUMB_COLOR),
+			);
+		}
 	}
 
 	fn update(
@@ -834,6 +868,41 @@ fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
 	(lines != 0).then_some(lines)
 }
 
+/// The scroll indicator's thumb rectangle for a grid of `bounds`, or `None` when nothing should
+/// be drawn — at the live bottom (`offset == 0`) or with no history to indicate (§23). Split from
+/// the draw so the geometry, the part that can be wrong, is testable without a renderer (as with
+/// `corner_parts`). The thumb tracks the text area, not the padding: its height is the viewport's
+/// share of the whole document (`rows` of screen plus `history` of scrollback), floored at
+/// `SCROLLBAR_MIN_THUMB` so a deep history still shows a visible mark, and its top runs from the
+/// track's top at the oldest retained line (`offset == history`) down toward the bottom as the
+/// view returns to the live tail — clamped so that minimum height can never push it off the end.
+fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> Option<Rectangle> {
+	if offset == 0 || history == 0 {
+		return None;
+	}
+	let rows = f32::from(rows);
+	let history = f32::from(history);
+	let offset = f32::from(offset);
+	let document = history + rows;
+
+	let track_top = bounds.y + GRID_PADDING;
+	let track_height = rows * CELL_HEIGHT;
+	let thumb_height = (track_height * rows / document)
+		.max(SCROLLBAR_MIN_THUMB)
+		.min(track_height);
+	// 0 at the oldest line, growing toward 1 as the view returns to the bottom.
+	let position = (history - offset) / document;
+	let max_top = track_top + track_height - thumb_height;
+	let thumb_top = (track_top + position * track_height).min(max_top);
+
+	Some(Rectangle {
+		x: bounds.x + bounds.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
+		y: thumb_top,
+		width: SCROLLBAR_WIDTH,
+		height: thumb_height,
+	})
+}
+
 /// Which way a scroll went, as the protocol's wheel button. A horizontal-only scroll
 /// reports nothing — the protocol's wheel is vertical.
 fn wheel_button(delta: mouse::ScrollDelta) -> Option<report::Button> {
@@ -1258,6 +1327,57 @@ mod tests {
 			}),
 			Some(1)
 		);
+	}
+
+	#[test]
+	fn the_scroll_indicator_hides_at_the_live_bottom_and_with_no_history() {
+		// Nothing to indicate at the live tail (offset 0) or before any line has scrolled off
+		// (history 0), so no thumb is drawn — "auto-hiding" without a timer (§23).
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		assert!(scrollbar_thumb(bounds, 24, 0, 0).is_none());
+		assert!(scrollbar_thumb(bounds, 24, 100, 0).is_none());
+		// Scrolled up at all, with history to show: a thumb appears.
+		assert!(scrollbar_thumb(bounds, 24, 100, 1).is_some());
+	}
+
+	#[test]
+	fn the_scroll_thumb_tracks_position_and_depth_within_the_track() {
+		// The thumb sits in the right gutter, reports where the view is (top of the track at the
+		// oldest line, sliding down toward the live tail) and how deep the history is (a shorter
+		// thumb the more there is), and never leaves the text area's vertical span (§23).
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let track_top = GRID_PADDING;
+		let track_bottom = GRID_PADDING + 24.0 * CELL_HEIGHT;
+		let close = |left: f32, right: f32| {
+			assert!((left - right).abs() < 0.01, "expected {right}, got {left}");
+		};
+
+		// At the oldest retained line (offset == history) the thumb is pinned to the track top.
+		let top = scrollbar_thumb(bounds, 24, 100, 100).unwrap();
+		close(top.y, track_top);
+		close(top.x, bounds.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET);
+
+		// Returning toward the live tail slides the thumb down the track, monotonically.
+		let middle = scrollbar_thumb(bounds, 24, 100, 50).unwrap();
+		let near_bottom = scrollbar_thumb(bounds, 24, 100, 1).unwrap();
+		assert!(top.y < middle.y && middle.y < near_bottom.y);
+
+		// However deep the history, the thumb stays inside the track and never shorter than the
+		// floor that keeps it visible.
+		let deep = scrollbar_thumb(bounds, 24, 5000, 2500).unwrap();
+		close(deep.height, SCROLLBAR_MIN_THUMB);
+		assert!(deep.y >= track_top - 0.01);
+		assert!(deep.y + deep.height <= track_bottom + 0.01);
 	}
 
 	#[test]

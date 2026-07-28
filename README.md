@@ -68,8 +68,10 @@ references below (§n) point into it.
   scrolls it (whenever no full-screen program has claimed the wheel), **Shift+PageUp/PageDown**
   page through it and **Shift+Home/End** jump to the top and back to the live bottom; typing (or
   pasting) snaps you back to the prompt so what you send lands where it echoes. New output while
-  you are scrolled up leaves you where you are reading. A full-screen program (vim, tmux, less)
-  keeps its own pages, so scrolling there is theirs, not cmote's (§23).
+  you are scrolled up leaves you where you are reading. A thin **scroll indicator** appears at the
+  right edge while you are scrolled up and disappears at the live bottom — its bar shows where you
+  are in the history and how deep it runs. A full-screen program (vim, tmux, less) keeps its own
+  pages, so scrolling there is theirs, not cmote's (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -414,7 +416,10 @@ switch types a short `^[[O` / `^[[I` at the prompt, and tabbing the keyboard to 
 and back does the same — proof the remote is told (turn it off again with `printf '\033[?1004l'`,
 §23). Fill the screen with history (`seq 1 200`), then **scroll back**: the mouse wheel and
 **Shift+PageUp/PageDown** move up through the run, **Shift+Home** jumps to the oldest line and
-**Shift+End** back to the bottom, and typing any key snaps you back to the prompt (§23). Scroll up,
+**Shift+End** back to the bottom, and typing any key snaps you back to the prompt (§23). As you
+scroll up a thin bar appears at the right edge showing your place in the history — it is longer for
+a shallow history and shorter for a deep one — and vanishes the instant you are back at the live
+bottom. Scroll up,
 then run something that prints (`sleep 2; echo done` in another split, or just wait for a clock) —
 the view stays where you are reading rather than jumping to the new output. Open `less /etc/services`
 or `vim`, scroll with the wheel, and confirm it pages the *program* (its own alternate screen has no
