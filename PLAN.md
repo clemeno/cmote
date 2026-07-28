@@ -1647,8 +1647,18 @@ leak that would spread the swap across the GUI. So the work is staged:
   keeps its old path — inverting its cell in the run planner, so a glyph under it stays legible;
   the other three are overlays drawn on top of an untouched cell after its row. Blink is dropped
   (cmote runs no animation timer), so every shape is steady, and DECTCEM hiding still wins.
+- **Stage 7 — report focus to the remote (done).** Focus reporting (DECSET `?1004`): a program
+  asks to be told when the terminal gains or loses focus, and the terminal answers `CSI I` /
+  `CSI O` so it can undim, pause a spinner, or repaint. The engine tracks the mode but leaves the
+  sending to the host, so `term::screen` exposes `focus_reporting()` and `app` watches iced's
+  window `Focused` / `Unfocused` events. What counts as focus is cmote's call: the shell is
+  focused only while the OS window is **and** the keyboard ring is on the terminal, so a switch to
+  a side panel reads as a focus-out too — the remote is blind to cmote's panels, so it should hear
+  about either. Every internal focus move funnels through one `set_focus`, and only a real change
+  from the last reported state reaches the wire (a steady state is never re-sent); the state is
+  reconciled after each output chunk, so a program toggling `?1004` mid-session is never stranded.
 - **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
-  UI (`SCROLLBACK` is 0 today, §9), and focus reporting (`?1004`).
+  UI (`SCROLLBACK` is 0 today, §9) — the one remaining item.
 
 ### Security stays put
 

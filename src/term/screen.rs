@@ -232,6 +232,16 @@ impl<'a> Screen<'a> {
 		self.engine.mode().contains(TermMode::BRACKETED_PASTE)
 	}
 
+	/// Whether focus reporting (DECSET 1004) is on — the remote asked to be told when the
+	/// terminal gains or loses focus, and cmote answers with `CSI I` / `CSI O` (§23). It is
+	/// cmote (not the engine) that watches the window and sends those bytes; this only reads
+	/// back whether the program turned the mode on. What counts as focus is `app`'s call —
+	/// cmote treats a pane switch off the shell as a focus-out too, since the remote knows
+	/// nothing of cmote's own panels.
+	pub fn focus_reporting(&self) -> bool {
+		self.engine.mode().contains(TermMode::FOCUS_IN_OUT)
+	}
+
 	/// Which mouse protocol the remote program turned on (§9). The three reporting modes are
 	/// mutually exclusive in the engine, so the most specific one set wins.
 	pub fn mouse_mode(&self) -> MouseMode {
@@ -430,5 +440,17 @@ mod tests {
 		assert_eq!(cursor_shape("\x1b[4 q"), CursorShape::Underline);
 		assert_eq!(cursor_shape("\x1b[5 q"), CursorShape::Bar);
 		assert_eq!(cursor_shape("\x1b[6 q"), CursorShape::Bar);
+	}
+
+	#[test]
+	fn focus_reporting_follows_decset_1004() {
+		// Off until a program asks; `?1004h` turns it on and `?1004l` back off. This is what
+		// tells cmote whether to send `CSI I` / `CSI O` on a focus change (§23).
+		let mut terminal = Terminal::new(1, 8);
+		assert!(!terminal.screen().focus_reporting());
+		terminal.process(b"\x1b[?1004h");
+		assert!(terminal.screen().focus_reporting());
+		terminal.process(b"\x1b[?1004l");
+		assert!(!terminal.screen().focus_reporting());
 	}
 }

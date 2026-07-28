@@ -283,6 +283,15 @@ pub struct App {
 	files: files::Files,
 	/// Which of the three — shell, tree, files pane — the keyboard belongs to (§20).
 	focus: Focus,
+	/// Whether the OS window currently has focus (§23). Half of what "the shell is focused"
+	/// means for focus reporting — the other half is `focus == Focus::Terminal`. Started `true`
+	/// by `new` (a window opens focused); the first `Unfocused` event corrects it if not.
+	window_focused: bool,
+	/// The last shell-focus state cmote told the remote, for focus reporting (§23). Only a
+	/// change from this reaches the wire, so a steady state is never re-sent and a program that
+	/// enables `?1004` hears nothing until focus actually moves. Started `true` — the state a
+	/// program assumes on enabling the mode — and re-baselined to `true` at each session start.
+	shell_focus_reported: bool,
 	/// Which modifier keys are down right now (§21). Tracked from the keyboard
 	/// subscription because a mouse press reports none of its own, and Ctrl+click,
 	/// Shift+click and Ctrl+drag all need to know.
@@ -418,6 +427,9 @@ pub enum Message {
 	Key(iced::keyboard::Event),
 	/// The window changed size — refit the terminal grid to it (§9).
 	WindowResized(iced::Size),
+	/// The OS window gained (`true`) or lost (`false`) focus — reported to the remote as
+	/// `CSI I` / `CSI O` if it enabled focus reporting (§23).
+	WindowFocus(bool),
 	/// The user clicked Disconnect in the terminal status bar — ask to confirm (§10).
 	DisconnectPressed,
 	/// The user confirmed Disconnect in the modal — tear the session down.
@@ -530,6 +542,10 @@ impl App {
 		// event can still be centred and clamped (§10).
 		let app = Self {
 			targets: crate::profiles::Targets::load(),
+			// A window opens focused, and a program that enables focus reporting assumes the
+			// same (§23); both are corrected by the first real change if the platform disagrees.
+			window_focused: true,
+			shell_focus_reported: true,
 			..Self::default()
 		};
 		let size = iced::window::latest()
@@ -597,6 +613,7 @@ impl App {
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
 			Message::Key(event) => return self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
+			Message::WindowFocus(focused) => self.on_window_focus(focused),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
 			Message::DisconnectCancelled => self.confirm_disconnect = false,
@@ -978,6 +995,10 @@ impl App {
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Input(replies));
 				}
+				// That chunk may have turned focus reporting on or off (§23); reconcile the
+				// remote to the shell's true focus, so a program enabling `?1004` while a side
+				// panel holds the keyboard is not left believing the shell is focused.
+				self.report_focus();
 				if let Some(cwd) = cwd {
 					let needed = self.explorer.reveal_if_new(&cwd);
 					self.list_dirs(needed);
@@ -1506,15 +1527,60 @@ impl App {
 			.unwrap_or(0);
 		// Backwards is a forward step of len-1, which keeps the wrap-around in one place.
 		let step = if backwards { ring.len() - 1 } else { 1 };
-		self.focus = ring[(at + step) % ring.len()];
+		self.set_focus(ring[(at + step) % ring.len()]);
 	}
 
 	/// Give the keyboard to a panel because it was clicked (§20). Also closes the OTHER
 	/// panel's context menu — clicking into a panel is as much a click-away from the menu
 	/// next door as clicking the grid is.
 	fn focus_pane(&mut self, focus: Focus) {
-		self.focus = focus;
+		self.set_focus(focus);
 		self.menu = None;
+	}
+
+	/// Move cmote's keyboard ring to `focus`, the single funnel for every internal focus move
+	/// (§20, §23). Routing them all through here means focus reporting sees each one: a switch
+	/// off the shell to a panel reads as the shell losing focus, and back as regaining it. Only
+	/// a live-session move belongs here — the lifecycle reset in `clear_grid_interaction` sets
+	/// the field straight, since a session opening or closing is not a focus event to report.
+	fn set_focus(&mut self, focus: Focus) {
+		self.focus = focus;
+		self.report_focus();
+	}
+
+	/// The OS window gained or lost focus (§23). Remember it and let the remote know if it
+	/// asked: the shell is focused only while the window is AND the ring is on it, so window
+	/// focus and every pane switch feed the one reporter.
+	fn on_window_focus(&mut self, focused: bool) {
+		self.window_focused = focused;
+		self.report_focus();
+	}
+
+	/// Tell the remote the shell gained (`CSI I`) or lost (`CSI O`) focus, when the state it
+	/// asked to hear about actually flips (focus reporting, DECSET 1004, §23). The shell counts
+	/// as focused only while the OS window is focused AND cmote's keyboard ring is on the
+	/// terminal — so alt-tabbing away and switching to a side panel both read as a focus-out,
+	/// per the reading that the remote, blind to cmote's panels, should hear about either.
+	///
+	/// Silent unless a shell is live and the program turned reporting on. The last reported
+	/// state is kept so only transitions reach the wire — a steady state is never re-sent, and
+	/// a program merely enabling the mode hears nothing until focus moves. Because this also
+	/// runs after each chunk of shell output, a program that toggles `?1004` mid-session is
+	/// reconciled to the true state on its next output rather than left believing the wrong one.
+	fn report_focus(&mut self) {
+		let Some(terminal) = self.terminal.as_ref() else {
+			return;
+		};
+		if !terminal.screen().focus_reporting() {
+			return;
+		}
+		let focused = self.window_focused && self.focus == Focus::Terminal;
+		if focused == self.shell_focus_reported {
+			return;
+		}
+		self.shell_focus_reported = focused;
+		let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+		self.send_command(SshCommand::Input(report.to_vec()));
 	}
 
 	/// Keys while the folder tree has the focus (§20). Up/Down walk the visible rows,
@@ -1558,7 +1624,7 @@ impl App {
 				return self.on_explorer(ExplorerMessage::RenameStarted(path));
 			}
 			Named::Escape => {
-				self.focus = Focus::Terminal;
+				self.set_focus(Focus::Terminal);
 				return iced::Task::none();
 			}
 			_ => return iced::Task::none(),
@@ -1619,7 +1685,7 @@ impl App {
 				return self.on_files(FilesMessage::RenameStarted(path));
 			}
 			Named::Escape => {
-				self.focus = Focus::Terminal;
+				self.set_focus(Focus::Terminal);
 				return iced::Task::none();
 			}
 			_ => return iced::Task::none(),
@@ -1751,7 +1817,7 @@ impl App {
 	fn on_grid_pressed(&mut self) {
 		self.menu = None;
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
-		self.focus = Focus::Terminal;
+		self.set_focus(Focus::Terminal);
 		if self.terminal.is_some() {
 			self.selection = Some(ui::selection::Selection::new(self.hover_cell));
 			self.selecting = true;
@@ -1765,7 +1831,7 @@ impl App {
 	/// the grid does (§20) and dismisses any menu left open.
 	fn on_mouse_report(&mut self, bytes: Vec<u8>) {
 		self.menu = None;
-		self.focus = Focus::Terminal;
+		self.set_focus(Focus::Terminal);
 		self.send_command(SshCommand::Input(bytes));
 	}
 
@@ -1850,8 +1916,12 @@ impl App {
 		self.clash = None;
 		// Every session starts with the keyboard at the shell (§20), and none is mid-resume:
 		// a torn-down session has nothing to settle, and a fresh one sets this itself once it
-		// knows whether it has a shell directory to replay (§22).
+		// knows whether it has a shell directory to replay (§22). Set straight rather than
+		// through `set_focus`: opening or closing a session is not a focus move to report, and
+		// the new session's remote starts out believing the shell is focused (§23), so the
+		// reported baseline is reset to match — the window's own focus is left as it is.
 		self.focus = Focus::Terminal;
+		self.shell_focus_reported = true;
 		self.resume_cwd = None;
 		// The panels' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
@@ -2115,7 +2185,7 @@ impl App {
 				self.explorer.toggle();
 				// A hidden panel cannot hold the keyboard: hand it back to the shell (§20).
 				if !self.explorer.visible() && self.focus == Focus::Tree {
-					self.focus = Focus::Terminal;
+					self.set_focus(Focus::Terminal);
 				}
 				// The panel's width just moved between it and the grid: reflow both the
 				// local emulator and the remote pty to the new column count.
@@ -2284,7 +2354,7 @@ impl App {
 				self.files.toggle();
 				// A hidden pane cannot hold the keyboard: hand it back to the shell (§20).
 				if !self.files.visible() && self.focus == Focus::Files {
-					self.focus = Focus::Terminal;
+					self.set_focus(Focus::Terminal);
 				}
 				// The pane's height just moved between it and the grid: reflow both the
 				// local emulator and the remote pty to the new row count.
@@ -2717,7 +2787,9 @@ impl App {
 		// Track window size on every screen so a dialog can be centred/clamped even
 		// before a terminal exists (§10).
 		let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
-		let mut subs = vec![ssh, resizes];
+		// Track window focus on every screen too, so focus reporting (§23) sees a change that
+		// happens while a dialog or the form is up and the shell still reflects it on return.
+		let mut subs = vec![ssh, resizes, focus_events()];
 
 		// While a copy toast is up, ride the window's frame clock so it can dismiss itself
 		// once its dwell elapses (§10). This build's iced executor is the thread-pool
@@ -2749,6 +2821,18 @@ impl App {
 /// `and_then` unwraps it — if there is somehow no window, this is a no-op.
 fn fit_terminal() -> iced::Task<Message> {
 	iced::window::latest().and_then(|id| iced::window::size(id).map(Message::WindowResized))
+}
+
+/// Window focus changes, as `Message::WindowFocus(bool)` for focus reporting (§23). iced
+/// ships no dedicated focus-event subscription, so this filters the raw event stream down to
+/// the two window events that matter and drops the rest — so the shell is not woken on every
+/// frame the way subscribing to all window events would.
+fn focus_events() -> iced::Subscription<Message> {
+	iced::event::listen_with(|event, _status, _window| match event {
+		iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocus(true)),
+		iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowFocus(false)),
+		_ => None,
+	})
 }
 
 /// Open the native file picker for a private-key file (§7). The dialog is modal
@@ -2920,6 +3004,72 @@ fn keep_visible(offset: f32, view: f32, top: f32, height: f32) -> f32 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	// An `App` with a live emulator and an open command channel, so `send_command` succeeds
+	// and its bytes can be read back off `rx`. The window starts focused with the ring on the
+	// shell — the baseline a program assumes — so a focus change is measured against it.
+	fn app_with_terminal(rx_cap: usize) -> (App, mpsc::Receiver<SshCommand>) {
+		let (tx, rx) = mpsc::channel(rx_cap);
+		let app = App {
+			command_tx: Some(tx),
+			terminal: Some(term::Terminal::new(24, 80)),
+			window_focused: true,
+			shell_focus_reported: true,
+			focus: Focus::Terminal,
+			..App::default()
+		};
+		(app, rx)
+	}
+
+	// The next input queued for the shell, or `None` if nothing was sent.
+	fn next_input(rx: &mut mpsc::Receiver<SshCommand>) -> Option<Vec<u8>> {
+		match rx.try_recv() {
+			Ok(SshCommand::Input(bytes)) => Some(bytes),
+			_ => None,
+		}
+	}
+
+	/// A program that enabled focus reporting (`?1004`) hears `CSI I` / `CSI O` when the shell
+	/// gains or loses focus — from the window losing OS focus AND from the keyboard ring moving
+	/// off the shell to a side panel (§23) — and hears each edge only once.
+	#[test]
+	fn focus_reporting_answers_window_and_pane_changes() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.terminal.as_mut().unwrap().process(b"\x1b[?1004h");
+
+		// The window loses, then regains, OS focus.
+		app.on_window_focus(false);
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[O"[..]));
+		app.on_window_focus(true);
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[I"[..]));
+
+		// The keyboard ring moving off the shell to a side panel is a focus-out to the remote,
+		// which knows nothing of cmote's panels.
+		app.set_focus(Focus::Files);
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[O"[..]));
+
+		// Moving between two panels never restores the shell's focus, so nothing more is sent.
+		app.set_focus(Focus::Tree);
+		assert_eq!(next_input(&mut rx), None);
+
+		// Returning the ring to the shell is the matching focus-in.
+		app.set_focus(Focus::Terminal);
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[I"[..]));
+
+		// Re-asserting a state it already holds — window focused, ring on the shell — is silent.
+		app.on_window_focus(true);
+		assert_eq!(next_input(&mut rx), None);
+	}
+
+	/// Until a program asks for focus reporting, a focus change is cmote's own business and
+	/// nothing reaches the wire (§23).
+	#[test]
+	fn focus_changes_are_silent_until_the_program_asks() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.on_window_focus(false);
+		app.set_focus(Focus::Files);
+		assert_eq!(next_input(&mut rx), None);
+	}
 
 	#[test]
 	fn scrolling_a_selection_into_view_moves_only_at_the_edges() {

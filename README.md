@@ -60,6 +60,10 @@ references below (§n) point into it.
 - **The cursor takes the shape a program asks for** — a block, an underline, or a thin bar,
   whichever the remote picks with DECSCUSR (vim's insert-mode bar, say); drawn steady, since
   cmote runs no blink timer (§23).
+- **The remote is told when focus changes** — a program that turns on focus reporting (`?1004`,
+  as tmux and vim do) hears `CSI I` / `CSI O` as the window gains or loses focus, so it can
+  undim or pause a spinner. Moving cmote's keyboard to a side panel counts as the shell losing
+  focus too, since the remote knows nothing of cmote's own panels (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -399,7 +403,10 @@ background colour (`printf '\033]11;?\033\\'`): it replies on the input channel,
 prompt the answer `rgb:1e1e/1e1e/1e1e` appears as if typed — proof it reports what it draws (§23).
 Change the cursor's shape (`printf '\033[6 q'` for a bar, `\033[4 q` an underline, `\033[2 q`
 back to a block) and confirm it redraws each time — the shape a program like vim would pick (§23).
-Print wide glyphs over aligned
+Turn on focus reporting (`printf '\033[?1004h'`), then click to another window and back: each
+switch types a short `^[[O` / `^[[I` at the prompt, and tabbing the keyboard to the file tree
+and back does the same — proof the remote is told (turn it off again with `printf '\033[?1004l'`,
+§23). Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.
