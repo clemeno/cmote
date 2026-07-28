@@ -449,6 +449,10 @@ pub enum Message {
 	/// the report it expects. Only raised while the remote has a mouse protocol on and the
 	/// user is not holding Shift, so it never competes with the selection above.
 	MouseReport(Vec<u8>),
+	/// The wheel scrolled cmote's own scrollback (§23); the payload is a signed line count,
+	/// positive up into history. Raised by the grid only when no mouse-aware program wants the
+	/// wheel, so it never competes with the mouse report above.
+	TerminalScroll(i32),
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
 	/// Read the system clipboard, then paste it into the shell.
@@ -622,6 +626,7 @@ impl App {
 			Message::GridReleased => self.on_grid_released(),
 			Message::GridRightPressed => self.menu = Some(self.pointer),
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
+			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
 			Message::CopyPressed => return self.on_copy(),
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
@@ -1489,6 +1494,19 @@ impl App {
 			Focus::Terminal => {}
 		}
 
+		// Shift + PageUp / PageDown page through the shell's own scrollback, and Shift + Home /
+		// End jump to its ends, rather than reaching the remote (§23). Shift-guarded so the bare
+		// keys still send their CSI sequences to a full-screen program; reached only with the
+		// shell focused, since a focused panel has already claimed the arrows and their neighbours.
+		if modifiers.shift()
+			&& let iced::keyboard::Key::Named(named) = &key
+			&& let Some(motion) = scroll_motion(named)
+			&& let Some(terminal) = self.terminal.as_mut()
+		{
+			terminal.scroll(motion);
+			return iced::Task::none();
+		}
+
 		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
 		// form; read that mode off the emulator so `encode` sends the sequences the
 		// remote program actually listens for. No terminal means no session — treat
@@ -1505,6 +1523,12 @@ impl App {
 			modifiers,
 			application_cursor,
 		) {
+			// Typing returns the view to the live bottom (§23): a keystroke sent while scrolled
+			// back into history lands where it will be echoed, not off-screen above. The scroll
+			// keys above return before reaching here, so paging never snaps itself back.
+			if let Some(terminal) = self.terminal.as_mut() {
+				terminal.scroll(term::ScrollMotion::Bottom);
+			}
 			self.send_command(SshCommand::Input(bytes));
 		}
 		iced::Task::none()
@@ -1835,6 +1859,17 @@ impl App {
 		self.send_command(SshCommand::Input(bytes));
 	}
 
+	/// Scroll the shell's own scrollback by the wheel (§23). Positive lines move up into
+	/// history, negative back toward the live bottom; the grid reads the new offset next frame.
+	/// A missing terminal (no session) is a no-op, as is any scroll on the alternate screen —
+	/// there the engine keeps no history, so the motion clamps to nothing. Scrolling is a purely
+	/// local view change: nothing is sent to the remote, and the focus is left where it is.
+	fn on_terminal_scroll(&mut self, lines: i32) {
+		if let Some(terminal) = self.terminal.as_mut() {
+			terminal.scroll(term::ScrollMotion::Lines(lines));
+		}
+	}
+
 	/// Finish a drag (§10). A press-release with no movement leaves an empty
 	/// selection (anchor == head), which we clear so a plain click deselects.
 	fn on_grid_released(&mut self) {
@@ -1884,11 +1919,19 @@ impl App {
 	/// nothing. The selection/highlight is deliberately kept — pasting does not clear
 	/// it, so the user can still copy what they had selected.
 	fn on_pasted(&mut self, text: Option<String>) {
-		let (Some(text), Some(terminal)) = (text, self.terminal.as_ref()) else {
+		let Some(text) = text else {
+			return;
+		};
+		let Some(terminal) = self.terminal.as_ref() else {
 			return;
 		};
 		let bracketed = terminal.screen().bracketed_paste();
 		let bytes = term::keymap::encode_paste(&text, bracketed);
+		// A paste is input too, so it returns the view to the live bottom the way a keystroke
+		// does (§23) — the pasted text lands where it echoes, not above a scrolled-up viewport.
+		if let Some(terminal) = self.terminal.as_mut() {
+			terminal.scroll(term::ScrollMotion::Bottom);
+		}
 		self.send_command(SshCommand::Input(bytes));
 	}
 
@@ -2835,6 +2878,20 @@ fn focus_events() -> iced::Subscription<Message> {
 	})
 }
 
+/// The scrollback motion a Shift+navigation key asks for, or `None` for a key that does not
+/// scroll (§23). PageUp/PageDown page through history, Home/End jump to the oldest retained
+/// line and back to the live bottom — the xterm shifted-navigation set the terminal owns.
+fn scroll_motion(named: &iced::keyboard::key::Named) -> Option<term::ScrollMotion> {
+	use iced::keyboard::key::Named;
+	match named {
+		Named::PageUp => Some(term::ScrollMotion::PageUp),
+		Named::PageDown => Some(term::ScrollMotion::PageDown),
+		Named::Home => Some(term::ScrollMotion::Top),
+		Named::End => Some(term::ScrollMotion::Bottom),
+		_ => None,
+	}
+}
+
 /// Open the native file picker for a private-key file (§7). The dialog is modal
 /// and would block the GUI thread, so it runs as an async `Task` instead; its
 /// result arrives back through the Elm loop as `Message::KeyFilePicked`. We keep
@@ -3069,6 +3126,75 @@ mod tests {
 		app.on_window_focus(false);
 		app.set_focus(Focus::Files);
 		assert_eq!(next_input(&mut rx), None);
+	}
+
+	// A key-press event for the terminal handler. `text: None` is fine for the named keys these
+	// tests use (Enter / PageUp encode from the key itself), and the physical code is non-numpad
+	// so it never trips the NumLock special-case in `keymap`.
+	fn key_press(
+		named: iced::keyboard::key::Named,
+		code: iced::keyboard::key::Code,
+		modifiers: iced::keyboard::Modifiers,
+	) -> iced::keyboard::Event {
+		iced::keyboard::Event::KeyPressed {
+			key: iced::keyboard::Key::Named(named),
+			modified_key: iced::keyboard::Key::Named(named),
+			physical_key: iced::keyboard::key::Physical::Code(code),
+			location: iced::keyboard::Location::Standard,
+			modifiers,
+			text: None,
+			repeat: false,
+		}
+	}
+
+	// Forty lines of output over the 24-row screen, so there is history to scroll into.
+	fn with_history(app: &mut App) {
+		let output: Vec<u8> = (0..40).flat_map(|_| b"x\r\n".to_vec()).collect();
+		app.terminal.as_mut().unwrap().process(&output);
+	}
+
+	// The current scrollback offset off the live emulator.
+	fn offset(app: &App) -> u16 {
+		app.terminal.as_ref().unwrap().screen().display_offset()
+	}
+
+	/// Typing while scrolled back into history snaps the view to the live bottom, and the key
+	/// still reaches the shell (§23) — so what is typed lands where it will be echoed.
+	#[test]
+	fn typing_returns_the_scrollback_to_the_live_bottom() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		with_history(&mut app);
+
+		app.on_terminal_scroll(5);
+		assert!(offset(&app) > 0, "scrolled up into history");
+
+		let _ = app.on_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
+		assert_eq!(offset(&app), 0, "snapped back to the bottom");
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\r"[..]));
+	}
+
+	/// Shift+PageUp scrolls cmote's own scrollback and sends nothing to the remote, while bare
+	/// PageUp stays the shell's key and sends its CSI sequence (§23) — the two never collide.
+	#[test]
+	fn shift_page_up_scrolls_history_while_bare_page_up_reaches_the_shell() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		with_history(&mut app);
+
+		let _ = app.on_key(key_press(Named::PageUp, Code::PageUp, Modifiers::SHIFT));
+		assert!(offset(&app) > 0, "the terminal's own scrollback moved");
+		assert_eq!(next_input(&mut rx), None, "nothing reached the shell");
+
+		// Bare PageUp is the shell's: it sends the CSI "~" sequence (snapping the view back on
+		// the way, since it is a keystroke to the remote).
+		let _ = app.on_key(key_press(Named::PageUp, Code::PageUp, Modifiers::empty()));
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[5~"[..]));
+		assert_eq!(offset(&app), 0, "typing snapped it back to the bottom");
 	}
 
 	#[test]

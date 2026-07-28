@@ -64,6 +64,12 @@ references below (§n) point into it.
   as tmux and vim do) hears `CSI I` / `CSI O` as the window gains or loses focus, so it can
   undim or pause a spinner. Moving cmote's keyboard to a side panel counts as the shell losing
   focus too, since the remote knows nothing of cmote's own panels (§23).
+- **Scroll back over what left the screen** — cmote keeps 10 000 lines of history. The **wheel**
+  scrolls it (whenever no full-screen program has claimed the wheel), **Shift+PageUp/PageDown**
+  page through it and **Shift+Home/End** jump to the top and back to the live bottom; typing (or
+  pasting) snaps you back to the prompt so what you send lands where it echoes. New output while
+  you are scrolled up leaves you where you are reading. A full-screen program (vim, tmux, less)
+  keeps its own pages, so scrolling there is theirs, not cmote's (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -406,7 +412,13 @@ back to a block) and confirm it redraws each time — the shape a program like v
 Turn on focus reporting (`printf '\033[?1004h'`), then click to another window and back: each
 switch types a short `^[[O` / `^[[I` at the prompt, and tabbing the keyboard to the file tree
 and back does the same — proof the remote is told (turn it off again with `printf '\033[?1004l'`,
-§23). Print wide glyphs over aligned
+§23). Fill the screen with history (`seq 1 200`), then **scroll back**: the mouse wheel and
+**Shift+PageUp/PageDown** move up through the run, **Shift+Home** jumps to the oldest line and
+**Shift+End** back to the bottom, and typing any key snaps you back to the prompt (§23). Scroll up,
+then run something that prints (`sleep 2; echo done` in another split, or just wait for a clock) —
+the view stays where you are reading rather than jumping to the new output. Open `less /etc/services`
+or `vim`, scroll with the wheel, and confirm it pages the *program* (its own alternate screen has no
+cmote scrollback), then quit and confirm the wheel scrolls cmote's history again (§23). Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.

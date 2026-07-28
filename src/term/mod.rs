@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
 
@@ -41,15 +41,33 @@ use crate::palette;
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
 
-/// How many scrolled-off lines to retain. v1 shows only the visible screen, so none —
-/// scrollback is a later feature (§23). With no history the active screen's top row is
-/// always the topmost line, which is what lets `screen` map a viewport row straight to a
-/// grid line with no display-offset arithmetic.
-const SCROLLBACK: usize = 0;
+/// How many scrolled-off lines to retain (§23). Deep enough to scroll back over a long build
+/// or a `cat` of a big file; the engine grows the buffer lazily up to this cap, so the memory
+/// is bounded at roughly this many rows of cells. On the alternate screen (vim, tmux, less) the
+/// engine keeps no history at all, so scrolling there is inert by construction — a full-screen
+/// program manages its own pages. Because the viewport can now sit above the active screen,
+/// `screen` offsets every read by the engine's display offset (`Screen::cell` / `display_offset`)
+/// rather than mapping a viewport row straight to a grid line.
+const SCROLLBACK: usize = 10_000;
 
 /// The engine, specialised to our reply-collecting listener. `screen::Screen` borrows this
 /// to read the grid, so the alias is the one name that would change under another engine.
 pub(super) type Engine = Term<Replies>;
+
+/// A scrollback movement the GUI asks for (§23). cmote's own small vocabulary so the engine's
+/// `Scroll` type stays behind `term/`, the same way `screen` hides the rest of the engine. The
+/// wheel sends `Lines`, Shift+PageUp/PageDown send `PageUp`/`PageDown`, Shift+Home/End send
+/// `Top`/`Bottom`, and every keystroke sends `Bottom` to snap the view back to the live prompt.
+pub enum ScrollMotion {
+	/// By a signed number of lines — positive scrolls up into history, negative back down.
+	Lines(i32),
+	/// By a whole viewport, up into history or back down toward the live screen.
+	PageUp,
+	PageDown,
+	/// All the way to the oldest retained line, or back to the live bottom.
+	Top,
+	Bottom,
+}
 
 impl Terminal {
 	/// Create an emulator with a `rows`×`cols` grid, matching the remote pty.
@@ -126,6 +144,23 @@ impl Terminal {
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
+	}
+
+	/// Move the scrollback viewport (§23). The engine owns both the retained history and the
+	/// display offset into it; cmote only says which way to move, then reads the offset back
+	/// through `screen` to lay out the grid. On the alternate screen there is no history, so the
+	/// engine clamps every motion to a no-op — which is why scrolling never fights a full-screen
+	/// program (vim, tmux, less), each of which manages its own pages. The only engine event this
+	/// raises is `MouseCursorDirty`, which our reply listener drops.
+	pub fn scroll(&mut self, motion: ScrollMotion) {
+		let scroll = match motion {
+			ScrollMotion::Lines(lines) => Scroll::Delta(lines),
+			ScrollMotion::PageUp => Scroll::PageUp,
+			ScrollMotion::PageDown => Scroll::PageDown,
+			ScrollMotion::Top => Scroll::Top,
+			ScrollMotion::Bottom => Scroll::Bottom,
+		};
+		self.term.scroll_display(scroll);
 	}
 
 	/// Tell the emulator the pixel size of one cell, so it can answer a program that asks for
@@ -451,5 +486,51 @@ mod tests {
 		// input channel is for keystrokes and query answers only.
 		let mut terminal = Terminal::new(10, 40);
 		assert!(terminal.process(b"\x1b]2;build\x07").is_empty());
+	}
+
+	#[test]
+	fn scrolling_back_reveals_lines_that_left_the_top() {
+		// A three-row screen fed six lines: the first three have scrolled off into history (§23).
+		// At the live bottom (offset 0) the viewport shows the last three; scrolling up one line
+		// brings the line just above the top back into view, and a scroll to the bottom returns
+		// to the live tail. This is the whole point of the display-offset arithmetic in `screen`.
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+		assert_eq!(terminal.screen().display_offset(), 0);
+		assert_eq!(read(&terminal, 0, 0, 4).trim(), "four");
+		assert_eq!(read(&terminal, 2, 0, 3).trim(), "six");
+		// Up one line: the top row is now "three", the line that had just scrolled off.
+		terminal.scroll(ScrollMotion::Lines(1));
+		assert_eq!(terminal.screen().display_offset(), 1);
+		assert_eq!(read(&terminal, 0, 0, 5).trim(), "three");
+		// Back to the bottom: the live tail again, offset zero.
+		terminal.scroll(ScrollMotion::Bottom);
+		assert_eq!(terminal.screen().display_offset(), 0);
+		assert_eq!(read(&terminal, 2, 0, 3).trim(), "six");
+	}
+
+	#[test]
+	fn output_leaves_a_scrolled_back_viewport_where_it_is() {
+		// Reading history must not be yanked to the bottom by activity (§23): with the viewport
+		// scrolled up, a fresh line of output leaves the SAME lines on screen. The engine keeps
+		// the display stationary in content — it tracks new output by growing the offset
+		// underneath, so what the user is reading does not slide out from under them.
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour");
+		terminal.scroll(ScrollMotion::Lines(1));
+		assert_eq!(read(&terminal, 0, 0, 3).trim(), "one");
+		terminal.process(b"\r\nfive");
+		assert_eq!(read(&terminal, 0, 0, 3).trim(), "one");
+	}
+
+	#[test]
+	fn the_alternate_screen_has_no_scrollback() {
+		// A full-screen program (DECSET ?1049) swaps to the alternate screen, which keeps no
+		// history — so a scroll-to-top there is a no-op and the viewport stays at the bottom.
+		// That is what makes scrolling inert while vim / tmux / less own the screen (§23).
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"\x1b[?1049h");
+		terminal.scroll(ScrollMotion::Top);
+		assert_eq!(terminal.screen().display_offset(), 0);
 	}
 }

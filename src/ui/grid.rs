@@ -108,6 +108,11 @@ const CURSOR_BAR_THICKNESS: f32 = 2.0;
 const CURSOR_UNDERLINE_THICKNESS: f32 = 2.0;
 const CURSOR_OUTLINE_THICKNESS: f32 = 1.0;
 
+/// How many lines one mouse-wheel notch scrolls the scrollback (§23). Three is the usual
+/// terminal step — brisk enough to move but well short of a page. A pixel-precise (trackpad)
+/// delta is converted by the cell height instead, so it scrolls a line per cell of travel.
+const WHEEL_LINES: f32 = 3.0;
+
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
 /// a drawn corner joins a shaped line without a step.
@@ -201,8 +206,15 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 
 		let (rows, cols) = self.screen.size();
 		let (cursor_row, cursor_col) = self.screen.cursor_position();
-		// The cursor draws only when DECTCEM shows it and the shape is not `Hidden` (§23).
-		let cursor_shape = (!self.screen.hide_cursor())
+		// The cursor is always on the live screen; when the viewport is scrolled back into
+		// history its row on screen is that plus the display offset, and once that drops below
+		// the viewport (scrolled far enough that the prompt is off the bottom) it is not drawn
+		// at all (§23).
+		let cursor_display_row = cursor_row.saturating_add(self.screen.display_offset());
+		let cursor_on_screen = cursor_display_row < rows;
+		// The cursor draws only when it is on screen, DECTCEM shows it, and the shape is not
+		// `Hidden` (§23).
+		let cursor_shape = (cursor_on_screen && !self.screen.hide_cursor())
 			.then(|| self.screen.cursor_shape())
 			.filter(|shape| *shape != CursorShape::Hidden);
 		// A block cursor inverts its cell in the run planner so a glyph under it stays legible;
@@ -226,7 +238,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					self.screen,
 					row,
 					cols,
-					block_cursor && row == cursor_row,
+					block_cursor && row == cursor_display_row,
 					cursor_col,
 					self.selection,
 				) {
@@ -241,7 +253,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					shape,
 					Rectangle {
 						x: origin.x + f32::from(cursor_col) * CELL_WIDTH,
-						y: origin.y + f32::from(cursor_row) * CELL_HEIGHT,
+						y: origin.y + f32::from(cursor_display_row) * CELL_HEIGHT,
 						width: CELL_WIDTH,
 						height: CELL_HEIGHT,
 					},
@@ -266,18 +278,40 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			state.modifiers = *modifiers;
 		}
 
+		let iced::Event::Mouse(pointer) = event else {
+			return;
+		};
+		let mode = self.screen.mouse_mode();
+		let shift = state.modifiers.shift();
+
+		// The wheel is the one pointer event that means something even with no mouse-aware
+		// program: unless such a program has asked for it — and Shift is not taking the mouse
+		// back, the xterm convention — a scroll moves cmote's own scrollback (§23). Handled
+		// before the report path below so it works at a bare shell prompt, where no mouse mode
+		// is on, and gated to the grid's own bounds so scrolling over a side panel is not us.
+		if let mouse::Event::WheelScrolled { delta } = pointer {
+			let to_program = mode != MouseMode::None && !shift;
+			if !to_program {
+				if cursor
+					.position()
+					.is_some_and(|position| layout.bounds().contains(position))
+					&& let Some(lines) = wheel_lines(*delta)
+				{
+					shell.publish(Message::TerminalScroll(lines));
+					shell.capture_event();
+				}
+				return;
+			}
+		}
+
 		// No mouse protocol on, or Shift held: the pointer is the user's, for selecting
 		// text and opening our own menu. Nothing is captured, so the layers above act as
 		// they always have. A button already down is the exception — its press went to the
 		// program, so its release and its drag must too, or the program is left believing
 		// the button never came up.
-		let mode = self.screen.mouse_mode();
-		if mode == MouseMode::None || (state.modifiers.shift() && state.held.is_none()) {
+		if mode == MouseMode::None || (shift && state.held.is_none()) {
 			return;
 		}
-		let iced::Event::Mouse(pointer) = event else {
-			return;
-		};
 		let bounds = layout.bounds();
 		let Some(position) = cursor.position() else {
 			return;
@@ -788,6 +822,18 @@ fn press_button(button: mouse::Button) -> Option<report::Button> {
 	}
 }
 
+/// How far a scroll should move cmote's scrollback, in lines — positive up into history,
+/// matching the engine's delta sign (§23). A line-based wheel notch is scaled by `WHEEL_LINES`;
+/// a pixel-based (trackpad) delta is divided by the cell height so it tracks the gesture. A
+/// purely horizontal scroll moves nothing and yields `None`, so no message is published.
+fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
+	let lines = match delta {
+		mouse::ScrollDelta::Lines { y, .. } => (y * WHEEL_LINES).round() as i32,
+		mouse::ScrollDelta::Pixels { y, .. } => (y / CELL_HEIGHT).round() as i32,
+	};
+	(lines != 0).then_some(lines)
+}
+
 /// Which way a scroll went, as the protocol's wheel button. A horizontal-only scroll
 /// reports nothing — the protocol's wheel is vertical.
 fn wheel_button(delta: mouse::ScrollDelta) -> Option<report::Button> {
@@ -1185,6 +1231,32 @@ mod tests {
 		assert_eq!(
 			row_runs("\x1b[4:3mx", 1)[0].style.underline,
 			UnderlineStyle::Curly
+		);
+	}
+
+	#[test]
+	fn a_wheel_notch_becomes_a_line_delta_and_a_horizontal_scroll_is_ignored() {
+		// One notch up scrolls WHEEL_LINES into history (positive, the engine's sign), one notch
+		// down scrolls back out (negative), and a purely horizontal scroll moves nothing (§23).
+		assert_eq!(
+			wheel_lines(mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 }),
+			Some(3)
+		);
+		assert_eq!(
+			wheel_lines(mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 }),
+			Some(-3)
+		);
+		assert_eq!(
+			wheel_lines(mouse::ScrollDelta::Lines { x: 2.0, y: 0.0 }),
+			None
+		);
+		// A pixel-precise (trackpad) delta scrolls a line per cell of vertical travel.
+		assert_eq!(
+			wheel_lines(mouse::ScrollDelta::Pixels {
+				x: 0.0,
+				y: CELL_HEIGHT
+			}),
+			Some(1)
 		);
 	}
 

@@ -195,11 +195,22 @@ impl<'a> Screen<'a> {
 		)
 	}
 
-	/// The cursor's `(row, col)`, zero-based, in visible-viewport coordinates. We keep no
-	/// scrollback (§9), so the active screen's top row is always row 0.
+	/// The cursor's `(row, col)` within the active screen, zero-based. This is where the shell
+	/// is writing — always on the live screen, never in history. When the viewport is scrolled
+	/// back (`display_offset` > 0) the cursor's row ON SCREEN is this plus the offset, which the
+	/// renderer works out so it can leave the cursor undrawn once it drops below the viewport (§23).
 	pub fn cursor_position(&self) -> (u16, u16) {
 		let point = self.engine.grid().cursor.point;
 		(point.line.0.max(0) as u16, point.column.0 as u16)
+	}
+
+	/// How far the viewport is scrolled back into history, in lines — 0 at the live bottom, up
+	/// to the retained history depth at the top (§23). The renderer adds it to a viewport row to
+	/// reach the grid line to read (`cell`), and to the cursor's active-screen row to find where
+	/// the cursor sits on screen. cmote moves it through `Terminal::scroll`; the engine keeps it
+	/// stationary as new output arrives, so reading history is never yanked to the bottom by activity.
+	pub fn display_offset(&self) -> u16 {
+		self.engine.grid().display_offset() as u16
 	}
 
 	/// Whether the cursor is hidden (DECTCEM off).
@@ -275,7 +286,12 @@ impl<'a> Screen<'a> {
 		if row as usize >= self.engine.screen_lines() || col as usize >= self.engine.columns() {
 			return None;
 		}
-		let cell = &self.engine.grid()[Line(i32::from(row))][Column(col as usize)];
+		// A viewport row maps to a grid line by subtracting the display offset: at the live
+		// bottom (offset 0) row 0 is grid line 0, and scrolling back walks the window into the
+		// negative lines the engine stores history on (§23). The engine clamps the offset to the
+		// retained history depth, so the resulting line is always within the stored grid.
+		let line = i32::from(row) - i32::from(self.display_offset());
+		let cell = &self.engine.grid()[Line(line)][Column(col as usize)];
 		Some(build_cell(cell))
 	}
 }
