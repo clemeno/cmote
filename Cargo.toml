@@ -1,6 +1,6 @@
 [package]
 name = "cmote"
-version = "2.4.0"
+version = "3.0.0"
 edition = "2024"
 # MIT, matching the LICENSE file. Declared here too so the crate carries a valid
 # SPDX license: `cargo deny check licenses` (CI, PLAN §12) flags any package with
@@ -8,6 +8,16 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# The VT/ANSI terminal engine (PLAN §9, §16). Replaces `vt100`, whose small subset was
+# the compatibility ceiling: alacritty_terminal is a full VT implementation — DEC
+# line-drawing charset, scrollback, origin mode, custom tab stops, the rich SGR set
+# (dim/italic/strikethrough/conceal, double/curly/dotted/dashed underline + underline
+# colour), and it answers host queries (DSR/DA/DECRQM, OSC colour) itself via an
+# `EventListener`, which retires our hand-rolled `term::compat` and `term::answer`. Pure
+# Rust and Apache-2.0, so it keeps the no-C-toolchain portable build (§12). It bundles a
+# tty/event-loop we do not use (we feed bytes off the SSH channel), but that is pure-Rust
+# dead weight, not a C dependency.
+alacritty_terminal = "0.26"
 anyhow = "1.0.104"
 # `advanced` unlocks the `Widget` trait, so the terminal grid can be one custom widget
 # that draws every cell at an exact pixel position (PLAN §11) instead of a widget per
