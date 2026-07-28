@@ -1,6 +1,6 @@
 [package]
 name = "cmote"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2024"
 # MIT, matching the LICENSE file. Declared here too so the crate carries a valid
 # SPDX license: `cargo deny check licenses` (CI, PLAN §12) flags any package with

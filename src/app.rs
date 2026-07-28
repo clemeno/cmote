@@ -948,16 +948,23 @@ impl App {
 				return fit_terminal();
 			}
 			SshEvent::Output(bytes) => {
-				// Feed raw shell output into the emulator; the next render draws it. The
-				// same bytes may carry a cwd announcement, so read the (possibly new)
-				// directory out before the borrow ends and let the tree follow it (§18).
-				let cwd = match self.terminal.as_mut() {
+				// Feed raw shell output into the emulator; the next render draws it.
+				// `process` also answers the status/identity queries vt100 has no arm for
+				// (§9): a program that sent one blocks reading its stdin until the reply
+				// reaches it, so send the returned bytes straight back on the input channel,
+				// the same path a keystroke takes. The same bytes may carry a cwd
+				// announcement, so read the (possibly new) directory out before the borrow
+				// ends and let the tree follow it (§18).
+				let (cwd, replies) = match self.terminal.as_mut() {
 					Some(terminal) => {
-						terminal.process(&bytes);
-						terminal.cwd().map(str::to_owned)
+						let replies = terminal.process(&bytes);
+						(terminal.cwd().map(str::to_owned), replies)
 					}
-					None => None,
+					None => (None, Vec::new()),
 				};
+				if !replies.is_empty() {
+					self.send_command(SshCommand::Input(replies));
+				}
 				if let Some(cwd) = cwd {
 					let needed = self.explorer.reveal_if_new(&cwd);
 					self.list_dirs(needed);

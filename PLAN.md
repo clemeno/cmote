@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v2.2.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v2.4.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -29,8 +29,10 @@ carrying each entry's size and date, §19, confirms every copy with a self-dismi
 there, §22; **v2.3.0** makes full-screen programs work — the cursor-move spellings the parser
 lacked are rewritten on the way in, §9, the grid became one widget that draws every cell at
 an exact pixel and every glyph the bundled font lacks itself, §11, the mouse is forwarded to
-programs that ask for it, §9, and F1-F12 are mapped, §9). Both targets are supported
-first-class, and each has a verified toolchain on its host:
+programs that ask for it, §9, and F1-F12 are mapped, §9; **v2.4.0** answers the DSR/DA status
+and identity queries the parser never replied to, so a program that probes the cursor
+position or the terminal type no longer stalls waiting on a timeout, §9). Both targets are
+supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -343,6 +345,48 @@ Turning a raw byte stream into a screen.
   malformed one is passed through verbatim rather than swallowed, and one longer than any
   real sequence stops being buffered at all (§12). The alternative — vendoring a patched
   `vt100` — is a fork to maintain for five match arms.
+- **The queries the parser has no arm for** (`term/compat.rs`'s sibling `term/answer.rs`,
+  v2.4): a few sequences are not commands the terminal obeys but **questions** it must
+  answer — the program writes them downstream and then **blocks reading its stdin** until
+  the reply comes back upstream. `vt100` drops them the same way it drops the alias moves,
+  so the program stalls until a timeout fires (vim, tmux, less and emacs all probe at
+  startup; a `CSI 6 n` size-probe can hang a shell script outright). `answer.rs` recognises
+  five and replies:
+
+  | query | name | reply | needs |
+  |---|---|---|---|
+  | `CSI 5 n` | DSR — are you ok? | `CSI 0 n` | — |
+  | `CSI 6 n` | DSR-CPR — where is the cursor? | `CSI row ; col R` | the live cursor |
+  | `CSI ? 6 n` | DECXCPR — cursor + page | `CSI ? row ; col ; 1 R` | the live cursor |
+  | `CSI c` / `CSI 0 c` | DA1 — what terminal are you? | `CSI ? 62 ; 1 ; 6 c` | — |
+  | `CSI > c` / `CSI > 0 c` | DA2 — secondary id | `CSI > 1 ; 10 ; 0 c` | — |
+
+  The reply travels the **opposite** direction to the compat rewrite: not into the parser
+  but **back to the server on the input channel**, the same path a keystroke takes — so
+  `Terminal::process` now returns the reply bytes and app.rs sends them as
+  `SshCommand::Input`. That direction is why this is a separate module rather than another
+  arm in `compat`: it withholds nothing from the parser (the queries are no-ops there
+  anyway) and only reports **where** each query ends, so `process` can split the parser feed
+  there, read whatever live state the reply needs, and answer.
+
+  The one query that needs live state is the cursor-position report, and it must reflect the
+  cursor **where the query sat**, not where later output in the same chunk left it. The
+  classic size-probe is why — `ESC 7` save, `CSI 999;999 H` jump to the far corner (clamped
+  to the real size), `CSI 6 n` ask, `ESC 8` restore: read the cursor after the whole chunk
+  and the restore has already undone the jump, so the program would misread the terminal as
+  one cell wide. Splitting the feed at the query keeps the answer honest, and a test locks
+  it. The **DA1 identity is VT220-class** (`?62;1;6c` — VT220 with 132-column mode and
+  selective erase) but deliberately claims neither **sixel** (4) nor **ReGIS** (3), so a
+  program cannot take the answer as licence to send graphics the grid cannot render; DA2
+  reports a low firmware version (`>1;10;0c`) rather than impersonating a specific modern
+  xterm, since that version is what tools like tmux read to gate features. **Security**: a
+  reply is numeric only (digits, `;`, a final letter) with no `CR`/`LF`, so one landing at a
+  shell prompt cannot submit a command — exactly how a real terminal behaves. We
+  deliberately do **not** answer the OSC title/clipboard *query* variants, which can reflect
+  server-set text back as input (a known injection vector); only fixed-format reports.
+  `ponytail:` origin mode (DECOM) is not tracked, so a `CSI 6 n` under a scroll-region
+  origin reports absolute coordinates — the common case (no origin mode) is correct, and the
+  upgrade path is `alacritty_terminal` (§16).
 - **Render** (`ui/grid.rs`, rewritten v2.3): the `Screen` is drawn by **one custom
   widget** (`iced`'s `advanced` feature), not by a widget per cell. It paints quads and
   text at absolute pixel positions, using a **bundled** monospace font (**Fira Mono**,
@@ -860,15 +904,16 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   queues instead, §17, §21), and preserving file modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
-- **Richer terminal** — *the gap `vt100` left is now papered over rather than open* (v2.3):
-  the cursor-move spellings it has no arm for are rewritten on the way in and the grid
-  draws the glyphs no bundled font carries, so a full-screen program renders (§9). What
-  the parser still does not do: **answer** a query — `CSI 6 n` (report cursor position) and
-  the other DSR/DA probes get no reply, so a program that waits on one stalls until it
-  times out; **scrollback** is off (`SCROLLBACK = 0`), so there is no scrolling back over
-  what left the screen and no wheel scrolling outside a program that asked for the mouse;
-  autowrap (`?7l`) is always on. Swapping in `alacritty_terminal` answers all three at
-  once and stays the upgrade path if the rewriter ever grows past a handful of arms.
+- **Richer terminal** — *the gap `vt100` left is now papered over rather than open* (v2.3,
+  v2.4): the cursor-move spellings it has no arm for are rewritten on the way in, the DSR/DA
+  **queries** it never answered are answered (v2.4, §9), and the grid draws the glyphs no
+  bundled font carries, so a full-screen program renders and no longer stalls on a probe.
+  What the parser still does not do: **scrollback** is off (`SCROLLBACK = 0`), so there is
+  no scrolling back over what left the screen and no wheel scrolling outside a program that
+  asked for the mouse; **origin mode** (DECOM) is not tracked, so a cursor report under a
+  scroll-region origin is absolute (§9); autowrap (`?7l`) is always on. Swapping in
+  `alacritty_terminal` answers all of these at once and stays the upgrade path if the
+  rewriter/answerer ever grows past a handful of arms.
 - **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
   selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
   Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on

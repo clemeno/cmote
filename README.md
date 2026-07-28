@@ -45,8 +45,11 @@ references below (§n) point into it.
   geometry rather than borrowed from whatever font the system offers. The escape sequences
   `vt100` has no arm for are rewritten on the way in (a program that spells "move the cursor
   to row 12, column 40" the other legal way used to have every move dropped, and its screen
-  came out as wrapped, scrolling gibberish). **F1-F12** are mapped as the pty's terminfo
-  entry describes them (§9).
+  came out as wrapped, scrolling gibberish). The **status and identity queries** it also
+  has no arm for are answered — a program asks "where is the cursor?" (`CSI 6n`) or "what
+  terminal are you?" (`CSI c`) and blocks reading its input until the reply comes back, so
+  vim, tmux, less and shell size-probes used to stall on a timeout; cmote now replies (§9).
+  **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -308,7 +311,10 @@ mapping (including application-cursor-mode arrow keys, CSI vs SS3, and every F1-
 against the terminfo entry), the escape-sequence rewrite (each translation, the private
 and intermediate sequences that must *not* be touched, a malformed one that must come back
 out, a sequence split across three chunks, and an end-to-end check that two positioned
-writes land in their own cells), pointer-event → mouse-report encoding (each encoding, each
+writes land in their own cells), the status/identity query answering (each query recognised
+and its look-alikes ignored, the reply formats, a query split across chunks, and — end to
+end — a cursor-position size-probe that must report the clamped corner and not the cursor
+the following restore put back), pointer-event → mouse-report encoding (each encoding, each
 mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits X10 must
 not carry), the grid's run packing and the geometry of the glyphs it draws itself (a braille
 cell read back as its dot pattern, a rounded corner's arc and tails measured against a real
@@ -534,7 +540,16 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
 **12. Full-screen apps.** Run `vim` (or `less` on a long file). The file should render, and
 the **arrow keys** should move the cursor — this exercises application cursor mode (DECCKM):
 the app enables it and cmote switches its arrow keys to the SS3 form so they register. In
-`vim`, `:q!` to exit. Then the harder cases:
+`vim`, `:q!` to exit. Then the query answering and the harder cases:
+
+- **Cursor-position probe.** At the shell, run
+  `printf '\033[6n'; read -rsdR r; echo "cursor: ${r#*[}"`. It should print the cursor's
+  row;col at once and return to a prompt — if cmote did not answer, `read` would hang until
+  you press Enter. Then measure the screen:
+  `printf '\0337\033[999;999H\033[6n\0338'; read -rsdR r; echo "size: ${r#*[}"` should report
+  the terminal's actual rows;cols (resize the window and repeat — it should track). A program
+  like `vim` or `tmux` should now open without the ~1s startup pause its DA probe used to
+  cost.
 
 - Run **btop** (`brew install btop` on a mac remote). Every panel should sit in its own box
   where it belongs — no line running on into the next, no frame drawn twice down the screen.
