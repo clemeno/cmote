@@ -53,7 +53,7 @@ This document is the reference to build against.
 | GUI | **iced 0.14** — pure-Rust, Elm architecture (state / `Message` / `update` / `view`) |
 | SSH | **russh 0.62** — pure-Rust async SSH client (no C deps → clean static build) |
 | Async runtime | **tokio** (multi-thread) on a background thread; bridged to the GUI by channels |
-| Terminal | **Full VT emulator** — `vt100` maintains the screen grid, with `term::compat` rewriting the sequences it has no arm for (§9); the grid is drawn by one custom iced widget, cell-exact (§9) |
+| Terminal | **Full VT emulator** — `alacritty_terminal` maintains the screen grid and answers the host's status/identity queries itself (§9, §23); the grid is drawn by one custom iced widget, cell-exact (§9). *(v3.0 replaced the original `vt100`, whose small subset was the compatibility ceiling — §23.)* |
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
@@ -91,11 +91,17 @@ Each decision below is a thing to learn from, not just a dependency.
   async and must never block the UI. The idiomatic bridge is a dedicated tokio runtime
   on its own thread, talking to the GUI over channels (§4). This is *the* pattern for
   "GUI + network" in Rust; learning it here transfers everywhere.
-- **vt100 over alacritty_terminal** — a real terminal must interpret ANSI escape
-  sequences (colors, cursor moves, clears). `vt100` parses a byte stream into a simple
-  `Screen` grid of cells we can render directly in iced — small, readable, enough for
-  v1. `alacritty_terminal` is more complete but heavier and its API tracks Alacritty's
-  needs, not ours. `ponytail:` start with vt100; upgrade path noted in §16.
+- **vt100 first, then alacritty_terminal (DECISION REVERSED in v3.0)** — a real terminal
+  must interpret ANSI escape sequences (colors, cursor moves, clears). `vt100` parsed a byte
+  stream into a simple `Screen` grid of cells we could render directly in iced — small,
+  readable, enough for v1 — and starting there was the right call: it kept the early terminal
+  code legible while the async/GUI bridge and the security path were the real lessons. But
+  its subset became the **compatibility ceiling** (whole classes of documented behaviour it
+  cannot represent, §16), so **v3.0 swapped to `alacritty_terminal`** — a full VT
+  implementation, heavier and with an API that tracks Alacritty's needs, but the only way to
+  render arbitrary programs and answer their queries. The staged swap and its reasoning are
+  §23. The lesson stands both ways: start simple, and replace the simple thing when its
+  limits — not a guess about them — are what block you.
 - **Session-only *secrets*** — the safest secret is the one never persisted. Passwords
   and decrypted keys live only for the session and are wiped with `zeroize`. As of v1.3
   connection *profiles* (host / port / user / auth kind / key path — no secret) ARE
@@ -113,7 +119,7 @@ Each decision below is a thing to learn from, not just a dependency.
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `russh-sftp` | 2.3.0 | the sftp subsystem, for file upload (§17) | rides russh's `ChannelStream` — a protocol on the existing SSH stack, not a second one. Pure Rust, no C |
 | `tokio` | 1.53 | async runtime | features: `rt-multi-thread`, `net`, `io-util`, `fs` (streaming an upload off disk, §17), `sync`, `macros`, `time` |
-| `vt100` | 0.16.2 | VT/ANSI screen parser | feeds bytes → `Screen` grid of cells (0.16, not 0.15 — latest on crates.io). It has no arm for a handful of standard sequences; `term::compat` rewrites those on the way in rather than forking the crate (§9) |
+| `alacritty_terminal` | 0.26.0 | VT/ANSI terminal engine | full VT implementation behind Alacritty; feeds bytes via its `vte` ANSI `Processor`, exposes a grid of cells, and answers host queries through an `EventListener` (§9, §23). Pure Rust, Apache-2.0. *(v3.0 replaced `vt100` 0.16.2 — §23; `vte` is pulled in transitively by it.)* |
 | `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
@@ -196,7 +202,7 @@ cmote/
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
-    │   ├── grid.rs        the vt100 Screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
+    │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
@@ -212,9 +218,7 @@ cmote/
     │   ├── upload.rs      file upload over an sftp channel: batch pre-scan, stream, progress (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
-    │   ├── mod.rs         terminal emulator wrapper: feed bytes, expose the screen view, resize (§9, §16, §23)
-    │   ├── answer.rs      answer the DSR/DA status & identity queries the parser leaves silent (§9)
-    │   ├── compat.rs      rewrite the escape sequences vt100 has no arm for into the ones it has (§9)
+    │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize (§9, §16, §23)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
@@ -252,7 +256,7 @@ Ordered so cheap validation and security gates come first.
    rows, …)` → `request_shell()`. The pty size comes from the current terminal-view
    dimensions.
 6. **Stream**: loop — server data arrives on the channel → `SshEvent::Output(bytes)` →
-   GUI feeds it to the vt100 parser (§9); user keystrokes arrive as
+   GUI feeds it to the terminal engine (§9); user keystrokes arrive as
    `SshCommand::Input(bytes)` → `channel.data(&bytes)`. Window resize →
    `SshCommand::Resize` → `channel.window_change(...)`.
 
@@ -320,75 +324,32 @@ The one control that stops a man-in-the-middle. Implemented in `Handler::check_s
 
 Turning a raw byte stream into a screen.
 
-- **Parser**: `vt100::Parser` fed every `SshEvent::Output` chunk. It interprets ANSI
-  escapes and maintains a `Screen`: a grid of cells, each with a glyph, fg/bg color,
-  and attributes (bold, underline, inverse), plus cursor position.
-- **The sequences the parser has no arm for** (`term/compat.rs`, v2.3): ECMA-48 gives
-  several cursor movements **two spellings**, and `vt100` implements only one of each. A
-  program that picks the other has every move **silently dropped** — its output then
-  streams out as plain text, wraps at the right edge and scrolls, which looks like a
-  corrupted screen rather than a missing feature. btop is exactly that program: its
-  `Mv::to` positions every panel with `CSI y;x f`, the one spelling with no arm. So the
-  byte stream is rewritten on the way to the parser:
-
-  | dropped | rewritten to | meaning |
-  |---|---|---|
-  | `CSI y;x f` (HVP) | `CSI y;x H` (CUP) | move to row, column |
-  | ``CSI n ` `` (HPA) | `CSI n G` (CHA) | move to column |
-  | `CSI n a` (HPR) | `CSI n C` (CUF) | move right |
-  | `CSI n e` (VPR) | `CSI n B` (CUD) | move down |
-  | `CSI s` / `CSI u` | `ESC 7` / `ESC 8` | save / restore cursor |
-
-  The rewriter is a state machine, not a search over a buffer, because output arrives in
-  arbitrary chunks and a sequence can split anywhere — including between the `ESC` and the
-  `[`. It holds a sequence back until its final byte, since a rewrite can change the
-  length (`CSI s` is three bytes, `ESC 7` is two). A **private** sequence (`CSI ? … f`) or
-  one carrying an intermediate byte is never touched: those mean something else. A
-  malformed one is passed through verbatim rather than swallowed, and one longer than any
-  real sequence stops being buffered at all (§12). The alternative — vendoring a patched
-  `vt100` — is a fork to maintain for five match arms.
-- **The queries the parser has no arm for** (`term/compat.rs`'s sibling `term/answer.rs`,
-  v2.4): a few sequences are not commands the terminal obeys but **questions** it must
-  answer — the program writes them downstream and then **blocks reading its stdin** until
-  the reply comes back upstream. `vt100` drops them the same way it drops the alias moves,
-  so the program stalls until a timeout fires (vim, tmux, less and emacs all probe at
-  startup; a `CSI 6 n` size-probe can hang a shell script outright). `answer.rs` recognises
-  five and replies:
-
-  | query | name | reply | needs |
-  |---|---|---|---|
-  | `CSI 5 n` | DSR — are you ok? | `CSI 0 n` | — |
-  | `CSI 6 n` | DSR-CPR — where is the cursor? | `CSI row ; col R` | the live cursor |
-  | `CSI ? 6 n` | DECXCPR — cursor + page | `CSI ? row ; col ; 1 R` | the live cursor |
-  | `CSI c` / `CSI 0 c` | DA1 — what terminal are you? | `CSI ? 62 ; 1 ; 6 c` | — |
-  | `CSI > c` / `CSI > 0 c` | DA2 — secondary id | `CSI > 1 ; 10 ; 0 c` | — |
-
-  The reply travels the **opposite** direction to the compat rewrite: not into the parser
-  but **back to the server on the input channel**, the same path a keystroke takes — so
-  `Terminal::process` now returns the reply bytes and app.rs sends them as
-  `SshCommand::Input`. That direction is why this is a separate module rather than another
-  arm in `compat`: it withholds nothing from the parser (the queries are no-ops there
-  anyway) and only reports **where** each query ends, so `process` can split the parser feed
-  there, read whatever live state the reply needs, and answer.
-
-  The one query that needs live state is the cursor-position report, and it must reflect the
-  cursor **where the query sat**, not where later output in the same chunk left it. The
-  classic size-probe is why — `ESC 7` save, `CSI 999;999 H` jump to the far corner (clamped
-  to the real size), `CSI 6 n` ask, `ESC 8` restore: read the cursor after the whole chunk
-  and the restore has already undone the jump, so the program would misread the terminal as
-  one cell wide. Splitting the feed at the query keeps the answer honest, and a test locks
-  it. The **DA1 identity is VT220-class** (`?62;1;6c` — VT220 with 132-column mode and
-  selective erase) but deliberately claims neither **sixel** (4) nor **ReGIS** (3), so a
-  program cannot take the answer as licence to send graphics the grid cannot render; DA2
-  reports a low firmware version (`>1;10;0c`) rather than impersonating a specific modern
-  xterm, since that version is what tools like tmux read to gate features. **Security**: a
-  reply is numeric only (digits, `;`, a final letter) with no `CR`/`LF`, so one landing at a
-  shell prompt cannot submit a command — exactly how a real terminal behaves. We
-  deliberately do **not** answer the OSC title/clipboard *query* variants, which can reflect
-  server-set text back as input (a known injection vector); only fixed-format reports.
-  `ponytail:` origin mode (DECOM) is not tracked, so a `CSI 6 n` under a scroll-region
-  origin reports absolute coordinates — the common case (no origin mode) is correct, and the
-  upgrade path is `alacritty_terminal` (§16).
+- **Parser**: every `SshEvent::Output` chunk is fed to `alacritty_terminal` through its
+  `vte` ANSI `Processor` (`Processor::advance`), which interprets each ANSI escape and glyph
+  and maintains the grid — cells with a glyph, fg/bg colour and attributes, plus the cursor
+  and the terminal modes. It is a full VT implementation (§23), so the two gaps cmote used to
+  paper over from outside — the cursor-move spellings the old `vt100` lacked (btop's `CSI
+  y;x f` among them) and the status/identity queries it never answered — are handled by the
+  engine itself. The hand-rolled `term/compat` (a rewriter for five alias sequences) and
+  `term/answer` (a DSR/DA answerer) were **retired** with the swap.
+- **The engine answers the host's queries itself.** Some sequences are not commands but
+  **questions** the program writes downstream and then **blocks reading its stdin** for —
+  cursor-position reports (`CSI 6 n`), device status (`CSI 5 n`), device attributes (`CSI c`
+  / `CSI > c`), mode requests (DECRQM) — so leaving them silent stalls vim, tmux, less and
+  shell size-probes on a timeout. The engine writes each reply as an `Event::PtyWrite`;
+  cmote's listener collects those and `Terminal::process` returns them, and app.rs sends them
+  **back on the input channel**, the same path a keystroke takes. A cursor-position report is
+  emitted at the instant the query is parsed, so it reflects the cursor **where the query
+  sat** — the size-probe idiom (`ESC 7` save, jump to a far corner clamped to the real size,
+  `CSI 6 n`, `ESC 8` restore) reports the corner and not the restored position; a test locks
+  it. **Security**: cmote forwards only the engine's `PtyWrite` replies — numeric reports
+  (digits, `;`, a final letter, no `CR`/`LF`, so one cannot submit a command at a prompt) —
+  and **drops** the OSC 52 clipboard events (`ClipboardLoad` / `ClipboardStore`): a remote
+  must not read or poison the local clipboard (§12). The OSC-colour (`ColorRequest`) and
+  window-size (`TextAreaSizeRequest`) replies are not wired yet — a follow-up (§23).
+  `ponytail:` the ancient X10 mouse protocol (`?9`, press-only) is not implemented by the
+  engine, so it is no longer supported — an accepted loss, since no current program asks for
+  it (§23).
 - **Render** (`ui/grid.rs`, rewritten v2.3): the `Screen` is drawn by **one custom
   widget** (`iced`'s `advanced` feature), not by a widget per cell. It paints quads and
   text at absolute pixel positions, using a **bundled** monospace font (**Fira Mono**,
@@ -430,7 +391,7 @@ Turning a raw byte stream into a screen.
 - **The mouse, for programs that ask for it** (`term/mouse.rs`, v2.3): a full-screen
   program turns a mouse protocol on (`ESC[?1000h` and friends) and then expects every
   click, release and — in the motion modes — every move between cells to come back as a
-  short report on the input channel. `vt100` tracks which mode and encoding was asked for
+  short report on the input channel. The engine tracks which mode and encoding was asked for
   (`Screen::mouse_protocol_mode` / `mouse_protocol_encoding`); `term::mouse::encode` turns
   one pointer event plus that state into the bytes. Both encodings are covered: **SGR**
   (`ESC[<b;col;row M|m` — what everything modern asks for, no coordinate ceiling) and the
@@ -475,15 +436,15 @@ Turning a raw byte stream into a screen.
 - **Resize** (done): a `window::resize_events()` subscription (Terminal screen only)
   gives the window's logical size; `ui::terminal::grid_size` converts it to `(rows,
   cols)` using the known cell metrics (minus padding, rounded down so nothing clips,
-  clamped ≥ 1×1). On a *change*, `App` resizes the `vt100` parser **and** sends
+  clamped ≥ 1×1). On a *change*, `App` resizes the terminal engine **and** sends
   `SshCommand::Resize{cols,rows}` so the server reflows (`window_change`). A fresh shell
   fits immediately by fetching the current size once (`window::latest` → `window::size`)
   instead of waiting for the first resize event.
-- **Scrollback**: `vt100` can keep a bounded scrollback, but `term::SCROLLBACK` is **0** —
+- **Scrollback**: the engine can keep a bounded scrollback, but `term::SCROLLBACK` is **0** —
   only the visible screen exists, so nothing scrolls back and the wheel does nothing
   except in a program that asked for the mouse (§9). Raising it is a constant; a scrollbar
   and a way to select across it are the work (§16).
-- **Security note**: rendering untrusted server bytes is safe here — the vt100 parser
+- **Security note**: rendering untrusted server bytes is safe here — the engine
   *interprets* escapes into grid state; it never executes anything. We deliberately do
   **not** honor dangerous sequences (e.g. clipboard-write OSC 52) in v1.
 
@@ -606,7 +567,7 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     to get out of the way.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
-  centered, **Disconnect** on the right; the vt100 grid fills the rest, and keyboard
+  centered, **Disconnect** on the right; the terminal grid fills the rest, and keyboard
   focus goes there. Disconnect opens a
   **confirmation modal** (the shared dialog chrome — Cancel / Disconnect footer — over a
   dimming, click-away scrim) so an accidental click cannot drop a live session; confirming sends
@@ -755,17 +716,18 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   `.ppk`, and an unsupported (ECDSA) `.ppk` → clear-error path.
 - **Host key** (`ssh/hostkey.rs`): known-match → accept; unknown → prompt path;
   known-mismatch → refuse. Fingerprint formatting is stable.
-- **Terminal** (`term/`): feed byte fixtures (plain text, color SGR, cursor moves,
-  clear-screen) → assert the resulting `Screen` grid. Deterministic, no network. The
-  alias rewrite (§9) is tested both ways: `term/compat.rs` on the byte stream (each
-  translation, the private and intermediate sequences that must *not* be touched, a
-  malformed one that must come back out, a sequence split across three chunks) and
-  `term/mod.rs` end to end — position with the `f` spelling, write, position again, and
-  assert each word landed in its own cell with nothing spilled on the way.
+- **Terminal** (`term/`): feed byte fixtures through the engine and read the result back
+  through the `screen::Screen` view. Deterministic, no network. `term/mod.rs` covers the
+  wiring the engine swap put in cmote's hands (§23): a full-screen program's `f`-spelling
+  moves land in their own cells (the engine parses HVP natively — the reason the rewriter is
+  gone), a wide glyph reserves two columns, and the engine's query replies are drained and
+  returned — DSR → `CSI 0 n`, DA → a `CSI ? … c`, a cursor report at the live position, the
+  save/jump/report/restore size-probe reporting the clamped corner, and a query split across
+  two chunks answered on completion.
 - **Input mapping**: key events → correct byte sequences (Enter, Ctrl-C, arrows, and every
   F1-F12 in both cursor modes). Pointer events likewise (`term/mouse.rs`): each encoding,
   each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
-  bits X10 must not carry.
+  bits.
 - **Grid geometry** (`ui/grid.rs`): the run packing (a wide glyph sealed into two columns,
   a non-ASCII one into one, runs covering every column exactly once and each starting
   where the last ended) and the drawn glyphs' maths — a braille cell read back as its dot
@@ -906,23 +868,22 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   queues instead, §17, §21), and preserving file modes/timestamps in either direction.
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
-- **Richer terminal** — *the gap `vt100` left is now papered over rather than open* (v2.3,
-  v2.4): the cursor-move spellings it has no arm for are rewritten on the way in, the DSR/DA
-  **queries** it never answered are answered (v2.4, §9), and the grid draws the glyphs no
-  bundled font carries, so a full-screen program renders and no longer stalls on a probe.
-  What the parser still does not do: **scrollback** is off (`SCROLLBACK = 0`), so there is
-  no scrolling back over what left the screen and no wheel scrolling outside a program that
-  asked for the mouse; **origin mode** (DECOM) is not tracked, so a cursor report under a
-  scroll-region origin is absolute (§9); autowrap (`?7l`) is always on. Swapping in
-  `alacritty_terminal` answers all of these at once — **that swap is now underway (§23)**,
-  and closing these remaining gaps is exactly what it buys. The full audited inventory of what
-  the terminal still lacks to drive *any* documented app UX — every gap tagged **[bolt-on]**
-  (addable beside `vt100`, like `compat.rs`/`answer.rs`) or **[engine]** (needs the
-  `alacritty_terminal` swap), each grounded in ECMA-48 / the DEC VT manuals / xterm
-  `ctlseqs`, with a `file:line` evidence appendix — lives in
-  [`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md). It is the reference for
-  sequencing this work: a ranked bolt-on backlog (OSC 11 background query first) plus the
-  engine swap.
+- **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
+  replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
+  cursor reports, custom tab stops, the autowrap toggle and the host's status/identity
+  queries (DSR/DA/DECRQM) are handled by the engine, not papered over — a full-screen program
+  renders and no longer stalls on a probe. Still deferred (the §23 follow-ups): **rendering**
+  the rich attributes the engine now tracks — dim, italic, strikethrough, conceal, the
+  underline styles and underline colour (Stage 3); **scrollback** is still off
+  (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel scrolling
+  outside a program that asked for the mouse; the **OSC-colour** (`ColorRequest`) and
+  **window-size** (`TextAreaSizeRequest`) query replies are not wired; **cursor shape**
+  (DECSCUSR) and the window **title** from OSC 0/2 are not surfaced. The full audited
+  inventory of what the terminal still lacks to drive *any* documented app UX — every gap
+  tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
+  **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
+  `ctlseqs`, with a `file:line` evidence appendix, lives in
+  [`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md).
 - **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
   selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
   Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on
@@ -967,7 +928,7 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   (§12). Non-cwd OSC sequences (titles, clipboard writes) pass through and leave the last
   known path alone.
 - **Where it runs.** `Terminal::process` feeds the same bytes to the tracker and to
-  `vt100`, which ignores OSC codes it does not know — so nothing is stripped and the two
+  the engine, which ignores OSC codes it does not know — so nothing is stripped and the two
   never disagree. The path is exposed as `Terminal::cwd`.
 - **The shell hook** (`ssh::client::CWD_HOOK`). Passive reading alone leaves a plain
   bash/zsh remote silent, so right after the shell opens cmote sends **one line** that
@@ -1607,13 +1568,20 @@ leak that would spread the swap across the GUI. So the work is staged:
   `ui/grid`, `ui/selection` and `term/mouse` change in *type* only. `Terminal::screen()` hands
   back this view; `vt100` is now named **nowhere outside `term/`**. A pure refactor, no
   behaviour change, so `app.rs` and `ui/terminal.rs` did not move at all.
-- **Stage 2 — swap the engine behind the seam.** Rewrite `term/mod.rs` and `term/screen.rs`
-  to drive `alacritty_terminal`: feed bytes through `vte::ansi::Processor::advance` with the
-  `Term` as the handler; an `EventListener` collects `PtyWrite` / `ColorRequest` /
-  `TextAreaSizeRequest` into the reply bytes `process()` already returns; **retire
-  `term/compat` and `term/answer`** (the engine now parses the alias moves and answers the
-  queries natively). The callers do not move. Gains: DEC charsets, origin-correct cursor
-  reports, and the query replies — all at once.
+- **Stage 2 — swap the engine behind the seam (done).** `term/mod.rs` and `term/screen.rs`
+  now drive `alacritty_terminal`: bytes go through `vte::ansi::Processor::advance` with the
+  `Term` as the handler; an `EventListener` collects the engine's `PtyWrite` replies into the
+  bytes `process()` returns; `term/compat` and `term/answer` were **deleted** (the engine
+  parses every cursor-move spelling and answers DSR / DA / DECRQM / cursor-position reports
+  natively). The callers did not move. Gains: the DEC line-drawing charset, origin-correct
+  cursor reports, custom tab stops, and the query replies — at once. **Accepted loss:** the
+  ancient X10 mouse protocol (`?9`, press-only), which the engine does not implement, so
+  `screen::MouseMode` lost its `Press` variant and `term/mouse` its X10 path — no current
+  program asks for it. The `ColorRequest` (OSC colour) and `TextAreaSizeRequest`
+  (window-size) replies are collected by the engine but **not yet wired** — a follow-up,
+  because answering them correctly needs the render palette and the cell pixel metrics, which
+  live in `ui/`; leaving them silent is no worse than the old engine, which never answered
+  them either.
 - **Stage 3 — enrich the view.** Extend `term::screen::Cell` and the grid to render dim,
   italic, strikethrough, conceal and the underline *styles* (double / curly / dotted /
   dashed) plus underline colour — the attributes vt100 could not represent. Italic needs a
@@ -1625,6 +1593,9 @@ leak that would spread the swap across the GUI. So the work is staged:
 ### Security stays put
 
 The engine surfaces OSC 52 clipboard requests as `Event::ClipboardLoad` / `ClipboardStore`;
-those are **deliberately left unwired** — the same policy as §9/§12, a remote must not read
-or poison the local clipboard, and cmote only touches it on an explicit local action. Only
-the safe reports (`PtyWrite`, `ColorRequest`, `TextAreaSizeRequest`) are answered.
+those are **deliberately dropped** — the same policy as §9/§12, a remote must not read or
+poison the local clipboard, and cmote only touches it on an explicit local action. The
+listener keeps only `PtyWrite` (the numeric status/identity reports); every other event —
+the clipboard pair, the bell, the title, the colour and window-size requests — is ignored,
+so nothing a remote sends can reach the clipboard or echo attacker-controlled text back as
+input.

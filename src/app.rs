@@ -949,10 +949,10 @@ impl App {
 			}
 			SshEvent::Output(bytes) => {
 				// Feed raw shell output into the emulator; the next render draws it.
-				// `process` also answers the status/identity queries vt100 has no arm for
-				// (§9): a program that sent one blocks reading its stdin until the reply
-				// reaches it, so send the returned bytes straight back on the input channel,
-				// the same path a keystroke takes. The same bytes may carry a cwd
+				// `process` also returns the engine's replies to the status/identity queries
+				// it carried (§9, §23): a program that sent one blocks reading its stdin until
+				// the reply reaches it, so send the returned bytes straight back on the input
+				// channel, the same path a keystroke takes. The same bytes may carry a cwd
 				// announcement, so read the (possibly new) directory out before the borrow
 				// ends and let the tree follow it (§18).
 				let (cwd, replies) = match self.terminal.as_mut() {

@@ -36,20 +36,20 @@ references below (§n) point into it.
 - **Trust-on-first-use** host-key verification against a portable `known_hosts`:
   first contact shows the fingerprint for explicit accept/reject; a later key change
   is a hard stop, not a warning (§8).
-- A full **VT terminal** (`vt100` grid rendered by iced) that reflows to the window
-  size, forwarding the new pty size to the remote (§9).
+- A full **VT terminal** — a complete VT engine (`alacritty_terminal`) whose grid cmote
+  draws with iced — that reflows to the window size, forwarding the new pty size to the
+  remote (§9, §23).
 - **Full-screen programs draw properly** — btop, htop, vim, midnight commander. The screen
   is one widget that puts every glyph at the exact pixel its column starts at, so nothing a
   program prints can shift the line it is on; **braille** graphs and **rounded box corners**
   — glyphs no monospace font we could bundle actually carries — are drawn from their own
-  geometry rather than borrowed from whatever font the system offers. The escape sequences
-  `vt100` has no arm for are rewritten on the way in (a program that spells "move the cursor
-  to row 12, column 40" the other legal way used to have every move dropped, and its screen
-  came out as wrapped, scrolling gibberish). The **status and identity queries** it also
-  has no arm for are answered — a program asks "where is the cursor?" (`CSI 6n`) or "what
-  terminal are you?" (`CSI c`) and blocks reading its input until the reply comes back, so
-  vim, tmux, less and shell size-probes used to stall on a timeout; cmote now replies (§9).
-  **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
+  geometry rather than borrowed from whatever font the system offers. The engine interprets
+  the full escape-sequence set — the DEC line-drawing characters older programs box-draw
+  with, custom tab stops, origin mode — so a program's screen lands where it belongs instead
+  of coming out as wrapped, scrolling gibberish. It also **answers the queries a program
+  blocks on** — "where is the cursor?" (`CSI 6n`), "what terminal are you?" (`CSI c`) — that
+  otherwise stall vim, tmux and less on a startup timeout; cmote sends the replies straight
+  back (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -308,15 +308,13 @@ Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
 mapping (including application-cursor-mode arrow keys, CSI vs SS3, and every F1-F12
-against the terminfo entry), the escape-sequence rewrite (each translation, the private
-and intermediate sequences that must *not* be touched, a malformed one that must come back
-out, a sequence split across three chunks, and an end-to-end check that two positioned
-writes land in their own cells), the status/identity query answering (each query recognised
-and its look-alikes ignored, the reply formats, a query split across chunks, and — end to
-end — a cursor-position size-probe that must report the clamped corner and not the cursor
-the following restore put back), pointer-event → mouse-report encoding (each encoding, each
-mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits X10 must
-not carry), the grid's run packing and the geometry of the glyphs it draws itself (a braille
+against the terminfo entry), the terminal engine's wiring end to end (an `f`-spelling move
+lands in its own cell, a wide glyph reserves two columns, and the engine's query replies are
+drained and sent back — device status, device attributes, a live cursor-position report, the
+save/jump/report/restore size-probe reporting the clamped corner, and a query split across
+two chunks answered on completion), pointer-event → mouse-report encoding (each encoding, each
+mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits), the
+grid's run packing and the geometry of the glyphs it draws itself (a braille
 cell read back as its dot pattern, a rounded corner's arc and tails measured against a real
 cell), the grid-resize
 math, mouse-selection geometry and text extraction (wide
@@ -553,9 +551,8 @@ the app enables it and cmote switches its arrow keys to the SS3 form so they reg
 
 - Run **btop** (`brew install btop` on a mac remote). Every panel should sit in its own box
   where it belongs — no line running on into the next, no frame drawn twice down the screen.
-  That is the escape-sequence rewrite: btop positions its whole UI with the one spelling the
-  parser has no arm for, and without the rewrite its output degenerates into wrapped,
-  scrolling text (§9).
+  btop positions its whole UI with cursor moves the previous engine could not follow; the
+  VT engine (§23) interprets them, so the layout lands where it belongs.
 - Its **graphs** should be dot patterns, evenly spaced inside their cells, and its **box
   corners** should be rounded and meet the straight lines cleanly. Both are drawn from
   geometry, not shaped from a font — no monospace font we could bundle has braille at all.

@@ -1,14 +1,19 @@
-// term/screen.rs — cmote's engine-agnostic view of the terminal screen (PLAN §9, §16).
+// term/screen.rs — cmote's engine-agnostic view of the terminal screen (PLAN §9, §16, §23).
 //
 // The rest of the app must not know WHICH VT engine backs the terminal. `ui::grid`,
 // `ui::selection` and `app` read the screen only through the types here — a `Screen`
 // borrowed for one frame, its `Cell`s, a `Color`, and the mouse / paste / cursor modes.
-// That is the seam PLAN §9 always intended: the grid used to read `vt100::Cell` directly,
-// which is the leak this closes. With it closed, swapping the engine (vt100 ->
-// alacritty_terminal, §16) is a change to how this view is BUILT — only this file and
-// `term::mod` — not a change to a single caller, because the method surface stays put.
-//
-// Today the view is built over `vt100`; `vt100` is named nowhere else outside `term/`.
+// That is the seam PLAN §9 always intended, and §23 swaps the engine behind it: this file
+// and `term::mod` translate `alacritty_terminal`'s grid into these cmote types, and no
+// caller moved when the engine changed from `vt100`.
+
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::TermMode;
+use alacritty_terminal::term::cell::{Cell as EngineCell, Flags};
+use alacritty_terminal::vte::ansi::{Color as EngineColor, NamedColor};
+
+use super::Engine;
 
 /// A cell colour, independent of the engine. `Default` is the terminal's default foreground
 /// or background (the renderer decides which); `Indexed` is a slot in the xterm-256 palette
@@ -21,11 +26,11 @@ pub enum Color {
 }
 
 /// Which xterm mouse protocol the remote program turned on (§9), or `None` when it has not
-/// asked for the mouse. Mirrors the set the engine tracks.
+/// asked for the mouse. The engine does not implement X10 (`?9`, press-only), so that mode
+/// never appears — the three reporting modes below are mutually exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseMode {
 	None,
-	Press,
 	PressRelease,
 	ButtonMotion,
 	AnyMotion,
@@ -93,7 +98,8 @@ impl Cell {
 		self.bold
 	}
 
-	/// A single underline (the only style the current engine distinguishes).
+	/// Any underline style — the grid draws a single rule for all of them until §23's
+	/// enrich stage teaches it the distinct styles.
 	pub fn underline(&self) -> bool {
 		self.underline
 	}
@@ -105,101 +111,140 @@ impl Cell {
 }
 
 /// A borrowed view of the terminal screen for one read. Cheap to copy — it wraps a
-/// reference to the engine's screen — and every accessor hands back cmote's own types, so
+/// reference to the engine's terminal — and every accessor hands back cmote's own types, so
 /// the caller never sees the engine.
 #[derive(Clone, Copy)]
 pub struct Screen<'a> {
-	inner: &'a vt100::Screen,
+	engine: &'a Engine,
 }
 
 impl<'a> Screen<'a> {
-	/// Wrap the engine's screen. Built by `Terminal::screen`; the engine type is the one
-	/// thing that changes when the emulator is swapped (§16).
-	pub(crate) fn new(inner: &'a vt100::Screen) -> Self {
-		Self { inner }
+	/// Wrap the engine's terminal. Built by `Terminal::screen`; the engine type is the one
+	/// thing that changed when the emulator was swapped (§16, §23).
+	pub(crate) fn new(engine: &'a Engine) -> Self {
+		Self { engine }
 	}
 
 	/// The grid size as `(rows, cols)`.
 	pub fn size(&self) -> (u16, u16) {
-		self.inner.size()
+		(
+			self.engine.screen_lines() as u16,
+			self.engine.columns() as u16,
+		)
 	}
 
-	/// The cursor's `(row, col)`, zero-based.
+	/// The cursor's `(row, col)`, zero-based, in visible-viewport coordinates. We keep no
+	/// scrollback (§9), so the active screen's top row is always row 0.
 	pub fn cursor_position(&self) -> (u16, u16) {
-		self.inner.cursor_position()
+		let point = self.engine.grid().cursor.point;
+		(point.line.0.max(0) as u16, point.column.0 as u16)
 	}
 
 	/// Whether the cursor is hidden (DECTCEM off).
 	pub fn hide_cursor(&self) -> bool {
-		self.inner.hide_cursor()
+		!self.engine.mode().contains(TermMode::SHOW_CURSOR)
 	}
 
 	/// Whether application-cursor mode (DECCKM) is on — arrows send SS3, not CSI (§9).
 	pub fn application_cursor(&self) -> bool {
-		self.inner.application_cursor()
+		self.engine.mode().contains(TermMode::APP_CURSOR)
 	}
 
 	/// Whether bracketed paste (DECSET 2004) is on — a paste is framed so the shell inserts
 	/// it literally (§9).
 	pub fn bracketed_paste(&self) -> bool {
-		self.inner.bracketed_paste()
+		self.engine.mode().contains(TermMode::BRACKETED_PASTE)
 	}
 
-	/// Which mouse protocol the remote program turned on (§9).
+	/// Which mouse protocol the remote program turned on (§9). The three reporting modes are
+	/// mutually exclusive in the engine, so the most specific one set wins.
 	pub fn mouse_mode(&self) -> MouseMode {
-		mouse_mode(self.inner.mouse_protocol_mode())
+		let mode = self.engine.mode();
+		if mode.contains(TermMode::MOUSE_MOTION) {
+			MouseMode::AnyMotion
+		} else if mode.contains(TermMode::MOUSE_DRAG) {
+			MouseMode::ButtonMotion
+		} else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+			MouseMode::PressRelease
+		} else {
+			MouseMode::None
+		}
 	}
 
 	/// How mouse reports are encoded (§9).
 	pub fn mouse_encoding(&self) -> MouseEncoding {
-		mouse_encoding(self.inner.mouse_protocol_encoding())
+		let mode = self.engine.mode();
+		if mode.contains(TermMode::SGR_MOUSE) {
+			MouseEncoding::Sgr
+		} else if mode.contains(TermMode::UTF8_MOUSE) {
+			MouseEncoding::Utf8
+		} else {
+			MouseEncoding::Default
+		}
 	}
 
-	/// The cell at `(row, col)`, or `None` when it is out of bounds.
+	/// The cell at `(row, col)`, or `None` when it is out of bounds. `row`/`col` are in the
+	/// same visible-viewport coordinates the renderer walks.
 	pub fn cell(&self, row: u16, col: u16) -> Option<Cell> {
-		self.inner.cell(row, col).map(build_cell)
+		if row as usize >= self.engine.screen_lines() || col as usize >= self.engine.columns() {
+			return None;
+		}
+		let cell = &self.engine.grid()[Line(i32::from(row))][Column(col as usize)];
+		Some(build_cell(cell))
 	}
 }
 
 /// Build the engine-agnostic cell from the engine's own.
-fn build_cell(cell: &vt100::Cell) -> Cell {
+fn build_cell(cell: &EngineCell) -> Cell {
+	let mut text = String::new();
+	text.push(cell.c);
+	if let Some(zerowidth) = cell.zerowidth() {
+		text.extend(zerowidth);
+	}
+	// A lone space is a blank cell: keep `text` empty so `has_contents` is false and the
+	// renderer's blank-cell fast paths (skip the glyph, trim trailing blanks) behave exactly
+	// as they did over the previous engine.
+	if text == " " {
+		text.clear();
+	}
+
 	Cell {
-		text: cell.contents().to_owned(),
-		fg: color(cell.fgcolor()),
-		bg: color(cell.bgcolor()),
-		bold: cell.bold(),
-		underline: cell.underline(),
-		inverse: cell.inverse(),
-		wide: cell.is_wide(),
-		wide_continuation: cell.is_wide_continuation(),
+		text,
+		fg: color(cell.fg),
+		bg: color(cell.bg),
+		bold: cell.flags.contains(Flags::BOLD),
+		underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+		inverse: cell.flags.contains(Flags::INVERSE),
+		wide: cell.flags.contains(Flags::WIDE_CHAR),
+		wide_continuation: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
 	}
 }
 
-/// Map the engine's colour onto ours.
-fn color(color: vt100::Color) -> Color {
+/// Map the engine's colour onto ours. A named colour is either a role the renderer resolves
+/// to its own default (foreground / background / cursor) or one of the palette slots, which
+/// we hand back as an index so the grid's xterm-256 palette stays the single source of the
+/// actual RGB.
+fn color(color: EngineColor) -> Color {
 	match color {
-		vt100::Color::Default => Color::Default,
-		vt100::Color::Idx(index) => Color::Indexed(index),
-		vt100::Color::Rgb(r, g, b) => Color::Rgb(r, g, b),
+		EngineColor::Spec(rgb) => Color::Rgb(rgb.r, rgb.g, rgb.b),
+		EngineColor::Indexed(index) => Color::Indexed(index),
+		// `NamedColor`'s discriminants are the palette indices: 0-15 are the ANSI and bright
+		// slots, 259-266 the dim variants (mapped back onto the base ANSI slots since cmote
+		// draws no dim palette), and everything else (foreground / background / cursor and
+		// the bright/dim foreground roles) is the terminal default.
+		EngineColor::Named(named) => match named as usize {
+			index @ 0..=15 => Color::Indexed(index as u8),
+			index @ 259..=266 => Color::Indexed((index - 259) as u8),
+			_ => Color::Default,
+		},
 	}
 }
 
-/// Map the engine's mouse mode onto ours.
-fn mouse_mode(mode: vt100::MouseProtocolMode) -> MouseMode {
-	match mode {
-		vt100::MouseProtocolMode::None => MouseMode::None,
-		vt100::MouseProtocolMode::Press => MouseMode::Press,
-		vt100::MouseProtocolMode::PressRelease => MouseMode::PressRelease,
-		vt100::MouseProtocolMode::ButtonMotion => MouseMode::ButtonMotion,
-		vt100::MouseProtocolMode::AnyMotion => MouseMode::AnyMotion,
-	}
-}
-
-/// Map the engine's mouse encoding onto ours.
-fn mouse_encoding(encoding: vt100::MouseProtocolEncoding) -> MouseEncoding {
-	match encoding {
-		vt100::MouseProtocolEncoding::Default => MouseEncoding::Default,
-		vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
-		vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
-	}
-}
+/// A compile-time check that `NamedColor`'s discriminants are where `color` assumes: the 16
+/// ANSI slots at 0-15 and the dim run beginning at 259. If a future engine version renumbers
+/// them, this fails to build rather than silently mis-mapping a colour.
+const _: () = {
+	assert!(NamedColor::Black as usize == 0);
+	assert!(NamedColor::BrightWhite as usize == 15);
+	assert!(NamedColor::DimBlack as usize == 259);
+};

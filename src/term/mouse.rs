@@ -89,12 +89,11 @@ pub fn encode(
 		Event::Release(_) => 3,
 		Event::Motion(held) => held.map_or(3, Button::code) + 32,
 	};
-	// X10 (`?9`) predates modifier reporting; every later mode carries it.
-	if mode != MouseMode::Press {
-		field += u8::from(modifiers.shift()) * 4
-			+ u8::from(modifiers.alt()) * 8
-			+ u8::from(modifiers.control()) * 16;
-	}
+	// Every mode we can be in carries the modifier bits (the engine does not implement the
+	// ancient X10 protocol, which predated them, §23).
+	field += u8::from(modifiers.shift()) * 4
+		+ u8::from(modifiers.alt()) * 8
+		+ u8::from(modifiers.control()) * 16;
 
 	let column = col.saturating_add(1);
 	let line = row.saturating_add(1);
@@ -126,13 +125,12 @@ pub fn encode(
 	})
 }
 
-/// Whether `mode` asks to hear about `event` at all. Presses go to every mode; releases
-/// to everything but X10; a move only to the two motion modes, and `ButtonMotion` wants
-/// it only while a button is down.
+/// Whether `mode` asks to hear about `event` at all. Presses and releases go to every
+/// reporting mode; a move only to the two motion modes, and `ButtonMotion` wants it only
+/// while a button is down.
 fn wants(mode: MouseMode, event: Event) -> bool {
 	match event {
-		Event::Press(_) => mode != MouseMode::None,
-		Event::Release(_) => !matches!(mode, MouseMode::None | MouseMode::Press),
+		Event::Press(_) | Event::Release(_) => mode != MouseMode::None,
 		Event::Motion(held) => match mode {
 			MouseMode::ButtonMotion => held.is_some(),
 			MouseMode::AnyMotion => true,
@@ -341,9 +339,9 @@ mod tests {
 	}
 
 	#[test]
-	fn modifiers_add_their_bits_except_in_x10_mode() {
-		// Ctrl (16) + Alt (8) on a left press = 24. X10 predates the whole idea.
-		let modern = encode(
+	fn modifiers_add_their_bits() {
+		// Ctrl (16) + Alt (8) on a left press = 24.
+		let report = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
 			Event::Press(Button::Left),
@@ -351,32 +349,7 @@ mod tests {
 			0,
 			Modifiers::CTRL | Modifiers::ALT,
 		);
-		assert_eq!(modern.as_deref(), Some(&b"\x1b[<24;1;1M"[..]));
-		let x10 = encode(
-			MouseMode::Press,
-			MouseEncoding::Sgr,
-			Event::Press(Button::Left),
-			0,
-			0,
-			Modifiers::CTRL | Modifiers::ALT,
-		);
-		assert_eq!(x10.as_deref(), Some(&b"\x1b[<0;1;1M"[..]));
-	}
-
-	#[test]
-	fn x10_mode_hears_presses_only() {
-		// `?9` reports a press and nothing else — no release, no movement.
-		assert!(
-			encode(
-				MouseMode::Press,
-				MouseEncoding::Sgr,
-				Event::Release(Button::Left),
-				0,
-				0,
-				none()
-			)
-			.is_none()
-		);
+		assert_eq!(report.as_deref(), Some(&b"\x1b[<24;1;1M"[..]));
 	}
 
 	#[test]
