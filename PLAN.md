@@ -200,6 +200,7 @@ cmote/
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
+    ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
@@ -222,7 +223,7 @@ cmote/
     │   ├── upload.rs      file upload over an sftp channel: batch pre-scan, stream, progress (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
-    │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize (§9, §16, §23)
+    │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries (§9, §16, §23)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
@@ -346,11 +347,15 @@ Turning a raw byte stream into a screen.
   emitted at the instant the query is parsed, so it reflects the cursor **where the query
   sat** — the size-probe idiom (`ESC 7` save, jump to a far corner clamped to the real size,
   `CSI 6 n`, `ESC 8` restore) reports the corner and not the restored position; a test locks
-  it. **Security**: cmote forwards only the engine's `PtyWrite` replies — numeric reports
-  (digits, `;`, a final letter, no `CR`/`LF`, so one cannot submit a command at a prompt) —
-  and **drops** the OSC 52 clipboard events (`ClipboardLoad` / `ClipboardStore`): a remote
-  must not read or poison the local clipboard (§12). The OSC-colour (`ColorRequest`) and
-  window-size (`TextAreaSizeRequest`) replies are not wired yet — a follow-up (§23).
+  it. cmote also answers the terminal's **colour** queries (OSC 10 / 11 / 12 foreground /
+  background / cursor, OSC 4;n a palette slot) and its **text-area pixel size** (CSI 14t),
+  resolving them against cmote's own colour scheme (`palette`, the same table the grid paints
+  from) and the cell metrics — so a program that probes the background to pick a light/dark
+  theme is told exactly what the screen shows (§23). **Security**: every reply cmote sends is a
+  report the engine formatted — a `PtyWrite` numeric report, an OSC-colour string, or a
+  pixel-size report — and none carries `CR`/`LF`, so a remote cannot use a query reply to submit
+  a command at a prompt. The OSC 52 clipboard events (`ClipboardLoad` / `ClipboardStore`) are
+  **dropped**: a remote must not read or poison the local clipboard (§12).
   `ponytail:` the ancient X10 mouse protocol (`?9`, press-only) is not implemented by the
   engine, so it is no longer supported — an accepted loss, since no current program asks for
   it (§23).
@@ -885,12 +890,13 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   renders and no longer stalls on a probe. All of the rich SGR attributes the engine tracks
   are **rendered** as of v3.0 (§23 Stage 3): dim, italic, strikethrough, conceal, the underline
   *styles* (double / dotted / dashed / curly) and underline colour — italic drawn from a
-  bundled IBM Plex Mono face, since Fira Mono ships none (Stage 3b). Still deferred (the §23
-  follow-ups): **scrollback** is still off
-  (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel scrolling
-  outside a program that asked for the mouse; the **OSC-colour** (`ColorRequest`) and
-  **window-size** (`TextAreaSizeRequest`) query replies are not wired; **cursor shape**
-  (DECSCUSR) and the window **title** from OSC 0/2 are not surfaced. The full audited
+  bundled IBM Plex Mono face, since Fira Mono ships none (Stage 3b). The terminal also now
+  **answers the host's colour and pixel-size queries** (OSC 10/11/12/4, CSI 14t) from its own
+  colour scheme and cell metrics (§23), so a program that probes the background to pick a theme
+  is answered rather than left guessing. Still deferred (the §23 follow-ups): **scrollback** is
+  still off (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel
+  scrolling outside a program that asked for the mouse; **cursor shape** (DECSCUSR) and the
+  window **title** from OSC 0/2 are not surfaced. The full audited
   inventory of what the terminal still lacks to drive *any* documented app UX — every gap
   tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
   **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
@@ -1551,7 +1557,8 @@ strikethrough, conceal, and single / double / curly / dotted / dashed underline 
 underline colour. Crucially it **answers host queries itself**: writing a DSR/DA/DECRQM or an
 OSC colour query into it produces the reply through its `EventListener`
 (`Event::PtyWrite`, `Event::ColorRequest`, `Event::TextAreaSizeRequest`), which **subsumes
-`term/answer` and extends it** to the OSC-colour and window-size probes we never handled. It
+`term/answer` and extends it** to the OSC-colour and pixel-size probes the old engine never
+handled — all now wired (Stage 4). It
 is **pure Rust and Apache-2.0** (already on the `deny.toml` allow-list via Material Icons),
 so it keeps the no-C-toolchain portable build (§12) — verified: `cargo deny` clean, no C
 compiler pulled, and it adds no new advisory over the three already accepted.
@@ -1589,11 +1596,9 @@ leak that would spread the swap across the GUI. So the work is staged:
   cursor reports, custom tab stops, and the query replies — at once. **Accepted loss:** the
   ancient X10 mouse protocol (`?9`, press-only), which the engine does not implement, so
   `screen::MouseMode` lost its `Press` variant and `term/mouse` its X10 path — no current
-  program asks for it. The `ColorRequest` (OSC colour) and `TextAreaSizeRequest`
-  (window-size) replies are collected by the engine but **not yet wired** — a follow-up,
-  because answering them correctly needs the render palette and the cell pixel metrics, which
-  live in `ui/`; leaving them silent is no worse than the old engine, which never answered
-  them either.
+  program asks for it. The `ColorRequest` (OSC colour) and `TextAreaSizeRequest` (pixel-size)
+  replies were left collected-but-unwired at this stage — answering them needs cmote's colour
+  scheme and cell metrics — and are wired in Stage 4.
 - **Stage 3a — enrich the view, no new font (done).** `term::screen::Cell` now carries
   `dim`, `hidden` (conceal), `strikeout`, an `UnderlineStyle` (none / single / double / dotted
   / dashed / curly, read from the engine's distinct flags) and `underline_color` (SGR 58); the
@@ -1613,6 +1618,16 @@ leak that would spread the swap across the GUI. So the work is staged:
   Mono **Regular (400)** at the same time and made it the body weight (the terminal previously
   used Medium (500) as a stand-in only because Regular was not bundled). Each face is picked by
   exact family + weight + style, since `cosmic-text` does not nearest-match within a family.
+- **Stage 4 — answer the colour and pixel-size queries (done).** The replies Stage 2 left
+  unwired. A program asks the terminal its foreground / background / cursor colour (OSC 10 / 11
+  / 12), a palette slot (OSC 4;n) or its text area in pixels (CSI 14t); the engine hands the
+  listener a slot plus a formatter, and cmote resolves it against its own colour scheme and cell
+  metrics, so the answer is exactly what the grid paints. The colour scheme moved to a new
+  shared `palette` module — one source of truth for both the renderer and the answerer, so the
+  two can never disagree (a terminal that misreports its background would defeat the theme
+  detection the query exists for). The character-size query (CSI 18t) the engine already
+  answered itself as a plain report; that still works. The GUI passes the cell pixel size down
+  to the emulator once (`set_cell_pixels`), keeping the render metrics out of `term/`.
 - **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
   UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), the window title from OSC 0/2,
   and focus reporting (`?1004`).
@@ -1621,8 +1636,9 @@ leak that would spread the swap across the GUI. So the work is staged:
 
 The engine surfaces OSC 52 clipboard requests as `Event::ClipboardLoad` / `ClipboardStore`;
 those are **deliberately dropped** — the same policy as §9/§12, a remote must not read or
-poison the local clipboard, and cmote only touches it on an explicit local action. The
-listener keeps only `PtyWrite` (the numeric status/identity reports); every other event —
-the clipboard pair, the bell, the title, the colour and window-size requests — is ignored,
-so nothing a remote sends can reach the clipboard or echo attacker-controlled text back as
-input.
+poison the local clipboard, and cmote only touches it on an explicit local action. The listener
+answers only the events that expect a report — `PtyWrite`, and the colour and pixel-size queries
+(Stage 4), each resolved to a fixed report with no `CR`/`LF`, so none can submit a command at a
+prompt. Every other event — the clipboard pair, the bell, the title, a colour *set* — is
+ignored, so nothing a remote sends can reach the clipboard or echo attacker-controlled text back
+as input.

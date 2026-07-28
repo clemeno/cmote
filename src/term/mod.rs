@@ -10,11 +10,13 @@
 // This wrapper exists so the rest of the app depends on a tiny, intention-named surface
 // (`process`, `resize`, `screen`, `cwd`) instead of the engine's full API, and so the
 // engine stays swappable (§23 replaced `vt100` with `alacritty_terminal` behind exactly
-// this surface). The engine also answers the host's status/identity queries itself — DSR,
-// DA, DECRQM, cursor-position reports — writing the reply as an `Event::PtyWrite`, which is
-// why `process` returns those bytes for the caller to send back. That retired the
-// hand-rolled `term::compat` (the engine parses every cursor-move spelling) and
-// `term::answer` (the engine answers every query).
+// this surface). The engine also answers the host's queries itself — the status/identity ones
+// (DSR, DA, DECRQM, cursor-position reports) it formats whole, and the ones about the terminal's
+// own colours and pixel size (OSC 10/11/12/4, CSI 14t) it hands us a slot plus a formatter for,
+// which we resolve against cmote's colour scheme (`palette`) and cell metrics (§23). Every reply
+// comes back as bytes `process` returns for the caller to send. That retired the hand-rolled
+// `term::compat` (the engine parses every cursor-move spelling) and `term::answer` (the engine
+// answers every query).
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
@@ -24,10 +26,12 @@ pub mod screen; // the engine-agnostic view of the screen the app reads through 
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::Term;
-use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Config;
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
+
+use crate::palette;
 
 /// The pty size the client requests and the emulator starts at, before the first
 /// window measurement arrives (§9). Kept here as the single source of truth so
@@ -50,7 +54,11 @@ pub(super) type Engine = Term<Replies>;
 impl Terminal {
 	/// Create an emulator with a `rows`×`cols` grid, matching the remote pty.
 	pub fn new(rows: u16, cols: u16) -> Self {
-		let replies = Arc::new(Mutex::new(Vec::new()));
+		let replies = Arc::new(Mutex::new(ReplyBuffer {
+			rows,
+			cols,
+			..ReplyBuffer::default()
+		}));
 		let config = Config {
 			scrolling_history: SCROLLBACK,
 			..Config::default()
@@ -85,7 +93,7 @@ impl Terminal {
 		self.cwd.feed(bytes);
 		self.parser.advance(&mut self.term, bytes);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
-		std::mem::take(&mut *buffer)
+		std::mem::take(&mut buffer.bytes)
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -103,6 +111,20 @@ impl Terminal {
 			rows: rows as usize,
 			cols: cols as usize,
 		});
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		buffer.rows = rows;
+		buffer.cols = cols;
+	}
+
+	/// Tell the emulator the pixel size of one cell, so it can answer a program that asks for
+	/// its text area in pixels (CSI 14t). The GUI owns the cell metrics (§9), so it sets this
+	/// once after construction; the emulator treats the numbers as opaque and only echoes them
+	/// back. Until set they are zero, so the reply reads as a zero-sized area — harmless, since
+	/// only graphics-capable programs ask and cmote draws no graphics.
+	pub fn set_cell_pixels(&mut self, width: u16, height: u16) {
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		buffer.cell_width = width;
+		buffer.cell_height = height;
 	}
 
 	/// The current screen, as cmote's engine-agnostic view (§9, §16, §23). The rest of the
@@ -119,32 +141,82 @@ pub struct Terminal {
 	/// Drives `term` from the raw byte stream (`Processor::advance`). Owns the VT state
 	/// machine, so a sequence split across `process` calls is buffered here between them.
 	parser: Processor,
-	/// Reply bytes the engine produced for host queries this round (DSR/DA/DECRQM/CPR),
-	/// written by the `Replies` listener during `advance` and drained by `process`. An
-	/// `Arc<Mutex<_>>` because the engine owns its own clone of the handle; the mutex is
-	/// never contended (only the GUI thread touches it).
-	replies: Arc<Mutex<Vec<u8>>>,
+	/// Reply bytes the engine produced for host queries this round, plus the few numbers a
+	/// colour or size answer needs (the grid size and cell pixel size). Written by the `Replies`
+	/// listener during `advance` and drained by `process`. An `Arc<Mutex<_>>` because the engine
+	/// owns its own clone of the handle; the mutex is never contended (only the GUI thread
+	/// touches it).
+	replies: Arc<Mutex<ReplyBuffer>>,
 	/// The remote working directory, learned from the OSC sequences the shell emits on each
 	/// prompt (§17). The engine ignores those codes, so the same bytes are scanned here.
 	cwd: cwd::Cwd,
 }
 
+/// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
+/// numbers a colour or size answer needs — the grid size and one cell's pixel size — so the
+/// listener can resolve every query the instant it arrives, in the exact order the host sent
+/// them, without reaching back into the engine.
+#[derive(Default)]
+struct ReplyBuffer {
+	bytes: Vec<u8>,
+	rows: u16,
+	cols: u16,
+	cell_width: u16,
+	cell_height: u16,
+}
+
 /// The engine's event sink. The engine reports everything the emulation layer cannot handle
-/// itself as an `Event`; we keep only `PtyWrite` — the bytes a host query must be answered
-/// with — and drop the rest. In particular the OSC 52 clipboard events
-/// (`ClipboardLoad`/`ClipboardStore`) are deliberately ignored: a remote must not read or
-/// poison the local clipboard, and cmote only touches it on an explicit local action (§12).
+/// itself as an `Event`; we answer the ones that expect a reply and drop the rest. In
+/// particular the OSC 52 clipboard events (`ClipboardLoad`/`ClipboardStore`) are deliberately
+/// ignored: a remote must not read or poison the local clipboard, and cmote only touches it on
+/// an explicit local action (§12).
 #[derive(Clone)]
-pub(crate) struct Replies(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct Replies(Arc<Mutex<ReplyBuffer>>);
 
 impl EventListener for Replies {
 	fn send_event(&self, event: Event) {
-		if let Event::PtyWrite(text) = event {
-			self.0
-				.lock()
-				.expect("reply buffer mutex poisoned")
-				.extend_from_slice(text.as_bytes());
+		let mut buffer = self.0.lock().expect("reply buffer mutex poisoned");
+		match event {
+			// A reply the engine already formatted whole (DSR / DA / DECRQM / cursor-position
+			// report, the character-cell size CSI 18t): its bytes go back verbatim.
+			Event::PtyWrite(text) => buffer.bytes.extend_from_slice(text.as_bytes()),
+			// "What colour is X?" — OSC 10 / 11 / 12 (foreground / background / cursor) or OSC
+			// 4;n (palette slot n). The engine gives us the slot and a closure that frames the
+			// reply; we resolve the slot against cmote's own scheme so the answer is exactly what
+			// the grid paints (`palette`), then let the closure format it.
+			Event::ColorRequest(index, format) => {
+				let (r, g, b) = report_color(index);
+				let reply = format(Rgb { r, g, b });
+				buffer.bytes.extend_from_slice(reply.as_bytes());
+			}
+			// "How big is your text area in pixels?" — CSI 14t. Answered from the grid size and
+			// the cell pixel size the GUI set (`set_cell_pixels`); the closure multiplies them.
+			Event::TextAreaSizeRequest(format) => {
+				let reply = format(WindowSize {
+					num_lines: buffer.rows,
+					num_cols: buffer.cols,
+					cell_width: buffer.cell_width,
+					cell_height: buffer.cell_height,
+				});
+				buffer.bytes.extend_from_slice(reply.as_bytes());
+			}
+			// Everything else — the clipboard pair, the bell, the title, colour *sets* — needs
+			// no reply and is dropped.
+			_ => {}
 		}
+	}
+}
+
+/// The RGB cmote reports for a colour-query slot. A palette index (0-255) resolves through the
+/// shared xterm-256 table; the named background role reports the scheme's background, and every
+/// other role (foreground, cursor, the bright/dim foregrounds) the foreground — the cursor is
+/// drawn by inverting the cell, so its ink is the foreground. Only the foreground / background /
+/// cursor roles and 0-255 are reachable through OSC 10 / 11 / 12 / 4.
+fn report_color(index: usize) -> (u8, u8, u8) {
+	match index {
+		0..=255 => palette::xterm_256(index as u8),
+		i if i == NamedColor::Background as usize => palette::DEFAULT_BG,
+		_ => palette::DEFAULT_FG,
 	}
 }
 
@@ -270,5 +342,55 @@ mod tests {
 		let mut terminal = Terminal::new(10, 40);
 		assert!(terminal.process(b"\x1b[6").is_empty());
 		assert_eq!(terminal.process(b"n"), b"\x1b[1;1R".to_vec());
+	}
+
+	#[test]
+	fn a_background_colour_query_reports_the_scheme_background() {
+		// OSC 11 "what is your background?" -> the scheme's background (palette::DEFAULT_BG,
+		// 0x1e) in the rgb:RRRR/GGGG/BBBB form, echoing the BEL terminator the query used. This
+		// is what lets a program pick a light/dark colourscheme to suit the terminal.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b]11;?\x07"),
+			b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_foreground_colour_query_reports_the_scheme_foreground() {
+		// OSC 10 "what is your foreground?" -> the scheme's foreground (0xd0).
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b]10;?\x07"),
+			b"\x1b]10;rgb:d0d0/d0d0/d0d0\x07".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_palette_colour_query_reports_that_slot() {
+		// OSC 4;3 "what is palette slot 3?" -> ANSI yellow (0x808000), resolved through the
+		// same shared table the grid paints from, so the answer never disagrees with the screen.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b]4;3;?\x07"),
+			b"\x1b]4;3;rgb:8080/8080/0000\x07".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_pixel_size_query_multiplies_the_cell_size_by_the_grid() {
+		// CSI 14t "text area in pixels?" -> rows*cell_height by cols*cell_width, from the cell
+		// pixel size the GUI set: 10 rows * 17 = 170 high, 40 cols * 8 = 320 wide.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
+	}
+
+	#[test]
+	fn a_character_size_query_still_reports_rows_and_columns() {
+		// CSI 18t "text area in characters?" is answered by the engine itself as a plain
+		// report; it must keep working alongside the queries we resolve. 10 rows by 40 columns.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[18t"), b"\x1b[8;10;40t".to_vec());
 	}
 }

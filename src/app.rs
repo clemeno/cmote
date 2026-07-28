@@ -926,7 +926,14 @@ impl App {
 				// A shell is open: spin up an emulator at the pty size we asked for,
 				// show the terminal, then immediately refit it to the real window
 				// rather than waiting for the first resize event.
-				self.terminal = Some(term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS));
+				let mut terminal = term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS);
+				// Hand the emulator the cell's pixel size (the GUI owns the metrics, §9) so it
+				// can answer a program that asks its text area in pixels (CSI 14t, §23).
+				terminal.set_cell_pixels(
+					ui::terminal::CELL_WIDTH.round() as u16,
+					ui::terminal::CELL_HEIGHT.round() as u16,
+				);
+				self.terminal = Some(terminal);
 				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
 

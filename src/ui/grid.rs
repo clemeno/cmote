@@ -27,6 +27,7 @@
 // tracking keeps working underneath.
 
 use crate::app::Message;
+use crate::palette;
 use crate::term::mouse as report;
 use crate::term::screen::{
 	Cell as ScreenCell, Color as CellColor, MouseMode, Screen, UnderlineStyle,
@@ -56,10 +57,11 @@ const TERMINAL_FONT: Font = Font::with_name("Fira Mono");
 /// so an italic run stays on the same pixel grid as the upright text around it.
 const TERMINAL_FONT_ITALIC: Font = Font::with_name("IBM Plex Mono");
 
-/// The default foreground/background when a cell asks for the "default" color — a
-/// light-on-dark scheme, and the window's backdrop behind the whole grid.
-const DEFAULT_FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
-const DEFAULT_BG: Color = Color::from_rgb8(0x1e, 0x1e, 0x1e);
+/// The default foreground/background when a cell asks for the "default" color — the
+/// light-on-dark scheme (the single source of truth is `palette`, so the renderer and the
+/// colour-query answerer never disagree, §23), and the window's backdrop behind the whole grid.
+const DEFAULT_FG: Color = rgb(palette::DEFAULT_FG);
+const DEFAULT_BG: Color = rgb(palette::DEFAULT_BG);
 
 /// The background of a selected cell (§10). A muted blue that reads clearly under the
 /// default light foreground; selected cells keep their own fg, only the fill changes, so
@@ -119,30 +121,6 @@ const BRAILLE_DOTS: [(f32, f32); 8] = [
 	(0.0, 3.0),
 	(1.0, 3.0),
 ];
-
-/// The 16 base ANSI colors (indices 0-15): the 8 standard colors then their bright
-/// variants. Values follow the common xterm palette.
-const ANSI_16: [(u8, u8, u8); 16] = [
-	(0x00, 0x00, 0x00), // 0 black
-	(0x80, 0x00, 0x00), // 1 red
-	(0x00, 0x80, 0x00), // 2 green
-	(0x80, 0x80, 0x00), // 3 yellow
-	(0x00, 0x00, 0x80), // 4 blue
-	(0x80, 0x00, 0x80), // 5 magenta
-	(0x00, 0x80, 0x80), // 6 cyan
-	(0xc0, 0xc0, 0xc0), // 7 white
-	(0x80, 0x80, 0x80), // 8 bright black (gray)
-	(0xff, 0x00, 0x00), // 9 bright red
-	(0x00, 0xff, 0x00), // 10 bright green
-	(0xff, 0xff, 0x00), // 11 bright yellow
-	(0x00, 0x00, 0xff), // 12 bright blue
-	(0xff, 0x00, 0xff), // 13 bright magenta
-	(0x00, 0xff, 0xff), // 14 bright cyan
-	(0xff, 0xff, 0xff), // 15 bright white
-];
-
-/// The six intensity steps of the 6×6×6 color cube (indices 16-231).
-const CUBE_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 
 /// The terminal grid widget. Borrows the emulator's screen for the frame rather than
 /// copying it — a full screen of cells is exactly the thing not worth cloning 60 times a
@@ -922,31 +900,19 @@ fn blend(from: Color, to: Color, t: f32) -> Color {
 }
 
 /// Map a cell color to an iced color. `Default` becomes the caller's default (different
-/// for fg and bg); indexed colors go through the xterm-256 palette.
+/// for fg and bg); indexed colors go through the shared xterm-256 palette.
 fn resolve(color: CellColor, default: Color) -> Color {
 	match color {
 		CellColor::Default => default,
-		CellColor::Indexed(index) => xterm_256(index),
+		CellColor::Indexed(index) => rgb(palette::xterm_256(index)),
 		CellColor::Rgb(r, g, b) => Color::from_rgb8(r, g, b),
 	}
 }
 
-/// The xterm 256-color palette: 0-15 base ANSI, 16-231 a 6×6×6 cube, 232-255 a 24-step
-/// grayscale ramp.
-fn xterm_256(index: u8) -> Color {
-	if index < 16 {
-		let (r, g, b) = ANSI_16[index as usize];
-		return Color::from_rgb8(r, g, b);
-	}
-	if index < 232 {
-		let value = index - 16;
-		let r = CUBE_STEPS[(value / 36) as usize];
-		let g = CUBE_STEPS[((value / 6) % 6) as usize];
-		let b = CUBE_STEPS[(value % 6) as usize];
-		return Color::from_rgb8(r, g, b);
-	}
-	let level = 8 + (index - 232) * 10;
-	Color::from_rgb8(level, level, level)
+/// A `palette` RGB triple as an iced color — the one place the shared palette's plain
+/// `(u8, u8, u8)` is lifted into the renderer's colour type.
+const fn rgb((r, g, b): (u8, u8, u8)) -> Color {
+	Color::from_rgb8(r, g, b)
 }
 
 #[cfg(test)]

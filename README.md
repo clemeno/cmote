@@ -47,9 +47,11 @@ references below (§n) point into it.
   the full escape-sequence set — the DEC line-drawing characters older programs box-draw
   with, custom tab stops, origin mode — so a program's screen lands where it belongs instead
   of coming out as wrapped, scrolling gibberish. It also **answers the queries a program
-  blocks on** — "where is the cursor?" (`CSI 6n`), "what terminal are you?" (`CSI c`) — that
-  otherwise stall vim, tmux and less on a startup timeout; cmote sends the replies straight
-  back (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
+  blocks on or adapts to** — "where is the cursor?" (`CSI 6n`), "what terminal are you?"
+  (`CSI c`), "what is your background colour?" (`OSC 11`, which lets an editor pick a light or
+  dark colourscheme to match), "how big is your screen?" — that otherwise stall vim, tmux and
+  less on a startup timeout or leave them guessing; cmote answers each with what it actually
+  shows (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
 - **Text styling comes through** — colour (256-colour and truecolor), bold, faint, reverse
   video, concealed text, strikethrough, and every underline style a program reaches for:
   single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
@@ -387,7 +389,9 @@ activates the focused radio or button. Expect:
 than the normal one (both weights are bundled — §9). Print the other styles
 (`printf '\033[2mfaint\033[0m \033[3mitalic\033[0m \033[9mstruck\033[0m \033[4munder\033[0m \033[4:3mcurly\033[0m\n'`)
 and confirm faint reads dimmer, italic slants (in IBM Plex Mono, §23), struck has a line
-through it, and the two underlines differ — one straight, one wavy (§23). Print wide glyphs over aligned
+through it, and the two underlines differ — one straight, one wavy (§23). Ask the terminal its
+background colour (`printf '\033]11;?\033\\'`): it replies on the input channel, so at a bash
+prompt the answer `rgb:1e1e/1e1e/1e1e` appears as if typed — proof it reports what it draws (§23). Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.
