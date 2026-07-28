@@ -212,11 +212,13 @@ cmote/
     │   ├── upload.rs      file upload over an sftp channel: batch pre-scan, stream, progress (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
-    │   ├── mod.rs         vt100::Parser wrapper: feed bytes, expose Screen, handle resize
+    │   ├── mod.rs         terminal emulator wrapper: feed bytes, expose the screen view, resize (§9, §16, §23)
+    │   ├── answer.rs      answer the DSR/DA status & identity queries the parser leaves silent (§9)
     │   ├── compat.rs      rewrite the escape sequences vt100 has no arm for into the ones it has (§9)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
-    │   └── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
+    │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
+    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through (§9, §16, §23)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -912,8 +914,8 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   no scrolling back over what left the screen and no wheel scrolling outside a program that
   asked for the mouse; **origin mode** (DECOM) is not tracked, so a cursor report under a
   scroll-region origin is absolute (§9); autowrap (`?7l`) is always on. Swapping in
-  `alacritty_terminal` answers all of these at once and stays the upgrade path if the
-  rewriter/answerer ever grows past a handful of arms. The full audited inventory of what
+  `alacritty_terminal` answers all of these at once — **that swap is now underway (§23)**,
+  and closing these remaining gaps is exactly what it buys. The full audited inventory of what
   the terminal still lacks to drive *any* documented app UX — every gap tagged **[bolt-on]**
   (addable beside `vt100`, like `compat.rs`/`answer.rs`) or **[engine]** (needs the
   `alacritty_terminal` swap), each grounded in ECMA-48 / the DEC VT manuals / xterm
@@ -1546,3 +1548,83 @@ header so both panels name the same place.
   It reads `Files::path` live (`ExplorerMessage::CopyCurrentPath` carries no path), so the
   button and the header can never name different directories, and it dims before the first
   listing when there is nothing to copy.
+
+## 23. Terminal engine swap: vt100 → alacritty_terminal (v3.0)
+
+The engine under the terminal is being replaced. This section records **why**, **which**,
+and **how** — the decision so it is not re-litigated, and the staging so the work stays
+shippable at every commit.
+
+### Why replace it at all
+
+`vt100` 0.16 is a deliberately small VT subset built on `vte`: it drops the control
+functions it has no arm for and, decisively, **never stores a whole class of state**, so a
+number of documented features cannot be rendered or reported no matter what is bolted on
+beside it. cmote already papers over two of those gaps from outside the crate — `term/compat`
+rewrites the cursor-move spellings it lacks (§9), `term/answer` replies to the DSR/DA
+queries it never answers (§9) — but blink / strikethrough / conceal / undercurl /
+underline-colour, the DEC line-drawing charset, DCS (sixel), custom tab stops, the autowrap
+toggle, origin-mode-correct cursor reports and double-width lines are **unrepresentable** in
+its data model. The full audited inventory, each gap tagged *bolt-on* (addable beside the
+engine) or *engine* (needs replacing it), is in
+[`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md). Everything tagged
+*engine* there is what this swap buys at once.
+
+### Which engine — decided: `alacritty_terminal` 0.26
+
+A full VT implementation (the engine behind Alacritty): DEC charsets, scrollback, origin
+mode, custom tab stops, the autowrap toggle, and the rich SGR set — dim, italic,
+strikethrough, conceal, and single / double / curly / dotted / dashed underline plus
+underline colour. Crucially it **answers host queries itself**: writing a DSR/DA/DECRQM or an
+OSC colour query into it produces the reply through its `EventListener`
+(`Event::PtyWrite`, `Event::ColorRequest`, `Event::TextAreaSizeRequest`), which **subsumes
+`term/answer` and extends it** to the OSC-colour and window-size probes we never handled. It
+is **pure Rust and Apache-2.0** (already on the `deny.toml` allow-list via Material Icons),
+so it keeps the no-C-toolchain portable build (§12) — verified: `cargo deny` clean, no C
+compiler pulled, and it adds no new advisory over the three already accepted.
+
+Alternatives weighed (grounded, not from memory):
+- **`wezterm-term`** is strictly richer — it adds text-**blink** and inline **images**
+  (sixel / kitty / iTerm2) — **but it is not published to crates.io** (git dependency or a
+  pre-1.0 single-maintainer fork only), which fails the reliable-and-publishable bar for a
+  portable app; and its image capability is unusable here without an image compositor we do
+  not have. Revisit only if images become a hard requirement *and* it gets published
+  (wezterm#6663, open, no ETA).
+- **`termwiz`** alone is a parser + screen buffer, **not** a full emulator — using it would
+  mean re-implementing the very state machine the swap exists to drop.
+
+**Trade accepted:** no inline images and no text-blink attribute — both marginal or unusable
+for us today. The major version bump to **v3.0** marks this core change.
+
+### How — staged behind one seam, green at every commit
+
+`term/mod.rs` was always meant to be the seam the emulator hides behind (§9), but the grid,
+the selection extractor and the mouse encoder read `vt100::Screen`/`Cell` **directly** — the
+leak that would spread the swap across the GUI. So the work is staged:
+
+- **Stage 1 — seal the seam (done).** `term/screen` is a cmote-owned view — `Screen`, `Cell`,
+  `Color`, `MouseMode`, `MouseEncoding` — with a method surface mirroring vt100's, so
+  `ui/grid`, `ui/selection` and `term/mouse` change in *type* only. `Terminal::screen()` hands
+  back this view; `vt100` is now named **nowhere outside `term/`**. A pure refactor, no
+  behaviour change, so `app.rs` and `ui/terminal.rs` did not move at all.
+- **Stage 2 — swap the engine behind the seam.** Rewrite `term/mod.rs` and `term/screen.rs`
+  to drive `alacritty_terminal`: feed bytes through `vte::ansi::Processor::advance` with the
+  `Term` as the handler; an `EventListener` collects `PtyWrite` / `ColorRequest` /
+  `TextAreaSizeRequest` into the reply bytes `process()` already returns; **retire
+  `term/compat` and `term/answer`** (the engine now parses the alias moves and answers the
+  queries natively). The callers do not move. Gains: DEC charsets, origin-correct cursor
+  reports, and the query replies — all at once.
+- **Stage 3 — enrich the view.** Extend `term::screen::Cell` and the grid to render dim,
+  italic, strikethrough, conceal and the underline *styles* (double / curly / dotted /
+  dashed) plus underline colour — the attributes vt100 could not represent. Italic needs a
+  bundled italic face (Fira Mono ships none), so it arrives with a font.
+- **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
+  UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), the window title from OSC 0/2,
+  and focus reporting (`?1004`).
+
+### Security stays put
+
+The engine surfaces OSC 52 clipboard requests as `Event::ClipboardLoad` / `ClipboardStore`;
+those are **deliberately left unwired** — the same policy as §9/§12, a remote must not read
+or poison the local clipboard, and cmote only touches it on an explicit local action. Only
+the safe reports (`PtyWrite`, `ColorRequest`, `TextAreaSizeRequest`) are answered.

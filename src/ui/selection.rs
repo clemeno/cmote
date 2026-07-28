@@ -12,8 +12,10 @@
 // last row — not a rectangular block. That matches how xterm and friends behave
 // and is what users expect when dragging across wrapped output.
 
+use crate::term::screen::Screen;
+
 /// A single grid position. `row`/`col` are 0-based cell coordinates, the same
-/// space `vt100::Screen::cell` and the renderer use. `Default` is the origin cell,
+/// space `screen::Screen::cell` and the renderer use. `Default` is the origin cell,
 /// which lets `App` (which owns a "last hovered cell") derive `Default`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cell {
@@ -93,7 +95,7 @@ impl Selection {
 	/// each cell's glyph, and joins rows with `\n`. Trailing blanks on every line
 	/// are trimmed — terminal cells are blank-padded to the grid width, and copying
 	/// that padding would paste a wall of spaces.
-	pub fn extract(&self, screen: &vt100::Screen) -> String {
+	pub fn extract(&self, screen: Screen<'_>) -> String {
 		if self.is_empty() {
 			return String::new();
 		}
@@ -114,11 +116,14 @@ impl Selection {
 				let cell = screen.cell(row, col);
 				// A wide glyph's trailing half owns no text of its own — skip it so the
 				// lead cell's glyph is not doubled.
-				if cell.is_some_and(vt100::Cell::is_wide_continuation) {
+				if cell
+					.as_ref()
+					.is_some_and(|cell| cell.is_wide_continuation())
+				{
 					col += 1;
 					continue;
 				}
-				match cell {
+				match &cell {
 					Some(cell) if cell.has_contents() => line.push_str(cell.contents()),
 					// An empty cell is a space; blank runs get trimmed off the end below.
 					_ => line.push(' '),

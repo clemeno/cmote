@@ -1,4 +1,4 @@
-// ui/grid.rs — the vt100 screen drawn as ONE widget (PLAN §9).
+// ui/grid.rs — the terminal screen drawn as ONE widget (PLAN §9).
 //
 // The emulator gives us a grid of cells; this draws it. Every glyph is placed at the
 // exact pixel its column starts at, and every background is a quad of exactly the cells
@@ -26,6 +26,11 @@
 // the xterm convention — and a bare move is never captured, so the pane's own hover
 // tracking keeps working underneath.
 
+use crate::app::Message;
+use crate::term::mouse as report;
+use crate::term::screen::{Cell as ScreenCell, Color as CellColor, MouseMode, Screen};
+use crate::ui::selection::{Cell, Selection};
+use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
 use iced::advanced::Renderer as _;
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::Quad;
@@ -37,12 +42,6 @@ use iced::{
 	Background, Border, Color, Element, Font, Length, Pixels, Point, Rectangle, Size, Theme,
 	alignment, mouse,
 };
-use vt100::MouseProtocolMode;
-
-use crate::app::Message;
-use crate::term::mouse as report;
-use crate::ui::selection::{Cell, Selection};
-use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
 
 /// The bundled monospace font (Fira Mono, embedded in the binary — see `app::MONO_FONT`).
 /// Naming it explicitly instead of `Font::MONOSPACE` means the grid looks identical on
@@ -119,12 +118,12 @@ const CUBE_STEPS: [u8; 6] = [0x00, 0x5f, 0x87, 0xaf, 0xd7, 0xff];
 /// copying it — a full screen of cells is exactly the thing not worth cloning 60 times a
 /// second.
 pub struct Grid<'a> {
-	screen: &'a vt100::Screen,
+	screen: Screen<'a>,
 	selection: Option<&'a Selection>,
 }
 
 /// Draw the emulator's current screen, highlighting `selection` if there is one.
-pub fn grid<'a>(screen: &'a vt100::Screen, selection: Option<&'a Selection>) -> Grid<'a> {
+pub fn grid<'a>(screen: Screen<'a>, selection: Option<&'a Selection>) -> Grid<'a> {
 	Grid { screen, selection }
 }
 
@@ -231,8 +230,8 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// they always have. A button already down is the exception — its press went to the
 		// program, so its release and its drag must too, or the program is left believing
 		// the button never came up.
-		let mode = self.screen.mouse_protocol_mode();
-		if mode == MouseProtocolMode::None || (state.modifiers.shift() && state.held.is_none()) {
+		let mode = self.screen.mouse_mode();
+		if mode == MouseMode::None || (state.modifiers.shift() && state.held.is_none()) {
 			return;
 		}
 		let iced::Event::Mouse(pointer) = event else {
@@ -294,7 +293,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 
 		let Some(bytes) = report::encode(
 			mode,
-			self.screen.mouse_protocol_encoding(),
+			self.screen.mouse_encoding(),
 			pointer_event,
 			cell.row,
 			cell.col,
@@ -638,7 +637,7 @@ struct Run {
 /// non-ASCII one claims its own single column whatever the fallback font does with it.
 /// Wide *continuation* cells are skipped: the lead already reserves their column.
 fn plan_runs(
-	screen: &vt100::Screen,
+	screen: Screen<'_>,
 	row: u16,
 	cols: u16,
 	on_cursor_row: bool,
@@ -656,19 +655,22 @@ fn plan_runs(
 
 		// The trailing half of a wide glyph: its column was already claimed by the lead
 		// cell's two-column run, so emit nothing for it.
-		if cell.is_some_and(vt100::Cell::is_wide_continuation) {
+		if cell
+			.as_ref()
+			.is_some_and(|cell| cell.is_wide_continuation())
+		{
 			continue;
 		}
 
-		let is_wide = cell.is_some_and(vt100::Cell::is_wide);
-		let glyph = match cell {
+		let is_wide = cell.as_ref().is_some_and(|cell| cell.is_wide());
+		let glyph = match &cell {
 			Some(cell) if cell.has_contents() => cell.contents().to_string(),
 			_ => " ".to_string(),
 		};
 		let seals = is_wide || !glyph.is_ascii();
 		let is_cursor = on_cursor_row && col == cursor_col;
 		let is_selected = selection.is_some_and(|selection| selection.contains(row, col));
-		let style = cell_style(cell, is_cursor, is_selected);
+		let style = cell_style(cell.as_ref(), is_cursor, is_selected);
 
 		// Extend only when this cell joins freely AND the open run is an unsealed run of
 		// the same style.
@@ -709,7 +711,7 @@ fn plan_runs(
 /// selection fill, keeping its foreground so the text stays legible; because `CellStyle`
 /// is the run-grouping key, this also breaks the selected run off from its neighbours
 /// automatically (§10).
-fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool, is_selected: bool) -> CellStyle {
+fn cell_style(cell: Option<&ScreenCell>, is_cursor: bool, is_selected: bool) -> CellStyle {
 	let (mut fg, mut bg, bold, underline) = match cell {
 		Some(cell) => (
 			resolve(cell.fgcolor(), DEFAULT_FG),
@@ -720,7 +722,7 @@ fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool, is_selected: bool) ->
 		None => (DEFAULT_FG, DEFAULT_BG, false, false),
 	};
 
-	let inverse = cell.is_some_and(vt100::Cell::inverse);
+	let inverse = cell.is_some_and(|cell| cell.inverse());
 	if inverse ^ is_cursor {
 		std::mem::swap(&mut fg, &mut bg);
 	}
@@ -739,13 +741,13 @@ fn cell_style(cell: Option<&vt100::Cell>, is_cursor: bool, is_selected: bool) ->
 	}
 }
 
-/// Map a vt100 color to an iced color. `Default` becomes the caller's default (different
+/// Map a cell color to an iced color. `Default` becomes the caller's default (different
 /// for fg and bg); indexed colors go through the xterm-256 palette.
-fn resolve(color: vt100::Color, default: Color) -> Color {
+fn resolve(color: CellColor, default: Color) -> Color {
 	match color {
-		vt100::Color::Default => default,
-		vt100::Color::Idx(index) => xterm_256(index),
-		vt100::Color::Rgb(r, g, b) => Color::from_rgb8(r, g, b),
+		CellColor::Default => default,
+		CellColor::Indexed(index) => xterm_256(index),
+		CellColor::Rgb(r, g, b) => Color::from_rgb8(r, g, b),
 	}
 }
 

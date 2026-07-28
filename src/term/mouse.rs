@@ -3,9 +3,9 @@
 // A full-screen program that wants the mouse asks for it: `ESC [ ? 1000 h` and friends
 // turn on one of the xterm mouse protocols, and from then on the terminal answers every
 // click, release and (in the motion modes) every move between cells with a short report
-// on the input channel. vt100 tracks which mode and which encoding the program asked for
-// (`Screen::mouse_protocol_mode` / `mouse_protocol_encoding`); this module turns one
-// pointer event plus that state into the bytes to send.
+// on the input channel. The emulator tracks which mode and which encoding the program
+// asked for, surfaced engine-agnostically as `screen::MouseMode` / `screen::MouseEncoding`
+// (§16); this module turns one pointer event plus that state into the bytes to send.
 //
 // Two encodings are in use in the wild:
 //   Default   ESC [ M  <32+button> <32+col> <32+row>   — one byte per field, so it
@@ -20,7 +20,8 @@
 // that before calling in.
 
 use iced::keyboard::Modifiers;
-use vt100::{MouseProtocolEncoding, MouseProtocolMode};
+
+use crate::term::screen::{MouseEncoding, MouseMode};
 
 /// ASCII escape, the lead byte of every report.
 const ESC: u8 = 0x1b;
@@ -66,8 +67,8 @@ pub enum Event {
 /// kind of event (or for the mouse at all). `row`/`col` are zero-based grid cells; the
 /// protocol is one-based, so they are shifted here — the single place that knows it.
 pub fn encode(
-	mode: MouseProtocolMode,
-	encoding: MouseProtocolEncoding,
+	mode: MouseMode,
+	encoding: MouseEncoding,
 	event: Event,
 	row: u16,
 	col: u16,
@@ -81,7 +82,7 @@ pub fn encode(
 	// (3); SGR keeps the real button and marks the release with its final byte instead. A
 	// move adds 32, and "no button held" is that same 3.
 	let released = matches!(event, Event::Release(_));
-	let sgr = encoding == MouseProtocolEncoding::Sgr;
+	let sgr = encoding == MouseEncoding::Sgr;
 	let mut field = match event {
 		Event::Press(button) => button.code(),
 		Event::Release(button) if sgr => button.code(),
@@ -89,7 +90,7 @@ pub fn encode(
 		Event::Motion(held) => held.map_or(3, Button::code) + 32,
 	};
 	// X10 (`?9`) predates modifier reporting; every later mode carries it.
-	if mode != MouseProtocolMode::Press {
+	if mode != MouseMode::Press {
 		field += u8::from(modifiers.shift()) * 4
 			+ u8::from(modifiers.alt()) * 8
 			+ u8::from(modifiers.control()) * 16;
@@ -98,13 +99,13 @@ pub fn encode(
 	let column = col.saturating_add(1);
 	let line = row.saturating_add(1);
 	Some(match encoding {
-		MouseProtocolEncoding::Sgr => {
+		MouseEncoding::Sgr => {
 			let final_byte = if released { 'm' } else { 'M' };
 			format!("\x1b[<{field};{column};{line}{final_byte}").into_bytes()
 		}
 		// Same three fields, each written as a code point rather than a byte, which is how
 		// this mode lifts the 223 ceiling.
-		MouseProtocolEncoding::Utf8 => {
+		MouseEncoding::Utf8 => {
 			let mut out = vec![ESC, b'[', b'M'];
 			let mut buffer = [0u8; 4];
 			for value in [u32::from(field), u32::from(column), u32::from(line)] {
@@ -115,7 +116,7 @@ pub fn encode(
 		}
 		// One byte per field. Past the ceiling the coordinate cannot be said at all, so
 		// clamp: a report about the edge cell beats a report about a wrapped-around one.
-		MouseProtocolEncoding::Default => {
+		MouseEncoding::Default => {
 			let mut out = vec![ESC, b'[', b'M'];
 			for value in [u16::from(field), column, line] {
 				out.push(32 + value.min(CLASSIC_MAX) as u8);
@@ -128,13 +129,13 @@ pub fn encode(
 /// Whether `mode` asks to hear about `event` at all. Presses go to every mode; releases
 /// to everything but X10; a move only to the two motion modes, and `ButtonMotion` wants
 /// it only while a button is down.
-fn wants(mode: MouseProtocolMode, event: Event) -> bool {
+fn wants(mode: MouseMode, event: Event) -> bool {
 	match event {
-		Event::Press(_) => mode != MouseProtocolMode::None,
-		Event::Release(_) => !matches!(mode, MouseProtocolMode::None | MouseProtocolMode::Press),
+		Event::Press(_) => mode != MouseMode::None,
+		Event::Release(_) => !matches!(mode, MouseMode::None | MouseMode::Press),
 		Event::Motion(held) => match mode {
-			MouseProtocolMode::ButtonMotion => held.is_some(),
-			MouseProtocolMode::AnyMotion => true,
+			MouseMode::ButtonMotion => held.is_some(),
+			MouseMode::AnyMotion => true,
 			_ => false,
 		},
 	}
@@ -154,8 +155,8 @@ mod tests {
 		// Until a program asks for the mouse, a click is the user's own business.
 		assert_eq!(
 			encode(
-				MouseProtocolMode::None,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::None,
+				MouseEncoding::Sgr,
 				Event::Press(Button::Left),
 				0,
 				0,
@@ -169,16 +170,16 @@ mod tests {
 	fn sgr_press_and_release_differ_only_in_the_final_byte() {
 		// Cell (row 4, col 9) is line 5, column 10 in the protocol's one-based numbering.
 		let press = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
 			Event::Press(Button::Left),
 			4,
 			9,
 			none(),
 		);
 		let release = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
 			Event::Release(Button::Left),
 			4,
 			9,
@@ -192,8 +193,8 @@ mod tests {
 	fn the_classic_encoding_offsets_every_field_by_32() {
 		// ESC [ M then three bytes: button, column, row — each biased by 32.
 		let report = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Default,
+			MouseMode::PressRelease,
+			MouseEncoding::Default,
 			Event::Press(Button::Right),
 			0,
 			0,
@@ -206,8 +207,8 @@ mod tests {
 	fn the_classic_release_loses_the_button_but_sgr_keeps_it() {
 		// The one-byte form can only say "a button came up"; SGR names which.
 		let classic = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Default,
+			MouseMode::PressRelease,
+			MouseEncoding::Default,
 			Event::Release(Button::Right),
 			0,
 			0,
@@ -216,8 +217,8 @@ mod tests {
 		.unwrap();
 		assert_eq!(classic[3], 32 + 3);
 		let sgr = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
 			Event::Release(Button::Right),
 			0,
 			0,
@@ -232,8 +233,8 @@ mod tests {
 		// 223 is the last cell the single-byte form can name; a wider grid must not wrap
 		// around and report a completely different column.
 		let report = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Default,
+			MouseMode::PressRelease,
+			MouseEncoding::Default,
 			Event::Press(Button::Left),
 			0,
 			400,
@@ -243,8 +244,8 @@ mod tests {
 		assert_eq!(report[4], 255);
 		// The same cell in SGR has no ceiling at all.
 		let sgr = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
 			Event::Press(Button::Left),
 			0,
 			400,
@@ -260,8 +261,8 @@ mod tests {
 		let drag = Event::Motion(Some(Button::Left));
 		assert!(
 			encode(
-				MouseProtocolMode::PressRelease,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::PressRelease,
+				MouseEncoding::Sgr,
 				drag,
 				0,
 				0,
@@ -271,8 +272,8 @@ mod tests {
 		);
 		assert_eq!(
 			encode(
-				MouseProtocolMode::ButtonMotion,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::ButtonMotion,
+				MouseEncoding::Sgr,
 				drag,
 				0,
 				0,
@@ -287,8 +288,8 @@ mod tests {
 		let hover = Event::Motion(None);
 		assert!(
 			encode(
-				MouseProtocolMode::ButtonMotion,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::ButtonMotion,
+				MouseEncoding::Sgr,
 				hover,
 				0,
 				0,
@@ -298,8 +299,8 @@ mod tests {
 		);
 		assert_eq!(
 			encode(
-				MouseProtocolMode::AnyMotion,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::AnyMotion,
+				MouseEncoding::Sgr,
 				hover,
 				0,
 				0,
@@ -315,8 +316,8 @@ mod tests {
 		// Scrolling reports button 64/65 as a press; there is no matching release.
 		assert_eq!(
 			encode(
-				MouseProtocolMode::PressRelease,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::PressRelease,
+				MouseEncoding::Sgr,
 				Event::Press(Button::WheelUp),
 				0,
 				0,
@@ -327,8 +328,8 @@ mod tests {
 		);
 		assert_eq!(
 			encode(
-				MouseProtocolMode::PressRelease,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::PressRelease,
+				MouseEncoding::Sgr,
 				Event::Press(Button::WheelDown),
 				0,
 				0,
@@ -343,8 +344,8 @@ mod tests {
 	fn modifiers_add_their_bits_except_in_x10_mode() {
 		// Ctrl (16) + Alt (8) on a left press = 24. X10 predates the whole idea.
 		let modern = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::PressRelease,
+			MouseEncoding::Sgr,
 			Event::Press(Button::Left),
 			0,
 			0,
@@ -352,8 +353,8 @@ mod tests {
 		);
 		assert_eq!(modern.as_deref(), Some(&b"\x1b[<24;1;1M"[..]));
 		let x10 = encode(
-			MouseProtocolMode::Press,
-			MouseProtocolEncoding::Sgr,
+			MouseMode::Press,
+			MouseEncoding::Sgr,
 			Event::Press(Button::Left),
 			0,
 			0,
@@ -367,8 +368,8 @@ mod tests {
 		// `?9` reports a press and nothing else — no release, no movement.
 		assert!(
 			encode(
-				MouseProtocolMode::Press,
-				MouseProtocolEncoding::Sgr,
+				MouseMode::Press,
+				MouseEncoding::Sgr,
 				Event::Release(Button::Left),
 				0,
 				0,
@@ -383,8 +384,8 @@ mod tests {
 		// Column 300 is code point 300 + 32 + 1 = 333, two bytes in UTF-8 — which is the
 		// whole point of this mode over the single-byte one.
 		let report = encode(
-			MouseProtocolMode::PressRelease,
-			MouseProtocolEncoding::Utf8,
+			MouseMode::PressRelease,
+			MouseEncoding::Utf8,
 			Event::Press(Button::Left),
 			0,
 			300,

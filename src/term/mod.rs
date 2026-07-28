@@ -15,6 +15,7 @@ pub mod compat; // rewrites escape sequences the parser lacks into the ones it h
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
+pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16)
 
 /// The pty size the client requests and the emulator starts at, before the first
 /// window measurement arrives (§9). Kept here as the single source of truth so
@@ -108,9 +109,10 @@ impl Terminal {
 		self.parser.screen_mut().set_size(rows, cols);
 	}
 
-	/// Borrow the current screen grid for rendering.
-	pub fn screen(&self) -> &vt100::Screen {
-		self.parser.screen()
+	/// The current screen, as cmote's engine-agnostic view (§9, §16). The rest of the app
+	/// reads the grid only through this, so the engine stays behind `term/`.
+	pub fn screen(&self) -> screen::Screen<'_> {
+		screen::Screen::new(self.parser.screen())
 	}
 }
 
@@ -139,7 +141,7 @@ mod tests {
 		let read = |row: u16, col: u16, len: u16| -> String {
 			(col..col + len)
 				.filter_map(|col| screen.cell(row, col))
-				.map(|cell| cell.contents())
+				.map(|cell| cell.contents().to_owned())
 				.collect()
 		};
 		assert_eq!(read(2, 4, 4), "left");
