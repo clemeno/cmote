@@ -894,10 +894,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   **answers the host's colour and pixel-size queries** (OSC 10/11/12/4, CSI 14t) from its own
   colour scheme and cell metrics (§23), so a program that probes the background to pick a theme
   is answered rather than left guessing, and the **window title** a program sets (OSC 0/2) is
-  shown in the title bar (§23). Still deferred (the §23 follow-ups): **scrollback** is
+  shown in the title bar (§23). The **cursor shape** a program picks with DECSCUSR
+  (`CSI Ps SP q`) is now drawn too (§23 Stage 6): block (the default, an inverted cell),
+  underline, bar, or the hollow-block outline — steady, since cmote runs no animation timer, so
+  blink is dropped. Still deferred (the §23 follow-ups): **scrollback** is
   still off (`SCROLLBACK = 0`), so no scrolling back over what left the screen and no wheel
-  scrolling outside a program that asked for the mouse; **cursor shape** (DECSCUSR) is not
-  surfaced (the cursor is always a block). The full audited
+  scrolling outside a program that asked for the mouse. The full audited
   inventory of what the terminal still lacks to drive *any* documented app UX — every gap
   tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
   **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
@@ -1638,8 +1640,15 @@ leak that would spread the swap across the GUI. So the work is staged:
   shared buffer, stripped of control characters (the title bar is chrome cmote owns — a remote
   must not smuggle newlines or escapes into it). `Terminal::title` hands it to `App::title`,
   which shows it in the third slot of the bar in place of the cwd, keeping the endpoint (§17).
+- **Stage 6 — draw the cursor shape the remote picks (done).** DECSCUSR (`CSI Ps SP q`) lets a
+  program choose a block, underline, or bar cursor (blinking or steady); the engine tracks the
+  choice, `term::screen` exposes it as a `CursorShape` (the engine's "beam" renamed `Bar`, plus
+  the unfocused `HollowBlock` and an explicit `Hidden`), and the grid draws it. The block shape
+  keeps its old path — inverting its cell in the run planner, so a glyph under it stays legible;
+  the other three are overlays drawn on top of an untouched cell after its row. Blink is dropped
+  (cmote runs no animation timer), so every shape is steady, and DECTCEM hiding still wins.
 - **Follow-ups (independent commits, the swap merely unlocks them):** scrollback + a scroll
-  UI (`SCROLLBACK` is 0 today, §9), cursor shape (DECSCUSR), and focus reporting (`?1004`).
+  UI (`SCROLLBACK` is 0 today, §9), and focus reporting (`?1004`).
 
 ### Security stays put
 

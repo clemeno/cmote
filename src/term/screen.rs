@@ -11,7 +11,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::{Cell as EngineCell, Flags};
-use alacritty_terminal::vte::ansi::{Color as EngineColor, NamedColor};
+use alacritty_terminal::vte::ansi::{
+	Color as EngineColor, CursorShape as EngineCursorShape, NamedColor,
+};
 
 use super::Engine;
 
@@ -56,6 +58,21 @@ pub enum UnderlineStyle {
 	Dotted,
 	Dashed,
 	Curly,
+}
+
+/// The shape the cursor draws as (§23). A remote picks it with DECSCUSR (`CSI Ps SP q`) — a
+/// steady or blinking block, underline, or bar — and the engine tracks the choice. `Bar` is
+/// the engine's "beam"; `HollowBlock` is the outline a terminal shows when its window is not
+/// focused. `Hidden` is a shape a program can select outright, distinct from DECTCEM hiding
+/// the cursor (`hide_cursor`) — the grid draws neither. Blink is deliberately not carried:
+/// cmote runs no animation timer, so the cursor is always steady.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CursorShape {
+	Block,
+	Underline,
+	Bar,
+	HollowBlock,
+	Hidden,
 }
 
 /// One cell's glyph and the attributes the renderer reads (§9). Owned rather than borrowed,
@@ -188,6 +205,20 @@ impl<'a> Screen<'a> {
 	/// Whether the cursor is hidden (DECTCEM off).
 	pub fn hide_cursor(&self) -> bool {
 		!self.engine.mode().contains(TermMode::SHOW_CURSOR)
+	}
+
+	/// The shape the cursor should draw as (§23), as the remote last set it with DECSCUSR.
+	/// Independent of `hide_cursor` (DECTCEM): a program can pick a shape and still hide the
+	/// cursor, so the grid checks both. Blink is dropped on the way through — cmote draws a
+	/// steady cursor whatever the remote asked (see `CursorShape`).
+	pub fn cursor_shape(&self) -> CursorShape {
+		match self.engine.cursor_style().shape {
+			EngineCursorShape::Block => CursorShape::Block,
+			EngineCursorShape::Underline => CursorShape::Underline,
+			EngineCursorShape::Beam => CursorShape::Bar,
+			EngineCursorShape::HollowBlock => CursorShape::HollowBlock,
+			EngineCursorShape::Hidden => CursorShape::Hidden,
+		}
 	}
 
 	/// Whether application-cursor mode (DECCKM) is on — arrows send SS3, not CSI (§9).
@@ -374,5 +405,30 @@ mod tests {
 		let cell = cell0("\x1b[4;58:5:9mx");
 		assert_eq!(cell.underline(), UnderlineStyle::Single);
 		assert_eq!(cell.underline_color(), Some(Color::Indexed(9)));
+	}
+
+	// The cursor shape after feeding a DECSCUSR sequence to a fresh emulator.
+	fn cursor_shape(input: &str) -> CursorShape {
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(input.as_bytes());
+		terminal.screen().cursor_shape()
+	}
+
+	#[test]
+	fn a_fresh_screen_shows_a_block_cursor() {
+		// The engine's default, and cmote's: no DECSCUSR has run.
+		assert_eq!(cursor_shape(""), CursorShape::Block);
+	}
+
+	#[test]
+	fn decscusr_selects_the_cursor_shape() {
+		// `CSI Ps SP q` — the space is the intermediate. Odd Ps blink, even steady; blink is
+		// dropped, so each pair lands on one shape. 0 and 1 reset to the block default.
+		assert_eq!(cursor_shape("\x1b[0 q"), CursorShape::Block);
+		assert_eq!(cursor_shape("\x1b[2 q"), CursorShape::Block);
+		assert_eq!(cursor_shape("\x1b[3 q"), CursorShape::Underline);
+		assert_eq!(cursor_shape("\x1b[4 q"), CursorShape::Underline);
+		assert_eq!(cursor_shape("\x1b[5 q"), CursorShape::Bar);
+		assert_eq!(cursor_shape("\x1b[6 q"), CursorShape::Bar);
 	}
 }

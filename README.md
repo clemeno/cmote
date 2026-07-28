@@ -57,6 +57,9 @@ references below (§n) point into it.
   single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
   each in its own colour when the program sets one, plus **italic** — drawn from a bundled
   IBM Plex Mono face, since Fira Mono ships no italic of its own (§23).
+- **The cursor takes the shape a program asks for** — a block, an underline, or a thin bar,
+  whichever the remote picks with DECSCUSR (vim's insert-mode bar, say); drawn steady, since
+  cmote runs no blink timer (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
@@ -393,7 +396,10 @@ than the normal one (both weights are bundled — §9). Print the other styles
 and confirm faint reads dimmer, italic slants (in IBM Plex Mono, §23), struck has a line
 through it, and the two underlines differ — one straight, one wavy (§23). Ask the terminal its
 background colour (`printf '\033]11;?\033\\'`): it replies on the input channel, so at a bash
-prompt the answer `rgb:1e1e/1e1e/1e1e` appears as if typed — proof it reports what it draws (§23). Print wide glyphs over aligned
+prompt the answer `rgb:1e1e/1e1e/1e1e` appears as if typed — proof it reports what it draws (§23).
+Change the cursor's shape (`printf '\033[6 q'` for a bar, `\033[4 q` an underline, `\033[2 q`
+back to a block) and confirm it redraws each time — the shape a program like vim would pick (§23).
+Print wide glyphs over aligned
 columns (e.g. `printf '12\n世b\n'`) and confirm the character after a CJK/emoji glyph
 stays in its column — a wide glyph reserves two cells (§9). Resize the window and run
 `tput cols; tput lines` (or `stty size`) — the reported size should track the window.

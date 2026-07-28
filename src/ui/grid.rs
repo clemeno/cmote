@@ -30,7 +30,7 @@ use crate::app::Message;
 use crate::palette;
 use crate::term::mouse as report;
 use crate::term::screen::{
-	Cell as ScreenCell, Color as CellColor, MouseMode, Screen, UnderlineStyle,
+	Cell as ScreenCell, Color as CellColor, CursorShape, MouseMode, Screen, UnderlineStyle,
 };
 use crate::ui::selection::{Cell, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
@@ -94,6 +94,19 @@ const STRIKEOUT_THICKNESS: f32 = 1.0;
 /// How far a faint (dim) cell's foreground is pulled from its background toward its full
 /// colour — below 1.0 so the text reads as reduced intensity but stays legible.
 const DIM_STRENGTH: f32 = 0.55;
+
+/// The cursor's ink and the thickness of its non-block shapes (§23). A remote picks the shape
+/// with DECSCUSR; the block shape inverts its cell (so a glyph under it stays legible) and is
+/// drawn in the run planner, while these three are overlays drawn on top of an otherwise
+/// normal cell: a `Bar` at the cell's left edge, an `Underline` along its bottom — both
+/// thicker than the SGR underline rule (`UNDERLINE_THICKNESS`) so they read as a cursor and
+/// not an attribute — and a `HollowBlock` one-pixel outline (what a terminal shows when its
+/// window is unfocused). The ink is the default foreground, the conventional cursor colour on
+/// this scheme, and every shape is drawn steady: cmote runs no animation timer, so no blink.
+const CURSOR_COLOR: Color = DEFAULT_FG;
+const CURSOR_BAR_THICKNESS: f32 = 2.0;
+const CURSOR_UNDERLINE_THICKNESS: f32 = 2.0;
+const CURSOR_OUTLINE_THICKNESS: f32 = 1.0;
 
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
@@ -188,7 +201,13 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 
 		let (rows, cols) = self.screen.size();
 		let (cursor_row, cursor_col) = self.screen.cursor_position();
-		let cursor_visible = !self.screen.hide_cursor();
+		// The cursor draws only when DECTCEM shows it and the shape is not `Hidden` (§23).
+		let cursor_shape = (!self.screen.hide_cursor())
+			.then(|| self.screen.cursor_shape())
+			.filter(|shape| *shape != CursorShape::Hidden);
+		// A block cursor inverts its cell in the run planner so a glyph under it stays legible;
+		// every other shape is an overlay drawn on top after the row, its cell left untouched.
+		let block_cursor = cursor_shape == Some(CursorShape::Block);
 		let origin = Point::new(bounds.x + GRID_PADDING, bounds.y + GRID_PADDING);
 
 		renderer.with_layer(visible, |renderer| {
@@ -207,12 +226,26 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					self.screen,
 					row,
 					cols,
-					cursor_visible && row == cursor_row,
+					block_cursor && row == cursor_row,
 					cursor_col,
 					self.selection,
 				) {
 					draw_run(renderer, run, origin.x, top, row_bounds);
 				}
+			}
+
+			// A shaped (non-block) cursor sits on top of its cell's glyph, once, after the grid.
+			if let Some(shape) = cursor_shape.filter(|shape| *shape != CursorShape::Block) {
+				draw_cursor(
+					renderer,
+					shape,
+					Rectangle {
+						x: origin.x + f32::from(cursor_col) * CELL_WIDTH,
+						y: origin.y + f32::from(cursor_row) * CELL_HEIGHT,
+						width: CELL_WIDTH,
+						height: CELL_HEIGHT,
+					},
+				);
 			}
 		});
 	}
@@ -424,6 +457,45 @@ fn draw_run(
 		run.style.fg,
 		row_bounds,
 	);
+}
+
+/// Draw the cursor as a shape overlaid on its cell (§23). Only the shapes that sit *on top*
+/// of an otherwise normal cell are here — `Bar` a rule down the left edge, `Underline` one
+/// along the bottom, `HollowBlock` an outline around the whole cell. The block cursor is not
+/// (it inverts its cell in the run planner instead, keeping its glyph legible), and `Hidden`
+/// never arrives (the caller filters both). All draw in the cursor colour, steady, no blink.
+fn draw_cursor(renderer: &mut iced::Renderer, shape: CursorShape, bounds: Rectangle) {
+	match shape {
+		CursorShape::Bar => renderer.fill_quad(
+			fill(Rectangle {
+				width: CURSOR_BAR_THICKNESS,
+				..bounds
+			}),
+			Background::Color(CURSOR_COLOR),
+		),
+		CursorShape::Underline => renderer.fill_quad(
+			fill(Rectangle {
+				y: bounds.y + CELL_HEIGHT - CURSOR_UNDERLINE_THICKNESS,
+				height: CURSOR_UNDERLINE_THICKNESS,
+				..bounds
+			}),
+			Background::Color(CURSOR_COLOR),
+		),
+		CursorShape::HollowBlock => renderer.fill_quad(
+			Quad {
+				bounds,
+				border: Border {
+					color: CURSOR_COLOR,
+					width: CURSOR_OUTLINE_THICKNESS,
+					radius: 0.0.into(),
+				},
+				shadow: iced::Shadow::default(),
+				snap: true,
+			},
+			Background::Color(Color::TRANSPARENT),
+		),
+		CursorShape::Block | CursorShape::Hidden => {}
+	}
 }
 
 /// Draw a run's underline in the requested style (§9, §23). `fill_text` draws glyphs only,
