@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v2.4.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v3.0.2** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -31,8 +31,19 @@ lacked are rewritten on the way in, §9, the grid became one widget that draws e
 an exact pixel and every glyph the bundled font lacks itself, §11, the mouse is forwarded to
 programs that ask for it, §9, and F1-F12 are mapped, §9; **v2.4.0** answers the DSR/DA status
 and identity queries the parser never replied to, so a program that probes the cursor
-position or the terminal type no longer stalls waiting on a timeout, §9). Both targets are
-supported first-class, and each has a verified toolchain on its host:
+position or the terminal type no longer stalls waiting on a timeout, §9; **v3.0.0** swaps the
+terminal engine from `vt100` to `alacritty_terminal` — a full VT implementation — which
+unblocks the DEC line-drawing charset, the rich SGR set (dim / italic / strikethrough /
+conceal, every underline style + underline colour), origin-mode-correct cursor reports, the
+OSC colour and pixel-size query replies, the remote-set window title, the DECSCUSR cursor
+shape, focus reporting, and 10 000 lines of scrollback with a scroll indicator, §23; **v3.0.1**
+follows OSC 8 hyperlinks — Ctrl+click or a right-click Open link / Copy link, the scheme gated
+to http/https/mailto, §24; **v3.0.2** speaks the kitty keyboard protocol — the `CSI u` encoding
+for disambiguate, press / repeat / release events, report-all and associated text, superseding
+modifyOtherKeys when an editor turns it on, §25). The Cargo.toml crate version stays **3.0.0**
+(the last major-milestone tag); §24 and §25 shipped as the point-labelled v3.0.1 / v3.0.2
+increments on top of it. Both targets are supported first-class, and each has a verified
+toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -123,8 +134,11 @@ Each decision below is a thing to learn from, not just a dependency.
 | `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
+| `serde` / `serde_json` | 1.0 | serialize `targets.json` — saved profiles + the per-target session snapshot (§14, §22) | `derive` on the profile structs; a corrupt store is logged and treated as empty, never a crash |
+| `open` | 5 | launch an OSC 8 hyperlink in the OS browser (§24) | pure Rust, no C toolchain; hands the URI to PowerShell `Start-Process` as data (an env var), never a shell command line — the `cmd /C start` inject path is behind an off-by-default `insecure` feature we do not enable. cmote still gates the scheme to http/https/mailto first (`link`) |
 | `anyhow` | 1.0 | app-level error handling (`Result<_, anyhow::Error>`) | context-rich errors, `?` everywhere |
 | `thiserror` | 1.x | *(deferred)* typed error enums for module boundaries | add when a module becomes a real API |
+| `tempfile` | 3 | *(dev-dependency)* temp dirs for tests writing `known_hosts` fixtures (§13) | test-only; not linked into the shipped binary |
 
 Versions above are the ones actually resolved by `cargo add` at scaffold time and
 recorded in `Cargo.lock`. We keep **caret (`^`) requirements** in `Cargo.toml` and
@@ -202,6 +216,9 @@ cmote/
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
+    ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
+    ├── profiles.rs       load/save `targets.json`: saved connection profiles + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
+    ├── secret.rs         the session-secret wrapper (`Secret` over `zeroize`): passwords / passphrases held in memory, wiped on drop, never logged (§12)
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
@@ -209,6 +226,7 @@ cmote/
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
+    │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
@@ -936,8 +954,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   v1 ships one session for simplicity.
 - **Broader auth** — `keyboard-interactive` (2FA / OTP prompts), SSH agent / Pageant
   support, certificate auth.
-- **More key types for `.ppk`** — the in-house parser (§7) covers RSA + Ed25519 in
-  v1; ECDSA support is a follow-up (add the curve handling to `ppk.rs`).
+- **More key types for `.ppk`** — *done, and by a different route than first planned*:
+  the original plan was a hand-rolled parser covering RSA + Ed25519 with ECDSA deferred, but
+  the swap to `ssh-key`'s `from_ppk` (§7 — already in the russh tree, no new dependency) reads
+  PPK v2/v3 with RSA, Ed25519, **ECDSA and DSA** inner keys, so the "ECDSA is a follow-up" gap
+  no longer exists. A genuinely exotic container surfaces a clear error, not a crash.
 - **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1, v2.2)*: **upload** of one or
   many local files into a chosen remote folder, from four surfaces, with the collisions
   settled up front (§17), a **folder tree** of the remote filesystem that browses and
@@ -967,7 +988,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   on (§23 Stage 8): `SCROLLBACK = 10 000`, the wheel and Shift+PageUp/PageDown/Home/End scroll the
   history, typing snaps back to the live bottom, and a thin, read-only **scroll indicator** in the
   grid's right gutter shows position and depth while the view is scrolled up. That was the last §23
-  follow-up, so §23 (the engine swap and everything it unblocked) is complete. The full audited
+  follow-up, so §23 (the engine swap and everything it unblocked) is complete. Two further
+terminal features then shipped on top of the swap, each a small addition beside the engine
+rather than a change to it: **OSC 8 hyperlinks** (§24, v3.0.1) — the engine records the
+per-cell URI and cmote follows it on Ctrl+click or a right-click **Open link / Copy link**,
+the scheme gated to http/https/mailto — and the **kitty keyboard protocol** (§25, v3.0.2) —
+the engine tracks the push/pop/query flag stack and answers `CSI ? u` itself, cmote flips the
+engine flag on and encodes the `CSI u` key reports (disambiguate, press / repeat / release,
+report-all, associated text), superseding modifyOtherKeys when an editor enables it. The full audited
   inventory of what the terminal still lacks to drive *any* documented app UX — rewritten
   against the `alacritty_terminal` baseline now that the swap is done, with each remaining gap
   grouped by *where the work lives* (`[keymap]`, `[reply]`, `[seam+grid]`, or the short
@@ -1762,7 +1790,7 @@ as input.
 
 ---
 
-## 24. OSC 8 hyperlinks (v3.1)
+## 24. OSC 8 hyperlinks (v3.0.1)
 
 A modern program can mark a run of text as a **clickable link** with the OSC 8 escape —
 `ESC ] 8 ; params ; URI ST`, the text, then `ESC ] 8 ; ; ST` to close — so `ls --hyperlink`,
@@ -1786,6 +1814,7 @@ cmote's job is only to **surface** it and **act** on a click:
   offered, handy when the visible text hides it. `ponytail:` there is no hover affordance in
   v3.1 — a link is discoverable by right-clicking or Ctrl+clicking, and a program that styles
   its link (colour/underline) still shows through; a Ctrl-hover underline is a later polish.
+  (`ponytail:` hover affordance still open as of v3.0.2.)
 
 ### Opening is a security boundary
 
@@ -1810,7 +1839,7 @@ safe envelope.
 
 ---
 
-## 25. Kitty keyboard protocol (v3.1)
+## 25. Kitty keyboard protocol (v3.0.2)
 
 The classic terminal input alphabet loses information the moment a key is anything but a plain
 letter. `Ctrl+I` collapses onto Tab (both `0x09`), `Ctrl+M` onto Enter (`0x0d`); `Ctrl+digit`

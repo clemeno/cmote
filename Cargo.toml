@@ -44,7 +44,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # `fs` = async local file I/O, so streaming an upload never blocks a runtime worker.
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros", "time"] }
-vt100 = "0.16.2"
 zeroize = "1.9.0"
 
 [dev-dependencies]

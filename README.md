@@ -343,8 +343,10 @@ It also audits the dependency tree: `cargo audit` for RustSec advisories and
 `cargo deny` (see `deny.toml`) for the license allow-list, banned crates (no
 `aws-lc-*` — keeps the NASM-free portable build, §12), and trusted sources.
 
-Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
-`.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
+Automated coverage: key parsing (the `.ppk` header sniff, Ed25519 `.ppk` loaded plain and
+encrypted, the encrypted-key passphrase re-ask paths, and a non-`.ppk` blob routed to the
+OpenSSH loader — the `.ppk` fixtures are Ed25519, the format `from_ppk` also reads RSA / ECDSA /
+DSA §7), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
 mapping (including application-cursor-mode arrow keys, CSI vs SS3, every F1-F12
 against the terminfo entry, the modified named keys — Ctrl/Shift/Alt + arrows /
