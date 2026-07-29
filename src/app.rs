@@ -1516,12 +1516,22 @@ impl App {
 			.as_ref()
 			.is_some_and(|terminal| terminal.screen().application_cursor());
 
+		// The remote's modifyOtherKeys level, so `encode` can report Ctrl/Alt combos as the
+		// unambiguous CSI 27 form when an editor asked for it (§9). Read off the terminal, not
+		// the screen view: the engine does not track this mode, so cmote scans the stream for it.
+		let modify_other_keys = self
+			.terminal
+			.as_ref()
+			.map(|terminal| terminal.modify_other_keys())
+			.unwrap_or_default();
+
 		if let Some(bytes) = term::keymap::encode(
 			&key,
 			physical_key,
 			text.as_deref(),
 			modifiers,
 			application_cursor,
+			modify_other_keys,
 		) {
 			// Typing returns the view to the live bottom (§23): a keystroke sent while scrolled
 			// back into history lands where it will be echoed, not off-screen above. The scroll

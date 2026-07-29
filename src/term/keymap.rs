@@ -12,6 +12,8 @@
 use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 
+use super::modkeys::ModifyOtherKeys;
+
 /// ASCII escape (`ESC`), the lead byte of every CSI sequence and the meta prefix.
 const ESC: u8 = 0x1b;
 
@@ -33,14 +35,29 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// `named_bytes` to pick the matching cursor-key encoding. `modifiers` is threaded
 /// there too: a Ctrl/Shift/Alt held with a navigation or function key encodes the
 /// xterm modifier parameter (`CSI 1;<mod><final>` / `CSI <n>;<mod>~`), so a remote
-/// editor reads Ctrl+Right as word-motion and Shift+Down as select-line.
+/// editor reads Ctrl+Right as word-motion and Shift+Down as select-line. `modify_other_keys`
+/// is the remote's `modifyOtherKeys` level (read from `Terminal::modify_other_keys`): when a
+/// program turns it on, a Ctrl/Alt combo on a main-keyboard character is reported as the
+/// unambiguous `CSI 27;<mod>;<code>~` form instead of the lossy C0 byte or nothing at all.
 pub fn encode(
 	key: &Key,
 	physical: Physical,
 	text: Option<&str>,
 	modifiers: Modifiers,
 	application_cursor: bool,
+	modify_other_keys: ModifyOtherKeys,
 ) -> Option<Vec<u8>> {
+	// modifyOtherKeys first, so at level 2 it claims Ctrl+C before the C0 path turns it into
+	// 0x03: an editor that turned the mode on wants the raw key event, not the interrupt byte.
+	// Only Ctrl/Alt combos on a printable key are ever claimed — Shift-only and unmodified keys,
+	// and every named/navigation/function key, keep their ordinary encoding below.
+	if let Key::Character(character) = key
+		&& (modifiers.control() || modifiers.alt())
+		&& let Some(bytes) = modify_other_key(character, modifiers, modify_other_keys)
+	{
+		return Some(bytes);
+	}
+
 	// Control combos first, so Ctrl-C beats the plain 'c' it would otherwise be.
 	// (Alt is excluded here; Alt+Ctrl combos are rare and left to the OS.)
 	if modifiers.control()
@@ -289,8 +306,9 @@ fn csi(params: &[u8], final_byte: u8) -> Vec<u8> {
 	out
 }
 
-/// A number as its decimal ASCII digits (15 -> `b"15"`), for a CSI parameter.
-fn ascii_number(value: u16) -> Vec<u8> {
+/// A number as its decimal ASCII digits (15 -> `b"15"`), for a CSI parameter. Wide enough to
+/// hold a Unicode codepoint, since `modifyOtherKeys` puts one in the parameter (see `other_key_bytes`).
+fn ascii_number(value: u32) -> Vec<u8> {
 	value.to_string().into_bytes()
 }
 
@@ -304,7 +322,7 @@ fn ascii_number(value: u16) -> Vec<u8> {
 fn letter_key(final_byte: u8, application_ss3: bool, modifiers: Modifiers) -> Vec<u8> {
 	if let Some(code) = modifier_param(modifiers) {
 		let mut params = b"1;".to_vec();
-		params.extend_from_slice(&ascii_number(u16::from(code)));
+		params.extend_from_slice(&ascii_number(u32::from(code)));
 		return csi(&params, final_byte);
 	}
 	let prefix = if application_ss3 { b'O' } else { b'[' };
@@ -316,12 +334,50 @@ fn letter_key(final_byte: u8, application_ss3: bool, modifiers: Modifiers) -> Ve
 /// a held modifier inserts the `;<mod>` parameter to give `ESC [ <n> ; <mod> ~`. DECCKM
 /// never changes these keys, so no application-cursor flag reaches here.
 fn tilde_key(number: u16, modifiers: Modifiers) -> Vec<u8> {
-	let mut params = ascii_number(number);
+	let mut params = ascii_number(u32::from(number));
 	if let Some(code) = modifier_param(modifiers) {
 		params.push(b';');
-		params.extend_from_slice(&ascii_number(u16::from(code)));
+		params.extend_from_slice(&ascii_number(u32::from(code)));
 	}
 	csi(&params, b'~')
+}
+
+/// The bytes for a Ctrl/Alt combo on a main-keyboard character under `modifyOtherKeys`, or
+/// `None` when the mode leaves this combo alone (see `encode`). Level 2 reports every Ctrl/Alt
+/// combo; level 1 reports only the gaps — a Ctrl combo whose base has no C0 control byte
+/// (Ctrl+digit, Ctrl+`;`, …) — and leaves Ctrl+letter as its C0 and Alt as its ESC-meta prefix.
+/// The `character` is the key's base (unshifted-role) text, so its first codepoint is the `code`
+/// xterm reports, with Shift folded into the modifier parameter rather than the letter's case.
+fn modify_other_key(
+	character: &str,
+	modifiers: Modifiers,
+	level: ModifyOtherKeys,
+) -> Option<Vec<u8>> {
+	match level {
+		ModifyOtherKeys::Off => None,
+		ModifyOtherKeys::Level2 => other_key_bytes(character, modifiers),
+		// Level 1 fills only the gaps: a Ctrl combo with no ordinary byte. Anything that already
+		// has one (Ctrl+letter -> C0, Alt-as-meta) falls through to keep it.
+		ModifyOtherKeys::Level1 => (modifiers.control() && control_byte(character).is_none())
+			.then(|| other_key_bytes(character, modifiers))
+			.flatten(),
+	}
+}
+
+/// Assemble the `CSI 27 ; <modifier> ; <codepoint> ~` report for one character key, or `None`
+/// if the key carries no character. The modifier parameter is the same `1 + bits` scheme as the
+/// navigation keys (`modifier_param`); the codepoint is the key's base character. This is the
+/// default (`formatOtherKeys=0`) xterm form — an editor reads it as an unambiguous key event.
+fn other_key_bytes(character: &str, modifiers: Modifiers) -> Option<Vec<u8>> {
+	let code = character.chars().next()? as u32;
+	// The caller only reaches here with Ctrl or Alt down, so a parameter always exists; the
+	// fallback keeps the arithmetic total for the impossible bare-Shift case.
+	let parameter = modifier_param(modifiers).unwrap_or(1);
+	let mut params = b"27;".to_vec();
+	params.extend_from_slice(&ascii_number(u32::from(parameter)));
+	params.push(b';');
+	params.extend_from_slice(&ascii_number(code));
+	Some(csi(&params, b'~'))
 }
 
 #[cfg(test)]
@@ -332,6 +388,11 @@ mod tests {
 	// A convenience: no modifiers held.
 	fn none() -> Modifiers {
 		Modifiers::empty()
+	}
+
+	// A convenience: the default (off) modifyOtherKeys level, which most tests run under.
+	fn off() -> ModifyOtherKeys {
+		ModifyOtherKeys::Off
 	}
 
 	// Wrap a physical `Code` as the `Physical` `encode` expects. Most tests are about
@@ -349,7 +410,7 @@ mod tests {
 	fn plain_character_sends_its_text() {
 		let key = Key::Character("a".into());
 		assert_eq!(
-			encode(&key, main_key(), Some("a"), none(), false),
+			encode(&key, main_key(), Some("a"), none(), false, off()),
 			Some(b"a".to_vec())
 		);
 	}
@@ -359,7 +420,7 @@ mod tests {
 		// The OS reports the logical key as "a" but the produced text as "A".
 		let key = Key::Character("a".into());
 		assert_eq!(
-			encode(&key, main_key(), Some("A"), Modifiers::SHIFT, false),
+			encode(&key, main_key(), Some("A"), Modifiers::SHIFT, false, off()),
 			Some(b"A".to_vec())
 		);
 	}
@@ -368,7 +429,7 @@ mod tests {
 	fn ctrl_c_is_etx() {
 		let key = Key::Character("c".into());
 		assert_eq!(
-			encode(&key, main_key(), None, Modifiers::CTRL, false),
+			encode(&key, main_key(), None, Modifiers::CTRL, false, off()),
 			Some(vec![0x03])
 		);
 	}
@@ -377,7 +438,7 @@ mod tests {
 	fn enter_is_carriage_return() {
 		let key = Key::Named(Named::Enter);
 		assert_eq!(
-			encode(&key, phys(Code::Enter), Some("\r"), none(), false),
+			encode(&key, phys(Code::Enter), Some("\r"), none(), false, off()),
 			Some(b"\r".to_vec())
 		);
 	}
@@ -387,7 +448,7 @@ mod tests {
 		// DECCKM reset (the shell's default): arrows are the CSI form ESC[A.
 		let key = Key::Named(Named::ArrowUp);
 		assert_eq!(
-			encode(&key, phys(Code::ArrowUp), None, none(), false),
+			encode(&key, phys(Code::ArrowUp), None, none(), false, off()),
 			Some(b"\x1b[A".to_vec())
 		);
 	}
@@ -398,7 +459,7 @@ mod tests {
 		// what those apps bind their arrow keys to — the fix for "arrows do nothing".
 		let key = Key::Named(Named::ArrowUp);
 		assert_eq!(
-			encode(&key, phys(Code::ArrowUp), None, none(), true),
+			encode(&key, phys(Code::ArrowUp), None, none(), true, off()),
 			Some(b"\x1bOA".to_vec())
 		);
 	}
@@ -409,19 +470,19 @@ mod tests {
 		let home = Key::Named(Named::Home);
 		let end = Key::Named(Named::End);
 		assert_eq!(
-			encode(&home, phys(Code::Home), None, none(), false),
+			encode(&home, phys(Code::Home), None, none(), false, off()),
 			Some(b"\x1b[H".to_vec())
 		);
 		assert_eq!(
-			encode(&home, phys(Code::Home), None, none(), true),
+			encode(&home, phys(Code::Home), None, none(), true, off()),
 			Some(b"\x1bOH".to_vec())
 		);
 		assert_eq!(
-			encode(&end, phys(Code::End), None, none(), false),
+			encode(&end, phys(Code::End), None, none(), false, off()),
 			Some(b"\x1b[F".to_vec())
 		);
 		assert_eq!(
-			encode(&end, phys(Code::End), None, none(), true),
+			encode(&end, phys(Code::End), None, none(), true, off()),
 			Some(b"\x1bOF".to_vec())
 		);
 	}
@@ -432,11 +493,11 @@ mod tests {
 		// application mode leaves them unchanged.
 		let page_up = Key::Named(Named::PageUp);
 		assert_eq!(
-			encode(&page_up, phys(Code::PageUp), None, none(), false),
-			encode(&page_up, phys(Code::PageUp), None, none(), true)
+			encode(&page_up, phys(Code::PageUp), None, none(), false, off()),
+			encode(&page_up, phys(Code::PageUp), None, none(), true, off())
 		);
 		assert_eq!(
-			encode(&page_up, phys(Code::PageUp), None, none(), true),
+			encode(&page_up, phys(Code::PageUp), None, none(), true, off()),
 			Some(b"\x1b[5~".to_vec())
 		);
 	}
@@ -464,11 +525,11 @@ mod tests {
 			let key = Key::Named(named);
 			// The form does not change with the cursor-key mode, so both must match.
 			assert_eq!(
-				encode(&key, main_key(), None, none(), false).as_deref(),
+				encode(&key, main_key(), None, none(), false, off()).as_deref(),
 				Some(bytes)
 			);
 			assert_eq!(
-				encode(&key, main_key(), None, none(), true).as_deref(),
+				encode(&key, main_key(), None, none(), true, off()).as_deref(),
 				Some(bytes)
 			);
 		}
@@ -480,17 +541,17 @@ mod tests {
 		// modifier parameter (Ctrl = 5), ESC[1;5C. Shift is select (2), Alt is 3.
 		let right = Key::Named(Named::ArrowRight);
 		assert_eq!(
-			encode(&right, main_key(), None, Modifiers::CTRL, false),
+			encode(&right, main_key(), None, Modifiers::CTRL, false, off()),
 			Some(b"\x1b[1;5C".to_vec())
 		);
 		let down = Key::Named(Named::ArrowDown);
 		assert_eq!(
-			encode(&down, main_key(), None, Modifiers::SHIFT, false),
+			encode(&down, main_key(), None, Modifiers::SHIFT, false, off()),
 			Some(b"\x1b[1;2B".to_vec())
 		);
 		let left = Key::Named(Named::ArrowLeft);
 		assert_eq!(
-			encode(&left, main_key(), None, Modifiers::ALT, false),
+			encode(&left, main_key(), None, Modifiers::ALT, false, off()),
 			Some(b"\x1b[1;3D".to_vec())
 		);
 	}
@@ -501,7 +562,7 @@ mod tests {
 		// xterm behaves the same, so editors match on it in both cursor-key modes.
 		let right = Key::Named(Named::ArrowRight);
 		assert_eq!(
-			encode(&right, main_key(), None, Modifiers::CTRL, true),
+			encode(&right, main_key(), None, Modifiers::CTRL, true, off()),
 			Some(b"\x1b[1;5C".to_vec())
 		);
 	}
@@ -516,7 +577,8 @@ mod tests {
 				main_key(),
 				None,
 				Modifiers::CTRL | Modifiers::SHIFT,
-				false
+				false,
+				off()
 			),
 			Some(b"\x1b[1;6D".to_vec())
 		);
@@ -526,7 +588,8 @@ mod tests {
 				main_key(),
 				None,
 				Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT,
-				false
+				false,
+				off()
 			),
 			Some(b"\x1b[1;8D".to_vec())
 		);
@@ -539,7 +602,7 @@ mod tests {
 		// Ctrl+End is not, so it reaches here.)
 		let end = Key::Named(Named::End);
 		assert_eq!(
-			encode(&end, phys(Code::End), None, Modifiers::CTRL, false),
+			encode(&end, phys(Code::End), None, Modifiers::CTRL, false, off()),
 			Some(b"\x1b[1;5F".to_vec())
 		);
 	}
@@ -550,12 +613,26 @@ mod tests {
 		// Ctrl+PageUp = ESC[5;5~ (Shift+PageUp is claimed for scrollback before encode).
 		let delete = Key::Named(Named::Delete);
 		assert_eq!(
-			encode(&delete, phys(Code::Delete), None, Modifiers::CTRL, false),
+			encode(
+				&delete,
+				phys(Code::Delete),
+				None,
+				Modifiers::CTRL,
+				false,
+				off()
+			),
 			Some(b"\x1b[3;5~".to_vec())
 		);
 		let page_up = Key::Named(Named::PageUp);
 		assert_eq!(
-			encode(&page_up, phys(Code::PageUp), None, Modifiers::CTRL, false),
+			encode(
+				&page_up,
+				phys(Code::PageUp),
+				None,
+				Modifiers::CTRL,
+				false,
+				off()
+			),
 			Some(b"\x1b[5;5~".to_vec())
 		);
 	}
@@ -566,12 +643,12 @@ mod tests {
 		// same bytes terminfo lists as `kf13`. F5 onward keep the "~" form and gain `;mod`.
 		let f1 = Key::Named(Named::F1);
 		assert_eq!(
-			encode(&f1, main_key(), None, Modifiers::SHIFT, false),
+			encode(&f1, main_key(), None, Modifiers::SHIFT, false, off()),
 			Some(b"\x1b[1;2P".to_vec())
 		);
 		let f5 = Key::Named(Named::F5);
 		assert_eq!(
-			encode(&f5, main_key(), None, Modifiers::CTRL, false),
+			encode(&f5, main_key(), None, Modifiers::CTRL, false, off()),
 			Some(b"\x1b[15;5~".to_vec())
 		);
 	}
@@ -597,7 +674,7 @@ mod tests {
 		for (named, bytes) in expected {
 			let key = Key::Named(named);
 			assert_eq!(
-				encode(&key, main_key(), None, none(), false).as_deref(),
+				encode(&key, main_key(), None, none(), false, off()).as_deref(),
 				Some(bytes)
 			);
 		}
@@ -609,13 +686,145 @@ mod tests {
 		// so a plain Right is still ESC[C and a plain Delete still ESC[3~.
 		let right = Key::Named(Named::ArrowRight);
 		assert_eq!(
-			encode(&right, main_key(), None, none(), false),
+			encode(&right, main_key(), None, none(), false, off()),
 			Some(b"\x1b[C".to_vec())
 		);
 		let delete = Key::Named(Named::Delete);
 		assert_eq!(
-			encode(&delete, phys(Code::Delete), None, none(), false),
+			encode(&delete, phys(Code::Delete), None, none(), false, off()),
 			Some(b"\x1b[3~".to_vec())
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_level_two_wraps_a_ctrl_combo() {
+		// With modifyOtherKeys level 2 the remote wants the raw key event, so Ctrl+C is the
+		// unambiguous `CSI 27 ; mod ; code ~` (mod 5 = Ctrl, code 99 = 'c'), NOT the C0 0x03.
+		let key = Key::Character("c".into());
+		assert_eq!(
+			encode(
+				&key,
+				main_key(),
+				Some("c"),
+				Modifiers::CTRL,
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"\x1b[27;5;99~".to_vec())
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_encodes_a_ctrl_digit_that_had_no_byte() {
+		// Ctrl+2 has no C0 byte, so today it is lost; under the mode it becomes a real event
+		// (code 50 = '2'). This is the whole point — combos editors otherwise never see.
+		let key = Key::Character("2".into());
+		assert_eq!(
+			encode(
+				&key,
+				main_key(),
+				Some("2"),
+				Modifiers::CTRL,
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"\x1b[27;5;50~".to_vec())
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_folds_shift_and_alt_into_the_parameter() {
+		// The parameter is the same 1 + Shift(1) + Alt(2) + Ctrl(4) scheme as the arrows, and
+		// the code stays the base letter: Ctrl+Alt+a is mod 7, code 97.
+		let key = Key::Character("a".into());
+		assert_eq!(
+			encode(
+				&key,
+				main_key(),
+				Some("a"),
+				Modifiers::CTRL | Modifiers::ALT,
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"\x1b[27;7;97~".to_vec())
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_level_one_fills_only_the_gaps() {
+		// Level 1 encodes the gap combos (Ctrl+digit, no C0) but leaves the ones that already
+		// have a byte: Ctrl+C stays 0x03, so a shell keeps its interrupt.
+		let digit = Key::Character("2".into());
+		assert_eq!(
+			encode(
+				&digit,
+				main_key(),
+				Some("2"),
+				Modifiers::CTRL,
+				false,
+				ModifyOtherKeys::Level1
+			),
+			Some(b"\x1b[27;5;50~".to_vec())
+		);
+		let letter = Key::Character("c".into());
+		assert_eq!(
+			encode(
+				&letter,
+				main_key(),
+				Some("c"),
+				Modifiers::CTRL,
+				false,
+				ModifyOtherKeys::Level1
+			),
+			Some(vec![0x03])
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_leaves_plain_and_shift_only_typing_alone() {
+		// The mode governs Ctrl/Alt combos only: ordinary typing and capitals still send their
+		// text even at level 2, so an editor's normal input is untouched.
+		let plain = Key::Character("a".into());
+		assert_eq!(
+			encode(
+				&plain,
+				main_key(),
+				Some("a"),
+				none(),
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"a".to_vec())
+		);
+		let shifted = Key::Character("a".into());
+		assert_eq!(
+			encode(
+				&shifted,
+				main_key(),
+				Some("A"),
+				Modifiers::SHIFT,
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"A".to_vec())
+		);
+	}
+
+	#[test]
+	fn modify_other_keys_does_not_touch_named_keys() {
+		// Navigation keys keep their own sequences whatever the level: Ctrl+Right is still the
+		// arrow's CSI param form, never the 27-form (which is for the main-keyboard keys).
+		let right = Key::Named(Named::ArrowRight);
+		assert_eq!(
+			encode(
+				&right,
+				main_key(),
+				None,
+				Modifiers::CTRL,
+				false,
+				ModifyOtherKeys::Level2
+			),
+			Some(b"\x1b[1;5C".to_vec())
 		);
 	}
 
@@ -623,7 +832,7 @@ mod tests {
 	fn alt_character_gets_esc_prefix() {
 		let key = Key::Character("x".into());
 		assert_eq!(
-			encode(&key, main_key(), Some("x"), Modifiers::ALT, false),
+			encode(&key, main_key(), Some("x"), Modifiers::ALT, false, off()),
 			Some(b"\x1bx".to_vec())
 		);
 	}
@@ -632,7 +841,7 @@ mod tests {
 	fn bare_modifier_key_sends_nothing() {
 		let key = Key::Named(Named::Shift);
 		assert_eq!(
-			encode(&key, phys(Code::ShiftLeft), None, none(), false),
+			encode(&key, phys(Code::ShiftLeft), None, none(), false, off()),
 			None
 		);
 	}
@@ -644,7 +853,7 @@ mod tests {
 		// must send the digit, not an arrow. Physical code Numpad2 + text "2" => "2".
 		let key = Key::Named(Named::ArrowDown);
 		assert_eq!(
-			encode(&key, phys(Code::Numpad2), Some("2"), none(), false),
+			encode(&key, phys(Code::Numpad2), Some("2"), none(), false, off()),
 			Some(b"2".to_vec())
 		);
 	}
@@ -655,7 +864,7 @@ mod tests {
 		// role, so numpad 2 keeps acting as Down (CSI ESC[B) — unchanged behaviour.
 		let key = Key::Named(Named::ArrowDown);
 		assert_eq!(
-			encode(&key, phys(Code::Numpad2), None, none(), false),
+			encode(&key, phys(Code::Numpad2), None, none(), false, off()),
 			Some(b"\x1b[B".to_vec())
 		);
 	}
@@ -666,7 +875,14 @@ mod tests {
 		// the OS produces the locale's separator as text; send it verbatim.
 		let key = Key::Named(Named::Delete);
 		assert_eq!(
-			encode(&key, phys(Code::NumpadDecimal), Some("."), none(), false),
+			encode(
+				&key,
+				phys(Code::NumpadDecimal),
+				Some("."),
+				none(),
+				false,
+				off()
+			),
 			Some(b".".to_vec())
 		);
 	}
@@ -677,7 +893,14 @@ mod tests {
 		// shortcut ignores it and the logical Enter mapping applies: carriage return.
 		let key = Key::Named(Named::Enter);
 		assert_eq!(
-			encode(&key, phys(Code::NumpadEnter), Some("\r"), none(), false),
+			encode(
+				&key,
+				phys(Code::NumpadEnter),
+				Some("\r"),
+				none(),
+				false,
+				off()
+			),
 			Some(b"\r".to_vec())
 		);
 	}

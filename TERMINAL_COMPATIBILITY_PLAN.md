@@ -81,26 +81,36 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
 - **Encodes input**: printable + layout, Ctrl-\* → C0, Alt-as-meta, Enter/Tab/Backspace/Esc,
   arrows/Home/End (DECCKM-aware), Insert/Delete/PageUp/Down, **F1–F12** and **F13–F24**,
   **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / navigation / F-keys, in the
-  xterm `CSI 1;<mod><final>` / `CSI <n>;<mod>~` form), numpad (NumLock-aware), bracketed paste
-  with an injection scrub.
+  xterm `CSI 1;<mod><final>` / `CSI <n>;<mod>~` form), **modifyOtherKeys** (Ctrl/Alt on the
+  main keyboard reported as `CSI 27;<mod>;<code>~` at level 1/2 when a remote editor enables it,
+  scanned out of the stream by `term::modkeys`), numpad (NumLock-aware), bracketed paste with
+  an injection scrub.
 - **Reads the remote cwd** from OSC 7 / OSC 9;9 for the tree, pane, and title (`cwd.rs`).
 
 ---
 
 ## 2. Still open — input (all `[keymap]`, engine-independent)
 
-The remaining input gaps live entirely in `term::keymap`; none needs engine work, though two
-can read a mode the engine already tracks.
+The remaining input gaps live entirely in `term::keymap`. `modifyOtherKeys` is now **done**
+(§1); what is left:
 
 | Missing | What it unblocks | Tag | Src |
 |---|---|---|---|
-| **DECKPAM application keypad** — the numpad should send `ESC O p…y` while an app enables app-keypad mode | the engine already tracks the mode (`set_keypad_application_mode`); the seam does not yet expose it and the numpad is decided by NumLock only | [seam+keymap] | [DEC] |
-| **xterm `modifyOtherKeys`** (`CSI >4;2m` → keys as `CSI 27;mod;code~`) | Ctrl/Shift combos on keys with no C0 code (Ctrl+1, Ctrl+;) reach editors | [keymap] (mode scan + encode) | [xterm] |
 | **Kitty keyboard protocol** (`CSI >flags u` … report `CSI code;mods;event u`) | full key + modifier + event disambiguation | [seam+keymap] | [vendor] |
+| **DECKPAM application keypad** — the numpad should send `ESC O p…y` while an app enables app-keypad mode | *near-nil value on a PC client* — see the note below | [seam+keymap] | [DEC] |
 
 The engine *parses* the kitty keyboard mode and can report it (`report_keyboard_mode`), but only
 when its `kitty_keyboard` config flag is on, and the **encoding** of key presses into kitty's
 `u`-form is cmote's to write — the larger half of the work.
+
+**Why DECKPAM is deprioritised.** cmote already mirrors xterm's default `numLock: true`
+behaviour: with NumLock on the numpad sends its digit (the `pm2 ls` fix, keyed off the OS
+producing `text`), with NumLock off it is navigation following DECCKM. Every ncurses full-screen
+app sets DECKPAM as part of terminfo `smkx`, so *honouring it for the number keys would divert
+NumLock-on digits to `ESC O q…y` inside vim / less* — re-breaking the exact digit-typing the
+`pm2 ls` fix protects. The only genuinely safe DECKPAM wins on a PC are NumpadEnter → `ESC O M`
+and the operators `+ - * /` → `ESC O k/m/j/o` (no NumLock ambiguity), which is tiny value. So
+the "small, like DECCKM" framing does not hold here; it is parked below the higher-value items.
 
 ---
 
@@ -165,14 +175,20 @@ effects" reason. Answering an OSC 52 read query would be an injection vector and
 
 ## 7. Recommendation
 
-With the engine swap done, the cheap, self-contained wins that remain, ranked by UX bite:
+With the engine swap and `modifyOtherKeys` done, the cheap, self-contained wins that remain,
+ranked by UX bite:
 
-1. **DECKPAM application keypad** — small; the engine already tracks the mode, so this is a seam
-   getter plus a keymap branch, exactly like DECCKM.
-2. **xterm `modifyOtherKeys`** — a mode scanner + encoder; unblocks Ctrl-combos editors expect.
-3. **OSC 8 hyperlinks** — surface the per-cell URI the engine already stores, then render it
+1. **OSC 8 hyperlinks** — surface the per-cell URI the engine already stores, then render it
    clickable in the grid.
-4. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation.
+2. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation, and a
+   superset of `modifyOtherKeys` for editors that speak it.
+3. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
+   a PC client it is a near-no-op at best and a `pm2 ls` regression at worst, so only the
+   NumpadEnter / operator forms are worth anything, and only marginally.
+
+`modifyOtherKeys` (was #2) shipped as `term::modkeys` + a `keymap::encode` branch: the stream is
+scanned for `CSI > 4 ; p m`, and a Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~`
+(level 2 for every combo, level 1 for the gap combos only).
 
 The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
@@ -223,8 +239,12 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `cell`. **Not yet surfaced**: application-keypad, per-cell hyperlink, blink.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
-  `letter_key` / `tilde_key` shape the two key families), the numpad NumLock heuristic, and the
-  bracketed-paste terminator scrub. **Absent**: DECKPAM, `modifyOtherKeys`, kitty keyboard.
+  `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`
+  / `other_key_bytes` emit the `CSI 27;mod;code~` form when the level is on), the numpad NumLock
+  heuristic, and the bracketed-paste terminator scrub. **Absent**: DECKPAM, kitty keyboard.
+- **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
+  `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
+  `Terminal::modify_other_keys` and threaded into `keymap::encode`.
 - **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
 - **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
   (the reply synthesizer) — the engine parses every spelling and answers every query they used

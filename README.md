@@ -54,7 +54,10 @@ references below (§n) point into it.
   shows (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them, and a
   **modifier held on a named key** now goes through: Ctrl+arrow for word-motion, Shift+arrow
   to select by line, Ctrl+Delete, modified F-keys, and F13-F24 all send the sequence xterm
-  would, where before the modifier was dropped (§9).
+  would, where before the modifier was dropped (§9). And when an editor asks for
+  **modifyOtherKeys**, the Ctrl/Alt combos the plain terminal alphabet cannot spell — Ctrl+digit,
+  Ctrl+punctuation, Ctrl+C as a distinct key rather than the interrupt — reach it unambiguously
+  (§9).
 - **Text styling comes through** — colour (256-colour and truecolor), bold, faint, reverse
   video, concealed text, strikethrough, and every underline style a program reaches for:
   single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
@@ -204,7 +207,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
-| Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, and **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys), F13-F24 included |
+| Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys, F13-F24 included), and **modifyOtherKeys** Ctrl/Alt combos (`CSI 27;…~`) when an editor turns the mode on |
 | Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
@@ -335,8 +338,10 @@ Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
 mapping (including application-cursor-mode arrow keys, CSI vs SS3, every F1-F12
-against the terminfo entry, and the modified named keys — Ctrl/Shift/Alt + arrows /
-navigation / F-keys and F13-F24), the terminal engine's wiring end to end (an `f`-spelling move
+against the terminfo entry, the modified named keys — Ctrl/Shift/Alt + arrows /
+navigation / F-keys and F13-F24 — and modifyOtherKeys, both the stream scanner that
+detects the mode and the `CSI 27;mod;code~` encoding it switches on), the terminal engine's
+wiring end to end (an `f`-spelling move
 lands in its own cell, a wide glyph reserves two columns, and the engine's query replies are
 drained and sent back — device status, device attributes, a live cursor-position report, the
 save/jump/report/restore size-probe reporting the clamped corner, and a query split across
@@ -620,6 +625,11 @@ the app enables it and cmote switches its arrow keys to the SS3 form so they reg
   extend a visual selection. (Bare **Shift+PageUp/PageDown/Home/End** still page cmote's own
   scrollback, §23 — that binding wins over the shell on purpose; the Ctrl/Alt variants reach
   the shell.)
+- **modifyOtherKeys.** In **neovim** (or vim with `:set modifyOtherKeys=2`), the Ctrl-combos a
+  plain terminal cannot send now arrive: try mapping one, e.g. `:nnoremap <C-,> :echo "got it"<CR>`
+  then press **Ctrl+,** — it should fire, where in a stock terminal it does nothing. Ctrl+letter
+  bindings keep working too. Back at the bash prompt (mode off), **Ctrl+C** must still interrupt
+  as always — the mode is the editor's to turn on, and off by default.
 
 **13. Copying, confirmed.** Click the copy button in the **files pane header**, then in the
 **folder-tree header**, then the one on a selected entry's **details popup**. Each should

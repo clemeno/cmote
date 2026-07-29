@@ -455,6 +455,21 @@ Turning a raw byte stream into a screen.
   two key families. Caveat: the four scrollback keys — **Shift** + PageUp/PageDown/Home/End —
   are claimed by the app layer for cmote's own history (§23) before `encode`, so their
   Ctrl/Alt variants reach the shell but the Shift form is intentionally cmote's.
+  **modifyOtherKeys** (xterm XTMODKEYS resource 4): the *main-keyboard* keys — letters,
+  digits, punctuation — cannot carry a modifier in the classic input alphabet. Ctrl+letter
+  collapses onto a C0 byte (Ctrl+I is indistinguishable from Tab), and Ctrl+digit / most
+  Ctrl+symbol combos have no byte at all and are simply lost. When a remote editor turns the
+  mode on it wants those combos back as the unambiguous `CSI 27 ; <mod> ; <code> ~` form
+  (`<code>` the base character's codepoint, `<mod>` the same summed parameter as above). The
+  engine does **not** interpret this private-CSI — it is an input-encoding hint, not a screen
+  op — so cmote scans the output stream for `CSI > 4 ; p m` in a small state machine
+  (`term::modkeys`, mirroring the cwd scanner), exposes the level through
+  `Terminal::modify_other_keys`, and `encode` reads it: **level 2** wraps every Ctrl/Alt
+  character combo (so Ctrl+C becomes the event, not the interrupt — which is what the editor
+  that asked for the mode wants), **level 1** fills only the gaps (a Ctrl combo with no C0,
+  leaving Ctrl+letter as its byte), and **off** (the default) changes nothing. Shift-only and
+  unmodified keys, and every named/navigation/function key, keep their ordinary encoding —
+  the mode governs the "other" main-keyboard keys only.
 - **Paste** (done, v1.1): `term::keymap::encode_paste` turns clipboard text into input
   bytes. When the remote enabled **bracketed paste** (DECSET 2004 — read from
   `Screen::bracketed_paste()`) the text is framed by `ESC[200~`…`ESC[201~` so the shell
@@ -764,7 +779,12 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   F1-F12 in both cursor modes), plus the **modified named keys** — the summed modifier
   parameter, a modified arrow overriding DECCKM to the CSI form, the `~`-key parameter
   insertion, F1-F4 switching SS3→CSI when modified, F13-F24 at their terminfo forms, and a
-  bare key left unchanged. Pointer events likewise (`term/mouse.rs`): each encoding,
+  bare key left unchanged — and **modifyOtherKeys**: level 2 wrapping Ctrl+C / Ctrl+digit /
+  Ctrl+Alt into the `CSI 27` form, level 1 encoding only the gap combos while leaving Ctrl+C
+  its C0, and the mode leaving plain typing, Shift-only keys, and named keys untouched. The
+  mode scanner (`term/modkeys.rs`) is tested on its own: the two set levels, both off
+  spellings, another XTMODKEYS resource ignored, a split-across-chunks sequence, and an
+  ordinary SGR not tripping it. Pointer events likewise (`term/mouse.rs`): each encoding,
   each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
   bits.
 - **Grid geometry** (`ui/grid.rs`): the run packing (a wide glyph sealed into two columns,

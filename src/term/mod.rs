@@ -20,6 +20,7 @@
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
+pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 
@@ -94,6 +95,7 @@ impl Terminal {
 			parser: Processor::new(),
 			replies,
 			cwd: cwd::Cwd::default(),
+			modkeys: modkeys::ModKeys::default(),
 		}
 	}
 
@@ -109,6 +111,7 @@ impl Terminal {
 	/// which reads the stream as it came off the wire.
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
+		self.modkeys.feed(bytes);
 		self.parser.advance(&mut self.term, bytes);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		std::mem::take(&mut buffer.bytes)
@@ -119,6 +122,14 @@ impl Terminal {
 	/// OSC 9;9, forever.
 	pub fn cwd(&self) -> Option<&str> {
 		self.cwd.path()
+	}
+
+	/// The xterm `modifyOtherKeys` level the remote last selected (§9). `Off` until a program
+	/// asks for it. The engine does not interpret the mode (it is an input-encoding hint, not a
+	/// screen operation), so cmote scans the stream for it (`modkeys`) and the key encoder reads
+	/// it here to decide whether a Ctrl/Alt combo becomes the `CSI 27 ; mod ; code ~` form.
+	pub fn modify_other_keys(&self) -> modkeys::ModifyOtherKeys {
+		self.modkeys.level()
 	}
 
 	/// The window title the remote program last set (OSC 0/2), if any (§23). `None` until a
@@ -197,6 +208,10 @@ pub struct Terminal {
 	/// The remote working directory, learned from the OSC sequences the shell emits on each
 	/// prompt (§17). The engine ignores those codes, so the same bytes are scanned here.
 	cwd: cwd::Cwd,
+	/// The remote's xterm `modifyOtherKeys` level (§9), learned from the private-CSI a program
+	/// writes to ask for unambiguous Ctrl/Alt key reports. The engine ignores that sequence, so —
+	/// like the cwd — the same bytes are scanned here for the key encoder to read.
+	modkeys: modkeys::ModKeys,
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
