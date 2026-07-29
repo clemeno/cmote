@@ -30,7 +30,10 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// absent. `application_cursor` is the emulator's DECCKM state (read from
 /// `screen.application_cursor()`): full-screen apps such as vim, less, and nano
 /// turn it on and then expect the SS3 arrow-key form, so it is threaded down to
-/// `named_bytes` to pick the matching cursor-key encoding.
+/// `named_bytes` to pick the matching cursor-key encoding. `modifiers` is threaded
+/// there too: a Ctrl/Shift/Alt held with a navigation or function key encodes the
+/// xterm modifier parameter (`CSI 1;<mod><final>` / `CSI <n>;<mod>~`), so a remote
+/// editor reads Ctrl+Right as word-motion and Shift+Down as select-line.
 pub fn encode(
 	key: &Key,
 	physical: Physical,
@@ -71,7 +74,7 @@ pub fn encode(
 
 	match key {
 		// Named keys map to their fixed control byte or escape sequence.
-		Key::Named(named) => named_bytes(named, application_cursor),
+		Key::Named(named) => named_bytes(named, modifiers, application_cursor),
 
 		// A printable key: send its produced text. Alt acts as "meta", which the
 		// xterm convention encodes as an ESC prefix before the character.
@@ -180,61 +183,145 @@ fn is_numpad_number(physical: Physical) -> bool {
 }
 
 /// The bytes for a named (non-character) key. Returns `None` for named keys we
-/// do not forward (bare modifiers, function keys we have not mapped yet). The
-/// cursor and Home/End keys depend on `application_cursor`: see `cursor_key`.
-fn named_bytes(named: &Named, application_cursor: bool) -> Option<Vec<u8>> {
-	let sequence: &[u8] = match named {
-		Named::Enter => b"\r",
-		Named::Tab => b"\t",
-		Named::Space => b" ",
-		Named::Backspace => &[0x7f],
-		Named::Escape => &[ESC],
-		// Cursor and Home/End keys carry the DECCKM-dependent prefix, so they build
-		// their bytes through `cursor_key` and return directly.
-		Named::ArrowUp => return Some(cursor_key(b'A', application_cursor)),
-		Named::ArrowDown => return Some(cursor_key(b'B', application_cursor)),
-		Named::ArrowRight => return Some(cursor_key(b'C', application_cursor)),
-		Named::ArrowLeft => return Some(cursor_key(b'D', application_cursor)),
-		Named::Home => return Some(cursor_key(b'H', application_cursor)),
-		Named::End => return Some(cursor_key(b'F', application_cursor)),
-		// The remaining navigation keys are the "~" CSI sequences, which DECCKM does
-		// not change, so they are the same in both modes.
-		Named::Insert => b"\x1b[2~",
-		Named::Delete => b"\x1b[3~",
-		Named::PageUp => b"\x1b[5~",
-		Named::PageDown => b"\x1b[6~",
+/// do not forward (bare modifiers, keys past our map). `modifiers` carries any
+/// Ctrl/Shift/Alt held with the key, encoded the xterm way for the navigation and
+/// function keys (see `letter_key` / `tilde_key`); the cursor and Home/End keys also
+/// depend on `application_cursor` (DECCKM) for their *unmodified* form.
+fn named_bytes(named: &Named, modifiers: Modifiers, application_cursor: bool) -> Option<Vec<u8>> {
+	let bytes = match named {
+		Named::Enter => b"\r".to_vec(),
+		Named::Tab => b"\t".to_vec(),
+		Named::Space => b" ".to_vec(),
+		Named::Backspace => vec![0x7f],
+		Named::Escape => vec![ESC],
+
+		// Cursor keys + Home/End. Unmodified they are the CSI form, or the SS3 form while
+		// DECCKM is set; a held modifier overrides that to the CSI `1;<mod>` form.
+		Named::ArrowUp => letter_key(b'A', application_cursor, modifiers),
+		Named::ArrowDown => letter_key(b'B', application_cursor, modifiers),
+		Named::ArrowRight => letter_key(b'C', application_cursor, modifiers),
+		Named::ArrowLeft => letter_key(b'D', application_cursor, modifiers),
+		Named::Home => letter_key(b'H', application_cursor, modifiers),
+		Named::End => letter_key(b'F', application_cursor, modifiers),
+
+		// The "~" navigation keys. DECCKM never changes these; a modifier inserts the
+		// same `;<mod>` parameter (Ctrl+Delete, Ctrl+PageUp, …).
+		//
+		// Note: Shift + PageUp/PageDown/Home/End never arrive here — the app layer claims
+		// them for cmote's own scrollback (§23) before calling `encode`. Their Ctrl/Alt
+		// variants are not claimed, so those do reach this map and are encoded.
+		Named::Insert => tilde_key(2, modifiers),
+		Named::Delete => tilde_key(3, modifiers),
+		Named::PageUp => tilde_key(5, modifiers),
+		Named::PageDown => tilde_key(6, modifiers),
+
 		// The function keys, exactly as the terminfo entry for the pty we asked for
 		// (`xterm-256color`) describes them — which is what a remote program looks them up
 		// in. The split is historical, not arbitrary: F1-F4 inherited the VT100 keypad's
 		// SS3 form (`kf1=\EOP`), F5 onwards are the later CSI "~" form with a gap in the
 		// numbering at 16 and 22. Getting one wrong means a dead key in every full-screen
-		// program — btop's options menu is F2, midnight commander lives on F1-F10.
-		Named::F1 => b"\x1bOP",
-		Named::F2 => b"\x1bOQ",
-		Named::F3 => b"\x1bOR",
-		Named::F4 => b"\x1bOS",
-		Named::F5 => b"\x1b[15~",
-		Named::F6 => b"\x1b[17~",
-		Named::F7 => b"\x1b[18~",
-		Named::F8 => b"\x1b[19~",
-		Named::F9 => b"\x1b[20~",
-		Named::F10 => b"\x1b[21~",
-		Named::F11 => b"\x1b[23~",
-		Named::F12 => b"\x1b[24~",
+		// program — btop's options menu is F2, midnight commander lives on F1-F10. Modified,
+		// F1-F4 switch to the CSI `1;<mod>` letter form and F5-F12 gain the `;<mod>`
+		// parameter — the `kf13`… terminfo entries a remote program looks up.
+		Named::F1 => letter_key(b'P', true, modifiers),
+		Named::F2 => letter_key(b'Q', true, modifiers),
+		Named::F3 => letter_key(b'R', true, modifiers),
+		Named::F4 => letter_key(b'S', true, modifiers),
+		Named::F5 => tilde_key(15, modifiers),
+		Named::F6 => tilde_key(17, modifiers),
+		Named::F7 => tilde_key(18, modifiers),
+		Named::F8 => tilde_key(19, modifiers),
+		Named::F9 => tilde_key(20, modifiers),
+		Named::F10 => tilde_key(21, modifiers),
+		Named::F11 => tilde_key(23, modifiers),
+		Named::F12 => tilde_key(24, modifiers),
+
+		// F13-F24. xterm defines these as the Shift-modified F1-F12 sequences, so they are
+		// fixed forms — the base keys' `1;2` / `;2` encodings written out. A further modifier
+		// on the physical F13-F24 keys (rare hardware) is not layered on, matching xterm,
+		// which does not stack a second modifier here.
+		Named::F13 => b"\x1b[1;2P".to_vec(),
+		Named::F14 => b"\x1b[1;2Q".to_vec(),
+		Named::F15 => b"\x1b[1;2R".to_vec(),
+		Named::F16 => b"\x1b[1;2S".to_vec(),
+		Named::F17 => b"\x1b[15;2~".to_vec(),
+		Named::F18 => b"\x1b[17;2~".to_vec(),
+		Named::F19 => b"\x1b[18;2~".to_vec(),
+		Named::F20 => b"\x1b[19;2~".to_vec(),
+		Named::F21 => b"\x1b[20;2~".to_vec(),
+		Named::F22 => b"\x1b[21;2~".to_vec(),
+		Named::F23 => b"\x1b[23;2~".to_vec(),
+		Named::F24 => b"\x1b[24;2~".to_vec(),
+
 		_ => return None,
 	};
-	Some(sequence.to_vec())
+	Some(bytes)
 }
 
-/// Encode one cursor/navigation key given its final byte (`A`=Up, `B`=Down,
-/// `C`=Right, `D`=Left, `H`=Home, `F`=End). Only the prefix differs by mode: in
-/// application cursor mode (DECCKM set) a real xterm sends the SS3 form `ESC O <b>`,
-/// otherwise the CSI form `ESC [ <b>`. The two share the final byte, so we pick the
-/// second byte and reuse the rest. Getting this wrong is exactly why full-screen
-/// apps ignore the arrow keys: vim binds them to the SS3 form once it enables DECCKM.
-fn cursor_key(final_byte: u8, application_cursor: bool) -> Vec<u8> {
-	let prefix = if application_cursor { b'O' } else { b'[' };
+/// The xterm modifier parameter for a key that carries one: `1` plus a bitmask of the
+/// held modifiers — Shift = 1, Alt = 2, Ctrl = 4 (so Ctrl alone = 5, Ctrl+Shift = 6,
+/// Ctrl+Alt = 7, all three = 8), exactly as terminfo's `kRIT5`, `kf13`, … spell it.
+/// Returns `None` when no encodable modifier is down: the unmodified value is a bare
+/// `1`, which xterm omits, so the caller then emits the plain sequence with no parameter.
+fn modifier_param(modifiers: Modifiers) -> Option<u8> {
+	let mut bits = 0u8;
+	if modifiers.shift() {
+		bits += 1;
+	}
+	if modifiers.alt() {
+		bits += 2;
+	}
+	if modifiers.control() {
+		bits += 4;
+	}
+	(bits != 0).then_some(1 + bits)
+}
+
+/// Assemble a CSI sequence — `ESC [ <params> <final>` — from pre-formatted parameter
+/// bytes and a final byte. Every modified-key form funnels through here so the envelope
+/// (`ESC`, `[`, params, final) lives in one place.
+fn csi(params: &[u8], final_byte: u8) -> Vec<u8> {
+	let mut out = Vec::with_capacity(params.len() + 3);
+	out.push(ESC);
+	out.push(b'[');
+	out.extend_from_slice(params);
+	out.push(final_byte);
+	out
+}
+
+/// A number as its decimal ASCII digits (15 -> `b"15"`), for a CSI parameter.
+fn ascii_number(value: u16) -> Vec<u8> {
+	value.to_string().into_bytes()
+}
+
+/// Encode a key whose final byte is a letter — the cursor keys `A`-`D`, Home `H`, End
+/// `F`, and F1-F4 `P`-`S`. `application_ss3` picks the *unmodified* form: the SS3
+/// `ESC O <final>` (always so for F1-F4, and for the cursor keys only while DECCKM is
+/// set) versus the CSI `ESC [ <final>`. A held modifier overrides both — xterm then
+/// always sends `ESC [ 1 ; <mod> <final>`, even in application-cursor mode — so an editor
+/// reads Ctrl+Right as `ESC [ 1 ; 5 C`. Getting the unmodified prefix wrong is exactly
+/// why full-screen apps ignore the arrow keys: vim binds them to the SS3 form under DECCKM.
+fn letter_key(final_byte: u8, application_ss3: bool, modifiers: Modifiers) -> Vec<u8> {
+	if let Some(code) = modifier_param(modifiers) {
+		let mut params = b"1;".to_vec();
+		params.extend_from_slice(&ascii_number(u16::from(code)));
+		return csi(&params, final_byte);
+	}
+	let prefix = if application_ss3 { b'O' } else { b'[' };
 	vec![ESC, prefix, final_byte]
+}
+
+/// Encode a "~"-terminated navigation key by its parameter number (Insert = 2, Delete =
+/// 3, PageUp = 5, PageDown = 6, F5-F12 = 15/17/…/24). Unmodified that is `ESC [ <n> ~`;
+/// a held modifier inserts the `;<mod>` parameter to give `ESC [ <n> ; <mod> ~`. DECCKM
+/// never changes these keys, so no application-cursor flag reaches here.
+fn tilde_key(number: u16, modifiers: Modifiers) -> Vec<u8> {
+	let mut params = ascii_number(number);
+	if let Some(code) = modifier_param(modifiers) {
+		params.push(b';');
+		params.extend_from_slice(&ascii_number(u16::from(code)));
+	}
+	csi(&params, b'~')
 }
 
 #[cfg(test)]
@@ -385,6 +472,151 @@ mod tests {
 				Some(bytes)
 			);
 		}
+	}
+
+	#[test]
+	fn a_modifier_on_an_arrow_uses_the_csi_param_form() {
+		// Ctrl+Right is word-motion in shells and editors: the CSI form with the xterm
+		// modifier parameter (Ctrl = 5), ESC[1;5C. Shift is select (2), Alt is 3.
+		let right = Key::Named(Named::ArrowRight);
+		assert_eq!(
+			encode(&right, main_key(), None, Modifiers::CTRL, false),
+			Some(b"\x1b[1;5C".to_vec())
+		);
+		let down = Key::Named(Named::ArrowDown);
+		assert_eq!(
+			encode(&down, main_key(), None, Modifiers::SHIFT, false),
+			Some(b"\x1b[1;2B".to_vec())
+		);
+		let left = Key::Named(Named::ArrowLeft);
+		assert_eq!(
+			encode(&left, main_key(), None, Modifiers::ALT, false),
+			Some(b"\x1b[1;3D".to_vec())
+		);
+	}
+
+	#[test]
+	fn a_modified_arrow_ignores_application_cursor_mode() {
+		// Even with DECCKM set, a held modifier forces the CSI `1;mod` form, never SS3 —
+		// xterm behaves the same, so editors match on it in both cursor-key modes.
+		let right = Key::Named(Named::ArrowRight);
+		assert_eq!(
+			encode(&right, main_key(), None, Modifiers::CTRL, true),
+			Some(b"\x1b[1;5C".to_vec())
+		);
+	}
+
+	#[test]
+	fn stacked_modifiers_sum_into_the_parameter() {
+		// The parameter is 1 + Shift(1) + Alt(2) + Ctrl(4). Ctrl+Shift = 6, all three = 8.
+		let left = Key::Named(Named::ArrowLeft);
+		assert_eq!(
+			encode(
+				&left,
+				main_key(),
+				None,
+				Modifiers::CTRL | Modifiers::SHIFT,
+				false
+			),
+			Some(b"\x1b[1;6D".to_vec())
+		);
+		assert_eq!(
+			encode(
+				&left,
+				main_key(),
+				None,
+				Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT,
+				false
+			),
+			Some(b"\x1b[1;8D".to_vec())
+		);
+	}
+
+	#[test]
+	fn a_modifier_on_home_or_end_uses_the_letter_param_form() {
+		// Home `H` / End `F` are letter-final like the arrows, so a modifier gives the same
+		// ESC[1;mod<final> shape. (Bare Shift+End is claimed for scrollback before encode;
+		// Ctrl+End is not, so it reaches here.)
+		let end = Key::Named(Named::End);
+		assert_eq!(
+			encode(&end, phys(Code::End), None, Modifiers::CTRL, false),
+			Some(b"\x1b[1;5F".to_vec())
+		);
+	}
+
+	#[test]
+	fn a_modifier_on_a_tilde_key_inserts_the_parameter() {
+		// The "~" keys keep their number and gain `;mod`: Ctrl+Delete = ESC[3;5~,
+		// Ctrl+PageUp = ESC[5;5~ (Shift+PageUp is claimed for scrollback before encode).
+		let delete = Key::Named(Named::Delete);
+		assert_eq!(
+			encode(&delete, phys(Code::Delete), None, Modifiers::CTRL, false),
+			Some(b"\x1b[3;5~".to_vec())
+		);
+		let page_up = Key::Named(Named::PageUp);
+		assert_eq!(
+			encode(&page_up, phys(Code::PageUp), None, Modifiers::CTRL, false),
+			Some(b"\x1b[5;5~".to_vec())
+		);
+	}
+
+	#[test]
+	fn a_modifier_on_f1_to_f4_switches_ss3_to_the_csi_param_form() {
+		// Unmodified F1 is SS3 ESC O P; Shift+F1 becomes the CSI letter form ESC[1;2P — the
+		// same bytes terminfo lists as `kf13`. F5 onward keep the "~" form and gain `;mod`.
+		let f1 = Key::Named(Named::F1);
+		assert_eq!(
+			encode(&f1, main_key(), None, Modifiers::SHIFT, false),
+			Some(b"\x1b[1;2P".to_vec())
+		);
+		let f5 = Key::Named(Named::F5);
+		assert_eq!(
+			encode(&f5, main_key(), None, Modifiers::CTRL, false),
+			Some(b"\x1b[15;5~".to_vec())
+		);
+	}
+
+	#[test]
+	fn the_high_function_keys_map_to_their_terminfo_forms() {
+		// F13-F24 = the Shift-modified F1-F12 sequences (kf13…kf24). A single wrong byte is
+		// a dead key in any program that binds the high F-keys.
+		let expected: [(Named, &[u8]); 12] = [
+			(Named::F13, b"\x1b[1;2P"),
+			(Named::F14, b"\x1b[1;2Q"),
+			(Named::F15, b"\x1b[1;2R"),
+			(Named::F16, b"\x1b[1;2S"),
+			(Named::F17, b"\x1b[15;2~"),
+			(Named::F18, b"\x1b[17;2~"),
+			(Named::F19, b"\x1b[18;2~"),
+			(Named::F20, b"\x1b[19;2~"),
+			(Named::F21, b"\x1b[20;2~"),
+			(Named::F22, b"\x1b[21;2~"),
+			(Named::F23, b"\x1b[23;2~"),
+			(Named::F24, b"\x1b[24;2~"),
+		];
+		for (named, bytes) in expected {
+			let key = Key::Named(named);
+			assert_eq!(
+				encode(&key, main_key(), None, none(), false).as_deref(),
+				Some(bytes)
+			);
+		}
+	}
+
+	#[test]
+	fn an_unmodified_named_key_is_unchanged() {
+		// The modifier work must not disturb the bare keys: no modifier means no parameter,
+		// so a plain Right is still ESC[C and a plain Delete still ESC[3~.
+		let right = Key::Named(Named::ArrowRight);
+		assert_eq!(
+			encode(&right, main_key(), None, none(), false),
+			Some(b"\x1b[C".to_vec())
+		);
+		let delete = Key::Named(Named::Delete);
+		assert_eq!(
+			encode(&delete, phys(Code::Delete), None, none(), false),
+			Some(b"\x1b[3~".to_vec())
+		);
 	}
 
 	#[test]
