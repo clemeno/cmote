@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v3.0.2** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v3.0.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -36,13 +36,13 @@ terminal engine from `vt100` to `alacritty_terminal` — a full VT implementatio
 unblocks the DEC line-drawing charset, the rich SGR set (dim / italic / strikethrough /
 conceal, every underline style + underline colour), origin-mode-correct cursor reports, the
 OSC colour and pixel-size query replies, the remote-set window title, the DECSCUSR cursor
-shape, focus reporting, and 10 000 lines of scrollback with a scroll indicator, §23; **v3.0.1**
+shape, focus reporting, and 10 000 lines of scrollback with a scroll indicator, §23; it also
 follows OSC 8 hyperlinks — Ctrl+click or a right-click Open link / Copy link, the scheme gated
-to http/https/mailto, §24; **v3.0.2** speaks the kitty keyboard protocol — the `CSI u` encoding
+to http/https/mailto, §24; and speaks the kitty keyboard protocol — the `CSI u` encoding
 for disambiguate, press / repeat / release events, report-all and associated text, superseding
-modifyOtherKeys when an editor turns it on, §25). The Cargo.toml crate version stays **3.0.0**
-(the last major-milestone tag); §24 and §25 shipped as the point-labelled v3.0.1 / v3.0.2
-increments on top of it. Both targets are supported first-class, and each has a verified
+modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
+**v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
+3.0.0. Both targets are supported first-class, and each has a verified
 toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -990,9 +990,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   grid's right gutter shows position and depth while the view is scrolled up. That was the last §23
   follow-up, so §23 (the engine swap and everything it unblocked) is complete. Two further
 terminal features then shipped on top of the swap, each a small addition beside the engine
-rather than a change to it: **OSC 8 hyperlinks** (§24, v3.0.1) — the engine records the
+rather than a change to it: **OSC 8 hyperlinks** (§24) — the engine records the
 per-cell URI and cmote follows it on Ctrl+click or a right-click **Open link / Copy link**,
-the scheme gated to http/https/mailto — and the **kitty keyboard protocol** (§25, v3.0.2) —
+the scheme gated to http/https/mailto — and the **kitty keyboard protocol** (§25) —
 the engine tracks the push/pop/query flag stack and answers `CSI ? u` itself, cmote flips the
 engine flag on and encodes the `CSI u` key reports (disambiguate, press / repeat / release,
 report-all, associated text), superseding modifyOtherKeys when an editor enables it. The full audited
@@ -1790,7 +1790,7 @@ as input.
 
 ---
 
-## 24. OSC 8 hyperlinks (v3.0.1)
+## 24. OSC 8 hyperlinks (v3.0.0)
 
 A modern program can mark a run of text as a **clickable link** with the OSC 8 escape —
 `ESC ] 8 ; params ; URI ST`, the text, then `ESC ] 8 ; ; ST` to close — so `ls --hyperlink`,
@@ -1812,9 +1812,9 @@ cmote's job is only to **surface** it and **act** on a click:
   A **right-click** on a link cell adds **Open link** and **Copy link** to the terminal's
   context menu (`ui/terminal.rs`), both carrying the URI — the one place the whole address is
   offered, handy when the visible text hides it. `ponytail:` there is no hover affordance in
-  v3.1 — a link is discoverable by right-clicking or Ctrl+clicking, and a program that styles
+  v3.0.0 — a link is discoverable by right-clicking or Ctrl+clicking, and a program that styles
   its link (colour/underline) still shows through; a Ctrl-hover underline is a later polish.
-  (`ponytail:` hover affordance still open as of v3.0.2.)
+  (`ponytail:` hover affordance still open as of v3.0.0.)
 
 ### Opening is a security boundary
 
@@ -1839,7 +1839,7 @@ safe envelope.
 
 ---
 
-## 25. Kitty keyboard protocol (v3.0.2)
+## 25. Kitty keyboard protocol (v3.0.0)
 
 The classic terminal input alphabet loses information the moment a key is anything but a plain
 letter. `Ctrl+I` collapses onto Tab (both `0x09`), `Ctrl+M` onto Enter (`0x0d`); `Ctrl+digit`
