@@ -135,10 +135,14 @@ low UX value: modern applications rely on the DA / DECRQM answers that already w
 
 ## 4. Still open — rendering / attributes
 
+**OSC 8 hyperlinks are now done** (§24) — the seam surfaces the per-cell URI (`Cell::hyperlink`),
+Ctrl+click and a context-menu Open/Copy follow it, and `link` gates the scheme to
+http/https/mailto before opening. What remains here is small and low-value:
+
 | Missing | Note | Tag | Src |
 |---|---|---|---|
-| **OSC 8 hyperlinks** (`OSC 8;;URI ST`, clickable) | the engine already parses and stores the URI per cell (`Cell::set_hyperlink`); the seam does not surface it and the grid does not render or click it — the data is there, the work is clickable rendering | [seam+grid] | [community] |
 | **Blink** (SGR 5/6) | the engine stores the bit; cmote draws steady **by choice** — it runs no animation timer (the same call made for the cursor). Could show a static marker; deliberately not animated | [policy] | [ECMA-48] |
+| **OSC 8 hover affordance** | the link is followed, but there is no Ctrl-hover underline yet — a link is found by right-click or a program's own styling (§24) | [seam+grid] low pri | [community] |
 | **OSC 133 shell-integration** (semantic prompt marks) | niche; a stream scanner beside the cwd tracker could capture them | [seam] low pri | [community] |
 
 ---
@@ -175,20 +179,22 @@ effects" reason. Answering an OSC 52 read query would be an injection vector and
 
 ## 7. Recommendation
 
-With the engine swap and `modifyOtherKeys` done, the cheap, self-contained wins that remain,
-ranked by UX bite:
+With the engine swap, `modifyOtherKeys` and OSC 8 hyperlinks done, the cheap, self-contained
+wins that remain, ranked by UX bite:
 
-1. **OSC 8 hyperlinks** — surface the per-cell URI the engine already stores, then render it
-   clickable in the grid.
-2. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation, and a
+1. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation, and a
    superset of `modifyOtherKeys` for editors that speak it.
-3. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
+2. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
    a PC client it is a near-no-op at best and a `pm2 ls` regression at worst, so only the
    NumpadEnter / operator forms are worth anything, and only marginally.
 
-`modifyOtherKeys` (was #2) shipped as `term::modkeys` + a `keymap::encode` branch: the stream is
-scanned for `CSI > 4 ; p m`, and a Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~`
-(level 2 for every combo, level 1 for the gap combos only).
+`OSC 8 hyperlinks` (was #1) shipped as a seam getter (`Cell::hyperlink`) plus the `link` module:
+the engine already stores the URI per cell, so cmote surfaces it, and **Ctrl+click** or a
+right-click **Open link / Copy link** follows it — the scheme gated to http/https/mailto and the
+URI handed to a launcher that never builds a shell command line (§24). `modifyOtherKeys` (the
+earlier #2) shipped as `term::modkeys` + a `keymap::encode` branch: the stream is scanned for
+`CSI > 4 ; p m`, and a Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2
+for every combo, level 1 for the gap combos only).
 
 The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
@@ -214,8 +220,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   application-keypad mode.
 - **XTWINOPS size reports**: `text_area_size_pixels` (`term/mod.rs:2259`) and
   `text_area_size_chars` (`term/mod.rs:2268`).
-- **OSC 8 hyperlinks**: stored per cell — `Cell::set_hyperlink` (`term/cell.rs:202`), the
-  handler at `term/mod.rs:1874`.
+- **OSC 8 hyperlinks**: stored per cell — `Cell::set_hyperlink` (`term/cell.rs:202`) and read
+  back via `Cell::hyperlink` → `Option<Hyperlink>` with `.uri()` (`term/cell.rs:219`), the
+  handler at `term/mod.rs:1874`. cmote surfaces this through the seam (below).
 - **Scroll region is vertical only**: `set_scrolling_region(top, bottom)` (`term/mod.rs:2155`) —
   no horizontal (left/right) margins.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
@@ -233,10 +240,11 @@ Audited file:line anchors behind the claims above, for later re-checking.
   engine types behind `Terminal` + `ScrollMotion`.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
-  `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`. `Screen` getters:
-  `size`, `cursor_position`, `display_offset`, `history_size`, `hide_cursor`, `cursor_shape`,
-  `application_cursor`, `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`,
-  `cell`. **Not yet surfaced**: application-keypad, per-cell hyperlink, blink.
+  `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
+  cell's OSC 8 URI, §24). `Screen` getters: `size`, `cursor_position`, `display_offset`,
+  `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `bracketed_paste`,
+  `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`. **Not yet surfaced**:
+  application-keypad, blink.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`
@@ -246,6 +254,11 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
   `Terminal::modify_other_keys` and threaded into `keymap::encode`.
 - **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
+- **`link.rs`** — following an OSC 8 hyperlink (§24): `is_allowed` gates the scheme to
+  http/https/mailto (pure, unit-tested), `open` hands an allowed URI to `open::that_detached`
+  (PowerShell `Start-Process` with the URI as env-var data, never `cmd /C start`). Wired in
+  `app.rs` (Ctrl+click → `follow_link`, `link_at` reads the seam) and `ui/terminal.rs`
+  (right-click **Open link / Copy link**, `link_at` resolves the clicked cell).
 - **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
   (the reply synthesizer) — the engine parses every spelling and answers every query they used
   to cover.

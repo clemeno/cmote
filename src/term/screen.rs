@@ -94,6 +94,7 @@ pub struct Cell {
 	inverse: bool,
 	wide: bool,
 	wide_continuation: bool,
+	hyperlink: Option<String>,
 }
 
 impl Cell {
@@ -169,6 +170,15 @@ impl Cell {
 	/// Reverse video — foreground and background swapped.
 	pub fn inverse(&self) -> bool {
 		self.inverse
+	}
+
+	/// The URI of the OSC 8 hyperlink covering this cell, or `None` when the cell is not part
+	/// of a link (§24). A program sets it with `ESC ] 8 ; params ; URI ST`, and the engine
+	/// records the same URI on every cell up to the closing `ESC ] 8 ; ; ST`; cmote reads it
+	/// back so a click on the cell can open the link. The bytes are the remote's verbatim —
+	/// what may actually be opened is `link`'s decision, not the cell's.
+	pub fn hyperlink(&self) -> Option<&str> {
+		self.hyperlink.as_deref()
 	}
 }
 
@@ -334,6 +344,10 @@ fn build_cell(cell: &EngineCell) -> Cell {
 		inverse: cell.flags.contains(Flags::INVERSE),
 		wide: cell.flags.contains(Flags::WIDE_CHAR),
 		wide_continuation: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+		// The engine shares one `Arc<Hyperlink>` across a link's cells; cmote's cell is owned
+		// per read (like its `text`), so the URI is copied out here — links are rare, so a
+		// blank cell still allocates nothing.
+		hyperlink: cell.hyperlink().map(|link| link.uri().to_owned()),
 	}
 }
 
@@ -432,6 +446,27 @@ mod tests {
 		assert_eq!(cell0("\x1b[4:5mx").underline(), UnderlineStyle::Dashed);
 		// And SGR 24 turns any of them back off.
 		assert_eq!(cell0("\x1b[4m\x1b[24mx").underline(), UnderlineStyle::None);
+	}
+
+	#[test]
+	fn an_osc_8_hyperlink_is_read_back_on_its_cells() {
+		// `ESC ] 8 ; ; URI BEL` opens a link, the text after it is the link's cells, and
+		// `ESC ] 8 ; ; BEL` closes it. The covered cell carries the URI; the cell after the
+		// close does not (§24). A wider grid so both cells are in bounds.
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(b"\x1b]8;;https://example.com/\x07A\x1b]8;;\x07B");
+		let linked = terminal
+			.screen()
+			.cell(0, 0)
+			.expect("cell (0,0) is in bounds");
+		assert_eq!(linked.contents(), "A");
+		assert_eq!(linked.hyperlink(), Some("https://example.com/"));
+		let plain = terminal
+			.screen()
+			.cell(0, 1)
+			.expect("cell (0,1) is in bounds");
+		assert_eq!(plain.contents(), "B");
+		assert_eq!(plain.hyperlink(), None);
 	}
 
 	#[test]

@@ -18,6 +18,7 @@ use tokio::sync::mpsc;
 use crate::bridge::{self, SshCommand, SshEvent};
 use crate::explorer::{self, ExplorerMessage};
 use crate::files::{self, FilesMessage};
+use crate::link;
 use crate::secret::Secret;
 use crate::term;
 use crate::ui;
@@ -455,6 +456,12 @@ pub enum Message {
 	TerminalScroll(i32),
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
+	/// Open an OSC 8 hyperlink from the terminal's context menu (§24). Carries the URI, so
+	/// the menu item stands alone; the Ctrl+click path opens straight from `on_grid_pressed`
+	/// and raises no message.
+	LinkOpen(String),
+	/// Copy an OSC 8 hyperlink's URI to the clipboard, from the same context menu (§24).
+	LinkCopy(String),
 	/// Read the system clipboard, then paste it into the shell.
 	PastePressed,
 	/// The async clipboard read finished: `Some(text)` to paste, `None` if empty.
@@ -628,6 +635,14 @@ impl App {
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
 			Message::CopyPressed => return self.on_copy(),
+			Message::LinkOpen(uri) => {
+				self.menu = None;
+				self.follow_link(&uri);
+			}
+			Message::LinkCopy(uri) => {
+				self.menu = None;
+				return self.copy_to_clipboard(uri);
+			}
 			Message::PastePressed => return self.on_paste(),
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::SyncPressed => self.on_sync(),
@@ -1852,9 +1867,45 @@ impl App {
 		self.menu = None;
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
 		self.set_focus(Focus::Terminal);
-		if self.terminal.is_some() {
-			self.selection = Some(ui::selection::Selection::new(self.hover_cell));
-			self.selecting = true;
+		if self.terminal.is_none() {
+			return;
+		}
+		// Ctrl+click follows an OSC 8 hyperlink instead of selecting (§24): the modifier is
+		// what most terminals use, and it keeps a plain click free to select the link's text.
+		// A cell with no link falls through to the ordinary selection, so Ctrl+click on
+		// unlinked text still just selects.
+		if self.modifiers.control()
+			&& let Some(uri) = self.link_at(self.hover_cell)
+		{
+			self.follow_link(&uri);
+			return;
+		}
+		self.selection = Some(ui::selection::Selection::new(self.hover_cell));
+		self.selecting = true;
+	}
+
+	/// The URI of the OSC 8 hyperlink on a grid cell, if any (§24). `None` with no session,
+	/// an out-of-bounds cell, or a cell that is not part of a link. Returned owned so the
+	/// short-lived screen borrow is dropped before the caller acts on it.
+	fn link_at(&self, cell: ui::selection::Cell) -> Option<String> {
+		self.terminal
+			.as_ref()?
+			.screen()
+			.cell(cell.row, cell.col)?
+			.hyperlink()
+			.map(str::to_owned)
+	}
+
+	/// Open an OSC 8 hyperlink (§24), or note it when its scheme is refused. Web and mail
+	/// links open in the OS's default browser; anything else is blocked with a toast, since
+	/// the URI is the remote's to choose (`link::open` is the policy). Shared by Ctrl+click
+	/// and the context menu's "Open link".
+	fn follow_link(&mut self, uri: &str) {
+		if !link::open(uri) {
+			self.snackbar = Some(Snackbar {
+				message: "Link blocked — cmote opens only http, https and mailto.".to_owned(),
+				shown_at: std::time::Instant::now(),
+			});
 		}
 	}
 

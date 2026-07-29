@@ -81,6 +81,11 @@ references below (§n) point into it.
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons or a right-click menu. Paste is
   **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
+- **Clickable links** — a program that marks text as a hyperlink (the OSC 8 escape, as
+  `ls --hyperlink` and many build tools do) makes it followable: **Ctrl+click** opens it in
+  your browser, or right-click for **Open link / Copy link**. cmote opens only http, https and
+  mailto — a link's scheme decides which local program Windows launches, and the address comes
+  from the remote, so anything else is refused (§24).
 - **The mouse reaches the program that asked for it** — click a process in btop, a tab in
   tmux, a line in vim; the wheel scrolls what is under it. cmote forwards clicks, releases,
   drags and scrolls in the xterm protocols a program enables, and **holding Shift takes the
@@ -203,7 +208,8 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Drag across the grid | Select text (highlighted in place) |
-| Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory) |
+| Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory); on a link cell, **Open link / Copy link** too |
+| **Ctrl+click** a link | Open an OSC 8 hyperlink in the browser (http/https/mailto only) |
 | **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
@@ -349,7 +355,8 @@ two chunks answered on completion), pointer-event → mouse-report encoding (eac
 mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits), the
 grid's run packing and the geometry of the glyphs it draws itself (a braille
 cell read back as its dot pattern, a rounded corner's arc and tails measured against a real
-cell), the grid-resize
+cell), the OSC 8 hyperlink surfaced on its cells and the link scheme allow-list (http/https/
+mailto through, `file:` / `vscode:` / `javascript:` and a scheme-less URI refused, §24), the grid-resize
 math, mouse-selection geometry and text extraction (wide
 glyphs, trailing-blank trimming, multi-row joins), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
@@ -630,6 +637,13 @@ the app enables it and cmote switches its arrow keys to the SS3 form so they reg
   then press **Ctrl+,** — it should fire, where in a stock terminal it does nothing. Ctrl+letter
   bindings keep working too. Back at the bash prompt (mode off), **Ctrl+C** must still interrupt
   as always — the mode is the editor's to turn on, and off by default.
+- **Clickable links (OSC 8).** At the shell, emit a link:
+  `printf '\e]8;;https://example.com\e\\click me\e]8;;\e\\\n'`. **Ctrl+click** the words *click
+  me* — your browser should open example.com; **right-click** them for **Open link / Copy link**
+  (Copy link should paste back `https://example.com`). Then emit a refused one —
+  `printf '\e]8;;file:///c:/windows\e\\nope\e]8;;\e\\\n'` — and Ctrl+click it: nothing opens and
+  a toast says the link was blocked (only http/https/mailto open, since the address is the
+  remote's, §24). Plain text with no link is unaffected — Ctrl+click there just selects.
 
 **13. Copying, confirmed.** Click the copy button in the **files pane header**, then in the
 **folder-tree header**, then the one on a selected entry's **details popup**. Each should

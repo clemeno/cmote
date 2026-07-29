@@ -23,6 +23,14 @@ anyhow = "1.0.104"
 # that draws every cell at an exact pixel position (PLAN §11) instead of a widget per
 # cell — the only way a fallback glyph cannot shift the row it is on.
 iced = { version = "0.14.0", features = ["advanced"] }
+# Opens an OSC 8 hyperlink in the OS's default browser (PLAN §24). Pure Rust, no C
+# toolchain, so the portable build holds (§11). Its default launcher hands the URI to
+# PowerShell `Start-Process` as an ENVIRONMENT VARIABLE (data, never shell code), falling
+# back to `explorer.exe` with the URI as a single argument — the `cmd /C start` path that
+# would let a crafted query string (`?a=1&calc`) inject a command is behind an off-by-
+# default `insecure` feature we do not enable. cmote still gates the scheme (`link`) to
+# http/https/mailto before handing anything over.
+open = "5"
 rfd = "0.17.2"
 # default-features=false drops russh's default `aws-lc-rs` crypto backend (needs
 # a C toolchain + NASM to build). We use `ring` instead: it ships pre-generated

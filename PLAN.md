@@ -200,6 +200,7 @@ cmote/
     ├── app.rs            iced App: State, Message, update(), view(), subscription()
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
+    ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
@@ -227,7 +228,8 @@ cmote/
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
-    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through (§9, §16, §23)
+    │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
+    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link (§9, §16, §23, §24)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -787,6 +789,12 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   ordinary SGR not tripping it. Pointer events likewise (`term/mouse.rs`): each encoding,
   each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
   bits.
+- **Hyperlinks** (§24): the seam reads an **OSC 8** link back on its cells — a
+  `ESC ] 8 ; ; URI BEL` opening covers the text after it and the cell past the close carries
+  none (`term/screen.rs`) — and the **scheme allow-list** is tested on its own (`link.rs`):
+  http/https/mailto pass (case-insensitively), `file:`/`vscode:`/`javascript:` and a
+  scheme-less URI are refused, and a later colon in the path cannot smuggle an allowed scheme
+  past the check. The launch itself is a side effect, so only the pure policy is unit-tested.
 - **Grid geometry** (`ui/grid.rs`): the run packing (a wide glyph sealed into two columns,
   a non-ASCII one into one, runs covering every column exactly once and each starting
   where the last ended) and the drawn glyphs' maths — a braille cell read back as its dot
@@ -1738,3 +1746,51 @@ answers only the events that expect a report — `PtyWrite`, and the colour and 
 prompt. Every other event — the clipboard pair, the bell, the title, a colour *set* — is
 ignored, so nothing a remote sends can reach the clipboard or echo attacker-controlled text back
 as input.
+
+---
+
+## 24. OSC 8 hyperlinks (v3.1)
+
+A modern program can mark a run of text as a **clickable link** with the OSC 8 escape —
+`ESC ] 8 ; params ; URI ST`, the text, then `ESC ] 8 ; ; ST` to close — so `ls --hyperlink`,
+`gcc`'s diagnostics, and many TUIs attach a real URL to a file name or an error code. cmote
+now follows those links.
+
+### The engine already parses it; cmote surfaces and follows it
+
+`alacritty_terminal` interprets OSC 8 itself: it records the link's URI on **every cell** the
+run covers (an `Arc<Hyperlink>` shared across them). So there is nothing to scan out of the
+stream — unlike modifyOtherKeys (§9) or the cwd (§17), this is screen state the engine holds.
+cmote's job is only to **surface** it and **act** on a click:
+
+- **Seam** (`term/screen.rs`): `Cell` gains a `hyperlink: Option<String>`, read back through
+  `Cell::hyperlink()`. It is copied out per read like the cell's `text` — links are rare, so a
+  blank cell still allocates nothing — which keeps the engine's own type off the seam (§16).
+- **Follow** (`app.rs`): **Ctrl+click** on a link cell opens it instead of starting a
+  selection — the modifier most terminals use, so a plain click still selects the link's text.
+  A **right-click** on a link cell adds **Open link** and **Copy link** to the terminal's
+  context menu (`ui/terminal.rs`), both carrying the URI — the one place the whole address is
+  offered, handy when the visible text hides it. `ponytail:` there is no hover affordance in
+  v3.1 — a link is discoverable by right-clicking or Ctrl+clicking, and a program that styles
+  its link (colour/underline) still shows through; a Ctrl-hover underline is a later polish.
+
+### Opening is a security boundary
+
+The URI is **remote-controlled**, and Windows opens a URI with whatever program is registered
+for its **scheme** — so an arbitrary scheme (`file:`, a custom `vscode:`-style handler, …) is a
+way for the remote to start a local program from a link. Two controls (`link.rs`):
+
+- **Scheme allow-list** — cmote opens only **http / https / mailto** (the schemes a terminal
+  link realistically needs) and refuses everything else, with a toast so a blocked click is
+  never silent. `is_allowed` is a pure function, unit-tested apart from the launch (§13).
+- **No shell** — the URI is handed to the `open` crate's default launcher, which passes it to
+  PowerShell `Start-Process` as an **environment variable** (data, never a command line),
+  falling back to `explorer.exe` with the URI as a single argument. The `cmd /C start` path —
+  where a crafted query string (`https://x/?a=1&calc`) would let `&` inject a command — is
+  behind an off-by-default `insecure` feature cmote does not enable. So even an allowed scheme
+  cannot smuggle a command through the opener. The launch is fire-and-forget
+  (`that_detached`), so the UI thread never stalls waiting on the browser.
+
+This is the mirror of the §9/§12 clipboard stance: a remote may *describe* an action (a link,
+a clipboard write) but cmote performs it only on an explicit local gesture and only within a
+safe envelope.

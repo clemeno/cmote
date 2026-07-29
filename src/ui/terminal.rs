@@ -219,8 +219,12 @@ pub fn view<'a>(
 	// vector — and the whole view — takes that `'a` lifetime.
 	let mut layers: Vec<Element<'a, Message>> = vec![base];
 	if let Some(point) = menu {
+		// A right-click on an OSC 8 link cell adds Open/Copy link to the menu (§24). The
+		// anchor is where the click landed, so the cell — and its link, if any — is read
+		// straight from it; a non-link cell leaves the menu with only its usual items.
+		let link = link_at(terminal, point);
 		layers.push(crate::ui::menu::dismiss_layer(Message::MenuDismissed));
-		layers.push(context_menu(point, has_selection));
+		layers.push(context_menu(point, has_selection, link.as_deref()));
 	}
 	// The explorer's own right-click menu (§18), placed against the panel rather than
 	// the pointer, and its click-away dismiss layer.
@@ -448,14 +452,34 @@ pub fn human_bytes(bytes: u64) -> String {
 	format!("{:.1} TiB", value / (KIB * KIB * KIB * KIB))
 }
 
+/// The URI of the OSC 8 hyperlink under a grid-local point, if the cell there is part of a
+/// link (§24). The point is where a right-click landed; `cell_at` maps it to a cell and the
+/// seam reads back the link. `None` for a cell with no link, so the menu shows its usual
+/// items only. Returned owned because the resulting menu item must carry the URI in a
+/// `'static` message.
+fn link_at(terminal: &Terminal, point: Point) -> Option<String> {
+	let screen = terminal.screen();
+	let (rows, cols) = screen.size();
+	let cell = cell_at(point, rows, cols);
+	screen
+		.cell(cell.row, cell.col)?
+		.hyperlink()
+		.map(str::to_owned)
+}
+
 /// The right-click context menu (§10): Copy selection and Paste in the shared menu
 /// chrome (`ui::menu`), anchored at the click. Copy is disabled without a selection (same
-/// rule as the status bar), which the chrome dims. `point` is local to the grid, which
-/// sits below the status bar in the stack, so shift it down by the bar height to place the
-/// panel under the cursor. `ponytail:` no edge clamping — near the window's right/bottom
-/// the panel can run past the edge; good enough for v1.
-fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> {
-	let panel = crate::ui::menu::panel(vec![
+/// rule as the status bar), which the chrome dims. When the clicked cell is an OSC 8 link,
+/// `link` carries its URI and two more items — Open link and Copy link — are added (§24).
+/// `point` is local to the grid, which sits below the status bar in the stack, so shift it
+/// down by the bar height to place the panel under the cursor. `ponytail:` no edge clamping
+/// — near the window's right/bottom the panel can run past the edge; good enough for v1.
+fn context_menu(
+	point: Point,
+	has_selection: bool,
+	link: Option<&str>,
+) -> Element<'static, Message> {
+	let mut items = vec![
 		crate::ui::menu::item(
 			"Copy selection".to_owned(),
 			has_selection.then_some(Message::CopyPressed),
@@ -464,7 +488,20 @@ fn context_menu(point: Point, has_selection: bool) -> Element<'static, Message> 
 		// Send local files into the shell's own working directory (§17): the picker opens,
 		// then the confirmation with that folder already filled in.
 		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
-	]);
+	];
+	// On a link cell, follow or copy the link too (§24). Both carry the URI, so the menu is
+	// the one place the whole address is offered — handy when a link's visible text hides it.
+	if let Some(uri) = link {
+		items.push(crate::ui::menu::item(
+			"Open link".to_owned(),
+			Some(Message::LinkOpen(uri.to_owned())),
+		));
+		items.push(crate::ui::menu::item(
+			"Copy link".to_owned(),
+			Some(Message::LinkCopy(uri.to_owned())),
+		));
+	}
+	let panel = crate::ui::menu::panel(items);
 
 	// A full-size transparent container whose padding positions the panel at the
 	// click point (top-left aligned by default).
