@@ -20,6 +20,7 @@
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
+pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
@@ -80,6 +81,16 @@ impl Terminal {
 		}));
 		let config = Config {
 			scrolling_history: SCROLLBACK,
+			// Let the engine accept, track and answer the kitty keyboard protocol (§25). Unlike
+			// modifyOtherKeys — which the engine ignores, so `modkeys` scans it out of the stream —
+			// the engine fully implements kitty: it keeps the pushed-flags stack (`CSI > flags u` /
+			// `CSI < n u` / `CSI = flags ; mode u`), swaps it across the alternate screen, and
+			// answers the `CSI ? u` query itself. All of that is gated behind this flag, off in
+			// `Config::default()`. With it on, cmote's only job is the *encoding*: it reads the
+			// active flags off the seam (`Screen::kitty_flags`) and `keymap`/`kitty` turn a key press
+			// into the matching CSI u report. The query reply comes back as an `Event::PtyWrite`,
+			// which the `Replies` listener already drains — so no extra reply path is needed.
+			kitty_keyboard: true,
 			..Config::default()
 		};
 		let term = Term::new(
@@ -536,6 +547,19 @@ mod tests {
 		assert_eq!(read(&terminal, 0, 0, 3).trim(), "one");
 		terminal.process(b"\r\nfive");
 		assert_eq!(read(&terminal, 0, 0, 3).trim(), "one");
+	}
+
+	#[test]
+	fn the_kitty_keyboard_query_is_answered_once_a_program_enables_it() {
+		// With `config.kitty_keyboard` on, the engine tracks the pushed-flags stack and answers
+		// the `CSI ? u` query itself (§25). Before any program pushes a mode the active set is
+		// empty, so the report is flags 0; after pushing the disambiguate flag (`CSI > 1 u`) the
+		// report names it. This is the whole reason cmote needs no scanner of its own here — the
+		// engine owns the state, and cmote only reads it back through the seam to drive encoding.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[?u"), b"\x1b[?0u".to_vec());
+		terminal.process(b"\x1b[>1u");
+		assert_eq!(terminal.process(b"\x1b[?u"), b"\x1b[?1u".to_vec());
 	}
 
 	#[test]

@@ -1436,17 +1436,52 @@ impl App {
 			return iced::Task::none();
 		}
 
-		let iced::keyboard::Event::KeyPressed {
-			key,
-			physical_key,
-			text,
-			modifiers,
-			..
-		} = event
-		else {
-			return iced::Task::none(); // ignore key releases and other keyboard events
+		// Split the event into the pieces the shell encoder needs, plus which transition it is: a
+		// press flags whether it is an auto-repeat, and a release carries no produced text (§25).
+		// Other keyboard events (a bare modifier change is handled above) carry no key.
+		let (key, physical_key, text, modifiers, key_event) = match event {
+			iced::keyboard::Event::KeyPressed {
+				key,
+				physical_key,
+				text,
+				modifiers,
+				repeat,
+				..
+			} => {
+				let kind = if repeat {
+					term::kitty::KeyEvent::Repeat
+				} else {
+					term::kitty::KeyEvent::Press
+				};
+				(key, physical_key, text, modifiers, kind)
+			}
+			iced::keyboard::Event::KeyReleased {
+				key,
+				physical_key,
+				modifiers,
+				..
+			} => (
+				key,
+				physical_key,
+				None,
+				modifiers,
+				term::kitty::KeyEvent::Release,
+			),
+			_ => return iced::Task::none(),
 		};
 		self.modifiers = modifiers;
+
+		// A release never drives cmote's own shortcuts (closing a modal, cycling focus, scrolling
+		// history) — those all fire on the press. It matters only as a key-up the shell itself may
+		// want, and only under the kitty event-types flag (§25); so it skips the whole interaction
+		// pipeline below and goes straight to the shell, but solely when the shell owns the
+		// keyboard right now. In every legacy case the encoder returns nothing, so this is inert.
+		if key_event == term::kitty::KeyEvent::Release {
+			if self.shell_owns_keyboard() {
+				return self.forward_to_shell(&key, physical_key, None, modifiers, key_event);
+			}
+			return iced::Task::none();
+		}
 
 		// The collision questions (§17, §21) are modal: Esc backs out of the whole batch,
 		// everything else waits for a button. The download's and the upload's read the same.
@@ -1522,41 +1557,62 @@ impl App {
 			return iced::Task::none();
 		}
 
-		// Full-screen apps (vim, less, nano) enable DECCKM to get the SS3 arrow-key
-		// form; read that mode off the emulator so `encode` sends the sequences the
-		// remote program actually listens for. No terminal means no session — treat
-		// it as the default (CSI) mode, though this path only runs on the Terminal screen.
-		let application_cursor = self
-			.terminal
-			.as_ref()
-			.is_some_and(|terminal| terminal.screen().application_cursor());
+		// A press/repeat with the shell focused: hand it to the encoder and the channel.
+		self.forward_to_shell(&key, physical_key, text.as_deref(), modifiers, key_event)
+	}
 
-		// The remote's modifyOtherKeys level, so `encode` can report Ctrl/Alt combos as the
-		// unambiguous CSI 27 form when an editor asked for it (§9). Read off the terminal, not
-		// the screen view: the engine does not track this mode, so cmote scans the stream for it.
-		let modify_other_keys = self
+	/// Encode a key event for the focused shell and send it down the channel (§9, §25). Shared by a
+	/// press/repeat (the tail of `on_key`) and a release (which only reaches here when the shell
+	/// owns the keyboard). Reads the three input modes the encoder needs off the terminal — DECCKM
+	/// for the arrow-key form (full-screen apps such as vim/less/nano enable it and then expect the
+	/// SS3 arrows), the modifyOtherKeys level, and the active kitty flag set — then snaps the
+	/// scrollback to the live bottom whenever the key produced bytes, so a keystroke sent while
+	/// scrolled up lands where it echoes, not off-screen above (§23). A release that produces
+	/// nothing leaves the viewport where it is. No terminal means no session, so the modes read as
+	/// their defaults; this path only runs on the Terminal screen anyway.
+	fn forward_to_shell(
+		&mut self,
+		key: &iced::keyboard::Key,
+		physical: iced::keyboard::key::Physical,
+		text: Option<&str>,
+		modifiers: iced::keyboard::Modifiers,
+		event: term::kitty::KeyEvent,
+	) -> iced::Task<Message> {
+		// modifyOtherKeys is read off the terminal, not the screen view: the engine does not track
+		// that mode, so cmote scans the stream for it (§9). DECCKM and the kitty flags, by contrast,
+		// the engine does track, so they come off the screen seam (§25).
+		let modes = self
 			.terminal
 			.as_ref()
-			.map(|terminal| terminal.modify_other_keys())
+			.map(|terminal| term::keymap::Modes {
+				application_cursor: terminal.screen().application_cursor(),
+				modify_other_keys: terminal.modify_other_keys(),
+				kitty: terminal.screen().kitty_flags(),
+			})
 			.unwrap_or_default();
 
-		if let Some(bytes) = term::keymap::encode(
-			&key,
-			physical_key,
-			text.as_deref(),
-			modifiers,
-			application_cursor,
-			modify_other_keys,
-		) {
-			// Typing returns the view to the live bottom (§23): a keystroke sent while scrolled
-			// back into history lands where it will be echoed, not off-screen above. The scroll
-			// keys above return before reaching here, so paging never snaps itself back.
+		if let Some(bytes) = term::keymap::encode(key, physical, text, modifiers, modes, event) {
 			if let Some(terminal) = self.terminal.as_mut() {
 				terminal.scroll(term::ScrollMotion::Bottom);
 			}
 			self.send_command(SshCommand::Input(bytes));
 		}
 		iced::Task::none()
+	}
+
+	/// Whether the remote shell is the keyboard's target right now (§9, §20). False while a modal
+	/// (the disconnect confirmation, a file-collision or upload question, an inline rename) is up or
+	/// a side panel holds the focus — in every such case a keystroke belongs to cmote's own UI, not
+	/// the session. Used to decide whether a key *release* should reach the shell; a press is routed
+	/// by the fuller guard chain in `on_key`, which this mirrors.
+	fn shell_owns_keyboard(&self) -> bool {
+		!self.confirm_disconnect
+			&& self.clash.is_none()
+			&& self.upload_clash.is_none()
+			&& self.transfer.is_none()
+			&& self.explorer.editing().is_none()
+			&& self.files.editing().is_none()
+			&& matches!(self.focus, Focus::Terminal)
 	}
 
 	/// The focus ring (§20): shell, tree, files pane, and round again — skipping whichever

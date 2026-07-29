@@ -91,17 +91,17 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
 
 ## 2. Still open — input (all `[keymap]`, engine-independent)
 
-The remaining input gaps live entirely in `term::keymap`. `modifyOtherKeys` is now **done**
-(§1); what is left:
+Both `modifyOtherKeys` (§1) and the **kitty keyboard protocol** (§25, shipped) are now **done**.
+What is left:
 
 | Missing | What it unblocks | Tag | Src |
 |---|---|---|---|
-| **Kitty keyboard protocol** (`CSI >flags u` … report `CSI code;mods;event u`) | full key + modifier + event disambiguation | [seam+keymap] | [vendor] |
 | **DECKPAM application keypad** — the numpad should send `ESC O p…y` while an app enables app-keypad mode | *near-nil value on a PC client* — see the note below | [seam+keymap] | [DEC] |
 
-The engine *parses* the kitty keyboard mode and can report it (`report_keyboard_mode`), but only
-when its `kitty_keyboard` config flag is on, and the **encoding** of key presses into kitty's
-`u`-form is cmote's to write — the larger half of the work.
+Kitty shipped by flipping the engine's `kitty_keyboard` config flag on — so the engine tracks the
+push/pop/query stack and answers `CSI ? u` itself — and writing the key-press → `CSI u` encoder
+(`term/kitty.rs`), the flag set read off the seam (`Screen::kitty_flags`). The one input gap that
+remains is DECKPAM.
 
 **Why DECKPAM is deprioritised.** cmote already mirrors xterm's default `numLock: true`
 behaviour: with NumLock on the numpad sends its digit (the `pm2 ls` fix, keyed off the OS
@@ -179,22 +179,26 @@ effects" reason. Answering an OSC 52 read query would be an injection vector and
 
 ## 7. Recommendation
 
-With the engine swap, `modifyOtherKeys` and OSC 8 hyperlinks done, the cheap, self-contained
-wins that remain, ranked by UX bite:
+With the engine swap, `modifyOtherKeys`, OSC 8 hyperlinks and the kitty keyboard protocol all
+done, only one cheap, self-contained keymap win remains:
 
-1. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation, and a
-   superset of `modifyOtherKeys` for editors that speak it.
-2. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
+1. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
    a PC client it is a near-no-op at best and a `pm2 ls` regression at worst, so only the
    NumpadEnter / operator forms are worth anything, and only marginally.
 
-`OSC 8 hyperlinks` (was #1) shipped as a seam getter (`Cell::hyperlink`) plus the `link` module:
-the engine already stores the URI per cell, so cmote surfaces it, and **Ctrl+click** or a
-right-click **Open link / Copy link** follows it — the scheme gated to http/https/mailto and the
-URI handed to a launcher that never builds a shell command line (§24). `modifyOtherKeys` (the
-earlier #2) shipped as `term::modkeys` + a `keymap::encode` branch: the stream is scanned for
-`CSI > 4 ; p m`, and a Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2
-for every combo, level 1 for the gap combos only).
+The **kitty keyboard protocol** (was #1) shipped as `term::kitty` + a `keymap::encode` branch,
+the inverse of the modifyOtherKeys split: the engine already implements the whole control plane
+(push / pop / set / query, stack, alternate-screen swap), gated behind its `kitty_keyboard`
+config flag — cmote flips that on, so there is no scanner and no reply path, and reads the active
+flags off the seam (`Screen::kitty_flags`) to drive the `CSI u` encoder. Disambiguate, event types
+(press / repeat / release, the key-up now forwarded from iced), report-all and associated text are
+encoded; alternate keys best-effort (§25). `OSC 8 hyperlinks` (an earlier #1) shipped as a seam
+getter (`Cell::hyperlink`) plus the `link` module: **Ctrl+click** or a right-click **Open link /
+Copy link** follows it, the scheme gated to http/https/mailto and the URI handed to a launcher
+that never builds a shell command line (§24). `modifyOtherKeys` (an earlier #2) shipped as
+`term::modkeys` + a `keymap::encode` branch: the stream is scanned for `CSI > 4 ; p m`, and a
+Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2 for every combo, level 1
+for the gap combos only) — kept for the programs that speak it rather than kitty.
 
 The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
@@ -213,9 +217,14 @@ Audited file:line anchors behind the claims above, for later re-checking.
   answers **primary** DA (`ESC[?6c`) and **secondary** DA (`ESC[>0;<ver>;1c`) — the `=`
   (tertiary) intermediate falls to a debug no-op. `device_status` (DSR, `term/mod.rs:1332`) and
   `report_mode` (DECRQM, `term/mod.rs:2135`) reply likewise.
-- **Kitty keyboard**: `report_keyboard_mode` (`term/mod.rs:1275`) reports the active mode, but
-  **guards on `config.kitty_keyboard`** — off unless enabled; the mode is tracked on a
-  `keyboard_mode_stack`.
+- **Kitty keyboard**: fully implemented but **guarded on `config.kitty_keyboard`** — every
+  handler (`push_keyboard_mode` `term/mod.rs:1288`, `pop_keyboard_modes` `:1308`,
+  `report_keyboard_mode` `:1275`, `set_keyboard_mode` `:1029`) early-returns when the flag is off.
+  cmote **turns it on** in `Terminal::new`, so the engine tracks the pushed-flags
+  `keyboard_mode_stack`, swaps it across the alternate screen, and answers the `CSI ? u` query
+  (`report_keyboard_mode` writes `ESC [ ? <flags> u` as an `Event::PtyWrite`). The active flags
+  fold into `TermMode` (`DISAMBIGUATE_ESC_CODES` `1<<18` … `REPORT_ASSOCIATED_TEXT` `1<<22`), which
+  cmote reads through `Term::mode()` (`term/mod.rs:709`). So the encoding is cmote's only job (§25).
 - **DECKPAM**: `set_keypad_application_mode` (`term/mod.rs:2180`) — the engine tracks the
   application-keypad mode.
 - **XTWINOPS size reports**: `text_area_size_pixels` (`term/mod.rs:2259`) and
@@ -243,13 +252,23 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
   cell's OSC 8 URI, §24). `Screen` getters: `size`, `cursor_position`, `display_offset`,
   `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `bracketed_paste`,
-  `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`. **Not yet surfaced**:
-  application-keypad, blink.
+  `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`, `kitty_flags` (the five active kitty
+  protocol flags, read off `Term::mode()`, §25). **Not yet surfaced**: application-keypad, blink.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`
   / `other_key_bytes` emit the `CSI 27;mod;code~` form when the level is on), the numpad NumLock
-  heuristic, and the bracketed-paste terminator scrub. **Absent**: DECKPAM, kitty keyboard.
+  heuristic, and the bracketed-paste terminator scrub. It now also carries an input-modes bundle
+  (`Modes` — DECCKM, the modifyOtherKeys level, the kitty flags) and a `KeyEvent` (press / repeat /
+  release), and **dispatches to `term/kitty.rs` whenever a kitty flag is active**, superseding the
+  legacy path; a legacy release yields nothing and a legacy repeat is a press. **Absent**: DECKPAM.
+- **`term/kitty.rs`** — the kitty keyboard encoder (§25). `KittyFlags` (the five progressive flags)
+  and `KeyEvent`; `encode` turns a key event into kitty's `CSI <keycode>[:<shifted>] ;
+  <mods>[:<event>] ; <text> u`, keeping the legacy final byte for keys that had one (arrows,
+  Home/End, F-keys, the `~` navigation keys), leaving Enter/Tab/Backspace legacy until modified,
+  and emitting `CSI 27 u` for Esc. Reports releases/repeats only under `report_events`, plain
+  letters as codes only under `report_all`, and the associated text / shifted alternate under
+  their flags. No engine dependency — pure input → bytes, unit-tested per flag.
 - **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
   `Terminal::modify_other_keys` and threaded into `keymap::encode`.

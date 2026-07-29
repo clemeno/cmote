@@ -226,10 +226,11 @@ cmote/
     ├── term/
     │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries (§9, §16, §23)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
-    │   ├── keymap.rs      GUI key events → the bytes a terminal sends (§9)
+    │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
+    │   ├── kitty.rs       encode a key event in the kitty keyboard protocol's CSI u form (§25)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
-    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link (§9, §16, §23, §24)
+    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link + the kitty flags (§9, §16, §23, §24, §25)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -789,6 +790,18 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   ordinary SGR not tripping it. Pointer events likewise (`term/mouse.rs`): each encoding,
   each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
   bits.
+- **Kitty keyboard** (§25): the encoder (`term/kitty.rs`) is tested per flag — disambiguate
+  turning Esc into `CSI 27 u` and Ctrl/Alt letters into unambiguous codes while plain and
+  Shift-only typing stays text; Enter/Tab/Backspace holding their legacy bytes until modified;
+  the functional keys keeping their legacy final byte (Ctrl+Left `CSI 1;5D`, F1 SS3, F5 `~`);
+  event types adding `:3` on a release and `:2` on a repeat, and a text key having no release
+  until report-all promotes it to a code; report-all making a plain letter `CSI 97 u`;
+  associated text riding along as `CSI 97;1;97u`; and alternate keys adding the shifted glyph
+  `CSI 97:65;2u`. The seam (`term/screen.rs`) reads the active flags back off the engine as a
+  program pushes / pops them, and `term/mod.rs` shows the engine answering the `CSI ? u` query
+  now that the config flag is on. `keymap` is checked at the boundary: an active flag routes to
+  the kitty encoder (superseding modifyOtherKeys), and the legacy path stays silent on a release
+  and treats a repeat as a press.
 - **Hyperlinks** (§24): the seam reads an **OSC 8** link back on its cells — a
   `ESC ] 8 ; ; URI BEL` opening covers the text after it and the cell past the close carries
   none (`term/screen.rs`) — and the **scheme allow-list** is tested on its own (`link.rs`):
@@ -1794,3 +1807,76 @@ way for the remote to start a local program from a link. Two controls (`link.rs`
 This is the mirror of the §9/§12 clipboard stance: a remote may *describe* an action (a link,
 a clipboard write) but cmote performs it only on an explicit local gesture and only within a
 safe envelope.
+
+---
+
+## 25. Kitty keyboard protocol (v3.1)
+
+The classic terminal input alphabet loses information the moment a key is anything but a plain
+letter. `Ctrl+I` collapses onto Tab (both `0x09`), `Ctrl+M` onto Enter (`0x0d`); `Ctrl+digit`
+and most `Ctrl+symbol` combos have no byte at all; `Esc` is indistinguishable from the start of
+an escape sequence; and a key *release* is invisible. modifyOtherKeys (§9) patched the worst of
+the Ctrl/Alt gaps; kitty's protocol replaces the lot with an unambiguous, opt-in encoding that
+neovim, kakoune, helix, fish and a growing list of TUIs now speak.
+
+### The engine tracks the state; cmote only encodes
+
+This is the inverse of the modifyOtherKeys split. `alacritty_terminal` **fully implements** the
+protocol's control plane: it parses the push (`CSI > flags u`), pop (`CSI < n u`) and set
+(`CSI = flags ; mode u`) sequences, keeps the flag stack (bounded, and swapped across the
+alternate screen so a full-screen program's mode is saved and restored), and **answers the
+`CSI ? u` query itself**. All of it is gated behind one config flag, `kitty_keyboard`, off in
+`Config::default()`. cmote flips it on in `Terminal::new` — so there is **no scanner** to write
+(unlike modkeys) and **no reply path** to add (the query answer comes back as an
+`Event::PtyWrite`, which the `Replies` listener already drains). The active flag set folds into
+the engine's mode bits, and cmote reads it back off the seam (`Screen::kitty_flags` →
+`keymap::Modes.kitty`). cmote's whole job is the other half: turning a key event into the
+matching report, in `term/kitty.rs`.
+
+The five progressive-enhancement flags, and how far cmote honours each:
+
+- **disambiguate (0b1)** — the base every real client pushes. `Esc` becomes `CSI 27 u`, a
+  `Ctrl`/`Alt` combo an unambiguous `CSI code ; mod u`. Fully encoded.
+- **report events (0b10)** — press / repeat / release told apart with an `:event` sub-parameter.
+  Fully wired: iced delivers `KeyReleased` and flags auto-repeat on `KeyPressed`, and `app`
+  forwards both to the shell — the key-up a legacy terminal could never send.
+- **report all keys (0b1000)** — even a plain letter becomes a code, not text. Encoded.
+- **report associated text (0b10000)** — the produced glyph rides along as trailing code points.
+  Encoded.
+- **report alternate keys (0b100)** — the keycode gains the shifted glyph. Best-effort: cmote
+  fills the shifted sub-field from the OS-produced text; the base-layout sub-field it cannot
+  compute portably, so it is omitted.
+
+### Encoding rules that matter (one wrong byte is a dead key)
+
+- Keys that already had a **legacy escape code keep their final byte** — the arrows/Home/End/F1-F4
+  stay letter-final with a fixed keycode of `1` (`Ctrl+Left` = `CSI 1;5D`), the navigation and
+  F5-F12 keys stay `~`-final with their historic number — and only gain the modifier/event
+  parameters. So a program that also knows the old sequences is never surprised, and a bare
+  cursor key still honours DECCKM (SS3 under application-cursor mode).
+- **Enter / Tab / Backspace** keep their C0 bytes (`\r` / `\t` / `0x7f`) until a modifier is held,
+  then switch to the `CSI code ; mod u` form — the shell-compatibility carve-out the spec makes.
+- A **release or repeat is reported only when the program asked for event types**; otherwise a
+  release yields nothing and a repeat is a plain press. A **text key** (a bare or Shift-only
+  letter) has no escape code to hang a release on, so its key-up stays silent until report-all
+  promotes it to a code.
+- The **modifier field is written even when empty** (as the bare `1`) whenever an event or text
+  field follows it, so the later fields keep their place: a plain `a` under report-all +
+  report-text is `CSI 97;1;97u`.
+
+cmote leans on one simplification true of every real client: it treats the protocol as active
+whenever *any* flag is pushed and always applies the disambiguating encoding — a program that
+pushed, say, report-events without disambiguate (none do) would get disambiguated keys too,
+which is harmless. The **numpad** stays on its NumLock text heuristic (§9, the `pm2 ls` fix)
+ahead of the kitty branch, so a NumLock digit types its digit whatever the remote enabled;
+`ponytail:` its kitty private-use keypad codes are not emitted, and **F13-F24** keep their fixed
+legacy sequences under kitty rather than kitty's private-use code points — both rare, both
+documented rather than chased.
+
+### Why this over modifyOtherKeys
+
+They answer the same need, and an editor speaks one or the other, so `keymap::encode` checks the
+kitty flags first: an active set supersedes the modifyOtherKeys branch entirely. Kitty is the
+stricter and more complete of the pair — it disambiguates *every* key, not just the Ctrl/Alt
+main-keyboard combos, and it is the one modern editors reach for. modifyOtherKeys stays for the
+programs that still emit only `CSI > 4 ; p m`.

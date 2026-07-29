@@ -12,6 +12,7 @@
 use iced::keyboard::key::{Code, Named, Physical};
 use iced::keyboard::{Key, Modifiers};
 
+use super::kitty::{self, KeyEvent, KittyFlags};
 use super::modkeys::ModifyOtherKeys;
 
 /// ASCII escape (`ESC`), the lead byte of every CSI sequence and the meta prefix.
@@ -24,36 +25,92 @@ const ESC: u8 = 0x1b;
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// Turn one key press into the bytes to send, or `None` if the key produces no
-/// input (a bare modifier, an unmapped named key). `physical` is the key's physical
-/// location on the keyboard (used only to single out the numpad — see below). `text`
-/// is the OS-produced string for the key (already honoring layout and Shift); we
-/// prefer it for printable input and fall back to the logical key only when it is
-/// absent. `application_cursor` is the emulator's DECCKM state (read from
-/// `screen.application_cursor()`): full-screen apps such as vim, less, and nano
-/// turn it on and then expect the SS3 arrow-key form, so it is threaded down to
-/// `named_bytes` to pick the matching cursor-key encoding. `modifiers` is threaded
-/// there too: a Ctrl/Shift/Alt held with a navigation or function key encodes the
-/// xterm modifier parameter (`CSI 1;<mod><final>` / `CSI <n>;<mod>~`), so a remote
-/// editor reads Ctrl+Right as word-motion and Shift+Down as select-line. `modify_other_keys`
-/// is the remote's `modifyOtherKeys` level (read from `Terminal::modify_other_keys`): when a
-/// program turns it on, a Ctrl/Alt combo on a main-keyboard character is reported as the
-/// unambiguous `CSI 27;<mod>;<code>~` form instead of the lossy C0 byte or nothing at all.
+/// The three remote input modes the encoder reads off the terminal, grouped so a key press does
+/// not have to thread them one by one (§9, §25). `app` fills this in from the emulator before every
+/// keystroke: DECCKM off the screen view, the modifyOtherKeys level off the terminal (the engine
+/// does not track it, so cmote scans the stream), and the kitty flag set off the screen view again
+/// (the engine does track that). `Default` — DECCKM off, modifyOtherKeys off, no kitty flags — is
+/// the plain xterm behaviour, and is what the tests run under.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Modes {
+	/// DECCKM: full-screen apps (vim, less, nano) turn it on and then expect the SS3 arrow form.
+	pub application_cursor: bool,
+	/// The remote's `modifyOtherKeys` level, for the `CSI 27 ; mod ; code ~` reports (§9).
+	pub modify_other_keys: ModifyOtherKeys,
+	/// The active kitty keyboard protocol flags, which supersede the legacy encoding (§25).
+	pub kitty: KittyFlags,
+}
+
+/// Turn one key event into the bytes to send, or `None` if it produces no input (a bare modifier,
+/// an unmapped named key, a release with nothing to report). `physical` is the key's physical
+/// location on the keyboard (used only to single out the numpad — see below). `text` is the
+/// OS-produced string for the key (already honoring layout and Shift); we prefer it for printable
+/// input and fall back to the logical key only when it is absent. `modifiers` carries any
+/// Ctrl/Shift/Alt held: with a navigation or function key it encodes the xterm modifier parameter
+/// (`CSI 1;<mod><final>` / `CSI <n>;<mod>~`), so a remote editor reads Ctrl+Right as word-motion and
+/// Shift+Down as select-line. `modes` bundles DECCKM, the modifyOtherKeys level and the kitty flag
+/// set (see `Modes`). `event` says whether this is a press, an auto-repeat, or a release — the
+/// legacy path emits bytes only for a press (a real terminal is silent on key-up), while kitty can
+/// report all three.
 pub fn encode(
 	key: &Key,
 	physical: Physical,
 	text: Option<&str>,
 	modifiers: Modifiers,
-	application_cursor: bool,
-	modify_other_keys: ModifyOtherKeys,
+	modes: Modes,
+	event: KeyEvent,
 ) -> Option<Vec<u8>> {
+	// The numpad number keys (0-9 and the decimal) have a dual identity that the
+	// logical `key` alone hides. With NumLock on they type a digit; with NumLock off
+	// the same physical key is navigation (arrow / Home / PageUp / …). winit reports
+	// the logical `key` for the *navigation* role — so a NumLock-on digit can arrive
+	// as `Named(ArrowDown)` and, matched on `key`, would send an arrow instead of "2"
+	// (the `pm2 ls` bug). iced does not expose NumLock state, but the OS-produced
+	// `text` is the tell: it is present exactly when a character was typed. So for a
+	// numpad number key with printable text (and no Ctrl/Alt/Logo turning it into a
+	// combo), send that text. NumLock-off presses carry no text and fall through to
+	// the navigation mapping below; a key-up carries none either, so it sends nothing.
+	// Kept ahead of every protocol branch so a NumLock digit types its digit whatever
+	// the remote enabled. Scoped to numpad physical codes so it can never disturb
+	// Backspace or the main-row keys.
+	if is_numpad_number(physical) && !modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+		match (event, text) {
+			(KeyEvent::Release, _) => return None,
+			(_, Some(typed)) if !typed.is_empty() => return Some(typed.as_bytes().to_vec()),
+			_ => {}
+		}
+	}
+
+	// The kitty keyboard protocol replaces the whole legacy encoding when a program has pushed any
+	// of its flags (§25): the active set comes off the seam and the key becomes an unambiguous
+	// `CSI u` report. Taken before modifyOtherKeys because the two answer the same need and an
+	// editor speaks one or the other — kitty is the stricter, more complete of the pair.
+	if modes.kitty.is_active() {
+		return kitty::encode(
+			key,
+			physical,
+			text,
+			modifiers,
+			modes.application_cursor,
+			modes.kitty,
+			event,
+		);
+	}
+
+	// The legacy encoding below has no notion of a key release — a real terminal is silent when a
+	// key comes up — and it repeats a held key as another press, so a release produces no bytes and
+	// a repeat falls through the press path unchanged.
+	if event == KeyEvent::Release {
+		return None;
+	}
+
 	// modifyOtherKeys first, so at level 2 it claims Ctrl+C before the C0 path turns it into
 	// 0x03: an editor that turned the mode on wants the raw key event, not the interrupt byte.
 	// Only Ctrl/Alt combos on a printable key are ever claimed — Shift-only and unmodified keys,
 	// and every named/navigation/function key, keep their ordinary encoding below.
 	if let Key::Character(character) = key
 		&& (modifiers.control() || modifiers.alt())
-		&& let Some(bytes) = modify_other_key(character, modifiers, modify_other_keys)
+		&& let Some(bytes) = modify_other_key(character, modifiers, modes.modify_other_keys)
 	{
 		return Some(bytes);
 	}
@@ -68,30 +125,9 @@ pub fn encode(
 		return Some(vec![byte]);
 	}
 
-	// The numpad number keys (0-9 and the decimal) have a dual identity that the
-	// logical `key` alone hides. With NumLock on they type a digit; with NumLock off
-	// the same physical key is navigation (arrow / Home / PageUp / …). winit reports
-	// the logical `key` for the *navigation* role — so a NumLock-on digit can arrive
-	// as `Named(ArrowDown)` and, matched on `key`, would send an arrow instead of "2"
-	// (the `pm2 ls` bug). iced does not expose NumLock state, but the OS-produced
-	// `text` is the tell: it is present exactly when a character was typed. So for a
-	// numpad number key with printable text (and no Ctrl/Alt/Logo turning it into a
-	// combo), send that text. NumLock-off presses carry no text and fall through to
-	// the navigation mapping below. Scoped to numpad physical codes so it can never
-	// disturb Backspace or the main-row keys.
-	if is_numpad_number(physical)
-		&& !modifiers.control()
-		&& !modifiers.alt()
-		&& !modifiers.logo()
-		&& let Some(typed) = text
-		&& !typed.is_empty()
-	{
-		return Some(typed.as_bytes().to_vec());
-	}
-
 	match key {
 		// Named keys map to their fixed control byte or escape sequence.
-		Key::Named(named) => named_bytes(named, modifiers, application_cursor),
+		Key::Named(named) => named_bytes(named, modifiers, modes.application_cursor),
 
 		// A printable key: send its produced text. Alt acts as "meta", which the
 		// xterm convention encodes as an ESC prefix before the character.
@@ -404,6 +440,27 @@ mod tests {
 	// A neutral, non-numpad physical key for tests that do not exercise the numpad.
 	fn main_key() -> Physical {
 		phys(Code::KeyA)
+	}
+
+	// Most tests here predate the kitty parameters (§25) and exercise a legacy PRESS with the
+	// protocol off. This shim keeps their six-argument call sites unchanged — it shadows the real
+	// `encode` for the test module (an explicit item wins over the `use super::*` glob) and fills
+	// in "no kitty flags, key press". The kitty-specific tests below call `super::encode` directly
+	// with the full argument list.
+	fn encode(
+		key: &Key,
+		physical: Physical,
+		text: Option<&str>,
+		modifiers: Modifiers,
+		application_cursor: bool,
+		modify_other_keys: ModifyOtherKeys,
+	) -> Option<Vec<u8>> {
+		let modes = Modes {
+			application_cursor,
+			modify_other_keys,
+			kitty: KittyFlags::default(),
+		};
+		super::encode(key, physical, text, modifiers, modes, KeyEvent::Press)
 	}
 
 	#[test]
@@ -938,5 +995,73 @@ mod tests {
 		// and left in place (matching xterm, which filters just the terminator).
 		let out = encode_paste("a\x1b[200~b", true);
 		assert_eq!(out, b"\x1b[200~a\x1b[200~b\x1b[201~".to_vec());
+	}
+
+	// The kitty disambiguate flag set, for the dispatch tests below.
+	fn kitty_on() -> KittyFlags {
+		KittyFlags {
+			disambiguate: true,
+			..KittyFlags::default()
+		}
+	}
+
+	#[test]
+	fn an_active_kitty_flag_set_routes_through_the_kitty_encoder() {
+		// With a kitty flag pushed, Ctrl+C is the protocol's `CSI 99;5u` (code 99 = 'c'), not the
+		// C0 0x03 the legacy path would send — proof `encode` hands off to `kitty` before the
+		// control-byte branch. Kitty supersedes modifyOtherKeys even when both are set.
+		let key = Key::Character("c".into());
+		let modes = Modes {
+			application_cursor: false,
+			modify_other_keys: ModifyOtherKeys::Level2,
+			kitty: kitty_on(),
+		};
+		assert_eq!(
+			super::encode(
+				&key,
+				main_key(),
+				Some("c"),
+				Modifiers::CTRL,
+				modes,
+				KeyEvent::Press
+			),
+			Some(b"\x1b[99;5u".to_vec())
+		);
+	}
+
+	#[test]
+	fn the_legacy_path_is_silent_on_a_key_release() {
+		// No kitty flag pushed: a real terminal sends nothing when a key comes up, so a release
+		// encodes to no bytes even for a key that would produce some on a press.
+		let key = Key::Character("a".into());
+		assert_eq!(
+			super::encode(
+				&key,
+				main_key(),
+				Some("a"),
+				Modifiers::empty(),
+				Modes::default(),
+				KeyEvent::Release,
+			),
+			None
+		);
+	}
+
+	#[test]
+	fn the_legacy_path_treats_a_repeat_as_a_press() {
+		// A held key repeats as another press on a legacy terminal, so a repeat encodes to the same
+		// bytes the press does.
+		let key = Key::Character("a".into());
+		assert_eq!(
+			super::encode(
+				&key,
+				main_key(),
+				Some("a"),
+				Modifiers::empty(),
+				Modes::default(),
+				KeyEvent::Repeat,
+			),
+			Some(b"a".to_vec())
+		);
 	}
 }

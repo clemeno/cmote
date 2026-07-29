@@ -16,6 +16,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use super::Engine;
+use super::kitty::KittyFlags;
 
 /// A cell colour, independent of the engine. `Default` is the terminal's default foreground
 /// or background (the renderer decides which); `Indexed` is a slot in the xterm-256 palette
@@ -255,6 +256,22 @@ impl<'a> Screen<'a> {
 	/// Whether application-cursor mode (DECCKM) is on — arrows send SS3, not CSI (§9).
 	pub fn application_cursor(&self) -> bool {
 		self.engine.mode().contains(TermMode::APP_CURSOR)
+	}
+
+	/// Which kitty keyboard protocol flags the remote program currently has in effect (§25).
+	/// The engine parses the push/pop/set sequences and folds the active flag set into its mode
+	/// bits (it is told to by `config.kitty_keyboard`, set in `Terminal::new`); cmote reads them
+	/// back here so `keymap`/`kitty` know how far to enhance the key encoding. All five are off
+	/// until a program pushes them, so the default is the ordinary legacy encoding.
+	pub fn kitty_flags(&self) -> KittyFlags {
+		let mode = self.engine.mode();
+		KittyFlags {
+			disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+			report_events: mode.contains(TermMode::REPORT_EVENT_TYPES),
+			report_alternates: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+			report_all: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+			report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+		}
 	}
 
 	/// Whether bracketed paste (DECSET 2004) is on — a paste is framed so the shell inserts
@@ -513,6 +530,26 @@ mod tests {
 		assert!(terminal.screen().focus_reporting());
 		terminal.process(b"\x1b[?1004l");
 		assert!(!terminal.screen().focus_reporting());
+	}
+
+	#[test]
+	fn kitty_flags_track_what_a_program_pushed() {
+		// Off until a program asks (§25). `CSI > 1 u` pushes the disambiguate flag (bit 1); `CSI >
+		// 9 u` (bits 1 + 8) sets disambiguate + report-all together; `CSI < u` pops back to the
+		// previous entry. cmote reads the active set off the seam to drive the key encoder — the
+		// engine owns the stack because `config.kitty_keyboard` is on.
+		let mut terminal = Terminal::new(1, 8);
+		assert!(!terminal.screen().kitty_flags().is_active());
+		terminal.process(b"\x1b[>1u");
+		let flags = terminal.screen().kitty_flags();
+		assert!(flags.disambiguate);
+		assert!(!flags.report_all);
+		terminal.process(b"\x1b[>9u");
+		let flags = terminal.screen().kitty_flags();
+		assert!(flags.disambiguate);
+		assert!(flags.report_all);
+		terminal.process(b"\x1b[<u");
+		assert!(!terminal.screen().kitty_flags().report_all);
 	}
 
 	#[test]
