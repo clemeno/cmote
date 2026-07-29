@@ -1,17 +1,16 @@
 # cmote — Terminal Compatibility Plan
 
 A reference inventory of **what cmote's terminal still lacks to render or drive any
-documented remote-terminal-application UX**, and what each gap would cost. Every entry is a
-sequence specified in an official or widely-adopted source — nothing here is speculative.
+documented remote-terminal-application UX**, and what each remaining gap would cost. Every
+entry is a sequence specified in an official or widely-adopted source — nothing here is
+speculative.
 
-Produced 2026-07-28 by auditing the actual code:
-
-- the emulator crate **`vt100` 0.16.2** (its `vte`-based `WrappedScreen` dispatch, its
-  `Screen`/`Cell` public API, and what it silently drops), and
-- cmote's own terminal layer (`src/term/*`, `src/ui/grid.rs`, `src/app.rs`).
-
-File:line evidence for the audited claims is collected in the [Evidence](#evidence)
-appendix, so any statement here can be re-checked against the source it came from.
+**Rewritten 2026-07-29, after the §23 engine swap.** The baseline is now
+**`alacritty_terminal` 0.26** — a full VT implementation — replacing the old **`vt100`
+0.16.2** subset. The previous edition of this document was written against `vt100` and framed
+every gap as a `[bolt-on]` / `[engine]` split, because that crate was a deliberately small VT
+subset that could neither parse nor represent most of the spec. **That ceiling is gone.** What
+remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
 Sources cited by tag:
 
@@ -23,181 +22,162 @@ Sources cited by tag:
   synchronized output `?2026`, OSC 133 shell integration).
 - `[vendor]` — documented by one vendor only (kitty keyboard/graphics, iTerm2 OSC 1337).
 
+File:line evidence for the audited claims is collected in the [Evidence](#evidence) appendix.
+
 ---
 
-## 0. The one structural fact
+## 0. The new baseline
 
-**`vt100` 0.16.2 is the ceiling, not cmote's code.** It is a deliberately small VT subset
-sitting on the `vte` byte-tokenizer: control functions it has no arm for are routed to
-no-op callbacks and discarded, and — decisively — **a whole class of state it never stores,
-so cmote cannot render or report it no matter what we bolt on.** The crate is also a pure
-state sink: it never generates a reply to any host query (that is why cmote answers DSR/DA
-itself in `term/answer.rs`).
+`alacritty_terminal` 0.26 parses and represents the full VT set cmote cares about, and —
+unlike `vt100` — **generates host replies itself** (through `Event::PtyWrite`), so the
+"application stalls on a query timeout" class of bug is largely closed by construction. cmote
+wires the engine behind a cmote-owned seam (`term::screen`), drains the engine's replies
+through a `Replies` listener, and answers only the few queries that need cmote's own data (its
+colour scheme, its cell pixel size). The old `term::compat` (cursor-move rewriter) and
+`term::answer` (reply synthesizer) modules were **deleted** in the swap — the engine does both.
 
-Consequently every gap below carries an **effort tag**:
+Effort is now just *where the work lives*, not a hard wall:
 
-- **[bolt-on]** — addable *beside* `vt100`, the way `term/compat.rs` (rewrite on the way in)
-  and `term/answer.rs` (reply on the way back) already are: scan the output stream, encode a
-  key, or read a getter the crate already exposes. **Engine-independent** — it survives a
-  later engine swap unchanged.
-- **[engine]** — impossible on `vt100` 0.16.2 because the crate cannot parse or represent it.
-  Needs replacing the emulator. PLAN §16 already names the target: **`alacritty_terminal`**
-  (or wezterm's `termwiz`), a full VT implementation.
-
-The strategic split that falls out of this: the **[bolt-on]** items are the cheap,
-high-value, self-contained wins (each is an "A-sized" module with unit tests); the
-**[engine]** swap is the single large move that unlocks everything else at once, and is the
-only path to "support *any* documented app UX".
+- **[keymap]** — cmote's input encoder (`term::keymap`); engine-independent.
+- **[reply]** — extend cmote's reply path (the `Replies` listener in `term::mod`) for a query
+  the engine does not answer itself.
+- **[seam+grid]** — surface a getter the engine already has through `term::screen`, then render
+  it in the grid.
+- **[engine-limit]** — `alacritty_terminal` 0.26 itself does not parse or represent it; it would
+  need an engine fork/upgrade or a scanner bolted on beside it. This is the *new, far higher*
+  ceiling, and it is short.
 
 ---
 
 ## 1. Baseline — what already works
 
-So the gaps read against a known floor. cmote today:
+So the gaps read against a known floor. As of v3.0 (§23) cmote:
 
-- **Renders** (per cell): bold (real bundled bold face), single underline (drawn as a rule),
-  inverse, and full-depth colour — 16 / 256 / 24-bit truecolor, fg and bg. Draws **braille**
-  (U+2800–28FF) and **rounded box corners** (U+256D–2570) from geometry, since no bundled
-  monospace font carries them. Cursor is a visible-aware inverse block (§9, §11).
-- **Rewrites on the way in** (`compat.rs`): the cursor-move alias spellings `vt100` lacks —
-  HVP `f`→CUP, HPA `` ` ``→CHA, HPR `a`→CUF, VPR `e`→CUD, and `CSI s`/`u`→DECSC/DECRC.
-- **Answers host queries** (`answer.rs`, v2.4): DSR status `CSI 5n`, cursor-position
-  `CSI 6n`, extended cursor `CSI ?6n`, primary DA `CSI c`, secondary DA `CSI >c`.
-- **Tracks & honours modes** `vt100` exposes: application-cursor DECCKM (arrows→SS3),
-  bracketed paste `?2004`, cursor visibility `?25`, mouse `?9/1000/1002/1003` in SGR / UTF-8 /
-  classic encodings, alternate-screen bit (parsed, but see §3 — **not read**).
-- **Encodes input**: printable + layout, Ctrl-\*, Alt-as-meta, Enter/Tab/Backspace/Esc,
-  arrows/Home/End (DECCKM-aware), Insert/Delete/PageUp/Down, **F1–F12**, numpad (NumLock
-  aware), bracketed paste with injection scrub.
-- **Reads the remote cwd** from OSC 7 / OSC 9;9 for the tree, pane and title (`cwd.rs`).
+- **Renders** (per cell): bold, **dim / faint**, **italic** (from a bundled IBM Plex Mono
+  face, since Fira Mono ships none), inverse, **conceal**, **strikethrough**, every
+  **underline style** (single / double / dotted / dashed / curly) and **underline colour**, and
+  full colour depth — 16 / 256 / 24-bit truecolor, fg and bg. Draws **braille** (U+2800–28FF)
+  and **rounded box corners** (U+256D–2570) from geometry, since no bundled monospace font
+  carries them. Cursor is drawn in the **shape a program picks with DECSCUSR** (block /
+  underline / bar / hollow), steady — cmote runs no animation timer, so blink is dropped.
+- **Keeps 10 000 lines of scrollback** with a thin, read-only scroll indicator (§23 Stage 8):
+  the wheel and Shift+PageUp/PageDown/Home/End scroll the history, and typing snaps back to the
+  live bottom. The alternate screen keeps no history, so scrolling is inert there by design.
+- **Lets the engine interpret** the whole VT stream, no cmote papering-over: the **DEC
+  line-drawing charset** (older programs box-draw with it), **origin mode** (so cursor reports
+  are origin-correct), **custom tab stops** (HTS / TBC), the **autowrap toggle** (DECAWM),
+  **REP** repeat, the (vertical) scroll region, and **alternate-screen** switching.
+- **Answers host queries.** Primary / secondary **DA** (`CSI c`, `CSI >c`), **DSR** status and
+  cursor-position (`CSI 5n`, `CSI 6n`), and **DECRQM** request-mode are answered by the engine.
+  The **colour queries** (OSC 10 / 11 / 12 and OSC 4 palette) and the **pixel / text-area
+  size** reports (`CSI 14t`, `CSI 18t`) are answered by cmote's listener from its own colour
+  scheme and cell metrics — so a program probing the background to pick a light-vs-dark theme is
+  answered rather than left guessing.
+- **Shows the window title** a program sets with OSC 0 / OSC 2 in the title bar (§23).
+- **Tracks and honours modes**: application-cursor DECCKM (arrows → SS3), bracketed paste
+  `?2004`, cursor visibility `?25`, mouse `?9 / 1000 / 1002 / 1003` in SGR / UTF-8 / classic
+  encodings, alternate screen, and **focus reporting `?1004`** (the shell hears `CSI I` / `CSI
+  O` as it gains or loses focus).
+- **Encodes input**: printable + layout, Ctrl-\* → C0, Alt-as-meta, Enter/Tab/Backspace/Esc,
+  arrows/Home/End (DECCKM-aware), Insert/Delete/PageUp/Down, **F1–F12** and **F13–F24**,
+  **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / navigation / F-keys, in the
+  xterm `CSI 1;<mod><final>` / `CSI <n>;<mod>~` form), numpad (NumLock-aware), bracketed paste
+  with an injection scrub.
+- **Reads the remote cwd** from OSC 7 / OSC 9;9 for the tree, pane, and title (`cwd.rs`).
 
 ---
 
-## 2. Query → reply gaps (the "app stalls on a timeout" class)
+## 2. Still open — input (all `[keymap]`, engine-independent)
 
-Highest UX value. Same family as the v2.4 work: the application writes the query downstream
-and **blocks reading its stdin** until the answer arrives, so leaving it silent costs a
-timeout stall or a wrong detection. All **[bolt-on]** — scan the stream, reply on the input
-channel (the `SshCommand::Input` path `answer.rs` already uses).
+The remaining input gaps live entirely in `term::keymap`; none needs engine work, though two
+can read a mode the engine already tracks.
+
+| Missing | What it unblocks | Tag | Src |
+|---|---|---|---|
+| **DECKPAM application keypad** — the numpad should send `ESC O p…y` while an app enables app-keypad mode | the engine already tracks the mode (`set_keypad_application_mode`); the seam does not yet expose it and the numpad is decided by NumLock only | [seam+keymap] | [DEC] |
+| **xterm `modifyOtherKeys`** (`CSI >4;2m` → keys as `CSI 27;mod;code~`) | Ctrl/Shift combos on keys with no C0 code (Ctrl+1, Ctrl+;) reach editors | [keymap] (mode scan + encode) | [xterm] |
+| **Kitty keyboard protocol** (`CSI >flags u` … report `CSI code;mods;event u`) | full key + modifier + event disambiguation | [seam+keymap] | [vendor] |
+
+The engine *parses* the kitty keyboard mode and can report it (`report_keyboard_mode`), but only
+when its `kitty_keyboard` config flag is on, and the **encoding** of key presses into kitty's
+`u`-form is cmote's to write — the larger half of the work.
+
+---
+
+## 3. Still open — query → reply (niche; `[reply]`, some need DCS)
+
+The high-value query class is already closed: DA / DSR / DECRQM by the engine, the colour and
+pixel-size queries by cmote's listener. What the engine still does **not** answer:
 
 | Missing | What blocks on it | Reply shape | Tag | Src |
 |---|---|---|---|---|
-| **OSC 11 / 10 / 12 colour query** (`OSC 11;?`) | **vim / neovim query the background colour to choose a light-vs-dark scheme** — the most-felt gap after v2.4; misdetection, not just a stall | `OSC 11;rgb:RRRR/GGGG/BBBB ST` | [bolt-on] | [xterm] |
-| **OSC 4;n;? palette query** | apps probing a 256-palette entry | `OSC 4;n;rgb:… ST` | [bolt-on] | [xterm] |
-| **XTWINOPS reports** — `CSI 18t` (text area in cells), `CSI 14t` (pixels), `CSI 19t`, `CSI 11t`, title `CSI 21t` | image tools, pixel-size probes | `CSI 8;h;w t` etc. | [bolt-on] | [xterm] |
-| **DECRQM** request-mode (`CSI ?Ps$p`) | apps testing whether bracketed-paste / focus / a mode is supported | `CSI ?Ps;v$y` | [bolt-on] | [DEC][xterm] |
-| **DECRQSS** request-setting (`DCS $q … ST`) — report current SGR / scroll region / cursor style | editors & multiplexers restoring state | `DCS 1$r … ST` | [bolt-on]* | [DEC] |
-| **XTVERSION** (`CSI >q`) | modern feature detection | `DCS >\|cmote(ver) ST` | [bolt-on] | [xterm] |
-| **DA3 tertiary** (`CSI =c`) | terminal-id probes | `DCS !\|<hex> ST` | [bolt-on] | [xterm] |
-| **XTGETTCAP** (`DCS +q <hex> ST`) | apps querying terminfo caps directly | `DCS 1+r … ST` | [bolt-on] | [xterm] |
-| **Answerback** (ENQ `0x05`) | legacy identification | configurable string (usually empty) | [bolt-on] | [ECMA-48] |
+| **DA3 tertiary** (`CSI =c`) | terminal-id probes | `DCS !\|<hex> ST` | [reply] | [xterm] |
+| **XTVERSION** (`CSI >q`) | modern feature detection | `DCS >\|cmote(ver) ST` | [reply] | [xterm] |
+| **DECRQSS** request-setting (`DCS $q … ST`) | editors/multiplexers restoring SGR / scroll region / cursor style | `DCS 1$r … ST` | [reply] (needs a DCS reply path) | [DEC] |
+| **XTGETTCAP** (`DCS +q <hex> ST`) | apps querying terminfo caps directly | `DCS 1+r … ST` | [reply] (needs a DCS reply path) | [xterm] |
+| **Answerback** (ENQ `0x05`) | legacy identification | configurable string (usually empty) | [reply] | [ECMA-48] |
 
-\* DECRQSS/XTGETTCAP need a small **DCS** scanner (vt100 drops DCS entirely), and a few
-DECRQSS answers need internal state vt100 does not expose (e.g. the scroll-region bounds) —
-those specific answers are **[engine]**.
-
-**Related correctness bug:** a `CSI 6n` cursor report is **wrong under origin mode (DECOM)** —
-it should be relative to the scroll region. `vt100` tracks the DECOM flag but exposes no
-getter, so fixing this is **[engine]** (or a private DECOM tracker of our own).
+The engine's `identify_terminal` handles the primary and secondary DA intermediates only — the
+`=` (tertiary) intermediate is dropped — so DA3 falls to cmote if ever wanted. All of these are
+low UX value: modern applications rely on the DA / DECRQM answers that already work.
 
 ---
 
-## 3. Rendering / attribute gaps
+## 4. Still open — rendering / attributes
 
 | Missing | Note | Tag | Src |
 |---|---|---|---|
-| **Dim / faint** (SGR 2) | `vt100` *has* `cell.dim()`; our grid simply never reads it — draw the fg dimmed | [bolt-on] | [ECMA-48] |
-| **Italic** (SGR 3) | `vt100` *has* `cell.italic()`; grid ignores it. **Fira Mono ships no italic face** — needs a bundled italic mono or a synthesised slant | [bolt-on] + font | [ECMA-48] |
-| **Blink (5/6), Strikethrough (9), Conceal (8), Double-underline (21), Curly/undercurl (4:3), Underline-colour (58/59), Overline (53)** | `vt100` stores **none** of these bits | [engine] | [ECMA-48] / [xterm] (4:3, 58) |
-| **Cursor shape / style** DECSCUSR (`CSI Ps SP q`) — block / underline / bar, steady / blink | grid draws an inverse block only; vt100 never parses it | [bolt-on] (own tracker + grid) | [xterm][DEC] |
-| **DEC line-drawing charset** (`ESC(0` … SI/SO) | vt100 drops charset designation, so **ncurses / older apps that box-draw the VT100 way render literal letters (`lqqk`)** instead of borders | [bolt-on] as a compat-style charset translator, *or* [engine] | [DEC] |
-| **Double-width / double-height lines** DECDWL / DECDHL (`ESC#3-6`) | vt100 drops `ESC#` | [engine] | [DEC] |
+| **OSC 8 hyperlinks** (`OSC 8;;URI ST`, clickable) | the engine already parses and stores the URI per cell (`Cell::set_hyperlink`); the seam does not surface it and the grid does not render or click it — the data is there, the work is clickable rendering | [seam+grid] | [community] |
+| **Blink** (SGR 5/6) | the engine stores the bit; cmote draws steady **by choice** — it runs no animation timer (the same call made for the cursor). Could show a static marker; deliberately not animated | [policy] | [ECMA-48] |
+| **OSC 133 shell-integration** (semantic prompt marks) | niche; a stream scanner beside the cwd tracker could capture them | [seam] low pri | [community] |
 
 ---
 
-## 4. Modes / behaviours
+## 5. The new engine's own ceiling (`[engine-limit]`)
 
-| Missing | Note | Tag | Src |
-|---|---|---|---|
-| **Alternate-screen awareness** | vt100 exposes `alternate_screen()`; **cmote never reads it** — needed to keep scrollback primary-only and to gate alt-scroll | [bolt-on] | [xterm] |
-| **Autowrap toggle** DECAWM `?7` | hard-wired ON in vt100 | [engine] | [DEC] |
-| **Focus reporting** `?1004` (`CSI I` / `CSI O` on focus in/out) | vt100 does not track the mode; needs own scanner + iced window-focus events | [bolt-on] | [xterm] |
-| **Alternate-scroll** `?1007` (wheel → arrow keys on the alt screen) | depends on alt-screen awareness above | [bolt-on] | [xterm] |
-| **Custom tab stops** HTS / TBC | vt100 is fixed at every 8 columns, no stop table | [engine] | [ECMA-48] |
-| **Left / right margins** DECSLRM `?69h` (VT420) | vt100 has no horizontal margins | [engine] | [DEC] |
-| **REP** repeat `CSI Ps b` | vt100 drops it — the repeated glyphs vanish | [bolt-on] (expand in a rewriter) or [engine] | [ECMA-48] |
-| **Synchronized output** `?2026` (batch redraw to stop tearing) | safe to ignore today; a strict impl would buffer a frame | [bolt-on] low pri | [community] |
+`alacritty_terminal` 0.26 does not parse or represent these, so they would need an engine
+fork/upgrade or a scanner bolted on beside it. This is the whole of the remaining hard ceiling —
+short, and only images are high value:
 
----
-
-## 5. Input protocol gaps (all keymap-side — no engine needed)
-
-| Missing | Note | Tag | Src |
-|---|---|---|---|
-| **Modified named keys** — Ctrl/Shift/Alt + arrows / Home / End / F-keys → `CSI 1;<mod><L>` and `CSI <n>;<mod>~` | cmote drops the modifier on named keys today | [bolt-on] | [xterm] |
-| **F13–F24** | unmapped (`_ => None`) | [bolt-on] | [xterm] |
-| **DECKPAM application keypad** — app-keypad numpad should send `ESC O p…y` | vt100 exposes `application_keypad()`, **unused**; numpad decided by NumLock only | [bolt-on] | [DEC] |
-| **xterm `modifyOtherKeys`** (`CSI >4;2m` → keys as `CSI 27;mod;code~`) | needs a mode scanner (the app sets it) + encoder | [bolt-on] | [xterm] |
-| **Kitty keyboard protocol** (`CSI >flags u` … report `CSI code;mods;event u`) | larger; disambiguates every key + modifier | [bolt-on] | [vendor] |
+- **Sixel / ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — the crate carries **no
+  graphics support at all**, so this needs both engine work *and* a compositor in the renderer.
+  `[DEC]` / `[vendor]`. The one genuinely high-value item here.
+- **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
+  (single wide glyphs are; whole-line doubling is not). `[DEC]`.
+- **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
+  (`set_scrolling_region(top, bottom)`). `[DEC]`.
+- **DRCS soft fonts, VT320 status line, VT420 rectangular ops** (DECCRA / DECFRA / DECERA, and
+  the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`.
+- **Synchronized output `?2026`** — not observed in the crate; safe to ignore today, a strict
+  implementation would buffer a frame. `[community]`, low pri.
 
 ---
 
-## 6. Graphics / images / hyperlinks (the truly "exotic")
+## 6. Deliberately excluded (policy, not gap)
 
-All need **DCS/APC** parsing (vt100 drops all of it) plus a compositor, so **[engine]** +
-real renderer work, except where noted:
-
-- **Sixel**, **ReGIS** — `[DEC]`.
-- **Kitty graphics protocol**, **iTerm2 inline images (OSC 1337)** — `[vendor]`.
-- **OSC 8 hyperlinks** (`OSC 8;;URI ST`, clickable) — `[community]`. A stream **[bolt-on]**
-  scanner can capture them, but clickable rendering in the grid is the work.
-- **OSC 133 shell-integration** (semantic prompt marks) — `[community]`, niche; a **[bolt-on]**
-  scanner (cmote already scans OSC for the cwd).
-- **DRCS soft fonts**, **VT320 status line**, **VT420 rectangular ops** (DECCRA / DECFRA /
-  DECERA, and the **DECRQCRA checksum query** some conformance apps block on) — `[DEC]`,
-  **[engine]**.
+**OSC 52 clipboard read/write** — the engine surfaces it as `Event::ClipboardLoad` /
+`ClipboardStore`; cmote **drops both on purpose** (§9 / §12 / §23): a remote could read or
+poison the local clipboard, and cmote touches the clipboard only on an explicit *local* action.
+The **bell** and any remote colour *set* request are dropped for the same "no remote-driven side
+effects" reason. Answering an OSC 52 read query would be an injection vector and stays out.
 
 ---
 
-## 7. Scrollback
+## 7. Recommendation
 
-`term::SCROLLBACK = 0` — a **cmote choice**, not a vt100 limit (`Screen::set_scrollback`
-exists). **[bolt-on]**, but the real work is the UI: a scrollbar, wheel handling off the
-alt screen, and extending mouse selection across the scrolled-off region.
+With the engine swap done, the cheap, self-contained wins that remain, ranked by UX bite:
 
----
+1. **DECKPAM application keypad** — small; the engine already tracks the mode, so this is a seam
+   getter plus a keymap branch, exactly like DECCKM.
+2. **xterm `modifyOtherKeys`** — a mode scanner + encoder; unblocks Ctrl-combos editors expect.
+3. **OSC 8 hyperlinks** — surface the per-cell URI the engine already stores, then render it
+   clickable in the grid.
+4. **Kitty keyboard protocol** — the largest keymap item; full key disambiguation.
 
-## 8. Deliberately excluded (policy, not gap)
-
-**OSC 52 clipboard read/write** — kept out on purpose (§9, §12, §16): a remote could read or
-poison the local clipboard, and cmote only touches the clipboard on an explicit *local*
-action. Documented and intentionally unimplemented. Answering the OSC 52 `?` *read* query
-would be an injection vector and stays out for the same reason the OSC title/clipboard query
-variants are unanswered in `answer.rs`.
-
----
-
-## 9. Recommendation — two independent tracks
-
-1. **Bolt-ons (do regardless of the engine question).** Ranked by UX bite, each an A-sized,
-   self-contained, unit-tested module that survives a later engine swap:
-   1. **OSC 11 background-colour query** (vim / neovim light-vs-dark) — the clear next win.
-   2. **Modified-key + F13–F24 encoding** (keymap only).
-   3. **Focus reporting `?1004`**.
-   4. **Cursor shape DECSCUSR** (own tracker + grid).
-   5. **Window title from OSC 0/2** (cmote already scans OSC; today only cwd feeds the title).
-   6. **Dim + italic** rendering (italic needs a font).
-   7. **DECRQM / XTWINOPS / XTVERSION** replies.
-
-2. **The engine swap to `alacritty_terminal`.** The only move that unlocks, in one step:
-   blink / strikethrough / conceal / undercurl / underline-colour, the DEC line-drawing
-   charset, DCS / sixel, custom tab stops, the autowrap toggle, double-width lines,
-   origin-mode-correct CPR, and the rectangular ops. Large — it touches the whole
-   render + state layer — but it is the documented ceiling-raiser (PLAN §16), and none of the
-   track-1 work is wasted against it.
-
-For "support *any* documented app UX," track 2 is unavoidable. Track 1 is where the cheap,
-high-value wins live and can start immediately.
+The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
+kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
+rectangular ops) are legacy and rare. For "support *any* documented app UX", graphics is the one
+outstanding ceiling-raiser; everything else above is A-sized and engine-independent.
 
 ---
 
@@ -205,49 +185,47 @@ high-value wins live and can start immediately.
 
 Audited file:line anchors behind the claims above, for later re-checking.
 
-### `vt100` 0.16.2 (registry crate — `…/vt100-0.16.2/src/`)
+### `alacritty_terminal` 0.26.0 (registry crate — `…/alacritty_terminal-0.26.0/src/`)
 
-- **Pure sink, no host replies.** `parser.rs` `process()` returns `()`; the `*_formatted`
-  / `*_diff` methods in `term.rs` re-serialise *our own* screen for replay, not query
-  answers. Unmatched control functions → `callbacks.rs` no-op `unhandled_*` hooks.
-- **CSI present** (`perform.rs` `csi_dispatch`, impls in `screen.rs`): `@ A B C D E F G H
-  J K L M P S T X d m r` and window-op `t` **subop 8 only**; private `?J ?K ?h ?l`.
-- **CSI absent** (→ `unhandled_csi`): `f` HVP, `n` DSR, `c` DA, `g` TBC, `b` REP,
-  `` ` `` HPA, `a` HPR, `e` VPR, `q`/`SP q` DECSCUSR, `p`-family (DECSTR/DECRQM), `s`/`u`,
-  `Z` CBT, and **any non-`?` intermediate** (`>c`, `=c`, `$p`, `!p`, `SP q`).
-- **SGR** (`screen.rs` `sgr`, store `attrs.rs` — a 5-bit `mode`): present = 0,1,2,3,4,7 +
-  off-codes + 30-49 + 90-107 (16 / 256 / truecolor, `:` and `;` forms). **Absent** = 5/6
-  blink, 8 conceal, 9 strike, 21 double-underline, 4:3 undercurl, 58/59 underline-colour,
-  53 overline.
-- **ESC present**: `7 8 = > M c` (+ vendor `ESC g` visual bell). **Absent**: `ESC( ) * +`
-  charset (so **DEC Special Graphics G0/G1 unmapped**), `ESC#3-6` line size, `ESC H` HTS.
-- **DEC private modes present** with getters: 1, 25, 47, 1049, 1000/1002/1003, 1005/1006,
-  2004, and 9. Mode 6 (DECOM) is stored but **no getter**. **Absent**: 7 (DECAWM — wrap
-  hardwired on), 12, **1004 focus**, 1007, 1015, 1047, 3, 5, 2026.
-- **OSC**: only 0/1/2 (→ discarded callbacks, **no `title()` getter**) and 52 (→ callback).
-  **Absent**: 4, 7, 8, 9;9, 10/11/12 (+ their `?` queries). 
-- **DCS**: `Perform::hook/put/unhook` unimplemented → **all DCS silently consumed** (no
-  sixel, no DECRQSS, no XTGETTCAP).
-- **`Cell` getters**: `contents is_wide is_wide_continuation fgcolor bgcolor bold dim
-  italic underline inverse` — no blink / strike / conceal / underline-colour / hyperlink.
+- **Generates host replies** via `Event::PtyWrite`. `identify_terminal` (`term/mod.rs:1257`)
+  answers **primary** DA (`ESC[?6c`) and **secondary** DA (`ESC[>0;<ver>;1c`) — the `=`
+  (tertiary) intermediate falls to a debug no-op. `device_status` (DSR, `term/mod.rs:1332`) and
+  `report_mode` (DECRQM, `term/mod.rs:2135`) reply likewise.
+- **Kitty keyboard**: `report_keyboard_mode` (`term/mod.rs:1275`) reports the active mode, but
+  **guards on `config.kitty_keyboard`** — off unless enabled; the mode is tracked on a
+  `keyboard_mode_stack`.
+- **DECKPAM**: `set_keypad_application_mode` (`term/mod.rs:2180`) — the engine tracks the
+  application-keypad mode.
+- **XTWINOPS size reports**: `text_area_size_pixels` (`term/mod.rs:2259`) and
+  `text_area_size_chars` (`term/mod.rs:2268`).
+- **OSC 8 hyperlinks**: stored per cell — `Cell::set_hyperlink` (`term/cell.rs:202`), the
+  handler at `term/mod.rs:1874`.
+- **Scroll region is vertical only**: `set_scrolling_region(top, bottom)` (`term/mod.rs:2155`) —
+  no horizontal (left/right) margins.
+- **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
+  `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
+  crate source.
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 
-- **`ui/grid.rs`** — `cell_style` (grid.rs:712) maps a `Cell` to a `CellStyle` carrying only
-  `fg bg bold underline`. Reads `bold()` (:718), `underline()` (:719), `inverse()` (:723);
-  colour depth full (ANSI_16 / 256-cube / `Rgb`, :96-116, :748). **Ignores `dim()` and
-  `italic()` though vt100 exposes them.** Cursor = inverse block via `inverse ^ is_cursor`
-  (:723-726); no cursor-shape. Braille (:568) and rounded corners (:550) drawn from
-  geometry; Fira Mono Medium/Bold only (app.rs:31,42), **no italic face**.
-- **`term/mod.rs`** — `Terminal` exposes `screen() cwd() resize() process()`; `process`
-  returns the DSR/DA reply bytes (mod.rs:78). `SCROLLBACK = 0` (mod.rs:29). Does **not**
-  surface title, alternate-screen, cursor shape, or application-keypad.
-- **`term/keymap.rs`** — F1–F12 only (F13–F24 → `None`); modifiers dropped on named keys;
-  **no** modifyOtherKeys / kitty / DECKPAM / focus report / answerback.
-- **`term/mouse.rs`** — modes `?9/1000/1002/1003`; encodings classic / UTF-8 / SGR. **No**
-  `?1015`, **no** `?1004` focus.
-- **`app.rs`** — `App::title` (app.rs:2573) uses the endpoint + `Terminal::cwd()` (OSC
-  7/9;9 tracker) only, **never a vt100/OSC-0/2 title**. **No** XTWINOPS handling. Every
-  upstream byte path is one of six `SshCommand::Input` sites (resume `cd`, the answer.rs
-  replies, keyboard, mouse reports, paste, programmatic `cd`); only the replies site answers
-  host queries.
+- **`term/mod.rs`** — the `Replies` listener answers the events that expect a report and drops
+  the rest (`~:228-258`): `Event::PtyWrite` (the engine's DA / DSR / DECRQM / cursor-position,
+  accumulated whole), `ColorRequest` (OSC 10 / 11 / 12 / 4, resolved against cmote's scheme via
+  `report_color`), `TextAreaSizeRequest` (`CSI 14t`, from the grid + cell pixel size),
+  `Title` / `ResetTitle` (OSC 0 / 2, sanitized). **Dropped**: `ClipboardLoad` / `ClipboardStore`
+  (OSC 52), the bell, and colour *set* requests. `SCROLLBACK = 10_000`. The seam hides the
+  engine types behind `Terminal` + `ScrollMotion`.
+- **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
+  `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
+  `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`. `Screen` getters:
+  `size`, `cursor_position`, `display_offset`, `history_size`, `hide_cursor`, `cursor_shape`,
+  `application_cursor`, `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`,
+  `cell`. **Not yet surfaced**: application-keypad, per-cell hyperlink, blink.
+- **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
+  **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
+  `letter_key` / `tilde_key` shape the two key families), the numpad NumLock heuristic, and the
+  bracketed-paste terminator scrub. **Absent**: DECKPAM, `modifyOtherKeys`, kitty keyboard.
+- **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
+- **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
+  (the reply synthesizer) — the engine parses every spelling and answers every query they used
+  to cover.

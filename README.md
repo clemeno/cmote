@@ -51,7 +51,10 @@ references below (§n) point into it.
   (`CSI c`), "what is your background colour?" (`OSC 11`, which lets an editor pick a light or
   dark colourscheme to match), "how big is your screen?" — that otherwise stall vim, tmux and
   less on a startup timeout or leave them guessing; cmote answers each with what it actually
-  shows (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them (§9).
+  shows (§9, §23). **F1-F12** are mapped as the pty's terminfo entry describes them, and a
+  **modifier held on a named key** now goes through: Ctrl+arrow for word-motion, Shift+arrow
+  to select by line, Ctrl+Delete, modified F-keys, and F13-F24 all send the sequence xterm
+  would, where before the modifier was dropped (§9).
 - **Text styling comes through** — colour (256-colour and truecolor), bold, faint, reverse
   video, concealed text, strikethrough, and every underline style a program reaches for:
   single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
@@ -201,7 +204,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
-| Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode) and **F1-F12** included |
+| Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, and **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys), F13-F24 included |
 | Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
@@ -331,8 +334,9 @@ It also audits the dependency tree: `cargo audit` for RustSec advisories and
 Automated coverage: key parsing (encrypted/unencrypted OpenSSH, RSA and Ed25519
 `.ppk`, unsupported-key error path), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
-mapping (including application-cursor-mode arrow keys, CSI vs SS3, and every F1-F12
-against the terminfo entry), the terminal engine's wiring end to end (an `f`-spelling move
+mapping (including application-cursor-mode arrow keys, CSI vs SS3, every F1-F12
+against the terminfo entry, and the modified named keys — Ctrl/Shift/Alt + arrows /
+navigation / F-keys and F13-F24), the terminal engine's wiring end to end (an `f`-spelling move
 lands in its own cell, a wide glyph reserves two columns, and the engine's query replies are
 drained and sent back — device status, device attributes, a live cursor-position report, the
 save/jump/report/restore size-probe reporting the clamped corner, and a query split across
@@ -610,6 +614,12 @@ the app enables it and cmote switches its arrow keys to the SS3 form so they reg
   the pointer belongs to btop again. Quit with `q`.
 - Run **htop** and **mc** (midnight commander) for a second opinion on both — mc lives on
   F1-F10 and is entirely mouse-driven.
+- **Modified keys.** At the shell (bash/zsh), hold **Ctrl** and press **Left** / **Right**:
+  the cursor should jump a whole word, not one character — this is the modified named-key
+  encoding (`ESC[1;5C`), which was silently dropped before. In `vim`, **Shift+arrow** should
+  extend a visual selection. (Bare **Shift+PageUp/PageDown/Home/End** still page cmote's own
+  scrollback, §23 — that binding wins over the shell on purpose; the Ctrl/Alt variants reach
+  the shell.)
 
 **13. Copying, confirmed.** Click the copy button in the **files pane header**, then in the
 **folder-tree header**, then the one on a selected entry's **details popup**. Each should

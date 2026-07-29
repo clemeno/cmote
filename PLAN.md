@@ -440,6 +440,21 @@ Turning a raw byte stream into a screen.
   the **physical** code plus the presence of `text` — a numpad number key that
   produced text sends that character; otherwise it falls through to the navigation
   mapping. Without this, typing e.g. `pm2` on the numpad emitted arrow keys.
+  **Modified named keys**: a Ctrl/Shift/Alt held with an arrow, Home/End, a `~`
+  navigation key, or an F-key is now encoded the xterm way, where before the modifier
+  was dropped on named keys. The parameter is `1 + Shift(1) + Alt(2) + Ctrl(4)` (so
+  Ctrl = 5, Ctrl+Shift = 6, all three = 8), exactly what terminfo's `kRIT5`, `kf13`, …
+  spell. The letter-final keys (arrows, Home `H`, End `F`, F1-F4 `P`-`S`) take the CSI
+  `ESC [ 1 ; <mod> <final>` form, which **overrides DECCKM** — matching xterm, so
+  Ctrl+Right is `ESC [ 1 ; 5 C` in both cursor modes — while the `~` keys insert the
+  same parameter (`ESC [ <n> ; <mod> ~`, e.g. Ctrl+Delete `ESC [ 3 ; 5 ~`). Word-motion
+  (Ctrl+arrow) and select-by-line (Shift+arrow) now reach a remote editor. **F13-F24**
+  are mapped too, to the terminfo `kf13`…`kf24` forms — which xterm defines as the
+  Shift-modified F1-F12 sequences, so they are fixed. One data-driven encoder builds it
+  all: `modifier_param` computes the parameter, and `letter_key` / `tilde_key` shape the
+  two key families. Caveat: the four scrollback keys — **Shift** + PageUp/PageDown/Home/End —
+  are claimed by the app layer for cmote's own history (§23) before `encode`, so their
+  Ctrl/Alt variants reach the shell but the Shift form is intentionally cmote's.
 - **Paste** (done, v1.1): `term::keymap::encode_paste` turns clipboard text into input
   bytes. When the remote enabled **bracketed paste** (DECSET 2004 — read from
   `Screen::bracketed_paste()`) the text is framed by `ESC[200~`…`ESC[201~` so the shell
@@ -746,7 +761,10 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
   save/jump/report/restore size-probe reporting the clamped corner, and a query split across
   two chunks answered on completion.
 - **Input mapping**: key events → correct byte sequences (Enter, Ctrl-C, arrows, and every
-  F1-F12 in both cursor modes). Pointer events likewise (`term/mouse.rs`): each encoding,
+  F1-F12 in both cursor modes), plus the **modified named keys** — the summed modifier
+  parameter, a modified arrow overriding DECCKM to the CSI form, the `~`-key parameter
+  insertion, F1-F4 switching SS3→CSI when modified, F13-F24 at their terminfo forms, and a
+  bare key left unchanged. Pointer events likewise (`term/mouse.rs`): each encoding,
   each mode's gating, the classic form's 223-column ceiling, the wheel, and the modifier
   bits.
 - **Grid geometry** (`ui/grid.rs`): the run packing (a wide glyph sealed into two columns,
@@ -909,10 +927,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   history, typing snaps back to the live bottom, and a thin, read-only **scroll indicator** in the
   grid's right gutter shows position and depth while the view is scrolled up. That was the last §23
   follow-up, so §23 (the engine swap and everything it unblocked) is complete. The full audited
-  inventory of what the terminal still lacks to drive *any* documented app UX — every gap
-  tagged **[bolt-on]** (addable beside the engine, like `term::cwd`'s OSC scanner) or
-  **[engine]** (was the swap, now done) — grounded in ECMA-48 / the DEC VT manuals / xterm
-  `ctlseqs`, with a `file:line` evidence appendix, lives in
+  inventory of what the terminal still lacks to drive *any* documented app UX — rewritten
+  against the `alacritty_terminal` baseline now that the swap is done, with each remaining gap
+  grouped by *where the work lives* (`[keymap]`, `[reply]`, `[seam+grid]`, or the short
+  `[engine-limit]` ceiling), grounded in ECMA-48 / the DEC VT manuals / xterm `ctlseqs`, with a
+  `file:line` evidence appendix — lives in
   [`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md).
 - **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
   selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
