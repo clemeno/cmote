@@ -634,7 +634,7 @@ impl App {
 			Message::GridRightPressed => self.menu = Some(self.pointer),
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
-			Message::CopyPressed => return self.on_copy(),
+			Message::CopyPressed => return self.on_copy_rich(),
 			Message::LinkOpen(uri) => {
 				self.menu = None;
 				self.follow_link(&uri);
@@ -1418,7 +1418,7 @@ impl App {
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
 	/// subscription is added only there), so no extra screen check is needed.
 	fn on_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
-		use iced::keyboard::key::Named;
+		use iced::keyboard::key::{Code, Named, Physical};
 
 		// While the Disconnect confirmation modal is open, keystrokes belong to the
 		// dialog (notably Ctrl+C to copy the selected message text), not the remote
@@ -1542,6 +1542,40 @@ impl App {
 			Focus::Tree => return self.on_tree_key(&key),
 			Focus::Files => return self.on_files_key(&key, modifiers),
 			Focus::Terminal => {}
+		}
+
+		// Copy / paste keyboard shortcuts, with the shell focused (§10). Taken before the key is
+		// encoded for the remote, so a terminal binding wins over the program — the way xterm and
+		// kitty keep these for the terminal itself. Matched on the PHYSICAL key, so the shortcut
+		// holds on any layout (AZERTY, Dvorak, …), not only where C / V sit on QWERTY. Alt / Logo
+		// held means it is some other combination, so leave those for the shell.
+		if modifiers.control() && !modifiers.alt() && !modifiers.logo() {
+			match physical_key {
+				// Ctrl+C copies the selection as rich HTML (colour + attributes), but ONLY when
+				// something is selected; with no selection it must fall through to the shell as the
+				// interrupt (ETX / SIGINT). Ctrl+Shift+C always copies, as plain text only. A rich
+				// copy then clears the selection, so an immediate second Ctrl+C is the interrupt,
+				// not a re-copy — a stale highlight can never silently swallow an intended Ctrl+C.
+				Physical::Code(Code::KeyC) => {
+					if modifiers.shift() {
+						return self.on_copy();
+					}
+					if self
+						.selection
+						.is_some_and(|selection| !selection.is_empty())
+					{
+						let task = self.on_copy_rich();
+						self.selection = None;
+						return task;
+					}
+					// no selection: fall through so Ctrl+C reaches the shell as the interrupt
+				}
+				// Ctrl+V and Ctrl+Shift+V both paste plain text: a terminal takes bytes for the
+				// remote shell, so there is no styled paste to distinguish (pasting escape codes
+				// would be a paste-injection hazard, the one the bracketed-paste strip guards).
+				Physical::Code(Code::KeyV) => return self.on_paste(),
+				_ => {}
+			}
 		}
 
 		// Shift + PageUp / PageDown page through the shell's own scrollback, and Shift + Home /
@@ -2010,6 +2044,39 @@ impl App {
 			return iced::Task::none();
 		}
 		self.copy_to_clipboard(text)
+	}
+
+	/// Copy the current selection to the clipboard as styled HTML with a plain-text fallback
+	/// (§10). The HTML carries each cell's colour and attributes, so a paste into a rich editor
+	/// keeps the terminal's look; the plain text rides alongside for editors — and the shell
+	/// itself — that read only text. Bound to Ctrl+C (with a selection) and the context menu's
+	/// Copy. If the rich write fails (the OS clipboard was briefly held by another app), it falls
+	/// back to iced's plain-text write so a copy is never silently lost.
+	fn on_copy_rich(&mut self) -> iced::Task<Message> {
+		self.menu = None;
+		let (Some(selection), Some(terminal)) = (self.selection, self.terminal.as_ref()) else {
+			return iced::Task::none();
+		};
+		let plain = selection.extract(terminal.screen());
+		if plain.is_empty() {
+			return iced::Task::none();
+		}
+		let html = crate::ui::richcopy::to_html(&selection, terminal.screen());
+
+		self.snackbar = Some(Snackbar {
+			message: "Copied to clipboard.".to_owned(),
+			shown_at: std::time::Instant::now(),
+		});
+
+		// A fresh arboard handle per copy writes the HTML and its plain-text alternate together,
+		// and holds no clipboard open between copies (a held clipboard would block other apps). On
+		// any error, fall back to a plain-text write so the copy still lands on the clipboard.
+		let written = arboard::Clipboard::new()
+			.and_then(|mut clipboard| clipboard.set_html(html, Some(plain.clone())));
+		match written {
+			Ok(()) => iced::Task::none(),
+			Err(_) => iced::clipboard::write(plain),
+		}
 	}
 
 	/// Put `text` on the system clipboard and raise the copy-confirmation toast (§10).

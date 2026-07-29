@@ -664,6 +664,26 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
     starts and no menu opens. **Shift** hands the pointer back to this layer. A click that
     went to the program still moves the keyboard focus to the shell (§20) and closes any
     open menu, exactly as a click on the grid does.
+  - **Copy / paste keyboard shortcuts + styled copy** (done, v3.0): copy and paste are also
+    on the keyboard, taken in `on_key` *before* the key is encoded for the remote so a
+    terminal binding wins over the program — the way xterm and kitty reserve theirs. Matched
+    on the **physical** key, so they hold on any layout, not just QWERTY. **Ctrl+C** copies —
+    but only when a selection exists; with none it falls straight through to the shell as the
+    interrupt (ETX / SIGINT), and a copy then **clears the selection** so an immediate second
+    Ctrl+C interrupts rather than re-copying (a stale highlight can never swallow an intended
+    interrupt). Ctrl+C is a **rich** copy: `ui::richcopy` serialises the selected cells to
+    HTML carrying each cell's resolved colour (through the shared `palette`, so it matches the
+    grid), reverse video, faint, conceal, bold, italic, underline and strike-through, wrapped
+    in one `<pre>` whose defaults are the terminal's own; `arboard` writes that HTML **and** a
+    plain-text alternate together, so a paste into a rich editor keeps the look while a
+    plain-text reader (and the shell) still gets the characters. iced's own `clipboard::write`
+    is plain-text only, hence the dedicated backend; a failed rich write falls back to it so a
+    copy is never lost. **Ctrl+Shift+C** copies the same selection as **plain text only**.
+    **Ctrl+V** and **Ctrl+Shift+V** both paste plain text: a terminal takes bytes for the
+    remote's stdin, so there is no styled paste to distinguish — pasting escape codes would be
+    the very paste-injection the bracketed-paste strip guards against (§9). The context menu's
+    and status bar's **Copy** now route through the rich path too, for one copy behaviour
+    whatever the trigger.
   - **Folder tree beside the grid** (done, v2.0): the right of the screen holds the remote
     folder explorer, with a draggable splitter between it and the grid and a status-bar
     button that hides it. Its width comes out of the grid's own width, so the same

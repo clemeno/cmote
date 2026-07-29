@@ -19,6 +19,14 @@ license = "MIT"
 # dead weight, not a C dependency.
 alacritty_terminal = "0.26"
 anyhow = "1.0.104"
+# Writes styled HTML to the system clipboard for a rich Ctrl+C (PLAN §10): the terminal grid
+# carries per-cell colour and attributes, so a copy can preserve the look when pasted into a
+# rich editor, with a plain-text fallback riding alongside for editors (and the shell) that read
+# only text. iced's own `clipboard::write` is plain-text only, hence a dedicated backend here.
+# `default-features = false` drops the `image-data` feature (and the heavy `image` crate) we do
+# not use. Pure Rust on both targets — Windows via `clipboard-win`, macOS via `objc2`, both
+# already in the tree through iced — so the no-C-toolchain portable build holds (PLAN §11).
+arboard = { version = "3", default-features = false }
 # `advanced` unlocks the `Widget` trait, so the terminal grid can be one custom widget
 # that draws every cell at an exact pixel position (PLAN §11) instead of a widget per
 # cell — the only way a fallback glyph cannot shift the row it is on.

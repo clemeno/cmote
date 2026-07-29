@@ -82,8 +82,11 @@ references below (§n) point into it.
   are in the history and how deep it runs. A full-screen program (vim, tmux, less) keeps its own
   pages, so scrolling there is theirs, not cmote's (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
-  **Paste** — from the status-bar buttons or a right-click menu. Paste is
-  **bracketed-paste** aware and strips the paste-injection terminator (§9-§10).
+  **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Ctrl+C**
+  copies (when a selection exists; otherwise it is the shell's interrupt) as **styled HTML**
+  that keeps the terminal's colours and attributes when pasted into a rich editor, with a
+  plain-text fallback; **Ctrl+Shift+C** copies plain text only. **Ctrl+V** / **Ctrl+Shift+V**
+  paste, **bracketed-paste** aware and stripping the paste-injection terminator (§9-§10).
 - **Clickable links** — a program that marks text as a hyperlink (the OSC 8 escape, as
   `ls --hyperlink` and many build tools do) makes it followable: **Ctrl+click** opens it in
   your browser, or right-click for **Open link / Copy link**. cmote opens only http, https and
@@ -213,7 +216,10 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Drag across the grid | Select text (highlighted in place) |
 | Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory); on a link cell, **Open link / Copy link** too |
 | **Ctrl+click** a link | Open an OSC 8 hyperlink in the browser (http/https/mailto only) |
-| **Ctrl+C** / **Ctrl+V** via the buttons or menu | Copy the selection, paste (bracketed-paste aware) |
+| **Ctrl+C** | Copy the selection as styled HTML + plain text (rich paste keeps colours); with no selection, the shell's interrupt instead. Clears the selection after copying |
+| **Ctrl+Shift+C** | Copy the selection as plain text only |
+| **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
+| **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
 | Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys, F13-F24 included), **modifyOtherKeys** Ctrl/Alt combos (`CSI 27;…~`), and the **kitty keyboard protocol** (`CSI u`, incl. key-release events) when an editor turns either mode on |

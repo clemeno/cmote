@@ -12,7 +12,7 @@
 // last row — not a rectangular block. That matches how xterm and friends behave
 // and is what users expect when dragging across wrapped output.
 
-use crate::term::screen::Screen;
+use crate::term::screen::{Cell as ScreenCell, Screen};
 
 /// A single grid position. `row`/`col` are 0-based cell coordinates, the same
 /// space `screen::Screen::cell` and the renderer use. `Default` is the origin cell,
@@ -89,49 +89,76 @@ impl Selection {
 		start.order_key() <= here && here <= end.order_key()
 	}
 
-	/// Extract the selected text from `screen` as the clipboard string (§10).
-	/// Walks each selected row, takes the column span that row contributes (the
-	/// tail of the first row, whole middle rows, the head of the last row), reads
-	/// each cell's glyph, and joins rows with `\n`. Trailing blanks on every line
-	/// are trimmed — terminal cells are blank-padded to the grid width, and copying
-	/// that padding would paste a wall of spaces.
-	pub fn extract(&self, screen: Screen<'_>) -> String {
+	/// The selected cells, row by row, in reading order (§10). Each row is the column span it
+	/// contributes — the tail of the first row, whole middle rows, the head of the last — with
+	/// the trailing half of every wide glyph dropped (its lead cell owns the glyph) and trailing
+	/// blank cells trimmed, since a terminal pads every row to the full width and copying that
+	/// padding would paste a wall of spaces.
+	///
+	/// This is the shared geometry behind both the plain-text copy (`extract`) and the styled
+	/// HTML copy (`ui::richcopy`), so the two can never disagree on which cells a selection
+	/// covers. It hands back owned cells (they are cheap and short-lived for a copy), keeping
+	/// this module free of any clipboard or HTML concern.
+	pub fn selected_rows(&self, screen: Screen<'_>) -> Vec<Vec<ScreenCell>> {
 		if self.is_empty() {
-			return String::new();
+			return Vec::new();
 		}
 		let (start, end) = self.bounds();
 		let (_, cols) = screen.size();
 		let last_col = cols.saturating_sub(1);
 
-		let mut lines: Vec<String> = Vec::new();
+		let mut rows: Vec<Vec<ScreenCell>> = Vec::new();
 		for row in start.row..=end.row {
-			// The column range this row contributes: clipped to the start cell on the
-			// first row and the end cell on the last, full width in between.
+			// The column range this row contributes: clipped to the start cell on the first row
+			// and the end cell on the last, full width in between.
 			let from = if row == start.row { start.col } else { 0 };
 			let to = if row == end.row { end.col } else { last_col };
 
-			let mut line = String::new();
+			let mut cells: Vec<ScreenCell> = Vec::new();
 			let mut col = from;
 			while col <= to {
-				let cell = screen.cell(row, col);
-				// A wide glyph's trailing half owns no text of its own — skip it so the
-				// lead cell's glyph is not doubled.
-				if cell
-					.as_ref()
-					.is_some_and(|cell| cell.is_wide_continuation())
-				{
+				let Some(cell) = screen.cell(row, col) else {
+					col += 1;
+					continue;
+				};
+				// A wide glyph's trailing half owns no glyph of its own — skip it so the lead
+				// cell's glyph is not doubled.
+				if cell.is_wide_continuation() {
 					col += 1;
 					continue;
 				}
-				match &cell {
-					Some(cell) if cell.has_contents() => line.push_str(cell.contents()),
-					// An empty cell is a space; blank runs get trimmed off the end below.
-					_ => line.push(' '),
-				}
+				cells.push(cell);
 				col += 1;
 			}
-			lines.push(line.trim_end().to_string());
+			// Trim the row's trailing blank padding (see the doc comment).
+			while cells.last().is_some_and(|cell| !cell.has_contents()) {
+				cells.pop();
+			}
+			rows.push(cells);
 		}
+		rows
+	}
+
+	/// Extract the selected text from `screen` as the clipboard string (§10). Walks the shared
+	/// `selected_rows` geometry, reads each cell's glyph (a blank cell is a space), and joins
+	/// rows with `\n`. Trailing blanks are already trimmed by `selected_rows`, so copying never
+	/// pastes the grid's width-padding.
+	pub fn extract(&self, screen: Screen<'_>) -> String {
+		let lines: Vec<String> = self
+			.selected_rows(screen)
+			.iter()
+			.map(|cells| {
+				let mut line = String::new();
+				for cell in cells {
+					if cell.has_contents() {
+						line.push_str(cell.contents());
+					} else {
+						line.push(' ');
+					}
+				}
+				line
+			})
+			.collect();
 		lines.join("\n")
 	}
 }
