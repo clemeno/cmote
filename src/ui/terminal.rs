@@ -72,6 +72,25 @@ pub const UPLOAD_CLASH_BODY: &str = "Some of these files are already in the dest
 /// give — including cancelling the batch outright.
 pub const DOWNLOAD_EXISTS_BODY: &str = "These files are already in the folder you picked. Skipping leaves the local copies alone, saving alongside adds a -1 to the name, and replacing overwrites them — replaced files are not recoverable. Nothing has been downloaded yet.";
 
+/// The body of the "new folder" dialog (§18). `app` appends the folder it will be made in. The
+/// name goes in the field below; Enter there, or the Create button, sends it.
+pub const NEW_FOLDER_DIALOG_BODY: &str = "A new folder is created inside the directory below. Type its name — no slashes, since that would put it somewhere else.";
+
+/// The widget id of the "new folder" dialog's name field, so `app` can focus it as the dialog
+/// opens (§18) — the name is the one thing to type, and Enter in it creates the folder.
+pub const NEW_FOLDER_INPUT_ID: &str = "new-folder-name";
+
+/// The body of the delete confirmation (§18), followed by the names being removed. Deleting is
+/// not undoable and a folder takes everything inside it, so the warning is stated plainly before
+/// the list — the same caution the home list's own delete carries (§14).
+pub const DELETE_DIALOG_BODY: &str = "Delete these from the server? This cannot be undone — a folder is removed with everything inside it.";
+
+/// The body of a recursive transfer's file-collision prompt (§17, §19), followed by the name of
+/// the file already there. Asked one file at a time as the tree is walked: overwrite or skip just
+/// this one, keep both (a -1 copy beside it), settle every later collision the same way at once,
+/// or cancel the whole transfer — files already copied stay.
+pub const CONFLICT_DIALOG_BODY: &str = "A file with this name is already at the destination. Choose what to do — replaced files are not recoverable. This applies as you go; \"all\" settles every remaining collision the same way.";
+
 /// Everything the status bar and the modals need to know about the upload feature
 /// (§17), grouped so `view` keeps a readable signature. `file_count` is how many local
 /// files are picked (zero disables Upload) and `first_file` the first one's name, so the
@@ -112,6 +131,13 @@ pub struct Modals<'a> {
 	/// The same, for an upload batch (§17). Separate flag because the two dialogs word the
 	/// question and wire their answers differently, even though the chrome is shared.
 	pub upload_clash: bool,
+	/// The "new folder" dialog's typed name when it is open, `None` when closed (§18). Carries the
+	/// name rather than a bare bool because the dialog's field draws from it.
+	pub new_folder: Option<&'a str>,
+	/// Whether the delete confirmation is open (§18).
+	pub pending_delete: bool,
+	/// Whether a recursive transfer's file-collision prompt is open (§17, §19).
+	pub transfer_conflict: bool,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -142,6 +168,9 @@ pub fn view<'a>(
 		confirm_disconnect,
 		clash,
 		upload_clash,
+		new_folder,
+		pending_delete,
+		transfer_conflict,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -275,6 +304,27 @@ pub fn view<'a>(
 			crate::app::ClashChoice::Cancel,
 		)));
 		layers.push(upload_clash_panel(dialog_body, drag));
+	}
+	// The "new folder" dialog (§18): the body plus a name field. Every dismissal route cancels,
+	// so backing out creates nothing.
+	if let Some(name) = new_folder {
+		layers.push(crate::ui::dialog::backdrop(Message::NewFolderCancelled));
+		layers.push(new_folder_panel(dialog_body, name, drag));
+	}
+	// The delete confirmation (§18): the ✕ and the backdrop keep the entries, so dismissing never
+	// deletes — the destructive action is only ever the explicit button.
+	if pending_delete {
+		layers.push(crate::ui::dialog::backdrop(Message::DeleteCancelled));
+		layers.push(delete_panel(dialog_body, drag));
+	}
+	// A recursive transfer's file-collision prompt (§17, §19): six answers, the whole transfer
+	// parked behind it. The ✕ and backdrop both cancel the transfer — the safe choice, since
+	// resuming would need an explicit decision about the file.
+	if transfer_conflict {
+		layers.push(crate::ui::dialog::backdrop(
+			Message::TransferConflictResolved(crate::bridge::ConflictChoice::Cancel),
+		));
+		layers.push(transfer_conflict_panel(dialog_body, drag));
 	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
@@ -635,6 +685,103 @@ fn download_clash_panel<'a>(
 				.on_press(Message::DownloadClash(ClashChoice::Replace))
 				.into(),
 		],
+		drag,
+	)
+}
+
+/// The "new folder" dialog (§18), in the shared dialog chrome: what it does and where in the
+/// (selectable) body, then the name in an editable field — Enter there creates, as does the
+/// Create button. Every dismissal route emits `NewFolderCancelled`, so backing out makes nothing.
+fn new_folder_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	name: &'a str,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	let content = column![
+		crate::ui::dialog::selectable_body(dialog_body),
+		text_input("Folder name", name)
+			.id(NEW_FOLDER_INPUT_ID)
+			.on_input(Message::NewFolderNameChanged)
+			.on_submit(Message::NewFolderConfirmed),
+	]
+	.spacing(12);
+
+	crate::ui::dialog::dialog(
+		"New folder".to_owned(),
+		Message::NewFolderCancelled,
+		content.into(),
+		vec![
+			button("Cancel")
+				.on_press(Message::NewFolderCancelled)
+				.into(),
+			button("Create")
+				.on_press(Message::NewFolderConfirmed)
+				.into(),
+		],
+		drag,
+	)
+}
+
+/// The delete confirmation (§18), in the shared dialog chrome: the warning and the names in the
+/// (selectable) body, then Cancel / Delete. The ✕ and the backdrop both keep the entries, so
+/// dismissing never deletes — the destructive action is only ever the explicit button.
+fn delete_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	crate::ui::dialog::dialog(
+		"Delete from the server?".to_owned(),
+		Message::DeleteCancelled,
+		crate::ui::dialog::selectable_body(dialog_body),
+		vec![
+			button("Cancel").on_press(Message::DeleteCancelled).into(),
+			button("Delete").on_press(Message::DeleteConfirmed).into(),
+		],
+		drag,
+	)
+}
+
+/// A recursive transfer's file-collision prompt (§17, §19). Six answers is more than the shared
+/// footer's one row holds, so they sit in the BODY as two rows — the three per-file answers on
+/// top, the two sweeping "…all" ones and Cancel below — each button `Fill`-wide so a row divides
+/// evenly. The ✕ and backdrop cancel the whole transfer, the safe default when the file's fate is
+/// still undecided.
+fn transfer_conflict_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	use crate::bridge::ConflictChoice;
+
+	let choice = |label: &'a str, answer: ConflictChoice| -> Element<'a, Message> {
+		button(label)
+			.width(Length::Fill)
+			.on_press(Message::TransferConflictResolved(answer))
+			.into()
+	};
+
+	let content = column![
+		crate::ui::dialog::selectable_body(dialog_body),
+		row![
+			choice("Overwrite", ConflictChoice::Overwrite),
+			choice("Keep both", ConflictChoice::KeepBoth),
+			choice("Skip", ConflictChoice::Skip),
+		]
+		.spacing(8),
+		row![
+			choice("Overwrite all", ConflictChoice::OverwriteAll),
+			choice("Skip all", ConflictChoice::SkipAll),
+			choice("Cancel", ConflictChoice::Cancel),
+		]
+		.spacing(8),
+	]
+	.spacing(12);
+
+	crate::ui::dialog::dialog(
+		"A file is already there".to_owned(),
+		Message::TransferConflictResolved(ConflictChoice::Cancel),
+		content.into(),
+		// The answers live in the body, so the footer carries none of its own.
+		Vec::new(),
 		drag,
 	)
 }

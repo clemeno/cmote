@@ -166,6 +166,18 @@ pub enum FilesMessage {
 	/// The empty-space menu's "Upload… here" (§17): pick local files to send into the pane's
 	/// current directory. Carries no path — the pane's own is read when the press arrives.
 	PaneUploadHere,
+	/// The empty-space menu's "Upload folder… here" (§17): pick a local folder to send, tree and
+	/// all, into the pane's current directory. Like `PaneUploadHere`, the pane's own path is read
+	/// when the press arrives.
+	PaneUploadFolderHere,
+	/// The empty-space menu's "New folder…" (§18): open the dialog to create a folder in the
+	/// pane's current directory.
+	NewFolderHere,
+	/// Menu "Delete…": open the confirmation to remove the selection — one entry or many (§18).
+	DeleteStarted(String),
+	/// Menu "Download folder…": recreate this remote directory's whole tree on this machine (§19).
+	/// Offered only for a lone directory; a file uses `Download`, a mixed selection its files.
+	DownloadFolder(String),
 	/// The pointer moved while a band is being dragged, reported by the full-window capture
 	/// layer, so the payload is in WINDOW coordinates rather than the pane's (§21).
 	BandMoved(Point),

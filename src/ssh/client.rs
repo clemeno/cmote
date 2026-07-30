@@ -25,7 +25,7 @@ use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::bridge::{ConnectParams, SshCommand, SshEvent};
+use crate::bridge::{ConflictChoice, ConnectParams, SshCommand, SshEvent};
 use crate::secret::Secret;
 use crate::ssh::auth;
 use crate::ssh::browse;
@@ -150,6 +150,40 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::UploadTree { local, remote } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::UploadTree { local, remote })
+						.await;
+				}
+			}
+			SshCommand::DownloadTree { remote, local } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::DownloadTree { remote, local })
+						.await;
+				}
+			}
+			SshCommand::ResolveConflict(choice) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::ResolveConflict(choice))
+						.await;
+				}
+			}
+			SshCommand::MakeDir(path) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::MakeDir(path)).await;
+				}
+			}
+			SshCommand::Delete(paths) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::Delete(paths)).await;
+				}
+			}
 			SshCommand::RenameDir { from, to } => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -192,6 +226,17 @@ pub(crate) enum SessionMsg {
 	ListFiles { path: String, request: u64 },
 	/// Fetch a remote file to a local path (§19).
 	Download { remote: String, local: PathBuf },
+	/// Send a whole local folder to the remote, recreating its tree (§17).
+	UploadTree { local: PathBuf, remote: String },
+	/// Fetch a whole remote folder to this machine, recreating its tree (§19).
+	DownloadTree { remote: String, local: PathBuf },
+	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19), forwarded
+	/// to the transfer waiting on it.
+	ResolveConflict(ConflictChoice),
+	/// Create a new remote folder (§18).
+	MakeDir(String),
+	/// Delete remote entries, folders and their contents included (§18).
+	Delete(Vec<String>),
 	/// Resolve one symlink for the files pane's details popup (§20).
 	ReadLink(String),
 	/// Rename a remote folder (§18).
@@ -334,6 +379,13 @@ async fn stream(
 	// rest of the session, since a tree asks many small questions.
 	let mut sftp = browse::Sftp::default();
 
+	// The reply channel for the transfer currently running, if it is a recursive one (§17, §19).
+	// A tree transfer parks mid-way to ask about a file collision; its answer arrives as a
+	// `ResolveConflict` and is forwarded here. Held across the whole stream: only one transfer
+	// runs at a time, so starting a new one simply replaces this, and a stale sender (its transfer
+	// already ended) just fails its send harmlessly. `None` when nothing recursive is in flight.
+	let mut conflict_tx: Option<mpsc::Sender<ConflictChoice>> = None;
+
 	loop {
 		tokio::select! {
 			// Something arrived from the server on the channel.
@@ -387,6 +439,35 @@ async fn stream(
 					}
 					Some(SessionMsg::Download { remote, local }) => {
 						download::start(session, events, remote, local).await;
+					}
+					// A recursive transfer runs on its own channel and task like a single file,
+					// but it can pause to ask about a collision — so a fresh reply channel is made
+					// here and its sending end kept, to forward the answers to (§17, §19).
+					Some(SessionMsg::UploadTree { local, remote }) => {
+						let (answers_tx, answers_rx) = mpsc::channel::<ConflictChoice>(8);
+						conflict_tx = Some(answers_tx);
+						upload::start_tree(session, events, local, remote, answers_rx).await;
+					}
+					Some(SessionMsg::DownloadTree { remote, local }) => {
+						let (answers_tx, answers_rx) = mpsc::channel::<ConflictChoice>(8);
+						conflict_tx = Some(answers_tx);
+						download::start_tree(session, events, remote, local, answers_rx).await;
+					}
+					// Forward a collision answer to the transfer parked on it. A send that fails —
+					// the transfer already finished, or there was never a recursive one — is
+					// nothing to act on; the answer simply had no one waiting.
+					Some(SessionMsg::ResolveConflict(choice)) => {
+						if let Some(answers) = conflict_tx.as_ref() {
+							let _ = answers.send(choice).await;
+						}
+					}
+					// Creating and deleting share the browse session with the listings, the same
+					// as rename — one channel for all the tree's small operations (§18).
+					Some(SessionMsg::MakeDir(path)) => {
+						browse::make_dir(session, &mut sftp, events, path).await;
+					}
+					Some(SessionMsg::Delete(paths)) => {
+						browse::remove(session, &mut sftp, events, paths).await;
 					}
 					Some(SessionMsg::RenameDir { from, to }) => {
 						browse::rename(session, &mut sftp, events, from, to).await;

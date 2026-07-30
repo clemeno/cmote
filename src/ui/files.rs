@@ -815,8 +815,16 @@ pub fn context_menu<'a>(
 	if let Some(anchor) = files.pane_menu() {
 		let panel = menu::panel(vec![
 			menu::item(
+				"New folder…".to_owned(),
+				Some(Message::Files(FilesMessage::NewFolderHere)),
+			),
+			menu::item(
 				"Upload… here".to_owned(),
 				Some(Message::Files(FilesMessage::PaneUploadHere)),
+			),
+			menu::item(
+				"Upload folder… here".to_owned(),
+				Some(Message::Files(FilesMessage::PaneUploadFolderHere)),
 			),
 			menu::item(
 				"Refresh".to_owned(),
@@ -856,13 +864,24 @@ pub fn context_menu<'a>(
 		),
 		menu::item(
 			suffix("Download…"),
-			// A folder cannot be downloaded, but a batch that merely CONTAINS one still can:
-			// the app pulls the files out of it and leaves the folders where they are.
+			// A folder cannot be downloaded as a file, but a batch that merely CONTAINS one still
+			// can: the app pulls the files out of it and leaves the folders where they are.
 			(!is_dir || many).then(|| Message::Files(FilesMessage::Download(path.clone()))),
+		),
+		menu::item(
+			"Download folder…".to_owned(),
+			// A lone directory downloads its whole tree (§19); a file or a mixed selection uses
+			// the item above, so this is enabled only for the one folder-shaped case.
+			(is_dir && !many).then(|| Message::Files(FilesMessage::DownloadFolder(path.clone()))),
 		),
 		menu::item(
 			"Rename…".to_owned(),
 			(!many).then(|| Message::Files(FilesMessage::RenameStarted(path.clone()))),
+		),
+		// Remove the selection — one entry or many, folders and their contents included (§18).
+		item(
+			&suffix("Delete…"),
+			FilesMessage::DeleteStarted(path.clone()),
 		),
 		item(&suffix("Copy name"), FilesMessage::CopyName(path.clone())),
 		menu::item(

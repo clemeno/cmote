@@ -20,7 +20,9 @@ use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::bridge::SshEvent;
+use crate::bridge::{ConflictChoice, SshEvent};
+use crate::explorer;
+use crate::ssh::transfer::{self, FileAction, Sticky, TreePlan};
 
 /// How much of the file to move per write. 32 KiB sits comfortably under the SFTP
 /// packet limit while keeping the number of round trips low.
@@ -248,4 +250,242 @@ async fn copy(
 		.send(SshEvent::TransferProgress { sent, total })
 		.await;
 	Ok(())
+}
+
+/// Open the SFTP channel and hand a whole-folder upload to a background task (§17). The mirror
+/// of `start` for a single file, but the transfer may PAUSE mid-way to ask the user about a file
+/// whose destination is already taken — so it is handed the `answers` receiver `run()` keeps the
+/// other end of, and parks on it while the shell keeps flowing behind the prompt.
+pub async fn start_tree<H: client::Handler>(
+	session: &client::Handle<H>,
+	events: &mpsc::Sender<SshEvent>,
+	local: PathBuf,
+	remote: String,
+	answers: mpsc::Receiver<ConflictChoice>,
+) {
+	match super::open_sftp(session).await {
+		Ok(sftp) => {
+			tokio::spawn(transfer_tree(sftp, local, remote, events.clone(), answers));
+		}
+		Err(error) => {
+			eprintln!("sftp channel failed: {error:#}");
+			let _ = events
+				.send(SshEvent::UploadFailed(
+					"Could not open an SFTP channel — the server may not offer the sftp \
+					 subsystem."
+						.to_string(),
+				))
+				.await;
+		}
+	}
+}
+
+/// Send the local folder to the remote, reporting one terminal event (§17). A clean run ends in
+/// `UploadDone` with the folder's remote path; a user cancel and a real failure both end in
+/// `UploadFailed` — the message tells them apart, and either way the shell is left untouched.
+async fn transfer_tree(
+	sftp: SftpSession,
+	local_root: PathBuf,
+	remote_dir: String,
+	events: mpsc::Sender<SshEvent>,
+	mut answers: mpsc::Receiver<ConflictChoice>,
+) {
+	match send_tree(&sftp, &local_root, &remote_dir, &events, &mut answers).await {
+		Ok(Some(path)) => {
+			let _ = events.send(SshEvent::UploadDone(path)).await;
+		}
+		// A cancel is not a failure, but it IS the terminal signal the GUI waits for to free the
+		// transfer slot — a neutral message, so the status bar does not cry error over a choice.
+		Ok(None) => {
+			let _ = events
+				.send(SshEvent::UploadFailed(
+					"Folder upload cancelled.".to_string(),
+				))
+				.await;
+		}
+		Err(error) => {
+			eprintln!("folder upload failed: {error:#}");
+			let _ = events
+				.send(SshEvent::UploadFailed(format!(
+					"Folder upload failed: {error}"
+				)))
+				.await;
+		}
+	}
+	let _ = sftp.close().await;
+}
+
+/// The tree upload itself: recreate the folder under `remote_dir`, then copy every file into it,
+/// merging into whatever is already there and asking about each collision (§17). Returns the
+/// destination path on success, or `None` when the user cancelled partway.
+async fn send_tree(
+	sftp: &SftpSession,
+	local_root: &Path,
+	remote_dir: &str,
+	events: &mpsc::Sender<SshEvent>,
+	answers: &mut mpsc::Receiver<ConflictChoice>,
+) -> Result<Option<String>> {
+	// The folder keeps its own name inside the destination, the same rule a single file follows.
+	let name = local_root
+		.file_name()
+		.and_then(std::ffi::OsStr::to_str)
+		.context("the folder has no name to upload under")?;
+	let remote_target = explorer::join(remote_dir, name);
+
+	let plan = walk_local(local_root)
+		.await
+		.with_context(|| format!("could not read {}", local_root.display()))?;
+	let total = plan.total();
+
+	// Create the destination and every subdirectory before any file goes into them. `plan.dirs`
+	// is parents-before-children, so a folder is never asked for before the one that holds it.
+	ensure_remote_dir(sftp, &remote_target).await?;
+	for rel in &plan.dirs {
+		ensure_remote_dir(sftp, &transfer::remote_join(&remote_target, rel)).await?;
+	}
+
+	let mut sent = 0u64;
+	let mut reported = 0u64;
+	let mut sticky: Option<Sticky> = None;
+	let _ = events
+		.send(SshEvent::TransferProgress { sent, total })
+		.await;
+
+	for (rel, size) in &plan.files {
+		let dest = transfer::remote_join(&remote_target, rel);
+		let leaf = rel.last().map_or("", String::as_str);
+		// A destination already taken is a question, not an overwrite (§17). Everything else
+		// falls through to a plain write to `dest`.
+		let dest = if sftp.try_exists(&dest).await.unwrap_or(false) {
+			match transfer::resolve(events, answers, &mut sticky, leaf).await {
+				FileAction::Overwrite => dest,
+				FileAction::KeepBoth => {
+					let dir = explorer::parent(&dest).unwrap_or(&remote_target).to_owned();
+					free_remote(sftp, &dir, leaf).await
+				}
+				FileAction::Skip => {
+					// Count the skipped bytes as handled so the bar still reaches the end.
+					sent += size;
+					let _ = events
+						.send(SshEvent::TransferProgress { sent, total })
+						.await;
+					continue;
+				}
+				FileAction::Cancel => return Ok(None),
+			}
+		} else {
+			dest
+		};
+		let local = transfer::local_join(local_root, rel);
+		send_file(sftp, &local, &dest, events, &mut sent, &mut reported, total).await?;
+	}
+
+	let _ = events
+		.send(SshEvent::TransferProgress { sent, total })
+		.await;
+	if plan.skipped_links > 0 {
+		eprintln!("folder upload skipped {} symlink(s)", plan.skipped_links);
+	}
+	Ok(Some(remote_target))
+}
+
+/// Copy one local file to the remote, folding its bytes into the tree-wide `sent` counter and
+/// emitting a progress event every `PROGRESS_STEP` (§17). Split from `copy` because a tree's
+/// progress runs across many files against one running total, not per file from zero.
+async fn send_file(
+	sftp: &SftpSession,
+	local: &Path,
+	remote: &str,
+	events: &mpsc::Sender<SshEvent>,
+	sent: &mut u64,
+	reported: &mut u64,
+	total: u64,
+) -> Result<()> {
+	let mut source = tokio::fs::File::open(local)
+		.await
+		.with_context(|| format!("could not open {}", local.display()))?;
+	let mut destination = sftp
+		.create(remote.to_owned())
+		.await
+		.with_context(|| format!("could not create {remote} on the server"))?;
+
+	let mut buffer = vec![0u8; CHUNK];
+	loop {
+		let read = source.read(&mut buffer).await.context("read failed")?;
+		if read == 0 {
+			break;
+		}
+		destination
+			.write_all(&buffer[..read])
+			.await
+			.context("write failed")?;
+		*sent += read as u64;
+		if *sent - *reported >= PROGRESS_STEP {
+			*reported = *sent;
+			let _ = events
+				.send(SshEvent::TransferProgress { sent: *sent, total })
+				.await;
+		}
+	}
+	destination.shutdown().await.context("close failed")?;
+	Ok(())
+}
+
+/// Create `path` on the server unless it is already there, so an upload merges into an existing
+/// folder rather than failing on it (§17). An existence check that the server refuses is treated
+/// as "not there" and the create is attempted — its own error then surfaces if that was wrong.
+async fn ensure_remote_dir(sftp: &SftpSession, path: &str) -> Result<()> {
+	if sftp.try_exists(path).await.unwrap_or(false) {
+		return Ok(());
+	}
+	sftp.create_dir(path)
+		.await
+		.with_context(|| format!("could not create {path} on the server"))
+}
+
+/// Walk a local directory tree into the plan both transfer directions share (§17). Iterative,
+/// not recursive, so a deep tree costs heap not stack; symlinks are counted and skipped rather
+/// than followed, which is what keeps a cyclic link from walking forever.
+///
+/// `ponytail:` the whole listing is held in memory before a byte is sent — fine for an ordinary
+/// folder, but a tree of millions of files would be felt. Upgrade path: stream the walk and the
+/// transfer together, the way the files pane's batched listing does (§19).
+async fn walk_local(root: &Path) -> Result<TreePlan> {
+	let mut plan = TreePlan::default();
+	// Each frontier item is a directory to read and its path RELATIVE to the root (empty for the
+	// root itself, which is created by the caller, not listed here).
+	let mut frontier: Vec<(PathBuf, Vec<String>)> = vec![(root.to_path_buf(), Vec::new())];
+	while let Some((dir, rel)) = frontier.pop() {
+		let mut reader = tokio::fs::read_dir(&dir)
+			.await
+			.with_context(|| format!("could not read {}", dir.display()))?;
+		while let Some(entry) = reader
+			.next_entry()
+			.await
+			.context("could not read an entry")?
+		{
+			let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+				// A name this platform cannot render as UTF-8 has no clean remote counterpart;
+				// leave it rather than invent one.
+				continue;
+			};
+			let mut child_rel = rel.clone();
+			child_rel.push(name);
+			let file_type = entry
+				.file_type()
+				.await
+				.context("could not read a file type")?;
+			if file_type.is_symlink() {
+				plan.skipped_links += 1;
+			} else if file_type.is_dir() {
+				plan.dirs.push(child_rel.clone());
+				frontier.push((entry.path(), child_rel));
+			} else if file_type.is_file() {
+				let size = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
+				plan.files.push((child_rel, size));
+			}
+			// Anything else — a fifo, a socket, a device node — is not a file to send.
+		}
+	}
+	Ok(plan)
 }

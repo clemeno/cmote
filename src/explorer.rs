@@ -62,6 +62,12 @@ pub enum ExplorerMessage {
 	/// Menu "Upload…": pick local files to send into this folder (§17). Carries the folder's
 	/// path, so the files land in the one that was right-clicked, not wherever the shell sits.
 	UploadHere(String),
+	/// Menu "Upload folder…": pick a local folder to send, tree and all, into this one (§17).
+	UploadFolderHere(String),
+	/// Menu "New folder…": open the dialog to create a subfolder inside this one (§18).
+	NewFolderHere(String),
+	/// Menu "Delete…": open the confirmation to remove this folder and everything inside it (§18).
+	DeleteStarted(String),
 	/// Menu "Rename": turn the row into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
@@ -456,6 +462,37 @@ impl Explorer {
 		Some((rename.path.clone(), join(parent, new_name)))
 	}
 
+	/// Re-list an already-known folder without opening or closing it (§18) — the refresh a
+	/// create or a delete triggers, so a new child appears in place or a removed one vanishes.
+	/// A folder never listed (nothing to refresh) or one already loading needs no fetch: `None`
+	/// then. Unlike `expand`, this never forces a collapsed folder open — a change inside a
+	/// closed branch is recorded for when it is next opened, not sprung into view.
+	pub fn refresh_dir(&mut self, path: &str) -> Option<String> {
+		let node = self.nodes.get_mut(path)?;
+		if node.loading || node.children.is_none() {
+			return None;
+		}
+		node.loading = true;
+		Some(path.to_owned())
+	}
+
+	/// Forget a folder and everything beneath it (§18): its subtree was just deleted, so those
+	/// rows must go. A selection anywhere inside the gone subtree is dropped too, so the menu and
+	/// the keyboard never point at a row that is no longer there. The parent's own cached child
+	/// list still names it until the caller re-lists the parent (`refresh_dir`).
+	pub fn forget(&mut self, path: &str) {
+		let prefix = format!("{}/", path.trim_end_matches('/'));
+		self.nodes
+			.retain(|key, _| key != path && !key.starts_with(&prefix));
+		if self
+			.selected
+			.as_deref()
+			.is_some_and(|selected| selected == path || selected.starts_with(&prefix))
+		{
+			self.selected = None;
+		}
+	}
+
 	/// A rename succeeded: forget everything the tree knew about the old path (its whole
 	/// subtree moved with it), select the new one, and return the parent to re-list so the
 	/// row reappears under its new name in the right sort position.
@@ -513,6 +550,15 @@ pub fn join(directory: &str, child: &str) -> String {
 	} else {
 		format!("{directory}/{child}")
 	}
+}
+
+/// Whether `name` is usable as a single new folder or file name (§18): something after
+/// trimming, and no path separator in it — a `/` would make it a *path*, not a name, and drop
+/// the new entry somewhere other than where the user asked. The same rule the inline rename
+/// enforces on the name it commits.
+pub fn is_plain_name(name: &str) -> bool {
+	let trimmed = name.trim();
+	!trimmed.is_empty() && !trimmed.contains('/')
 }
 
 /// A path's own final component — the folder's name. The root is its own name.
@@ -751,6 +797,51 @@ mod tests {
 		assert_eq!(explorer.selected(), Some("/people"));
 		// The stale branch is gone: nothing under the old name survives.
 		assert!(!explorer.rows().iter().any(|row| row.path == "/home/user"));
+	}
+
+	#[test]
+	fn refresh_re_lists_a_known_folder_without_opening_a_closed_one() {
+		let mut explorer = tree(&["home"]);
+		explorer.expand("/home", false);
+		explorer.listed("/home", vec!["user".to_owned()]);
+		explorer.collapse("/home");
+
+		// A known folder is re-fetched (a new child may have appeared)…
+		assert_eq!(explorer.refresh_dir("/home"), Some("/home".to_owned()));
+		// …but stays closed: the refresh records the change, it does not spring the branch open.
+		assert!(!explorer.rows().iter().any(|row| row.path == "/home/user"));
+
+		// A folder the tree has never listed has nothing to refresh, and neither has one already
+		// loading (the fetch above is still in flight).
+		assert_eq!(explorer.refresh_dir("/etc"), None);
+		assert_eq!(explorer.refresh_dir("/home"), None);
+	}
+
+	#[test]
+	fn forgetting_drops_the_subtree_and_any_selection_in_it() {
+		let mut explorer = tree(&["home", "etc"]);
+		explorer.expand("/home", false);
+		explorer.listed("/home", vec!["user".to_owned()]);
+		explorer.select("/home/user");
+
+		explorer.forget("/home");
+		// The subtree BELOW the forgotten folder is gone, and the selection with it — nothing
+		// points at a deleted row. The `/home` row itself lingers as a childless leaf until the
+		// caller re-lists its parent (the parent's cached child list still names it), which is
+		// exactly what `on_deleted` does next in the real flow.
+		assert!(!explorer.rows().iter().any(|row| row.path == "/home/user"));
+		assert_eq!(explorer.selected(), None);
+		// A sibling outside the deleted subtree is untouched.
+		assert!(explorer.rows().iter().any(|row| row.path == "/etc"));
+	}
+
+	#[test]
+	fn a_plain_name_has_content_and_no_separator() {
+		assert!(is_plain_name("notes"));
+		assert!(is_plain_name("  spaced out  "));
+		assert!(!is_plain_name(""));
+		assert!(!is_plain_name("   "));
+		assert!(!is_plain_name("a/b"));
 	}
 
 	#[test]

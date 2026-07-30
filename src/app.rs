@@ -323,6 +323,18 @@ pub struct App {
 	downloaded: usize,
 	/// A multi-file download held at the "some of these are already there" question (§21).
 	clash: Option<Clash>,
+	/// The "new folder" dialog's target and typed name (§18), `Some` while it is open. The
+	/// parent is where the folder will be made — a tree folder or the pane's directory — and
+	/// `name` is what the user is typing; `None` the rest of the time, which hides the dialog.
+	new_folder: Option<NewFolder>,
+	/// The remote entries a delete confirmation is holding (§18): the paths that will be removed
+	/// once the user confirms. `Some` while the confirmation is up, `None` otherwise — deleting is
+	/// not undoable, so nothing is sent until this is confirmed.
+	pending_delete: Option<Vec<String>>,
+	/// The file a recursive transfer is currently asking about (§17, §19): its name, shown in the
+	/// six-way conflict dialog. `Some` parks the transfer behind the prompt; answering clears it
+	/// and sends the choice back down the wire.
+	transfer_conflict: Option<String>,
 	/// The copy-confirmation toast currently showing, if any (§10). Set on every clipboard
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
@@ -387,6 +399,15 @@ struct Snackbar {
 struct Clash {
 	remotes: Vec<String>,
 	dir: PathBuf,
+}
+
+/// The in-progress "new folder" dialog (§18): where the folder will be made, and the name typed
+/// so far. A small owned struct, like the home screen's rename, because it is the same shape of
+/// interaction — a name being entered against a fixed target.
+#[derive(Debug, Clone)]
+struct NewFolder {
+	parent: String,
+	name: String,
 }
 
 /// What to do about local files a multi-file download would land on top of (§21).
@@ -592,6 +613,32 @@ pub enum Message {
 	},
 	/// The answer to "some of these files are already there" (§21).
 	DownloadClash(ClashChoice),
+	// --- create / delete / recursive transfer (§18, §17, §19) ---
+	/// The "new folder" dialog's name field changed.
+	NewFolderNameChanged(String),
+	/// The "new folder" dialog was submitted (the Create button, or Enter in the field).
+	NewFolderConfirmed,
+	/// The "new folder" dialog was dismissed (Cancel / ✕ / backdrop / Esc) — nothing is made.
+	NewFolderCancelled,
+	/// The delete confirmation was confirmed — remove the held entries from the server (§18).
+	DeleteConfirmed,
+	/// The delete confirmation was dismissed — keep the entries.
+	DeleteCancelled,
+	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Carries the
+	/// six-way choice; `update` sends it down and clears the dialog so the transfer resumes.
+	TransferConflictResolved(bridge::ConflictChoice),
+	/// The folder picker for a recursive UPLOAD closed (§17): `local` is the folder to send (or
+	/// `None` if cancelled), `dir` the remote directory it goes into.
+	UploadFolderPicked {
+		local: Option<PathBuf>,
+		dir: String,
+	},
+	/// The folder picker for a recursive DOWNLOAD closed (§19): `remote` is the folder to fetch,
+	/// `local` where to recreate it (or `None` if cancelled).
+	DownloadFolderTargetPicked {
+		remote: String,
+		local: Option<PathBuf>,
+	},
 	/// Something happened in the remote folder tree (§18). Nested rather than flattened
 	/// — the panel has a dozen interactions of its own, and burying them in this enum
 	/// would drown the screens that only have two or three.
@@ -797,6 +844,21 @@ impl App {
 				{
 					self.queue_downloads(&clash.remotes, &clash.dir, choice);
 				}
+			}
+			// Create / delete / recursive transfer (§18, §17, §19).
+			Message::NewFolderNameChanged(value) => {
+				if let Some(new_folder) = self.new_folder.as_mut() {
+					new_folder.name = value;
+				}
+			}
+			Message::NewFolderConfirmed => self.confirm_new_folder(),
+			Message::NewFolderCancelled => self.new_folder = None,
+			Message::DeleteConfirmed => self.confirm_remote_delete(),
+			Message::DeleteCancelled => self.pending_delete = None,
+			Message::TransferConflictResolved(choice) => self.on_conflict_resolved(choice),
+			Message::UploadFolderPicked { local, dir } => self.start_upload_tree(local, dir),
+			Message::DownloadFolderTargetPicked { remote, local } => {
+				self.start_download_tree(remote, local);
 			}
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
@@ -1370,6 +1432,28 @@ impl App {
 			SshEvent::RenameFailed(reason) => {
 				self.explorer.set_notice(reason.clone());
 				self.files.set_notice(reason);
+			}
+			SshEvent::MakeDirDone(path) => {
+				// The new folder appeared inside its parent: re-list the parent in both panels so
+				// it shows in the right sort position (§18). Take an owned parent to end the borrow.
+				if let Some(parent) = explorer::parent(&path).map(str::to_owned) {
+					self.refresh_remote_dir(&parent);
+				}
+			}
+			SshEvent::MakeDirFailed(reason) => {
+				self.explorer.set_notice(reason.clone());
+				self.files.set_notice(reason);
+			}
+			SshEvent::DeleteDone(paths) => self.on_deleted(paths),
+			SshEvent::DeleteFailed(reason) => {
+				self.explorer.set_notice(reason.clone());
+				self.files.set_notice(reason);
+			}
+			SshEvent::TransferConflict { name } => {
+				// Park the transfer behind the six-way question, naming the file it is about (§17,
+				// §19). The shared dialog body carries a fixed intro plus that name.
+				self.set_dialog_body(&format!("{}\n\n{name}", ui::terminal::CONFLICT_DIALOG_BODY));
+				self.transfer_conflict = Some(name);
 			}
 			SshEvent::UploadExists(path) => {
 				// The batch pre-scan already settled every collision it knew about (§17), so
@@ -2800,6 +2884,21 @@ impl App {
 				self.explorer.close_menu();
 				return browse_upload_into(path);
 			}
+			ExplorerMessage::UploadFolderHere(path) => {
+				// The tree's "Upload folder…": pick a local folder to send whole into this one (§17).
+				self.explorer.close_menu();
+				return browse_upload_folder_into(path);
+			}
+			ExplorerMessage::NewFolderHere(path) => {
+				// The tree's "New folder…": create a subfolder inside the right-clicked one (§18).
+				self.explorer.close_menu();
+				return self.begin_new_folder(path);
+			}
+			ExplorerMessage::DeleteStarted(path) => {
+				// The tree's "Delete…": remove this folder and its whole subtree, once confirmed (§18).
+				self.explorer.close_menu();
+				self.begin_delete(vec![path]);
+			}
 			ExplorerMessage::RenameStarted(path) => {
 				self.explorer.start_rename(path);
 				// The root has no parent, so it declines to be renamed; only focus the
@@ -2945,6 +3044,36 @@ impl App {
 				self.files.close_menu();
 				let dir = self.files.path().unwrap_or("").to_owned();
 				return browse_upload_into(dir);
+			}
+			FilesMessage::PaneUploadFolderHere => {
+				// "Upload folder… here": send a whole local folder into the directory on show (§17).
+				self.files.close_menu();
+				let dir = self.files.path().unwrap_or("").to_owned();
+				return browse_upload_folder_into(dir);
+			}
+			FilesMessage::NewFolderHere => {
+				// "New folder…": create a folder in the directory the pane is showing (§18).
+				self.files.close_menu();
+				let dir = self.files.path().unwrap_or("").to_owned();
+				return self.begin_new_folder(dir);
+			}
+			FilesMessage::DeleteStarted(path) => {
+				// "Delete…": remove the whole selection once confirmed (§18). A right-click inside
+				// the selection kept it; one outside has already collapsed onto the clicked entry.
+				self.files.close_menu();
+				let targets = self.action_targets(&path);
+				self.begin_delete(targets);
+			}
+			FilesMessage::DownloadFolder(path) => {
+				// "Download folder…": recreate this remote directory's tree locally (§19). One
+				// transfer at a time, like every other, so a running one blocks it.
+				self.files.close_menu();
+				if self.transfer.is_some() {
+					self.files
+						.set_notice("A transfer is already running.".to_owned());
+					return iced::Task::none();
+				}
+				return pick_download_tree_target(path);
 			}
 			FilesMessage::BandMoved(point) => {
 				// Window coordinates from the capture layer: the pane is full width along the
@@ -3181,6 +3310,152 @@ impl App {
 		}
 	}
 
+	/// Open the "new folder" dialog for a folder to be created inside `parent` (§18): the tree
+	/// folder that was right-clicked, or the directory the files pane is showing. Seeds the body
+	/// with what it does and where, then focuses the name field so the user types straight away.
+	/// An empty parent (the pane has shown nothing yet) asks nothing.
+	fn begin_new_folder(&mut self, parent: String) -> iced::Task<Message> {
+		if parent.is_empty() {
+			return iced::Task::none();
+		}
+		self.set_dialog_body(&format!(
+			"{}\n\n{parent}",
+			ui::terminal::NEW_FOLDER_DIALOG_BODY
+		));
+		self.new_folder = Some(NewFolder {
+			parent,
+			name: String::new(),
+		});
+		iced::widget::operation::focus(ui::terminal::NEW_FOLDER_INPUT_ID)
+	}
+
+	/// Ask the server to create the folder the dialog is holding (§18). A blank name, or one
+	/// carrying a path separator (which would put the folder somewhere other than asked), is not
+	/// submittable — the dialog stays open rather than closing on nothing, the same rule the
+	/// inline rename follows. A good name closes the dialog and sends the request.
+	fn confirm_new_folder(&mut self) {
+		let Some(new_folder) = self.new_folder.as_ref() else {
+			return;
+		};
+		if !explorer::is_plain_name(&new_folder.name) {
+			return;
+		}
+		let path = explorer::join(&new_folder.parent, new_folder.name.trim());
+		self.new_folder = None;
+		self.send_command(SshCommand::MakeDir(path));
+	}
+
+	/// Open the delete confirmation for `paths` (§18): name each target, warn that a folder goes
+	/// with everything inside it, and hold the paths until the user confirms. Nothing to delete is
+	/// a no-op. Deleting is not undoable, so this only ever raises the question — the removal
+	/// happens on an explicit confirm, the same discipline as Disconnect and the home list (§14).
+	fn begin_delete(&mut self, paths: Vec<String>) {
+		if paths.is_empty() {
+			return;
+		}
+		let names = join_lines(paths.iter().map(|path| explorer::name(path).to_owned()));
+		self.set_dialog_body(&format!("{}\n\n{names}", ui::terminal::DELETE_DIALOG_BODY));
+		self.pending_delete = Some(paths);
+	}
+
+	/// Delete the held entries (§18) — only reached from a confirmed prompt. The panels re-list
+	/// when the server reports it done (`on_deleted`), so nothing is dropped from the view on a
+	/// hopeful guess.
+	fn confirm_remote_delete(&mut self) {
+		if let Some(paths) = self.pending_delete.take() {
+			self.send_command(SshCommand::Delete(paths));
+		}
+	}
+
+	/// A recursive transfer's collision prompt was answered (§17, §19): clear the dialog and send
+	/// the choice to the transfer parked on it, which resumes — or, on Cancel, winds down and
+	/// reports back through the usual terminal event.
+	fn on_conflict_resolved(&mut self, choice: bridge::ConflictChoice) {
+		self.transfer_conflict = None;
+		self.send_command(SshCommand::ResolveConflict(choice));
+	}
+
+	/// Start a recursive folder upload the picker chose a source for (§17). A cancelled picker
+	/// (`None`) sends nothing; a transfer already running, or a batch still queued, blocks it —
+	/// the one progress bar serves them all. The bar starts at an unknown total the first progress
+	/// event fills in.
+	fn start_upload_tree(&mut self, local: Option<PathBuf>, dir: String) {
+		let Some(local) = local else {
+			return;
+		};
+		if self.transfer.is_some() || !self.uploads.is_empty() {
+			self.transfer_notice = Some("A transfer is already running.".to_owned());
+			return;
+		}
+		if self.send_command(SshCommand::UploadTree { local, remote: dir }) {
+			self.transfer_notice = None;
+			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		}
+	}
+
+	/// Start a recursive folder download the picker chose a destination for (§19). The mirror of
+	/// `start_upload_tree`: a cancelled picker sends nothing, a running transfer blocks it.
+	fn start_download_tree(&mut self, remote: String, local: Option<PathBuf>) {
+		let Some(local) = local else {
+			return;
+		};
+		if self.transfer.is_some() {
+			self.files
+				.set_notice("A transfer is already running.".to_owned());
+			return;
+		}
+		if self.send_command(SshCommand::DownloadTree { remote, local }) {
+			self.transfer_notice = None;
+			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		}
+	}
+
+	/// Re-list a remote directory in whichever panel is showing it (§18): the tree, if it knows
+	/// the folder, and the files pane, if that is the directory on show. The refresh a create or a
+	/// delete triggers, so a new row appears — or a gone one vanishes — in place.
+	fn refresh_remote_dir(&mut self, dir: &str) {
+		if let Some(fetch) = self.explorer.refresh_dir(dir) {
+			self.send_command(SshCommand::ListDir(fetch));
+		}
+		if self.files.path() == Some(dir)
+			&& let Some(request) = self.files.refresh()
+		{
+			self.list_files(request);
+		}
+	}
+
+	/// Entries were deleted (§18): step the files pane out of any folder that is now gone, drop
+	/// the deleted subtrees from the tree, and re-list each parent they vanished from so the rows
+	/// update in place. Done here rather than in a model because it spans both panels and the
+	/// pane's own idea of where it is.
+	fn on_deleted(&mut self, paths: Vec<String>) {
+		// If the pane sits inside a deleted subtree, move it up to a folder that still exists
+		// before anything re-lists — otherwise it would try to list a directory that is gone.
+		if let Some(pane) = self.files.path().map(str::to_owned) {
+			for deleted in &paths {
+				if is_within(&pane, deleted) {
+					let up = explorer::parent(deleted)
+						.unwrap_or(explorer::ROOT)
+						.to_owned();
+					self.browse_to(&up);
+					break;
+				}
+			}
+		}
+		let mut parents: Vec<String> = Vec::new();
+		for path in &paths {
+			self.explorer.forget(path);
+			if let Some(parent) = explorer::parent(path).map(str::to_owned)
+				&& !parents.contains(&parent)
+			{
+				parents.push(parent);
+			}
+		}
+		for parent in parents {
+			self.refresh_remote_dir(&parent);
+		}
+	}
+
 	/// Reflow the terminal to the current window *and* panel footprint (§18). The panel
 	/// takes its width out of the grid, so showing, hiding or resizing it changes the
 	/// column count exactly as a window resize would — and goes through the same path.
@@ -3296,6 +3571,12 @@ impl App {
 							confirm_disconnect: self.confirm_disconnect,
 							clash: self.clash.is_some(),
 							upload_clash: self.upload_clash.is_some(),
+							new_folder: self
+								.new_folder
+								.as_ref()
+								.map(|new_folder| new_folder.name.as_str()),
+							pending_delete: self.pending_delete.is_some(),
+							transfer_conflict: self.transfer_conflict.is_some(),
 							body: &self.dialog_body,
 							drag,
 						},
@@ -3514,6 +3795,44 @@ fn pick_download_folder(remotes: Vec<String>) -> iced::Task<Message> {
 			dir: handle.map(|handle| handle.path().to_path_buf()),
 		},
 	)
+}
+
+/// Open the native folder picker for a recursive upload (§17): one local folder to send into the
+/// already-known remote destination. Async like the other pickers, so the modal never blocks the
+/// GUI thread. The folder keeps its own name inside the destination.
+fn browse_upload_folder_into(dir: String) -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Select a folder to upload")
+			.pick_folder(),
+		move |handle| Message::UploadFolderPicked {
+			local: handle.map(|handle| handle.path().to_path_buf()),
+			dir: dir.clone(),
+		},
+	)
+}
+
+/// Open the native folder picker for a recursive download (§19): where to recreate the remote
+/// folder on this machine. The folder keeps its own name inside the picked directory, the mirror
+/// of the upload side.
+fn pick_download_tree_target(remote: String) -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Save the remote folder into")
+			.pick_folder(),
+		move |handle| Message::DownloadFolderTargetPicked {
+			remote: remote.clone(),
+			local: handle.map(|handle| handle.path().to_path_buf()),
+		},
+	)
+}
+
+/// Whether `path` is `ancestor` itself or sits somewhere beneath it (§18) — the test for a files
+/// pane showing a directory that a delete just removed. The trailing slash is normalised so `/a`
+/// matches `/a/b` but not the unrelated `/ab`.
+fn is_within(path: &str, ancestor: &str) -> bool {
+	let ancestor = ancestor.trim_end_matches('/');
+	path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
 /// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§21) —

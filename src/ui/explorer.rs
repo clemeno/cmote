@@ -382,9 +382,17 @@ pub fn context_menu<'a>(
 	let path = open.path.clone();
 	let panel = menu::panel(vec![
 		item("Open in terminal", ExplorerMessage::Cd(path.clone())),
-		// Send local files into this folder (§17), whichever directory the shell is in.
+		// Create a subfolder inside this one (§18).
+		item("New folder…", ExplorerMessage::NewFolderHere(path.clone())),
+		// Send local files, or a whole local folder, into this one (§17).
 		item("Upload…", ExplorerMessage::UploadHere(path.clone())),
+		item(
+			"Upload folder…",
+			ExplorerMessage::UploadFolderHere(path.clone()),
+		),
 		item("Rename…", ExplorerMessage::RenameStarted(path.clone())),
+		// Remove this folder and everything inside it, once confirmed (§18).
+		item("Delete…", ExplorerMessage::DeleteStarted(path.clone())),
 		item("Copy name", ExplorerMessage::CopyName(path.clone())),
 		// Disabled without a cwd: there is nothing to be relative *to*.
 		menu::item(

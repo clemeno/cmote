@@ -69,6 +69,28 @@ pub struct InteractivePrompt {
 	pub echo: bool,
 }
 
+/// How a recursive transfer settles ONE file whose destination is already taken (§17, §19).
+/// A tree upload or download merges into an existing folder, so a colliding *file* stops the
+/// transfer and asks the user — the mirror of the flat batch's up-front question, but posed one
+/// file at a time because a deep tree cannot be pre-scanned into a single list the user would
+/// read. The six answers are the ones a file manager offers: three that settle just this file,
+/// two "…all" that settle every collision still to come without asking again, and Cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictChoice {
+	/// Overwrite this one file; keep asking about the next.
+	Overwrite,
+	/// Write this one to a free `name-1` beside the original; keep asking about the next.
+	KeepBoth,
+	/// Leave this one alone; keep asking about the next.
+	Skip,
+	/// Overwrite this one AND every later collision, without asking again (a sticky policy).
+	OverwriteAll,
+	/// Skip this one AND every later collision, without asking again (a sticky policy).
+	SkipAll,
+	/// Abandon the whole transfer; files already copied stay where they are.
+	Cancel,
+}
+
 /// Parameters the user fills in on the connect form, handed to the SSH task once
 /// to start a session. A plain owned struct so it moves across the channel
 /// without borrowing GUI state.
@@ -127,6 +149,24 @@ pub enum SshCommand {
 	ListFiles { path: String, request: u64 },
 	/// Fetch a remote file to a local path the user picked in the save dialog (§19).
 	Download { remote: String, local: PathBuf },
+	/// Send a whole local folder to the remote, recreating its tree under `remote` (§17). The
+	/// folder keeps its own name inside the destination; missing remote directories are made and
+	/// existing ones merged into, and a file that would land on one already there raises a
+	/// per-file conflict (`TransferConflict` out, `ResolveConflict` back).
+	UploadTree { local: PathBuf, remote: String },
+	/// Fetch a whole remote folder to this machine, recreating its tree under `local` (§19). The
+	/// mirror of `UploadTree`: same merge-and-per-file-conflict behaviour, in the other direction.
+	DownloadTree { remote: String, local: PathBuf },
+	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Routed to
+	/// the transfer waiting on it; a `*All` answer makes the task stop asking for the rest.
+	ResolveConflict(ConflictChoice),
+	/// Create a new empty folder on the server (§18). `path` is the full path of the folder to
+	/// make; the task refuses to replace anything already sitting there.
+	MakeDir(String),
+	/// Delete remote entries (§18). Each path is removed whatever it is — a file, a symlink, or a
+	/// folder and everything inside it (a recursive walk). Not undoable, so the GUI only sends
+	/// this after an explicit confirmation naming the targets.
+	Delete(Vec<String>),
 	/// Resolve one symlink for the files pane's details popup (§20). Sent when a link is
 	/// selected — one round trip for the entry being looked at, rather than one per link
 	/// in the listing.
@@ -187,6 +227,12 @@ pub enum SshEvent {
 	DownloadDone(String),
 	/// The download failed; carries a short reason for the status bar (§19).
 	DownloadFailed(String),
+	/// A recursive transfer hit a file whose destination is already taken (§17, §19). Carries
+	/// the entry's name to show; the GUI raises the six-way conflict dialog and sends the answer
+	/// back as `ResolveConflict`. The transfer is parked until it arrives, so the shell keeps
+	/// flowing behind the prompt. Only a per-FILE collision asks — directories merge and a sticky
+	/// "…all" answer settles every later one without another of these.
+	TransferConflict { name: String },
 	/// The folders inside `path`, for the explorer tree (§18). Names only, not paths —
 	/// the tree already knows the parent it asked about.
 	DirListed { path: String, dirs: Vec<String> },
@@ -214,6 +260,16 @@ pub enum SshEvent {
 	RenameDone { from: String, to: String },
 	/// The rename did not happen, with the reason for the panel's notice line.
 	RenameFailed(String),
+	/// A new folder was created (§18); carries its full path so both panels re-list the parent
+	/// it appeared in and the row shows up in the right sort position.
+	MakeDirDone(String),
+	/// The folder was not created, with the reason for the panel's notice line.
+	MakeDirFailed(String),
+	/// Remote entries were deleted (§18); carries the paths that were removed so both panels
+	/// re-list the parents they vanished from — and step a pane out of a folder that is now gone.
+	DeleteDone(Vec<String>),
+	/// A delete did not happen (or only partly did), with the reason for the panel's notice line.
+	DeleteFailed(String),
 	/// The session ended (server closed, or user disconnected).
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).

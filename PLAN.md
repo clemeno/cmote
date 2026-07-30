@@ -235,11 +235,12 @@ cmote/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
     │   ├── auth.rs        method selection + attempts (publickey, password, keyboard-interactive) + 2FA chaining (§7)
-    │   ├── browse.rs      list + rename remote folders and files over sftp, falling back to `ls`/`mv` (§18, §19)
-    │   ├── download.rs    file download over an sftp channel: stream, progress (§19)
+    │   ├── browse.rs      list + rename + create + delete remote entries over sftp, falling back to `ls`/`mv`/`mkdir`/`rm -rf` (§18, §19)
+    │   ├── download.rs    file + recursive-folder download over an sftp channel: stream, progress, per-file collisions (§19)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
-    │   ├── upload.rs      file upload over an sftp channel: batch pre-scan, stream, progress (§17)
+    │   ├── transfer.rs    the recursive transfer's shared spine: the tree plan + the per-file collision protocol (§17, §19)
+    │   ├── upload.rs      file + recursive-folder upload over an sftp channel: batch pre-scan, stream, progress, per-file collisions (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries (§9, §16, §23)
@@ -1055,14 +1056,23 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   the swap to `ssh-key`'s `from_ppk` (§7 — already in the russh tree, no new dependency) reads
   PPK v2/v3 with RSA, Ed25519, **ECDSA and DSA** inner keys, so the "ECDSA is a follow-up" gap
   no longer exists. A genuinely exotic container surfaces a clear error, not a crash.
-- **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1, v2.2)*: **upload** of one or
+- **SFTP / file transfer** — *partly done (v1.4, v2.0, v2.1, v2.2, v3.0)*: **upload** of one or
   many local files into a chosen remote folder, from four surfaces, with the collisions
-  settled up front (§17), a **folder tree** of the remote filesystem that browses and
-  renames (§18), and a **files pane** that lists one whole directory and **downloads** files
-  from it, one or a whole selection at a time (§19, §21). Still deferred: creating and
-  deleting remote entries, directory (recursive) transfers, cancelling a transfer in flight,
-  resuming an interrupted one, drag-and-drop onto a folder, two transfers at once (a batch
-  queues instead, §17, §21), and preserving file modes/timestamps in either direction.
+  settled up front (§17), a **folder tree** of the remote filesystem that browses, renames,
+  **creates and deletes** (§18), and a **files pane** that lists one whole directory and
+  **downloads** files from it, one or a whole selection at a time (§19, §21). v3.0 filled the
+  three biggest gaps: **creating** a folder (a "New folder" dialog on the tree and pane menus),
+  **deleting** any entry — a folder goes with its whole subtree, behind a confirmation naming
+  the targets (§18) — and **recursive directory transfers** in both directions: a local folder
+  uploaded tree-and-all, a remote folder downloaded the same, each merging into an existing
+  destination and asking about every colliding *file* one at a time (overwrite / keep both / skip
+  this one, overwrite-all / skip-all, or cancel the lot), the per-file mirror of the flat batch's
+  up-front question (§17, §19). All of it is SFTP-first with an `mkdir`/`rm -rf`/exec fallback,
+  like the listings. Still deferred: cancelling a transfer mid-copy (a recursive one can only be
+  stopped at a collision prompt), resuming an interrupted one, drag-and-drop onto a folder, two
+  transfers at once (a batch queues instead, §17, §21), preserving file modes/timestamps in either
+  direction, and following symlinks inside a recursive walk (they are counted and skipped, never
+  followed, so a cyclic link cannot loop the transfer).
 - **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
   not a v1 need.
 - **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
@@ -1211,6 +1221,29 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   field and not the remote shell; `Esc` cancels, and a running transfer ignores it — there is
   no cancel to give it (deferred, §16).
 
+### Recursive folder transfer (v3.0)
+
+*Upload folder…* and *Download folder…* move a whole directory **tree** — the local one recreated
+on the server, or the remote one recreated on this machine. Both directions share one spine
+(`ssh/transfer.rs`) and differ only in which filesystem they read and which they write:
+
+- **Walk, then copy.** The source tree is walked into a plan — the directories (parents before
+  children) and the files with their sizes, so the one progress bar has a real total — held in
+  memory before a byte moves (`ponytail:` fine for an ordinary folder, felt for one of millions;
+  the upgrade path is to stream the walk and the copy together, the way the pane's listing already
+  batches, §19). The walk is **iterative, not recursive**, so a deep tree costs heap not stack,
+  and **symlinks are counted and skipped, never followed** — that is what stops a cyclic link
+  looping the transfer. Missing destination directories are created; existing ones are merged into.
+- **Per-file collisions, mid-transfer.** A tree cannot be pre-scanned into one list a user would
+  read, so each file whose destination is already taken **parks the transfer and asks** — the
+  spawned transfer sends `SshEvent::TransferConflict` and awaits a `ResolveConflict` reply on a
+  channel `client::run` forwards to it, the same request/await shape auth uses for a passphrase
+  (§7); the shell keeps flowing behind the prompt. The six answers are a file manager's: *Overwrite*
+  / *Keep both* (a `-1` copy) / *Skip* settle just this file, *Overwrite all* / *Skip all* set a
+  sticky policy that settles every later collision without asking again, and *Cancel* stops the
+  whole transfer — files already copied stay. This is the per-file mirror of the flat batch's
+  up-front question above; the flat paths are untouched.
+
 ---
 
 ## 18. Remote folder explorer (v2.0)
@@ -1223,8 +1256,8 @@ paths, what collapsing does, which folders a `cd` reveals) unit-testable with no
 
 ### The model (`explorer.rs`)
 
-- **Folders only, POSIX paths.** The tree lists directories, not files: files have no
-  action attached to them yet (download is still deferred, §16), and leaving them out
+- **Folders only, POSIX paths.** The tree lists directories, not files: files are the files
+  pane's job (§19), so listing them here too would only duplicate it, and leaving them out
   keeps both the row count and the traffic down. Paths are `/`-separated because that is
   what SFTP puts on the wire whatever the server runs on — one dialect, no guessing.
 - **Lazy, because a filesystem is not a list.** A folder's children are unknown until
@@ -1294,11 +1327,11 @@ announced path carries one.
   round-trip test locks `window_size`/`grid_size` together with the panel included. The
   drag is clamped to 60% of the window, because a splitter with no ceiling can leave the
   terminal one column wide and the user dragging their way back out.
-- **Right-click menu**, on the folder under the pointer: *Open in terminal*, *Rename…*,
-  *Copy name*, *Copy relative path*, *Copy full path*, *Expand (refresh)*, *Collapse*.
-  "Copy relative path" is disabled when the shell has never announced a cwd — there is
-  nothing to be relative to. "Expand" force-refetches, which is also the refresh for a
-  directory changed from the shell (a `mkdir` typed at the prompt).
+- **Right-click menu**, on the folder under the pointer: *Open in terminal*, *New folder…*,
+  *Upload…*, *Upload folder…*, *Rename…*, *Delete…*, *Copy name*, *Copy relative path*,
+  *Copy full path*, *Expand (refresh)*, *Collapse*. "Copy relative path" is disabled when the
+  shell has never announced a cwd — there is nothing to be relative to. "Expand" force-refetches,
+  which is also the refresh for a directory changed from the shell (a `mkdir` typed at the prompt).
 - **Relative paths walk both ways.** `relative` emits `..` for every level the two paths do
   not share, so the result is usable from the shell's current directory even when the
   folder sits on another branch (`/home/user` → `/var/log` gives `../../var/log`).
@@ -1316,6 +1349,19 @@ announced path carries one.
   re-lists the parent, so the row reappears under its new name in sort order. **The shell's
   own cwd is not updated** — a shell sitting inside a renamed folder is left on a stale
   path, which is the server's semantics, not something cmote can fix from outside.
+- **New folder and delete (v3.0).** *New folder…* opens a small name dialog (the shared modal
+  chrome, §10) whose one field is auto-focused; the same blank / `/` guard the rename uses keeps
+  a bad name unsubmittable. *Delete…* opens a confirmation naming every target and warning that a
+  folder goes with everything inside it — not undoable, so, like Disconnect and the home list
+  (§14), it only ever raises the question; the removal waits for an explicit confirm. Both are
+  driven from `ssh/browse.rs` on the shared listing session: an SFTP `mkdir`, and a delete that
+  **walks a folder's subtree** (files unlinked, then directories removed deepest-first, symlinks
+  unlinked never followed), with an `mkdir` / `rm -rf` exec fallback for a server with no sftp
+  subsystem. On success both panels re-list the affected parent, and a files pane sitting inside a
+  deleted folder steps up to the nearest surviving one.
+- **Recursive transfers (v3.0).** *Upload folder…* sends a picked local folder tree-and-all into
+  the menu's folder; the files pane's own *Download folder…* is the mirror. See §17 for the
+  merge-and-per-file-collision protocol they share.
 - **Failures are a notice line**, under the tree, not the error screen: a directory the
   user may not read must not tear down a working shell (the same call as an upload
   failure, §17). The path is the user's own, so naming it is what makes it actionable.
@@ -1449,10 +1495,12 @@ for a window resize.
 ### Actions
 
 - The right-click menu uses the shared chrome (§10): **Open in terminal** (directories
-  only), **Download…** (files only), **Rename…**, **Copy name / relative path / full
-  path**, **Refresh**. Each inapplicable item is *disabled*, not hidden, so the menu keeps
-  one shape. Opened on a multiple selection it acts on all of it, which is what disables
-  Rename and Open in terminal there and puts the count on the rest (§21).
+  only), **Download…** (files, or a selection's files), **Download folder…** (a lone
+  directory, §17), **Rename…**, **Delete…**, **Copy name / relative path / full path**,
+  **Refresh**. Each inapplicable item is *disabled*, not hidden, so the menu keeps one shape.
+  Opened on a multiple selection it acts on all of it, which is what disables Rename and Open in
+  terminal there and puts the count on Delete and the rest (§21). The empty-grid menu adds
+  **New folder…** and **Upload folder… here** beside the existing Upload / Refresh (§17, §18).
 - **Rename** reuses the tree's rules and the same `RenameDir` command — SFTP's rename does
   not care whether it is moving a directory — with the same guards: no blank name, no `/`
   (that would be a move, not a rename), and a destination that already exists is refused

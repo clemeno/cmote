@@ -113,9 +113,10 @@ references below (§n) point into it.
   terminal, over **SFTP** (falling back to `ls` on a server with the subsystem disabled).
   Click a folder to expand or collapse it; the tree **follows the shell**, opening the
   whole chain from `/` down to wherever you `cd`. Right-click a folder for **Open in
-  terminal** (types a quoted `cd`), **Upload…** (sends local files into that folder),
-  **Rename…** (inline, like F2 on the home list), **Copy name / relative path / full path**,
-  **Expand** (which also refreshes) and **Collapse**. Its header names the folder on show —
+  terminal** (types a quoted `cd`), **New folder…**, **Upload…** (sends local files into that
+  folder), **Upload folder…** (sends a whole local folder), **Rename…** (inline, like F2 on the
+  home list), **Delete…**, **Copy name / relative path / full path**, **Expand** (which also
+  refreshes) and **Collapse**. Its header names the folder on show —
   middle-ellipsised and capped at two lines, with a **copy button** beside it. Drag the
   splitter to resize the panel — the terminal reflows to match — or hide it with the status
   bar's **Folders** button; the `.*` checkbox in its header hides dot-folders (§18, §22).
@@ -126,9 +127,11 @@ references below (§n) point into it.
   long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
   directory streams in batches of 1000 and the header counts as they land. Icons come from a
   bundled icon font, by category (folder, image, code, archive, document, audio, video, link,
-  plain). Right-click an entry for **Open in terminal**, **Download…**, **Rename…**, **Copy
-  name / relative path / full path** and **Refresh**; right-click **empty space** for
-  **Upload… here** and **Refresh**. The header carries an **up** button, the directory's path
+  plain). Right-click an entry for **Open in terminal**, **Download…**, **Download folder…**
+  (a lone directory, tree and all), **Rename…**, **Delete…**, **Copy name / relative path /
+  full path** and **Refresh**; right-click **empty space** for **New folder…**, **Upload…
+  here**, **Upload folder… here** and **Refresh**. The header carries an **up** button, the
+  directory's path
   (middle-ellipsised to one line) and a **copy button** for it. Drag the splitter to resize
   the pane, or hide it with the status bar's **Files** button; the same `.*` checkbox hides
   dot-files here too (§19).
@@ -180,6 +183,18 @@ references below (§n) point into it.
   **Replace**, **Skip**, **Keep both** (`name-1.txt`) or **Cancel**. The files then go one at
   a time behind the status bar's progress bar, closing with `Uploaded N files`, and a failure
   names its reason and moves on to the next (§17).
+- **Create and delete remote entries** — **New folder…** (on the tree and the pane's
+  empty-space menus) opens a small name dialog; **Delete…** (on either menu, and on a whole
+  files-pane selection) removes what you picked over **SFTP** — a folder goes with its **entire
+  subtree** — behind a confirmation that names the targets and warns it cannot be undone. Both
+  fall back to `mkdir` / `rm -rf` on a server with the sftp subsystem disabled (§18).
+- **Recursive folder transfer** — **Upload folder…** sends a whole local directory tree onto the
+  server, and **Download folder…** pulls a whole remote one down, each recreating the tree on the
+  other side and **merging** into a destination that already exists. When a file inside the tree
+  would land on one already there, cmote asks **one file at a time**: **Overwrite**, **Keep both**
+  (`name-1`), or **Skip** just this one; **Overwrite all** or **Skip all** to settle every later
+  clash the same way; or **Cancel** the whole transfer (files already copied stay). Symlinks are
+  skipped, never followed, so a cyclic link can't loop it (§17, §19).
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
   Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and

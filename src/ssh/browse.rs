@@ -25,7 +25,7 @@ use anyhow::{Context, Result, bail};
 use russh::{Channel, ChannelMsg, client};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
-use russh_sftp::protocol::{File, StatusCode};
+use russh_sftp::protocol::{File, FileAttributes, StatusCode};
 use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
@@ -154,6 +154,61 @@ pub async fn rename<H: client::Handler>(
 		Err(error) => {
 			let _ = events
 				.send(SshEvent::RenameFailed(format!(
+					"Could not ask the server: {error}"
+				)))
+				.await;
+		}
+	}
+}
+
+/// Create a new folder on the server, reporting `MakeDirDone` or `MakeDirFailed` (§18). Same
+/// channel choice as `list`: the shared SFTP session when there is one, an `mkdir` over an exec
+/// channel otherwise.
+pub async fn make_dir<H: client::Handler>(
+	session: &client::Handle<H>,
+	sftp: &mut Sftp,
+	events: &mpsc::Sender<SshEvent>,
+	path: String,
+) {
+	if let Some(handle) = sftp.get(session).await {
+		tokio::spawn(make_dir_sftp(handle, path, events.clone()));
+		return;
+	}
+	match session.channel_open_session().await {
+		Ok(channel) => {
+			tokio::spawn(make_dir_exec(channel, path, events.clone()));
+		}
+		Err(error) => {
+			let _ = events
+				.send(SshEvent::MakeDirFailed(format!(
+					"Could not ask the server: {error}"
+				)))
+				.await;
+		}
+	}
+}
+
+/// Delete remote entries, reporting one `DeleteDone` for the whole set or one `DeleteFailed`
+/// (§18). Each path is removed whatever it is — a file, a symlink (unlinked, never followed), or
+/// a folder and its whole subtree. Same channel choice as `list`; on the SFTP path the removal
+/// is a walk this module drives, on the exec fallback a single `rm -rf`.
+pub async fn remove<H: client::Handler>(
+	session: &client::Handle<H>,
+	sftp: &mut Sftp,
+	events: &mpsc::Sender<SshEvent>,
+	paths: Vec<String>,
+) {
+	if let Some(handle) = sftp.get(session).await {
+		tokio::spawn(remove_sftp(handle, paths, events.clone()));
+		return;
+	}
+	match session.channel_open_session().await {
+		Ok(channel) => {
+			tokio::spawn(remove_exec(channel, paths, events.clone()));
+		}
+		Err(error) => {
+			let _ = events
+				.send(SshEvent::DeleteFailed(format!(
 					"Could not ask the server: {error}"
 				)))
 				.await;
@@ -396,6 +451,102 @@ async fn rename_sftp(
 	let _ = events.send(event).await;
 }
 
+/// The SFTP folder creation. Like the rename, the destination is checked FIRST — `lstat`, so a
+/// symlink sitting there is seen as itself rather than followed — because `mkdir` on an occupied
+/// path gives a terse server error, and "already exists" is the reason worth showing (§18).
+async fn make_dir_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Sender<SshEvent>) {
+	let event = match sftp.lstat(path.clone()).await {
+		Ok(_) => SshEvent::MakeDirFailed(format!("{path} already exists — nothing was created.")),
+		Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {
+			// The default attributes let the server apply the connecting user's umask, the same
+			// permissions a plain `mkdir` at the shell would give.
+			match sftp.mkdir(path.clone(), FileAttributes::default()).await {
+				Ok(_) => SshEvent::MakeDirDone(path),
+				Err(error) => {
+					SshEvent::MakeDirFailed(format!("Could not create the folder: {error}"))
+				}
+			}
+		}
+		Err(error) => SshEvent::MakeDirFailed(format!("Could not check {path}: {error}")),
+	};
+	let _ = events.send(event).await;
+}
+
+/// The SFTP delete: remove each target in turn, walking a folder's whole subtree. A failure
+/// stops at the first one and names it — a delete that half-happened is worth being told about,
+/// and the panels re-list either way so what did go survives the message (§18).
+async fn remove_sftp(
+	sftp: Arc<RawSftpSession>,
+	paths: Vec<String>,
+	events: mpsc::Sender<SshEvent>,
+) {
+	for path in &paths {
+		if let Err(error) = remove_tree(&sftp, path).await {
+			let _ = events
+				.send(SshEvent::DeleteFailed(format!(
+					"Could not delete {path}: {error}"
+				)))
+				.await;
+			return;
+		}
+	}
+	let _ = events.send(SshEvent::DeleteDone(paths)).await;
+}
+
+/// Remove one entry whatever it is (§18). A symlink is seen by `lstat` as itself and unlinked
+/// with `remove`, NEVER followed — following it would delete whatever it points at. A plain file
+/// is unlinked the same way; a real directory is emptied and then removed by `remove_subtree`.
+async fn remove_tree(sftp: &RawSftpSession, root: &str) -> Result<()> {
+	let attrs = sftp
+		.lstat(root.to_owned())
+		.await
+		.with_context(|| format!("could not stat {root}"))?;
+	if attrs.attrs.is_dir() {
+		remove_subtree(sftp, root).await
+	} else {
+		sftp.remove(root.to_owned())
+			.await
+			.map(|_| ())
+			.with_context(|| format!("could not remove {root}"))
+	}
+}
+
+/// Empty a directory and remove it (§18). Breadth-first rather than recursive so a deep tree
+/// costs heap, not stack: every descendant is discovered into `dirs` (parents before children)
+/// and `files`, then the files are unlinked and the directories removed DEEPEST FIRST — a
+/// directory only goes once nothing inside it is left. A symlink to a folder is a file here (its
+/// own `lstat` type is a link), so it is unlinked, not descended into.
+async fn remove_subtree(sftp: &RawSftpSession, root: &str) -> Result<()> {
+	let mut dirs = vec![root.to_owned()];
+	let mut files: Vec<String> = Vec::new();
+	let mut frontier = vec![root.to_owned()];
+	while let Some(dir) = frontier.pop() {
+		for entry in read_names(sftp, &dir).await? {
+			let child = join(&dir, &entry.filename);
+			if entry.attrs.is_dir() {
+				dirs.push(child.clone());
+				frontier.push(child);
+			} else {
+				files.push(child);
+			}
+		}
+	}
+
+	for file in &files {
+		sftp.remove(file.clone())
+			.await
+			.with_context(|| format!("could not remove {file}"))?;
+	}
+	// Deepest first: `dirs` is in discovery order (a parent before its children), so removing it
+	// in reverse takes the children before the parent — which is what `rmdir` needs.
+	for dir in dirs.iter().rev() {
+		sftp.rmdir(dir.clone())
+			.await
+			.with_context(|| format!("could not remove {dir}"))?;
+	}
+	Ok(())
+}
+
 /// Resolve one symlink for the details popup (§20), reporting `LinkTarget` — or nothing
 /// at all, since a link that will not resolve (a broken one, a server that refuses)
 /// simply leaves the popup without that line.
@@ -496,6 +647,46 @@ async fn rename_exec(
 	let event = match exec(channel, command).await {
 		Ok(_) => SshEvent::RenameDone { from, to },
 		Err(error) => SshEvent::RenameFailed(format!("Could not rename: {error}")),
+	};
+	let _ = events.send(event).await;
+}
+
+/// The `mkdir` fallback. The existence test and the create are one command so nothing can slip
+/// into the path between them, and `-e` catches a file, a folder or a dangling symlink already
+/// sitting there — the same guard `rename_exec` uses.
+async fn make_dir_exec(
+	channel: Channel<client::Msg>,
+	path: String,
+	events: mpsc::Sender<SshEvent>,
+) {
+	let quoted = shell_quote(&path);
+	let command = format!(
+		"if [ -e {quoted} ]; then echo 'already exists' >&2; exit 1; fi; mkdir -- {quoted}"
+	);
+	let event = match exec(channel, command).await {
+		Ok(_) => SshEvent::MakeDirDone(path),
+		Err(error) => SshEvent::MakeDirFailed(format!("Could not create the folder: {error}")),
+	};
+	let _ = events.send(event).await;
+}
+
+/// The `rm -rf` fallback: one command removes the whole set, folders and their contents included.
+/// Each path is quoted so a name carrying a space or a quote stays one argument, and `--` stops a
+/// name that starts with a dash being read as a flag — the deletion is a blunt instrument, so
+/// making sure it only ever sees paths and never options matters (§18).
+async fn remove_exec(
+	channel: Channel<client::Msg>,
+	paths: Vec<String>,
+	events: mpsc::Sender<SshEvent>,
+) {
+	let quoted = paths
+		.iter()
+		.map(|path| shell_quote(path))
+		.collect::<Vec<_>>()
+		.join(" ");
+	let event = match exec(channel, format!("rm -rf -- {quoted}")).await {
+		Ok(_) => SshEvent::DeleteDone(paths),
+		Err(error) => SshEvent::DeleteFailed(format!("Could not delete: {error}")),
 	};
 	let _ = events.send(event).await;
 }
