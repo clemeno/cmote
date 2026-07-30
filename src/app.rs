@@ -8,8 +8,17 @@
 //
 // There is no hidden widget tree and no global mutable state. Every change
 // flows through `update`, and the compiler forces us to handle each `Message`.
+//
+// Tabs (§26): the state is two layers. `Tab` holds ONE session's whole state — everything a
+// single-session app once was — and carries its own `update`/`view`/`title`. `App` owns a
+// `Vec<Tab>` plus the active index and the shared target list / vault; its own
+// `update`/`view`/`subscription` pick the active tab, delegate to it, route each session's SSH
+// events to the tab that owns them, and draw the tab strip. Adding tabs did not disturb the
+// per-session logic — it moved wholesale onto `Tab`.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use iced::Element;
 use iced::widget::{text, text_editor};
@@ -99,6 +108,286 @@ pub fn run() -> iced::Result {
 		.run()
 }
 
+/// The application: a strip of independent tabs and the state they share (§26). Each `Tab` is a
+/// whole session (its own screen, terminal, panels and dialogs); `App` owns the `Vec<Tab>`, which
+/// one is active, and the single target list and secret vault every tab's home screen and connect
+/// flow act on. Its `update`/`view`/`subscription` pick the active tab and delegate, route each
+/// session's SSH events to the tab that owns them, and draw the tab strip on top.
+struct App {
+	/// The open tabs, in strip order. Never empty — closing the last one opens a fresh home tab.
+	tabs: Vec<Tab>,
+	/// Index into `tabs` of the tab on screen and holding the keyboard.
+	active: usize,
+	/// The next tab id to hand out (§26). Monotonic and never reused, so a closed tab's id can
+	/// never collide with a worker still shutting down.
+	next_id: u64,
+	/// The one app-wide saved-target list, shared into every tab (§14) — one file on disk.
+	targets: Rc<RefCell<crate::profiles::Targets>>,
+	/// The one app-wide secret vault, shared into every tab (§16) — unlocking it anywhere unlocks
+	/// it everywhere.
+	vault: Rc<RefCell<Option<crate::vault::Vault>>>,
+	/// The id of a live tab whose "×" is waiting on the close confirmation (§26), or `None` when
+	/// no confirmation is up. A live session is torn down only once the user confirms.
+	pending_close: Option<u64>,
+}
+
+impl App {
+	/// Construct the initial state and the first `Task`. iced calls this once at startup: load the
+	/// shared target list, start with one home tab, and fetch the window size right away so a
+	/// dialog opened before the first resize is still centred (§10, §26).
+	fn new() -> (Self, iced::Task<Message>) {
+		let targets = Rc::new(RefCell::new(crate::profiles::Targets::load()));
+		let vault = Rc::new(RefCell::new(None));
+		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+		let app = Self {
+			tabs: vec![first],
+			active: 0,
+			next_id: 1,
+			targets,
+			vault,
+			pending_close: None,
+		};
+		let size = iced::window::latest()
+			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
+		(app, size)
+	}
+
+	/// The active tab (there is always one).
+	fn active(&self) -> &Tab {
+		&self.tabs[self.active]
+	}
+
+	/// The active tab, mutably.
+	fn active_mut(&mut self) -> &mut Tab {
+		&mut self.tabs[self.active]
+	}
+
+	/// Apply one message. Tab-strip management and a session's SSH events are handled here; a
+	/// window resize is trimmed to the region below the strip; everything else is for the tab on
+	/// screen and is delegated to it (§26).
+	fn update(&mut self, message: Message) -> iced::Task<Message> {
+		match message {
+			// Route a session's event to the tab that owns it — maybe a background one, so its
+			// shell keeps drawing off-screen. An event for a tab already closed is dropped.
+			Message::Ssh(id, event) => match self.tabs.iter_mut().find(|tab| tab.id == id) {
+				Some(tab) => tab.on_ssh_event(event),
+				None => iced::Task::none(),
+			},
+			Message::TabNew => self.open_tab(),
+			Message::TabSelected(index) => self.select_tab(index),
+			Message::TabCloseRequested(id) => self.request_close(id),
+			Message::TabCloseConfirmed => self.close_confirmed(),
+			Message::TabCloseCancelled => {
+				self.pending_close = None;
+				iced::Task::none()
+			}
+			// A resize is global to the OS window; hand the active tab the region BELOW the strip,
+			// so its grid fits the space it actually has rather than overrunning it by a row (§26).
+			Message::WindowResized(size) => {
+				let inner = iced::Size {
+					width: size.width,
+					height: (size.height - ui::tabs::STRIP_HEIGHT).max(0.0),
+				};
+				self.active_mut().update(Message::WindowResized(inner))
+			}
+			// Everything else is for the tab on screen.
+			other => self.active_mut().update(other),
+		}
+	}
+
+	/// Open a new tab on the home screen and make it active (§26). It inherits the window
+	/// geometry / focus so its first paint is sized right.
+	fn open_tab(&mut self) -> iced::Task<Message> {
+		let id = self.next_id;
+		self.next_id += 1;
+		// Inherit the window geometry / focus from the active tab if there is one; an empty strip
+		// (the last tab was just closed) starts from defaults, corrected by the next resize (§26).
+		let (size, focused, modifiers) = match self.tabs.get(self.active) {
+			Some(tab) => (tab.window_size, tab.window_focused, tab.modifiers),
+			None => (
+				iced::Size::default(),
+				true,
+				iced::keyboard::Modifiers::default(),
+			),
+		};
+		let mut tab = Tab::home(self.targets.clone(), self.vault.clone(), id, size);
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		self.tabs.push(tab);
+		self.active = self.tabs.len() - 1;
+		iced::Task::none()
+	}
+
+	/// Switch to the tab at `index` (§26). Carry the window geometry / focus onto it (the outgoing
+	/// tab held the latest) and refit its terminal, in case the window resized while it was in the
+	/// background.
+	fn select_tab(&mut self, index: usize) -> iced::Task<Message> {
+		if index >= self.tabs.len() || index == self.active {
+			return iced::Task::none();
+		}
+		let size = self.active().window_size;
+		let focused = self.active().window_focused;
+		let modifiers = self.active().modifiers;
+		self.active = index;
+		let tab = self.active_mut();
+		tab.window_size = size;
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		fit_terminal()
+	}
+
+	/// A tab's "×" (§26): confirm first if it holds a live session — like the Disconnect button,
+	/// closing is not undoable — otherwise drop it at once. The tab being closed is brought to the
+	/// front so the confirmation reads against the session it dismisses.
+	fn request_close(&mut self, id: u64) -> iced::Task<Message> {
+		let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+			return iced::Task::none();
+		};
+		if self.tabs[index].is_live() {
+			self.pending_close = Some(id);
+			if index != self.active {
+				return self.select_tab(index);
+			}
+			iced::Task::none()
+		} else {
+			self.remove_tab(index)
+		}
+	}
+
+	/// The close confirmation was accepted (§26): disconnect the tab's session and drop it.
+	fn close_confirmed(&mut self) -> iced::Task<Message> {
+		let Some(id) = self.pending_close.take() else {
+			return iced::Task::none();
+		};
+		let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+			return iced::Task::none();
+		};
+		// Tear the session down cleanly first: the Disconnect closes the remote side; dropping the
+		// tab then drops its command sender, which ends its worker loop (§4, §26).
+		self.tabs[index].send_command(SshCommand::Disconnect);
+		self.remove_tab(index)
+	}
+
+	/// Drop the tab at `index`, keeping the strip non-empty and `active` in range (§26).
+	fn remove_tab(&mut self, index: usize) -> iced::Task<Message> {
+		// Save a live tab's session before it goes (§22) — the same snapshot a disconnect writes.
+		self.tabs[index].persist_session();
+		self.tabs.remove(index);
+		// Never leave the window empty: closing the last tab opens a fresh home tab.
+		if self.tabs.is_empty() {
+			return self.open_tab();
+		}
+		// Keep the active index valid and on a sensible neighbour.
+		if index < self.active {
+			self.active -= 1;
+		} else if self.active >= self.tabs.len() {
+			self.active = self.tabs.len() - 1;
+		}
+		fit_terminal()
+	}
+
+	/// Centre the close-confirmation card in the window (§26). The card floats over the WHOLE
+	/// window (strip included), so the full height is the active tab's inner height plus the strip.
+	fn close_dialog_pos(&self) -> iced::Point {
+		let size = self.active().window_size;
+		iced::Point::new(
+			((size.width - ui::dialog::DIALOG_WIDTH) / 2.0).max(0.0),
+			((size.height + ui::tabs::STRIP_HEIGHT - ui::dialog::DIALOG_HEIGHT_ESTIMATE) / 2.0)
+				.max(0.0),
+		)
+	}
+
+	/// The window title, from the active tab (its endpoint and shell directory, §17).
+	fn title(&self) -> String {
+		self.active().title()
+	}
+
+	/// Draw the tab strip, then the active tab's view beneath it, then — if a live tab's close is
+	/// pending — the confirmation over everything (§26).
+	fn view(&self) -> Element<'_, Message> {
+		let chips: Vec<ui::tabs::Chip> = self
+			.tabs
+			.iter()
+			.enumerate()
+			.map(|(index, tab)| ui::tabs::Chip {
+				id: tab.id,
+				label: tab.strip_label(),
+				active: index == self.active,
+			})
+			.collect();
+		let body = iced::widget::column![ui::tabs::strip(&chips), self.active().view()]
+			.width(iced::Length::Fill)
+			.height(iced::Length::Fill);
+
+		if self.pending_close.is_none() {
+			return body.into();
+		}
+
+		// A live tab's close waits on this confirmation, floated over the whole window (§26).
+		let drag = ui::dialog::Drag {
+			pos: self.close_dialog_pos(),
+			dragging: false,
+		};
+		let message =
+			text("This tab has a live session. Closing it will disconnect the shell.").size(14);
+		let footer = vec![
+			iced::widget::button(text("Cancel"))
+				.on_press(Message::TabCloseCancelled)
+				.into(),
+			iced::widget::button(text("Close tab"))
+				.on_press(Message::TabCloseConfirmed)
+				.into(),
+		];
+		let card = ui::dialog::dialog(
+			"Close this tab?".to_owned(),
+			Message::TabCloseCancelled,
+			message.into(),
+			footer,
+			drag,
+		);
+		iced::widget::stack![body, ui::dialog::backdrop(Message::TabCloseCancelled), card]
+			.width(iced::Length::Fill)
+			.height(iced::Length::Fill)
+			.into()
+	}
+
+	/// The streams the app listens to (§4, §26). One SSH worker PER tab, tagged with the tab id so
+	/// its events route back to the right session; the window geometry / focus streams, global to
+	/// the OS window; and — keyed on the ACTIVE tab's screen — its keyboard listener and, while a
+	/// copy toast is up, the frame clock.
+	fn subscription(&self) -> iced::Subscription<Message> {
+		let mut subs: Vec<iced::Subscription<Message>> = self
+			.tabs
+			.iter()
+			.map(|tab| {
+				// `map` demands a NON-capturing closure, so the tab id cannot be closed over. `with`
+				// threads it into each event as `(id, event)`, which the plain closure then unpacks
+				// — routing every session's output back to the tab that owns it (§4, §26).
+				bridge::session_subscription(tab.id)
+					.with(tab.id)
+					.map(|(id, event)| Message::Ssh(id, event))
+			})
+			.collect();
+
+		// Window size and focus are global — the active tab is the one that reacts to them (§10, §23).
+		subs.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
+		subs.push(focus_events());
+
+		let active = self.active();
+		if active.snackbar.is_some() {
+			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
+		}
+		match active.screen {
+			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
+			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
+			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			_ => {}
+		}
+
+		iced::Subscription::batch(subs)
+	}
+}
+
 /// Which screen the single window is currently showing. This is the small state
 /// machine from PLAN §10 — every transition happens in `update`.
 #[derive(Debug, Default)]
@@ -158,15 +447,23 @@ pub enum Focus {
 	Files,
 }
 
-/// The whole application state. Owned in one place; nothing else mutates it.
+/// One session's whole state — its screen, its connection, its terminal and panels, its
+/// dialogs (§6). This used to BE the app; with tabs (§26) the app owns a `Vec<Tab>` and each
+/// tab is one of these, fully independent: a tab can sit at the home list while another runs a
+/// shell. Everything here is per-tab EXCEPT the two `Rc<RefCell<…>>` fields, which are shared
+/// clones of the single app-wide target list and secret vault (see `App`).
 #[derive(Debug, Default)]
-pub struct App {
+pub struct Tab {
+	/// This tab's stable identity, handed out by `App` and never reused (§26). It keys the
+	/// tab's own SSH worker subscription and routes that session's events back to this tab.
+	id: u64,
 	/// Which screen is visible.
 	pub screen: Screen,
-	/// The saved connection targets shown on the home screen (§14). Loaded from disk
-	/// at startup, kept sorted, and re-saved whenever it changes (a rename, a delete,
-	/// or a successful connect). Profiles only — never any secret material (§12).
-	targets: crate::profiles::Targets,
+	/// The saved connection targets shown on the home screen (§14, §26). A shared clone of the
+	/// ONE app-wide list (loaded from disk at startup, kept sorted, re-saved on any change): a
+	/// rename or delete in one tab's home screen is seen by every other, and there is a single
+	/// file on disk. Profiles only — never any secret material (§12).
+	targets: Rc<RefCell<crate::profiles::Targets>>,
 	/// The endpoint key (`user@host:port`) of the highlighted target on the home
 	/// screen, if any. Drives the row highlight and is what the right-click menu and
 	/// the F2/Enter/Delete shortcuts act on.
@@ -345,10 +642,12 @@ pub struct App {
 	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
 	/// reaches it, or when the user moves the shell themselves.
 	resume_cwd: Option<String>,
-	/// The unlocked secret vault for this session (§16), or `None` until the user unlocks it.
-	/// Held so repeated stores/reads need no re-prompt; dropped when the app exits, wiping the
-	/// decrypted secrets it carries. Lazy: a user who never opts in never has one.
-	vault: Option<crate::vault::Vault>,
+	/// The unlocked secret vault (§16, §26), or `None` until the user unlocks it. A shared clone
+	/// of the ONE app-wide vault: unlocking it in any tab unlocks it for all, so a return visit in
+	/// another tab needs no re-prompt. Held so repeated stores/reads need no re-prompt; dropped
+	/// when the app exits, wiping the decrypted secrets it carries. Lazy: a user who never opts in
+	/// never has one.
+	vault: Rc<RefCell<Option<crate::vault::Vault>>>,
 	/// The master passphrase being typed in the vault prompt, and its confirm field (create
 	/// mode). Kept out of the vault itself so a cancelled prompt leaves nothing behind; cleared
 	/// on submit or cancel (§16, §12).
@@ -658,29 +957,68 @@ pub enum Message {
 	/// The drag ended (pointer released) (§10).
 	DialogReleased,
 	// --- events bubbled up from the SSH task via the subscription (§4) ---
-	Ssh(SshEvent),
+	/// An event from one tab's SSH worker (§4, §26). The `u64` is the tab id it belongs to, so
+	/// `App` feeds it to the right session even when that tab is in the background — a shell
+	/// there keeps drawing while another is on screen.
+	Ssh(u64, SshEvent),
+	// --- tab strip (§26). Mouse-only: click a tab to switch, "+" to open, "×" to close. ---
+	/// The "+" button — open a new tab on the home screen and make it active.
+	TabNew,
+	/// A tab was clicked — make it active (payload: its position in the strip).
+	TabSelected(usize),
+	/// A tab's "×" (or a middle-click) — close it (payload: its id). A live session first
+	/// raises the Disconnect confirmation; an idle tab closes at once.
+	TabCloseRequested(u64),
+	/// The close confirmation for a live tab was accepted — disconnect it and drop it.
+	TabCloseConfirmed,
+	/// The close confirmation was dismissed — keep the tab.
+	TabCloseCancelled,
 }
 
-impl App {
-	/// Construct the initial state and the first `Task`. iced calls this once at
-	/// startup. We start on the Connect screen with no work to do, so the task
-	/// is empty.
-	fn new() -> (Self, iced::Task<Message>) {
-		// Load the saved targets so the home list is populated on the first paint (§14).
-		// We start on the home screen, not the form, so there is no field to focus yet.
-		// Fetch the window size right away so a dialog opened before the first resize
-		// event can still be centred and clamped (§10).
-		let app = Self {
-			targets: crate::profiles::Targets::load(),
+impl Tab {
+	/// Build a fresh tab sitting on the home screen (§26), sharing the app-wide target list and
+	/// vault handed in, and stamped with the current window size so a dialog it opens before the
+	/// first resize is still centred (§10). `App::new` builds the first one; the "+" strip button
+	/// builds each later one.
+	fn home(
+		targets: Rc<RefCell<crate::profiles::Targets>>,
+		vault: Rc<RefCell<Option<crate::vault::Vault>>>,
+		id: u64,
+		window_size: iced::Size,
+	) -> Self {
+		Self {
+			id,
+			targets,
+			vault,
+			window_size,
 			// A window opens focused, and a program that enables focus reporting assumes the
 			// same (§23); both are corrected by the first real change if the platform disagrees.
 			window_focused: true,
 			shell_focus_reported: true,
 			..Self::default()
-		};
-		let size = iced::window::latest()
-			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
-		(app, size)
+		}
+	}
+
+	/// The label this tab shows on its strip chip (§26): the connected endpoint once a shell is
+	/// open (or dialing), otherwise a word for the screen it is sitting on. Names the session so a
+	/// user with several open can tell them apart.
+	fn strip_label(&self) -> String {
+		match &self.screen {
+			Screen::Terminal | Screen::Connecting { .. } => self
+				.connection
+				.clone()
+				.unwrap_or_else(|| "session".to_owned()),
+			Screen::Home => "Home".to_owned(),
+			Screen::Error => "Error".to_owned(),
+			// The connect form and every dialog over it are all one "new connection" in progress.
+			_ => "New connection".to_owned(),
+		}
+	}
+
+	/// Whether this tab holds a live shell (§26). Closing one is confirmed like a Disconnect;
+	/// closing a tab still at the home list or the connect form just drops it.
+	fn is_live(&self) -> bool {
+		matches!(self.screen, Screen::Terminal)
 	}
 
 	/// The heart of the Elm loop: apply one `Message` to the state. Returns a
@@ -879,7 +1217,16 @@ impl App {
 				self.dialog_dragging = false;
 				self.dialog_drag_last = None;
 			}
-			Message::Ssh(event) => return self.on_ssh_event(event),
+			// `App` routes an SSH event to the tab that owns the session before delegating, so it
+			// already picked the right `self`; the id is not needed again here (§26).
+			Message::Ssh(_id, event) => return self.on_ssh_event(event),
+			// Tab-strip management is `App`'s job — it intercepts these before delegating, so a
+			// tab never sees them. The arms exist only to keep the match total (§26).
+			Message::TabNew
+			| Message::TabSelected(_)
+			| Message::TabCloseRequested(_)
+			| Message::TabCloseConfirmed
+			| Message::TabCloseCancelled => {}
 		}
 		iced::Task::none()
 	}
@@ -906,7 +1253,7 @@ impl App {
 			self.pending_remember = Some((endpoint, secret));
 			// A secret is in play, so the vault must be unlocked to store it. If it is not yet,
 			// defer the connect behind the master-passphrase prompt and resume it on unlock.
-			if self.vault.is_none() {
+			if self.vault.borrow().is_none() {
 				return self.open_vault_modal(VaultPending::Connect(params));
 			}
 		}
@@ -1008,7 +1355,7 @@ impl App {
 
 		match opened {
 			Ok(vault) => {
-				self.vault = Some(vault);
+				*self.vault.borrow_mut() = Some(vault);
 				self.vault_confirm.clear();
 				self.vault_failed = false;
 				self.resume_vault_pending()
@@ -1030,9 +1377,14 @@ impl App {
 		match self.vault_pending.take() {
 			Some(VaultPending::Connect(params)) => self.dial(params),
 			Some(VaultPending::Prefill(endpoint)) => {
-				if let Some(vault) = &self.vault
-					&& let Some(secret) = vault.get(&endpoint).cloned()
-				{
+				// Read the secret in a short borrow that ends before the `&mut self` call: a held
+				// `Ref` on the shared vault cell would clash with `fill_secret_field` (§26).
+				let secret = self
+					.vault
+					.borrow()
+					.as_ref()
+					.and_then(|vault| vault.get(&endpoint).cloned());
+				if let Some(secret) = secret {
 					self.fill_secret_field(&secret);
 				}
 				self.go_to_form()
@@ -1263,7 +1615,7 @@ impl App {
 				let mut resume_terminal = None;
 				let mut resume_files = None;
 				if let Some(target) = self.pending_target.take() {
-					let key = self.targets.upsert_on_connect(
+					let key = self.targets.borrow_mut().upsert_on_connect(
 						&target.host,
 						target.port,
 						&target.user,
@@ -1275,11 +1627,15 @@ impl App {
 					// come back to drive the cd / pane / tree restore below. `upsert_on_connect`
 					// leaves a known endpoint's saved state untouched, so it is still here to
 					// read; taking an owned snapshot ends the borrow before the panels change.
-					if let Some(session) = self
+					// Snapshot the saved session in a short borrow that ends before the `&mut self`
+					// call: a held `Ref` on the shared target cell would clash with
+					// `restore_session` (§26).
+					let session = self
 						.targets
+						.borrow()
 						.find(&key)
-						.map(crate::profiles::Target::session)
-					{
+						.map(crate::profiles::Target::session);
+					if let Some(session) = session {
 						(resume_terminal, resume_files) = self.restore_session(session);
 					}
 					// Remembered-secret bookkeeping (§16). A successful connect is the ONLY place
@@ -1291,7 +1647,7 @@ impl App {
 					// vault unlocked, which the dial / open flow already ensured whenever a secret
 					// was in play; if it is locked (the user never engaged it) the flag is left
 					// as stored.
-					if let Some(vault) = self.vault.as_mut() {
+					if let Some(vault) = self.vault.borrow_mut().as_mut() {
 						if let Some((endpoint, secret)) = self.pending_remember.take() {
 							if let Err(error) = vault.store(&endpoint, secret) {
 								eprintln!("could not save the vault: {error:#}");
@@ -1301,11 +1657,13 @@ impl App {
 						{
 							eprintln!("could not update the vault: {error:#}");
 						}
-						self.targets.set_remembered(&key, vault.get(&key).is_some());
+						self.targets
+							.borrow_mut()
+							.set_remembered(&key, vault.get(&key).is_some());
 					}
 					self.pending_remember = None;
 					self.home_selected = Some(key);
-					if let Err(error) = self.targets.save() {
+					if let Err(error) = self.targets.borrow().save() {
 						eprintln!("could not save targets: {error:#}");
 					}
 				}
@@ -1616,7 +1974,7 @@ impl App {
 		// Copy out the fields before touching `self.form`, so the borrow of `self.targets` ends
 		// first (assigning the form mutably borrows `self`).
 		let Some((host, port, user, auth_kind, key_path, remember)) =
-			self.targets.find(&key).map(|target| {
+			self.targets.borrow().find(&key).map(|target| {
 				(
 					target.host.clone(),
 					target.port,
@@ -1643,19 +2001,24 @@ impl App {
 		};
 
 		if remember {
-			match &self.vault {
+			// Read the vault's state in short borrows and drop them before any `&mut self` call
+			// (`fill_secret_field` / `open_vault_modal`), so the shared cell is never held across
+			// a mutation of the tab (§26).
+			if self.vault.borrow().is_some() {
 				// Vault already open this session: pull the secret straight into the field.
-				Some(vault) => {
-					if let Some(secret) = vault.get(&key).cloned() {
-						self.fill_secret_field(&secret);
-					}
+				let secret = self
+					.vault
+					.borrow()
+					.as_ref()
+					.and_then(|vault| vault.get(&key).cloned());
+				if let Some(secret) = secret {
+					self.fill_secret_field(&secret);
 				}
+			} else {
 				// Vault locked: show the (now populated) form as the backdrop and prompt to
 				// unlock; the pre-fill resumes on success.
-				None => {
-					self.screen = Screen::Connect;
-					return self.open_vault_modal(VaultPending::Prefill(key));
-				}
+				self.screen = Screen::Connect;
+				return self.open_vault_modal(VaultPending::Prefill(key));
 			}
 		}
 		self.go_to_form()
@@ -1669,24 +2032,29 @@ impl App {
 		let Some(key) = self.home_selected.clone() else {
 			return iced::Task::none();
 		};
-		let Some(target) = self.targets.find(&key) else {
+		let Some(name) = self
+			.targets
+			.borrow()
+			.find(&key)
+			.map(|target| target.name.clone())
+		else {
 			return iced::Task::none();
 		};
-		self.home_rename = Some(ui::home::RenameState {
-			key,
-			text: target.name.clone(),
-		});
+		self.home_rename = Some(ui::home::RenameState { key, text: name });
 		iced::widget::operation::focus(ui::home::RENAME_INPUT_ID)
 	}
 
 	/// Commit the in-progress rename (§14): apply it (which re-sorts the list) and save.
 	/// A blank name is rejected by the store, so committing one just discards the edit.
 	fn commit_rename(&mut self) {
-		if let Some(rename) = self.home_rename.take()
-			&& self.targets.rename(&rename.key, &rename.text)
-			&& let Err(error) = self.targets.save()
-		{
-			eprintln!("could not save targets: {error:#}");
+		if let Some(rename) = self.home_rename.take() {
+			// Two borrows of the one shared cell must not overlap (a mut + a shared borrow is a
+			// RefCell panic), so the rename's `borrow_mut` ends on its own line before `save`
+			// takes a fresh shared borrow (§26).
+			let renamed = self.targets.borrow_mut().rename(&rename.key, &rename.text);
+			if renamed && let Err(error) = self.targets.borrow().save() {
+				eprintln!("could not save targets: {error:#}");
+			}
 		}
 	}
 
@@ -1698,14 +2066,15 @@ impl App {
 		let Some(key) = self.home_selected.clone() else {
 			return;
 		};
-		let Some(target) = self.targets.find(&key) else {
+		let Some(name) = self
+			.targets
+			.borrow()
+			.find(&key)
+			.map(|target| target.name.clone())
+		else {
 			return;
 		};
-		let body = format!(
-			"{}\n\n{}  ({key})",
-			ui::home::DELETE_DIALOG_BODY,
-			target.name
-		);
+		let body = format!("{}\n\n{}  ({key})", ui::home::DELETE_DIALOG_BODY, name);
 		self.set_dialog_body(&body);
 		self.confirm_delete = true;
 	}
@@ -1719,14 +2088,14 @@ impl App {
 		self.home_menu_open = false;
 		self.confirm_delete = false;
 		if let Some(key) = self.home_selected.take() {
-			if let Some(vault) = self.vault.as_mut()
+			if let Some(vault) = self.vault.borrow_mut().as_mut()
 				&& let Err(error) = vault.forget(&key)
 			{
 				eprintln!("could not update the vault: {error:#}");
 			}
-			if self.targets.remove(&key)
-				&& let Err(error) = self.targets.save()
-			{
+			// Fresh, non-overlapping borrows of the shared target cell (see `commit_rename`).
+			let removed = self.targets.borrow_mut().remove(&key);
+			if removed && let Err(error) = self.targets.borrow().save() {
 				eprintln!("could not save targets: {error:#}");
 			}
 		}
@@ -2782,9 +3151,9 @@ impl App {
 			return;
 		};
 		let session = self.capture_session();
-		if self.targets.set_session(&endpoint, session)
-			&& let Err(error) = self.targets.save()
-		{
+		// Non-overlapping borrows of the shared target cell (see `commit_rename`).
+		let moved = self.targets.borrow_mut().set_session(&endpoint, session);
+		if moved && let Err(error) = self.targets.borrow().save() {
 			eprintln!("could not save targets: {error:#}");
 		}
 	}
@@ -3514,8 +3883,10 @@ impl App {
 			dragging: self.dialog_dragging,
 		};
 		match &self.screen {
+			// The shared target list is read through a short-lived borrow; `home::view` clones
+			// every name it needs, so nothing in the returned element outlives the borrow (§26).
 			Screen::Home => ui::home::view(
-				self.targets.items(),
+				self.targets.borrow().items(),
 				self.home_selected.as_deref(),
 				self.home_rename.as_ref(),
 				self.home_menu_open,
@@ -3633,44 +4004,6 @@ impl App {
 		.width(iced::Length::Fill)
 		.height(iced::Length::Fill)
 		.into()
-	}
-
-	/// Streams the app listens to. The SSH worker's outbound events (§4) are
-	/// always mapped into `Message::Ssh(..)`. While a shell is open we also listen
-	/// for key presses and window resizes (§9) — turned into `Message::Key(..)` and
-	/// `Message::WindowResized(..)`; limiting those to the Terminal screen means the
-	/// connect form's text inputs keep the keyboard to themselves and the form does
-	/// not react to resizes it does not care about.
-	fn subscription(&self) -> iced::Subscription<Message> {
-		let ssh = bridge::subscription().map(Message::Ssh);
-		// Track window size on every screen so a dialog can be centred/clamped even
-		// before a terminal exists (§10).
-		let resizes = iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size));
-		// Track window focus on every screen too, so focus reporting (§23) sees a change that
-		// happens while a dialog or the form is up and the shell still reflects it on return.
-		let mut subs = vec![ssh, resizes, focus_events()];
-
-		// While a copy toast is up, ride the window's frame clock so it can dismiss itself
-		// once its dwell elapses (§10). This build's iced executor is the thread-pool
-		// backend, which has no `time::every`; `frames()` needs no async runtime — it
-		// listens for the redraws the runtime already keeps requesting while a message is
-		// flowing, so the tick self-sustains and stops the moment the toast clears.
-		if self.snackbar.is_some() {
-			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
-		}
-
-		// Per-screen keyboard listeners. On the terminal every key is forwarded to the
-		// shell; on the connect form Tab / Shift+Tab move focus (typing still reaches the
-		// fields through the widget tree); on the home screen the F2 / Enter / Delete / Esc
-		// shortcuts (§14). Other screens need no keyboard subscription.
-		match self.screen {
-			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
-			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
-			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
-			_ => {}
-		}
-
-		iced::Subscription::batch(subs)
 	}
 }
 
@@ -3945,15 +4278,15 @@ mod tests {
 	// An `App` with a live emulator and an open command channel, so `send_command` succeeds
 	// and its bytes can be read back off `rx`. The window starts focused with the ring on the
 	// shell — the baseline a program assumes — so a focus change is measured against it.
-	fn app_with_terminal(rx_cap: usize) -> (App, mpsc::Receiver<SshCommand>) {
+	fn app_with_terminal(rx_cap: usize) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (tx, rx) = mpsc::channel(rx_cap);
-		let app = App {
+		let app = Tab {
 			command_tx: Some(tx),
 			terminal: Some(term::Terminal::new(24, 80)),
 			window_focused: true,
 			shell_focus_reported: true,
 			focus: Focus::Terminal,
-			..App::default()
+			..Tab::default()
 		};
 		(app, rx)
 	}
@@ -4028,13 +4361,13 @@ mod tests {
 	}
 
 	// Forty lines of output over the 24-row screen, so there is history to scroll into.
-	fn with_history(app: &mut App) {
+	fn with_history(app: &mut Tab) {
 		let output: Vec<u8> = (0..40).flat_map(|_| b"x\r\n".to_vec()).collect();
 		app.terminal.as_mut().unwrap().process(&output);
 	}
 
 	// The current scrollback offset off the live emulator.
-	fn offset(app: &App) -> u16 {
+	fn offset(app: &Tab) -> u16 {
 		app.terminal.as_ref().unwrap().screen().display_offset()
 	}
 
@@ -4103,16 +4436,17 @@ mod tests {
 		// than tripping the "worker not ready" error; the receiver is kept alive so the
 		// channel stays open.
 		let (tx, _rx) = mpsc::channel(64);
-		let mut app = App {
+		let mut app = Tab {
 			command_tx: Some(tx),
-			..App::default()
+			..Tab::default()
 		};
 
 		// A target connected to before, remembered at a shell directory and a *different*
 		// pane directory — the divergent case a tree-click peek leaves behind.
 		app.targets
+			.borrow_mut()
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
-		app.targets.set_session(
+		app.targets.borrow_mut().set_session(
 			"u@h:22",
 			crate::profiles::SessionState {
 				terminal_path: Some("/var/log".to_owned()),
@@ -4121,7 +4455,7 @@ mod tests {
 			},
 		);
 		app.connection = Some("u@h:22".to_owned());
-		app.pending_target = Some(app.targets.find("u@h:22").unwrap().clone());
+		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
 
 		// One OSC 7 cwd announcement, as the shell emits on each prompt (§17).
 		let announce =
@@ -4170,7 +4504,7 @@ mod tests {
 	fn shift_click_and_shift_arrow_reach_the_selection() {
 		use iced::keyboard::{Event, Modifiers};
 
-		let mut app = App::default();
+		let mut app = Tab::default();
 		let request = app
 			.files
 			.show("/home")
@@ -4187,7 +4521,7 @@ mod tests {
 				.collect(),
 			true,
 		);
-		let chosen = |app: &App| {
+		let chosen = |app: &Tab| {
 			app.files
 				.selected_rows(app.explorer.show_hidden())
 				.into_iter()
@@ -4310,5 +4644,70 @@ mod tests {
 				),
 			]
 		);
+	}
+
+	// A bare app with one home tab and empty shared state, so the tab-strip bookkeeping (§26) is
+	// exercised without an iced runtime or the disk. The `Task`s these calls return are dropped —
+	// only the tab list and active index are under test.
+	fn tab_app() -> App {
+		let targets = Rc::new(RefCell::new(crate::profiles::Targets::default()));
+		let vault = Rc::new(RefCell::new(None));
+		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+		App {
+			tabs: vec![first],
+			active: 0,
+			next_id: 1,
+			targets,
+			vault,
+			pending_close: None,
+		}
+	}
+
+	#[test]
+	fn opening_a_tab_adds_a_fresh_home_tab_and_activates_it() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		assert_eq!(app.tabs.len(), 2);
+		assert_eq!(app.active, 1, "the new tab is the active one");
+		assert_ne!(app.tabs[0].id, app.tabs[1].id, "ids are never reused");
+		assert!(matches!(app.tabs[1].screen, Screen::Home));
+	}
+
+	#[test]
+	fn closing_an_idle_tab_keeps_the_active_tab_the_same() {
+		let mut app = tab_app();
+		let _ = app.open_tab(); // 2 tabs, active = 1
+		let _ = app.open_tab(); // 3 tabs, active = 2
+		let first_id = app.tabs[0].id;
+		let active_id = app.tabs[app.active].id;
+		// Closing an idle tab BEFORE the active one shifts indices but must leave the same tab active.
+		let _ = app.request_close(first_id);
+		assert_eq!(app.tabs.len(), 2);
+		assert_eq!(
+			app.tabs[app.active].id, active_id,
+			"same tab still on screen"
+		);
+	}
+
+	#[test]
+	fn closing_the_last_tab_leaves_a_fresh_home_tab() {
+		let mut app = tab_app();
+		let only_id = app.tabs[0].id;
+		let _ = app.request_close(only_id);
+		// The window is never left empty: a NEW home tab replaces the closed one.
+		assert_eq!(app.tabs.len(), 1);
+		assert_ne!(app.tabs[0].id, only_id, "a fresh tab, not the closed one");
+		assert!(matches!(app.tabs[0].screen, Screen::Home));
+	}
+
+	#[test]
+	fn selecting_switches_the_active_tab_and_ignores_bad_indices() {
+		let mut app = tab_app();
+		let _ = app.open_tab(); // active = 1
+		let _ = app.select_tab(0);
+		assert_eq!(app.active, 0);
+		// Out of range or the current tab is a no-op.
+		let _ = app.select_tab(9);
+		assert_eq!(app.active, 0);
 	}
 }

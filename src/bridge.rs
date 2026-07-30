@@ -282,16 +282,21 @@ pub enum SshEvent {
 	Error(String),
 }
 
-/// Build the subscription that carries SSH events into the GUI. iced identifies
-/// a subscription by the `worker` function's type, so it starts exactly once and
-/// keeps running for the life of the app.
-pub fn subscription() -> Subscription<SshEvent> {
-	Subscription::run(worker)
+/// Build the SSH-event subscription for ONE tab's session (§4, §26). iced identifies a
+/// subscription by the `(data, builder)` pair, so passing the tab's id keys a DISTINCT worker
+/// per tab: each starts its own network thread and its own `run` loop, and lives exactly as long
+/// as its tab is in the batch — a closed tab drops out and its worker is torn down. The id is
+/// only an identity here; `App` tags this stream's events with the same id via `.map` so it can
+/// route them back to the tab that owns the session (a background tab keeps receiving output).
+pub fn session_subscription(id: u64) -> Subscription<SshEvent> {
+	Subscription::run_with(id, worker)
 }
 
 /// The worker stream. Runs on iced's executor; its job is only to *shuttle*
-/// events — the real network I/O runs on a separate tokio runtime thread (§4).
-fn worker() -> impl Stream<Item = SshEvent> {
+/// events — the real network I/O runs on a separate tokio runtime thread (§4). The `_id` is
+/// unused by the logic; it is part of the subscription's identity so each tab gets its own
+/// worker (§26).
+fn worker(_id: &u64) -> impl Stream<Item = SshEvent> + use<> {
 	// `iced::stream::channel` gives us `output`, a sink into the subscription.
 	// Its concrete type is a futures mpsc sender; annotate so inference is happy.
 	iced::stream::channel(

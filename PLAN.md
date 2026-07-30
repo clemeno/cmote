@@ -211,7 +211,7 @@ cmote/
 │   └── MaterialIcons-LICENSE.txt  its Apache-2.0 license (required for redistribution)
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
-    ├── app.rs            iced App: State, Message, update(), view(), subscription()
+    ├── app.rs            iced App: a strip of independent `Tab`s + the shared target list / vault; `Tab` = one session's State/Message/update/view; App delegates + routes SSH events per tab + draws the strip (§26)
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
@@ -230,6 +230,7 @@ cmote/
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
+    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
@@ -1048,8 +1049,14 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   so a forgotten master passphrase means the secrets are gone, by design. Still deferred: the
   other `age` unlock paths (encrypt to the user's own SSH key, or a dedicated generated identity
   file), which drop into the same code path when wanted.
-- **Multiple sessions / tabs** — the channel-per-session design (§4) already allows it;
-  v1 ships one session for simplicity.
+- **Multiple sessions / tabs** — *done (v3.0)*. Fully independent tabs (§26): each tab is a whole
+  session state machine — its own screen (home / connect / a live shell), terminal, panels and
+  dialogs — so one can browse the home list while another runs a shell. `App` owns a `Vec<Tab>`
+  and the active index; the ONE target list and secret vault are shared (`Rc<RefCell<…>>`) so a
+  rename or an unlock in any tab is seen by all. Per-tab SSH workers via
+  `bridge::session_subscription(id)` (keyed `Subscription::run_with`) route each session's events
+  back home. Mouse-only strip: click to switch, "+" to open, "×" to close (a live tab confirms
+  first). See §26 and `ui/tabs.rs`.
 - **`keyboard-interactive` auth (2FA / OTP)** — *done (v3.0)*. An explicit "Interactive"
   method on the form, plus automatic chaining into keyboard-interactive after a password/key
   attempt while the server still offers it (a fallback, or a second factor after a partial
@@ -2070,3 +2077,60 @@ kitty flags first: an active set supersedes the modifyOtherKeys branch entirely.
 stricter and more complete of the pair — it disambiguates *every* key, not just the Ctrl/Alt
 main-keyboard combos, and it is the one modern editors reach for. modifyOtherKeys stays for the
 programs that still emit only `CSI > 4 ; p m`.
+
+## 26. Multiple sessions in tabs (v3.0.0)
+
+The window held one session. Now it holds a **strip of tabs**, each a **fully independent**
+session: a tab can sit on the home list while another runs a shell, dial a second connection while
+the first stays live, and each keeps its own terminal, folder tree, files pane, selection and
+dialogs. Two open connections no longer mean two windows.
+
+### The split: `Tab` and `App`
+
+The whole single-session state — everything `App` used to be — moved wholesale onto a **`Tab`**
+struct, keeping its `update` / `view` / `title` and every helper unchanged. A new, thin **`App`**
+owns a `Vec<Tab>`, the active index, and the two things that must be **shared**, not duplicated:
+
+- the saved-target list (`profiles::Targets`) — one file on disk; a rename or delete in one tab's
+  home screen must show in every other;
+- the unlocked secret vault (`vault::Vault`) — one master passphrase; unlocking it in any tab
+  unlocks it for all.
+
+Both are held as `Rc<RefCell<…>>` and cloned into each tab, so a tab's home-screen and connect-flow
+code reaches them through short borrows (`self.targets.borrow()`) with no parameter threading. The
+home-screen list view is read through a borrow that outlives nothing — `ui::home::view` clones
+every name it draws, so its `targets` argument has a lifetime independent of the returned element.
+`window_size` / `window_focused` / `modifiers` stay per-tab (only the active tab receives those
+events); the active tab's copies are carried onto a tab when it is opened or activated.
+
+`App::update` intercepts tab-strip management and each session's SSH events, and delegates
+everything else to the active tab. `App::view` draws the strip, then the active tab's own view
+beneath it. `App::subscription` batches ONE worker per tab plus the active tab's keyboard listener.
+
+### One worker per tab
+
+The two-thread bridge (§4) was one worker for the whole app; now each tab gets its own.
+`bridge::session_subscription(id)` is `Subscription::run_with(id, worker)` — iced keys a
+subscription by its `(data, builder)` pair, so each tab id starts a DISTINCT worker (its own
+network thread and `ssh::client::run` loop) and tears it down when the tab leaves the batch. The
+protocol did not change: `SshCommand` / `SshEvent` / `client.rs` are untouched. Each tab's stream
+is tagged with its id (`.with(id).map(…)`, since `map` demands a non-capturing closure) into
+`Message::Ssh(id, event)`, which `App` routes to the tab that owns the session — so a **background**
+tab's shell keeps drawing and its listings keep arriving while another tab is on screen. Closing a
+tab drops it from the `Vec`; that drops its command sender, which ends its `run` loop, and removes
+its subscription from the batch — a clean teardown from one `Vec::remove`.
+
+### The strip, and the geometry it costs
+
+`ui/tabs.rs` draws the strip: one chip per tab (its endpoint once connected, else the screen it is
+on), tinted when active, each with a "×"; a trailing "+". **Mouse-only** (the chosen scope): a left
+click on a chip selects, "×" closes, "+" opens a fresh home tab. Closing a **live** tab first
+raises a confirmation (like Disconnect, closing is not undoable); an idle tab closes at once.
+Closing the last tab never leaves an empty window — a fresh home tab replaces it.
+
+The strip has a fixed height (`STRIP_HEIGHT`), so the terminal below it lives in a window that much
+shorter. iced's `mouse_area` reports widget-local coordinates, so pointer math inside a tab is
+unaffected; the one thing that reads the raw window size — the grid-fit and dialog-centre math — is
+fed a height already reduced by `STRIP_HEIGHT` (`App` trims it off every `WindowResized` before
+delegating), so the grid fits the space it has rather than overrunning it by a row. A tab switch
+refits the newly shown terminal, in case the window resized while it was backgrounded.

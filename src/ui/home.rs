@@ -67,7 +67,10 @@ pub struct RenameState {
 /// on top of everything, with `dialog_body` as its selectable message and `drag` its
 /// position.
 pub fn view<'a>(
-	targets: &'a [Target],
+	// `targets` has its OWN lifetime, not `'a`: every row clones the names it shows (see
+	// `target_row`), so nothing in the returned element borrows the list. That lets `app` pass a
+	// short-lived borrow of the shared, `RefCell`-guarded target list (§26).
+	targets: &[Target],
 	selected: Option<&str>,
 	rename: Option<&'a RenameState>,
 	menu_open: bool,
@@ -150,7 +153,9 @@ fn confirm_delete_panel(
 
 /// The scrollable list of target rows, or an empty-state hint when there are none.
 fn target_list<'a>(
-	targets: &'a [Target],
+	// Fresh lifetime, like `view` — the rows clone what they show, so the list is not borrowed
+	// into the returned element (§26).
+	targets: &[Target],
 	selected: Option<&str>,
 	rename: Option<&'a RenameState>,
 ) -> Element<'a, Message> {
@@ -179,7 +184,7 @@ fn target_list<'a>(
 /// it. Wrapped in a `mouse_area` so a left click selects it and a right click opens the
 /// context menu (both carry the endpoint key). Fixed height so the menu placement math
 /// (see `context_menu`) lines up.
-fn target_row(target: &Target, key: String, selected: bool) -> Element<'_, Message> {
+fn target_row(target: &Target, key: String, selected: bool) -> Element<'static, Message> {
 	// The endpoint is muted grey — but ONLY on an unselected row. `text::secondary`
 	// pins an absolute colour (`secondary.base.color`), which ignores the selected row's
 	// tint and stays dark grey on it. On the selected row the style is left at its

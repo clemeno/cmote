@@ -12,7 +12,8 @@ remote filesystem beside it, a grid of the current directory's files under it (k
 navigable, with a details popup and rubber-band multi-selection), the remote working
 directory in the title bar, and file transfer both ways. Full-screen programs — btop,
 vim, htop, midnight commander — draw properly and take the mouse. Reconnect to a saved
-target and the shell and both panels come back to the directories you left them in.
+target and the shell and both panels come back to the directories you left them in. Open
+as many sessions as you like in **tabs** — each fully independent, all in one window.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -22,6 +23,12 @@ references below (§n) point into it.
 
 ## Features
 
+- **Tabs — many independent sessions in one window.** Each tab is its own session: one can sit
+  on the home list while another runs a shell, and every tab keeps its own terminal, folder tree,
+  files pane, selection and dialogs. A background tab's shell keeps running and its listings keep
+  arriving while you work in another. Mouse-only strip across the top: **click** a tab to switch,
+  **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
+  targets and the unlocked vault are shared across every tab.
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
   passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
@@ -729,6 +736,16 @@ Kill the connection the hard way too (`docker stop cmote-sshd`, or `pkill sshd` 
 remote) and reconnect — the snapshot should survive a hangup, not just a clean disconnect.
 Finally, connect to a target saved by an older build (or delete the session fields from
 `targets.json` by hand): it should open at the login directory with default panels, no error.
+
+**15. Tabs.** Connect a session, then click **"+"** on the strip: a new **Home** tab opens and
+takes over the window while the first shell keeps running behind it. Connect a second target,
+then click back to the first tab — its shell should be exactly where you left it (run a slow
+command like `sleep 5; date` in the background tab, switch away and back, and its output should
+have arrived). Resize the window with two live tabs and switch between them: each grid should
+fit the window (no missing bottom row). Click a tab's **"×"**: an idle Home/Connect tab closes at
+once, a **live** shell asks to confirm first. Close every tab in turn — the last close should
+leave a single fresh Home tab, never an empty window. A rename or delete on one tab's home list
+should be visible on another tab's home list (the target store is shared).
 
 **Cleanup:**
 
