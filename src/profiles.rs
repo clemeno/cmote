@@ -9,9 +9,13 @@
 //   the secret at connect time; only the "how to reach it" part is remembered.
 //
 // That keeps the §12 guarantee ("the safest secret is the one never persisted")
-// intact while still making reconnecting convenient, and it keeps the store fully
-// portable — a `targets.json` copied to another machine leaks nothing. (Opt-in
-// secret persistence, encrypted at rest, is a separate later investigation.)
+// intact for THIS file while still making reconnecting convenient, and it keeps the
+// store fully portable — a `targets.json` copied to another machine leaks nothing.
+//
+// Opt-in secret persistence, encrypted at rest, now exists as a SEPARATE, deliberate
+// relaxation (§16, `vault.rs`): a saved password / key passphrase lives only in the
+// encrypted `secrets.age`, never here. All this file gains is a `remember_secret` flag
+// (metadata) so the home list and form know a secret can be pre-filled from that vault.
 //
 // The file is `targets.json` in the shared data directory (§11, `paths::data_dir`).
 
@@ -66,6 +70,13 @@ pub struct Target {
 	pub explorer_width: Option<f32>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub files_height: Option<f32>,
+	/// Whether an encrypted secret (a password or a key passphrase) is stored for this target
+	/// in the portable vault (§16, `vault.rs`). Metadata ONLY — this flag rides here so the
+	/// home list and the connect form know a secret can be pre-filled, while the secret itself
+	/// lives solely in `secrets.age`, never in this file (§12). Off by default; a `targets.json`
+	/// written before opt-in persistence existed loads with it false and behaves as before.
+	#[serde(default, skip_serializing_if = "is_false")]
+	pub remember_secret: bool,
 }
 
 /// The slice of a target's state that one session updates and the next restores (§22): where
@@ -89,6 +100,13 @@ pub struct SessionState {
 /// `targets.json` written before this field existed keeps behaving as it did.
 fn shown_by_default() -> bool {
 	true
+}
+
+/// Serde skip predicate for a `bool` that defaults to false: keeps a `false` flag out of the
+/// written JSON so the file stays tidy and an older reader is unaffected. `skip_serializing_if`
+/// passes a `&bool`, hence the reference.
+fn is_false(flag: &bool) -> bool {
+	!*flag
 }
 
 impl Target {
@@ -179,11 +197,30 @@ impl Targets {
 					files_path: None,
 					explorer_width: None,
 					files_height: None,
+					// A brand-new target has stored no secret yet; the flag is set later, only
+					// if a connect actually persists one to the vault (§16).
+					remember_secret: false,
 				});
 			}
 		}
 		self.sort();
 		endpoint
+	}
+
+	/// Set (or clear) the "a secret is stored for this target" flag (§16), returning whether it
+	/// changed. Called after a successful connect to keep the flag in step with what the vault
+	/// actually holds — the source of truth is the vault, this is only the hint the home list
+	/// and form read so they never promise a pre-fill that is not there. A missing endpoint is
+	/// a no-op.
+	pub fn set_remembered(&mut self, endpoint: &str, remember: bool) -> bool {
+		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
+			return false;
+		};
+		if target.remember_secret == remember {
+			return false;
+		}
+		target.remember_secret = remember;
+		true
 	}
 
 	/// Rename the target with this endpoint key. A blank/whitespace-only name is
@@ -348,6 +385,7 @@ mod tests {
 			files_path: None,
 			explorer_width: None,
 			files_height: None,
+			remember_secret: false,
 		}
 	}
 
@@ -585,6 +623,55 @@ mod tests {
 		)
 		.unwrap();
 		assert!(Targets::load_from(&path).items()[0].show_hidden);
+	}
+
+	#[test]
+	fn the_remember_flag_is_set_cleared_and_round_trips() {
+		// Arrange: a target with no secret stored yet.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+		assert!(!targets.find("u@h:22").unwrap().remember_secret);
+
+		// Act / Assert: setting it reports a change and sticks; setting the same value again
+		// reports none; an unknown endpoint is a no-op.
+		assert!(targets.set_remembered("u@h:22", true));
+		assert!(targets.find("u@h:22").unwrap().remember_secret);
+		assert!(!targets.set_remembered("u@h:22", true));
+		assert!(!targets.set_remembered("nobody@nowhere:22", true));
+
+		// It survives a save/load round trip (the flag is metadata, no secret is written here).
+		targets.save_to(&path).expect("save");
+		assert!(
+			Targets::load_from(&path)
+				.find("u@h:22")
+				.unwrap()
+				.remember_secret
+		);
+
+		// Clearing it drops it back to the tidy default (skipped from the JSON).
+		assert!(targets.set_remembered("u@h:22", false));
+		targets.save_to(&path).expect("save");
+		assert!(
+			!Targets::load_from(&path)
+				.find("u@h:22")
+				.unwrap()
+				.remember_secret
+		);
+	}
+
+	#[test]
+	fn a_targets_file_without_the_remember_field_defaults_to_off() {
+		// A store written before opt-in persistence existed must load with no secret promised.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(
+			&path,
+			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"password"}]"#,
+		)
+		.unwrap();
+		assert!(!Targets::load_from(&path).items()[0].remember_secret);
 	}
 
 	#[test]

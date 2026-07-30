@@ -22,8 +22,9 @@ references below (§n) point into it.
 ## Features
 
 - **Home screen of saved targets** — every successful connection is remembered as a
-  named target and listed alphabetically. Profiles only: **no passwords or passphrases
-  are ever written to disk** (only host / port / user / auth method / key path). Click a
+  named target and listed alphabetically. Profiles only by default: **no passwords or
+  passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
+  secret is stored only if you opt in to the encrypted vault (below). Click a
   target to select it, then click it again (or press **Enter**) to open it and pre-fill
   the form; **rename** it in place with **F2** or right-click → **Rename** (the list
   re-sorts); right-click also offers **Open** and **Delete** (deleting asks to confirm —
@@ -33,6 +34,13 @@ references below (§n) point into it.
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
   `ssh-key`'s `from_ppk`). Encrypted keys prompt for a passphrase on their own screen —
   or pre-fill an optional passphrase field on the form (leave it empty to be prompted).
+- **Remember a secret (opt-in, portable)** — tick **Remember** on the form to keep that
+  target's password or key passphrase in an encrypted vault (`secrets.age`), so a return visit
+  pre-fills the masked field. The vault is one file protected by a **master passphrase** you
+  choose (`age`: scrypt + XChaCha20-Poly1305), so it stays portable — it unlocks on any machine
+  with the passphrase, unlike a machine-bound OS keyring. Off by default; the secret is saved
+  only after a *successful* connect (a wrong password is never stored), and a forgotten master
+  passphrase means the secrets are gone (no recovery, by design).
 - **Trust-on-first-use** host-key verification against a portable `known_hosts`:
   first contact shows the fingerprint for explicit accept/reject; a later key change
   is a hard stop, not a warning (§8).
@@ -191,9 +199,11 @@ references below (§n) point into it.
   shell is put back with a visible `cd`. The snapshot is written at every teardown — a clean
   Disconnect, a remote hangup, an error — and a value this session never learned never erases
   the one already saved. Profile metadata only: still **no secrets on disk** (§22).
-- Session-only **secrets** — passwords and key passphrases are held in memory and
-  `zeroize`d on drop, never written to disk (§12). Only non-secret connection *profiles*
-  are persisted, for the home list (§14).
+- **Secrets** — passwords and key passphrases are held in memory and `zeroize`d on drop, and
+  by default never written to disk (§12); only non-secret connection *profiles* are persisted,
+  for the home list (§14). The one exception is the **opt-in** encrypted vault (§16): tick
+  "Remember" and the secret is kept in `secrets.age`, sealed with a master passphrase you
+  choose — portable across machines, and off unless you ask for it.
 
 ## Gestures and shortcuts
 
@@ -315,9 +325,11 @@ right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
 
 ## Data and portability
 
-cmote writes two files — `known_hosts` (pinned host keys) and `targets.json` (saved
+cmote writes up to three files — `known_hosts` (pinned host keys), `targets.json` (saved
 connection profiles plus where each session left off: the two directories, the `.*` toggle
-and the panel sizes — **no secrets**). Both live in the same directory, resolved at
+and the panel sizes — **no secrets**), and, only once you opt in to remembering a secret,
+`secrets.age` (the encrypted credential vault, §16 — a master-passphrase-sealed `age` blob,
+the sole place any secret is stored). All live in the same directory, resolved at
 runtime (§11, `paths::data_dir`):
 
 1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
@@ -328,7 +340,10 @@ runtime (§11, `paths::data_dir`):
 
 To reset trust for a host, delete the offending line (or the whole file) from
 `known_hosts`. To drop a saved target, use right-click → Delete in the app and confirm
-the prompt (or delete its entry from `targets.json`).
+the prompt (or delete its entry from `targets.json`) — deleting a target also forgets its
+vault secret when the vault is unlocked. To forget every remembered secret at once, delete
+`secrets.age`; a forgotten master passphrase is unrecoverable, so this is also the only way
+back in if you lose it (you keep the profiles, just re-enter the secrets).
 
 ## Testing
 

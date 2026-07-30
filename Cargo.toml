@@ -8,6 +8,17 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# The encrypted secret vault for opt-in credential persistence (PLAN §16). A saved
+# password / key passphrase is kept in `cmote-data/secrets.age`, encrypted with a master
+# passphrase the user chooses — so the whole store stays PORTABLE (a USB stick unlocks on any
+# OS/machine with the passphrase), unlike a machine-bound OS keyring / DPAPI blob. `age` is the
+# modern file-encryption format (scrypt KDF + XChaCha20-Poly1305 AEAD) and the crate is pure
+# Rust (RustCrypto primitives, system RNG via `getrandom`) — no C toolchain, so the no-NASM /
+# no-C portable build holds (§11). `default-features = false` drops the ASCII-armor / async /
+# plugin / ssh extras: the vault is a binary blob decrypted by passphrase, so only the core
+# format is needed. Its `secrecy` re-export (`age::secrecy`) carries the master passphrase into
+# the API without a plaintext copy lingering.
+age = { version = "0.11", default-features = false }
 # The VT/ANSI terminal engine (PLAN §9, §16). Replaces `vt100`, whose small subset was
 # the compatibility ceiling: alacritty_terminal is a full VT implementation — DEC
 # line-drawing charset, scrollback, origin mode, custom tab stops, the rich SGR set

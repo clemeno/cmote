@@ -121,6 +121,11 @@ pub enum Screen {
 	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
 	/// text the user types lives in `App::passphrase_input`.
 	NeedPassphrase,
+	/// The master-passphrase prompt for the portable secret vault (§16), shown over the
+	/// connect form: CREATE it (first time, typed twice) or UNLOCK it. The typed values live
+	/// in `App::vault_input` / `vault_confirm`; on success the pending action (`vault_pending`)
+	/// — a deferred connect, or a form pre-fill — resumes.
+	VaultUnlock,
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
 	/// A terminal failure. The generic, non-leaking message (§12) lives in
@@ -315,6 +320,41 @@ pub struct App {
 	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
 	/// reaches it, or when the user moves the shell themselves.
 	resume_cwd: Option<String>,
+	/// The unlocked secret vault for this session (§16), or `None` until the user unlocks it.
+	/// Held so repeated stores/reads need no re-prompt; dropped when the app exits, wiping the
+	/// decrypted secrets it carries. Lazy: a user who never opts in never has one.
+	vault: Option<crate::vault::Vault>,
+	/// The master passphrase being typed in the vault prompt, and its confirm field (create
+	/// mode). Kept out of the vault itself so a cancelled prompt leaves nothing behind; cleared
+	/// on submit or cancel (§16, §12).
+	vault_input: String,
+	vault_confirm: String,
+	/// Whether the vault prompt is CREATING a passphrase (no vault file yet, two fields) rather
+	/// than unlocking an existing one (a single field). Fixed when the prompt opens.
+	vault_creating: bool,
+	/// Whether the vault prompt should show its "wrong / do not match" hint — set on a failed
+	/// unlock or a mismatched create, cleared when the prompt reopens (§16).
+	vault_failed: bool,
+	/// What a successful vault unlock should resume (§16): a deferred connect, or a form
+	/// pre-fill. `None` when no vault prompt is pending.
+	vault_pending: Option<VaultPending>,
+	/// The secret captured at dial time to store once the connect succeeds (§16), with its
+	/// endpoint. Set only when "Remember" is on and the secret is non-empty; taken and written
+	/// on `Connected`, cleared if the connect never leaves. Persisting only on success means a
+	/// wrong password is never saved.
+	pending_remember: Option<(String, Secret)>,
+}
+
+/// What a successful vault unlock should resume (§16). The master-passphrase prompt can
+/// interrupt two flows, so it records which to return to once the vault is open: continuing a
+/// connection set to remember its secret, or pre-filling the form from a secret already stored
+/// for a target the user opened.
+#[derive(Debug)]
+enum VaultPending {
+	/// Continue dialing this connection; its secret is stored on a successful connect.
+	Connect(bridge::ConnectParams),
+	/// Pre-fill the connect form's masked field from the stored secret for this endpoint.
+	Prefill(String),
 }
 
 /// A copy-confirmation toast (§10): the message it shows and when it appeared. The
@@ -424,6 +464,18 @@ pub enum Message {
 	PassphraseSubmitted,
 	/// The user dismissed the prompt — abort the connection.
 	PassphraseCancelled,
+	// --- remembered secrets: the "Remember" tick + the master-passphrase vault (§16) ---
+	/// The connect form's "Remember" checkbox was toggled (mouse click or Enter/Space on the
+	/// Remember stop). Carries no state — `update` flips the flag.
+	RememberToggled,
+	/// The vault prompt's master-passphrase field changed.
+	VaultInputChanged(String),
+	/// The vault prompt's confirm field changed (create mode only).
+	VaultConfirmChanged(String),
+	/// The vault prompt was submitted (the Unlock / Create button, or Enter in a field).
+	VaultSubmitted,
+	/// The vault prompt was dismissed (Cancel / ✕ / backdrop).
+	VaultCancelled,
 	// --- terminal input: a raw key press, forwarded only while a shell is open (§9) ---
 	Key(iced::keyboard::Event),
 	/// The window changed size — refit the terminal grid to it (§9).
@@ -614,7 +666,7 @@ impl App {
 					self.form.key_path = path;
 				}
 			}
-			Message::ConnectPressed => self.on_connect_pressed(),
+			Message::ConnectPressed => return self.on_connect_pressed(),
 			Message::BackPressed => return self.go_to_form(),
 			Message::FormKey(event) => return self.on_form_key(event),
 			Message::AcceptHostKey => self.on_host_key_decision(true),
@@ -622,6 +674,11 @@ impl App {
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
+			Message::RememberToggled => self.form.remember = !self.form.remember,
+			Message::VaultInputChanged(value) => self.vault_input = value,
+			Message::VaultConfirmChanged(value) => self.vault_confirm = value,
+			Message::VaultSubmitted => return self.on_vault_submitted(),
+			Message::VaultCancelled => return self.on_vault_cancelled(),
 			Message::Key(event) => return self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::WindowFocus(focused) => self.on_window_focus(focused),
@@ -738,17 +795,41 @@ impl App {
 		iced::Task::none()
 	}
 
-	/// Validate the form, then send a `Connect` command to the SSH task. Cheap
-	/// validation fails fast to the error screen.
-	fn on_connect_pressed(&mut self) {
+	/// Validate the form, then begin connecting (§10). Cheap validation fails fast to the error
+	/// screen. When "Remember" is ticked and a non-empty secret is in play (§16), the secret is
+	/// captured to store on success; if the vault is not yet unlocked the whole connect is
+	/// deferred behind the master-passphrase prompt and resumed on unlock.
+	fn on_connect_pressed(&mut self) -> iced::Task<Message> {
 		let params = match self.form.validate() {
 			Ok(params) => params,
 			Err(reason) => {
 				self.show_error(&reason);
-				return;
+				return iced::Task::none();
 			}
 		};
 
+		// Decide, before `params` moves into the dial, whether this connect should remember its
+		// secret — and capture it now. Only a non-empty secret is worth storing (§16).
+		if self.form.remember
+			&& let Some(secret) = extract_secret(&params.auth)
+		{
+			let endpoint = crate::profiles::endpoint_of(&params.user, &params.host, params.port);
+			self.pending_remember = Some((endpoint, secret));
+			// A secret is in play, so the vault must be unlocked to store it. If it is not yet,
+			// defer the connect behind the master-passphrase prompt and resume it on unlock.
+			if self.vault.is_none() {
+				return self.open_vault_modal(VaultPending::Connect(params));
+			}
+		}
+
+		self.dial(params)
+	}
+
+	/// Send a validated `Connect` to the SSH task and move to the connecting screen (§10). Split
+	/// from `on_connect_pressed` so the deferred-vault path can resume straight here once the
+	/// master passphrase is entered (§16). Records the profile (no secret) to save if the
+	/// session opens (§14).
+	fn dial(&mut self, params: bridge::ConnectParams) -> iced::Task<Message> {
 		// Fresh attempt: no passphrase has been tried yet, so any upcoming prompt is
 		// a first ask (no "incorrect" hint) until the user submits one (§7).
 		self.passphrase_failed = false;
@@ -772,12 +853,13 @@ impl App {
 			// brand-new target takes the default `upsert_on_connect` gives it (§14).
 			show_hidden: self.explorer.show_hidden(),
 			// The pending target only carries auth into `upsert_on_connect`; the remembered
-			// session (§22) lives with the *stored* target, which the upsert leaves untouched,
-			// so these placeholders are never read.
+			// session (§22) and the remember flag (§16) live with the *stored* target, which the
+			// upsert leaves untouched, so these placeholders are never read.
 			terminal_path: None,
 			files_path: None,
 			explorer_width: None,
 			files_height: None,
+			remember_secret: false,
 		});
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
@@ -788,8 +870,109 @@ impl App {
 			self.connection = Some(endpoint);
 			self.screen = Screen::Connecting { status };
 		} else {
-			// The command never left: do not leave a pending target to save later.
+			// The command never left: do not leave a pending target — or a secret to save — behind.
 			self.pending_target = None;
+			self.pending_remember = None;
+		}
+		iced::Task::none()
+	}
+
+	/// Open the master-passphrase prompt for the secret vault (§16), recording what to resume
+	/// once it unlocks. The prompt is in CREATE mode (two fields) when no vault file exists yet,
+	/// UNLOCK mode (one field) when it does — fixed here so the view need not re-check the disk.
+	/// It shows over the connect form, so the caller has already put the form on screen.
+	fn open_vault_modal(&mut self, pending: VaultPending) -> iced::Task<Message> {
+		self.vault_creating = !crate::vault::Vault::exists();
+		self.vault_input.clear();
+		self.vault_confirm.clear();
+		self.vault_failed = false;
+		self.vault_pending = Some(pending);
+		self.set_dialog_body(if self.vault_creating {
+			ui::VAULT_CREATE_BODY
+		} else {
+			ui::VAULT_UNLOCK_BODY
+		});
+		self.screen = Screen::VaultUnlock;
+		iced::widget::operation::focus(ui::VAULT_INPUT_ID)
+	}
+
+	/// Handle the vault prompt's submit (§16). Creating: the passphrase must be non-empty and
+	/// match its confirmation, else re-ask with the mismatch hint. Unlocking: a wrong passphrase
+	/// (or an unreadable file) re-asks with the "not correct" hint — no oracle beyond that
+	/// (§12). On success the unlocked vault is kept for the session and the pending action
+	/// resumes. The typed values are taken (not copied) out of the fields so nothing lingers.
+	fn on_vault_submitted(&mut self) -> iced::Task<Message> {
+		let entered = std::mem::take(&mut self.vault_input);
+
+		let opened = if self.vault_creating {
+			let confirm = std::mem::take(&mut self.vault_confirm);
+			// A new master passphrase must be non-empty and typed identically twice, so the one
+			// value that protects everything can never be a typo the user cannot reproduce.
+			if entered.is_empty() || entered != confirm {
+				self.vault_failed = true;
+				return iced::widget::operation::focus(ui::VAULT_INPUT_ID);
+			}
+			crate::vault::Vault::create(entered)
+		} else {
+			crate::vault::Vault::unlock(entered)
+		};
+
+		match opened {
+			Ok(vault) => {
+				self.vault = Some(vault);
+				self.vault_confirm.clear();
+				self.vault_failed = false;
+				self.resume_vault_pending()
+			}
+			Err(error) => {
+				// Wrong passphrase, or a damaged / unresolvable file: re-ask. The detail is
+				// logged, never shown (§12).
+				eprintln!("could not open the vault: {error:#}");
+				self.vault_failed = true;
+				iced::widget::operation::focus(ui::VAULT_INPUT_ID)
+			}
+		}
+	}
+
+	/// Resume whatever the vault unlock was blocking (§16): continue the deferred connect, or
+	/// pre-fill the form's masked field from the now-readable secret. A `Prefill` whose entry is
+	/// missing (the flag out of step with the vault) simply leaves the field blank.
+	fn resume_vault_pending(&mut self) -> iced::Task<Message> {
+		match self.vault_pending.take() {
+			Some(VaultPending::Connect(params)) => self.dial(params),
+			Some(VaultPending::Prefill(endpoint)) => {
+				if let Some(vault) = &self.vault
+					&& let Some(secret) = vault.get(&endpoint).cloned()
+				{
+					self.fill_secret_field(&secret);
+				}
+				self.go_to_form()
+			}
+			None => iced::Task::none(),
+		}
+	}
+
+	/// Dismiss the vault prompt (§16): clear the typed values and the pending secret, and drop
+	/// back to the connect form (populated behind the prompt in both flows). Cancelling never
+	/// stores anything — the deferred connect and the pre-fill are simply abandoned; the user
+	/// can still type the secret by hand.
+	fn on_vault_cancelled(&mut self) -> iced::Task<Message> {
+		self.vault_input.clear();
+		self.vault_confirm.clear();
+		self.vault_failed = false;
+		self.vault_pending = None;
+		self.pending_remember = None;
+		self.screen = Screen::Connect;
+		iced::Task::none()
+	}
+
+	/// Put a decrypted secret into the masked form field its auth method uses (§16): the
+	/// password under password auth, the key passphrase under key auth. One endpoint has one
+	/// stored secret and one auth kind, so the destination is unambiguous.
+	fn fill_secret_field(&mut self, secret: &Secret) {
+		match self.form.auth_kind {
+			AuthKind::Password => self.form.password = secret.expose().to_owned(),
+			AuthKind::Key => self.form.passphrase = secret.expose().to_owned(),
 		}
 	}
 
@@ -955,6 +1138,28 @@ impl App {
 					{
 						(resume_terminal, resume_files) = self.restore_session(session);
 					}
+					// Remembered-secret bookkeeping (§16). A successful connect is the ONLY place
+					// a secret is persisted — the credentials are now known good, so a wrong
+					// password was never stored. With "Remember" on, store what dial captured;
+					// with it off, forget any secret the vault held for this endpoint. The
+					// target's flag is then synced to what the vault actually holds, so the home
+					// list never promises a pre-fill that is not there. All of this needs the
+					// vault unlocked, which the dial / open flow already ensured whenever a secret
+					// was in play; if it is locked (the user never engaged it) the flag is left
+					// as stored.
+					if let Some(vault) = self.vault.as_mut() {
+						if let Some((endpoint, secret)) = self.pending_remember.take() {
+							if let Err(error) = vault.store(&endpoint, secret) {
+								eprintln!("could not save the vault: {error:#}");
+							}
+						} else if !self.form.remember
+							&& let Err(error) = vault.forget(&key)
+						{
+							eprintln!("could not update the vault: {error:#}");
+						}
+						self.targets.set_remembered(&key, vault.get(&key).is_some());
+					}
+					self.pending_remember = None;
 					self.home_selected = Some(key);
 					if let Err(error) = self.targets.save() {
 						eprintln!("could not save targets: {error:#}");
@@ -1232,26 +1437,61 @@ impl App {
 		self.go_to_form()
 	}
 
-	/// Open the connect form pre-filled from the selected target (§14): its host / port
-	/// / user / auth / key path are copied in; the secret fields start empty so the user
-	/// enters them here (never persisted, §12). A stale/missing selection is a no-op.
+	/// Open the connect form pre-filled from the selected target (§14): its host / port / user /
+	/// auth / key path are copied in. The secret field starts empty UNLESS the target has a
+	/// remembered secret (§16), in which case it is pre-filled from the vault — unlocking it via
+	/// the master-passphrase prompt first if the vault is not yet open. A stale/missing
+	/// selection is a no-op.
 	fn open_selected_target(&mut self) -> iced::Task<Message> {
 		self.home_menu_open = false;
 		let Some(key) = self.home_selected.clone() else {
 			return iced::Task::none();
 		};
-		let Some(target) = self.targets.find(&key) else {
+		// Copy out the fields before touching `self.form`, so the borrow of `self.targets` ends
+		// first (assigning the form mutably borrows `self`).
+		let Some((host, port, user, auth_kind, key_path, remember)) =
+			self.targets.find(&key).map(|target| {
+				(
+					target.host.clone(),
+					target.port,
+					target.user.clone(),
+					target.auth_kind,
+					target.key_path.clone(),
+					target.remember_secret,
+				)
+			})
+		else {
 			return iced::Task::none();
 		};
 		self.form = ui::connect::ConnectForm {
-			host: target.host.clone(),
-			port: target.port.to_string(),
-			user: target.user.clone(),
-			auth_kind: target.auth_kind,
+			host,
+			port: port.to_string(),
+			user,
+			auth_kind,
 			password: String::new(),
-			key_path: target.key_path.clone(),
+			key_path,
 			passphrase: String::new(),
+			// A remembered target opens with the box already ticked (§16); untick to stop
+			// remembering it, which forgets the stored secret on the next connect.
+			remember,
 		};
+
+		if remember {
+			match &self.vault {
+				// Vault already open this session: pull the secret straight into the field.
+				Some(vault) => {
+					if let Some(secret) = vault.get(&key).cloned() {
+						self.fill_secret_field(&secret);
+					}
+				}
+				// Vault locked: show the (now populated) form as the backdrop and prompt to
+				// unlock; the pre-fill resumes on success.
+				None => {
+					self.screen = Screen::Connect;
+					return self.open_vault_modal(VaultPending::Prefill(key));
+				}
+			}
+		}
 		self.go_to_form()
 	}
 
@@ -1305,15 +1545,24 @@ impl App {
 	}
 
 	/// Delete the selected target (§14) and save — only reached from a confirmed prompt.
-	/// Clears the selection so the menu and the shortcuts no longer point at a gone row.
+	/// Clears the selection so the menu and the shortcuts no longer point at a gone row. Also
+	/// forgets any remembered secret for this endpoint (§16) when the vault is unlocked; if it
+	/// is locked the encrypted entry is left orphaned in `secrets.age` — harmless (it is
+	/// unreachable without its target and still encrypted) and pruned only when next unlocked.
 	fn delete_selected_target(&mut self) {
 		self.home_menu_open = false;
 		self.confirm_delete = false;
-		if let Some(key) = self.home_selected.take()
-			&& self.targets.remove(&key)
-			&& let Err(error) = self.targets.save()
-		{
-			eprintln!("could not save targets: {error:#}");
+		if let Some(key) = self.home_selected.take() {
+			if let Some(vault) = self.vault.as_mut()
+				&& let Err(error) = vault.forget(&key)
+			{
+				eprintln!("could not update the vault: {error:#}");
+			}
+			if self.targets.remove(&key)
+				&& let Err(error) = self.targets.save()
+			{
+				eprintln!("could not save targets: {error:#}");
+			}
 		}
 	}
 
@@ -2935,6 +3184,17 @@ impl App {
 				),
 				Message::PassphraseCancelled,
 			),
+			Screen::VaultUnlock => self.form_with_dialog(
+				ui::vault_view(
+					&self.vault_input,
+					&self.vault_confirm,
+					self.vault_creating,
+					self.vault_failed,
+					&self.dialog_body,
+					drag,
+				),
+				Message::VaultCancelled,
+			),
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => {
 					let base = ui::terminal::view(
@@ -3193,6 +3453,29 @@ fn file_name_of(path: &std::path::Path) -> &str {
 	path.file_name()
 		.and_then(std::ffi::OsStr::to_str)
 		.unwrap_or("file")
+}
+
+/// The secret a "Remember" tick should persist for this auth method (§16): the password, or a
+/// non-empty pre-seeded key passphrase. An empty secret is nothing worth storing, so it maps to
+/// `None` — the target flag then stays off and the vault keeps no empty entry. A key relying on
+/// the interactive passphrase prompt (§7) has no form secret to capture here, so it is `None`
+/// too; remembering a key passphrase means typing it on the form.
+fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
+	let secret = match auth {
+		bridge::AuthMethod::Password(secret) => secret,
+		bridge::AuthMethod::Key {
+			passphrase: Some(secret),
+			..
+		} => secret,
+		bridge::AuthMethod::Key {
+			passphrase: None, ..
+		} => return None,
+	};
+	if secret.expose().is_empty() {
+		None
+	} else {
+		Some(secret.clone())
+	}
 }
 
 /// Build an upload batch's queue from the picked files, the destination folder and the

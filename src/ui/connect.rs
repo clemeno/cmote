@@ -8,7 +8,7 @@
 use std::path::{Path, PathBuf};
 
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, radio, row, text, text_input};
+use iced::widget::{button, checkbox, column, container, radio, row, text, text_input};
 use iced::{Border, Color, Element, Length};
 use serde::{Deserialize, Serialize};
 
@@ -74,13 +74,16 @@ pub enum FormStop {
 	/// The optional key-passphrase field. Only exists under key auth (§14); Tab skips
 	/// it entirely under password auth (see `is_applicable`).
 	KeyPassphrase,
+	/// The "Remember" checkbox (§16). A toggle, not a text field, so — like the radios — it
+	/// wears the focus ring and is flipped by Enter/Space rather than taking native focus.
+	Remember,
 	Connect,
 }
 
 impl FormStop {
 	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
 	/// do not apply to the current auth method.
-	const ORDER: [FormStop; 8] = [
+	const ORDER: [FormStop; 9] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
@@ -88,6 +91,7 @@ impl FormStop {
 		FormStop::AuthKey,
 		FormStop::Credential,
 		FormStop::KeyPassphrase,
+		FormStop::Remember,
 		FormStop::Connect,
 	];
 
@@ -153,6 +157,7 @@ impl FormStop {
 			FormStop::AuthPassword => Some(Message::AuthKindChanged(AuthKind::Password)),
 			FormStop::AuthKey => Some(Message::AuthKindChanged(AuthKind::Key)),
 			FormStop::Credential if auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
+			FormStop::Remember => Some(Message::RememberToggled),
 			FormStop::Connect => Some(Message::ConnectPressed),
 			_ => None,
 		}
@@ -194,6 +199,12 @@ pub struct ConnectForm {
 	/// Filled, it is tried first so the key unlocks without a prompt. Session-only:
 	/// it is moved into a `Secret` on submit and never saved with the target (§12).
 	pub passphrase: String,
+	/// Whether to remember the credential (password, or the key passphrase) for this target
+	/// in the portable encrypted vault (§16). Off by default — the safe, no-secret-at-rest
+	/// behaviour (§12) — and honoured only on a SUCCESSFUL connect, so a wrong password is
+	/// never stored. When a saved-secret target is opened, this starts ticked and the masked
+	/// field is pre-filled from the vault.
+	pub remember: bool,
 }
 
 impl ConnectForm {
@@ -297,6 +308,8 @@ pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 		// The credential fields depend on the selected method — only the relevant
 		// ones are shown, so the form stays uncluttered.
 		auth_fields(form, focus),
+		// The opt-in "remember this secret" toggle (§16), below the credential it applies to.
+		remember_toggle(form.auth_kind, form.remember, focus == FormStop::Remember),
 		focus_ring(
 			button("Connect").on_press(Message::ConnectPressed),
 			focus == FormStop::Connect,
@@ -394,6 +407,26 @@ fn passphrase_field(value: &str) -> Element<'_, Message> {
 	]
 	.spacing(10)
 	.into()
+}
+
+/// The opt-in "Remember" toggle (§16): a checkbox that stores this target's secret in the
+/// portable encrypted vault on a successful connect. The label names the exact credential it
+/// applies to — the password, or the key passphrase — so it reads unambiguously under either
+/// auth method. Like the radios, it wears the focus ring when it is the active keyboard stop and
+/// is flipped by Enter/Space (`FormStop::Remember`); a click toggles it directly. It always
+/// raises the same `RememberToggled` message (the new state is derived in `update`), so mouse
+/// and keyboard agree.
+fn remember_toggle(auth: AuthKind, remembered: bool, focused: bool) -> Element<'static, Message> {
+	let label = match auth {
+		AuthKind::Password => "Remember password",
+		AuthKind::Key => "Remember passphrase",
+	};
+	focus_ring(
+		checkbox(remembered)
+			.label(label)
+			.on_toggle(|_checked| Message::RememberToggled),
+		focused,
+	)
 }
 
 /// The key-file chooser: the chosen path (or a prompt) and a Browse button that

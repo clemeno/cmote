@@ -38,6 +38,22 @@ pub const PASSPHRASE_DIALOG_BODY: &str =
 /// because iced's widget `Id` is `From<&'static str>`.
 pub const PASSPHRASE_INPUT_ID: &str = "passphrase-input";
 
+/// The widget ids of the master-passphrase prompt's fields (§16). The first is always shown;
+/// the confirm field appears only when creating the vault (see `vault_view`). Stable `&'static`
+/// strings so `app` can move focus to them the instant the prompt opens.
+pub const VAULT_INPUT_ID: &str = "vault-input";
+pub const VAULT_CONFIRM_INPUT_ID: &str = "vault-confirm";
+
+/// The body copy for the vault prompt when UNLOCKING an existing vault (§16). Public so `app`
+/// can seed it into the dialog buffer when the prompt opens.
+pub const VAULT_UNLOCK_BODY: &str =
+	"Enter your master passphrase to unlock the saved credentials in this portable vault.";
+
+/// The body copy for the vault prompt when CREATING the vault for the first time (§16). It
+/// spells out the one hard rule of a portable encrypted store: forget the passphrase and the
+/// secrets are gone — there is no recovery, by design.
+pub const VAULT_CREATE_BODY: &str = "Choose a master passphrase to protect saved credentials. It encrypts the vault so the whole store stays portable across machines. There is no way to recover it if you forget it, so keep it safe.";
+
 /// The colour of the "wrong passphrase" hint (§7). A muted red that reads clearly on
 /// the default light theme. This is about a *local* key-file passphrase, not remote
 /// auth, so it is not a credential oracle (§12) — the key is decrypted and MAC-checked
@@ -151,6 +167,73 @@ pub fn passphrase_view<'a>(
 			button("Cancel")
 				.on_press(Message::PassphraseCancelled)
 				.into(),
+		],
+		drag,
+	)
+}
+
+/// The master-passphrase prompt for the portable secret vault (§16), in the shared dialog
+/// chrome. Two modes, chosen by `creating`:
+///   * CREATE (no vault file yet) — a passphrase field plus a confirm field, so the first
+///     passphrase cannot be a typo the user can never reproduce; the button reads "Create".
+///   * UNLOCK (a vault file exists) — a single passphrase field; the button reads "Unlock".
+///
+/// A wrong unlock or a mismatched create brings the prompt back with `failed` set, which shows
+/// the matching hint. Only the message (`body`) is selectable; the fields are their own widgets.
+/// `value` / `confirm` are owned by `App` and passed in, so this view stays pure.
+pub fn vault_view<'a>(
+	value: &'a str,
+	confirm: &'a str,
+	creating: bool,
+	failed: bool,
+	body: &'a text_editor::Content,
+	drag: dialog::Drag,
+) -> Element<'a, Message> {
+	let mut content = column![dialog::selectable_body(body)].spacing(12);
+
+	if failed {
+		// The hint differs by mode: a mismatch on create, a wrong passphrase on unlock. Neither
+		// is a credential oracle (§12) — this is a LOCAL vault passphrase, not remote auth.
+		let hint = if creating {
+			"The passphrases are empty or do not match. Please try again."
+		} else {
+			"That passphrase was not correct. Please try again."
+		};
+		content = content.push(text(hint).size(14).color(PASSPHRASE_ERROR));
+	}
+
+	content = content.push(
+		text_input("Master passphrase", value)
+			.id(VAULT_INPUT_ID)
+			.secure(true)
+			.on_input(Message::VaultInputChanged)
+			.on_submit(Message::VaultSubmitted),
+	);
+
+	// The confirm field exists only while creating — there is nothing to confirm on unlock.
+	if creating {
+		content = content.push(
+			text_input("Confirm passphrase", confirm)
+				.id(VAULT_CONFIRM_INPUT_ID)
+				.secure(true)
+				.on_input(Message::VaultConfirmChanged)
+				.on_submit(Message::VaultSubmitted),
+		);
+	}
+
+	let (title, action) = if creating {
+		("Create vault passphrase", "Create")
+	} else {
+		("Unlock vault", "Unlock")
+	};
+
+	dialog::dialog(
+		title.to_owned(),
+		Message::VaultCancelled,
+		content.into(),
+		vec![
+			button(action).on_press(Message::VaultSubmitted).into(),
+			button("Cancel").on_press(Message::VaultCancelled).into(),
 		],
 		drag,
 	)

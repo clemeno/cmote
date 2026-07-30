@@ -728,7 +728,12 @@ the registry.
   on macOS the binary links only `libSystem`, present on every Sequoia install, so it
   stays self-contained without bundling).
 - **Build/run**: `cargo run` (dev), `cargo build --release` → `target/release/cmote.exe`
-  on Windows, `target/release/cmote` on macOS.
+  on Windows, `target/release/cmote` on macOS. **On an Apple Silicon Mac**, add
+  `--target x86_64-apple-darwin` to get the *shipped* Intel binary (it lands under
+  `target/x86_64-apple-darwin/release/`): the Xcode CLT SDK carries both arch slices, so no
+  extra tooling is needed to build it — only **Rosetta 2** to run it locally, since a native
+  `cargo build` already gives you a runnable aarch64 binary for day-to-day work. Same split
+  CI uses (§13).
 
 ---
 
@@ -858,16 +863,50 @@ Pure logic is unit-tested; anything needing a live server is integration/manual.
 
 Tests use Rust's built-in `#[test]` / `#[cfg(test)]` — no framework dependency.
 
-**CI (done, v1.2 — `.github/workflows/ci.yml`).** Every push and pull request to
-`main` runs the same gates the README asks for locally, so `main` stays green on both
-targets: `cargo fmt --check` (once, platform-independent), `cargo clippy -D warnings`
-+ `cargo test` on **Windows** (native `x86_64-pc-windows-msvc`) and on **macOS**
-(clippy cross-compiled against the shipped `x86_64-apple-darwin` target — proving it
-builds, ring included — with the tests run natively on the aarch64 runner, valid
-because the logic under test is architecture-agnostic, §16), plus the supply-chain
-audit (§12). Only the live-SSH end-to-end path stays manual — there is still no CI SSH
-server. CI builds no release artifact; publishing the portable binaries stays a manual
-step (§16, code signing / release automation).
+**CI (done, v1.2 — `.github/workflows/ci.yml`).** Every push to `main`, and every pull
+request whose *base* is `main`, runs the same gates the README asks for locally, so `main`
+stays green on both targets: `cargo fmt --check` (once, platform-independent),
+`cargo clippy -D warnings` + `cargo test` on **Windows** (native
+`x86_64-pc-windows-msvc`) and on **macOS** (the arch split below), plus the supply-chain
+audit (§12). Those two events are the only triggers — no `workflow_dispatch`, no schedule,
+no tags — so a push to any other branch runs nothing until a PR targets `main`. The four
+jobs are independent (no `needs:`), so a formatting failure never masks a test failure;
+`concurrency` keyed on `github.ref` with `cancel-in-progress` kills a superseded run
+instead of burning minutes on it; and the token is `contents: read`, the least authority
+that works.
+
+**The macOS arch split — why an aarch64 runner validates an Intel target.** GitHub's
+`macos-latest` is Apple Silicon, but cmote ships `x86_64-apple-darwin` (§1). That job
+therefore does two deliberately different things on two architectures:
+
+- **Cross-compiling to Intel from an ARM Mac is a first-class Apple case, not a
+  workaround** — it is how universal binaries have always been made. The Xcode Command
+  Line Tools ship a macOS SDK carrying **both** the `arm64` and `x86_64` slices, `clang`
+  and `ld` accept `-arch x86_64` on an M-series host, and `x86_64-apple-darwin` is a Rust
+  **tier 1** target, so `rustup target add` fetches a prebuilt `std` for it. Same OS, same
+  SDK, a different arch slice: no sysroot hunting, no cross-linker, no container.
+- **Compiling for an architecture and running it are different asks.** Emitting x86_64
+  code on an arm64 host needs nothing extra; *executing* an x86_64 binary needs **Rosetta
+  2**. That is the constraint behind the asymmetry — clippy carries
+  `--target x86_64-apple-darwin` because nothing is executed, while `cargo test` omits it
+  and builds/runs native aarch64 binaries, sidestepping Rosetta entirely. Valid because
+  the logic under test is architecture-agnostic (§16) — and that native run doubles as
+  standing evidence the stack works on Apple Silicon.
+- **Build scripts and proc macros always compile for the *host*.** Even under `--target`,
+  cargo builds `ring`'s `build.rs` as arm64 and then has it emit x86_64 assembly via `cc`.
+  That is the normal split, and it is why the cross job genuinely exercises ring's
+  target-specific assembly path (§12) rather than skipping it.
+- **What the cross job does *not* prove: linking.** `cargo clippy` has `cargo check`
+  semantics — `--emit=metadata`, no link step — so it shows the Intel target type-checks,
+  lints clean, and gets its assembly generated, but never that an Intel *binary links*. A
+  symbol-level break would slip through. `ponytail:` accepted ceiling — a real link check
+  costs a full codegen pass on every PR. The upgrade path is one added step,
+  `cargo build --target x86_64-apple-darwin`; take it when CI starts producing Intel
+  artifacts.
+
+Only the live-SSH end-to-end path stays manual — there is still no CI SSH server. CI
+builds no release artifact; publishing the portable binaries stays a manual step (§16,
+code signing / release automation).
 
 ---
 
@@ -876,14 +915,15 @@ step (§16, code signing / release automation).
 The home screen (`ui/home.rs`) is the landing screen: a list of previously used
 connection **targets**, so reconnecting is a click instead of re-typing the form.
 
-- **What persists — profiles only, never secrets (§12).** A target records `name`,
-  `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path`, and the panels'
-  `show_hidden` preference. No password and no
-  key passphrase is ever written. This keeps the §12 "the safest secret is the one never
-  persisted" guarantee **and** keeps the store fully portable — a `targets.json` copied
-  to another machine leaks nothing. The user still enters the secret on the form each
-  time. *(Opt-in, encrypted-at-rest secret persistence — Windows DPAPI / macOS Keychain
-  — is deliberately deferred to a later investigation; see §16.)*
+- **What persists — profiles only, never secrets in this file (§12).** A target records
+  `name`, `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path`, the panels'
+  `show_hidden` preference, and a `remember_secret` flag. No password and no key passphrase is
+  ever written to `targets.json`. This keeps the §12 "the safest secret is the one never
+  persisted" guarantee for this file **and** keeps it fully portable — a `targets.json` copied
+  to another machine leaks nothing. The user enters the secret on the form each time, unless it
+  was remembered. *(Opt-in, PORTABLE encrypted-at-rest secret persistence now exists — a
+  master-passphrase `age` vault, `secrets.age`, separate from this file; see §16. The
+  `remember_secret` flag here is only the hint that such a secret can be pre-filled.)*
 - **Store** (`profiles.rs`): `targets.json` in the shared data directory
   (`paths::data_dir`, the same portable-or-fallback resolution `known_hosts` uses, §11),
   serialized with `serde` / `serde_json`. A missing file means "no targets yet"; a
@@ -964,12 +1004,21 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 
 ## 16. Deferred (with upgrade paths)
 
-- **Credential persistence (secrets at rest)** — saved connection *profiles* shipped in
-  v1.3 (§14), but only the non-secret metadata. Persisting the password / passphrase
-  themselves — encrypted with **Windows DPAPI** / the **macOS Keychain** (both
-  user-bound) or an OS keyring, as an opt-in per target — is the remaining piece. It
-  adds a real secret-at-rest threat model and, being machine-bound, trades against the
-  portable store, so it is a deliberate later investigation.
+- **Credential persistence (secrets at rest)** — *done (v3.0), as a PORTABLE opt-in.* Saved
+  profiles carried metadata only (§14); a password / key passphrase is now optionally kept too,
+  in a separate encrypted vault. The obvious store — Windows DPAPI / macOS Keychain, or an OS
+  keyring — is machine-bound and would NOT travel with `cmote-data/`, against the portable-USB
+  identity (§11). So instead the vault is one file, `secrets.age`, encrypted with the **`age`**
+  format (scrypt KDF + XChaCha20-Poly1305) under a **master passphrase** the user chooses, which
+  unlocks on any OS or machine. Off by default (the §12 "never persisted" default holds): a
+  "Remember" tick on the connect form stores the secret only on a SUCCESSFUL connect (a wrong
+  password is never saved), and opening a saved-secret target pre-fills the masked field after a
+  one-time master-passphrase unlock. `targets.json` keeps only a `remember_secret` flag, never
+  ciphertext; the decrypted secrets are `Secret` (zeroized) in memory (`vault.rs`). The
+  inescapable trade: a portable key must live outside the machine — here, in the user's head —
+  so a forgotten master passphrase means the secrets are gone, by design. Still deferred: the
+  other `age` unlock paths (encrypt to the user's own SSH key, or a dedicated generated identity
+  file), which drop into the same code path when wanted.
 - **Multiple sessions / tabs** — the channel-per-session design (§4) already allows it;
   v1 ships one session for simplicity.
 - **Broader auth** — `keyboard-interactive` (2FA / OTP prompts), SSH agent / Pageant
@@ -1022,11 +1071,13 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   `[engine-limit]` ceiling), grounded in ECMA-48 / the DEC VT manuals / xterm `ctlseqs`, with a
   `file:line` evidence appendix — lives in
   [`TERMINAL_COMPATIBILITY_PLAN.md`](TERMINAL_COMPATIBILITY_PLAN.md).
-- **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1)*: stream
-  selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
-  Still deferred: honoring remote **OSC 52** clipboard-write requests (kept out on
-  purpose — we only touch the clipboard on explicit local action), keyboard shortcuts for
-  copy/paste (v1.1 is button- and menu-driven), and rectangular/block selection.
+- **Clipboard: mouse selection + copy + bracketed paste** — *done (v1.1), extended (v3.0)*:
+  stream selection with copy, and bracketed paste with the injection-terminator scrub (§9-§10).
+  v3.0 added **copy/paste keyboard shortcuts** (Ctrl+C / Ctrl+Shift+C / Ctrl+V / Ctrl+Shift+V,
+  physical-key matched) and made **Ctrl+C a styled (HTML) copy** via `ui::richcopy` + `arboard`,
+  with a plain-text alternate alongside (§10). Still deferred: honoring remote **OSC 52**
+  clipboard-write requests (kept out on purpose — we only touch the clipboard on explicit local
+  action) and rectangular/block selection.
 - **Host-key mismatch override UI** — a guarded "the key changed, here's the old vs new
   fingerprint" flow, if ever needed (kept out of v1 on purpose).
 - **Code signing + auto-update** — sign the exe (Authenticode) so Win11 SmartScreen
@@ -1035,7 +1086,9 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
 - **GNU toolchain build** — only if a fully MSVC-CRT-free static exe is ever required.
 - **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
   architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
-  Mac needs it. v1 targets Intel Sequoia as asked.
+  Mac needs it. v1 targets Intel Sequoia as asked. Note that CI already runs the full test
+  suite *natively on an aarch64 runner* (§13), so ARM portability is continuously proven —
+  what is missing is a shipped artifact, not the port.
 
 ---
 
