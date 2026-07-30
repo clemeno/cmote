@@ -68,7 +68,7 @@ This document is the reference to build against.
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
-| Auth order | Offer `publickey` first (if a key is given), then `password`; driven by what the server accepts |
+| Auth order | The chosen method first (`publickey` / `password` / `keyboard-interactive`), then chain into `keyboard-interactive` while the server still offers it — 2FA / OTP and challenge-response (§7); driven by what the server accepts |
 | File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
 | Errors | `anyhow` at the app boundary; typed `thiserror` enums deferred until a real API needs them |
 | Config location | `known_hosts` **and** `targets.json` in `./cmote-data/` beside the exe, falling back to `%LOCALAPPDATA%\cmote` (Windows) or `~/Library/Application Support/cmote` (macOS) if that dir is read-only |
@@ -234,7 +234,7 @@ cmote/
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
-    │   ├── auth.rs        method selection + attempts (publickey, password)
+    │   ├── auth.rs        method selection + attempts (publickey, password, keyboard-interactive) + 2FA chaining (§7)
     │   ├── browse.rs      list + rename remote folders and files over sftp, falling back to `ls`/`mv` (§18, §19)
     │   ├── download.rs    file download over an sftp channel: stream, progress (§19)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
@@ -273,11 +273,21 @@ Ordered so cheap validation and security gates come first.
      auto-accept.**
    - known + **mismatch** → **abort** the connection, surface a loud warning (possible
      MITM). No override in v1.
-4. **Authenticate (§7)** — attempt in order, stopping on first success:
-   - if a key was supplied → `authenticate_publickey`.
-   - else / on failure, if a password was supplied → `authenticate_password`.
+4. **Authenticate (§7)** — the chosen method first, then chain into keyboard-interactive
+   as the server directs:
+   - the form's choice runs first: `authenticate_publickey` (key), `authenticate_password`
+     (password), or the keyboard-interactive loop (interactive).
+   - then, while the server still lists `keyboard-interactive` and attempts remain, run its
+     prompt loop — the same code path covers a **fallback** (our method was not offered but
+     the server does challenge-response) and a **second factor** after a partial success
+     (a key/password **plus** an OTP). Bounded like OpenSSH's `MaxAuthTries` so a re-offering
+     server cannot loop the prompt forever; the user can cancel any prompt to abort.
+   - each keyboard-interactive request emits `SshEvent::Interactive { name, instructions,
+     prompts }`; the GUI shows a field per prompt (masked when `echo` is false — an OTP /
+     password) and sends the answers back as `SshCommand::Interactive`. A message-only request
+     (no prompts) is answered with an empty response set without troubling the user.
    - respect the server's advertised methods; report `Authenticating`, then either
-     `Connected` or a generic `Error` (no oracle about which field was wrong).
+     `Connected` or a **single generic** `Error` (no oracle about which factor was wrong).
 5. **Shell**: `channel_open_session()` → `request_pty(term = "xterm-256color", cols,
    rows, …)` → `request_shell()`. The pty size comes from the current terminal-view
    dimensions.
@@ -527,12 +537,15 @@ Turning a raw byte stream into a screen.
 A small state machine drives the single window.
 
 ```
-enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Error(String) }
+enum Screen { Home, Connect, Connecting, ConfirmHostKey, NeedPassphrase, Interactive, VaultUnlock, Terminal, Error }
 ```
 
 - **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio for
-  the auth method (Password **or** Key — a sum type, never both, §7); a "Browse…"
-  button (`rfd`) for the key file; a password field for password auth. There is **no**
+  the auth method (Password, Key, **or** Interactive — a sum type, never more than one, §7);
+  a "Browse…" button (`rfd`) for the key file; a password field for password auth.
+  **Interactive** (keyboard-interactive / 2FA / OTP) shows no credential field at all — the
+  server drives every prompt on connect — so it also hides the passphrase and "Remember"
+  controls, and Tab skips them. There is **no**
   passphrase field: a key's passphrase is asked for on its own screen, and only if the
   key turns out to be encrypted (see below). A Connect button; validation fails fast to
   the Error screen (§6.0). **Full keyboard navigation** (§10): iced can only focus text
@@ -562,6 +575,16 @@ enum Screen { Connect, Connecting, ConfirmHostKey, NeedPassphrase, Terminal, Err
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below),
   floating over the dimmed connect form.
+- **Interactive prompt** (`Screen::Interactive`, §7): the server's keyboard-interactive
+  challenge — 2FA / OTP and challenge-response. One field per prompt in the server's request,
+  each masked when its `echo` flag is false (a password / OTP) and plain when true (a
+  username), captioned with the server's own prompt text. The dialog's selectable body carries
+  a fixed intro plus the server's optional heading/instructions, so the whole message can be
+  copied. The first field is auto-focused; Enter in any field submits the whole set, which
+  rides back as `SshCommand::Interactive(Vec<Secret>)`. The server can send several requests in
+  a row (password, then a one-time code), so the dialog reappears until auth resolves. Answers
+  are moved into `Secret`s and cleared on submit; Cancel tears the connection down. Shares the
+  dialog chrome, floating over the dimmed connect form.
 - **Context menus** (`ui::menu`, done — v2.0): the four right-click menus — the grid's
   Copy/Paste (§10), the home list's Open/Rename/Delete (§14), the folder tree's seven
   items (§18) and the files pane's (§19) — share one chrome, the way the dialogs share `ui::dialog`. They had drifted
@@ -1021,8 +1044,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   file), which drop into the same code path when wanted.
 - **Multiple sessions / tabs** — the channel-per-session design (§4) already allows it;
   v1 ships one session for simplicity.
-- **Broader auth** — `keyboard-interactive` (2FA / OTP prompts), SSH agent / Pageant
-  support, certificate auth.
+- **`keyboard-interactive` auth (2FA / OTP)** — *done (v3.0)*. An explicit "Interactive"
+  method on the form, plus automatic chaining into keyboard-interactive after a password/key
+  attempt while the server still offers it (a fallback, or a second factor after a partial
+  success — key/password **plus** an OTP). The server's prompts are shown one masked-or-plain
+  field each and answered live; bounded like `MaxAuthTries`. See §7 and `ssh/auth.rs`.
+- **Broader auth (still deferred)** — SSH agent / Pageant support, certificate auth.
 - **More key types for `.ppk`** — *done, and by a different route than first planned*:
   the original plan was a hand-rolled parser covering RSA + Ed25519 with ECDSA deferred, but
   the swap to `ssh-key`'s `from_ppk` (§7 — already in the russh tree, no new dependency) reads

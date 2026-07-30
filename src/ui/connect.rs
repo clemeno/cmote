@@ -68,8 +68,11 @@ pub enum FormStop {
 	User,
 	AuthPassword,
 	AuthKey,
+	/// The keyboard-interactive radio (§7). Like the other auth radios it is a focus ring
+	/// stop, activated by Enter/Space to switch the method.
+	AuthInteractive,
 	/// The credential control: the password field under password auth, the Browse
-	/// button under key auth (§7).
+	/// button under key auth (§7). Absent under interactive auth, which shows no credential.
 	Credential,
 	/// The optional key-passphrase field. Only exists under key auth (§14); Tab skips
 	/// it entirely under password auth (see `is_applicable`).
@@ -83,25 +86,28 @@ pub enum FormStop {
 impl FormStop {
 	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
 	/// do not apply to the current auth method.
-	const ORDER: [FormStop; 9] = [
+	const ORDER: [FormStop; 10] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
 		FormStop::AuthPassword,
 		FormStop::AuthKey,
+		FormStop::AuthInteractive,
 		FormStop::Credential,
 		FormStop::KeyPassphrase,
 		FormStop::Remember,
 		FormStop::Connect,
 	];
 
-	/// Whether this stop is reachable under `auth`. Every stop is except the
-	/// key-passphrase field, which is present only when key auth is selected. This is
-	/// what lets Tab skip the passphrase stop under password auth so it never lands on
-	/// a control that is not on screen.
+	/// Whether this stop is reachable under `auth`. This is what lets Tab skip stops for
+	/// controls that are not on screen: the key-passphrase field exists only under key auth,
+	/// and under INTERACTIVE auth there is no credential control and no "remember" toggle (the
+	/// server drives every prompt, §7), so both are skipped too.
 	fn is_applicable(self, auth: AuthKind) -> bool {
 		match self {
+			FormStop::Credential => auth != AuthKind::Interactive,
 			FormStop::KeyPassphrase => auth == AuthKind::Key,
+			FormStop::Remember => auth != AuthKind::Interactive,
 			_ => true,
 		}
 	}
@@ -156,6 +162,7 @@ impl FormStop {
 		match self {
 			FormStop::AuthPassword => Some(Message::AuthKindChanged(AuthKind::Password)),
 			FormStop::AuthKey => Some(Message::AuthKindChanged(AuthKind::Key)),
+			FormStop::AuthInteractive => Some(Message::AuthKindChanged(AuthKind::Interactive)),
 			FormStop::Credential if auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
 			FormStop::Remember => Some(Message::RememberToggled),
 			FormStop::Connect => Some(Message::ConnectPressed),
@@ -178,6 +185,10 @@ pub enum AuthKind {
 	#[default]
 	Password,
 	Key,
+	/// Keyboard-interactive: the server drives the prompts — 2FA / OTP and challenge-response
+	/// (§7). Nothing is entered on the form; every factor is answered live on connect, so this
+	/// choice carries no secret to validate or persist.
+	Interactive,
 }
 
 /// The connect form's editable fields. Plain owned values that mirror the
@@ -265,6 +276,9 @@ impl ConnectForm {
 				};
 				Ok(AuthMethod::Key { path, passphrase })
 			}
+			// Interactive auth reads no field — the server prompts for every factor on connect
+			// (§7), so there is nothing to validate or carry beyond the choice itself.
+			AuthKind::Interactive => Ok(AuthMethod::Interactive),
 		}
 	}
 }
@@ -274,7 +288,7 @@ impl ConnectForm {
 /// current keyboard stop, used to draw the highlight ring on the active radio/button
 /// (text inputs show iced's own focus outline instead) (§10).
 pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
-	column![
+	let mut content = column![
 		// A back affordance to the home list (§14). Not part of the Tab ring — it is a
 		// navigation escape, also reachable with Esc (see `app::on_form_key`).
 		row![
@@ -308,17 +322,27 @@ pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 		// The credential fields depend on the selected method — only the relevant
 		// ones are shown, so the form stays uncluttered.
 		auth_fields(form, focus),
-		// The opt-in "remember this secret" toggle (§16), below the credential it applies to.
-		remember_toggle(form.auth_kind, form.remember, focus == FormStop::Remember),
-		focus_ring(
-			button("Connect").on_press(Message::ConnectPressed),
-			focus == FormStop::Connect,
-		),
 	]
 	.spacing(12)
 	.padding(20)
-	.max_width(420)
-	.into()
+	.max_width(420);
+
+	// The opt-in "remember this secret" toggle (§16), below the credential it applies to —
+	// omitted under interactive auth, which has no single secret to store (§7).
+	if form.auth_kind != AuthKind::Interactive {
+		content = content.push(remember_toggle(
+			form.auth_kind,
+			form.remember,
+			focus == FormStop::Remember,
+		));
+	}
+
+	content
+		.push(focus_ring(
+			button("Connect").on_press(Message::ConnectPressed),
+			focus == FormStop::Connect,
+		))
+		.into()
 }
 
 /// Wrap `content` in a highlight ring when `focused` — a bordered container that marks
@@ -367,6 +391,15 @@ fn auth_selector(selected: AuthKind, focus: FormStop) -> Element<'static, Messag
 			),
 			focus == FormStop::AuthKey,
 		),
+		focus_ring(
+			radio(
+				"Interactive",
+				AuthKind::Interactive,
+				Some(selected),
+				Message::AuthKindChanged
+			),
+			focus == FormStop::AuthInteractive,
+		),
 	]
 	.spacing(10)
 	.into()
@@ -390,6 +423,15 @@ fn auth_fields(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 			passphrase_field(&form.passphrase),
 		]
 		.spacing(12)
+		.into(),
+		// Interactive auth has no fields to fill: the server prompts for each factor (a
+		// password, then a one-time code, …) once you connect (§7). A short note stands in
+		// for the credential inputs so the form does not look unfinished.
+		AuthKind::Interactive => text(
+			"The server will prompt for each factor (for example a password, then a one-time \
+			 code) when you connect.",
+		)
+		.size(14)
 		.into(),
 	}
 }
@@ -420,6 +462,9 @@ fn remember_toggle(auth: AuthKind, remembered: bool, focused: bool) -> Element<'
 	let label = match auth {
 		AuthKind::Password => "Remember password",
 		AuthKind::Key => "Remember passphrase",
+		// Not reached — `view` omits this toggle under interactive auth, which has no single
+		// secret to store (§7) — but the match must be total, so give a neutral fallback.
+		AuthKind::Interactive => "Remember secret",
 	};
 	focus_ring(
 		checkbox(remembered)
@@ -516,6 +561,18 @@ mod tests {
 			AuthMethod::Password(secret) => assert_eq!(secret.expose(), "hunter2"),
 			other => panic!("expected password auth, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn interactive_auth_carries_no_secret() {
+		// Interactive auth validates to the fieldless method — the server drives the prompts,
+		// so there is nothing on the form to capture (§7).
+		let form = ConnectForm {
+			auth_kind: AuthKind::Interactive,
+			..base_form()
+		};
+		let params = form.validate().expect("valid interactive form");
+		assert!(matches!(params.auth, AuthMethod::Interactive));
 	}
 
 	#[test]

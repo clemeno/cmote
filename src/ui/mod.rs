@@ -54,6 +54,20 @@ pub const VAULT_UNLOCK_BODY: &str =
 /// secrets are gone — there is no recovery, by design.
 pub const VAULT_CREATE_BODY: &str = "Choose a master passphrase to protect saved credentials. It encrypts the vault so the whole store stays portable across machines. There is no way to recover it if you forget it, so keep it safe.";
 
+/// The intro line for the keyboard-interactive prompt (§7). The server's own heading and
+/// instructions (either may be empty) are appended to it when the prompt opens, so the whole
+/// message is one selectable block the user can copy.
+pub const INTERACTIVE_DIALOG_BODY: &str =
+	"The server is asking for additional authentication. Answer each prompt below to continue.";
+
+/// The widget id of the keyboard-interactive field at `index` (§7). Keeping the derivation in
+/// one place means the view (which tags each field) and `app` (which focuses the first field
+/// when the prompt opens) build the exact same id. The fields are dynamic — one per prompt in
+/// the server's request — so a per-index id is needed rather than a single constant.
+pub fn interactive_field_id(index: usize) -> String {
+	format!("interactive-{index}")
+}
+
 /// The colour of the "wrong passphrase" hint (§7). A muted red that reads clearly on
 /// the default light theme. This is about a *local* key-file passphrase, not remote
 /// auth, so it is not a credential oracle (§12) — the key is decrypted and MAC-checked
@@ -234,6 +248,50 @@ pub fn vault_view<'a>(
 		vec![
 			button(action).on_press(Message::VaultSubmitted).into(),
 			button("Cancel").on_press(Message::VaultCancelled).into(),
+		],
+		drag,
+	)
+}
+
+/// The keyboard-interactive prompt (§7): the server's challenge shown as one masked-or-plain
+/// field per prompt, in the shared dialog chrome. `body` (`App::dialog_body`) carries the intro
+/// plus the server's heading/instructions as one selectable block; the fields are their own
+/// widgets. `prompts` describes each field (its caption and whether to mask it), `answers` holds
+/// what the user has typed so far — one entry per prompt, in order — so a submit reads them back
+/// in the same order. Both are owned by `App` and passed in, so this view stays pure.
+pub fn interactive_view<'a>(
+	prompts: &'a [crate::bridge::InteractivePrompt],
+	answers: &'a [String],
+	body: &'a text_editor::Content,
+	drag: dialog::Drag,
+) -> Element<'a, Message> {
+	let mut content = column![dialog::selectable_body(body)].spacing(12);
+
+	// One field per prompt, in order. `echo` decides masking: an echoed prompt (a username)
+	// shows its text, a non-echoed one (a password / OTP) is masked. The caption sits above the
+	// field — server prompts can be a full sentence — and the answer is looked up by index so
+	// the field shows what has been typed. Enter in any field submits the whole set.
+	for (index, prompt) in prompts.iter().enumerate() {
+		let value = answers.get(index).map(String::as_str).unwrap_or("");
+		let field = text_input("", value)
+			.id(interactive_field_id(index))
+			.secure(!prompt.echo)
+			.on_input(move |text| Message::InteractiveAnswerChanged(index, text))
+			.on_submit(Message::InteractiveSubmitted);
+		content = content.push(column![text(&prompt.label).size(14), field].spacing(4));
+	}
+
+	dialog::dialog(
+		"Additional authentication".to_owned(),
+		Message::InteractiveCancelled,
+		content.into(),
+		vec![
+			button("Submit")
+				.on_press(Message::InteractiveSubmitted)
+				.into(),
+			button("Cancel")
+				.on_press(Message::InteractiveCancelled)
+				.into(),
 		],
 		drag,
 	)

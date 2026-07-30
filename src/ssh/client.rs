@@ -14,31 +14,28 @@
 // Accept/Reject. That answer arrives as another SshCommand — so `run()` has to
 // stay free to receive it. Spawning the session keeps the command loop live.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use russh::client;
-use russh::keys::{PrivateKey, PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::PublicKey;
 use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::bridge::{AuthMethod, ConnectParams, SshCommand, SshEvent};
+use crate::bridge::{ConnectParams, SshCommand, SshEvent};
 use crate::secret::Secret;
+use crate::ssh::auth;
 use crate::ssh::browse;
 use crate::ssh::download;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
-use crate::ssh::keyfile::{self, Loaded};
 use crate::ssh::upload;
 use crate::term;
 
 /// How long to wait for the TCP connect + SSH handshake before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// How many times to re-prompt for a private-key passphrase before giving up.
-const MAX_PASSPHRASE_ATTEMPTS: u32 = 3;
 
 /// The shell integration cmote installs once, right after the shell opens (§17).
 ///
@@ -83,6 +80,11 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 			SshCommand::Passphrase(secret) => {
 				if let Some(link) = session.as_ref() {
 					let _ = link.to_session.send(SessionMsg::Passphrase(secret)).await;
+				}
+			}
+			SshCommand::Interactive(answers) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::Interactive(answers)).await;
 				}
 			}
 			SshCommand::Input(bytes) => {
@@ -165,14 +167,17 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 	}
 }
 
-/// Messages `run()` forwards to a live session task.
-enum SessionMsg {
+/// Messages `run()` forwards to a live session task. `pub(crate)` because the auth module
+/// (`ssh::auth`) receives passphrase and keyboard-interactive answers off this same channel.
+pub(crate) enum SessionMsg {
 	/// Keyboard bytes to write to the shell.
 	Data(Vec<u8>),
 	/// Terminal resized; reflow the remote pty.
 	Resize { cols: u16, rows: u16 },
 	/// A passphrase the user typed to unlock an encrypted key (§7).
 	Passphrase(Secret),
+	/// The user's answers to a keyboard-interactive request (§7), one per prompt in order.
+	Interactive(Vec<Secret>),
 	/// Send a local file to the remote over a second, sftp channel (§17).
 	Upload {
 		local: PathBuf,
@@ -284,40 +289,10 @@ async fn connect_and_run(
 	.context("connection timed out")?
 	.context("could not connect")?;
 
-	// Authenticate with the method the user chose (§7). A failure is deliberately
-	// generic — we never reveal whether the user, the password, or the key was
-	// wrong (no credential oracle).
-	let authenticated = match &params.auth {
-		AuthMethod::Password(password) => session
-			.authenticate_password(params.user.as_str(), password.expose())
-			.await
-			.context("authentication request failed")?
-			.success(),
-
-		AuthMethod::Key { path, passphrase } => {
-			// Load the key. A passphrase pre-seeded from the form (§14) is tried first;
-			// otherwise an encrypted key prompts interactively (§7). `clone` because the
-			// passphrase is borrowed from `params` and `resolve_key` needs to own it.
-			let key = resolve_key(path, passphrase.clone(), events, &mut to_session_rx).await?;
-			// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
-			// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which
-			// it accepts and use the strongest; other key types ignore this.
-			let hash_alg = if key.algorithm().is_rsa() {
-				session.best_supported_rsa_hash().await?.flatten()
-			} else {
-				None
-			};
-			let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
-			session
-				.authenticate_publickey(params.user.as_str(), key)
-				.await
-				.context("authentication request failed")?
-				.success()
-		}
-	};
-	if !authenticated {
-		bail!("authentication failed");
-	}
+	// Authenticate: the chosen method first, then chaining into keyboard-interactive as the
+	// server directs — 2FA / OTP and challenge-response (§7). A failure is a single generic
+	// error, with no hint about which factor was wrong (no credential oracle, §12).
+	auth::authenticate(&mut session, &params, events, &mut to_session_rx).await?;
 
 	let _ = events.send(SshEvent::Connected).await;
 
@@ -344,68 +319,6 @@ async fn connect_and_run(
 	channel.data(CWD_HOOK.as_bytes()).await?;
 
 	stream(channel, &session, events, to_session_rx).await
-}
-
-/// Load the chosen private key (§7, §14), prompting for a passphrase only when the
-/// key is actually encrypted. `initial` is the optional passphrase pre-seeded from
-/// the form: `Some` is tried before any prompt (so a known passphrase unlocks the
-/// key silently), `None` keeps the original interactive-only behavior.
-///
-/// The load happens in two stages. First we probe with NO passphrase, which cleanly
-/// classifies the file: an unencrypted key loads here (any typed passphrase is
-/// meaningless for it and is correctly ignored); an unencrypted but malformed key is
-/// a hard error; an encrypted key reports `NeedsPassphrase` and drops to the retry
-/// loop. There we try the pre-seed (if any), then ask the GUI and retry — up to
-/// `MAX_PASSPHRASE_ATTEMPTS` prompts. A wrong passphrase (pre-seeded or typed) just
-/// asks again.
-async fn resolve_key(
-	path: &Path,
-	initial: Option<Secret>,
-	events: &mpsc::Sender<SshEvent>,
-	to_session_rx: &mut mpsc::Receiver<SessionMsg>,
-) -> Result<PrivateKey> {
-	// Stage one: classify the file with no passphrase.
-	match keyfile::load_private_key(path, None)? {
-		Loaded::Key(key) => return Ok(*key),
-		// Encrypted: fall through to the passphrase loop below.
-		Loaded::NeedsPassphrase => {}
-	}
-
-	// Stage two: the key is encrypted. Try the pre-seed first, then prompt and retry.
-	let mut passphrase = initial;
-	let mut attempts = 0u32;
-
-	loop {
-		// A passphrase in hand (pre-seed or typed) that unlocks the key wins immediately.
-		if let Some(secret) = passphrase.as_ref()
-			&& let Ok(Loaded::Key(key)) = keyfile::load_private_key(path, Some(secret))
-		{
-			return Ok(*key);
-		}
-
-		if attempts >= MAX_PASSPHRASE_ATTEMPTS {
-			bail!("too many incorrect passphrase attempts");
-		}
-		attempts += 1;
-
-		let _ = events.send(SshEvent::NeedPassphrase).await;
-		passphrase = Some(recv_passphrase(to_session_rx).await?);
-	}
-}
-
-/// Await the user's passphrase from the GUI, ignoring any stray input/resize
-/// that could arrive before the shell is open. A disconnect or a dropped channel
-/// means the user gave up on the prompt.
-async fn recv_passphrase(to_session_rx: &mut mpsc::Receiver<SessionMsg>) -> Result<Secret> {
-	loop {
-		match to_session_rx.recv().await {
-			Some(SessionMsg::Passphrase(secret)) => return Ok(secret),
-			Some(SessionMsg::Disconnect) | None => {
-				bail!("cancelled before a passphrase was entered")
-			}
-			Some(_) => {} // ignore keystrokes/resize until the shell exists
-		}
-	}
 }
 
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.
@@ -446,8 +359,9 @@ async fn stream(
 					Some(SessionMsg::Resize { cols, rows }) => {
 						channel.window_change(cols as u32, rows as u32, 0, 0).await?;
 					}
-					// A passphrase only matters during auth; ignore a late one.
-					Some(SessionMsg::Passphrase(_)) => {}
+					// Passphrase and keyboard-interactive answers only matter during auth;
+					// ignore any that arrive late, once the shell is already streaming.
+					Some(SessionMsg::Passphrase(_)) | Some(SessionMsg::Interactive(_)) => {}
 					// The transfer runs on its own channel and its own task, so the
 					// shell keeps flowing while a big file goes across (§17).
 					Some(SessionMsg::Upload { local, remote, overwrite }) => {
@@ -490,8 +404,9 @@ async fn stream(
 }
 
 /// Our russh event handler. The one method that matters for v1 is the host-key
-/// gate; every other callback keeps its default (no-op) behavior.
-struct Handler {
+/// gate; every other callback keeps its default (no-op) behavior. `pub(crate)` because
+/// the auth module (`ssh::auth`) names it as the session's handler type.
+pub(crate) struct Handler {
 	host: String,
 	port: u16,
 	known_hosts: PathBuf,

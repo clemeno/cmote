@@ -121,6 +121,11 @@ pub enum Screen {
 	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
 	/// text the user types lives in `App::passphrase_input`.
 	NeedPassphrase,
+	/// The server posed a keyboard-interactive challenge (§7): 2FA / OTP or any
+	/// challenge-response scheme. The request's fields live in `App::interactive_prompts` and
+	/// the user's in-progress answers in `App::interactive_answers`; submitting sends them back
+	/// and the server drives what comes next — another prompt, success, or a generic failure.
+	Interactive,
 	/// The master-passphrase prompt for the portable secret vault (§16), shown over the
 	/// connect form: CREATE it (first time, typed twice) or UNLOCK it. The typed values live
 	/// in `App::vault_input` / `vault_confirm`; on success the pending action (`vault_pending`)
@@ -203,6 +208,14 @@ pub struct App {
 	/// if it is set when the prompt appears, the previous attempt was rejected (§7).
 	/// Reset at the start of each connection attempt.
 	passphrase_failed: bool,
+	/// The current keyboard-interactive request's fields (§7), one per prompt with its echo
+	/// hint. Empty unless the Interactive screen is showing; set from `SshEvent::Interactive`
+	/// and cleared once the prompt is answered or cancelled.
+	interactive_prompts: Vec<bridge::InteractivePrompt>,
+	/// The user's in-progress answers to `interactive_prompts` (§7), one `String` per prompt in
+	/// the same order. Moved into `Secret`s on submit and then cleared, so no plain copy of an
+	/// OTP or password lingers in app state (§12).
+	interactive_answers: Vec<String>,
 	/// The `user@host:port` of the current session, shown in the terminal's status
 	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
 	/// secret, so it is safe in `Debug`.
@@ -464,6 +477,13 @@ pub enum Message {
 	PassphraseSubmitted,
 	/// The user dismissed the prompt — abort the connection.
 	PassphraseCancelled,
+	// --- keyboard-interactive prompt (§7): 2FA / OTP and challenge-response ---
+	/// A keyboard-interactive answer field changed: which prompt (index) and its new text.
+	InteractiveAnswerChanged(usize, String),
+	/// The keyboard-interactive prompt was submitted (Submit button, or Enter in a field).
+	InteractiveSubmitted,
+	/// The keyboard-interactive prompt was dismissed — abort the connection.
+	InteractiveCancelled,
 	// --- remembered secrets: the "Remember" tick + the master-passphrase vault (§16) ---
 	/// The connect form's "Remember" checkbox was toggled (mouse click or Enter/Space on the
 	/// Remember stop). Carries no state — `update` flips the flag.
@@ -674,6 +694,13 @@ impl App {
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
+			Message::InteractiveAnswerChanged(index, value) => {
+				if let Some(slot) = self.interactive_answers.get_mut(index) {
+					*slot = value;
+				}
+			}
+			Message::InteractiveSubmitted => return self.on_interactive_submitted(),
+			Message::InteractiveCancelled => return self.on_interactive_cancelled(),
 			Message::RememberToggled => self.form.remember = !self.form.remember,
 			Message::VaultInputChanged(value) => self.vault_input = value,
 			Message::VaultConfirmChanged(value) => self.vault_confirm = value,
@@ -973,6 +1000,9 @@ impl App {
 		match self.form.auth_kind {
 			AuthKind::Password => self.form.password = secret.expose().to_owned(),
 			AuthKind::Key => self.form.passphrase = secret.expose().to_owned(),
+			// Interactive auth has no stored secret to fill — every factor is typed live (§7).
+			// A remembered target is never interactive, so this arm is not reached in practice.
+			AuthKind::Interactive => {}
 		}
 	}
 
@@ -1006,6 +1036,33 @@ impl App {
 	/// the form. Clearing the field first means the discarded text does not linger.
 	fn on_passphrase_cancelled(&mut self) -> iced::Task<Message> {
 		self.passphrase_input.clear();
+		self.send_command(SshCommand::Disconnect);
+		self.go_to_form()
+	}
+
+	/// Send the typed keyboard-interactive answers to the SSH task (§7) and return to a
+	/// connecting status. Each answer is moved straight into a `Secret` and the buffers cleared,
+	/// so no plain copy of an OTP or password lingers in app state (§12). The server drives what
+	/// happens next: another prompt (the dialog reappears), success, or a generic failure.
+	fn on_interactive_submitted(&mut self) -> iced::Task<Message> {
+		let answers: Vec<Secret> = std::mem::take(&mut self.interactive_answers)
+			.into_iter()
+			.map(Secret::new)
+			.collect();
+		self.interactive_prompts.clear();
+		if self.send_command(SshCommand::Interactive(answers)) {
+			self.screen = Screen::Connecting {
+				status: "authenticating…".to_string(),
+			};
+		}
+		iced::Task::none()
+	}
+
+	/// Dismiss the keyboard-interactive prompt: tear the connection down and go back to the form
+	/// (§7). Clearing the buffers first means the discarded answers do not linger (§12).
+	fn on_interactive_cancelled(&mut self) -> iced::Task<Message> {
+		self.interactive_answers.clear();
+		self.interactive_prompts.clear();
 		self.send_command(SshCommand::Disconnect);
 		self.go_to_form()
 	}
@@ -1110,6 +1167,30 @@ impl App {
 				// Focus the field so the user can type at once — the re-ask path
 				// lands here too, refocusing on every prompt (§7).
 				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
+			}
+			SshEvent::Interactive {
+				name,
+				instructions,
+				prompts,
+			} => {
+				// Seed the selectable body with a fixed intro plus the server's heading and
+				// blurb — either may be empty — so the whole message is one selectable, copyable
+				// block (§7, §10). One blank line separates each part that is present.
+				let mut body = ui::INTERACTIVE_DIALOG_BODY.to_owned();
+				for extra in [name.trim(), instructions.trim()] {
+					if !extra.is_empty() {
+						body.push_str("\n\n");
+						body.push_str(extra);
+					}
+				}
+				self.set_dialog_body(&body);
+				// Start every field blank, one per prompt, and show the dialog. The server only
+				// sends a request with at least one prompt here (an empty, message-only request
+				// is answered by the SSH task itself), so focusing the first field is always apt.
+				self.interactive_answers = vec![String::new(); prompts.len()];
+				self.interactive_prompts = prompts;
+				self.screen = Screen::Interactive;
+				return iced::widget::operation::focus(ui::interactive_field_id(0));
 			}
 			SshEvent::Connected => {
 				// The session is real: persist the target now (§14) — profiles only, no
@@ -3184,6 +3265,15 @@ impl App {
 				),
 				Message::PassphraseCancelled,
 			),
+			Screen::Interactive => self.form_with_dialog(
+				ui::interactive_view(
+					&self.interactive_prompts,
+					&self.interactive_answers,
+					&self.dialog_body,
+					drag,
+				),
+				Message::InteractiveCancelled,
+			),
 			Screen::VaultUnlock => self.form_with_dialog(
 				ui::vault_view(
 					&self.vault_input,
@@ -3470,6 +3560,9 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 		bridge::AuthMethod::Key {
 			passphrase: None, ..
 		} => return None,
+		// Interactive auth carries no secret — every factor is answered live (§7) — so there is
+		// nothing to remember.
+		bridge::AuthMethod::Interactive => return None,
 	};
 	if secret.expose().is_empty() {
 		None

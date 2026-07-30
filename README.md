@@ -4,8 +4,8 @@
 
 A **native, portable SSH client for Windows 11 and macOS** written in Rust. A home
 screen lists your saved connection targets; pick one (or start a new connection), fill
-in host / port / user, pick an auth method (password or a private key — PEM or PuTTY
-`.ppk`), connect. On success the server hands us a shell and cmote renders a **full VT
+in host / port / user, pick an auth method (password, a private key — PEM or PuTTY
+`.ppk` — or keyboard-interactive for 2FA / OTP), connect. On success the server hands us a shell and cmote renders a **full VT
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
 remote filesystem beside it, a grid of the current directory's files under it (keyboard
 navigable, with a details popup and rubber-band multi-selection), the remote working
@@ -34,6 +34,11 @@ references below (§n) point into it.
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
   `ssh-key`'s `from_ppk`). Encrypted keys prompt for a passphrase on their own screen —
   or pre-fill an optional passphrase field on the form (leave it empty to be prompted).
+- **Keyboard-interactive (2FA / OTP)** — pick **Interactive** for challenge-response servers,
+  and cmote also chains into it automatically after a password/key when the server asks for a
+  second factor (key/password **plus** a one-time code). The server's prompts appear one field
+  each — masked for a code or password, plain for a username — and are answered live; nothing
+  is stored.
 - **Remember a secret (opt-in, portable)** — tick **Remember** on the form to keep that
   target's password or key passphrase in an encrypted vault (`secrets.age`), so a return visit
   pre-fills the masked field. The vault is one file protected by a **master passphrase** you

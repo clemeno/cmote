@@ -49,6 +49,24 @@ pub enum AuthMethod {
 		path: PathBuf,
 		passphrase: Option<Secret>,
 	},
+	/// Server-driven keyboard-interactive auth (§7): 2FA / OTP and any challenge-response
+	/// scheme. It carries NO secret — every prompt is answered live during the handshake, so
+	/// there is nothing to pre-seed on the form or persist with the target (§12). cmote also
+	/// falls into this method automatically when a password or key attempt leaves
+	/// keyboard-interactive as the remaining factor (a second factor, or a fallback), so it
+	/// covers both the explicit choice and the implicit continuation.
+	Interactive,
+}
+
+/// One field of a keyboard-interactive request (§7). It mirrors russh's `Prompt` in a type
+/// the GUI owns and can move across the channel: `label` is the server's caption for the
+/// field ("Password:", "Verification code:"), and `echo` is its hint about visibility —
+/// `true` for a value safe to show (a username), `false` for a secret (a password / OTP) the
+/// field must mask.
+#[derive(Debug, Clone)]
+pub struct InteractivePrompt {
+	pub label: String,
+	pub echo: bool,
 }
 
 /// Parameters the user fills in on the connect form, handed to the SSH task once
@@ -74,6 +92,11 @@ pub enum SshCommand {
 	/// The passphrase the user typed after a `NeedPassphrase` prompt, to decrypt
 	/// the chosen private key (§7).
 	Passphrase(Secret),
+	/// The user's answers to a keyboard-interactive request (§7), one per prompt in the same
+	/// order the request listed them. Each rides in a `Secret` so an OTP or password is
+	/// redacted in logs and wiped on drop — even the echoed prompts, which costs nothing and
+	/// keeps the type uniform.
+	Interactive(Vec<Secret>),
 	/// Raw keyboard bytes to send down the channel (keystroke, escape seq, ...).
 	Input(Vec<u8>),
 	/// The terminal view changed size; reflow the remote pty.
@@ -129,6 +152,16 @@ pub enum SshEvent {
 	HostKey(String),
 	/// The private key is encrypted and we need its passphrase (§7).
 	NeedPassphrase,
+	/// The server posed a keyboard-interactive challenge (§7): `name` and `instructions` are
+	/// its optional heading and blurb (either may be empty), and `prompts` the fields to
+	/// answer. The GUI shows a prompt dialog and sends the answers back as
+	/// `SshCommand::Interactive`. One of these arrives per request; a server can send several
+	/// in a row (password, then a one-time code), so the dialog reappears until auth resolves.
+	Interactive {
+		name: String,
+		instructions: String,
+		prompts: Vec<InteractivePrompt>,
+	},
 	/// Authentication succeeded and a shell is open — switch to the terminal.
 	Connected,
 	/// A chunk of terminal output to feed the vt100 parser (§9).

@@ -2,7 +2,7 @@
 //
 // Split by responsibility so no single file owns the whole protocol:
 //   client  — the russh Handler + the connect→auth→shell→stream task loop (§6)
-//   auth    — method selection and attempts: publickey then password (§7)
+//   auth    — method selection, attempts, and 2FA chaining into keyboard-interactive (§7)
 //   hostkey — TOFU host-key verification against a portable known_hosts (§8)
 //   keyfile — load PEM/OpenSSH keys and PuTTY .ppk, handle passphrases (§7)
 //   upload  — send a local file to the remote over an sftp channel (§17)
