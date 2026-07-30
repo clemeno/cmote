@@ -1062,9 +1062,10 @@ impl App {
 		match self.form.auth_kind {
 			AuthKind::Password => self.form.password = secret.expose().to_owned(),
 			AuthKind::Key => self.form.passphrase = secret.expose().to_owned(),
-			// Interactive auth has no stored secret to fill — every factor is typed live (§7).
-			// A remembered target is never interactive, so this arm is not reached in practice.
-			AuthKind::Interactive => {}
+			// The promptless methods have no stored secret to fill — interactive types every
+			// factor live and agent auth signs with a key the agent already holds (§7). A
+			// remembered target is never one of these, so these arms are not reached in practice.
+			AuthKind::Interactive | AuthKind::Agent => {}
 		}
 	}
 
@@ -3879,9 +3880,9 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 		bridge::AuthMethod::Key {
 			passphrase: None, ..
 		} => return None,
-		// Interactive auth carries no secret — every factor is answered live (§7) — so there is
-		// nothing to remember.
-		bridge::AuthMethod::Interactive => return None,
+		// The promptless methods carry no secret to remember — interactive answers every factor
+		// live, and agent auth signs with a key the agent holds; neither has anything to store (§7).
+		bridge::AuthMethod::Interactive | bridge::AuthMethod::Agent => return None,
 	};
 	if secret.expose().is_empty() {
 		None

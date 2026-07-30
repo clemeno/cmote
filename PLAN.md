@@ -68,7 +68,7 @@ This document is the reference to build against.
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
 | Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
-| Auth order | The chosen method first (`publickey` / `password` / `keyboard-interactive`), then chain into `keyboard-interactive` while the server still offers it — 2FA / OTP and challenge-response (§7); driven by what the server accepts |
+| Auth order | The chosen method first (`publickey` / `password` / `keyboard-interactive` / `agent`), then chain into `keyboard-interactive` while the server still offers it — 2FA / OTP and challenge-response (§7); driven by what the server accepts |
 | File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
 | Errors | `anyhow` at the app boundary; typed `thiserror` enums deferred until a real API needs them |
 | Config location | `known_hosts` **and** `targets.json` in `./cmote-data/` beside the exe, falling back to `%LOCALAPPDATA%\cmote` (Windows) or `~/Library/Application Support/cmote` (macOS) if that dir is read-only |
@@ -234,7 +234,8 @@ cmote/
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
     │   ├── client.rs      russh Handler impl; connect → auth → shell; the tokio task loop
-    │   ├── auth.rs        method selection + attempts (publickey, password, keyboard-interactive) + 2FA chaining (§7)
+    │   ├── agent.rs       publickey auth via an SSH agent / Pageant (OpenSSH pipe, Pageant, `SSH_AUTH_SOCK`); no key material seen (§7)
+    │   ├── auth.rs        method selection + attempts (publickey, password, keyboard-interactive, agent) + 2FA chaining (§7)
     │   ├── browse.rs      list + rename + create + delete remote entries over sftp, falling back to `ls`/`mv`/`mkdir`/`rm -rf` (§18, §19)
     │   ├── download.rs    file + recursive-folder download over an sftp channel: stream, progress, per-file collisions (§19)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
@@ -277,7 +278,9 @@ Ordered so cheap validation and security gates come first.
 4. **Authenticate (§7)** — the chosen method first, then chain into keyboard-interactive
    as the server directs:
    - the form's choice runs first: `authenticate_publickey` (key), `authenticate_password`
-     (password), or the keyboard-interactive loop (interactive).
+     (password), the keyboard-interactive loop (interactive), or `authenticate_publickey_with`
+     driven by a live SSH agent / Pageant (agent — `ssh/agent.rs`, which offers each agent key
+     in turn and lets the agent sign, so no key material is ever seen).
    - then, while the server still lists `keyboard-interactive` and attempts remain, run its
      prompt loop — the same code path covers a **fallback** (our method was not offered but
      the server does challenge-response) and a **second factor** after a partial success
@@ -542,10 +545,12 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, NeedPassphrase, Interac
 ```
 
 - **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio for
-  the auth method (Password, Key, **or** Interactive — a sum type, never more than one, §7);
+  the auth method (Password, Key, Interactive **or** Agent — a sum type, never more than one,
+  §7), the four laid out two-by-two beside the label so they fit the column;
   a "Browse…" button (`rfd`) for the key file; a password field for password auth.
-  **Interactive** (keyboard-interactive / 2FA / OTP) shows no credential field at all — the
-  server drives every prompt on connect — so it also hides the passphrase and "Remember"
+  **Interactive** (keyboard-interactive / 2FA / OTP) and **Agent** (SSH agent / Pageant) are
+  both *promptless*: they show no credential field at all — the server drives every prompt, or
+  the agent holds and signs with the key — so they also hide the passphrase and "Remember"
   controls, and Tab skips them. There is **no**
   passphrase field: a key's passphrase is asked for on its own screen, and only if the
   key turns out to be encrypted (see below). A Connect button; validation fails fast to
@@ -1050,7 +1055,15 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   attempt while the server still offers it (a fallback, or a second factor after a partial
   success — key/password **plus** an OTP). The server's prompts are shown one masked-or-plain
   field each and answered live; bounded like `MaxAuthTries`. See §7 and `ssh/auth.rs`.
-- **Broader auth (still deferred)** — SSH agent / Pageant support, certificate auth.
+- **SSH agent / Pageant auth** — *done (v3.0)*. An explicit "Agent" method on the form: a
+  running agent holds the keys and signs the challenge, so cmote never sees the private key and
+  there is no file to pick or passphrase to type. On Windows it tries the OpenSSH agent (named
+  pipe `\\.\pipe\openssh-ssh-agent`, also via `SSH_AUTH_SOCK` when that points at a pipe) then
+  Pageant; on macOS it uses `ssh-agent` via `SSH_AUTH_SOCK`. Each agent's public keys are offered
+  in turn until the server accepts one, then it chains into keyboard-interactive like any other
+  primary method (§7). Certificate identities are left for the still-deferred certificate path.
+  See §7 and `ssh/agent.rs`.
+- **Broader auth (still deferred)** — certificate auth (including agent-held certificates).
 - **More key types for `.ppk`** — *done, and by a different route than first planned*:
   the original plan was a hand-rolled parser covering RSA + Ed25519 with ECDSA deferred, but
   the swap to `ssh-key`'s `from_ppk` (§7 — already in the russh tree, no new dependency) reads

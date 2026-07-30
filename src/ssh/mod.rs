@@ -3,6 +3,7 @@
 // Split by responsibility so no single file owns the whole protocol:
 //   client  — the russh Handler + the connect→auth→shell→stream task loop (§6)
 //   auth    — method selection, attempts, and 2FA chaining into keyboard-interactive (§7)
+//   agent   — public-key auth delegated to an SSH agent / Pageant, no key material seen (§7)
 //   hostkey — TOFU host-key verification against a portable known_hosts (§8)
 //   keyfile — load PEM/OpenSSH keys and PuTTY .ppk, handle passphrases (§7)
 //   upload  — send a local file (or a whole folder tree) to the remote over sftp (§17)
@@ -11,6 +12,7 @@
 //   transfer— the shared spine of a recursive transfer: the tree plan and the per-file
 //             collision protocol both directions use (§17, §19)
 
+pub mod agent;
 pub mod auth;
 pub mod browse;
 pub mod client;

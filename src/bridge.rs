@@ -56,6 +56,12 @@ pub enum AuthMethod {
 	/// keyboard-interactive as the remaining factor (a second factor, or a fallback), so it
 	/// covers both the explicit choice and the implicit continuation.
 	Interactive,
+	/// Public-key auth delegated to a running SSH agent — the Windows OpenSSH agent or Pageant
+	/// on Windows, `ssh-agent` (via `SSH_AUTH_SOCK`) on macOS (§7). It carries NO secret and NO
+	/// file path: the agent holds the private keys already unlocked and does the signing itself,
+	/// so cmote never sees the key material. Nothing to pre-seed on the form or persist with the
+	/// target (§12); the connection just asks the agent to sign the auth challenge.
+	Agent,
 }
 
 /// One field of a keyboard-interactive request (§7). It mirrors russh's `Prompt` in a type

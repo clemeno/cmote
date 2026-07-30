@@ -71,6 +71,9 @@ pub enum FormStop {
 	/// The keyboard-interactive radio (§7). Like the other auth radios it is a focus ring
 	/// stop, activated by Enter/Space to switch the method.
 	AuthInteractive,
+	/// The SSH agent / Pageant radio (§7). Another focus-ring stop, activated by Enter/Space
+	/// to switch the method; like interactive auth it shows no credential fields.
+	AuthAgent,
 	/// The credential control: the password field under password auth, the Browse
 	/// button under key auth (§7). Absent under interactive auth, which shows no credential.
 	Credential,
@@ -86,13 +89,14 @@ pub enum FormStop {
 impl FormStop {
 	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
 	/// do not apply to the current auth method.
-	const ORDER: [FormStop; 10] = [
+	const ORDER: [FormStop; 11] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
 		FormStop::AuthPassword,
 		FormStop::AuthKey,
 		FormStop::AuthInteractive,
+		FormStop::AuthAgent,
 		FormStop::Credential,
 		FormStop::KeyPassphrase,
 		FormStop::Remember,
@@ -105,9 +109,9 @@ impl FormStop {
 	/// server drives every prompt, §7), so both are skipped too.
 	fn is_applicable(self, auth: AuthKind) -> bool {
 		match self {
-			FormStop::Credential => auth != AuthKind::Interactive,
+			FormStop::Credential => !auth.is_promptless(),
 			FormStop::KeyPassphrase => auth == AuthKind::Key,
-			FormStop::Remember => auth != AuthKind::Interactive,
+			FormStop::Remember => !auth.is_promptless(),
 			_ => true,
 		}
 	}
@@ -163,6 +167,7 @@ impl FormStop {
 			FormStop::AuthPassword => Some(Message::AuthKindChanged(AuthKind::Password)),
 			FormStop::AuthKey => Some(Message::AuthKindChanged(AuthKind::Key)),
 			FormStop::AuthInteractive => Some(Message::AuthKindChanged(AuthKind::Interactive)),
+			FormStop::AuthAgent => Some(Message::AuthKindChanged(AuthKind::Agent)),
 			FormStop::Credential if auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
 			FormStop::Remember => Some(Message::RememberToggled),
 			FormStop::Connect => Some(Message::ConnectPressed),
@@ -189,6 +194,21 @@ pub enum AuthKind {
 	/// (§7). Nothing is entered on the form; every factor is answered live on connect, so this
 	/// choice carries no secret to validate or persist.
 	Interactive,
+	/// SSH agent / Pageant: a running agent holds the keys and signs the challenge (§7). Like
+	/// interactive auth nothing is entered on the form — there is no key file to pick and no
+	/// passphrase, since the agent already unlocked the key — so this choice carries no secret
+	/// to validate or persist either.
+	Agent,
+}
+
+impl AuthKind {
+	/// Whether this method shows no credential fields and stores no secret, so the form has
+	/// nothing to capture for it (§7). Interactive (the server drives every prompt) and Agent
+	/// (a running agent holds and signs with the key) are both promptless; the credential
+	/// control, the key-passphrase field and the "Remember" toggle are all hidden for them.
+	fn is_promptless(self) -> bool {
+		matches!(self, AuthKind::Interactive | AuthKind::Agent)
+	}
 }
 
 /// The connect form's editable fields. Plain owned values that mirror the
@@ -279,6 +299,9 @@ impl ConnectForm {
 			// Interactive auth reads no field — the server prompts for every factor on connect
 			// (§7), so there is nothing to validate or carry beyond the choice itself.
 			AuthKind::Interactive => Ok(AuthMethod::Interactive),
+			// Agent auth reads no field either — a running agent holds the keys and signs the
+			// challenge (§7), so there is no file, passphrase or secret to capture.
+			AuthKind::Agent => Ok(AuthMethod::Agent),
 		}
 	}
 }
@@ -328,8 +351,8 @@ pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 	.max_width(420);
 
 	// The opt-in "remember this secret" toggle (§16), below the credential it applies to —
-	// omitted under interactive auth, which has no single secret to store (§7).
-	if form.auth_kind != AuthKind::Interactive {
+	// omitted under the promptless methods (interactive, agent), which have no secret to store (§7).
+	if !form.auth_kind.is_promptless() {
 		content = content.push(remember_toggle(
 			form.auth_kind,
 			form.remember,
@@ -367,41 +390,44 @@ fn focus_ring<'a>(content: impl Into<Element<'a, Message>>, focused: bool) -> El
 		.into()
 }
 
-/// The two radio buttons that choose the authentication method. `radio` needs a
+/// The four radio buttons that choose the authentication method. `radio` needs a
 /// `Copy + Eq` value; passing `Some(selected)` marks the current one as chosen. Each
 /// radio wears the focus ring when it is the active keyboard stop.
+///
+/// The radios are laid out two-by-two beside the "Auth" label: four in a single row would
+/// overrun the form's ~420px column, so they wrap onto two lines (Password / Key, then
+/// Interactive / Agent) while the label stays aligned with the other rows.
 fn auth_selector(selected: AuthKind, focus: FormStop) -> Element<'static, Message> {
+	// A small helper so each radio is built the same way, differing only by label, value and
+	// which focus stop rings it.
+	let radio_stop = |label: &'static str, value: AuthKind, stop: FormStop| {
+		focus_ring(
+			radio(label, value, Some(selected), Message::AuthKindChanged),
+			focus == stop,
+		)
+	};
 	row![
 		text("Auth").width(90),
-		focus_ring(
-			radio(
-				"Password",
-				AuthKind::Password,
-				Some(selected),
-				Message::AuthKindChanged
-			),
-			focus == FormStop::AuthPassword,
-		),
-		focus_ring(
-			radio(
-				"Key",
-				AuthKind::Key,
-				Some(selected),
-				Message::AuthKindChanged
-			),
-			focus == FormStop::AuthKey,
-		),
-		focus_ring(
-			radio(
-				"Interactive",
-				AuthKind::Interactive,
-				Some(selected),
-				Message::AuthKindChanged
-			),
-			focus == FormStop::AuthInteractive,
-		),
+		column![
+			row![
+				radio_stop("Password", AuthKind::Password, FormStop::AuthPassword),
+				radio_stop("Key", AuthKind::Key, FormStop::AuthKey),
+			]
+			.spacing(10),
+			row![
+				radio_stop(
+					"Interactive",
+					AuthKind::Interactive,
+					FormStop::AuthInteractive
+				),
+				radio_stop("Agent", AuthKind::Agent, FormStop::AuthAgent),
+			]
+			.spacing(10),
+		]
+		.spacing(8),
 	]
 	.spacing(10)
+	.align_y(iced::alignment::Vertical::Center)
 	.into()
 }
 
@@ -430,6 +456,14 @@ fn auth_fields(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 		AuthKind::Interactive => text(
 			"The server will prompt for each factor (for example a password, then a one-time \
 			 code) when you connect.",
+		)
+		.size(14)
+		.into(),
+		// Agent auth has no fields either: a running SSH agent supplies and signs with the key.
+		// The note names the agents cmote looks for so the user knows what must be running (§7).
+		AuthKind::Agent => text(
+			"cmote will use a key held by your running SSH agent (the Windows OpenSSH agent or \
+			 Pageant on Windows, ssh-agent on macOS). Nothing to enter here.",
 		)
 		.size(14)
 		.into(),
@@ -462,9 +496,10 @@ fn remember_toggle(auth: AuthKind, remembered: bool, focused: bool) -> Element<'
 	let label = match auth {
 		AuthKind::Password => "Remember password",
 		AuthKind::Key => "Remember passphrase",
-		// Not reached — `view` omits this toggle under interactive auth, which has no single
-		// secret to store (§7) — but the match must be total, so give a neutral fallback.
-		AuthKind::Interactive => "Remember secret",
+		// Not reached — `view` omits this toggle under the promptless methods (interactive,
+		// agent), which have no secret to store (§7) — but the match must be total, so give a
+		// neutral fallback.
+		AuthKind::Interactive | AuthKind::Agent => "Remember secret",
 	};
 	focus_ring(
 		checkbox(remembered)
@@ -573,6 +608,31 @@ mod tests {
 		};
 		let params = form.validate().expect("valid interactive form");
 		assert!(matches!(params.auth, AuthMethod::Interactive));
+	}
+
+	#[test]
+	fn agent_auth_carries_no_secret() {
+		// Agent auth validates to the fieldless method too — a running agent holds the key and
+		// signs the challenge, so like interactive auth there is nothing on the form to capture,
+		// no file to pick and no passphrase (§7).
+		let form = ConnectForm {
+			auth_kind: AuthKind::Agent,
+			..base_form()
+		};
+		let params = form.validate().expect("valid agent form");
+		assert!(matches!(params.auth, AuthMethod::Agent));
+	}
+
+	#[test]
+	fn a_promptless_method_hides_the_credential_and_remember_stops() {
+		// Both promptless methods (interactive, agent) drop the credential control, the optional
+		// key-passphrase field and the "Remember" toggle from the Tab ring, since none of those
+		// apply when the form captures no secret (§7).
+		for auth in [AuthKind::Interactive, AuthKind::Agent] {
+			assert!(!FormStop::Credential.is_applicable(auth));
+			assert!(!FormStop::KeyPassphrase.is_applicable(auth));
+			assert!(!FormStop::Remember.is_applicable(auth));
+		}
 	}
 
 	#[test]

@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{AuthMethod, ConnectParams, InteractivePrompt, SshEvent};
 use crate::secret::Secret;
+use crate::ssh::agent;
 use crate::ssh::client::{Handler, SessionMsg};
 use crate::ssh::keyfile::{self, Loaded};
 
@@ -41,7 +42,7 @@ const MAX_AUTH_ATTEMPTS: u32 = 3;
 /// (`AuthResult` for password/publickey, `KeyboardInteractiveAuthResponse` for the interactive
 /// loop) so the chaining loop can reason about both the same way. We keep only what the loop
 /// needs: whether it is done, and — on failure — which methods the server will still consider.
-enum Outcome {
+pub(crate) enum Outcome {
 	Success,
 	Failure { remaining: MethodSet },
 }
@@ -105,6 +106,12 @@ pub(crate) async fn authenticate(
 		AuthMethod::Interactive => {
 			keyboard_interactive(session, params.user.as_str(), events, to_session_rx).await?
 		}
+
+		// Public-key auth via a running SSH agent / Pageant (§7). The agent holds the keys and
+		// signs each challenge itself, so there is no secret to prompt for and no key file to
+		// load — cmote never sees the private key. A success may still chain into a second
+		// factor below, exactly like the key path.
+		AuthMethod::Agent => agent::authenticate(session, params.user.as_str()).await?,
 	};
 
 	// Then follow the server into keyboard-interactive for as long as it keeps offering the

@@ -5,7 +5,8 @@
 A **native, portable SSH client for Windows 11 and macOS** written in Rust. A home
 screen lists your saved connection targets; pick one (or start a new connection), fill
 in host / port / user, pick an auth method (password, a private key — PEM or PuTTY
-`.ppk` — or keyboard-interactive for 2FA / OTP), connect. On success the server hands us a shell and cmote renders a **full VT
+`.ppk` — keyboard-interactive for 2FA / OTP, or a key held by your **SSH agent / Pageant**),
+connect. On success the server hands us a shell and cmote renders a **full VT
 terminal** inside the window — a working interactive prompt, with a browsable tree of the
 remote filesystem beside it, a grid of the current directory's files under it (keyboard
 navigable, with a details popup and rubber-band multi-selection), the remote working
@@ -39,6 +40,11 @@ references below (§n) point into it.
   second factor (key/password **plus** a one-time code). The server's prompts appear one field
   each — masked for a code or password, plain for a username — and are answered live; nothing
   is stored.
+- **SSH agent / Pageant** — pick **Agent** to let a running agent hold the key and sign the
+  challenge, so cmote never sees the private key and there is nothing to type. On Windows it
+  looks for the OpenSSH agent (the `\\.\pipe\openssh-ssh-agent` pipe, or `SSH_AUTH_SOCK` when it
+  points at one) and then Pageant; on macOS it uses `ssh-agent` via `SSH_AUTH_SOCK`. Every agent
+  key is offered in turn until the server accepts one, and it still chains into 2FA afterwards.
 - **Remember a secret (opt-in, portable)** — tick **Remember** on the form to keep that
   target's password or key passphrase in an encrypted vault (`secrets.age`), so a return visit
   pre-fills the masked field. The vault is one file protected by a **master passphrase** you
@@ -456,7 +462,7 @@ docker run --rm -d --name cmote-sshd -p 2222:22 \
 
 **2. Password auth + first-contact host key.** Run `cargo run`, enter `localhost`,
 port `2222`, user `tester`, choose **Password**, type `testpass`, connect. **Tab** /
-**Shift+Tab** should move focus across every control — the fields, both auth radios, and
+**Shift+Tab** should move focus across every control — the fields, the four auth radios, and
 the Connect button (the active radio/button shows a highlight ring); **Enter/Space**
 activates the focused radio or button. Expect:
 
@@ -513,6 +519,10 @@ ssh-keygen -t ed25519 -f ./smoke_key_enc -N "hunter2"      # encrypted
   re-ask) before the correct one succeeds.
 - **PuTTY `.ppk`:** convert a key with PuTTYgen and repeat — both encrypted and
   unencrypted `.ppk` should behave like the OpenSSH cases.
+- **SSH agent / Pageant:** load `smoke_key` into an agent (`ssh-add ./smoke_key`, or add it
+  in Pageant on Windows), choose **Agent** — no fields appear — and connect → shell opens with
+  no file to pick and no passphrase. Stop the agent (or empty it) and retry: expect a clear
+  "no SSH agent found" / "no keys to offer" message, not a hang.
 
 **5. Host-key mismatch (hard stop).** Delete the server container and start a fresh
 one (new host key) on the same port, then reconnect. Expect a hard failure that names
