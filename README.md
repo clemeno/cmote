@@ -13,7 +13,8 @@ navigable, with a details popup and rubber-band multi-selection), the remote wor
 directory in the title bar, and file transfer both ways. Full-screen programs — btop,
 vim, htop, midnight commander — draw properly and take the mouse. Reconnect to a saved
 target and the shell and both panels come back to the directories you left them in. Open
-as many sessions as you like in **tabs** — each fully independent, all in one window.
+as many sessions as you like in **tabs** — each fully independent, all in one window. Tunnel
+ports through the connection — local, remote or a SOCKS proxy — and they come back on reconnect.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -29,6 +30,12 @@ references below (§n) point into it.
   arriving while you work in another. Mouse-only strip across the top: **click** a tab to switch,
   **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
   targets and the unlocked vault are shared across every tab.
+- **Port forwarding — local, remote and dynamic tunnels.** The **Tunnels** button on the status
+  bar opens a manager: add a **Local** (`-L`) forward to reach a service through the server, a
+  **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
+  SOCKS5 proxy that lets each connection pick its own target. Each tunnel rides the same
+  connection — no second login — and shows live / failed in the dialog; the set is **remembered
+  per target** and re-established when you reconnect. Binds to loopback by default.
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
   passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
@@ -746,6 +753,17 @@ fit the window (no missing bottom row). Click a tab's **"×"**: an idle Home/Con
 once, a **live** shell asks to confirm first. Close every tab in turn — the last close should
 leave a single fresh Home tab, never an empty window. A rename or delete on one tab's home list
 should be visible on another tab's home list (the target store is shared).
+
+**16. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
+forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the
+row to go from `○` to a green `●`; from your machine, `curl localhost:8080` (or `ssh -p 8080
+localhost`) should reach it through the tunnel. Add a **Dynamic** forward — listen `1080` — and
+point a browser or `curl --socks5 localhost:1080 https://example.com` at it. Add a **Remote**
+forward — listen `9090` on the server, to `localhost:<something-local>` — and connect to it *on the
+remote*. Try a duplicate bind (two locals on `8080`) and a taken port: the first is refused inline,
+the second shows the row **failed** without dropping the shell. Remove a forward with its **✕** — the
+tunnel stops. Then **Disconnect** and reconnect to the same target: the forwards you left should be
+re-established automatically (they are saved in `targets.json`).
 
 **Cleanup:**
 

@@ -138,6 +138,10 @@ pub struct Modals<'a> {
 	pub pending_delete: bool,
 	/// Whether a recursive transfer's file-collision prompt is open (§17, §19).
 	pub transfer_conflict: bool,
+	/// The port-forwards manager and its list/add-form state (§27). Grouped in with the other
+	/// modals because it is one — an overlay with the shared chrome — and it keeps `view` under
+	/// the argument limit.
+	pub forwards: crate::ui::forward::ForwardsView<'a>,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -171,6 +175,7 @@ pub fn view<'a>(
 		new_folder,
 		pending_delete,
 		transfer_conflict,
+		forwards,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -225,7 +230,8 @@ pub fn view<'a>(
 			can_sync,
 			upload,
 			explorer.visible(),
-			files.visible()
+			files.visible(),
+			forwards.entries.len(),
 		),
 		body
 	]
@@ -326,6 +332,13 @@ pub fn view<'a>(
 		));
 		layers.push(transfer_conflict_panel(dialog_body, drag));
 	}
+	// The port-forwards manager (§27): its own list + add form in the shared chrome. The ✕ and
+	// the backdrop both just close it — nothing here is destructive, forwards are removed by
+	// their own ✕ — so dismissing leaves every tunnel exactly as it was.
+	if forwards.open {
+		layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
+		layers.push(crate::ui::forward::panel(forwards, drag));
+	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
 	// (a scrollable's offset, here the folder tree's) against its position in the widget
@@ -353,6 +366,7 @@ fn status_bar<'a>(
 	upload: UploadView<'a>,
 	explorer_visible: bool,
 	files_visible: bool,
+	forward_count: usize,
 ) -> Element<'a, Message> {
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
@@ -392,6 +406,15 @@ fn status_bar<'a>(
 		.size(STATUS_BAR_TEXT),
 	)
 	.on_press(Message::Files(crate::files::FilesMessage::Toggled));
+	// The tunnels manager (§27): opens the port-forwards dialog. The label carries the live
+	// count so the bar shows at a glance how many are up without opening it.
+	let tunnels_label = if forward_count > 0 {
+		format!("Tunnels ({forward_count})")
+	} else {
+		"Tunnels".to_owned()
+	};
+	let tunnels =
+		button(text(tunnels_label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed);
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
@@ -423,7 +446,7 @@ fn status_bar<'a>(
 	let center = container(center_zone(endpoint, upload))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
-	let right = container(row![tree, pane, disconnect].spacing(10))
+	let right = container(row![tree, pane, tunnels, disconnect].spacing(10))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right);
 

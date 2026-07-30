@@ -667,6 +667,22 @@ pub struct Tab {
 	/// on `Connected`, cleared if the connect never leaves. Persisting only on success means a
 	/// wrong password is never saved.
 	pending_remember: Option<(String, Secret)>,
+	/// This session's port forwards (§27), each an entry with its runtime id, spec and status.
+	/// Populated on connect from the target's saved set and by the tunnels dialog; the ids key a
+	/// forward to its `ForwardReady` / `ForwardFailed` event and to the `RemoveForward` command.
+	forwards: Vec<crate::forward::ForwardEntry>,
+	/// The next forward id to hand out (§27). Monotonic per tab, never reused, so a removed
+	/// forward's late event can never land on a new one.
+	next_forward_id: u64,
+	/// Whether the port-forwards management dialog is open (§27).
+	forward_dialog: bool,
+	/// The add form's selected kind (§27).
+	forward_kind: crate::forward::ForwardKind,
+	/// The add form's listen and target fields, and the last parse error to show under them
+	/// (§27). Cleared as forwards are added; the error is cleared on the next edit or a clean add.
+	forward_listen: String,
+	forward_to: String,
+	forward_error: Option<String>,
 }
 
 /// What a successful vault unlock should resume (§16). The master-passphrase prompt can
@@ -973,6 +989,21 @@ pub enum Message {
 	TabCloseConfirmed,
 	/// The close confirmation was dismissed — keep the tab.
 	TabCloseCancelled,
+	// --- port forwarding (§27): the tunnels dialog opened from the status bar ---
+	/// The status bar's "Tunnels" button — open the port-forwards manager.
+	ForwardsPressed,
+	/// The tunnels dialog was dismissed (Close / ✕ / backdrop) — nothing is torn down.
+	ForwardsClosed,
+	/// The add form's kind selector changed (Local / Remote / Dynamic).
+	ForwardKindSelected(crate::forward::ForwardKind),
+	/// The add form's listen field changed.
+	ForwardListenChanged(String),
+	/// The add form's target field changed.
+	ForwardToChanged(String),
+	/// The add form's Add button (or Enter in a field) — parse, validate, and start the forward.
+	ForwardAddPressed,
+	/// A forward's row ✕ — tear that forward down (payload: its runtime id).
+	ForwardRemove(u64),
 }
 
 impl Tab {
@@ -1227,6 +1258,23 @@ impl Tab {
 			| Message::TabCloseRequested(_)
 			| Message::TabCloseConfirmed
 			| Message::TabCloseCancelled => {}
+			// Port forwarding (§27).
+			Message::ForwardsPressed => return self.open_forwards_dialog(),
+			Message::ForwardsClosed => self.forward_dialog = false,
+			Message::ForwardKindSelected(kind) => {
+				self.forward_kind = kind;
+				self.forward_error = None;
+			}
+			Message::ForwardListenChanged(value) => {
+				self.forward_listen = value;
+				self.forward_error = None;
+			}
+			Message::ForwardToChanged(value) => {
+				self.forward_to = value;
+				self.forward_error = None;
+			}
+			Message::ForwardAddPressed => self.add_forward(),
+			Message::ForwardRemove(id) => self.remove_forward(id),
 		}
 		iced::Task::none()
 	}
@@ -1289,13 +1337,14 @@ impl Tab {
 			// brand-new target takes the default `upsert_on_connect` gives it (§14).
 			show_hidden: self.explorer.show_hidden(),
 			// The pending target only carries auth into `upsert_on_connect`; the remembered
-			// session (§22) and the remember flag (§16) live with the *stored* target, which the
-			// upsert leaves untouched, so these placeholders are never read.
+			// session (§22), the remember flag (§16) and the saved forwards (§27) live with the
+			// *stored* target, which the upsert leaves untouched, so these placeholders are never read.
 			terminal_path: None,
 			files_path: None,
 			explorer_width: None,
 			files_height: None,
 			remember_secret: false,
+			forwards: Vec::new(),
 		});
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
@@ -1614,6 +1663,9 @@ impl Tab {
 				// for when the user returns to the home list.
 				let mut resume_terminal = None;
 				let mut resume_files = None;
+				// The forwards this target saved (§27), read here and re-established once the shell
+				// is up. Captured in the same short borrow discipline as the session snapshot.
+				let mut saved_forwards = Vec::new();
 				if let Some(target) = self.pending_target.take() {
 					let key = self.targets.borrow_mut().upsert_on_connect(
 						&target.host,
@@ -1638,6 +1690,14 @@ impl Tab {
 					if let Some(session) = session {
 						(resume_terminal, resume_files) = self.restore_session(session);
 					}
+					// The saved forwards, taken by a short borrow that ends before any `&mut self`
+					// call below (§27), to be started once the terminal is shown.
+					saved_forwards = self
+						.targets
+						.borrow()
+						.find(&key)
+						.map(|target| target.forwards.clone())
+						.unwrap_or_default();
 					// Remembered-secret bookkeeping (§16). A successful connect is the ONLY place
 					// a secret is persisted — the credentials are now known good, so a wrong
 					// password was never stored. With "Remember" on, store what dial captured;
@@ -1702,6 +1762,11 @@ impl Tab {
 					self.send_command(SshCommand::Input(line.into_bytes()));
 					self.resume_cwd = Some(cwd);
 				}
+
+				// Re-establish the forwards this target saved (§27), now the connection is up.
+				// Each is queued as `Starting` and asked for down the same channel; the server /
+				// listener reports readiness or failure back as a `ForwardReady`/`ForwardFailed`.
+				self.establish_forwards(saved_forwards);
 				return fit_terminal();
 			}
 			SshEvent::Output(bytes) => {
@@ -1859,6 +1924,15 @@ impl Tab {
 				self.pump_uploads();
 				self.finish_batch_if_drained();
 			}
+			// A forward came up or failed (§27): mark its row. A failure never tears the shell
+			// down — the tunnel simply shows as failed in the dialog. A late event for a forward
+			// already removed finds no entry and is dropped.
+			SshEvent::ForwardReady { id } => {
+				self.set_forward_status(id, crate::forward::ForwardStatus::Active)
+			}
+			SshEvent::ForwardFailed { id, reason } => {
+				self.set_forward_status(id, crate::forward::ForwardStatus::Failed(reason));
+			}
 			SshEvent::Disconnected => {
 				// A remote hangup ends a live session too: remember where it was (§22).
 				self.persist_session();
@@ -1926,6 +2000,122 @@ impl Tab {
 		self.connection = None;
 		self.clear_grid_interaction();
 		self.go_home()
+	}
+
+	/// Open the port-forwards manager (§27): close any context menu, show the dialog centred, and
+	/// focus the listen field so a forward can be typed straight away.
+	fn open_forwards_dialog(&mut self) -> iced::Task<Message> {
+		self.menu = None;
+		self.forward_error = None;
+		self.dialog_pos = self.centered_dialog_pos();
+		self.dialog_dragging = false;
+		self.dialog_drag_last = None;
+		self.forward_dialog = true;
+		iced::widget::operation::focus(ui::forward::LISTEN_INPUT_ID)
+	}
+
+	/// Add the forward described by the add form (§27): parse the two fields, reject a duplicate
+	/// bind, then hand it a fresh id, queue it as `Starting`, ask the worker to start it, and
+	/// save the updated set to the target. A parse error is shown under the form and nothing is
+	/// sent. The listen/target fields are cleared on success so the next forward starts blank;
+	/// the kind is kept, since adding several of one kind is common.
+	fn add_forward(&mut self) {
+		let spec = match crate::forward::ForwardSpec::parse(
+			self.forward_kind,
+			&self.forward_listen,
+			&self.forward_to,
+		) {
+			Ok(spec) => spec,
+			Err(reason) => {
+				self.forward_error = Some(reason);
+				return;
+			}
+		};
+		// Two forwards cannot bind the same local (or server) endpoint; refuse the duplicate
+		// before it is sent, so the second one's inevitable bind failure never happens.
+		if self
+			.forwards
+			.iter()
+			.any(|entry| entry.spec.same_endpoint(&spec))
+		{
+			self.forward_error = Some("A forward already binds that address.".to_owned());
+			return;
+		}
+
+		let id = self.next_forward_id;
+		self.next_forward_id += 1;
+		if self.send_command(SshCommand::AddForward {
+			id,
+			spec: spec.clone(),
+		}) {
+			self.forwards.push(crate::forward::ForwardEntry {
+				id,
+				spec,
+				status: crate::forward::ForwardStatus::Starting,
+			});
+			self.forward_listen.clear();
+			self.forward_to.clear();
+			self.forward_error = None;
+			self.persist_forwards();
+		}
+	}
+
+	/// Tear down the forward with this id (§27): drop it from the list, ask the worker to stop
+	/// it, and save the shrunk set. An unknown id is a no-op.
+	fn remove_forward(&mut self, id: u64) {
+		let Some(index) = self.forwards.iter().position(|entry| entry.id == id) else {
+			return;
+		};
+		self.forwards.remove(index);
+		self.send_command(SshCommand::RemoveForward(id));
+		self.persist_forwards();
+	}
+
+	/// Start a set of forwards a reconnect restored (§27): each gets a fresh id, is queued as
+	/// `Starting`, and is asked for down the channel. No persistence here — the set came FROM the
+	/// stored target, so it is already saved.
+	fn establish_forwards(&mut self, specs: Vec<crate::forward::ForwardSpec>) {
+		for spec in specs {
+			let id = self.next_forward_id;
+			self.next_forward_id += 1;
+			if self.send_command(SshCommand::AddForward {
+				id,
+				spec: spec.clone(),
+			}) {
+				self.forwards.push(crate::forward::ForwardEntry {
+					id,
+					spec,
+					status: crate::forward::ForwardStatus::Starting,
+				});
+			}
+		}
+	}
+
+	/// Mark a forward's row from a worker event (§27). An id with no matching entry — a late
+	/// event for one already removed — is ignored.
+	fn set_forward_status(&mut self, id: u64, status: crate::forward::ForwardStatus) {
+		if let Some(entry) = self.forwards.iter_mut().find(|entry| entry.id == id) {
+			entry.status = status;
+		}
+	}
+
+	/// Save the session's current forward set to its target (§27), so a reconnect re-establishes
+	/// them. Only meaningful with a live connection (the forwards belong to that target); the
+	/// specs are written whole, and `set_forwards` skips the disk write when nothing changed.
+	fn persist_forwards(&mut self) {
+		let Some(endpoint) = self.connection.clone() else {
+			return;
+		};
+		let specs: Vec<crate::forward::ForwardSpec> = self
+			.forwards
+			.iter()
+			.map(|entry| entry.spec.clone())
+			.collect();
+		// Non-overlapping borrows of the shared target cell (see `commit_rename`).
+		let moved = self.targets.borrow_mut().set_forwards(&endpoint, specs);
+		if moved && let Err(error) = self.targets.borrow().save() {
+			eprintln!("could not save targets: {error:#}");
+		}
 	}
 
 	/// Return to the connect form: reset the keyboard focus to the first field and
@@ -2938,6 +3128,12 @@ impl Tab {
 		// so `reset` deliberately leaves those alone.
 		self.explorer.reset();
 		self.files.reset();
+		// A session's forwards die with it (§27): the worker drops its listeners when the session
+		// ends, so the list — and the open dialog — belong to this session and are cleared. A fresh
+		// session re-establishes the target's saved set itself, after this runs.
+		self.forwards.clear();
+		self.forward_dialog = false;
+		self.forward_error = None;
 	}
 
 	/// Open the upload confirmation for the picked batch (§17): list the files in the body,
@@ -3949,6 +4145,14 @@ impl Tab {
 								.map(|new_folder| new_folder.name.as_str()),
 							pending_delete: self.pending_delete.is_some(),
 							transfer_conflict: self.transfer_conflict.is_some(),
+							forwards: ui::forward::ForwardsView {
+								open: self.forward_dialog,
+								entries: &self.forwards,
+								kind: self.forward_kind,
+								listen: &self.forward_listen,
+								to: &self.forward_to,
+								error: self.forward_error.as_deref(),
+							},
 							body: &self.dialog_body,
 							drag,
 						},
@@ -4339,6 +4543,138 @@ mod tests {
 		app.on_window_focus(false);
 		app.set_focus(Focus::Files);
 		assert_eq!(next_input(&mut rx), None);
+	}
+
+	// The next command queued for the SSH worker, or `None` if nothing was sent. Broader than
+	// `next_input`, since the forward flow sends `AddForward` / `RemoveForward`, not `Input`.
+	fn next_command(rx: &mut mpsc::Receiver<SshCommand>) -> Option<SshCommand> {
+		rx.try_recv().ok()
+	}
+
+	/// Adding a forward from the dialog parses the two fields, queues the entry as `Starting`,
+	/// sends the worker an `AddForward`, and clears the fields for the next one (§27).
+	#[test]
+	fn adding_a_forward_parses_queues_and_sends_it() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Local;
+		app.forward_listen = "8080".to_owned();
+		app.forward_to = "db:5432".to_owned();
+
+		app.add_forward();
+
+		// Queued once, marked starting, and the input fields reset (the kind is kept).
+		assert_eq!(app.forwards.len(), 1);
+		assert_eq!(
+			app.forwards[0].status,
+			crate::forward::ForwardStatus::Starting
+		);
+		assert!(app.forward_listen.is_empty());
+		assert!(app.forward_to.is_empty());
+		assert!(app.forward_error.is_none());
+
+		// The worker was asked to start exactly that spec.
+		match next_command(&mut rx) {
+			Some(SshCommand::AddForward { id, spec }) => {
+				assert_eq!(id, app.forwards[0].id);
+				assert_eq!(spec.listen_port, 8080);
+				assert_eq!(spec.target_host, "db");
+				assert_eq!(spec.target_port, 5432);
+			}
+			other => panic!("expected AddForward, got {other:?}"),
+		}
+	}
+
+	/// A forward that does not parse sets the inline error and sends nothing (§27).
+	#[test]
+	fn a_bad_forward_shows_an_error_and_sends_nothing() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.forward_listen = "not-a-port".to_owned();
+		app.forward_to = "db:5432".to_owned();
+
+		app.add_forward();
+
+		assert!(app.forwards.is_empty());
+		assert!(app.forward_error.is_some());
+		assert!(next_command(&mut rx).is_none());
+	}
+
+	/// Two forwards cannot bind the same endpoint: the duplicate is refused before it is sent,
+	/// so the second one's inevitable bind failure never happens (§27).
+	#[test]
+	fn a_duplicate_bind_is_refused() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Local;
+		app.forward_listen = "8080".to_owned();
+		app.forward_to = "a:1".to_owned();
+		app.add_forward();
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::AddForward { .. })
+		));
+
+		// Same bind, different target: rejected, nothing added, nothing sent.
+		app.forward_listen = "8080".to_owned();
+		app.forward_to = "b:2".to_owned();
+		app.add_forward();
+		assert_eq!(app.forwards.len(), 1);
+		assert!(app.forward_error.is_some());
+		assert!(next_command(&mut rx).is_none());
+	}
+
+	/// Removing a forward drops its row and asks the worker to tear it down (§27).
+	#[test]
+	fn removing_a_forward_drops_it_and_sends_remove() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Dynamic;
+		app.forward_listen = "1080".to_owned();
+		app.add_forward();
+		let id = app.forwards[0].id;
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::AddForward { .. })
+		));
+
+		app.remove_forward(id);
+		assert!(app.forwards.is_empty());
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::RemoveForward(removed)) if removed == id
+		));
+
+		// Removing an unknown id is a no-op — no row change, no command.
+		app.remove_forward(999);
+		assert!(next_command(&mut rx).is_none());
+	}
+
+	/// A worker's readiness / failure event marks the matching row; an event for a forward
+	/// already removed is ignored (§27).
+	#[test]
+	fn a_forward_event_marks_its_row() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Local;
+		app.forward_listen = "8080".to_owned();
+		app.forward_to = "db:5432".to_owned();
+		app.add_forward();
+		let id = app.forwards[0].id;
+
+		let _ = app.on_ssh_event(SshEvent::ForwardReady { id });
+		assert_eq!(
+			app.forwards[0].status,
+			crate::forward::ForwardStatus::Active
+		);
+
+		let _ = app.on_ssh_event(SshEvent::ForwardFailed {
+			id,
+			reason: "port in use".to_owned(),
+		});
+		assert_eq!(
+			app.forwards[0].status,
+			crate::forward::ForwardStatus::Failed("port in use".to_owned())
+		);
+
+		// A stale event for a removed forward touches nothing.
+		let _ = app.on_ssh_event(SshEvent::ForwardReady { id: 999 });
+		assert_eq!(app.forwards.len(), 1);
 	}
 
 	// A key-press event for the terminal handler. `text: None` is fine for the named keys these

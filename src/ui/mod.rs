@@ -8,6 +8,7 @@ pub mod connect; // the connection form
 pub mod dialog; // shared modal-dialog chrome (header / body / footer)
 pub mod explorer; // the remote folder tree beside the terminal (§18)
 pub mod files; // the remote file grid under the terminal (§19)
+pub mod forward; // the port-forwards management dialog (§27)
 pub mod grid; // the terminal screen itself, drawn cell-exact as one widget (§9)
 pub mod home; // the home screen: saved connection targets (§14)
 pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss layer (§10)

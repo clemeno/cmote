@@ -19,6 +19,7 @@ use iced::futures::SinkExt; // brings `.send()` onto the futures mpsc Sender
 use iced::futures::Stream;
 use tokio::sync::mpsc;
 
+use crate::forward::ForwardSpec;
 use crate::secret::Secret;
 use crate::ssh;
 
@@ -180,6 +181,16 @@ pub enum SshCommand {
 	/// Rename a remote folder (§18). `to` is the same directory with a new last
 	/// component; the task refuses to replace an occupied path.
 	RenameDir { from: String, to: String },
+	/// Start a port forward on the live connection (§27). `id` is the app-assigned handle used
+	/// to report the outcome back (`ForwardReady` / `ForwardFailed`) and to cancel it later
+	/// (`RemoveForward`); `spec` says which of the three shapes it is and where it binds/goes.
+	/// A Local/Dynamic forward binds a local listener; a Remote forward asks the server to bind
+	/// one. The tunnels run on the same SSH connection as the shell — no new authentication.
+	AddForward { id: u64, spec: ForwardSpec },
+	/// Tear down the forward with this id (§27). The local listener (Local/Dynamic) stops
+	/// accepting and its in-flight tunnels are dropped; a Remote forward's server listener is
+	/// cancelled. A missing id is a no-op.
+	RemoveForward(u64),
 	/// Close the channel and tear down the connection.
 	Disconnect,
 }
@@ -276,6 +287,13 @@ pub enum SshEvent {
 	DeleteDone(Vec<String>),
 	/// A delete did not happen (or only partly did), with the reason for the panel's notice line.
 	DeleteFailed(String),
+	/// A port forward is up (§27): its local listener bound, or the server accepted its remote
+	/// listen request. Carries the id so the GUI marks the right row live in the tunnels dialog.
+	ForwardReady { id: u64 },
+	/// A port forward could not start (§27): the local port was already taken, the server
+	/// refused the remote listen, or the bind address was bad. Carries the id and a short reason
+	/// for the row — a forward's own failure never tears the shell down, unlike a session error.
+	ForwardFailed { id: u64, reason: String },
 	/// The session ended (server closed, or user disconnected).
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).

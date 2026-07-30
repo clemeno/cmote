@@ -30,12 +30,18 @@ use crate::secret::Secret;
 use crate::ssh::auth;
 use crate::ssh::browse;
 use crate::ssh::download;
+use crate::ssh::forward;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::ssh::upload;
 use crate::term;
 
 /// How long to wait for the TCP connect + SSH handshake before giving up.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many accepted-but-not-yet-opened forward connections may queue between the listeners and
+/// the session loop before a listener awaits (§27). Generous — a burst of tunnel connections is
+/// drained as fast as channels open — and bounded so it cannot grow without limit.
+const CHANNEL_BOUND_FORWARD: usize = 64;
 
 /// The shell integration cmote installs once, right after the shell opens (§17).
 ///
@@ -192,6 +198,19 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::AddForward { id, spec } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::AddForward { id, spec })
+						.await;
+				}
+			}
+			SshCommand::RemoveForward(id) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::RemoveForward(id)).await;
+				}
+			}
 			SshCommand::Disconnect => {
 				if let Some(link) = session.take() {
 					let _ = link.to_session.send(SessionMsg::Disconnect).await;
@@ -241,6 +260,13 @@ pub(crate) enum SessionMsg {
 	ReadLink(String),
 	/// Rename a remote folder (§18).
 	RenameDir { from: String, to: String },
+	/// Start a port forward on the live connection (§27).
+	AddForward {
+		id: u64,
+		spec: crate::forward::ForwardSpec,
+	},
+	/// Tear a port forward down (§27).
+	RemoveForward(u64),
 	/// Tear the session down.
 	Disconnect,
 }
@@ -316,12 +342,18 @@ async fn connect_and_run(
 		..Default::default()
 	});
 
+	// The table remote forwards share between the Handler (which receives the server's
+	// forwarded-tcpip channels) and the session loop (which adds/removes them, §27). One per
+	// session, cloned into both.
+	let remote_forwards = forward::remote_table();
+
 	let handler = Handler {
 		host: params.host.clone(),
 		port: params.port,
 		known_hosts: hostkey::known_hosts_path()?,
 		events: events.clone(),
 		decision: Some(decision_rx),
+		remote_forwards: remote_forwards.clone(),
 	};
 
 	// TCP connect + SSH handshake, bounded by a timeout. The handshake runs the
@@ -363,7 +395,7 @@ async fn connect_and_run(
 	// arrives invisibly on every prompt.
 	channel.data(CWD_HOOK.as_bytes()).await?;
 
-	stream(channel, &session, events, to_session_rx).await
+	stream(channel, &session, events, to_session_rx, remote_forwards).await
 }
 
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.
@@ -374,10 +406,18 @@ async fn stream(
 	session: &client::Handle<Handler>,
 	events: &mpsc::Sender<SshEvent>,
 	mut to_session_rx: mpsc::Receiver<SessionMsg>,
+	remote_forwards: forward::RemoteTable,
 ) -> Result<()> {
 	// The explorer's SFTP channel (§18): opened on the first listing and kept for the
 	// rest of the session, since a tree asks many small questions.
 	let mut sftp = browse::Sftp::default();
+
+	// The port forwards on this session (§27). A local/dynamic listener cannot open its own SSH
+	// channel (the session `Handle` is not `Sync`), so it hands each accepted socket back here on
+	// `accepted_rx`; the select loop opens the `direct-tcpip` channel and spawns a detached pump.
+	// Dropping `forwards` at the end of the loop aborts every local listener.
+	let (accepted_tx, mut accepted_rx) = mpsc::channel::<forward::Accepted>(CHANNEL_BOUND_FORWARD);
+	let mut forwards = forward::Forwards::new(remote_forwards, accepted_tx);
 
 	// The reply channel for the transfer currently running, if it is a recursive one (§17, §19).
 	// A tree transfer parks mid-way to ask about a file collision; its answer arrives as a
@@ -403,6 +443,11 @@ async fn stream(
 					Some(_) => {}
 					None => break, // channel fully closed
 				}
+			}
+			// A local/dynamic forward accepted a connection (§27). Open its SSH channel here —
+			// the one place allowed to — and let the pump run detached.
+			Some(accepted) = accepted_rx.recv() => {
+				forward::open_local_tunnel(session, accepted).await;
 			}
 			// A command arrived from the GUI (via run()).
 			command = to_session_rx.recv() => {
@@ -472,6 +517,15 @@ async fn stream(
 					Some(SessionMsg::RenameDir { from, to }) => {
 						browse::rename(session, &mut sftp, events, from, to).await;
 					}
+					// Start / stop a port forward on this connection (§27). Add spawns a local
+					// listener or asks the server to listen; remove aborts / cancels it. Both run
+					// on the same session, so no new authentication.
+					Some(SessionMsg::AddForward { id, spec }) => {
+						forwards.add(session, events, id, spec).await;
+					}
+					Some(SessionMsg::RemoveForward(id)) => {
+						forwards.remove(session, id).await;
+					}
 					// Explicit disconnect, or run() dropped the link.
 					Some(SessionMsg::Disconnect) | None => {
 						let _ = channel.eof().await;
@@ -494,6 +548,10 @@ pub(crate) struct Handler {
 	events: mpsc::Sender<SshEvent>,
 	/// Consumed once, in `check_server_key`, to await the user's decision.
 	decision: Option<oneshot::Receiver<bool>>,
+	/// The active remote forwards, shared with the session loop (§27): the server's bound port →
+	/// the local target to dial. Read in `server_channel_open_forwarded_tcpip` when the server
+	/// opens a channel for a connection that arrived on one of those ports.
+	remote_forwards: forward::RemoteTable,
 }
 
 impl client::Handler for Handler {
@@ -568,5 +626,23 @@ impl client::Handler for Handler {
 				Ok(true)
 			}
 		}
+	}
+
+	/// A connection arrived on one of our remote forwards (§27): the server bound a port
+	/// (`tcpip_forward`) and someone connected to it, so it opens this `forwarded-tcpip` channel
+	/// back to us. Route it to the local target mapped for that port — accept and pump if one is
+	/// there, reject otherwise. All the logic is in `ssh::forward` so this stays a one-liner.
+	async fn server_channel_open_forwarded_tcpip(
+		&mut self,
+		channel: Channel<client::Msg>,
+		_connected_address: &str,
+		connected_port: u32,
+		_originator_address: &str,
+		_originator_port: u32,
+		reply: client::ChannelOpenHandle,
+		_session: &mut client::Session,
+	) -> Result<(), Self::Error> {
+		forward::accept_remote(&self.remote_forwards, channel, reply, connected_port as u16).await;
+		Ok(())
 	}
 }

@@ -8,6 +8,7 @@
 //   keyfile — load PEM/OpenSSH keys and PuTTY .ppk, handle passphrases (§7)
 //   upload  — send a local file (or a whole folder tree) to the remote over sftp (§17)
 //   download— pull a remote file (or a whole folder tree) down over sftp (§19)
+//   forward — run local / remote / dynamic port forwards over the live connection (§27)
 //   browse  — read, rename, create and delete remote folders for the explorer tree (§18)
 //   transfer— the shared spine of a recursive transfer: the tree plan and the per-file
 //             collision protocol both directions use (§17, §19)
@@ -17,6 +18,7 @@ pub mod auth;
 pub mod browse;
 pub mod client;
 pub mod download;
+pub mod forward;
 pub mod hostkey;
 pub mod keyfile;
 pub mod transfer;

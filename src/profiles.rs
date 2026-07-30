@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::forward::ForwardSpec;
 use crate::ui::connect::AuthKind;
 
 /// One saved connection target — profile metadata only, no secret material (§12).
@@ -77,6 +78,13 @@ pub struct Target {
 	/// written before opt-in persistence existed loads with it false and behaves as before.
 	#[serde(default, skip_serializing_if = "is_false")]
 	pub remember_secret: bool,
+	/// The port forwards to re-establish on the next connection to this target (§27). Persisted
+	/// because a tunnel set (a database on a bastion, a SOCKS proxy) is part of "how I use this
+	/// server", not a secret — so it rides here beside the resume paths, and reconnecting sets
+	/// them up again automatically. Empty by default and omitted from the JSON when empty, so an
+	/// older `targets.json` loads with no forwards and behaves exactly as before.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub forwards: Vec<ForwardSpec>,
 }
 
 /// The slice of a target's state that one session updates and the next restores (§22): where
@@ -200,6 +208,9 @@ impl Targets {
 					// A brand-new target has stored no secret yet; the flag is set later, only
 					// if a connect actually persists one to the vault (§16).
 					remember_secret: false,
+					// No forwards until the user adds some on a live session (§27); an existing
+					// endpoint's saved forwards are left untouched by the auth-only branch above.
+					forwards: Vec::new(),
 				});
 			}
 		}
@@ -220,6 +231,22 @@ impl Targets {
 			return false;
 		}
 		target.remember_secret = remember;
+		true
+	}
+
+	/// Replace the saved forwards for this target (§27), returning whether they changed. The
+	/// forward list is add/remove, not a fold of optional fields like `set_session`, so it is
+	/// written whole: the app hands the current set after every add or removal on a live
+	/// session, and an unchanged set reports `false` so the caller skips the disk write. A
+	/// missing endpoint is a no-op.
+	pub fn set_forwards(&mut self, endpoint: &str, forwards: Vec<ForwardSpec>) -> bool {
+		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
+			return false;
+		};
+		if target.forwards == forwards {
+			return false;
+		}
+		target.forwards = forwards;
 		true
 	}
 
@@ -386,6 +413,7 @@ mod tests {
 			explorer_width: None,
 			files_height: None,
 			remember_secret: false,
+			forwards: Vec::new(),
 		}
 	}
 
@@ -659,6 +687,49 @@ mod tests {
 				.unwrap()
 				.remember_secret
 		);
+	}
+
+	#[test]
+	fn forwards_are_set_and_round_trip_but_default_empty() {
+		use crate::forward::{ForwardKind, ForwardSpec};
+
+		// Arrange: a target with no forwards yet.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+		assert!(targets.find("u@h:22").unwrap().forwards.is_empty());
+
+		// Act / Assert: setting them reports a change and sticks; setting the same set again
+		// reports none; an unknown endpoint is a no-op.
+		let specs = vec![
+			ForwardSpec::parse(ForwardKind::Local, "8080", "db:5432").unwrap(),
+			ForwardSpec::parse(ForwardKind::Dynamic, "1080", "").unwrap(),
+		];
+		assert!(targets.set_forwards("u@h:22", specs.clone()));
+		assert_eq!(targets.find("u@h:22").unwrap().forwards, specs);
+		assert!(!targets.set_forwards("u@h:22", specs.clone()));
+		assert!(!targets.set_forwards("nobody@nowhere:22", specs.clone()));
+
+		// They survive a save/load round trip.
+		targets.save_to(&path).expect("save");
+		assert_eq!(
+			Targets::load_from(&path).find("u@h:22").unwrap().forwards,
+			specs
+		);
+	}
+
+	#[test]
+	fn a_targets_file_without_the_forwards_field_defaults_to_empty() {
+		// A store written before forwards existed must load with none and behave as before.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(
+			&path,
+			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"password"}]"#,
+		)
+		.unwrap();
+		assert!(Targets::load_from(&path).items()[0].forwards.is_empty());
 	}
 
 	#[test]

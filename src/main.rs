@@ -15,6 +15,7 @@ mod app; // iced application: State, Message, update, view, subscription
 mod bridge; // channel message types that cross the GUI <-> tokio boundary (§4)
 mod explorer; // the remote folder tree's model: nodes, expansion, path arithmetic (§18)
 mod files; // the remote file browser's model: one directory, batched listings (§19)
+mod forward; // the pure port-forward spec: kind + bind/target, parse/validate/label (§27)
 mod link; // opening an OSC 8 hyperlink safely: scheme policy + the OS browser launch (§24)
 mod palette; // the terminal colour scheme, shared by the renderer and the query answerer (§9, §23)
 mod paths; // where on-disk data lives: known_hosts + saved targets (§11, §14)

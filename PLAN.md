@@ -214,6 +214,7 @@ cmote/
     ├── app.rs            iced App: a strip of independent `Tab`s + the shared target list / vault; `Tab` = one session's State/Message/update/view; App delegates + routes SSH events per tab + draws the strip (§26)
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
+    ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
     ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
@@ -225,6 +226,7 @@ cmote/
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
+    │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
     │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
@@ -239,6 +241,7 @@ cmote/
     │   ├── auth.rs        method selection + attempts (publickey, password, keyboard-interactive, agent) + 2FA chaining (§7)
     │   ├── browse.rs      list + rename + create + delete remote entries over sftp, falling back to `ls`/`mv`/`mkdir`/`rm -rf` (§18, §19)
     │   ├── download.rs    file + recursive-folder download over an sftp channel: stream, progress, per-file collisions (§19)
+    │   ├── forward.rs     run port forwards: local/dynamic listeners → direct-tcpip, remote via tcpip_forward + Handler, SOCKS5 (§27)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     │   ├── transfer.rs    the recursive transfer's shared spine: the tree plan + the per-file collision protocol (§17, §19)
@@ -669,8 +672,10 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, NeedPassphrase, Interac
     to get out of the way.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
-  centered, **Disconnect** on the right; the terminal grid fills the rest, and keyboard
-  focus goes there. Disconnect opens a
+  centered, and on the right the panel toggles, a **Tunnels** button (§27, its label
+  carrying the live forward count) and **Disconnect**; the terminal grid fills the rest, and
+  keyboard focus goes there. Tunnels opens the port-forwards manager (`ui::forward`, a modal in
+  the shared chrome, §27). Disconnect opens a
   **confirmation modal** (the shared dialog chrome — Cancel / Disconnect footer — over a
   dimming, click-away scrim) so an accidental click cannot drop a live session; confirming sends
   `SshCommand::Disconnect` and returns to the form immediately (the `Disconnected` event
@@ -1093,8 +1098,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   transfers at once (a batch queues instead, §17, §21), preserving file modes/timestamps in either
   direction, and following symlinks inside a recursive walk (they are counted and skipped, never
   followed, so a cyclic link cannot loop the transfer).
-- **Port forwarding (local/remote/dynamic)** — russh supports the channels; a feature,
-  not a v1 need.
+- **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
+  remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
+  dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). Still
+  deferred: a server-assigned remote port (`-R 0`), bracketed-IPv6 bind addresses, and per-tunnel
+  connection counts / activity in the dialog.
 - **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
   replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
   cursor reports, custom tab stops, the autowrap toggle and the host's status/identity
@@ -2134,3 +2142,70 @@ unaffected; the one thing that reads the raw window size — the grid-fit and di
 fed a height already reduced by `STRIP_HEIGHT` (`App` trims it off every `WindowResized` before
 delegating), so the grid fits the space it has rather than overrunning it by a row. A tab switch
 refits the newly shown terminal, in case the window resized while it was backgrounded.
+
+## 27. Port forwarding (v3.0.0)
+
+The live SSH connection can carry more than a shell. cmote now runs **port forwards** — tunnels —
+over it, in all three shapes OpenSSH offers, managed from a **Tunnels** dialog on the terminal
+status bar. A tunnel rides the same authenticated connection as the shell, so there is no second
+login; the whole set for a target is **remembered and re-established on reconnect** (§22), because a
+tunnel set (a database behind a bastion, a SOCKS proxy) is part of how a server is used, not a
+secret.
+
+### The three kinds
+
+Exactly OpenSSH's `-L` / `-R` / `-D`:
+
+- **Local (`-L`)** — cmote binds a local port; each connection to it is carried through the SSH
+  connection and dialed **from the server** to a fixed target. `localhost:8080 → db.internal:5432`.
+- **Remote (`-R`)** — the **server** binds a port; each connection there is carried back and dialed
+  **from this machine**. `server:9090 → localhost:3000`.
+- **Dynamic (`-D`)** — cmote runs a local **SOCKS5** proxy; every connection names its own target
+  in the SOCKS handshake, each carried from the server. One tunnel, any destination.
+
+The spec is pure data (`forward.rs`): the kind, the bind `host:port` (loopback by default — a
+forward opened without thinking never exposes the tunnel to the whole network), and, for
+Local/Remote, the target `host:port`. It parses from the dialog's two fields, validates, labels
+itself for a row, and serialises for `targets.json`. `ponytail:` a bare port is allowed on the bind
+side (loopback assumed); an unbracketed IPv6 literal is not (the host/port split is on the last
+colon).
+
+### The one constraint that shapes the network layer
+
+russh's session `Handle` is **not `Clone` and not `Sync`** — it owns a reply receiver — so **only
+the one task that owns it** (`client::stream`) may open channels on it. A local listener therefore
+cannot open its own SSH channel. The split (`ssh/forward.rs`):
+
+- **Local / Dynamic (outbound).** A spawned listener binds the port and accepts. For Local the
+  target is fixed; for Dynamic the listener runs the SOCKS5 handshake itself (no-auth, CONNECT only)
+  to learn the target. It then hands the raw socket back to `stream` over a channel (`Accepted`).
+  `stream` opens the `direct-tcpip` channel — the one place allowed to — and spawns a **detached**
+  pump (`copy_bidirectional`), which owns the socket and the channel stream and needs nothing
+  shared, so a long-lived tunnel never holds up the shell. `ponytail:` the SOCKS success reply is
+  written optimistically, before the channel opens (the listener cannot open it); a channel that
+  then fails shows the client a closed connection rather than a SOCKS error, one step later.
+- **Remote (inbound).** `stream` asks the server to listen (`tcpip_forward`) and records the local
+  target in a table **shared with the `Handler`** (an `Arc<Mutex>`). When a connection arrives the
+  server opens a `forwarded-tcpip` channel back; russh delivers it to `Handler::
+  server_channel_open_forwarded_tcpip`, which looks the bound port up in the table, accepts, dials
+  the local target and pumps. Removal cancels the server listen (`cancel_tcpip_forward`) and prunes
+  the table. `ponytail:` the table is keyed by port only, and a server-assigned `-R 0` is a later
+  nicety (a concrete port is required for now).
+
+The `Forwards` manager `stream` owns holds the local listener tasks and the remote entries; dropping
+it at session end aborts every local listener, and the remote listeners die with the connection —
+a clean teardown from one scope exit.
+
+### The bridge, the state, and the dialog
+
+Two new commands (`AddForward { id, spec }` / `RemoveForward(id)`) and two events (`ForwardReady
+{ id }` / `ForwardFailed { id, reason }`) extend the protocol (§4); the id is app-assigned, keying a
+forward to its outcome and its removal. Each tab keeps a `Vec<ForwardEntry>` (id + spec + status:
+Starting → Active / Failed) and a small add-form. The **Tunnels** button (status bar, with the live
+count) opens the manager — the shared dialog chrome (§10) with a row per forward (label, status dot,
+remove ✕) above the add form (a kind selector, a listen field, a target field hidden for Dynamic).
+Adding parses, refuses a duplicate bind before it is sent, queues the entry and asks the worker;
+removing drops the row and tears the tunnel down. Both persist the set to the target. A forward's
+**failure never tears the shell down** — unlike a session error, it just shows the row as failed. On
+connect the target's saved forwards are re-established automatically; on any teardown the list
+(and the worker's listeners) go with the session.
