@@ -280,6 +280,12 @@ pub fn view<'a>(
 		layers.push(crate::ui::files::dismiss_layer());
 		layers.push(pane_menu);
 	}
+	// The files pane's sort menu (§19), dropped from its header button, with its own click-away
+	// layer beneath. Separate from the context menus above — only ever one of the three is up.
+	if let Some(sort_menu) = crate::ui::files::sort_menu(files) {
+		layers.push(crate::ui::files::sort_dismiss_layer());
+		layers.push(sort_menu);
+	}
 	// While a splitter is being dragged, a transparent layer on top follows the pointer
 	// everywhere — so the resize keeps tracking outside the bar (§18, §19).
 	if explorer.dragging() {

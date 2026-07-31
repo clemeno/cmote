@@ -132,6 +132,29 @@ const DOCUMENT: &[&str] = &[
 const AUDIO: &[&str] = &["mp3", "wav", "flac", "ogg", "m4a", "aac", "opus", "wma"];
 const VIDEO: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "wmv", "flv", "m4v"];
 
+/// Which column a user-chosen sort orders the grid by (§19). There is deliberately no `None`
+/// variant: the ABSENCE of a sort is `Option::None` on the pane's `sort` field, and it means the
+/// default order the server task already laid down — directories first, then everything else by
+/// name (the free `sort`). Picking a key overrides that; picking the lit one again drops back to
+/// it. `Extension` orders by the text after a name's last dot (all `.rs` together), which is why
+/// it is not called "Type": it is the file's extension, not the SFTP entry kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKey {
+	Name,
+	Modified,
+	Extension,
+	Size,
+}
+
+/// The direction a `SortKey` runs in (§19). Ascending is the default the sort menu opens on. It
+/// flips the WITHIN-group order only: directories stay grouped ahead of files whichever way it
+/// points — "folders first" is the one rule the direction never reverses (`compare_entries`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDir {
+	Ascending,
+	Descending,
+}
+
 /// Everything the files pane can ask the app to do (§19). Nested under
 /// `Message::Files` for the same reason the tree's messages are (§18): a dozen more
 /// top-level variants would bury the rest of the enum.
@@ -190,6 +213,17 @@ pub enum FilesMessage {
 	PointerMoved(Point),
 	/// Dismiss the context menu without choosing an item.
 	MenuDismissed,
+	/// The header's sort button: open, or close, the sort menu (§19). The menu itself carries the
+	/// four keys and the two directions; this only toggles whether it is dropped down.
+	SortMenuOpened,
+	/// A click-away closed the sort menu, the way `MenuDismissed` closes the context one (§19).
+	SortMenuDismissed,
+	/// A key was picked in the sort menu (§19). Picking the ALREADY-LIT key clears the sort, back
+	/// to the default order — the menu has no explicit "None", so the lit key is the way off.
+	SortKeyPicked(SortKey),
+	/// A direction was picked in the sort menu (§19). Remembered even with no key set, so it is
+	/// ready the moment one is.
+	SortDirPicked(SortDir),
 	/// Re-list the directory on show — the refresh for a folder changed from the shell.
 	Refresh,
 	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
@@ -310,6 +344,14 @@ pub struct Files {
 	/// recognisable as stale. Resolving a link costs a round trip, which is why it is
 	/// asked for one selection at a time rather than for every link in the listing (§19).
 	link_target: Option<(String, String)>,
+	/// The user's chosen sort, or `None` for the default dirs-first-by-name order (§19). `sort`
+	/// is the key, `sort_dir` its direction (Ascending until the menu says otherwise), and
+	/// `sort_menu_open` whether the header's sort menu is dropped down. Kept on the model, not the
+	/// view, so a chosen order survives every relayout and outlives a change of directory — a sort
+	/// is a view preference, not a property of one folder — and the menu's ticks always mirror it.
+	sort: Option<SortKey>,
+	sort_dir: SortDir,
+	sort_menu_open: bool,
 }
 
 impl Default for Files {
@@ -338,6 +380,9 @@ impl Default for Files {
 			scroll: 0.0,
 			zone: Zone::default(),
 			link_target: None,
+			sort: None,
+			sort_dir: SortDir::Ascending,
+			sort_menu_open: false,
 		}
 	}
 }
@@ -549,6 +594,56 @@ impl Files {
 	pub fn open_pane_menu(&mut self) {
 		self.menu = None;
 		self.pane_menu = Some(self.pointer);
+		// Only one surface is ever up, and the sort menu is one of them (§19).
+		self.sort_menu_open = false;
+	}
+
+	/// The chosen sort key, or `None` for the default order (§19). The header tints its sort
+	/// button while this is set, and the sort menu ticks the row that matches.
+	pub fn sort_key(&self) -> Option<SortKey> {
+		self.sort
+	}
+
+	/// The chosen sort direction (§19): Ascending until the menu changes it, and only meaningful
+	/// once a key is set.
+	pub fn sort_dir(&self) -> SortDir {
+		self.sort_dir
+	}
+
+	/// Whether the header's sort menu is dropped down (§19).
+	pub fn sort_menu_open(&self) -> bool {
+		self.sort_menu_open
+	}
+
+	/// Toggle the sort menu open or shut — the header's sort button (§19). Opening it closes any
+	/// context menu, so only one surface is ever up.
+	pub fn toggle_sort_menu(&mut self) {
+		self.sort_menu_open = !self.sort_menu_open;
+		if self.sort_menu_open {
+			self.menu = None;
+			self.pane_menu = None;
+		}
+	}
+
+	/// Close the sort menu — a click-away (§19).
+	pub fn close_sort_menu(&mut self) {
+		self.sort_menu_open = false;
+	}
+
+	/// Pick a sort key from the menu (§19). Picking the one already lit clears the sort: the menu
+	/// carries no "None" row, so the active key doubles as the way back to the default order.
+	pub fn pick_sort_key(&mut self, key: SortKey) {
+		self.sort = if self.sort == Some(key) {
+			None
+		} else {
+			Some(key)
+		};
+	}
+
+	/// Pick a sort direction from the menu (§19). Stored even with no key set, so it is ready the
+	/// moment one is.
+	pub fn set_sort_dir(&mut self, dir: SortDir) {
+		self.sort_dir = dir;
 	}
 
 	/// The in-progress inline rename, if any.
@@ -691,6 +786,8 @@ impl Files {
 	pub fn open_menu(&mut self, path: String) {
 		let kind = self.kind_of(&path).unwrap_or(Kind::File);
 		self.pane_menu = None;
+		// Only one surface is ever up, and the sort menu is one of them (§19).
+		self.sort_menu_open = false;
 		self.menu = Some(Menu {
 			path,
 			kind,
@@ -878,10 +975,18 @@ impl Files {
 	/// than at fetch time, so flipping the shared `.*` toggle (the tree's, §18) costs
 	/// nothing — and the filter is the only thing that toggle does.
 	pub fn rows(&self, show_hidden: bool) -> Vec<&Entry> {
-		self.entries
+		let mut rows: Vec<&Entry> = self
+			.entries
 			.iter()
 			.filter(|entry| show_hidden || !entry.name.starts_with('.'))
-			.collect()
+			.collect();
+		// Only a user-chosen sort re-orders here. With none, the entries are already in the
+		// default dirs-first-by-name order the server task laid down (the free `sort` below),
+		// so the common case pays nothing beyond the filter above.
+		if let Some(key) = self.sort {
+			rows.sort_by(|left, right| compare_entries(left, right, key, self.sort_dir));
+		}
+		rows
 	}
 }
 
@@ -897,6 +1002,50 @@ pub fn sort(entries: &mut [Entry]) {
 			// unstable sort could then swap them between two listings of the same folder.
 			.then_with(|| left.name.cmp(&right.name))
 	});
+}
+
+/// Order two entries under a user-chosen sort (§19). Directories always come first, whatever the
+/// key or direction — "folders first" is the one rule the direction never flips; it reorders only
+/// WITHIN each group. Every key falls back to the name, so the order is total and stable across
+/// re-listings, exactly as the default `sort` is.
+fn compare_entries(left: &Entry, right: &Entry, key: SortKey, dir: SortDir) -> std::cmp::Ordering {
+	use std::cmp::Ordering;
+	// Folders ahead of the rest, settled BEFORE the direction so a descending sort cannot sink
+	// them below the files.
+	let folder_first = (left.kind != Kind::Dir).cmp(&(right.kind != Kind::Dir));
+	if folder_first != Ordering::Equal {
+		return folder_first;
+	}
+	let within = match key {
+		SortKey::Name => name_cmp(left, right),
+		// `Option` orders `None` before `Some`, so an entry the `ls` fallback left without a
+		// size or time (§19) sorts ahead of the rest ascending — a stable, predictable spot.
+		SortKey::Modified => left.meta.mtime.cmp(&right.meta.mtime),
+		SortKey::Size => left.meta.size.cmp(&right.meta.size),
+		// The shared `extension` returns `None` for a name with no extension (and for a bare
+		// dot-file); `unwrap_or_default` maps that to "", which sorts ahead of any real
+		// extension ascending — a stable, predictable spot for the extensionless.
+		SortKey::Extension => extension(&left.name)
+			.unwrap_or_default()
+			.cmp(&extension(&right.name).unwrap_or_default()),
+	}
+	// The name settles every tie, so two files of one size (or one extension) keep a stable,
+	// readable order rather than an arbitrary one.
+	.then_with(|| name_cmp(left, right));
+	match dir {
+		SortDir::Ascending => within,
+		SortDir::Descending => within.reverse(),
+	}
+}
+
+/// Two names compared case-insensitively, with the exact bytes as the tie-break — the very order
+/// the default `sort` uses, so "folders first, then by name" reads identically whether it came
+/// from the server task or from a user picking `Name`.
+fn name_cmp(left: &Entry, right: &Entry) -> std::cmp::Ordering {
+	left.name
+		.to_lowercase()
+		.cmp(&right.name.to_lowercase())
+		.then_with(|| left.name.cmp(&right.name))
 }
 
 /// Render an mtime in the server's own timezone (§20), as `YYYY-MM-DD HH:MM:SS ZONE`.
@@ -1237,6 +1386,30 @@ mod tests {
 			kind,
 			meta: Meta::default(),
 		}
+	}
+
+	/// A file entry carrying a size and an mtime, for the sort tests — the only ones that read
+	/// past a name and a kind.
+	fn sized(name: &str, size: u64, mtime: u32) -> Entry {
+		Entry {
+			name: name.to_owned(),
+			kind: Kind::File,
+			meta: Meta {
+				size: Some(size),
+				mtime: Some(mtime),
+				owner: None,
+				group: None,
+			},
+		}
+	}
+
+	/// The names `rows` returns, in order — what every sort test asserts against.
+	fn names(files: &Files) -> Vec<String> {
+		files
+			.rows(false)
+			.into_iter()
+			.map(|entry| entry.name.clone())
+			.collect()
 	}
 
 	/// A pane showing `/home` with one batch of entries already landed.
@@ -1685,5 +1858,98 @@ mod tests {
 		assert_eq!(files.height(), MIN_HEIGHT);
 		files.set_height(5_000.0, 400.0);
 		assert_eq!(files.height(), 400.0);
+	}
+
+	#[test]
+	fn no_sort_leaves_the_rows_in_arrival_order() {
+		// The server task pre-sorts before batching, so with no sort chosen the pane must hand
+		// the entries back exactly as they landed — it adds no order of its own.
+		let (files, _) = pane(&[
+			entry("src", Kind::Dir),
+			sized("apple.txt", 10, 100),
+			sized("banana.txt", 20, 200),
+		]);
+		assert_eq!(files.sort_key(), None);
+		assert_eq!(names(&files), ["src", "apple.txt", "banana.txt"]);
+	}
+
+	#[test]
+	fn picking_the_lit_key_again_clears_the_sort() {
+		let (mut files, _) = pane(&[entry("a", Kind::File)]);
+		files.pick_sort_key(SortKey::Size);
+		assert_eq!(files.sort_key(), Some(SortKey::Size));
+		// The menu has no "None" row: the lit key is the way back to the default order.
+		files.pick_sort_key(SortKey::Size);
+		assert_eq!(files.sort_key(), None);
+		// A different key just switches, it does not clear.
+		files.pick_sort_key(SortKey::Name);
+		files.pick_sort_key(SortKey::Modified);
+		assert_eq!(files.sort_key(), Some(SortKey::Modified));
+	}
+
+	#[test]
+	fn sorting_by_size_descending_keeps_folders_first() {
+		let (mut files, _) = pane(&[
+			sized("small.bin", 10, 100),
+			entry("zzz_dir", Kind::Dir),
+			sized("big.bin", 900, 200),
+			entry("aaa_dir", Kind::Dir),
+			sized("mid.bin", 400, 300),
+		]);
+		files.pick_sort_key(SortKey::Size);
+		files.set_sort_dir(SortDir::Descending);
+		// Folders stay grouped at the top whatever the direction — that grouping is what the
+		// direction never flips. WITHIN the group it does flip: the folders have no size, so they
+		// tie on it and fall back to name, which descending then runs Z→A (zzz before aaa). The
+		// files follow, biggest first.
+		assert_eq!(
+			names(&files),
+			["zzz_dir", "aaa_dir", "big.bin", "mid.bin", "small.bin"]
+		);
+	}
+
+	#[test]
+	fn sorting_by_name_descending_reverses_within_each_group() {
+		let (mut files, _) = pane(&[
+			entry("alpha", Kind::Dir),
+			entry("beta", Kind::Dir),
+			entry("x.txt", Kind::File),
+			entry("y.txt", Kind::File),
+		]);
+		files.pick_sort_key(SortKey::Name);
+		files.set_sort_dir(SortDir::Descending);
+		// Folders still lead, but each group runs Z→A.
+		assert_eq!(names(&files), ["beta", "alpha", "y.txt", "x.txt"]);
+	}
+
+	#[test]
+	fn sorting_by_extension_groups_like_kinds_then_falls_back_to_name() {
+		let (mut files, _) = pane(&[
+			sized("c.txt", 1, 1),
+			sized("b.rs", 1, 1),
+			sized("a.txt", 1, 1),
+			sized("d", 1, 1), // no extension sorts as the empty string, ahead of the rest
+		]);
+		files.pick_sort_key(SortKey::Extension);
+		files.set_sort_dir(SortDir::Ascending);
+		// "" (d) < "rs" (b) < "txt" (a, c), and the name settles the two .txt files.
+		assert_eq!(names(&files), ["d", "b.rs", "a.txt", "c.txt"]);
+	}
+
+	#[test]
+	fn opening_the_sort_menu_shuts_a_context_menu_and_vice_versa() {
+		let (mut files, _) = pane(&[entry("src", Kind::Dir)]);
+		files.open_pane_menu();
+		assert!(files.pane_menu().is_some());
+
+		// The sort menu takes the one surface: the context menu closes.
+		files.toggle_sort_menu();
+		assert!(files.sort_menu_open());
+		assert!(files.pane_menu().is_none());
+
+		// And opening a context menu closes the sort menu right back.
+		files.open_menu("/home/src".to_owned());
+		assert!(!files.sort_menu_open());
+		assert!(files.menu().is_some());
 	}
 }

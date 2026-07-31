@@ -1503,7 +1503,29 @@ for a window resize.
 - **Sorted by the server task, appended by the model.** Directories first, then everything
   else, each case-insensitively. Sorting once, before the cut into batches, is what lets
   the model simply append and still hold a stable order across batches; sorting per batch
-  in the model would either break the order or re-sort the whole listing on every one.
+  in the model would either break the order or re-sort the whole listing on every one. This
+  is the DEFAULT order — what the pane shows until the user picks a sort of their own (below).
+- **A user-chosen sort, on top of that default.** The header's **sort** button drops a small
+  menu: one group of four keys — **Name**, **Last modified**, **Extension** (the text after a
+  name's last dot, so all `.rs` sit together — labelled "Extension", not "Type", to say it is
+  not the SFTP kind) and **Size** — and a second group of two directions, **Ascending**
+  (the default) and **Descending**. The choice lives on the model (`sort: Option<SortKey>`,
+  `sort_dir`), not the view, so it survives every relayout and outlives a change of directory
+  — a sort is a view preference, not a property of one folder. `rows` applies it only when a
+  key is set, so the common no-sort case still pays nothing beyond the dot-file filter; with a
+  key it `sort_by`s the (already small, one-directory) row slice. **Folders stay first**
+  whatever the key or direction — that grouping is the one thing the direction never flips; it
+  reorders only *within* each group (`compare_entries` settles the folder/file split before it
+  ever reverses). Every key falls back to the name, so the order is total and stable across
+  re-listings, exactly as the default is. The menu carries no "None" row: picking the **lit**
+  key again clears the sort, back to the default order, and the header's sort button is lit
+  (foreground vs. muted) whenever a non-default order is in effect. Picking a key or a
+  direction leaves the menu open, so both halves of a sort can be set in one visit; a
+  click-away (`sort_dismiss_layer`) or the button itself closes it. Unlike the pane's
+  context menus, which anchor to the window's bottom and grow up, the sort menu hangs from the
+  header at the pane's TOP and grows down — there is room below the toolbar, none above it. The
+  ticked-row and separator chrome is shared: `menu::check_item` and `menu::separator` join
+  `menu::item` so the sort menu reads as one of the family.
 - **Symlinks keep their own kind.** Resolving one costs a round trip *per link*, and a
   crowded directory is exactly where that adds up — so a link gets the link icon and is
   not followed. (The tree does resolve them, §18: it sees far fewer entries and needs to

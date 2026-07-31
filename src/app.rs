@@ -4180,6 +4180,15 @@ impl Tab {
 				}
 			}
 			FilesMessage::MenuDismissed => self.files.close_menu(),
+			// The sort menu is a plain view preference: none of these re-list or re-fetch, they
+			// only re-order what `rows` already holds, so each just mutates and falls through to
+			// the shared `Task::none()` below (§19).
+			FilesMessage::SortMenuOpened => self.files.toggle_sort_menu(),
+			FilesMessage::SortMenuDismissed => self.files.close_sort_menu(),
+			// Picking a key or a direction leaves the menu open, so both halves of a sort can be
+			// set in one visit; a click-away (or the button) closes it.
+			FilesMessage::SortKeyPicked(key) => self.files.pick_sort_key(key),
+			FilesMessage::SortDirPicked(dir) => self.files.set_sort_dir(dir),
 			FilesMessage::Refresh => {
 				self.files.close_menu();
 				if let Some(request) = self.files.refresh() {

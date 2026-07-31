@@ -10,7 +10,8 @@
 // Positioning stays with the caller, because the three anchor differently (the pointer,
 // a row index, the panel's right edge) and only the caller knows its own geometry.
 
-use iced::widget::{button, column, container, mouse_area, text};
+use iced::alignment::Vertical;
+use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{Background, Border, Color, Element, Length, Padding};
 
 use crate::app::Message;
@@ -35,6 +36,15 @@ const DISABLED_FG: Color = Color::from_rgb8(0x80, 0x80, 0x80);
 const TEXT_SIZE: f32 = 13.0;
 const CORNER_RADIUS: f32 = 4.0;
 
+/// The tick column reserved at the head of a `check_item`, wide enough for the ✓ glyph. Every row
+/// in a checkable menu leaves it, ticked or not, so the labels line up in one column whether or
+/// not they are chosen (§19).
+const CHECK_WIDTH: f32 = 16.0;
+
+/// The hairline drawn by `separator`, dividing one group of items from the next (§19). Dim enough
+/// to read as a rule rather than a disabled item.
+const SEPARATOR_FG: Color = Color::from_rgb8(0x55, 0x55, 0x55);
+
 /// One menu item. `on_press` of `None` renders it disabled — iced does that for a button
 /// with no message — and dims its label so the difference is visible.
 pub fn item(label: String, on_press: Option<Message>) -> Element<'static, Message> {
@@ -57,6 +67,49 @@ pub fn item(label: String, on_press: Option<Message>) -> Element<'static, Messag
 		})
 		.on_press_maybe(on_press)
 		.into()
+}
+
+/// A menu item that carries a tick — one of a radio-style group where the chosen row is marked
+/// (§19). Unlike `item` it is always live: clicking the ticked row is itself a meaningful action
+/// (it toggles the sort off), so there is no disabled state. The tick sits in a fixed-width column
+/// so every label in the group starts at the same x, ticked or not.
+pub fn check_item(label: String, checked: bool, on_press: Message) -> Element<'static, Message> {
+	let mark = if checked { "\u{2713}" } else { "" }; // ✓
+	button(
+		row![
+			container(text(mark).size(TEXT_SIZE)).width(Length::Fixed(CHECK_WIDTH)),
+			text(label).size(TEXT_SIZE),
+		]
+		.align_y(Vertical::Center),
+	)
+	.width(Length::Fill)
+	.padding(Padding::from([2.0, 6.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(Background::Color(HOVER_BG)),
+			_ => None,
+		},
+		text_color: FG,
+		..button::Style::default()
+	})
+	.on_press(on_press)
+	.into()
+}
+
+/// A hairline between two groups of items in one menu (§19). A padded 1px rule rather than a
+/// bare line, so it sits clear of the rows above and below it instead of crowding them.
+pub fn separator() -> Element<'static, Message> {
+	container(
+		container(text(""))
+			.width(Length::Fill)
+			.height(Length::Fixed(1.0))
+			.style(|_theme| container::Style {
+				background: Some(SEPARATOR_FG.into()),
+				..container::Style::default()
+			}),
+	)
+	.padding(Padding::from([3.0, 4.0]))
+	.into()
 }
 
 /// The menu surface holding the items. Fixed width, rounded like the dialog card, and

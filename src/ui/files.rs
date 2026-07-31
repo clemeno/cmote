@@ -32,7 +32,7 @@ use iced::{Color, Element, Font, Length, Padding};
 
 use crate::app::Message;
 use crate::explorer;
-use crate::files::{Category, Entry, Files, FilesMessage, Kind, Rename};
+use crate::files::{Category, Entry, Files, FilesMessage, Kind, Rename, SortDir, SortKey};
 use crate::ui::explorer::{
 	FG, HEADER_BG, MENU_INSET, MUTED_FG, NOTICE_FG, NOTICE_HEIGHT, PANEL_BG, SELECTED_BG,
 	SPLITTER_BG, TEXT_SIZE, focus_border, hidden_toggle,
@@ -100,15 +100,15 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// item count and the `.*` toggle share it — so the path stays on ONE line (a line this wide
 /// holds a long path) and is trimmed with `…` to fit rather than wrapping and shoving those
 /// controls around. `HEADER_CONTROLS_WIDTH` is the room those controls and their gaps take
-/// beside the path (the up, copy and refresh buttons, the item count and the `.*` toggle);
-/// `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
+/// beside the path (the up and copy buttons, the item count, the refresh and sort buttons and the
+/// `.*` toggle); `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
 ///
 /// Both are deliberately PESSIMISTIC — a fatter glyph and more control room than the face and
 /// toolbar truly take — so the char budget lands under what the line really holds and the `…`
 /// always trims the path with margin to spare, never a hair too late. The trade is a path cut
 /// a little sooner than strictly needed; containment wins. (The same all-wide-glyph tolerance
 /// the grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
-const HEADER_CONTROLS_WIDTH: f32 = 232.0;
+const HEADER_CONTROLS_WIDTH: f32 = 268.0;
 const HEADER_CHAR: f32 = 8.0;
 
 /// The rubber band's fill and edge (§21). Translucent, so the cells it is being dragged
@@ -140,6 +140,9 @@ const UP_GLYPH: char = '\u{e5d8}';
 const COPY_GLYPH: char = '\u{e14d}';
 const REFRESH_GLYPH: char = '\u{e5d5}';
 const COLLAPSE_GLYPH: char = '\u{e5d6}';
+/// Material Icons' `sort`: the header button that drops the sort menu (§19). Lit (foreground) when
+/// a sort is in effect, dimmed like a disabled control when the grid is in its default order.
+const SORT_GLYPH: char = '\u{e164}';
 const HEADER_ICON_SIZE: f32 = 16.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark panel, distinct
@@ -367,6 +370,8 @@ fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> 
 				.align_x(Horizontal::Right),
 			// Re-list the directory on show; the twin of the tree's header ↻ (§18, §19).
 			refresh_button(Message::Files(FilesMessage::Refresh)),
+			// Drop the sort menu; lit when a non-default order is in effect (§19).
+			sort_button(files.sort_key().is_some()),
 			hidden_toggle(show_hidden),
 		]
 		.spacing(12)
@@ -468,6 +473,29 @@ pub(crate) fn refresh_button(message: Message) -> Element<'static, Message> {
 /// children. Only the tree wears one — the flat file grid has nothing to collapse.
 pub(crate) fn collapse_all_button(message: Message) -> Element<'static, Message> {
 	header_icon_button(COLLAPSE_GLYPH, message)
+}
+
+/// The pane header's "sort" button (§19): drops the sort menu. Shaped like the refresh button
+/// beside it — same face, same hover fill — but with the copy/up buttons' lit-or-dimmed trick:
+/// `active` (a sort is in effect) paints it foreground, the default order leaves it muted, so the
+/// toolbar says at a glance whether the grid is in its natural order or one the user chose.
+fn sort_button(active: bool) -> Element<'static, Message> {
+	button(
+		text(SORT_GLYPH.to_string())
+			.font(ICON_FONT)
+			.size(HEADER_ICON_SIZE)
+			.color(if active { FG } else { MUTED_FG }),
+	)
+	.padding(Padding::from([0.0, 4.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press(Message::Files(FilesMessage::SortMenuOpened))
+	.into()
 }
 
 /// The details popup's copy button (§20): copies the card's whole description in one press.
@@ -1002,6 +1030,80 @@ fn place_menu<'a>(
 /// The click-away layer that sits under this menu (shared chrome, §10).
 pub fn dismiss_layer() -> Element<'static, Message> {
 	menu::dismiss_layer(Message::Files(FilesMessage::MenuDismissed))
+}
+
+/// How far in from the window's right edge the sort menu hangs (§19). The menu drops right-aligned
+/// so it sits beneath the toolbar's right-hand cluster — the sort button among them — rather than
+/// being pinned to a button whose exact x a fill row never reports.
+const SORT_MENU_RIGHT_INSET: f32 = 8.0;
+/// The gap between the header's bottom edge and the top of the dropped sort menu (§19).
+const SORT_MENU_TOP_GAP: f32 = 2.0;
+
+/// The sort menu, dropped from the header's sort button (§19): two groups on the shared menu
+/// surface — the four keys, a separator, then the two directions — each row ticked when it is the
+/// live choice. `None` when the menu is closed. Unlike the context menus it hangs from the pane's
+/// TOP edge and grows DOWNWARD: the header is at the top and this pane fills the window's bottom,
+/// so there is room below the toolbar but none above it.
+///
+/// It is `'static`: every row is built from the key and direction read out by value here, so the
+/// element borrows nothing from `files` and outlives this call.
+pub fn sort_menu(files: &Files) -> Option<Element<'static, Message>> {
+	if !files.sort_menu_open() {
+		return None;
+	}
+	let key = files.sort_key();
+	let dir = files.sort_dir();
+
+	// A key row is ticked when it is the live sort; clicking it sends `SortKeyPicked`, which the
+	// model turns into "switch to this" or, on the lit one, "back to the default order".
+	let key_item = |label: &str, which: SortKey| {
+		menu::check_item(
+			label.to_owned(),
+			key == Some(which),
+			Message::Files(FilesMessage::SortKeyPicked(which)),
+		)
+	};
+	// A direction row is ticked when it is the current direction — Ascending by default, even
+	// before any key is chosen.
+	let dir_item = |label: &str, which: SortDir| {
+		menu::check_item(
+			label.to_owned(),
+			dir == which,
+			Message::Files(FilesMessage::SortDirPicked(which)),
+		)
+	};
+
+	let panel = menu::panel(vec![
+		key_item("Name", SortKey::Name),
+		key_item("Last modified", SortKey::Modified),
+		key_item("Extension", SortKey::Extension),
+		key_item("Size", SortKey::Size),
+		menu::separator(),
+		dir_item("Ascending", SortDir::Ascending),
+		dir_item("Descending", SortDir::Descending),
+	]);
+
+	Some(
+		container(panel)
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.align_x(Horizontal::Right)
+			.padding(Padding {
+				top: HEADER_HEIGHT + SORT_MENU_TOP_GAP,
+				right: SORT_MENU_RIGHT_INSET,
+				bottom: 0.0,
+				left: 0.0,
+			})
+			.into(),
+	)
+}
+
+/// The click-away layer under the sort menu (§19), the twin of the context menu's `dismiss_layer`.
+/// Picking a key or a direction leaves the menu open — so both halves of a sort can be set in one
+/// visit — which is why closing it needs this layer (or the sort button) rather than happening on
+/// the first click.
+pub fn sort_dismiss_layer() -> Element<'static, Message> {
+	menu::dismiss_layer(Message::Files(FilesMessage::SortMenuDismissed))
 }
 
 #[cfg(test)]
