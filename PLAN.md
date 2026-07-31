@@ -1555,6 +1555,9 @@ for a window resize.
   which reads as a photo album; a file manager reads as a list. A cell is now a wide, short
   row — a small icon in front of a left-aligned name — and the grid still wraps into columns,
   so a wide window shows several of them per line rather than one long column.
+- **Each cell wears a one-pixel border** (`CELL_BORDER`, the splitter bar's grey), so the grid
+  reads as a field of distinct tiles rather than one run of names. It sits *under* the selection
+  fill, so a chosen cell keeps the same footprint as its neighbours — just filled blue.
 - **A name too long for its two lines is middle-ellipsised** (`crate::ui::elide_middle`,
   §22): the start *and* the extension survive, which is what tells two similar names apart —
   a tail-clipped `report-2026-q1-fin…` and `report-2026-q1-dra…` do not. The full name is

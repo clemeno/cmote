@@ -156,7 +156,8 @@ references below (§n) point into it.
 - **Remote files pane** — a grid of **every entry** in one directory, full width under the
   terminal. Each cell is a wide row: a small icon in front of the name, with the **size and
   the modified date** on a second, muted line underneath (`2026-03-20 11:46 CEST`; a folder
-  shows only the date, and anything the listing never learned reads as a dash). A name too
+  shows only the date, and anything the listing never learned reads as a dash). Each cell
+  carries a **thin border** so the grid reads as distinct tiles. A name too
   long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
   directory streams in batches of 1000 and the header counts as they land. Icons come from a
   bundled icon font, by category (folder, image, code, archive, document, audio, video, link,
@@ -689,9 +690,9 @@ then follow the shell. Then:
   count should climb in steps of 1000 as the batches land, and the window stays responsive
   throughout.
 - Each cell should read as a row: icon, name, and under it the size and the modified date
-  in the server's zone (a folder shows only the date). Compare a few against `ls -l` on the
-  remote. A very long name should be cut in the middle (`report-fin…-draft.pdf`), never at
-  the extension.
+  in the server's zone (a folder shows only the date), each **framed by a thin border** so
+  the grid reads as distinct tiles. Compare a few against `ls -l` on the remote. A very long
+  name should be cut in the middle (`report-fin…-draft.pdf`), never at the extension.
 - Double-click a folder in the grid → the grid enters it and **the shell stays put** (the
   prompt's directory does not change, and the pane must NOT snap back on the next prompt).
   Same for the header's **up** button and **Enter**.

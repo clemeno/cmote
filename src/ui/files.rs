@@ -75,6 +75,11 @@ const LABEL_SIZE: f32 = 11.0;
 /// space between the two lines.
 const META_SIZE: f32 = 10.0;
 const META_GAP: f32 = 2.0;
+/// The hairline round every cell (§19): a subtle grey a shade lighter than the panel, so the grid
+/// reads as a field of distinct tiles rather than one run of names. The splitter bar's own value —
+/// quiet enough to frame a cell without competing with its icon, and it sits UNDER the selection
+/// fill so a chosen cell keeps the same footprint as its neighbours, just filled blue.
+const CELL_BORDER: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 
 /// Sizing the middle-ellipsis so a name always fits the cell's two lines (§19). The label
 /// sits to the right of the icon, so its width is the cell minus the padding, the icon and
@@ -786,8 +791,9 @@ fn cell<'a>(
 	.style(move |_theme| container::Style {
 		background: is_selected.then(|| SELECTED_BG.into()),
 		border: iced::Border {
+			width: 1.0,
 			radius: 4.0.into(),
-			..iced::Border::default()
+			color: CELL_BORDER,
 		},
 		..container::Style::default()
 	});
