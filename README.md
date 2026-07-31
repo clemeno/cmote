@@ -595,8 +595,11 @@ the title should follow within a prompt. Set a title from a program
 **8. Remote folder tree.** The panel on the right should list `/` on connect. Then:
 
 - Click folders to expand and collapse them; a slow directory shows `·` until its listing
-  arrives. Expand a few levels, collapse the top one, re-open it — it should show exactly
-  one level again, instantly (nothing is re-fetched).
+  arrives. Expand a few levels, collapse the top one, re-open it — it shows exactly one clean
+  level again. Opening always re-lists, so a shell-side change under a collapsed folder is
+  caught: with a folder open, `mv one-of-its-children ../elsewhere/` in the terminal, collapse
+  that folder, then click it open again → the moved child is gone (the cached rows draw at once,
+  then the fresh listing replaces them).
 - `cd /etc/ssh` in the shell → the tree opens `/` → `/etc` → `/etc/ssh` on its own and
   highlights it. `cd` back and forth: the tree only ever expands, never closes what you
   opened.
@@ -619,8 +622,8 @@ the title should follow within a prompt. Set a title from a program
   tree focused) → every open folder re-lists at once. A collapsed branch is left closed —
   re-opening it shows the fresh listing.
 - **Collapse all.** Expand several levels, then press the header **collapse-all** button → the
-  tree snaps back to the root's own children, and re-opening any branch is instant (nothing was
-  re-fetched).
+  tree snaps back to the root's own children, and re-opening any branch draws its cached rows
+  instantly (then re-lists in the background to catch any change).
 - Drag the splitter left and right: the grid reflows (`tput cols` should follow) and the
   panel stops at its minimum and at 60% of the window. The **Folders** button hides the
   panel and gives its columns back to the grid.

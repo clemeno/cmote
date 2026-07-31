@@ -1327,8 +1327,16 @@ paths, what collapsing does, which folders a `cd` reveals) unit-testable with no
   listed and empty. Collapsing that distinction is what would make a refused directory
   re-request itself on every redraw.
 - **Collapse takes the subtree with it.** Closing a folder closes everything under it, so
-  re-opening shows one clean level again — which matches the menu's Expand, which opens
-  exactly one level. Nothing is discarded, so re-expanding costs no round trip.
+  re-opening shows one clean level again. Nothing is discarded, so the cached rows draw at
+  once with no empty flash.
+- **Opening a folder re-lists it.** `expand` re-fetches whenever the call is what *opens* a
+  folder — a genuine closed→open transition — not only the first time. A user who collapses
+  a folder, moves a child out of it from the shell, then clicks it open again must see the
+  new contents, not the stale cache; opening is deliberate, so it asks the server every time.
+  The cached children stay on screen under a spinner until the fresh listing lands, so the
+  row never flashes empty. `force` (the menu's Refresh, a completed rename) re-lists a folder
+  that is *already* open; `reveal_if_new`'s ancestors that are already open are left untouched,
+  so following the shell does not re-list the whole chain on every `cd`.
 - **Hidden folders are a filter, not a fetch.** Listings always include dot-prefixed
   entries; the panel's `.*` checkbox only decides whether the rows are drawn, so
   flipping it is free. They are shown by default — on a server, `.ssh` / `.config` are
@@ -1408,8 +1416,8 @@ announced path carries one.
   see, and a fetch in flight will bring the fresh listing itself. Beside ↻ sits a **collapse-all
   button** (`unfold_less`, `Explorer::collapse_all`): it closes every branch back to the root's own
   children — the clean top-level view after a deep dive — while leaving the cached listings in
-  place, so re-expanding costs no round trip. The root itself stays open; closing it would shrink
-  the panel to a single `/` row.
+  place, so a re-opened branch draws instantly (though opening re-lists it in the background, as
+  above). The root itself stays open; closing it would shrink the panel to a single `/` row.
 - **Relative paths walk both ways.** `relative` emits `..` for every level the two paths do
   not share, so the result is usable from the shell's current directory even when the
   folder sits on another branch (`/home/user` → `/var/log` gives `../../var/log`).

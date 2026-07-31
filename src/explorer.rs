@@ -346,13 +346,30 @@ impl Explorer {
 		self.scroll = 0.0;
 	}
 
-	/// Open a folder, returning the path to list when its children are still needed.
-	/// `force` re-fetches an already-listed folder — that is what the menu's Expand
-	/// does, so it also serves as the refresh for a directory changed from the shell.
+	/// Open a folder, returning the path to list when its children need fetching.
+	///
+	/// A folder is re-listed whenever this call is what *opens* it — a genuine closed→open
+	/// transition — not only the first time. That is the rule that keeps the tree honest: a
+	/// user who collapses a folder, changes it from the shell (`mv` a child out of it), then
+	/// clicks it open again must see the new contents, not the stale cache. Opening is a
+	/// deliberate act, so it always asks the server. The old children stay on screen under a
+	/// spinner until the fresh listing lands (`listed`), so the row never flashes empty.
+	///
+	/// `force` re-lists even without an open transition — an already-open folder — which is
+	/// what the menu's Refresh and a completed rename need to pull fresh contents into a
+	/// branch that is already showing.
+	///
+	/// A folder already loading, or one already open and cached when neither opening nor
+	/// forced, needs nothing: `None` then. This last case is what keeps `reveal_if_new` from
+	/// re-listing ancestors that are already open on every `cd`.
 	pub fn expand(&mut self, path: &str, force: bool) -> Option<String> {
 		let node = self.nodes.entry(path.to_owned()).or_default();
+		let opening = !node.open; // this call is the closed→open transition
 		node.open = true;
-		if node.loading || (node.children.is_some() && !force) {
+		if node.loading {
+			return None;
+		}
+		if node.children.is_some() && !force && !opening {
 			return None;
 		}
 		node.loading = true;
@@ -360,8 +377,9 @@ impl Explorer {
 	}
 
 	/// Close a folder *and every folder under it*, so re-opening it shows one clean
-	/// level again (§18). Collapsing is local state only — nothing is discarded, so
-	/// re-expanding costs no round trip.
+	/// level again (§18). Collapsing discards nothing — the cached children stay, so the
+	/// row draws them instantly on re-open (no empty flash) while `expand` re-lists in the
+	/// background to catch any shell-side change.
 	pub fn collapse(&mut self, path: &str) {
 		let prefix = format!("{}/", path.trim_end_matches('/'));
 		for (key, node) in self.nodes.iter_mut() {
@@ -373,9 +391,10 @@ impl Explorer {
 
 	/// Collapse every branch back to the top level (§18): the header's collapse-all button. Closes
 	/// each folder but the root, so the tree returns to showing just the root's own children — the
-	/// clean starting view after a deep dive. Like `collapse`, this is local state only: the cached
-	/// listings stay, so re-expanding any branch costs no round trip. The root is left open because
-	/// it is the tree's anchor — closing it would collapse the panel to a single "/" row.
+	/// clean starting view after a deep dive. Like `collapse`, this discards nothing: the cached
+	/// listings stay, so a re-opened branch draws instantly while `expand` re-lists it in the
+	/// background. The root is left open because it is the tree's anchor — closing it would
+	/// collapse the panel to a single "/" row.
 	pub fn collapse_all(&mut self) {
 		for (key, node) in self.nodes.iter_mut() {
 			if key.as_str() != ROOT {
@@ -384,8 +403,9 @@ impl Explorer {
 		}
 	}
 
-	/// A row click: select the folder and flip it open or shut. Returns a path to list
-	/// when opening it needs one.
+	/// A row click: select the folder and flip it open or shut. Returns a path to list when
+	/// opening it needs one — and opening always re-lists (`expand`'s open transition), so a
+	/// folder reopened after a shell-side change shows its current contents, not the cache.
 	pub fn toggle_node(&mut self, path: &str) -> Option<String> {
 		self.select(path);
 		self.menu = None;
@@ -785,6 +805,42 @@ mod tests {
 	}
 
 	#[test]
+	fn reopening_a_folder_re_lists_it_so_a_shell_side_move_shows() {
+		// The reported bug: open a folder, move a child out of it from the shell, collapse the
+		// folder by clicking, click it open again — and the moved-away child is still there. A
+		// re-open is a deliberate act, so it must re-list, not trust the cache.
+		let mut explorer = tree(&["cbl1m"]);
+		assert_eq!(
+			explorer.toggle_node("/cbl1m"),
+			Some("/cbl1m".to_owned()),
+			"opening a never-listed folder fetches it"
+		);
+		explorer.listed("/cbl1m", vec!["custom_deployment".to_owned()]);
+		assert!(
+			explorer
+				.rows()
+				.iter()
+				.any(|row| row.name == "custom_deployment")
+		);
+
+		// Click to collapse, then click to re-open: the re-open re-lists even though /cbl1m is cached.
+		assert_eq!(
+			explorer.toggle_node("/cbl1m"),
+			None,
+			"the open row collapses, no fetch"
+		);
+		assert_eq!(
+			explorer.toggle_node("/cbl1m"),
+			Some("/cbl1m".to_owned()),
+			"re-opening re-lists, so a folder moved out from the shell is caught"
+		);
+		// The fresh listing (custom_deployment was moved into _archives) replaces the stale child.
+		explorer.listed("/cbl1m", vec!["_archives".to_owned()]);
+		let names: Vec<String> = explorer.rows().into_iter().map(|row| row.name).collect();
+		assert_eq!(names, vec!["/", "cbl1m", "_archives"]);
+	}
+
+	#[test]
 	fn collapse_all_returns_to_the_top_level_but_keeps_the_root() {
 		let mut explorer = tree(&["home", "etc"]);
 		explorer.expand("/home", false);
@@ -798,8 +854,9 @@ mod tests {
 		let names: Vec<String> = explorer.rows().into_iter().map(|row| row.name).collect();
 		assert_eq!(names, vec!["/", "etc", "home"]);
 
-		// Nothing was discarded: re-opening /home shows its one cached level with no re-fetch.
-		assert_eq!(explorer.expand("/home", false), None);
+		// Re-opening /home re-lists it (opening is deliberate, so it catches shell-side changes)…
+		assert_eq!(explorer.expand("/home", false), Some("/home".to_owned()));
+		// …but nothing was discarded: the cached level draws at once while that fetch is in flight.
 		assert!(explorer.rows().iter().any(|row| row.path == "/home/user"));
 	}
 

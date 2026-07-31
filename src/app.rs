@@ -2734,8 +2734,9 @@ impl Tab {
 			Named::ArrowDown | Named::Tab => 1,
 			Named::ArrowUp => -1,
 			Named::ArrowRight => {
-				// Open the folder — the same call the row click makes, so a folder never
-				// listed is fetched here too.
+				// Open the folder — the same call the row click makes: a folder never listed is
+				// fetched here too, and re-opening a closed one re-lists it (`expand`), so the
+				// keyboard catches a shell-side change just as the mouse does.
 				if let Some(path) = self.explorer.selected().map(str::to_owned)
 					&& let Some(fetch) = self.explorer.expand(&path, false)
 				{
