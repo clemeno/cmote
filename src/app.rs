@@ -99,14 +99,14 @@ pub fn run() -> iced::Result {
 		.font(ITALIC_FONT)
 		.font(ITALIC_FONT_BOLD)
 		.font(ICON_FONT)
-		// Open wide enough for a 180-column terminal *and* the explorer panel beside it
-		// (the size is derived from the grid metrics so it stays in step with
-		// `grid_size`, §18).
+		// Open wide enough for a full-width 180-column terminal, tall enough to also show the
+		// files strip under it (§18, §19) — the folder tree shares that strip now rather than
+		// sitting beside the grid, so only the height carries a reserve. The size is derived
+		// from the grid metrics so it stays in step with `grid_size`.
 		.window(iced::window::Settings {
 			size: ui::terminal::window_size(
 				INITIAL_COLS,
 				INITIAL_ROWS,
-				explorer::DEFAULT_WIDTH + explorer::SPLITTER_WIDTH,
 				files::DEFAULT_HEIGHT + files::SPLITTER_HEIGHT,
 			),
 			..iced::window::Settings::default()
@@ -2340,10 +2340,10 @@ impl Tab {
 		// Remember the window size on every screen so a dialog (which can appear before a
 		// terminal exists) can be centred and its dragging clamped (§10).
 		self.window_size = size;
-		// The explorer panel takes its width out of the grid and the files pane its height,
-		// so the same call serves a window resize and either panel's resize (§18, §19).
-		let (rows, cols) =
-			ui::terminal::grid_size(size, self.explorer.reserved(), self.files.reserved());
+		// The files pane takes its height out of the grid — the terminal is full width now, the
+		// tree sits under it (§18) — so the same call serves a window resize and the pane's own
+		// resize (§19).
+		let (rows, cols) = ui::terminal::grid_size(size, self.files.reserved());
 		let changed = match self.terminal.as_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
 				terminal.resize(rows, cols);
@@ -3167,7 +3167,7 @@ impl Tab {
 			return iced::Task::none();
 		};
 
-		let columns = ui::files::columns(self.window_size.width) as isize;
+		let columns = ui::files::columns(self.files_width()) as isize;
 		// Shift held on an arrow extends the selection instead of moving it (§21). Not on
 		// Tab: there, Shift already means "the other way".
 		let extend = modifiers.shift();
@@ -3222,7 +3222,7 @@ impl Tab {
 		let rows = self.files.rows(self.explorer.show_hidden());
 		let paths: Vec<String> = ui::files::band_hits(
 			rect,
-			ui::files::columns(self.window_size.width),
+			ui::files::columns(self.files_width()),
 			rows.len(),
 			self.files.scroll(),
 		)
@@ -3261,6 +3261,15 @@ impl Tab {
 		}
 	}
 
+	/// How wide the files pane is: the window less the folder tree's column beside it (§18, §19).
+	/// The tree took its width off the terminal before; it takes it off the pane now, so every
+	/// piece of the pane's geometry that keys off its width — the column count, the popup, the
+	/// rubber band, the menus — reads this rather than the raw window width. `Explorer::reserved`
+	/// is zero when the tree is hidden, so the pane is the full window then.
+	fn files_width(&self) -> f32 {
+		self.window_size.width - self.explorer.reserved()
+	}
+
 	/// Scroll the files pane so the selected cell is on screen (§20). The grid's geometry
 	/// is the view's (`ui::files`), so the same arithmetic that lays the cells out is what
 	/// works out where the selected one sits. The model is told the new offset as well as
@@ -3269,7 +3278,7 @@ impl Tab {
 		let Some(index) = self.files.selected_index(self.explorer.show_hidden()) else {
 			return iced::Task::none();
 		};
-		let row = index / ui::files::columns(self.window_size.width);
+		let row = index / ui::files::columns(self.files_width());
 		let offset = keep_visible(
 			self.files.scroll(),
 			ui::files::grid_height(&self.files),
@@ -3291,8 +3300,7 @@ impl Tab {
 		let offset = keep_visible(
 			self.explorer.scroll(),
 			ui::explorer::tree_height(
-				self.window_size.height,
-				self.files.reserved(),
+				self.files.height(),
 				self.files.path(),
 				self.explorer.width(),
 			),
@@ -4119,8 +4127,8 @@ impl Tab {
 				return pick_download_tree_target(path);
 			}
 			FilesMessage::BandMoved(point) => {
-				// Window coordinates from the capture layer: the pane is full width along the
-				// bottom of the window, so only the vertical origin has to come off.
+				// Window coordinates from the capture layer: the pane's left edge is the window's
+				// and it runs to the bottom, so only the vertical origin — the strip's top — comes off.
 				let local = iced::Point::new(
 					point.x,
 					point.y - (self.window_size.height - self.files.height()),
@@ -4674,7 +4682,9 @@ impl Tab {
 							explorer: &self.explorer,
 							files: &self.files,
 							focus: self.focus,
-							width: self.window_size.width,
+							// The pane's width (the window less the tree's column beside it), which is
+							// what its grid wraps at and its overlays are placed against (§18, §19).
+							width: self.files_width(),
 							height: self.window_size.height,
 							drop_hover: self.drop_hover,
 						},

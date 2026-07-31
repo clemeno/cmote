@@ -140,19 +140,15 @@ pub(crate) fn focus_border(focused: bool) -> Border {
 	}
 }
 
-/// How tall the scrollable part of the tree is (§20): the window, less the status bar
-/// above it and whatever the files pane takes below. What "on screen" means when the app
-/// scrolls a keyboard-moved row back into view.
+/// How tall the scrollable part of the tree is (§20): the browser strip's height — which the
+/// tree now shares with the files pane beside it (§18, §19) — less this panel's own header.
+/// What "on screen" means when the app scrolls a keyboard-moved row back into view.
 ///
 /// `ponytail:` the notice line, when one is showing, is not subtracted — the estimate is
 /// then one line generous and the tree scrolls very slightly further than it had to. The
-/// pane's own `grid_height` is exact because it owns its height; this one is derived.
-pub fn tree_height(window_height: f32, files_reserved: f32, path: Option<&str>, width: f32) -> f32 {
-	(window_height
-		- crate::ui::terminal::STATUS_BAR_HEIGHT
-		- files_reserved
-		- header_height(path, width))
-	.max(0.0)
+/// pane's own `grid_height` is exact because it owns its height; this one is derived from it.
+pub fn tree_height(pane_height: f32, path: Option<&str>, width: f32) -> f32 {
+	(pane_height - header_height(path, width)).max(0.0)
 }
 
 /// How many characters of the path fit on one header line in a panel `width` wide — the

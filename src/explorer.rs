@@ -208,9 +208,10 @@ impl Explorer {
 		self.dragging
 	}
 
-	/// How much horizontal room the panel takes from the terminal grid: the tree plus
-	/// its splitter, or nothing at all when hidden. `ui::terminal::grid_size` subtracts
-	/// exactly this, so the reflow math and the layout can never drift.
+	/// How much horizontal room the tree takes from the files pane beside it (§18, §19): the
+	/// tree plus its splitter, or nothing at all when hidden. The pane's width is the window
+	/// less exactly this, so the pane's grid math and the strip layout can never drift. The
+	/// terminal reserves no width any more — the tree sits under it now, not beside it.
 	pub fn reserved(&self) -> f32 {
 		if self.visible {
 			self.width + SPLITTER_WIDTH

@@ -105,17 +105,22 @@ pub struct UploadView<'a> {
 	pub notice: Option<&'a str>,
 }
 
-/// The two browser panels beside and under the grid (§18, §19), grouped so `view` keeps
+/// The two browser panels in the strip under the grid (§18, §19), grouped so `view` keeps
 /// a readable signature — the same reason `Modals` and `UploadView` exist. They travel
-/// together: both take room from the grid, both draw overlays, and the tree owns the
-/// dot-entry toggle that filters the pane.
+/// together: the files pane takes the strip's height off the grid and the tree sits in it
+/// on the pane's right, both draw overlays, and the tree owns the dot-entry toggle that
+/// filters the pane.
 #[derive(Debug, Clone, Copy)]
 pub struct Panels<'a> {
 	pub explorer: &'a Explorer,
 	pub files: &'a Files,
 	/// Which of the three the keyboard belongs to (§20): the panels draw a ring when it is
-	/// theirs, and the files pane places its details popup from the window's width.
+	/// theirs, and the files pane places its details popup from the pane's width.
 	pub focus: crate::app::Focus,
+	/// The files pane's width — the window less the folder tree's column beside it (§18, §19).
+	/// The pane's grid wraps at it, so it is what says how many columns there are and therefore
+	/// where the selected cell — and the details popup beside it — sit (§20); the tree no longer
+	/// takes width from the terminal, only from the pane.
 	pub width: f32,
 	/// The window's height (§19): the files pane's sort menu is a full-window overlay, so it needs
 	/// this to convert the pane's own top edge — the pane sits at the window's bottom, so its top
@@ -211,27 +216,21 @@ pub fn view<'a>(
 	// `cd` is a harmless no-op — far better than dimming a button that would in fact move.
 	let can_sync = files.path().is_some() && files.path() != terminal.cwd();
 
-	// Under the bar: the grid takes what is left after the explorer panel and its
-	// splitter (§18). The grid is `Fill`, so hiding the panel hands its width straight
-	// back — `grid_size` subtracts the same `Explorer::reserved`, which is what keeps the
-	// reflow math in step with this layout.
-	let body: Element<'a, Message> = if explorer.visible() {
-		iced::widget::row![
-			interactive_grid,
-			crate::ui::explorer::splitter(),
-			crate::ui::explorer::panel(explorer, files.path(), focus == crate::app::Focus::Tree),
-		]
-		.spacing(0)
-		.width(Length::Fill)
-		.height(Length::Fill)
-		.into()
-	} else {
-		interactive_grid.into()
-	};
+	// The terminal now has the whole area under the bar to itself — full width, alone in its
+	// section (§18). The folder tree used to share this row; it moved down beside the files
+	// pane, so the grid is always `Fill` here and reserves width for nothing.
+	let body: Element<'a, Message> = interactive_grid.into();
 
-	// Bar on top (fixed height), then the terminal row, then — full width, under both —
-	// the files pane and its own horizontal splitter (§19). The bar borrows the upload
-	// labels, which is why the base takes the view's `'a` lifetime.
+	// Whether the folder tree is actually on screen: it lives inside the files strip now, so
+	// it is only ever drawn beside a visible files pane (§18). Hiding the pane takes the tree
+	// with it — the strip is one region.
+	let tree_shown = files.visible() && explorer.visible();
+
+	// Bar on top (fixed height), then the full-width terminal, then — the browser strip: the
+	// files pane and, on its right, the folder tree (§18, §19). The strip is one fixed-height
+	// row governed by the files splitter above it; the tree keeps its own splitter, now between
+	// the pane and itself. The bar borrows the upload labels, which is why the base takes the
+	// view's `'a` lifetime.
 	let mut stacked = column![
 		status_bar(
 			endpoint,
@@ -246,15 +245,34 @@ pub fn view<'a>(
 	]
 	.spacing(0);
 	if files.visible() {
-		stacked = stacked
-			.push(crate::ui::files::splitter())
-			.push(crate::ui::files::panel(
-				files,
-				explorer.show_hidden(),
-				width,
-				focus == crate::app::Focus::Files,
-				drop_hover,
-			));
+		let pane = crate::ui::files::panel(
+			files,
+			explorer.show_hidden(),
+			width,
+			focus == crate::app::Focus::Files,
+			drop_hover,
+		);
+		// The pane fills the strip's width; the tree, when shown, takes a fixed column on its
+		// right — the very width `width` was already reduced by (§18), so the pane's grid math
+		// and this layout agree on where the pane ends.
+		let strip: Element<'a, Message> = if tree_shown {
+			iced::widget::row![
+				pane,
+				crate::ui::explorer::splitter(),
+				crate::ui::explorer::panel(
+					explorer,
+					files.path(),
+					focus == crate::app::Focus::Tree
+				),
+			]
+			.spacing(0)
+			.width(Length::Fill)
+			.height(Length::Fixed(files.height()))
+			.into()
+		} else {
+			pane
+		};
+		stacked = stacked.push(crate::ui::files::splitter()).push(strip);
 	}
 	let base: Element<'a, Message> = stacked.width(Length::Fill).height(Length::Fill).into();
 
@@ -271,10 +289,13 @@ pub fn view<'a>(
 		layers.push(crate::ui::menu::dismiss_layer(Message::MenuDismissed));
 		layers.push(context_menu(point, has_selection, link.as_deref()));
 	}
-	// The explorer's own right-click menu (§18), placed against the panel rather than
-	// the pointer, and its click-away dismiss layer.
-	if let Some(panel_menu) =
-		crate::ui::explorer::context_menu(explorer, terminal.cwd(), STATUS_BAR_HEIGHT)
+	// The explorer's own right-click menu (§18), placed against the panel rather than the
+	// pointer, and its click-away dismiss layer. The tree sits in the browser strip now, so its
+	// top in window coordinates is the strip's top — the window height less the pane's own
+	// height — not the status bar. Only drawn while the tree is actually shown.
+	if tree_shown
+		&& let Some(panel_menu) =
+			crate::ui::explorer::context_menu(explorer, terminal.cwd(), height - files.height())
 	{
 		layers.push(crate::ui::explorer::dismiss_layer());
 		layers.push(panel_menu);
@@ -293,7 +314,7 @@ pub fn view<'a>(
 	}
 	// While a splitter is being dragged, a transparent layer on top follows the pointer
 	// everywhere — so the resize keeps tracking outside the bar (§18, §19).
-	if explorer.dragging() {
+	if tree_shown && explorer.dragging() {
 		layers.push(crate::ui::explorer::drag_layer());
 	}
 	if files.dragging() {
@@ -842,15 +863,15 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
 }
 
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
-/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top, the explorer
-/// panel and its splitter take `reserved_width` off the width (§18), the files pane and
-/// its splitter take `reserved_height` off the height (§19) — each zero when that panel
-/// is hidden — then the grid's own padding is subtracted on both axes. Rounds down so the last
-/// cell is never clipped, and clamps to at least 1×1 so the emulator always has
-/// a valid size. The app calls this on a window resize — and on a panel resize — to
-/// reflow both the local emulator and the remote pty (§9).
-pub fn grid_size(area: Size, reserved_width: f32, reserved_height: f32) -> (u16, u16) {
-	let usable_width = area.width - reserved_width - 2.0 * GRID_PADDING;
+/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the files strip
+/// and its splitter take `reserved_height` off the height (§19) — zero when the pane is hidden
+/// — then the grid's own padding is subtracted on both axes. The terminal is full width now
+/// (§18): the folder tree moved down into the files strip, so nothing reserves horizontal room
+/// any more. Rounds down so the last cell is never clipped, and clamps to at least 1×1 so the
+/// emulator always has a valid size. The app calls this on a window resize — and on a pane
+/// resize — to reflow both the local emulator and the remote pty (§9).
+pub fn grid_size(area: Size, reserved_height: f32) -> (u16, u16) {
+	let usable_width = area.width - 2.0 * GRID_PADDING;
 	let usable_height = area.height - STATUS_BAR_HEIGHT - reserved_height - 2.0 * GRID_PADDING;
 	let cols = (usable_width / CELL_WIDTH)
 		.floor()
@@ -863,13 +884,13 @@ pub fn grid_size(area: Size, reserved_width: f32, reserved_height: f32) -> (u16,
 
 /// The window (logical) size whose content fits exactly a `cols`×`rows` grid — the
 /// inverse of `grid_size`, built from the same metrics so the two never drift. Adds the
-/// grid padding on both axes, the status-bar height and the space the explorer panel
-/// reserves (§18), plus half a cell of slack so float rounding in `grid_size` cannot come
-/// back a row/column short. `run` uses it to open the window sized for a chosen terminal
-/// size *and* the panel beside it (§10, §11).
-pub fn window_size(cols: u16, rows: u16, reserved_width: f32, reserved_height: f32) -> Size {
-	let width =
-		f32::from(cols) * CELL_WIDTH + reserved_width + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
+/// grid padding on both axes, the status-bar height and the space the files strip reserves
+/// at the bottom (§19), plus half a cell of slack so float rounding in `grid_size` cannot come
+/// back a row/column short. The terminal spans the full width now (§18), so only the height
+/// carries a reserve. `run` uses it to open the window sized for a chosen terminal size *and*
+/// the strip under it (§10, §11).
+pub fn window_size(cols: u16, rows: u16, reserved_height: f32) -> Size {
+	let width = f32::from(cols) * CELL_WIDTH + 2.0 * GRID_PADDING + CELL_WIDTH / 2.0;
 	let height = f32::from(rows) * CELL_HEIGHT
 		+ STATUS_BAR_HEIGHT
 		+ reserved_height
@@ -886,57 +907,39 @@ mod tests {
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
 		// width:  (812 - 12)      / 8.4  = 95.2  -> 95 cols
 		// height: (500 - 34 - 12) / 16.8 = 27.02 -> 27 rows  (34 = status bar)
-		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0, 0.0);
+		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0);
 		assert_eq!((rows, cols), (27, 95));
 	}
 
 	#[test]
-	fn the_explorer_panel_takes_its_width_off_the_grid() {
-		// The panel is laid out beside the grid, so the columns it costs must come out of
-		// the same arithmetic the reflow uses — otherwise the pty and the view disagree
-		// by exactly the panel's width (§18).
-		let area = Size::new(812.0, 500.0);
-		let (_, wide) = grid_size(area, 0.0, 0.0);
-		let (_, narrow) = grid_size(area, 168.0, 0.0); // 168 / 8.4 = 20 columns exactly
-		assert_eq!(wide - narrow, 20);
-	}
-
-	#[test]
 	fn the_files_pane_takes_its_height_off_the_grid() {
-		// Same discipline on the other axis (§19): the rows the pane costs must come out
-		// of the arithmetic the reflow uses, or the pty and the view disagree by exactly
-		// the pane's height.
+		// The pane is laid out under the grid, so the rows it costs must come out of the same
+		// arithmetic the reflow uses (§19), or the pty and the view disagree by exactly the
+		// pane's height. It is the only reserve left: the terminal spans the full width (§18).
 		let area = Size::new(812.0, 500.0);
-		let (tall, _) = grid_size(area, 0.0, 0.0);
-		let (short, _) = grid_size(area, 0.0, 168.0); // 168 / 16.8 = 10 rows exactly
+		let (tall, _) = grid_size(area, 0.0);
+		let (short, _) = grid_size(area, 168.0); // 168 / 16.8 = 10 rows exactly
 		assert_eq!(tall - short, 10);
 	}
 
 	#[test]
 	fn tiny_area_clamps_to_at_least_one_cell() {
 		// Smaller than the padding would give a negative count; clamp to 1×1.
-		assert_eq!(grid_size(Size::new(1.0, 1.0), 0.0, 0.0), (1, 1));
-		// A panel dragged wider than the window itself must not produce a zero or
-		// negative column count — only the width is squeezed, so the rows still fit.
-		let (rows, cols) = grid_size(Size::new(200.0, 200.0), 400.0, 400.0);
-		assert_eq!((rows, cols), (1, 1));
+		assert_eq!(grid_size(Size::new(1.0, 1.0), 0.0), (1, 1));
+		// A strip dragged taller than the window itself must not produce a zero or negative
+		// row count — only the height is squeezed, so the columns still fit.
+		let (rows, _) = grid_size(Size::new(200.0, 200.0), 400.0);
+		assert_eq!(rows, 1);
 	}
 
 	#[test]
 	fn window_size_fits_the_requested_grid() {
 		// A window opened via `window_size` must reflow back to exactly that grid, so the
-		// initial window is big enough for the intended cell count (§11) — with and
-		// without the two browser panels around it (§18, §19).
-		assert_eq!(
-			grid_size(window_size(160, 40, 0.0, 0.0), 0.0, 0.0),
-			(40, 160)
-		);
-		let wide = crate::explorer::DEFAULT_WIDTH + crate::explorer::SPLITTER_WIDTH;
+		// initial window is big enough for the intended cell count (§11) — with and without the
+		// files strip reserved under it (§19).
+		assert_eq!(grid_size(window_size(160, 40, 0.0), 0.0), (40, 160));
 		let tall = crate::files::DEFAULT_HEIGHT + crate::files::SPLITTER_HEIGHT;
-		assert_eq!(
-			grid_size(window_size(160, 40, wide, tall), wide, tall),
-			(40, 160)
-		);
+		assert_eq!(grid_size(window_size(160, 40, tall), tall), (40, 160));
 	}
 
 	#[test]

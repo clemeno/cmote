@@ -17,8 +17,8 @@ key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
 light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
 working directory and uploads a local file into it over SFTP, §17; v2.0.0 puts a
-2D folder tree of the remote filesystem beside the terminal — browse, jump, rename,
-copy paths, §18; **v2.1.0** adds the icon grid of files under the terminal — every entry
+2D folder tree of the remote filesystem in the browser strip beside the files pane — browse,
+jump, rename, copy paths, §18; **v2.1.0** adds the icon grid of files under the terminal — every entry
 in one directory, streamed in batches, with rename and download, §19 — makes it and the
 tree keyboard-navigable with a details popup beside the selection, §20, and lets a rubber
 band, Ctrl/Shift click or Ctrl+A select many entries at once for a batch copy or
@@ -749,10 +749,11 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
     the very paste-injection the bracketed-paste strip guards against (§9). The context menu's
     and status bar's **Copy** now route through the rich path too, for one copy behaviour
     whatever the trigger.
-  - **Folder tree beside the grid** (done, v2.0): the right of the screen holds the remote
-    folder explorer, with a draggable splitter between it and the grid and a status-bar
-    button that hides it. Its width comes out of the grid's own width, so the same
-    `grid_size` call reflows the pty for a panel resize and a window resize alike (§18).
+  - **Folder tree beside the files pane** (done, v2.0; moved v3.x): the right end of the
+    bottom browser strip holds the remote folder explorer, with a draggable splitter between
+    it and the files pane and a status-bar button that hides it. Its width comes out of the
+    *pane's* now, not the grid's — the terminal keeps the full width above the strip — so a
+    tree resize only reshapes the pane, and only the strip's height reflows the pty (§18, §19).
 - **Error** (`Screen::Error`): a generic, non-leaking message (selectable/copyable) plus
   a "Back" button, in the shared dialog chrome floating over the dimmed connect form.
   Closing (✕) or a backdrop click goes Back. Detail is logged, not shown (§12).
@@ -1312,7 +1313,8 @@ on the server, or the remote one recreated on this machine. Both directions shar
 
 ## 18. Remote folder explorer (v2.0)
 
-The headline of v2: a **2D tree of the remote filesystem** to the right of the terminal,
+The headline of v2: a **2D tree of the remote filesystem** in the browser strip along the
+bottom, to the right of the files pane (§19) — the terminal keeps the whole width above it —
 so the far side can be navigated with the mouse instead of `cd` and `ls`. It is split
 three ways — a pure model (`explorer.rs`), a pure view (`ui/explorer.rs`), and the
 network calls (`ssh/browse.rs`) — which is what keeps the interesting rules (relative
@@ -1392,13 +1394,17 @@ announced path carries one.
 
 ### The panel (`ui/explorer.rs`)
 
-- **Layout.** A fixed-width column to the right of the grid with a draggable splitter
-  between them, and a status-bar button that hides the whole thing. The panel's width is
-  taken out of the grid's, so `grid_size` subtracts `Explorer::reserved` and a splitter
-  drag reflows the remote pty exactly as a window resize does — one code path, and a
-  round-trip test locks `window_size`/`grid_size` together with the panel included. The
-  drag is clamped to 60% of the window, because a splitter with no ceiling can leave the
-  terminal one column wide and the user dragging their way back out.
+- **Layout.** A fixed-width column at the right end of the bottom browser strip — to the
+  right of the files pane (§19), not beside the terminal any more — with a draggable
+  splitter between the pane and the tree, and a status-bar button that hides the whole
+  thing. The tree only ever shows beside a visible files pane: the strip is one region, so
+  hiding the pane takes the tree with it. The column's width is taken out of the *pane's*
+  now, not the terminal's — `files_width` subtracts `Explorer::reserved` — so a splitter
+  drag only reshapes the pane's grid, never the pty; the terminal reflows for the strip's
+  *height* alone (`grid_size` subtracts `Files::reserved`), and a round-trip test locks
+  `window_size`/`grid_size` together with that height reserve. The drag is clamped to 60% of
+  the window, because a splitter with no ceiling can leave the pane a sliver wide and the
+  user dragging their way back out.
 - **Right-click menu**, on the folder under the pointer: *Open in terminal*, *New folder…*,
   *Upload…*, *Upload folder…*, *Rename…*, *Delete…*, *Copy name*, *Copy relative path*,
   *Copy full path*, *Refresh*. "Copy relative path" is disabled when the shell has never announced
@@ -1479,9 +1485,10 @@ announced path carries one.
 
 ## 19. Remote files pane (v2.1)
 
-An **icon grid of every entry in one directory**, full width under
-the terminal and the folder tree. The tree (§18) answers "where am I in the filesystem";
-this answers "what is actually in here". Same three-way split — a pure model
+An **icon grid of every entry in one directory**, in the browser strip under the terminal.
+The strip runs the window's full width; the pane fills it, save for the folder tree's column
+on the right when that is shown (§18). The tree answers "where am I in the filesystem"; this
+answers "what is actually in here". Same three-way split — a pure model
 (`files.rs`), a pure view (`ui/files.rs`), and the network calls (`ssh/browse.rs`,
 `ssh/download.rs`) — so the rules that matter are unit-testable with no server.
 
@@ -1645,11 +1652,11 @@ for a window resize.
 - **The menu opens upwards.** Same frozen-anchor construction as the tree's (§18), but
   bottom-aligned: this pane is at the bottom of the window, so a menu dropping downwards
   would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor, and
-  the left edge is **clamped against the window width** (v2.2) — the panel is a fixed
-  `menu::WIDTH`, so once the anchor would push its right edge past the window, it is pinned
-  `MENU_INSET` in from that edge instead of spilling off. The pane is full width, so the
-  pane's width *is* the window's; the tree's menu already did this (§18), and `place_menu`
-  now does it for both of this pane's menus — the entry's and the empty-space one.
+  the left edge is **clamped against the pane's width** (v2.2) — the panel is a fixed
+  `menu::WIDTH`, so once the anchor would push its right edge past the pane, it is pinned
+  `MENU_INSET` in from that edge instead of spilling off. The pane's width is the window less
+  the tree's column when one is shown (§18); the tree's menu already did the same trick, and
+  `place_menu` now does it for both of this pane's menus — the entry's and the empty-space one.
 - **Empty space has its own menu (v2.2).** A right-click that lands on no cell opens a short
   menu of the things that are about the *directory* rather than an entry: **Upload… here**
   (§17) and **Refresh**. It shares the chrome, the frozen anchor and the placement above.
@@ -1814,8 +1821,8 @@ does when an action has nine targets instead of one.
 - **A full-window capture layer** (`band_drag_layer`) carries the moves and the release,
   the same trick the splitters use: `mouse_area` reports a release only while the pointer is
   over it, so a band dragged out of the pane and let go over the terminal would otherwise
-  never end. Its points are window coordinates; the pane is full width along the bottom, so
-  only the vertical origin has to come off.
+  never end. Its points are window coordinates; the pane's left edge is the window's and it
+  runs to the bottom, so only the vertical origin — the strip's top — has to come off.
 - `ponytail:` **no auto-scroll** at the pane's edges — a band cannot reach past what is on
   screen. Add a scroll-on-edge timer if selecting more than a screenful becomes routine.
 
@@ -1901,8 +1908,9 @@ header so both panels name the same place.
   path may scroll the tree a line more than strictly needed — the same tolerance the notice
   line already carries.
 - **The files pane's own header trims its path the same way, but to one line** — that header
-  is the window's full width and a busy toolbar row (up · path · copy · item count · `.*`),
-  so the path stays on one line (a line that wide holds a long path) and is middle-ellipsised
+  spans the pane's width (the window less the tree's column, §18) and is a busy toolbar row
+  (up · path · copy · item count · `.*`), so the path stays on one line (a line that wide
+  holds a long path) and is middle-ellipsised
   to fit rather than wrapping and shoving those controls around. The connect form's chosen
   key-file path is trimmed the same way, to two lines. One `elide_middle` rule keeps every
   name and path in the app cut alike; each caller only owns its own "how many fit" estimate.

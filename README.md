@@ -137,8 +137,9 @@ references below (§n) point into it.
   tmux, a line in vim; the wheel scrolls what is under it. cmote forwards clicks, releases,
   drags and scrolls in the xterm protocols a program enables, and **holding Shift takes the
   pointer back** for text selection and cmote's own right-click menu (§9).
-- **Remote folder tree** — a 2D explorer of the remote filesystem to the right of the
-  terminal, over **SFTP** (falling back to `ls` on a server with the subsystem disabled).
+- **Remote folder tree** — a 2D explorer of the remote filesystem in the bottom strip, to
+  the right of the files pane (the terminal keeps the full width above), over **SFTP**
+  (falling back to `ls` on a server with the subsystem disabled).
   Click a folder to expand or collapse it; the tree **follows the shell**, opening the
   whole chain from `/` down to wherever you `cd`. Right-click a folder for **Open in
   terminal** (types a quoted `cd`), **New folder…**, **Upload…** (sends local files into that
@@ -153,8 +154,9 @@ references below (§n) point into it.
   the top level. Drag the splitter to resize the panel — the terminal reflows to match — or hide it
   with the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
   (§18, §22).
-- **Remote files pane** — a grid of **every entry** in one directory, full width under the
-  terminal. Each cell is a wide row: a small icon in front of the name, with the **size and
+- **Remote files pane** — a grid of **every entry** in one directory, in the browser strip
+  under the terminal (the folder tree shares that strip, on the pane's right, §18). Each cell
+  is a wide row: a small icon in front of the name, with the **size and
   the modified date, and the `owner:group`** on a second, muted line underneath
   (`4.0 KB · 2026-03-20 11:46 · cme:staff`, the date in the server's own wall clock but without
   the zone tag — that stays in the details popup; a folder shows only the date and the owner,
@@ -311,7 +313,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
 
-**Folder tree** (right of the terminal — the status bar's **Folders** button hides it)
+**Folder tree** (right of the files pane, in the bottom strip — the status bar's **Folders** button hides it; shown only alongside the files pane)
 
 | Gesture | What it does |
 |---|---|
