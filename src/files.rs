@@ -1096,18 +1096,20 @@ pub fn format_mtime(epoch: u32, zone: &Zone) -> String {
 	with_zone(stamp, zone)
 }
 
-/// A compact mtime for the file grid's cells (§19): `YYYY-MM-DD HH:MM ZONE`, without the
-/// seconds `format_mtime` carries but still tagged with the server's zone. A cell has room to
-/// say the day, the minute and the zone at a glance, not the exact second — that stays the
-/// details popup's job (§20), which still calls `format_mtime` for the full reading.
+/// A compact mtime for the file grid's cells (§19): `YYYY-MM-DD HH:MM`, without the seconds
+/// `format_mtime` carries AND without its zone tag. The instant is still shifted into the
+/// server's wall clock (so a cell reads the same clock as `ls -l` on that machine), but the
+/// `CEST (+02:00)` tag is dropped — a cell is narrow, and the same zone repeated on every row
+/// is noise. Naming the zone stays the details popup's job (§20), which calls `format_mtime`
+/// for the full, tagged reading. The `zone` is kept as a parameter because `local_parts` still
+/// needs the offset to do the shift; only the trailing tag goes.
 pub fn format_mtime_short(epoch: u32, zone: &Zone) -> String {
 	let (year, month, day, seconds) = local_parts(epoch, zone);
-	let stamp = format!(
+	format!(
 		"{year:04}-{month:02}-{day:02} {:02}:{:02}",
 		seconds / 3600,
 		seconds % 3600 / 60,
-	);
-	with_zone(stamp, zone)
+	)
 }
 
 /// Tag a formatted `stamp` with the server's zone (§20): its label, its `+HH:MM` offset, or
@@ -1703,21 +1705,20 @@ mod tests {
 	}
 
 	#[test]
-	fn the_short_mtime_drops_the_seconds_but_keeps_the_zone() {
-		// The grid cell's compact form: same instant, same zone shift and same zone tag as the
-		// full format, but trimmed to the day and the minute — the seconds go, the zone stays.
+	fn the_short_mtime_keeps_the_shift_but_drops_the_seconds_and_zone() {
+		// The grid cell's compact form: same instant and same zone SHIFT as the full format —
+		// the clock is still the server's wall clock — but trimmed to the day and the minute,
+		// and with no zone tag. The seconds go and the `CEST (+02:00)` tag goes; the shift stays.
 		let utc = Zone::default();
-		assert_eq!(
-			format_mtime_short(1_774_000_000, &utc),
-			"2026-03-20 09:46 UTC"
-		);
+		assert_eq!(format_mtime_short(1_774_000_000, &utc), "2026-03-20 09:46");
 		let paris = Zone {
 			offset: 120,
 			label: "CEST".to_owned(),
 		};
+		// +02:00 still moves 09:46 UTC to 11:46 local — only the trailing tag is gone.
 		assert_eq!(
 			format_mtime_short(1_774_000_000, &paris),
-			"2026-03-20 11:46 CEST (+02:00)"
+			"2026-03-20 11:46"
 		);
 	}
 

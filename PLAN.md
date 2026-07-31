@@ -1562,13 +1562,19 @@ for a window resize.
   §22): the start *and* the extension survive, which is what tells two similar names apart —
   a tail-clipped `report-2026-q1-fin…` and `report-2026-q1-dra…` do not. The full name is
   always one selection away in the popup (§20).
-- **A second, muted line carries the size and the modified date** (`2026-03-20 11:46 CEST`).
-  A directory shows only the date — a directory entry's own size is not the size of its
-  contents, and printing 4096 for every folder would be noise that reads as data. Any fact
-  the `ls` fallback never learned shows as a dash, the same convention the popup uses.
-- **One zone-tagging helper, two forms.** The cell's compact `format_mtime_short` (day and
-  minute) and the popup's full form share the date computation and the zone tag (§20), so
-  the two can never disagree about the instant or the timezone.
+- **A second, muted line carries the size, the modified date and the `owner:group`**
+  (`4.0 KB · 2026-03-20 11:46 · cme:staff`), reading left to right like a terse `ls -l` line.
+  A directory shows no size — a directory entry's own size is not the size of its contents, and
+  printing 4096 for every folder would be noise that reads as data — but keeps the date and the
+  owner. Any fact the `ls` fallback never learned shows as a dash, the same convention the popup
+  uses; the `owner:group` is the popup's own `owner_group` helper (§20), so the two agree.
+- **One date computation, two forms — but only the popup wears the zone tag.** The cell's
+  compact `format_mtime_short` (day and minute) and the popup's full form share `local_parts`,
+  so both read the *same* instant on the *same* server wall clock (§20) — they can never
+  disagree about the time. Where they part is the tag: the popup appends `CEST (+02:00)` via
+  `with_zone`, the cell does not. A cell is narrow and the same zone on every row is noise; the
+  cell still keeps the *shift* (that is what makes its clock match `ls -l`), it just drops the
+  label and offset text. Naming the zone is the popup's job.
 - **Every cell keeps a uniform height.** Band hit-testing, row-wise arrow navigation and
   popup placement are all arithmetic over `CELL_HEIGHT` (§20, §21) — a cell that grew with
   its content would break all three at once.

@@ -155,8 +155,10 @@ references below (§n) point into it.
   (§18, §22).
 - **Remote files pane** — a grid of **every entry** in one directory, full width under the
   terminal. Each cell is a wide row: a small icon in front of the name, with the **size and
-  the modified date** on a second, muted line underneath (`2026-03-20 11:46 CEST`; a folder
-  shows only the date, and anything the listing never learned reads as a dash). Each cell
+  the modified date, and the `owner:group`** on a second, muted line underneath
+  (`4.0 KB · 2026-03-20 11:46 · cme:staff`, the date in the server's own wall clock but without
+  the zone tag — that stays in the details popup; a folder shows only the date and the owner,
+  and anything the listing never learned reads as a dash). Each cell
   carries a **thin border** so the grid reads as distinct tiles. A name too
   long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
   directory streams in batches of 1000 and the header counts as they land. Icons come from a
@@ -488,8 +490,9 @@ upload batch planner (every file queued under its own name when nothing clashes,
 collision answer — Replace, Skip, Keep both — deciding what happens to each clashing file,
 all without an App or a server), the middle-ellipsis cut (a short string left alone, a long
 one keeping both ends inside its budget, and the cut never landing inside a glyph) and the
-grid cell's two-line version of it, the short mtime that drops the seconds but keeps the
-zone, the session snapshot's round trip through `targets.json` (including a pre-v2.2 file
+grid cell's two-line version of it, the short mtime that keeps the server's wall-clock shift
+but drops the seconds and the zone tag, the session snapshot's round trip through
+`targets.json` (including a pre-v2.2 file
 with no session fields at all), and — again through the app's own handlers — a reconnect
 that resumes both paths and pins the pane until the shell has caught up.
 
@@ -689,9 +692,11 @@ then follow the shell. Then:
   (`mkdir /tmp/many && cd /tmp/many && seq 1 5000 | xargs touch`) and re-enter it: the
   count should climb in steps of 1000 as the batches land, and the window stays responsive
   throughout.
-- Each cell should read as a row: icon, name, and under it the size and the modified date
-  in the server's zone (a folder shows only the date), each **framed by a thin border** so
-  the grid reads as distinct tiles. Compare a few against `ls -l` on the remote. A very long
+- Each cell should read as a row: icon, name, and under it the size, the modified date
+  on the server's wall clock but with **no zone tag**, and the `owner:group` (a folder shows
+  only the date and the owner), each **framed by a thin border** so the grid reads as distinct
+  tiles. Compare a few against `ls -l` on the remote — the clock, the size and the owner should
+  match; the zone tag lives in the details popup. A very long
   name should be cut in the middle (`report-fin…-draft.pdf`), never at the extension.
 - Double-click a folder in the grid → the grid enters it and **the shell stays put** (the
   prompt's directory does not change, and the pane must NOT snap back on the next prompt).

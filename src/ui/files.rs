@@ -771,9 +771,9 @@ fn cell<'a>(
 		.spacing(ICON_LABEL_GAP)
 		.align_y(Vertical::Center)
 		.width(Length::Fill);
-	// The second line, under the name: the file's size and when it was last modified (§19).
-	// Muted so the name still reads first; it wraps nothing, and the cell clips it if a wide
-	// date and zone ever outrun the column.
+	// The second line, under the name: the file's size, when it was last modified, and its
+	// owner:group (§19). Muted so the name still reads first; it wraps nothing, and the cell
+	// clips it if a wide line ever outruns the column.
 	let meta = text(meta_line(entry, files))
 		.size(META_SIZE)
 		.color(MUTED_FG)
@@ -814,24 +814,28 @@ fn label_budget() -> usize {
 	per_line * LABEL_LINES
 }
 
-/// A cell's second line: a file's size and its last-modified date, compact, under the name
-/// (§19). A folder shows only the date — a directory entry's own size is not the size of what
-/// is inside it (§21), so a number there would mislead. Facts the `ls` fallback never learns
-/// (§19) show as a dash rather than leaving the line lopsided; the details popup carries the
-/// exact size and the full timestamp (§20).
+/// A cell's second line: a file's size, its last-modified date and its `owner:group`, compact,
+/// under the name (§19), reading left to right like a terse `ls -l` line. A folder shows no
+/// size — a directory entry's own size is not the size of what is inside it (§21), so a number
+/// there would mislead — but it keeps the date and the owner. Facts the `ls` fallback never
+/// learns (§19) show as a dash rather than leaving the line lopsided; the details popup carries
+/// the exact size, the full timestamp and the same `owner:group` (§20).
 fn meta_line(entry: &Entry, files: &Files) -> String {
 	let date = entry.meta.mtime.map_or_else(
 		|| "—".to_owned(),
 		|mtime| crate::files::format_mtime_short(mtime, files.zone()),
 	);
+	// The same `owner:group` the popup names (§20), each half falling back to `?` and the whole
+	// to a dash when the server named neither — the convention size and date already use.
+	let owner = crate::files::owner_group(&entry.meta).unwrap_or_else(|| "—".to_owned());
 	if entry.kind == Kind::Dir {
-		return date;
+		return format!("{date} · {owner}");
 	}
 	let size = entry
 		.meta
 		.size
 		.map_or_else(|| "—".to_owned(), crate::ui::terminal::human_bytes);
-	format!("{size} · {date}")
+	format!("{size} · {date} · {owner}")
 }
 
 /// The Material Icons code point for a category (§19). The names are the font's own:
