@@ -52,11 +52,20 @@ pub enum ExplorerMessage {
 	/// The tree was scrolled; the payload is its absolute vertical offset. Tracked so
 	/// arrow-key navigation can tell whether the row it moved to is already on screen (§20).
 	Scrolled(f32),
-	/// Menu "Expand": open the folder and re-fetch its children — which doubles as
-	/// the refresh for a directory changed from the shell.
-	Expand(String),
-	/// Menu "Collapse": close the folder and everything under it.
-	Collapse(String),
+	/// Menu "Refresh" (one folder): re-list this folder's *contents*, and re-list its *parent* so
+	/// its own name and existence are checked too — a rename or deletion made from the shell shows
+	/// up in the parent's listing, not the folder's. So a right-click Refresh answers "is it still
+	/// there, under this name, holding these children?" in one go. Named "Refresh", not "Expand",
+	/// because that is the word a user hunts for when the tree has gone stale under a shell command.
+	RefreshDir(String),
+	/// The header ↻ button and F5 (§18): re-list every open folder in one action, so all the
+	/// expanded content is current at once — the fix for a tree left stale by a `mv` or a
+	/// `mkdir` typed in the console, where nothing in the GUI knew to re-fetch.
+	RefreshTree,
+	/// The header's collapse-all button (§18): close every branch back to the root's own children,
+	/// the clean top-level view after exploring deep. A single folder still collapses by clicking
+	/// its open row or pressing ←; only the menu item is gone.
+	CollapseAll,
 	/// Menu "Open in terminal": send a `cd` for this folder to the shell.
 	Cd(String),
 	/// Menu "Upload…": pick local files to send into this folder (§17). Carries the folder's
@@ -362,6 +371,19 @@ impl Explorer {
 		}
 	}
 
+	/// Collapse every branch back to the top level (§18): the header's collapse-all button. Closes
+	/// each folder but the root, so the tree returns to showing just the root's own children — the
+	/// clean starting view after a deep dive. Like `collapse`, this is local state only: the cached
+	/// listings stay, so re-expanding any branch costs no round trip. The root is left open because
+	/// it is the tree's anchor — closing it would collapse the panel to a single "/" row.
+	pub fn collapse_all(&mut self) {
+		for (key, node) in self.nodes.iter_mut() {
+			if key.as_str() != ROOT {
+				node.open = false;
+			}
+		}
+	}
+
 	/// A row click: select the folder and flip it open or shut. Returns a path to list
 	/// when opening it needs one.
 	pub fn toggle_node(&mut self, path: &str) -> Option<String> {
@@ -474,6 +496,23 @@ impl Explorer {
 		}
 		node.loading = true;
 		Some(path.to_owned())
+	}
+
+	/// Re-list *every open folder* the tree is showing (§18): the whole-tree refresh behind the
+	/// header ↻ button and F5. Each open, already-listed folder is marked loading and returned
+	/// for the app to re-fetch, so a single action brings all the expanded content up to date —
+	/// the user never has to work out which folders a `mv` touched. A folder that is closed
+	/// (its rows are not on screen) or already loading is skipped: nothing changes under a
+	/// branch you cannot see, and a fetch in flight will bring the fresh listing itself.
+	pub fn refresh_open(&mut self) -> Vec<String> {
+		let mut needed = Vec::new();
+		for (path, node) in self.nodes.iter_mut() {
+			if node.open && node.children.is_some() && !node.loading {
+				node.loading = true;
+				needed.push(path.clone());
+			}
+		}
+		needed
 	}
 
 	/// Forget a folder and everything beneath it (§18): its subtree was just deleted, so those
@@ -746,6 +785,25 @@ mod tests {
 	}
 
 	#[test]
+	fn collapse_all_returns_to_the_top_level_but_keeps_the_root() {
+		let mut explorer = tree(&["home", "etc"]);
+		explorer.expand("/home", false);
+		explorer.listed("/home", vec!["user".to_owned()]);
+		explorer.expand("/home/user", false);
+		explorer.listed("/home/user", vec!["src".to_owned()]);
+		assert_eq!(explorer.rows().len(), 5); // / + home + user + src + etc
+
+		explorer.collapse_all();
+		// The root stays open, so its own children still show; everything below them is closed.
+		let names: Vec<String> = explorer.rows().into_iter().map(|row| row.name).collect();
+		assert_eq!(names, vec!["/", "etc", "home"]);
+
+		// Nothing was discarded: re-opening /home shows its one cached level with no re-fetch.
+		assert_eq!(explorer.expand("/home", false), None);
+		assert!(explorer.rows().iter().any(|row| row.path == "/home/user"));
+	}
+
+	#[test]
 	fn revealing_a_directory_opens_its_whole_chain_once() {
 		let mut explorer = Explorer::default();
 		let needed = explorer.reveal_if_new("/home/user/src");
@@ -815,6 +873,28 @@ mod tests {
 		// loading (the fetch above is still in flight).
 		assert_eq!(explorer.refresh_dir("/etc"), None);
 		assert_eq!(explorer.refresh_dir("/home"), None);
+	}
+
+	#[test]
+	fn refresh_open_re_lists_every_shown_branch_and_skips_the_rest() {
+		let mut explorer = tree(&["home", "etc"]);
+		explorer.expand("/home", false);
+		explorer.listed("/home", vec!["user".to_owned()]);
+		explorer.expand("/etc", false);
+		explorer.listed("/etc", Vec::new());
+		// /home is now LISTED but CLOSED — its rows have left the screen.
+		explorer.collapse("/home");
+
+		// The whole-tree refresh re-lists exactly the open, listed branches — the root and /etc —
+		// and skips /home (closed, so nothing under it is on screen to go stale). Sorted because
+		// `BTreeMap` iterates in key order.
+		let mut needed = explorer.refresh_open();
+		needed.sort();
+		assert_eq!(needed, vec!["/".to_owned(), "/etc".to_owned()]);
+
+		// Every returned folder is now loading, so a second refresh before those fetches land asks
+		// for nothing — no piling up duplicate listings.
+		assert!(explorer.refresh_open().is_empty());
 	}
 
 	#[test]

@@ -63,14 +63,16 @@ const PATH_LINE_HEIGHT: f32 = 16.0;
 /// trims it — kept to the same two the file grid's names use, so a deep path can no longer
 /// grow the header without bound and crowd the tree beneath it.
 const PATH_LINES: usize = 2;
-/// The room the copy button and the `.*` toggle take along the header's first line, and a
-/// glyph advance at `TEXT_SIZE`. These size the path's middle-ellipsis (`path_per_line`) as
-/// well as the wrapped-line count `header_height` feeds the scroll math, so they are
-/// deliberately PESSIMISTIC — a fatter glyph and more control room than the face and buttons
-/// truly take — so the char budget lands under what two lines really hold and the `…` trims a
-/// deep path with margin to spare rather than letting it spill onto a third line.
+/// The room the copy button, the refresh button, the collapse-all button and the `.*` toggle take
+/// along the header's first line, and a glyph advance at `TEXT_SIZE`. These size the path's
+/// middle-ellipsis (`path_per_line`) as well as the wrapped-line count `header_height` feeds the
+/// scroll math, so they are deliberately PESSIMISTIC — a fatter glyph and more control room than
+/// the face and buttons truly take — so the char budget lands under what two lines really hold and
+/// the `…` trims a deep path with margin to spare rather than letting it spill onto a third line.
 const TOGGLE_WIDTH: f32 = 44.0;
 const COPY_BUTTON_WIDTH: f32 = 28.0;
+const REFRESH_BUTTON_WIDTH: f32 = 28.0;
+const COLLAPSE_BUTTON_WIDTH: f32 = 28.0;
 const AVG_CHAR_WIDTH: f32 = 8.0;
 /// The notice line's height, fixed so both panels can subtract it from their scrollable
 /// area exactly rather than guessing at a padded line of text (§20).
@@ -158,7 +160,13 @@ pub fn tree_height(window_height: f32, files_reserved: f32, path: Option<&str>, 
 /// advance. Shared by `header`, which middle-ellipsises the path to `PATH_LINES` of these, and
 /// `header_height`, which counts the wrapped lines, so the two agree on what "a line" holds.
 fn path_per_line(width: f32) -> f32 {
-	let usable = (width - TOGGLE_WIDTH - COPY_BUTTON_WIDTH - 2.0 * HEADER_PAD_H).max(1.0);
+	let usable = (width
+		- TOGGLE_WIDTH
+		- COPY_BUTTON_WIDTH
+		- REFRESH_BUTTON_WIDTH
+		- COLLAPSE_BUTTON_WIDTH
+		- 2.0 * HEADER_PAD_H)
+		.max(1.0);
 	(usable / AVG_CHAR_WIDTH).floor().max(1.0)
 }
 
@@ -229,6 +237,11 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 				has_path,
 				Message::Explorer(ExplorerMessage::CopyCurrentPath),
 			),
+			// Re-list every open folder in one press: the tree's header refresh, matched by
+			// the pane's own below (§18).
+			crate::ui::files::refresh_button(Message::Explorer(ExplorerMessage::RefreshTree)),
+			// Close every branch back to the root's children — the tree's own control, no pane twin.
+			crate::ui::files::collapse_all_button(Message::Explorer(ExplorerMessage::CollapseAll)),
 			hidden_toggle(explorer.show_hidden()),
 		]
 		.spacing(6)
@@ -400,8 +413,11 @@ pub fn context_menu<'a>(
 			cwd.map(|_| Message::Explorer(ExplorerMessage::CopyRelative(path.clone()))),
 		),
 		item("Copy full path", ExplorerMessage::CopyPath(path.clone())),
-		item("Expand (refresh)", ExplorerMessage::Expand(path.clone())),
-		item("Collapse", ExplorerMessage::Collapse(path)),
+		// "Refresh", not "Expand": re-list this folder AND its parent, so its contents, its name
+		// and its very existence are all checked — the word a user hunts for when the tree has
+		// gone stale under a shell command. Collapsing a single folder is the row click or ←; the
+		// header's collapse-all handles the whole tree, so neither needs a menu item.
+		item("Refresh", ExplorerMessage::RefreshDir(path)),
 	]);
 
 	// Placed from the pointer, right-aligned. The panel's right edge IS the window's

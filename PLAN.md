@@ -1387,9 +1387,29 @@ announced path carries one.
   terminal one column wide and the user dragging their way back out.
 - **Right-click menu**, on the folder under the pointer: *Open in terminal*, *New folder…*,
   *Upload…*, *Upload folder…*, *Rename…*, *Delete…*, *Copy name*, *Copy relative path*,
-  *Copy full path*, *Expand (refresh)*, *Collapse*. "Copy relative path" is disabled when the
-  shell has never announced a cwd — there is nothing to be relative to. "Expand" force-refetches,
-  which is also the refresh for a directory changed from the shell (a `mkdir` typed at the prompt).
+  *Copy full path*, *Refresh*. "Copy relative path" is disabled when the shell has never announced
+  a cwd — there is nothing to be relative to. *Refresh* answers "is this folder still here, under
+  this name, holding these children?" — it re-lists the folder's **contents** (forced open, so the
+  result shows) *and* its **parent**, because a rename or deletion done from the shell surfaces in
+  the parent's listing, never the folder's. It is named "Refresh", not "Expand", deliberately —
+  that is the word a user hunts for when the tree has gone stale, and the earlier "Expand
+  (refresh)" label was missed for exactly that reason. There is **no menu *Collapse*** (nor
+  *Expand*): a single folder still opens/closes by clicking its row or pressing → / ←, and the
+  whole tree collapses from the header button below — a menu item for each was redundant.
+- **Refresh and collapse-all, in the header (v3.0).** A shell command that moves or makes a folder
+  leaves the GUI with no way to know, so refreshing must be both effective and obvious. Three
+  refresh affordances, all labelled/keyed the way the file world expects: the per-folder menu
+  *Refresh* above; a header **↻ button** (the shared `ui::files::refresh_button`, twin of the copy
+  button) that re-lists **every open folder** in one press via `Explorer::refresh_open`, so all
+  the expanded content comes current without the user working out which folders a move touched;
+  and **F5** while the tree holds the keyboard, mapped to that same whole-tree refresh. The pane
+  below wears the twin button and its own F5 (§19), so each panel refreshes the one that has
+  focus. A closed or already-loading branch is skipped — nothing changes under rows you cannot
+  see, and a fetch in flight will bring the fresh listing itself. Beside ↻ sits a **collapse-all
+  button** (`unfold_less`, `Explorer::collapse_all`): it closes every branch back to the root's own
+  children — the clean top-level view after a deep dive — while leaving the cached listings in
+  place, so re-expanding costs no round trip. The root itself stays open; closing it would shrink
+  the panel to a single `/` row.
 - **Relative paths walk both ways.** `relative` emits `..` for every level the two paths do
   not share, so the result is usable from the shell's current directory even when the
   folder sits on another branch (`/home/user` → `/var/log` gives `../../var/log`).
@@ -1586,6 +1606,11 @@ for a window resize.
   same pane-only `browse_to` as a double-clicked folder — the console stays put — and it is
   *disabled* — not hidden — at the root and before the first listing, the two cases with
   no parent. The message carries no path: the pane's own is read when the press lands.
+- **A header ↻ button, matching the tree's (v3.0).** The same shared `refresh_button` sits in
+  this header too, beside the `.*` toggle, and re-lists the directory on show (`FilesMessage::Refresh`
+  — the menu item's twin). **F5** does the same while the pane holds the keyboard. So refresh is
+  reachable the same way in both panels — menu, header button, F5 — and each key/button acts on
+  the panel that has focus.
 - **The `.*` toggle is the tree's.** One flag (`Explorer::show_hidden`) filters both
   panels, and each header carries a checkbox that shows and flips it — so hiding dot-files
   hides them everywhere, and the pane still has the control when the tree is collapsed.

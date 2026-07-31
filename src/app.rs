@@ -2761,6 +2761,9 @@ impl Tab {
 				};
 				return self.on_explorer(ExplorerMessage::RenameStarted(path));
 			}
+			// F5 refreshes the whole visible tree, the same as the header ↻ button — the
+			// familiar file-manager key for "bring what I am looking at up to date".
+			Named::F5 => return self.on_explorer(ExplorerMessage::RefreshTree),
 			Named::Escape => {
 				self.set_focus(Focus::Terminal);
 				return iced::Task::none();
@@ -2822,6 +2825,9 @@ impl Tab {
 				};
 				return self.on_files(FilesMessage::RenameStarted(path));
 			}
+			// F5 re-lists the directory on show, the same as the header ↻ button — the pane's
+			// twin of the tree's F5, each refreshing the panel that holds the keyboard.
+			Named::F5 => return self.on_files(FilesMessage::Refresh),
 			Named::Escape => {
 				self.set_focus(Focus::Terminal);
 				return iced::Task::none();
@@ -3450,17 +3456,36 @@ impl Tab {
 			}
 			ExplorerMessage::PointerMoved(point) => self.explorer.set_pointer(point),
 			ExplorerMessage::MenuDismissed => self.explorer.close_menu(),
-			ExplorerMessage::Expand(path) => {
+			ExplorerMessage::RefreshDir(path) => {
 				self.explorer.close_menu();
-				// Forced, so the menu item doubles as the refresh for a directory that
-				// changed under us (a `mkdir` typed in the shell).
+				// The menu's "Refresh" answers "is this folder still here, under this name, holding
+				// these children?" Its CONTENTS come from re-listing the folder itself (forced open,
+				// so the result shows at once); its own NAME and EXISTENCE come from re-listing its
+				// PARENT — a rename or deletion made from the shell surfaces in the parent's listing,
+				// never the folder's. The root has no parent, so only its contents refresh.
+				if let Some(parent) = explorer::parent(&path).map(str::to_owned)
+					&& let Some(fetch) = self.explorer.refresh_dir(&parent)
+				{
+					self.send_command(SshCommand::ListDir(fetch));
+				}
 				if let Some(fetch) = self.explorer.expand(&path, true) {
 					self.send_command(SshCommand::ListDir(fetch));
 				}
 			}
-			ExplorerMessage::Collapse(path) => {
+			ExplorerMessage::RefreshTree => {
+				// The header ↻ button and F5: re-list every open folder, so all the expanded
+				// content is current in one action — the user never has to work out which folders
+				// a move touched. Each becomes its own listing request.
 				self.explorer.close_menu();
-				self.explorer.collapse(&path);
+				for fetch in self.explorer.refresh_open() {
+					self.send_command(SshCommand::ListDir(fetch));
+				}
+			}
+			ExplorerMessage::CollapseAll => {
+				// The header's collapse-all button: close every branch back to the root's own
+				// children. Local state only — nothing is re-fetched — so this needs no command.
+				self.explorer.close_menu();
+				self.explorer.collapse_all();
 			}
 			ExplorerMessage::Cd(path) => {
 				// The tree's "Open in terminal" and its Enter key: a deliberate console move,

@@ -136,11 +136,16 @@ references below (§n) point into it.
   whole chain from `/` down to wherever you `cd`. Right-click a folder for **Open in
   terminal** (types a quoted `cd`), **New folder…**, **Upload…** (sends local files into that
   folder), **Upload folder…** (sends a whole local folder), **Rename…** (inline, like F2 on the
-  home list), **Delete…**, **Copy name / relative path / full path**, **Expand** (which also
-  refreshes) and **Collapse**. Its header names the folder on show —
-  middle-ellipsised and capped at two lines, with a **copy button** beside it. Drag the
-  splitter to resize the panel — the terminal reflows to match — or hide it with the status
-  bar's **Folders** button; the `.*` checkbox in its header hides dot-folders (§18, §22).
+  home list), **Delete…**, **Copy name / relative path / full path** and **Refresh** (re-checks
+  the folder is still there, under its name, and re-lists what is inside). A single folder opens
+  and closes by clicking its row or with → / ←, so there is no menu Expand/Collapse. Its header
+  names the folder on show — middle-ellipsised and capped at two lines — with a **copy button**, a
+  **↻ refresh button** and a **collapse-all button** beside it. The refresh button (and **F5**
+  while the tree has focus) re-lists **every open folder** at once, so the tree catches up in one
+  press after you move or make a folder from the shell; collapse-all closes every branch back to
+  the top level. Drag the splitter to resize the panel — the terminal reflows to match — or hide it
+  with the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
+  (§18, §22).
 - **Remote files pane** — a grid of **every entry** in one directory, full width under the
   terminal. Each cell is a wide row: a small icon in front of the name, with the **size and
   the modified date** on a second, muted line underneath (`2026-03-20 11:46 CEST`; a folder
@@ -152,10 +157,10 @@ references below (§n) point into it.
   (a lone directory, tree and all), **Rename…**, **Delete…**, **Copy name / relative path /
   full path** and **Refresh**; right-click **empty space** for **New folder…**, **Upload…
   here**, **Upload folder… here** and **Refresh**. The header carries an **up** button, the
-  directory's path
-  (middle-ellipsised to one line) and a **copy button** for it. Drag the splitter to resize
-  the pane, or hide it with the status bar's **Files** button; the same `.*` checkbox hides
-  dot-files here too (§19).
+  directory's path (middle-ellipsised to one line), a **copy button** for it and a **↻ refresh
+  button** (re-lists the directory on show; **F5** does the same while the pane has focus). Drag
+  the splitter to resize the pane, or hide it with the status bar's **Files** button; the same
+  `.*` checkbox hides dot-files here too (§19).
 - **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
   folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
   else and leave the shell where it is, so you can look inside a directory without disturbing
@@ -283,11 +288,13 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Click a folder | Expand or collapse it, and select it |
-| Right-click a folder | Open in terminal / Upload… / Rename… / Copy name / Copy relative path / Copy full path / Expand / Collapse |
+| Right-click a folder | Open in terminal / Upload… / Rename… / Copy name / Copy relative path / Copy full path / Refresh |
 | **↑** / **↓**, **Tab** / **Shift+Tab** | Walk the visible rows |
 | **→** / **←** | Open / close the selected folder |
 | **Enter** | `cd` the shell into it |
 | **F2** | Rename in place (**Enter** commits, **Esc** abandons) |
+| **F5** / header **↻** button | Refresh — re-list every open folder in one press |
+| Header **collapse-all** button | Close every branch back to the top level |
 | **Esc** | Give the keyboard back to the shell |
 | Copy button in the header | Copy the path of the folder on show |
 | `.*` checkbox | Hide or show dot-entries (shared with the files pane) |
@@ -311,6 +318,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Tab** / **Shift+Tab** | Next / previous entry |
 | **Enter** | Show the selected folder in the pane |
 | **F2** | Rename in place |
+| **F5** / header **↻** button | Refresh — re-list the directory on show |
 | **Esc** | Give the keyboard back to the shell |
 | ↑ button in the header | Show the parent directory |
 | Copy button in the header | Copy the path of the directory on show |
@@ -603,6 +611,16 @@ the title should follow within a prompt. Set a title from a program
   reappears sorted under its new name. Rename onto an existing name → the notice line
   under the tree says it already exists and nothing changed. Rename a folder you cannot
   write → the notice shows the refusal and the shell stays open.
+- **Refresh a change made from the shell.** With a folder expanded, run `mkdir a/new` in the
+  terminal → the tree does not update on its own. Right-click the folder → **Refresh** re-lists it;
+  the new child appears. Now `mv a a2` in the shell and **Refresh** the (now stale) `a` row → it
+  disappears and `a2` shows in its place: Refresh re-checks the folder's own name and existence
+  (via its parent), not just its contents. Or press the header **↻** button (or **F5** with the
+  tree focused) → every open folder re-lists at once. A collapsed branch is left closed —
+  re-opening it shows the fresh listing.
+- **Collapse all.** Expand several levels, then press the header **collapse-all** button → the
+  tree snaps back to the root's own children, and re-opening any branch is instant (nothing was
+  re-fetched).
 - Drag the splitter left and right: the grid reflows (`tput cols` should follow) and the
   panel stops at its minimum and at 60% of the window. The **Folders** button hides the
   panel and gives its columns back to the grid.
@@ -634,7 +652,8 @@ then follow the shell. Then:
   file goes through the OS dialog's own replace prompt. **Open in terminal** is greyed out
   on a file, **Download…** on a folder.
 - **Rename…** edits the label in place; Enter commits and the grid re-lists so the entry
-  lands in its new sort position. **Refresh** picks up a file created from the shell.
+  lands in its new sort position. **Refresh** (the menu item, the header **↻** button, or
+  **F5** with the pane focused) picks up a file created from the shell.
 - Drag the horizontal splitter: the grid reflows (`tput lines` should follow) and stops at
   the minimum and at 60% of the window. The **Files** button hides the pane and gives its
   rows back to the terminal.

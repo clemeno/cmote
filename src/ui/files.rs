@@ -100,14 +100,15 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// item count and the `.*` toggle share it — so the path stays on ONE line (a line this wide
 /// holds a long path) and is trimmed with `…` to fit rather than wrapping and shoving those
 /// controls around. `HEADER_CONTROLS_WIDTH` is the room those controls and their gaps take
-/// beside the path; `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
+/// beside the path (the up, copy and refresh buttons, the item count and the `.*` toggle);
+/// `HEADER_CHAR` is a glyph advance at `TEXT_SIZE`.
 ///
 /// Both are deliberately PESSIMISTIC — a fatter glyph and more control room than the face and
 /// toolbar truly take — so the char budget lands under what the line really holds and the `…`
 /// always trims the path with margin to spare, never a hair too late. The trade is a path cut
 /// a little sooner than strictly needed; containment wins. (The same all-wide-glyph tolerance
 /// the grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
-const HEADER_CONTROLS_WIDTH: f32 = 200.0;
+const HEADER_CONTROLS_WIDTH: f32 = 232.0;
 const HEADER_CHAR: f32 = 8.0;
 
 /// The rubber band's fill and edge (§21). Translucent, so the cells it is being dragged
@@ -132,11 +133,13 @@ const POPUP_BG: Color = Color::from_rgb8(0x1c, 0x1c, 0x1c);
 const POPUP_ICON_SIZE: f32 = 14.0;
 const POPUP_BUTTON_ROW: f32 = 16.0;
 
-/// The header buttons: Material Icons' `arrow_upward` (up one folder) and `content_copy`
-/// (copy the path on show), both sized to sit with the header text rather than with the
-/// grid's icons.
+/// The header buttons: Material Icons' `arrow_upward` (up one folder), `content_copy`
+/// (copy the path on show), `refresh` (re-list what is on show) and `unfold_less` (collapse the
+/// tree to its top level), all sized to sit with the header text rather than with the grid's icons.
 const UP_GLYPH: char = '\u{e5d8}';
 const COPY_GLYPH: char = '\u{e14d}';
+const REFRESH_GLYPH: char = '\u{e5d5}';
+const COLLAPSE_GLYPH: char = '\u{e5d6}';
 const HEADER_ICON_SIZE: f32 = 16.0;
 
 /// Icon colours by category (§19). Muted enough to sit on the dark panel, distinct
@@ -333,6 +336,8 @@ fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> 
 				.color(MUTED_FG)
 				.width(Length::Fill)
 				.align_x(Horizontal::Right),
+			// Re-list the directory on show; the twin of the tree's header ↻ (§18, §19).
+			refresh_button(Message::Files(FilesMessage::Refresh)),
 			hidden_toggle(show_hidden),
 		]
 		.spacing(12)
@@ -396,6 +401,44 @@ pub(crate) fn copy_button(enabled: bool, message: Message) -> Element<'static, M
 	})
 	.on_press_maybe(enabled.then_some(message))
 	.into()
+}
+
+/// A header icon button, always live: the refresh and collapse-all controls share this exact
+/// shape, differing only in glyph and message. Styled like the copy and up buttons beside it —
+/// same face, same hover fill — but without their `on_press_maybe` dimming, because these two
+/// always have something to do. `pub(crate)` and message-agnostic so the tree and the pane
+/// headers can each wire their own action to it.
+pub(crate) fn header_icon_button(glyph: char, message: Message) -> Element<'static, Message> {
+	button(
+		text(glyph.to_string())
+			.font(ICON_FONT)
+			.size(HEADER_ICON_SIZE)
+			.color(FG),
+	)
+	.padding(Padding::from([0.0, 4.0]))
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(SELECTED_BG.into()),
+			_ => None,
+		},
+		..button::Style::default()
+	})
+	.on_press(message)
+	.into()
+}
+
+/// The header "refresh" button (§18, §19): re-lists whatever the panel is showing, so its content
+/// is current after a change made outside the GUI — a `mv` or a `mkdir` typed in the console. Both
+/// headers wear one — the tree re-lists its open folders, the pane re-lists its directory — each
+/// passing its own message.
+pub(crate) fn refresh_button(message: Message) -> Element<'static, Message> {
+	header_icon_button(REFRESH_GLYPH, message)
+}
+
+/// The tree header's "collapse all" button (§18): closes every branch back to the root's own
+/// children. Only the tree wears one — the flat file grid has nothing to collapse.
+pub(crate) fn collapse_all_button(message: Message) -> Element<'static, Message> {
+	header_icon_button(COLLAPSE_GLYPH, message)
 }
 
 /// The details popup's copy button (§20): copies the card's whole description in one press.
