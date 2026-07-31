@@ -208,7 +208,9 @@ references below (§n) point into it.
   on the server; if some are already there, **one dialog asks about the whole batch** —
   **Replace**, **Skip**, **Keep both** (`name-1.txt`) or **Cancel**. The files then go one at
   a time behind the status bar's progress bar, closing with `Uploaded N files`, and a failure
-  names its reason and moves on to the next (§17).
+  names its reason and moves on to the next (§17). When the batch lands, the files pane (and the
+  tree) **re-list the destination folder** if they are showing it, so what you just sent appears in
+  place without a manual Refresh (§29).
 - **Create and delete remote entries** — **New folder…** (on the tree and the pane's
   empty-space menus) opens a small name dialog; **Delete…** (on either menu, and on a whole
   files-pane selection) removes what you picked over **SFTP** — a folder goes with its **entire
@@ -221,6 +223,14 @@ references below (§n) point into it.
   (`name-1`), or **Skip** just this one; **Overwrite all** or **Skip all** to settle every later
   clash the same way; or **Cancel** the whole transfer (files already copied stay). Symlinks are
   skipped, never followed, so a cyclic link can't loop it (§17, §19).
+- **Drag a file in to upload it** — drag a file off the desktop and drop it anywhere on the
+  window; it uploads into the **files pane's current directory**, reusing the same pre-scan and, on
+  a name already there, the same **Overwrite / Keep both / Skip / Cancel** dialog the menu upload
+  uses. While a file is dragged over the window the pane wears a **green ring** to say where the
+  drop will land. One file at a time this iteration — a folder or a second file is declined with a
+  note (use **Upload folder…** for a whole tree). Dragging a remote file *out* onto the desktop is
+  not offered: the GUI toolkit can receive an OS drop but cannot start one, so pulling files down
+  stays the right-click **Download…** (§29).
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
   Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and
@@ -312,6 +322,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+A** | Select every entry on show |
 | Right-click an entry | The entry's menu — on a multiple selection it acts on all of it |
 | Right-click empty space | Upload… here / Refresh |
+| **Drag a file from the desktop onto the window** | Upload it into the folder on show (one file); the pane rings green while it hovers |
 | Copy button in the details popup | Copy the whole details card |
 | **←** / **→** | Move one cell; **↑** / **↓** move a whole row |
 | **Shift** + those arrows | Extend the selection instead of moving it |
@@ -586,6 +597,13 @@ the title should follow within a prompt. Set a title from a program
   (the pane's directory, so point the pane elsewhere with the tree first and confirm the
   destination follows the *pane*, not the shell), and right-click a **folder in the tree** →
   **Upload…** (that folder).
+- **Drag a file in.** Point the pane at a folder (a tree click, or `cd` in the shell), then drag a
+  file from the OS file manager over the window — the pane rings **green** — and drop it. It uploads
+  into the pane's folder with no destination dialog, and **the pane re-lists on its own** so the new
+  file appears in the grid without a manual Refresh (`ls` there confirms it). Drop a file whose name is
+  already there → the same **Overwrite / Keep both / Skip / Cancel** dialog. Drop a **folder** → a
+  note declines it (single files only). Drop while a transfer is running → declined with the busy
+  note. (Dragging a file *out* of the pane onto the desktop is not offered — use **Download…**.)
 - Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
   status bar shows the failure and the shell stays open.
 - Start a shell that does **not** announce its directory (`docker exec … sh`, or unset the

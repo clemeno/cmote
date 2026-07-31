@@ -2323,3 +2323,76 @@ locked by tests (two hosts, so the line is not trivially 1).
   `host keytype base64` shape); an exotic hand-written `known_hosts` line surfaces "(could not read
   the stored key)" rather than a wrong fingerprint, and the dialog still opens with the presented
   key so the decision is never blocked on it.
+
+## 29. Drag-and-drop upload (v3.0.0)
+
+Uploading already had four doors (§17) — all of them a picker or a menu. This adds the obvious
+fifth: drag a file off the desktop and drop it onto the window, and it uploads into the files
+pane's current directory. One file this iteration; folders and multi-file drops are deliberately
+out of scope (there is a menu **Upload folder…** for a whole tree, §17).
+
+### One direction only, on purpose
+
+The gesture is **host → pane** only. iced (via winit) can *receive* an OS file drop — the
+`window::Event::FileHovered` / `FileDropped` / `FilesHoveredLeft` events — but it has **no API to
+originate** one, so a remote file cannot be dragged *out* onto the desktop. That half stays the
+right-click **Download…** it already was (§19). Building a drag-*source* would mean native Win32
+OLE (`IDataObject` + `DoDragDrop` with delayed rendering, WinSCP-style): Windows-only, unsafe, and
+against the portable + learn-in-iced grain. Not worth it for one gesture with a working
+menu equivalent.
+
+### The flow
+
+`file_drop_events()` is a second `event::listen_with` subscription beside `focus_events`, filtering
+the window-event stream down to the three drag events. It is global (like focus and resize), so
+`App` routes the resulting messages to the active tab:
+
+- `FileHovered` → `Message::FileHovered` → light the pane's **drop ring** (a green border, distinct
+  from the blue focus ring), but only with a live session — a hover over a home tab lights nothing.
+- `FilesHoveredLeft` → `Message::FileDropLeft` → put the ring out.
+- `FileDropped(path)` → `Message::FileDropped` → `Tab::on_file_dropped`.
+
+The drop events carry **no pointer position** (iced does not report one), so a drop cannot be aimed
+at a widget — but it does not need to be: every drop targets the pane's own directory by definition,
+which is the whole contract. So position is irrelevant and a drop anywhere on the window uploads
+into the pane's folder.
+
+`on_file_dropped` reuses the entire §17 upload pipeline. It seeds a one-file batch
+(`upload_files` / `upload_dir` = the pane's directory) and calls `on_upload_confirmed` — the same
+entry point the destination-confirm dialog calls — so the destination is **pre-scanned** and, on a
+name already taken, the **same Overwrite / Keep both / Skip / Cancel dialog** opens (reused, not a
+new one). There is no destination-confirm step: the drop already said where.
+
+**Every upload now re-lists its destination.** When a batch (or a folder-tree upload) lands, the
+completion calls `refresh_remote_dir(upload_dir)` — the same helper a create or delete uses — so if
+the files pane (or the tree) is showing the folder the file went into, it re-lists in place and the
+new file appears without a manual Refresh. It is a no-op when the pane is elsewhere, so an upload to
+the shell's cwd while the pane is pointed at another folder costs no round trip. This fixes the
+drag-drop's most confusing gap: a file you drop onto the pane you are looking at now shows up in it.
+The tree-upload flow keeps no queue, so it stashes its destination in `upload_dir` on start for the
+same completion to read.
+
+### The decision is pure
+
+The guard logic is pulled into `drop_outcome(connected, busy, is_dir, pane_dir) -> DropOutcome`,
+free of `self` so it is unit-tested like `plan_uploads` and `band_hits`. The order is deliberate:
+
+- **no session** outranks everything — a folder dropped onto a home tab is a silent `Ignore`, not a
+  "folders aren't supported" notice about something that could never have uploaded;
+- a **busy** transfer (or a batch mid-setup — `upload_files` still non-empty catches the *second*
+  file of a multi-file drop, since each file arrives as its own event) is declined, one flow at a
+  time behind the single progress bar;
+- a **folder** is declined this iteration;
+- a plain file with a **real pane directory** becomes an `Upload`; without one (nothing listed yet)
+  it is `NoDir`, and the user is told to open a folder rather than the file landing on a guess.
+
+### What is deliberately NOT here
+
+- **No drag-out** (pane → desktop): iced cannot originate an OS drag; see above.
+- **No folders, no multi-file** drop yet — single files only this iteration.
+- **No positional targeting**: iced's drop events carry no coordinates, and the pane's folder is the
+  only meaningful destination anyway, so a drop lands there wherever on the window it is released.
+- `ponytail:` the drop ring lights on *any* hover over the window while connected, since the event
+  has no position to test against the pane's bounds. It reads as "a file here will go to the pane",
+  which is exactly true — but a positional highlight would need iced to report the pointer during a
+  drag, which it does not.

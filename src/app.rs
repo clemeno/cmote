@@ -372,6 +372,7 @@ impl App {
 		// Window size and focus are global — the active tab is the one that reacts to them (§10, §23).
 		subs.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
 		subs.push(focus_events());
+		subs.push(file_drop_events());
 
 		let active = self.active();
 		if active.snackbar.is_some() {
@@ -594,6 +595,10 @@ pub struct Tab {
 	/// (§17, §19). `ponytail:` no timed fade — that would need a timer subscription for a
 	/// line of text.
 	transfer_notice: Option<String>,
+	/// Whether a file from the OS is being dragged over the window right now (§29). Lights the
+	/// files pane as the drop target while true; set by `FileHovered`, cleared when the drag leaves
+	/// or drops. Purely a visual cue — the drop itself reads the pane's directory, not this flag.
+	drop_hover: bool,
 	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
 	/// width, expansion state and selection; `app` only relays its events and turns the
 	/// paths it asks for into `SshCommand::ListDir`.
@@ -851,6 +856,16 @@ pub enum Message {
 	/// The OS window gained (`true`) or lost (`false`) focus — reported to the remote as
 	/// `CSI I` / `CSI O` if it enabled focus reporting (§23).
 	WindowFocus(bool),
+	/// A file is being dragged over the window from the OS (§29): light the files pane as the
+	/// drop target. iced reports the hover with no pointer position, so this carries none — every
+	/// drop lands in the pane's own directory, so the fact of a hover is all that matters.
+	FileHovered,
+	/// The OS drag left the window without dropping (§29): put the pane's drop highlight out.
+	FileDropLeft,
+	/// A file was dropped onto the window from the OS (§29): upload it into the files pane's
+	/// current directory. One file this iteration — a folder, or a drop with no session or no
+	/// directory to land in, is declined with a notice.
+	FileDropped(PathBuf),
 	/// The user clicked Disconnect in the terminal status bar — ask to confirm (§10).
 	DisconnectPressed,
 	/// The user confirmed Disconnect in the modal — tear the session down.
@@ -1139,6 +1154,12 @@ impl Tab {
 			Message::Key(event) => return self.on_key(event),
 			Message::WindowResized(size) => self.on_window_resized(size),
 			Message::WindowFocus(focused) => self.on_window_focus(focused),
+			// OS file drops (§29): a drag over the window lights the pane as the drop target, and a
+			// drop uploads the file into it. Only a live session can be a target, so a hover with no
+			// shell open lights nothing.
+			Message::FileHovered => self.drop_hover = self.terminal.is_some(),
+			Message::FileDropLeft => self.drop_hover = false,
+			Message::FileDropped(path) => return self.on_file_dropped(path),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
 			Message::DisconnectCancelled => self.confirm_disconnect = false,
@@ -1936,7 +1957,12 @@ impl Tab {
 					} else {
 						format!("Uploaded to {path}")
 					});
+					// Show what just landed: if the pane (or the tree) is on the folder we uploaded
+					// into, re-list it so the new file — or folder — appears without a manual Refresh
+					// (§29). Captured before `finish_batch`, which clears `upload_dir`.
+					let dir = self.upload_dir.clone();
 					self.finish_batch();
+					self.refresh_remote_dir(&dir);
 				}
 			}
 			SshEvent::UploadFailed(message) => {
@@ -3143,6 +3169,8 @@ impl Tab {
 		self.upload_overwrite = false;
 		self.upload_clash = None;
 		self.transfer_notice = None;
+		// A drag that was mid-hover when the session went is over with it (§29).
+		self.drop_hover = false;
 		// A queued batch belongs to the session that asked for it (§17, §21).
 		self.downloads.clear();
 		self.downloaded = 0;
@@ -3341,6 +3369,54 @@ impl Tab {
 		self.upload_dir.clear();
 		if matches!(self.transfer, Some(TransferState::ConfirmPath)) {
 			self.transfer = None;
+		}
+	}
+
+	/// A local file was dropped onto the window from the OS (§29). Send it into the files pane's
+	/// current directory, reusing the whole upload pipeline — the destination pre-scan and, on a
+	/// name already taken, the same Overwrite / Keep both / Skip / Cancel dialog a menu upload
+	/// opens (§17). One file this iteration: a folder, a drop with no session, or one with no pane
+	/// directory to land in is declined rather than guessed at. The drop already says where the
+	/// bytes go — the pane's own folder — so there is no destination confirmation, unlike the menu
+	/// upload; it goes straight to the pre-scan.
+	fn on_file_dropped(&mut self, local: PathBuf) -> iced::Task<Message> {
+		// Whatever we decide, the drag is over: the target highlight goes out with it.
+		self.drop_hover = false;
+
+		// A batch already set up or running would fight over the one progress bar. `upload_files`
+		// being non-empty catches a second file of a multi-file drop — each file arrives as its
+		// own event — and a menu upload mid-setup alike: one flow at a time (§17).
+		let busy =
+			self.transfer.is_some() || !self.uploads.is_empty() || !self.upload_files.is_empty();
+		match drop_outcome(
+			self.terminal.is_some(),
+			busy,
+			local.is_dir(),
+			self.files.path(),
+		) {
+			// No session (or not the terminal screen): nowhere to send, so say nothing.
+			DropOutcome::Ignore => iced::Task::none(),
+			DropOutcome::Busy => {
+				self.transfer_notice = Some("A transfer is already running.".to_owned());
+				iced::Task::none()
+			}
+			DropOutcome::Folder => {
+				self.transfer_notice =
+					Some("Drop a single file — folder drops aren't supported yet.".to_owned());
+				iced::Task::none()
+			}
+			DropOutcome::NoDir => {
+				self.transfer_notice = Some("Open a folder in the files pane first.".to_owned());
+				iced::Task::none()
+			}
+			// Seed the one-file batch and run the ordinary confirmed-upload path: it pre-scans the
+			// destination, then either sends or opens the collision dialog (§17).
+			DropOutcome::Upload(dir) => {
+				self.upload_files = vec![local];
+				self.upload_dir = dir;
+				self.transfer_notice = None;
+				self.on_upload_confirmed()
+			}
 		}
 	}
 
@@ -4004,8 +4080,15 @@ impl Tab {
 			self.transfer_notice = Some("A transfer is already running.".to_owned());
 			return;
 		}
-		if self.send_command(SshCommand::UploadTree { local, remote: dir }) {
+		if self.send_command(SshCommand::UploadTree {
+			local,
+			remote: dir.clone(),
+		}) {
 			self.transfer_notice = None;
+			// Remembered so completion re-lists this folder if the pane is on it (§29) — the same
+			// refresh a single-file upload gets. The tree flow keeps no queue, so this is the only
+			// reader of `upload_dir` for it, and `finish_batch` clears it at the end.
+			self.upload_dir = dir;
 			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
 		}
 	}
@@ -4225,6 +4308,7 @@ impl Tab {
 							files: &self.files,
 							focus: self.focus,
 							width: self.window_size.width,
+							drop_hover: self.drop_hover,
 						},
 					);
 					// The copy toast floats over the whole terminal screen as the top layer
@@ -4284,6 +4368,23 @@ fn focus_events() -> iced::Subscription<Message> {
 	iced::event::listen_with(|event, _status, _window| match event {
 		iced::Event::Window(iced::window::Event::Focused) => Some(Message::WindowFocus(true)),
 		iced::Event::Window(iced::window::Event::Unfocused) => Some(Message::WindowFocus(false)),
+		_ => None,
+	})
+}
+
+/// OS file-drop events, as upload triggers (§29). iced surfaces a drag from the desktop as window
+/// events with NO pointer position, so a drop cannot be aimed at a widget — but the feature aims
+/// every drop at the files pane's own directory anyway, so the fact of the drop is all it needs.
+/// `FileHovered` lights the pane as the drop target, `FilesHoveredLeft` puts it out again, and
+/// `FileDropped` carries the local path to upload. Every other event is dropped here, so the shell
+/// is not woken on the rest of the stream — the same discipline `focus_events` keeps.
+fn file_drop_events() -> iced::Subscription<Message> {
+	iced::event::listen_with(|event, _status, _window| match event {
+		iced::Event::Window(iced::window::Event::FileHovered(_)) => Some(Message::FileHovered),
+		iced::Event::Window(iced::window::Event::FilesHoveredLeft) => Some(Message::FileDropLeft),
+		iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+			Some(Message::FileDropped(path))
+		}
 		_ => None,
 	})
 }
@@ -4482,6 +4583,44 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 		None
 	} else {
 		Some(secret.clone())
+	}
+}
+
+/// What a file dropped onto the window should do (§29). Split out of `on_file_dropped` so the
+/// decision — is there a session, is a transfer busy, is it a folder, is there a directory to
+/// land in — is pure and testable, the way `plan_uploads` and `band_hits` are.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DropOutcome {
+	/// No live session (or not on the terminal): ignore the drop silently — with nowhere to send,
+	/// there is nothing to tell the user.
+	Ignore,
+	/// A transfer is already running or a batch is being set up: decline, one flow at a time.
+	Busy,
+	/// A folder was dropped; this iteration takes single files only.
+	Folder,
+	/// The files pane has no directory yet, so there is nowhere to drop into.
+	NoDir,
+	/// Upload the dropped file into this remote directory — the pane's own.
+	Upload(String),
+}
+
+/// Decide a dropped file's fate from the state it depends on (§29), free of `self` so it is
+/// tested on its own. The order is deliberate: no session outranks everything (a folder dropped
+/// with nowhere to go still reads `Ignore`), then a busy transfer, then the single-file rule, and
+/// only a plain file with a real destination becomes an `Upload`.
+fn drop_outcome(connected: bool, busy: bool, is_dir: bool, pane_dir: Option<&str>) -> DropOutcome {
+	if !connected {
+		return DropOutcome::Ignore;
+	}
+	if busy {
+		return DropOutcome::Busy;
+	}
+	if is_dir {
+		return DropOutcome::Folder;
+	}
+	match pane_dir {
+		Some(dir) => DropOutcome::Upload(dir.to_owned()),
+		None => DropOutcome::NoDir,
 	}
 }
 
@@ -5037,6 +5176,54 @@ mod tests {
 				),
 			]
 		);
+	}
+
+	#[test]
+	fn a_dropped_file_uploads_into_the_pane_directory() {
+		// A live session, nothing transferring, a plain file, and the pane showing a folder: the
+		// drop uploads into that folder.
+		let outcome = drop_outcome(true, false, false, Some("/home/user"));
+		assert_eq!(outcome, DropOutcome::Upload("/home/user".to_owned()));
+	}
+
+	#[test]
+	fn a_drop_with_no_session_is_ignored_even_when_it_is_a_folder() {
+		// No session outranks every other rule: with nowhere to send, a folder drop is silent, not
+		// a "folders aren't supported" notice about something that could never have happened.
+		assert_eq!(
+			drop_outcome(false, false, true, Some("/home/user")),
+			DropOutcome::Ignore
+		);
+	}
+
+	#[test]
+	fn a_drop_while_busy_is_declined_before_the_single_file_rule() {
+		// A transfer in flight (or a batch being set up) declines the drop whatever it is — the one
+		// progress bar cannot serve two, so the busy check comes before the folder check.
+		assert_eq!(
+			drop_outcome(true, true, false, Some("/home/user")),
+			DropOutcome::Busy
+		);
+		assert_eq!(
+			drop_outcome(true, true, true, Some("/home/user")),
+			DropOutcome::Busy
+		);
+	}
+
+	#[test]
+	fn a_dropped_folder_is_declined_this_iteration() {
+		// A live session, not busy, but the drop is a directory: single files only for now.
+		assert_eq!(
+			drop_outcome(true, false, true, Some("/home/user")),
+			DropOutcome::Folder
+		);
+	}
+
+	#[test]
+	fn a_drop_with_no_pane_directory_has_nowhere_to_land() {
+		// Connected and idle, a plain file, but the pane has listed nothing yet: there is no folder
+		// to drop into, so the user is told to open one rather than the file landing on a guess.
+		assert_eq!(drop_outcome(true, false, false, None), DropOutcome::NoDir);
 	}
 
 	// A bare app with one home tab and empty shared state, so the tab-strip bookkeeping (§26) is

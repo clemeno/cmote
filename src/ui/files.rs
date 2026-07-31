@@ -154,6 +154,11 @@ const AUDIO_COLOR: Color = Color::from_rgb8(0xe0, 0x98, 0xb0);
 const VIDEO_COLOR: Color = Color::from_rgb8(0xd8, 0x98, 0x78);
 const PLAIN_COLOR: Color = Color::from_rgb8(0xa8, 0xa8, 0xa8);
 
+/// The ring drawn round the pane while a file from the OS is being dragged over the window (§29):
+/// a green that reads as "drop here", deliberately unlike the blue focus ring so the two states
+/// never blur into one.
+const DROP_TARGET_FG: Color = Color::from_rgb8(0x5a, 0xc0, 0x7a);
+
 /// The files pane: a header (the directory, the entry count, the shared `.*` toggle), the
 /// icon grid, and — when something went wrong — a notice line under it. Fixed to the
 /// model's current height so `grid_size` can subtract exactly that (§19).
@@ -166,8 +171,15 @@ const PLAIN_COLOR: Color = Color::from_rgb8(0xa8, 0xa8, 0xa8);
 /// `width` is the window's, which is also the pane's: the grid wraps at it, so it is what
 /// says how many columns there are and therefore where the selected cell — and the
 /// details popup beside it — sit (§20). `focused` draws the ring that says the keyboard
-/// is here.
-pub fn panel(files: &Files, show_hidden: bool, width: f32, focused: bool) -> Element<'_, Message> {
+/// is here; `drop_target` draws the green ring that says a dragged-in file will land in this
+/// folder (§29), and it wins over the focus ring while a drag is in progress.
+pub fn panel(
+	files: &Files,
+	show_hidden: bool,
+	width: f32,
+	focused: bool,
+	drop_target: bool,
+) -> Element<'_, Message> {
 	let mut content =
 		column![header(files, show_hidden, width), grid(files, show_hidden)].spacing(0);
 	if let Some(notice) = files.notice() {
@@ -195,7 +207,13 @@ pub fn panel(files: &Files, show_hidden: bool, width: f32, focused: bool) -> Ele
 			.height(Length::Fixed(files.height()))
 			.style(move |_theme| container::Style {
 				background: Some(PANEL_BG.into()),
-				border: focus_border(focused),
+				// A drag in progress paints the drop ring over the focus ring: while one is being
+				// dragged in, where it will land matters more than which panel holds the keyboard.
+				border: if drop_target {
+					drop_border()
+				} else {
+					focus_border(focused)
+				},
 				..container::Style::default()
 			}),
 	)
@@ -208,6 +226,17 @@ pub fn panel(files: &Files, show_hidden: bool, width: f32, focused: bool) -> Ele
 	// `mouse_area` catches a right-press over it first, so this only fires off the cells.
 	.on_right_press(Message::Files(FilesMessage::PanelRightPressed))
 	.into()
+}
+
+/// The border the pane wears while a file is being dragged over the window (§29): a green ring,
+/// a touch thicker than the focus ring so "drop here" reads at a glance. Its own function rather
+/// than a const because `iced::Border`'s radius is not const-constructible.
+fn drop_border() -> iced::Border {
+	iced::Border {
+		width: 2.0,
+		radius: 0.0.into(),
+		color: DROP_TARGET_FG,
+	}
 }
 
 /// The rubber band itself (§21): a translucent rectangle over the grid, clipped to the

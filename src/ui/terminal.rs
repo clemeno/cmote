@@ -117,6 +117,9 @@ pub struct Panels<'a> {
 	/// theirs, and the files pane places its details popup from the window's width.
 	pub focus: crate::app::Focus,
 	pub width: f32,
+	/// Whether a file from the OS is being dragged over the window (§29): lights the files pane
+	/// as the drop target, so the user sees where a release will send it.
+	pub drop_hover: bool,
 }
 
 /// What every modal on this screen needs (§10): whether the Disconnect confirmation is
@@ -167,6 +170,7 @@ pub fn view<'a>(
 		files,
 		focus,
 		width,
+		drop_hover,
 	} = panels;
 	let Modals {
 		confirm_disconnect,
@@ -244,6 +248,7 @@ pub fn view<'a>(
 				explorer.show_hidden(),
 				width,
 				focus == crate::app::Focus::Files,
+				drop_hover,
 			));
 	}
 	let base: Element<'a, Message> = stacked.width(Length::Fill).height(Length::Fill).into();
