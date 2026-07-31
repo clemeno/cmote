@@ -811,9 +811,11 @@ should be visible on another tab's home list (the target store is shared).
 window, **Quit** exits. With a **live** session, the dialog says how many will disconnect; on Quit
 the shell should be torn down cleanly (`who` / the server's log shows a normal logout, not a reset)
 before the window closes. Now the title-bar **×**: it too asks **Quit cmote?** — even with no live
-session — and on confirm disconnects everything before exiting. On a **live** shell, **Ctrl+D**
-should reach the remote as EOF (it logs you out, landing back on the home screen), *not* close the
-tab; a second **Ctrl+D** there then closes it.
+session — and on confirm disconnects everything before exiting. While the **Quit cmote?** card is up,
+**drag it by its header** — like every other dialog it moves and stays where you drop it (clamped so
+the header never leaves the window); the same works on the per-tab **live-shell close** card. On a
+**live** shell, **Ctrl+D** should reach the remote as EOF (it logs you out, landing back on the home
+screen), *not* close the tab; a second **Ctrl+D** there then closes it.
 
 **17. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
 forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the

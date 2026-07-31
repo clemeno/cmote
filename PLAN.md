@@ -2422,6 +2422,16 @@ quit will disconnect. Esc / Cancel backs out; Enter / **Quit** accepts. While it
 app-wide: `App::update` intercepts every keystroke (`quit_key_intercept`) so none reaches the shell
 underneath — Esc and Enter drive the dialog, everything else is swallowed.
 
+Like every other dialog (§10), both overlay cards — this quit card and the per-tab close confirmation
+(§26) — are **draggable by their header**. But because they float over the *whole* window rather than
+one tab, their drag cannot live on any single `Tab`; it lives on `App` (`overlay_pos` /
+`overlay_dragging` / `overlay_drag_last`, seeded centred on open by `seed_overlay`). While an overlay is
+up (`overlay_open`), `App::update` steers the shared `DialogGrabbed` / `DialogDragged` / `DialogReleased`
+to itself (`on_overlay_dragged`, clamped by `clamp_overlay_pos` against the full window height, strip
+included) instead of delegating them to the active tab, which otherwise drives its own dialogs' drag.
+Until this, the two overlay cards were the only dialogs pinned centred every frame — a stray exception
+to §10 that a drag now closes.
+
 ### Draining, so nothing is cut mid-flight
 
 The SSH workers each run on their own tokio runtime (§4), off the GUI thread. `iced::exit()` ends the

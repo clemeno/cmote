@@ -144,6 +144,14 @@ struct App {
 	/// dialog is up; `Draining` once the user accepts, holding the sessions whose clean disconnect
 	/// is still outstanding. Reached from the OS window's × or from closing the last tab.
 	quit: Option<QuitPhase>,
+	/// The drag state of the App-level overlay card — the live-tab close confirmation (§26) and the
+	/// quit dialog (§30). Unlike a tab's own dialogs, these float over the WHOLE window (the strip
+	/// included), so their drag cannot live on any one tab; it lives here. `overlay_pos` is the
+	/// card's top-left, seeded to centre when the overlay opens; `overlay_dragging` /
+	/// `overlay_drag_last` track a header drag in progress, exactly as a tab's `dialog_*` do (§10).
+	overlay_pos: iced::Point,
+	overlay_dragging: bool,
+	overlay_drag_last: Option<iced::Point>,
 }
 
 /// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
@@ -177,6 +185,10 @@ impl App {
 			vault,
 			pending_close: None,
 			quit: None,
+			// Re-seeded to centre each time an overlay opens; the origin is only a placeholder.
+			overlay_pos: iced::Point::ORIGIN,
+			overlay_dragging: false,
+			overlay_drag_last: None,
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
@@ -236,6 +248,25 @@ impl App {
 			Message::QuitConfirmed => self.quit_confirmed(),
 			Message::QuitCancelled => self.quit_cancelled(),
 			Message::QuitTick => self.quit_tick(),
+			// The overlay dialogs (a live tab's close confirmation, §26; the quit card, §30) float
+			// over the WHOLE window, so their header drag is the App's to track — the very same
+			// DialogGrabbed / DialogDragged / DialogReleased the tab dialogs use, but caught here so
+			// the floating card moves, not the hidden tab dialog beneath it. The guard means that
+			// when NO overlay is up these fall through to the tab, which drives its own dialogs.
+			Message::DialogGrabbed if self.overlay_open() => {
+				self.overlay_dragging = true;
+				self.overlay_drag_last = None;
+				iced::Task::none()
+			}
+			Message::DialogDragged(pointer) if self.overlay_open() => {
+				self.on_overlay_dragged(pointer);
+				iced::Task::none()
+			}
+			Message::DialogReleased if self.overlay_open() => {
+				self.overlay_dragging = false;
+				self.overlay_drag_last = None;
+				iced::Task::none()
+			}
 			// A resize is global to the OS window; hand the active tab the region BELOW the strip,
 			// so its grid fits the space it actually has rather than overrunning it by a row (§26).
 			Message::WindowResized(size) => {
@@ -243,7 +274,13 @@ impl App {
 					width: size.width,
 					height: (size.height - ui::tabs::STRIP_HEIGHT).max(0.0),
 				};
-				self.active_mut().update(Message::WindowResized(inner))
+				let task = self.active_mut().update(Message::WindowResized(inner));
+				// A card dragged before the window shrank could fall off-screen; clamp it back into
+				// the new bounds so its header stays reachable (§26). Harmless when none is open.
+				if self.overlay_open() {
+					self.overlay_pos = self.clamp_overlay_pos(self.overlay_pos);
+				}
+				task
 			}
 			// Everything else is for the tab on screen.
 			other => self.active_mut().update(other),
@@ -306,6 +343,7 @@ impl App {
 		}
 		if self.tabs[index].is_live() {
 			self.pending_close = Some(id);
+			self.seed_overlay();
 			if index != self.active {
 				return self.select_tab(index);
 			}
@@ -323,6 +361,7 @@ impl App {
 		if self.quit.is_none() {
 			self.pending_close = None;
 			self.quit = Some(QuitPhase::Confirming);
+			self.seed_overlay();
 		}
 		iced::Task::none()
 	}
@@ -452,6 +491,47 @@ impl App {
 		)
 	}
 
+	/// True while an App-level overlay card is on screen (§26, §30): a live tab's close
+	/// confirmation or the quit dialog. Both float over the whole window and share one drag, so
+	/// the header-drag messages are steered here (rather than to the active tab) while it holds.
+	fn overlay_open(&self) -> bool {
+		self.quit.is_some() || self.pending_close.is_some()
+	}
+
+	/// Centre the overlay card and clear any leftover drag as it opens (§26, §30), so a position
+	/// dragged into during a previous overlay never carries across to the next — the App-level twin
+	/// of a tab's `set_dialog_body` reset.
+	fn seed_overlay(&mut self) {
+		self.overlay_pos = self.close_dialog_pos();
+		self.overlay_dragging = false;
+		self.overlay_drag_last = None;
+	}
+
+	/// Clamp the overlay card's top-left so it stays reachable (§26). Mirrors a tab's
+	/// `clamp_dialog_pos`, but the height baseline includes the strip, since the overlay floats
+	/// over the whole window: horizontal is exact against the fixed width, vertical keeps at least
+	/// the header (`DIALOG_DRAG_MIN_VISIBLE`) on screen so the card can be dragged near the bottom.
+	fn clamp_overlay_pos(&self, pos: iced::Point) -> iced::Point {
+		let size = self.active().window_size;
+		let full_height = size.height + ui::tabs::STRIP_HEIGHT;
+		let max_x = (size.width - ui::dialog::DIALOG_WIDTH).max(0.0);
+		let max_y = (full_height - ui::dialog::DIALOG_DRAG_MIN_VISIBLE).max(0.0);
+		iced::Point::new(pos.x.clamp(0.0, max_x), pos.y.clamp(0.0, max_y))
+	}
+
+	/// Track the overlay card under a header drag (§26), the App-level twin of a tab's
+	/// `on_dialog_dragged`: the first move of a drag only records the anchor, later moves apply the
+	/// pointer delta so the card follows without jumping, then clamp it back into the window.
+	fn on_overlay_dragged(&mut self, pointer: iced::Point) {
+		if !self.overlay_dragging {
+			return;
+		}
+		if let Some(last) = self.overlay_drag_last {
+			self.overlay_pos = self.clamp_overlay_pos(self.overlay_pos + (pointer - last));
+		}
+		self.overlay_drag_last = Some(pointer);
+	}
+
 	/// The window title, from the active tab (its endpoint and shell directory, §17).
 	fn title(&self) -> String {
 		self.active().title()
@@ -485,10 +565,12 @@ impl App {
 			return body.into();
 		}
 
-		// A live tab's close waits on this confirmation, floated over the whole window (§26).
+		// A live tab's close waits on this confirmation, floated over the whole window (§26). Its
+		// card is draggable by the header, so it reads its position from the App-level drag state
+		// (seeded to centre on open) rather than being pinned centred every frame.
 		let drag = ui::dialog::Drag {
-			pos: self.close_dialog_pos(),
-			dragging: false,
+			pos: self.overlay_pos,
+			dragging: self.overlay_dragging,
 		};
 		let message =
 			text("This tab has a live session. Closing it will disconnect the shell.").size(14);
@@ -522,9 +604,11 @@ impl App {
 		body: Element<'a, Message>,
 		quit: &QuitPhase,
 	) -> Element<'a, Message> {
+		// The quit card is draggable too (§30): its position and drag come from the shared
+		// App-level overlay state, seeded to centre when the quit flow opened.
 		let drag = ui::dialog::Drag {
-			pos: self.close_dialog_pos(),
-			dragging: false,
+			pos: self.overlay_pos,
+			dragging: self.overlay_dragging,
 		};
 		let (heading, detail, footer): (&str, String, Vec<Element<'a, Message>>) = match quit {
 			QuitPhase::Confirming => {
@@ -5493,6 +5577,9 @@ mod tests {
 			vault,
 			pending_close: None,
 			quit: None,
+			overlay_pos: iced::Point::ORIGIN,
+			overlay_dragging: false,
+			overlay_drag_last: None,
 		}
 	}
 
@@ -5645,6 +5732,71 @@ mod tests {
 			!matches!(app.quit, Some(QuitPhase::Draining { .. })),
 			"no live session means no drain phase"
 		);
+	}
+
+	#[test]
+	fn the_overlay_card_opens_centred_and_at_rest() {
+		let mut app = tab_app();
+		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		let _ = app.request_quit();
+		// The quit / close card shares one draggable position; on open it sits centred and is not
+		// mid-drag, so a spot dragged into during a previous overlay never carries across (§26, §30).
+		assert_eq!(app.overlay_pos, app.close_dialog_pos());
+		assert!(!app.overlay_dragging);
+		assert!(app.overlay_drag_last.is_none());
+	}
+
+	#[test]
+	fn dragging_the_overlay_card_follows_the_pointer() {
+		let mut app = tab_app();
+		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		let _ = app.request_quit();
+		let start = app.overlay_pos;
+		// Grab, then the first move only anchors (no jump), and the second applies its delta — the
+		// header-drag messages the dialog emits are steered to the App while an overlay is up (§26).
+		let _ = app.update(Message::DialogGrabbed);
+		assert!(app.overlay_dragging);
+		let _ = app.update(Message::DialogDragged(iced::Point::new(500.0, 500.0)));
+		assert_eq!(
+			app.overlay_pos, start,
+			"the first move only records the anchor"
+		);
+		let _ = app.update(Message::DialogDragged(iced::Point::new(520.0, 540.0)));
+		assert_eq!(
+			app.overlay_pos,
+			iced::Point::new(start.x + 20.0, start.y + 40.0),
+			"later moves shift the card by the pointer delta"
+		);
+		let _ = app.update(Message::DialogReleased);
+		assert!(!app.overlay_dragging, "releasing ends the drag");
+		assert!(app.overlay_drag_last.is_none());
+	}
+
+	#[test]
+	fn a_header_drag_goes_to_the_tab_when_no_overlay_is_up() {
+		let mut app = tab_app();
+		// With no overlay floating, the same DialogGrabbed drives the ACTIVE TAB's own dialog (§10),
+		// not the App-level card — the guard keeps the two drag states from crossing wires.
+		let _ = app.update(Message::DialogGrabbed);
+		assert!(!app.overlay_dragging, "the App-level card is untouched");
+		assert!(app.tabs[0].dialog_dragging, "the tab drives its own dialog");
+	}
+
+	#[test]
+	fn shrinking_the_window_pulls_a_dragged_overlay_back_into_reach() {
+		let mut app = tab_app();
+		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		let _ = app.request_quit();
+		// Fling the card to the far corner, then shrink the window under it: the card must not be
+		// left stranded off-screen — its header stays reachable inside the new bounds (§26).
+		app.overlay_dragging = true;
+		let _ = app.update(Message::DialogDragged(iced::Point::new(900.0, 900.0)));
+		let _ = app.update(Message::DialogDragged(iced::Point::new(4000.0, 4000.0)));
+		let _ = app.update(Message::WindowResized(iced::Size::new(500.0, 400.0)));
+		let max_x = 500.0 - ui::dialog::DIALOG_WIDTH;
+		assert!(app.overlay_pos.x <= max_x.max(0.0) + f32::EPSILON);
+		let max_y = 400.0 - ui::dialog::DIALOG_DRAG_MIN_VISIBLE;
+		assert!(app.overlay_pos.y <= max_y + f32::EPSILON);
 	}
 
 	#[test]
