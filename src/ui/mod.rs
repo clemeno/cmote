@@ -28,6 +28,12 @@ use crate::app::Message;
 /// selectable block. Public so `app` can seed it into the dialog buffer.
 pub const HOST_KEY_DIALOG_BODY: &str = "This is the first connection to this server. Verify the fingerprint below matches the server you expect before trusting it.";
 
+/// The body copy for the CHANGED host-key dialog (§8) — the loud override warning. The two
+/// fingerprints (stored vs presented, each on its own line) are appended when the dialog opens, so
+/// the whole warning is one selectable, copyable block for out-of-band comparison. Public so `app`
+/// can seed it into the dialog buffer.
+pub const HOST_KEY_CHANGED_DIALOG_BODY: &str = "WARNING: the host key for this server has CHANGED since it was last trusted. This can mean the server's key was legitimately rotated — or that the connection is being intercepted (a man-in-the-middle attack). Compare the two fingerprints below against the server you expect, out-of-band, before overriding.";
+
 /// The body copy for the passphrase dialog (§7). Public so `app` can seed it into the
 /// dialog buffer when the encrypted-key prompt opens.
 pub const PASSPHRASE_DIALOG_BODY: &str =
@@ -75,6 +81,11 @@ pub fn interactive_field_id(index: usize) -> String {
 /// auth, so it is not a credential oracle (§12) — the key is decrypted and MAC-checked
 /// on this machine, and telling the user their local passphrase was wrong is expected.
 const PASSPHRASE_ERROR: Color = Color::from_rgb8(0xb0, 0x00, 0x00);
+
+/// The colour of the changed-host-key warning line (§8). A bright red that reads clearly on the
+/// dialog's DARK card — unlike `PASSPHRASE_ERROR`, which is a muted red for the light form — so the
+/// man-in-the-middle warning stands out from the body copy it sits above.
+const WARNING_FG: Color = Color::from_rgb8(0xff, 0x5c, 0x5c);
 
 /// Shorten `text` to at most `max_chars`, dropping the MIDDLE and marking the cut with a
 /// single `…`, so both the start and the end survive rather than the tail being lost to a
@@ -134,6 +145,48 @@ pub fn host_key_view(body: &text_editor::Content, drag: dialog::Drag) -> Element
 		vec![
 			button("Reject").on_press(Message::RejectHostKey).into(),
 			button("Accept").on_press(Message::AcceptHostKey).into(),
+		],
+		drag,
+	)
+}
+
+/// The CHANGED host-key prompt (§8): the loud override dialog. A key pinned for this host no
+/// longer matches — key rotation OR a man-in-the-middle — so this is a security decision, never an
+/// auto-accept. It shows a bright warning line plus BOTH fingerprints (stored vs presented, carried
+/// in the selectable `body` for out-of-band comparison) and three deliberate choices:
+///   * **Reject** — refuse; the safe default, also on ✕ / a backdrop click.
+///   * **Trust once** — connect this session only, leaving known_hosts unchanged (warns again).
+///   * **Replace key** — pin the new key, so future connections verify against it silently.
+///
+/// `body` (`App::dialog_body`) holds the warning copy and the two fingerprints as one selectable
+/// block. There is intentionally no type-to-confirm speed bump: the warning, both fingerprints and
+/// the reject-by-default dismissal are the friction (§8).
+pub fn host_key_changed_view(
+	body: &text_editor::Content,
+	drag: dialog::Drag,
+) -> Element<'_, Message> {
+	// The warning line sits above the selectable body — the same shape as the passphrase prompt's
+	// hint — so the "possible attack" message is loud without needing a colour on the shared chrome.
+	let content = column![
+		text("⚠ Possible man-in-the-middle — override only if you expect this change.")
+			.size(14)
+			.color(WARNING_FG),
+		dialog::selectable_body(body),
+	]
+	.spacing(12);
+
+	dialog::dialog(
+		"Host key has CHANGED".to_owned(),
+		Message::RejectHostKey,
+		content.into(),
+		vec![
+			button("Reject").on_press(Message::RejectHostKey).into(),
+			button("Trust once")
+				.on_press(Message::TrustHostKeyOnce)
+				.into(),
+			button("Replace key")
+				.on_press(Message::ReplaceHostKey)
+				.into(),
 		],
 		drag,
 	)

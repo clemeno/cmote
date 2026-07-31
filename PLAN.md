@@ -66,7 +66,7 @@ This document is the reference to build against.
 | Async runtime | **tokio** (multi-thread) on a background thread; bridged to the GUI by channels |
 | Terminal | **Full VT emulator** — `alacritty_terminal` maintains the screen grid and answers the host's status/identity queries itself (§9, §23); the grid is drawn by one custom iced widget, cell-exact (§9). *(v3.0 replaced the original `vt100`, whose small subset was the compatibility ceiling — §23.)* |
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
-| Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; mismatch = hard stop |
+| Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; a mismatch opens a loud override dialog — reject / trust once / replace — never auto-trusted (§8, §28) |
 | Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
 | Auth order | The chosen method first (`publickey` / `password` / `keyboard-interactive` / `agent`), then chain into `keyboard-interactive` while the server still offers it — 2FA / OTP and challenge-response (§7); driven by what the server accepts |
 | File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
@@ -242,7 +242,7 @@ cmote/
     │   ├── browse.rs      list + rename + create + delete remote entries over sftp, falling back to `ls`/`mv`/`mkdir`/`rm -rf` (§18, §19)
     │   ├── download.rs    file + recursive-folder download over an sftp channel: stream, progress, per-file collisions (§19)
     │   ├── forward.rs     run port forwards: local/dynamic listeners → direct-tcpip, remote via tcpip_forward + Handler, SOCKS5 (§27)
-    │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn
+    │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn; a changed key's stored fingerprint + replace, for the override dialog (§8, §28)
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     │   ├── transfer.rs    the recursive transfer's shared spine: the tree plan + the per-file collision protocol (§17, §19)
     │   ├── upload.rs      file + recursive-folder upload over an sftp channel: batch pre-scan, stream, progress, per-file collisions (§17)
@@ -277,8 +277,10 @@ Ordered so cheap validation and security gates come first.
    - unknown → emit `SshEvent::HostKey(fingerprint)`; the GUI shows it and asks the
      user to accept. On accept we append to `known_hosts` and continue. **Never
      auto-accept.**
-   - known + **mismatch** → **abort** the connection, surface a loud warning (possible
-     MITM). No override in v1.
+   - known + **mismatch** → emit `SshEvent::HostKeyChanged { stored, presented }` and block on
+     the user's explicit choice: **reject** (the default), **trust once** (this session, no
+     write) or **replace** (pin the new key). A loud dialog with both fingerprints; never
+     auto-trusted (§8, §28).
 4. **Authenticate (§7)** — the chosen method first, then chain into keyboard-interactive
    as the server directs:
    - the form's choice runs first: `authenticate_publickey` (key), `authenticate_password`
@@ -355,12 +357,34 @@ The one control that stops a man-in-the-middle. Implemented in `Handler::check_s
   (SHA-256, the format users recognize) to the user and require an explicit accept
   before appending it. This is trust-on-first-use: we can't verify a key we've never
   seen, but we pin it and detect any change afterward.
-- **Mismatch**: a stored key that no longer matches → treat as hostile (key rotation
-  *or* MITM). v1 **refuses to connect** and tells the user to remove the stale entry
-  by hand if the change is legitimate. No silent override, no "connect anyway" button
-  in v1 (that button is how people get MITM'd).
-- **Why not skip it** — accepting any host key (the "just make it work" shortcut) turns
-  every connection into a spoofing target. Non-negotiable; never simplified away.
+- **Mismatch (override UI — REVISED in v3.0.0, §28)**: a stored key that no longer matches →
+  treat as hostile (key rotation *or* MITM). v1 refused outright and told the user to edit
+  `known_hosts` by hand. v3.0 keeps that suspicion but **surfaces the decision** instead of
+  dead-ending it, because the by-hand path is opaque and the common real cause (a server that
+  rotated its key) is legitimate. `check_server_key` no longer returns `Ok(false)` on a change:
+  it emits `SshEvent::HostKeyChanged { stored, presented }` and **blocks** the handshake on the
+  user's explicit choice, exactly like first contact. The dialog is deliberately loud — a red
+  "possible man-in-the-middle" line and **both** SHA-256 fingerprints (the one pinned vs the one
+  presented, each selectable for out-of-band comparison) — and offers three choices:
+  - **Reject** — refuse. The safe default: the ✕ and a backdrop click both pick it, and a GUI
+    that went away counts as reject.
+  - **Trust once** — connect this session only, leaving `known_hosts` untouched, so the same key
+    warns again next time. The safer override when the change might be transient or unverified.
+  - **Replace key** — drop the stale line and pin the presented key, so future connections verify
+    against it silently. The path for a confirmed rotation.
+
+  The friction is the warning, the two fingerprints and reject-by-default — **not** a
+  type-to-confirm speed bump, which was considered and left out as disproportionate. Crucially a
+  changed key is still **never auto-trusted**: every override is an explicit, informed click. The
+  three-way choice rides one `HostKeyChoice` enum on the existing decision one-shot; `Pin` learns
+  a first-contact key or **replaces** a changed one (`hostkey::replace` = drop the offending line
+  + `learn`), `TrustOnce` connects without writing, `Reject` refuses.
+- **Why an override at all** — refusing outright did not make anyone safer; it made the legitimate
+  case (rotation) a dead end that pushed users to disable checking entirely elsewhere. A loud,
+  fingerprint-comparing, reject-by-default dialog keeps the MITM signal while giving the honest
+  case a visible, auditable path. The line held is *no silent* override — never *no* override.
+- **Why not skip it** — accepting any host key unconditionally (the "just make it work" shortcut)
+  turns every connection into a spoofing target. Non-negotiable; never simplified away.
 
 ---
 
@@ -545,7 +569,7 @@ Turning a raw byte stream into a screen.
 A small state machine drives the single window.
 
 ```
-enum Screen { Home, Connect, Connecting, ConfirmHostKey, NeedPassphrase, Interactive, VaultUnlock, Terminal, Error }
+enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPassphrase, Interactive, VaultUnlock, Terminal, Error }
 ```
 
 - **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio for
@@ -575,6 +599,12 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, NeedPassphrase, Interac
   Accept / Reject (§8), in the shared dialog chrome floating over the dimmed connect form
   (below). Closing (✕) or a backdrop click rejects — the safe default, so dismissing never
   trusts an unverified host.
+- **Host key changed** (`Screen::HostKeyChanged`, §8, §28): the mismatch override dialog, over
+  the same dimmed form. Loud by design — a red "possible man-in-the-middle" line and **both**
+  SHA-256 fingerprints (stored vs presented, selectable for out-of-band comparison, seeded into
+  `App::dialog_body`) — with a three-button footer: **Reject** / **Trust once** / **Replace key**.
+  Closing (✕) or a backdrop click rejects, so dismissing never trusts a changed key. A changed
+  key is never auto-trusted; each override is one explicit click (§8).
 - **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
   key is encrypted (§7). A masked field with Unlock / Cancel; the field is auto-focused
   when the screen opens (a `text_input::focus` task keyed to a shared id, refocused on
@@ -2209,3 +2239,54 @@ removing drops the row and tears the tunnel down. Both persist the set to the ta
 **failure never tears the shell down** — unlike a session error, it just shows the row as failed. On
 connect the target's saved forwards are re-established automatically; on any teardown the list
 (and the worker's listeners) go with the session.
+
+---
+
+## 28. Host-key mismatch override (v3.0.0)
+
+The one host-key case v1 dead-ended is the one that matters most in practice: a key that was
+pinned but no longer matches. §8's TOFU refused it outright — `check_server_key` returned
+`Ok(false)` and told the user to edit `known_hosts` by hand. That was safe but opaque, and the
+common real cause (a server that legitimately rotated its key) had no path but a text editor. The
+danger of a "connect anyway" button is real — it is how people get MITM'd — so the fix is not to
+remove the friction but to make the decision **loud, informed and reject-by-default**.
+
+### The flow
+
+`check_server_key` no longer refuses a changed key on the spot. On `HostKeyVerdict::Changed { line }`
+it reads the fingerprint currently pinned (`hostkey::stored_fingerprint`, parsing the offending
+`known_hosts` line back to a key so the fingerprint is computed exactly as the presented key's is),
+emits `SshEvent::HostKeyChanged { stored, presented }`, and **blocks the handshake** on the user's
+choice — the same one-shot the first-contact gate uses. The GUI shows a loud dialog
+(`Screen::HostKeyChanged`, `ui::host_key_changed_view`): a red "possible man-in-the-middle" line
+above **both** SHA-256 fingerprints — what was trusted vs what the server now sends, seeded into the
+selectable `dialog_body` so either can be copied for out-of-band comparison. Three buttons:
+
+- **Reject** — refuse. The safe default: the ✕, a backdrop click, and a GUI that went away all pick
+  it.
+- **Trust once** — connect this session only, leaving `known_hosts` untouched (it warns again next
+  time). The safer override when the change is unverified or might be transient.
+- **Replace key** — drop the stale line and pin the presented key, so future connections verify
+  silently. The path for a confirmed rotation.
+
+### The plumbing
+
+One enum carries all of it: `bridge::HostKeyChoice { Reject, TrustOnce, Pin }`, sent as
+`SshCommand::HostKeyResponse(HostKeyChoice)` (it replaced the old `bool`, so first contact and the
+mismatch share one command). The Handler reads the choice against the verdict it is blocked on:
+`Pin` **learns** a first-contact key or **replaces** a changed one (`hostkey::replace` = drop the
+flagged line + `learn`), `TrustOnce` returns `Ok(true)` without writing, `Reject` returns
+`Ok(false)`. A shared `Handler::await_decision` consumes the one-shot and treats a dropped sender as
+`Reject`. `stored_fingerprint`/`replace` are line-indexed by the same 1-based number russh reports,
+locked by tests (two hosts, so the line is not trivially 1).
+
+### What is deliberately NOT here
+
+- **No type-to-confirm.** A "type the host name to proceed" speed bump was considered and left out
+  as disproportionate — the warning, the two fingerprints and reject-by-default are the friction.
+- **No auto-trust, ever.** Every override is one explicit, informed click; nothing about a changed
+  key is accepted silently. The line held is *no silent* override — never *no* override (§8).
+- `ponytail:` `stored_fingerprint` reads the *first* key blob on the flagged line (the standard
+  `host keytype base64` shape); an exotic hand-written `known_hosts` line surfaces "(could not read
+  the stored key)" rather than a wrong fingerprint, and the dialog still opens with the presented
+  key so the decision is never blocked on it.

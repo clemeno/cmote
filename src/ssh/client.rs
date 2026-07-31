@@ -25,7 +25,7 @@ use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
-use crate::bridge::{ConflictChoice, ConnectParams, SshCommand, SshEvent};
+use crate::bridge::{ConflictChoice, ConnectParams, HostKeyChoice, SshCommand, SshEvent};
 use crate::secret::Secret;
 use crate::ssh::auth;
 use crate::ssh::browse;
@@ -78,9 +78,9 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 				// session sees its command channel close and winds down.
 				session = Some(SessionLink::start(params, events.clone()));
 			}
-			SshCommand::HostKeyResponse(accept) => {
+			SshCommand::HostKeyResponse(choice) => {
 				if let Some(link) = session.as_mut() {
-					link.send_decision(accept);
+					link.send_decision(choice);
 				}
 			}
 			SshCommand::Passphrase(secret) => {
@@ -275,14 +275,14 @@ pub(crate) enum SessionMsg {
 /// and a one-shot for the host-key decision (used at most once).
 struct SessionLink {
 	to_session: mpsc::Sender<SessionMsg>,
-	decision: Option<oneshot::Sender<bool>>,
+	decision: Option<oneshot::Sender<HostKeyChoice>>,
 }
 
 impl SessionLink {
 	/// Spawn a session task for `params` and return the handle to talk to it.
 	fn start(params: ConnectParams, events: mpsc::Sender<SshEvent>) -> Self {
 		let (to_session_tx, to_session_rx) = mpsc::channel::<SessionMsg>(256);
-		let (decision_tx, decision_rx) = oneshot::channel::<bool>();
+		let (decision_tx, decision_rx) = oneshot::channel::<HostKeyChoice>();
 
 		tokio::spawn(session_task(params, events, to_session_rx, decision_rx));
 
@@ -292,11 +292,11 @@ impl SessionLink {
 		}
 	}
 
-	/// Deliver the user's host-key decision to the waiting handshake. Consumes
+	/// Deliver the user's host-key decision to the waiting handshake (§8). Consumes
 	/// the one-shot; further calls are no-ops.
-	fn send_decision(&mut self, accept: bool) {
+	fn send_decision(&mut self, choice: HostKeyChoice) {
 		if let Some(tx) = self.decision.take() {
-			let _ = tx.send(accept);
+			let _ = tx.send(choice);
 		}
 	}
 }
@@ -307,7 +307,7 @@ async fn session_task(
 	params: ConnectParams,
 	events: mpsc::Sender<SshEvent>,
 	to_session_rx: mpsc::Receiver<SessionMsg>,
-	decision_rx: oneshot::Receiver<bool>,
+	decision_rx: oneshot::Receiver<HostKeyChoice>,
 ) {
 	let _ = events.send(SshEvent::Connecting).await;
 
@@ -333,7 +333,7 @@ async fn connect_and_run(
 	params: ConnectParams,
 	events: &mpsc::Sender<SshEvent>,
 	mut to_session_rx: mpsc::Receiver<SessionMsg>,
-	decision_rx: oneshot::Receiver<bool>,
+	decision_rx: oneshot::Receiver<HostKeyChoice>,
 ) -> Result<()> {
 	let config = Arc::new(client::Config {
 		// No inactivity timeout: an interactive shell may sit idle for a long
@@ -547,7 +547,7 @@ pub(crate) struct Handler {
 	known_hosts: PathBuf,
 	events: mpsc::Sender<SshEvent>,
 	/// Consumed once, in `check_server_key`, to await the user's decision.
-	decision: Option<oneshot::Receiver<bool>>,
+	decision: Option<oneshot::Receiver<HostKeyChoice>>,
 	/// The active remote forwards, shared with the session loop (§27): the server's bound port →
 	/// the local target to dial. Read in `server_channel_open_forwarded_tcpip` when the server
 	/// opens a channel for a connection that arrived on one of those ports.
@@ -582,17 +582,50 @@ impl client::Handler for Handler {
 			// Pinned and matches: proceed silently.
 			HostKeyVerdict::Known => Ok(true),
 
-			// Pinned but different: possible MITM. Refuse, no override (§8).
-			HostKeyVerdict::Changed { .. } => {
+			// Pinned but DIFFERENT: key rotation or a man-in-the-middle. Show both fingerprints
+			// and wait for the user's explicit override — reject / trust once / replace (§8). No
+			// auto-trust: the change is a security event, so the decision is always the user's.
+			HostKeyVerdict::Changed { line } => {
+				// The fingerprint currently pinned, so the dialog can show what was trusted beside
+				// what the server now sends. A read failure is non-fatal — the dialog still opens
+				// with the presented key and a placeholder for the stored one.
+				let stored =
+					hostkey::stored_fingerprint(&self.known_hosts, line).unwrap_or_else(|error| {
+						eprintln!("failed to read stored host key: {error:#}");
+						"(could not read the stored key)".to_string()
+					});
+				let presented = hostkey::fingerprint(server_public_key);
 				let _ = self
 					.events
-					.send(SshEvent::Error(
-						"Host key has CHANGED — refusing to connect (possible attack). \
-						 Remove the stale known_hosts entry if this change is expected."
-							.to_string(),
-					))
+					.send(SshEvent::HostKeyChanged { stored, presented })
 					.await;
-				Ok(false)
+
+				match self.await_decision().await {
+					// Refuse: the safe default, and what a dropped GUI counts as.
+					HostKeyChoice::Reject => Ok(false),
+					// Trust this session only; leave known_hosts as it is, so it warns again.
+					HostKeyChoice::TrustOnce => Ok(true),
+					// Replace the stale entry so future connections verify against the new key.
+					HostKeyChoice::Pin => {
+						if let Err(error) = hostkey::replace(
+							&self.host,
+							self.port,
+							server_public_key,
+							&self.known_hosts,
+							line,
+						) {
+							eprintln!("failed to replace host key: {error:#}");
+							let _ = self
+								.events
+								.send(SshEvent::Error(
+									"Could not update the saved host key.".to_string(),
+								))
+								.await;
+							return Ok(false);
+						}
+						Ok(true)
+					}
+				}
 			}
 
 			// First contact: show the fingerprint and wait for explicit consent.
@@ -600,30 +633,30 @@ impl client::Handler for Handler {
 				let fingerprint = hostkey::fingerprint(server_public_key);
 				let _ = self.events.send(SshEvent::HostKey(fingerprint)).await;
 
-				// Block the handshake here until the GUI answers. A dropped
-				// sender (GUI gone) counts as "reject".
-				let accept = match self.decision.take() {
-					Some(rx) => rx.await.unwrap_or(false),
-					None => false,
-				};
-				if !accept {
-					return Ok(false);
+				match self.await_decision().await {
+					// Reject (the default for a dropped GUI too), or connect once without pinning.
+					HostKeyChoice::Reject => Ok(false),
+					HostKeyChoice::TrustOnce => Ok(true),
+					// Pin the accepted key so future connections are verified against it.
+					HostKeyChoice::Pin => {
+						if let Err(error) = hostkey::learn(
+							&self.host,
+							self.port,
+							server_public_key,
+							&self.known_hosts,
+						) {
+							eprintln!("failed to record host key: {error:#}");
+							let _ = self
+								.events
+								.send(SshEvent::Error(
+									"Could not save the accepted host key.".to_string(),
+								))
+								.await;
+							return Ok(false);
+						}
+						Ok(true)
+					}
 				}
-
-				// Pin the accepted key so future connections are verified.
-				if let Err(error) =
-					hostkey::learn(&self.host, self.port, server_public_key, &self.known_hosts)
-				{
-					eprintln!("failed to record host key: {error:#}");
-					let _ = self
-						.events
-						.send(SshEvent::Error(
-							"Could not save the accepted host key.".to_string(),
-						))
-						.await;
-					return Ok(false);
-				}
-				Ok(true)
 			}
 		}
 	}
@@ -644,5 +677,18 @@ impl client::Handler for Handler {
 	) -> Result<(), Self::Error> {
 		forward::accept_remote(&self.remote_forwards, channel, reply, connected_port as u16).await;
 		Ok(())
+	}
+}
+
+impl Handler {
+	/// Block the handshake on the user's host-key choice (§8), shared by the first-contact and
+	/// mismatch gates. Consumes the one-shot; a dropped sender — the GUI went away before
+	/// answering — is treated as `Reject`, the safe default. Called at most once per connection
+	/// (a handshake sees either an unknown key or a changed one, never both).
+	async fn await_decision(&mut self) -> HostKeyChoice {
+		match self.decision.take() {
+			Some(rx) => rx.await.unwrap_or(HostKeyChoice::Reject),
+			None => HostKeyChoice::Reject,
+		}
 	}
 }

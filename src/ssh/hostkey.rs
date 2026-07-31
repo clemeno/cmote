@@ -58,6 +58,64 @@ pub fn learn(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<(
 		.context("failed to record host key in known_hosts")
 }
 
+/// The SHA-256 fingerprint of the key CURRENTLY pinned for a host, read from the known_hosts line
+/// `verify` flagged as changed (§8). The mismatch dialog shows this beside the presented key's
+/// fingerprint, so the user compares what was trusted before against what the server sends now —
+/// the whole point of an override being a judgement, not a reflex. `line` is 1-indexed, exactly as
+/// `HostKeyVerdict::Changed` reports it. Computed through the same `fingerprint` as the presented
+/// key, so the two strings are directly comparable.
+pub fn stored_fingerprint(path: &Path, line: usize) -> Result<String> {
+	let text = std::fs::read_to_string(path).context("failed to read known_hosts")?;
+	let index = line
+		.checked_sub(1)
+		.context("known_hosts line is 1-indexed")?;
+	let entry = text
+		.lines()
+		.nth(index)
+		.context("known_hosts line is out of range")?;
+	// A known_hosts entry is `host[,host2…] keytype base64 [comment]`: the key blob is the third
+	// whitespace field. Parse it back to a key rather than trust the raw text, so a malformed line
+	// is an error, not a bogus fingerprint.
+	let blob = entry
+		.split_whitespace()
+		.nth(2)
+		.context("known_hosts line has no key blob")?;
+	let pubkey = russh::keys::parse_public_key_base64(blob)
+		.context("failed to parse the stored host key")?;
+	Ok(fingerprint(&pubkey))
+}
+
+/// Replace the stale key pinned for a host (§8): drop the offending known_hosts line, then pin the
+/// newly-accepted key in its place. Only ever reached after the user explicitly chose "Replace
+/// key" in the mismatch dialog — never automatically. `line` is 1-indexed, as `verify` reports.
+/// After this, future connections verify silently against the new key.
+pub fn replace(host: &str, port: u16, pubkey: &PublicKey, path: &Path, line: usize) -> Result<()> {
+	remove_line(path, line)?;
+	learn(host, port, pubkey, path)
+}
+
+/// Remove the 1-indexed `line` from a known_hosts file, rewriting the rest verbatim. The helper
+/// behind `replace`: drop the stale entry before the new key is learned. `lines()` strips the
+/// terminator, so the kept lines are re-joined with `\n` and the file is newline-ended — the
+/// OpenSSH format is one entry per line, each newline-terminated.
+fn remove_line(path: &Path, line: usize) -> Result<()> {
+	let text = std::fs::read_to_string(path).context("failed to read known_hosts")?;
+	let index = line
+		.checked_sub(1)
+		.context("known_hosts line is 1-indexed")?;
+	let kept: Vec<&str> = text
+		.lines()
+		.enumerate()
+		.filter(|(number, _)| *number != index)
+		.map(|(_, entry)| entry)
+		.collect();
+	let mut rebuilt = kept.join("\n");
+	if !rebuilt.is_empty() {
+		rebuilt.push('\n');
+	}
+	std::fs::write(path, rebuilt).context("failed to rewrite known_hosts")
+}
+
 /// Resolve the portable known_hosts path (§11): the shared data directory
 /// (`cmote-data/` beside the exe, or the per-user fallback — see `paths::data_dir`)
 /// with the `known_hosts` file name joined on.
@@ -132,6 +190,60 @@ mod tests {
 
 		// Assert
 		assert_eq!(verdict, HostKeyVerdict::Changed { line: 1 });
+	}
+
+	#[test]
+	fn stored_fingerprint_reads_the_pinned_key_at_its_line() {
+		// Arrange: two hosts, so the reported line is not trivially 1. example.com is pinned to
+		// KEY_A on line 2; the server now presents KEY_B.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("known_hosts");
+		std::fs::write(
+			&path,
+			format!("other.example ssh-ed25519 {KEY_B}\nexample.com ssh-ed25519 {KEY_A}\n"),
+		)
+		.unwrap();
+
+		// Act: the mismatch verdict names the offending line; read the fingerprint stored there.
+		let verdict = verify("example.com", 22, &key(KEY_B), &path).unwrap();
+		let HostKeyVerdict::Changed { line } = verdict else {
+			panic!("expected a changed verdict, got {verdict:?}");
+		};
+		let stored = stored_fingerprint(&path, line).unwrap();
+
+		// Assert: it is KEY_A's fingerprint (what was trusted), not KEY_B's (what was presented).
+		assert_eq!(stored, fingerprint(&key(KEY_A)));
+		assert_ne!(stored, fingerprint(&key(KEY_B)));
+	}
+
+	#[test]
+	fn replace_swaps_the_pinned_key_and_leaves_other_hosts() {
+		// Arrange: other.example on line 1, example.com pinned to KEY_A on line 2.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("known_hosts");
+		std::fs::write(
+			&path,
+			format!("other.example ssh-ed25519 {KEY_B}\nexample.com ssh-ed25519 {KEY_A}\n"),
+		)
+		.unwrap();
+		let HostKeyVerdict::Changed { line } =
+			verify("example.com", 22, &key(KEY_B), &path).unwrap()
+		else {
+			panic!("expected a changed verdict");
+		};
+
+		// Act: replace example.com's stale key with the presented one.
+		replace("example.com", 22, &key(KEY_B), &path, line).unwrap();
+
+		// Assert: example.com now verifies against KEY_B, and other.example's line is untouched.
+		assert_eq!(
+			verify("example.com", 22, &key(KEY_B), &path).unwrap(),
+			HostKeyVerdict::Known
+		);
+		assert_eq!(
+			verify("other.example", 22, &key(KEY_B), &path).unwrap(),
+			HostKeyVerdict::Known
+		);
 	}
 
 	#[test]

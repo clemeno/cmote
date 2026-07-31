@@ -65,6 +65,25 @@ pub enum AuthMethod {
 	Agent,
 }
 
+/// The user's answer to a host-key prompt (§8). A first-contact UNKNOWN key offers only
+/// `Reject` / `Pin` (accept and remember it); a CHANGED key — the mismatch dialog — offers all
+/// three, because trusting a changed key *once*, without pinning, is a distinct and safer choice
+/// when the change might be transient or you cannot verify it yet. The SSH task reads this against
+/// the verdict it is blocked on: `Pin` learns a new key or REPLACES the stale line of a changed
+/// one; `TrustOnce` connects this session without touching `known_hosts`; `Reject` refuses. The
+/// safe default — a dismissed dialog, or a GUI that went away — is always `Reject`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostKeyChoice {
+	/// Refuse the connection. The safe default: closing the dialog (✕ / backdrop) picks this.
+	Reject,
+	/// Connect this session only; leave `known_hosts` unchanged, so the same key warns again next
+	/// time. Offered for a CHANGED key when the user wants to proceed without committing trust.
+	TrustOnce,
+	/// Connect and persist the key to `known_hosts` — LEARN it (first contact) or REPLACE the
+	/// stale line (a changed key) — so future connections verify against it silently.
+	Pin,
+}
+
 /// One field of a keyboard-interactive request (§7). It mirrors russh's `Prompt` in a type
 /// the GUI owns and can move across the channel: `label` is the server's caption for the
 /// field ("Password:", "Verification code:"), and `echo` is its hint about visibility —
@@ -115,9 +134,10 @@ pub struct ConnectParams {
 pub enum SshCommand {
 	/// Open a new connection with these parameters.
 	Connect(ConnectParams),
-	/// The user's answer to an unknown-host-key prompt (§8): accept (pin it and
-	/// continue) or reject (refuse the connection). `true` = accept.
-	HostKeyResponse(bool),
+	/// The user's answer to a host-key prompt (§8): reject, trust just this session, or pin the
+	/// key. Answers both the first-contact (`HostKey`) and the mismatch (`HostKeyChanged`) prompts
+	/// — the SSH task reads the choice against whichever verdict it is waiting on (§8).
+	HostKeyResponse(HostKeyChoice),
 	/// The passphrase the user typed after a `NeedPassphrase` prompt, to decrypt
 	/// the chosen private key (§7).
 	Passphrase(Secret),
@@ -207,6 +227,12 @@ pub enum SshEvent {
 	/// The server presented an unseen host key. The GUI shows this SHA-256
 	/// fingerprint and asks the user to accept before we continue (§8).
 	HostKey(String),
+	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
+	/// man-in-the-middle. The GUI shows a loud override dialog with BOTH SHA-256 fingerprints so
+	/// the change can be judged out-of-band: `stored` is what was trusted before, `presented` is
+	/// what the server sent now. The user's choice comes back as `HostKeyResponse` (reject / trust
+	/// once / replace); dismissing rejects. A changed key is never auto-trusted.
+	HostKeyChanged { stored: String, presented: String },
 	/// The private key is encrypted and we need its passphrase (§7).
 	NeedPassphrase,
 	/// The server posed a keyboard-interactive challenge (§7): `name` and `instructions` are

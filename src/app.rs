@@ -24,7 +24,7 @@ use iced::Element;
 use iced::widget::{text, text_editor};
 use tokio::sync::mpsc;
 
-use crate::bridge::{self, SshCommand, SshEvent};
+use crate::bridge::{self, HostKeyChoice, SshCommand, SshEvent};
 use crate::explorer::{self, ExplorerMessage};
 use crate::files::{self, FilesMessage};
 use crate::link;
@@ -407,6 +407,11 @@ pub enum Screen {
 	/// fingerprint text itself lives in `App::dialog_body` (the selectable message),
 	/// seeded when this state is entered — the variant is just the marker.
 	ConfirmHostKey,
+	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
+	/// man-in-the-middle. The loud override dialog shows both fingerprints (stored vs presented,
+	/// carried in `App::dialog_body`) and offers reject / trust once / replace. Like
+	/// `ConfirmHostKey` this variant is just the marker; the message lives in the dialog body.
+	HostKeyChanged,
 	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
 	/// text the user types lives in `App::passphrase_input`.
 	NeedPassphrase,
@@ -804,8 +809,15 @@ pub enum Message {
 	/// ignored here and still reach the focused input through the widget tree.
 	FormKey(iced::keyboard::Event),
 	// --- host-key confirmation (§8) ---
+	/// Accept a first-contact (unknown) key: pin it and continue.
 	AcceptHostKey,
+	/// Reject a host-key prompt (unknown or changed): refuse the connection — the safe default,
+	/// also emitted by the dialog's ✕ and a backdrop click.
 	RejectHostKey,
+	/// Override a CHANGED key for this session only, without touching known_hosts (§8).
+	TrustHostKeyOnce,
+	/// Override a CHANGED key by replacing the stale known_hosts entry with the new one (§8).
+	ReplaceHostKey,
 	// --- key passphrase prompt (§7), shown only when the key is encrypted ---
 	/// The user edited the passphrase prompt field.
 	PassphraseChanged(String),
@@ -1105,8 +1117,10 @@ impl Tab {
 			Message::ConnectPressed => return self.on_connect_pressed(),
 			Message::BackPressed => return self.go_to_form(),
 			Message::FormKey(event) => return self.on_form_key(event),
-			Message::AcceptHostKey => self.on_host_key_decision(true),
-			Message::RejectHostKey => self.on_host_key_decision(false),
+			Message::AcceptHostKey => self.on_host_key_decision(HostKeyChoice::Pin),
+			Message::RejectHostKey => self.on_host_key_decision(HostKeyChoice::Reject),
+			Message::TrustHostKeyOnce => self.on_host_key_decision(HostKeyChoice::TrustOnce),
+			Message::ReplaceHostKey => self.on_host_key_decision(HostKeyChoice::Pin),
 			Message::PassphraseChanged(value) => self.passphrase_input = value,
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
@@ -1470,11 +1484,12 @@ impl Tab {
 		}
 	}
 
-	/// Relay the user's host-key accept/reject to the SSH task (§8). On accept we
-	/// go back to a connecting status; on reject the refused handshake will
-	/// surface its own error.
-	fn on_host_key_decision(&mut self, accept: bool) {
-		if self.send_command(SshCommand::HostKeyResponse(accept)) && accept {
+	/// Relay the user's host-key choice to the SSH task (§8): reject, trust once, or pin. Any
+	/// choice but reject means the handshake proceeds, so we go back to a connecting status; on
+	/// reject the refused handshake surfaces its own error and moves the screen.
+	fn on_host_key_decision(&mut self, choice: HostKeyChoice) {
+		let proceeding = choice != HostKeyChoice::Reject;
+		if self.send_command(SshCommand::HostKeyResponse(choice)) && proceeding {
 			self.screen = Screen::Connecting {
 				status: "authenticating…".to_string(),
 			};
@@ -1621,6 +1636,16 @@ impl Tab {
 				// selected and copied for out-of-band comparison (§8, §10).
 				self.set_dialog_body(&format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY));
 				self.screen = Screen::ConfirmHostKey;
+			}
+			SshEvent::HostKeyChanged { stored, presented } => {
+				// Seed the selectable body with the warning plus BOTH fingerprints, each labelled
+				// and on its own line, so the whole block — what was trusted vs what was sent — can
+				// be selected and copied for out-of-band comparison (§8, §10).
+				self.set_dialog_body(&format!(
+					"{}\n\nStored (trusted before):\n{stored}\n\nPresented (sent now):\n{presented}",
+					ui::HOST_KEY_CHANGED_DIALOG_BODY
+				));
+				self.screen = Screen::HostKeyChanged;
 			}
 			SshEvent::NeedPassphrase => {
 				// Start from an empty field each time we ask (including a re-ask
@@ -4097,6 +4122,12 @@ impl Tab {
 			// dismisses with the dialog's own safe action (reject / cancel / back).
 			Screen::ConfirmHostKey => self.form_with_dialog(
 				ui::host_key_view(&self.dialog_body, drag),
+				Message::RejectHostKey,
+			),
+			// The mismatch override dialog, over the same dimmed form. Dismissing rejects — the
+			// safe default — so a backdrop click never trusts a changed key (§8).
+			Screen::HostKeyChanged => self.form_with_dialog(
+				ui::host_key_changed_view(&self.dialog_body, drag),
 				Message::RejectHostKey,
 			),
 			Screen::NeedPassphrase => self.form_with_dialog(

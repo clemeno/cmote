@@ -67,8 +67,9 @@ references below (§n) point into it.
   only after a *successful* connect (a wrong password is never stored), and a forgotten master
   passphrase means the secrets are gone (no recovery, by design).
 - **Trust-on-first-use** host-key verification against a portable `known_hosts`:
-  first contact shows the fingerprint for explicit accept/reject; a later key change
-  is a hard stop, not a warning (§8).
+  first contact shows the fingerprint for explicit accept/reject; a later key **change** opens
+  a loud override dialog — both fingerprints (stored vs presented), a possible-MITM warning, and
+  reject / trust-once / replace, defaulting to reject and never auto-trusting (§8, §28).
 - A full **VT terminal** — a complete VT engine (`alacritty_terminal`) whose grid cmote
   draws with iced — that reflows to the window size, forwarding the new pty size to the
   remote (§9, §23).
@@ -538,10 +539,13 @@ ssh-keygen -t ed25519 -f ./smoke_key_enc -N "hunter2"      # encrypted
   no file to pick and no passphrase. Stop the agent (or empty it) and retry: expect a clear
   "no SSH agent found" / "no keys to offer" message, not a hang.
 
-**5. Host-key mismatch (hard stop).** Delete the server container and start a fresh
-one (new host key) on the same port, then reconnect. Expect a hard failure that names
-the changed key and does **not** offer to continue — remove the stale `known_hosts`
-line to proceed intentionally.
+**5. Host-key mismatch (override dialog).** Delete the server container and start a fresh
+one (new host key) on the same port, then reconnect. Expect the loud **Host key has CHANGED**
+dialog: a red possible-MITM line and **both** SHA-256 fingerprints (stored vs presented,
+selectable/copyable), with **Reject** / **Trust once** / **Replace key**. Closing (✕) or a
+backdrop click rejects. **Trust once** connects without touching `known_hosts` (reconnect and it
+warns again); **Replace key** pins the new key (reconnect and it is silent). A changed key is
+never trusted without an explicit click (§8, §28).
 
 **6. Selection, copy, and paste.** In the shell, run `echo hello world`, then drag
 across the output to select it — the selection should highlight and **Copy** (status
