@@ -2396,3 +2396,71 @@ free of `self` so it is unit-tested like `plan_uploads` and `band_hits`. The ord
   has no position to test against the pane's bounds. It reads as "a file here will go to the pane",
   which is exactly true — but a positional highlight would need iced to report the pointer during a
   drag, which it does not.
+
+## 30. Confirmed, clean quit (v3.0.0)
+
+Two gaps closed at once: cmote used to *never* exit by closing tabs (the last tab silently reopened a
+fresh home tab, §26), and clicking the OS window's title-bar **×** tore the process down on the spot —
+whatever sessions were live got their sockets yanked, not a clean SSH disconnect. This section makes
+leaving deliberate and tidy: closing the last tab, or the window ×, asks first, and the app exits only
+once **every remote connection has closed cleanly**.
+
+### Leaving is one path
+
+Both exit routes funnel into one `QuitPhase` state machine on `App`:
+
+- **The last tab's close** (its chip ×, or Ctrl+D on a home tab — see below). `request_close` spots
+  `tabs.len() == 1` and, rather than reopening a home tab, calls `request_quit`.
+- **The OS window ×.** `exit_on_close_request(false)` on the builder stops winit from closing the
+  window itself; the request instead arrives as a `window::close_requests()` event, mapped to
+  `Message::QuitRequested`. Per the chosen UX it **always** confirms — even with nothing live — so a
+  stray × on the title bar never drops sessions by surprise.
+
+`request_quit` puts up the **Quit cmote?** dialog (`QuitPhase::Confirming`), floated over the whole
+window, strip and all, like the per-tab close dialog it outranks. It reports how many live sessions the
+quit will disconnect. Esc / Cancel backs out; Enter / **Quit** accepts. While it is up it is modal
+app-wide: `App::update` intercepts every keystroke (`quit_key_intercept`) so none reaches the shell
+underneath — Esc and Enter drive the dialog, everything else is swallowed.
+
+### Draining, so nothing is cut mid-flight
+
+The SSH workers each run on their own tokio runtime (§4), off the GUI thread. `iced::exit()` ends the
+*process*, killing those runtimes — so exiting the instant Quit is pressed could sever a session before
+its clean teardown (`channel.eof()` → break → `SshEvent::Disconnected`, §6) has flushed. So `quit`
+does not exit immediately:
+
+- `quit_confirmed` snapshots the ids of the live tabs, persists each session (§22), sends every one a
+  `SshCommand::Disconnect`, and enters `QuitPhase::Draining { pending, since }`. With **nothing live**
+  there is nothing to wait for, so it exits at once.
+- Each session's clean shutdown ends with `SshEvent::Disconnected` (or an `Error`). `App::update`
+  already routes those to the owning tab; it now also notes them (`note_drained`), striking the id off
+  `pending`. When `pending` empties — every connection down — it returns `iced::exit()`. So the process
+  leaves only *after* the last socket has closed politely.
+- **Liveness safety net.** A wedged transport must not hold quit open for ever. While draining, the
+  frame clock (`window::frames()`, the same one the toast uses) ticks `Message::QuitTick`, which
+  compares `since.elapsed()` against `QUIT_DRAIN_TIMEOUT` (2 s) and forces the exit if a session never
+  acknowledged. It is a backstop only: a local channel EOF finishes in milliseconds, so it is never hit
+  in practice.
+
+While draining, the dialog swaps to a button-less **Quitting cmote…** card; `quit_cancelled` is inert
+once past `Confirming`, so a stray backdrop click cannot abort a teardown already under way.
+
+### Ctrl+D — only once logged off
+
+Ctrl+D closes the current tab, but **only from the home screen** (`on_home_key`) — that is, once you
+are logged off from any remote. On a live shell Ctrl+D is EOF to the remote (the way you *log out*), so
+binding it to close-tab there would steal a core terminal key; it is left to the encoder. The two read
+as one gesture: Ctrl+D at the shell logs out → lands back on the home screen → a second Ctrl+D closes
+the tab — exactly a terminal's own "Ctrl+D twice" to close a window. It routes through the same
+`TabCloseRequested`, so Ctrl+D on the *last* tab still asks to quit cmote. (**Ctrl+W** was the obvious
+alternative — the universal close-tab key, no EOF conflict — but the shell-EOF-then-close pairing was
+the chosen feel.)
+
+### What is deliberately NOT here
+
+- **No quit on a non-last tab close.** Closing a tab when others remain is unchanged (§26): an idle tab
+  goes at once, a live one asks the per-tab Disconnect confirmation. Only the *last* close is a quit.
+- **No forced kill.** Quit waits for a clean disconnect (bounded by the timeout); it never SIGKILLs a
+  session to leave faster.
+- `ponytail:` the drain waits on the **live (Terminal-screen) tabs only**. A tab still handshaking has
+  no shell to disconnect and its worker unwinds when its link drops; the timeout covers any straggler.

@@ -76,6 +76,13 @@ const MAX_PANEL_FRACTION: f32 = 0.6;
 /// register, short enough not to linger over the shell.
 const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// The safety net on a clean quit (§30): once the user confirms, cmote waits for every live
+/// session to report it has disconnected before the process exits, so no remote connection is
+/// cut mid-flight. A session that never acknowledges (a wedged transport) must not wedge quit
+/// with it, so after this long the app leaves anyway. In practice the drain finishes in
+/// milliseconds — a local channel EOF, not a network round-trip — so this bound is never hit.
+const QUIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -104,6 +111,10 @@ pub fn run() -> iced::Result {
 			),
 			..iced::window::Settings::default()
 		})
+		// Keep the OS window's title-bar × from tearing the process down on its own (§30): with
+		// this false the close request arrives as an event instead, so cmote can confirm the quit
+		// and disconnect every session cleanly before it exits, rather than dropping them abruptly.
+		.exit_on_close_request(false)
 		.subscription(App::subscription)
 		.run()
 }
@@ -129,6 +140,25 @@ struct App {
 	/// The id of a live tab whose "×" is waiting on the close confirmation (§26), or `None` when
 	/// no confirmation is up. A live session is torn down only once the user confirms.
 	pending_close: Option<u64>,
+	/// The app-wide quit flow (§30): `None` in normal use; `Confirming` while the "Quit cmote?"
+	/// dialog is up; `Draining` once the user accepts, holding the sessions whose clean disconnect
+	/// is still outstanding. Reached from the OS window's × or from closing the last tab.
+	quit: Option<QuitPhase>,
+}
+
+/// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
+/// (`pending_close`): this one closes ALL tabs and ends the process, so it also has to wait for
+/// every remote connection to come down cleanly first.
+enum QuitPhase {
+	/// The "Quit cmote?" confirmation is on screen, waiting for Cancel or Quit.
+	Confirming,
+	/// Quit is confirmed and cmote is disconnecting: `pending` is the ids of the live sessions
+	/// not yet reported down, and `since` clocks the drain against `QUIT_DRAIN_TIMEOUT` so a
+	/// session that never acknowledges cannot hold the process open for ever.
+	Draining {
+		pending: Vec<u64>,
+		since: std::time::Instant,
+	},
 }
 
 impl App {
@@ -146,6 +176,7 @@ impl App {
 			targets,
 			vault,
 			pending_close: None,
+			quit: None,
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
@@ -166,13 +197,31 @@ impl App {
 	/// window resize is trimmed to the region below the strip; everything else is for the tab on
 	/// screen and is delegated to it (§26).
 	fn update(&mut self, message: Message) -> iced::Task<Message> {
+		// The quit confirmation is modal app-wide (§30): while it is up, Esc cancels and Enter
+		// confirms, and every other keystroke is swallowed so none reaches the shell beneath it.
+		// Non-key messages (button presses, SSH events, ticks, resizes) pass straight through.
+		if self.quit.is_some()
+			&& let Some(task) = self.quit_key_intercept(&message)
+		{
+			return task;
+		}
 		match message {
 			// Route a session's event to the tab that owns it — maybe a background one, so its
 			// shell keeps drawing off-screen. An event for a tab already closed is dropped.
-			Message::Ssh(id, event) => match self.tabs.iter_mut().find(|tab| tab.id == id) {
-				Some(tab) => tab.on_ssh_event(event),
-				None => iced::Task::none(),
-			},
+			Message::Ssh(id, event) => {
+				// A session going down is what a quit drain waits for: note it BEFORE the event is
+				// consumed, then let the owning tab do its own clean-up (persist, back to home).
+				let ended = matches!(event, SshEvent::Disconnected | SshEvent::Error(_));
+				let task = match self.tabs.iter_mut().find(|tab| tab.id == id) {
+					Some(tab) => tab.on_ssh_event(event),
+					None => iced::Task::none(),
+				};
+				// One fewer session to wait on; once the last is down the process exits (§30).
+				if ended && let Some(exit) = self.note_drained(id) {
+					return exit;
+				}
+				task
+			}
 			Message::TabNew => self.open_tab(),
 			Message::TabSelected(index) => self.select_tab(index),
 			Message::TabCloseRequested(id) => self.request_close(id),
@@ -181,6 +230,12 @@ impl App {
 				self.pending_close = None;
 				iced::Task::none()
 			}
+			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
+			// confirming drains every session cleanly, then the process exits.
+			Message::QuitRequested => self.request_quit(),
+			Message::QuitConfirmed => self.quit_confirmed(),
+			Message::QuitCancelled => self.quit_cancelled(),
+			Message::QuitTick => self.quit_tick(),
 			// A resize is global to the OS window; hand the active tab the region BELOW the strip,
 			// so its grid fits the space it actually has rather than overrunning it by a row (§26).
 			Message::WindowResized(size) => {
@@ -243,6 +298,12 @@ impl App {
 		let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
 			return iced::Task::none();
 		};
+		// Closing the LAST tab would empty the window — that is really a request to quit cmote, so
+		// it takes the quit confirmation (which also disconnects every session cleanly) rather than
+		// silently reopening a fresh home tab as it used to (§30).
+		if self.tabs.len() == 1 {
+			return self.request_quit();
+		}
 		if self.tabs[index].is_live() {
 			self.pending_close = Some(id);
 			if index != self.active {
@@ -252,6 +313,99 @@ impl App {
 		} else {
 			self.remove_tab(index)
 		}
+	}
+
+	/// Begin the quit flow (§30): raised by the OS window's × or by closing the last tab. The
+	/// "Quit cmote?" confirmation goes up over everything; nothing is torn down until the user
+	/// accepts. A no-op if a quit is already in flight, and it supersedes any single-tab close
+	/// confirmation, since quitting closes every tab anyway.
+	fn request_quit(&mut self) -> iced::Task<Message> {
+		if self.quit.is_none() {
+			self.pending_close = None;
+			self.quit = Some(QuitPhase::Confirming);
+		}
+		iced::Task::none()
+	}
+
+	/// The "Quit cmote?" confirmation was accepted (§30): send every live session a clean
+	/// Disconnect and wait for each to report it is down before the process exits — so no remote
+	/// connection is cut mid-flight. With nothing live there is nothing to drain, so exit at once;
+	/// otherwise the frame clock (subscribed while draining) polls the timeout as a safety net.
+	fn quit_confirmed(&mut self) -> iced::Task<Message> {
+		let pending: Vec<u64> = self
+			.tabs
+			.iter()
+			.filter(|tab| tab.is_live())
+			.map(|tab| tab.id)
+			.collect();
+		if pending.is_empty() {
+			return iced::exit();
+		}
+		for tab in self.tabs.iter_mut().filter(|tab| tab.is_live()) {
+			// Saves each session before it goes (§22), the same snapshot a disconnect writes.
+			tab.persist_session();
+			tab.send_command(SshCommand::Disconnect);
+		}
+		self.quit = Some(QuitPhase::Draining {
+			pending,
+			since: std::time::Instant::now(),
+		});
+		iced::Task::none()
+	}
+
+	/// The "Quit cmote?" confirmation was dismissed (§30). Only backs out while still asking —
+	/// once draining has begun there is nothing to cancel, so a stray backdrop click is inert.
+	fn quit_cancelled(&mut self) -> iced::Task<Message> {
+		if matches!(self.quit, Some(QuitPhase::Confirming)) {
+			self.quit = None;
+		}
+		iced::Task::none()
+	}
+
+	/// A frame tick while draining (§30): exit once the timeout is up even if a session never
+	/// acknowledged, so a wedged transport can never hold the process open. The common case — every
+	/// session already down — has exited via `note_drained` long before this fires.
+	fn quit_tick(&mut self) -> iced::Task<Message> {
+		if let Some(QuitPhase::Draining { since, .. }) = &self.quit
+			&& since.elapsed() >= QUIT_DRAIN_TIMEOUT
+		{
+			return iced::exit();
+		}
+		iced::Task::none()
+	}
+
+	/// Record that tab `id`'s session has finished its clean teardown during a quit drain (§30).
+	/// Returns the exit task once none remain — so the process leaves only after every remote
+	/// connection has closed — and `None` when not draining or others are still outstanding.
+	fn note_drained(&mut self, id: u64) -> Option<iced::Task<Message>> {
+		let QuitPhase::Draining { pending, .. } = self.quit.as_mut()? else {
+			return None;
+		};
+		pending.retain(|&waiting| waiting != id);
+		pending.is_empty().then(iced::exit)
+	}
+
+	/// While the quit dialog is up, decide the fate of one message (§30). A keystroke is consumed:
+	/// on the confirmation, Esc cancels and Enter accepts; anything else is swallowed so it cannot
+	/// reach the shell, and while draining every key is swallowed. A non-key message returns `None`
+	/// to flow on to `update` untouched — the Quit/Cancel buttons, SSH events and the drain tick.
+	fn quit_key_intercept(&mut self, message: &Message) -> Option<iced::Task<Message>> {
+		use iced::keyboard::key::Named;
+		let event = match message {
+			Message::Key(event) | Message::HomeKey(event) | Message::FormKey(event) => event,
+			_ => return None,
+		};
+		if matches!(self.quit, Some(QuitPhase::Confirming))
+			&& let iced::keyboard::Event::KeyPressed { key, .. } = event
+		{
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				return Some(self.quit_cancelled());
+			}
+			if matches!(key, iced::keyboard::Key::Named(Named::Enter)) {
+				return Some(self.quit_confirmed());
+			}
+		}
+		Some(iced::Task::none())
 	}
 
 	/// The close confirmation was accepted (§26): disconnect the tab's session and drop it.
@@ -273,7 +427,8 @@ impl App {
 		// Save a live tab's session before it goes (§22) — the same snapshot a disconnect writes.
 		self.tabs[index].persist_session();
 		self.tabs.remove(index);
-		// Never leave the window empty: closing the last tab opens a fresh home tab.
+		// Defensive: a last-tab close now routes to the quit flow (§30), so this path only ever
+		// runs with tabs to spare. If one ever slipped through, never leave the window empty.
 		if self.tabs.is_empty() {
 			return self.open_tab();
 		}
@@ -302,8 +457,8 @@ impl App {
 		self.active().title()
 	}
 
-	/// Draw the tab strip, then the active tab's view beneath it, then — if a live tab's close is
-	/// pending — the confirmation over everything (§26).
+	/// Draw the tab strip, then the active tab's view beneath it, then — if a quit is pending or a
+	/// live tab's close is pending — the confirmation over everything (§26, §30).
 	fn view(&self) -> Element<'_, Message> {
 		let chips: Vec<ui::tabs::Chip> = self
 			.tabs
@@ -318,6 +473,13 @@ impl App {
 		let body = iced::widget::column![ui::tabs::strip(&chips), self.active().view()]
 			.width(iced::Length::Fill)
 			.height(iced::Length::Fill);
+
+		// The app-wide quit dialog outranks a single tab's close: it floats over the whole window,
+		// strip and all (§30). While confirming it offers Cancel / Quit; while draining it just
+		// reports progress with no buttons, since there is nothing left to cancel.
+		if let Some(quit) = &self.quit {
+			return self.quit_overlay(body.into(), quit);
+		}
 
 		if self.pending_close.is_none() {
 			return body.into();
@@ -351,6 +513,59 @@ impl App {
 			.into()
 	}
 
+	/// Float the quit confirmation / drain card over the whole window (§30). Confirming: how many
+	/// sessions the quit will disconnect, with Cancel / Quit. Draining: a bare "closing sessions"
+	/// note with no buttons — the backdrop's dismiss message is `QuitCancelled`, which is inert
+	/// once draining, so a stray click cannot abort a teardown already under way.
+	fn quit_overlay<'a>(
+		&self,
+		body: Element<'a, Message>,
+		quit: &QuitPhase,
+	) -> Element<'a, Message> {
+		let drag = ui::dialog::Drag {
+			pos: self.close_dialog_pos(),
+			dragging: false,
+		};
+		let (heading, detail, footer): (&str, String, Vec<Element<'a, Message>>) = match quit {
+			QuitPhase::Confirming => {
+				let live = self.tabs.iter().filter(|tab| tab.is_live()).count();
+				let detail = if live == 0 {
+					"Close cmote and all its tabs?".to_owned()
+				} else {
+					format!(
+						"{live} live session{} will be disconnected.",
+						if live == 1 { "" } else { "s" }
+					)
+				};
+				let footer = vec![
+					iced::widget::button(text("Cancel"))
+						.on_press(Message::QuitCancelled)
+						.into(),
+					iced::widget::button(text("Quit"))
+						.on_press(Message::QuitConfirmed)
+						.into(),
+				];
+				("Quit cmote?", detail, footer)
+			}
+			QuitPhase::Draining { .. } => (
+				"Quitting cmote…",
+				"Closing sessions cleanly…".to_owned(),
+				Vec::new(),
+			),
+		};
+		let card = ui::dialog::dialog(
+			heading.to_owned(),
+			Message::QuitCancelled,
+			text(detail).size(14).into(),
+			footer,
+			drag,
+		);
+		iced::widget::stack![body, ui::dialog::backdrop(Message::QuitCancelled), card]
+			.width(iced::Length::Fill)
+			.height(iced::Length::Fill)
+			.into()
+	}
+
 	/// The streams the app listens to (§4, §26). One SSH worker PER tab, tagged with the tab id so
 	/// its events route back to the right session; the window geometry / focus streams, global to
 	/// the OS window; and — keyed on the ACTIVE tab's screen — its keyboard listener and, while a
@@ -373,6 +588,14 @@ impl App {
 		subs.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
 		subs.push(focus_events());
 		subs.push(file_drop_events());
+		// The OS window's title-bar × arrives here rather than closing the window, because
+		// `exit_on_close_request(false)` held it back — so cmote can quit on its own terms (§30).
+		subs.push(iced::window::close_requests().map(|_id| Message::QuitRequested));
+		// While a quit is draining, tick each frame to re-check the timeout — the same frame clock
+		// the toast uses, added only for the moment the drain is in flight (§30).
+		if matches!(self.quit, Some(QuitPhase::Draining { .. })) {
+			subs.push(iced::window::frames().map(|_instant| Message::QuitTick));
+		}
 
 		let active = self.active();
 		if active.snackbar.is_some() {
@@ -1016,6 +1239,17 @@ pub enum Message {
 	TabCloseConfirmed,
 	/// The close confirmation was dismissed — keep the tab.
 	TabCloseCancelled,
+	// --- quitting cmote (§30): the last-tab close or the OS window's × ---
+	/// Quit was requested — from the window's title-bar × or from closing the last tab. Raises
+	/// the "Quit cmote?" confirmation; nothing is torn down until it is accepted.
+	QuitRequested,
+	/// The "Quit cmote?" confirmation was accepted — disconnect every session cleanly, then exit.
+	QuitConfirmed,
+	/// The "Quit cmote?" confirmation was dismissed — stay open (inert once draining has begun).
+	QuitCancelled,
+	/// A frame tick while draining (§30): re-checks the drain timeout so a wedged session cannot
+	/// hold the process open. Carries no payload — `update` reads the drain's own age.
+	QuitTick,
 	// --- port forwarding (§27): the tunnels dialog opened from the status bar ---
 	/// The status bar's "Tunnels" button — open the port-forwards manager.
 	ForwardsPressed,
@@ -1292,7 +1526,12 @@ impl Tab {
 			| Message::TabSelected(_)
 			| Message::TabCloseRequested(_)
 			| Message::TabCloseConfirmed
-			| Message::TabCloseCancelled => {}
+			| Message::TabCloseCancelled
+			// The quit flow is `App`'s job too (§30) — a tab never sees these.
+			| Message::QuitRequested
+			| Message::QuitConfirmed
+			| Message::QuitCancelled
+			| Message::QuitTick => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			Message::ForwardsClosed => self.forward_dialog = false,
@@ -2351,7 +2590,7 @@ impl Tab {
 	fn on_home_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
-		let iced::keyboard::Event::KeyPressed { key, .. } = event else {
+		let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
 			return iced::Task::none();
 		};
 
@@ -2367,6 +2606,19 @@ impl Tab {
 				self.home_rename = None;
 			}
 			return iced::Task::none();
+		}
+
+		// Ctrl+D closes this tab — but only from the home screen, i.e. once logged off from any
+		// remote (§30). On a live shell the same key is EOF to the remote (the way you log out),
+		// so it is left to the terminal there; pressing it logs the shell out, which lands back
+		// here, and a second Ctrl+D then closes the tab — mirroring a terminal's own Ctrl+D twice.
+		// It routes through `TabCloseRequested`, so closing the last tab still asks to quit cmote.
+		if modifiers.control()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
+		{
+			return iced::Task::done(Message::TabCloseRequested(self.id));
 		}
 
 		match key {
@@ -5240,6 +5492,7 @@ mod tests {
 			targets,
 			vault,
 			pending_close: None,
+			quit: None,
 		}
 	}
 
@@ -5270,14 +5523,128 @@ mod tests {
 	}
 
 	#[test]
-	fn closing_the_last_tab_leaves_a_fresh_home_tab() {
+	fn closing_the_last_tab_asks_to_quit_instead_of_replacing_it() {
 		let mut app = tab_app();
 		let only_id = app.tabs[0].id;
 		let _ = app.request_close(only_id);
-		// The window is never left empty: a NEW home tab replaces the closed one.
+		// Closing the last tab would empty the window, so it raises the quit confirmation and keeps
+		// the tab exactly as it was — the app leaves only once that is accepted (§30).
+		assert!(matches!(app.quit, Some(QuitPhase::Confirming)));
 		assert_eq!(app.tabs.len(), 1);
-		assert_ne!(app.tabs[0].id, only_id, "a fresh tab, not the closed one");
-		assert!(matches!(app.tabs[0].screen, Screen::Home));
+		assert_eq!(
+			app.tabs[0].id, only_id,
+			"the tab is untouched, not replaced"
+		);
+	}
+
+	#[test]
+	fn a_window_close_request_raises_the_quit_confirmation() {
+		let mut app = tab_app();
+		let _ = app.request_quit();
+		assert!(matches!(app.quit, Some(QuitPhase::Confirming)));
+	}
+
+	#[test]
+	fn cancelling_backs_out_of_the_quit_while_still_confirming() {
+		let mut app = tab_app();
+		let _ = app.request_quit();
+		let _ = app.quit_cancelled();
+		assert!(
+			app.quit.is_none(),
+			"the confirmation is dismissed, app stays open"
+		);
+	}
+
+	#[test]
+	fn cancelling_is_inert_once_the_drain_has_begun() {
+		let mut app = tab_app();
+		// A stray backdrop click mid-teardown must not abort a disconnect already under way (§30).
+		app.quit = Some(QuitPhase::Draining {
+			pending: vec![1],
+			since: std::time::Instant::now(),
+		});
+		let _ = app.quit_cancelled();
+		assert!(
+			matches!(app.quit, Some(QuitPhase::Draining { .. })),
+			"draining cannot be cancelled"
+		);
+	}
+
+	#[test]
+	fn requesting_quit_supersedes_a_pending_single_tab_close() {
+		let mut app = tab_app();
+		// Quitting closes every tab, so a lone tab's close confirmation is dropped in its favour.
+		app.pending_close = Some(app.tabs[0].id);
+		let _ = app.request_quit();
+		assert!(app.pending_close.is_none());
+		assert!(matches!(app.quit, Some(QuitPhase::Confirming)));
+	}
+
+	#[test]
+	fn requesting_quit_again_does_not_restart_an_in_flight_quit() {
+		let mut app = tab_app();
+		app.quit = Some(QuitPhase::Draining {
+			pending: vec![1],
+			since: std::time::Instant::now(),
+		});
+		let _ = app.request_quit();
+		assert!(
+			matches!(app.quit, Some(QuitPhase::Draining { .. })),
+			"a second request does not knock the drain back to confirming"
+		);
+	}
+
+	#[test]
+	fn draining_exits_only_once_the_last_session_reports_down() {
+		let mut app = tab_app();
+		app.quit = Some(QuitPhase::Draining {
+			pending: vec![7, 9],
+			since: std::time::Instant::now(),
+		});
+		// The first of two down: still waiting, so no exit yet.
+		assert!(app.note_drained(7).is_none());
+		match &app.quit {
+			Some(QuitPhase::Draining { pending, .. }) => assert_eq!(pending, &[9]),
+			_ => panic!("still draining"),
+		}
+		// The last down: now the process may exit.
+		assert!(app.note_drained(9).is_some(), "all sessions down → exit");
+	}
+
+	#[test]
+	fn draining_ignores_a_session_it_is_not_waiting_on() {
+		let mut app = tab_app();
+		app.quit = Some(QuitPhase::Draining {
+			pending: vec![7],
+			since: std::time::Instant::now(),
+		});
+		// An unrelated tab's id must not empty the wait list.
+		assert!(app.note_drained(3).is_none());
+		match &app.quit {
+			Some(QuitPhase::Draining { pending, .. }) => assert_eq!(pending, &[7]),
+			_ => panic!("still draining"),
+		}
+	}
+
+	#[test]
+	fn noting_a_drain_outside_the_quit_flow_does_nothing() {
+		let mut app = tab_app();
+		// Not draining (nor even quitting): a stray Disconnected is just ignored (§30).
+		assert!(app.note_drained(1).is_none());
+		assert!(app.quit.is_none());
+	}
+
+	#[test]
+	fn confirming_quit_with_no_live_session_exits_without_draining() {
+		let mut app = tab_app();
+		let _ = app.request_quit();
+		// The lone tab is a home tab, not a live shell, so there is nothing to disconnect: the
+		// confirm returns the exit task straight away rather than entering the drain (§30).
+		let _ = app.quit_confirmed();
+		assert!(
+			!matches!(app.quit, Some(QuitPhase::Draining { .. })),
+			"no live session means no drain phase"
+		);
 	}
 
 	#[test]

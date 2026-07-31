@@ -30,6 +30,13 @@ references below (§n) point into it.
   arriving while you work in another. Mouse-only strip across the top: **click** a tab to switch,
   **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
   targets and the unlocked vault are shared across every tab.
+- **Confirmed, clean quit.** Closing the **last** tab, or clicking the window's title-bar **×**,
+  asks **Quit cmote?** first — telling you how many live sessions it will disconnect — so a stray
+  click never drops your work. On confirm, every session is **disconnected cleanly** (a proper SSH
+  channel close, not a yanked socket) and only then does the process exit; a wedged session can't
+  hold quit open past a short timeout. **Ctrl+D** closes the current tab, but only once you're back
+  on the home screen — on a live shell it stays EOF to the remote (the way you log out), so
+  Ctrl+D logs out, and Ctrl+D again closes the tab, just like a terminal (§30).
 - **Port forwarding — local, remote and dynamic tunnels.** The **Tunnels** button on the status
   bar opens a manager: add a **Local** (`-L`) forward to reach a service through the server, a
   **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
@@ -272,6 +279,8 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 |---|---|
 | **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous region — shell, folder tree, files pane (hidden panels are skipped) |
 | Click a region | Focus it |
+| **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead |
+| Window title-bar **×** | Ask **Quit cmote?**, then disconnect every session cleanly and exit |
 | Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |
 | Drag inside a dialog's body | Select its text; **Ctrl+C** copies it |
 
@@ -794,11 +803,19 @@ then click back to the first tab — its shell should be exactly where you left 
 command like `sleep 5; date` in the background tab, switch away and back, and its output should
 have arrived). Resize the window with two live tabs and switch between them: each grid should
 fit the window (no missing bottom row). Click a tab's **"×"**: an idle Home/Connect tab closes at
-once, a **live** shell asks to confirm first. Close every tab in turn — the last close should
-leave a single fresh Home tab, never an empty window. A rename or delete on one tab's home list
+once, a **live** shell asks to confirm first. A rename or delete on one tab's home list
 should be visible on another tab's home list (the target store is shared).
 
-**16. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
+**16. Quitting cleanly.** With one tab left, click its **"×"** (or, from the home screen, press
+**Ctrl+D**): instead of reopening a blank tab, cmote asks **Quit cmote?** — **Cancel** keeps the
+window, **Quit** exits. With a **live** session, the dialog says how many will disconnect; on Quit
+the shell should be torn down cleanly (`who` / the server's log shows a normal logout, not a reset)
+before the window closes. Now the title-bar **×**: it too asks **Quit cmote?** — even with no live
+session — and on confirm disconnects everything before exiting. On a **live** shell, **Ctrl+D**
+should reach the remote as EOF (it logs you out, landing back on the home screen), *not* close the
+tab; a second **Ctrl+D** there then closes it.
+
+**17. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
 forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the
 row to go from `○` to a green `●`; from your machine, `curl localhost:8080` (or `ssh -p 8080
 localhost`) should reach it through the tunnel. Add a **Dynamic** forward — listen `1080` — and
