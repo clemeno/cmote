@@ -1045,9 +1045,17 @@ const SORT_MENU_TOP_GAP: f32 = 2.0;
 /// TOP edge and grows DOWNWARD: the header is at the top and this pane fills the window's bottom,
 /// so there is room below the toolbar but none above it.
 ///
+/// `window_height` is what puts it beside the button rather than up near the window's top. This is a
+/// FULL-WINDOW overlay (it stacks with the context menus, which anchor to the window's BOTTOM), but
+/// the sort button lives in the pane's header — and the pane sits flush at the window's bottom, so
+/// its top edge is `window_height − pane height` down the window. The menu's `top` padding is
+/// measured from the window's top, so the pane's own offset has to be added back in; without it the
+/// menu dropped `HEADER_HEIGHT` below the WINDOW's top, far above the button (the same conversion
+/// `app` does to map a pane press back into pane space).
+///
 /// It is `'static`: every row is built from the key and direction read out by value here, so the
 /// element borrows nothing from `files` and outlives this call.
-pub fn sort_menu(files: &Files) -> Option<Element<'static, Message>> {
+pub fn sort_menu(files: &Files, window_height: f32) -> Option<Element<'static, Message>> {
 	if !files.sort_menu_open() {
 		return None;
 	}
@@ -1063,12 +1071,13 @@ pub fn sort_menu(files: &Files) -> Option<Element<'static, Message>> {
 			Message::Files(FilesMessage::SortKeyPicked(which)),
 		)
 	};
-	// A direction row is ticked when it is the current direction — Ascending by default, even
-	// before any key is chosen.
+	// A direction row is ticked only when it is the live order — and the order is a tri-state, so at
+	// the unset default NEITHER is ticked. Clicking a row sends `SortDirPicked`, which sets it or, on
+	// the lit one, unsets it back to the ascending default (the twin of clearing the lit key).
 	let dir_item = |label: &str, which: SortDir| {
 		menu::check_item(
 			label.to_owned(),
-			dir == which,
+			dir == Some(which),
 			Message::Files(FilesMessage::SortDirPicked(which)),
 		)
 	};
@@ -1083,13 +1092,17 @@ pub fn sort_menu(files: &Files) -> Option<Element<'static, Message>> {
 		dir_item("Descending", SortDir::Descending),
 	]);
 
+	// The pane's top edge in window coordinates: it sits flush at the bottom, so its header
+	// starts this far down. `.max(0.0)` guards the instant before the first window size arrives,
+	// when the height is still zero and the subtraction would go negative.
+	let pane_top = (window_height - files.height()).max(0.0);
 	Some(
 		container(panel)
 			.width(Length::Fill)
 			.height(Length::Fill)
 			.align_x(Horizontal::Right)
 			.padding(Padding {
-				top: HEADER_HEIGHT + SORT_MENU_TOP_GAP,
+				top: pane_top + HEADER_HEIGHT + SORT_MENU_TOP_GAP,
 				right: SORT_MENU_RIGHT_INSET,
 				bottom: 0.0,
 				left: 0.0,

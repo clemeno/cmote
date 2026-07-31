@@ -1000,12 +1000,18 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   (`SshEvent::Connected`), never on a mere attempt. `upsert_on_connect` adds a new target
   (named after the endpoint) or refreshes an existing endpoint's auth/key while keeping
   its custom name — so reconnecting never spawns a duplicate and never clobbers a rename.
-- **Per-target display preference.** The `.*` toggle shared by the folder tree and the
+- **Per-target display preferences.** The `.*` toggle shared by the folder tree and the
   files pane (§18, §19) is remembered with the target: whether a server's dotfiles are
   the point or the noise is a property of that server, not of the app. It is applied on
   `Connected` — before the first listing, so nothing flashes — and written back only when
   the toggle actually moves. A `targets.json` written before the field existed defaults
-  to *shown*, which is what those installs already did.
+  to *shown*, which is what those installs already did. The **files pane's sort** (§19)
+  rides the same rail: both halves — key and direction, each a tri-state — fold into the
+  session snapshot, are applied on `Connected` before the first listing, and are written
+  back whenever a pick moves them. Each is omitted from the JSON when unset, so an older
+  file loads unsorted and behaves exactly as before. The snapshot carries the sort as an
+  `Option<Option<_>>`: the outer says "the session determined it", the inner is the value,
+  so a session that *cleared* its sort is remembered as cleared, distinct from "leave it".
 - **Interactions** (`app.rs` + `ui/home.rs`): pick a row to **pre-fill the form**
   (host / port / user / auth / key; the secret fields start empty); **New connection**
   opens a blank form; **rename** in place via **F2** or the right-click menu (Enter
@@ -1508,24 +1514,31 @@ for a window resize.
 - **A user-chosen sort, on top of that default.** The header's **sort** button drops a small
   menu: one group of four keys — **Name**, **Last modified**, **Extension** (the text after a
   name's last dot, so all `.rs` sit together — labelled "Extension", not "Type", to say it is
-  not the SFTP kind) and **Size** — and a second group of two directions, **Ascending**
-  (the default) and **Descending**. The choice lives on the model (`sort: Option<SortKey>`,
-  `sort_dir`), not the view, so it survives every relayout and outlives a change of directory
-  — a sort is a view preference, not a property of one folder. `rows` applies it only when a
-  key is set, so the common no-sort case still pays nothing beyond the dot-file filter; with a
-  key it `sort_by`s the (already small, one-directory) row slice. **Folders stay first**
-  whatever the key or direction — that grouping is the one thing the direction never flips; it
-  reorders only *within* each group (`compare_entries` settles the folder/file split before it
-  ever reverses). Every key falls back to the name, so the order is total and stable across
-  re-listings, exactly as the default is. The menu carries no "None" row: picking the **lit**
-  key again clears the sort, back to the default order, and the header's sort button is lit
-  (foreground vs. muted) whenever a non-default order is in effect. Picking a key or a
-  direction leaves the menu open, so both halves of a sort can be set in one visit; a
+  not the SFTP kind) and **Size** — and a second group of two directions, **Ascending** and
+  **Descending**. **Both halves are a tri-state and independently unset-able.** The choice lives
+  on the model (`sort: Option<SortKey>`, `sort_dir: Option<SortDir>`), not the view, so it survives
+  every relayout and outlives a change of directory — a sort is a view preference, not a property
+  of one folder. `rows` applies it only when a key is set, so the common no-sort case still pays
+  nothing beyond the dot-file filter; with a key it `sort_by`s the (already small, one-directory)
+  row slice, and an **unset direction sorts ascending** — so a key on its own already reorders the
+  grid. **Folders stay first** whatever the key or direction — that grouping is the one thing the
+  direction never flips; it reorders only *within* each group (`compare_entries` settles the
+  folder/file split before it ever reverses). Every key falls back to the name, so the order is
+  total and stable across re-listings, exactly as the default is. The menu carries no "None" row
+  for either group: picking the **lit** key clears the sort back to the default order, and picking
+  the **lit** direction unsets the order back to ascending — so at the default NEITHER direction is
+  ticked. The header's sort button is lit (foreground vs. muted) whenever a **key** reorders the
+  grid; a direction with no key leaves the default order, so the button stays muted. Picking a key
+  or a direction leaves the menu open, so both halves of a sort can be set in one visit; a
   click-away (`sort_dismiss_layer`) or the button itself closes it. Unlike the pane's
   context menus, which anchor to the window's bottom and grow up, the sort menu hangs from the
-  header at the pane's TOP and grows down — there is room below the toolbar, none above it. The
-  ticked-row and separator chrome is shared: `menu::check_item` and `menu::separator` join
-  `menu::item` so the sort menu reads as one of the family.
+  header at the pane's TOP and grows down — there is room below the toolbar, none above it (the
+  overlay is full-window, so it adds the pane's own top offset, `window height − pane height`, to
+  land beside the button rather than up near the window's top). The ticked-row and separator chrome
+  is shared: `menu::check_item` and `menu::separator` join `menu::item` so the sort menu reads as
+  one of the family. **The sort is remembered per target** (§22): both halves fold into the same
+  session snapshot as the `.*` filter and the panel sizes, so the grid reopens in the order a
+  target was last left in.
 - **Symlinks keep their own kind.** Resolving one costs a round trip *per link*, and a
   crowded directory is exactly where that adds up — so a link gets the link icon and is
   not followed. (The tree does resolve them, §18: it sees far fewer entries and needs to

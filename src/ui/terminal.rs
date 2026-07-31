@@ -117,6 +117,10 @@ pub struct Panels<'a> {
 	/// theirs, and the files pane places its details popup from the window's width.
 	pub focus: crate::app::Focus,
 	pub width: f32,
+	/// The window's height (§19): the files pane's sort menu is a full-window overlay, so it needs
+	/// this to convert the pane's own top edge — the pane sits at the window's bottom, so its top
+	/// is `window height − pane height` — into the window space its placement is measured in.
+	pub height: f32,
 	/// Whether a file from the OS is being dragged over the window (§29): lights the files pane
 	/// as the drop target, so the user sees where a release will send it.
 	pub drop_hover: bool,
@@ -170,6 +174,7 @@ pub fn view<'a>(
 		files,
 		focus,
 		width,
+		height,
 		drop_hover,
 	} = panels;
 	let Modals {
@@ -282,7 +287,7 @@ pub fn view<'a>(
 	}
 	// The files pane's sort menu (§19), dropped from its header button, with its own click-away
 	// layer beneath. Separate from the context menus above — only ever one of the three is up.
-	if let Some(sort_menu) = crate::ui::files::sort_menu(files) {
+	if let Some(sort_menu) = crate::ui::files::sort_menu(files, height) {
 		layers.push(crate::ui::files::sort_dismiss_layer());
 		layers.push(sort_menu);
 	}

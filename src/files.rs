@@ -21,6 +21,7 @@
 use std::collections::HashSet;
 
 use iced::{Point, Rectangle};
+use serde::{Deserialize, Serialize};
 
 /// The pane's starting height, the shortest the splitter may drag it to, and the
 /// grab bar's own height (§19). `ui::terminal` subtracts the pane plus the bar from
@@ -138,7 +139,11 @@ const VIDEO: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "wmv", "flv", "m4v"
 /// name (the free `sort`). Picking a key overrides that; picking the lit one again drops back to
 /// it. `Extension` orders by the text after a name's last dot (all `.rs` together), which is why
 /// it is not called "Type": it is the file's extension, not the SFTP entry kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// The serde names are the lowercase words, so a target's remembered sort reads naturally in the
+/// hand-editable `targets.json` (§22) — the same style `AuthKind` and `ForwardKind` use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SortKey {
 	Name,
 	Modified,
@@ -146,10 +151,15 @@ pub enum SortKey {
 	Size,
 }
 
-/// The direction a `SortKey` runs in (§19). Ascending is the default the sort menu opens on. It
-/// flips the WITHIN-group order only: directories stay grouped ahead of files whichever way it
-/// points — "folders first" is the one rule the direction never reverses (`compare_entries`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The direction a `SortKey` runs in (§19). Like the key it is OPTIONAL on the model
+/// (`Option<SortDir>`): the order can be unset just as the criteria can, and an unset order sorts
+/// ASCENDING — so the menu opens with neither direction ticked, and clicking the lit one unsets it
+/// again. It flips the WITHIN-group order only: directories stay grouped ahead of files whichever
+/// way it points — "folders first" is the one rule the direction never reverses (`compare_entries`).
+///
+/// Serialized lowercase for the same reason as `SortKey`, so a remembered order reads plainly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SortDir {
 	Ascending,
 	Descending,
@@ -345,12 +355,14 @@ pub struct Files {
 	/// asked for one selection at a time rather than for every link in the listing (§19).
 	link_target: Option<(String, String)>,
 	/// The user's chosen sort, or `None` for the default dirs-first-by-name order (§19). `sort`
-	/// is the key, `sort_dir` its direction (Ascending until the menu says otherwise), and
-	/// `sort_menu_open` whether the header's sort menu is dropped down. Kept on the model, not the
-	/// view, so a chosen order survives every relayout and outlives a change of directory — a sort
-	/// is a view preference, not a property of one folder — and the menu's ticks always mirror it.
+	/// is the key and `sort_dir` its direction — BOTH optional and independently unset-able: an
+	/// unset direction sorts ascending (so a key alone already reorders), and either is cleared by
+	/// clicking its own lit row in the menu. `sort_menu_open` is whether the header's sort menu is
+	/// dropped down. Kept on the model, not the view, so a chosen order survives every relayout and
+	/// outlives a change of directory — a sort is a view preference, not a property of one folder —
+	/// and it is what `app` persists per target so it reopens as it was left (§22).
 	sort: Option<SortKey>,
-	sort_dir: SortDir,
+	sort_dir: Option<SortDir>,
 	sort_menu_open: bool,
 }
 
@@ -381,7 +393,7 @@ impl Default for Files {
 			zone: Zone::default(),
 			link_target: None,
 			sort: None,
-			sort_dir: SortDir::Ascending,
+			sort_dir: None,
 			sort_menu_open: false,
 		}
 	}
@@ -604,9 +616,11 @@ impl Files {
 		self.sort
 	}
 
-	/// The chosen sort direction (§19): Ascending until the menu changes it, and only meaningful
-	/// once a key is set.
-	pub fn sort_dir(&self) -> SortDir {
+	/// The chosen sort direction, or `None` when the order is unset (§19). An unset order sorts
+	/// ascending (`rows`), and the direction is only ever felt once a key is set. Returned as it is
+	/// stored — `None`, `Ascending` or `Descending` — so the menu ticks the row that matches, or
+	/// none, and `app` can persist the exact tri-state per target (§22).
+	pub fn sort_dir(&self) -> Option<SortDir> {
 		self.sort_dir
 	}
 
@@ -640,9 +654,24 @@ impl Files {
 		};
 	}
 
-	/// Pick a sort direction from the menu (§19). Stored even with no key set, so it is ready the
-	/// moment one is.
-	pub fn set_sort_dir(&mut self, dir: SortDir) {
+	/// Pick a sort direction from the menu (§19), the exact twin of `pick_sort_key`: picking the one
+	/// already lit unsets the order (back to the ascending default), so the menu needs no "None" row
+	/// for the direction any more than it does for the key. Stored even with no key set, so it is
+	/// ready the moment one is.
+	pub fn pick_sort_dir(&mut self, dir: SortDir) {
+		self.sort_dir = if self.sort_dir == Some(dir) {
+			None
+		} else {
+			Some(dir)
+		};
+	}
+
+	/// Set the sort outright — key and direction together — to restore a target's remembered choice
+	/// (§22). Unlike the two `pick_*` menu actions (which toggle) this writes the values straight in,
+	/// so a stored `None` reopens in the default order and a stored key/direction reopens on it. The
+	/// next `rows` reorders the grid to match.
+	pub fn set_sort(&mut self, sort: Option<SortKey>, dir: Option<SortDir>) {
+		self.sort = sort;
 		self.sort_dir = dir;
 	}
 
@@ -984,7 +1013,9 @@ impl Files {
 		// default dirs-first-by-name order the server task laid down (the free `sort` below),
 		// so the common case pays nothing beyond the filter above.
 		if let Some(key) = self.sort {
-			rows.sort_by(|left, right| compare_entries(left, right, key, self.sort_dir));
+			// An unset direction sorts ascending, so a key on its own already reorders the grid.
+			let dir = self.sort_dir.unwrap_or(SortDir::Ascending);
+			rows.sort_by(|left, right| compare_entries(left, right, key, dir));
 		}
 		rows
 	}
@@ -1897,7 +1928,7 @@ mod tests {
 			sized("mid.bin", 400, 300),
 		]);
 		files.pick_sort_key(SortKey::Size);
-		files.set_sort_dir(SortDir::Descending);
+		files.pick_sort_dir(SortDir::Descending);
 		// Folders stay grouped at the top whatever the direction — that grouping is what the
 		// direction never flips. WITHIN the group it does flip: the folders have no size, so they
 		// tie on it and fall back to name, which descending then runs Z→A (zzz before aaa). The
@@ -1917,7 +1948,7 @@ mod tests {
 			entry("y.txt", Kind::File),
 		]);
 		files.pick_sort_key(SortKey::Name);
-		files.set_sort_dir(SortDir::Descending);
+		files.pick_sort_dir(SortDir::Descending);
 		// Folders still lead, but each group runs Z→A.
 		assert_eq!(names(&files), ["beta", "alpha", "y.txt", "x.txt"]);
 	}
@@ -1931,9 +1962,40 @@ mod tests {
 			sized("d", 1, 1), // no extension sorts as the empty string, ahead of the rest
 		]);
 		files.pick_sort_key(SortKey::Extension);
-		files.set_sort_dir(SortDir::Ascending);
+		files.pick_sort_dir(SortDir::Ascending);
 		// "" (d) < "rs" (b) < "txt" (a, c), and the name settles the two .txt files.
 		assert_eq!(names(&files), ["d", "b.rs", "a.txt", "c.txt"]);
+	}
+
+	#[test]
+	fn a_key_alone_sorts_ascending_and_the_lit_order_toggles_off() {
+		// The order is a tri-state now: unset, ascending or descending. A key with the order left
+		// unset must already sort — ascending — so picking just a criteria is enough.
+		let (mut files, _) = pane(&[
+			sized("b.txt", 20, 200),
+			sized("a.txt", 10, 100),
+			sized("c.txt", 30, 300),
+		]);
+		files.pick_sort_key(SortKey::Name);
+		assert_eq!(files.sort_dir(), None, "order starts unset");
+		assert_eq!(
+			names(&files),
+			["a.txt", "b.txt", "c.txt"],
+			"unset sorts ascending"
+		);
+
+		// Picking Descending flips it; picking the now-lit Descending again unsets the order, which
+		// falls back to ascending — the exact twin of clearing the lit key.
+		files.pick_sort_dir(SortDir::Descending);
+		assert_eq!(files.sort_dir(), Some(SortDir::Descending));
+		assert_eq!(names(&files), ["c.txt", "b.txt", "a.txt"]);
+		files.pick_sort_dir(SortDir::Descending);
+		assert_eq!(files.sort_dir(), None, "clicking the lit order unsets it");
+		assert_eq!(
+			names(&files),
+			["a.txt", "b.txt", "c.txt"],
+			"back to ascending"
+		);
 	}
 
 	#[test]

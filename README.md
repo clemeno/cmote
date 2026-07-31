@@ -168,8 +168,10 @@ references below (§n) point into it.
   button** (re-lists the directory on show; **F5** does the same while the pane has focus). A
   **sort button** beside it drops a menu to order the grid by **Name**, **Last modified**,
   **Extension** or **Size**, **Ascending** or **Descending** — folders always stay grouped
-  first; picking the lit key again clears the sort back to the default order, and the button
-  lights up while a sort is in effect. Drag the splitter to resize the pane, or hide it with the
+  first. The order and the direction are each optional: picking the **lit** key clears the sort
+  back to the default order, picking the **lit** direction unsets it (an unset direction sorts
+  ascending), and the button lights up while a key is reordering the grid. **The chosen sort is
+  remembered per target** and restored on reconnect. Drag the splitter to resize the pane, or hide it with the
   status bar's **Files** button; the same `.*` checkbox hides dot-files here too (§19).
 - **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
   folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
@@ -260,7 +262,8 @@ references below (§n) point into it.
   card's) raises a short toast at the bottom of the window that fades itself after three
   seconds, so a copy is never a silent no-op you have to test by pasting (§10).
 - **Resuming where you left off** — a saved target remembers, per target, the **shell's
-  directory**, the **files pane's directory**, the `.*` toggle and both **panel sizes**. On
+  directory**, the **files pane's directory**, the `.*` toggle, the **files-pane sort** (key and
+  direction) and both **panel sizes**. On
   the next connection the pane reopens there, the tree reveals the chain down to it, and the
   shell is put back with a visible `cd`. The snapshot is written at every teardown — a clean
   Disconnect, a remote hangup, an error — and a value this session never learned never erases
@@ -342,7 +345,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Enter** | Show the selected folder in the pane |
 | **F2** | Rename in place |
 | **F5** / header **↻** button | Refresh — re-list the directory on show |
-| **Sort** button in the header | Menu: order by Name / Last modified / Extension / Size, Ascending or Descending; folders stay first. Pick the lit key again to clear back to the default order |
+| **Sort** button in the header | Menu: order by Name / Last modified / Extension / Size, Ascending or Descending; folders stay first. Pick the lit key to clear the sort, the lit direction to unset it (unset sorts ascending). Remembered per target |
 | **Esc** | Give the keyboard back to the shell |
 | ↑ button in the header | Show the parent directory |
 | Copy button in the header | Copy the path of the directory on show |
@@ -625,13 +628,19 @@ the title should follow within a prompt. Set a title from a program
 - **Sort the grid.** Point the pane at a mixed directory (`/usr/bin` is a good crowded one, or
   make one: `mkdir /tmp/s && cd /tmp/s && mkdir b_dir a_dir && head -c 3000 /dev/zero > big.log
   && echo hi > small.txt && echo x > mid.md`). Click the header's **sort** button → the menu
-  drops **below** the toolbar with four keys and **Ascending** ticked. Pick **Size**, then
-  **Descending** — the button lights up, folders stay grouped at the top, and the files reorder
-  biggest-first; the menu stays open so you can flip the direction without reopening it. Pick
-  **Extension** → files group by their `.log`/`.md`/`.txt` ending. Pick the **lit** key again →
-  the sort clears, the button dims, and the grid returns to the default folders-first-by-name
-  order. Click away → the menu closes. The chosen sort **sticks across directories** (browse
-  elsewhere and back) until you clear it, and re-listing (**F5**) keeps it.
+  drops **below** the toolbar, right beside the button, with four keys and — by default —
+  **neither** direction ticked. Pick **Name** with no direction → the button lights up, folders
+  stay grouped at the top, and each group runs A→Z (an unset direction sorts ascending). Pick
+  **Size**, then **Descending** — the files reorder biggest-first; the menu stays open so you can
+  set both halves without reopening it. Pick the **lit** **Descending** again → it unsets, back to
+  ascending. Pick **Extension** → files group by their `.log`/`.md`/`.txt` ending. Pick the **lit**
+  key again → the sort clears, the button dims, and the grid returns to the default
+  folders-first-by-name order. Click away → the menu closes. The chosen sort **sticks across
+  directories** (browse elsewhere and back) until you clear it, and re-listing (**F5**) keeps it.
+- **The sort is remembered per target.** With a sort set (say **Size**, **Descending**),
+  **Disconnect** and reconnect to the same target → the pane reopens already sorted that way, the
+  button lit. Clearing the sort before disconnecting reopens in the default order. (A target you
+  never sorted, and a `targets.json` from before this existed, reopen unsorted.)
 
 **8. Remote folder tree.** The panel on the right should list `/` on connect. Then:
 

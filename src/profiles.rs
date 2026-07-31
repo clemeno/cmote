@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::files::{SortDir, SortKey};
 use crate::forward::ForwardSpec;
 use crate::ui::connect::AuthKind;
 
@@ -71,6 +72,17 @@ pub struct Target {
 	pub explorer_width: Option<f32>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub files_height: Option<f32>,
+	/// The files pane's sort when the session last ended (§19, §22), reapplied on the next
+	/// connection so the grid reopens in the order this target was left in. A per-target display
+	/// preference, not a secret, so it rides here beside `show_hidden`: which server this is decides
+	/// how its files are best read. Both halves are optional and independent — `sort` is the key (a
+	/// missing one is the default dirs-first-by-name order) and `sort_dir` the direction (a missing
+	/// one sorts ascending) — and each is omitted from the JSON when unset, so an older file loads
+	/// with no sort and a tidy one stays tidy.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub sort: Option<SortKey>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub sort_dir: Option<SortDir>,
 	/// Whether an encrypted secret (a password or a key passphrase) is stored for this target
 	/// in the portable vault (§16, `vault.rs`). Metadata ONLY — this flag rides here so the
 	/// home list and the connect form know a secret can be pre-filled, while the secret itself
@@ -102,6 +114,12 @@ pub struct SessionState {
 	pub show_hidden: Option<bool>,
 	pub explorer_width: Option<f32>,
 	pub files_height: Option<f32>,
+	/// The pane's sort, both halves (§19). The OUTER `Option` is the snapshot's usual "did this
+	/// session determine it" — always `Some` from a real capture — and the INNER one is the value
+	/// itself, which is legitimately unset when no key (or no direction) is chosen. So `None` means
+	/// "leave the stored sort alone" and `Some(None)` means "the session had no sort, clear it".
+	pub sort: Option<Option<SortKey>>,
+	pub sort_dir: Option<Option<SortDir>>,
 }
 
 /// Serde default for `show_hidden` — matches the panels' own default (shown), so a
@@ -136,6 +154,10 @@ impl Target {
 			show_hidden: Some(self.show_hidden),
 			explorer_width: self.explorer_width,
 			files_height: self.files_height,
+			// The stored sort is always known (both halves may be unset), so it comes back as
+			// `Some`, carrying the exact tri-state — key and direction — for the next connection.
+			sort: Some(self.sort),
+			sort_dir: Some(self.sort_dir),
 		}
 	}
 }
@@ -205,6 +227,10 @@ impl Targets {
 					files_path: None,
 					explorer_width: None,
 					files_height: None,
+					// A brand-new target opens in the default order — no key, no direction — until
+					// the user picks one on a live session (§19).
+					sort: None,
+					sort_dir: None,
 					// A brand-new target has stored no secret yet; the flag is set later, only
 					// if a connect actually persists one to the vault (§16).
 					remember_secret: false,
@@ -311,6 +337,21 @@ impl Targets {
 			target.files_height = Some(height);
 			changed = true;
 		}
+		// The sort's two halves fold in like the rest: each `Some` overwrites, each `None` leaves
+		// the stored value alone. The inner value is itself an `Option`, so `Some(None)` writes
+		// "no key / no direction" — the way a session that cleared its sort is remembered as cleared.
+		if let Some(sort) = session.sort
+			&& target.sort != sort
+		{
+			target.sort = sort;
+			changed = true;
+		}
+		if let Some(sort_dir) = session.sort_dir
+			&& target.sort_dir != sort_dir
+		{
+			target.sort_dir = sort_dir;
+			changed = true;
+		}
 		changed
 	}
 
@@ -412,6 +453,8 @@ mod tests {
 			files_path: None,
 			explorer_width: None,
 			files_height: None,
+			sort: None,
+			sort_dir: None,
 			remember_secret: false,
 			forwards: Vec::new(),
 		}
@@ -606,6 +649,8 @@ mod tests {
 				show_hidden: Some(false),
 				explorer_width: Some(300.0),
 				files_height: Some(240.0),
+				sort: Some(Some(SortKey::Size)),
+				sort_dir: Some(Some(SortDir::Descending)),
 			},
 		);
 		let session = targets.find("u@h:1").unwrap().session();
@@ -614,6 +659,8 @@ mod tests {
 		assert_eq!(session.show_hidden, Some(false));
 		assert_eq!(session.explorer_width, Some(300.0));
 		assert_eq!(session.files_height, Some(240.0));
+		assert_eq!(session.sort, Some(Some(SortKey::Size)));
+		assert_eq!(session.sort_dir, Some(Some(SortDir::Descending)));
 
 		// An all-`None` snapshot changes nothing and skips the write.
 		assert!(!targets.set_session("u@h:1", SessionState::default()));
@@ -638,6 +685,78 @@ mod tests {
 		assert!(!targets.find("u@h:1").unwrap().show_hidden);
 		assert!(targets.find("u@h:2").unwrap().show_hidden);
 		assert!(!targets.set_session("u@h:1", hide));
+	}
+
+	#[test]
+	fn the_sort_is_remembered_per_target_and_round_trips() {
+		// Arrange: two targets, both starting unsorted.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None);
+		assert_eq!(targets.find("u@h:1").unwrap().sort, None);
+		assert_eq!(targets.find("u@h:1").unwrap().sort_dir, None);
+
+		// Act: sort the first one by size, descending, through the one snapshot setter.
+		let by_size_desc = SessionState {
+			sort: Some(Some(SortKey::Size)),
+			sort_dir: Some(Some(SortDir::Descending)),
+			..SessionState::default()
+		};
+		assert!(targets.set_session("u@h:1", by_size_desc.clone()));
+
+		// Assert: it stuck, its neighbour is untouched, and the same values again report "nothing
+		// changed" so the caller skips the write.
+		assert_eq!(targets.find("u@h:1").unwrap().sort, Some(SortKey::Size));
+		assert_eq!(
+			targets.find("u@h:1").unwrap().sort_dir,
+			Some(SortDir::Descending)
+		);
+		assert_eq!(targets.find("u@h:2").unwrap().sort, None);
+		assert!(!targets.set_session("u@h:1", by_size_desc));
+
+		// Clearing the sort back to the default order is a real change (`Some(None)`), not "leave
+		// it alone" (`None`): a session that cleared its sort must be remembered as cleared.
+		let cleared = SessionState {
+			sort: Some(None),
+			sort_dir: Some(None),
+			..SessionState::default()
+		};
+		assert!(targets.set_session("u@h:1", cleared));
+		assert_eq!(targets.find("u@h:1").unwrap().sort, None);
+		assert_eq!(targets.find("u@h:1").unwrap().sort_dir, None);
+
+		// A key with the direction left unset round-trips through a save/load: the grid reopens
+		// sorted by that key, ascending (an unset direction sorts ascending in the pane).
+		targets.set_session(
+			"u@h:1",
+			SessionState {
+				sort: Some(Some(SortKey::Extension)),
+				..SessionState::default()
+			},
+		);
+		targets.save_to(&path).expect("save");
+		let loaded = Targets::load_from(&path);
+		let restored = loaded.find("u@h:1").unwrap();
+		assert_eq!(restored.sort, Some(SortKey::Extension));
+		assert_eq!(restored.sort_dir, None);
+	}
+
+	#[test]
+	fn a_targets_file_without_the_sort_fields_defaults_to_unset() {
+		// A store written before the sort was remembered must load with none and behave as before.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(
+			&path,
+			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"password"}]"#,
+		)
+		.unwrap();
+		let loaded = Targets::load_from(&path);
+		let target = &loaded.items()[0];
+		assert_eq!(target.sort, None);
+		assert_eq!(target.sort_dir, None);
 	}
 
 	#[test]

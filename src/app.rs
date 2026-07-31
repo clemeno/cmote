@@ -1701,6 +1701,10 @@ impl Tab {
 			files_path: None,
 			explorer_width: None,
 			files_height: None,
+			// A pending target's sort is a placeholder too: the stored target's remembered sort
+			// wins on connect, and a brand-new one starts unsorted (§19, §22).
+			sort: None,
+			sort_dir: None,
 			remember_secret: false,
 			forwards: Vec::new(),
 		});
@@ -3773,6 +3777,10 @@ impl Tab {
 			show_hidden: Some(self.explorer.show_hidden()),
 			explorer_width: Some(self.explorer.width()),
 			files_height: Some(self.files.height()),
+			// The pane always knows its sort (both halves may be unset), so it is always `Some`
+			// here — `set_session` then writes the tri-state through as-is (§19, §22).
+			sort: Some(self.files.sort_key()),
+			sort_dir: Some(self.files.sort_dir()),
 		}
 	}
 
@@ -3810,6 +3818,12 @@ impl Tab {
 	) -> (Option<String>, Option<String>) {
 		if let Some(show_hidden) = session.show_hidden {
 			self.explorer.set_hidden(show_hidden);
+		}
+		// The remembered sort goes straight onto the pane model, so the grid reopens in the order
+		// this target was left in (§22). Both halves travel together from `capture_session`, so
+		// they are applied together; `set_sort` writes the tri-state outright rather than toggling.
+		if let (Some(sort), Some(sort_dir)) = (session.sort, session.sort_dir) {
+			self.files.set_sort(sort, sort_dir);
 		}
 		if let Some(width) = session.explorer_width
 			&& self.window_size.width > 1.0
@@ -4186,9 +4200,17 @@ impl Tab {
 			FilesMessage::SortMenuOpened => self.files.toggle_sort_menu(),
 			FilesMessage::SortMenuDismissed => self.files.close_sort_menu(),
 			// Picking a key or a direction leaves the menu open, so both halves of a sort can be
-			// set in one visit; a click-away (or the button) closes it.
-			FilesMessage::SortKeyPicked(key) => self.files.pick_sort_key(key),
-			FilesMessage::SortDirPicked(dir) => self.files.set_sort_dir(dir),
+			// set in one visit; a click-away (or the button) closes it. Each pick persists the sort
+			// into the connected target (§22), the same way the `.*` toggle folds into the snapshot,
+			// so the chosen order survives a disconnect and even a later hard exit.
+			FilesMessage::SortKeyPicked(key) => {
+				self.files.pick_sort_key(key);
+				self.persist_session();
+			}
+			FilesMessage::SortDirPicked(dir) => {
+				self.files.pick_sort_dir(dir);
+				self.persist_session();
+			}
 			FilesMessage::Refresh => {
 				self.files.close_menu();
 				if let Some(request) = self.files.refresh() {
@@ -4653,6 +4675,7 @@ impl Tab {
 							files: &self.files,
 							focus: self.focus,
 							width: self.window_size.width,
+							height: self.window_size.height,
 							drop_hover: self.drop_hover,
 						},
 					);
