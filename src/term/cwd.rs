@@ -10,10 +10,11 @@
 //   OSC 9;9 ESC ] 9 ; 9 ; C:\path             BEL | ST   — the Windows convention
 //
 // Both are scanned here, so a remote of either family works. The sequences are
-// invisible to the user (vt100 ignores OSC codes it does not know), and the shell hook
-// that emits them is installed once when the shell opens (`ssh::client::CWD_HOOK`), so
-// nothing has to be typed at upload time. A shell that emits neither simply leaves the
-// cwd unknown — the upload dialog then asks for the path (§17).
+// invisible to the user (vt100 ignores OSC codes it does not know). A shell that emits
+// one on its own (fish, a Windows OSC 9;9 shell) is read passively; a silent bash/zsh has
+// the emitter (`term::echo::CWD_HOOK`) typed in only after the GUI has watched it stay
+// quiet for a moment (§17). A shell that announces neither leaves the cwd unknown — the
+// upload dialog then asks for the path.
 //
 // The scanner is a small state machine rather than a regex over a buffer, because
 // output arrives in arbitrary chunks: a sequence can be split anywhere, including

@@ -674,9 +674,11 @@ confirm a multi-line clipboard does **not** auto-run each line (bracketed paste 
 it). Right-click anywhere to confirm the context menu opens at the cursor and dismisses
 on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
 
-**7. Remote directory + upload.** On connect, one setup line is echoed into the shell
-(the cwd hook, §17) and the window title should read
-`cmote — tester@localhost:2222 — /config` (or wherever the shell starts). `cd /tmp` and
+**7. Remote directory + upload.** On connect the window title should read
+`cmote — tester@localhost:2222 — /config` (or wherever the shell starts) within a second — for a
+plain bash/zsh cmote quietly types in a cwd hook to make that happen (§17), and its echo is hidden
+so **no setup line appears** in the terminal (a shell that reports its own directory, like fish, is
+left untouched and shows nothing either). `cd /tmp` and
 the title should follow within a prompt. Set a title from a program
 (`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
 — my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:

@@ -44,28 +44,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// drained as fast as channels open — and bounded so it cannot grow without limit.
 const CHANNEL_BOUND_FORWARD: usize = 64;
 
-/// The shell integration cmote installs once, right after the shell opens (§17).
-///
-/// SSH never tells a client where the remote shell *is*, so — like every terminal that
-/// shows the remote directory — we have the shell announce it. `cmote_cwd` prints an
-/// **OSC 7** sequence (`ESC ] 7 ; file://host/path ESC \`), which is invisible in the
-/// terminal and picked up by `term::cwd`; hooking it into `PROMPT_COMMAND` (bash) and
-/// `precmd_functions` (zsh) makes it fire on every prompt, so the directory follows
-/// `cd` with no further typing. The trailing call reports the starting directory
-/// immediately instead of waiting for the next prompt.
-///
-/// `ponytail:` bash and zsh only. fish already emits OSC 7 on its own, and a Windows
-/// shell that emits OSC 9;9 is read too, so the passive tracker covers those; any other
-/// shell simply prints a syntax error on this one line and leaves the cwd unknown — the
-/// upload dialog then asks for the path. Upgrade path: detect the shell first (`echo
-/// $0`) and send the matching snippet.
-const CWD_HOOK: &str = concat!(
-	r#"cmote_cwd() { printf '\033]7;file://%s%s\033\\' "${HOSTNAME-}" "$PWD"; }; "#,
-	r#"PROMPT_COMMAND="cmote_cwd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"; "#,
-	r#"precmd_functions+=(cmote_cwd); cmote_cwd"#,
-	"\n",
-);
-
 /// The SSH task loop. Owns the channels to the one live session (v1 is single-
 /// session) and routes commands to it. Returns when the GUI drops its command
 /// sender (app exit).
@@ -441,11 +419,13 @@ async fn connect_and_run(
 		.await?;
 	channel.request_shell(true).await?;
 
-	// Install the cwd announcer before the user can type (§17). Sent as ordinary shell
-	// input, so it is echoed once like any typed command; from then on the directory
-	// arrives invisibly on every prompt.
-	channel.data(CWD_HOOK.as_bytes()).await?;
-
+	// The cwd announcer is not typed in here. SSH tells us nothing about where the shell is, so
+	// cmote learns it from the OSC the shell emits on each prompt (`term::cwd`); a shell that
+	// emits none has the announcer typed in — but only after the GUI has watched it stay silent
+	// for a moment (`app::CWD_PROBE`), so a shell that speaks for itself (fish, a Windows OSC 9;9
+	// shell) is left alone and never sees bash syntax it would choke on. That later injection is
+	// `Terminal::begin_cwd_injection`, sent down this same input channel with its echo hidden by
+	// the terminal's elider (§17).
 	stream(channel, &session, events, to_session_rx, remote_forwards).await
 }
 

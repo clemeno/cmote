@@ -19,6 +19,7 @@
 // answers every query).
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
+mod echo; // the cwd announcer to type into a silent shell, and the elider that hides its echo (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
@@ -107,6 +108,7 @@ impl Terminal {
 			replies,
 			cwd: cwd::Cwd::default(),
 			modkeys: modkeys::ModKeys::default(),
+			echo: echo::HookEcho::default(),
 		}
 	}
 
@@ -119,13 +121,27 @@ impl Terminal {
 	/// A cursor-position report is emitted at the moment the query is parsed, so it reflects
 	/// the cursor where the query sat — the engine gets that right where the old hand-rolled
 	/// answerer had to split the feed to. The same bytes also feed the cwd tracker (§17),
-	/// which reads the stream as it came off the wire.
+	/// which reads the stream as it came off the wire — while the engine draws the bytes with
+	/// the cwd hook's own echo elided (`echo`), so the one line cmote types into a silent shell
+	/// never shows. The elider is a transparent pass-through unless armed, so a passive session
+	/// hands the engine exactly the raw bytes.
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
 		self.modkeys.feed(bytes);
-		self.parser.advance(&mut self.term, bytes);
+		let visible = self.echo.filter(bytes);
+		self.parser.advance(&mut self.term, &visible);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		std::mem::take(&mut buffer.bytes)
+	}
+
+	/// Hand over the cwd announcer to type into a shell that has stayed silent (§17), arming the
+	/// echo elider as it does so the setup line the shell echoes back never reaches the grid. The
+	/// caller sends the returned bytes on the input channel. Called only when cmote decides to
+	/// inject — a shell that announces its own directory never calls this, and the elider stays
+	/// idle.
+	pub fn begin_cwd_injection(&mut self) -> &'static [u8] {
+		self.echo.arm();
+		echo::CWD_HOOK.as_bytes()
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -223,6 +239,10 @@ pub struct Terminal {
 	/// writes to ask for unambiguous Ctrl/Alt key reports. The engine ignores that sequence, so —
 	/// like the cwd — the same bytes are scanned here for the key encoder to read.
 	modkeys: modkeys::ModKeys,
+	/// Hides the echo of the cwd announcer cmote types into a silent shell (§17). Idle — a
+	/// transparent pass-through — unless `begin_cwd_injection` arms it, so a session that never
+	/// injects hands the engine the raw bytes untouched.
+	echo: echo::HookEcho,
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
