@@ -419,13 +419,10 @@ async fn connect_and_run(
 		.await?;
 	channel.request_shell(true).await?;
 
-	// The cwd announcer is not typed in here. SSH tells us nothing about where the shell is, so
-	// cmote learns it from the OSC the shell emits on each prompt (`term::cwd`); a shell that
-	// emits none has the announcer typed in — but only after the GUI has watched it stay silent
-	// for a moment (`app::CWD_PROBE`), so a shell that speaks for itself (fish, a Windows OSC 9;9
-	// shell) is left alone and never sees bash syntax it would choke on. That later injection is
-	// `Terminal::begin_cwd_injection`, sent down this same input channel with its echo hidden by
-	// the terminal's elider (§17).
+	// cmote types nothing into the shell. SSH tells us nothing about where the shell is, so cmote
+	// learns the working directory from the OSC the shell emits on each prompt (`term::cwd`): a
+	// shell that announces its cwd (fish, a Windows OSC 9;9 shell) is followed, and a silent
+	// bash/zsh simply leaves the cwd unknown — the remote's shell history is left untouched (§17).
 	stream(channel, &session, events, to_session_rx, remote_forwards).await
 }
 

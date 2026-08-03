@@ -76,13 +76,6 @@ const MAX_PANEL_FRACTION: f32 = 0.6;
 /// register, short enough not to linger over the shell.
 const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How long cmote listens for a shell to announce its own directory before typing the cwd hook in
-/// (§17). A shell that emits OSC 7/9;9 itself (fish, a Windows shell) speaks on its first prompt,
-/// well inside this; only a shell still silent when the window closes gets the hook. Long enough
-/// to let a native announcement win the race — so cmote never spits bash syntax at a shell that
-/// speaks for itself — yet short enough that a plain bash/zsh title fills in without a visible lag.
-const CWD_PROBE: std::time::Duration = std::time::Duration::from_millis(1000);
-
 /// The safety net on a clean quit (§30): once the user confirms, cmote waits for every live
 /// session to report it has disconnected before the process exits, so no remote connection is
 /// cut mid-flight. A session that never acknowledges (a wedged transport) must not wedge quit
@@ -692,11 +685,6 @@ impl App {
 		if active.snackbar.is_some() {
 			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
 		}
-		// While the cwd-hook probe runs, tick each frame so the listen window still closes when a
-		// silent shell sends nothing to react to (§17). Clearing the probe drops this next diff.
-		if active.cwd_probe.is_some() {
-			subs.push(iced::window::frames().map(|_instant| Message::CwdProbeTick));
-		}
 		match active.screen {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
@@ -981,12 +969,6 @@ pub struct Tab {
 	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
 	/// reaches it, or when the user moves the shell themselves.
 	resume_cwd: Option<String>,
-	/// The cwd-hook probe clock (§17), or `None` when not probing. Set to the connect instant on
-	/// `Connected`; while it is `Some` the shell is being watched to see whether it announces its
-	/// own directory. Cleared the moment it does (nothing to install) or once `CWD_PROBE` elapses
-	/// in silence (the hook is typed in then) — and on teardown, so a session dropped mid-probe
-	/// stops ticking and nothing is injected into a dead channel.
-	cwd_probe: Option<std::time::Instant>,
 	/// The unlocked secret vault (§16, §26), or `None` until the user unlocks it. A shared clone
 	/// of the ONE app-wide vault: unlocking it in any tab unlocks it for all, so a return visit in
 	/// another tab needs no re-prompt. Held so repeated stores/reads need no re-prompt; dropped
@@ -1270,10 +1252,6 @@ pub enum Message {
 	/// payload: `update` reads the toast's own age to decide whether its dwell has elapsed.
 	/// Only subscribed to while a toast is up, so it costs nothing the rest of the time.
 	SnackbarTick,
-	/// A window-frame tick while the cwd-hook probe is running (§17). Carries no payload:
-	/// `update` reads the probe's own age to decide whether the listen window has elapsed, so a
-	/// shell that falls silent still gets the hook. Only subscribed to while a probe is pending.
-	CwdProbeTick,
 	// --- file upload to the remote (§17) ---
 	/// The status bar's File… button — open the native multi-file picker.
 	UploadPickPressed,
@@ -1594,9 +1572,6 @@ impl Tab {
 					self.snackbar = None;
 				}
 			}
-			// A frame tick while the cwd-hook probe runs (§17): the window may have closed on a
-			// silent shell, which is what types the hook in. Ends the probe and stops the ticking.
-			Message::CwdProbeTick => self.check_cwd_probe(),
 			Message::UploadPickPressed => return browse_upload(),
 			// A cancelled picker yields no files, which keeps whatever was already chosen —
 			// the same rule the key-file picker on the form uses.
@@ -2001,31 +1976,6 @@ impl Tab {
 		}
 	}
 
-	/// Advance the cwd-hook probe (§17). On connect the shell is watched for a moment: if it
-	/// announces its own directory (fish, a configured bash/zsh, a Windows OSC 9;9 shell) there is
-	/// nothing to install; if it has stayed silent past `CWD_PROBE`, cmote types its announcer hook
-	/// in. Either outcome ends the probe — it never fires twice — and a session dropped mid-probe
-	/// (no terminal) ends it too, so nothing is injected into a dead channel. Called on every
-	/// output chunk and on a frame tick while the probe runs, so silence still triggers it.
-	fn check_cwd_probe(&mut self) {
-		let Some(started) = self.cwd_probe else {
-			return;
-		};
-		let hook = match self.terminal.as_mut() {
-			// Session gone mid-probe, or the shell announced its own cwd: nothing to type in.
-			None => None,
-			Some(terminal) if terminal.cwd().is_some() => None,
-			// Still inside the listen window — give the shell more time to speak for itself first.
-			Some(_) if started.elapsed() < CWD_PROBE => return,
-			// Silent past the window: type the announcer in, arming the elider so its echo is hidden.
-			Some(terminal) => Some(terminal.begin_cwd_injection().to_vec()),
-		};
-		self.cwd_probe = None;
-		if let Some(hook) = hook {
-			self.send_command(SshCommand::Input(hook));
-		}
-	}
-
 	/// Load `text` into the dialog body buffer so the dialog about to open shows it as
 	/// selectable, copyable content (§10). Called at each dialog-open transition; a
 	/// fresh `Content` also resets any selection left from a previous dialog.
@@ -2225,10 +2175,6 @@ impl Tab {
 					ui::terminal::CELL_HEIGHT.round() as u16,
 				);
 				self.terminal = Some(terminal);
-				// Start the cwd-hook probe (§17): watch the shell for a moment, and type the
-				// announcer in only if it stays silent. Set before the resume `cd` below so a
-				// native OSC 7 that the `cd` provokes (fish) is seen and stands the probe down.
-				self.cwd_probe = Some(std::time::Instant::now());
 				self.clear_grid_interaction();
 				self.screen = Screen::Terminal;
 
@@ -2278,10 +2224,6 @@ impl Tab {
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Input(replies));
 				}
-				// This chunk may have carried the shell's own cwd announcement, which stands the
-				// hook probe down — or been the last before it falls silent, which (once the window
-				// elapses) is what triggers the injection (§17).
-				self.check_cwd_probe();
 				// That chunk may have turned focus reporting on or off (§23); reconcile the
 				// remote to the shell's true focus, so a program enabling `?1004` while a side
 				// panel holds the keyboard is not left believing the shell is focused.
@@ -2457,7 +2399,6 @@ impl Tab {
 				// A remote hangup ends a live session too: remember where it was (§22).
 				self.persist_session();
 				self.terminal = None;
-				self.cwd_probe = None;
 				self.connection = None;
 				self.clear_grid_interaction();
 				return self.go_home();
@@ -2467,7 +2408,6 @@ impl Tab {
 				// reaches here with no terminal, and `persist_session` then does nothing (§22).
 				self.persist_session();
 				self.terminal = None;
-				self.cwd_probe = None;
 				self.connection = None;
 				self.clear_grid_interaction();
 				self.show_error(&message);
@@ -2519,7 +2459,6 @@ impl Tab {
 		self.persist_session();
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
-		self.cwd_probe = None;
 		self.connection = None;
 		self.clear_grid_interaction();
 		self.go_home()

@@ -1284,25 +1284,19 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   than 4 KiB is abandoned rather than buffered, so a hostile stream cannot grow our memory
   (§12). Non-cwd OSC sequences (titles, clipboard writes) pass through and leave the last
   known path alone.
-- **Where it runs.** `Terminal::process` feeds the raw bytes to the tracker and the
-  engine-facing view to the engine — the two differ only by the hook's own echo, which the
-  elider (`term::echo`) drops on the way to the engine while the tracker still sees the wire
-  bytes. The engine ignores OSC codes it does not know, so nothing else is stripped and the two
-  never disagree. The path is exposed as `Terminal::cwd`.
-- **The shell hook** (`term::echo::CWD_HOOK`), typed in **only when needed**. Passive reading
-  already covers a shell that announces its own directory — fish emits OSC 7 out of the box, a
-  Windows shell emits OSC 9;9 — so cmote injects nothing for those. A plain bash/zsh is silent,
-  and for it cmote types in **one line** that defines `cmote_cwd` (a `printf` of OSC 7), hooks it
-  into `PROMPT_COMMAND` (bash) and `precmd_functions` (zsh), and calls it once for the starting
-  directory. But it does not inject blindly: on connect the GUI **probes** — it watches the shell
-  for `CWD_PROBE` (one second) and injects only if no announcement has arrived by then (`Tab::check_cwd_probe`,
-  driven by output chunks and a frame tick). So a shell that speaks for itself is left untouched
-  and never sees bash syntax it would choke on. `ponytail:` the injected line is sent as ordinary
-  input, so the shell echoes it once — but cmote **is** the terminal, so `term::echo` elides that
-  echo from the display (armed as the line is sent, matching the `cmote_cwd(` signature through the
-  line's newline); every later announcement was always invisible. A shell that is neither native
-  nor bash/zsh gets the line, its one syntax error, and the elided echo. Upgrade path: probe the
-  shell family (`echo $0`) and send the matching snippet.
+- **Where it runs.** `Terminal::process` feeds every raw byte to the tracker and to the engine
+  alike. The engine ignores OSC codes it does not know, so the cwd sequence passes through it
+  untouched and the two never disagree. The path is exposed as `Terminal::cwd`.
+- **No shell hook — passive reading only.** cmote types **nothing** into the remote shell. A
+  shell that announces its own directory is followed for free (fish emits OSC 7 out of the box, a
+  Windows shell emits OSC 9;9); a plain bash/zsh with no shell integration stays silent, so its
+  cwd is simply unknown and the upload dialog asks for a path. An earlier build installed an
+  announcer by typing one line into the shell — but that line is unavoidably recorded in the
+  remote's command history (readline/zle log every submitted line; hiding its on-screen echo does
+  not stop the record), and it is bash syntax a shell like fish would choke on. Rather than
+  pollute the user's shell, cmote leaves it untouched and accepts an unknown cwd on a silent
+  bash/zsh. Upgrade path for a user who wants cwd-follow there: add the OSC 7
+  `PROMPT_COMMAND`/`precmd` hook to their own shell config, which cmote then reads passively.
 - **Shown in the window title.** `App::title` is a function of the state:
   `cmote — user@host:port — /current/dir` while connected, dropping the third part when the
   shell never announces one. When a program sets its own window title (OSC 0/2, §23) that takes

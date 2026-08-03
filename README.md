@@ -277,10 +277,12 @@ references below (§n) point into it.
   stays the right-click **Download…** (§29).
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
-  Windows remotes. bash and zsh are hooked up automatically when the shell opens; fish and
-  Windows Terminal-style prompts already announce it themselves (§17). When a program sets its
-  own title (`OSC 0` / `OSC 2` — `vim` naming the file it is editing, say), that shows in the
-  title bar instead; the host is always kept alongside so the window stays identifiable (§23).
+  Windows remotes. fish and Windows Terminal-style prompts announce it themselves and are
+  followed for free; a plain bash/zsh stays silent unless you add the prompt hook to your own
+  shell config, in which case cmote picks it up too — cmote types nothing into the shell itself,
+  so your command history stays clean (§17). When a program sets its own title (`OSC 0` /
+  `OSC 2` — `vim` naming the file it is editing, say), that shows in the title bar instead; the
+  host is always kept alongside so the window stays identifiable (§23).
 - **Consistent dialogs** — the delete-target, disconnect, upload and overwrite
   confirmations, the host-key prompt, the passphrase prompt, and the error notice share
   one chrome: a header bar (question on the left, close ✕
@@ -674,12 +676,11 @@ confirm a multi-line clipboard does **not** auto-run each line (bracketed paste 
 it). Right-click anywhere to confirm the context menu opens at the cursor and dismisses
 on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
 
-**7. Remote directory + upload.** On connect the window title should read
-`cmote — tester@localhost:2222 — /config` (or wherever the shell starts) within a second — for a
-plain bash/zsh cmote quietly types in a cwd hook to make that happen (§17), and its echo is hidden
-so **no setup line appears** in the terminal (a shell that reports its own directory, like fish, is
-left untouched and shows nothing either). `cd /tmp` and
-the title should follow within a prompt. Set a title from a program
+**7. Remote directory + upload.** On a shell that announces its directory (fish, a Windows
+OSC 9;9 prompt, or a bash/zsh with the OSC 7 prompt hook in its own config) the window title
+should read `cmote — tester@localhost:2222 — /config` (or wherever the shell starts), and `cd /tmp`
+should update it within a prompt — cmote types **nothing** into the shell, so a plain bash/zsh with
+no such hook shows no directory in the title and leaves the command history untouched (§17). Set a title from a program
 (`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
 — my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:
 
@@ -708,9 +709,9 @@ the title should follow within a prompt. Set a title from a program
   note. (Dragging a file *out* of the pane onto the desktop is not offered — use **Download…**.)
 - Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
   status bar shows the failure and the shell stays open.
-- Start a shell that does **not** announce its directory (`docker exec … sh`, or unset the
-  hook with `unset PROMPT_COMMAND; unset -f cmote_cwd`) → the title drops the directory
-  and the upload dialog offers an empty folder, which lands in the login directory.
+- Start a shell that does **not** announce its directory (a plain `bash --norc`, or
+  `docker exec … sh`) → the title drops the directory and the upload dialog offers an empty
+  folder, which lands in the login directory.
 - **Sort the grid.** Point the pane at a mixed directory (`/usr/bin` is a good crowded one, or
   make one: `mkdir /tmp/s && cd /tmp/s && mkdir b_dir a_dir && head -c 3000 /dev/zero > big.log
   && echo hi > small.txt && echo x > mid.md`). Click the header's **sort** button → the menu
