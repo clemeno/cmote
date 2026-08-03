@@ -314,7 +314,7 @@ pub fn view<'a>(
 	}
 	// The files pane's sort menu (§19), dropped from its header button, with its own click-away
 	// layer beneath. Separate from the context menus above — only ever one of the three is up.
-	if let Some(sort_menu) = crate::ui::files::sort_menu(files, height) {
+	if let Some(sort_menu) = crate::ui::files::sort_menu(files, height, width) {
 		layers.push(crate::ui::files::sort_dismiss_layer());
 		layers.push(sort_menu);
 	}

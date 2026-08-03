@@ -1084,9 +1084,10 @@ pub fn dismiss_layer() -> Element<'static, Message> {
 	menu::dismiss_layer(Message::Files(FilesMessage::MenuDismissed))
 }
 
-/// How far in from the window's right edge the sort menu hangs (§19). The menu drops right-aligned
+/// How far in from the PANE's right edge the sort menu hangs (§19). The menu drops right-aligned
 /// so it sits beneath the toolbar's right-hand cluster — the sort button among them — rather than
-/// being pinned to a button whose exact x a fill row never reports.
+/// being pinned to a button whose exact x a fill row never reports. It is the pane's right edge,
+/// not the window's: the folder tree sits beside the pane now (§18), so the two no longer coincide.
 const SORT_MENU_RIGHT_INSET: f32 = 8.0;
 /// The gap between the header's bottom edge and the top of the dropped sort menu (§19).
 const SORT_MENU_TOP_GAP: f32 = 2.0;
@@ -1105,9 +1106,19 @@ const SORT_MENU_TOP_GAP: f32 = 2.0;
 /// menu dropped `HEADER_HEIGHT` below the WINDOW's top, far above the button (the same conversion
 /// `app` does to map a pane press back into pane space).
 ///
+/// `width` does the same for the horizontal: the pane no longer spans the window — the folder tree
+/// sits on its right now (§18) — so the sort button is at the PANE's right edge, `width` in, not the
+/// window's. The panel is placed by a left offset that pins its right edge to the pane's, the same
+/// way the pane's own context menu clamps itself inside `width`; right-aligning against the whole
+/// window (as it once did, when the pane WAS the width) would drop it out over the tree.
+///
 /// It is `'static`: every row is built from the key and direction read out by value here, so the
 /// element borrows nothing from `files` and outlives this call.
-pub fn sort_menu(files: &Files, window_height: f32) -> Option<Element<'static, Message>> {
+pub fn sort_menu(
+	files: &Files,
+	window_height: f32,
+	width: f32,
+) -> Option<Element<'static, Message>> {
 	if !files.sort_menu_open() {
 		return None;
 	}
@@ -1148,16 +1159,20 @@ pub fn sort_menu(files: &Files, window_height: f32) -> Option<Element<'static, M
 	// starts this far down. `.max(0.0)` guards the instant before the first window size arrives,
 	// when the height is still zero and the subtraction would go negative.
 	let pane_top = (window_height - files.height()).max(0.0);
+	// The menu's left edge, so its right edge pins to the pane's right (minus the inset): the panel
+	// is a fixed `menu::WIDTH` wide, so start it that far plus the inset in from `width`. Placing by
+	// a left offset — rather than align-right against the full-window overlay — is what keeps it over
+	// the PANE now the tree sits to its right (§18). `.max(0.0)` guards a pane narrower than the menu.
+	let left = (width - menu::WIDTH - SORT_MENU_RIGHT_INSET).max(0.0);
 	Some(
 		container(panel)
 			.width(Length::Fill)
 			.height(Length::Fill)
-			.align_x(Horizontal::Right)
 			.padding(Padding {
 				top: pane_top + HEADER_HEIGHT + SORT_MENU_TOP_GAP,
-				right: SORT_MENU_RIGHT_INSET,
+				right: 0.0,
 				bottom: 0.0,
-				left: 0.0,
+				left,
 			})
 			.into(),
 	)
