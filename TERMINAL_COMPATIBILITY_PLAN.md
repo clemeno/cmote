@@ -163,8 +163,10 @@ short, and only images are high value:
   (`set_scrolling_region(top, bottom)`). `[DEC]`.
 - **DRCS soft fonts, VT320 status line, VT420 rectangular ops** (DECCRA / DECFRA / DECERA, and
   the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`.
-- **Synchronized output `?2026`** — not observed in the crate; safe to ignore today, a strict
-  implementation would buffer a frame. `[community]`, low pri.
+- **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
+  `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
+  (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
+  each frame, so the visible effect is nil either way. `[community]`, low pri.
 
 ---
 
@@ -207,6 +209,175 @@ The `[engine-limit]` items are the only remaining large moves, and only **images
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
 rectangular ops) are legacy and rare. For "support *any* documented app UX", graphics is the one
 outstanding ceiling-raiser; everything else above is A-sized and engine-independent.
+
+---
+
+## 8. Feature support matrix (vs `vtdn.dev`)
+
+A per-sequence audit against the escape-sequence catalogue published at
+[vtdn.dev](https://vtdn.dev), so support is legible one line at a time rather than only as the
+"still-missing" lens of §2–§6. Every ✅/⚠️/❌ below was verified against the real sources — the
+engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
+(`term/`, `ui/grid.rs`) — not from memory.
+
+Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not supported. A ❌ marked
+*(policy)* is excluded on purpose (§6), not a gap.
+
+### OSC — Operating System Command
+
+| Code | Feature | Status | Note |
+|---|---|---|---|
+| 0 | Icon name + window title | ✅ | title shown; icon name dropped (`term/mod.rs`) |
+| 2 | Window title | ✅ | control chars stripped (anti-spoof) |
+| 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** ignored (fixed palette) |
+| 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
+| 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
+| 9 | Desktop notification | ❌ | |
+| 9;4 | Progress reporting | ❌ | |
+| 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate); **set** ignored |
+| 22 | Mouse pointer shape | ❌ | |
+| 52 (write) | Clipboard write | ❌ | *(policy)* — remote must not poison local clipboard (§6) |
+| 52 (read) | Clipboard read | ❌ | *(policy)* — remote must not read local clipboard (§6) |
+| 104 | Reset palette entry | ❌ | no effect (fixed palette) |
+| 110 / 111 / 112 | Reset fg / bg / cursor colour | ❌ | no effect (fixed scheme) |
+| 133 | Shell integration (semantic prompts) | ❌ | §4 notes a scanner could capture these |
+| Kitty 21 | Colour by semantic name | ❌ | |
+| Kitty 99 | Rich notifications | ❌ | |
+| iTerm 1337 File | Inline images | ❌ | no image rendering (§5) |
+| iTerm 1337 | Marks / vars / profiles | ❌ | |
+| 777 | urxvt notification | ❌ | |
+
+### CSI — cursor movement & editing
+
+| Feature | Code | Status | Note |
+|---|---|---|---|
+| Cursor up / down / fwd / back | A / B / C / D | ✅ | |
+| Cursor next / prev line | E / F | ✅ | |
+| Absolute position | G / H (+ f) | ✅ | HVP `f` too |
+| Forward / backward tab | I / Z | ✅ | |
+| Vertical / horizontal PA | d / \` | ✅ | |
+| Save / restore cursor | s / u | ✅ | ANSI.SYS form |
+| Insert / delete / erase char | @ / P / X | ✅ | |
+| Insert / delete line | L / M | ✅ | |
+| Erase in display | J | ✅ | |
+| Erase scrollback | 3 J | ✅ | |
+| Erase in line | K | ✅ | |
+| Selective erase (protected) | ? J / ? K | ❌ | no protected-region support |
+| Repeat character | b (REP) | ✅ | handled in the vte parser (`ansi.rs`) |
+| Scroll up / down | S / T | ✅ | |
+| Scrolling region (top / bottom) | r (DECSTBM) | ✅ | vertical only |
+| Left / right margins | s (DECSLRM) | ❌ | engine scroll region is vertical only (§5) |
+| Tab clear | g | ✅ | |
+| Rectangular erase / fill / copy | $ z / $ x / $ v | ❌ | not represented (§5) |
+| Cursor style | Ps SP q (DECSCUSR) | ✅ | block / underline / bar; blink dropped |
+| Device status report | 5n / 6n | ✅ | |
+| Primary / secondary DA | c / > c | ✅ | unblocks vim / tmux startup |
+| Tertiary DA | = c | ❌ | `=` intermediate is a no-op (§3) |
+| Request mode (DECRQM) | ? Ps $ p | ✅ | engine answers |
+| Colour palette stack | # p / # q | ❌ | |
+
+### ESC — single sequences
+
+| Feature | Code | Status | Note |
+|---|---|---|---|
+| Index / Reverse index | ESC D / ESC M | ✅ | |
+| Next line | ESC E | ✅ | |
+| Set tab stop | ESC H | ✅ | |
+| Save / restore cursor | ESC 7 / ESC 8 | ✅ | |
+| Full reset | ESC c (RIS) | ✅ | |
+| Keypad app / numeric | ESC = / ESC > | ✅ | tracked; not yet used for numpad encoding (DECKPAM, §2) |
+| Screen alignment test | ESC #8 (DECALN) | ✅ | |
+| Designate charset G0 / G1 | ESC ( / ESC ) | ✅ | DEC line-drawing works |
+| Single shift G2 / G3 | ESC N / ESC O | ❌ | |
+| Locking shifts | LS2 / LS3 / LS1R… | ⚠️ | SO / SI + designation only |
+| Double-height / width lines | ESC #3–6 | ❌ | not represented (§5) |
+| 7 / 8-bit control output | ESC SP F / G | ❌ | |
+| UTF-8 charset | ESC % G | ✅ | engine is always UTF-8 |
+
+### DCS — Device Control String
+
+| Feature | Code | Status | Note |
+|---|---|---|---|
+| Request status string | DCS $ q (DECRQSS) | ❌ | needs a DCS reply path (§3) |
+| Termcap query | DCS + q (XTGETTCAP) | ❌ | needs a DCS reply path (§3) |
+| Terminal version | CSI > q (XTVERSION) | ❌ | DA replies cover identity (§3) |
+| Sixel graphics | DCS … q | ❌ | no graphics (§5) |
+| tmux passthrough | DCS tmux; … | ❌ | |
+
+### SGR — text styling
+
+| Attribute | Code | Status | Note |
+|---|---|---|---|
+| Bold | 1 | ✅ | |
+| Dim / faint | 2 | ✅ | faded toward bg |
+| Italic | 3 | ✅ | bundled IBM Plex Mono face |
+| Underline | 4 | ✅ | |
+| Slow / rapid blink | 5 / 6 | ⚠️ | tracked, **not shown** — no animation timer (§4) |
+| Reverse video | 7 | ✅ | |
+| Hidden / conceal | 8 | ✅ | copy still yields the text |
+| Strikethrough | 9 | ✅ | |
+| Double underline | 21 / 4:2 | ✅ | |
+| Curly / dotted / dashed underline | 4:3 / 4:4 / 4:5 | ✅ | drawn as our own quads |
+| Overline | 53 | ❌ | not carried |
+| 16 ANSI colours | 30–37 / 40–47 / 90–97 / 100–107 | ✅ | |
+| 256-colour indexed | 38;5 / 48;5 | ✅ | |
+| Truecolor (`;` and `:`) | 38;2 / 38:2 | ✅ | both spellings |
+| Underline colour | 58;5 / 58;2 | ✅ | |
+
+### DECSET / DECRST private modes
+
+| Mode | # | Status | Note |
+|---|---|---|---|
+| Application cursor keys | 1 | ✅ | arrows send SS3 |
+| 132 / 80 column | 3 | ⚠️ | DECCOLM clears screen, no resize (DECRQM: NotSupported) |
+| Global reverse video | 5 (DECSCNM) | ❌ | |
+| Origin mode | 6 | ✅ | |
+| Auto-wrap | 7 | ✅ | |
+| Blinking cursor | 12 | ⚠️ | tracked, drawn steady |
+| Show / hide cursor | 25 | ✅ | |
+| Reverse wrap | 45 | ❌ | |
+| Left / right margin | 69 | ❌ | |
+| Sixel scrolling | 80 | ❌ | |
+| Alternate screen | 1049 | ✅ | no scrollback there, by design |
+| Mouse: normal / btn / any | 1000 / 1002 / 1003 | ✅ | `term/mouse.rs` |
+| Focus events | 1004 | ✅ | cmote sends CSI I / CSI O |
+| SGR mouse | 1006 | ✅ | |
+| Alt-scroll | 1007 | ✅ | |
+| SGR-pixel mouse | 1016 | ❌ | |
+| Bracketed paste | 2004 | ✅ | with an injection scrub |
+| Synchronized output | 2026 | ⚠️ | parser batches; engine mode is a no-op; cmote already atomic |
+| Grapheme clustering | 2027 | ❌ | |
+| Colour-scheme reporting | 2031 | ❌ | |
+| In-band resize | 2048 | ❌ | |
+| Insert / replace (IRM) | 4 | ✅ | |
+| Newline mode (LNM) | 20 | ✅ | |
+| X10 mouse (press-only) | 9 | ❌ | engine never implemented it |
+
+### Graphics, window ops, keyboard, C0
+
+| Feature | Status | Note |
+|---|---|---|
+| Sixel / kitty graphics / placeholders / animation | ❌ | cmote draws no images (§5) |
+| iTerm2 inline images | ❌ | |
+| Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | ❌ | *(policy)* — cmote owns its tabbed window; remote can't drive it |
+| Window / position / state reports (CSI 11 / 13 t) | ❌ | |
+| Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
+| Cell size (CSI 16 t) | ❌ | |
+| Title stack (CSI 22 / 23 t) | ✅ | `push_title` / `pop_title` |
+| **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
+| **xterm modifyOtherKeys** | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9) |
+| ENQ answerback | ❌ | no answerback string (§3) |
+| BEL | ⚠️ | accepted, **silent** — bell event dropped |
+| BS / HT / LF / CR | ✅ | |
+| SO / SI | ✅ | charset shift |
+
+**Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
+colour, alternate screen, mouse, bracketed paste, focus, DA / DSR / DECRQM, DECSCUSR, REP, and the
+kitty keyboard protocol. Most of the ❌ column is **deliberate**: no images, no remote clipboard
+(OSC 52), no remote window control (CSI t), no blink animation, and a fixed colour scheme so
+dynamic-palette writes are query-only. The genuine plain gaps are the newer private modes
+(2027 / 2031 / 2048), selective / rectangular editing, left-right margins, and the DCS query
+replies (DECRQSS / XTGETTCAP / XTVERSION) — all catalogued with their cost in §2–§5.
 
 ---
 
