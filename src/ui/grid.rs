@@ -526,10 +526,20 @@ fn draw_run(
 	} else {
 		text::Shaping::Advanced
 	};
+	// The text layout box is ONE cell wider than the run's own pixel width. A run's advance
+	// is exactly `run.cols * CELL_WIDTH`, but cosmic-text sums each glyph's advance in f32 and
+	// the total lands a sliver past that; a glyph whose right edge exceeds the layout width is
+	// culled, so the run's LAST glyph would vanish whenever the run ends on a visible cell — a
+	// colour change, the cell before the cursor, the last char of an `ls --color` name. The
+	// slack lifts that boundary clear of the rounding (and gives an oversized fallback glyph in
+	// a sealed one-column run room to shape). It paints nothing extra: the content is fixed, so
+	// the empty tail draws nothing, and everything is still clipped to `row_bounds` and pinned
+	// at `left` by the left alignment, so no glyph moves.
+	let text_bounds_width = width + CELL_WIDTH;
 	renderer.fill_text(
 		text::Text {
 			content: run.content,
-			bounds: Size::new(width, CELL_HEIGHT),
+			bounds: Size::new(text_bounds_width, CELL_HEIGHT),
 			size: Pixels(FONT_SIZE),
 			line_height: text::LineHeight::Absolute(Pixels(CELL_HEIGHT)),
 			// The face for this run. Upright cells draw from Fira Mono, italic cells from IBM
