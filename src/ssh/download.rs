@@ -285,10 +285,13 @@ fn stamp_local_blocking(local: &Path, mtime: Option<u32>, mode: Option<u32>) {
 #[cfg(unix)]
 fn apply_mode(local: &Path, mode: Option<u32>) {
 	use std::os::unix::fs::PermissionsExt;
-	if let Some(bits) = mode {
-		if let Err(error) = std::fs::set_permissions(local, std::fs::Permissions::from_mode(bits)) {
-			eprintln!("could not set permissions on {}: {error}", local.display());
-		}
+	// A let-chain (edition 2024) rather than two nested `if let`s: bind the source's mode bits and,
+	// only if that succeeded, attempt the change — clippy's `collapsible_if` asks for exactly this,
+	// and the flat form reads as the single guarded action it is.
+	if let Some(bits) = mode
+		&& let Err(error) = std::fs::set_permissions(local, std::fs::Permissions::from_mode(bits))
+	{
+		eprintln!("could not set permissions on {}: {error}", local.display());
 	}
 }
 
