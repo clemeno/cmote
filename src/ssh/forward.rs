@@ -37,15 +37,17 @@ use crate::bridge::SshEvent;
 use crate::forward::{ForwardKind, ForwardSpec};
 
 /// The table shared between the Handler and the `Forwards` manager for REMOTE forwards
-/// (§27): the server's bound port → the local `(host, port)` to dial when a connection
-/// arrives on it. The Handler reads it in `server_channel_open_forwarded_tcpip`; `Forwards`
-/// writes it as remote forwards are added and removed. A `std::sync::Mutex` is right here —
-/// every critical section is a single map op with no `.await` held across the lock.
+/// (§27): the server's bound port → the local `(host, port, forward id)` to dial when a
+/// connection arrives on it. The `(host, port)` is where to dial; the id lets the Handler's
+/// pump attribute the connection to the right row for the live gauge. The Handler reads it in
+/// `server_channel_open_forwarded_tcpip`; `Forwards` writes it as remote forwards are added and
+/// removed. A `std::sync::Mutex` is right here — every critical section is a single map op with
+/// no `.await` held across the lock.
 ///
 /// `ponytail:` keyed by port only, not `(address, port)`. Two remote forwards that bind the
 /// same port on different server interfaces would collide; binding distinct ports (the usual
 /// case) is unaffected.
-pub type RemoteTable = Arc<Mutex<HashMap<u16, (String, u16)>>>;
+pub type RemoteTable = Arc<Mutex<HashMap<u16, (String, u16, u64)>>>;
 
 /// A fresh, empty remote-forward table. Made once per session in `connect_and_run` and cloned
 /// into both the Handler and the `Forwards` manager.
@@ -57,7 +59,7 @@ pub fn remote_table() -> RemoteTable {
 /// here is a single infallible map operation, so a poisoning holder cannot have left the map
 /// half-updated — taking the inner value is safe and keeps a forward glitch from crashing the
 /// session.
-fn lock(table: &RemoteTable) -> std::sync::MutexGuard<'_, HashMap<u16, (String, u16)>> {
+fn lock(table: &RemoteTable) -> std::sync::MutexGuard<'_, HashMap<u16, (String, u16, u64)>> {
 	table
 		.lock()
 		.unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -67,8 +69,10 @@ fn lock(table: &RemoteTable) -> std::sync::MutexGuard<'_, HashMap<u16, (String, 
 /// the SSH channel the listener is not allowed to (see the module header). Carries the raw
 /// socket plus the target the tunnel goes to — fixed for a Local forward, SOCKS-negotiated for
 /// a Dynamic one — and the peer address, reported to the server as the tunnel's originator. It
-/// needs no forward id: once opened, a tunnel is pumped the same whichever forward accepted it.
+/// also carries the `id` of the forward that accepted it, so the detached pump can report this
+/// connection's start and end and move that row's live gauge (§27).
 pub struct Accepted {
+	pub id: u64,
 	pub target_host: String,
 	pub target_port: u16,
 	pub tcp: TcpStream,
@@ -129,7 +133,7 @@ impl Forwards {
 				// has too.
 				if requested != 0 {
 					lock(&self.table)
-						.insert(requested, (spec.target_host.clone(), spec.target_port));
+						.insert(requested, (spec.target_host.clone(), spec.target_port, id));
 				}
 				match session
 					.tcpip_forward(spec.listen_host.clone(), u32::from(requested))
@@ -164,7 +168,7 @@ impl Forwards {
 						// will report).
 						if requested == 0 {
 							lock(&self.table)
-								.insert(bound, (spec.target_host.clone(), spec.target_port));
+								.insert(bound, (spec.target_host.clone(), spec.target_port, id));
 						}
 						// Remember the BOUND port (not the requested 0) so removal cancels and prunes
 						// the right one.
@@ -268,6 +272,7 @@ async fn listen(
 
 		if let Some((target_host, target_port, tcp)) = resolved {
 			let accepted = Accepted {
+				id,
 				target_host,
 				target_port,
 				tcp,
@@ -286,13 +291,17 @@ async fn listen(
 /// open the pump is fully detached — it owns the socket and the channel stream and needs
 /// nothing shared — so a slow or long-lived tunnel never holds up the shell. A refused channel
 /// simply drops the socket, closing the client's connection.
-pub async fn open_local_tunnel<H: RusshHandler>(session: &Handle<H>, accepted: Accepted) {
+pub async fn open_local_tunnel<H: RusshHandler>(
+	session: &Handle<H>,
+	accepted: Accepted,
+	events: mpsc::Sender<SshEvent>,
+) {
 	let Accepted {
+		id,
 		target_host,
 		target_port,
 		tcp,
 		peer,
-		..
 	} = accepted;
 
 	match session
@@ -308,14 +317,16 @@ pub async fn open_local_tunnel<H: RusshHandler>(session: &Handle<H>, accepted: A
 			let mut stream = channel.into_stream();
 			tokio::spawn(async move {
 				let mut tcp = tcp;
-				// Copy in both directions until either end closes; errors here are ordinary
-				// connection ends, nothing to report.
+				// The channel is open, so a connection is now flowing: raise the row's gauge, pump
+				// until either end closes (errors here are ordinary connection ends), then lower it.
+				let _ = events.send(SshEvent::ForwardConnectionOpened { id }).await;
 				let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+				let _ = events.send(SshEvent::ForwardConnectionClosed { id }).await;
 			});
 		}
 		Err(_) => {
 			// The server would not open the channel (target refused, policy): let `tcp` drop,
-			// which closes the client's side.
+			// which closes the client's side. Nothing flowed, so the gauge is left untouched.
 		}
 	}
 }
@@ -329,10 +340,12 @@ pub async fn accept_remote(
 	channel: Channel<Msg>,
 	reply: ChannelOpenHandle,
 	connected_port: u16,
+	events: mpsc::Sender<SshEvent>,
 ) {
-	// Copy the target out under a short lock, then release it before any await.
+	// Copy the target (and the forward's id, for the gauge) out under a short lock, then release
+	// it before any await.
 	let target = lock(table).get(&connected_port).cloned();
-	let Some((host, port)) = target else {
+	let Some((host, port, id)) = target else {
 		// Nothing mapped for that port (a stale connection after removal): decline the open.
 		reply.reject(ChannelOpenFailure::ConnectFailed).await;
 		return;
@@ -344,7 +357,11 @@ pub async fn accept_remote(
 	tokio::spawn(async move {
 		if let Ok(mut tcp) = TcpStream::connect((host.as_str(), port)).await {
 			let mut stream = channel.into_stream();
+			// Only a connection that actually reached its target counts on the gauge: raise it here,
+			// after the successful dial, and lower it when the pump ends.
+			let _ = events.send(SshEvent::ForwardConnectionOpened { id }).await;
 			let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+			let _ = events.send(SshEvent::ForwardConnectionClosed { id }).await;
 		}
 	});
 }

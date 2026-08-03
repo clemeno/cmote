@@ -1152,8 +1152,9 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). v3.x
   then added the **server-assigned remote port** (`-R 0`): a remote forward may bind port 0, the
   server picks a free port, and the row shows the port it chose while the saved spec keeps 0 so a
-  reconnect asks afresh (§27). Still deferred: bracketed-IPv6 bind addresses and per-tunnel
-  connection counts / activity in the dialog.
+  reconnect asks afresh (§27). v3.x also made the dialog a **live monitor** — each active row shows
+  `N open · M total`, the connections crossing the tunnel now and in all, driven from the byte pumps
+  themselves (§27). Still deferred: bracketed-IPv6 bind addresses.
 - **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
   replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
   cursor reports, custom tab stops, the autowrap toggle and the host's status/identity
@@ -2403,12 +2404,28 @@ The `Forwards` manager `stream` owns holds the local listener tasks and the remo
 it at session end aborts every local listener, and the remote listeners die with the connection —
 a clean teardown from one scope exit.
 
+### Watching the traffic (a live gauge)
+
+The Tunnels dialog is a live monitor, not just a list: each active row shows `N open · M total` — the
+connections crossing the tunnel **right now** and the number it has carried in all. The count is
+driven from the same detached pumps that move the bytes. Each pump now knows the forward it belongs
+to (`Accepted` carries the id for a local/dynamic tunnel; the shared table's value gained the id for
+a remote one), so it can bracket its byte copy with a `ForwardConnectionOpened { id }` before and a
+`ForwardConnectionClosed { id }` after. The app raises the open and total counts on an open and
+lowers the open count on a close (saturating, so a stale close can never underflow); the total only
+ever grows, which is what tells an idle-but-used tunnel (`0 open · 5 total`) from a never-used one. A
+remote connection counts only once its **dial to the local target succeeds** — a connection that
+reached nothing is not traffic. The gauge lives on `ForwardEntry` (pure data, unit-tested), so it is
+display-only: nothing about it is persisted, and a reconnect starts a fresh count.
+
 ### The bridge, the state, and the dialog
 
-Two new commands (`AddForward { id, spec }` / `RemoveForward(id)`) and two events (`ForwardReady
-{ id }` / `ForwardFailed { id, reason }`) extend the protocol (§4); the id is app-assigned, keying a
-forward to its outcome and its removal. Each tab keeps a `Vec<ForwardEntry>` (id + spec + status:
-Starting → Active / Failed) and a small add-form. The **Tunnels** button (status bar, with the live
+Two commands (`AddForward { id, spec }` / `RemoveForward(id)`) and four events (`ForwardReady
+{ id, assigned_port }` / `ForwardFailed { id, reason }` and the gauge's `ForwardConnectionOpened
+{ id }` / `ForwardConnectionClosed { id }`) extend the protocol (§4); the id is app-assigned, keying a
+forward to its outcome, its removal, and its activity. Each tab keeps a `Vec<ForwardEntry>` (id +
+spec + status: Starting → Active / Failed, plus the assigned port and the live/total counts) and a
+small add-form. The **Tunnels** button (status bar, with the live
 count) opens the manager — the shared dialog chrome (§10) with a row per forward (label, status dot,
 remove ✕) above the add form (a kind selector, a listen field, a target field hidden for Dynamic).
 Adding parses, refuses a duplicate bind before it is sent, queues the entry and asks the worker;

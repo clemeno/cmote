@@ -352,6 +352,13 @@ pub enum SshEvent {
 	/// refused the remote listen, or the bind address was bad. Carries the id and a short reason
 	/// for the row — a forward's own failure never tears the shell down, unlike a session error.
 	ForwardFailed { id: u64, reason: String },
+	/// A connection began flowing through forward `id` (§27): a client dialed a local/dynamic
+	/// listener, or the server opened a `forwarded-tcpip` channel for a remote one and the dial
+	/// succeeded. The tunnels dialog raises that row's live "open" and cumulative "total" counts.
+	ForwardConnectionOpened { id: u64 },
+	/// A connection through forward `id` ended (§27): its byte pump finished. The dialog lowers
+	/// that row's live "open" count by one; the cumulative total stays, as a record of traffic seen.
+	ForwardConnectionClosed { id: u64 },
 	/// The session ended (server closed, or user disconnected).
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).

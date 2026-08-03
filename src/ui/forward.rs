@@ -91,10 +91,17 @@ fn forward_row(entry: &ForwardEntry) -> Element<'_, Message> {
 	};
 
 	// The label (the entry's, not the spec's, so a `-R 0` shows the server-assigned port), plus a
-	// failure reason on its own muted line when the forward could not start.
+	// muted sub-line: a failure reason when the forward could not start, or — for a live one — the
+	// activity gauge showing the connections open now and carried in total.
 	let mut labelled = column![text(entry.label()).size(BODY_SIZE).color(FG)].spacing(2);
 	if let Some(reason) = hint {
 		labelled = labelled.push(text(reason).size(BODY_SIZE - 2.0).color(FAILED_FG));
+	} else if entry.status == ForwardStatus::Active {
+		labelled = labelled.push(
+			text(entry.activity_gauge())
+				.size(BODY_SIZE - 2.0)
+				.color(MUTED_FG),
+		);
 	}
 
 	let remove = button(text("✕").size(BODY_SIZE))

@@ -504,7 +504,7 @@ async fn stream(
 			// A local/dynamic forward accepted a connection (§27). Open its SSH channel here —
 			// the one place allowed to — and let the pump run detached.
 			Some(accepted) = accepted_rx.recv() => {
-				forward::open_local_tunnel(session, accepted).await;
+				forward::open_local_tunnel(session, accepted, events.clone()).await;
 			}
 			// A command arrived from the GUI (via run()).
 			command = to_session_rx.recv() => {
@@ -749,7 +749,14 @@ impl client::Handler for Handler {
 		reply: client::ChannelOpenHandle,
 		_session: &mut client::Session,
 	) -> Result<(), Self::Error> {
-		forward::accept_remote(&self.remote_forwards, channel, reply, connected_port as u16).await;
+		forward::accept_remote(
+			&self.remote_forwards,
+			channel,
+			reply,
+			connected_port as u16,
+			self.events.clone(),
+		)
+		.await;
 		Ok(())
 	}
 }

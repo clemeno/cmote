@@ -208,6 +208,13 @@ pub struct ForwardEntry {
 	/// `None` for every forward that named its own port; `Some` only after a 0-request came up,
 	/// so the row can show where the server is actually listening while the spec keeps its 0.
 	pub bound_port: Option<u16>,
+	/// The connections flowing through this forward right now (§27) — raised by a
+	/// `ForwardConnectionOpened` event and lowered by a `ForwardConnectionClosed`, so the tunnels
+	/// dialog can show a live gauge of what the tunnel is actually carrying.
+	pub open_count: u32,
+	/// Every connection this forward has EVER carried (§27): a running tally that only grows, so
+	/// the gauge tells an idle-but-used tunnel (`0 open · 5 total`) from a never-used one.
+	pub total_count: u32,
 }
 
 impl ForwardEntry {
@@ -218,6 +225,26 @@ impl ForwardEntry {
 			Some(port) => self.spec.label_on(port),
 			None => self.spec.label(),
 		}
+	}
+
+	/// A connection started flowing through this forward (§27): one more open, and one more ever.
+	pub fn connection_opened(&mut self) {
+		self.open_count += 1;
+		self.total_count += 1;
+	}
+
+	/// A connection through this forward ended (§27): one fewer open. Saturating, so a close whose
+	/// open was never seen (a stale event after the row was reset) can never underflow the count.
+	/// The total is untouched — it counts connections carried, not connections still live.
+	pub fn connection_closed(&mut self) {
+		self.open_count = self.open_count.saturating_sub(1);
+	}
+
+	/// The live activity gauge for the row (§27): the connections open now and the total ever, as
+	/// `N open · M total`. Shown only for an Active forward (the caller checks the status), where it
+	/// turns a static row into a monitor of the traffic actually crossing the tunnel.
+	pub fn activity_gauge(&self) -> String {
+		format!("{} open · {} total", self.open_count, self.total_count)
 	}
 }
 
@@ -399,6 +426,8 @@ mod tests {
 			spec,
 			status: ForwardStatus::Active,
 			bound_port: Some(38217),
+			open_count: 0,
+			total_count: 0,
 		};
 		assert_eq!(entry.label(), "R  127.0.0.1:38217 → localhost:3000");
 		// The spec itself is untouched, so a reconnect still asks for a fresh server port.
@@ -414,7 +443,46 @@ mod tests {
 			spec,
 			status: ForwardStatus::Active,
 			bound_port: None,
+			open_count: 0,
+			total_count: 0,
 		};
 		assert_eq!(entry.label(), "L  127.0.0.1:8080 → db:5432");
+	}
+
+	#[test]
+	fn a_forward_counts_its_open_and_total_connections() {
+		// The gauge rises with each connection and, on close, the live count falls while the total
+		// stands — so an idle-but-used tunnel still shows what it has carried.
+		let spec = ForwardSpec::parse(ForwardKind::Local, "8080", "db:5432").unwrap();
+		let mut entry = ForwardEntry {
+			id: 1,
+			spec,
+			status: ForwardStatus::Active,
+			bound_port: None,
+			open_count: 0,
+			total_count: 0,
+		};
+		assert_eq!(entry.activity_gauge(), "0 open · 0 total");
+		entry.connection_opened();
+		entry.connection_opened();
+		assert_eq!(entry.activity_gauge(), "2 open · 2 total");
+		entry.connection_closed();
+		assert_eq!(entry.activity_gauge(), "1 open · 2 total");
+	}
+
+	#[test]
+	fn a_forwards_open_count_never_underflows() {
+		// A close with no matching open (a stale event) must not wrap the unsigned count around.
+		let spec = ForwardSpec::parse(ForwardKind::Local, "8080", "db:5432").unwrap();
+		let mut entry = ForwardEntry {
+			id: 1,
+			spec,
+			status: ForwardStatus::Active,
+			bound_port: None,
+			open_count: 0,
+			total_count: 0,
+		};
+		entry.connection_closed();
+		assert_eq!(entry.activity_gauge(), "0 open · 0 total");
 	}
 }

@@ -42,8 +42,9 @@ references below (§n) point into it.
   **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
   SOCKS5 proxy that lets each connection pick its own target. A remote forward may listen on port
   **0** to let the **server pick a free port** (`-R 0`); the row then shows the port it chose. Each
-  tunnel rides the same connection — no second login — and shows live / failed in the dialog; the
-  set is **remembered per target** and re-established when you reconnect. Binds to loopback by
+  tunnel rides the same connection — no second login — and shows live / failed in the dialog, with a
+  live **activity gauge** (`N open · M total`) counting the connections crossing it now and in all;
+  the set is **remembered per target** and re-established when you reconnect. Binds to loopback by
   default.
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
@@ -868,7 +869,9 @@ screen), *not* close the tab; a second **Ctrl+D** there then closes it.
 **17. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
 forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the
 row to go from `○` to a green `●`; from your machine, `curl localhost:8080` (or `ssh -p 8080
-localhost`) should reach it through the tunnel. Add a **Dynamic** forward — listen `1080` — and
+localhost`) should reach it through the tunnel — and watch the row's **gauge** move as you connect:
+`0 open · 0 total` becomes `1 open · 1 total` while a connection is live, then `0 open · 1 total`
+once it closes. Add a **Dynamic** forward — listen `1080` — and
 point a browser or `curl --socks5 localhost:1080 https://example.com` at it. Add a **Remote**
 forward — listen `9090` on the server, to `localhost:<something-local>` — and connect to it *on the
 remote*. Add another **Remote** with listen `0` (`-R 0`): the server picks a free port and the row

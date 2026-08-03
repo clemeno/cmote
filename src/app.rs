@@ -2362,6 +2362,10 @@ impl Tab {
 			SshEvent::ForwardFailed { id, reason } => {
 				self.set_forward_status(id, crate::forward::ForwardStatus::Failed(reason));
 			}
+			// A connection opened or closed on a forward (§27): move its live gauge. A late event
+			// for a forward already removed finds no row and is dropped.
+			SshEvent::ForwardConnectionOpened { id } => self.bump_forward(id, true),
+			SshEvent::ForwardConnectionClosed { id } => self.bump_forward(id, false),
 			SshEvent::Disconnected => {
 				// A remote hangup ends a live session too: remember where it was (§22).
 				self.persist_session();
@@ -2483,6 +2487,9 @@ impl Tab {
 				status: crate::forward::ForwardStatus::Starting,
 				// Set only if this is a `-R 0` and the server later reports the port it chose.
 				bound_port: None,
+				// A fresh forward has carried nothing yet; the gauge fills as connections flow.
+				open_count: 0,
+				total_count: 0,
 			});
 			self.forward_listen.clear();
 			self.forward_to.clear();
@@ -2519,6 +2526,9 @@ impl Tab {
 					status: crate::forward::ForwardStatus::Starting,
 					// Set only if this is a `-R 0` and the server later reports the port it chose.
 					bound_port: None,
+					// A fresh forward has carried nothing yet; the gauge fills as connections flow.
+					open_count: 0,
+					total_count: 0,
 				});
 			}
 		}
@@ -2540,6 +2550,19 @@ impl Tab {
 			entry.status = crate::forward::ForwardStatus::Active;
 			if assigned_port.is_some() {
 				entry.bound_port = assigned_port;
+			}
+		}
+	}
+
+	/// A connection opened or closed on forward `id` (§27): move its live gauge. `opened` raises the
+	/// open and total counts; a close lowers the open count (the total only ever grows). An id with
+	/// no matching row — a late event for one already removed — is ignored.
+	fn bump_forward(&mut self, id: u64, opened: bool) {
+		if let Some(entry) = self.forwards.iter_mut().find(|entry| entry.id == id) {
+			if opened {
+				entry.connection_opened();
+			} else {
+				entry.connection_closed();
 			}
 		}
 	}
@@ -5454,6 +5477,33 @@ mod tests {
 			"R  127.0.0.1:38217 → localhost:3000"
 		);
 		assert_eq!(app.forwards[0].spec.listen_port, 0);
+	}
+
+	/// Connection open/close events move a forward's live gauge (§27): opens raise the live and
+	/// total counts, a close lowers the live count while the total stands, and a stale event for a
+	/// removed forward is ignored.
+	#[test]
+	fn a_forward_connection_event_moves_the_gauge() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Local;
+		app.forward_listen = "8080".to_owned();
+		app.forward_to = "db:5432".to_owned();
+		app.add_forward();
+		let id = app.forwards[0].id;
+		// A fresh forward has carried nothing.
+		assert_eq!(app.forwards[0].activity_gauge(), "0 open · 0 total");
+
+		let _ = app.on_ssh_event(SshEvent::ForwardConnectionOpened { id });
+		let _ = app.on_ssh_event(SshEvent::ForwardConnectionOpened { id });
+		assert_eq!(app.forwards[0].activity_gauge(), "2 open · 2 total");
+
+		// A close drops the live count; the total, a record of traffic seen, stays.
+		let _ = app.on_ssh_event(SshEvent::ForwardConnectionClosed { id });
+		assert_eq!(app.forwards[0].activity_gauge(), "1 open · 2 total");
+
+		// A stale event for a forward that no longer exists changes nothing.
+		let _ = app.on_ssh_event(SshEvent::ForwardConnectionOpened { id: 999 });
+		assert_eq!(app.forwards[0].activity_gauge(), "1 open · 2 total");
 	}
 
 	// A key-press event for the terminal handler. `text: None` is fine for the named keys these
