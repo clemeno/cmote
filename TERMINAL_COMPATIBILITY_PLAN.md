@@ -135,14 +135,15 @@ low UX value: modern applications rely on the DA / DECRQM answers that already w
 
 ## 4. Still open — rendering / attributes
 
-**OSC 8 hyperlinks are now done** (§24) — the seam surfaces the per-cell URI (`Cell::hyperlink`),
-Ctrl+click and a context-menu Open/Copy follow it, and `link` gates the scheme to
-http/https/mailto before opening. What remains here is small and low-value:
+**OSC 8 hyperlinks are now done** (§24), **including the Ctrl-hover underline** (v3.x) — the seam
+surfaces the per-cell URI (`Cell::hyperlink`), Ctrl+click and a context-menu Open/Copy follow it,
+`link` gates the scheme to http/https/mailto before opening, and the grid now underlines the whole
+run of a link while Ctrl is held over it, so the link reveals itself before the click. What remains
+here is small and low-value:
 
 | Missing | Note | Tag | Src |
 |---|---|---|---|
 | **Blink** (SGR 5/6) | the engine stores the bit; cmote draws steady **by choice** — it runs no animation timer (the same call made for the cursor). Could show a static marker; deliberately not animated | [policy] | [ECMA-48] |
-| **OSC 8 hover affordance** | the link is followed, but there is no Ctrl-hover underline yet — a link is found by right-click or a program's own styling (§24) | [seam+grid] low pri | [community] |
 | **OSC 133 shell-integration** (semantic prompt marks) | niche; a stream scanner beside the cwd tracker could capture them | [seam] low pri | [community] |
 
 ---
@@ -195,7 +196,9 @@ flags off the seam (`Screen::kitty_flags`) to drive the `CSI u` encoder. Disambi
 encoded; alternate keys best-effort (§25). `OSC 8 hyperlinks` (an earlier #1) shipped as a seam
 getter (`Cell::hyperlink`) plus the `link` module: **Ctrl+click** or a right-click **Open link /
 Copy link** follows it, the scheme gated to http/https/mailto and the URI handed to a launcher
-that never builds a shell command line (§24). `modifyOtherKeys` (an earlier #2) shipped as
+that never builds a shell command line (§24); v3.x added the **Ctrl-hover underline** — the grid
+finds the pointer's link run (`link_run_at`) and underlines it while Ctrl is held, driven off the
+repaints the app already emits on a hover move or a modifier change, so it needs no new plumbing. `modifyOtherKeys` (an earlier #2) shipped as
 `term::modkeys` + a `keymap::encode` branch: the stream is scanned for `CSI > 4 ; p m`, and a
 Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2 for every combo, level 1
 for the gap combos only) — kept for the programs that speak it rather than kitty.
@@ -278,6 +281,11 @@ Audited file:line anchors behind the claims above, for later re-checking.
   (PowerShell `Start-Process` with the URI as env-var data, never `cmd /C start`). Wired in
   `app.rs` (Ctrl+click → `follow_link`, `link_at` reads the seam) and `ui/terminal.rs`
   (right-click **Open link / Copy link**, `link_at` resolves the clicked cell).
+- **`ui/grid.rs`** — the Ctrl-hover link underline (§24): `link_run_at` walks the contiguous
+  same-URI reading-order run under a cell (pure, unit-tested), `hovered_link_run` gates it on Ctrl
+  being held and the pointer being over the grid (read from the widget's own `State.modifiers` and
+  the `draw` cursor), and `cell_style` gives a plain link cell in that run a single foreground
+  underline while it is the hover target.
 - **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
   (the reply synthesizer) — the engine parses every spelling and answers every query they used
   to cover.

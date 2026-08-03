@@ -26,6 +26,8 @@
 // the xterm convention — and a bare move is never captured, so the pane's own hover
 // tracking keeps working underneath.
 
+use std::ops::RangeInclusive;
+
 use crate::app::Message;
 use crate::palette;
 use crate::term::mouse as report;
@@ -176,6 +178,36 @@ struct State {
 	last: Option<Cell>,
 }
 
+impl Grid<'_> {
+	/// The reading-order run of the OSC 8 link under the pointer while Ctrl is held (§24), or
+	/// `None` when Ctrl is up, the pointer is off the grid, or the cell there carries no link.
+	/// This is only the gate — the modifier and the pointer; finding the run is `link_run_at`
+	/// (pure, so it is unit-tested without a renderer). `bounds` is the grid's layout rectangle,
+	/// so the pointer is made grid-local exactly as the mouse-report path does (`cell_at`).
+	fn hovered_link_run(
+		&self,
+		modifiers: Modifiers,
+		cursor: mouse::Cursor,
+		bounds: Rectangle,
+		rows: u16,
+		cols: u16,
+	) -> Option<RangeInclusive<usize>> {
+		if !modifiers.control() {
+			return None;
+		}
+		let position = cursor.position()?;
+		if !bounds.contains(position) {
+			return None;
+		}
+		let cell = cell_at(
+			Point::new(position.x - bounds.x, position.y - bounds.y),
+			rows,
+			cols,
+		);
+		link_run_at(self.screen, cell, rows, cols)
+	}
+}
+
 impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 	fn tag(&self) -> tree::Tag {
 		tree::Tag::of::<State>()
@@ -200,14 +232,15 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 
 	fn draw(
 		&self,
-		_tree: &Tree,
+		tree: &Tree,
 		renderer: &mut iced::Renderer,
 		_theme: &Theme,
 		_style: &iced::advanced::renderer::Style,
 		layout: Layout<'_>,
-		_cursor: mouse::Cursor,
+		cursor: mouse::Cursor,
 		viewport: &Rectangle,
 	) {
+		let state = tree.state.downcast_ref::<State>();
 		let bounds = layout.bounds();
 		let Some(visible) = bounds.intersection(viewport) else {
 			return;
@@ -218,6 +251,12 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		renderer.fill_quad(fill(bounds), Background::Color(DEFAULT_BG));
 
 		let (rows, cols) = self.screen.size();
+		// The Ctrl-hover link affordance (§24): while Ctrl is held and the pointer is over an
+		// OSC 8 link cell, the whole link's run of cells is underlined, so the link reveals itself
+		// as one before the Ctrl+click that opens it. Computed once and consulted per cell in the
+		// run planner below; the app already repaints on every hover move and modifier change, so
+		// the underline follows the pointer and appears/vanishes with Ctrl without extra plumbing.
+		let link_hover = self.hovered_link_run(state.modifiers, cursor, bounds, rows, cols);
 		let (cursor_row, cursor_col) = self.screen.cursor_position();
 		// The cursor is always on the live screen; when the viewport is scrolled back into
 		// history its row on screen is that plus the display offset, and once that drops below
@@ -254,6 +293,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					block_cursor && row == cursor_display_row,
 					cursor_col,
 					self.selection,
+					link_hover.as_ref(),
 				) {
 					draw_run(renderer, run, origin.x, top, row_bounds);
 				}
@@ -943,11 +983,49 @@ struct Run {
 	cols: u16,
 }
 
+/// The contiguous reading-order run of cells sharing the OSC 8 hyperlink URI at `cell`, in
+/// row-major indices (`row * cols + col`), or `None` when that cell carries no link (§24). The
+/// engine lays a link's cells out contiguously — they share one `Arc<Hyperlink>` — so the run is
+/// a single `[start, end]` span, which is exactly what the Ctrl-hover underline covers, across a
+/// wrap and all. Pure (no renderer, no widget), so the walk is unit-tested on its own.
+fn link_run_at(
+	screen: Screen<'_>,
+	cell: Cell,
+	rows: u16,
+	cols: u16,
+) -> Option<RangeInclusive<usize>> {
+	let uri = screen.cell(cell.row, cell.col)?.hyperlink()?.to_owned();
+	let width = usize::from(cols);
+	let total = usize::from(rows) * width;
+	let here = usize::from(cell.row) * width + usize::from(cell.col);
+	// Whether the cell at a row-major index carries the very same link URI. A fresh `Cell` is
+	// built per probe, but a link is only as long as its text, so the walk is short.
+	let same = |index: usize| {
+		let probe_row = (index / width) as u16;
+		let probe_col = (index % width) as u16;
+		screen
+			.cell(probe_row, probe_col)
+			.and_then(|cell| cell.hyperlink().map(|link| link == uri))
+			.unwrap_or(false)
+	};
+	let mut start = here;
+	while start > 0 && same(start - 1) {
+		start -= 1;
+	}
+	let mut end = here;
+	while end + 1 < total && same(end + 1) {
+		end += 1;
+	}
+	Some(start..=end)
+}
+
 /// Pack one screen row into runs (§9). Walks the row left to right, growing a run while
 /// cells are narrow, ASCII, and share a style; anything else is sealed into a run of its
 /// own so its width cannot leak into its neighbours — a wide cell claims two columns, a
 /// non-ASCII one claims its own single column whatever the fallback font does with it.
-/// Wide *continuation* cells are skipped: the lead already reserves their column.
+/// Wide *continuation* cells are skipped: the lead already reserves their column. `link_run`
+/// is the Ctrl-hover link's reading-order span (§24): a cell inside it is underlined as the
+/// affordance, which — being part of the style key — also seals it into its own run.
 fn plan_runs(
 	screen: Screen<'_>,
 	row: u16,
@@ -955,6 +1033,7 @@ fn plan_runs(
 	on_cursor_row: bool,
 	cursor_col: u16,
 	selection: Option<&Selection>,
+	link_run: Option<&RangeInclusive<usize>>,
 ) -> Vec<Run> {
 	let mut runs: Vec<Run> = Vec::new();
 	let mut content = String::new();
@@ -982,7 +1061,10 @@ fn plan_runs(
 		let seals = is_wide || !glyph.is_ascii();
 		let is_cursor = on_cursor_row && col == cursor_col;
 		let is_selected = selection.is_some_and(|selection| selection.contains(row, col));
-		let style = cell_style(cell.as_ref(), is_cursor, is_selected);
+		// This cell's row-major index, matched against the Ctrl-hover link's span (§24).
+		let index = usize::from(row) * usize::from(cols) + usize::from(col);
+		let is_link_hover = link_run.is_some_and(|run| run.contains(&index));
+		let style = cell_style(cell.as_ref(), is_cursor, is_selected, is_link_hover);
 
 		// Extend only when this cell joins freely AND the open run is an unsealed run of
 		// the same style.
@@ -1024,7 +1106,12 @@ fn plan_runs(
 /// stays legible; and conceal last, painting the glyph and its rules in the final background
 /// so it holds its cell but shows nothing. Because `CellStyle` is the run-grouping key, the
 /// selection (and any per-cell attribute) breaks its run off from its neighbours (§10).
-fn cell_style(cell: Option<&ScreenCell>, is_cursor: bool, is_selected: bool) -> CellStyle {
+fn cell_style(
+	cell: Option<&ScreenCell>,
+	is_cursor: bool,
+	is_selected: bool,
+	is_link_hover: bool,
+) -> CellStyle {
 	let Some(cell) = cell else {
 		return CellStyle {
 			fg: DEFAULT_FG,
@@ -1058,11 +1145,20 @@ fn cell_style(cell: Option<&ScreenCell>, is_cursor: bool, is_selected: bool) -> 
 	}
 	// A concealed cell shows nothing, so its underline vanishes into the background too;
 	// otherwise the rule takes its explicit colour, or the (post-swap) foreground.
-	let underline_color = if cell.hidden() {
+	let mut underline = cell.underline();
+	let mut underline_color = if cell.hidden() {
 		bg
 	} else {
 		explicit_underline.unwrap_or(fg)
 	};
+	// The Ctrl-hover link affordance (§24): a link cell that has no underline of its own gains a
+	// single one in the foreground while it is the hover target, so the link shows as one. A cell
+	// already underlined keeps its own rule — it is visibly a link already — so the hover never
+	// downgrades a program's fancier underline (a spell-check curly, say) to a plain line.
+	if is_link_hover && underline == UnderlineStyle::None {
+		underline = UnderlineStyle::Single;
+		underline_color = fg;
+	}
 
 	CellStyle {
 		fg,
@@ -1070,7 +1166,7 @@ fn cell_style(cell: Option<&ScreenCell>, is_cursor: bool, is_selected: bool) -> 
 		bold: cell.bold(),
 		italic: cell.italic(),
 		strikeout: cell.strikeout(),
-		underline: cell.underline(),
+		underline,
 		underline_color,
 	}
 }
@@ -1113,7 +1209,7 @@ mod tests {
 	fn row_runs(input: &str, cols: u16) -> Vec<Run> {
 		let mut terminal = Terminal::new(1, cols);
 		terminal.process(input.as_bytes());
-		plan_runs(terminal.screen(), 0, cols, false, 0, None)
+		plan_runs(terminal.screen(), 0, cols, false, 0, None, None)
 	}
 
 	#[test]
@@ -1255,7 +1351,7 @@ mod tests {
 		let mut terminal = Terminal::new(1, 5);
 		terminal.process(b"abcde");
 		let selection = Selection::new(Cell { row: 0, col: 1 }).with_head(Cell { row: 0, col: 2 });
-		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, Some(&selection));
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, Some(&selection), None);
 
 		// "a" | "bc" (selected) | "de"
 		assert_eq!(runs.len(), 3);
@@ -1389,5 +1485,50 @@ mod tests {
 		let italic: Vec<_> = runs.iter().filter(|run| run.style.italic).collect();
 		assert_eq!(italic.len(), 1);
 		assert!(italic[0].content.starts_with('b'));
+	}
+
+	#[test]
+	fn link_run_at_spans_the_whole_link_and_nothing_else() {
+		// An OSC 8 link over "site": every one of its four cells shares the URI, so the run is the
+		// contiguous span 0..=3, and it comes back whole from any cell of the link. The plain 'X'
+		// after the close carries no link, so it has no run at all (§24).
+		let cols = 20;
+		let mut terminal = Terminal::new(1, cols);
+		terminal.process(b"\x1b]8;;https://example.com\x07site\x1b]8;;\x07X");
+		let screen = terminal.screen();
+		assert_eq!(
+			link_run_at(screen, Cell { row: 0, col: 2 }, 1, cols),
+			Some(0..=3)
+		);
+		assert_eq!(
+			link_run_at(screen, Cell { row: 0, col: 0 }, 1, cols),
+			Some(0..=3)
+		);
+		assert_eq!(link_run_at(screen, Cell { row: 0, col: 4 }, 1, cols), None);
+	}
+
+	#[test]
+	fn a_ctrl_hovered_link_cell_gains_a_single_underline() {
+		// With no hover the link cells carry no underline; when the link's span is the hover run,
+		// exactly those cells gain a single underline — the affordance the pointer draws on Ctrl.
+		let cols = 20;
+		let mut terminal = Terminal::new(1, cols);
+		terminal.process(b"\x1b]8;;https://example.com\x07site\x1b]8;;\x07X");
+
+		let plain = plan_runs(terminal.screen(), 0, cols, false, 0, None, None);
+		assert!(
+			plain
+				.iter()
+				.all(|run| run.style.underline == UnderlineStyle::None)
+		);
+
+		let run = 0..=3usize;
+		let hovered = plan_runs(terminal.screen(), 0, cols, false, 0, None, Some(&run));
+		let underlined: String = hovered
+			.iter()
+			.filter(|run| run.style.underline == UnderlineStyle::Single)
+			.map(|run| run.content.as_str())
+			.collect();
+		assert_eq!(underlined, "site");
 	}
 }

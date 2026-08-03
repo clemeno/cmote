@@ -37,8 +37,9 @@ unblocks the DEC line-drawing charset, the rich SGR set (dim / italic / striketh
 conceal, every underline style + underline colour), origin-mode-correct cursor reports, the
 OSC colour and pixel-size query replies, the remote-set window title, the DECSCUSR cursor
 shape, focus reporting, and 10 000 lines of scrollback with a scroll indicator, §23; it also
-follows OSC 8 hyperlinks — Ctrl+click or a right-click Open link / Copy link, the scheme gated
-to http/https/mailto, §24; and speaks the kitty keyboard protocol — the `CSI u` encoding
+follows OSC 8 hyperlinks — a Ctrl-hover underline reveals one, then Ctrl+click or a right-click
+Open link / Copy link opens it, the scheme gated to http/https/mailto, §24; and speaks the kitty
+keyboard protocol — the `CSI u` encoding
 for disambiguate, press / repeat / release events, report-all and associated text, superseding
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
@@ -1180,7 +1181,8 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   follow-up, so §23 (the engine swap and everything it unblocked) is complete. Two further
 terminal features then shipped on top of the swap, each a small addition beside the engine
 rather than a change to it: **OSC 8 hyperlinks** (§24) — the engine records the
-per-cell URI and cmote follows it on Ctrl+click or a right-click **Open link / Copy link**,
+per-cell URI and cmote follows it on Ctrl+click (revealing it first with a **Ctrl-hover underline**
+over the link's run) or a right-click **Open link / Copy link**,
 the scheme gated to http/https/mailto — and the **kitty keyboard protocol** (§25) —
 the engine tracks the push/pop/query flag stack and answers `CSI ? u` itself, cmote flips the
 engine flag on and encodes the `CSI u` key reports (disambiguate, press / repeat / release,
@@ -2181,10 +2183,19 @@ cmote's job is only to **surface** it and **act** on a click:
   selection — the modifier most terminals use, so a plain click still selects the link's text.
   A **right-click** on a link cell adds **Open link** and **Copy link** to the terminal's
   context menu (`ui/terminal.rs`), both carrying the URI — the one place the whole address is
-  offered, handy when the visible text hides it. `ponytail:` there is no hover affordance in
-  v3.0.0 — a link is discoverable by right-clicking or Ctrl+clicking, and a program that styles
-  its link (colour/underline) still shows through; a Ctrl-hover underline is a later polish.
-  (`ponytail:` hover affordance still open as of v3.0.0.)
+  offered, handy when the visible text hides it.
+- **Hover affordance** (`ui/grid.rs`, v3.x): while **Ctrl is held** and the pointer is over a link,
+  the grid underlines the link's whole run — so the link reveals itself as one *before* the
+  Ctrl+click that opens it, the reveal and the action sharing the one modifier. The grid finds the
+  run by walking outward from the hovered cell while the OSC 8 URI stays the same (`link_run_at`);
+  because a link's cells are laid out contiguously (one shared `Arc<Hyperlink>`) that run is a single
+  reading-order span, which underlines correctly even across a wrap. A link cell that already carries
+  an underline of its own keeps it, so the hover never downgrades a program's styling. It needs no
+  new state or redraw plumbing: the app already repaints on every hover move and every modifier
+  change, so the grid recomputes the run each frame from the pointer it is handed (`draw`'s cursor)
+  and its own tracked modifiers (the widget `State`). `ponytail:` the affordance shows whenever Ctrl
+  is over a link, even where a full-screen mouse program would eat the click — a harmless underline,
+  not a promise the click is free.
 
 ### Opening is a security boundary
 

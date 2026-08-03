@@ -132,7 +132,8 @@ references below (§n) point into it.
   plain-text fallback; **Ctrl+Shift+C** copies plain text only. **Ctrl+V** / **Ctrl+Shift+V**
   paste, **bracketed-paste** aware and stripping the paste-injection terminator (§9-§10).
 - **Clickable links** — a program that marks text as a hyperlink (the OSC 8 escape, as
-  `ls --hyperlink` and many build tools do) makes it followable: **Ctrl+click** opens it in
+  `ls --hyperlink` and many build tools do) makes it followable: hold **Ctrl** and the link
+  underlines under your pointer, then **Ctrl+click** opens it in
   your browser, or right-click for **Open link / Copy link**. cmote opens only http, https and
   mailto — a link's scheme decides which local program Windows launches, and the address comes
   from the remote, so anything else is refused (§24).
@@ -813,7 +814,9 @@ the app enables it and cmote switches its arrow keys to the SS3 form so they reg
   bindings keep working too. Back at the bash prompt (mode off), **Ctrl+C** must still interrupt
   as always — the mode is the editor's to turn on, and off by default.
 - **Clickable links (OSC 8).** At the shell, emit a link:
-  `printf '\e]8;;https://example.com\e\\click me\e]8;;\e\\\n'`. **Ctrl+click** the words *click
+  `printf '\e]8;;https://example.com\e\\click me\e]8;;\e\\\n'`. Hold **Ctrl** and move over *click
+  me* — the whole link underlines under the pointer and the underline follows it, appearing and
+  vanishing as you press and release Ctrl. **Ctrl+click** the words *click
   me* — your browser should open example.com; **right-click** them for **Open link / Copy link**
   (Copy link should paste back `https://example.com`). Then emit a refused one —
   `printf '\e]8;;file:///c:/windows\e\\nope\e]8;;\e\\\n'` — and Ctrl+click it: nothing opens and
