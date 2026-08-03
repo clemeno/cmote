@@ -571,9 +571,9 @@ fn grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 
 /// The details popup for the selection (§20): for one entry, its full name, where it points
 /// if it is a symlink, then its type, when it was last modified in the server's own
-/// timezone, its size, and its `owner:group`; for several, how many they are and what they
-/// come to (§21). `None` when nothing is selected, or when the cursor is filtered out by
-/// the `.*` toggle.
+/// timezone, its size, its permission word and its `owner:group`; for several, how many they
+/// are and what they come to (§21). `None` when nothing is selected, or when the cursor is
+/// filtered out by the `.*` toggle.
 ///
 /// Placed beside the cell rather than under the pointer, because the selection moves by
 /// keyboard as well as by click. iced does not say where a laid-out cell ended up, so the
@@ -688,6 +688,9 @@ fn entry_lines(files: &Files, entry: &Entry) -> Vec<String> {
 			|mtime| crate::files::format_mtime(mtime, files.zone()),
 		),
 		entry.meta.size.map_or_else(|| "—".to_owned(), human_size),
+		// The permission word on its own line, kept just ahead of the owner it governs —
+		// the same `-rw-r--r--` the cell shows, here with room to stand alone (§20).
+		entry.meta.mode.clone().unwrap_or_else(|| "—".to_owned()),
 		crate::files::owner_group(&entry.meta).unwrap_or_else(|| "—".to_owned()),
 	]);
 	lines
@@ -826,28 +829,44 @@ fn label_budget() -> usize {
 	per_line * LABEL_LINES
 }
 
-/// A cell's second line: a file's size, its last-modified date and its `owner:group`, compact,
-/// under the name (§19), reading left to right like a terse `ls -l` line. A folder shows no
-/// size — a directory entry's own size is not the size of what is inside it (§21), so a number
-/// there would mislead — but it keeps the date and the owner. Facts the `ls` fallback never
-/// learns (§19) show as a dash rather than leaving the line lopsided; the details popup carries
-/// the exact size, the full timestamp and the same `owner:group` (§20).
+/// A cell's second line: a file's size, its last-modified date, then its permission word
+/// and `owner:group`, compact, under the name (§19), reading left to right like a terse
+/// `ls -l` line. A folder shows no size — a directory entry's own size is not the size of
+/// what is inside it (§21), so a number there would mislead — but it keeps the date, the
+/// mode and the owner. Facts the `ls` fallback never learns (§19) show as a dash rather than
+/// leaving the line lopsided; the details popup carries the exact size, the full timestamp
+/// and the same mode and `owner:group` (§20).
 fn meta_line(entry: &Entry, files: &Files) -> String {
 	let date = entry.meta.mtime.map_or_else(
 		|| "—".to_owned(),
 		|mtime| crate::files::format_mtime_short(mtime, files.zone()),
 	);
-	// The same `owner:group` the popup names (§20), each half falling back to `?` and the whole
-	// to a dash when the server named neither — the convention size and date already use.
-	let owner = crate::files::owner_group(&entry.meta).unwrap_or_else(|| "—".to_owned());
+	let access = access_line(entry);
 	if entry.kind == Kind::Dir {
-		return format!("{date} · {owner}");
+		return format!("{date} · {access}");
 	}
 	let size = entry
 		.meta
 		.size
 		.map_or_else(|| "—".to_owned(), crate::ui::terminal::human_bytes);
-	format!("{size} · {date} · {owner}")
+	format!("{size} · {date} · {access}")
+}
+
+/// The permission word and `owner:group` as one field, the way `ls -l` reads them:
+/// `-rw-r--r-- cme:staff` (§20). The mode comes first — the permissions the user asked to
+/// see ahead of the ownership — and either half falls back on its own: a server that gave
+/// the mode but not the owner still shows the mode. The whole collapses to a single dash
+/// when neither was reported, which is the `ls` fallback's answer (§19), matching the dash
+/// size and date already use there.
+fn access_line(entry: &Entry) -> String {
+	let mode = entry.meta.mode.as_deref();
+	let owner = crate::files::owner_group(&entry.meta);
+	match (mode, owner) {
+		(None, None) => "—".to_owned(),
+		(Some(mode), None) => mode.to_owned(),
+		(None, Some(owner)) => owner,
+		(Some(mode), Some(owner)) => format!("{mode} {owner}"),
+	}
 }
 
 /// The Material Icons code point for a category (§19). The names are the font's own:

@@ -72,6 +72,10 @@ pub struct Meta {
 	/// it gave only that.
 	pub owner: Option<String>,
 	pub group: Option<String>,
+	/// The unix permission word rendered `ls -l` style — `drwxr-xr-x`, `-rw-r--r--` (§20).
+	/// Built from the numeric mode SFTP always carries (`format_mode`); `None` on the `ls`
+	/// fallback (§19), which reports no attributes at all.
+	pub mode: Option<String>,
 }
 
 /// The remote machine's timezone (§20), asked for once per session (`date +'%z %Z'`).
@@ -1242,6 +1246,52 @@ pub fn parse_longname(longname: &str) -> Option<(String, String)> {
 	Some((owner.to_owned(), group.to_owned()))
 }
 
+/// Render a unix mode word as an `ls -l` permission string — `drwxr-xr-x`, `-rw-r--r--`
+/// (§20). The leading character is the entry type; the next nine are the read / write /
+/// execute bits for owner, group and other. The set-user-id, set-group-id and sticky bits
+/// fold into the matching execute column exactly as `ls` shows them (`s`/`S`, `t`/`T`).
+///
+/// Built from the numeric mode SFTP carries with every listing, rather than from the
+/// longname's own mode field: the number is always present and always the same shape,
+/// where the text field can be absent or carry a trailing ACL marker (`+`, `.`, `@`) that
+/// this format has no column for.
+pub fn format_mode(bits: u32) -> String {
+	// The leading type letter, read off the high mode bits — the same letters `ls -l` prints.
+	let kind = match bits & 0o170000 {
+		0o040000 => 'd', // directory
+		0o120000 => 'l', // symlink
+		0o100000 => '-', // regular file
+		0o060000 => 'b', // block device
+		0o020000 => 'c', // character device
+		0o010000 => 'p', // fifo (named pipe)
+		0o140000 => 's', // socket
+		_ => '?',        // a type we do not name
+	};
+	// The three rwx triads, each folding in the special bit that shares its execute column:
+	// set-user-id on owner, set-group-id on group, the sticky bit on other.
+	let owner = triad(bits >> 6, bits & 0o4000 != 0, 's');
+	let group = triad(bits >> 3, bits & 0o2000 != 0, 's');
+	let other = triad(bits, bits & 0o1000 != 0, 't');
+	format!("{kind}{owner}{group}{other}")
+}
+
+/// One `rwx` triad for `format_mode`. `bits` holds the three permission bits in its low
+/// three positions; `special` is this column's setuid/setgid/sticky bit, drawn as its
+/// letter (`s`/`t`) when execute is also set, its upper-case form (`S`/`T`) when it is
+/// not — the way `ls -l` renders it.
+fn triad(bits: u32, special: bool, letter: char) -> String {
+	let read = if bits & 0o4 != 0 { 'r' } else { '-' };
+	let write = if bits & 0o2 != 0 { 'w' } else { '-' };
+	let execute = bits & 0o1 != 0;
+	let last = match (special, execute) {
+		(true, true) => letter,
+		(true, false) => letter.to_ascii_uppercase(),
+		(false, true) => 'x',
+		(false, false) => '-',
+	};
+	format!("{read}{write}{last}")
+}
+
 /// The owner and group of an entry as one `owner:group` field (§20), each falling back to
 /// `?` on its own — a server that names the user but not the group still says something
 /// useful. `None` when it reported neither, which is the `ls` fallback's answer (§19).
@@ -1451,6 +1501,7 @@ mod tests {
 				mtime: Some(mtime),
 				owner: None,
 				group: None,
+				mode: None,
 			},
 		}
 	}
@@ -1854,6 +1905,24 @@ mod tests {
 		assert_eq!(owner_group(&half).as_deref(), Some("1000:?"));
 		// The `ls` fallback reports neither, and the popup then shows no owner line.
 		assert_eq!(owner_group(&Meta::default()), None);
+	}
+
+	#[test]
+	fn a_mode_word_reads_the_way_ls_prints_it() {
+		// A regular file, rw-r--r--; a directory, rwxr-xr-x; a symlink, all bits set.
+		assert_eq!(format_mode(0o100644), "-rw-r--r--");
+		assert_eq!(format_mode(0o040755), "drwxr-xr-x");
+		assert_eq!(format_mode(0o120777), "lrwxrwxrwx");
+		// The special bits fold into the execute column: setuid/setgid as `s` over an
+		// execute bit, the sticky bit as `t` — `/tmp` and a setuid binary both here.
+		assert_eq!(format_mode(0o041777), "drwxrwxrwt");
+		assert_eq!(format_mode(0o104755), "-rwsr-xr-x");
+		// And upper-case when the execute bit under them is NOT set — a setgid with no
+		// group-execute reads `S`, exactly as `ls -l` shows it.
+		assert_eq!(format_mode(0o102644), "-rw-r-Sr--");
+		// A device and a fifo keep their own leading letter.
+		assert_eq!(format_mode(0o020666), "crw-rw-rw-");
+		assert_eq!(format_mode(0o010644), "prw-r--r--");
 	}
 
 	#[test]

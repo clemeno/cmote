@@ -166,11 +166,12 @@ references below (§n) point into it.
   (§18, §22).
 - **Remote files pane** — a grid of **every entry** in one directory, in the browser strip
   under the terminal (the folder tree shares that strip, on the pane's right, §18). Each cell
-  is a wide row: a small icon in front of the name, with the **size and
-  the modified date, and the `owner:group`** on a second, muted line underneath
-  (`4.0 KB · 2026-03-20 11:46 · cme:staff`, the date in the server's own wall clock but without
-  the zone tag — that stays in the details popup; a folder shows only the date and the owner,
-  and anything the listing never learned reads as a dash). Each cell
+  is a wide row: a small icon in front of the name, with the **size,
+  the modified date, and the permission word and `owner:group`** on a second, muted line underneath
+  (`4.0 KB · 2026-03-20 11:46 · -rw-r--r-- cme:staff`, the date in the server's own wall clock but
+  without the zone tag — that stays in the details popup; the mode reads `ls -l` style
+  (`drwxr-xr-x`); a folder shows only the date, the mode and the owner, and anything the listing
+  never learned reads as a dash). Each cell
   carries a **thin border** so the grid reads as distinct tiles. A name too
   long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
   directory streams in batches of 1000 and the header counts as they land. Icons come from a
@@ -209,7 +210,8 @@ references below (§n) point into it.
   narrow and may clip it), where a **symlink points**, the file's **MIME type**, its
   **modification time in the server's own timezone** (`2026-03-20 11:46:40 CEST (+02:00)` —
   the zone is read off the server once per session), its **size** (human, with the exact
-  byte count behind it) and its **`owner:group`** as names, not numbers. Anything the server
+  byte count behind it), its **permission word** (`drwxr-xr-x`, `ls -l` style) and its
+  **`owner:group`** as names, not numbers. Anything the server
   would not say reads as a dash, and a button on the card copies **the whole thing** at once
   (§20, §22).
 - **Selecting many entries at once** — drag a **rubber band** over the grid's empty space,
@@ -776,9 +778,10 @@ then follow the shell. Then:
   count should climb in steps of 1000 as the batches land, and the window stays responsive
   throughout.
 - Each cell should read as a row: icon, name, and under it the size, the modified date
-  on the server's wall clock but with **no zone tag**, and the `owner:group` (a folder shows
-  only the date and the owner), each **framed by a thin border** so the grid reads as distinct
-  tiles. Compare a few against `ls -l` on the remote — the clock, the size and the owner should
+  on the server's wall clock but with **no zone tag**, then the permission word (`ls -l`
+  style, `-rw-r--r--`) and the `owner:group` (a folder shows only the date, the mode and the
+  owner), each **framed by a thin border** so the grid reads as distinct tiles. Compare a few
+  against `ls -l` on the remote — the clock, the size, the mode and the owner should
   match; the zone tag lives in the details popup. A very long
   name should be cut in the middle (`report-fin…-draft.pdf`), never at the extension.
 - Double-click a folder in the grid → the grid enters it and **the shell stays put** (the
@@ -811,7 +814,8 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
   confirm).
 - With an entry selected, the popup beside it should name the entry in full, and show the
   MIME type (`text/x-python` on a `.py`, `application/octet-stream` on something unknown),
-  the time, the size and `owner:group`. Compare the time and the owner against `ls -l` on
+  the time, the size, the permission word and `owner:group`. Compare the time, the mode and
+  the owner against `ls -l` on
   the remote — they should agree, including the timezone. Select a symlink
   (`ln -s /etc /tmp/link-to-etc`) → the popup adds `→ /etc` a moment later.
 - **Enter** on a folder enters it; **F2** renames in place.

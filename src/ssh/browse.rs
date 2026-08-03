@@ -348,6 +348,9 @@ fn entry_of(file: File) -> Entry {
 			mtime: file.attrs.mtime,
 			owner,
 			group,
+			// The numeric mode carries the type and permission bits together; render it the
+			// way `ls -l` reads (§20). Absent only if this server sent no permissions flag.
+			mode: file.attrs.permissions.map(files::format_mode),
 		},
 	}
 }

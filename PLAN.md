@@ -1693,12 +1693,16 @@ for a window resize.
   §22): the start *and* the extension survive, which is what tells two similar names apart —
   a tail-clipped `report-2026-q1-fin…` and `report-2026-q1-dra…` do not. The full name is
   always one selection away in the popup (§20).
-- **A second, muted line carries the size, the modified date and the `owner:group`**
-  (`4.0 KB · 2026-03-20 11:46 · cme:staff`), reading left to right like a terse `ls -l` line.
-  A directory shows no size — a directory entry's own size is not the size of its contents, and
-  printing 4096 for every folder would be noise that reads as data — but keeps the date and the
-  owner. Any fact the `ls` fallback never learned shows as a dash, the same convention the popup
-  uses; the `owner:group` is the popup's own `owner_group` helper (§20), so the two agree.
+- **A second, muted line carries the size, the modified date, then the permission word and the
+  `owner:group`** (`4.0 KB · 2026-03-20 11:46 · -rw-r--r-- cme:staff`), reading left to right like
+  a terse `ls -l` line. A directory shows no size — a directory entry's own size is not the size of
+  its contents, and printing 4096 for every folder would be noise that reads as data — but keeps the
+  date, the mode and the owner. The mode (`drwxr-xr-x`, `-rw-r--r--`) is built from the numeric mode
+  SFTP carries with every entry, by `format_mode` — not from the `longname` text, which can be
+  absent or carry a trailing ACL marker the ten-column form has no room for — and it sits just ahead
+  of the owner it governs (`access_line`). Any fact the `ls` fallback never learned shows as a dash,
+  the same convention the popup uses; the `owner:group` is the popup's own `owner_group` helper (§20),
+  so the two agree.
 - **One date computation, two forms — but only the popup wears the zone tag.** The cell's
   compact `format_mtime_short` (day and minute) and the popup's full form share `local_parts`,
   so both read the *same* instant on the *same* server wall clock (§20) — they can never
@@ -1865,7 +1869,8 @@ keyboard just landed on.
   because the "type" line only earns its place if the type can vary. It leads with the
   entry's **full name** (the grid cell middle-ellipsises a name too long for its two lines) and, for a
   symlink, **where it points**; then the type, the modification time, the size (human, with
-  the exact byte count once the two differ) and `owner:group`.
+  the exact byte count once the two differ), the **permission word** (`drwxr-xr-x`, on its own line
+  just ahead of the owner it governs) and `owner:group`.
 - **The type of a file is its MIME type**, from `files::mime` — an extension table, because
   asking the server would be a round trip per selection and the extension is already in
   hand; unlisted extensions read `application/octet-stream`, the same answer
@@ -1903,6 +1908,13 @@ keyboard just landed on.
   handshake, same round trips — only the parsing layer differs. `ponytail:`
   `files::parse_longname` is a column split, guarded by requiring the mode column to be
   mode-shaped and the size column to be a number; numeric ids are the fallback.
+- **The permission word from the numeric mode**, not the `longname` text: SFTP sends a
+  numeric mode with every entry, and `files::format_mode` renders it the way `ls -l` prints —
+  the type letter (`d`/`l`/`-`/`b`/`c`/`p`/`s`), the three rwx triads, and the setuid/setgid/sticky
+  bits folded into their execute columns (`s`/`S`, `t`/`T`). The number is chosen over the
+  `longname`'s own mode field because it is always present and always ten columns wide, where the
+  text can be absent or carry a trailing ACL marker (`+`, `.`, `@`) the form has no room for.
+  The `ls` fallback (§19) sends no mode, so it reads as a dash.
 - **Times in the server's own timezone.** An mtime is an instant; reading it as a wall
   clock needs a zone, and the honest one is the machine the files live on — `ls -l` there
   says the same thing. One `date +'%z %Z'` per session on an exec channel
