@@ -445,9 +445,31 @@ Release:
 
 The release is left as a **draft** to review before publishing. The artifacts are **not**
 code-signed or notarized yet (deferred — §16), so a fresh download trips SmartScreen /
-Gatekeeper until then; the checksums are the integrity check in the meantime. A manual
-**Run workflow** (workflow_dispatch) builds both targets *without* publishing, to exercise
-the pipeline before cutting a tag.
+Gatekeeper until then; the checksums are the integrity check in the meantime.
+
+### Cutting a release
+
+The build is driven **entirely by the tag push** — creating a release by hand in the web UI
+builds nothing, and GitHub does not create the git tag for such a draft until you publish it.
+So always start from the tag:
+
+1. Make sure `main` is green and `version` in `Cargo.toml` matches the tag you are about to cut.
+2. *(optional)* Dry-run first, no tag: **Actions → Release → Run workflow** (or `gh workflow run
+   release.yml --ref main`). Both targets build and package; nothing is published — this is the
+   `workflow_dispatch` path, there to exercise the pipeline before a real tag.
+3. Tag the release commit and push — **this is what fires the workflow**:
+
+   ```sh
+   git tag -a 3.0.0 -m "cmote 3.0.0"
+   git push origin 3.0.0
+   ```
+
+4. The workflow builds both targets and opens a **draft** Release with the three assets above.
+5. Review the draft — confirm the assets are attached and edit the notes — then **Publish**.
+
+Because the git tag is created by the push (not by saving a draft), the workflow and the release
+have a single owner: the tag. Do **not** also hand-create a release for the same tag, or the two
+collide (GitHub allows only one release per tag).
 
 ## Data and portability
 
