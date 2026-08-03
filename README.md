@@ -249,6 +249,12 @@ references below (§n) point into it.
   size-compares every file so only the missing ones and the interrupted file's tail cross again.
   Resume works within one live session; a dropped *connection* tears down the session, so that is
   not resumable (§16, §17).
+- **Timestamps are kept** — a transferred file keeps its **modification time** instead of being
+  re-dated to "now", both when you upload and when you download, so a folder still sorts by date and
+  a build still sees the right ages. Between two Unix machines the **permission bits** ride along too
+  (a script stays executable); a Windows file has no Unix mode to carry, so only the timestamp
+  travels. It is always on and never gets in the way — a server or disk that refuses the stamp is
+  quietly skipped and the file itself is untouched (§17, §19).
 - **Drag a file in to upload it** — drag a file off the desktop and drop it anywhere on the
   window; it uploads into the **files pane's current directory**, reusing the same pre-scan and, on
   a name already there, the same **Overwrite / Keep both / Skip / Cancel** dialog the menu upload

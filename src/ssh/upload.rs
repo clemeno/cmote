@@ -27,7 +27,9 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
-use crate::ssh::transfer::{self, CopyOutcome, FileAction, Start, Sticky, TreePlan, resume_start};
+use crate::ssh::transfer::{
+	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, TreePlan, resume_start,
+};
 
 /// How much of the file to move per write. 32 KiB sits comfortably under the SFTP
 /// packet limit while keeping the number of round trips low.
@@ -199,6 +201,14 @@ async fn transfer(
 
 	match copy(&sftp, &local, &remote, resume, &events, &cancel).await {
 		Ok(CopyOutcome::Done) => {
+			// Best-effort, before announcing it: stamp the copy with the source's timestamps and,
+			// from a Unix source, its permission bits (§17). A re-stat here is a cheap local call,
+			// and a server that refuses setstat just leaves the bytes undecorated — still a good
+			// upload.
+			if let Ok(meta) = tokio::fs::metadata(&local).await {
+				let (mtime, atime, mode) = source_stamp(&meta);
+				stamp_remote(&sftp, &remote, mtime, atime, mode).await;
+			}
 			// Report where the bytes actually landed: a relative path (what the dialog
 			// offers when the shell's cwd is unknown) resolves against the login
 			// directory, and the user should see the full path, not their own input.
@@ -339,6 +349,50 @@ async fn open_remote_at(sftp: &SftpSession, remote: &str, offset: u64) -> Result
 	Ok(file)
 }
 
+/// Pull the timestamps and (on a Unix host) the permission bits off a local file's metadata (§17),
+/// in the seconds-since-epoch form the SFTP stamp wants. A timestamp the filesystem will not give
+/// reads as `None`, and the stamp then omits it rather than guessing.
+fn source_stamp(meta: &std::fs::Metadata) -> (Option<u32>, Option<u32>, Option<u32>) {
+	let mtime = meta.modified().ok().and_then(transfer::epoch_secs);
+	let atime = meta.accessed().ok().and_then(transfer::epoch_secs);
+	(mtime, atime, source_mode(meta))
+}
+
+/// The source file's Unix permission bits, on a Unix host that has them.
+#[cfg(unix)]
+fn source_mode(meta: &std::fs::Metadata) -> Option<u32> {
+	use std::os::unix::fs::MetadataExt;
+	Some(meta.mode() & 0o7777)
+}
+
+/// A Windows source has no Unix permission bits to carry — so an upload from Windows sends only
+/// the timestamps, and the server's own umask decides the new file's mode.
+#[cfg(not(unix))]
+fn source_mode(_meta: &std::fs::Metadata) -> Option<u32> {
+	None
+}
+
+/// Stamp the just-uploaded remote file with the source's modification time and, from a Unix
+/// source, its permission bits (§17). Best-effort by design: many servers refuse setstat
+/// (read-only exports, chrooted SFTP), so a failure is logged and swallowed — the bytes are
+/// across, which is the transfer's promise, and a metadata refusal must never turn a good upload
+/// into a failure. A source with no readable metadata at all makes no round trip.
+async fn stamp_remote(
+	sftp: &SftpSession,
+	remote: &str,
+	mtime: Option<u32>,
+	atime: Option<u32>,
+	mode: Option<u32>,
+) {
+	if mtime.is_none() && mode.is_none() {
+		return;
+	}
+	let attrs = transfer::upload_stamp(mtime, atime, mode);
+	if let Err(error) = sftp.set_metadata(remote.to_owned(), attrs).await {
+		eprintln!("could not stamp {remote} with the source's metadata: {error}");
+	}
+}
+
 /// Open the SFTP channel and hand a whole-folder upload to a background task (§17). The mirror
 /// of `start` for a single file, but the transfer may PAUSE mid-way to ask the user about a file
 /// whose destination is already taken — so it is handed the `answers` receiver `run()` keeps the
@@ -466,9 +520,9 @@ async fn send_tree(
 		.send(SshEvent::TransferProgress { sent, total })
 		.await;
 
-	for (rel, size) in &plan.files {
-		let dest = transfer::remote_join(&remote_target, rel);
-		let leaf = rel.last().map_or("", String::as_str);
+	for file in &plan.files {
+		let dest = transfer::remote_join(&remote_target, &file.rel);
+		let leaf = file.rel.last().map_or("", String::as_str);
 		// A resume never prompts (§16): an existing destination is the transfer's own earlier
 		// work, which `send_file` size-compares and appends to — not a fresh collision. A first
 		// run, though, treats a destination already taken as a question, not an overwrite (§17);
@@ -482,7 +536,7 @@ async fn send_tree(
 				}
 				FileAction::Skip => {
 					// Count the skipped bytes as handled so the bar still reaches the end.
-					sent += size;
+					sent += file.size;
 					let _ = events
 						.send(SshEvent::TransferProgress { sent, total })
 						.await;
@@ -493,7 +547,7 @@ async fn send_tree(
 		} else {
 			dest
 		};
-		let local = transfer::local_join(local_root, rel);
+		let local = transfer::local_join(local_root, &file.rel);
 		// A cancel mid-file drops that file's partial and stops the whole tree (§16): the files
 		// already fully copied stay, mirroring how a single-file cancel keeps nothing but its own.
 		if send_file(
@@ -501,7 +555,7 @@ async fn send_tree(
 			&local,
 			&dest,
 			resume,
-			*size,
+			file.size,
 			events,
 			&mut sent,
 			&mut reported,
@@ -512,6 +566,9 @@ async fn send_tree(
 		{
 			return Ok(None);
 		}
+		// The file is fully across: stamp it with the metadata the walk captured off the source
+		// (§17), the per-file mirror of the single-file stamp above.
+		stamp_remote(sftp, &dest, file.mtime, file.atime, file.mode).await;
 	}
 
 	let _ = events
@@ -653,8 +710,22 @@ async fn walk_local(root: &Path) -> Result<TreePlan> {
 				plan.dirs.push(child_rel.clone());
 				frontier.push((entry.path(), child_rel));
 			} else if file_type.is_file() {
-				let size = entry.metadata().await.map(|meta| meta.len()).unwrap_or(0);
-				plan.files.push((child_rel, size));
+				// Read the source's size and metadata once, here, so the transfer can stamp each
+				// copy to match without a second stat when it reaches the file (§17).
+				let (size, mtime, atime, mode) = match entry.metadata().await {
+					Ok(meta) => {
+						let (mtime, atime, mode) = source_stamp(&meta);
+						(meta.len(), mtime, atime, mode)
+					}
+					Err(_) => (0, None, None, None),
+				};
+				plan.files.push(PlannedFile {
+					rel: child_rel,
+					size,
+					mtime,
+					atime,
+					mode,
+				});
 			}
 			// Anything else — a fifo, a socket, a device node — is not a file to send.
 		}

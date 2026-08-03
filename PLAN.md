@@ -1135,12 +1135,18 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   rest of the batch, since a deliberate cancel is final — and a mid-flight *failure* instead keeps
   its partial and offers a **Resume** that re-sends only the bytes still missing (a byte-offset
   append for a single file; a whole tree re-walked and size-compared so only the gaps and the
-  interrupted file's tail cross again). Still deferred: resuming across a *dropped connection*
-  (cancel/resume live inside one live session — a lost session tears down to the error screen, so
-  its transfer state is gone), drag-and-drop onto a folder, two transfers at once (a batch queues
-  instead, §17, §21), preserving file modes/timestamps in either direction, and following symlinks
-  inside a recursive walk (they are counted and skipped, never followed, so a cyclic link cannot
-  loop the transfer).
+  interrupted file's tail cross again). v3.x also began **preserving file metadata** across a copy
+  (§17, §19): every finished file is stamped, best-effort, with the source's **modification time**
+  — the one attribute meaningful in the everyday Windows case, where the client neither has a Unix
+  mode to send nor can apply one — and, when both ends are Unix, its **permission bits** too (so a
+  script keeps its `+x`). It never fails a transfer: a server that refuses `setstat` or a filesystem
+  that will not take the timestamp is logged and the bytes stand. Still deferred: resuming across a
+  *dropped connection* (cancel/resume live inside one live session — a lost session tears down to
+  the error screen, so its transfer state is gone), drag-and-drop onto a folder, two transfers at
+  once (a batch queues instead, §17, §21), preserving the *access* time as its own attribute
+  (SFTP couples it with mtime, so an upload sends the pair but does not treat atime as a goal), and
+  following symlinks inside a recursive walk (they are counted and skipped, never followed, so a
+  cyclic link cannot loop the transfer).
 - **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
   remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
   dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). Still
@@ -1347,6 +1353,31 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
 
 Both live inside one connection: a transfer whose *session* drops tears down to the error screen, so
 its state is gone — resuming across a reconnect is the deferred upgrade path (§16).
+
+### Preserving file metadata (v3.x)
+
+Every finished file is **stamped to match its source**, best-effort, so a copy is not silently
+re-dated to "now". What is meaningful depends on the two ends, and cmote's everyday case is a
+Windows client:
+
+- **Modification time**, both directions. On upload the worker calls SFTP `setstat`; on download it
+  sets the local file's time with std's `File::set_modified`. The wrinkle is on the SFTP side:
+  the protocol carries access and modification time as **one** attribute, so an mtime cannot be sent
+  without an atime, and an omitted-but-flagged field goes out as zero — which would reset the file's
+  access time to 1970. So `transfer::upload_stamp` (pure, unit-tested) sends the source's real atime
+  alongside the mtime, or the mtime itself when the source has no readable atime, never a bare zero.
+  Setting the local time has no such coupling.
+- **Unix permission bits**, only where both ends have them. A Windows source exposes no Unix mode to
+  read and a Windows destination cannot apply one, so the permission half is compiled in only under
+  `#[cfg(unix)]`; on Windows the timestamp travels alone. Only the low bits (`& 0o7777`) are carried
+  — the file-type bits are the far side's business.
+
+It is **never** allowed to fail a transfer: a server that refuses `setstat` (read-only exports,
+chrooted SFTP) or a filesystem that will not take a timestamp is logged and the bytes stand. A tree
+captures each file's metadata during the walk (`transfer::PlannedFile`), so stamping costs no extra
+round trip per file; a single file reads it off the one stat it already does. The *access* time is
+not itself a goal (SFTP just forces it along for the ride), and there is no mode/timestamp UI — it is
+always on, the friendlier default for a GUI than scp/rsync's `-p` flag.
 
 ---
 

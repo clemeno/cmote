@@ -17,7 +17,9 @@
 // module only defines the plan they both fill in and the decision they both make per file.
 
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use russh_sftp::protocol::FileAttributes;
 use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
@@ -31,18 +33,40 @@ pub(crate) struct TreePlan {
 	/// Every directory in the tree, PARENTS BEFORE CHILDREN, so creating them in order never
 	/// asks for a folder whose parent does not exist yet. The root itself is the empty path.
 	pub dirs: Vec<Vec<String>>,
-	/// Every regular file, with the size the progress bar totals over.
-	pub files: Vec<(Vec<String>, u64)>,
+	/// Every regular file — its place in the tree, its size, and the source metadata to stamp
+	/// onto the copy once it lands (§17).
+	pub files: Vec<PlannedFile>,
 	/// Symbolic links found and left out (§17): following one risks a cycle and copying the link
 	/// itself is not what SFTP's byte copy does, so a recursive transfer skips them and says how
 	/// many in its closing notice rather than failing the whole tree over one.
 	pub skipped_links: usize,
 }
 
+/// One regular file in a walked tree (§17): where it goes, how big it is, and the source's
+/// timestamps and permission bits so the copy can be stamped to match once it is written. Every
+/// metadata field is optional — a source that does not expose one (a Windows file has no Unix
+/// mode; a filesystem may refuse an access time) leaves it `None`, and the stamp then omits that
+/// attribute rather than inventing one.
+#[derive(Debug)]
+pub(crate) struct PlannedFile {
+	/// The file's path relative to the tree root, as a component list each side joins its own way.
+	pub rel: Vec<String>,
+	/// The byte count the progress bar totals over.
+	pub size: u64,
+	/// Seconds since the Unix epoch of the source's last modification, if known.
+	pub mtime: Option<u32>,
+	/// Seconds since the Unix epoch of the source's last access, if known — kept because SFTP
+	/// carries it in the same attribute as mtime, so an upload stamp must send the two together.
+	pub atime: Option<u32>,
+	/// The source's Unix permission bits (`& 0o7777`), if it has any — always `None` from a
+	/// Windows source, which has no Unix mode to carry.
+	pub mode: Option<u32>,
+}
+
 impl TreePlan {
 	/// The total bytes to copy — what `SshEvent::TransferProgress` reports progress against.
 	pub fn total(&self) -> u64 {
-		self.files.iter().map(|(_, size)| size).sum()
+		self.files.iter().map(|file| file.size).sum()
 	}
 }
 
@@ -107,6 +131,39 @@ pub(crate) fn resume_start(resume: bool, dest_size: Option<u64>, source_size: u6
 		Some(have) if have >= source_size => Start::Skip,
 		Some(have) => Start::At(have),
 	}
+}
+
+/// Whole seconds since the Unix epoch for a wall-clock time (§17) — the unit both SFTP's mtime /
+/// atime and our local stamp work in. A time before the epoch has no representation in SFTP's
+/// unsigned field, so it reads as `None` and the caller omits the timestamp rather than sending a
+/// wrapped one; a far-future time is clamped to the field's ceiling for the same reason. Pure, so
+/// the conversion is unit-tested against fixed instants.
+pub(crate) fn epoch_secs(time: SystemTime) -> Option<u32> {
+	time.duration_since(UNIX_EPOCH)
+		.ok()
+		.map(|elapsed| elapsed.as_secs().min(u32::MAX as u64) as u32)
+}
+
+/// Build the attributes an upload stamps onto the freshly written remote file (§17), setting only
+/// the metadata we actually have. Permissions go on only when the source carried a Unix mode.
+/// Timestamps are the subtle part: SFTP carries access and modification time as ONE attribute, so
+/// setting the modification time forces an access time alongside it, and an omitted-but-flagged
+/// field goes on the wire as zero — which would reset the file's access time to 1970. So whenever
+/// there is an mtime we also send an atime (the source's real one if we read it, otherwise the
+/// mtime itself), and when there is no mtime we send neither. Pure, so this field-selection logic
+/// is unit-tested without a server.
+pub(crate) fn upload_stamp(
+	mtime: Option<u32>,
+	atime: Option<u32>,
+	mode: Option<u32>,
+) -> FileAttributes {
+	let mut attrs = FileAttributes::empty();
+	attrs.permissions = mode;
+	if let Some(modified) = mtime {
+		attrs.mtime = Some(modified);
+		attrs.atime = Some(atime.unwrap_or(modified));
+	}
+	attrs
 }
 
 /// Decide what to do about a file whose destination `name` is already taken (§17, §19).
@@ -212,5 +269,54 @@ mod tests {
 		// either way there is nothing to append, so skip it.
 		assert_eq!(resume_start(true, Some(100), 100), Start::Skip);
 		assert_eq!(resume_start(true, Some(140), 100), Start::Skip);
+	}
+
+	#[test]
+	fn epoch_seconds_count_from_1970() {
+		use std::time::Duration;
+		assert_eq!(super::epoch_secs(super::UNIX_EPOCH), Some(0));
+		assert_eq!(
+			super::epoch_secs(super::UNIX_EPOCH + Duration::from_secs(1_700_000_000)),
+			Some(1_700_000_000)
+		);
+	}
+
+	#[test]
+	fn a_time_before_the_epoch_has_no_stamp() {
+		use std::time::Duration;
+		// SFTP's timestamp field is unsigned, so a pre-1970 time cannot be represented — better to
+		// carry no timestamp than a wrapped-around one.
+		let before = super::UNIX_EPOCH
+			.checked_sub(Duration::from_secs(1))
+			.unwrap();
+		assert_eq!(super::epoch_secs(before), None);
+	}
+
+	#[test]
+	fn an_upload_stamp_sets_only_what_it_is_given() {
+		let attrs = super::upload_stamp(Some(100), Some(50), Some(0o644));
+		assert_eq!(attrs.mtime, Some(100));
+		assert_eq!(attrs.atime, Some(50));
+		assert_eq!(attrs.permissions, Some(0o644));
+	}
+
+	#[test]
+	fn an_upload_stamp_backfills_a_missing_access_time_from_the_mtime() {
+		// SFTP couples atime with mtime; sending an mtime alone would zero the access time, so an
+		// absent atime borrows the mtime rather than going out as 1970.
+		let attrs = super::upload_stamp(Some(100), None, None);
+		assert_eq!(attrs.mtime, Some(100));
+		assert_eq!(attrs.atime, Some(100));
+		assert_eq!(attrs.permissions, None);
+	}
+
+	#[test]
+	fn an_upload_stamp_with_no_mtime_sends_no_timestamp_at_all() {
+		// No mtime means no timestamp pair — never a lone atime, which would drag a zero mtime
+		// onto the wire and reset the modification time.
+		let attrs = super::upload_stamp(None, Some(50), None);
+		assert_eq!(attrs.mtime, None);
+		assert_eq!(attrs.atime, None);
+		assert_eq!(attrs.permissions, None);
 	}
 }

@@ -12,16 +12,20 @@ use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use russh::client;
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::FileAttributes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
-use crate::ssh::transfer::{self, CopyOutcome, FileAction, Start, Sticky, TreePlan, resume_start};
+use crate::ssh::transfer::{
+	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, TreePlan, resume_start,
+};
 
 /// How much of the file to move per read, and how many bytes between progress events.
 /// The same figures the upload uses, for the same reasons (§17).
@@ -107,14 +111,14 @@ async fn copy(
 	events: &mpsc::Sender<SshEvent>,
 	cancel: &Arc<AtomicBool>,
 ) -> Result<CopyOutcome> {
-	// The size is only for the progress bar, so a server that will not report one is not
-	// a failure: the transfer then runs with an unknown total.
-	let total = sftp
-		.metadata(remote.to_owned())
-		.await
-		.ok()
-		.and_then(|metadata| metadata.size)
-		.unwrap_or(0);
+	// One metadata fetch serves both the progress total and the stamp the finished file will get —
+	// the remote's modification time and, for a Unix destination, its permission bits. A server
+	// that will not report metadata is not a failure: the total is then unknown (the transfer runs
+	// without one) and no stamp is applied.
+	let source_meta = sftp.metadata(remote.to_owned()).await.ok();
+	let total = source_meta.as_ref().and_then(|meta| meta.size).unwrap_or(0);
+	let mtime = source_meta.as_ref().and_then(|meta| meta.mtime);
+	let mode = source_meta.as_ref().and_then(remote_mode);
 
 	// Where to pick up. With the remote size known, the shared rule decides skip / append / fresh;
 	// with it unknown (`total == 0`), a size compare cannot say whether the local partial is
@@ -132,6 +136,9 @@ async fn copy(
 					let _ = events
 						.send(SshEvent::TransferProgress { sent: total, total })
 						.await;
+					// Already fully here, but a prior run may have died before stamping it — so
+					// still apply the source's metadata (§19) before calling it done.
+					stamp_local(local, mtime, mode).await;
 					return Ok(CopyOutcome::Done);
 				}
 				Start::At(offset) => offset,
@@ -193,6 +200,10 @@ async fn copy(
 	// Flush before reporting success: without this the last writes can still be in the
 	// OS buffer when the user is told the file is on disk.
 	destination.flush().await.context("close failed")?;
+	// The file is complete on disk: stamp it with the remote's modification time and (on Unix) its
+	// permission bits (§19), best-effort, before announcing it.
+	drop(destination);
+	stamp_local(local, mtime, mode).await;
 	let _ = events
 		.send(SshEvent::TransferProgress {
 			sent: received,
@@ -225,6 +236,71 @@ async fn open_local_at(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 		.await
 		.with_context(|| format!("could not seek {} to the resume point", local.display()))?;
 	Ok(file)
+}
+
+/// Stamp the just-downloaded local file with the remote's modification time and, on a Unix
+/// destination, its permission bits (§19). The twin of the upload's `stamp_remote`, best-effort
+/// for the same reason: a filesystem that will not take the timestamp (some network mounts) is
+/// logged and ignored — the bytes are on disk, which is the promise. The std calls block, so they
+/// run on the blocking pool rather than the async reactor; a source with nothing to stamp makes no
+/// call at all.
+async fn stamp_local(local: &Path, mtime: Option<u32>, mode: Option<u32>) {
+	if mtime.is_none() && mode.is_none() {
+		return;
+	}
+	let path = local.to_path_buf();
+	let _ = tokio::task::spawn_blocking(move || stamp_local_blocking(&path, mtime, mode)).await;
+}
+
+/// The blocking half of `stamp_local`: set the modification time (which std, unlike SFTP, lets us
+/// set on its own — no coupled access time to worry about) and then the permission bits. The two
+/// are independent, so one failing does not stop the other, and both only log on error since a
+/// missing timestamp never unmakes the download.
+fn stamp_local_blocking(local: &Path, mtime: Option<u32>, mode: Option<u32>) {
+	if let Some(secs) = mtime {
+		let when = UNIX_EPOCH + Duration::from_secs(u64::from(secs));
+		// Setting the modification time needs the file opened for writing; open WITHOUT truncating
+		// so the freshly written bytes are left in place.
+		match std::fs::OpenOptions::new().write(true).open(local) {
+			Ok(file) => {
+				if let Err(error) = file.set_modified(when) {
+					eprintln!(
+						"could not set the modification time on {}: {error}",
+						local.display()
+					);
+				}
+			}
+			Err(error) => {
+				eprintln!(
+					"could not open {} to set its modification time: {error}",
+					local.display()
+				);
+			}
+		}
+	}
+	apply_mode(local, mode);
+}
+
+/// Apply the source's Unix permission bits to the local file, on a Unix host that has them.
+#[cfg(unix)]
+fn apply_mode(local: &Path, mode: Option<u32>) {
+	use std::os::unix::fs::PermissionsExt;
+	if let Some(bits) = mode {
+		if let Err(error) = std::fs::set_permissions(local, std::fs::Permissions::from_mode(bits)) {
+			eprintln!("could not set permissions on {}: {error}", local.display());
+		}
+	}
+}
+
+/// A Windows destination has no Unix permission bits to apply — the timestamp is all that carries
+/// across, and the file keeps the default ACL it was created with.
+#[cfg(not(unix))]
+fn apply_mode(_local: &Path, _mode: Option<u32>) {}
+
+/// Keep just the permission bits (`& 0o7777`) of a remote file's mode (§19). The upper bits are
+/// the file type, which is the server's business, not something to stamp onto a plain local file.
+fn remote_mode(meta: &FileAttributes) -> Option<u32> {
+	meta.permissions.map(|bits| bits & 0o7777)
 }
 
 /// How far to probe for a free `name-1`, `name-2`… beside a local name already taken (§19), the
@@ -359,9 +435,9 @@ async fn receive_tree(
 		})
 		.await;
 
-	for (rel, size) in &plan.files {
-		let dest = transfer::local_join(&local_target, rel);
-		let leaf = rel.last().map_or("", String::as_str);
+	for file in &plan.files {
+		let dest = transfer::local_join(&local_target, &file.rel);
+		let leaf = file.rel.last().map_or("", String::as_str);
 		// A resume never prompts (§16): an existing local file is the transfer's own earlier work,
 		// which `receive_file` size-compares and appends to. A first run treats it as a collision.
 		let dest = if !resume && dest.exists() {
@@ -374,7 +450,7 @@ async fn receive_tree(
 					free_local(&dir, leaf)
 				}
 				FileAction::Skip => {
-					received += size;
+					received += file.size;
 					let _ = events
 						.send(SshEvent::TransferProgress {
 							sent: received,
@@ -388,7 +464,7 @@ async fn receive_tree(
 		} else {
 			dest
 		};
-		let remote = transfer::remote_join(remote_root, rel);
+		let remote = transfer::remote_join(remote_root, &file.rel);
 		// A cancel mid-file drops that file's partial and stops the whole tree (§16); files already
 		// fully pulled stay.
 		if receive_file(
@@ -396,7 +472,7 @@ async fn receive_tree(
 			&remote,
 			&dest,
 			resume,
-			*size,
+			file.size,
 			events,
 			&mut received,
 			&mut reported,
@@ -407,6 +483,9 @@ async fn receive_tree(
 		{
 			return Ok(None);
 		}
+		// The file is fully on disk: stamp it with the metadata the walk captured off the remote
+		// (§19), the per-file mirror of the single-file stamp.
+		stamp_local(&dest, file.mtime, file.mode).await;
 	}
 
 	let _ = events
@@ -529,7 +608,15 @@ async fn walk_remote(sftp: &SftpSession, root: &str) -> Result<TreePlan> {
 				plan.dirs.push(child_rel.clone());
 				frontier.push((explorer::join(&dir, &name), child_rel));
 			} else {
-				plan.files.push((child_rel, meta.len()));
+				// Capture the remote's metadata here, off the same listing, so the copy can be
+				// stamped to match without a second round trip per file (§19).
+				plan.files.push(PlannedFile {
+					rel: child_rel,
+					size: meta.len(),
+					mtime: meta.mtime,
+					atime: meta.atime,
+					mode: remote_mode(&meta),
+				});
 			}
 		}
 	}
