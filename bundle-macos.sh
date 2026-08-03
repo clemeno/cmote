@@ -3,8 +3,12 @@
 # app (no Terminal window) — see PLAN §11. Run after `cargo build --release`.
 set -eu
 
-BIN="target/release/cmote"
-APP="target/release/cmote.app"
+# Both paths can be overridden from the environment so a cross-compiled build can
+# point BIN at target/<triple>/release/cmote — the release workflow builds the Intel
+# target on an Apple-Silicon runner (PLAN §16), where the default native path below
+# does not exist. Unset, the defaults keep a plain `cargo build --release` unchanged.
+BIN="${BIN:-target/release/cmote}"
+APP="${APP:-target/release/cmote.app}"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 
 [ -x "$BIN" ] || { echo "missing $BIN — run: cargo build --release" >&2; exit 1; }

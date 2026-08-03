@@ -1,0 +1,128 @@
+# Release build — cuts the downloadable, portable binaries for a tagged version
+# (PLAN §16, "Release pipeline"). CI (`ci.yml`) keeps `main` green but deliberately
+# ships nothing; THIS workflow is the publishing half: on a version tag it builds the
+# optimized binary for both supported targets, packages each the way its OS expects
+# (a bare portable `cmote.exe` on Windows, a Finder-launchable `cmote.app` on macOS),
+# checksums them, and attaches the lot to a DRAFT GitHub Release for a human to review
+# and publish.
+#
+# The artifacts are NOT yet code-signed or notarized — Authenticode on Windows and
+# `codesign` + notarize on macOS stay deferred (PLAN §16). So a fresh download still
+# trips SmartScreen / Gatekeeper until that lands; the `SHA256SUMS` file is the
+# integrity check in the meantime.
+name: Release
+
+on:
+  # A version tag (bare `MAJOR.MINOR.PATCH`, matching the repo's existing tags —
+  # `2.3.0`, not `v2.3.0`) is what publishes a release.
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+  # A manual run builds and packages both targets WITHOUT publishing (the release
+  # job below is tag-only), so the pipeline can be exercised before a real tag.
+  workflow_dispatch:
+
+# Never cancel a release mid-flight; each tag is its own ref, so this only guards
+# against a double-trigger on the same ref.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+# Default to read-only; only the publish job opts up to `contents: write`.
+permissions:
+  contents: read
+
+jobs:
+  # ── Windows portable exe ──────────────────────────────────────────────────
+  # windows-latest is our native `x86_64-pc-windows-msvc` target, so a plain
+  # release build writes `target/release/cmote.exe` — the portable binary that
+  # ships as-is (no installer, no bundle).
+  windows:
+    name: build (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # `--locked` builds strictly from the committed Cargo.lock — a release must
+      # be reproducible, and a stale lock should fail the build rather than float.
+      - run: cargo build --release --locked
+      - name: Stage the exe under its release name
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/cmote.exe \
+            "dist/cmote-${GITHUB_REF_NAME}-x86_64-pc-windows-msvc.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  # ── macOS app bundle (Intel) ──────────────────────────────────────────────
+  # The runners are Apple Silicon, but cmote ships for Intel (PLAN §1), so we
+  # cross-compile `x86_64-apple-darwin` exactly as CI does, then wrap the Mach-O
+  # in `cmote.app` (bundle-macos.sh) so Finder launches it as a GUI app rather
+  # than opening a Terminal on the bare binary (README, PLAN §11). `ditto` zips
+  # the bundle the macOS way, preserving its structure.
+  macos:
+    name: build (x86_64-apple-darwin)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Wrap the binary in cmote.app and zip it
+        shell: bash
+        env:
+          # Point the bundler at the cross-compiled binary — its default is the
+          # native `target/release/cmote`, which a --target build does not write.
+          BIN: target/x86_64-apple-darwin/release/cmote
+        run: |
+          ./bundle-macos.sh
+          mkdir -p dist
+          ditto -c -k --keepParent target/release/cmote.app \
+            "dist/cmote-${GITHUB_REF_NAME}-x86_64-apple-darwin.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*
+          if-no-files-found: error
+
+  # ── Publish (tag only) ────────────────────────────────────────────────────
+  # Gathers both targets' artifacts, checksums them uniformly on one host, and
+  # attaches everything to a DRAFT release. Skipped on a manual dry run — that
+  # `if` is what makes workflow_dispatch a build-only exercise.
+  release:
+    name: draft release
+    needs: [windows, macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # The only job that writes: creating a release needs the token's write scope.
+    permissions:
+      contents: write
+    steps:
+      - name: Collect the built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # One SHA-256 per file, computed in one place so the digests are uniform
+      # across OSes. Glob only the `cmote-*` payloads so the sums file, written
+      # into the same directory, never hashes itself.
+      - name: Checksum the artifacts
+        run: (cd dist && sha256sum cmote-* > SHA256SUMS)
+      - name: Create the draft release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Left as a draft: a human reviews the artifacts and clicks Publish, so
+          # nothing goes public automatically and a bad tag can be redone silently.
+          draft: true
+          name: cmote ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/cmote-*
+            dist/SHA256SUMS

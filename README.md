@@ -431,6 +431,24 @@ open target/release/cmote.app
 is not code-signed or notarized yet (deferred — §12), so the first launch needs a
 right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
 
+## Releases
+
+Pushing a version tag (bare `MAJOR.MINOR.PATCH`, e.g. `3.0.0` — no `v` prefix, matching
+the repo's tags) runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
+which builds the optimized binary on both targets and attaches these to a **draft** GitHub
+Release:
+
+- `cmote-<version>-x86_64-pc-windows-msvc.exe` — the portable Windows binary.
+- `cmote-<version>-x86_64-apple-darwin.app.zip` — the macOS Intel `cmote.app`, zipped.
+- `SHA256SUMS` — a SHA-256 for each, so a download can be verified (`sha256sum -c
+  SHA256SUMS`, or `shasum -a 256 -c SHA256SUMS` on macOS).
+
+The release is left as a **draft** to review before publishing. The artifacts are **not**
+code-signed or notarized yet (deferred — §16), so a fresh download trips SmartScreen /
+Gatekeeper until then; the checksums are the integrity check in the meantime. A manual
+**Run workflow** (workflow_dispatch) builds both targets *without* publishing, to exercise
+the pipeline before cutting a tag.
+
 ## Data and portability
 
 cmote writes up to three files — `known_hosts` (pinned host keys), `targets.json` (saved

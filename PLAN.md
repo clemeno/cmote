@@ -1236,9 +1236,19 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   on a loud, reject-by-default dialog showing both SHA-256 fingerprints, with **Reject** /
   **Trust once** / **Replace key**. Never auto-trusted — every override is one explicit, informed
   click (§28).
-- **Code signing + auto-update** — sign the exe (Authenticode) so Win11 SmartScreen
-  trusts it, and `codesign` + notarize the macOS binary/`.app` so Gatekeeper allows it;
-  add a signed update channel.
+- **Release pipeline** — *done (v3.x)*. A tag-triggered `release.yml` sits beside `ci.yml`
+  in `.github/workflows/`: a bare `MAJOR.MINOR.PATCH` tag (the repo's convention — `2.3.0`,
+  not `v2.3.0`) builds the optimized binary on both targets, packages each the platform way
+  — a portable `cmote.exe`, a zipped Finder-launchable `cmote.app` (`bundle-macos.sh`, whose
+  `BIN` the workflow overrides at the cross-compiled Intel binary since the runner is Apple
+  Silicon) — checksums them into `SHA256SUMS`, and attaches the lot to a **draft** GitHub
+  Release for a human to review and publish. A manual `workflow_dispatch` run builds both
+  targets *without* publishing, to exercise the pipeline before cutting a tag. The publish
+  job is the only one granted `contents: write`; the builds stay read-only.
+- **Code signing + auto-update** — *still deferred*. Sign the exe (Authenticode) so Win11
+  SmartScreen trusts it, and `codesign` + notarize the macOS binary/`.app` so Gatekeeper
+  allows it; then add a signed update channel. Until then a fresh download from the release
+  above trips SmartScreen / Gatekeeper, and the `SHA256SUMS` file is the integrity check.
 - **GNU toolchain build** — only if a fully MSVC-CRT-free static exe is ever required.
 - **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
   architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
