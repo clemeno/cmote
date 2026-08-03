@@ -1130,11 +1130,17 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   destination and asking about every colliding *file* one at a time (overwrite / keep both / skip
   this one, overwrite-all / skip-all, or cancel the lot), the per-file mirror of the flat batch's
   up-front question (§17, §19). All of it is SFTP-first with an `mkdir`/`rm -rf`/exec fallback,
-  like the listings. Still deferred: cancelling a transfer mid-copy (a recursive one can only be
-  stopped at a collision prompt), resuming an interrupted one, drag-and-drop onto a folder, two
-  transfers at once (a batch queues instead, §17, §21), preserving file modes/timestamps in either
-  direction, and following symlinks inside a recursive walk (they are counted and skipped, never
-  followed, so a cyclic link cannot loop the transfer).
+  like the listings. v3.x then added **cancel and resume** (§16 below, wired in §17): the status
+  bar's ✕ stops the running transfer — the worker deletes the partial it was writing and drops the
+  rest of the batch, since a deliberate cancel is final — and a mid-flight *failure* instead keeps
+  its partial and offers a **Resume** that re-sends only the bytes still missing (a byte-offset
+  append for a single file; a whole tree re-walked and size-compared so only the gaps and the
+  interrupted file's tail cross again). Still deferred: resuming across a *dropped connection*
+  (cancel/resume live inside one live session — a lost session tears down to the error screen, so
+  its transfer state is gone), drag-and-drop onto a folder, two transfers at once (a batch queues
+  instead, §17, §21), preserving file modes/timestamps in either direction, and following symlinks
+  inside a recursive walk (they are counted and skipped, never followed, so a cyclic link cannot
+  loop the transfer).
 - **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
   remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
   dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). Still
@@ -1273,18 +1279,22 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   after the pre-scan — is skipped rather than reopening the question mid-batch.
 - **Progress.** The copy loop streams 32 KiB chunks and emits `TransferProgress` every
   256 KiB — enough for a smooth bar, far below the flood that per-chunk events would be.
-- **Failures stay in the bar, and the batch goes on.** A failed file shows its reason in the
-  status bar and the queue moves to the next; it must not route to the error *screen*, which
-  would tear down a healthy shell over a file that never left. Unlike an auth failure (§12),
-  the detail here is the user's own path — showing it is what makes the error actionable.
+- **Failures stay in the bar.** A failure shows its reason in the status bar, never the error
+  *screen* — that would tear down a healthy shell over a file that never left. Unlike an auth
+  failure (§12), the detail here is the user's own path, so showing it is what makes the error
+  actionable. A failure *before any bytes move* (the sftp channel would not open, the source would
+  not read) has nothing to resume, so the queue moves to the next file as it always did; a failure
+  *mid-copy* keeps its partial and pauses the batch for a **Resume** instead (§16 cancel/resume,
+  below).
 - **Success clears the batch.** Once the queue drains, the picked files are cleared, which
   disables the Upload button, so a stray click cannot re-send what just landed. The reported
   destination is the server's `canonicalize` of the path, so the user sees where the bytes
   actually went rather than what they typed.
 - **Keyboard.** While a confirmation or the collision question is open the terminal's key
   listener swallows keys (as it does for the Disconnect modal), so typing goes to the folder
-  field and not the remote shell; `Esc` cancels, and a running transfer ignores it — there is
-  no cancel to give it (deferred, §16).
+  field and not the remote shell; `Esc` cancels the *confirmation*. A running transfer still
+  swallows `Esc` — stopping one is the status bar's ✕, a deliberate press rather than a stray key
+  (§16 cancel/resume, below).
 
 ### Recursive folder transfer (v3.0)
 
@@ -1308,6 +1318,35 @@ on the server, or the remote one recreated on this machine. Both directions shar
   sticky policy that settles every later collision without asking again, and *Cancel* stops the
   whole transfer — files already copied stay. This is the per-file mirror of the flat batch's
   up-front question above; the flat paths are untouched.
+
+### Cancel and resume (v3.x)
+
+A running transfer can be **stopped** (the status bar's ✕) and, after a mid-flight *failure*, can be
+**resumed** (a Resume beside the failure notice). The two are deliberately different endings:
+
+- **Cancel is final.** The ✕ sends `SshCommand::CancelTransfer`; `client::run` sets a per-transfer
+  `Arc<AtomicBool>` it holds beside the collision channel — one transfer at a time, so each start
+  makes a fresh flag and keeps a clone. Every copy loop (single file and each file of a tree) polls
+  it between 32 KiB chunks; on seeing it set the loop **deletes the partial it was writing** and
+  returns a neutral *cancelled* outcome. The GUI empties both queues on the click, so cancelling
+  the running file takes the rest of the batch with it. A cancel is not a failure — it reports
+  through the usual `*Failed` event with a "cancelled" message, so the bar stays calm and offers no
+  resume: the partial is gone.
+- **Resume continues a failure.** A copy that *errors* mid-flight (not a cancel) keeps its partial
+  and reports `SshEvent::TransferInterrupted`; the GUI remembers what it launched (`in_flight` →
+  `resumable`) and shows Resume. Resume re-issues the exact command with `resume` set. The task then
+  **sizes the destination and sends only the bytes still missing**: `resume_start` (pure, unit-tested
+  in `ssh/transfer.rs`) compares the destination's current size to the source's — equal or larger is
+  *skip* (already there), smaller is *append from there*, absent is a fresh send. A single file opens
+  its destination without truncating and seeks both ends to the offset; a tree re-walks and
+  size-compares every file, so only the gaps and the interrupted file's tail cross again — and in
+  resume mode an existing destination is the transfer's own earlier work, never a collision, so it
+  never re-prompts. This is size-based, trusting the existing prefix to be the file's own (`ponytail:`
+  no checksum — the same assumption `curl -C -` and rsync's naive mode make). A batch resumes its
+  failed file, then drains the rest as usual.
+
+Both live inside one connection: a transfer whose *session* drops tears down to the error screen, so
+its state is gone — resuming across a reconnect is the deferred upgrade path (§16).
 
 ---
 

@@ -16,6 +16,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -110,6 +111,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 				local,
 				remote,
 				overwrite,
+				resume,
 			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -118,6 +120,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 							local,
 							remote,
 							overwrite,
+							resume,
 						})
 						.await;
 				}
@@ -148,27 +151,51 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 					let _ = link.to_session.send(SessionMsg::ReadLink(path)).await;
 				}
 			}
-			SshCommand::Download { remote, local } => {
+			SshCommand::Download {
+				remote,
+				local,
+				resume,
+			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::Download { remote, local })
+						.send(SessionMsg::Download {
+							remote,
+							local,
+							resume,
+						})
 						.await;
 				}
 			}
-			SshCommand::UploadTree { local, remote } => {
+			SshCommand::UploadTree {
+				local,
+				remote,
+				resume,
+			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::UploadTree { local, remote })
+						.send(SessionMsg::UploadTree {
+							local,
+							remote,
+							resume,
+						})
 						.await;
 				}
 			}
-			SshCommand::DownloadTree { remote, local } => {
+			SshCommand::DownloadTree {
+				remote,
+				local,
+				resume,
+			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::DownloadTree { remote, local })
+						.send(SessionMsg::DownloadTree {
+							remote,
+							local,
+							resume,
+						})
 						.await;
 				}
 			}
@@ -178,6 +205,11 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.to_session
 						.send(SessionMsg::ResolveConflict(choice))
 						.await;
+				}
+			}
+			SshCommand::CancelTransfer => {
+				if let Some(link) = session.as_ref() {
+					let _ = link.to_session.send(SessionMsg::CancelTransfer).await;
 				}
 			}
 			SshCommand::MakeDir(path) => {
@@ -231,11 +263,13 @@ pub(crate) enum SessionMsg {
 	Passphrase(Secret),
 	/// The user's answers to a keyboard-interactive request (§7), one per prompt in order.
 	Interactive(Vec<Secret>),
-	/// Send a local file to the remote over a second, sftp channel (§17).
+	/// Send a local file to the remote over a second, sftp channel (§17). `resume` appends from
+	/// the destination's current size rather than truncating (§16).
 	Upload {
 		local: PathBuf,
 		remote: String,
 		overwrite: bool,
+		resume: bool,
 	},
 	/// Check which of an upload batch's names already exist before it sends (§17).
 	CheckUploads { dir: String, names: Vec<String> },
@@ -243,15 +277,32 @@ pub(crate) enum SessionMsg {
 	ListDir(String),
 	/// List every entry inside a remote directory, for the files pane (§19).
 	ListFiles { path: String, request: u64 },
-	/// Fetch a remote file to a local path (§19).
-	Download { remote: String, local: PathBuf },
-	/// Send a whole local folder to the remote, recreating its tree (§17).
-	UploadTree { local: PathBuf, remote: String },
-	/// Fetch a whole remote folder to this machine, recreating its tree (§19).
-	DownloadTree { remote: String, local: PathBuf },
+	/// Fetch a remote file to a local path (§19). `resume` appends from the local partial's size
+	/// rather than truncating (§16).
+	Download {
+		remote: String,
+		local: PathBuf,
+		resume: bool,
+	},
+	/// Send a whole local folder to the remote, recreating its tree (§17). `resume` size-compares
+	/// each file and sends only the missing tail, with no collision prompts (§16).
+	UploadTree {
+		local: PathBuf,
+		remote: String,
+		resume: bool,
+	},
+	/// Fetch a whole remote folder to this machine, recreating its tree (§19). `resume` as above.
+	DownloadTree {
+		remote: String,
+		local: PathBuf,
+		resume: bool,
+	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19), forwarded
 	/// to the transfer waiting on it.
 	ResolveConflict(ConflictChoice),
+	/// Stop the running transfer (§16): set the flag its copy loop polls, so it deletes its
+	/// partial and stops. Routed to the flag `stream` keeps for the transfer currently in flight.
+	CancelTransfer,
 	/// Create a new remote folder (§18).
 	MakeDir(String),
 	/// Delete remote entries, folders and their contents included (§18).
@@ -426,6 +477,12 @@ async fn stream(
 	// already ended) just fails its send harmlessly. `None` when nothing recursive is in flight.
 	let mut conflict_tx: Option<mpsc::Sender<ConflictChoice>> = None;
 
+	// The cancel flag for the transfer currently running (§16), held the same way as `conflict_tx`:
+	// one transfer at a time, so each start makes a fresh flag and keeps a clone here, and a
+	// `CancelTransfer` sets it. The spawned copy loop polls it between chunks; a stale flag whose
+	// transfer already ended simply never gets read. `None` when nothing is transferring.
+	let mut cancel: Option<Arc<AtomicBool>> = None;
+
 	loop {
 		tokio::select! {
 			// Something arrived from the server on the channel.
@@ -461,8 +518,10 @@ async fn stream(
 					Some(SessionMsg::Passphrase(_)) | Some(SessionMsg::Interactive(_)) => {}
 					// The transfer runs on its own channel and its own task, so the
 					// shell keeps flowing while a big file goes across (§17).
-					Some(SessionMsg::Upload { local, remote, overwrite }) => {
-						upload::start(session, events, local, remote, overwrite).await;
+					Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
+						let flag = Arc::new(AtomicBool::new(false));
+						cancel = Some(flag.clone());
+						upload::start(session, events, local, remote, overwrite, resume, flag).await;
 					}
 					// The batch collision pre-scan (§17): a couple of round trips on its own
 					// channel before the first byte, so the "some are already there" question
@@ -482,21 +541,28 @@ async fn stream(
 					Some(SessionMsg::ReadLink(path)) => {
 						browse::read_link(session, &mut sftp, events, path).await;
 					}
-					Some(SessionMsg::Download { remote, local }) => {
-						download::start(session, events, remote, local).await;
+					Some(SessionMsg::Download { remote, local, resume }) => {
+						let flag = Arc::new(AtomicBool::new(false));
+						cancel = Some(flag.clone());
+						download::start(session, events, remote, local, resume, flag).await;
 					}
 					// A recursive transfer runs on its own channel and task like a single file,
 					// but it can pause to ask about a collision — so a fresh reply channel is made
-					// here and its sending end kept, to forward the answers to (§17, §19).
-					Some(SessionMsg::UploadTree { local, remote }) => {
+					// here and its sending end kept, to forward the answers to (§17, §19). It gets a
+					// fresh cancel flag too, on the same one-at-a-time reasoning (§16).
+					Some(SessionMsg::UploadTree { local, remote, resume }) => {
 						let (answers_tx, answers_rx) = mpsc::channel::<ConflictChoice>(8);
 						conflict_tx = Some(answers_tx);
-						upload::start_tree(session, events, local, remote, answers_rx).await;
+						let flag = Arc::new(AtomicBool::new(false));
+						cancel = Some(flag.clone());
+						upload::start_tree(session, events, local, remote, resume, answers_rx, flag).await;
 					}
-					Some(SessionMsg::DownloadTree { remote, local }) => {
+					Some(SessionMsg::DownloadTree { remote, local, resume }) => {
 						let (answers_tx, answers_rx) = mpsc::channel::<ConflictChoice>(8);
 						conflict_tx = Some(answers_tx);
-						download::start_tree(session, events, remote, local, answers_rx).await;
+						let flag = Arc::new(AtomicBool::new(false));
+						cancel = Some(flag.clone());
+						download::start_tree(session, events, remote, local, resume, answers_rx, flag).await;
 					}
 					// Forward a collision answer to the transfer parked on it. A send that fails —
 					// the transfer already finished, or there was never a recursive one — is
@@ -504,6 +570,14 @@ async fn stream(
 					Some(SessionMsg::ResolveConflict(choice)) => {
 						if let Some(answers) = conflict_tx.as_ref() {
 							let _ = answers.send(choice).await;
+						}
+					}
+					// Stop the running transfer (§16): raise the flag its copy loop polls. A cancel
+					// with nothing in flight, or after the transfer already ended, sets a flag no one
+					// reads — harmless.
+					Some(SessionMsg::CancelTransfer) => {
+						if let Some(flag) = cancel.as_ref() {
+							flag.store(true, Ordering::Relaxed);
 						}
 					}
 					// Creating and deleting share the browse session with the listings, the same

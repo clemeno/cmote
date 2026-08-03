@@ -155,10 +155,13 @@ pub enum SshCommand {
 	/// relative, which the server resolves against the login directory. `overwrite` is
 	/// false on the first attempt: the task then reports `UploadExists` instead of
 	/// clobbering a file, and the GUI re-sends with `true` only if the user confirms.
+	/// `resume` continues an interrupted transfer (§16): the task sizes the destination
+	/// and appends only the bytes still missing rather than truncating and re-sending.
 	Upload {
 		local: PathBuf,
 		remote: String,
 		overwrite: bool,
+		resume: bool,
 	},
 	/// Check, before an upload batch sends a single byte, which of `names` already exist
 	/// in the remote directory `dir` (§17). The task answers with `UploadPrescan`, so the
@@ -174,19 +177,40 @@ pub enum SshCommand {
 	/// comes back on each batch so the pane can tell a listing it still wants from one
 	/// for a directory it has already left.
 	ListFiles { path: String, request: u64 },
-	/// Fetch a remote file to a local path the user picked in the save dialog (§19).
-	Download { remote: String, local: PathBuf },
+	/// Fetch a remote file to a local path the user picked in the save dialog (§19). `resume`
+	/// continues an interrupted download (§16): the task reads the remote from the local partial's
+	/// size and appends, rather than truncating the local file and pulling it again.
+	Download {
+		remote: String,
+		local: PathBuf,
+		resume: bool,
+	},
 	/// Send a whole local folder to the remote, recreating its tree under `remote` (§17). The
 	/// folder keeps its own name inside the destination; missing remote directories are made and
 	/// existing ones merged into, and a file that would land on one already there raises a
-	/// per-file conflict (`TransferConflict` out, `ResolveConflict` back).
-	UploadTree { local: PathBuf, remote: String },
+	/// per-file conflict (`TransferConflict` out, `ResolveConflict` back). `resume` continues an
+	/// interrupted tree (§16): each file is size-compared and only the missing tail is sent, with
+	/// no collision prompts — an existing destination is the transfer's own earlier work.
+	UploadTree {
+		local: PathBuf,
+		remote: String,
+		resume: bool,
+	},
 	/// Fetch a whole remote folder to this machine, recreating its tree under `local` (§19). The
 	/// mirror of `UploadTree`: same merge-and-per-file-conflict behaviour, in the other direction.
-	DownloadTree { remote: String, local: PathBuf },
+	DownloadTree {
+		remote: String,
+		local: PathBuf,
+		resume: bool,
+	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Routed to
 	/// the transfer waiting on it; a `*All` answer makes the task stop asking for the rest.
 	ResolveConflict(ConflictChoice),
+	/// Stop the transfer running right now (§16) — the status bar's ✕. The task sets a flag its
+	/// copy loop checks between chunks; on seeing it, the loop deletes the partial it was writing
+	/// (a deliberate cancel is final, unlike a failure) and reports the neutral "cancelled"
+	/// outcome. A no-op when nothing is transferring.
+	CancelTransfer,
 	/// Create a new empty folder on the server (§18). `path` is the full path of the folder to
 	/// make; the task refuses to replace anything already sitting there.
 	MakeDir(String),
@@ -270,6 +294,12 @@ pub enum SshEvent {
 	DownloadDone(String),
 	/// The download failed; carries a short reason for the status bar (§19).
 	DownloadFailed(String),
+	/// A transfer stopped mid-flight on a failure, but its partial was KEPT so it can be resumed
+	/// (§16). Distinct from `*Failed` (final, nothing to continue) and from a cancel (which
+	/// deletes its partial): the GUI shows `message` and offers a Resume, which re-runs the same
+	/// transfer with `resume` set so it appends only the bytes still missing. Shared by both
+	/// directions — the GUI remembers which one it launched, so this carries no path of its own.
+	TransferInterrupted { message: String },
 	/// A recursive transfer hit a file whose destination is already taken (§17, §19). Carries
 	/// the entry's name to show; the GUI raises the six-way conflict dialog and sends the answer
 	/// back as `ResolveConflict`. The transfer is parked until it arrives, so the shell keeps

@@ -103,6 +103,10 @@ pub struct UploadView<'a> {
 	pub dest: &'a str,
 	pub state: Option<TransferState>,
 	pub notice: Option<&'a str>,
+	/// Whether a transfer was interrupted and can be resumed (§16). Draws the Resume button beside
+	/// the notice while nothing is running; the ✕ that stops a running transfer needs no flag, only
+	/// `state` being `Running`.
+	pub resumable: bool,
 }
 
 /// The two browser panels in the strip under the grid (§18, §19), grouped so `view` keeps
@@ -528,17 +532,30 @@ fn center_zone<'a>(endpoint: &str, upload: UploadView<'a>) -> Element<'a, Messag
 				.length(Length::Fixed(160.0))
 				.girth(Length::Fixed(10.0)),
 			text(label).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG),
+			// The ✕ stops the transfer (§16): the worker deletes the partial and winds down. A
+			// deliberate cancel is final, so there is no confirmation — the same weight as
+			// dismissing any status-bar action.
+			button(text("✕").size(STATUS_BAR_TEXT)).on_press(Message::TransferCancelPressed),
 		]
 		.spacing(10)
 		.align_y(iced::alignment::Vertical::Center)
 		.into();
 	}
 
+	// Nothing running: the last outcome (or the endpoint), and — when a failure left something to
+	// pick up — a Resume beside it that re-sends only the bytes still missing (§16).
 	let label = upload.notice.unwrap_or(endpoint).to_owned();
-	text(label)
-		.size(STATUS_BAR_TEXT)
-		.color(STATUS_BAR_FG)
-		.into()
+	let notice = text(label).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG);
+	if upload.resumable {
+		return row![
+			notice,
+			button(text("Resume").size(STATUS_BAR_TEXT)).on_press(Message::TransferResumePressed),
+		]
+		.spacing(10)
+		.align_y(iced::alignment::Vertical::Center)
+		.into();
+	}
+	notice.into()
 }
 
 /// A byte count in the units a person reads (§17). Binary units, one decimal above a

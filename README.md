@@ -224,8 +224,9 @@ references below (§n) point into it.
   folder's **Upload…** in the tree. Before a byte is sent, every destination name is checked
   on the server; if some are already there, **one dialog asks about the whole batch** —
   **Replace**, **Skip**, **Keep both** (`name-1.txt`) or **Cancel**. The files then go one at
-  a time behind the status bar's progress bar, closing with `Uploaded N files`, and a failure
-  names its reason and moves on to the next (§17). When the batch lands, the files pane (and the
+  a time behind the status bar's progress bar, closing with `Uploaded N files`. A failure names
+  its reason: one *before any bytes move* skips to the next file, and one *mid-copy* keeps its
+  partial and offers **Resume** (below) (§17). When the batch lands, the files pane (and the
   tree) **re-list the destination folder** if they are showing it, so what you just sent appears in
   place without a manual Refresh (§29).
 - **Create and delete remote entries** — **New folder…** (on the tree and the pane's
@@ -240,6 +241,14 @@ references below (§n) point into it.
   (`name-1`), or **Skip** just this one; **Overwrite all** or **Skip all** to settle every later
   clash the same way; or **Cancel** the whole transfer (files already copied stay). Symlinks are
   skipped, never followed, so a cyclic link can't loop it (§17, §19).
+- **Cancel or resume a transfer** — while one is running the status bar shows a **✕**: press it to
+  stop now — the partial file it was writing is deleted and the rest of a batch is dropped, since a
+  deliberate cancel is final. If a transfer instead **fails mid-flight** (a hiccup on the link, not
+  a cancel) its partial is kept and a **Resume** appears beside the notice; Resume picks up from
+  exactly where it stopped — a byte-offset append for a single file, and for a folder a re-walk that
+  size-compares every file so only the missing ones and the interrupted file's tail cross again.
+  Resume works within one live session; a dropped *connection* tears down the session, so that is
+  not resumable (§16, §17).
 - **Drag a file in to upload it** — drag a file off the desktop and drop it anywhere on the
   window; it uploads into the **files pane's current directory**, reusing the same pre-scan and, on
   a name already there, the same **Overwrite / Keep both / Skip / Cancel** dialog the menu upload

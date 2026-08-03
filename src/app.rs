@@ -949,6 +949,16 @@ pub struct Tab {
 	/// six-way conflict dialog. `Some` parks the transfer behind the prompt; answering clears it
 	/// and sends the choice back down the wire.
 	transfer_conflict: Option<String>,
+	/// The transfer running right now, remembered so a mid-flight failure can be resumed (§16). Set
+	/// at every start — a queued file, a folder tree, or a resume itself — and cleared when it
+	/// lands; it carries the direction and endpoints `resume_transfer` needs to relaunch it. `None`
+	/// when nothing is transferring.
+	in_flight: Option<Resumable>,
+	/// A transfer that stopped on a failure and can be picked up where it left off (§16). Set from
+	/// `in_flight` when a `TransferInterrupted` arrives — the partial was kept, unlike a cancel —
+	/// and cleared by a resume, a cancel, a fresh transfer, or a clean finish. `Some` is what draws
+	/// the status bar's Resume button.
+	resumable: Option<Resumable>,
 	/// The copy-confirmation toast currently showing, if any (§10). Set on every clipboard
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
@@ -1065,6 +1075,23 @@ pub enum TransferState {
 	ConfirmPath,
 	/// Transferring, with the bytes written so far out of the file's size.
 	Running { sent: u64, total: u64 },
+}
+
+/// A transfer kept so it can be relaunched (§16) — as `in_flight` while it runs, or as `resumable`
+/// after a failure parked it. It carries just enough to re-issue the exact command: the direction
+/// (which decides upload vs download, single file vs whole tree) and its two endpoints. A resume
+/// re-sends with `resume` set, so the task appends only the bytes still missing rather than
+/// starting the file over.
+#[derive(Debug, Clone)]
+enum Resumable {
+	/// A single file going up: local source, remote destination.
+	Upload { local: PathBuf, remote: String },
+	/// A single file coming down: remote source, local destination.
+	Download { remote: String, local: PathBuf },
+	/// A whole folder going up (§17): local root, remote parent directory.
+	UploadTree { local: PathBuf, remote: String },
+	/// A whole folder coming down (§19): remote root, local parent directory.
+	DownloadTree { remote: String, local: PathBuf },
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -1245,6 +1272,12 @@ pub enum Message {
 	/// The user backed out of an upload confirmation or its collision question (Cancel / ✕ /
 	/// backdrop / Esc) — nothing is sent.
 	UploadCancelled,
+	/// The status bar's ✕ on a running transfer (§16): stop the in-flight file and drop the rest
+	/// of the batch. The partial it was writing is deleted, so a cancel is final.
+	TransferCancelPressed,
+	/// The status bar's Resume after an interrupted transfer (§16): relaunch it, appending only
+	/// the bytes still missing, then carry on with any batch still queued behind it.
+	TransferResumePressed,
 	/// Something happened in the files pane (§19). Nested for the same reason the tree's
 	/// messages are.
 	Files(FilesMessage),
@@ -1555,6 +1588,8 @@ impl Tab {
 			Message::UploadConfirmed => return self.on_upload_confirmed(),
 			Message::UploadClashResolved(choice) => self.on_upload_clash(choice),
 			Message::UploadCancelled => self.cancel_upload(),
+			Message::TransferCancelPressed => self.cancel_transfer(),
+			Message::TransferResumePressed => return self.resume_transfer(),
 			Message::Explorer(message) => return self.on_explorer(message),
 			Message::Files(message) => return self.on_files(message),
 			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
@@ -2199,6 +2234,10 @@ impl Tab {
 			SshEvent::LinkTarget { path, target } => self.files.set_link_target(path, target),
 			SshEvent::DownloadDone(path) => {
 				self.transfer = None;
+				// This file landed, so there is nothing to resume; the next one, if any, is
+				// remembered afresh by `pump_downloads`.
+				self.in_flight = None;
+				self.resumable = None;
 				self.downloaded += 1;
 				self.transfer_notice = Some(format!("Saved to {path}"));
 				// A batch keeps going, and says how it went once the last file lands (§21).
@@ -2213,6 +2252,15 @@ impl Tab {
 				// One file failing does not abandon the rest of the batch — the notice says
 				// which one it was, and the queue moves on.
 				self.pump_downloads();
+			}
+			// A transfer stopped mid-flight but kept its partial (§16), so it can be resumed rather
+			// than lost: park it, show the reason, and offer Resume. The queue behind it is left in
+			// place, so resuming the failed file drains the rest afterwards. Direction-agnostic —
+			// `in_flight` already knows which command to relaunch.
+			SshEvent::TransferInterrupted { message } => {
+				self.transfer = None;
+				self.transfer_notice = Some(message);
+				self.resumable = self.in_flight.take();
 			}
 			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
 			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
@@ -2276,6 +2324,9 @@ impl Tab {
 				// One file landed; count it and start the next. The closing notice, and
 				// clearing the picked files, wait until the whole batch has drained (§17).
 				self.transfer = None;
+				// Landed, so nothing to resume; `pump_uploads` remembers the next file itself.
+				self.in_flight = None;
+				self.resumable = None;
 				self.uploaded += 1;
 				self.pump_uploads();
 				if self.transfer.is_none() && self.uploads.is_empty() {
@@ -3674,14 +3725,23 @@ impl Tab {
 			let total = std::fs::metadata(&local)
 				.map(|meta| meta.len())
 				.unwrap_or(0);
+			// A fresh file starting means the previous transfer's resume offer, if any, is stale
+			// (§16); remember this file so its own failure can be resumed.
+			self.resumable = None;
+			self.in_flight = Some(Resumable::Upload {
+				local: local.clone(),
+				remote: remote.clone(),
+			});
 			if self.send_command(SshCommand::Upload {
 				local,
 				remote,
 				overwrite: self.upload_overwrite,
+				resume: false,
 			}) {
 				self.transfer = Some(TransferState::Running { sent: 0, total });
 			} else {
 				self.transfer = None;
+				self.in_flight = None;
 			}
 		}
 	}
@@ -3718,6 +3778,67 @@ impl Tab {
 		if matches!(self.transfer, Some(TransferState::ConfirmPath)) {
 			self.transfer = None;
 		}
+	}
+
+	/// Stop the transfer running right now (§16) — the status bar's ✕. Empties both queues and
+	/// forgets any resume point, since a deliberate cancel is final and takes the whole batch with
+	/// it, then tells the worker to stop: its copy loop deletes the partial it was writing and
+	/// reports the neutral "cancelled" outcome, which clears the bar and, the queues now empty,
+	/// closes the batch out. `transfer` is left running until that outcome lands, so the bar does
+	/// not flicker between the click and the worker winding down.
+	fn cancel_transfer(&mut self) {
+		self.uploads.clear();
+		self.downloads.clear();
+		self.uploaded = 0;
+		self.downloaded = 0;
+		self.resumable = None;
+		self.in_flight = None;
+		self.send_command(SshCommand::CancelTransfer);
+	}
+
+	/// Pick up a transfer that a failure interrupted (§16) — the status bar's Resume. Relaunches
+	/// the exact command `resumable` remembers with `resume` set, so the task sizes the destination
+	/// and sends only the bytes still missing; a single file left in a batch drains the rest once
+	/// it lands. Does nothing if there is nothing to resume, or if the session has since gone.
+	fn resume_transfer(&mut self) -> iced::Task<Message> {
+		let Some(resumable) = self.resumable.take() else {
+			return iced::Task::none();
+		};
+		// Mirror what a fresh start records, so this resumed transfer is itself resumable if it too
+		// is interrupted (a flaky link may need more than one nudge).
+		self.in_flight = Some(resumable.clone());
+		let command = match resumable {
+			Resumable::Upload { local, remote } => SshCommand::Upload {
+				local,
+				remote,
+				// The partial is our own earlier work, not a clash, so skip the exists check and
+				// go straight to the appending copy.
+				overwrite: true,
+				resume: true,
+			},
+			Resumable::Download { remote, local } => SshCommand::Download {
+				remote,
+				local,
+				resume: true,
+			},
+			Resumable::UploadTree { local, remote } => SshCommand::UploadTree {
+				local,
+				remote,
+				resume: true,
+			},
+			Resumable::DownloadTree { remote, local } => SshCommand::DownloadTree {
+				remote,
+				local,
+				resume: true,
+			},
+		};
+		if self.send_command(command) {
+			self.transfer_notice = None;
+			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		} else {
+			self.in_flight = None;
+		}
+		iced::Task::none()
 	}
 
 	/// A local file was dropped onto the window from the OS (§29). Send it into the files pane's
@@ -4315,9 +4436,20 @@ impl Tab {
 		let Some(local) = local else {
 			return;
 		};
-		if self.send_command(SshCommand::Download { remote, local }) {
+		self.resumable = None;
+		self.in_flight = Some(Resumable::Download {
+			remote: remote.clone(),
+			local: local.clone(),
+		});
+		if self.send_command(SshCommand::Download {
+			remote,
+			local,
+			resume: false,
+		}) {
 			self.transfer_notice = None;
 			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		} else {
+			self.in_flight = None;
 		}
 	}
 
@@ -4455,9 +4587,15 @@ impl Tab {
 			self.transfer_notice = Some("A transfer is already running.".to_owned());
 			return;
 		}
+		self.resumable = None;
+		self.in_flight = Some(Resumable::UploadTree {
+			local: local.clone(),
+			remote: dir.clone(),
+		});
 		if self.send_command(SshCommand::UploadTree {
 			local,
 			remote: dir.clone(),
+			resume: false,
 		}) {
 			self.transfer_notice = None;
 			// Remembered so completion re-lists this folder if the pane is on it (§29) — the same
@@ -4465,6 +4603,8 @@ impl Tab {
 			// reader of `upload_dir` for it, and `finish_batch` clears it at the end.
 			self.upload_dir = dir;
 			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		} else {
+			self.in_flight = None;
 		}
 	}
 
@@ -4479,9 +4619,20 @@ impl Tab {
 				.set_notice("A transfer is already running.".to_owned());
 			return;
 		}
-		if self.send_command(SshCommand::DownloadTree { remote, local }) {
+		self.resumable = None;
+		self.in_flight = Some(Resumable::DownloadTree {
+			remote: remote.clone(),
+			local: local.clone(),
+		});
+		if self.send_command(SshCommand::DownloadTree {
+			remote,
+			local,
+			resume: false,
+		}) {
 			self.transfer_notice = None;
 			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
+		} else {
+			self.in_flight = None;
 		}
 	}
 
@@ -4677,6 +4828,7 @@ impl Tab {
 							dest: &self.upload_dir,
 							state: self.transfer,
 							notice: self.transfer_notice.as_deref(),
+							resumable: self.resumable.is_some(),
 						},
 						ui::terminal::Panels {
 							explorer: &self.explorer,

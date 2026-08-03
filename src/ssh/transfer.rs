@@ -66,6 +66,49 @@ pub(crate) enum FileAction {
 	Cancel,
 }
 
+/// How a copy loop ended when it was NOT an error (§16 cancel/resume). `Done` is the whole file
+/// across; `Cancelled` is the user pressing the status bar's ✕ mid-flight — the loop notices the
+/// shared flag, deletes the partial it was writing, and stops. A real I/O failure is the third
+/// outcome, but it travels as the loop's `Err`, not here: a failure keeps its partial so the
+/// transfer can be resumed, whereas a cancel throws it away, so the two must not be confused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CopyOutcome {
+	Done,
+	Cancelled,
+}
+
+/// Where a copy should begin, given whether this is a resume and how big the destination already
+/// is (§16). A fresh transfer always starts at zero — its `create` truncates, so nothing is
+/// carried over. A resume sizes the destination against the source it is continuing:
+///
+///   * as many bytes as the source (or more) are already there, so it finished before the
+///     interruption — `Skip` it rather than re-send a byte; and
+///   * fewer bytes means that many survived, so continue writing from exactly there (`At`).
+///
+/// An absent or empty partial (`None` / `Some(0)`) is `At(0)` — a plain fresh send — so a resume
+/// that reaches a file never started simply sends it whole. This is size-based, so it trusts the
+/// bytes already written to be the file's own prefix (`ponytail:` no checksum — an SFTP append is
+/// the same assumption `curl -C -` and rsync's naive mode make).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Start {
+	Skip,
+	At(u64),
+}
+
+/// Decide where a copy starts (§16) — see [`Start`]. Pure, so the resume arithmetic is unit-tested
+/// without a server: the two file systems only differ in how they read `dest_size`, not in what
+/// the number means.
+pub(crate) fn resume_start(resume: bool, dest_size: Option<u64>, source_size: u64) -> Start {
+	if !resume {
+		return Start::At(0);
+	}
+	match dest_size {
+		None | Some(0) => Start::At(0),
+		Some(have) if have >= source_size => Start::Skip,
+		Some(have) => Start::At(have),
+	}
+}
+
 /// Decide what to do about a file whose destination `name` is already taken (§17, §19).
 ///
 /// A sticky policy already in force answers without troubling the user; otherwise the transfer
@@ -133,4 +176,41 @@ pub(crate) fn local_join(root: &Path, rel: &[String]) -> PathBuf {
 		path.push(component);
 	}
 	path
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{Start, resume_start};
+
+	#[test]
+	fn a_fresh_transfer_always_starts_at_zero() {
+		// Not a resume: whatever is at the destination is about to be truncated, so the size of
+		// it never matters — the copy sends the whole file from the top.
+		assert_eq!(resume_start(false, None, 100), Start::At(0));
+		assert_eq!(resume_start(false, Some(40), 100), Start::At(0));
+		assert_eq!(resume_start(false, Some(100), 100), Start::At(0));
+	}
+
+	#[test]
+	fn a_resume_with_no_partial_sends_the_whole_file() {
+		// The resume reached a file the interruption never got to: nothing on the far side (or an
+		// empty stub) means send it whole, from zero.
+		assert_eq!(resume_start(true, None, 100), Start::At(0));
+		assert_eq!(resume_start(true, Some(0), 100), Start::At(0));
+	}
+
+	#[test]
+	fn a_resume_continues_a_partial_from_where_it_stopped() {
+		assert_eq!(resume_start(true, Some(40), 100), Start::At(40));
+		assert_eq!(resume_start(true, Some(1), 100), Start::At(1));
+	}
+
+	#[test]
+	fn a_resume_skips_a_file_already_fully_there() {
+		// Exactly the source's size means it landed in full before the interruption; larger than
+		// the source can only be a stale, different file, and re-sending would not improve it —
+		// either way there is nothing to append, so skip it.
+		assert_eq!(resume_start(true, Some(100), 100), Start::Skip);
+		assert_eq!(resume_start(true, Some(140), 100), Start::Skip);
+	}
 }

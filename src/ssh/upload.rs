@@ -12,17 +12,22 @@
 // `UploadFailed`, or — when the destination is already taken and the user has not
 // confirmed an overwrite — `UploadExists`.
 
+use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use russh::client;
 use russh_sftp::client::SftpSession;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use russh_sftp::client::fs::File;
+use russh_sftp::protocol::OpenFlags;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
-use crate::ssh::transfer::{self, FileAction, Sticky, TreePlan};
+use crate::ssh::transfer::{self, CopyOutcome, FileAction, Start, Sticky, TreePlan, resume_start};
 
 /// How much of the file to move per write. 32 KiB sits comfortably under the SFTP
 /// packet limit while keeping the number of round trips low.
@@ -46,10 +51,20 @@ pub async fn start<H: client::Handler>(
 	local: PathBuf,
 	remote: String,
 	overwrite: bool,
+	resume: bool,
+	cancel: Arc<AtomicBool>,
 ) {
 	match super::open_sftp(session).await {
 		Ok(sftp) => {
-			tokio::spawn(transfer(sftp, local, remote, overwrite, events.clone()));
+			tokio::spawn(transfer(
+				sftp,
+				local,
+				remote,
+				overwrite,
+				resume,
+				events.clone(),
+				cancel,
+			));
 		}
 		Err(error) => {
 			eprintln!("sftp channel failed: {error:#}");
@@ -152,11 +167,15 @@ async fn transfer(
 	local: PathBuf,
 	remote: String,
 	overwrite: bool,
+	resume: bool,
 	events: mpsc::Sender<SshEvent>,
+	cancel: Arc<AtomicBool>,
 ) {
 	// A file already there is not an error — it is a question, and the user has already
 	// been asked exactly once. Checking before opening the destination matters: SFTP's
-	// create truncates, so by the time a write fails the old contents are gone.
+	// create truncates, so by the time a write fails the old contents are gone. A resume
+	// carries `overwrite`, so it skips straight to the copy, where it appends rather than
+	// truncates (§16) — the file already there is its own interrupted work, not a clash.
 	if !overwrite {
 		match sftp.try_exists(&remote).await {
 			Ok(true) => {
@@ -178,8 +197,8 @@ async fn transfer(
 		}
 	}
 
-	match copy(&sftp, &local, &remote, &events).await {
-		Ok(()) => {
+	match copy(&sftp, &local, &remote, resume, &events, &cancel).await {
+		Ok(CopyOutcome::Done) => {
 			// Report where the bytes actually landed: a relative path (what the dialog
 			// offers when the shell's cwd is unknown) resolves against the login
 			// directory, and the user should see the full path, not their own input.
@@ -189,12 +208,21 @@ async fn transfer(
 				.unwrap_or_else(|_| remote.clone());
 			let _ = events.send(SshEvent::UploadDone(resolved)).await;
 		}
-		Err(error) => {
-			eprintln!("upload failed: {error:#}");
-			// Unlike an auth failure (§12), the detail here is the user's own file and
-			// path — showing it is what makes the error actionable.
+		// The user pressed ✕ (§16): the copy loop already deleted the partial, so this is a
+		// neutral end, not an error — a message the status bar shows without crying failure.
+		Ok(CopyOutcome::Cancelled) => {
 			let _ = events
-				.send(SshEvent::UploadFailed(format!("Upload failed: {error}")))
+				.send(SshEvent::UploadFailed("Upload cancelled.".to_string()))
+				.await;
+		}
+		// A mid-flight failure keeps its partial (§16), so this is resumable rather than final:
+		// the GUI offers a Resume that re-sends only the bytes still missing.
+		Err(error) => {
+			eprintln!("upload interrupted: {error:#}");
+			let _ = events
+				.send(SshEvent::TransferInterrupted {
+					message: format!("Upload interrupted: {error} — Resume to continue."),
+				})
 				.await;
 		}
 	}
@@ -203,29 +231,67 @@ async fn transfer(
 
 /// The copy loop: local file in, remote file out, a progress event every
 /// `PROGRESS_STEP` bytes. Split from `transfer` so the outcome handling above reads as
-/// one `match` over one `Result`.
+/// one `match` over one `Result`. On a resume it opens the destination for append at its
+/// current size and skips that many bytes of the source, so only the missing tail crosses
+/// (§16); between chunks it polls `cancel`, and on a cancel it drops the partial and stops.
 async fn copy(
 	sftp: &SftpSession,
 	local: &Path,
 	remote: &str,
+	resume: bool,
 	events: &mpsc::Sender<SshEvent>,
-) -> Result<()> {
+	cancel: &Arc<AtomicBool>,
+) -> Result<CopyOutcome> {
 	let total = tokio::fs::metadata(local)
 		.await
 		.with_context(|| format!("could not read {}", local.display()))?
 		.len();
+	// On a resume, how much is already on the server decides where to pick up; a fresh send
+	// ignores it and starts at zero (a truncating create).
+	let dest_size = if resume {
+		sftp.metadata(remote.to_owned())
+			.await
+			.ok()
+			.and_then(|meta| meta.size)
+	} else {
+		None
+	};
+	let offset = match resume_start(resume, dest_size, total) {
+		// The whole file is already there from before the interruption: nothing to send.
+		Start::Skip => {
+			let _ = events
+				.send(SshEvent::TransferProgress { sent: total, total })
+				.await;
+			return Ok(CopyOutcome::Done);
+		}
+		Start::At(offset) => offset,
+	};
+
 	let mut source = tokio::fs::File::open(local)
 		.await
 		.with_context(|| format!("could not open {}", local.display()))?;
-	let mut destination = sftp
-		.create(remote.to_owned())
-		.await
-		.with_context(|| format!("could not create {remote} on the server"))?;
+	let mut destination = open_remote_at(sftp, remote, offset).await?;
+	if offset > 0 {
+		source
+			.seek(SeekFrom::Start(offset))
+			.await
+			.context("could not seek the local file to the resume point")?;
+	}
 
 	let mut buffer = vec![0u8; CHUNK];
-	let mut sent = 0u64;
-	let mut reported = 0u64;
+	let mut sent = offset;
+	let mut reported = offset;
+	let _ = events
+		.send(SshEvent::TransferProgress { sent, total })
+		.await;
 	loop {
+		// Checked before each read so a cancel is honoured promptly and, crucially, before any
+		// more bytes are written: the partial is then deleted and the transfer ends here (§16).
+		if cancel.load(Ordering::Relaxed) {
+			drop(destination);
+			let _ = sftp.remove_file(remote.to_owned()).await;
+			return Ok(CopyOutcome::Cancelled);
+		}
 		let read = source.read(&mut buffer).await.context("read failed")?;
 		if read == 0 {
 			break;
@@ -249,7 +315,28 @@ async fn copy(
 	let _ = events
 		.send(SshEvent::TransferProgress { sent, total })
 		.await;
-	Ok(())
+	Ok(CopyOutcome::Done)
+}
+
+/// Open a remote file to write at `offset` (§16). A zero offset is a fresh send: `create`
+/// truncates whatever is there, the transfer's normal behaviour. A non-zero offset is a resume:
+/// open the existing file for writing WITHOUT truncating and seek to where the last run stopped,
+/// so the append lands exactly at the byte boundary the destination already reached.
+async fn open_remote_at(sftp: &SftpSession, remote: &str, offset: u64) -> Result<File> {
+	if offset == 0 {
+		return sftp
+			.create(remote.to_owned())
+			.await
+			.with_context(|| format!("could not create {remote} on the server"));
+	}
+	let mut file = sftp
+		.open_with_flags(remote.to_owned(), OpenFlags::WRITE | OpenFlags::CREATE)
+		.await
+		.with_context(|| format!("could not open {remote} on the server to resume"))?;
+	file.seek(SeekFrom::Start(offset))
+		.await
+		.with_context(|| format!("could not seek {remote} to the resume point"))?;
+	Ok(file)
 }
 
 /// Open the SFTP channel and hand a whole-folder upload to a background task (§17). The mirror
@@ -261,11 +348,21 @@ pub async fn start_tree<H: client::Handler>(
 	events: &mpsc::Sender<SshEvent>,
 	local: PathBuf,
 	remote: String,
+	resume: bool,
 	answers: mpsc::Receiver<ConflictChoice>,
+	cancel: Arc<AtomicBool>,
 ) {
 	match super::open_sftp(session).await {
 		Ok(sftp) => {
-			tokio::spawn(transfer_tree(sftp, local, remote, events.clone(), answers));
+			tokio::spawn(transfer_tree(
+				sftp,
+				local,
+				remote,
+				resume,
+				events.clone(),
+				answers,
+				cancel,
+			));
 		}
 		Err(error) => {
 			eprintln!("sftp channel failed: {error:#}");
@@ -287,15 +384,28 @@ async fn transfer_tree(
 	sftp: SftpSession,
 	local_root: PathBuf,
 	remote_dir: String,
+	resume: bool,
 	events: mpsc::Sender<SshEvent>,
 	mut answers: mpsc::Receiver<ConflictChoice>,
+	cancel: Arc<AtomicBool>,
 ) {
-	match send_tree(&sftp, &local_root, &remote_dir, &events, &mut answers).await {
+	match send_tree(
+		&sftp,
+		&local_root,
+		&remote_dir,
+		resume,
+		&events,
+		&mut answers,
+		&cancel,
+	)
+	.await
+	{
 		Ok(Some(path)) => {
 			let _ = events.send(SshEvent::UploadDone(path)).await;
 		}
-		// A cancel is not a failure, but it IS the terminal signal the GUI waits for to free the
-		// transfer slot — a neutral message, so the status bar does not cry error over a choice.
+		// A cancel — the ✕ (§16) or the conflict dialog's Cancel — is not a failure, but it IS the
+		// terminal signal the GUI waits for to free the transfer slot: a neutral message, so the
+		// status bar does not cry error over a choice, and no resume, since a cancel is final.
 		Ok(None) => {
 			let _ = events
 				.send(SshEvent::UploadFailed(
@@ -303,12 +413,15 @@ async fn transfer_tree(
 				))
 				.await;
 		}
+		// A mid-flight failure keeps every byte already copied (§16): a Resume re-walks the tree
+		// and size-compares, so only the files still missing (and the tail of the interrupted one)
+		// are sent again.
 		Err(error) => {
-			eprintln!("folder upload failed: {error:#}");
+			eprintln!("folder upload interrupted: {error:#}");
 			let _ = events
-				.send(SshEvent::UploadFailed(format!(
-					"Folder upload failed: {error}"
-				)))
+				.send(SshEvent::TransferInterrupted {
+					message: format!("Folder upload interrupted: {error} — Resume to continue."),
+				})
 				.await;
 		}
 	}
@@ -322,8 +435,10 @@ async fn send_tree(
 	sftp: &SftpSession,
 	local_root: &Path,
 	remote_dir: &str,
+	resume: bool,
 	events: &mpsc::Sender<SshEvent>,
 	answers: &mut mpsc::Receiver<ConflictChoice>,
+	cancel: &Arc<AtomicBool>,
 ) -> Result<Option<String>> {
 	// The folder keeps its own name inside the destination, the same rule a single file follows.
 	let name = local_root
@@ -354,9 +469,11 @@ async fn send_tree(
 	for (rel, size) in &plan.files {
 		let dest = transfer::remote_join(&remote_target, rel);
 		let leaf = rel.last().map_or("", String::as_str);
-		// A destination already taken is a question, not an overwrite (§17). Everything else
-		// falls through to a plain write to `dest`.
-		let dest = if sftp.try_exists(&dest).await.unwrap_or(false) {
+		// A resume never prompts (§16): an existing destination is the transfer's own earlier
+		// work, which `send_file` size-compares and appends to — not a fresh collision. A first
+		// run, though, treats a destination already taken as a question, not an overwrite (§17);
+		// everything else falls through to a plain write to `dest`.
+		let dest = if !resume && sftp.try_exists(&dest).await.unwrap_or(false) {
 			match transfer::resolve(events, answers, &mut sticky, leaf).await {
 				FileAction::Overwrite => dest,
 				FileAction::KeepBoth => {
@@ -377,7 +494,24 @@ async fn send_tree(
 			dest
 		};
 		let local = transfer::local_join(local_root, rel);
-		send_file(sftp, &local, &dest, events, &mut sent, &mut reported, total).await?;
+		// A cancel mid-file drops that file's partial and stops the whole tree (§16): the files
+		// already fully copied stay, mirroring how a single-file cancel keeps nothing but its own.
+		if send_file(
+			sftp,
+			&local,
+			&dest,
+			resume,
+			*size,
+			events,
+			&mut sent,
+			&mut reported,
+			total,
+			cancel,
+		)
+		.await? == CopyOutcome::Cancelled
+		{
+			return Ok(None);
+		}
 	}
 
 	let _ = events
@@ -391,26 +525,64 @@ async fn send_tree(
 
 /// Copy one local file to the remote, folding its bytes into the tree-wide `sent` counter and
 /// emitting a progress event every `PROGRESS_STEP` (§17). Split from `copy` because a tree's
-/// progress runs across many files against one running total, not per file from zero.
+/// progress runs across many files against one running total, not per file from zero. On a resume
+/// it size-compares the destination (§16): a file already fully there is skipped (its bytes still
+/// counted, so the bar reaches the end), and a partial is appended from where it stopped; between
+/// chunks it polls `cancel`, dropping the partial and reporting `Cancelled` if it is set.
+#[allow(clippy::too_many_arguments)]
 async fn send_file(
 	sftp: &SftpSession,
 	local: &Path,
 	remote: &str,
+	resume: bool,
+	size: u64,
 	events: &mpsc::Sender<SshEvent>,
 	sent: &mut u64,
 	reported: &mut u64,
 	total: u64,
-) -> Result<()> {
+	cancel: &Arc<AtomicBool>,
+) -> Result<CopyOutcome> {
+	let dest_size = if resume {
+		sftp.metadata(remote.to_owned())
+			.await
+			.ok()
+			.and_then(|meta| meta.size)
+	} else {
+		None
+	};
+	let offset = match resume_start(resume, dest_size, size) {
+		// Already fully there from before the interruption: count its bytes and move on.
+		Start::Skip => {
+			*sent += size;
+			let _ = events
+				.send(SshEvent::TransferProgress { sent: *sent, total })
+				.await;
+			return Ok(CopyOutcome::Done);
+		}
+		Start::At(offset) => offset,
+	};
+
 	let mut source = tokio::fs::File::open(local)
 		.await
 		.with_context(|| format!("could not open {}", local.display()))?;
-	let mut destination = sftp
-		.create(remote.to_owned())
-		.await
-		.with_context(|| format!("could not create {remote} on the server"))?;
+	let mut destination = open_remote_at(sftp, remote, offset).await?;
+	if offset > 0 {
+		source
+			.seek(SeekFrom::Start(offset))
+			.await
+			.context("could not seek the local file to the resume point")?;
+		// The bytes already on the server count towards the running total straight away, so the
+		// bar reflects the resumed progress rather than dropping back.
+		*sent += offset;
+	}
 
 	let mut buffer = vec![0u8; CHUNK];
 	loop {
+		if cancel.load(Ordering::Relaxed) {
+			drop(destination);
+			let _ = sftp.remove_file(remote.to_owned()).await;
+			return Ok(CopyOutcome::Cancelled);
+		}
 		let read = source.read(&mut buffer).await.context("read failed")?;
 		if read == 0 {
 			break;
@@ -428,7 +600,7 @@ async fn send_file(
 		}
 	}
 	destination.shutdown().await.context("close failed")?;
-	Ok(())
+	Ok(CopyOutcome::Done)
 }
 
 /// Create `path` on the server unless it is already there, so an upload merges into an existing
