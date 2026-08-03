@@ -1154,7 +1154,10 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   server picks a free port, and the row shows the port it chose while the saved spec keeps 0 so a
   reconnect asks afresh (§27). v3.x also made the dialog a **live monitor** — each active row shows
   `N open · M total`, the connections crossing the tunnel now and in all, driven from the byte pumps
-  themselves (§27). Still deferred: bracketed-IPv6 bind addresses.
+  themselves (§27). v3.x then closed the last gap by accepting **bracketed-IPv6 addresses** on either
+  side — `[::1]:8080`, exactly as a URL or OpenSSH writes them — with an unbracketed IPv6 refused with
+  a message pointing at the bracket form rather than mis-split on its last colon (§27). That was the
+  last port-forward follow-up, so the chapter is complete.
 - **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
   replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
   cursor reports, custom tab stops, the autowrap toggle and the host's status/identity
@@ -2357,9 +2360,12 @@ Exactly OpenSSH's `-L` / `-R` / `-D`:
 The spec is pure data (`forward.rs`): the kind, the bind `host:port` (loopback by default — a
 forward opened without thinking never exposes the tunnel to the whole network), and, for
 Local/Remote, the target `host:port`. It parses from the dialog's two fields, validates, labels
-itself for a row, and serialises for `targets.json`. `ponytail:` a bare port is allowed on the bind
-side (loopback assumed); an unbracketed IPv6 literal is not (the host/port split is on the last
-colon).
+itself for a row, and serialises for `targets.json`. A bare port is allowed on the bind side
+(loopback assumed), and an **IPv6 literal is bracketed** on either side — `[::1]:8080`, as a URL or
+OpenSSH writes it — so the address/port split is unambiguous; the host is stored without its brackets
+and re-bracketed only when the pair is joined for a bind string or a row label (`join_host_port`).
+`ponytail:` an *unbracketed* IPv6 that still carries a colon is refused with a message naming the
+bracket form rather than mis-split on its last colon — the one place the split cannot guess.
 
 ### The one constraint that shapes the network layer
 

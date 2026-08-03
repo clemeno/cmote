@@ -45,7 +45,7 @@ references below (§n) point into it.
   tunnel rides the same connection — no second login — and shows live / failed in the dialog, with a
   live **activity gauge** (`N open · M total`) counting the connections crossing it now and in all;
   the set is **remembered per target** and re-established when you reconnect. Binds to loopback by
-  default.
+  default. Addresses take a hostname, an IPv4, or a **bracketed IPv6** literal (`[::1]:8080`).
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
   passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
@@ -876,7 +876,10 @@ point a browser or `curl --socks5 localhost:1080 https://example.com` at it. Add
 forward — listen `9090` on the server, to `localhost:<something-local>` — and connect to it *on the
 remote*. Add another **Remote** with listen `0` (`-R 0`): the server picks a free port and the row
 shows it (e.g. `R  127.0.0.1:38217 → …`); connect to that port on the remote to reach the local
-service. Try a duplicate bind (two locals on `8080`) and a taken port: the first is refused inline,
+service. Add a Local forward on a **bracketed IPv6** loopback — listen `[::1]:8081`, to
+`localhost:22` — and reach it with `curl -g 'http://[::1]:8081'`; an *unbracketed* `::1:8081` is
+refused inline with a message naming the bracket form. Try a duplicate bind (two locals on `8080`)
+and a taken port: the first is refused inline,
 the second shows the row **failed** without dropping the shell. Remove a forward with its **✕** — the
 tunnel stops. Then **Disconnect** and reconnect to the same target: the forwards you left should be
 re-established automatically (they are saved in `targets.json`).

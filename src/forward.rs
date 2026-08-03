@@ -139,9 +139,10 @@ impl ForwardSpec {
 		}
 	}
 
-	/// The `host:port` the listener binds, ready for `TcpListener::bind` / `tcpip_forward`.
+	/// The `host:port` the listener binds, ready for `TcpListener::bind` / `tcpip_forward`, with
+	/// an IPv6 host bracketed so the string parses back (a bare `::1:8080` does not).
 	pub fn listen_addr(&self) -> String {
-		format!("{}:{}", self.listen_host, self.listen_port)
+		join_host_port(&self.listen_host, self.listen_port)
 	}
 
 	/// Two forwards clash if they bind the same interface and port for the same kind's side —
@@ -167,10 +168,13 @@ impl ForwardSpec {
 	/// `summary`, but with an explicit listen port — used to show the port the SERVER assigned a
 	/// `-R 0` forward, where the spec's own `listen_port` is still the authored 0 (§27).
 	fn summary_on(&self, listen_port: u16) -> String {
-		let listen = format!("{}:{}", self.listen_host, listen_port);
+		let listen = join_host_port(&self.listen_host, listen_port);
 		match self.kind {
 			ForwardKind::Dynamic => format!("{listen} (SOCKS)"),
-			_ => format!("{listen} → {}:{}", self.target_host, self.target_port),
+			_ => format!(
+				"{listen} → {}",
+				join_host_port(&self.target_host, self.target_port)
+			),
 		}
 	}
 
@@ -248,14 +252,28 @@ impl ForwardEntry {
 	}
 }
 
+/// Join a host and a port back into the `host:port` string a listener binds or a row shows.
+/// An IPv6 literal (the host still carries a colon) is bracketed — `::1` → `[::1]:22` — so the
+/// result is unambiguous and parses back; `TcpListener::bind` rejects a bare `::1:22` outright.
+/// A hostname or IPv4 has no colon and is joined plainly.
+fn join_host_port(host: &str, port: u16) -> String {
+	if host.contains(':') {
+		format!("[{host}]:{port}")
+	} else {
+		format!("{host}:{port}")
+	}
+}
+
 /// Parse a `host:port` (or, when `default_host` is `Some`, a bare `port`) into its parts.
 /// `allow_zero` permits port 0 — a Remote forward's `-R 0`, "let the server choose the port";
 /// every other caller passes `false`, so 0 stays the invalid port it is for a listener that
 /// binds a real port here (a local bind) or a target that must be dialed (any target).
 ///
-/// The host/port split is on the LAST colon, so an unbracketed IPv6 literal is NOT handled —
-/// `::1` would be read as host `:` port `1`. `ponytail:` bracketed IPv6 (`[::1]:22`) is a
-/// later nicety; the common hostname / IPv4 case is covered and the error is clear otherwise.
+/// An IPv6 literal is written bracketed, exactly as a URL or OpenSSH does it: `[::1]:22`. The
+/// brackets are what make the split unambiguous — a bare `::1:22` cannot say which colon divides
+/// the address from the port — so an unbracketed address that still carries a colon is refused
+/// with a message pointing at the bracket form. The host is stored WITHOUT its brackets (`::1`);
+/// `join_host_port` (above) puts them back whenever the pair is joined for a bind string or label.
 fn parse_endpoint(
 	input: &str,
 	default_host: Option<&str>,
@@ -266,24 +284,46 @@ fn parse_endpoint(
 		return Err("cannot be empty".to_owned());
 	}
 
-	let (host, port_text) = match trimmed.rsplit_once(':') {
-		// A colon splits host from port; an empty host before it means "use the default".
-		Some((host, port)) => {
-			let host = if host.is_empty() {
-				match default_host {
-					Some(default) => default,
-					None => return Err("a host is required (host:port)".to_owned()),
-				}
-			} else {
-				host
-			};
-			(host, port)
+	// An IPv6 literal is bracketed (`[::1]:22`): the address sits inside the brackets and the
+	// port follows the `]`. This is the ONE form where the address itself holds colons, so it is
+	// parsed first, on its own terms, before the ordinary last-colon split.
+	let (host, port_text) = if let Some(rest) = trimmed.strip_prefix('[') {
+		let (host, after) = rest
+			.split_once(']')
+			.ok_or_else(|| "an IPv6 address opened with '[' has no closing ']'".to_owned())?;
+		if host.is_empty() {
+			return Err("the brackets hold no address ([::1]:port)".to_owned());
 		}
-		// No colon: only allowed when a default host lets a bare port stand alone.
-		None => match default_host {
-			Some(default) => (default, trimmed),
-			None => return Err("expected host:port".to_owned()),
-		},
+		// After the `]` must come `:port` — not a bare `]`, nor any other trailing text.
+		let port = after
+			.strip_prefix(':')
+			.ok_or_else(|| "a port must follow the ']' ([::1]:port)".to_owned())?;
+		(host, port)
+	} else {
+		match trimmed.rsplit_once(':') {
+			// A colon splits host from port; an empty host before it means "use the default".
+			Some((host, port)) => {
+				// A colon left in the HOST is an unbracketed IPv6 literal — ambiguous, since the
+				// split took the LAST colon. Point at the bracket form rather than guess.
+				if host.contains(':') {
+					return Err("an IPv6 address must be bracketed ([::1]:port)".to_owned());
+				}
+				let host = if host.is_empty() {
+					match default_host {
+						Some(default) => default,
+						None => return Err("a host is required (host:port)".to_owned()),
+					}
+				} else {
+					host
+				};
+				(host, port)
+			}
+			// No colon: only allowed when a default host lets a bare port stand alone.
+			None => match default_host {
+				Some(default) => (default, trimmed),
+				None => return Err("expected host:port".to_owned()),
+			},
+		}
 	};
 
 	let port: u16 = port_text
@@ -484,5 +524,49 @@ mod tests {
 		};
 		entry.connection_closed();
 		assert_eq!(entry.activity_gauge(), "0 open · 0 total");
+	}
+
+	#[test]
+	fn a_bracketed_ipv6_bind_parses_and_binds_back_bracketed() {
+		// `[::1]:8080` stores the address WITHOUT its brackets, but `listen_addr` puts them back so
+		// the string a listener binds is unambiguous (a bare `::1:8080` would not parse).
+		let spec = ForwardSpec::parse(ForwardKind::Local, "[::1]:8080", "db:5432").unwrap();
+		assert_eq!(spec.listen_host, "::1");
+		assert_eq!(spec.listen_port, 8080);
+		assert_eq!(spec.listen_addr(), "[::1]:8080");
+	}
+
+	#[test]
+	fn a_bracketed_ipv6_target_is_kept_and_labelled_bracketed() {
+		// A full IPv6 target survives too, and the row re-brackets it so the label reads back.
+		let spec = ForwardSpec::parse(ForwardKind::Local, "8080", "[2001:db8::1]:5432").unwrap();
+		assert_eq!(spec.target_host, "2001:db8::1");
+		assert_eq!(spec.target_port, 5432);
+		assert_eq!(spec.label(), "L  127.0.0.1:8080 → [2001:db8::1]:5432");
+	}
+
+	#[test]
+	fn an_unbracketed_ipv6_points_at_the_bracket_form() {
+		// The last-colon split cannot say where the address ends, so it is refused with guidance
+		// rather than silently mis-parsed.
+		let error = ForwardSpec::parse(ForwardKind::Local, "::1:8080", "db:5432").unwrap_err();
+		assert!(error.contains("bracketed"));
+	}
+
+	#[test]
+	fn a_bracketed_ipv6_still_needs_a_well_formed_port() {
+		// A bare `[::1]` names no port; an empty one and an unclosed bracket are rejected too.
+		assert!(ForwardSpec::parse(ForwardKind::Local, "[::1]", "db:5432").is_err());
+		assert!(ForwardSpec::parse(ForwardKind::Local, "[::1]:", "db:5432").is_err());
+		assert!(ForwardSpec::parse(ForwardKind::Local, "[::1", "db:5432").is_err());
+	}
+
+	#[test]
+	fn a_remote_ipv6_bind_may_ask_the_server_to_choose_its_port() {
+		// `-R [::]:0`: a bracketed all-interfaces IPv6 bind still allows the server-chosen port.
+		let spec = ForwardSpec::parse(ForwardKind::Remote, "[::]:0", "localhost:3000").unwrap();
+		assert_eq!(spec.listen_host, "::");
+		assert_eq!(spec.listen_port, 0);
+		assert_eq!(spec.listen_addr(), "[::]:0");
 	}
 }
