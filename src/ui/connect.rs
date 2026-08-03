@@ -77,6 +77,10 @@ pub enum FormStop {
 	/// The credential control: the password field under password auth, the Browse
 	/// button under key auth (§7). Absent under interactive auth, which shows no credential.
 	Credential,
+	/// The optional certificate Browse button (§7, §14). Only exists under key auth, between the
+	/// key file and the passphrase; a focus-ring stop like the key Browse, activated by
+	/// Enter/Space to open the certificate picker. Tab skips it under every other method.
+	Certificate,
 	/// The optional key-passphrase field. Only exists under key auth (§14); Tab skips
 	/// it entirely under password auth (see `is_applicable`).
 	KeyPassphrase,
@@ -89,7 +93,7 @@ pub enum FormStop {
 impl FormStop {
 	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
 	/// do not apply to the current auth method.
-	const ORDER: [FormStop; 11] = [
+	const ORDER: [FormStop; 12] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
@@ -98,6 +102,7 @@ impl FormStop {
 		FormStop::AuthInteractive,
 		FormStop::AuthAgent,
 		FormStop::Credential,
+		FormStop::Certificate,
 		FormStop::KeyPassphrase,
 		FormStop::Remember,
 		FormStop::Connect,
@@ -110,6 +115,7 @@ impl FormStop {
 	fn is_applicable(self, auth: AuthKind) -> bool {
 		match self {
 			FormStop::Credential => !auth.is_promptless(),
+			FormStop::Certificate => auth == AuthKind::Key,
 			FormStop::KeyPassphrase => auth == AuthKind::Key,
 			FormStop::Remember => !auth.is_promptless(),
 			_ => true,
@@ -169,6 +175,7 @@ impl FormStop {
 			FormStop::AuthInteractive => Some(Message::AuthKindChanged(AuthKind::Interactive)),
 			FormStop::AuthAgent => Some(Message::AuthKindChanged(AuthKind::Agent)),
 			FormStop::Credential if auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
+			FormStop::Certificate => Some(Message::BrowseCertPressed),
 			FormStop::Remember => Some(Message::RememberToggled),
 			FormStop::Connect => Some(Message::ConnectPressed),
 			_ => None,
@@ -225,6 +232,11 @@ pub struct ConnectForm {
 	pub password: String,
 	/// Chosen private-key file for `Key` auth (set by the file picker).
 	pub key_path: Option<PathBuf>,
+	/// Optional OpenSSH certificate for `Key` auth (§7, §14). Auto-filled with the
+	/// `<key>-cert.pub` sibling when a key is picked and that file exists, cleared or replaced
+	/// from the form. `None` means plain public-key auth. A path, not a secret, so it is
+	/// remembered with the saved target — unlike the passphrase below.
+	pub cert_path: Option<PathBuf>,
 	/// Optional passphrase for an encrypted key (§14). Left empty, the connect flow
 	/// keeps its original behavior — an encrypted key prompts interactively (§7).
 	/// Filled, it is tried first so the key unlocks without a prompt. Session-only:
@@ -294,7 +306,13 @@ impl ConnectForm {
 				} else {
 					Some(Secret::new(self.passphrase.clone()))
 				};
-				Ok(AuthMethod::Key { path, passphrase })
+				// The optional certificate rides along as-is: `None` is plain key auth, `Some`
+				// asks the connect flow to present the key-and-certificate pair (§7).
+				Ok(AuthMethod::Key {
+					path,
+					passphrase,
+					certificate: self.cert_path.clone(),
+				})
 			}
 			// Interactive auth reads no field — the server prompts for every factor on connect
 			// (§7), so there is nothing to validate or carry beyond the choice itself.
@@ -442,10 +460,12 @@ fn auth_fields(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 			PASSWORD_INPUT_ID,
 			Message::PasswordChanged,
 		),
-		// The key file plus an optional passphrase. Leaving the passphrase empty keeps
-		// the interactive-prompt behavior (§7); filling it pre-seeds the unlock (§14).
+		// The key file, an optional certificate, and an optional passphrase. Leaving the
+		// passphrase empty keeps the interactive-prompt behavior (§7); filling it pre-seeds the
+		// unlock (§14). A certificate is optional and auto-filled from the key's sibling (§7).
 		AuthKind::Key => column![
 			key_file_row(form.key_path.as_deref(), focus == FormStop::Credential),
+			cert_file_row(form.cert_path.as_deref(), focus == FormStop::Certificate),
 			passphrase_field(&form.passphrase),
 		]
 		.spacing(12)
@@ -534,6 +554,49 @@ fn key_file_row(path: Option<&Path>, focused: bool) -> Element<'static, Message>
 		),
 	]
 	.spacing(10)
+	.into()
+}
+
+/// The optional certificate-file chooser under key auth (§7, §14). An SSH certificate is an
+/// add-on to the key — the private key still signs, the certificate is the CA-signed public
+/// blob sent with it — so this row sits between the key file and the passphrase. `Browse…` (the
+/// Tab stop, ring-highlighted when `focused`) opens the picker; a `Clear` button appears only
+/// once a certificate is set, dropping back to plain key auth — which matters because picking a
+/// key auto-fills a `<key>-cert.pub` sibling when one exists (§7). The buttons sit beside the
+/// label and the chosen path shows elided on its own line beneath, so two buttons fit the
+/// narrow form column where the inline key-file row has room for only one. Returns an owned
+/// (`'static`) element — the path is copied into a label, nothing is borrowed.
+fn cert_file_row(path: Option<&Path>, focused: bool) -> Element<'static, Message> {
+	// The chosen path is middle-ellipsised to the row's two lines, like the key file (§22); the
+	// whole path is still what `validate` reads. A missing certificate reads as the plain default.
+	let label = match path {
+		Some(path) => {
+			let per_line = (KEY_PATH_WIDTH / KEY_PATH_CHAR).floor().max(1.0) as usize;
+			crate::ui::elide_middle(&path.display().to_string(), per_line * KEY_PATH_LINES)
+		}
+		None => "No certificate (optional)".to_string(),
+	};
+	// Browse is always present and is the keyboard stop; Clear rides beside it only when a
+	// certificate is set, and is mouse-only (a secondary affordance, not in the Tab ring).
+	let mut buttons = row![focus_ring(
+		button("Browse…").on_press(Message::BrowseCertPressed),
+		focused,
+	)]
+	.spacing(10)
+	.align_y(iced::alignment::Vertical::Center);
+	if path.is_some() {
+		buttons = buttons.push(button("Clear").on_press(Message::ClearCertPressed));
+	}
+	column![
+		row![text("Certificate").width(90), buttons]
+			.spacing(10)
+			.align_y(iced::alignment::Vertical::Center),
+		text(label)
+			.size(13)
+			.width(Length::Fill)
+			.wrapping(Wrapping::WordOrGlyph),
+	]
+	.spacing(6)
 	.into()
 }
 
@@ -653,13 +716,51 @@ mod tests {
 		};
 		let params = form.validate().expect("valid key form");
 		match params.auth {
-			AuthMethod::Key { path, passphrase } => {
+			AuthMethod::Key {
+				path,
+				passphrase,
+				certificate,
+			} => {
 				assert_eq!(path, PathBuf::from("/keys/id_ed25519"));
 				// An empty passphrase field must not become an empty secret — it stays
 				// `None` so the interactive prompt still fires for an encrypted key (§7).
 				assert!(passphrase.is_none());
+				// No certificate chosen means plain public-key auth, exactly as before (§7).
+				assert!(certificate.is_none());
 			}
 			other => panic!("expected key auth, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn key_auth_carries_a_chosen_certificate() {
+		// A certificate set on the form rides through validation as `Some`, so the connect flow
+		// presents the key-and-certificate pair (§7). It is orthogonal to the passphrase.
+		let form = ConnectForm {
+			auth_kind: AuthKind::Key,
+			key_path: Some(PathBuf::from("/keys/id_ed25519")),
+			cert_path: Some(PathBuf::from("/keys/id_ed25519-cert.pub")),
+			..base_form()
+		};
+		let params = form.validate().expect("valid key form");
+		match params.auth {
+			AuthMethod::Key { certificate, .. } => {
+				assert_eq!(
+					certificate,
+					Some(PathBuf::from("/keys/id_ed25519-cert.pub"))
+				);
+			}
+			other => panic!("expected key auth, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn the_certificate_stop_is_reachable_only_under_key_auth() {
+		// The certificate Browse button is a Tab stop only when key auth is selected; every
+		// other method (which shows no key file) skips it, like the passphrase field.
+		assert!(FormStop::Certificate.is_applicable(AuthKind::Key));
+		for auth in [AuthKind::Password, AuthKind::Interactive, AuthKind::Agent] {
+			assert!(!FormStop::Certificate.is_applicable(auth));
 		}
 	}
 

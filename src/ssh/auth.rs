@@ -81,24 +81,47 @@ pub(crate) async fn authenticate(
 			Outcome::from(result)
 		}
 
-		AuthMethod::Key { path, passphrase } => {
+		AuthMethod::Key {
+			path,
+			passphrase,
+			certificate,
+		} => {
 			// Load the key. A passphrase pre-seeded from the form (§14) is tried first;
 			// otherwise an encrypted key prompts interactively (§7). `clone` because the
 			// passphrase is borrowed from `params` and `resolve_key` needs to own it.
 			let key = resolve_key(path, passphrase.clone(), events, to_session_rx).await?;
-			// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
-			// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which it
-			// accepts and use the strongest; other key types ignore this.
-			let hash_alg = if key.algorithm().is_rsa() {
-				session.best_supported_rsa_hash().await?.flatten()
-			} else {
-				None
+			let result = match certificate {
+				// No certificate: plain public-key auth, exactly as before.
+				None => {
+					// RSA keys must pick a signature hash: OpenSSH offers rsa-sha2-512,
+					// rsa-sha2-256, or the legacy ssh-rsa (SHA-1). Ask the server which it
+					// accepts and use the strongest; other key types ignore this.
+					let hash_alg = if key.algorithm().is_rsa() {
+						session.best_supported_rsa_hash().await?.flatten()
+					} else {
+						None
+					};
+					let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
+					session
+						.authenticate_publickey(params.user.as_str(), key)
+						.await
+						.context("authentication request failed")?
+				}
+				// A certificate: present the private key AND its CA-signed certificate (§7). The
+				// key still signs the challenge; the certificate is the extra blob that lets the
+				// server trust the signature via the CA rather than a per-key `authorized_keys`
+				// entry. russh derives the signature algorithm from the certificate itself (so an
+				// RSA certificate carries its own `rsa-sha2-*` choice), hence no separate hash
+				// negotiation on this path. A certificate that will not load is a hard error
+				// surfaced to the user, not a silent fall-back to bare-key auth.
+				Some(cert_path) => {
+					let cert = keyfile::load_certificate(cert_path)?;
+					session
+						.authenticate_openssh_cert(params.user.as_str(), Arc::new(key), cert)
+						.await
+						.context("authentication request failed")?
+				}
 			};
-			let key = PrivateKeyWithHashAlg::new(Arc::new(key), hash_alg);
-			let result = session
-				.authenticate_publickey(params.user.as_str(), key)
-				.await
-				.context("authentication request failed")?;
 			Outcome::from(result)
 		}
 

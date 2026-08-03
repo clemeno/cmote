@@ -1140,6 +1140,12 @@ pub enum Message {
 	BrowseKeyPressed,
 	/// The picker closed: `Some(path)` if a file was chosen, `None` if cancelled.
 	KeyFilePicked(Option<PathBuf>),
+	/// The user clicked the certificate Browse button — open the native certificate picker (§7).
+	BrowseCertPressed,
+	/// The certificate picker closed: `Some(path)` if chosen, `None` if cancelled.
+	CertFilePicked(Option<PathBuf>),
+	/// The user clicked Clear beside the certificate — drop back to plain key auth (§7).
+	ClearCertPressed,
 	// --- form actions ---
 	ConnectPressed,
 	BackPressed,
@@ -1476,10 +1482,31 @@ impl Tab {
 			Message::BrowseKeyPressed => return browse_key(),
 			// A cancelled picker (`None`) keeps whatever was already chosen.
 			Message::KeyFilePicked(path) => {
-				if path.is_some() {
-					self.form.key_path = path;
+				if let Some(path) = path {
+					// Auto-fill the certificate from the OpenSSH `<key>-cert.pub` sibling when one
+					// sits beside the key and no certificate is already chosen — the same
+					// convenience the command-line client offers (§7). Non-destructive: a
+					// certificate the user picked or a key with no sibling is left untouched.
+					if self.form.cert_path.is_none()
+						&& let Some(sibling) = crate::ssh::keyfile::cert_sibling(&path)
+						&& sibling.is_file()
+					{
+						self.form.cert_path = Some(sibling);
+					}
+					self.form.key_path = Some(path);
 				}
 			}
+			// Opening the certificate picker is async, like the key picker above.
+			Message::BrowseCertPressed => return browse_cert(),
+			// A cancelled picker keeps whatever was already chosen; a pick sets the certificate.
+			Message::CertFilePicked(path) => {
+				if path.is_some() {
+					self.form.cert_path = path;
+				}
+			}
+			// Clear drops the certificate back to plain key auth, undoing an auto-filled or
+			// mistaken choice (§7).
+			Message::ClearCertPressed => self.form.cert_path = None,
 			Message::ConnectPressed => return self.on_connect_pressed(),
 			Message::BackPressed => return self.go_to_form(),
 			Message::FormKey(event) => return self.on_form_key(event),
@@ -1712,12 +1739,12 @@ impl Tab {
 		self.passphrase_failed = false;
 
 		// Capture the profile (no secret) to save if this connect succeeds (§14). The
-		// key path is only meaningful for key auth; the name here is a placeholder —
-		// `upsert_on_connect` keeps an existing target's custom name.
-		let key_path = if self.form.auth_kind == ui::connect::AuthKind::Key {
-			self.form.key_path.clone()
+		// key path and certificate are only meaningful for key auth; the name here is a
+		// placeholder — `upsert_on_connect` keeps an existing target's custom name.
+		let (key_path, cert_path) = if self.form.auth_kind == ui::connect::AuthKind::Key {
+			(self.form.key_path.clone(), self.form.cert_path.clone())
 		} else {
-			None
+			(None, None)
 		};
 		self.pending_target = Some(crate::profiles::Target {
 			name: crate::profiles::endpoint_of(&params.user, &params.host, params.port),
@@ -1726,6 +1753,7 @@ impl Tab {
 			user: params.user.clone(),
 			auth_kind: self.form.auth_kind,
 			key_path,
+			cert_path,
 			// Placeholder like `name`: the stored preference wins on connect, and a
 			// brand-new target takes the default `upsert_on_connect` gives it (§14).
 			show_hidden: self.explorer.show_hidden(),
@@ -2081,6 +2109,7 @@ impl Tab {
 						&target.user,
 						target.auth_kind,
 						target.key_path,
+						target.cert_path,
 					);
 					// Restore this target's remembered session before the panels list anything
 					// (§22): the `.*` filter and panel sizes go on now, and the resume paths
@@ -2631,7 +2660,7 @@ impl Tab {
 		};
 		// Copy out the fields before touching `self.form`, so the borrow of `self.targets` ends
 		// first (assigning the form mutably borrows `self`).
-		let Some((host, port, user, auth_kind, key_path, remember)) =
+		let Some((host, port, user, auth_kind, key_path, cert_path, remember)) =
 			self.targets.borrow().find(&key).map(|target| {
 				(
 					target.host.clone(),
@@ -2639,6 +2668,7 @@ impl Tab {
 					target.user.clone(),
 					target.auth_kind,
 					target.key_path.clone(),
+					target.cert_path.clone(),
 					target.remember_secret,
 				)
 			})
@@ -2652,6 +2682,7 @@ impl Tab {
 			auth_kind,
 			password: String::new(),
 			key_path,
+			cert_path,
 			passphrase: String::new(),
 			// A remembered target opens with the box already ticked (§16); untick to stop
 			// remembering it, which forgets the stored secret on the next connect.
@@ -4985,6 +5016,18 @@ fn browse_key() -> iced::Task<Message> {
 	)
 }
 
+/// Open the native file picker for an OpenSSH certificate (§7). Same async-`Task` shape as
+/// `browse_key` — the modal dialog would block the GUI thread — with the pick arriving back as
+/// `Message::CertFilePicked`. The certificate is validated (parsed) later, at connect time.
+fn browse_cert() -> iced::Task<Message> {
+	iced::Task::perform(
+		rfd::AsyncFileDialog::new()
+			.set_title("Select a certificate")
+			.pick_file(),
+		|handle| Message::CertFilePicked(handle.map(|handle| handle.path().to_path_buf())),
+	)
+}
+
 /// Open the native picker for the files to upload (§17), from the status bar's File… button.
 /// Multi-select: one file or many, the flow is the same. Same async-`Task` shape as
 /// `browse_key` — the dialog is modal and would otherwise block the GUI thread. The
@@ -5610,7 +5653,7 @@ mod tests {
 		// pane directory — the divergent case a tree-click peek leaves behind.
 		app.targets
 			.borrow_mut()
-			.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
 			crate::profiles::SessionState {

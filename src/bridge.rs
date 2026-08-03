@@ -46,9 +46,22 @@ pub enum AuthMethod {
 	///
 	/// The passphrase is session-only — it rides in a `Secret` (redacted, wiped on
 	/// drop) and is never persisted with the saved target (§12).
+	///
+	/// `certificate` is an OPTIONAL OpenSSH user certificate (`<key>-cert.pub`) to present
+	/// alongside the key (§7). An SSH certificate is a public key signed by a trusted CA, so
+	/// the server trusts the one CA rather than every individual key. It is an add-on to key
+	/// auth, not a method of its own: the private key here still does the signing — the
+	/// certificate is the extra blob sent with the offer.
+	///   * `None` — plain public-key auth, exactly as before.
+	///   * `Some(path)` — load the certificate from `path` and authenticate with the
+	///     key-and-certificate pair (russh's `authenticate_openssh_cert`).
+	///
+	/// A certificate is public data (like the key *path*), so — unlike the passphrase — it is
+	/// remembered with the saved target (§14).
 	Key {
 		path: PathBuf,
 		passphrase: Option<Secret>,
+		certificate: Option<PathBuf>,
 	},
 	/// Server-driven keyboard-interactive auth (§7): 2FA / OTP and any challenge-response
 	/// scheme. It carries NO secret — every prompt is answered live during the handshake, so

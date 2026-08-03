@@ -46,6 +46,12 @@ pub struct Target {
 	/// password auth; omitted from the JSON when `None` to keep the file tidy.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub key_path: Option<PathBuf>,
+	/// The OpenSSH certificate file for key auth, if this target presents one alongside its key
+	/// (§7). A certificate is public data (like the key *path*), never a secret, so it is
+	/// remembered here; absent for plain key or password auth, and omitted from the JSON when
+	/// `None` so an older store and a cert-less target both stay tidy.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub cert_path: Option<PathBuf>,
 	/// Whether the folder tree and the files pane list dot-prefixed entries (§18, §19).
 	/// A per-target display preference, not a secret: which server this is decides
 	/// whether its dotfiles are the point or the noise, so the `.*` toggle is
@@ -193,8 +199,8 @@ impl Targets {
 	}
 
 	/// Record a successful connection (§14): if a target already exists for this
-	/// endpoint, refresh its auth kind / key path but KEEP its custom name; otherwise
-	/// add a new one named after the endpoint. Returns the endpoint key so the caller
+	/// endpoint, refresh its auth kind / key path / certificate but KEEP its custom name;
+	/// otherwise add a new one named after the endpoint. Returns the endpoint key so the caller
 	/// can select the row that was just saved. Re-sorts so the list stays ordered.
 	pub fn upsert_on_connect(
 		&mut self,
@@ -203,6 +209,7 @@ impl Targets {
 		user: &str,
 		auth_kind: AuthKind,
 		key_path: Option<PathBuf>,
+		cert_path: Option<PathBuf>,
 	) -> String {
 		let endpoint = endpoint_of(user, host, port);
 		match self.items.iter_mut().find(|t| t.endpoint() == endpoint) {
@@ -210,6 +217,7 @@ impl Targets {
 				// Endpoint already known: update how we authenticate, leave the name alone.
 				existing.auth_kind = auth_kind;
 				existing.key_path = key_path;
+				existing.cert_path = cert_path;
 			}
 			None => {
 				self.items.push(Target {
@@ -219,6 +227,7 @@ impl Targets {
 					user: user.to_string(),
 					auth_kind,
 					key_path,
+					cert_path,
 					show_hidden: shown_by_default(),
 					// A brand-new target has no session behind it yet, so there is nowhere to
 					// resume to — the first connect uses the fallbacks (root / login dir, and
@@ -448,6 +457,7 @@ mod tests {
 			user: user.to_string(),
 			auth_kind: AuthKind::Password,
 			key_path: None,
+			cert_path: None,
 			show_hidden: true,
 			terminal_path: None,
 			files_path: None,
@@ -481,7 +491,8 @@ mod tests {
 		let mut targets = Targets::default();
 
 		// Act
-		let key = targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None);
+		let key =
+			targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None, None);
 
 		// Assert
 		assert_eq!(key, "root@example.com:22");
@@ -493,12 +504,12 @@ mod tests {
 	fn upsert_same_endpoint_updates_auth_but_keeps_the_name() {
 		// Arrange: a renamed password target.
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None);
+		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None, None);
 		targets.rename("root@example.com:22", "prod");
 
 		// Act: reconnect to the same endpoint, this time with a key.
 		let path = Some(PathBuf::from("/keys/id_ed25519"));
-		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Key, path.clone());
+		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Key, path.clone(), None);
 
 		// Assert: still one target, name preserved, auth refreshed.
 		assert_eq!(targets.items().len(), 1);
@@ -509,11 +520,26 @@ mod tests {
 	}
 
 	#[test]
+	fn upsert_refreshes_and_clears_the_certificate() {
+		// A reconnect that adds a certificate records it; a later reconnect without one clears it
+		// — the certificate tracks the last successful connect, just like the key path (§14).
+		let mut targets = Targets::default();
+		let key = Some(PathBuf::from("/keys/id_ed25519"));
+		let cert = Some(PathBuf::from("/keys/id_ed25519-cert.pub"));
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Key, key.clone(), cert.clone());
+		assert_eq!(targets.find("u@h:22").unwrap().cert_path, cert);
+
+		// Reconnect with the same key but no certificate: the stored certificate is dropped.
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Key, key, None);
+		assert_eq!(targets.find("u@h:22").unwrap().cert_path, None);
+	}
+
+	#[test]
 	fn items_are_sorted_case_insensitively_by_name() {
 		// Arrange
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 22, "zoe", AuthKind::Password, None); // endpoint "zoe@h:22"
-		targets.upsert_on_connect("h", 22, "amy", AuthKind::Password, None); // endpoint "amy@h:22"
+		targets.upsert_on_connect("h", 22, "zoe", AuthKind::Password, None, None); // endpoint "zoe@h:22"
+		targets.upsert_on_connect("h", 22, "amy", AuthKind::Password, None, None); // endpoint "amy@h:22"
 		targets.rename("zoe@h:22", "Alpha");
 		targets.rename("amy@h:22", "beta");
 
@@ -526,8 +552,8 @@ mod tests {
 	fn rename_reorders_and_rejects_blank() {
 		// Arrange: two targets, "aaa" then "zzz".
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None); // u@h:1
-		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None); // u@h:2
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None); // u@h:1
+		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None, None); // u@h:2
 		targets.rename("u@h:1", "aaa");
 		targets.rename("u@h:2", "zzz");
 		assert_eq!(targets.items()[0].name, "aaa");
@@ -544,7 +570,7 @@ mod tests {
 	#[test]
 	fn remove_drops_the_matching_target() {
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
 		assert!(targets.remove("u@h:1"));
 		assert!(targets.items().is_empty());
 		assert!(!targets.remove("u@h:1")); // already gone
@@ -556,13 +582,14 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None);
+		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None, None);
 		targets.upsert_on_connect(
 			"box",
 			2222,
 			"me",
 			AuthKind::Key,
 			Some(PathBuf::from("/keys/id")),
+			Some(PathBuf::from("/keys/id-cert.pub")),
 		);
 		targets.rename("root@example.com:22", "prod");
 
@@ -578,7 +605,7 @@ mod tests {
 	fn the_resume_paths_are_remembered_and_never_wiped_by_a_silent_session() {
 		// Arrange: one target, no session behind it yet.
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
 
 		// A session ends knowing both where the shell and the pane were.
 		assert!(targets.set_session("u@h:1", paths("/var/log", "/etc")));
@@ -614,7 +641,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None);
+		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None, None);
 		targets.set_session(
 			"root@example.com:22",
 			SessionState {
@@ -640,7 +667,7 @@ mod tests {
 	fn a_whole_snapshot_writes_and_reads_back_through_session() {
 		// The full snapshot round-trips through `set_session` and back out of `session`.
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
 		targets.set_session(
 			"u@h:1",
 			SessionState {
@@ -670,8 +697,8 @@ mod tests {
 	fn the_hidden_toggle_is_remembered_per_target() {
 		// Arrange: two targets, both starting from the default (shown).
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
-		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
+		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None, None);
 
 		// Act: hide dotfiles on the first one only, through the one snapshot setter.
 		let hide = SessionState {
@@ -693,8 +720,8 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None);
-		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
+		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None, None);
 		assert_eq!(targets.find("u@h:1").unwrap().sort, None);
 		assert_eq!(targets.find("u@h:1").unwrap().sort_dir, None);
 
@@ -778,7 +805,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		assert!(!targets.find("u@h:22").unwrap().remember_secret);
 
 		// Act / Assert: setting it reports a change and sticks; setting the same value again
@@ -816,7 +843,7 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let path = dir.path().join("targets.json");
 		let mut targets = Targets::default();
-		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None);
+		targets.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		assert!(targets.find("u@h:22").unwrap().forwards.is_empty());
 
 		// Act / Assert: setting them reports a change and sticks; setting the same set again
@@ -836,6 +863,20 @@ mod tests {
 			Targets::load_from(&path).find("u@h:22").unwrap().forwards,
 			specs
 		);
+	}
+
+	#[test]
+	fn a_targets_file_without_the_cert_field_defaults_to_none() {
+		// A store written before certificates were remembered must load with none and behave as
+		// before — a key target simply presents no certificate.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(
+			&path,
+			r#"[{"name":"prod","host":"h","port":22,"user":"u","auth_kind":"key","key_path":"/keys/id"}]"#,
+		)
+		.unwrap();
+		assert_eq!(Targets::load_from(&path).items()[0].cert_path, None);
 	}
 
 	#[test]

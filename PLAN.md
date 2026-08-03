@@ -346,6 +346,29 @@ Two format families; only one is native to the SSH ecosystem.
 ECDSA/DSA inner keys; a genuinely exotic container surfaces a clear error, not a
 silent failure.
 
+**OpenSSH certificates (add-on to key auth).** A user certificate is a public key signed by
+a trusted CA, so a server trusts the one CA instead of every individual key in an
+`authorized_keys` file. cmote treats it exactly the way OpenSSH does — **an add-on to key
+auth, not a method of its own**: the private key still signs the challenge; the certificate
+is the extra CA-signed blob presented with the offer. So there is no fifth radio — under key
+auth an optional **Certificate** file sits beside the key file (a `Certificate: Option<PathBuf>`
+on `AuthMethod::Key`). When it is set, `ssh/auth.rs` loads it (`keyfile::load_certificate` →
+`russh::keys::load_openssh_certificate`, which parses the one-line `ssh-…-cert-v01@openssh.com`
+file) and authenticates with `session.authenticate_openssh_cert(user, key, cert)`; when it is
+absent the path is unchanged plain public-key auth. russh derives the signature algorithm from
+the certificate itself, so there is no separate RSA-hash negotiation on the certificate path,
+and a certificate that will not load is a hard error surfaced to the user rather than a silent
+fall-back to bare-key auth.
+
+- **Auto-detect** — picking a key auto-fills the OpenSSH `<key>-cert.pub` sibling when that
+  file exists and no certificate is already chosen (`keyfile::cert_sibling`), matching what the
+  command-line client does; a **Clear** button drops it back to plain key auth. Non-destructive:
+  a certificate the user chose, or a key with no sibling, is left untouched.
+- The certificate is **public data**, like the key *path* — so, unlike the passphrase, it is
+  remembered with the saved target (§14), never a secret in the vault (§12).
+- `ponytail:` **agent-held certificates** (a cert the SSH agent holds and signs for) are still
+  deferred (§16) — this is the file-based certificate only.
+
 ---
 
 ## 8. Host-key verification (security)
@@ -983,9 +1006,10 @@ The home screen (`ui/home.rs`) is the landing screen: a list of previously used
 connection **targets**, so reconnecting is a click instead of re-typing the form.
 
 - **What persists — profiles only, never secrets in this file (§12).** A target records
-  `name`, `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path`, the panels'
-  `show_hidden` preference, and a `remember_secret` flag. No password and no key passphrase is
-  ever written to `targets.json`. This keeps the §12 "the safest secret is the one never
+  `name`, `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path` and — when the target
+  presents one — the OpenSSH `cert_path` (§7), the panels' `show_hidden` preference, and a
+  `remember_secret` flag. A certificate is public data like the key *path*, so it rides here;
+  no password and no key passphrase is ever written to `targets.json`. This keeps the §12 "the safest secret is the one never
   persisted" guarantee for this file **and** keeps it fully portable — a `targets.json` copied
   to another machine leaks nothing. The user enters the secret on the form each time, unless it
   was remembered. *(Opt-in, PORTABLE encrypted-at-rest secret persistence now exists — a
@@ -1000,8 +1024,8 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   (case-insensitively, endpoint as the tie-breaker) and re-sorted whenever a name changes.
 - **Save-on-connect.** A target is written only once a session actually opens
   (`SshEvent::Connected`), never on a mere attempt. `upsert_on_connect` adds a new target
-  (named after the endpoint) or refreshes an existing endpoint's auth/key while keeping
-  its custom name — so reconnecting never spawns a duplicate and never clobbers a rename.
+  (named after the endpoint) or refreshes an existing endpoint's auth/key/certificate while
+  keeping its custom name — so reconnecting never spawns a duplicate and never clobbers a rename.
 - **Per-target display preferences.** The `.*` toggle shared by the folder tree and the
   files pane (§18, §19) is remembered with the target: whether a server's dotfiles are
   the point or the noise is a property of that server, not of the app. It is applied on
@@ -1111,9 +1135,16 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   pipe `\\.\pipe\openssh-ssh-agent`, also via `SSH_AUTH_SOCK` when that points at a pipe) then
   Pageant; on macOS it uses `ssh-agent` via `SSH_AUTH_SOCK`. Each agent's public keys are offered
   in turn until the server accepts one, then it chains into keyboard-interactive like any other
-  primary method (§7). Certificate identities are left for the still-deferred certificate path.
+  primary method (§7). Agent-held *certificate* identities are still deferred (the file-based
+  certificate path is done — §7, §16); an agent's plain public keys are what is offered here.
   See §7 and `ssh/agent.rs`.
-- **Broader auth (still deferred)** — certificate auth (including agent-held certificates).
+- **Certificate auth** — *done (v3.x), file-based*. An OpenSSH user certificate is presented
+  alongside a key as an add-on to key auth (§7): under key auth an optional **Certificate** file
+  sits beside the key file, auto-filled from the `<key>-cert.pub` sibling and clearable, loaded at
+  connect time and sent via russh's `authenticate_openssh_cert`. It is remembered with the target
+  as public metadata (§14), never in the secret vault. Still deferred: **agent-held certificates**
+  (a certificate the SSH agent holds and signs for — russh exposes `authenticate_certificate_with`
+  for the agent signer, which drops into the same auth path when wanted).
 - **More key types for `.ppk`** — *done, and by a different route than first planned*:
   the original plan was a hand-rolled parser covering RSA + Ed25519 with ECDSA deferred, but
   the swap to `ssh-key`'s `from_ppk` (§7 — already in the russh tree, no new dependency) reads

@@ -24,10 +24,10 @@
 // own crypto glue. See the PLAN §7 note for the reversed decision.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use russh::keys::{PrivateKey, decode_secret_key};
+use russh::keys::{Certificate, PrivateKey, decode_secret_key, load_openssh_certificate};
 
 use crate::secret::Secret;
 
@@ -65,6 +65,32 @@ pub fn load_private_key(path: &Path, passphrase: Option<&Secret>) -> Result<Load
 	} else {
 		load_openssh(&text, passphrase)
 	}
+}
+
+/// Load an OpenSSH user certificate from disk (§7). A certificate is a *public* artifact —
+/// the public key plus the CA's signature over it — so there is nothing to decrypt and no
+/// passphrase: the private key (loaded separately by `load_private_key`) still does the
+/// signing at auth time. russh's `load_openssh_certificate` reads the one-line
+/// `ssh-…-cert-v01@openssh.com <base64> [comment]` file and parses it; we only add a
+/// friendly error context. A file that is not a certificate (a bare public key, a private
+/// key, garbage) fails to parse and surfaces here as an `Err`.
+pub fn load_certificate(path: &Path) -> Result<Certificate> {
+	load_openssh_certificate(path).context("could not load the certificate file")
+}
+
+/// The OpenSSH-convention certificate path that sits beside a private key: `ssh` looks for
+/// `<key>-cert.pub` next to the identity file, so `~/.ssh/id_ed25519` implies
+/// `~/.ssh/id_ed25519-cert.pub`. Used to auto-fill the certificate field when the user picks
+/// a key (§7, §14), matching what the command-line client does. Returns `None` only when the
+/// path has no file name (a directory-like path), which never happens for a picked file.
+///
+/// The suffix is appended to the WHOLE file name, extension and all — OpenSSH does not strip
+/// an extension — so `key.pem` implies `key.pem-cert.pub`, exactly like the reference client.
+/// Kept as an `OsString` push so a non-UTF-8 name is preserved rather than lossily rebuilt.
+pub fn cert_sibling(key: &Path) -> Option<PathBuf> {
+	let mut name = key.file_name()?.to_owned();
+	name.push("-cert.pub");
+	Some(key.with_file_name(name))
 }
 
 /// Sniff whether the text is a PuTTY `.ppk`: its first line always starts with
@@ -133,6 +159,10 @@ mod tests {
 	const PPK_ED25519_ENC: &str = include_str!("fixtures/id_ed25519_enc.ppk");
 	const ENC_PASSPHRASE: &str = "123";
 
+	// A real OpenSSH Ed25519 user certificate (public key + CA signature), vendored from
+	// `ssh-key`'s test suite. It is the `<base64>` line an `ssh-keygen -s` produces.
+	const CERT_ED25519: &str = include_str!("fixtures/id_ed25519-cert.pub");
+
 	// Write key text to a temp file so we exercise the real read-from-path path.
 	fn temp_key(content: &str) -> NamedTempFile {
 		let mut file = NamedTempFile::new().expect("create temp key file");
@@ -198,5 +228,43 @@ mod tests {
 		// Not a ppk header → the OpenSSH decoder is tried, which rejects garbage.
 		let file = temp_key("this is not a key");
 		assert!(load_private_key(file.path(), None).is_err());
+	}
+
+	#[test]
+	fn loads_a_valid_ed25519_certificate() {
+		// Arrange: a real OpenSSH certificate written to a file (the read path is real).
+		let file = temp_key(CERT_ED25519);
+
+		// Act
+		let cert = load_certificate(file.path()).expect("valid ed25519 certificate");
+
+		// Assert: it is a certificate over an Ed25519 key.
+		assert_eq!(cert.algorithm(), Algorithm::Ed25519);
+	}
+
+	#[test]
+	fn a_non_certificate_file_is_rejected() {
+		// A private key is not a certificate: the certificate parser must refuse it, so a
+		// user who points the certificate field at a key file gets a clear error, not a silent
+		// wrong-blob auth attempt.
+		let file = temp_key(PPK_ED25519);
+		assert!(load_certificate(file.path()).is_err());
+		// And plain garbage is refused too.
+		let garbage = temp_key("this is not a certificate");
+		assert!(load_certificate(garbage.path()).is_err());
+	}
+
+	#[test]
+	fn cert_sibling_follows_the_openssh_convention() {
+		// `<key>-cert.pub` beside the key, appended to the whole file name (extension and all),
+		// exactly as the command-line client derives it.
+		assert_eq!(
+			cert_sibling(Path::new("/keys/id_ed25519")),
+			Some(PathBuf::from("/keys/id_ed25519-cert.pub"))
+		);
+		assert_eq!(
+			cert_sibling(Path::new("/keys/server.pem")),
+			Some(PathBuf::from("/keys/server.pem-cert.pub"))
+		);
 	}
 }

@@ -48,7 +48,8 @@ references below (§n) point into it.
   default. Addresses take a hostname, an IPv4, or a **bracketed IPv6** literal (`[::1]:8080`).
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
-  passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
+  passphrases in `targets.json`** (only host / port / user / auth method / key and certificate
+  path) — a
   secret is stored only if you opt in to the encrypted vault (below). Click a
   target to select it, then click it again (or press **Enter**) to open it and pre-fill
   the form; **rename** it in place with **F2** or right-click → **Rename** (the list
@@ -59,6 +60,11 @@ references below (§n) point into it.
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
   `ssh-key`'s `from_ppk`). Encrypted keys prompt for a passphrase on their own screen —
   or pre-fill an optional passphrase field on the form (leave it empty to be prompted).
+- **OpenSSH certificates** — under key auth, point the optional **Certificate** field at a
+  `*-cert.pub` to authenticate with a CA-signed certificate (the key still signs; the
+  certificate rides along). Picking a key auto-fills the `<key>-cert.pub` sibling when it exists
+  — exactly like the command-line client — and **Clear** drops back to a plain key. The
+  certificate path is remembered with the target (it is public, not a secret).
 - **Keyboard-interactive (2FA / OTP)** — pick **Interactive** for challenge-response servers,
   and cmote also chains into it automatically after a password/key when the server asks for a
   second factor (key/password **plus** a one-time code). The server's prompts appear one field
@@ -467,7 +473,8 @@ It also audits the dependency tree: `cargo audit` for RustSec advisories and
 Automated coverage: key parsing (the `.ppk` header sniff, Ed25519 `.ppk` loaded plain and
 encrypted, the encrypted-key passphrase re-ask paths, and a non-`.ppk` blob routed to the
 OpenSSH loader — the `.ppk` fixtures are Ed25519, the format `from_ppk` also reads RSA / ECDSA /
-DSA §7), host-key match/unknown/mismatch decisions and
+DSA §7), certificate loading (an Ed25519 `-cert.pub` parsed, a non-certificate file refused,
+and the `<key>-cert.pub` sibling derivation §7), host-key match/unknown/mismatch decisions and
 fingerprint formatting, terminal byte-stream → grid, key-event → byte-sequence
 mapping (including application-cursor-mode arrow keys, CSI vs SS3, every F1-F12
 against the terminfo entry, the modified named keys — Ctrl/Shift/Alt + arrows /
@@ -594,6 +601,16 @@ ssh-keygen -t ed25519 -f ./smoke_key_enc -N "hunter2"      # encrypted
   re-ask) before the correct one succeeds.
 - **PuTTY `.ppk`:** convert a key with PuTTYgen and repeat — both encrypted and
   unencrypted `.ppk` should behave like the OpenSSH cases.
+- **OpenSSH certificate:** sign the key with a CA and trust that CA on the server:
+  ```sh
+  ssh-keygen -t ed25519 -f ./smoke_ca -N ""                        # a throwaway CA
+  ssh-keygen -s ./smoke_ca -I tester -n tester ./smoke_key.pub     # writes smoke_key-cert.pub
+  # on the server: echo "@cert-authority *  $(cat smoke_ca.pub)" >> ~tester/.ssh/authorized_keys  (or TrustedUserCAKeys)
+  ```
+  Choose **Key** and browse to `smoke_key` — the **Certificate** field should auto-fill with
+  `smoke_key-cert.pub` (the sibling) — then connect → shell opens. Click **Clear** and connect
+  again to confirm it falls back to plain key auth. Reopen the saved target and confirm the
+  certificate path comes back pre-filled.
 - **SSH agent / Pageant:** load `smoke_key` into an agent (`ssh-add ./smoke_key`, or add it
   in Pageant on Windows), choose **Agent** — no fields appear — and connect → shell opens with
   no file to pick and no passphrase. Stop the agent (or empty it) and retry: expect a clear
