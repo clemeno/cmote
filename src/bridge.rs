@@ -344,8 +344,10 @@ pub enum SshEvent {
 	/// A delete did not happen (or only partly did), with the reason for the panel's notice line.
 	DeleteFailed(String),
 	/// A port forward is up (§27): its local listener bound, or the server accepted its remote
-	/// listen request. Carries the id so the GUI marks the right row live in the tunnels dialog.
-	ForwardReady { id: u64 },
+	/// listen request. Carries the id so the GUI marks the right row live in the tunnels dialog,
+	/// and `assigned_port` — `Some` only for a `-R 0`, the port the server chose, so the row can
+	/// show where it is actually listening; `None` for every forward that named its own port.
+	ForwardReady { id: u64, assigned_port: Option<u16> },
 	/// A port forward could not start (§27): the local port was already taken, the server
 	/// refused the remote listen, or the bind address was bad. Carries the id and a short reason
 	/// for the row — a forward's own failure never tears the shell down, unlike a session error.

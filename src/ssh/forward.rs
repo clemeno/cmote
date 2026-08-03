@@ -120,25 +120,68 @@ impl Forwards {
 				self.local.insert(id, task);
 			}
 			ForwardKind::Remote => {
-				// Insert the target BEFORE the request returns, so a connection the server opens
-				// the instant it starts listening already finds its mapping.
-				lock(&self.table).insert(
-					spec.listen_port,
-					(spec.target_host.clone(), spec.target_port),
-				);
-				self.remote
-					.insert(id, (spec.listen_host.clone(), spec.listen_port));
+				let requested = spec.listen_port;
+				// A concrete port is inserted into the table BEFORE the request returns, so a
+				// connection the server opens the instant it starts listening already finds its
+				// mapping. A `-R 0` asks the server to CHOOSE the port, so the port is not known
+				// until the reply — its mapping is inserted then instead. A connection in that
+				// sub-millisecond gap is declined and the client retries, the tiny window OpenSSH
+				// has too.
+				if requested != 0 {
+					lock(&self.table)
+						.insert(requested, (spec.target_host.clone(), spec.target_port));
+				}
 				match session
-					.tcpip_forward(spec.listen_host.clone(), u32::from(spec.listen_port))
+					.tcpip_forward(spec.listen_host.clone(), u32::from(requested))
 					.await
 				{
-					Ok(_) => {
-						let _ = events.send(SshEvent::ForwardReady { id }).await;
+					Ok(assigned) => {
+						// russh returns the server-chosen port for a 0 request and 0 for a concrete
+						// one (RFC 4254), so the port actually bound is the assignment when we asked
+						// for 0, else exactly what we asked for.
+						let bound = if requested == 0 {
+							match u16::try_from(assigned) {
+								Ok(port) if port != 0 => port,
+								// A server that accepted `-R 0` without naming a real port leaves
+								// nothing to map or cancel: treat it as a refusal rather than dangle.
+								_ => {
+									let _ = events
+										.send(SshEvent::ForwardFailed {
+											id,
+											reason: "the server assigned no port for the remote \
+											         forward"
+												.to_owned(),
+										})
+										.await;
+									return;
+								}
+							}
+						} else {
+							requested
+						};
+						// For a `-R 0` the mapping could not be inserted up front — do it now, keyed
+						// by the port the server actually bound (what its `forwarded-tcpip` channels
+						// will report).
+						if requested == 0 {
+							lock(&self.table)
+								.insert(bound, (spec.target_host.clone(), spec.target_port));
+						}
+						// Remember the BOUND port (not the requested 0) so removal cancels and prunes
+						// the right one.
+						self.remote.insert(id, (spec.listen_host.clone(), bound));
+						// Tell the GUI the assigned port only when the server chose it; a concrete
+						// request already knows its own port.
+						let assigned_port = (requested == 0).then_some(bound);
+						let _ = events
+							.send(SshEvent::ForwardReady { id, assigned_port })
+							.await;
 					}
 					Err(_) => {
-						// The server refused: undo the bookkeeping so nothing dangles.
-						lock(&self.table).remove(&spec.listen_port);
-						self.remote.remove(&id);
+						// The server refused: undo the bookkeeping so nothing dangles. (Nothing was
+						// inserted for a `-R 0`, so the remove is a harmless no-op there.)
+						if requested != 0 {
+							lock(&self.table).remove(&requested);
+						}
 						let _ = events
 							.send(SshEvent::ForwardFailed {
 								id,
@@ -197,7 +240,14 @@ async fn listen(
 			return;
 		}
 	};
-	let _ = events.send(SshEvent::ForwardReady { id }).await;
+	// A local/dynamic listener binds its own concrete port, so there is no server-assigned port
+	// to report.
+	let _ = events
+		.send(SshEvent::ForwardReady {
+			id,
+			assigned_port: None,
+		})
+		.await;
 
 	loop {
 		let (tcp, peer) = match listener.accept().await {

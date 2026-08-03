@@ -2356,8 +2356,8 @@ impl Tab {
 			// A forward came up or failed (§27): mark its row. A failure never tears the shell
 			// down — the tunnel simply shows as failed in the dialog. A late event for a forward
 			// already removed finds no entry and is dropped.
-			SshEvent::ForwardReady { id } => {
-				self.set_forward_status(id, crate::forward::ForwardStatus::Active)
+			SshEvent::ForwardReady { id, assigned_port } => {
+				self.mark_forward_ready(id, assigned_port)
 			}
 			SshEvent::ForwardFailed { id, reason } => {
 				self.set_forward_status(id, crate::forward::ForwardStatus::Failed(reason));
@@ -2481,6 +2481,8 @@ impl Tab {
 				id,
 				spec,
 				status: crate::forward::ForwardStatus::Starting,
+				// Set only if this is a `-R 0` and the server later reports the port it chose.
+				bound_port: None,
 			});
 			self.forward_listen.clear();
 			self.forward_to.clear();
@@ -2515,6 +2517,8 @@ impl Tab {
 					id,
 					spec,
 					status: crate::forward::ForwardStatus::Starting,
+					// Set only if this is a `-R 0` and the server later reports the port it chose.
+					bound_port: None,
 				});
 			}
 		}
@@ -2525,6 +2529,18 @@ impl Tab {
 	fn set_forward_status(&mut self, id: u64, status: crate::forward::ForwardStatus) {
 		if let Some(entry) = self.forwards.iter_mut().find(|entry| entry.id == id) {
 			entry.status = status;
+		}
+	}
+
+	/// A forward came up (§27): mark its row Active, and for a `-R 0` record the port the server
+	/// assigned so the row shows where it is actually listening. The spec keeps its authored 0, so
+	/// a reconnect asks for a fresh port rather than pinning this ephemeral one.
+	fn mark_forward_ready(&mut self, id: u64, assigned_port: Option<u16>) {
+		if let Some(entry) = self.forwards.iter_mut().find(|entry| entry.id == id) {
+			entry.status = crate::forward::ForwardStatus::Active;
+			if assigned_port.is_some() {
+				entry.bound_port = assigned_port;
+			}
 		}
 	}
 
@@ -5383,7 +5399,10 @@ mod tests {
 		app.add_forward();
 		let id = app.forwards[0].id;
 
-		let _ = app.on_ssh_event(SshEvent::ForwardReady { id });
+		let _ = app.on_ssh_event(SshEvent::ForwardReady {
+			id,
+			assigned_port: None,
+		});
 		assert_eq!(
 			app.forwards[0].status,
 			crate::forward::ForwardStatus::Active
@@ -5399,8 +5418,42 @@ mod tests {
 		);
 
 		// A stale event for a removed forward touches nothing.
-		let _ = app.on_ssh_event(SshEvent::ForwardReady { id: 999 });
+		let _ = app.on_ssh_event(SshEvent::ForwardReady {
+			id: 999,
+			assigned_port: None,
+		});
 		assert_eq!(app.forwards.len(), 1);
+	}
+
+	/// A `-R 0` forward's readiness carries the port the server chose; the row records it (so it
+	/// shows where the server listens) while the spec keeps its authored 0 (§27).
+	#[test]
+	fn a_server_assigned_remote_port_is_recorded_on_the_row() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.forward_kind = crate::forward::ForwardKind::Remote;
+		app.forward_listen = "0".to_owned();
+		app.forward_to = "localhost:3000".to_owned();
+		app.add_forward();
+		let id = app.forwards[0].id;
+		// Authored as 0, no assigned port yet.
+		assert_eq!(app.forwards[0].spec.listen_port, 0);
+		assert_eq!(app.forwards[0].bound_port, None);
+
+		let _ = app.on_ssh_event(SshEvent::ForwardReady {
+			id,
+			assigned_port: Some(38217),
+		});
+		assert_eq!(
+			app.forwards[0].status,
+			crate::forward::ForwardStatus::Active
+		);
+		assert_eq!(app.forwards[0].bound_port, Some(38217));
+		// The row shows the real port; the persisted spec still asks for a fresh one on reconnect.
+		assert_eq!(
+			app.forwards[0].label(),
+			"R  127.0.0.1:38217 → localhost:3000"
+		);
+		assert_eq!(app.forwards[0].spec.listen_port, 0);
 	}
 
 	// A key-press event for the terminal handler. `text: None` is fine for the named keys these

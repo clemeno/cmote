@@ -40,9 +40,11 @@ references below (§n) point into it.
 - **Port forwarding — local, remote and dynamic tunnels.** The **Tunnels** button on the status
   bar opens a manager: add a **Local** (`-L`) forward to reach a service through the server, a
   **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
-  SOCKS5 proxy that lets each connection pick its own target. Each tunnel rides the same
-  connection — no second login — and shows live / failed in the dialog; the set is **remembered
-  per target** and re-established when you reconnect. Binds to loopback by default.
+  SOCKS5 proxy that lets each connection pick its own target. A remote forward may listen on port
+  **0** to let the **server pick a free port** (`-R 0`); the row then shows the port it chose. Each
+  tunnel rides the same connection — no second login — and shows live / failed in the dialog; the
+  set is **remembered per target** and re-established when you reconnect. Binds to loopback by
+  default.
 - **Home screen of saved targets** — every successful connection is remembered as a
   named target and listed alphabetically. Profiles only by default: **no passwords or
   passphrases in `targets.json`** (only host / port / user / auth method / key path) — a
@@ -869,7 +871,9 @@ row to go from `○` to a green `●`; from your machine, `curl localhost:8080` 
 localhost`) should reach it through the tunnel. Add a **Dynamic** forward — listen `1080` — and
 point a browser or `curl --socks5 localhost:1080 https://example.com` at it. Add a **Remote**
 forward — listen `9090` on the server, to `localhost:<something-local>` — and connect to it *on the
-remote*. Try a duplicate bind (two locals on `8080`) and a taken port: the first is refused inline,
+remote*. Add another **Remote** with listen `0` (`-R 0`): the server picks a free port and the row
+shows it (e.g. `R  127.0.0.1:38217 → …`); connect to that port on the remote to reach the local
+service. Try a duplicate bind (two locals on `8080`) and a taken port: the first is refused inline,
 the second shows the row **failed** without dropping the shell. Remove a forward with its **✕** — the
 tunnel stops. Then **Disconnect** and reconnect to the same target: the forwards you left should be
 re-established automatically (they are saved in `targets.json`).

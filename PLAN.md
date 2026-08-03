@@ -1149,8 +1149,10 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   cyclic link cannot loop the transfer).
 - **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
   remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
-  dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). Still
-  deferred: a server-assigned remote port (`-R 0`), bracketed-IPv6 bind addresses, and per-tunnel
+  dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). v3.x
+  then added the **server-assigned remote port** (`-R 0`): a remote forward may bind port 0, the
+  server picks a free port, and the row shows the port it chose while the saved spec keeps 0 so a
+  reconnect asks afresh (§27). Still deferred: bracketed-IPv6 bind addresses and per-tunnel
   connection counts / activity in the dialog.
 - **Richer terminal** — *the engine swap (§23) raised the ceiling* (v3.0): `vt100` was
   replaced by `alacritty_terminal`, so the DEC line-drawing charset, origin-mode-correct
@@ -1192,8 +1194,11 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   with a plain-text alternate alongside (§10). Still deferred: honoring remote **OSC 52**
   clipboard-write requests (kept out on purpose — we only touch the clipboard on explicit local
   action) and rectangular/block selection.
-- **Host-key mismatch override UI** — a guarded "the key changed, here's the old vs new
-  fingerprint" flow, if ever needed (kept out of v1 on purpose).
+- **Host-key mismatch override UI** — *done (v3.0.0)*. A guarded "the key changed, here's the old
+  vs new fingerprint" flow: §8's TOFU refused a changed key outright; §28 now blocks the handshake
+  on a loud, reject-by-default dialog showing both SHA-256 fingerprints, with **Reject** /
+  **Trust once** / **Replace key**. Never auto-trusted — every override is one explicit, informed
+  click (§28).
 - **Code signing + auto-update** — sign the exe (Authenticode) so Win11 SmartScreen
   trusts it, and `codesign` + notarize the macOS binary/`.app` so Gatekeeper allows it;
   add a signed update channel.
@@ -2374,8 +2379,25 @@ cannot open its own SSH channel. The split (`ssh/forward.rs`):
   server opens a `forwarded-tcpip` channel back; russh delivers it to `Handler::
   server_channel_open_forwarded_tcpip`, which looks the bound port up in the table, accepts, dials
   the local target and pumps. Removal cancels the server listen (`cancel_tcpip_forward`) and prunes
-  the table. `ponytail:` the table is keyed by port only, and a server-assigned `-R 0` is a later
-  nicety (a concrete port is required for now).
+  the table. `ponytail:` the table is keyed by port only.
+
+### Letting the server choose the port (`-R 0`)
+
+A remote forward may bind port **0** — `ssh -R 0:host:port`, "let the server pick a free port and
+tell me which." The parser allows a 0 on the bind side for a Remote forward only (a local or
+dynamic listener must name a real port; a target port never may). russh's `tcpip_forward` returns
+the port the server chose for a 0 request (and 0 for a concrete one, per RFC 4254), so the worker
+learns the bound port from the reply. Two things follow from not knowing the port until then: the
+table is keyed by the **assigned** port (inserted after the reply, not before — a concrete request
+still pre-inserts to close the "connection the instant it listens" gap, but a 0 request cannot, so
+it accepts the same sub-millisecond window OpenSSH has), and the removal/cancel remembers the
+assigned port too. The port is carried home on `ForwardReady { assigned_port: Option<u16> }` —
+`Some` only for a 0-request — and the row shows it in place of the authored 0, while the persisted
+spec keeps 0 so a reconnect asks for a fresh port rather than pinning an ephemeral one. Two `-R 0`
+forwards no longer count as the same bind (both read as port 0, but the server assigns each a
+distinct port), so the second is not refused as a duplicate. `ponytail:` a server that accepts
+`-R 0` without naming a port is treated as a refusal rather than left dangling; and the cancel is
+sent with the assigned port (best effort — a forward also dies with the session on teardown).
 
 The `Forwards` manager `stream` owns holds the local listener tasks and the remote entries; dropping
 it at session end aborts every local listener, and the remote listeners die with the connection —

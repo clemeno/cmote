@@ -90,8 +90,9 @@ fn forward_row(entry: &ForwardEntry) -> Element<'_, Message> {
 		ForwardStatus::Failed(reason) => ("●", FAILED_FG, Some(reason.as_str())),
 	};
 
-	// The label, plus a failure reason on its own muted line when the forward could not start.
-	let mut labelled = column![text(entry.spec.label()).size(BODY_SIZE).color(FG)].spacing(2);
+	// The label (the entry's, not the spec's, so a `-R 0` shows the server-assigned port), plus a
+	// failure reason on its own muted line when the forward could not start.
+	let mut labelled = column![text(entry.label()).size(BODY_SIZE).color(FG)].spacing(2);
 	if let Some(reason) = hint {
 		labelled = labelled.push(text(reason).size(BODY_SIZE - 2.0).color(FAILED_FG));
 	}
