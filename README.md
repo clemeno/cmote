@@ -200,9 +200,11 @@ references below (§n) point into it.
   clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
   skipped), and the focused panel wears a ring so it is never a guess. In a panel the
   **arrow keys** walk the rows (in the grid, left/right move one cell and up/down a whole
-  row), **Tab / Shift+Tab** step next/previous, **Enter** opens, **F2** renames and **Esc**
-  hands the keyboard back to the shell. A keyboard-moved selection scrolls itself into view,
-  only at the edges (§20).
+  row), **PageUp/PageDown** jump a screenful at a time and **Home/End** leap to the first and
+  last entry, **Tab / Shift+Tab** step next/previous, **Enter** opens, **F2** renames and **Esc**
+  hands the keyboard back to the shell. **Shift** held on an arrow, a Page key or Home/End
+  extends the selection instead of moving it. A keyboard-moved selection scrolls itself into
+  view, only at the edges (§20).
 - **A details popup beside the selection** — the entry's **full name** (the grid's label is
   narrow and may clip it), where a **symlink points**, the file's **MIME type**, its
   **modification time in the server's own timezone** (`2026-03-20 11:46:40 CEST (+02:00)` —

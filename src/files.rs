@@ -516,6 +516,25 @@ impl Files {
 		}
 	}
 
+	/// Jump the cursor to the first or last row and select it — Home / End (§20). Unlike `step`,
+	/// which moves relative to the current cell, this lands on an ABSOLUTE end, so it is right
+	/// even with nothing selected yet: a relative step reads the empty-selection default (forward
+	/// starts at the top, backward at the bottom) and so a big delta would pick the OPPOSITE end.
+	/// `extend` runs the selection from the anchor to that end — Shift+Home / Shift+End (§21).
+	pub fn jump_to_edge(&mut self, show_hidden: bool, to_last: bool, extend: bool) {
+		let rows = self.rows(show_hidden);
+		// An empty grid has no end to land on, and `last` below would underflow.
+		let Some(last) = rows.len().checked_sub(1) else {
+			return;
+		};
+		let target = if to_last { last } else { 0 };
+		if extend {
+			self.select_range(show_hidden, target);
+		} else {
+			self.select_only(show_hidden, target);
+		}
+	}
+
 	/// Select every row from the anchor to `index`, inclusive, and put the cursor on
 	/// `index`. With no anchor — nothing has been clicked yet — the range is that one row.
 	fn select_range(&mut self, show_hidden: bool, index: usize) {
@@ -1601,6 +1620,54 @@ mod tests {
 		let request = empty.show("/home").expect("a new directory needs listing");
 		empty.chunk(request, Vec::new(), true);
 		empty.step(true, 1, false);
+		assert_eq!(empty.cursor(), None);
+	}
+
+	#[test]
+	fn home_and_end_land_on_the_absolute_ends() {
+		let (mut files, _) = pane(&[
+			entry("a", Kind::File),
+			entry("b", Kind::File),
+			entry("c", Kind::File),
+			entry("d", Kind::File),
+			entry("e", Kind::File),
+		]);
+
+		// End goes to the last row, Home back to the first.
+		files.jump_to_edge(true, true, false);
+		assert_eq!(files.cursor(), Some("/home/e"));
+		assert_eq!(files.selected_index(true), Some(4));
+		files.jump_to_edge(true, false, false);
+		assert_eq!(files.cursor(), Some("/home/a"));
+		assert_eq!(files.selected_index(true), Some(0));
+
+		// The whole reason this is not a big `step`: with NOTHING selected, Home still lands on
+		// the first row and End on the last. A relative jump would read the empty-selection
+		// default (forward from the top, backward from the bottom) and pick the OPPOSITE end.
+		files.deselect();
+		files.jump_to_edge(true, false, false);
+		assert_eq!(files.cursor(), Some("/home/a"), "Home from nothing → first");
+		files.deselect();
+		files.jump_to_edge(true, true, false);
+		assert_eq!(files.cursor(), Some("/home/e"), "End from nothing → last");
+
+		// Shift+End extends from the anchor to the last row.
+		files.select("/home/b");
+		files.jump_to_edge(true, true, true);
+		let chosen: Vec<String> = files
+			.selected_rows(true)
+			.into_iter()
+			.map(|(path, _)| path)
+			.collect();
+		assert_eq!(chosen, ["/home/b", "/home/c", "/home/d", "/home/e"]);
+		assert_eq!(files.cursor(), Some("/home/e"));
+
+		// An empty directory has no end, and reaching for one must not panic.
+		let mut empty = Files::default();
+		let request = empty.show("/home").expect("a new directory needs listing");
+		empty.chunk(request, Vec::new(), true);
+		empty.jump_to_edge(true, false, false);
+		empty.jump_to_edge(true, true, false);
 		assert_eq!(empty.cursor(), None);
 	}
 

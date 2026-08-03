@@ -3289,16 +3289,34 @@ impl Tab {
 		};
 
 		let columns = ui::files::columns(self.files_width()) as isize;
-		// Shift held on an arrow extends the selection instead of moving it (§21). Not on
+		// A page is a screenful of rows (less one, for context), turned into a model-space delta
+		// by the column count — the same units `step` moves the arrows in.
+		let page = ui::files::page_rows(&self.files) as isize * columns;
+		// Shift held on a movement key extends the selection instead of moving it (§21). Not on
 		// Tab: there, Shift already means "the other way".
 		let extend = modifiers.shift();
-		let (step, extend) = match named {
-			Named::ArrowRight => (1, extend),
-			Named::ArrowLeft => (-1, extend),
-			Named::ArrowDown => (columns, extend),
-			Named::ArrowUp => (-columns, extend),
-			Named::Tab if modifiers.shift() => (-1, false),
-			Named::Tab => (1, false),
+		// A step is relative to the current cell; an edge is an absolute end of the grid. Home
+		// and End must be absolute — a relative jump reads the empty-selection default and would
+		// land on the wrong end when nothing is selected yet (see `Files::jump_to_edge`).
+		enum Nav {
+			Step(isize),
+			Edge(bool),
+		}
+		let (nav, extend) = match named {
+			Named::ArrowRight => (Nav::Step(1), extend),
+			Named::ArrowLeft => (Nav::Step(-1), extend),
+			Named::ArrowDown => (Nav::Step(columns), extend),
+			Named::ArrowUp => (Nav::Step(-columns), extend),
+			// PageDown/PageUp are focus-gated to the pane, so they never fight the terminal's own
+			// scrollback on the same keys (`scroll_motion`) — that fires only while the terminal
+			// holds the keyboard.
+			Named::PageDown => (Nav::Step(page), extend),
+			Named::PageUp => (Nav::Step(-page), extend),
+			// Home/End land on an absolute end, right even with nothing selected yet.
+			Named::Home => (Nav::Edge(false), extend),
+			Named::End => (Nav::Edge(true), extend),
+			Named::Tab if modifiers.shift() => (Nav::Step(-1), false),
+			Named::Tab => (Nav::Step(1), false),
 			Named::Enter => {
 				let Some(path) = self.files.cursor().map(str::to_owned) else {
 					return iced::Task::none();
@@ -3323,7 +3341,11 @@ impl Tab {
 			_ => return iced::Task::none(),
 		};
 
-		self.files.step(self.explorer.show_hidden(), step, extend);
+		let show_hidden = self.explorer.show_hidden();
+		match nav {
+			Nav::Step(delta) => self.files.step(show_hidden, delta, extend),
+			Nav::Edge(to_last) => self.files.jump_to_edge(show_hidden, to_last, extend),
+		}
 		self.resolve_selected_link();
 		// Only the keyboard scrolls: a click is already on a cell the user can see, and
 		// scrolling under their cursor would move the thing they just aimed at.

@@ -343,6 +343,18 @@ pub fn grid_height(files: &Files) -> f32 {
 	(files.height() - HEADER_HEIGHT - notice).max(0.0)
 }
 
+/// How many rows a PageUp / PageDown jump moves the cursor (§20). A page is a screenful of the
+/// grid — the full rows that fit in `grid_height` at the cell pitch — LESS ONE, so a row of
+/// context carries across the jump, the same courtesy a pager or an editor's PageDown gives.
+/// Never zero: a pane dragged down to a sliver still moves by a whole row rather than standing
+/// still. The geometry lives here with the rest of the grid's layout; `app` multiplies this by
+/// the column count to get the model-space delta it hands `Files::step`.
+pub fn page_rows(files: &Files) -> usize {
+	let pitch = CELL_HEIGHT + CELL_SPACING;
+	let visible = (grid_height(files) / pitch).floor() as usize;
+	visible.saturating_sub(1).max(1)
+}
+
 /// The pane header: which directory is on show, how it is getting on, and the shared
 /// dot-entry toggle. The count is the pane's only progress indicator while a big listing
 /// streams in — it climbs a batch at a time (§19).
@@ -1210,5 +1222,19 @@ mod tests {
 		// In the gap between two rows: touching nothing selects nothing.
 		let gap = HEADER_HEIGHT + row_top(1) - CELL_SPACING / 2.0;
 		assert!(band_hits(band(0.0, gap, 1000.0, 0.0), columns, count, 0.0).is_empty());
+	}
+
+	#[test]
+	fn a_page_is_a_screenful_of_rows_less_one() {
+		// A grid tall enough for five whole rows — its header plus five cell pitches — so a
+		// PageDown steps by four, leaving one row of context across the jump.
+		let mut files = Files::default();
+		files.set_height(HEADER_HEIGHT + 5.0 * (CELL_HEIGHT + CELL_SPACING), 10_000.0);
+		assert_eq!(page_rows(&files), 4);
+
+		// Squeezed to its minimum the pane shows a single row, and a page is still a whole row —
+		// never zero, or PageDown would stand still.
+		files.set_height(crate::files::MIN_HEIGHT, 10_000.0);
+		assert_eq!(page_rows(&files), 1);
 	}
 }

@@ -1821,10 +1821,20 @@ keyboard just landed on.
 
 ### Walking the panels
 
-- **Files pane:** Left/Right step one cell, Up/Down a whole row, Tab/Shift+Tab
-  next/previous, **Enter** enters a folder (through the double-click's own handler, so
-  "only a directory can be entered" is decided in one place), **F2** renames. Both ends
-  clamp instead of wrapping.
+- **Files pane:** Left/Right step one cell, Up/Down a whole row, **PageUp/PageDown** a
+  screenful of rows (a page is a viewport's worth less one, so a row of context carries
+  across the jump — `ui::files::page_rows`), **Home/End** the first and last entry,
+  Tab/Shift+Tab next/previous, **Enter** enters a folder (through the double-click's own
+  handler, so "only a directory can be entered" is decided in one place), **F2** renames.
+  Both ends clamp instead of wrapping. The moving keys share one exit — a `Nav` value the
+  key match yields — that is either a relative `step` (arrows, Tab, the Page keys) or an
+  absolute `jump_to_edge` (Home/End). Home and End must be absolute, not a big step: a
+  relative jump reads the empty-selection default (forward starts at the top, backward at
+  the bottom), so from *nothing* selected a huge delta would land on the opposite end.
+  **Shift** on any moving key extends the selection from the anchor rather than moving it,
+  exactly as Shift+arrow already does (§21). The Page keys are focus-gated to the pane, so
+  they never fight the terminal's own PageUp/PageDown scrollback (§23) — that answers the
+  keys only while the shell holds the keyboard.
 - A row is `ui::files::columns(window width)` cells, computed with the same arithmetic
   `Row::wrap` breaks lines with — iced never reports where a laid-out cell ended up, so the
   view and the app both derive it rather than either one guessing.
