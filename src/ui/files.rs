@@ -28,14 +28,14 @@ use iced::widget::text::Wrapping;
 use iced::widget::{
 	button, column, container, mouse_area, row, scrollable, stack, text, text_input,
 };
-use iced::{Color, Element, Font, Length, Padding};
+use iced::{Color, Element, Font, Length, Padding, mouse};
 
 use crate::app::Message;
 use crate::explorer;
 use crate::files::{Category, Entry, Files, FilesMessage, Kind, Rename, SortDir, SortKey};
 use crate::ui::explorer::{
 	FG, HEADER_BG, MENU_INSET, MUTED_FG, NOTICE_FG, NOTICE_HEIGHT, PANEL_BG, SELECTED_BG,
-	SPLITTER_BG, TEXT_SIZE, focus_border, hidden_toggle,
+	SPLITTER_BG, SPLITTER_HOVER, TEXT_SIZE, focus_border, hidden_toggle,
 };
 use crate::ui::menu;
 
@@ -60,7 +60,7 @@ const ICON_FONT: Font = Font::with_name("Material Icons");
 /// runs longer (the details popup always shows it in full, §20). Every cell is the same
 /// height on purpose: the selection, keyboard row-nav and popup placement all step by a
 /// uniform pitch (`row_top`, `band_hits`), which a per-name height would break.
-const CELL_WIDTH: f32 = 350.0;
+const CELL_WIDTH: f32 = 310.0;
 pub const CELL_HEIGHT: f32 = 56.0;
 const CELL_SPACING: f32 = 4.0;
 /// The padding inside a cell, kept as a constant because the name-fitting estimate below has
@@ -904,24 +904,35 @@ fn icon_color(category: Category) -> Color {
 /// The grab bar between the terminal row and the files pane (§19). Pressing it starts a
 /// resize; the pointer-capture layer added while dragging reports the moves and the
 /// release, so tracking survives the pointer leaving the bar.
-pub fn splitter() -> Element<'static, Message> {
+///
+/// `active` lights the bar (hovered or dragging, from `Files::splitter_active`); the
+/// `ResizingVertically` cursor (a ↕) shows over it because it resizes the pane's HEIGHT, and
+/// `on_enter`/`on_exit` feed the hover half of that highlight back to the model.
+pub fn splitter(active: bool) -> Element<'static, Message> {
+	let fill = if active { SPLITTER_HOVER } else { SPLITTER_BG };
 	mouse_area(
 		container(text(""))
 			.width(Length::Fill)
 			.height(Length::Fixed(crate::files::SPLITTER_HEIGHT))
-			.style(|_theme| container::Style {
-				background: Some(SPLITTER_BG.into()),
+			.style(move |_theme| container::Style {
+				background: Some(fill.into()),
 				..container::Style::default()
 			}),
 	)
+	.interaction(mouse::Interaction::ResizingVertically)
 	.on_press(Message::Files(FilesMessage::SplitterGrabbed))
 	.on_release(Message::Files(FilesMessage::SplitterReleased))
+	.on_enter(Message::Files(FilesMessage::SplitterEntered))
+	.on_exit(Message::Files(FilesMessage::SplitterExited))
 	.into()
 }
 
-/// The transparent full-window layer present only while the splitter is being dragged.
+/// The transparent full-window layer present only while the splitter is being dragged. It
+/// wears the same `ResizingVertically` cursor as the bar, so the ↕ stays put for the whole
+/// drag even as the pointer leaves the thin handle.
 pub fn drag_layer() -> Element<'static, Message> {
 	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+		.interaction(mouse::Interaction::ResizingVertically)
 		.on_move(|point| Message::Files(FilesMessage::SplitterDragged(point)))
 		.on_release(Message::Files(FilesMessage::SplitterReleased))
 		.into()

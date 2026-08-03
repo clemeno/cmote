@@ -97,6 +97,10 @@ pub enum ExplorerMessage {
 	SplitterDragged(iced::Point),
 	/// The resize ended (pointer released).
 	SplitterReleased,
+	/// The pointer entered, or left, the splitter bar (§18). Only drives the bar's highlight —
+	/// the visual cue that it is grabbable — so it carries nothing but which way it went.
+	SplitterEntered,
+	SplitterExited,
 }
 
 /// One folder as the model knows it. A node exists only once something has referred
@@ -148,6 +152,10 @@ pub struct Explorer {
 	show_hidden: bool,
 	width: f32,
 	dragging: bool,
+	/// Whether the pointer is over the splitter right now (§18). Together with `dragging` it
+	/// lights the bar so the user sees it is grabbable before pressing — the hover half of the
+	/// same feedback the resize cursor gives.
+	splitter_hovered: bool,
 	nodes: BTreeMap<String, Node>,
 	selected: Option<String>,
 	menu: Option<Menu>,
@@ -174,6 +182,7 @@ impl Default for Explorer {
 			show_hidden: true,
 			width: DEFAULT_WIDTH,
 			dragging: false,
+			splitter_hovered: false,
 			nodes: BTreeMap::new(),
 			selected: None,
 			menu: None,
@@ -206,6 +215,17 @@ impl Explorer {
 	/// pointer-capture layer while it is, the same way a dragged dialog does (§10).
 	pub fn dragging(&self) -> bool {
 		self.dragging
+	}
+
+	/// Whether the splitter should be drawn lit (§18): while the pointer is over it, or while
+	/// it is being dragged — either way it is the active handle, so the bar brightens.
+	pub fn splitter_active(&self) -> bool {
+		self.dragging || self.splitter_hovered
+	}
+
+	/// The pointer entered or left the splitter bar (§18) — drives only its highlight.
+	pub fn set_splitter_hovered(&mut self, hovered: bool) {
+		self.splitter_hovered = hovered;
 	}
 
 	/// How much horizontal room the tree takes from the files pane beside it (§18, §19): the

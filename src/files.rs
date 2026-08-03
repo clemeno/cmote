@@ -266,6 +266,10 @@ pub enum FilesMessage {
 	SplitterDragged(Point),
 	/// The resize ended (pointer released).
 	SplitterReleased,
+	/// The pointer entered, or left, the splitter bar (§19). Drives only the bar's highlight —
+	/// the cue that it is grabbable — so it carries nothing but which way it went.
+	SplitterEntered,
+	SplitterExited,
 }
 
 /// A rubber band being dragged over the grid (§21): where the press landed and where the
@@ -314,6 +318,10 @@ pub struct Files {
 	visible: bool,
 	height: f32,
 	dragging: bool,
+	/// Whether the pointer is over the splitter right now (§19). With `dragging` it lights the
+	/// bar so the user sees it is grabbable before pressing — the hover half of the same
+	/// feedback the resize cursor gives.
+	splitter_hovered: bool,
 	/// The directory being shown, or `None` before anything has been asked for.
 	path: Option<String>,
 	/// The last working directory the shell was followed into (§19). Kept apart from
@@ -378,6 +386,7 @@ impl Default for Files {
 			visible: true,
 			height: DEFAULT_HEIGHT,
 			dragging: false,
+			splitter_hovered: false,
 			path: None,
 			followed: None,
 			entries: Vec::new(),
@@ -417,6 +426,17 @@ impl Files {
 	/// Whether the splitter is being dragged right now (§19).
 	pub fn dragging(&self) -> bool {
 		self.dragging
+	}
+
+	/// Whether the splitter should be drawn lit (§19): while the pointer is over it, or while
+	/// it is being dragged — either way it is the active handle, so the bar brightens.
+	pub fn splitter_active(&self) -> bool {
+		self.dragging || self.splitter_hovered
+	}
+
+	/// The pointer entered or left the splitter bar (§19) — drives only its highlight.
+	pub fn set_splitter_hovered(&mut self, hovered: bool) {
+		self.splitter_hovered = hovered;
 	}
 
 	/// How much vertical room the pane takes from the terminal grid: itself plus its

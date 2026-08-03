@@ -163,7 +163,8 @@ references below (§n) point into it.
   press after you move or make a folder from the shell; collapse-all closes every branch back to
   the top level. Drag the splitter to resize the panel — the terminal reflows to match — or hide it
   with the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
-  (§18, §22).
+  (§18, §22). The splitter shows a **↔ resize cursor** and **lights up** while you hover or drag it,
+  so it reads as grabbable (§31).
 - **Remote files pane** — a grid of **every entry** in one directory, in the browser strip
   under the terminal (the folder tree shares that strip, on the pane's right, §18). Each cell
   is a wide row: a small icon in front of the name, with the **size,
@@ -188,7 +189,13 @@ references below (§n) point into it.
   back to the default order, picking the **lit** direction unsets it (an unset direction sorts
   ascending), and the button lights up while a key is reordering the grid. **The chosen sort is
   remembered per target** and restored on reconnect. Drag the splitter to resize the pane, or hide it with the
-  status bar's **Files** button; the same `.*` checkbox hides dot-files here too (§19).
+  status bar's **Files** button; the same `.*` checkbox hides dot-files here too (§19). Its splitter
+  shows a **↕ resize cursor** and lights up on hover or drag, the same feedback the tree's does (§31).
+- **The window reopens at the size you left it.** cmote remembers the window's width and height
+  across restarts in a small `settings.json` beside the saved targets, so it comes back the size
+  you last made it (the panel sizes are remembered separately, per target, above). The terminal
+  area is whatever is left — the window height minus the files pane and its handle — so the pty
+  always matches what you see (§31).
 - **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
   folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
   else and leave the shell where it is, so you can look inside a directory without disturbing
@@ -340,7 +347,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
 | Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys, F13-F24 included), **modifyOtherKeys** Ctrl/Alt combos (`CSI 27;…~`), and the **kitty keyboard protocol** (`CSI u`, incl. key-release events) when an editor turns either mode on |
-| Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match |
+| Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match. The handle shows a resize cursor and lights up while hovered or dragged |
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
 
@@ -477,9 +484,10 @@ collide (GitHub allows only one release per tag).
 
 ## Data and portability
 
-cmote writes up to three files — `known_hosts` (pinned host keys), `targets.json` (saved
+cmote writes up to four files — `known_hosts` (pinned host keys), `targets.json` (saved
 connection profiles plus where each session left off: the two directories, the `.*` toggle
-and the panel sizes — **no secrets**), and, only once you opt in to remembering a secret,
+and the panel sizes — **no secrets**), `settings.json` (the app-wide window size, remembered
+across restarts — §31), and, only once you opt in to remembering a secret,
 `secrets.age` (the encrypted credential vault, §16 — a master-passphrase-sealed `age` blob,
 the sole place any secret is stored). All live in the same directory, resolved at
 runtime (§11, `paths::data_dir`):

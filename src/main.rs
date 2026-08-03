@@ -21,6 +21,7 @@ mod palette; // the terminal colour scheme, shared by the renderer and the query
 mod paths; // where on-disk data lives: known_hosts + saved targets (§11, §14)
 mod profiles; // saved connection targets, persisted as profiles only — no secrets (§14)
 mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases (§12)
+mod settings; // app-wide layout remembered between runs: the window size (§31)
 mod ssh; // SSH client, auth, host-key verification, key loading (§6-§8)
 mod term; // VT/ANSI terminal emulator wrapping the engine, behind a small surface (§9, §23)
 mod ui; // view helpers: the home list, the connect form and the terminal grid (§10)

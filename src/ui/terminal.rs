@@ -18,7 +18,7 @@ use crate::ui::selection::{Cell, Selection};
 
 /// Glyph size and line spacing. A fixed monospace metric — the whole grid shares
 /// it, so columns line up and rows tile without gaps.
-pub(crate) const FONT_SIZE: f32 = 14.0;
+pub(crate) const FONT_SIZE: f32 = 12.0;
 const LINE_HEIGHT: f32 = 1.2;
 
 /// One monospace cell in logical pixels. Height is the line box; width uses Fira
@@ -262,7 +262,7 @@ pub fn view<'a>(
 		let strip: Element<'a, Message> = if tree_shown {
 			iced::widget::row![
 				pane,
-				crate::ui::explorer::splitter(),
+				crate::ui::explorer::splitter(explorer.splitter_active()),
 				crate::ui::explorer::panel(
 					explorer,
 					files.path(),
@@ -276,7 +276,9 @@ pub fn view<'a>(
 		} else {
 			pane
 		};
-		stacked = stacked.push(crate::ui::files::splitter()).push(strip);
+		stacked = stacked
+			.push(crate::ui::files::splitter(files.splitter_active()))
+			.push(strip);
 	}
 	let base: Element<'a, Message> = stacked.width(Length::Fill).height(Length::Fill).into();
 
@@ -922,10 +924,10 @@ mod tests {
 
 	#[test]
 	fn grid_fits_area_minus_bar_and_padding_rounding_down() {
-		// width:  (812 - 12)      / 8.4  = 95.2  -> 95 cols
-		// height: (500 - 34 - 12) / 16.8 = 27.02 -> 27 rows  (34 = status bar)
+		// width:  (812 - 12)      / 7.2  = 111.1 -> 111 cols
+		// height: (500 - 34 - 12) / 14.4 = 31.5  -> 31 rows  (34 = status bar)
 		let (rows, cols) = grid_size(Size::new(812.0, 500.0), 0.0);
-		assert_eq!((rows, cols), (27, 95));
+		assert_eq!((rows, cols), (31, 111));
 	}
 
 	#[test]
@@ -935,7 +937,7 @@ mod tests {
 		// pane's height. It is the only reserve left: the terminal spans the full width (§18).
 		let area = Size::new(812.0, 500.0);
 		let (tall, _) = grid_size(area, 0.0);
-		let (short, _) = grid_size(area, 168.0); // 168 / 16.8 = 10 rows exactly
+		let (short, _) = grid_size(area, 144.0); // 144 / 14.4 = 10 rows exactly
 		assert_eq!(tall - short, 10);
 	}
 

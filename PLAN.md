@@ -2008,6 +2008,11 @@ header so both panels name the same place.
   omitted when absent. Profile metadata, never a secret — §12 is untouched. Adding another
   remembered value is one field on `SessionState` and `Target`, one line each in capture /
   restore / `set_session`.
+- **The panel sizes stay per target; the WINDOW size does not.** The tree width and pane
+  height belong to a connection — one server's files want a tall pane, another a wide tree —
+  so they ride here. The OS window is a different thing: there is one of it, shown on the home
+  screen before any target exists, so its size is an app-wide preference kept in `settings.json`
+  (§31), not in any target.
 - **`App::capture_session` reads the snapshot, `persist_session` folds it in and saves.** It
   runs at every teardown of a *live* session — clean Disconnect, remote hangup, error — and
   again the moment a value changes mid-session (the `.*` toggle), so a later hard exit still
@@ -2717,3 +2722,56 @@ the chosen feel.)
   session to leave faster.
 - `ponytail:` the drain waits on the **live (Terminal-screen) tabs only**. A tab still handshaking has
   no shell to disconnect and its worker unwinds when its link drops; the timeout covers any straggler.
+
+## 31. App-wide window size, and pane-handle feedback (v3.x)
+
+Two small layout niceties. cmote already remembered the panel sizes per target (§22); it did
+not remember the WINDOW, so every launch opened at the built-in default however the user last
+sized it. And the two resize handles were bare bars — no cursor, no answer to the pointer — so
+that they were grabbable at all was something you learned by trying. This section fixes both.
+
+### The one file that is not per-target
+
+- **`settings.rs` owns `settings.json`**, beside `targets.json` in the shared data directory
+  (§11). It holds exactly one thing today: the OS window's size as `(width, height)`. Almost
+  everything cmote persists is per-target (§14, §22) — but the window is app-wide (there is one,
+  and it shows before any target is chosen), so it cannot live on a `Target`.
+- **A settings file must never stop the app from starting.** Absent, truncated, wrong-typed or
+  hand-edited nonsense each reads as "no preference" plus a line on stderr — so neither `load`
+  nor `save` returns a `Result`. `sanitized` is a trust boundary: a stored size that is
+  non-finite or outside `[480, 4096]` is dropped whole, back to the first-run default.
+- **The 4096 ceiling is a renderer limit, not cosmetics.** wgpu guarantees a maximum texture
+  dimension of only 8192 *physical* pixels, and a surface is measured in physical pixels, so a
+  2× display doubles what is asked for. 4096 logical points leaves the margin, so a stored size
+  can never crash `Surface::configure` at launch — the one place a "harmless" settings file
+  could otherwise kill the app before its first frame.
+- **The position is deliberately NOT kept.** A window restored onto a monitor since unplugged is
+  worse than a centred one.
+
+### Where it plugs in
+
+- **`run` opens at `Settings::load().window_size()`**, falling back to the metric-derived default
+  (`ui::terminal::window_size`, a 180-column grid plus the browser strip) on a first run — so the
+  default still tracks the grid metrics rather than being a frozen literal.
+- **`App` holds a `Settings` and updates it on every resize.** `WindowResized` carries the whole
+  OS window, before the tab strip is subtracted (§26), so `set_window` records the true outer
+  size; a degenerate size (a minimize can report 0 × 0) is ignored so the last good one survives.
+- **`exit_app` is the single way out.** Every quit path (§30) — the confirm with nothing live, the
+  drain finishing, the drain timing out — funnels through it, so the size is written exactly once
+  however the app comes down. `save` is a no-op on a default-valued `Settings`, so a run that
+  never resized (and every unit test) leaves the file untouched rather than clobbering a good one.
+
+### The handles answer the pointer
+
+- **A resize cursor over each bar.** The tree's vertical splitter wears `ResizingHorizontally`
+  (↔, it sets a width); the pane's horizontal splitter wears `ResizingVertically` (↕, it sets a
+  height). The transparent full-window capture layer added during a drag (§18, §19) wears the
+  same cursor, so the arrow does not flicker back to the default when the pointer leaves the thin
+  bar mid-drag.
+- **The bar lights while it is the active handle** — hovered *or* being dragged
+  (`splitter_active` = `dragging || splitter_hovered`, on both panel models). Resting it is the
+  panel grey `SPLITTER_BG`; active it is the brighter `SPLITTER_HOVER`, shared by both handles so
+  they feel identical. Hover is fed back by the bar's own `mouse_area` `on_enter`/`on_exit`
+  (`SplitterEntered`/`SplitterExited`), which touch only the highlight — no relayout, so no grid
+  refit. This is the hand-rolled equivalent of what a `pane_grid` splitter gives for free; cmote's
+  splitters are custom `mouse_area` bars (they drive the pty reflow), so the feedback is explicit.

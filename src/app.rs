@@ -99,16 +99,21 @@ pub fn run() -> iced::Result {
 		.font(ITALIC_FONT)
 		.font(ITALIC_FONT_BOLD)
 		.font(ICON_FONT)
-		// Open wide enough for a full-width 180-column terminal, tall enough to also show the
-		// files strip under it (§18, §19) — the folder tree shares that strip now rather than
-		// sitting beside the grid, so only the height carries a reserve. The size is derived
-		// from the grid metrics so it stays in step with `grid_size`.
+		// Open at the size the last run left the window (§31), or — on a first run, or after a
+		// settings file that could not be trusted — wide enough for a full-width 180-column
+		// terminal and tall enough to also show the files strip under it (§18, §19). The tree
+		// shares that strip rather than sitting beside the grid, so the fallback reserves height
+		// only, and it is derived from the grid metrics so it stays in step with `grid_size`.
 		.window(iced::window::Settings {
-			size: ui::terminal::window_size(
-				INITIAL_COLS,
-				INITIAL_ROWS,
-				files::DEFAULT_HEIGHT + files::SPLITTER_HEIGHT,
-			),
+			size: crate::settings::Settings::load()
+				.window_size()
+				.unwrap_or_else(|| {
+					ui::terminal::window_size(
+						INITIAL_COLS,
+						INITIAL_ROWS,
+						files::DEFAULT_HEIGHT + files::SPLITTER_HEIGHT,
+					)
+				}),
 			..iced::window::Settings::default()
 		})
 		// Keep the OS window's title-bar × from tearing the process down on its own (§30): with
@@ -152,6 +157,10 @@ struct App {
 	overlay_pos: iced::Point,
 	overlay_dragging: bool,
 	overlay_drag_last: Option<iced::Point>,
+	/// The app-wide layout remembered between runs (§31) — the OS window's size. Held here
+	/// rather than per-tab because there is one window whatever tab is on show; updated on
+	/// every resize and written to `settings.json` on the way out (`exit_app`).
+	settings: crate::settings::Settings,
 }
 
 /// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
@@ -189,6 +198,10 @@ impl App {
 			overlay_pos: iced::Point::ORIGIN,
 			overlay_dragging: false,
 			overlay_drag_last: None,
+			// The same file `run` sized the window from (§31). Loaded again here — a tiny read
+			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
+			// first (synthetic) resize event overwrites `window` with the size actually granted.
+			settings: crate::settings::Settings::load(),
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
@@ -270,6 +283,9 @@ impl App {
 			// A resize is global to the OS window; hand the active tab the region BELOW the strip,
 			// so its grid fits the space it actually has rather than overrunning it by a row (§26).
 			Message::WindowResized(size) => {
+				// Remember the whole OS window's size for the next run (§31); saved on the way
+				// out. This is the raw window size, before the strip is subtracted below.
+				self.settings.set_window(size.width, size.height);
 				let inner = iced::Size {
 					width: size.width,
 					height: (size.height - ui::tabs::STRIP_HEIGHT).max(0.0),
@@ -378,7 +394,7 @@ impl App {
 			.map(|tab| tab.id)
 			.collect();
 		if pending.is_empty() {
-			return iced::exit();
+			return self.exit_app();
 		}
 		for tab in self.tabs.iter_mut().filter(|tab| tab.is_live()) {
 			// Saves each session before it goes (§22), the same snapshot a disconnect writes.
@@ -408,7 +424,7 @@ impl App {
 		if let Some(QuitPhase::Draining { since, .. }) = &self.quit
 			&& since.elapsed() >= QUIT_DRAIN_TIMEOUT
 		{
-			return iced::exit();
+			return self.exit_app();
 		}
 		iced::Task::none()
 	}
@@ -417,11 +433,26 @@ impl App {
 	/// Returns the exit task once none remain — so the process leaves only after every remote
 	/// connection has closed — and `None` when not draining or others are still outstanding.
 	fn note_drained(&mut self, id: u64) -> Option<iced::Task<Message>> {
-		let QuitPhase::Draining { pending, .. } = self.quit.as_mut()? else {
-			return None;
+		// Scope the mutable borrow of `self.quit` so `exit_app` (which borrows `self` shared)
+		// can run once the drain is done, without overlapping it.
+		let done = {
+			let QuitPhase::Draining { pending, .. } = self.quit.as_mut()? else {
+				return None;
+			};
+			pending.retain(|&waiting| waiting != id);
+			pending.is_empty()
 		};
-		pending.retain(|&waiting| waiting != id);
-		pending.is_empty().then(iced::exit)
+		done.then(|| self.exit_app())
+	}
+
+	/// The single way out of the process (§30, §31): write the app-wide layout — the window
+	/// size — to `settings.json`, then hand iced the exit task. Every quit path funnels through
+	/// here (the confirm with nothing live, the drain finishing, the drain timing out), so the
+	/// window size is saved exactly once however the app comes down. The save runs synchronously
+	/// before the returned task is processed, so the file is on disk before the runtime leaves.
+	fn exit_app(&self) -> iced::Task<Message> {
+		self.settings.save();
+		iced::exit()
 	}
 
 	/// While the quit dialog is up, decide the fate of one message (§30). A keystroke is consumed:
@@ -4216,6 +4247,9 @@ impl Tab {
 				}
 			}
 			ExplorerMessage::SplitterReleased => self.explorer.set_dragging(false),
+			// Hover only lights the bar (§18); no relayout, so no grid refit.
+			ExplorerMessage::SplitterEntered => self.explorer.set_splitter_hovered(true),
+			ExplorerMessage::SplitterExited => self.explorer.set_splitter_hovered(false),
 		}
 		iced::Task::none()
 	}
@@ -4517,6 +4551,9 @@ impl Tab {
 				}
 			}
 			FilesMessage::SplitterReleased => self.files.set_dragging(false),
+			// Hover only lights the bar (§19); no relayout, so no grid refit.
+			FilesMessage::SplitterEntered => self.files.set_splitter_hovered(true),
+			FilesMessage::SplitterExited => self.files.set_splitter_hovered(false),
 		}
 		iced::Task::none()
 	}
@@ -5942,6 +5979,9 @@ mod tests {
 			overlay_pos: iced::Point::ORIGIN,
 			overlay_dragging: false,
 			overlay_drag_last: None,
+			// Default (nothing remembered): `save` is a no-op on default, so a quit test never
+			// touches the disk (§31).
+			settings: crate::settings::Settings::default(),
 		}
 	}
 

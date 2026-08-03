@@ -15,7 +15,7 @@
 use iced::alignment::Vertical;
 use iced::widget::text::Wrapping;
 use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, text, text_input};
-use iced::{Border, Color, Element, Length, Padding};
+use iced::{Border, Color, Element, Length, Padding, mouse};
 
 use crate::app::Message;
 use crate::explorer::{Explorer, ExplorerMessage, Rename, Row};
@@ -36,6 +36,11 @@ pub const TREE_ID: &str = "explorer-tree";
 pub(crate) const PANEL_BG: Color = Color::from_rgb8(0x25, 0x25, 0x25);
 pub(crate) const HEADER_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
 pub(crate) const SPLITTER_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
+/// The splitter bar's colour while it is the active handle — hovered or being dragged (§18,
+/// §19). A clearly brighter grey than its resting `SPLITTER_BG`, so the bar answers the
+/// pointer the way the resize cursor does: this is the thing you can grab. Shared by both
+/// splitters, like `SPLITTER_BG`, so the two handles feel identical.
+pub(crate) const SPLITTER_HOVER: Color = Color::from_rgb8(0x5a, 0x5a, 0x5a);
 pub(crate) const FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
 pub(crate) const MUTED_FG: Color = Color::from_rgb8(0x90, 0x90, 0x90);
 pub(crate) const SELECTED_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
@@ -341,25 +346,36 @@ fn row_view<'a>(
 /// pointer-capture layer added while dragging reports the moves and the release, so
 /// tracking survives the pointer leaving the bar — the same construction a dragged
 /// dialog uses (§10).
-pub fn splitter() -> Element<'static, Message> {
+///
+/// `active` lights the bar (hovered or dragging, from `Explorer::splitter_active`); the
+/// `ResizingHorizontally` cursor (a ↔) shows over it because it resizes the panel's WIDTH,
+/// and `on_enter`/`on_exit` feed the hover half of that highlight back to the model.
+pub fn splitter(active: bool) -> Element<'static, Message> {
+	let fill = if active { SPLITTER_HOVER } else { SPLITTER_BG };
 	mouse_area(
 		container(text(""))
 			.width(Length::Fixed(crate::explorer::SPLITTER_WIDTH))
 			.height(Length::Fill)
-			.style(|_theme| container::Style {
-				background: Some(SPLITTER_BG.into()),
+			.style(move |_theme| container::Style {
+				background: Some(fill.into()),
 				..container::Style::default()
 			}),
 	)
+	.interaction(mouse::Interaction::ResizingHorizontally)
 	.on_press(Message::Explorer(ExplorerMessage::SplitterGrabbed))
 	.on_release(Message::Explorer(ExplorerMessage::SplitterReleased))
+	.on_enter(Message::Explorer(ExplorerMessage::SplitterEntered))
+	.on_exit(Message::Explorer(ExplorerMessage::SplitterExited))
 	.into()
 }
 
 /// The transparent full-window layer present only while the splitter is being dragged:
-/// it reports every pointer move and the release, wherever the pointer has wandered to.
+/// it reports every pointer move and the release, wherever the pointer has wandered to. It
+/// wears the same `ResizingHorizontally` cursor as the bar, so the ↔ stays put for the whole
+/// drag even as the pointer leaves the thin handle.
 pub fn drag_layer() -> Element<'static, Message> {
 	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+		.interaction(mouse::Interaction::ResizingHorizontally)
 		.on_move(|point| Message::Explorer(ExplorerMessage::SplitterDragged(point)))
 		.on_release(Message::Explorer(ExplorerMessage::SplitterReleased))
 		.into()
