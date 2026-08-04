@@ -2859,11 +2859,19 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   scrolls *itself* — a single outer `scrollable` moves both the gutter and the text together, and the
   numbers stay pixel-aligned with their lines **by construction**, no offset tracking. The wheel and
   the scrollbar move the view; a cursor move scrolls the outer scrollable to follow (see "Moving
-  through the file" below). (`ponytail:` two v1 limits left: the whole buffer is laid out every frame
-  rather than only the visible lines — fine under the 8 MiB cap, the same bounded bet the files pane
-  makes; and a line longer than the pane is clipped at the right edge with no horizontal scrollbar —
-  the cursor still reaches into it, but a fixed bar would need a second offset-synced scrollable. The
-  *vertical* cursor-follow, once missing, is done.)
+  through the file" below). **The gutter is virtualised**: iced rebuilds and lays out the whole view tree
+  every frame, so one number-widget per line made the gutter the dominant per-frame cost on a big
+  file — a 50k-line file meant ~50k rows of nested containers built and laid out every frame, while
+  the buffer beside it stays a *single* `text_editor` whose off-screen glyphs the renderer already
+  clips. So the gutter now materialises only the rows the outer scrollable currently shows (plus a
+  small overscan), collapsing the lines above and below into one spacer each — the same three-piece
+  trick the find-line band uses — so its total height is still `count × LINE_HEIGHT` and it stays
+  aligned with the text **by construction**. The visible window is read from the offset and height the
+  scrollable already reports; until the first frame measures the viewport every row is drawn, that
+  pre-virtualisation cost paid once. The window arithmetic (`visible_lines`) is a pure function with
+  its own unit tests. (`ponytail:` one v1 limit left: a line longer than the pane is clipped at the
+  right edge with no horizontal scrollbar — the cursor still reaches into it, but a fixed bar would
+  need a second offset-synced scrollable. The *vertical* cursor-follow, once missing, is done.)
 - **Changed lines are marked from a diff against what was loaded.** The model keeps the `original`
   lines from the moment of load; on every edit it recomputes which current lines differ and the
   gutter draws a bar on each changed or added line. The diff is a **common prefix/suffix trim**

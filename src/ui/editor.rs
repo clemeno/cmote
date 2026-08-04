@@ -67,6 +67,11 @@ const DIGIT_WIDTH: f32 = 8.0;
 /// The gutter's padding either side of the numbers.
 const GUTTER_PAD: f32 = 8.0;
 
+/// How many extra rows the virtualised gutter materialises above and below the visible window (§32).
+/// A small cushion so a scroll that lands between two frames never flashes an un-numbered edge; `view`
+/// reruns every frame with the fresh offset, so a few rows are plenty.
+const GUTTER_OVERSCAN: usize = 4;
+
 /// The widget id of the Save As path field, so `app` can focus it the instant the prompt opens (the
 /// same discipline as the rename field, §18).
 pub const SAVE_AS_INPUT_ID: &str = "editor-save-as";
@@ -377,21 +382,18 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 fn line_band<'a>(count: usize, line: usize, color: Color) -> Element<'a, Message> {
 	let above = line as f32 * LINE_HEIGHT;
 	let below = count.saturating_sub(line + 1) as f32 * LINE_HEIGHT;
-	let spacer = |height: f32| {
-		container(text(""))
-			.width(Length::Fill)
-			.height(Length::Fixed(height))
-	};
-	column![
-		spacer(above),
-		spacer(LINE_HEIGHT).style(move |_theme| container::Style {
+	// The band itself carries a fill, so it keeps its own styled container; the plain pads above and
+	// below share the gutter's spacer helper.
+	let band = container(text(""))
+		.width(Length::Fill)
+		.height(Length::Fixed(LINE_HEIGHT))
+		.style(move |_theme| container::Style {
 			background: Some(color.into()),
 			..container::Style::default()
-		}),
-		spacer(below),
-	]
-	.width(Length::Fill)
-	.into()
+		});
+	column![fixed_spacer(above), band, fixed_spacer(below)]
+		.width(Length::Fill)
+		.into()
 }
 
 /// The find / replace bar (§32): a query field with a live match count and prev / next steppers, a
@@ -495,21 +497,32 @@ fn find_bar<'a>(find: &'a crate::editor::Find, p: &Palette) -> Element<'a, Messa
 
 /// The gutter: one right-aligned number per line, a bar and the palette's change colour on lines
 /// changed since load (§32). Each row is exactly `LINE_HEIGHT`, matching the editor's absolute line
-/// height so the two stay aligned. (`ponytail:` one widget per line — fine for the config-and-script
-/// files this is for; a many-thousand-line file would want a drawn gutter, the same bound the
-/// buffer's laid-out-every-frame layout already carries, §32.)
+/// height so the two stay aligned.
+///
+/// Virtualised (§32): iced rebuilds and lays out the WHOLE view tree every frame, so one widget per
+/// line made a many-thousand-line file's gutter the dominant per-frame cost — while the buffer beside
+/// it is a single `text_editor` whose off-screen glyphs the renderer clips. So the gutter materialises
+/// only the rows the outer scrollable currently shows (plus a small overscan) and preserves the total
+/// height with one spacer above and one below — the same three-piece trick `line_band` uses. The
+/// window comes from the offset and visible height the scrollable already reports (§32); until the
+/// first frame measures the viewport every row is drawn, that pre-virtualisation cost paid just once.
 fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let count = editor.content.line_count().max(1);
 	let changed = editor.changed();
 	let match_line = editor.find_match_line();
+	// The width is sized to the LARGEST number (the last line), not the visible ones, so the column
+	// never jitters as different-length numbers scroll through.
 	let width = (count.to_string().len() as f32) * DIGIT_WIDTH + BAR_WIDTH + GUTTER_PAD * 2.0;
 	let mark = p.changed;
 	let muted = p.muted;
 	let match_fg = p.fg;
 	let match_bg = p.match_line;
 
-	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(count);
-	for index in 0..count {
+	let (first, last) = visible_lines(editor.scroll(), editor.view_height(), count);
+	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(last - first + 2);
+	// The lines above the window, collapsed to one spacer so their height is kept without their widgets.
+	rows.push(fixed_spacer(first as f32 * LINE_HEIGHT));
+	for index in first..last {
 		let is_changed = changed.get(index).copied().unwrap_or(false);
 		let is_match = Some(index) == match_line;
 		// The current match's number is the bright foreground on the same wash the buffer line wears;
@@ -557,6 +570,9 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 				.into(),
 		);
 	}
+	// The lines below the window, likewise collapsed — the two spacers plus the drawn rows sum to
+	// exactly `count × LINE_HEIGHT`, so the gutter still matches the buffer and the find-line band.
+	rows.push(fixed_spacer((count - last) as f32 * LINE_HEIGHT));
 
 	let bg = p.chrome_bg;
 	container(column(rows))
@@ -565,6 +581,34 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 			background: Some(bg.into()),
 			..container::Style::default()
 		})
+		.into()
+}
+
+/// The half-open range of line indices the gutter must draw for a scroll offset and visible height
+/// (§32): the rows on screen, widened by `GUTTER_OVERSCAN` either side and clamped to the file. A zero
+/// (unmeasured) height means the first frame has not reported the viewport yet, so draw every line —
+/// the pre-virtualisation cost, paid once until the real height arrives. Pure arithmetic, so it is
+/// unit-tested without a widget.
+fn visible_lines(offset: f32, view_height: f32, count: usize) -> (usize, usize) {
+	if view_height <= 0.0 {
+		return (0, count);
+	}
+	let first_visible = (offset.max(0.0) / LINE_HEIGHT).floor() as usize;
+	let rows_shown = (view_height / LINE_HEIGHT).ceil() as usize;
+	let first = first_visible.saturating_sub(GUTTER_OVERSCAN);
+	let last = (first_visible + rows_shown + GUTTER_OVERSCAN + 1).min(count);
+	// Guard the pathological case where the offset overshoots the content (the scrollable clamps it,
+	// but keep the window valid regardless): first never past last, so `last - first` cannot underflow.
+	(first.min(last), last)
+}
+
+/// A fixed-height, full-width filler that occupies vertical space without drawing anything — the plain
+/// spacer the gutter's virtualisation and the find-line band build their off-screen padding from
+/// (§32). The enclosing container supplies the background behind it.
+fn fixed_spacer<'a>(height: f32) -> Element<'a, Message> {
+	container(text(""))
+		.width(Length::Fill)
+		.height(Length::Fixed(height))
 		.into()
 }
 
@@ -696,4 +740,55 @@ fn dim_fill() -> Element<'static, Message> {
 			..container::Style::default()
 		})
 		.into()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// The gutter's virtualisation window (§32). Only the arithmetic is tested — the drawn rows are a
+	// widget tree — but that arithmetic is what keeps the gutter aligned and bounded, so it is the part
+	// worth pinning.
+
+	#[test]
+	fn an_unmeasured_viewport_draws_every_line() {
+		// Before the first frame reports a height, the whole file is drawn — the old cost, paid once.
+		assert_eq!(visible_lines(0.0, 0.0, 5000), (0, 5000));
+	}
+
+	#[test]
+	fn the_top_of_a_long_file_starts_at_the_first_line() {
+		// A 20-row viewport at the top: from line 0, plus the below overscan, never past the file.
+		assert_eq!(visible_lines(0.0, 400.0, 5000), (0, 25));
+	}
+
+	#[test]
+	fn a_scrolled_window_brackets_the_visible_rows() {
+		// Scrolled to line 100 (2000 px): the window is widened by the overscan either side, and the
+		// visible band [100, 120) sits inside it.
+		let (first, last) = visible_lines(2000.0, 400.0, 5000);
+		assert_eq!((first, last), (96, 125));
+		assert!(first <= 100 && last >= 120);
+	}
+
+	#[test]
+	fn the_window_clamps_to_the_last_line() {
+		// Near the foot of the file the window stops at the last line rather than running past it.
+		assert_eq!(visible_lines(99_600.0, 400.0, 5000), (4976, 5000));
+	}
+
+	#[test]
+	fn an_overshooting_offset_keeps_the_window_valid() {
+		// The scrollable clamps the offset, but even a wild one must leave `first <= last` so the row
+		// count cannot underflow — the window collapses to empty at the foot, its geometry still exact.
+		let (first, last) = visible_lines(10_000_000.0, 400.0, 100);
+		assert!(first <= last);
+		assert_eq!((first, last), (100, 100));
+	}
+
+	#[test]
+	fn a_short_file_draws_all_its_lines() {
+		// When the file is shorter than the viewport, every line is in the window.
+		assert_eq!(visible_lines(0.0, 400.0, 10), (0, 10));
+	}
 }
