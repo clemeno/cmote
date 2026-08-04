@@ -336,6 +336,12 @@ impl Find {
 			self.current + 1
 		}
 	}
+
+	/// The line the current match sits on, or `None` when the query has no matches (§32) — the line the
+	/// gutter number and the buffer band highlight.
+	pub fn current_line(&self) -> Option<usize> {
+		self.matches.get(self.current).map(|m| m.line)
+	}
 }
 
 /// Where an editor tab is in its lifecycle (§32). `Loading` until the bytes arrive; `Ready` with a
@@ -585,6 +591,14 @@ impl Editor {
 	/// height is enough to place it in the outer scrollable.
 	pub fn cursor_line(&self) -> usize {
 		self.content.cursor().position.line
+	}
+
+	/// The line the current find match is on, or `None` when the bar is closed or its query has no
+	/// matches (§32). The gutter and the buffer highlight this line so a match is visible even while
+	/// the find FIELD, not the buffer, holds focus — iced paints the buffer's own selection only when
+	/// the buffer is focused, so the selection alone would be invisible during a search.
+	pub fn find_match_line(&self) -> Option<usize> {
+		self.find.as_ref().and_then(Find::current_line)
 	}
 
 	/// Open the find bar (§32), keeping any query it already held, and select its current match so

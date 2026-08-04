@@ -99,6 +99,9 @@ struct Palette {
 	button_bg: Color,
 	/// The fill of the theme select's active option and the Save As card's border.
 	accent: Color,
+	/// The translucent band behind the current find match's line, and the fill of that line's gutter
+	/// cell (§32) — so a match shows even while the find field, not the buffer, holds focus.
+	match_line: Color,
 }
 
 /// Resolve a theme to its palette (§32).
@@ -115,6 +118,7 @@ fn palette(theme: EditorTheme) -> Palette {
 			notice: NOTICE_FG,
 			button_bg: PANEL_BG,
 			accent: SELECTED_BG,
+			match_line: Color::from_rgba8(0x4a, 0x90, 0xd0, 0.20), // a soft blue find-line wash
 		},
 		// "CME": Themer My Color Set Dark. Each value is that theme's own `editor.*` / `editorGutter.*`
 		// colour, so the buffer reads like the same file in VS Code — dark-teal ground, white text, a
@@ -129,6 +133,7 @@ fn palette(theme: EditorTheme) -> Palette {
 			notice: Color::from_rgb8(0xff, 0x66, 0x00),    // errorForeground
 			button_bg: Color::from_rgb8(0x40, 0x4e, 0x58), // editorWidget.background
 			accent: Color::from_rgb8(0x00, 0x66, 0x88),    // the user's teal accent (bracket guide)
+			match_line: Color::from_rgba8(0x00, 0xcc, 0xff, 0.16), // a faint cyan find-line wash
 		},
 	}
 }
@@ -282,7 +287,9 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		.padding(Padding::from([0.0, 8.0]))
 		.height(Length::Shrink)
 		.style(move |_theme, _status| text_editor::Style {
-			background: Background::Color(bg),
+			// Transparent, so the current-match band drawn behind the text shows through (§32). The
+			// buffer's own fill is the enclosing container's `buffer_bg`.
+			background: Background::Color(Color::TRANSPARENT),
 			border: Border::default(),
 			placeholder: muted,
 			value: fg,
@@ -305,9 +312,22 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		editor_widget.into()
 	};
 
-	let content = row![gutter(editor, p), editor_element]
+	let body = row![gutter(editor, p), editor_element]
 		.width(Length::Fill)
 		.height(Length::Shrink);
+
+	// A translucent band behind the current find match's line (§32), so the match is visible even while
+	// the find field holds focus (iced paints the buffer's own selection only when the buffer itself is
+	// focused). It rides BEHIND the text in a `stack` so the glyphs draw over it; the gutter, being
+	// opaque, hides the band on its side, leaving it to wash only the text column. Three fixed spacers,
+	// not one widget per line — the band is a single row, wherever it sits.
+	let line_count = editor.content.line_count().max(1);
+	let content: Element<'a, Message> = match editor.find_match_line() {
+		Some(line) if line < line_count => {
+			stack![line_band(line_count, line, p.match_line), body].into()
+		}
+		_ => body.into(),
+	};
 
 	// One outer vertical scrollable moves the gutter and the text together (§32). It reports its
 	// offset and visible height on every scroll and on the first frame, which is what lets `App`
@@ -340,6 +360,30 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 			.into(),
 		None => buffer,
 	}
+}
+
+/// The translucent band behind one line of the buffer (§32) — the current find match's line. Built
+/// from three fixed spacers (the lines above, the band itself, the lines below), so it is three
+/// widgets whatever the file's length, and its total height is `count × LINE_HEIGHT`, matching the
+/// gutter and the text exactly so the band lands on its line by construction.
+fn line_band<'a>(count: usize, line: usize, color: Color) -> Element<'a, Message> {
+	let above = line as f32 * LINE_HEIGHT;
+	let below = count.saturating_sub(line + 1) as f32 * LINE_HEIGHT;
+	let spacer = |height: f32| {
+		container(text(""))
+			.width(Length::Fill)
+			.height(Length::Fixed(height))
+	};
+	column![
+		spacer(above),
+		spacer(LINE_HEIGHT).style(move |_theme| container::Style {
+			background: Some(color.into()),
+			..container::Style::default()
+		}),
+		spacer(below),
+	]
+	.width(Length::Fill)
+	.into()
 }
 
 /// The find / replace bar (§32): a query field with a live match count and prev / next steppers, a
@@ -449,17 +493,30 @@ fn find_bar<'a>(find: &'a crate::editor::Find, p: &Palette) -> Element<'a, Messa
 fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let count = editor.content.line_count().max(1);
 	let changed = editor.changed();
+	let match_line = editor.find_match_line();
 	let width = (count.to_string().len() as f32) * DIGIT_WIDTH + BAR_WIDTH + GUTTER_PAD * 2.0;
 	let mark = p.changed;
 	let muted = p.muted;
+	let match_fg = p.fg;
+	let match_bg = p.match_line;
 
 	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(count);
 	for index in 0..count {
 		let is_changed = changed.get(index).copied().unwrap_or(false);
+		let is_match = Some(index) == match_line;
+		// The current match's number is the bright foreground on the same wash the buffer line wears;
+		// a changed line keeps its amber; every other number is dimmed.
+		let number_color = if is_match {
+			match_fg
+		} else if is_changed {
+			mark
+		} else {
+			muted
+		};
 		let number = text(format!("{}", index + 1))
 			.font(FONT)
 			.size(FONT_SIZE)
-			.color(if is_changed { mark } else { muted });
+			.color(number_color);
 		let bar = container(text(""))
 			.width(Length::Fixed(BAR_WIDTH))
 			.height(Length::Fill)
@@ -484,6 +541,10 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 					right: GUTTER_PAD,
 					bottom: 0.0,
 					left: 0.0,
+				})
+				.style(move |_theme| container::Style {
+					background: is_match.then(|| match_bg.into()),
+					..container::Style::default()
 				})
 				.into(),
 		);

@@ -2943,12 +2943,22 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
 - **Find / replace, in a bar above the buffer (Ctrl+F).** A small bar rides over the top of the buffer
   (pushing the text down, so a top match is never hidden behind it): a query field with a live
   `n / total` count and prev / next steppers, a toggle for a replace row, and the shared close ✕ (§10).
-  Enter in the query steps to the next match, Esc closes, Ctrl+H opens straight onto the replace row.
+  Enter in the query steps to the next match, Esc closes, Ctrl+H or Ctrl+R opens straight onto the
+  replace row.
   The search is **ASCII case-insensitive** (both sides `to_ascii_lowercase`, which preserves every byte
   offset, so a hit found in the lowered copy is valid in the original — a non-ASCII case pair like
   `é`/`É` stays distinct, the same narrow-and-predictable spirit as the encoding set). Matches are
   `(line, byte range)` because iced addresses the cursor and selection by **byte** index within a line;
-  stepping selects the span so it highlights, and the cursor-follow scrolls it in.
+  stepping selects the span and the cursor-follow scrolls it in.
+- **The current match's line is washed, and its number lit.** iced paints a `text_editor`'s own
+  selection **only while that editor is focused** — but during a search the find *field* holds focus,
+  so the selected match would be invisible. So the current match's **line** carries a translucent band
+  (drawn BEHIND the text in a `stack`, the buffer laid transparent over it; three fixed spacers, not a
+  widget per line) and its **gutter number** is lit on the same wash — both visible whatever holds
+  focus, and both immune to tab-column geometry since they key off the line, not the byte column. (A
+  glyph-exact always-on highlight would mean recolouring the match bytes through the highlighter, which
+  is CME-only and would have to splice against the syntect spans — the line wash is the simpler, tab-
+  correct choice.)
 - **The model owns the search; the pure parts are tested with no widget.** `Editor::find:
   Option<Find>` holds the query, every match and which is current; it is recomputed on every edit (for
   the count) but only *re-selected* on an explicit step, so typing never yanks the cursor onto a hit.
@@ -2972,7 +2982,8 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   writes a `Vec<u8>` atomically. It reuses `open_sftp` (§17).
 - **`ssh/client.rs`** dispatches the two new commands; **`app.rs`** owns the tab wiring (open, route
   by `editor_id`, save/save-as/close, the editor keyboard shortcuts — Ctrl+S save, Ctrl+Shift+S save
-  as, Ctrl+W close, **Ctrl+F find, Ctrl+H replace, Esc close-find** — the per-extension theme memory,
+  as, Ctrl+W close, **Ctrl+F find, Ctrl+H / Ctrl+R replace, Esc close-find** — the per-extension theme
+  memory,
   and the cursor-follow scroll over the buffer's scrollable id); **`ui/editor.rs`** is the
   toolbar-plus-gutter-plus-editor view, the find/replace bar, and the two-scheme `Palette`;
   **`ui/syntax.rs`** is the

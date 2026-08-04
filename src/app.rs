@@ -1922,11 +1922,15 @@ impl Tab {
 			Key::Character(c) if c.as_str().eq_ignore_ascii_case("f") => {
 				iced::Task::done(Message::Editor(EditorMessage::FindOpen))
 			}
-			// Ctrl/Cmd+H opens the bar (if closed) and reveals its replace row (§32).
-			Key::Character(c) if c.as_str().eq_ignore_ascii_case("h") => iced::Task::batch([
-				iced::Task::done(Message::Editor(EditorMessage::FindOpen)),
-				iced::Task::done(Message::Editor(EditorMessage::ReplaceToggle)),
-			]),
+			// Ctrl/Cmd+H or Ctrl/Cmd+R opens the bar (if closed) and reveals its replace row (§32).
+			Key::Character(c)
+				if c.as_str().eq_ignore_ascii_case("h") || c.as_str().eq_ignore_ascii_case("r") =>
+			{
+				iced::Task::batch([
+					iced::Task::done(Message::Editor(EditorMessage::FindOpen)),
+					iced::Task::done(Message::Editor(EditorMessage::ReplaceToggle)),
+				])
+			}
 			_ => iced::Task::none(),
 		}
 	}
