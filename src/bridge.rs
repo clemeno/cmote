@@ -216,6 +216,20 @@ pub enum SshCommand {
 		local: PathBuf,
 		resume: bool,
 	},
+	/// Read a whole remote file into the in-tab text editor (§32). `editor_id` is the EDITOR tab's
+	/// id, echoed back on `EditLoaded` / `EditLoadFailed` so the reply routes to the tab that asked
+	/// — not the session tab whose channel carried it (an editor has no channel of its own). The
+	/// whole file is one in-memory buffer, so the read is bounded by `edit::MAX_SIZE`.
+	EditLoad { editor_id: u64, path: String },
+	/// Write the editor's buffer back to the remote (§32). `editor_id` routes the reply; `path` is
+	/// the destination (a Save As names a new one); `bytes` are already encoded as the file was
+	/// opened (BOM and all — the GUI side owns the encoding). Written atomically: a temp sibling
+	/// then a rename over the target, so a drop mid-write cannot truncate the user's file.
+	EditSave {
+		editor_id: u64,
+		path: String,
+		bytes: Vec<u8>,
+	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Routed to
 	/// the transfer waiting on it; a `*All` answer makes the task stop asking for the rest.
 	ResolveConflict(ConflictChoice),
@@ -307,6 +321,23 @@ pub enum SshEvent {
 	DownloadDone(String),
 	/// The download failed; carries a short reason for the status bar (§19).
 	DownloadFailed(String),
+	/// A file was read for the editor (§32). `editor_id` is the tab that asked, `path` the file,
+	/// and `bytes` its raw contents — the GUI side decodes them (BOM / UTF detection lives there,
+	/// so the network layer stays encoding-agnostic).
+	EditLoaded {
+		editor_id: u64,
+		path: String,
+		bytes: Vec<u8>,
+	},
+	/// The editor load failed (§32): the file is over `edit::MAX_SIZE`, could not be read, or the
+	/// sftp channel would not open. The editor tab shows the reason in place of a buffer.
+	EditLoadFailed { editor_id: u64, reason: String },
+	/// The editor's buffer was saved to `path` (§32); the tab clears its dirty marks and, on a
+	/// Save As, is now editing the new file.
+	EditSaved { editor_id: u64, path: String },
+	/// The editor save failed (§32): the buffer stays dirty and the reason is shown, so the edits
+	/// that failed to persist are never thrown away.
+	EditSaveFailed { editor_id: u64, reason: String },
 	/// A transfer stopped mid-flight on a failure, but its partial was KEPT so it can be resumed
 	/// (§16). Distinct from `*Failed` (final, nothing to continue) and from a cancel (which
 	/// deletes its partial): the GUI shows `message` and offers a Resume, which re-runs the same
@@ -376,6 +407,22 @@ pub enum SshEvent {
 	Disconnected,
 	/// Something failed. A generic, non-leaking message (§12).
 	Error(String),
+}
+
+impl SshEvent {
+	/// The EDITOR tab an Edit* event is destined for (§32), or `None` for every other event. The
+	/// worker tags its whole stream with the SESSION tab's id (§26), but a file loaded or saved for
+	/// the editor belongs to the EDITOR tab that asked — so `App` routes these four by this id
+	/// instead, whichever session's channel carried them.
+	pub fn editor_target(&self) -> Option<u64> {
+		match self {
+			Self::EditLoaded { editor_id, .. }
+			| Self::EditLoadFailed { editor_id, .. }
+			| Self::EditSaved { editor_id, .. }
+			| Self::EditSaveFailed { editor_id, .. } => Some(*editor_id),
+			_ => None,
+		}
+	}
 }
 
 /// Build the SSH-event subscription for ONE tab's session (§4, §26). iced identifies a

@@ -31,6 +31,7 @@ use crate::secret::Secret;
 use crate::ssh::auth;
 use crate::ssh::browse;
 use crate::ssh::download;
+use crate::ssh::edit;
 use crate::ssh::forward;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
 use crate::ssh::upload;
@@ -177,6 +178,30 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::EditLoad { editor_id, path } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::EditLoad { editor_id, path })
+						.await;
+				}
+			}
+			SshCommand::EditSave {
+				editor_id,
+				path,
+				bytes,
+			} => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::EditSave {
+							editor_id,
+							path,
+							bytes,
+						})
+						.await;
+				}
+			}
 			SshCommand::ResolveConflict(choice) => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -274,6 +299,14 @@ pub(crate) enum SessionMsg {
 		remote: String,
 		local: PathBuf,
 		resume: bool,
+	},
+	/// Read a whole remote file into the in-tab text editor (§32). `editor_id` routes the reply.
+	EditLoad { editor_id: u64, path: String },
+	/// Write the editor's buffer back to the remote, atomically (§32).
+	EditSave {
+		editor_id: u64,
+		path: String,
+		bytes: Vec<u8>,
 	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19), forwarded
 	/// to the transfer waiting on it.
@@ -540,6 +573,14 @@ async fn stream(
 						let flag = Arc::new(AtomicBool::new(false));
 						cancel = Some(flag.clone());
 						download::start_tree(session, events, remote, local, resume, answers_rx, flag).await;
+					}
+					// The editor reads and writes a whole remote file on its own sftp channel, like a
+					// transfer, but buffer-shaped and reply-routed by the editor tab's id (§32).
+					Some(SessionMsg::EditLoad { editor_id, path }) => {
+						edit::load(session, events, editor_id, path).await;
+					}
+					Some(SessionMsg::EditSave { editor_id, path, bytes }) => {
+						edit::save(session, events, editor_id, path, bytes).await;
 					}
 					// Forward a collision answer to the transfer parked on it. A send that fails —
 					// the transfer already finished, or there was never a recursive one — is

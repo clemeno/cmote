@@ -260,6 +260,9 @@ pub enum FilesMessage {
 	RenameCommitted,
 	/// Menu "Download": pick a local destination, then pull the file.
 	Download(String),
+	/// Menu "Edit…" or a double-click on a file: open it in a new editor tab (§32). A directory
+	/// has nothing to edit, so the menu item is disabled there and the double-click browses instead.
+	EditStarted(String),
 	/// The splitter was pressed — begin resizing the pane.
 	SplitterGrabbed,
 	/// The pointer moved while resizing; the payload is its window position.

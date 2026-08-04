@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v3.0.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v3.1.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -43,7 +43,9 @@ keyboard protocol — the `CSI u` encoding
 for disambiguate, press / repeat / release events, report-all and associated text, superseding
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
-3.0.0. Both targets are supported first-class, and each has a verified
+3.0.0; **v3.1.0** adds a basic remote text editor that opens in its own tab — line-numbered,
+encoding- and line-ending-aware (BOM-detected, saved as opened), with changed-line marks and save /
+save-as / close over SFTP, §32. Both targets are supported first-class, and each has a verified
 toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -2775,3 +2777,134 @@ that they were grabbable at all was something you learned by trying. This sectio
   (`SplitterEntered`/`SplitterExited`), which touch only the highlight — no relayout, so no grid
   refit. This is the hand-rolled equivalent of what a `pane_grid` splitter gives for free; cmote's
   splitters are custom `mouse_area` bars (they drive the pty reflow), so the feedback is explicit.
+
+---
+
+## 32. Remote text editor in a tab (v3.1.0)
+
+A **basic text editor** for a remote file, opened in **its own tab** in the strip (§26). Until now
+a tab was always a session (a home list or a live shell); now a tab can also be an editor, so the
+one strip manages both. The editor opens a file over SFTP, shows it with **line numbers** and a
+**changed-line** gutter, and can **save**, **save as** a new remote file, and **close** — asking
+about unsaved changes first. It is deliberately small: no syntax highlighting, no find/replace, no
+split panes. It is for the "just fix this line in the config" job that otherwise means launching
+`vi` in the shell.
+
+Same three-way split as the panels (§18, §19): a pure model (`editor.rs`), a pure view
+(`ui/editor.rs`), and the network calls (`ssh/edit.rs`) — so the rules that carry the weight
+(encoding, line-ending, the changed-line diff) are unit-testable with no server.
+
+### The tab that is not a session
+
+- **A `Tab` now carries an `editor: Option<Editor>`.** When it is `Some`, the tab renders the
+  editor and is not a session: it has **no connection and no SSH worker of its own**. `App`'s
+  per-tab worker subscription (§26) skips an editor tab, so opening ten editors starts no network
+  threads.
+- **An editor tab is parented to the session it was opened from** (`Editor::session`, the parent
+  tab's id). It has no socket, so every SFTP load and save is sent on the **parent session's**
+  command channel — `App` looks the parent up by id and sends through its `command_tx`. Close the
+  parent session and its editors go **read-only-save**: the buffer stays open to read and copy, but
+  Save is disabled with a note, because the pipe it would write through is gone.
+- **Edit events are correlated by an `editor_id`, not the session id.** The worker tags every
+  event with the *session* tab's id (§26), but a loaded/saved file belongs to the *editor* tab that
+  asked. So `EditLoad` / `EditSave` carry the editor tab's id and the matching
+  `EditLoaded` / `EditSaved` / `*Failed` echo it back; `App` routes those to the tab whose id
+  equals the `editor_id`, whichever session produced them. Two editors loading at once cannot cross
+  their bytes.
+
+### Opening a file
+
+- **Two ways in, both from the files pane (§19).** A new **Edit…** item on the entry context menu
+  (files only, disabled on a directory or a multiple selection), and a **double-click on a file** —
+  which until now did nothing (double-click only browsed *into* a directory). Both emit
+  `FilesMessage::EditStarted(path)`, which the tab turns into an App-level `EditorOpen` carrying the
+  parent session id and the path; `App` creates the editor tab, makes it active, and sends
+  `EditLoad` on the parent's channel.
+- **A size ceiling.** The whole file is held in memory as one editable buffer, so a file over
+  `edit::MAX_SIZE` (**8 MiB**) is refused before it is pulled — a text editor is not a way to open a
+  disk image. The refusal is a message, not a crash.
+- **Undecodable is refused, not mangled.** If the bytes are not text in a supported encoding (a
+  binary, or a legacy charset cmote does not decode), or the file is over the ceiling, the editor
+  tab shows the reason in place of the buffer with only a **Close** — never mojibake that a save
+  would then persist.
+
+### Encoding — detect, preserve, never assume on save
+
+The rule the user set: *keep a BOM if the file has one; a BOM decides the UTF; with no BOM assume
+UTF-8 without one; refuse what cannot be opened; on save, persist exactly as opened.*
+
+- **Detection is BOM-only, then UTF-8.** A leading byte-order mark picks the encoding —
+  UTF-8 (`EF BB BF`), UTF-16 LE (`FF FE`), UTF-16 BE (`FE FF`). No BOM ⇒ **UTF-8, no BOM** (the
+  default, and the common case). A UTF-32 BOM, or bytes that do not decode cleanly under the chosen
+  encoding, are the "unsupported" case above. There is **no** statistical charset guessing and **no**
+  Windows-1252 fallback — a deliberately narrow, predictable set, decoded in-house (`char::
+  decode_utf16` and friends), so no `encoding_rs` dependency.
+- **`Encoding` is remembered on the model** as `(charset, had_bom)`. Save re-encodes the current
+  text under that exact charset and re-prepends the BOM **iff** the file had one — so an edit never
+  silently converts UTF-16-with-BOM into UTF-8, nor strips a BOM the file arrived with. cmote's own
+  default *for a brand-new Save As target* is UTF-8 without a BOM, but an opened file keeps whatever
+  it was.
+- **Line endings ride along, and iced already detects them.** `text_editor::Content::line_ending()`
+  reports the buffer's ending (`Lf` / `CrLf` / `Cr` / …); cmote reads it once at load to show it and
+  writes it back through `Content::text()`, which reassembles the buffer with that ending. A file
+  with no newline at all defaults to **LF**. The editor does not normalise endings behind the user's
+  back — the same "persist as opened" rule.
+
+### Line numbers, and marking what changed
+
+- **A gutter column beside the editor, both inside one `scrollable`.** iced's `text_editor` scrolls
+  internally and does not expose its scroll offset, so a naive gutter placed alongside would desync
+  the moment the text scrolled. cmote sidesteps it: the editor is laid out at `Wrapping::None` with
+  its **height shrunk to the whole content** (`Content::line_count()` × the line height), so it never
+  scrolls *itself* — a single outer `scrollable` moves both the gutter and the text together, and the
+  numbers stay pixel-aligned with their lines **by construction**, no offset tracking. The wheel and
+  the scrollbar move the view. (`ponytail:` two v1 limits, both noted for a later pass: the whole
+  buffer is laid out every frame rather than only the visible lines — fine under the 8 MiB cap, the
+  same bounded bet the files pane makes; and a line longer than the pane is clipped at the right edge
+  — the editor follows the cursor but there is no horizontal scrollbar yet, and no cursor-follow of
+  the *vertical* scroll either, so arrowing past the foot of the view waits on a wheel nudge.)
+- **Changed lines are marked from a diff against what was loaded.** The model keeps the `original`
+  lines from the moment of load; on every edit it recomputes which current lines differ and the
+  gutter draws a bar on each changed or added line. The diff is a **common prefix/suffix trim**
+  (which localises the change to a band) followed by a **bounded LCS within that band** — so a single
+  inserted or edited line marks only *itself*, not everything below it, while an edit band larger than
+  `LCS_BAND_CAP` lines falls back to marking the whole band rather than paying a quadratic diff.
+  Recomputed on each edit (not each frame), so it is off the render path. Saving makes the current
+  text the new `original`, so the marks clear. This is what "highlight unsaved modifications" asks for
+  — per-line, not just a global flag.
+- **A dirty dot rides the tab chip and the toolbar** whenever the buffer differs from `original`, so
+  an editor with unsaved work is obvious in the strip without opening it. `strip_label` shows
+  `• name.conf`.
+
+### Save, Save As, Close
+
+- **Save writes atomically.** `edit::save` streams the bytes to a temp sibling (`name~cmote.tmp`) on
+  the remote and then **renames it over** the target, so a connection dropped mid-write can never
+  leave the user's file half-written — the rename is the commit point. On success the editor's
+  `original` is reset and the marks clear; a failure keeps the buffer dirty and shows why.
+- **Save As names a new remote file.** There is no native "save to remote" dialog (rfd is local
+  only, §19), so Save As opens a small in-editor prompt for the destination path, pre-filled with the
+  current directory and name. Confirming saves there and **re-points** the editor at the new path (it
+  becomes the file being edited), the same as every editor's Save As. It is written in the **same
+  encoding the buffer was opened as** (BOM and all) — "persist as opened" holds for a copy too; Save
+  As is a new *name*, not a new *format*.
+- **Closing asks about unsaved work.** Closing a clean editor tab drops it at once. Closing a
+  **dirty** one raises a three-way confirmation over the whole window (like the live-session close,
+  §26, but with the extra choice): **Save** (write, then close), **Discard** (close, lose the edits),
+  **Cancel**. A dirty editor is thus as protected as a live shell — the strip's "×", not just an
+  explicit menu, routes through it.
+
+### Where it plugs in
+
+- **`bridge.rs`** gains `SshCommand::EditLoad { editor_id, path }` /
+  `EditSave { editor_id, path, bytes }` and `SshEvent::EditLoaded { editor_id, path, bytes }` /
+  `EditLoadFailed { editor_id, reason }` / `EditSaved { editor_id, path }` /
+  `EditSaveFailed { editor_id, reason }`. The bytes cross the channel raw; decoding is the model's
+  job on the GUI side, so the network layer stays encoding-agnostic.
+- **`ssh/edit.rs`** is the twin of `download`/`upload` (§17, §19) but buffer-shaped rather than
+  file-shaped: `load` reads the whole remote file into a `Vec<u8>` (bounded by `MAX_SIZE`), `save`
+  writes a `Vec<u8>` atomically. It reuses `open_sftp` (§17).
+- **`ssh/client.rs`** dispatches the two new commands; **`app.rs`** owns the tab wiring (open, route
+  by `editor_id`, save/save-as/close, the editor keyboard shortcuts — Ctrl+S save, Ctrl+Shift+S save
+  as, Ctrl+W close); **`ui/editor.rs`** is the toolbar-plus-gutter-plus-editor view; **`ui/files.rs`**
+  adds the Edit… item and the double-click-a-file path.

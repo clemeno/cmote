@@ -1015,6 +1015,13 @@ pub fn context_menu<'a>(
 			(is_dir && !many).then(|| Message::Files(FilesMessage::OpenInTerminal(path.clone()))),
 		),
 		menu::item(
+			"Edit…".to_owned(),
+			// A single file opens in a new editor tab (§32); a directory or a multiple selection has
+			// nothing to edit, so the item is disabled there — kept, not hidden, so the menu keeps one
+			// shape (§19).
+			(!is_dir && !many).then(|| Message::Files(FilesMessage::EditStarted(path.clone()))),
+		),
+		menu::item(
 			suffix("Download…"),
 			// A folder cannot be downloaded as a file, but a batch that merely CONTAINS one still
 			// can: the app pulls the files out of it and leaves the folders where they are.

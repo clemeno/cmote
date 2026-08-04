@@ -145,6 +145,10 @@ struct App {
 	/// The id of a live tab whose "×" is waiting on the close confirmation (§26), or `None` when
 	/// no confirmation is up. A live session is torn down only once the user confirms.
 	pending_close: Option<u64>,
+	/// The id of a DIRTY editor tab whose "×" is waiting on the unsaved-changes prompt (§32), or
+	/// `None`. Distinct from `pending_close` because its prompt is three-way — Save & close /
+	/// Discard / Cancel — where a live session's is two.
+	pending_editor_close: Option<u64>,
 	/// The app-wide quit flow (§30): `None` in normal use; `Confirming` while the "Quit cmote?"
 	/// dialog is up; `Draining` once the user accepts, holding the sessions whose clean disconnect
 	/// is still outstanding. Reached from the OS window's × or from closing the last tab.
@@ -193,6 +197,7 @@ impl App {
 			targets,
 			vault,
 			pending_close: None,
+			pending_editor_close: None,
 			quit: None,
 			// Re-seeded to centre each time an overlay opens; the origin is only a placeholder.
 			overlay_pos: iced::Point::ORIGIN,
@@ -234,6 +239,14 @@ impl App {
 			// Route a session's event to the tab that owns it — maybe a background one, so its
 			// shell keeps drawing off-screen. An event for a tab already closed is dropped.
 			Message::Ssh(id, event) => {
+				// An editor's load/save reply rides the SESSION's stream (it has no channel of its
+				// own) but belongs to the EDITOR tab that asked — route it there by editor id (§32).
+				if let Some(editor_id) = event.editor_target() {
+					return match self.tabs.iter_mut().find(|tab| tab.id == editor_id) {
+						Some(tab) => tab.on_edit_event(event),
+						None => iced::Task::none(),
+					};
+				}
 				// A session going down is what a quit drain waits for: note it BEFORE the event is
 				// consumed, then let the owning tab do its own clean-up (persist, back to home).
 				let ended = matches!(event, SshEvent::Disconnected | SshEvent::Error(_));
@@ -241,9 +254,13 @@ impl App {
 					Some(tab) => tab.on_ssh_event(event),
 					None => iced::Task::none(),
 				};
-				// One fewer session to wait on; once the last is down the process exits (§30).
-				if ended && let Some(exit) = self.note_drained(id) {
-					return exit;
+				if ended {
+					// Any editors opened from this session can no longer save — mark them so (§32).
+					self.orphan_editors(id);
+					// One fewer session to wait on; once the last is down the process exits (§30).
+					if let Some(exit) = self.note_drained(id) {
+						return exit;
+					}
 				}
 				task
 			}
@@ -253,6 +270,24 @@ impl App {
 			Message::TabCloseConfirmed => self.close_confirmed(),
 			Message::TabCloseCancelled => {
 				self.pending_close = None;
+				iced::Task::none()
+			}
+			// The in-tab editor (§32). Opening, saving and closing all need cross-tab reach — an
+			// editor saves through the session it was opened from — so they are handled here, at the
+			// App, not delegated to the tab. In-buffer editing (`Message::Editor`) and the editor
+			// shortcuts (`Message::EditorKey`) fall through to the active tab below.
+			Message::EditorOpen { session, path } => self.open_editor(session, path),
+			Message::EditorFlush(id) => self.flush_editor_save(id),
+			Message::EditorCloseSave => self.editor_close_save(),
+			Message::EditorCloseDiscard => self.editor_close_discard(),
+			Message::EditorCloseCancelled => {
+				self.pending_editor_close = None;
+				iced::Task::none()
+			}
+			Message::EditorCloseNow(id) => {
+				if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+					return self.remove_tab(index);
+				}
 				iced::Task::none()
 			}
 			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
@@ -359,6 +394,15 @@ impl App {
 		}
 		if self.tabs[index].is_live() {
 			self.pending_close = Some(id);
+			self.seed_overlay();
+			if index != self.active {
+				return self.select_tab(index);
+			}
+			iced::Task::none()
+		} else if self.tabs[index].is_dirty_editor() {
+			// A dirty editor is as protected as a live session (§32): its "×" raises the
+			// unsaved-changes prompt (Save & close / Discard / Cancel) rather than dropping the edits.
+			self.pending_editor_close = Some(id);
 			self.seed_overlay();
 			if index != self.active {
 				return self.select_tab(index);
@@ -511,6 +555,131 @@ impl App {
 		fit_terminal()
 	}
 
+	/// Open a remote file in a new editor tab (§32), parented to the session it was opened from, and
+	/// send the load on THAT session's channel. The editor tab has no worker of its own; its reply
+	/// (`EditLoaded` / `EditLoadFailed`) rides the parent's stream and routes back here by editor id.
+	fn open_editor(&mut self, session: u64, path: String) -> iced::Task<Message> {
+		let id = self.next_id;
+		self.next_id += 1;
+		// Inherit the window geometry / focus from the active tab so the first paint is sized right,
+		// exactly as `open_tab` does for a home tab (§26).
+		let (size, focused, modifiers) = match self.tabs.get(self.active) {
+			Some(tab) => (tab.window_size, tab.window_focused, tab.modifiers),
+			None => (
+				iced::Size::default(),
+				true,
+				iced::keyboard::Modifiers::default(),
+			),
+		};
+		let mut tab = Tab::new_editor(id, session, path.clone(), size);
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		self.tabs.push(tab);
+		self.active = self.tabs.len() - 1;
+
+		// Ask the parent session to read the file. If the parent is gone the editor opens straight
+		// into its "session closed" state rather than hanging on a load that can never arrive. The
+		// match resolves to a plain `bool` so the parent borrow is released before the fallback,
+		// which borrows the tabs again to reach the just-opened editor.
+		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
+			Some(parent) if parent.command_tx.is_some() => {
+				parent.send_command(SshCommand::EditLoad {
+					editor_id: id,
+					path,
+				})
+			}
+			_ => false,
+		};
+		if !sent && let Some(editor) = self.editor_mut(id) {
+			editor.mark_parent_gone();
+			editor.load_failed(
+				"The session this file was opened from is no longer available.".to_owned(),
+			);
+		}
+		iced::Task::none()
+	}
+
+	/// Send an editor tab's buffer to its parent session for saving (§32). Raised by the tab after a
+	/// Save / Save As; only the App can reach across to the parent's channel. A parent that has gone
+	/// away leaves the editor's save marked failed rather than hanging on a reply that never comes.
+	fn flush_editor_save(&mut self, editor_id: u64) -> iced::Task<Message> {
+		let Some((session, path, bytes)) = self
+			.tabs
+			.iter()
+			.find(|tab| tab.id == editor_id)
+			.and_then(|tab| tab.editor.as_ref())
+			.map(|editor| (editor.session, editor.path.clone(), editor.save_bytes()))
+		else {
+			return iced::Task::none();
+		};
+		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
+			Some(parent) => parent.send_command(SshCommand::EditSave {
+				editor_id,
+				path,
+				bytes,
+			}),
+			None => false,
+		};
+		if !sent && let Some(editor) = self.editor_mut(editor_id) {
+			editor.mark_parent_gone();
+			editor.save_failed("The session this file came from is closed.".to_owned());
+		}
+		iced::Task::none()
+	}
+
+	/// Mark every editor opened from session `id` as orphaned (§32): its parent is gone, so it can no
+	/// longer save. The buffer stays open to read and copy; the toolbar disables Save with a note.
+	fn orphan_editors(&mut self, id: u64) {
+		for tab in self.tabs.iter_mut() {
+			if let Some(editor) = tab.editor.as_mut()
+				&& editor.session == id
+			{
+				editor.mark_parent_gone();
+			}
+		}
+	}
+
+	/// The unsaved-editor close prompt's "Save & close" (§32): begin the save with a close-after flag
+	/// so the tab drops itself once the write lands (or stays, showing the error, if it fails).
+	fn editor_close_save(&mut self) -> iced::Task<Message> {
+		let Some(id) = self.pending_editor_close.take() else {
+			return iced::Task::none();
+		};
+		let Some(editor) = self.editor_mut(id) else {
+			return iced::Task::none();
+		};
+		if editor.begin_save_and_close() {
+			return self.flush_editor_save(id);
+		}
+		// Nothing to save (or no channel): just close it.
+		self.force_close(id)
+	}
+
+	/// The unsaved-editor close prompt's "Discard" (§32): drop the tab and lose the edits.
+	fn editor_close_discard(&mut self) -> iced::Task<Message> {
+		let Some(id) = self.pending_editor_close.take() else {
+			return iced::Task::none();
+		};
+		self.force_close(id)
+	}
+
+	/// Drop the tab with this id if it is still there (§32) — the shared tail of the discard and the
+	/// after-save auto-close.
+	fn force_close(&mut self, id: u64) -> iced::Task<Message> {
+		match self.tabs.iter().position(|tab| tab.id == id) {
+			Some(index) => self.remove_tab(index),
+			None => iced::Task::none(),
+		}
+	}
+
+	/// The editor on the tab with this id, mutably (§32).
+	fn editor_mut(&mut self, id: u64) -> Option<&mut crate::editor::Editor> {
+		self.tabs
+			.iter_mut()
+			.find(|tab| tab.id == id)
+			.and_then(|tab| tab.editor.as_mut())
+	}
+
 	/// Centre the close-confirmation card in the window (§26). The card floats over the WHOLE
 	/// window (strip included), so the full height is the active tab's inner height plus the strip.
 	fn close_dialog_pos(&self) -> iced::Point {
@@ -526,7 +695,7 @@ impl App {
 	/// confirmation or the quit dialog. Both float over the whole window and share one drag, so
 	/// the header-drag messages are steered here (rather than to the active tab) while it holds.
 	fn overlay_open(&self) -> bool {
-		self.quit.is_some() || self.pending_close.is_some()
+		self.quit.is_some() || self.pending_close.is_some() || self.pending_editor_close.is_some()
 	}
 
 	/// Centre the overlay card and clear any leftover drag as it opens (§26, §30), so a position
@@ -590,6 +759,51 @@ impl App {
 		// reports progress with no buttons, since there is nothing left to cancel.
 		if let Some(quit) = &self.quit {
 			return self.quit_overlay(body.into(), quit);
+		}
+
+		// A dirty editor's close waits on a three-way prompt (§32): Save & close / Discard / Cancel.
+		// Ranked below the app-wide quit but, like the live-session close, over the whole window.
+		if let Some(id) = self.pending_editor_close {
+			let name = self
+				.tabs
+				.iter()
+				.find(|tab| tab.id == id)
+				.and_then(|tab| tab.editor.as_ref())
+				.map_or_else(
+					|| "This file".to_owned(),
+					|editor| crate::explorer::name(&editor.path).to_owned(),
+				);
+			let drag = ui::dialog::Drag {
+				pos: self.overlay_pos,
+				dragging: self.overlay_dragging,
+			};
+			let message = text(format!("“{name}” has unsaved changes.")).size(14);
+			let footer = vec![
+				iced::widget::button(text("Cancel"))
+					.on_press(Message::EditorCloseCancelled)
+					.into(),
+				iced::widget::button(text("Discard"))
+					.on_press(Message::EditorCloseDiscard)
+					.into(),
+				iced::widget::button(text("Save & close"))
+					.on_press(Message::EditorCloseSave)
+					.into(),
+			];
+			let card = ui::dialog::dialog(
+				"Save changes?".to_owned(),
+				Message::EditorCloseCancelled,
+				message.into(),
+				footer,
+				drag,
+			);
+			return iced::widget::stack![
+				body,
+				ui::dialog::backdrop(Message::EditorCloseCancelled),
+				card
+			]
+			.width(iced::Length::Fill)
+			.height(iced::Length::Fill)
+			.into();
 		}
 
 		if self.pending_close.is_none() {
@@ -689,6 +903,9 @@ impl App {
 		let mut subs: Vec<iced::Subscription<Message>> = self
 			.tabs
 			.iter()
+			// An editor tab has no session of its own (§32): it saves through the tab it was opened
+			// from, so it starts NO worker — opening editors costs no network threads.
+			.filter(|tab| tab.editor.is_none())
 			.map(|tab| {
 				// `map` demands a NON-capturing closure, so the tab id cannot be closed over. `with`
 				// threads it into each event as `(id, event)`, which the plain closure then unpacks
@@ -720,6 +937,8 @@ impl App {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
 			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			// The editor's shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W); typing goes to the widget.
+			Screen::Editor => subs.push(iced::keyboard::listen().map(Message::EditorKey)),
 			_ => {}
 		}
 
@@ -766,6 +985,10 @@ pub enum Screen {
 	VaultUnlock,
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
+	/// A text editor open on a remote file (§32). This tab is NOT a session — it has no connection
+	/// of its own; its loads and saves ride the parent session's channel. The buffer and its state
+	/// live in `Tab::editor`, which is `Some` exactly while this screen shows.
+	Editor,
 	/// A terminal failure. The generic, non-leaking message (§12) lives in
 	/// `App::dialog_body` so it can be selected and copied; this variant just marks
 	/// that the error screen is showing.
@@ -839,6 +1062,10 @@ pub struct Tab {
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
 	terminal: Option<term::Terminal>,
+	/// The open text editor, when this tab is editing a remote file rather than running a session
+	/// (§32). `Some` exactly while `screen` is `Screen::Editor`; it holds the buffer, the encoding,
+	/// the changed-line marks and the id of the parent session its saves ride through.
+	editor: Option<crate::editor::Editor>,
 	/// The passphrase being typed on the `NeedPassphrase` screen. Kept here rather
 	/// than in the form so it never lingers there; it is moved into a `Secret` on
 	/// submit and the field is cleared (§12).
@@ -1419,6 +1646,32 @@ pub enum Message {
 	ForwardAddPressed,
 	/// A forward's row ✕ — tear that forward down (payload: its runtime id).
 	ForwardRemove(u64),
+	// --- the in-tab text editor (§32): a tab can edit a remote file, not only run a session ---
+	/// Open a remote file in a new editor tab (payload: the parent session's id and the path).
+	/// Raised by the files pane's "Edit…" or a file double-click; `App` creates the tab, then
+	/// sends the load on the parent session's channel and routes the reply back by editor id.
+	EditorOpen {
+		session: u64,
+		path: String,
+	},
+	/// Something happened in an editor buffer or its toolbar (§32). Nested like `Files` — an
+	/// editor has enough interactions of its own to keep out of this enum's top level.
+	Editor(crate::editor::EditorMessage),
+	/// A keystroke while an editor tab is active (§32): the shortcuts (Ctrl+S save, Ctrl+Shift+S
+	/// save as, Ctrl+W close). Typing itself reaches the text widget directly, not here.
+	EditorKey(iced::keyboard::Event),
+	/// The editor tab `id` asked to flush its buffer to the network (§32). Raised by the tab
+	/// after a Save / Save As; handled by `App`, which alone can reach the parent's channel.
+	EditorFlush(u64),
+	/// The unsaved-editor close prompt's "Save & close" (§32): save, then close once it lands.
+	EditorCloseSave,
+	/// The unsaved-editor close prompt's "Discard" — close the tab and lose the edits (§32).
+	EditorCloseDiscard,
+	/// The unsaved-editor close prompt's "Cancel" — keep the tab (§32).
+	EditorCloseCancelled,
+	/// Close editor tab `id` now, unconditionally (§32): the auto-close once its "Save & close"
+	/// finished writing.
+	EditorCloseNow(u64),
 }
 
 impl Tab {
@@ -1445,6 +1698,31 @@ impl Tab {
 		}
 	}
 
+	/// Build a fresh EDITOR tab (§32): no session of its own, its buffer `Loading` until the parent
+	/// session's channel delivers the file. `session` is the tab it was opened from, whose channel
+	/// its loads and saves ride. The shared target list and vault are left at their defaults — an
+	/// editor tab never shows the home screen, so it never reads them.
+	fn new_editor(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
+		Self {
+			id,
+			screen: Screen::Editor,
+			editor: Some(crate::editor::Editor::loading(session, path)),
+			window_size,
+			window_focused: true,
+			shell_focus_reported: true,
+			..Self::default()
+		}
+	}
+
+	/// Ask `App` to open `path` in a new editor tab parented to THIS session (§32). Raised by the
+	/// files pane's "Edit…" and a file double-click; `App` creates the tab and drives the load.
+	fn request_edit(&self, path: String) -> iced::Task<Message> {
+		iced::Task::done(Message::EditorOpen {
+			session: self.id,
+			path,
+		})
+	}
+
 	/// The label this tab shows on its strip chip (§26): the connected endpoint once a shell is
 	/// open (or dialing), otherwise a word for the screen it is sitting on. Names the session so a
 	/// user with several open can tell them apart.
@@ -1456,6 +1734,15 @@ impl Tab {
 				.unwrap_or_else(|| "session".to_owned()),
 			Screen::Home => "Home".to_owned(),
 			Screen::Error => "Error".to_owned(),
+			// An editor tab is named by its file, with a dot when it has unsaved edits (§32).
+			Screen::Editor => match &self.editor {
+				Some(editor) => {
+					let name = crate::explorer::name(&editor.path);
+					let dot = if editor.is_dirty() { "• " } else { "" };
+					format!("{dot}{name}")
+				}
+				None => "editor".to_owned(),
+			},
 			// The connect form and every dialog over it are all one "new connection" in progress.
 			_ => "New connection".to_owned(),
 		}
@@ -1465,6 +1752,110 @@ impl Tab {
 	/// closing a tab still at the home list or the connect form just drops it.
 	fn is_live(&self) -> bool {
 		matches!(self.screen, Screen::Terminal)
+	}
+
+	/// Whether this tab is an editor with unsaved edits (§32). Its "×" is confirmed like a live
+	/// session's, so a stray click cannot lose the work.
+	fn is_dirty_editor(&self) -> bool {
+		self.editor
+			.as_ref()
+			.is_some_and(crate::editor::Editor::is_dirty)
+	}
+
+	/// Apply an editor-buffer message (§32): typing and the Save As prompt's own field are handled
+	/// here; a Save / Save As confirm updates local state then asks `App` to flush the bytes, which
+	/// alone can reach the parent session's channel.
+	fn on_editor(&mut self, message: crate::editor::EditorMessage) -> iced::Task<Message> {
+		use crate::editor::EditorMessage;
+		let Some(editor) = self.editor.as_mut() else {
+			return iced::Task::none();
+		};
+		match message {
+			EditorMessage::Action(action) => {
+				editor.perform(action);
+			}
+			EditorMessage::Save => {
+				if editor.begin_save() {
+					return iced::Task::done(Message::EditorFlush(self.id));
+				}
+			}
+			EditorMessage::SaveAsStart => {
+				editor.begin_save_as();
+				// Focus the path field so the user types straight away, as the rename field does (§18).
+				return iced::widget::operation::focus(ui::editor::SAVE_AS_INPUT_ID);
+			}
+			EditorMessage::SaveAsChanged(path) => editor.save_as_changed(path),
+			EditorMessage::SaveAsConfirm => {
+				if editor.save_as_confirm() {
+					return iced::Task::done(Message::EditorFlush(self.id));
+				}
+			}
+			EditorMessage::SaveAsCancel => editor.save_as_cancel(),
+		}
+		iced::Task::none()
+	}
+
+	/// The editor's keyboard shortcuts (§32): Ctrl/Cmd+S saves, Ctrl/Cmd+Shift+S saves as, Ctrl/Cmd+W
+	/// closes. Typing itself reaches the text widget through the normal event path, so this listener
+	/// acts only on the modified combinations and lets every other key fall through untouched.
+	fn on_editor_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
+		use crate::editor::EditorMessage;
+		use iced::keyboard::{Event, Key};
+		let Event::KeyPressed { key, modifiers, .. } = event else {
+			return iced::Task::none();
+		};
+		if !modifiers.command() {
+			return iced::Task::none();
+		}
+		match key {
+			Key::Character(c) if c.as_str().eq_ignore_ascii_case("s") => {
+				let inner = if modifiers.shift() {
+					EditorMessage::SaveAsStart
+				} else {
+					EditorMessage::Save
+				};
+				iced::Task::done(Message::Editor(inner))
+			}
+			Key::Character(c) if c.as_str().eq_ignore_ascii_case("w") => {
+				iced::Task::done(Message::TabCloseRequested(self.id))
+			}
+			_ => iced::Task::none(),
+		}
+	}
+
+	/// Apply an editor load/save reply routed here by id (§32). A successful load fills the buffer
+	/// (or, if the bytes are not text in a supported encoding, shows the reason in its place); a
+	/// successful save clears the marks and — after a "Save & close" — drops the tab.
+	fn on_edit_event(&mut self, event: SshEvent) -> iced::Task<Message> {
+		let id = self.id;
+		let Some(editor) = self.editor.as_mut() else {
+			return iced::Task::none();
+		};
+		match event {
+			SshEvent::EditLoaded { bytes, .. } => match crate::editor::decode(&bytes) {
+				Some((text, encoding)) => editor.set_loaded(text, encoding),
+				None => editor.load_failed(
+					"This file is not text in a supported encoding (UTF-8 or UTF-16).".to_owned(),
+				),
+			},
+			SshEvent::EditLoadFailed { reason, .. } => editor.load_failed(reason),
+			SshEvent::EditSaved { path, .. } => {
+				editor.path = path;
+				editor.mark_saved();
+				// A "Save & close" waits on exactly this: the write landed, so drop the tab now (§32).
+				if editor.take_close_after_save() {
+					return iced::Task::done(Message::EditorCloseNow(id));
+				}
+			}
+			SshEvent::EditSaveFailed { reason, .. } => {
+				// Clear any pending close so a FAILED "Save & close" keeps the tab, showing the error.
+				editor.take_close_after_save();
+				editor.save_failed(reason);
+			}
+			// Not an editor event; nothing to do.
+			_ => {}
+		}
+		iced::Task::none()
 	}
 
 	/// The heart of the Elm loop: apply one `Message` to the state. Returns a
@@ -1650,6 +2041,10 @@ impl Tab {
 			Message::TransferResumePressed => return self.resume_transfer(),
 			Message::Explorer(message) => return self.on_explorer(message),
 			Message::Files(message) => return self.on_files(message),
+			// The editor buffer's own interactions (§32): typing, Save / Save As, the prompt field.
+			// The App has already peeled off the ones needing cross-tab reach (open / flush / close).
+			Message::Editor(message) => return self.on_editor(message),
+			Message::EditorKey(event) => return self.on_editor_key(event),
 			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
 			Message::DownloadFolderPicked { remotes, dir } => self.on_download_folder(remotes, dir),
 			Message::DownloadClash(choice) => {
@@ -1708,7 +2103,15 @@ impl Tab {
 			| Message::QuitRequested
 			| Message::QuitConfirmed
 			| Message::QuitCancelled
-			| Message::QuitTick => {}
+			| Message::QuitTick
+			// The editor's cross-tab work is `App`'s job (§32): opening a tab, flushing a save
+			// through the parent's channel, and the unsaved-close prompt all need reach a tab lacks.
+			| Message::EditorOpen { .. }
+			| Message::EditorFlush(_)
+			| Message::EditorCloseSave
+			| Message::EditorCloseDiscard
+			| Message::EditorCloseCancelled
+			| Message::EditorCloseNow(_) => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			Message::ForwardsClosed => self.forward_dialog = false,
@@ -2443,6 +2846,12 @@ impl Tab {
 				self.clear_grid_interaction();
 				self.show_error(&message);
 			}
+			// An editor's load/save replies are routed by `App` straight to the editor tab that asked
+			// (`on_edit_event`, §32), so a session's own event stream never delivers them here.
+			SshEvent::EditLoaded { .. }
+			| SshEvent::EditLoadFailed { .. }
+			| SshEvent::EditSaved { .. }
+			| SshEvent::EditSaveFailed { .. } => {}
 		}
 		iced::Task::none()
 	}
@@ -4404,13 +4813,19 @@ impl Tab {
 			}
 			FilesMessage::EntryOpened(path) => {
 				self.files.close_menu();
-				// Only a directory can be entered, and entering it browses the PANE there —
-				// the console stays put (§19). The console is moved on purpose, by Sync or
-				// "Open in terminal", not as a side effect of looking in a folder.
-				if self.files.kind_of(&path) != Some(files::Kind::Dir) {
-					return iced::Task::none();
+				// A directory is entered — browsing the PANE there, the console left where it is
+				// (§19). A FILE opens in a new editor tab (§32). The console is moved on purpose, by
+				// Sync or "Open in terminal", never as a side effect of either.
+				match self.files.kind_of(&path) {
+					Some(files::Kind::Dir) => self.browse_to(&path),
+					Some(_) => return self.request_edit(path),
+					None => {}
 				}
-				self.browse_to(&path);
+			}
+			FilesMessage::EditStarted(path) => {
+				// The menu's "Edit…" — the deliberate twin of a file double-click (§32).
+				self.files.close_menu();
+				return self.request_edit(path);
 			}
 			FilesMessage::OpenInTerminal(path) => {
 				// The pane's own "Open in terminal": the deliberate console move that a
@@ -4983,6 +5398,12 @@ impl Tab {
 					}
 				}
 				None => text("terminal starting…").into(),
+			},
+			// The in-tab editor (§32): its whole screen — toolbar, gutter, buffer — comes from
+			// `ui::editor`, which borrows the buffer in place, so nothing outlives this frame.
+			Screen::Editor => match &self.editor {
+				Some(editor) => ui::editor::view(editor, self.id),
+				None => text("editor starting…").into(),
 			},
 			Screen::Error => self.form_with_dialog(
 				ui::error_view(&self.dialog_body, drag),
@@ -5975,6 +6396,7 @@ mod tests {
 			targets,
 			vault,
 			pending_close: None,
+			pending_editor_close: None,
 			quit: None,
 			overlay_pos: iced::Point::ORIGIN,
 			overlay_dragging: false,

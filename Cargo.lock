@@ -818,7 +818,7 @@ dependencies = [
 
 [[package]]
 name = "cmote"
-version = "3.0.0"
+version = "3.1.0"
 dependencies = [
  "age",
  "alacritty_terminal",
