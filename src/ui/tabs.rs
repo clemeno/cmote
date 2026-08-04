@@ -33,7 +33,7 @@ const CHIP_HEIGHT: f32 = 30.0;
 
 /// The longest label a chip shows before the middle is elided (§22), so one long endpoint cannot
 /// push the "+" off the strip.
-const MAX_LABEL_CHARS: usize = 24;
+const MAX_LABEL_CHARS: usize = 48;
 
 /// One chip's data: the owning tab's id (for the close message), the label to show, and whether
 /// it is the active tab (which tints its fill and brightens its text).
