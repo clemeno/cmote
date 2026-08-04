@@ -1813,6 +1813,54 @@ impl Tab {
 		match message {
 			EditorMessage::Action(action) => {
 				editor.perform(action);
+				// Keep the cursor line on screen after the move (§32). iced's `text_editor` follows the
+				// cursor horizontally itself, but the vertical scroll lives on the OUTER scrollable that
+				// carries the gutter — so the vertical follow is driven here, the same keep-it-visible math
+				// the panels use for a selected cell (§20).
+				if let Some(offset) = follow_editor_cursor(editor) {
+					return scroll_editor_to(offset);
+				}
+			}
+			EditorMessage::Scrolled {
+				offset,
+				view_height,
+			} => editor.set_viewport(offset, view_height),
+			EditorMessage::FindOpen => {
+				// Open (or keep) the bar and focus its field so the user types straight away; if a query
+				// was already there, jump to its current match too.
+				let followed = editor.find_open();
+				let focus = iced::widget::operation::focus(ui::editor::FIND_INPUT_ID);
+				if followed && let Some(offset) = follow_editor_cursor(editor) {
+					return iced::Task::batch([focus, scroll_editor_to(offset)]);
+				}
+				return focus;
+			}
+			EditorMessage::FindClose => editor.find_close(),
+			EditorMessage::FindQueryChanged(query) => {
+				if editor.find_query_changed(query)
+					&& let Some(offset) = follow_editor_cursor(editor)
+				{
+					return scroll_editor_to(offset);
+				}
+			}
+			EditorMessage::FindStep(forward) => {
+				if editor.find_step(forward)
+					&& let Some(offset) = follow_editor_cursor(editor)
+				{
+					return scroll_editor_to(offset);
+				}
+			}
+			EditorMessage::ReplaceToggle => editor.replace_toggle(),
+			EditorMessage::ReplaceChanged(text) => editor.replace_changed(text),
+			EditorMessage::ReplaceOne => {
+				if editor.replace_one()
+					&& let Some(offset) = follow_editor_cursor(editor)
+				{
+					return scroll_editor_to(offset);
+				}
+			}
+			EditorMessage::ReplaceAll => {
+				editor.replace_all();
 			}
 			EditorMessage::Save => {
 				if editor.begin_save() {
@@ -1840,10 +1888,21 @@ impl Tab {
 	/// acts only on the modified combinations and lets every other key fall through untouched.
 	fn on_editor_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use crate::editor::EditorMessage;
+		use iced::keyboard::key::Named;
 		use iced::keyboard::{Event, Key};
 		let Event::KeyPressed { key, modifiers, .. } = event else {
 			return iced::Task::none();
 		};
+		// Escape closes the find bar if it is open (§32), whatever holds focus — the field has no close
+		// of its own. When the bar is closed, Escape does nothing here and falls through.
+		if matches!(key, Key::Named(Named::Escape)) {
+			let find_open = self.editor.as_ref().is_some_and(|e| e.find.is_some());
+			return if find_open {
+				iced::Task::done(Message::Editor(EditorMessage::FindClose))
+			} else {
+				iced::Task::none()
+			};
+		}
 		if !modifiers.command() {
 			return iced::Task::none();
 		}
@@ -1859,6 +1918,15 @@ impl Tab {
 			Key::Character(c) if c.as_str().eq_ignore_ascii_case("w") => {
 				iced::Task::done(Message::TabCloseRequested(self.id))
 			}
+			// Ctrl/Cmd+F opens the find bar and focuses it (§32).
+			Key::Character(c) if c.as_str().eq_ignore_ascii_case("f") => {
+				iced::Task::done(Message::Editor(EditorMessage::FindOpen))
+			}
+			// Ctrl/Cmd+H opens the bar (if closed) and reveals its replace row (§32).
+			Key::Character(c) if c.as_str().eq_ignore_ascii_case("h") => iced::Task::batch([
+				iced::Task::done(Message::Editor(EditorMessage::FindOpen)),
+				iced::Task::done(Message::Editor(EditorMessage::ReplaceToggle)),
+			]),
 			_ => iced::Task::none(),
 		}
 	}
@@ -5802,6 +5870,36 @@ fn keep_visible(offset: f32, view: f32, top: f32, height: f32) -> f32 {
 	} else {
 		offset
 	}
+}
+
+/// Scroll the editor buffer so the cursor line is on screen, updating the model to match (§32).
+/// Returns the new offset when a scroll is needed, or `None` when the line already shows (or the
+/// viewport is not measured yet). Shared by a plain edit and every Find jump — both move the cursor
+/// and want it followed. A free function, not a `Tab` method, so it can be called while a `&mut
+/// Editor` is already borrowed inside `on_editor` without re-borrowing the whole tab.
+fn follow_editor_cursor(editor: &mut crate::editor::Editor) -> Option<f32> {
+	let view_height = editor.view_height();
+	if view_height <= 0.0 {
+		return None;
+	}
+	let top = ui::editor::line_top(editor.cursor_line());
+	let offset = keep_visible(editor.scroll(), view_height, top, ui::editor::LINE_HEIGHT);
+	if offset == editor.scroll() {
+		return None;
+	}
+	// Pre-seat the offset so a second keystroke arriving before the scrollable reports back still
+	// measures against the value we just asked for.
+	editor.set_viewport(offset, view_height);
+	Some(offset)
+}
+
+/// The `scroll_to` task that moves the editor buffer to `offset` (§32) — the vertical half of the
+/// cursor-follow, the same operation the panels use to bring a selected cell on screen.
+fn scroll_editor_to(offset: f32) -> iced::Task<Message> {
+	iced::widget::operation::scroll_to(
+		ui::editor::BUFFER_SCROLL_ID,
+		iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
+	)
 }
 
 #[cfg(test)]

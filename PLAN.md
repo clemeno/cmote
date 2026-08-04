@@ -2858,11 +2858,12 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   its **height shrunk to the whole content** (`Content::line_count()` × the line height), so it never
   scrolls *itself* — a single outer `scrollable` moves both the gutter and the text together, and the
   numbers stay pixel-aligned with their lines **by construction**, no offset tracking. The wheel and
-  the scrollbar move the view. (`ponytail:` two v1 limits, both noted for a later pass: the whole
-  buffer is laid out every frame rather than only the visible lines — fine under the 8 MiB cap, the
-  same bounded bet the files pane makes; and a line longer than the pane is clipped at the right edge
-  — the editor follows the cursor but there is no horizontal scrollbar yet, and no cursor-follow of
-  the *vertical* scroll either, so arrowing past the foot of the view waits on a wheel nudge.)
+  the scrollbar move the view; a cursor move scrolls the outer scrollable to follow (see "Moving
+  through the file" below). (`ponytail:` two v1 limits left: the whole buffer is laid out every frame
+  rather than only the visible lines — fine under the 8 MiB cap, the same bounded bet the files pane
+  makes; and a line longer than the pane is clipped at the right edge with no horizontal scrollbar —
+  the cursor still reaches into it, but a fixed bar would need a second offset-synced scrollable. The
+  *vertical* cursor-follow, once missing, is done.)
 - **Changed lines are marked from a diff against what was loaded.** The model keeps the `original`
   lines from the moment of load; on every edit it recomputes which current lines differ and the
   gutter draws a bar on each changed or added line. The diff is a **common prefix/suffix trim**
@@ -2927,6 +2928,38 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   portable build holds (§11); the syntax token is the file extension, so an unknown/extensionless file
   simply stays plain.
 
+### Moving through the file — find, and following the cursor
+
+- **The cursor stays on screen.** iced's `text_editor` follows the cursor *horizontally* on its own,
+  but the vertical scroll lives on the OUTER scrollable that carries the gutter (the gutter trick
+  defeats the widget's own vertical scroll) — so a plain arrow-down past the foot of the view used to
+  wait on a wheel nudge. Now the buffer's scrollable reports its offset and visible height
+  (`on_scroll`, first frame included), and after any cursor move `App` runs the panels' own
+  `keep_visible` over the cursor line — `cursor().position.line` × the fixed `LINE_HEIGHT` — and issues
+  a `scroll_to` on the buffer's id. The same follow serves a Find jump, so a match off-screen is
+  scrolled onto it. (`ponytail:` still **no horizontal scrollbar** — a fixed-position one would need a
+  second scrollable offset-synced to the gutter, reintroducing exactly the desync the gutter trick
+  designs out; a long line is still reachable by moving the cursor into it.)
+- **Find / replace, in a bar above the buffer (Ctrl+F).** A small bar rides over the top of the buffer
+  (pushing the text down, so a top match is never hidden behind it): a query field with a live
+  `n / total` count and prev / next steppers, a toggle for a replace row, and the shared close ✕ (§10).
+  Enter in the query steps to the next match, Esc closes, Ctrl+H opens straight onto the replace row.
+  The search is **ASCII case-insensitive** (both sides `to_ascii_lowercase`, which preserves every byte
+  offset, so a hit found in the lowered copy is valid in the original — a non-ASCII case pair like
+  `é`/`É` stays distinct, the same narrow-and-predictable spirit as the encoding set). Matches are
+  `(line, byte range)` because iced addresses the cursor and selection by **byte** index within a line;
+  stepping selects the span so it highlights, and the cursor-follow scrolls it in.
+- **The model owns the search; the pure parts are tested with no widget.** `Editor::find:
+  Option<Find>` holds the query, every match and which is current; it is recomputed on every edit (for
+  the count) but only *re-selected* on an explicit step, so typing never yanks the cursor onto a hit.
+  `find_matches` (all occurrences, in document order) and `apply_replacements` (splice each line's
+  matches right-to-left so earlier offsets stay valid) are plain functions with unit tests. **Replace**
+  pastes over the current selection — keeping the widget's undo — then re-searches; **Replace All**
+  rebuilds the buffer from the matches already found (so what changes is exactly what was highlighted)
+  and re-seats it as a fresh `Content`, which resets undo, the accepted cost of a bulk edit.
+  (`ponytail:` Replace All swaps each *original* match once, so a replacement that itself contains the
+  query does not cascade; a single Replace, being manual, can re-hit a replacement that still matches.)
+
 ### Where it plugs in
 
 - **`bridge.rs`** gains `SshCommand::EditLoad { editor_id, path }` /
@@ -2939,7 +2972,9 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   writes a `Vec<u8>` atomically. It reuses `open_sftp` (§17).
 - **`ssh/client.rs`** dispatches the two new commands; **`app.rs`** owns the tab wiring (open, route
   by `editor_id`, save/save-as/close, the editor keyboard shortcuts — Ctrl+S save, Ctrl+Shift+S save
-  as, Ctrl+W close — and the per-extension theme memory); **`ui/editor.rs`** is the
-  toolbar-plus-gutter-plus-editor view and the two-scheme `Palette`; **`ui/syntax.rs`** is the
+  as, Ctrl+W close, **Ctrl+F find, Ctrl+H replace, Esc close-find** — the per-extension theme memory,
+  and the cursor-follow scroll over the buffer's scrollable id); **`ui/editor.rs`** is the
+  toolbar-plus-gutter-plus-editor view, the find/replace bar, and the two-scheme `Palette`;
+  **`ui/syntax.rs`** is the
   syntect-backed `Highlighter` and the CME `syntect::Theme` (behind the `two-face` dependency, pure-Rust
   `fancy-regex`); **`ui/files.rs`** adds the Edit… item and the double-click-a-file path.

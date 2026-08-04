@@ -250,6 +250,94 @@ fn lcs_kept(original: &[String], current: &[String]) -> Vec<bool> {
 	kept
 }
 
+/// One search hit (§32): the line it is on and the byte range within that line's text. Byte offsets,
+/// not character offsets, because iced places the cursor and the selection by BYTE index within a
+/// line (`Position::column` is a byte index) — so a match found here can be selected verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Match {
+	line: usize,
+	byte_start: usize,
+	byte_end: usize,
+}
+
+/// Every occurrence of `query` across `lines`, in document order (§32). The search is ASCII
+/// case-insensitive: both sides are lowered with `to_ascii_lowercase`, which touches only `A`–`Z`
+/// and so preserves every byte offset — the offsets found in the lowered copy are valid in the
+/// original. (A non-ASCII case pair like `é`/`É` therefore stays distinct; a narrow, predictable
+/// rule, the same spirit as the encoding set.) An empty query matches nothing.
+fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
+	let mut out = Vec::new();
+	if query.is_empty() {
+		return out;
+	}
+	let needle = query.to_ascii_lowercase();
+	for (line, text) in lines.iter().enumerate() {
+		let hay = text.to_ascii_lowercase();
+		let mut from = 0;
+		// `find` respects UTF-8 boundaries, and `from` only ever lands on a match end (a boundary), so
+		// the slice below is always valid. Matches do not overlap — each search resumes past the last.
+		while let Some(rel) = hay[from..].find(&needle) {
+			let byte_start = from + rel;
+			let byte_end = byte_start + needle.len();
+			out.push(Match {
+				line,
+				byte_start,
+				byte_end,
+			});
+			from = byte_end;
+		}
+	}
+	out
+}
+
+/// Apply `replacement` to every `matches` span in `lines`, returning the new lines (§32). Each line
+/// is spliced from its rightmost match leftward so the earlier byte offsets on that line stay valid
+/// as later ones are replaced; iterating the (document-ordered) matches in reverse gives exactly that
+/// order. Used by Replace All — the matches it is handed are the ones the bar found, so what is
+/// replaced is exactly what was highlighted.
+fn apply_replacements(lines: &[String], matches: &[Match], replacement: &str) -> Vec<String> {
+	let mut out = lines.to_vec();
+	for m in matches.iter().rev() {
+		out[m.line].replace_range(m.byte_start..m.byte_end, replacement);
+	}
+	out
+}
+
+/// The editor's find/replace state (§32): the query, every match, which one is current, and the
+/// replace companion. Held as `Editor::find = Some(..)` only while the bar is open; closing drops it.
+/// The matches are recomputed whenever the query or the buffer changes, so the count the bar shows
+/// and the span it highlights always reflect the live text.
+#[derive(Debug, Default)]
+pub struct Find {
+	/// The text being searched for. Empty means no matches and an idle bar.
+	pub query: String,
+	/// The replacement text for Replace / Replace All.
+	pub replace: String,
+	/// Whether the replace row is shown (its toggle, or Ctrl+H).
+	pub replace_open: bool,
+	/// Every match in the buffer, in document order (§32).
+	matches: Vec<Match>,
+	/// Which match is current — the one highlighted and stepped from. Zero and meaningless when
+	/// `matches` is empty.
+	current: usize,
+}
+
+impl Find {
+	/// How many matches the query has right now (§32) — the denominator the bar shows.
+	pub fn count(&self) -> usize {
+		self.matches.len()
+	}
+
+	/// The current match's 1-based position for display ("3 / 12"), or `0` when there are none (§32).
+	pub fn ordinal(&self) -> usize {
+		if self.matches.is_empty() {
+			0
+		} else {
+			self.current + 1
+		}
+	}
+}
+
 /// Where an editor tab is in its lifecycle (§32). `Loading` until the bytes arrive; `Ready` with a
 /// live buffer; `Failed` when the file is too big, binary, or an unsupported encoding — the view
 /// then shows the reason in place of the buffer, never mojibake.
@@ -303,6 +391,10 @@ pub fn extension_key(path: &str) -> String {
 pub enum EditorMessage {
 	/// An action from the text widget — an edit, a selection, a scroll (§32).
 	Action(text_editor::Action),
+	/// The outer scrollable moved: its current vertical offset and visible height (§32). Reported on
+	/// every scroll and on the first frame, so the cursor-follow can keep the cursor line on screen
+	/// without tracking the widget's own hidden offset.
+	Scrolled { offset: f32, view_height: f32 },
 	/// Save the buffer to its current path (the Save button, or Ctrl+S).
 	Save,
 	/// Open the Save As prompt (the Save As button, or Ctrl+Shift+S).
@@ -313,6 +405,22 @@ pub enum EditorMessage {
 	SaveAsConfirm,
 	/// Close the Save As prompt without saving.
 	SaveAsCancel,
+	/// Open the find bar, or refocus it if already open (Ctrl+F) (§32).
+	FindOpen,
+	/// Close the find bar (Esc) (§32).
+	FindClose,
+	/// The find query changed — re-search and jump to the first match.
+	FindQueryChanged(String),
+	/// Step to the next (`true`) or previous (`false`) match, wrapping at the ends (§32).
+	FindStep(bool),
+	/// Show or hide the replace row (§32).
+	ReplaceToggle,
+	/// The replacement text changed.
+	ReplaceChanged(String),
+	/// Replace the current match and advance to the next (§32).
+	ReplaceOne,
+	/// Replace every match in one pass (§32).
+	ReplaceAll,
 }
 
 /// One open editor — the state a `Tab` carries when it is editing rather than running a session
@@ -356,6 +464,18 @@ pub struct Editor {
 	/// The colour scheme this editor paints with (§32). Seeded from `App`'s per-extension memory when
 	/// the tab opens, and changed by the toolbar's theme select.
 	pub theme: EditorTheme,
+	/// The outer scrollable's current vertical offset and its visible height, as reported by
+	/// `on_scroll` (§32). iced's `text_editor` hides its own scroll offset, so cmote defeats the
+	/// widget's internal scroll (the gutter trick) and drives one outer scrollable instead — these two
+	/// numbers are all the cursor-follow needs to keep the cursor line on screen after a move. Both
+	/// are `0.0` until the first frame reports them, and the follow skips while the height is zero so
+	/// it never scrolls against an unmeasured viewport.
+	scroll: f32,
+	view_height: f32,
+	/// The find/replace bar's state while it is open, or `None` when closed (§32). Recomputed against
+	/// the buffer on every edit so its match count stays live, and it drives the selection the buffer
+	/// highlights as the user steps through hits.
+	pub find: Option<Find>,
 }
 
 impl Editor {
@@ -378,6 +498,9 @@ impl Editor {
 			dirty: false,
 			close_after_save: false,
 			theme,
+			scroll: 0.0,
+			view_height: 0.0,
+			find: None,
 		}
 	}
 
@@ -437,6 +560,192 @@ impl Editor {
 	/// Switch the colour scheme this editor paints with (§32) — the toolbar's theme select.
 	pub fn set_theme(&mut self, theme: EditorTheme) {
 		self.theme = theme;
+	}
+
+	/// Note the outer scrollable's offset and visible height (§32), reported by `on_scroll` on every
+	/// scroll and on the first frame — the two numbers the cursor-follow reads.
+	pub fn set_viewport(&mut self, offset: f32, view_height: f32) {
+		self.scroll = offset;
+		self.view_height = view_height;
+	}
+
+	/// The outer scrollable's current vertical offset (§32).
+	pub fn scroll(&self) -> f32 {
+		self.scroll
+	}
+
+	/// The outer scrollable's visible height, `0.0` until the first frame reports it (§32). The
+	/// cursor-follow skips while this is zero, so it never scrolls against an unmeasured viewport.
+	pub fn view_height(&self) -> f32 {
+		self.view_height
+	}
+
+	/// The line the cursor sits on (§32) — what the cursor-follow scrolls onto screen. iced hides the
+	/// widget's own scroll offset but exposes the cursor, so this line index plus the fixed line
+	/// height is enough to place it in the outer scrollable.
+	pub fn cursor_line(&self) -> usize {
+		self.content.cursor().position.line
+	}
+
+	/// Open the find bar (§32), keeping any query it already held, and select its current match so
+	/// reopening lands on a hit. Returns whether a match is now selected, so the caller can scroll it
+	/// into view.
+	pub fn find_open(&mut self) -> bool {
+		if self.find.is_none() {
+			self.find = Some(Find::default());
+		}
+		self.refind()
+	}
+
+	/// Close the find bar and forget its matches (§32). The buffer's own selection is left as it is —
+	/// closing search does not deselect what was found.
+	pub fn find_close(&mut self) {
+		self.find = None;
+	}
+
+	/// The find query changed (§32): re-search from the top and select the first match. Returns
+	/// whether a match is selected, so the caller can follow it.
+	pub fn find_query_changed(&mut self, query: String) -> bool {
+		if let Some(find) = self.find.as_mut() {
+			find.query = query;
+			find.current = 0;
+		}
+		self.refind()
+	}
+
+	/// Step to the next or previous match, wrapping at the ends (§32), and select it. Returns whether
+	/// a match is selected (false when the query has none), so the caller can follow it.
+	pub fn find_step(&mut self, forward: bool) -> bool {
+		let selected = {
+			let Some(find) = self.find.as_mut() else {
+				return false;
+			};
+			let len = find.matches.len();
+			if len == 0 {
+				return false;
+			}
+			find.current = if forward {
+				(find.current + 1) % len
+			} else {
+				// `+ len - 1` rather than `- 1` so a wrap from the first match stays in range.
+				(find.current + len - 1) % len
+			};
+			find.matches[find.current]
+		};
+		self.select_match(selected);
+		true
+	}
+
+	/// Show or hide the replace row (§32).
+	pub fn replace_toggle(&mut self) {
+		if let Some(find) = self.find.as_mut() {
+			find.replace_open = !find.replace_open;
+		}
+	}
+
+	/// The replacement text changed (§32).
+	pub fn replace_changed(&mut self, text: String) {
+		if let Some(find) = self.find.as_mut() {
+			find.replace = text;
+		}
+	}
+
+	/// Replace the current match with the replacement and move to the next (§32). The match is already
+	/// the buffer's selection, so pasting over it swaps just that span — which keeps the widget's own
+	/// undo, unlike Replace All. The buffer is then re-searched (offsets have shifted) and the current
+	/// index, unchanged, now points at the following hit. Returns whether the buffer changed.
+	pub fn replace_one(&mut self) -> bool {
+		let (selected, replacement) = {
+			let Some(find) = self.find.as_ref() else {
+				return false;
+			};
+			if find.matches.is_empty() {
+				return false;
+			}
+			(find.matches[find.current], find.replace.clone())
+		};
+		// Make sure the span we are about to overwrite is exactly the selection, then paste over it.
+		self.select_match(selected);
+		self.content
+			.perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+				std::sync::Arc::new(replacement),
+			)));
+		self.recompute();
+		self.refind();
+		true
+	}
+
+	/// Replace every match in one pass (§32). Unlike a per-match walk, this rebuilds the whole buffer
+	/// from the matches the bar already found — so what changes is exactly what was highlighted — and
+	/// re-seats it as a fresh `Content`. That resets the widget's undo history, the accepted cost of a
+	/// bulk edit (a single Replace keeps undo). Returns whether the buffer changed.
+	pub fn replace_all(&mut self) -> bool {
+		let (matches, replacement) = {
+			let Some(find) = self.find.as_ref() else {
+				return false;
+			};
+			if find.matches.is_empty() {
+				return false;
+			}
+			(find.matches.clone(), find.replace.clone())
+		};
+		let lines = lines_of(&self.content);
+		let ending = self
+			.content
+			.line_ending()
+			.unwrap_or(text_editor::LineEnding::Lf);
+		let joined = apply_replacements(&lines, &matches, &replacement).join(ending.as_str());
+		self.content = text_editor::Content::with_text(&joined);
+		self.recompute();
+		self.refind();
+		true
+	}
+
+	/// Recompute the matches for the current query and select the current one so the buffer highlights
+	/// it (§32). Shared by open / query-change / replace — every path that should re-search and jump.
+	/// Returns whether a match is selected. Does nothing when the bar is closed.
+	fn refind(&mut self) -> bool {
+		if self.find.is_none() {
+			return false;
+		}
+		let lines = lines_of(&self.content);
+		let selected = {
+			let find = self.find.as_mut().expect("just checked it is Some");
+			find.matches = find_matches(&lines, &find.query);
+			if find.matches.is_empty() {
+				find.current = 0;
+				None
+			} else {
+				// A query change resets `current` to 0; a buffer edit may have shrunk the match list, so
+				// clamp either way before reading.
+				if find.current >= find.matches.len() {
+					find.current = 0;
+				}
+				Some(find.matches[find.current])
+			}
+		};
+		match selected {
+			Some(m) => {
+				self.select_match(m);
+				true
+			}
+			None => false,
+		}
+	}
+
+	/// Select a match's span in the buffer so it highlights, cursor at its end (§32). iced selects by
+	/// byte position within a line, which is exactly what `Match` carries.
+	fn select_match(&mut self, m: Match) {
+		self.content.move_to(text_editor::Cursor {
+			position: text_editor::Position {
+				line: m.line,
+				column: m.byte_end,
+			},
+			selection: Some(text_editor::Position {
+				line: m.line,
+				column: m.byte_start,
+			}),
+		});
 	}
 
 	/// Begin a Save, if one is warranted (§32): dirty, not already saving, and a channel to save
@@ -530,6 +839,15 @@ impl Editor {
 		let current = lines_of(&self.content);
 		self.dirty = current != self.original;
 		self.changed = changed_flags(&self.original, &current);
+		// Keep the find bar's match list current as the buffer changes (§32) — but do NOT re-select,
+		// so typing never yanks the cursor onto a match. The count the bar shows stays honest; the
+		// jump-to-match only happens on an explicit search step.
+		if let Some(find) = self.find.as_mut() {
+			find.matches = find_matches(&current, &find.query);
+			if find.current >= find.matches.len() {
+				find.current = 0;
+			}
+		}
 	}
 }
 
@@ -673,5 +991,62 @@ mod tests {
 		// No extension, and a dot-file whose leading dot is not one, both bucket together as "".
 		assert_eq!(extension_key("/var/log/messages"), "");
 		assert_eq!(extension_key("/home/me/.bashrc"), "");
+	}
+
+	#[test]
+	fn find_matches_are_ascii_case_insensitive_and_in_document_order() {
+		// Arrange — "to" appears twice on line 0 (once cased differently) and once on line 2.
+		let lines = lines(&["To do or not to do", "nothing here", "auto"]);
+		// Act
+		let hits = find_matches(&lines, "to");
+		// Assert — order is line then byte offset; "To", "to", and the "to" inside "auto" all match.
+		assert_eq!(
+			hits,
+			vec![
+				Match {
+					line: 0,
+					byte_start: 0,
+					byte_end: 2
+				},
+				Match {
+					line: 0,
+					byte_start: 13,
+					byte_end: 15
+				},
+				Match {
+					line: 2,
+					byte_start: 2,
+					byte_end: 4
+				},
+			]
+		);
+	}
+
+	#[test]
+	fn find_matches_do_not_overlap_and_an_empty_query_finds_nothing() {
+		// "aa" in "aaaa" is two non-overlapping hits (0..2, 2..4), not three.
+		let hits = find_matches(&lines(&["aaaa"]), "aa");
+		assert_eq!(
+			hits.iter().map(|m| m.byte_start).collect::<Vec<_>>(),
+			vec![0, 2]
+		);
+		// An empty query is idle, not "everything".
+		assert!(find_matches(&lines(&["anything"]), "").is_empty());
+	}
+
+	#[test]
+	fn apply_replacements_swaps_every_span_and_keeps_offsets_valid() {
+		// Two matches on one line: replacing right-to-left keeps the left offset valid.
+		let lines = lines(&["foo and foo", "no match", "foo"]);
+		let matches = find_matches(&lines, "foo");
+		let out = apply_replacements(&lines, &matches, "BAR");
+		assert_eq!(
+			out,
+			vec![
+				"BAR and BAR".to_owned(),
+				"no match".to_owned(),
+				"BAR".to_owned()
+			]
+		);
 	}
 }

@@ -35,9 +35,21 @@ use crate::ui::explorer::{FG, HEADER_BG, MUTED_FG, NOTICE_FG, PANEL_BG, SELECTED
 const FONT: Font = Font::with_name("Fira Mono");
 
 /// The text size and the pitch each line occupies. `LINE_HEIGHT` is set on BOTH the editor (as an
-/// absolute line height) and every gutter row, so the numbers march in step with the text (§32).
+/// absolute line height) and every gutter row, so the numbers march in step with the text (§32). It
+/// is `pub` because `App`'s cursor-follow multiplies it by the cursor line to find that line's top.
 const FONT_SIZE: f32 = 13.0;
-const LINE_HEIGHT: f32 = 20.0;
+pub const LINE_HEIGHT: f32 = 20.0;
+
+/// The widget id of the buffer's outer scrollable, so `App` can scroll the cursor line into view
+/// after a move (§32) — the same discipline the files pane and folder tree use for their scrollables.
+pub const BUFFER_SCROLL_ID: &str = "editor-buffer";
+
+/// The Y offset of a line's top within the buffer (§32): every logical line is exactly `LINE_HEIGHT`
+/// tall (the editor is laid out at `Wrapping::None`), so a line's top is just its index times the
+/// pitch. `App`'s cursor-follow feeds this to `keep_visible`.
+pub fn line_top(line: usize) -> f32 {
+	line as f32 * LINE_HEIGHT
+}
 
 /// The toolbar's fixed height.
 const TOOLBAR_HEIGHT: f32 = 34.0;
@@ -58,6 +70,13 @@ const GUTTER_PAD: f32 = 8.0;
 /// The widget id of the Save As path field, so `app` can focus it the instant the prompt opens (the
 /// same discipline as the rename field, §18).
 pub const SAVE_AS_INPUT_ID: &str = "editor-save-as";
+
+/// The widget id of the find bar's query field, so Ctrl+F can focus it the instant the bar opens
+/// (§32) — the same discipline as the Save As field.
+pub const FIND_INPUT_ID: &str = "editor-find";
+
+/// The widget id of the find bar's replace field (§32).
+pub const REPLACE_INPUT_ID: &str = "editor-replace";
 
 /// The colours one editor paints with (§32), resolved from the tab's `EditorTheme`. Every drawing
 /// helper below takes a `&Palette` rather than a global, so a tab can differ from its neighbour.
@@ -290,7 +309,131 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		.width(Length::Fill)
 		.height(Length::Shrink);
 
-	container(scrollable(content).width(Length::Fill).height(Length::Fill))
+	// One outer vertical scrollable moves the gutter and the text together (§32). It reports its
+	// offset and visible height on every scroll and on the first frame, which is what lets `App`
+	// scroll the cursor line into view after a move without tracking the widget's hidden offset.
+	let scroller = scrollable(content)
+		.id(BUFFER_SCROLL_ID)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.on_scroll(|viewport| {
+			Message::Editor(EditorMessage::Scrolled {
+				offset: viewport.absolute_offset().y,
+				view_height: viewport.bounds().height,
+			})
+		});
+	let buffer: Element<'a, Message> = container(scroller)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.style(move |_theme| container::Style {
+			background: Some(bg.into()),
+			..container::Style::default()
+		})
+		.into();
+
+	// The find bar rides above the buffer while it is open (§32), pushing the text down rather than
+	// floating over it — so a match near the top is never hidden behind the bar.
+	match &editor.find {
+		Some(find) => column![find_bar(find, p), buffer]
+			.width(Length::Fill)
+			.height(Length::Fill)
+			.into(),
+		None => buffer,
+	}
+}
+
+/// The find / replace bar (§32): a query field with a live match count and prev / next steppers, a
+/// toggle for the replace row, and a close ✕. When the replace row is shown it adds a replacement
+/// field with Replace (this match) and All. Enter in the query steps to the next match; Enter in the
+/// replacement replaces the current one — so the common flow needs no mouse.
+fn find_bar<'a>(find: &'a crate::editor::Find, p: &Palette) -> Element<'a, Message> {
+	let query = text_input("Find", &find.query)
+		.id(FIND_INPUT_ID)
+		.on_input(|value| Message::Editor(EditorMessage::FindQueryChanged(value)))
+		.on_submit(Message::Editor(EditorMessage::FindStep(true)))
+		.padding(Padding::from([3.0, 8.0]))
+		.size(FONT_SIZE)
+		.width(Length::Fixed(220.0));
+
+	// The count: "3 / 12", "No results" once a query has none, or blank while the bar is idle.
+	let has_hits = find.count() > 0;
+	let count_label = if find.query.is_empty() {
+		String::new()
+	} else if has_hits {
+		format!("{} / {}", find.ordinal(), find.count())
+	} else {
+		"No results".to_owned()
+	};
+	let count = text(count_label)
+		.size(11)
+		.color(p.muted)
+		.width(Length::Fixed(72.0));
+
+	let first_row = row![
+		query,
+		count,
+		tool_button(
+			"‹",
+			Message::Editor(EditorMessage::FindStep(false)),
+			has_hits,
+			p
+		),
+		tool_button(
+			"›",
+			Message::Editor(EditorMessage::FindStep(true)),
+			has_hits,
+			p
+		),
+		tool_button(
+			if find.replace_open {
+				"Replace ▲"
+			} else {
+				"Replace ▼"
+			},
+			Message::Editor(EditorMessage::ReplaceToggle),
+			true,
+			p,
+		),
+		container(text("")).width(Length::Fill),
+		crate::ui::dialog::close_button(Message::Editor(EditorMessage::FindClose)),
+	]
+	.spacing(6)
+	.align_y(Vertical::Center);
+
+	let mut stack = column![first_row].spacing(6);
+	if find.replace_open {
+		let replace = text_input("Replace with", &find.replace)
+			.id(REPLACE_INPUT_ID)
+			.on_input(|value| Message::Editor(EditorMessage::ReplaceChanged(value)))
+			.on_submit(Message::Editor(EditorMessage::ReplaceOne))
+			.padding(Padding::from([3.0, 8.0]))
+			.size(FONT_SIZE)
+			.width(Length::Fixed(220.0));
+		stack = stack.push(
+			row![
+				replace,
+				tool_button(
+					"Replace",
+					Message::Editor(EditorMessage::ReplaceOne),
+					has_hits,
+					p
+				),
+				tool_button(
+					"All",
+					Message::Editor(EditorMessage::ReplaceAll),
+					has_hits,
+					p
+				),
+			]
+			.spacing(6)
+			.align_y(Vertical::Center),
+		);
+	}
+
+	let bg = p.chrome_bg;
+	container(stack)
+		.width(Length::Fill)
+		.padding(Padding::from([6.0, 10.0]))
 		.style(move |_theme| container::Style {
 			background: Some(bg.into()),
 			..container::Style::default()
