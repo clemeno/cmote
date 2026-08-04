@@ -115,7 +115,8 @@ fn toolbar(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 			Message::Editor(EditorMessage::SaveAsStart),
 			can_save_as
 		),
-		tool_button("Close", Message::TabCloseRequested(tab_id), true),
+		// The same ✕ that closes a dialog (§10), so "close this" is one icon app-wide.
+		crate::ui::dialog::close_button(Message::TabCloseRequested(tab_id)),
 	]
 	.spacing(6)
 	.align_y(Vertical::Center);

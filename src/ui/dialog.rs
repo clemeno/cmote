@@ -197,23 +197,7 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 		.width(Length::Fill)
 		.align_x(Horizontal::Left);
 
-	// Transparent so only the ✕ shows (no raised-button chrome), with the glyph
-	// centred in a fixed square so it aligns to the middle of the header row. The
-	// style ignores theme and status — always no fill, our foreground glyph — so it
-	// reads as a plain icon.
-	let glyph = container(text("✕").size(TITLE_SIZE))
-		.width(Length::Fixed(CLOSE_BUTTON_SIZE))
-		.height(Length::Fixed(CLOSE_BUTTON_SIZE))
-		.align_x(Horizontal::Center)
-		.align_y(Vertical::Center);
-	let close = button(glyph)
-		.padding(0)
-		.on_press(on_close)
-		.style(|_theme, _status| button::Style {
-			background: None,
-			text_color: FG,
-			..button::Style::default()
-		});
+	let close = close_button(on_close);
 
 	let bar = container(row![label, close].spacing(10).align_y(Vertical::Center))
 		.width(Length::Fill)
@@ -237,6 +221,27 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 	mouse_area(bar)
 		.on_press(Message::DialogGrabbed)
 		.on_release(Message::DialogReleased)
+		.into()
+}
+
+/// The shared close (✕) button (§10, §32): a transparent square with the glyph centred, no
+/// raised chrome, emitting `on_press`. The dialog header pins it top-right; the editor toolbar
+/// reuses it for its Close, so a "close this" affordance is the same icon everywhere. The style
+/// ignores theme and status — always no fill, our foreground glyph — so it reads as a plain icon.
+pub fn close_button(on_press: Message) -> Element<'static, Message> {
+	let glyph = container(text("✕").size(TITLE_SIZE))
+		.width(Length::Fixed(CLOSE_BUTTON_SIZE))
+		.height(Length::Fixed(CLOSE_BUTTON_SIZE))
+		.align_x(Horizontal::Center)
+		.align_y(Vertical::Center);
+	button(glyph)
+		.padding(0)
+		.on_press(on_press)
+		.style(|_theme, _status| button::Style {
+			background: None,
+			text_color: FG,
+			..button::Style::default()
+		})
 		.into()
 }
 
