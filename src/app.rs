@@ -1809,59 +1809,60 @@ impl Tab {
 		match message {
 			EditorMessage::Action(action) => {
 				editor.perform(action);
-				// Keep the cursor line on screen after the move (§32). iced's `text_editor` follows the
-				// cursor horizontally itself, but the vertical scroll lives on the OUTER scrollable that
-				// carries the gutter — so the vertical follow is driven here, the same keep-it-visible math
-				// the panels use for a selected cell (§20).
-				if let Some(offset) = follow_editor_cursor(editor) {
-					return scroll_editor_to(offset);
+				// Keep the cursor on screen after the move (§32). The buffer no longer scrolls itself on
+				// EITHER axis (the gutter/horizontal trick), so both follows are driven here — the same
+				// keep-it-visible math the panels use for a selected cell (§20), now applied on both axes.
+				if let Some(task) = follow_editor_cursor_task(editor) {
+					return task;
 				}
 			}
 			EditorMessage::Scrolled {
-				offset,
+				offset_x,
+				offset_y,
+				view_width,
 				view_height,
-			} => editor.set_viewport(offset, view_height),
+			} => editor.set_viewport(offset_x, offset_y, view_width, view_height),
 			EditorMessage::FindOpen => {
 				// Open (or keep) the bar and focus its field so the user types straight away; if a query
 				// was already there, jump to its current match too.
 				let followed = editor.find_open();
 				let focus = iced::widget::operation::focus(ui::editor::FIND_INPUT_ID);
-				if followed && let Some(offset) = follow_editor_cursor(editor) {
-					return iced::Task::batch([focus, scroll_editor_to(offset)]);
+				if followed && let Some(task) = follow_editor_cursor_task(editor) {
+					return iced::Task::batch([focus, task]);
 				}
 				return focus;
 			}
 			EditorMessage::FindClose => editor.find_close(),
 			EditorMessage::FindQueryChanged(query) => {
 				if editor.find_query_changed(query)
-					&& let Some(offset) = follow_editor_cursor(editor)
+					&& let Some(task) = follow_editor_cursor_task(editor)
 				{
-					return scroll_editor_to(offset);
+					return task;
 				}
 			}
 			EditorMessage::FindStep(forward) => {
 				if editor.find_step(forward)
-					&& let Some(offset) = follow_editor_cursor(editor)
+					&& let Some(task) = follow_editor_cursor_task(editor)
 				{
-					return scroll_editor_to(offset);
+					return task;
 				}
 			}
 			EditorMessage::ReplaceToggle => editor.replace_toggle(),
 			EditorMessage::ReplaceChanged(text) => editor.replace_changed(text),
 			EditorMessage::ReplaceOne => {
 				if editor.replace_one()
-					&& let Some(offset) = follow_editor_cursor(editor)
+					&& let Some(task) = follow_editor_cursor_task(editor)
 				{
-					return scroll_editor_to(offset);
+					return task;
 				}
 			}
 			EditorMessage::ReplaceAll => {
 				// Follow the cursor to the current match afterwards, like ReplaceOne / FindStep — the
 				// rebuild re-selects it, so keep it on screen instead of leaving the view where it was.
 				if editor.replace_all()
-					&& let Some(offset) = follow_editor_cursor(editor)
+					&& let Some(task) = follow_editor_cursor_task(editor)
 				{
-					return scroll_editor_to(offset);
+					return task;
 				}
 			}
 			EditorMessage::Save => {
@@ -5895,16 +5896,49 @@ fn follow_editor_cursor(editor: &mut crate::editor::Editor) -> Option<f32> {
 	}
 	// Pre-seat the offset so a second keystroke arriving before the scrollable reports back still
 	// measures against the value we just asked for.
-	editor.set_viewport(offset, view_height);
+	editor.set_scroll_y(offset);
 	Some(offset)
 }
 
-/// The `scroll_to` task that moves the editor buffer to `offset` (§32) — the vertical half of the
-/// cursor-follow, the same operation the panels use to bring a selected cell on screen.
-fn scroll_editor_to(offset: f32) -> iced::Task<Message> {
+/// The horizontal half of the cursor-follow (§32) — the mirror of `follow_editor_cursor` on the X
+/// axis. A fixed-width `text_editor` no longer scrolls to keep the cursor's column in view, so this
+/// does it: bring the cursor's column x into the visible width, pre-seating the horizontal offset.
+/// Returns the new offset when a scroll is needed, else `None` (already visible, or width unmeasured).
+fn follow_editor_cursor_x(editor: &mut crate::editor::Editor) -> Option<f32> {
+	let view_width = editor.view_width();
+	if view_width <= 0.0 {
+		return None;
+	}
+	let left = ui::editor::col_x(editor.cursor_display_column());
+	let offset = keep_visible(
+		editor.scroll_x(),
+		view_width,
+		left,
+		ui::editor::CHAR_ADVANCE,
+	);
+	if offset == editor.scroll_x() {
+		return None;
+	}
+	editor.set_scroll_x(offset);
+	Some(offset)
+}
+
+/// Follow the cursor on both axes after a move (§32) and return the one `scroll_to` task that brings
+/// it on screen, or `None` when neither axis needs to move. Both follows pre-seat the model, and the
+/// task always carries BOTH offsets so scrolling one axis never resets the other to zero.
+fn follow_editor_cursor_task(editor: &mut crate::editor::Editor) -> Option<iced::Task<Message>> {
+	let moved_y = follow_editor_cursor(editor).is_some();
+	let moved_x = follow_editor_cursor_x(editor).is_some();
+	(moved_x || moved_y).then(|| scroll_editor_to(editor.scroll_x(), editor.scroll()))
+}
+
+/// The `scroll_to` task that moves the editor buffer to `(x, y)` (§32) — the operation the panels use
+/// to bring a selected cell on screen, here on both axes so a horizontal follow keeps the vertical
+/// offset and vice versa.
+fn scroll_editor_to(x: f32, y: f32) -> iced::Task<Message> {
 	iced::widget::operation::scroll_to(
 		ui::editor::BUFFER_SCROLL_ID,
-		iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
+		iced::widget::scrollable::AbsoluteOffset { x, y },
 	)
 }
 

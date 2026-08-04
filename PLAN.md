@@ -2955,16 +2955,30 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
 
 ### Moving through the file — find, and following the cursor
 
-- **The cursor stays on screen.** iced's `text_editor` follows the cursor *horizontally* on its own,
-  but the vertical scroll lives on the OUTER scrollable that carries the gutter (the gutter trick
-  defeats the widget's own vertical scroll) — so a plain arrow-down past the foot of the view used to
-  wait on a wheel nudge. Now the buffer's scrollable reports its offset and visible height
-  (`on_scroll`, first frame included), and after any cursor move `App` runs the panels' own
+- **The cursor stays on screen, on both axes.** The vertical scroll lives on the buffer's scrollable
+  (the gutter trick defeats the widget's own vertical scroll) — so a plain arrow-down past the foot of
+  the view used to wait on a wheel nudge. Now the buffer's scrollable reports its offset and visible
+  size (`on_scroll`, first frame included), and after any cursor move `App` runs the panels' own
   `keep_visible` over the cursor line — `cursor().position.line` × the fixed `LINE_HEIGHT` — and issues
   a `scroll_to` on the buffer's id. The same follow serves a Find jump, so a match off-screen is
-  scrolled onto it. (`ponytail:` still **no horizontal scrollbar** — a fixed-position one would need a
-  second scrollable offset-synced to the gutter, reintroducing exactly the desync the gutter trick
-  designs out; a long line is still reachable by moving the cursor into it.)
+  scrolled onto it.
+- **Horizontal scrolling — the last long-line gap closed (v3.x).** The buffer now has a real
+  **horizontal scrollbar** and wheel, so a line wider than the pane is reachable without arrowing the
+  cursor into it. It could not be a bar synced to the widget's *own* horizontal scroll — iced hides that
+  offset exactly as it hides the vertical one — so the same trick the height uses is applied to the
+  width: the `text_editor` is laid out at an explicit fixed **content width** (its widest line from
+  `Editor::content_columns` × the fixed `CHAR_ADVANCE`, never below the viewport), so it never scrolls
+  itself, and a `scrollable::Direction::Both` supplies the visible bar and the wheel. That forced the
+  **gutter out of the shared scrollable** — a `Both` bar at the viewport foot cannot coexist with a
+  vertical scroll shared with a pinned gutter — so the gutter is now a `pin` translated up by the
+  reported offset (`pin` clips its child to its bounds), a *pure function* of that offset with **zero
+  sync lag**, preserving the old pixel-perfect lockstep without sharing a scrollable. A fixed-width
+  editor no longer follows the cursor's column itself, so `App` gained a **horizontal cursor-follow**
+  mirroring the vertical one (`col_x(cursor_display_column)` through the same `keep_visible`), and every
+  `scroll_to` now carries *both* offsets so following one axis never zeroes the other.
+  (`ponytail:` the content width is a display-column estimate — tabs expanded to 8, every other glyph
+  one column — so a double-width CJK line is under-measured by a hair, its extent a touch short, never
+  long; ASCII source, the common case, is exact.)
 - **Find / replace, in a bar above the buffer (Ctrl+F).** A small bar rides over the top of the buffer
   (pushing the text down, so a top match is never hidden behind it): a query field with a live
   `n / total` count and prev / next steppers, a toggle for a replace row, and the shared close ✕ (§10).

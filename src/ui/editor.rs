@@ -16,13 +16,23 @@
 // gutter placed beside it would desync the instant the text scrolled. Instead the editor is laid out
 // with its height SHRUNK to the whole buffer (`text_editor` defaults to `Length::Shrink`) and
 // `Wrapping::None`, so every logical line is exactly one row of `LINE_HEIGHT` and the editor never
-// scrolls itself — one outer `scrollable` moves the gutter and the text together, and the numbers
-// stay pixel-aligned with their lines by construction.
+// scrolls itself vertically — a `Direction::Both` `scrollable` moves the text, and the gutter, drawn
+// beside it, is not in that scrollable at all: it is a `pin` translated by the reported scroll offset,
+// so its numbers stay pixel-aligned with their lines by construction, with zero sync lag.
+//
+// The horizontal mirror (§32): the same widget hides its HORIZONTAL offset too, so a scrollbar synced
+// to it is impossible for the same reason. So the editor is given an explicit fixed WIDTH — its widest
+// line, from `content_columns` × the character advance — exactly as its height is the whole buffer, so
+// it never scrolls itself horizontally either; the `Both` scrollable supplies the visible horizontal
+// bar and the wheel, and a horizontal cursor-follow (driven by `App`, the mirror of the vertical one)
+// keeps the cursor column on screen after a move — the last long-line gap closed.
 
 use iced::alignment::{Horizontal, Vertical};
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
-	button, column, container, mouse_area, row, scrollable, stack, text, text_editor, text_input,
+	button, column, container, mouse_area, pin, row, scrollable, stack, text, text_editor,
+	text_input,
 };
 use iced::{Background, Border, Color, Element, Font, Length, Padding};
 
@@ -49,6 +59,28 @@ pub const BUFFER_SCROLL_ID: &str = "editor-buffer";
 /// pitch. `App`'s cursor-follow feeds this to `keep_visible`.
 pub fn line_top(line: usize) -> f32 {
 	line as f32 * LINE_HEIGHT
+}
+
+/// Fira Mono's fixed advance at `FONT_SIZE` — 0.6 em, the exact monospace pitch the terminal grid also
+/// relies on (§9, §11). The buffer's horizontal scroll extent and the horizontal cursor-follow both
+/// scale display columns by it. `pub` because `App`'s cursor-follow uses it as the cursor's "width".
+pub const CHAR_ADVANCE: f32 = FONT_SIZE * 0.6;
+
+/// The buffer text's left/right padding — the `[0.0, 8.0]` set on the `text_editor` (§32). The content
+/// width adds it on both sides; the cursor-follow adds the left one to a column's x.
+const TEXT_PAD_X: f32 = 8.0;
+
+/// The buffer's natural pixel width for a given widest-line column count (§32) — the width the
+/// `text_editor` is laid out at so it never scrolls itself horizontally. Both paddings plus one extra
+/// advance of slack, so the cursor sitting just past the last glyph of the longest line is reachable.
+pub fn content_width(cols: usize) -> f32 {
+	cols as f32 * CHAR_ADVANCE + TEXT_PAD_X * 2.0 + CHAR_ADVANCE
+}
+
+/// The X offset of a display column's left edge within the buffer widget (§32) — the horizontal
+/// counterpart of `line_top`. `App`'s horizontal cursor-follow feeds this to `keep_visible`.
+pub fn col_x(col: usize) -> f32 {
+	col as f32 * CHAR_ADVANCE + TEXT_PAD_X
 }
 
 /// The toolbar's fixed height.
@@ -276,20 +308,29 @@ fn theme_option(
 		.into()
 }
 
-/// The buffer with its line-number gutter, both inside one vertical `scrollable` so they scroll in
-/// lockstep (§32).
+/// The buffer with its pinned line-number gutter beside a horizontally- and vertically-scrollable
+/// text column (§32). The gutter rides the reported vertical offset (a `pin`, not the scrollable), so
+/// it stays in lockstep with the text; the text is laid out at its full content width so the `Both`
+/// scrollable supplies the horizontal bar.
 fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let bg = p.buffer_bg;
 	let fg = p.fg;
 	let muted = p.muted;
 	let selection = p.selection;
+	// Lay the editor out exactly as wide as its widest line, but never narrower than the viewport so a
+	// short file still fills the pane and a click past a line's end still lands on it (§32). At its
+	// content width the widget never scrolls itself — the outer `Both` scrollable does.
+	let content_px = content_width(editor.content_columns()).max(editor.view_width());
 	let editor_widget = text_editor(&editor.content)
 		.on_action(|action| Message::Editor(EditorMessage::Action(action)))
 		.font(FONT)
 		.size(FONT_SIZE)
 		.line_height(LineHeight::Absolute(LINE_HEIGHT.into()))
 		.wrapping(Wrapping::None)
-		.padding(Padding::from([0.0, 8.0]))
+		.padding(Padding::from([0.0, TEXT_PAD_X]))
+		// `text_editor::width` takes an absolute pixel width (not a `Length`) — exactly what we want: the
+		// widget is laid out at its content width so it never scrolls itself horizontally (§32).
+		.width(content_px)
 		.height(Length::Shrink)
 		.style(move |_theme, _status| text_editor::Style {
 			// Transparent, so the current-match band drawn behind the text shows through (§32). The
@@ -325,43 +366,50 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		editor_widget.into()
 	};
 
-	let body = row![gutter(editor, p), editor_element]
-		.width(Length::Fill)
-		.height(Length::Shrink);
-
 	// A translucent band behind the current find match's line (§32), so the match is visible even while
 	// the find field holds focus (iced paints the buffer's own selection only when the buffer itself is
-	// focused). It rides BEHIND the text in a `stack` so the glyphs draw over it; the gutter, being
-	// opaque, hides the band on its side, leaving it to wash only the text column. Three fixed spacers,
-	// not one widget per line — the band is a single row, wherever it sits.
+	// focused). It rides BEHIND the text in a `stack` so the glyphs draw over it, and is content-wide so
+	// it washes the whole line at any horizontal offset. Three fixed spacers, not one widget per line —
+	// the band is a single row, wherever it sits. The gutter lights the match row separately (§32).
 	let line_count = editor.content.line_count().max(1);
-	let content: Element<'a, Message> = match editor.find_match_line() {
+	let text_layer: Element<'a, Message> = match editor.find_match_line() {
 		Some(line) if line < line_count => {
-			stack![line_band(line_count, line, p.match_line), body].into()
+			stack![line_band(line_count, line, p.match_line), editor_element].into()
 		}
-		_ => body.into(),
+		_ => editor_element,
 	};
 
-	// One outer vertical scrollable moves the gutter and the text together (§32). It reports its
-	// offset and visible height on every scroll and on the first frame, which is what lets `App`
-	// scroll the cursor line into view after a move without tracking the widget's hidden offset.
-	let scroller = scrollable(content)
+	// The `Both` scrollable moves the text on both axes (§32) and reports its offset and visible size —
+	// the four numbers that let `App` follow the cursor's line AND column without reading the widget's
+	// hidden offsets. The gutter is NOT inside it: it pins to the reported vertical offset instead.
+	let scroller = scrollable(text_layer)
 		.id(BUFFER_SCROLL_ID)
 		.width(Length::Fill)
 		.height(Length::Fill)
+		.direction(Direction::Both {
+			vertical: Scrollbar::default(),
+			horizontal: Scrollbar::default(),
+		})
 		.on_scroll(|viewport| {
 			Message::Editor(EditorMessage::Scrolled {
-				offset: viewport.absolute_offset().y,
+				offset_x: viewport.absolute_offset().x,
+				offset_y: viewport.absolute_offset().y,
+				view_width: viewport.bounds().width,
 				view_height: viewport.bounds().height,
 			})
 		});
-	let buffer: Element<'a, Message> = container(scroller)
+	let text_pane: Element<'a, Message> = container(scroller)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.style(move |_theme| container::Style {
 			background: Some(bg.into()),
 			..container::Style::default()
 		})
+		.into();
+
+	let buffer: Element<'a, Message> = row![gutter(editor, p), text_pane]
+		.width(Length::Fill)
+		.height(Length::Fill)
 		.into();
 
 	// The find bar rides above the buffer while it is open (§32), pushing the text down rather than
@@ -499,10 +547,16 @@ fn find_bar<'a>(find: &'a crate::editor::Find, p: &Palette) -> Element<'a, Messa
 /// changed since load (§32). Each row is exactly `LINE_HEIGHT`, matching the editor's absolute line
 /// height so the two stay aligned.
 ///
+/// Pinned, not scrolled (§32): the gutter is NOT inside the buffer's scrollable — a `Both` scrollable's
+/// horizontal bar could not coexist with a shared vertical scroll while keeping the gutter still. So
+/// the full-height column of rows is placed in a `pin` translated up by the reported vertical offset
+/// (`pin` clips its child to its own bounds), which lands each number on its line as a pure function of
+/// that offset — zero sync lag, the old lockstep preserved without sharing a scrollable.
+///
 /// Virtualised (§32): iced rebuilds and lays out the WHOLE view tree every frame, so one widget per
 /// line made a many-thousand-line file's gutter the dominant per-frame cost — while the buffer beside
 /// it is a single `text_editor` whose off-screen glyphs the renderer clips. So the gutter materialises
-/// only the rows the outer scrollable currently shows (plus a small overscan) and preserves the total
+/// only the rows the buffer scrollable currently shows (plus a small overscan) and preserves the total
 /// height with one spacer above and one below — the same three-piece trick `line_band` uses. The
 /// window comes from the offset and visible height the scrollable already reports (§32); until the
 /// first frame measures the viewport every row is drawn, that pre-virtualisation cost paid just once.
@@ -571,12 +625,21 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		);
 	}
 	// The lines below the window, likewise collapsed — the two spacers plus the drawn rows sum to
-	// exactly `count × LINE_HEIGHT`, so the gutter still matches the buffer and the find-line band.
+	// exactly `count × LINE_HEIGHT`, so the column matches the buffer's height and the find-line band.
 	rows.push(fixed_spacer((count - last) as f32 * LINE_HEIGHT));
 
+	// Pin the full-height column up by the reported offset so line `first_visible` sits at the top of
+	// the gutter, then clip it to the viewport (§32). `pin` clips its child to its own bounds already;
+	// the container's `clip` is belt-and-braces and carries the gutter fill behind the whole column.
 	let bg = p.chrome_bg;
-	container(column(rows))
+	let pinned = pin(column(rows).width(Length::Fill))
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.y(-editor.scroll());
+	container(pinned)
 		.width(Length::Fixed(width))
+		.height(Length::Fill)
+		.clip(true)
 		.style(move |_theme| container::Style {
 			background: Some(bg.into()),
 			..container::Style::default()
@@ -790,5 +853,19 @@ mod tests {
 	fn a_short_file_draws_all_its_lines() {
 		// When the file is shorter than the viewport, every line is in the window.
 		assert_eq!(visible_lines(0.0, 400.0, 10), (0, 10));
+	}
+
+	#[test]
+	fn the_content_width_leaves_room_past_the_last_column() {
+		// The widest-line extent must reach past the last glyph, so the cursor sitting after it is
+		// scrollable into view — content_width is strictly wider than the last column's left x.
+		let cols = 80;
+		assert!(
+			content_width(cols) > col_x(cols),
+			"extent reaches past the final column"
+		);
+		// A column's x advances by exactly one character each step, offset by the left padding.
+		assert_eq!(col_x(1) - col_x(0), CHAR_ADVANCE);
+		assert_eq!(col_x(0), TEXT_PAD_X);
 	}
 }

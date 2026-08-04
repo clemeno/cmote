@@ -18,6 +18,27 @@ use iced::widget::text_editor;
 /// keystroke can never pay an O(n²) diff over the whole buffer.
 const LCS_BAND_CAP: usize = 1000;
 
+/// A tab's width in display columns for the horizontal-extent estimate (§32) — the common 8, matching
+/// how most tools expand a tab. It sizes the scroll extent and places the cursor for the horizontal
+/// follow; it never renders (iced lays the glyphs out itself, so this need only be close, not exact).
+const TAB_WIDTH: usize = 8;
+
+/// The display-column width of a line (§32): a tab advances to the next `TAB_WIDTH` stop, every other
+/// character counts as one column. `ponytail:` a double-width CJK glyph counts as one, so a CJK-heavy
+/// line's width is under-estimated (the horizontal extent is a hair short there, never long) — ASCII
+/// source, the common case, is exact.
+pub fn display_columns(text: &str) -> usize {
+	let mut cols = 0;
+	for ch in text.chars() {
+		if ch == '\t' {
+			cols += TAB_WIDTH - (cols % TAB_WIDTH);
+		} else {
+			cols += 1;
+		}
+	}
+	cols
+}
+
 /// The BOMs we recognise. A leading byte-order mark decides the encoding; everything else is read
 /// as UTF-8 without one (§32).
 const BOM_UTF8: [u8; 3] = [0xEF, 0xBB, 0xBF];
@@ -410,10 +431,16 @@ pub fn extension_key(path: &str) -> String {
 pub enum EditorMessage {
 	/// An action from the text widget — an edit, a selection, a scroll (§32).
 	Action(text_editor::Action),
-	/// The outer scrollable moved: its current vertical offset and visible height (§32). Reported on
-	/// every scroll and on the first frame, so the cursor-follow can keep the cursor line on screen
-	/// without tracking the widget's own hidden offset.
-	Scrolled { offset: f32, view_height: f32 },
+	/// The buffer's scrollable moved: its current offset and visible size on BOTH axes (§32). Reported
+	/// on every scroll and on the first frame, so the cursor-follow can keep the cursor line and column
+	/// on screen without tracking the widget's own hidden offset. The buffer now scrolls horizontally
+	/// too (a long line no longer only reachable by arrowing into it), so all four numbers ride here.
+	Scrolled {
+		offset_x: f32,
+		offset_y: f32,
+		view_width: f32,
+		view_height: f32,
+	},
 	/// Save the buffer to its current path (the Save button, or Ctrl+S).
 	Save,
 	/// Open the Save As prompt (the Save As button, or Ctrl+Shift+S).
@@ -483,14 +510,22 @@ pub struct Editor {
 	/// The colour scheme this editor paints with (§32). Seeded from `App`'s per-extension memory when
 	/// the tab opens, and changed by the toolbar's theme select.
 	pub theme: EditorTheme,
-	/// The outer scrollable's current vertical offset and its visible height, as reported by
-	/// `on_scroll` (§32). iced's `text_editor` hides its own scroll offset, so cmote defeats the
-	/// widget's internal scroll (the gutter trick) and drives one outer scrollable instead — these two
-	/// numbers are all the cursor-follow needs to keep the cursor line on screen after a move. Both
-	/// are `0.0` until the first frame reports them, and the follow skips while the height is zero so
-	/// it never scrolls against an unmeasured viewport.
+	/// The buffer scrollable's current offset and visible size on both axes, as reported by `on_scroll`
+	/// (§32). iced's `text_editor` hides its own scroll offset, so cmote defeats the widget's internal
+	/// scroll (the gutter/horizontal trick) and drives one outer scrollable instead — these numbers are
+	/// all the cursor-follow needs to keep the cursor line AND column on screen after a move. All are
+	/// `0.0` until the first frame reports them, and each follow skips while its extent is zero so it
+	/// never scrolls against an unmeasured viewport. `scroll_x` / `view_width` drive the horizontal
+	/// follow, the mirror of `scroll` / `view_height` for the vertical one.
 	scroll: f32,
 	view_height: f32,
+	scroll_x: f32,
+	view_width: f32,
+	/// The buffer's widest line in display columns (tabs expanded), recomputed on every edit (§32).
+	/// The view multiplies it by the fixed character advance to size the horizontal scroll extent, so
+	/// the `text_editor` is laid out exactly as wide as its content and never scrolls itself — the
+	/// horizontal counterpart of laying its HEIGHT out to the whole buffer.
+	content_cols: usize,
 	/// The find/replace bar's state while it is open, or `None` when closed (§32). Recomputed against
 	/// the buffer on every edit so its match count stays live, and it drives the selection the buffer
 	/// highlights as the user steps through hits.
@@ -519,6 +554,9 @@ impl Editor {
 			theme,
 			scroll: 0.0,
 			view_height: 0.0,
+			scroll_x: 0.0,
+			view_width: 0.0,
+			content_cols: 0,
 			find: None,
 		}
 	}
@@ -581,22 +619,71 @@ impl Editor {
 		self.theme = theme;
 	}
 
-	/// Note the outer scrollable's offset and visible height (§32), reported by `on_scroll` on every
-	/// scroll and on the first frame — the two numbers the cursor-follow reads.
-	pub fn set_viewport(&mut self, offset: f32, view_height: f32) {
-		self.scroll = offset;
+	/// Note the buffer scrollable's offset and visible size on both axes (§32), reported by `on_scroll`
+	/// on every scroll and on the first frame — the numbers the cursor-follow reads.
+	pub fn set_viewport(
+		&mut self,
+		offset_x: f32,
+		offset_y: f32,
+		view_width: f32,
+		view_height: f32,
+	) {
+		self.scroll_x = offset_x;
+		self.scroll = offset_y;
+		self.view_width = view_width;
 		self.view_height = view_height;
 	}
 
-	/// The outer scrollable's current vertical offset (§32).
+	/// Pre-seat the vertical offset after a cursor-follow scroll (§32), so a second keystroke arriving
+	/// before the scrollable reports back still measures against the value we just asked for.
+	pub fn set_scroll_y(&mut self, offset: f32) {
+		self.scroll = offset;
+	}
+
+	/// Pre-seat the horizontal offset after a cursor-follow scroll (§32) — the mirror of `set_scroll_y`.
+	pub fn set_scroll_x(&mut self, offset: f32) {
+		self.scroll_x = offset;
+	}
+
+	/// The buffer scrollable's current vertical offset (§32).
 	pub fn scroll(&self) -> f32 {
 		self.scroll
 	}
 
-	/// The outer scrollable's visible height, `0.0` until the first frame reports it (§32). The
+	/// The buffer scrollable's current horizontal offset (§32).
+	pub fn scroll_x(&self) -> f32 {
+		self.scroll_x
+	}
+
+	/// The buffer scrollable's visible height, `0.0` until the first frame reports it (§32). The
 	/// cursor-follow skips while this is zero, so it never scrolls against an unmeasured viewport.
 	pub fn view_height(&self) -> f32 {
 		self.view_height
+	}
+
+	/// The buffer scrollable's visible width, `0.0` until the first frame reports it (§32) — the
+	/// horizontal counterpart of `view_height`.
+	pub fn view_width(&self) -> f32 {
+		self.view_width
+	}
+
+	/// The buffer's widest line in display columns (§32) — the view scales it by the character advance
+	/// to size the horizontal scroll extent.
+	pub fn content_columns(&self) -> usize {
+		self.content_cols
+	}
+
+	/// The cursor's horizontal position in display columns, tabs expanded (§32) — the mirror of
+	/// `cursor_line`, read by the horizontal cursor-follow. Zero when the cursor's line cannot be read.
+	pub fn cursor_display_column(&self) -> usize {
+		let cursor = self.content.cursor().position;
+		let Some(line) = self.content.lines().nth(cursor.line) else {
+			return 0;
+		};
+		// `cursor.column` is a byte index on a char boundary within the line's text; slice up to it and
+		// count the columns before it. A defensive `unwrap_or` guards a stale column past a shrunk line.
+		let prefix = line.text.get(..cursor.column).unwrap_or(&line.text);
+		display_columns(prefix)
 	}
 
 	/// The line the cursor sits on (§32) — what the cursor-follow scrolls onto screen. iced hides the
@@ -887,6 +974,14 @@ impl Editor {
 		let current = lines_of(&self.content);
 		self.dirty = current != self.original;
 		self.changed = changed_flags(&self.original, &current);
+		// The widest line drives the horizontal scroll extent (§32) — recomputed here so the extent
+		// tracks an edit that lengthens or shortens the longest line. O(total chars) like the diff above,
+		// paid only on an edit, never on the render path.
+		self.content_cols = current
+			.iter()
+			.map(|line| display_columns(line))
+			.max()
+			.unwrap_or(0);
 		// Keep the find bar's match list current as the buffer changes (§32) — but do NOT re-select,
 		// so typing never yanks the cursor onto a match. The count the bar shows stays honest; the
 		// jump-to-match only happens on an explicit search step.
@@ -1053,6 +1148,20 @@ mod tests {
 		let base = lines(&["a"]);
 		let now = lines(&["a", "b", "c"]);
 		assert_eq!(changed_flags(&base, &now), vec![false, true, true]);
+	}
+
+	#[test]
+	fn display_columns_expands_tabs_to_the_next_stop() {
+		// Plain ASCII is one column per char.
+		assert_eq!(display_columns("hello"), 5);
+		// A leading tab jumps to the first stop (8), then two more chars.
+		assert_eq!(display_columns("\tab"), 10);
+		// A tab after four chars advances to the next multiple of 8 (4 → 8), not by a full 8.
+		assert_eq!(display_columns("abcd\tx"), 9);
+		// Two tabs from column 0: 8 then 16.
+		assert_eq!(display_columns("\t\t"), 16);
+		// An empty line is zero columns wide.
+		assert_eq!(display_columns(""), 0);
 	}
 
 	#[test]
