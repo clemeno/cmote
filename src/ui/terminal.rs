@@ -197,8 +197,9 @@ pub fn view<'a>(
 		body: dialog_body,
 		drag,
 	} = modals;
-	// The grid itself: one widget filling the space left under the status bar (§9).
-	let grid = crate::ui::grid::grid(terminal.screen(), selection);
+	// The grid itself: one widget filling the space left under the status bar (§9). It is handed
+	// the rows a shell prompt sits on (§34) so it can tick them in the left gutter.
+	let grid = crate::ui::grid::grid(terminal.screen(), selection, terminal.prompt_rows());
 
 	// It reacts to the mouse (§10): press-drag-release drives the text selection and a
 	// right-press opens the context menu. `on_move` reports a point local to the grid,

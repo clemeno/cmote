@@ -128,6 +128,19 @@ const SCROLLBAR_INSET: f32 = 1.0;
 const SCROLLBAR_MIN_THUMB: f32 = 16.0;
 const SCROLLBAR_THUMB_COLOR: Color = Color::from_rgba(0.82, 0.82, 0.82, 0.55);
 
+/// The prompt tick (§34): a small mark drawn in the LEFT padding gutter beside every shell
+/// prompt on screen, from the OSC 133 marks (`Terminal::prompt_rows`). It mirrors the scroll
+/// indicator on the right — a read-only mark living in the padding, never over a cell — so the
+/// eye can find where each command's prompt began and a prompt jump has something visible to land
+/// on. `PROMPT_TICK_WIDTH` wide, inset `PROMPT_TICK_INSET` from the left edge (the two together
+/// stay inside `GRID_PADDING`, so no glyph is touched), `PROMPT_TICK_VPAD` short of the row's full
+/// height so consecutive prompts read as separate ticks, and a soft cyan that stands apart from
+/// the grey scrollbar without competing with the text.
+const PROMPT_TICK_WIDTH: f32 = 3.0;
+const PROMPT_TICK_INSET: f32 = 1.0;
+const PROMPT_TICK_VPAD: f32 = 2.0;
+const PROMPT_TICK_COLOR: Color = Color::from_rgba(0.42, 0.72, 0.85, 0.85);
+
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
 /// a drawn corner joins a shaped line without a step.
@@ -161,11 +174,24 @@ const BRAILLE_DOTS: [(f32, f32); 8] = [
 pub struct Grid<'a> {
 	screen: Screen<'a>,
 	selection: Option<&'a Selection>,
+	/// Viewport rows that hold a shell prompt right now (§34), for the left-gutter ticks. Owned
+	/// (a short list, at most one per visible row) rather than borrowed, since it is computed fresh
+	/// each frame from the terminal's scroll position.
+	prompts: Vec<u16>,
 }
 
-/// Draw the emulator's current screen, highlighting `selection` if there is one.
-pub fn grid<'a>(screen: Screen<'a>, selection: Option<&'a Selection>) -> Grid<'a> {
-	Grid { screen, selection }
+/// Draw the emulator's current screen, highlighting `selection` if there is one and ticking the
+/// `prompts` rows in the left gutter (§34).
+pub fn grid<'a>(
+	screen: Screen<'a>,
+	selection: Option<&'a Selection>,
+	prompts: Vec<u16>,
+) -> Grid<'a> {
+	Grid {
+		screen,
+		selection,
+		prompts,
+	}
 }
 
 /// What the widget remembers between events: the modifiers (they arrive on their own
@@ -333,6 +359,24 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				},
 				Background::Color(SCROLLBAR_THUMB_COLOR),
 			);
+		}
+
+		// The prompt ticks (§34): one mark in the left padding gutter for every shell prompt on
+		// screen. Like the scroll indicator, they are drawn last and in the padding, so they sit
+		// over no cell and never disturb the text. A row outside the visible grid is skipped — the
+		// terminal only hands over on-screen rows, but the guard keeps the geometry honest.
+		for &row in &self.prompts {
+			if row < rows {
+				renderer.fill_quad(
+					Quad {
+						bounds: prompt_tick_rect(bounds, row),
+						border: Border::default().rounded(PROMPT_TICK_WIDTH / 2.0),
+						shadow: iced::Shadow::default(),
+						snap: false,
+					},
+					Background::Color(PROMPT_TICK_COLOR),
+				);
+			}
 		}
 	}
 
@@ -953,6 +997,21 @@ fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> O
 	})
 }
 
+/// The prompt tick's rectangle for a `row` of the grid `bounds` (§34): a short bar in the left
+/// padding gutter, centred on the row it marks. Split from the draw for the same reason as the
+/// scroll thumb — the geometry is the part that can be wrong, so it is testable without a
+/// renderer. The x stays inside `GRID_PADDING` (inset + width), so the mark never overlaps the
+/// first cell, which begins one `GRID_PADDING` in.
+fn prompt_tick_rect(bounds: Rectangle, row: u16) -> Rectangle {
+	let top = bounds.y + GRID_PADDING + f32::from(row) * CELL_HEIGHT;
+	Rectangle {
+		x: bounds.x + PROMPT_TICK_INSET,
+		y: top + PROMPT_TICK_VPAD,
+		width: PROMPT_TICK_WIDTH,
+		height: CELL_HEIGHT - 2.0 * PROMPT_TICK_VPAD,
+	}
+}
+
 /// Which way a scroll went, as the protocol's wheel button. A horizontal-only scroll
 /// reports nothing — the protocol's wheel is vertical.
 fn wheel_button(delta: mouse::ScrollDelta) -> Option<report::Button> {
@@ -1484,6 +1543,28 @@ mod tests {
 		close(deep.height, SCROLLBAR_MIN_THUMB);
 		assert!(deep.y >= track_top - 0.01);
 		assert!(deep.y + deep.height <= track_bottom + 0.01);
+	}
+
+	#[test]
+	fn a_prompt_tick_sits_in_the_left_gutter_on_its_row() {
+		// The tick lives in the left padding — its right edge (inset + width) stays inside
+		// GRID_PADDING, so it never reaches the first cell — and it is centred vertically on the
+		// row it marks (§34).
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let tick = prompt_tick_rect(bounds, 3);
+		assert!(
+			tick.x + tick.width <= GRID_PADDING,
+			"tick spills onto a cell"
+		);
+		// Row 3's top is GRID_PADDING + 3 cells down; the bar is inset by PROMPT_TICK_VPAD.
+		let expected_top = GRID_PADDING + 3.0 * CELL_HEIGHT + PROMPT_TICK_VPAD;
+		assert!((tick.y - expected_top).abs() < 0.01);
+		assert!((tick.height - (CELL_HEIGHT - 2.0 * PROMPT_TICK_VPAD)).abs() < 0.01);
 	}
 
 	#[test]

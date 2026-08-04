@@ -774,6 +774,7 @@ impl App {
 				id: tab.id,
 				label: tab.strip_label(),
 				active: index == self.active,
+				status: tab.prompt_status(),
 			})
 			.collect();
 		let body = iced::widget::column![ui::tabs::strip(&chips), self.active().view()]
@@ -1781,6 +1782,23 @@ impl Tab {
 			},
 			// The connect form and every dialog over it are all one "new connection" in progress.
 			_ => "New connection".to_owned(),
+		}
+	}
+
+	/// The command-status dot for this tab's chip (§34), from its OSC 133 shell-integration marks.
+	/// A running command wins over any past result; otherwise the last exit code decides ok vs
+	/// failed. `None` when the tab runs no shell, or when the shell has announced no integration
+	/// (no command has finished and none is running) — so the chip shows no dot at all.
+	fn prompt_status(&self) -> Option<ui::tabs::Status> {
+		let terminal = self.terminal.as_ref()?;
+		match terminal.command_state() {
+			term::osc133::CommandState::Running => Some(ui::tabs::Status::Running),
+			// At a prompt or idle: the last command's exit code is what the dot reports, if one has
+			// finished. A shell that never emits the `D` mark leaves this `None`.
+			_ => match terminal.last_exit()? {
+				0 => Some(ui::tabs::Status::Ok),
+				_ => Some(ui::tabs::Status::Failed),
+			},
 		}
 	}
 
@@ -3618,6 +3636,20 @@ impl Tab {
 				Physical::Code(Code::KeyV) => return self.on_paste(),
 				_ => {}
 			}
+		}
+
+		// Ctrl+Shift+Up / Ctrl+Shift+Down jump the scrollback to the previous / next shell prompt
+		// (§34), from the OSC 133 marks. Like the Shift+Page scroll below, it is cmote's own view
+		// motion — nothing is sent to the remote — and reached only with the shell focused. Guarded
+		// on Ctrl+Shift together so a bare or singly-modified arrow still reaches the shell.
+		if modifiers.control()
+			&& modifiers.shift()
+			&& let iced::keyboard::Key::Named(named) = &key
+			&& let Some(direction) = prompt_jump(named)
+			&& let Some(terminal) = self.terminal.as_mut()
+		{
+			terminal.jump_prompt(direction);
+			return iced::Task::none();
 		}
 
 		// Shift + PageUp / PageDown page through the shell's own scrollback, and Shift + Home /
@@ -5599,6 +5631,18 @@ fn scroll_motion(named: &iced::keyboard::key::Named) -> Option<term::ScrollMotio
 	}
 }
 
+/// The prompt-jump direction a Ctrl+Shift+arrow asks for, or `None` for any other key (§34). Up
+/// climbs to the previous prompt, Down returns toward the live one — the direction the arrow
+/// itself points through the scrollback.
+fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Direction> {
+	use iced::keyboard::key::Named;
+	match named {
+		Named::ArrowUp => Some(term::osc133::Direction::Previous),
+		Named::ArrowDown => Some(term::osc133::Direction::Next),
+		_ => None,
+	}
+}
+
 /// Open the native file picker for a private-key file (§7). The dialog is modal
 /// and would block the GUI thread, so it runs as an async `Task` instead; its
 /// result arrives back through the Elm loop as `Message::KeyFilePicked`. We keep
@@ -6254,6 +6298,54 @@ mod tests {
 		let _ = app.on_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
 		assert_eq!(offset(&app), 0, "snapped back to the bottom");
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\r"[..]));
+	}
+
+	/// Ctrl+Shift+Up / Ctrl+Shift+Down move cmote's view between shell prompts, from the OSC 133
+	/// marks (§34), and send nothing to the remote. Two prompts with output between them: the first
+	/// scrolls off, so jumping up climbs into history to it and jumping down returns toward the live
+	/// prompt.
+	#[test]
+	fn ctrl_shift_arrows_jump_between_prompts() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		let terminal = app.terminal.as_mut().unwrap();
+		// A first prompt, then enough output to push it up into history, then a second prompt.
+		terminal.process(b"\x1b]133;A\x07first$ \r\n");
+		let filler: Vec<u8> = (0..30).flat_map(|_| b"output\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		terminal.process(b"\x1b]133;A\x07second$ ");
+		assert_eq!(offset(&app), 0, "starts at the live bottom");
+
+		let jump = Modifiers::CTRL | Modifiers::SHIFT;
+		let _ = app.on_key(key_press(Named::ArrowUp, Code::ArrowUp, jump));
+		let climbed = offset(&app);
+		assert!(climbed > 0, "jumped up into history to the earlier prompt");
+		// The jump is cmote's own view motion — nothing was sent to the shell.
+		assert_eq!(next_input(&mut rx), None);
+
+		let _ = app.on_key(key_press(Named::ArrowDown, Code::ArrowDown, jump));
+		assert!(
+			offset(&app) < climbed,
+			"jumped back down toward the live prompt"
+		);
+	}
+
+	#[test]
+	fn prompt_jump_maps_only_the_vertical_arrows() {
+		use iced::keyboard::key::Named;
+
+		assert_eq!(
+			prompt_jump(&Named::ArrowUp),
+			Some(term::osc133::Direction::Previous)
+		);
+		assert_eq!(
+			prompt_jump(&Named::ArrowDown),
+			Some(term::osc133::Direction::Next)
+		);
+		assert_eq!(prompt_jump(&Named::ArrowLeft), None);
+		assert_eq!(prompt_jump(&Named::PageUp), None);
 	}
 
 	/// Shift+PageUp scrolls cmote's own scrollback and sends nothing to the remote, while bare

@@ -31,16 +31,47 @@ const ACTIVE_FG: Color = Color::from_rgb8(0xf0, 0xf0, 0xf0);
 /// Each chip's fixed height, so the bar's own height (`STRIP_HEIGHT`) is predictable.
 const CHIP_HEIGHT: f32 = 30.0;
 
+// The command-status dot's colours (§34): amber while a command runs, green when the last one
+// exited 0, red when it failed. Muted so the dot reads as a status light, not an alarm.
+const STATUS_RUNNING: Color = Color::from_rgb8(0xd7, 0xa8, 0x3a);
+const STATUS_OK: Color = Color::from_rgb8(0x5c, 0xb8, 0x5c);
+const STATUS_FAILED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
+
+/// The command-status dot a chip shows (§34), from the tab's OSC 133 shell-integration marks. A
+/// tab with no live shell, or a shell that announces no integration, carries `None` — so most
+/// chips show no dot at all and the strip stays quiet until a command actually runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+	/// A command is executing right now.
+	Running,
+	/// The last command finished and exited 0.
+	Ok,
+	/// The last command finished and exited non-zero.
+	Failed,
+}
+
+impl Status {
+	/// The dot's colour for this status.
+	fn color(self) -> Color {
+		match self {
+			Status::Running => STATUS_RUNNING,
+			Status::Ok => STATUS_OK,
+			Status::Failed => STATUS_FAILED,
+		}
+	}
+}
+
 /// The longest label a chip shows before the middle is elided (§22), so one long endpoint cannot
 /// push the "+" off the strip.
 const MAX_LABEL_CHARS: usize = 48;
 
-/// One chip's data: the owning tab's id (for the close message), the label to show, and whether
-/// it is the active tab (which tints its fill and brightens its text).
+/// One chip's data: the owning tab's id (for the close message), the label to show, whether it is
+/// the active tab (which tints its fill and brightens its text), and its command-status dot (§34).
 pub struct Chip {
 	pub id: u64,
 	pub label: String,
 	pub active: bool,
+	pub status: Option<Status>,
 }
 
 /// Build the tab strip from the chips, in strip order. Returns an owned (`'static`) element —
@@ -81,6 +112,14 @@ fn chip_view(index: usize, chip: &Chip) -> Element<'static, Message> {
 	let fg = if chip.active { ACTIVE_FG } else { INACTIVE_FG };
 
 	let name = text(label).size(13).color(fg);
+	// A leading status dot when the tab's shell reports one (§34): a running command, or how the
+	// last one exited. Its own colour whether the chip is active or not — the status matters the
+	// same on a background tab, which is the whole point of showing it per tab.
+	let mut contents = row![].spacing(6).align_y(Vertical::Center);
+	if let Some(status) = chip.status {
+		contents = contents.push(text("●").size(10).color(status.color()));
+	}
+	contents = contents.push(name);
 	let close = button(text("×").size(14).color(fg))
 		.padding([0.0, 4.0])
 		.on_press(Message::TabCloseRequested(chip.id))
@@ -90,8 +129,9 @@ fn chip_view(index: usize, chip: &Chip) -> Element<'static, Message> {
 			..button::Style::default()
 		});
 
+	contents = contents.push(close);
 	let active = chip.active;
-	let cell = container(row![name, close].spacing(6).align_y(Vertical::Center))
+	let cell = container(contents)
 		.height(Length::Fixed(CHIP_HEIGHT))
 		.padding([0.0, 8.0])
 		.align_y(Vertical::Center)

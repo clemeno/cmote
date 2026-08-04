@@ -28,6 +28,7 @@ pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
+pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 
@@ -120,6 +121,7 @@ impl Terminal {
 			cwd: cwd::Cwd::default(),
 			modkeys: modkeys::ModKeys::default(),
 			queries: query::Queries::default(),
+			prompts: osc133::Prompts::default(),
 		}
 	}
 
@@ -132,7 +134,9 @@ impl Terminal {
 	/// A cursor-position report is emitted at the moment the query is parsed, so it reflects
 	/// the cursor where the query sat — the engine gets that right where the old hand-rolled
 	/// answerer had to split the feed to. The same bytes also feed the cwd tracker (§17), which
-	/// reads the stream as it came off the wire for the working directory the shell announces.
+	/// reads the stream as it came off the wire for the working directory the shell announces, and
+	/// the OSC 133 prompt-mark scanner (§34) — for which `process` DOES split the advance, so each
+	/// mark is applied at the grid line the cursor is on when it arrives.
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
 		self.modkeys.feed(bytes);
@@ -140,7 +144,25 @@ impl Terminal {
 		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
 		// for the usual flow where a program sets attributes and then queries in the same write.
 		let queries = self.queries.feed(bytes);
-		self.parser.advance(&mut self.term, bytes);
+		// OSC 133 shell-integration marks (§34): the engine ignores them, so scan them out and
+		// apply each at the point in the stream it sits. A prompt-start anchors to a grid line, so
+		// the engine is advanced up to the mark's offset FIRST — then the cursor is read exactly
+		// where the prompt begins. The common case (no marks in the chunk) is a single advance, so
+		// only a chunk that actually carries a prompt boundary pays for the split.
+		let marks = self.prompts.feed(bytes);
+		if marks.is_empty() {
+			self.parser.advance(&mut self.term, bytes);
+		} else {
+			let mut start = 0;
+			for (offset, mark) in marks {
+				self.parser.advance(&mut self.term, &bytes[start..offset]);
+				start = offset;
+				let history = self.term.grid().history_size();
+				let (row, _) = self.screen().cursor_position();
+				self.prompts.apply(mark, history, row);
+			}
+			self.parser.advance(&mut self.term, &bytes[start..]);
+		}
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		let mut out = std::mem::take(&mut buffer.bytes);
 		drop(buffer);
@@ -202,6 +224,13 @@ impl Terminal {
 			rows: rows as usize,
 			cols: cols as usize,
 		});
+		// A resize reflows the grid: wrapped lines re-wrap at the new width, so the line count of
+		// the history changes and the absolute positions the prompt marks were recorded at no
+		// longer line up (§34). Rather than point a jump at the wrong reflowed line, drop the marks
+		// — a session keeps its scrollback, only the prompt ticks are relearned from the next
+		// prompt on. `ponytail:` cleared on any resize, including a height-only one that would not
+		// actually reflow the columns.
+		self.prompts.clear();
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
@@ -240,6 +269,49 @@ impl Terminal {
 	pub fn screen(&self) -> screen::Screen<'_> {
 		screen::Screen::new(&self.term)
 	}
+
+	/// Where the remote command cycle stands (§34), from the OSC 133 marks the shell emits. `Idle`
+	/// on a shell without integration configured, forever — nothing is ever guessed. The GUI pairs
+	/// it with `last_exit` for the per-tab status glyph.
+	pub fn command_state(&self) -> osc133::CommandState {
+		self.prompts.state()
+	}
+
+	/// The exit code of the last command the shell reported finishing (§34), or `None` when none
+	/// has yet — a fresh session, or a shell that never emits the `D` mark.
+	pub fn last_exit(&self) -> Option<i32> {
+		self.prompts.last_exit()
+	}
+
+	/// The viewport rows (0-based from the top of the visible screen) a prompt mark sits on right
+	/// now (§34), so the grid can draw a tick beside each. Empty on a shell without integration and
+	/// on the alternate screen, which keeps no history and shows no shell prompts.
+	pub fn prompt_rows(&self) -> Vec<u16> {
+		let grid = self.term.grid();
+		self.prompts.visible_rows(
+			grid.history_size(),
+			grid.display_offset(),
+			self.term.screen_lines(),
+		)
+	}
+
+	/// Scroll the nearest prompt above or below the viewport into view (§34), returning whether
+	/// there was one to move to (so the caller can leave the view be when there is not). The target
+	/// offset is `osc133`'s to choose; here it is turned into the signed delta the engine scrolls
+	/// by — positive climbs into history — relative to where the viewport sits now.
+	pub fn jump_prompt(&mut self, direction: osc133::Direction) -> bool {
+		let grid = self.term.grid();
+		let history = grid.history_size();
+		let offset = grid.display_offset();
+		let Some(target) = self.prompts.jump(direction, history, offset) else {
+			return false;
+		};
+		let delta = target as i32 - offset as i32;
+		if delta != 0 {
+			self.term.scroll_display(Scroll::Delta(delta));
+		}
+		true
+	}
 }
 
 /// The terminal emulator: the engine, the byte parser that feeds it, the buffer its replies
@@ -266,6 +338,12 @@ pub struct Terminal {
 	/// parser treats those as no-ops, so — like the cwd and modkeys — the same bytes are scanned
 	/// here, and `process` turns each completed query into a reply.
 	queries: query::Queries,
+	/// Reads the OSC 133 shell-integration prompt marks (§34), which the engine also ignores. Holds
+	/// the command-cycle state, the last exit code, and where each prompt sits, so the GUI can show
+	/// a per-tab status glyph and jump between prompts. Unlike the other scanners, `process` feeds
+	/// this one by splitting the advance at each mark, so a prompt is recorded at the grid line the
+	/// cursor is on when the mark arrives.
+	prompts: osc133::Prompts,
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
@@ -749,5 +827,30 @@ mod tests {
 			terminal.process(b"\x1bP+q544E\x1b\\"),
 			b"\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\".to_vec()
 		);
+	}
+
+	#[test]
+	fn a_shell_integration_cycle_tracks_state_and_exit() {
+		// One command bracketed by OSC 133 marks (§34): a prompt shows, the command runs, then it
+		// finishes with an exit code — each mark moving the state the status glyph reads.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.command_state(), osc133::CommandState::Idle);
+		terminal.process(b"\x1b]133;A\x07user@host:~$ ");
+		assert_eq!(terminal.command_state(), osc133::CommandState::Prompt);
+		terminal.process(b"\x1b]133;B\x07ls\r\n\x1b]133;C\x07");
+		assert_eq!(terminal.command_state(), osc133::CommandState::Running);
+		terminal.process(b"a.txt\r\n\x1b]133;D;0\x07");
+		assert_eq!(terminal.command_state(), osc133::CommandState::Idle);
+		assert_eq!(terminal.last_exit(), Some(0));
+	}
+
+	#[test]
+	fn a_prompt_is_anchored_to_the_line_the_cursor_is_on() {
+		// The split-advance is the whole point: the prompt mark must land on the line the cursor
+		// is on when OSC 133;A arrives, not where the chunk happens to end. Two banner lines, then
+		// a prompt on the third — its tick sits at viewport row 2.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"line one\r\nline two\r\n\x1b]133;A\x07$ ");
+		assert_eq!(terminal.prompt_rows(), vec![2]);
 	}
 }

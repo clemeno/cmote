@@ -97,6 +97,9 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   scanned out of the stream by `term::modkeys`), numpad (NumLock-aware), bracketed paste with
   an injection scrub.
 - **Reads the remote cwd** from OSC 7 / OSC 9;9 for the tree, pane, and title (`cwd.rs`).
+- **Reads OSC 133 shell-integration marks** (§34) for a per-tab command-status dot and
+  jump-to-prompt (Ctrl+Shift+Up/Down), scanned out of the stream by `term::osc133` — the same
+  tactic as `cwd`, but with the mark's grid line captured by splitting the engine advance at it.
 
 ---
 
@@ -165,7 +168,12 @@ here is small and low-value:
 | Missing | Note | Tag | Src |
 |---|---|---|---|
 | **Blink** (SGR 5/6) | the engine stores the bit; cmote draws steady **by choice** — it runs no animation timer (the same call made for the cursor). Could show a static marker; deliberately not animated | [policy] | [ECMA-48] |
-| **OSC 133 shell-integration** (semantic prompt marks) | niche; a stream scanner beside the cwd tracker could capture them | [seam] low pri | [community] |
+
+**OSC 133 shell-integration is now done** (§34) — the stream scanner this row once anticipated
+(`term/osc133.rs`, beside the cwd tracker). It drives a per-tab command-status dot and
+jump-to-prompt (Ctrl+Shift+Up/Down); prompt marks are stored as absolute line indices so they ride
+the scrollback, captured by splitting the engine advance at each mark. Select-command-output (the
+C→D output range) is the one piece deliberately left for later.
 
 ---
 
@@ -224,7 +232,12 @@ finds the pointer's link run (`link_run_at`) and underlines it while Ctrl is hel
 repaints the app already emits on a hover move or a modifier change, so it needs no new plumbing. `modifyOtherKeys` (an earlier #2) shipped as
 `term::modkeys` + a `keymap::encode` branch: the stream is scanned for `CSI > 4 ; p m`, and a
 Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2 for every combo, level 1
-for the gap combos only) — kept for the programs that speak it rather than kitty.
+for the gap combos only) — kept for the programs that speak it rather than kitty. **OSC 133
+shell-integration** (§4's old low-pri row) shipped as `term::osc133`: the stream is scanned for the
+A/B/C/D marks, prompts stored as absolute line indices so they ride the scrollback, and the result
+drives a per-tab command-status dot and Ctrl+Shift+Up/Down jump-to-prompt — the same
+scanner-beside-the-cwd tactic, but with each mark's grid line captured by splitting the engine
+advance at it.
 
 The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
@@ -261,7 +274,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 52 (read) | Clipboard read | ❌ | *(policy)* — remote must not read local clipboard (§6) |
 | 104 | Reset palette entry | ❌ | no effect (fixed palette) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | ❌ | no effect (fixed scheme) |
-| 133 | Shell integration (semantic prompts) | ❌ | §4 notes a scanner could capture these |
+| 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt; A/B/C/D tracked, exit code from D |
 | Kitty 21 | Colour by semantic name | ❌ | |
 | Kitty 99 | Rich notifications | ❌ | |
 | iTerm 1337 File | Inline images | ❌ | no image rendering (§5) |
@@ -481,6 +494,16 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
   `Terminal::modify_other_keys` and threaded into `keymap::encode`.
+- **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` is the same chunk-safe
+  byte machine as `cwd.rs` but returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
+  code parsed from its next field. `Prompts` holds the command state (`Idle`/`Prompt`/`Running`), the
+  last exit, and the prompt lines as **absolute indices** (`history_size + row`), with `visible_rows`
+  and `jump` doing the viewport-row math. `process` (`term/mod.rs`) splits the engine advance at each
+  mark's offset to read the cursor line there. Parse-and-arithmetic only, no engine types — the
+  scanner, the state machine, and the jump/visibility math are all unit-tested with no terminal.
+  Surfaced by `Terminal::{command_state,last_exit,prompt_rows,jump_prompt}`; drawn as a per-tab dot
+  (`ui/tabs.rs`) and a left-gutter tick (`ui/grid.rs::prompt_tick_rect`); jumped by Ctrl+Shift+Up/Down
+  (`app.rs::prompt_jump`). Marks are cleared on resize (reflow invalidates absolute lines).
 - **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
 - **`link.rs`** — following an OSC 8 hyperlink (§24): `is_allowed` gates the scheme to
   http/https/mailto (pure, unit-tested), `open` hands an allowed URI to `open::that_detached`

@@ -3079,3 +3079,69 @@ ignores — and formats a reply.
   `pen_sgr`/`sgr_color` helpers that read the alacritty pen (the only engine-coupled part). **`term/
   query.rs`** is the scanner, the reply formatters, the small capability map and the hex codec — free
   of any engine type, so every parse and every reply shape is unit-tested with no terminal.
+
+## 34. Shell-integration prompt marks — OSC 133 (v3.x)
+
+A shell with "shell integration" configured brackets every command it runs with OSC 133 escape
+sequences — the FinalTerm/iTerm2 convention every modern terminal now reads:
+
+    OSC 133 ; A        — a fresh prompt is about to be drawn
+    OSC 133 ; B        — the prompt is written; the user's input begins
+    OSC 133 ; C        — input is done; the command's output begins
+    OSC 133 ; D [; N]  — the command finished, with exit code N
+
+From those four marks a terminal knows where every prompt sits, whether a command is running, and
+how the last one ended. cmote turns that into two things: a **per-tab status dot** (is a command
+running, did the last one succeed?) and **jump-to-prompt** (Ctrl+Shift+Up/Down walk the scrollback
+between prompts). Like the cwd (§17), modifyOtherKeys (§9) and the identity queries (§33), the
+engine treats OSC 133 as an unknown OSC and ignores it, so cmote scans the same bytes itself.
+
+- **A byte scanner that hands back marks with offsets (`term/osc133.rs`).** The same chunk-safe
+  four-state machine as `cwd`, but where `cwd` keeps one latest value this one returns *a list* —
+  each completed mark tagged with the byte offset just past its terminator. Kept a pure `bytes ->
+  marks` function so it unit-tests with no engine at all. `133;A;aid=7` trailing fields are ignored;
+  `D`'s exit code is the field after the letter, `None` when the shell emits a bare `133;D`.
+- **Positions are captured by splitting the engine advance (`term/mod.rs::process`).** A prompt
+  mark anchors to a grid line, and that line is only known once the engine has been advanced up to
+  the mark — so `process`, uniquely, splits the advance at each mark's offset, reads the cursor
+  there, and applies the mark. The common case (a chunk with no marks) stays a single advance; only
+  a chunk that actually carries a prompt boundary pays for the split.
+- **Marks are stored as ABSOLUTE line indices, so they survive scrolling.** Line 0 is the first line
+  the session ever showed; a line's absolute index is `history_size + row` at the moment it is
+  recorded, because the active screen's top line always sits at absolute `history_size` (that many
+  lines have scrolled off above it). To place a mark on screen later, the reverse: viewport row =
+  `absolute - history_size + display_offset`. A jump lands the target prompt on the top row, clamped
+  to the retained history. (`ponytail:` this identity is EXACT only until the scrollback fills its
+  cap (§23) — past that the engine evicts an old line per new one, so `history_size` stops growing
+  while lines keep scrolling, and marks recorded across that point no longer share an origin. The
+  recent prompts a jump actually reaches stay exact; only history deeper than the cap drifts, landing
+  a jump *near* an old prompt rather than *on* it.)
+- **The dot is per tab, in the strip (`ui/tabs.rs`).** Amber while a command runs, green when the
+  last exited 0, red when it failed, and nothing at all on a tab with no shell or a shell that
+  announced no integration — so the strip stays quiet until a command actually runs. Read from each
+  tab's own `Terminal` (`command_state`/`last_exit`), so a background tab's dot is as live as the
+  active one's — the point of showing it per tab. (`ponytail:` the exit *code* itself is not shown,
+  only success/failure by colour; a chip is too small for `✗130`.)
+- **The tick is per prompt, in the grid (`ui/grid.rs`).** A small cyan mark in the left padding
+  gutter beside every prompt on screen — mirroring the scroll indicator on the right, a read-only
+  mark that lives in the padding and never over a cell. `Terminal::prompt_rows` maps the stored marks
+  to the visible rows each frame.
+- **The jump is a keybind (`app.rs`).** Ctrl+Shift+Up / Ctrl+Shift+Down, reached only with the shell
+  focused, guarded on Ctrl+Shift together so a bare or singly-modified arrow still reaches the shell
+  — the same discipline as the Shift+Page scrollback keys (§23). It moves cmote's own view; nothing
+  is sent to the remote.
+- **A resize drops the marks.** A resize reflows the grid, re-wrapping lines at the new width, so the
+  line count of the history changes and the recorded absolute positions no longer line up. Rather
+  than point a jump at the wrong reflowed line, `resize` clears the marks — the scrollback is kept,
+  only the prompt ticks are relearned from the next prompt on. (`ponytail:` cleared on any resize,
+  including a height-only one that would not actually reflow the columns.)
+
+### What is deliberately NOT here
+
+- **Select-command-output.** OSC 133;C/D bracket a command's output, so a terminal could offer
+  "select everything this command printed". That needs the C and D positions as a *range* and a way
+  to turn a scrollback range into a selection — a bigger feature than the prompt anchor, deferred.
+- **No injection of the marks.** cmote reads whatever the shell offers and adds nothing: a shell
+  without integration configured shows no dots, no ticks, and jump-to-prompt finds nothing. cmote
+  never rewrites the remote's shell init to turn it on — that is the user's to configure, exactly as
+  the cwd (§17) is.
