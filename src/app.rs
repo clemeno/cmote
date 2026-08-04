@@ -165,10 +165,6 @@ struct App {
 	/// rather than per-tab because there is one window whatever tab is on show; updated on
 	/// every resize and written to `settings.json` on the way out (`exit_app`).
 	settings: crate::settings::Settings,
-	/// The editor theme last chosen for each file extension (§32), keyed by `editor::extension_key`
-	/// (lower-cased, no dot; "" for no extension). Seeds every new editor tab so a file type keeps
-	/// the scheme it was last edited in. Session-scoped: it is not written to disk.
-	editor_theme_by_ext: std::collections::HashMap<String, crate::editor::EditorTheme>,
 }
 
 /// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
@@ -207,8 +203,6 @@ impl App {
 			overlay_pos: iced::Point::ORIGIN,
 			overlay_dragging: false,
 			overlay_drag_last: None,
-			// Nothing edited yet, so no file type has a remembered theme (§32).
-			editor_theme_by_ext: std::collections::HashMap::new(),
 			// The same file `run` sized the window from (§31). Loaded again here — a tiny read
 			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
 			// first (synthetic) resize event overwrites `window` with the size actually granted.
@@ -496,11 +490,12 @@ impl App {
 		done.then(|| self.exit_app())
 	}
 
-	/// The single way out of the process (§30, §31): write the app-wide layout — the window
-	/// size — to `settings.json`, then hand iced the exit task. Every quit path funnels through
-	/// here (the confirm with nothing live, the drain finishing, the drain timing out), so the
-	/// window size is saved exactly once however the app comes down. The save runs synchronously
-	/// before the returned task is processed, so the file is on disk before the runtime leaves.
+	/// The single way out of the process (§30, §31): write the app-wide layout — the window size
+	/// and the per-extension editor themes (§32) — to `settings.json`, then hand iced the exit
+	/// task. Every quit path funnels through here (the confirm with nothing live, the drain
+	/// finishing, the drain timing out), so the layout is saved exactly once however the app comes
+	/// down. The save runs synchronously before the returned task is processed, so the file is on
+	/// disk before the runtime leaves.
 	fn exit_app(&self) -> iced::Task<Message> {
 		self.settings.save();
 		iced::exit()
@@ -579,12 +574,11 @@ impl App {
 			),
 		};
 		// Open in the scheme this file type was last edited in (§32); an unseen extension starts on
-		// the default. The choice is recorded back on the map when the toolbar's select changes it.
+		// the default. The choice is recorded back in `settings` when the toolbar's select changes
+		// it, and now rides `settings.json`, so the type keeps its scheme across a restart (§31).
 		let theme = self
-			.editor_theme_by_ext
-			.get(&crate::editor::extension_key(&path))
-			.copied()
-			.unwrap_or_default();
+			.settings
+			.editor_theme(&crate::editor::extension_key(&path));
 		let mut tab = Tab::new_editor(id, session, path.clone(), size, theme);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
@@ -697,7 +691,9 @@ impl App {
 		{
 			editor.set_theme(theme);
 			let ext = crate::editor::extension_key(&editor.path);
-			self.editor_theme_by_ext.insert(ext, theme);
+			// Remembered app-wide and written on the way out (§31), so this file type keeps the
+			// scheme next run; the returned "changed?" flag is not needed here.
+			self.settings.set_editor_theme(ext, theme);
 		}
 		iced::Task::none()
 	}
@@ -6547,7 +6543,6 @@ mod tests {
 			// Default (nothing remembered): `save` is a no-op on default, so a quit test never
 			// touches the disk (§31).
 			settings: crate::settings::Settings::default(),
-			editor_theme_by_ext: std::collections::HashMap::new(),
 		}
 	}
 

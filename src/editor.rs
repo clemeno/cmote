@@ -356,9 +356,15 @@ pub enum Status {
 
 /// Which colour scheme an editor tab paints with (§32). Only the choice lives here in the model —
 /// the concrete colours are the view's (`ui::editor`), so the split stays clean. The choice is held
-/// on the tab and remembered per file extension by `App`, so reopening a `.json` comes up in the
-/// scheme last used for JSON, independent of what a `.rs` or `.php` tab is set to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// on the tab and remembered per file extension in `Settings`, so reopening a `.json` comes up in
+/// the scheme last used for JSON, independent of what a `.rs` or `.php` tab is set to — and that
+/// memory now survives a restart, written into `settings.json` with the rest of the layout (§31).
+///
+/// `serde` serializes the two variants lower-cased (`"default"` / `"cme"`), so the settings file
+/// stays legible to a hand-editor; an unrecognised value there fails the whole parse back to
+/// defaults, the same "a bad file never stops the app" rule the rest of `settings.rs` follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EditorTheme {
 	/// cmote's own dark panel palette — the default, matching the files pane and dialogs.
 	#[default]

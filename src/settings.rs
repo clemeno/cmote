@@ -1,10 +1,12 @@
 // settings.rs — the app-wide layout cmote remembers between runs (PLAN §31).
 //
 // Almost everything cmote persists is PER-TARGET (§14, §22): where the shell and the two
-// panels were for THAT server. The window itself is not — there is one OS window, shown on
-// the home screen before any target is chosen, so its size is an app-wide preference, not a
-// property of any one connection. That is all this file holds, in `settings.json` beside
-// `targets.json` in the shared data directory (§11).
+// panels were for THAT server. What lives here instead is app-wide — a preference that is the
+// same whatever connection is on show. The window itself is one such: there is one OS window,
+// shown on the home screen before any target is chosen, so its size is an app-wide preference,
+// not a property of any one connection. The per-extension editor theme (§32) is another: "CME
+// for `.rs`" is a preference about a file type, the same on every server. Both sit in
+// `settings.json` beside `targets.json` in the shared data directory (§11).
 //
 // The rule that shapes it (borrowed from a sister iced app): a settings file must never be
 // able to stop the app from starting. Absent, empty, truncated, wrong types, hand-edited
@@ -12,8 +14,11 @@
 // never an error the caller has to handle. So neither `load` nor `save` returns a `Result`:
 // there is nothing the caller could usefully do with one.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
+use crate::editor::EditorTheme;
 use crate::paths;
 
 /// The settings file's name inside the data directory (§11).
@@ -30,10 +35,10 @@ const FILE: &str = "settings.json";
 const MIN_WINDOW: f32 = 480.0;
 const MAX_WINDOW: f32 = 4096.0;
 
-/// What survives a restart, app-wide. Only the window size today; the per-target panel sizes
-/// and resume paths live in `targets.json` (§22), because they belong to a connection, not to
-/// the app. `#[serde(default)]` fills in anything an older or hand-edited file is missing, so
-/// adding a field here later can never invalidate an existing file.
+/// What survives a restart, app-wide: the OS window size (§31) and the per-extension editor theme
+/// (§32). The per-target panel sizes and resume paths live in `targets.json` (§22) instead, because
+/// they belong to a connection, not to the app. `#[serde(default)]` fills in anything an older or
+/// hand-edited file is missing, so adding a field here later can never invalidate an existing file.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -44,6 +49,15 @@ pub struct Settings {
 	/// so a first-run file stays empty (`{}`) rather than carrying a null.
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub window: Option<(f32, f32)>,
+
+	/// The colour scheme last chosen for each file extension in the in-tab editor (§32), keyed by
+	/// `editor::extension_key` (lower-cased, no dot; "" for no extension). This is app-wide, not
+	/// per-target: "CME for `.rs`" is a preference about a file TYPE, the same wherever the file
+	/// lives, so it belongs here and not in `targets.json`. Empty until a type is themed, and
+	/// skipped from the JSON while empty so a first-run file stays `{}`. `#[serde(default)]` fills
+	/// it in for an older file written before the field existed.
+	#[serde(default, skip_serializing_if = "HashMap::is_empty")]
+	pub editor_theme_by_ext: HashMap<String, EditorTheme>,
 }
 
 impl Settings {
@@ -87,6 +101,27 @@ impl Settings {
 	pub fn window_size(&self) -> Option<iced::Size> {
 		self.window
 			.map(|(width, height)| iced::Size::new(width, height))
+	}
+
+	/// The scheme a file with this extension key should open in (§32), or the default for a type
+	/// no one has themed yet. Keeps the read side in one place, the same way `window_size` does.
+	pub fn editor_theme(&self, ext: &str) -> EditorTheme {
+		self.editor_theme_by_ext
+			.get(ext)
+			.copied()
+			.unwrap_or_default()
+	}
+
+	/// Remember the scheme chosen for an extension key, reporting whether it actually changed so a
+	/// no-op re-select of the current scheme is not counted as a change. Persisted with the rest of
+	/// the layout on the way out (§31) — no separate write, since a theme pick is rare and
+	/// deliberate, not the per-frame churn a window resize is.
+	pub fn set_editor_theme(&mut self, ext: String, theme: EditorTheme) -> bool {
+		if self.editor_theme_by_ext.get(&ext) == Some(&theme) {
+			return false;
+		}
+		self.editor_theme_by_ext.insert(ext, theme);
+		true
 	}
 
 	/// Write the settings file, reporting a failure to stderr and carrying on. Creates the
@@ -211,6 +246,32 @@ mod tests {
 			Settings::from_json(r#"{"window":[1280.0,720.0]}"#).window,
 			Some((1280.0, 720.0))
 		);
+	}
+
+	#[test]
+	fn a_remembered_editor_theme_survives_the_round_trip() {
+		let mut settings = Settings::default();
+		// An unseen type opens on the default, and picking a scheme reports a real change.
+		assert_eq!(settings.editor_theme("rs"), EditorTheme::Default);
+		assert!(settings.set_editor_theme("rs".into(), EditorTheme::Cme));
+		// Re-picking the same scheme is no change, so the caller can tell it apart from a real pick.
+		assert!(!settings.set_editor_theme("rs".into(), EditorTheme::Cme));
+		// The choice reads back, and rides `settings.json` through a save/load round trip.
+		assert_eq!(settings.editor_theme("rs"), EditorTheme::Cme);
+		let json = serde_json::to_string(&settings).unwrap();
+		assert_eq!(
+			Settings::from_json(&json).editor_theme("rs"),
+			EditorTheme::Cme
+		);
+	}
+
+	#[test]
+	fn no_remembered_theme_leaves_the_first_run_file_empty() {
+		// The map is skipped from the JSON while empty, so a first run stays `{}` (below) — a themed
+		// file, though, carries the map, so `save` is no longer a no-op once a scheme is picked.
+		let mut settings = Settings::default();
+		settings.set_editor_theme("php".into(), EditorTheme::Cme);
+		assert_ne!(settings, Settings::default());
 	}
 
 	#[test]

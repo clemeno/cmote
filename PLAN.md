@@ -2907,13 +2907,18 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   `EditorTheme` enum; `ui/editor.rs` resolves it to a `Palette` and threads a `&Palette` into every
   drawing helper — so the model/view split (§18) holds, and two editor tabs can wear different schemes
   at once.
-- **Remembered per extension, App-wide.** The pick is recorded on `App` in a
+- **Remembered per extension, App-wide, across restarts.** The pick is recorded in `Settings` as a
   `HashMap<extension, EditorTheme>` keyed by `editor::extension_key` (lower-cased, no dot; `""` for a
   file with no extension). Opening a file seeds its editor from that map, so a `.json` reopens in the
   scheme JSON was last edited in, independent of what a `.ts` or `.php` tab is set to. The message is
-  App-level (`EditorThemeSelected`), not tab-local, precisely because the memory is App-wide.
-  (`ponytail:` the memory is **session-scoped** — it is not written to `settings.json`, so it resets
-  on restart. Persisting it is a one-field addition to the settings schema when wanted.)
+  App-level (`EditorThemeSelected`), not tab-local, precisely because the memory is App-wide — and it
+  now **persists**: the map rides `settings.json` beside the window size (§31), written on the single
+  `exit_app` funnel and read back at launch, so the scheme a file type wears survives a restart. It
+  lives in `settings.json` (app-wide), not `targets.json` (per-target), because "CME for `.rs`" is a
+  preference about a file *type*, the same whatever server the file is on. `EditorTheme` serializes
+  lower-cased (`"default"` / `"cme"`) for a legible hand-editable file, and the map is skipped from the
+  JSON while empty so a first run stays `{}`; an unrecognised scheme name there fails the parse back to
+  defaults, the same "a bad file never stops the app" rule the rest of the settings schema follows.
 - **CME turns on syntax highlighting; Default stays plain.** Under CME the buffer is highlighted so a
   file reads like it does in the user's VS Code — colours and all. It is an iced `Highlighter`
   (`ui/syntax.rs`) driven by `text_editor::highlight_with`, backed by **syntect** with the big
