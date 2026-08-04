@@ -270,7 +270,23 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 			selection,
 		});
 
-	let content = row![gutter(editor, p), editor_widget]
+	// CME turns on syntax highlighting (§32): syntect parses each line and our CME-derived theme
+	// colours the scopes. A token the CME theme leaves alone keeps the buffer's own `value` colour,
+	// so the highlight sits over the flat scheme rather than replacing it. Default stays plain.
+	let editor_element: Element<'a, Message> = if matches!(editor.theme, EditorTheme::Cme) {
+		editor_widget
+			.highlight_with::<crate::ui::syntax::Highlighter>(
+				crate::ui::syntax::Settings {
+					token: crate::editor::extension_key(&editor.path),
+				},
+				|highlight, _theme| highlight.to_format(),
+			)
+			.into()
+	} else {
+		editor_widget.into()
+	};
+
+	let content = row![gutter(editor, p), editor_element]
 		.width(Length::Fill)
 		.height(Length::Shrink);
 

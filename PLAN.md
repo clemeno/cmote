@@ -2913,6 +2913,19 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   App-level (`EditorThemeSelected`), not tab-local, precisely because the memory is App-wide.
   (`ponytail:` the memory is **session-scoped** — it is not written to `settings.json`, so it resets
   on restart. Persisting it is a one-field addition to the settings schema when wanted.)
+- **CME turns on syntax highlighting; Default stays plain.** Under CME the buffer is highlighted so a
+  file reads like it does in the user's VS Code — colours and all. It is an iced `Highlighter`
+  (`ui/syntax.rs`) driven by `text_editor::highlight_with`, backed by **syntect** with the big
+  **two-face** grammar pack (TypeScript, PHP, TOML, … well past syntect's own defaults). The engine is
+  iced's own `iced_highlighter` ported almost verbatim — including the snapshot cache that re-parses
+  from the nearest `LINES_PER_SNAPSHOT` boundary rather than the top — with **one** deliberate change:
+  the theme. iced's built-in highlighter can only pick a bundled `.tmTheme`; we build a `syntect::Theme`
+  from the CME theme's own `tokenColors`, so the scope colours are exactly the user's (comment
+  `#aaaaaa`, string `#ffffbb`, keyword `#00ddff`, …). A scope the CME theme leaves alone yields no
+  modifier, so that token keeps the flat `value` colour — the highlight sits over the scheme, not
+  instead of it. **syntect uses its `fancy-regex` backend (pure Rust), not Oniguruma**, so the no-C
+  portable build holds (§11); the syntax token is the file extension, so an unknown/extensionless file
+  simply stays plain.
 
 ### Where it plugs in
 
@@ -2927,5 +2940,6 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
 - **`ssh/client.rs`** dispatches the two new commands; **`app.rs`** owns the tab wiring (open, route
   by `editor_id`, save/save-as/close, the editor keyboard shortcuts — Ctrl+S save, Ctrl+Shift+S save
   as, Ctrl+W close — and the per-extension theme memory); **`ui/editor.rs`** is the
-  toolbar-plus-gutter-plus-editor view and the two-scheme `Palette`; **`ui/files.rs`** adds the Edit…
-  item and the double-click-a-file path.
+  toolbar-plus-gutter-plus-editor view and the two-scheme `Palette`; **`ui/syntax.rs`** is the
+  syntect-backed `Highlighter` and the CME `syntect::Theme` (behind the `two-face` dependency, pure-Rust
+  `fancy-regex`); **`ui/files.rs`** adds the Edit… item and the double-click-a-file path.

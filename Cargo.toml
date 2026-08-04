@@ -63,6 +63,14 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # `fs` = async local file I/O, so streaming an upload never blocks a runtime worker.
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "fs", "sync", "macros", "time"] }
+# Syntax highlighting for the in-tab editor's CME theme (PLAN §32). `two-face` bundles the large
+# Sublime/`bat` syntax set (TypeScript, PHP, TOML, …, far past syntect's own defaults) and re-exports
+# the `syntect` it was built against, so the versions never skew. `syntect-default-fancy` selects
+# syntect's `fancy-regex` backend — PURE RUST — instead of the default Oniguruma, whose `onig_sys`
+# needs a C compiler: that keeps the no-C-toolchain portable build (§11). We build the highlighter by
+# hand (`ui/syntax.rs`) rather than via iced's `highlighter` feature, because only a hand-built one can
+# carry OUR theme — a `syntect::Theme` assembled from the CME `tokenColors` — instead of a bundled one.
+two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
 zeroize = "1.9.0"
 
 [dev-dependencies]
