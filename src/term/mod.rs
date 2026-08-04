@@ -17,12 +17,18 @@
 // comes back as bytes `process` returns for the caller to send. That retired the hand-rolled
 // `term::compat` (the engine parses every cursor-move spelling) and `term::answer` (the engine
 // answers every query).
+//
+// Three identity queries the engine does NOT answer — its VT parser treats every DCS as a no-op
+// and has no arm for the version request — so cmote sniffs them out of the same stream and answers
+// them itself (`query`, §33): XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`) and XTGETTCAP
+// (`DCS + q … ST`). Only DECRQSS's SGR request needs live state; `process` fills it from the pen.
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
+mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 
 use std::sync::{Arc, Mutex};
@@ -31,7 +37,8 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::Config;
-use alacritty_terminal::vte::ansi::{NamedColor, Processor, Rgb};
+use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use crate::palette;
 
@@ -42,6 +49,11 @@ use crate::palette;
 /// size via `resize` + `SshCommand::Resize`.
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
+
+/// cmote's terminal identity, reported to a program that sends XTVERSION (§33). The `name(version)`
+/// form is what xterm and kitty use and what a fingerprinting program pattern-matches on; the
+/// version is the crate's, stamped in at build time so the reply never drifts from the binary.
+const VERSION: &str = concat!("cmote(", env!("CARGO_PKG_VERSION"), ")");
 
 /// How many scrolled-off lines to retain (§23). Deep enough to scroll back over a long build
 /// or a `cat` of a big file; the engine grows the buffer lazily up to this cap, so the memory
@@ -107,6 +119,7 @@ impl Terminal {
 			replies,
 			cwd: cwd::Cwd::default(),
 			modkeys: modkeys::ModKeys::default(),
+			queries: query::Queries::default(),
 		}
 	}
 
@@ -123,9 +136,35 @@ impl Terminal {
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
 		self.modkeys.feed(bytes);
+		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
+		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
+		// for the usual flow where a program sets attributes and then queries in the same write.
+		let queries = self.queries.feed(bytes);
 		self.parser.advance(&mut self.term, bytes);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
-		std::mem::take(&mut buffer.bytes)
+		let mut out = std::mem::take(&mut buffer.bytes);
+		drop(buffer);
+		for query in queries {
+			match query {
+				// XTVERSION: cmote's fixed name and version.
+				query::Query::Version => out.extend_from_slice(&query::version_reply(VERSION)),
+				// DECRQSS for SGR: rebuild the current pen — exactly what the grid paints — as an
+				// SGR string and report it valid.
+				query::Query::Decrqss(query::Decrqss::Sgr) => {
+					let sgr = pen_sgr(&self.term.grid().cursor.template);
+					out.extend_from_slice(&query::decrqss_sgr_reply(&sgr));
+				}
+				// Every other DECRQSS setting: an honest "unsupported".
+				query::Query::Decrqss(query::Decrqss::Unsupported) => {
+					out.extend_from_slice(&query::decrqss_unsupported_reply());
+				}
+				// XTGETTCAP: answer each requested capability from cmote's small map of facts.
+				query::Query::Capabilities(names) => {
+					out.extend_from_slice(&query::gettcap_reply(&names));
+				}
+			}
+		}
+		out
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -223,6 +262,10 @@ pub struct Terminal {
 	/// writes to ask for unambiguous Ctrl/Alt key reports. The engine ignores that sequence, so —
 	/// like the cwd — the same bytes are scanned here for the key encoder to read.
 	modkeys: modkeys::ModKeys,
+	/// Sniffs the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33). Its VT
+	/// parser treats those as no-ops, so — like the cwd and modkeys — the same bytes are scanned
+	/// here, and `process` turns each completed query into a reply.
+	queries: query::Queries,
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
@@ -308,6 +351,80 @@ fn report_color(index: usize) -> (u8, u8, u8) {
 		0..=255 => palette::xterm_256(index as u8),
 		i if i == NamedColor::Background as usize => palette::DEFAULT_BG,
 		_ => palette::DEFAULT_FG,
+	}
+}
+
+/// Rebuild the current SGR pen as a parameter string for a DECRQSS reply (§33). The pen is the
+/// template cell the engine stamps onto every glyph, so reading it back is authoritative — it is
+/// exactly what the grid paints, not a guess. The string always opens with `0` (a full reset) and
+/// then lists only what is set, so a fresh pen reports `0` and bold-red reports `0;1;31`; the
+/// caller frames it as `DCS 1 $ r <this> m ST`.
+fn pen_sgr(cell: &Cell) -> String {
+	let flags = cell.flags;
+	// Open from a clean slate, then append a code for each attribute the pen carries.
+	let mut codes = vec![String::from("0")];
+	if flags.contains(Flags::BOLD) {
+		codes.push("1".to_string());
+	}
+	if flags.contains(Flags::DIM) {
+		codes.push("2".to_string());
+	}
+	if flags.contains(Flags::ITALIC) {
+		codes.push("3".to_string());
+	}
+	// A double underline has its own code; every other underline variant (curl, dotted, dashed)
+	// reports as a plain underline — truthful that the text is underlined, without claiming a
+	// substyle that is a terminal-specific extension.
+	if flags.contains(Flags::DOUBLE_UNDERLINE) {
+		codes.push("21".to_string());
+	} else if flags.intersects(
+		Flags::UNDERLINE | Flags::UNDERCURL | Flags::DOTTED_UNDERLINE | Flags::DASHED_UNDERLINE,
+	) {
+		codes.push("4".to_string());
+	}
+	if flags.contains(Flags::INVERSE) {
+		codes.push("7".to_string());
+	}
+	if flags.contains(Flags::HIDDEN) {
+		codes.push("8".to_string());
+	}
+	if flags.contains(Flags::STRIKEOUT) {
+		codes.push("9".to_string());
+	}
+	if let Some(foreground) = sgr_color(cell.fg, false) {
+		codes.push(foreground);
+	}
+	if let Some(background) = sgr_color(cell.bg, true) {
+		codes.push(background);
+	}
+	codes.join(";")
+}
+
+/// One channel of the pen as its SGR colour codes, or `None` when it is the default (which the
+/// leading reset already covers). Named 0-7 map to 30-37 / 40-47, bright 8-15 to 90-97 / 100-107,
+/// a palette index to `38;5;n` / `48;5;n`, and a truecolor spec to `38;2;r;g;b` / `48;2;r;g;b`.
+fn sgr_color(color: Color, is_background: bool) -> Option<String> {
+	let (base, bright_base, extended) = if is_background {
+		(40, 100, 48)
+	} else {
+		(30, 90, 38)
+	};
+	match color {
+		// The default foreground/background need no explicit code — the reset stands in for them.
+		Color::Named(NamedColor::Foreground | NamedColor::Background) => None,
+		Color::Named(named) => {
+			let index = named as usize;
+			if index <= 7 {
+				Some((base + index).to_string())
+			} else if (8..=15).contains(&index) {
+				Some((bright_base + index - 8).to_string())
+			} else {
+				// A special role (cursor, dim/bright foreground): not an SGR colour, so default.
+				None
+			}
+		}
+		Color::Indexed(index) => Some(format!("{extended};5;{index}")),
+		Color::Spec(rgb) => Some(format!("{extended};2;{};{};{}", rgb.r, rgb.g, rgb.b)),
 	}
 }
 
@@ -571,5 +688,66 @@ mod tests {
 		terminal.process(b"\x1b[?1049h");
 		terminal.scroll(ScrollMotion::Top);
 		assert_eq!(terminal.screen().display_offset(), 0);
+	}
+
+	#[test]
+	fn a_version_query_is_answered_with_cmote_identity() {
+		// XTVERSION `CSI > q` -> `DCS > | cmote(<version>) ST`. The engine drops the query, so this
+		// reply comes entirely from cmote's out-of-band scanner (§33).
+		let mut terminal = Terminal::new(10, 40);
+		let mut expected = b"\x1bP>|".to_vec();
+		expected.extend_from_slice(VERSION.as_bytes());
+		expected.extend_from_slice(b"\x1b\\");
+		assert_eq!(terminal.process(b"\x1b[>q"), expected);
+	}
+
+	#[test]
+	fn a_decrqss_sgr_query_reports_the_current_pen() {
+		// A fresh pen is a full reset, so DECRQSS for SGR reports `0`: `DCS 1 $ r 0 m ST`.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0m\x1b\\".to_vec()
+		);
+		// After a program sets bold + red foreground, the same query reports `0;1;31`, rebuilt
+		// from the very pen the grid paints with.
+		terminal.process(b"\x1b[1;31m");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_decrqss_sgr_query_sees_attributes_set_in_the_same_chunk() {
+		// The reply is built AFTER the chunk is advanced, so an SGR change that precedes the query
+		// in the SAME write is reflected — the common case of a program setting a pen then asking.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b[1;31m\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
+		);
+	}
+
+	#[test]
+	fn an_unsupported_decrqss_query_is_answered_with_a_zero_status() {
+		// Scroll margins (`r`) are not exposed by the engine, so the honest reply is the invalid
+		// status `DCS 0 $ r ST` — enough to stop the program waiting, without lying about state.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP$qr\x1b\\"),
+			b"\x1bP0$r\x1b\\".to_vec()
+		);
+	}
+
+	#[test]
+	fn an_xtgettcap_query_reports_the_terminal_name() {
+		// `TN` (hex 544E) -> `xterm-256color`, the name cmote requested for the remote pty, framed
+		// as a valid `DCS 1 + r <name>=<value> ST` with both sides upper-case hex.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP+q544E\x1b\\"),
+			b"\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\".to_vec()
+		);
 	}
 }

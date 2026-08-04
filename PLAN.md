@@ -3008,3 +3008,52 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   **`ui/syntax.rs`** is the
   syntect-backed `Highlighter` and the CME `syntect::Theme` (behind the `two-face` dependency, pure-Rust
   `fancy-regex`); **`ui/files.rs`** adds the Edit… item and the double-click-a-file path.
+
+## 33. Answering the identity queries the engine drops (v3.x)
+
+The terminal engine (`alacritty_terminal`, §23) answers the queries that touch the grid — DSR,
+DA, DECRQM, cursor-position and text-area reports — and cmote drains those replies straight through
+(§9). Three it does **not** answer, because its VT parser treats every DCS string as a no-op (its
+`hook`/`put`/`unhook` only log) and it has no CSI arm for the version request:
+
+    CSI > q            XTVERSION  — "what terminal are you, and which version?"
+    DCS $ q <sel> ST   DECRQSS    — "what is setting <sel> right now?" (Request Status String)
+    DCS + q <hex> ST   XTGETTCAP  — "what is your value for terminfo capability <hex>?"
+
+A program that sends one (tmux, neovim, notcurses, kitty-aware TUIs) waits for a reply; unanswered,
+it stalls until a timeout, and some paste the query back as literal garbage. So cmote sniffs these
+out of the stream itself — the same tactic `cwd` and `modkeys` use for the sequences the engine
+ignores — and formats a reply.
+
+- **A separate out-of-band scanner (`term/query.rs`).** A byte-at-a-time state machine, chunk-safe
+  like `modkeys`, run in `process` **before** the engine advances. It parses only — it holds no
+  engine state — and returns the queries that completed in the chunk; `term/mod.rs` turns each into
+  a reply and appends it to the engine's own reply bytes. Unlike `modkeys`/`cwd`, which observe, this
+  scanner **emits**. An unrecognised DCS (a sixel image, a reply) is followed to its terminator all
+  the same, so its arbitrary data — the one place a stream legitimately carries raw bytes — cannot
+  masquerade as a fresh query. It shares the `CSI >` prefix with `modkeys` (which ends in `m`) and the
+  kitty query (`u`) and DA2 (`c`); the scanners are independent and key off the distinct final byte.
+- **XTVERSION → cmote's identity.** `DCS > | cmote(<version>) ST`, the version stamped from
+  `CARGO_PKG_VERSION` at build time so the reply never drifts from the binary. Static, no state.
+- **XTGETTCAP → only the facts cmote can state truthfully.** The terminal name (`TN` →
+  `xterm-256color`, the name cmote requested for the pty, §6) and the colour count (`Co`/`colors` →
+  256). Every other capability is answered **unknown** (`DCS 0 + r <name> ST`) — the honest answer a
+  well-behaved querier expects for a capability a terminal does not advertise. Names cross the wire
+  hex-encoded both ways; the reply echoes the canonical upper-case hex.
+- **DECRQSS → the one setting cmote renders faithfully.** Only **SGR** (`m`) is reported from real
+  state: the current pen — `grid().cursor.template`, exactly what the grid paints — rebuilt as an SGR
+  string (`0` for a reset pen, `0;1;31` for bold red), framed `DCS 1 $ r <params> m ST`. The pen is
+  read **after** the chunk is advanced, so a program that sets attributes and then queries in the same
+  write sees the attributes it set. Every other setting — cursor shape (cmote draws a fixed block by
+  inverting the cell), scroll margins (the engine does not expose them), conformance level — is
+  answered **unsupported** (`DCS 0 $ r ST`): an honest "I do not report that" that stops the program
+  waiting far more cheaply than a lie about state would cost. (`ponytail:` truecolor is *not* claimed
+  through XTGETTCAP `RGB` — its wire value is ambiguous — since 24-bit SGR works whether or not a
+  capability query confirms it; and a DECRQSS SGR pen change that trails the query **within one chunk**
+  is reflected too, because the pen is read once per chunk, not at the query's exact offset — the
+  common case is the query trailing its own state, which reads correctly.)
+
+- **`term/mod.rs`** owns the wiring: the `queries` scanner field, the `process` reply loop, and the
+  `pen_sgr`/`sgr_color` helpers that read the alacritty pen (the only engine-coupled part). **`term/
+  query.rs`** is the scanner, the reply formatters, the small capability map and the hex codec — free
+  of any engine type, so every parse and every reply shape is unit-tested with no terminal.
