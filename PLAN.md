@@ -2934,8 +2934,16 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   `#aaaaaa`, string `#ffffbb`, keyword `#00ddff`, …). A scope the CME theme leaves alone yields no
   modifier, so that token keeps the flat `value` colour — the highlight sits over the scheme, not
   instead of it. **syntect uses its `fancy-regex` backend (pure Rust), not Oniguruma**, so the no-C
-  portable build holds (§11); the syntax token is the file extension, so an unknown/extensionless file
-  simply stays plain.
+  portable build holds (§11).
+- **The grammar is resolved by more than the extension.** `resolve_syntax` widens the match, most
+  specific first: the whole file NAME as a token (Sublime grammars register bare names like `Makefile`,
+  `Dockerfile`, `.gitignore`, `.bashrc`, `CMakeLists.txt` among their "extensions"), then the extension
+  alone (`main.rs` → Rust), then the buffer's first line as a shebang / mode-line (`#!/bin/sh` → bash,
+  `#!/usr/bin/env python3` → Python), and only then plain text — so a name-only file, a dot-file, or an
+  extensionless script highlights instead of dropping to plain. The highlighter's iced identity is the
+  RESOLVED grammar's name, not the raw inputs, so a file that resolves by name or extension keeps a
+  stable identity when its first line is edited (the shebang never enters it) — no needless re-parse;
+  only a truly extensionless script re-resolves, correctly, when its own shebang changes.
 
 ### Moving through the file — find, and following the cursor
 

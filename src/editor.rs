@@ -384,12 +384,19 @@ impl EditorTheme {
 	}
 }
 
+/// The file name (basename) of a remote path (§32): the last path segment, splitting on both slash
+/// kinds so a stray backslash in an otherwise POSIX path is still handled. Borrowed from `path`, so
+/// the caller owns no copy. Used both for the theme key (via `extension_key`) and for grammar
+/// resolution, which needs the whole name (`Makefile`), not just the extension.
+pub fn file_name(path: &str) -> &str {
+	path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
 /// The lower-cased file extension a theme choice is remembered under (§32) — `json` for `Notes.JSON`,
 /// empty for a file with no extension (and for a dot-file like `.bashrc`, whose leading dot is a
-/// hidden-file marker, not an extension). Splitting on both slash kinds tolerates a stray backslash
-/// in an otherwise POSIX remote path.
+/// hidden-file marker, not an extension).
 pub fn extension_key(path: &str) -> String {
-	let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+	let name = file_name(path);
 	match name.rfind('.') {
 		Some(dot) if dot > 0 => name[dot + 1..].to_ascii_lowercase(),
 		_ => String::new(),
@@ -850,6 +857,18 @@ impl Editor {
 		&self.changed
 	}
 
+	/// The buffer's first line, for shebang / mode-line grammar detection under the CME theme (§32);
+	/// empty when the buffer is empty. It is read live, but the view folds the grammar it resolves into
+	/// a stable token, so a file that already resolves by name or extension never re-highlights when its
+	/// first line is edited — only a truly extensionless script re-resolves when its shebang changes.
+	pub fn first_line(&self) -> String {
+		self.content
+			.lines()
+			.next()
+			.map(|line| line.text.into_owned())
+			.unwrap_or_default()
+	}
+
 	/// The line ending the buffer uses, for the toolbar ("LF" / "CRLF" / "CR"). A buffer with no
 	/// newline reads as LF, the default cmote writes (§32).
 	pub fn line_ending_label(&self) -> &'static str {
@@ -1034,6 +1053,15 @@ mod tests {
 		let base = lines(&["a"]);
 		let now = lines(&["a", "b", "c"]);
 		assert_eq!(changed_flags(&base, &now), vec![false, true, true]);
+	}
+
+	#[test]
+	fn file_name_is_the_last_path_segment() {
+		assert_eq!(file_name("/etc/app/config.json"), "config.json");
+		assert_eq!(file_name("Makefile"), "Makefile");
+		assert_eq!(file_name("/home/me/.bashrc"), ".bashrc");
+		// A stray backslash in an otherwise POSIX path still splits.
+		assert_eq!(file_name("/a\\weird"), "weird");
 	}
 
 	#[test]

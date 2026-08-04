@@ -303,7 +303,15 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		editor_widget
 			.highlight_with::<crate::ui::syntax::Highlighter>(
 				crate::ui::syntax::Settings {
-					token: crate::editor::extension_key(&editor.path),
+					// Widen past the bare extension so a whole-name file (Makefile, .bashrc) or an
+					// extensionless shebang script highlights too (§32); the resolved grammar NAME is the
+					// identity, so a normal file's highlighter is not rebuilt when its first line is edited.
+					grammar: crate::ui::syntax::resolve_syntax(
+						crate::editor::file_name(&editor.path),
+						&editor.first_line(),
+					)
+					.name
+					.clone(),
 				},
 				|highlight, _theme| highlight.to_format(),
 			)

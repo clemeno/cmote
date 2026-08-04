@@ -45,13 +45,60 @@ static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_no_
 /// (§32). `'static`, so a `syntect::Highlighter` can borrow it for the program's life.
 static CME_THEME: LazyLock<Theme> = LazyLock::new(cme_theme);
 
-/// What identifies a highlighter run to iced (§32): the language token — here the file extension, so
-/// `rs` picks Rust, `json` JSON, `php` PHP. The theme is always CME, so it is not part of the
-/// settings; a change of `token` (a Save As to a new extension) is what makes iced rebuild.
+/// What identifies a highlighter run to iced (§32): the NAME of the resolved grammar (`"Rust"`,
+/// `"Makefile"`, `"Git Ignore"`, `"Plain Text"`). The view resolves the file's grammar once — widening
+/// past the bare extension to whole names and shebangs (`resolve_syntax`) — and passes its name here,
+/// so two states compare equal (and iced keeps the parser rather than rebuilding) exactly when the
+/// effective grammar is the same. That is what keeps a normal file from re-highlighting when its first
+/// line is edited: its name resolves by extension, so the shebang never enters the identity. The theme
+/// is always CME, so it is not part of the identity; a change of grammar — a Save As to a new type, or
+/// an edited shebang on an extensionless file — is what makes iced rebuild.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-	/// The language token — the file's lower-cased extension (`editor::extension_key`).
-	pub token: String,
+	/// The resolved grammar's name (`SyntaxReference::name`), from `resolve_syntax`.
+	pub grammar: String,
+}
+
+/// Resolve the grammar for a file, widening past the bare extension so a whole-name file (`Makefile`,
+/// `Dockerfile`, `.bashrc`, `.gitignore`, `CMakeLists.txt`) or an extensionless shebang script gets
+/// highlighted instead of dropping to plain text (§32). First hit wins, most specific first: the whole
+/// file name as a token — Sublime grammars register bare names like `Makefile` and `.gitignore` among
+/// their "extensions", matched case-insensitively — then the extension alone, then the buffer's first
+/// line as a shebang / mode-line, then plain text. `name` is the file's basename; `first_line` is the
+/// buffer's first line (empty when there is none).
+pub fn resolve_syntax(name: &str, first_line: &str) -> &'static SyntaxReference {
+	by_whole_name(name)
+		.or_else(|| by_extension(name))
+		.or_else(|| by_first_line(first_line))
+		.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text())
+}
+
+/// The grammar registering this exact file name among its extensions (§32) — how a name-only file like
+/// `Makefile` or a dot-file like `.bashrc` resolves. An empty name matches nothing.
+fn by_whole_name(name: &str) -> Option<&'static SyntaxReference> {
+	if name.is_empty() {
+		return None;
+	}
+	SYNTAXES.find_syntax_by_extension(name)
+}
+
+/// The grammar for the file's extension (§32) — the ordinary case (`main.rs` → Rust). The extension is
+/// the text after the LAST dot, and only when that dot is not the name's first character, so a dot-file
+/// like `.bashrc` has no extension here (the whole-name step catches it instead).
+fn by_extension(name: &str) -> Option<&'static SyntaxReference> {
+	match name.rfind('.') {
+		Some(dot) if dot > 0 => SYNTAXES.find_syntax_by_token(&name[dot + 1..]),
+		_ => None,
+	}
+}
+
+/// The grammar a first line's shebang or mode-line names (§32) — `#!/bin/sh` → bash. An empty line
+/// matches nothing.
+fn by_first_line(first_line: &str) -> Option<&'static SyntaxReference> {
+	if first_line.is_empty() {
+		return None;
+	}
+	SYNTAXES.find_syntax_by_first_line(first_line)
 }
 
 /// One highlighted span's style (§32): a `syntect` style modifier (a foreground colour, maybe a font
@@ -123,8 +170,10 @@ impl highlighter::Highlighter for Highlighter {
 	type Iterator<'a> = Box<dyn Iterator<Item = (Range<usize>, Self::Highlight)> + 'a>;
 
 	fn new(settings: &Self::Settings) -> Self {
+		// The view already widened the file to a grammar (`resolve_syntax`) and handed us its name, so
+		// here it is a direct lookup — plain text if the name is somehow unknown, never a panic.
 		let syntax = SYNTAXES
-			.find_syntax_by_token(&settings.token)
+			.find_syntax_by_name(&settings.grammar)
 			.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
 		let highlighter = highlighting::Highlighter::new(&CME_THEME);
 		let parser = ParseState::new(syntax);
@@ -139,7 +188,7 @@ impl highlighter::Highlighter for Highlighter {
 
 	fn update(&mut self, new_settings: &Self::Settings) {
 		self.syntax = SYNTAXES
-			.find_syntax_by_token(&new_settings.token)
+			.find_syntax_by_name(&new_settings.grammar)
 			.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
 		self.highlighter = highlighting::Highlighter::new(&CME_THEME);
 		// Restart from the top with the new grammar.
@@ -351,5 +400,39 @@ mod tests {
 		// Rust is well past syntect's own defaults, so this also proves the two-face pack loaded.
 		let syntax = SYNTAXES.find_syntax_by_token("rs");
 		assert_eq!(syntax.map(|s| s.name.as_str()), Some("Rust"));
+	}
+
+	#[test]
+	fn resolve_widens_past_the_bare_extension() {
+		// The ordinary case: a real extension resolves as before.
+		assert_eq!(resolve_syntax("main.rs", "").name, "Rust");
+		assert_eq!(resolve_syntax("data.json", "").name, "JSON");
+		// Whole-name files with no usable extension now resolve instead of dropping to plain text.
+		assert_eq!(resolve_syntax("Makefile", "").name, "Makefile");
+		assert_eq!(resolve_syntax("Dockerfile", "").name, "Dockerfile");
+		// A whole name that ends in a misleading extension still resolves by its name first: the CMake
+		// grammar owns `CMakeLists.txt`, so it wins over the `.txt` extension's Plain Text.
+		assert_eq!(resolve_syntax("CMakeLists.txt", "").name, "CMake");
+		// A dot-file (no extension in our sense) resolves by its whole name.
+		assert_eq!(resolve_syntax(".gitignore", "").name, "Git Ignore");
+		assert!(resolve_syntax(".bashrc", "").name.contains("bash"));
+	}
+
+	#[test]
+	fn resolve_uses_the_shebang_only_when_name_and_extension_miss() {
+		// An extensionless script resolves by its first-line shebang.
+		assert!(resolve_syntax("deploy", "#!/bin/sh").name.contains("bash"));
+		assert_eq!(
+			resolve_syntax("run", "#!/usr/bin/env python3").name,
+			"Python"
+		);
+		// A file that already resolves by extension IGNORES the shebang — this is what keeps a normal
+		// file's grammar (and so its highlighter identity) stable when line 0 is edited.
+		assert_eq!(
+			resolve_syntax("main.rs", "#!/usr/bin/env python3").name,
+			"Rust"
+		);
+		// Nothing matches: plain text, never a panic.
+		assert_eq!(resolve_syntax("mystery", "").name, "Plain Text");
 	}
 }
