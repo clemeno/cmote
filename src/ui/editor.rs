@@ -127,6 +127,7 @@ fn toolbar(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 	)
 	.width(Length::Fill)
 	.height(Length::Fixed(TOOLBAR_HEIGHT))
+	.align_y(Vertical::Center)
 	.padding(Padding::from([0.0, 10.0]))
 	.style(|_theme| container::Style {
 		background: Some(HEADER_BG.into()),
