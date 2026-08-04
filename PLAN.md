@@ -2894,6 +2894,26 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   **Cancel**. A dirty editor is thus as protected as a live shell — the strip's "×", not just an
   explicit menu, routes through it.
 
+### Theme, per file type
+
+- **Two schemes, chosen per tab.** The toolbar carries a small two-option select: **Default** —
+  cmote's own dark panels, the same family as the files pane and dialogs — and **CME**, the colours
+  of the user's VS Code theme (*Themer My Color Set Dark*), ported from that theme's own `editor.*` /
+  `editorGutter.*` values (dark-teal ground `#1a2a30`, white text, a light-blue change marker
+  `#aaddff`, a faint cyan selection, an orange warning tint). Only the buffer, gutter and toolbar are
+  themed; the shared close ✕ (§10) stays a neutral glyph.
+- **The choice lives in the model, the colours in the view.** `Editor::theme` holds only the
+  `EditorTheme` enum; `ui/editor.rs` resolves it to a `Palette` and threads a `&Palette` into every
+  drawing helper — so the model/view split (§18) holds, and two editor tabs can wear different schemes
+  at once.
+- **Remembered per extension, App-wide.** The pick is recorded on `App` in a
+  `HashMap<extension, EditorTheme>` keyed by `editor::extension_key` (lower-cased, no dot; `""` for a
+  file with no extension). Opening a file seeds its editor from that map, so a `.json` reopens in the
+  scheme JSON was last edited in, independent of what a `.ts` or `.php` tab is set to. The message is
+  App-level (`EditorThemeSelected`), not tab-local, precisely because the memory is App-wide.
+  (`ponytail:` the memory is **session-scoped** — it is not written to `settings.json`, so it resets
+  on restart. Persisting it is a one-field addition to the settings schema when wanted.)
+
 ### Where it plugs in
 
 - **`bridge.rs`** gains `SshCommand::EditLoad { editor_id, path }` /
@@ -2906,5 +2926,6 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   writes a `Vec<u8>` atomically. It reuses `open_sftp` (§17).
 - **`ssh/client.rs`** dispatches the two new commands; **`app.rs`** owns the tab wiring (open, route
   by `editor_id`, save/save-as/close, the editor keyboard shortcuts — Ctrl+S save, Ctrl+Shift+S save
-  as, Ctrl+W close); **`ui/editor.rs`** is the toolbar-plus-gutter-plus-editor view; **`ui/files.rs`**
-  adds the Edit… item and the double-click-a-file path.
+  as, Ctrl+W close — and the per-extension theme memory); **`ui/editor.rs`** is the
+  toolbar-plus-gutter-plus-editor view and the two-scheme `Palette`; **`ui/files.rs`** adds the Edit…
+  item and the double-click-a-file path.

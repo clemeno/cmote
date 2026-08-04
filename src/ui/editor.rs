@@ -1,8 +1,16 @@
 // ui/editor.rs — the in-tab text editor's view (PLAN §32).
 //
-// A pure view over `editor::Editor`: a toolbar (path, encoding, line ending, dirty dot, Save / Save
-// As / Close), then the buffer with a line-number gutter down its left. The model owns the text,
-// the changed-line marks and the Save As prompt state; this file only draws them.
+// A pure view over `editor::Editor`: a toolbar (path, encoding, line ending, dirty dot, a theme
+// select, Save / Save As / Close), then the buffer with a line-number gutter down its left. The
+// model owns the text, the changed-line marks, the Save As prompt state and the chosen theme; this
+// file only draws them.
+//
+// Theme (§32): the editor paints in one of two schemes, chosen per tab and remembered per file
+// extension by `App`. A tab's `EditorTheme` resolves here to a small `Palette`, and every drawing
+// helper takes a `&Palette` rather than reaching for a global colour — so two editor tabs can wear
+// different schemes at once. "Default" is cmote's own dark panels; "CME" is the user's VS Code theme
+// (Themer My Color Set Dark), ported from its `editor.*` colours so a file reads much as it does
+// there.
 //
 // The gutter trick (§32): iced's `text_editor` scrolls internally and hides its scroll offset, so a
 // gutter placed beside it would desync the instant the text scrolled. Instead the editor is laid out
@@ -19,7 +27,7 @@ use iced::widget::{
 use iced::{Background, Border, Color, Element, Font, Length, Padding};
 
 use crate::app::Message;
-use crate::editor::{Editor, EditorMessage, Status};
+use crate::editor::{Editor, EditorMessage, EditorTheme, Status};
 use crate::ui::explorer::{FG, HEADER_BG, MUTED_FG, NOTICE_FG, PANEL_BG, SELECTED_BG};
 
 /// The editor's monospace face — the terminal's bundled Fira Mono, so code lines up the same way it
@@ -34,10 +42,11 @@ const LINE_HEIGHT: f32 = 20.0;
 /// The toolbar's fixed height.
 const TOOLBAR_HEIGHT: f32 = 34.0;
 
-/// The gutter's changed-line bar: its width, and the amber that marks a line edited since load
-/// (§32). The same amber tints the changed line's number and the dirty dot, so "unsaved" reads one
-/// colour throughout.
+/// The gutter's changed-line bar width (§32). Its colour is the palette's `changed`.
 const BAR_WIDTH: f32 = 3.0;
+
+/// The amber that marks a changed line in the Default scheme (§32) — the palette's `changed` there.
+/// The CME scheme swaps in its own change colour.
 const CHANGED_MARK: Color = Color::from_rgb8(0xd0, 0xa0, 0x40);
 
 /// The average advance of Fira Mono at `FONT_SIZE`, for sizing the gutter to its digit count — the
@@ -50,17 +59,73 @@ const GUTTER_PAD: f32 = 8.0;
 /// same discipline as the rename field, §18).
 pub const SAVE_AS_INPUT_ID: &str = "editor-save-as";
 
+/// The colours one editor paints with (§32), resolved from the tab's `EditorTheme`. Every drawing
+/// helper below takes a `&Palette` rather than a global, so a tab can differ from its neighbour.
+struct Palette {
+	/// The toolbar and gutter fill.
+	chrome_bg: Color,
+	/// The editing surface behind the text.
+	buffer_bg: Color,
+	/// The main foreground — the path and the buffer text.
+	fg: Color,
+	/// Dimmed foreground — badges, line numbers, a disabled button, an inactive theme option.
+	muted: Color,
+	/// The highlight behind selected text.
+	selection: Color,
+	/// A changed-since-load line's bar and number.
+	changed: Color,
+	/// A transient warning — a save failure, the closed-session note, the "cannot open" heading.
+	notice: Color,
+	/// A toolbar button's fill.
+	button_bg: Color,
+	/// The fill of the theme select's active option and the Save As card's border.
+	accent: Color,
+}
+
+/// Resolve a theme to its palette (§32).
+fn palette(theme: EditorTheme) -> Palette {
+	match theme {
+		// cmote's own dark panels — the same family as the files pane and the dialogs.
+		EditorTheme::Default => Palette {
+			chrome_bg: HEADER_BG,
+			buffer_bg: PANEL_BG,
+			fg: FG,
+			muted: MUTED_FG,
+			selection: SELECTED_BG,
+			changed: CHANGED_MARK,
+			notice: NOTICE_FG,
+			button_bg: PANEL_BG,
+			accent: SELECTED_BG,
+		},
+		// "CME": Themer My Color Set Dark. Each value is that theme's own `editor.*` / `editorGutter.*`
+		// colour, so the buffer reads like the same file in VS Code — dark-teal ground, white text, a
+		// light-blue change marker, a faint cyan selection, an orange warning tint.
+		EditorTheme::Cme => Palette {
+			chrome_bg: Color::from_rgb8(0x20, 0x30, 0x3c), // editorGutter.background
+			buffer_bg: Color::from_rgb8(0x1a, 0x2a, 0x30), // editor.background
+			fg: Color::from_rgb8(0xff, 0xff, 0xff),        // editor.foreground
+			muted: Color::from_rgb8(0x60, 0x6b, 0x74),     // editorLineNumber.foreground
+			selection: Color::from_rgba8(0x00, 0xcc, 0xff, 0.2), // editor.selectionBackground #00CCFF33
+			changed: Color::from_rgb8(0xaa, 0xdd, 0xff),   // editorGutter.modifiedBackground
+			notice: Color::from_rgb8(0xff, 0x66, 0x00),    // errorForeground
+			button_bg: Color::from_rgb8(0x40, 0x4e, 0x58), // editorWidget.background
+			accent: Color::from_rgb8(0x00, 0x66, 0x88),    // the user's teal accent (bracket guide)
+		},
+	}
+}
+
 /// The whole editor screen for one tab (§32): the toolbar over the buffer (or the loading / failed
 /// message), with the Save As prompt floated on top when it is open. Borrows the editor for the
 /// lifetime of the returned element, since `text_editor` reads the buffer in place.
 pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
+	let p = palette(editor.theme);
 	let body: Element<'_, Message> = match &editor.status {
-		Status::Loading => centered(text("Loading…").size(15).color(MUTED_FG).into()),
-		Status::Failed(reason) => failed_body(reason, tab_id),
-		Status::Ready => buffer_body(editor),
+		Status::Loading => centered(text("Loading…").size(15).color(p.muted).into()),
+		Status::Failed(reason) => failed_body(reason, tab_id, &p),
+		Status::Ready => buffer_body(editor, &p),
 	};
 
-	let screen = column![toolbar(editor, tab_id), body]
+	let screen = column![toolbar(editor, tab_id, &p), body]
 		.width(Length::Fill)
 		.height(Length::Fill);
 
@@ -69,7 +134,7 @@ pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 		Some(path) => stack![
 			screen,
 			mouse_area(dim_fill()).on_press(Message::Editor(EditorMessage::SaveAsCancel)),
-			centered(save_as_card(path)),
+			centered(save_as_card(path, &p)),
 		]
 		.width(Length::Fill)
 		.height(Length::Fill)
@@ -79,41 +144,42 @@ pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 }
 
 /// The toolbar: the path (with a dirty dot when unsaved), the encoding and line ending, any notice,
-/// and the Save / Save As / Close buttons (§32).
-fn toolbar(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
+/// the theme select, and the Save / Save As / Close buttons (§32).
+fn toolbar<'a>(editor: &'a Editor, tab_id: u64, p: &Palette) -> Element<'a, Message> {
 	let ready = matches!(editor.status, Status::Ready);
 	let dirty = editor.is_dirty();
 	let dot = if dirty { "• " } else { "" };
-	let title = text(format!("{dot}{}", editor.path)).size(13).color(FG);
+	let title = text(format!("{dot}{}", editor.path)).size(13).color(p.fg);
 
 	// The right-hand info cluster: encoding, line ending, and whatever transient state applies.
 	let mut info = row![
-		badge(editor.encoding.label()),
-		badge(editor.line_ending_label()),
+		badge(editor.encoding.label(), p),
+		badge(editor.line_ending_label(), p),
 	]
 	.spacing(10)
 	.align_y(Vertical::Center);
 	if editor.saving {
-		info = info.push(text("Saving…").size(11).color(MUTED_FG));
+		info = info.push(text("Saving…").size(11).color(p.muted));
 	}
 	if editor.parent_gone {
 		info = info.push(
 			text("session closed — cannot save")
 				.size(11)
-				.color(NOTICE_FG),
+				.color(p.notice),
 		);
 	} else if let Some(notice) = &editor.notice {
-		info = info.push(text(notice.clone()).size(11).color(NOTICE_FG));
+		info = info.push(text(notice.clone()).size(11).color(p.notice));
 	}
 
 	let can_save = dirty && !editor.saving && !editor.parent_gone && ready;
 	let can_save_as = ready && !editor.parent_gone && !editor.saving;
 	let buttons = row![
-		tool_button("Save", Message::Editor(EditorMessage::Save), can_save),
+		tool_button("Save", Message::Editor(EditorMessage::Save), can_save, p),
 		tool_button(
 			"Save As…",
 			Message::Editor(EditorMessage::SaveAsStart),
-			can_save_as
+			can_save_as,
+			p
 		),
 		// The same ✕ that closes a dialog (§10), so "close this" is one icon app-wide.
 		crate::ui::dialog::close_button(Message::TabCloseRequested(tab_id)),
@@ -121,25 +187,73 @@ fn toolbar(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 	.spacing(6)
 	.align_y(Vertical::Center);
 
+	let bg = p.chrome_bg;
 	container(
-		row![container(title).width(Length::Fill), info, buttons,]
-			.spacing(14)
-			.align_y(Vertical::Center),
+		row![
+			container(title).width(Length::Fill),
+			info,
+			theme_select(editor.theme, p),
+			buttons,
+		]
+		.spacing(14)
+		.align_y(Vertical::Center),
 	)
 	.width(Length::Fill)
 	.height(Length::Fixed(TOOLBAR_HEIGHT))
 	.align_y(Vertical::Center)
 	.padding(Padding::from([0.0, 10.0]))
-	.style(|_theme| container::Style {
-		background: Some(HEADER_BG.into()),
+	.style(move |_theme| container::Style {
+		background: Some(bg.into()),
 		..container::Style::default()
 	})
 	.into()
 }
 
+/// The toolbar's two-option theme select (§32): a tiny segmented control, the active scheme filled
+/// with the palette's accent. Each option posts an App-level `EditorThemeSelected`, which repaints
+/// this editor and remembers the choice for the file's extension.
+fn theme_select(current: EditorTheme, p: &Palette) -> Element<'static, Message> {
+	row![
+		theme_option(EditorTheme::Default, current, p),
+		theme_option(EditorTheme::Cme, current, p),
+	]
+	.spacing(4)
+	.align_y(Vertical::Center)
+	.into()
+}
+
+/// One option in the theme select — filled with the accent and brightened when it is the current
+/// scheme, dim and un-filled otherwise (§32).
+fn theme_option(
+	theme: EditorTheme,
+	current: EditorTheme,
+	p: &Palette,
+) -> Element<'static, Message> {
+	let active = theme == current;
+	let bg = if active { p.accent } else { p.button_bg };
+	let fg = if active { p.fg } else { p.muted };
+	button(text(theme.label().to_owned()).size(11).color(fg))
+		.padding(Padding::from([3.0, 8.0]))
+		.on_press(Message::EditorThemeSelected(theme))
+		.style(move |_theme, _status| button::Style {
+			background: Some(bg.into()),
+			text_color: fg,
+			border: Border {
+				radius: 3.0.into(),
+				..Border::default()
+			},
+			..button::Style::default()
+		})
+		.into()
+}
+
 /// The buffer with its line-number gutter, both inside one vertical `scrollable` so they scroll in
 /// lockstep (§32).
-fn buffer_body(editor: &Editor) -> Element<'_, Message> {
+fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
+	let bg = p.buffer_bg;
+	let fg = p.fg;
+	let muted = p.muted;
+	let selection = p.selection;
 	let editor_widget = text_editor(&editor.content)
 		.on_action(|action| Message::Editor(EditorMessage::Action(action)))
 		.font(FONT)
@@ -148,48 +262,50 @@ fn buffer_body(editor: &Editor) -> Element<'_, Message> {
 		.wrapping(Wrapping::None)
 		.padding(Padding::from([0.0, 8.0]))
 		.height(Length::Shrink)
-		.style(|_theme, _status| text_editor::Style {
-			background: Background::Color(PANEL_BG),
+		.style(move |_theme, _status| text_editor::Style {
+			background: Background::Color(bg),
 			border: Border::default(),
-			placeholder: MUTED_FG,
-			value: FG,
-			selection: SELECTED_BG,
+			placeholder: muted,
+			value: fg,
+			selection,
 		});
 
-	let content = row![gutter(editor), editor_widget]
+	let content = row![gutter(editor, p), editor_widget]
 		.width(Length::Fill)
 		.height(Length::Shrink);
 
 	container(scrollable(content).width(Length::Fill).height(Length::Fill))
-		.style(|_theme| container::Style {
-			background: Some(PANEL_BG.into()),
+		.style(move |_theme| container::Style {
+			background: Some(bg.into()),
 			..container::Style::default()
 		})
 		.into()
 }
 
-/// The gutter: one right-aligned number per line, an amber bar and amber number on lines changed
-/// since load (§32). Each row is exactly `LINE_HEIGHT`, matching the editor's absolute line height so
-/// the two stay aligned. (`ponytail:` one widget per line — fine for the config-and-script files this
-/// is for; a many-thousand-line file would want a drawn gutter, the same bound the buffer's
-/// laid-out-every-frame layout already carries, §32.)
-fn gutter(editor: &Editor) -> Element<'_, Message> {
+/// The gutter: one right-aligned number per line, a bar and the palette's change colour on lines
+/// changed since load (§32). Each row is exactly `LINE_HEIGHT`, matching the editor's absolute line
+/// height so the two stay aligned. (`ponytail:` one widget per line — fine for the config-and-script
+/// files this is for; a many-thousand-line file would want a drawn gutter, the same bound the
+/// buffer's laid-out-every-frame layout already carries, §32.)
+fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let count = editor.content.line_count().max(1);
 	let changed = editor.changed();
 	let width = (count.to_string().len() as f32) * DIGIT_WIDTH + BAR_WIDTH + GUTTER_PAD * 2.0;
+	let mark = p.changed;
+	let muted = p.muted;
 
-	let mut rows: Vec<Element<'_, Message>> = Vec::with_capacity(count);
+	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(count);
 	for index in 0..count {
 		let is_changed = changed.get(index).copied().unwrap_or(false);
 		let number = text(format!("{}", index + 1))
 			.font(FONT)
 			.size(FONT_SIZE)
-			.color(if is_changed { CHANGED_MARK } else { MUTED_FG });
+			.color(if is_changed { mark } else { muted });
 		let bar = container(text(""))
 			.width(Length::Fixed(BAR_WIDTH))
 			.height(Length::Fill)
 			.style(move |_theme| container::Style {
-				background: is_changed.then(|| CHANGED_MARK.into()),
+				background: is_changed.then(|| mark.into()),
 				..container::Style::default()
 			});
 		let line = row![
@@ -214,10 +330,11 @@ fn gutter(editor: &Editor) -> Element<'_, Message> {
 		);
 	}
 
+	let bg = p.chrome_bg;
 	container(column(rows))
 		.width(Length::Fixed(width))
-		.style(|_theme| container::Style {
-			background: Some(HEADER_BG.into()),
+		.style(move |_theme| container::Style {
+			background: Some(bg.into()),
 			..container::Style::default()
 		})
 		.into()
@@ -225,14 +342,14 @@ fn gutter(editor: &Editor) -> Element<'_, Message> {
 
 /// The message shown in place of the buffer when the file cannot be opened — too big, binary, or an
 /// unsupported encoding (§32) — with only a Close.
-fn failed_body(reason: &str, tab_id: u64) -> Element<'_, Message> {
+fn failed_body(reason: &str, tab_id: u64, p: &Palette) -> Element<'static, Message> {
 	centered(
 		column![
 			text("This file cannot be opened in the editor.")
 				.size(15)
-				.color(NOTICE_FG),
-			text(reason.to_owned()).size(13).color(FG),
-			tool_button("Close", Message::TabCloseRequested(tab_id), true),
+				.color(p.notice),
+			text(reason.to_owned()).size(13).color(p.fg),
+			tool_button("Close", Message::TabCloseRequested(tab_id), true, p),
 		]
 		.spacing(14)
 		.align_x(Horizontal::Center)
@@ -242,7 +359,7 @@ fn failed_body(reason: &str, tab_id: u64) -> Element<'_, Message> {
 
 /// The Save As prompt card: a remote-path field pre-filled with the current path, and Save / Cancel
 /// (§32). Enter in the field confirms, so it saves without reaching for the mouse.
-fn save_as_card(path: &str) -> Element<'static, Message> {
+fn save_as_card(path: &str, p: &Palette) -> Element<'static, Message> {
 	let field = text_input("remote path", path)
 		.id(SAVE_AS_INPUT_ID)
 		.on_input(|value| Message::Editor(EditorMessage::SaveAsChanged(value)))
@@ -250,14 +367,26 @@ fn save_as_card(path: &str) -> Element<'static, Message> {
 		.padding(6)
 		.size(13);
 	let footer = row![
-		tool_button("Cancel", Message::Editor(EditorMessage::SaveAsCancel), true),
-		tool_button("Save", Message::Editor(EditorMessage::SaveAsConfirm), true),
+		tool_button(
+			"Cancel",
+			Message::Editor(EditorMessage::SaveAsCancel),
+			true,
+			p
+		),
+		tool_button(
+			"Save",
+			Message::Editor(EditorMessage::SaveAsConfirm),
+			true,
+			p
+		),
 	]
 	.spacing(8);
 
+	let bg = p.chrome_bg;
+	let border = p.accent;
 	let card = container(
 		column![
-			text("Save as — remote path").size(14).color(FG),
+			text("Save as — remote path").size(14).color(p.fg),
 			field,
 			footer,
 		]
@@ -265,12 +394,12 @@ fn save_as_card(path: &str) -> Element<'static, Message> {
 	)
 	.width(Length::Fixed(420.0))
 	.padding(16)
-	.style(|_theme| container::Style {
-		background: Some(HEADER_BG.into()),
+	.style(move |_theme| container::Style {
+		background: Some(bg.into()),
 		border: Border {
 			radius: 6.0.into(),
 			width: 1.0,
-			color: SELECTED_BG,
+			color: border,
 		},
 		..container::Style::default()
 	});
@@ -280,23 +409,31 @@ fn save_as_card(path: &str) -> Element<'static, Message> {
 }
 
 /// A small dimmed toolbar chip for the encoding / line-ending readout.
-fn badge(label: &str) -> Element<'static, Message> {
-	text(label.to_owned()).size(11).color(MUTED_FG).into()
+fn badge(label: &str, p: &Palette) -> Element<'static, Message> {
+	text(label.to_owned()).size(11).color(p.muted).into()
 }
 
 /// One toolbar button, enabled or greyed. A disabled button carries no `on_press`, so iced makes it
 /// inert — the same idiom the panels use for an inapplicable action (§19).
-fn tool_button(label: &str, message: Message, enabled: bool) -> Element<'static, Message> {
+fn tool_button(
+	label: &str,
+	message: Message,
+	enabled: bool,
+	p: &Palette,
+) -> Element<'static, Message> {
+	let fg = p.fg;
+	let muted = p.muted;
+	let bg = p.button_bg;
 	let mut widget =
 		button(
 			text(label.to_owned())
 				.size(12)
-				.color(if enabled { FG } else { MUTED_FG }),
+				.color(if enabled { fg } else { muted }),
 		)
 		.padding(Padding::from([4.0, 10.0]))
-		.style(|_theme, _status| button::Style {
-			background: Some(PANEL_BG.into()),
-			text_color: FG,
+		.style(move |_theme, _status| button::Style {
+			background: Some(bg.into()),
+			text_color: fg,
 			border: Border {
 				radius: 4.0.into(),
 				..Border::default()

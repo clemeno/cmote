@@ -260,6 +260,42 @@ pub enum Status {
 	Failed(String),
 }
 
+/// Which colour scheme an editor tab paints with (§32). Only the choice lives here in the model —
+/// the concrete colours are the view's (`ui::editor`), so the split stays clean. The choice is held
+/// on the tab and remembered per file extension by `App`, so reopening a `.json` comes up in the
+/// scheme last used for JSON, independent of what a `.rs` or `.php` tab is set to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EditorTheme {
+	/// cmote's own dark panel palette — the default, matching the files pane and dialogs.
+	#[default]
+	Default,
+	/// "CME": the colours of the user's VS Code theme (Themer My Color Set Dark), ported so a file
+	/// reads here much as it does in the editor it was authored in.
+	Cme,
+}
+
+impl EditorTheme {
+	/// The label the toolbar's theme select shows for this scheme.
+	pub fn label(self) -> &'static str {
+		match self {
+			EditorTheme::Default => "Default",
+			EditorTheme::Cme => "CME",
+		}
+	}
+}
+
+/// The lower-cased file extension a theme choice is remembered under (§32) — `json` for `Notes.JSON`,
+/// empty for a file with no extension (and for a dot-file like `.bashrc`, whose leading dot is a
+/// hidden-file marker, not an extension). Splitting on both slash kinds tolerates a stray backslash
+/// in an otherwise POSIX remote path.
+pub fn extension_key(path: &str) -> String {
+	let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+	match name.rfind('.') {
+		Some(dot) if dot > 0 => name[dot + 1..].to_ascii_lowercase(),
+		_ => String::new(),
+	}
+}
+
 /// What the editor view can ask of its tab (§32). The tab applies the ones that only touch this
 /// buffer (typing, the Save As prompt's own field); `Save` and `SaveAsConfirm`, which have to reach
 /// the parent session's channel, are turned by the tab into an App-level flush.
@@ -317,12 +353,16 @@ pub struct Editor {
 	/// Set by "Save & close" (§32): once the save lands the tab drops itself; on a save FAILURE the
 	/// flag is cleared and the tab stays, showing the error, so a failed save never silently closes.
 	close_after_save: bool,
+	/// The colour scheme this editor paints with (§32). Seeded from `App`'s per-extension memory when
+	/// the tab opens, and changed by the toolbar's theme select.
+	pub theme: EditorTheme,
 }
 
 impl Editor {
-	/// A fresh editor waiting on its bytes (§32): an empty buffer, `Loading`, parented to `session`.
-	/// The encoding is a placeholder until `set_loaded` learns the real one.
-	pub fn loading(session: u64, path: String) -> Self {
+	/// A fresh editor waiting on its bytes (§32): an empty buffer, `Loading`, parented to `session`,
+	/// painting with `theme` (the scheme `App` remembers for this file's extension). The encoding is a
+	/// placeholder until `set_loaded` learns the real one.
+	pub fn loading(session: u64, path: String, theme: EditorTheme) -> Self {
 		Self {
 			session,
 			path,
@@ -337,6 +377,7 @@ impl Editor {
 			changed: Vec::new(),
 			dirty: false,
 			close_after_save: false,
+			theme,
 		}
 	}
 
@@ -391,6 +432,11 @@ impl Editor {
 	/// The parent session closed (§32): saving is no longer possible.
 	pub fn mark_parent_gone(&mut self) {
 		self.parent_gone = true;
+	}
+
+	/// Switch the colour scheme this editor paints with (§32) — the toolbar's theme select.
+	pub fn set_theme(&mut self, theme: EditorTheme) {
+		self.theme = theme;
 	}
 
 	/// Begin a Save, if one is warranted (§32): dirty, not already saving, and a channel to save
@@ -616,5 +662,16 @@ mod tests {
 		let base = lines(&["a"]);
 		let now = lines(&["a", "b", "c"]);
 		assert_eq!(changed_flags(&base, &now), vec![false, true, true]);
+	}
+
+	#[test]
+	fn extension_key_is_the_lowercased_extension_or_empty() {
+		// The extension, lower-cased, drives the per-file-type theme memory (§32).
+		assert_eq!(extension_key("/etc/app/config.JSON"), "json");
+		assert_eq!(extension_key("src/main.rs"), "rs");
+		assert_eq!(extension_key("weird.name.Ts"), "ts");
+		// No extension, and a dot-file whose leading dot is not one, both bucket together as "".
+		assert_eq!(extension_key("/var/log/messages"), "");
+		assert_eq!(extension_key("/home/me/.bashrc"), "");
 	}
 }

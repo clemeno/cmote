@@ -165,6 +165,10 @@ struct App {
 	/// rather than per-tab because there is one window whatever tab is on show; updated on
 	/// every resize and written to `settings.json` on the way out (`exit_app`).
 	settings: crate::settings::Settings,
+	/// The editor theme last chosen for each file extension (§32), keyed by `editor::extension_key`
+	/// (lower-cased, no dot; "" for no extension). Seeds every new editor tab so a file type keeps
+	/// the scheme it was last edited in. Session-scoped: it is not written to disk.
+	editor_theme_by_ext: std::collections::HashMap<String, crate::editor::EditorTheme>,
 }
 
 /// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
@@ -203,6 +207,8 @@ impl App {
 			overlay_pos: iced::Point::ORIGIN,
 			overlay_dragging: false,
 			overlay_drag_last: None,
+			// Nothing edited yet, so no file type has a remembered theme (§32).
+			editor_theme_by_ext: std::collections::HashMap::new(),
 			// The same file `run` sized the window from (§31). Loaded again here — a tiny read
 			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
 			// first (synthetic) resize event overwrites `window` with the size actually granted.
@@ -290,6 +296,7 @@ impl App {
 				}
 				iced::Task::none()
 			}
+			Message::EditorThemeSelected(theme) => self.set_editor_theme(theme),
 			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
 			// confirming drains every session cleanly, then the process exits.
 			Message::QuitRequested => self.request_quit(),
@@ -571,7 +578,14 @@ impl App {
 				iced::keyboard::Modifiers::default(),
 			),
 		};
-		let mut tab = Tab::new_editor(id, session, path.clone(), size);
+		// Open in the scheme this file type was last edited in (§32); an unseen extension starts on
+		// the default. The choice is recorded back on the map when the toolbar's select changes it.
+		let theme = self
+			.editor_theme_by_ext
+			.get(&crate::editor::extension_key(&path))
+			.copied()
+			.unwrap_or_default();
+		let mut tab = Tab::new_editor(id, session, path.clone(), size, theme);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
 		self.tabs.push(tab);
@@ -670,6 +684,22 @@ impl App {
 			Some(index) => self.remove_tab(index),
 			None => iced::Task::none(),
 		}
+	}
+
+	/// Apply a theme pick from the active editor's toolbar (§32): paint that editor in the new scheme
+	/// and remember it against the file's extension, so the next editor opened on that type inherits
+	/// it. The toolbar that raised this belongs to the ACTIVE tab, so that is the editor it sets.
+	fn set_editor_theme(&mut self, theme: crate::editor::EditorTheme) -> iced::Task<Message> {
+		if let Some(editor) = self
+			.tabs
+			.get_mut(self.active)
+			.and_then(|tab| tab.editor.as_mut())
+		{
+			editor.set_theme(theme);
+			let ext = crate::editor::extension_key(&editor.path);
+			self.editor_theme_by_ext.insert(ext, theme);
+		}
+		iced::Task::none()
 	}
 
 	/// The editor on the tab with this id, mutably (§32).
@@ -1672,6 +1702,10 @@ pub enum Message {
 	/// Close editor tab `id` now, unconditionally (§32): the auto-close once its "Save & close"
 	/// finished writing.
 	EditorCloseNow(u64),
+	/// The active editor's toolbar picked a colour scheme (§32). Handled by `App` — it sets the
+	/// active editor's theme AND records the choice against the file's extension, so the memory is
+	/// App-wide, not trapped in one tab.
+	EditorThemeSelected(crate::editor::EditorTheme),
 }
 
 impl Tab {
@@ -1702,11 +1736,17 @@ impl Tab {
 	/// session's channel delivers the file. `session` is the tab it was opened from, whose channel
 	/// its loads and saves ride. The shared target list and vault are left at their defaults — an
 	/// editor tab never shows the home screen, so it never reads them.
-	fn new_editor(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
+	fn new_editor(
+		id: u64,
+		session: u64,
+		path: String,
+		window_size: iced::Size,
+		theme: crate::editor::EditorTheme,
+	) -> Self {
 		Self {
 			id,
 			screen: Screen::Editor,
-			editor: Some(crate::editor::Editor::loading(session, path)),
+			editor: Some(crate::editor::Editor::loading(session, path, theme)),
 			window_size,
 			window_focused: true,
 			shell_focus_reported: true,
@@ -2111,7 +2151,8 @@ impl Tab {
 			| Message::EditorCloseSave
 			| Message::EditorCloseDiscard
 			| Message::EditorCloseCancelled
-			| Message::EditorCloseNow(_) => {}
+			| Message::EditorCloseNow(_)
+			| Message::EditorThemeSelected(_) => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			Message::ForwardsClosed => self.forward_dialog = false,
@@ -6404,6 +6445,7 @@ mod tests {
 			// Default (nothing remembered): `save` is a no-op on default, so a quit test never
 			// touches the disk (§31).
 			settings: crate::settings::Settings::default(),
+			editor_theme_by_ext: std::collections::HashMap::new(),
 		}
 	}
 
