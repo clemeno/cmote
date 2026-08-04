@@ -12,6 +12,12 @@ every gap as a `[bolt-on]` / `[engine]` split, because that crate was a delibera
 subset that could neither parse nor represent most of the spec. **That ceiling is gone.** What
 remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
+**Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
+`src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
+mode newly honoured, a sequence newly rendered, or an engine bump that moves the ceiling. Editor,
+files-pane, and window-chrome work does **not** belong here. When terminal work does land, the edit
+is two places: the gap list in §2–§5 and the matching row in the §8 matrix.
+
 Sources cited by tag:
 
 - `[ECMA-48]` — ECMA-48 (5th ed.), the ANSI/ISO control-function standard.
@@ -32,15 +38,17 @@ File:line evidence for the audited claims is collected in the [Evidence](#eviden
 unlike `vt100` — **generates host replies itself** (through `Event::PtyWrite`), so the
 "application stalls on a query timeout" class of bug is largely closed by construction. cmote
 wires the engine behind a cmote-owned seam (`term::screen`), drains the engine's replies
-through a `Replies` listener, and answers only the few queries that need cmote's own data (its
-colour scheme, its cell pixel size). The old `term::compat` (cursor-move rewriter) and
+through a `Replies` listener, and answers itself both the queries that need cmote's own data (its
+colour scheme, its cell pixel size) and the three identity queries the engine drops — XTVERSION,
+DECRQSS and XTGETTCAP, sniffed from the stream by `term::query` (§33). The old `term::compat` (cursor-move rewriter) and
 `term::answer` (reply synthesizer) modules were **deleted** in the swap — the engine does both.
 
 Effort is now just *where the work lives*, not a hard wall:
 
 - **[keymap]** — cmote's input encoder (`term::keymap`); engine-independent.
-- **[reply]** — extend cmote's reply path (the `Replies` listener in `term::mod`) for a query
-  the engine does not answer itself.
+- **[reply]** — extend cmote's reply path (the `Replies` listener in `term::mod`, or the
+  `term::query` stream scanner) for a query the engine does not answer itself — the route §33 took
+  for XTVERSION / DECRQSS / XTGETTCAP.
 - **[seam+grid]** — surface a getter the engine already has through `term::screen`, then render
   it in the grid.
 - **[engine-limit]** — `alacritty_terminal` 0.26 itself does not parse or represent it; it would
@@ -72,7 +80,10 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   The **colour queries** (OSC 10 / 11 / 12 and OSC 4 palette) and the **pixel / text-area
   size** reports (`CSI 14t`, `CSI 18t`) are answered by cmote's listener from its own colour
   scheme and cell metrics — so a program probing the background to pick a light-vs-dark theme is
-  answered rather than left guessing.
+  answered rather than left guessing. The three **identity queries** the engine drops — XTVERSION
+  (`CSI > q`), DECRQSS (`DCS $ q … ST`) and XTGETTCAP (`DCS + q … ST`) — are sniffed from the stream
+  and answered by cmote itself (`term::query`, §33), so a program fingerprinting the terminal or
+  reading back its SGR no longer stalls on a dropped query.
 - **Shows the window title** a program sets with OSC 0 / OSC 2 in the title bar (§23).
 - **Tracks and honours modes**: application-cursor DECCKM (arrows → SS3), bracketed paste
   `?2004`, cursor visibility `?25`, mouse `?9 / 1000 / 1002 / 1003` in SGR / UTF-8 / classic
@@ -114,22 +125,32 @@ the "small, like DECCKM" framing does not hold here; it is parked below the high
 
 ---
 
-## 3. Still open — query → reply (niche; `[reply]`, some need DCS)
+## 3. Still open — query → reply (niche; `[reply]`)
 
-The high-value query class is already closed: DA / DSR / DECRQM by the engine, the colour and
-pixel-size queries by cmote's listener. What the engine still does **not** answer:
+The high-value query class is closed. DA / DSR / DECRQM are answered by the engine; the colour
+and pixel-size queries by cmote's listener; and **since §33** the three identity queries the engine
+drops are answered by cmote's own stream scanner (`term::query`), the same out-of-band tactic
+`cwd` / `modkeys` use for sequences the engine ignores:
+
+- **XTVERSION** (`CSI > q`) → `DCS > | cmote(<ver>) ST` — full, a truthful name and build version.
+- **XTGETTCAP** (`DCS + q <hex> ST`) → states only the two caps cmote can give truthfully —
+  terminal name `xterm-256color` and 256 colours — and answers every other capability an honest
+  unknown (`DCS 0 + r <name> ST`).
+- **DECRQSS** (`DCS $ q <sel> ST`) → reports **SGR** from the live pen (the exact attributes the
+  grid paints, rebuilt after the chunk advances so a set-then-query in one write is seen), and
+  every other setting an honest `ps=0` (`DCS 0 $ r ST`) rather than a lie about state cmote renders
+  fixed or cannot read.
+
+What no layer answers, both low value:
 
 | Missing | What blocks on it | Reply shape | Tag | Src |
 |---|---|---|---|---|
 | **DA3 tertiary** (`CSI =c`) | terminal-id probes | `DCS !\|<hex> ST` | [reply] | [xterm] |
-| **XTVERSION** (`CSI >q`) | modern feature detection | `DCS >\|cmote(ver) ST` | [reply] | [xterm] |
-| **DECRQSS** request-setting (`DCS $q … ST`) | editors/multiplexers restoring SGR / scroll region / cursor style | `DCS 1$r … ST` | [reply] (needs a DCS reply path) | [DEC] |
-| **XTGETTCAP** (`DCS +q <hex> ST`) | apps querying terminfo caps directly | `DCS 1+r … ST` | [reply] (needs a DCS reply path) | [xterm] |
 | **Answerback** (ENQ `0x05`) | legacy identification | configurable string (usually empty) | [reply] | [ECMA-48] |
 
 The engine's `identify_terminal` handles the primary and secondary DA intermediates only — the
-`=` (tertiary) intermediate is dropped — so DA3 falls to cmote if ever wanted. All of these are
-low UX value: modern applications rely on the DA / DECRQM answers that already work.
+`=` (tertiary) intermediate is dropped — so DA3 would fall to cmote if ever wanted. Both remaining
+gaps are low UX value: modern applications rely on the DA / DECRQM / XTVERSION answers that work.
 
 ---
 
@@ -298,9 +319,9 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 
 | Feature | Code | Status | Note |
 |---|---|---|---|
-| Request status string | DCS $ q (DECRQSS) | ❌ | needs a DCS reply path (§3) |
-| Termcap query | DCS + q (XTGETTCAP) | ❌ | needs a DCS reply path (§3) |
-| Terminal version | CSI > q (XTVERSION) | ❌ | DA replies cover identity (§3) |
+| Request status string | DCS $ q (DECRQSS) | ⚠️ | SGR reported from the live pen; other settings honest `ps=0` (`term/query.rs`, §33) |
+| Termcap query | DCS + q (XTGETTCAP) | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
+| Terminal version | CSI > q (XTVERSION) | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
 | Sixel graphics | DCS … q | ❌ | no graphics (§5) |
 | tmux passthrough | DCS tmux; … | ❌ | |
 
@@ -372,12 +393,13 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | SO / SI | ✅ | charset shift |
 
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
-colour, alternate screen, mouse, bracketed paste, focus, DA / DSR / DECRQM, DECSCUSR, REP, and the
-kitty keyboard protocol. Most of the ❌ column is **deliberate**: no images, no remote clipboard
+colour, alternate screen, mouse, bracketed paste, focus, DA / DSR / DECRQM, DECSCUSR, REP, the
+kitty keyboard protocol, and — since §33 — the identity queries the engine dropped (XTVERSION,
+DECRQSS SGR, XTGETTCAP). Most of the ❌ column is **deliberate**: no images, no remote clipboard
 (OSC 52), no remote window control (CSI t), no blink animation, and a fixed colour scheme so
-dynamic-palette writes are query-only. The genuine plain gaps are the newer private modes
-(2027 / 2031 / 2048), selective / rectangular editing, left-right margins, and the DCS query
-replies (DECRQSS / XTGETTCAP / XTVERSION) — all catalogued with their cost in §2–§5.
+dynamic-palette writes are query-only. The genuine plain gaps left are the newer private modes
+(2027 / 2031 / 2048), selective / rectangular editing, and left-right margins — all catalogued with
+their cost in §2–§5; of the identity queries only DA3 and answerback remain unanswered.
 
 ---
 
@@ -420,7 +442,20 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `report_color`), `TextAreaSizeRequest` (`CSI 14t`, from the grid + cell pixel size),
   `Title` / `ResetTitle` (OSC 0 / 2, sanitized). **Dropped**: `ClipboardLoad` / `ClipboardStore`
   (OSC 52), the bell, and colour *set* requests. `SCROLLBACK = 10_000`. The seam hides the
-  engine types behind `Terminal` + `ScrollMotion`.
+  engine types behind `Terminal` + `ScrollMotion`. Since §33 `process` also drains the `term::query`
+  scanner (`term/mod.rs:142-167`): the chunk is scanned for identity queries *before* the engine
+  advances, then each completed query becomes a reply — XTVERSION / XTGETTCAP from static facts,
+  `Decrqss(Sgr)` from the live pen via `pen_sgr(self.term.grid().cursor.template)`, built after the
+  advance so a set-then-query in one write is seen.
+- **`term/query.rs`** — the identity-query scanner (§33), the same out-of-band tactic as `cwd` /
+  `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`,
+  empty/zero parameter only — a non-zero param is some other private query), **DECRQSS**
+  (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector `Unsupported`) and **XTGETTCAP**
+  (`DCS + q <hex>[;…] ST`). An unrecognised DCS is followed to its terminator (`DcsIgnore`) so sixel
+  data cannot masquerade as a query, and `MAX_PARAMS` / `MAX_DATA` bound a hostile stream (§12).
+  Reply builders `version_reply` / `decrqss_sgr_reply` / `decrqss_unsupported_reply` /
+  `gettcap_reply`; `known_capability` states only `TN=xterm-256color` and `Co`/`colors=256`.
+  Parse-only, no engine types, unit-tested per reply shape.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
