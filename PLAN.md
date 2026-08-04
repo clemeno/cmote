@@ -2882,7 +2882,11 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
 - **Save writes atomically.** `edit::save` streams the bytes to a temp sibling (`name~cmote.tmp`) on
   the remote and then **renames it over** the target, so a connection dropped mid-write can never
   leave the user's file half-written — the rename is the commit point. On success the editor's
-  `original` is reset and the marks clear; a failure keeps the buffer dirty and shows why.
+  `original` is reset and the marks clear; a failure keeps the buffer dirty and shows why. SFTP v3's
+  rename will not overwrite an existing name (OpenSSH's included), so an overwrite-save falls back to
+  removing the target then renaming — and if THAT rename fails after the target is already gone, the
+  temp is the file's only remaining copy, so it is **kept and named in the error** for a manual rescue
+  rather than deleted (a stray `.tmp` beats losing the content).
 - **Save As names a new remote file.** There is no native "save to remote" dialog (rfd is local
   only, §19), so Save As opens a small in-editor prompt for the destination path, pre-filled with the
   current directory and name. Confirming saves there and **re-points** the editor at the new path (it
@@ -2971,7 +2975,9 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   matches right-to-left so earlier offsets stay valid) are plain functions with unit tests. **Replace**
   pastes over the current selection — keeping the widget's undo — then re-searches; **Replace All**
   rebuilds the buffer from the matches already found (so what changes is exactly what was highlighted)
-  and re-seats it as a fresh `Content`, which resets undo, the accepted cost of a bulk edit.
+  and re-seats it as a fresh `Content`, which resets undo, the accepted cost of a bulk edit. The
+  rebuild reassembles the buffer with each line's OWN ending (the way iced's `Content::text` does, via
+  `join_with_endings`), so a mixed-ending file's untouched lines are not normalised to one ending.
   (`ponytail:` Replace All swaps each *original* match once, so a replacement that itself contains the
   query does not cascade; a single Replace, being manual, can re-hit a replacement that still matches.)
 

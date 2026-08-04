@@ -1856,7 +1856,13 @@ impl Tab {
 				}
 			}
 			EditorMessage::ReplaceAll => {
-				editor.replace_all();
+				// Follow the cursor to the current match afterwards, like ReplaceOne / FindStep — the
+				// rebuild re-selects it, so keep it on screen instead of leaving the view where it was.
+				if editor.replace_all()
+					&& let Some(offset) = follow_editor_cursor(editor)
+				{
+					return scroll_editor_to(offset);
+				}
 			}
 			EditorMessage::Save => {
 				if editor.begin_save() {

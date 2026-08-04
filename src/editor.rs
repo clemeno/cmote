@@ -698,7 +698,9 @@ impl Editor {
 	/// Replace every match in one pass (§32). Unlike a per-match walk, this rebuilds the whole buffer
 	/// from the matches the bar already found — so what changes is exactly what was highlighted — and
 	/// re-seats it as a fresh `Content`. That resets the widget's undo history, the accepted cost of a
-	/// bulk edit (a single Replace keeps undo). Returns whether the buffer changed.
+	/// bulk edit (a single Replace keeps undo). The buffer is reassembled with each line's OWN ending
+	/// (the way iced's `Content::text` does), so a mixed-ending file's untouched lines are not
+	/// normalised. Returns whether the buffer changed.
 	pub fn replace_all(&mut self) -> bool {
 		let (matches, replacement) = {
 			let Some(find) = self.find.as_ref() else {
@@ -709,12 +711,19 @@ impl Editor {
 			}
 			(find.matches.clone(), find.replace.clone())
 		};
-		let lines = lines_of(&self.content);
-		let ending = self
+		// Rebuild the buffer from the matches the bar found — so what changes is exactly what was
+		// highlighted — carrying each line's OWN ending. iced varies the ending per line and only a
+		// bare `None` falls back to the default; joining with one uniform ending instead (the first
+		// line's) would silently normalise every line of a mixed-ending file, not just the edited ones.
+		let (lines, endings): (Vec<String>, Vec<text_editor::LineEnding>) = self
 			.content
-			.line_ending()
-			.unwrap_or(text_editor::LineEnding::Lf);
-		let joined = apply_replacements(&lines, &matches, &replacement).join(ending.as_str());
+			.lines()
+			.map(|line| (line.text.into_owned(), line.ending))
+			.unzip();
+		let joined = join_with_endings(
+			&apply_replacements(&lines, &matches, &replacement),
+			&endings,
+		);
 		self.content = text_editor::Content::with_text(&joined);
 		self.recompute();
 		self.refind();
@@ -875,6 +884,31 @@ impl Editor {
 /// text, not endings — iced never changes an ending on its own, so an ending shift is not an edit.
 fn lines_of(content: &text_editor::Content) -> Vec<String> {
 	content.lines().map(|line| line.text.into_owned()).collect()
+}
+
+/// Rejoin edited lines with each line's own ending, exactly as iced's `Content::text` reassembles a
+/// buffer (§32): a line's ending is emitted only when another line follows it (so a buffer with no
+/// trailing newline stays without one), and a bare `None` ending falls back to the default rather
+/// than gluing two lines together. Used by Replace All so rebuilding the buffer keeps a mixed-ending
+/// file's untouched lines as they were, rather than normalising them to one ending. `endings` is the
+/// per-line ending beside `lines`, the two always the same length (both come from `Content::lines`).
+fn join_with_endings(lines: &[String], endings: &[text_editor::LineEnding]) -> String {
+	use text_editor::LineEnding;
+	let mut out = String::new();
+	let last = lines.len().saturating_sub(1);
+	for (index, line) in lines.iter().enumerate() {
+		out.push_str(line);
+		if index != last {
+			// A `None` ending between two lines is not "no separator" — iced writes the default there,
+			// so mirror that; `unwrap_or_default` also covers a (never-hit) length mismatch as LF.
+			let ending = match endings.get(index).copied().unwrap_or_default() {
+				LineEnding::None => LineEnding::default(),
+				ending => ending,
+			};
+			out.push_str(ending.as_str());
+		}
+	}
+	out
 }
 
 #[cfg(test)]
@@ -1052,6 +1086,18 @@ mod tests {
 		);
 		// An empty query is idle, not "everything".
 		assert!(find_matches(&lines(&["anything"]), "").is_empty());
+	}
+
+	#[test]
+	fn join_with_endings_keeps_each_lines_own_ending() {
+		use text_editor::LineEnding;
+		// A CRLF line then an LF line, no trailing newline: each ending kept, none added past the last —
+		// so Replace All over a mixed-ending file does not normalise the lines it did not touch.
+		let out = join_with_endings(&lines(&["a", "b"]), &[LineEnding::CrLf, LineEnding::Lf]);
+		assert_eq!(out, "a\r\nb");
+		// A `None` ending BETWEEN two lines is written as the default (LF), not glued, matching iced.
+		let out = join_with_endings(&lines(&["a", "b"]), &[LineEnding::None, LineEnding::None]);
+		assert_eq!(out, "a\nb");
 	}
 
 	#[test]

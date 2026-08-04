@@ -158,8 +158,10 @@ pub async fn save<H: client::Handler>(
 /// point: until it lands the original file is untouched and the new content sits complete in the
 /// temp. SFTP v3's rename refuses to overwrite an existing name, so a failed rename falls back to
 /// removing the target and renaming again — the only non-atomic window is between that remove and
-/// the rename, sub-millisecond, and even then the full new content survives in the temp for a manual
-/// rescue. A failure anywhere best-effort removes the temp so a dead `.tmp` is not left behind.
+/// the rename, sub-millisecond. A failure best-effort removes the temp so a dead `.tmp` is not left
+/// behind — EXCEPT the one case where doing so would lose data: if the target was already removed and
+/// the second rename then fails, the temp is the file's only remaining copy, so it is kept and named
+/// in the error for a manual rescue rather than deleted.
 async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<()> {
 	let temp = format!("{path}{TEMP_SUFFIX}");
 
@@ -177,9 +179,22 @@ async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<()
 	// Commit. A plain rename works when the target is absent (a Save As to a new name) or the server
 	// allows overwrite; otherwise remove the stale target and rename into its place.
 	if sftp.rename(temp.clone(), path.to_owned()).await.is_err() {
-		let _ = sftp.remove_file(path.to_owned()).await;
+		// Remember whether the remove actually took: if it did, the original is now GONE and the temp
+		// is the file's only copy of the new content — which decides what we may safely delete below.
+		let removed_original = sftp.remove_file(path.to_owned()).await.is_ok();
 		if let Err(error) = sftp.rename(temp.clone(), path.to_owned()).await {
-			// Leave nothing dangling: the write failed to commit, so drop the temp before reporting.
+			if removed_original {
+				// The original is gone and the temp holds the whole new file. Deleting it now would
+				// destroy the user's only copy, so keep it and name it — a stray `.tmp` is a far
+				// smaller harm than data loss, and the content is then recoverable by hand.
+				return Err(error).with_context(|| {
+					format!(
+						"could not replace {path}; your edits are saved on the server as {temp}"
+					)
+				});
+			}
+			// The original is untouched (its removal failed too), so the temp is a redundant copy —
+			// drop it so nothing dangles, then report the failure.
 			let _ = sftp.remove_file(temp).await;
 			return Err(error).with_context(|| format!("could not replace {path}"));
 		}
