@@ -231,7 +231,7 @@ cmote/
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
-    │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports (§11)
+    │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
@@ -261,7 +261,7 @@ cmote/
     │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link + the kitty flags (§9, §16, §23, §24, §25)
-    │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current (§35)
+    │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -3240,9 +3240,10 @@ reveal-scroll, and "a found thing becomes an ordinary selection".
 
 ### What is deliberately NOT here
 
-- **Highlighting every match at once.** Only the current hit is marked, because "marked" means the
-  one selection the grid already paints. Washing all the others would need a second, list-shaped
-  highlight in the renderer — worth it later, not needed to find a line.
+- ~~**Highlighting every match at once.**~~ **Shipped in §39.** As built here, only the current hit was
+  marked, because "marked" meant the one selection the grid already paints; washing the others needed a
+  second, list-shaped highlight in the renderer, which §39 added (a per-frame mask over the visible
+  cells, the current hit still keeping the selection's own fill).
 - **Matches across a wrapped line.** A hit is found within one grid *row*, so a phrase straddling the
   wrap of a long logical line is missed (its halves are separate rows), and a cell's combining marks
   are not searched — only its base glyph. Joining wrapped rows would mean a second coordinate space
@@ -3466,3 +3467,89 @@ another chip and release, and the grabbed tab takes that chip's slot. No separat
   order to restore (§31).
 - **Nothing groups or sorts the strip for the user.** The editor rule above places a *new* tab; it
   never rearranges existing ones. Once the user has dragged a chip somewhere, that is where it stays.
+
+---
+
+## 39. Every match on screen, washed — the find bar shows where else the query is (v3.x)
+
+§35 shipped the scrollback find bar with one hit marked: the current one, revealed and turned into an
+ordinary selection so the existing highlight and Copy served it with no rendering work at all. That
+listed "highlighting every match at once" as deliberately absent — *worth it later*. This is later.
+Every hit on the visible screen now carries a **wash** (a muted amber fill), and the current one keeps
+the **selection's blue**, so the bar answers two questions instead of one: where you are, and where
+else the query is. Walking a query with ↑ / ↓ stops being blind stepping — the next hit is already
+visible before the step lands on it.
+
+### A second coordinate space, resolved once per frame
+
+A `Match` holds an **absolute** document line (§35), because it must survive new output pushing the
+viewport down. A renderer can only paint **viewport rows**. `Search::visible` is the one place the two
+meet: given the history depth, the display offset and the row count it returns `Highlight { row,
+start_col, end_col }` for the hits that land on screen, using the same `absolute - history_size +
+display_offset` mapping as §34's prompt ticks.
+
+- **`Highlight` is a separate type from `Match`, on purpose.** They are both a line and a column span;
+  one is a document coordinate and the other a screen one, and the day they are the same struct is the
+  day one gets passed where the other belongs. Two types make that a compile error.
+- **Scrolling needs no re-scan.** The washes are a projection of an absolute list, so wheeling through
+  the history moves every wash with the text it belongs to. Nothing is invalidated, nothing recomputed
+  but the projection.
+- **The walk starts at the first visible line.** The match list is in document order (`Terminal::find`
+  walks the grid oldest line first), so a `partition_point` skips the history above the viewport in log
+  time and the walk stops at its bottom. This runs on *every frame the grid draws*, and the query that
+  makes it matter is the ordinary one: find-as-you-type searches the first letter typed, and one letter
+  over a full scrollback has tens of thousands of hits, nearly all off screen.
+- **The current match is in the list like any other.** It is drawn as a selection *as well* (that is
+  how §35 reveals it), and the renderer lets the selection's fill win — so the current hit stands apart
+  without `visible` having to know which one it is. It also means a user who drags a new selection over
+  the grid still sees every hit washed, the current one included, rather than losing it from the set.
+
+### In the renderer: a mask, not a list (`ui/grid.rs`)
+
+The grid takes the visible highlights the way it already takes the prompt rows — owned, recomputed
+each frame — and flattens them into a **row-major `Vec<bool>` over the visible cells**, the same index
+space the Ctrl-hover link run (§24) already uses. The run planner then tests one boolean per cell.
+
+- **Why a mask.** A per-cell walk of the match list is `cells × matches`, and neither factor is small
+  in the case that matters (one letter typed, hundreds of hits per row). The mask is `cells + matches`
+  built once, `O(1)` per cell after. An empty list allocates nothing and every lookup misses — which is
+  the shut-bar case, i.e. almost always.
+- **The fill order is the whole trick, and it lives in `cell_style`:** faint, then inverse/cursor, then
+  **match**, then **selection**, then conceal. Because `CellStyle` is the run-grouping key, each fill
+  seals its cells into their own run exactly as a selection already did — no new draw path, no second
+  pass over the grid, one more branch in a function that was already resolving four of them.
+- **Different hue, not a paler shade.** The current hit is blue (the selection), the others amber. Two
+  brightnesses of one colour is what a dim screen or a colour-blind eye loses first; two hues survive
+  both.
+- **Out-of-grid highlights are dropped, not wrapped.** A resize between the scan and the frame can
+  leave a hit pointing past the last row or column; the mask skips the row and clips the span, because
+  a row-major write that ran off the end of a row would silently paint the row below it.
+- **`Marks` groups the selection and the mask into one argument.** `plan_runs` had reached the count
+  where a seventh loose `Option` is a mistake waiting to happen at a call site, and the two are always
+  consulted together and resolved the same way — a fill that replaces the cell's own background.
+
+### Where it plugs in
+
+`ui/terminal.rs::view` already had the bar's state (`Modals::search`) and the screen; it resolves the
+highlights there — where both the bar and the viewport's numbers are already to hand — and hands them
+to `grid()`. The bar closed means `None` means an empty vector means no washes. **`app.rs` is
+unchanged apart from a test**: the wash is a pure function of state the view already had.
+
+### What is deliberately NOT here
+
+- **New output does not join the washes until the next step or keystroke.** The match list is rebuilt
+  on a query change and before each step (§35) and never on arriving output, so a hit printed since
+  then is neither in the count nor washed. Rescanning the whole grid on every frame of a build log's
+  output is the one thing §35's "no index to invalidate" simplicity cannot afford; the fix, if it ever
+  matters, is to rescan on a step *and* on becoming idle, not per frame.
+- **No overview marks in the scrollbar gutter.** A "where in the whole history are the hits" ruler
+  beside the scroll thumb is a genuinely useful next step and a different feature: it needs the match
+  list mapped to the *document*, not the viewport, and a thumb that is currently a read-only mark
+  (§23) would start inviting clicks.
+- **The wash does not survive closing the bar.** Esc drops the `Search`, so the washes go with it and
+  only the current hit's selection stays (§35 chose that so what was found can still be copied).
+  Keeping every wash after the bar is gone would leave marks on the grid with nothing on screen
+  explaining them.
+- **Nothing dims the unmatched text.** A "focus mode" that fades everything but the hits would have to
+  rewrite every cell's foreground, which is the one thing the renderer must not do — a program's own
+  colours are its own (§9).

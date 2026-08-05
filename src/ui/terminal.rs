@@ -214,8 +214,21 @@ pub fn view<'a>(
 		drag,
 	} = modals;
 	// The grid itself: one widget filling the space left under the status bar (§9). It is handed
-	// the rows a shell prompt sits on (§34) so it can tick them in the left gutter.
-	let grid = crate::ui::grid::grid(terminal.screen(), selection, terminal.prompt_rows());
+	// the rows a shell prompt sits on (§34) so it can tick them in the left gutter, and the find
+	// bar's hits that land on the screen as it is scrolled right now (§39) so it can wash every one
+	// of them — resolved here, where both the bar's state and the viewport's numbers are already to
+	// hand, and empty whenever the bar is shut.
+	let screen = terminal.screen();
+	let matches = search
+		.map(|search| {
+			search.visible(
+				screen.history_size(),
+				screen.display_offset(),
+				screen.size().0,
+			)
+		})
+		.unwrap_or_default();
+	let grid = crate::ui::grid::grid(screen, selection, terminal.prompt_rows(), matches);
 
 	// It reacts to the mouse (§10): press-drag-release drives the text selection and a
 	// right-press opens the context menu. `on_move` reports a point local to the grid,

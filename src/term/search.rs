@@ -20,6 +20,11 @@
 //     addresses. A row therefore carries a byte -> column map beside its text, which is also how
 //     a double-width glyph's second cell (which holds no glyph of its own) is skipped without
 //     the columns after it drifting.
+//
+// Because the lines are absolute, the list also serves the renderer: `Search::visible` resolves the
+// hits that fall on the screen as it is scrolled right now into viewport rows (§39), and the grid
+// washes every one of them — so the current hit is where you are, and the washes are where else the
+// query is. That resolution is the only place the two coordinate spaces meet.
 
 /// One found occurrence: the absolute line it sits on and the inclusive column span it covers
 /// (§35). Inclusive because that is what a selection's head wants — `end_col` is the last cell of
@@ -27,6 +32,18 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Match {
 	pub line: u64,
+	pub start_col: u16,
+	pub end_col: u16,
+}
+
+/// One match placed on the screen as it is scrolled RIGHT NOW (§39): the viewport row it occupies
+/// (row 0 is the top visible line) and the inclusive column span it covers. A `Match` is stored in
+/// document coordinates so it survives new output; this is that coordinate resolved against the
+/// viewport for one frame, which is the only form a renderer can paint — and it is deliberately a
+/// separate type, so an absolute line and a screen row can never be passed for one another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Highlight {
+	pub row: u16,
 	pub start_col: u16,
 	pub end_col: u16,
 }
@@ -171,6 +188,47 @@ impl Search {
 	/// The current match, or `None` when the query has none.
 	pub fn current(&self) -> Option<Match> {
 		self.matches.get(self.current).copied()
+	}
+
+	/// Every match that falls on the visible screen right now, as viewport rows (§39) — what the
+	/// renderer washes so ALL the hits show at once and the eye can see how the query is spread
+	/// through the output, not only where the current hit is. The mapping is `absolute -
+	/// history_size + display_offset`, the same one the prompt ticks use (§34), so scrolling the
+	/// history moves the washes with the text they belong to and needs no re-scan.
+	///
+	/// The current match is INCLUDED. Revealing it already makes it an ordinary selection (§35) and
+	/// the renderer lets the selection's fill win, so the current hit stands out from the rest
+	/// without this having to know which one it is — and a user who drags a new selection over the
+	/// grid still sees every hit washed, the current one among them.
+	///
+	/// The walk starts at the first visible line rather than at the top of the document: matches
+	/// arrive in document order (`Terminal::find` walks the grid from the oldest line down), so a
+	/// `partition_point` skips the history above the viewport in log time and the walk stops at the
+	/// viewport's bottom. That matters because this runs on every frame the grid draws, and a query
+	/// of one letter over a full scrollback has tens of thousands of hits — nearly all of them off
+	/// screen. (An unsorted list could only *miss* a wash, never misplace one.)
+	pub fn visible(
+		&self,
+		history_size: u16,
+		display_offset: u16,
+		screen_lines: u16,
+	) -> Vec<Highlight> {
+		// The absolute line showing at viewport row 0: the top of the live screen, less however far
+		// the viewport has climbed back into the retained history.
+		let top = u64::from(history_size.saturating_sub(display_offset));
+		let bottom = top + u64::from(screen_lines);
+		let from = self.matches.partition_point(|found| found.line < top);
+		self.matches[from..]
+			.iter()
+			.take_while(|found| found.line < bottom)
+			.map(|found| Highlight {
+				// In range by the two bounds above, so the cast cannot wrap: `line - top` is below
+				// `screen_lines`, which is itself a `u16`.
+				row: (found.line - top) as u16,
+				start_col: found.start_col,
+				end_col: found.end_col,
+			})
+			.collect()
 	}
 
 	/// How many matches the query has right now — the denominator the bar shows.
@@ -372,5 +430,59 @@ mod tests {
 
 		search.refresh(three().into_iter().skip(1).collect());
 		assert_eq!(search.current().map(|m| m.line), Some(9));
+	}
+
+	#[test]
+	fn only_the_matches_on_screen_are_handed_to_the_renderer() {
+		// Arrange: hits on absolute lines 1, 5 and 9, and a 4-row screen with 6 lines of history —
+		// so at the live bottom the screen shows absolute 6..=9 and only the last hit is on it.
+		let mut search = Search::default();
+		search.set_matches(three());
+
+		// Act + assert: the hit on line 9 lands on the bottom row (9 - 6), the other two are above
+		// the viewport and are simply not there — the renderer is never asked to paint off screen.
+		assert_eq!(
+			search.visible(6, 0, 4),
+			vec![Highlight {
+				row: 3,
+				start_col: 0,
+				end_col: 2
+			}]
+		);
+	}
+
+	#[test]
+	fn scrolling_back_moves_the_highlights_with_their_text() {
+		// The same three hits, the same 4-row screen, now scrolled 5 lines back into history: the
+		// screen shows absolute 1..=4, so the hit on line 1 has arrived at the top row and the one
+		// that was visible at the bottom has gone off the end. No re-scan was needed for either —
+		// the matches are absolute, and this is the only thing that moved.
+		let mut search = Search::default();
+		search.set_matches(three());
+		assert_eq!(
+			search.visible(6, 5, 4),
+			vec![Highlight {
+				row: 0,
+				start_col: 0,
+				end_col: 2
+			}]
+		);
+		// A viewport somewhere in the middle catches the middle hit, at the row its line sits on.
+		assert_eq!(
+			search.visible(6, 2, 4),
+			vec![Highlight {
+				row: 1,
+				start_col: 4,
+				end_col: 6
+			}]
+		);
+	}
+
+	#[test]
+	fn an_idle_bar_highlights_nothing() {
+		// No query, so no hits, so no washes — and a screen with no history is the ordinary case
+		// that must not underflow the absolute -> row mapping.
+		let search = Search::default();
+		assert!(search.visible(0, 0, 24).is_empty());
 	}
 }

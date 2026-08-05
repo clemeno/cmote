@@ -6883,6 +6883,56 @@ mod tests {
 		assert_eq!(text, "needle");
 	}
 
+	/// Every hit on the visible screen is handed to the renderer, not only the current one (§39) —
+	/// the wash the grid paints under the others. The list is resolved against the viewport as it is
+	/// parked, so a hit up in the history counts in the bar's total without being painted, and the
+	/// current hit is in the list too, with the selection drawn over it.
+	#[test]
+	fn the_renderer_is_given_every_hit_on_the_visible_screen() {
+		let (mut app, _rx) = app_with_terminal(16);
+		{
+			let terminal = app.terminal.as_mut().unwrap();
+			// One hit scrolled off the 24-row screen, then two within a couple of rows of the bottom.
+			terminal.process(b"needle offscreen\r\n");
+			let filler: Vec<u8> = (0..40).flat_map(|_| b"filler\r\n".to_vec()).collect();
+			terminal.process(&filler);
+			terminal.process(b"needle one\r\nneedle two\r\n");
+		}
+
+		let _ = app.open_term_find();
+		app.term_find_query("needle".to_owned());
+
+		let search = app.search.as_ref().expect("the bar is open");
+		assert_eq!(search.count(), 3, "all three hits are in the bar's total");
+		let screen = app.terminal.as_ref().unwrap().screen();
+		let visible = search.visible(
+			screen.history_size(),
+			screen.display_offset(),
+			screen.size().0,
+		);
+		assert_eq!(
+			visible.len(),
+			2,
+			"the two hits on screen are washed; the one in history is not"
+		);
+		// Both cover the six cells of the word, on two different rows.
+		assert!(
+			visible
+				.iter()
+				.all(|found| (found.start_col, found.end_col) == (0, 5))
+		);
+		assert_ne!(visible[0].row, visible[1].row);
+		// The current hit is among them, and the selection covers the same cells — which is what
+		// makes the current one draw in the selection's colour over the wash rather than beside it.
+		let selection = app.selection.expect("the current match is selected");
+		assert!(
+			visible
+				.iter()
+				.any(|found| selection.contains(found.row, found.start_col)
+					&& selection.contains(found.row, found.end_col))
+		);
+	}
+
 	#[test]
 	fn prompt_jump_maps_only_the_vertical_arrows() {
 		use iced::keyboard::key::Named;

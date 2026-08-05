@@ -34,6 +34,7 @@ use crate::term::mouse as report;
 use crate::term::screen::{
 	Cell as ScreenCell, Color as CellColor, CursorShape, MouseMode, Screen, UnderlineStyle,
 };
+use crate::term::search::Highlight;
 use crate::ui::selection::{Cell, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
 use iced::advanced::Renderer as _;
@@ -69,6 +70,13 @@ const DEFAULT_BG: Color = rgb(palette::DEFAULT_BG);
 /// default light foreground; selected cells keep their own fg, only the fill changes, so
 /// text stays legible while the region is obviously highlighted.
 const SELECTION_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
+
+/// The background of a cell inside a find-bar match that is not the current one (§39). A muted
+/// amber, a different HUE from the selection's blue rather than a paler shade of it, so "here is
+/// the hit you are on" and "here is another hit" are told apart at a glance instead of by
+/// brightness — brightness is exactly what a colour-blind eye or a dim screen loses. Like the
+/// selection it changes only the fill, so the text underneath stays legible.
+const MATCH_BG: Color = Color::from_rgb8(0x54, 0x46, 0x1c);
 
 /// How thick an underlined cell's rule is, and how far above the cell's bottom edge it
 /// sits. `fill_text` draws glyphs only, so the rule is a quad of our own.
@@ -178,19 +186,26 @@ pub struct Grid<'a> {
 	/// (a short list, at most one per visible row) rather than borrowed, since it is computed fresh
 	/// each frame from the terminal's scroll position.
 	prompts: Vec<u16>,
+	/// The find bar's matches that fall on the visible screen right now (§39), each washed so every
+	/// hit shows and not only the current one. Owned and computed fresh each frame for the same
+	/// reason as `prompts`: it is a resolution of absolute document lines against wherever the
+	/// viewport happens to be parked, which changes with every scroll.
+	matches: Vec<Highlight>,
 }
 
-/// Draw the emulator's current screen, highlighting `selection` if there is one and ticking the
-/// `prompts` rows in the left gutter (§34).
+/// Draw the emulator's current screen, highlighting `selection` if there is one, washing the find
+/// bar's on-screen `matches` (§39) and ticking the `prompts` rows in the left gutter (§34).
 pub fn grid<'a>(
 	screen: Screen<'a>,
 	selection: Option<&'a Selection>,
 	prompts: Vec<u16>,
+	matches: Vec<Highlight>,
 ) -> Grid<'a> {
 	Grid {
 		screen,
 		selection,
 		prompts,
+		matches,
 	}
 }
 
@@ -299,6 +314,14 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// every other shape is an overlay drawn on top after the row, its cell left untouched.
 		let block_cursor = cursor_shape == Some(CursorShape::Block);
 		let origin = Point::new(bounds.x + GRID_PADDING, bounds.y + GRID_PADDING);
+		// The find bar's on-screen matches (§39), flattened once for the whole frame into the per-cell
+		// mask the run planner reads — see `match_mask` for why it is a mask and not a list. Bound
+		// before `marks` so the mask outlives the borrow the planner takes of it.
+		let mask = match_mask(&self.matches, rows, cols);
+		let marks = Marks {
+			selection: self.selection,
+			matches: &mask,
+		};
 
 		renderer.with_layer(visible, |renderer| {
 			for row in 0..rows {
@@ -318,7 +341,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					cols,
 					block_cursor && row == cursor_display_row,
 					cursor_col,
-					self.selection,
+					marks,
 					link_hover.as_ref(),
 				) {
 					draw_run(renderer, run, origin.x, top, row_bounds);
@@ -1088,6 +1111,51 @@ fn link_run_at(
 	Some(start..=end)
 }
 
+/// What is marked on the grid over and above the cells' own styling: the mouse text selection
+/// (§10) and the find bar's on-screen matches (§39). Grouped into one argument because they are
+/// consulted together for every cell and resolved the same way — a fill that replaces the cell's
+/// own background — and because `plan_runs` had already reached the argument count where one more
+/// loose `Option` is a mistake waiting to be made at a call site.
+#[derive(Default, Clone, Copy)]
+struct Marks<'a> {
+	selection: Option<&'a Selection>,
+	/// The row-major "this cell is inside a match" mask over the visible grid (see `match_mask`).
+	/// Empty when the find bar is shut, or open with no hits on screen.
+	matches: &'a [bool],
+}
+
+/// Flatten the visible matches into a per-cell lookup for one frame (§39): `mask[row * cols + col]`
+/// is true when that cell falls inside a hit. Row-major, the same index space the Ctrl-hover link
+/// run already uses, so the run planner tests both the same cheap way.
+///
+/// A mask rather than a walk of the match list per cell, because the list is not small in the case
+/// that matters: find-as-you-type means the FIRST letter typed is searched, and one letter over a
+/// screenful of text matches hundreds of times, so `cells × matches` per frame would stall the very
+/// keystroke it is meant to serve. This is `cells + matches` instead. An empty list allocates
+/// nothing at all and every lookup then misses, which is the shut-bar case — the common one.
+fn match_mask(matches: &[Highlight], rows: u16, cols: u16) -> Vec<bool> {
+	if matches.is_empty() {
+		return Vec::new();
+	}
+	let mut mask = vec![false; usize::from(rows) * usize::from(cols)];
+	for found in matches {
+		// A row or column past the grid's edge is dropped rather than wrapped onto the next row: the
+		// match list is resolved against the same screen, but a resize between the scan and this
+		// frame could leave a hit pointing outside it.
+		if found.row >= rows {
+			continue;
+		}
+		let base = usize::from(found.row) * usize::from(cols);
+		let last = found.end_col.min(cols.saturating_sub(1));
+		// An empty range when the span starts off the right edge, which is what an inclusive range
+		// with a start past its end iterates to — nothing.
+		for col in found.start_col..=last {
+			mask[base + usize::from(col)] = true;
+		}
+	}
+	mask
+}
+
 /// Pack one screen row into runs (§9). Walks the row left to right, growing a run while
 /// cells are narrow, ASCII, and share a style; anything else is sealed into a run of its
 /// own so its width cannot leak into its neighbours — a wide cell claims two columns, a
@@ -1101,7 +1169,7 @@ fn plan_runs(
 	cols: u16,
 	on_cursor_row: bool,
 	cursor_col: u16,
-	selection: Option<&Selection>,
+	marks: Marks<'_>,
 	link_run: Option<&RangeInclusive<usize>>,
 ) -> Vec<Run> {
 	let mut runs: Vec<Run> = Vec::new();
@@ -1129,11 +1197,21 @@ fn plan_runs(
 		};
 		let seals = is_wide || !glyph.is_ascii();
 		let is_cursor = on_cursor_row && col == cursor_col;
-		let is_selected = selection.is_some_and(|selection| selection.contains(row, col));
-		// This cell's row-major index, matched against the Ctrl-hover link's span (§24).
+		let is_selected = marks
+			.selection
+			.is_some_and(|selection| selection.contains(row, col));
+		// This cell's row-major index, matched against the find bar's match mask (§39) and the
+		// Ctrl-hover link's span (§24) — both live in this one index space.
 		let index = usize::from(row) * usize::from(cols) + usize::from(col);
+		let is_match = marks.matches.get(index).copied().unwrap_or(false);
 		let is_link_hover = link_run.is_some_and(|run| run.contains(&index));
-		let style = cell_style(cell.as_ref(), is_cursor, is_selected, is_link_hover);
+		let style = cell_style(
+			cell.as_ref(),
+			is_cursor,
+			is_selected,
+			is_match,
+			is_link_hover,
+		);
 
 		// Extend only when this cell joins freely AND the open run is an unsealed run of
 		// the same style.
@@ -1171,14 +1249,16 @@ fn plan_runs(
 /// Resolve a cell's colors and attributes into a `CellStyle` (§9, §23). The order matters:
 /// faint fades the ink toward its own background first; then inverse video and the cursor
 /// each swap fg/bg (together they cancel, matching how a real terminal draws the cursor over
-/// already-inverted text); then a selection takes the fill, keeping the foreground so text
-/// stays legible; and conceal last, painting the glyph and its rules in the final background
-/// so it holds its cell but shows nothing. Because `CellStyle` is the run-grouping key, the
-/// selection (and any per-cell attribute) breaks its run off from its neighbours (§10).
+/// already-inverted text); then a search match and, over it, a selection take the fill, keeping
+/// the foreground so text stays legible; and conceal last, painting the glyph and its rules in
+/// the final background so it holds its cell but shows nothing. Because `CellStyle` is the
+/// run-grouping key, either fill (and any per-cell attribute) breaks its run off from its
+/// neighbours (§10, §39).
 fn cell_style(
 	cell: Option<&ScreenCell>,
 	is_cursor: bool,
 	is_selected: bool,
+	is_match: bool,
 	is_link_hover: bool,
 ) -> CellStyle {
 	let Some(cell) = cell else {
@@ -1205,6 +1285,13 @@ fn cell_style(
 
 	if cell.inverse() ^ is_cursor {
 		std::mem::swap(&mut fg, &mut bg);
+	}
+	// The find bar's matches (§39): a wash under every hit on screen. Applied BEFORE the selection,
+	// so the current hit — which revealing already turned into an ordinary selection (§35) — keeps
+	// the selection's fill and stays the one the eye lands on. That ordering is the whole reason the
+	// match list can include the current match and stay ignorant of which one it is.
+	if is_match {
+		bg = MATCH_BG;
 	}
 	if is_selected {
 		bg = SELECTION_BG;
@@ -1278,7 +1365,7 @@ mod tests {
 	fn row_runs(input: &str, cols: u16) -> Vec<Run> {
 		let mut terminal = Terminal::new(1, cols);
 		terminal.process(input.as_bytes());
-		plan_runs(terminal.screen(), 0, cols, false, 0, None, None)
+		plan_runs(terminal.screen(), 0, cols, false, 0, Marks::default(), None)
 	}
 
 	#[test]
@@ -1420,7 +1507,11 @@ mod tests {
 		let mut terminal = Terminal::new(1, 5);
 		terminal.process(b"abcde");
 		let selection = Selection::new(Cell { row: 0, col: 1 }).with_head(Cell { row: 0, col: 2 });
-		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, Some(&selection), None);
+		let marks = Marks {
+			selection: Some(&selection),
+			matches: &[],
+		};
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, marks, None);
 
 		// "a" | "bc" (selected) | "de"
 		assert_eq!(runs.len(), 3);
@@ -1428,6 +1519,74 @@ mod tests {
 		assert_eq!(runs[1].style.bg, SELECTION_BG);
 		assert_ne!(runs[0].style.bg, SELECTION_BG);
 		assert_ne!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	#[test]
+	fn every_on_screen_match_is_washed_and_the_current_one_keeps_the_selection_fill() {
+		// Arrange: "ab ab" with both hits on row 0 (columns 0-1 and 3-4), and the SECOND one also
+		// selected — which is exactly the state the find bar leaves behind, since revealing the
+		// current match turns it into an ordinary selection (§35).
+		let mut terminal = Terminal::new(1, 5);
+		terminal.process(b"ab ab");
+		let hits = [
+			Highlight {
+				row: 0,
+				start_col: 0,
+				end_col: 1,
+			},
+			Highlight {
+				row: 0,
+				start_col: 3,
+				end_col: 4,
+			},
+		];
+		let selection = Selection::new(Cell { row: 0, col: 3 }).with_head(Cell { row: 0, col: 4 });
+		let mask = match_mask(&hits, 1, 5);
+		let marks = Marks {
+			selection: Some(&selection),
+			matches: &mask,
+		};
+
+		// Act
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, marks, None);
+
+		// Assert: "ab" (match wash) | " " (plain) | "ab" (selected, not washed) — the two fills are
+		// different colours, so the current hit is told apart from the other one, and each fill
+		// breaks its own run off from the space between them.
+		assert_eq!(runs.len(), 3);
+		assert_eq!(runs[0].content, "ab");
+		assert_eq!(runs[0].style.bg, MATCH_BG);
+		assert_eq!(runs[1].content, " ");
+		assert_eq!(runs[1].style.bg, DEFAULT_BG);
+		assert_eq!(runs[2].content, "ab");
+		assert_eq!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	#[test]
+	fn the_match_mask_drops_what_falls_outside_the_grid() {
+		// A hit on a row the grid no longer has (a resize shrank the screen between the scan and
+		// this frame) is dropped, and one whose span runs past the last column is clipped — never
+		// wrapped onto the row below, which is what an unclamped row-major write would do.
+		let hits = [
+			Highlight {
+				row: 5,
+				start_col: 0,
+				end_col: 1,
+			},
+			Highlight {
+				row: 0,
+				start_col: 2,
+				end_col: 9,
+			},
+		];
+		let mask = match_mask(&hits, 2, 4);
+		assert_eq!(
+			mask,
+			vec![false, false, true, true, false, false, false, false]
+		);
+
+		// And no hits means no allocation and no washes at all — the shut-bar case.
+		assert!(match_mask(&[], 2, 4).is_empty());
 	}
 
 	#[test]
@@ -1606,7 +1765,7 @@ mod tests {
 		let mut terminal = Terminal::new(1, cols);
 		terminal.process(b"\x1b]8;;https://example.com\x07site\x1b]8;;\x07X");
 
-		let plain = plan_runs(terminal.screen(), 0, cols, false, 0, None, None);
+		let plain = plan_runs(terminal.screen(), 0, cols, false, 0, Marks::default(), None);
 		assert!(
 			plain
 				.iter()
@@ -1614,7 +1773,15 @@ mod tests {
 		);
 
 		let run = 0..=3usize;
-		let hovered = plan_runs(terminal.screen(), 0, cols, false, 0, None, Some(&run));
+		let hovered = plan_runs(
+			terminal.screen(),
+			0,
+			cols,
+			false,
+			0,
+			Marks::default(),
+			Some(&run),
+		);
 		let underlined: String = hovered
 			.iter()
 			.filter(|run| run.style.underline == UnderlineStyle::Single)

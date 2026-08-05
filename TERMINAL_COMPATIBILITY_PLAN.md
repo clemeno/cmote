@@ -16,7 +16,9 @@ remains is a much smaller, concrete set of genuine gaps, grouped below by where 
 or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
 (§4) are closed, and what is open lives in **§5, the engine's own ceiling** — of which only graphics
 carries real UX value. §6 holds what cmote refuses on purpose. §36 also *corrected* this document:
-blink was listed as cmote's policy choice when in fact the engine drops the attribute entirely.
+blink was listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39
+touched this surface without moving a row** — the find bar's match washes are a local highlight, not a
+sequence answered; see the note in §4.
 
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
@@ -80,7 +82,8 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   live bottom. The alternate screen keeps no history, so scrolling is inert there by design. That
   history is **searchable** (§35): Ctrl+Shift+F floats a find bar over the grid, and each hit is
   revealed (centred when off-screen) and turned into an ordinary selection, so Copy takes it
-  (`term::search`).
+  (`term::search`). **Every hit on the visible screen is washed** in a second highlight colour (§39),
+  the current one keeping the selection's own fill, so the bar shows where else the query is.
 - **Lets the engine interpret** the whole VT stream, no cmote papering-over: the **DEC
   line-drawing charset** (older programs box-draw with it), **origin mode** (so cursor reports
   are origin-correct), **custom tab stops** (HTS / TBC), the **autowrap toggle** (DECAWM),
@@ -189,6 +192,14 @@ stored as absolute line indices so they ride the scrollback, captured by splitti
 advance at each mark. The one piece left for later is full-scrollback capture of an output taller
 than the screen — the selection is viewport-bound, like the mouse's.
 
+**The grid now carries a second highlight layer (§39), and it answers no sequence.** The find bar's
+on-screen matches are washed per cell (`ui/grid.rs::match_mask`, a row-major mask built once per frame
+and read in `cell_style` between the inverse/cursor swap and the selection fill). It is recorded here
+only because it touches this document's surface — `src/term/` and `ui/grid.rs` — and to be explicit
+that **no row of §2–§6 or the §8 matrix moves**: no host request produces it, no attribute is newly
+honoured, and nothing about what a remote program can ask for changed. A local highlight over cells the
+program already painted is cmote's own UX, like the selection it sits under.
+
 ---
 
 ## 5. The new engine's own ceiling (`[engine-limit]`)
@@ -275,7 +286,10 @@ selection) — the same scanner-beside-the-cwd tactic, but with each mark's grid
 splitting the engine advance at it. **Scrollback search** (§35) then shipped on the same two
 foundations, needing nothing of the engine beyond reads: `term::search` walks the whole grid
 (history included) for a query, and each hit is revealed by a scroll and handed to the UI as an
-ordinary selection — so it added no rendering, no reply path and no clipboard code.
+ordinary selection — so it added no reply path and no clipboard code, and at first no rendering
+either. **§39 then added the one rendering piece**: the hits that fall on the visible screen are
+resolved to viewport rows (`Search::visible`) and washed per cell, the current one still keeping the
+selection's fill. Still nothing of the engine beyond reads.
 
 The `[engine-limit]` items are now the *only* remaining moves of any size, and only **images**
 (sixel / kitty graphics) carry real UX value — the rest (blink, double-height lines, left/right
@@ -578,8 +592,15 @@ Audited file:line anchors behind the claims above, for later re-checking.
   columns into an ordinary `ui::selection::Selection`. Opened by Ctrl+Shift+F, which then owns the
   keyboard (the `self.search.is_some()` guard in `app.rs::on_key`, mirroring the inline rename fields);
   drawn as a floating overlay (`ui/terminal.rs::search_bar`) rather than a bar that would reflow the pty.
-  `ponytail:` per-row matching, so a hit across a wrapped line's fold is missed; only the current match
-  is highlighted.
+  **`Search::visible` (§39)** projects the hits onto the screen as it is scrolled — `absolute -
+  history_size + display_offset`, the same mapping `osc133::visible_rows` uses — starting the walk at
+  the first visible line with a `partition_point`, since the list is in document order and a one-letter
+  query has tens of thousands of hits nearly all off screen. `ui/terminal.rs::view` resolves them and
+  `ui/grid.rs::match_mask` flattens them into a per-frame row-major mask that `cell_style` reads
+  between the inverse/cursor swap and the selection fill, so the current hit keeps the selection's
+  colour and the rest wash amber. `ponytail:` per-row matching, so a hit across a wrapped line's fold is
+  missed; and the match list is rebuilt only on a query change or a step, so output printed since is
+  neither counted nor washed until the next one.
 - **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
 - **`link.rs`** — following an OSC 8 hyperlink (§24): `is_allowed` gates the scheme to
   http/https/mailto (pure, unit-tested), `open` hands an allowed URI to `open::that_detached`
