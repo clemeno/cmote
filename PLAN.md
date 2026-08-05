@@ -3884,3 +3884,65 @@ through `Selection::spanning`, which is the same call the word and line expansio
 - **The wrap-aware copy is only as good as the engine's flag.** A line whose wrap flag a reflow moved is
   re-joined wherever the flag now says — which is the engine's own reflow answer, and the same one its
   own selection uses.
+
+---
+
+## 43. A resize invalidates what was anchored to the grid (v3.x)
+
+Everything §40 gained by anchoring the selection in **absolute document lines** rests on those numbers
+meaning the same thing from one frame to the next. A **resize** is where they stop: re-wrapping the
+scrollback at a new width changes how many lines the history holds, so a line number recorded before the
+resize names *other text* after it.
+
+`Terminal::resize` already knew this. It drops the prompt marks (§34) and the inline images (§41) on a
+reflow for exactly this reason. What it could not reach is the state that lives a layer up, in the tab:
+**the selection and the find bar's match list**. So a drag over a path, a window dragged narrower, and
+the highlight was still on screen — over whatever the reflow had moved onto those lines. Copy then put
+text on the clipboard that the user never selected, with nothing on screen to say so. A highlight that
+lies is worse than no highlight at all.
+
+### The selection is dropped, not remapped (`app.rs`)
+
+`on_grid_reflowed` is the one place a reflow's fallout is handled, called from the single path a window
+resize *and* a files-pane resize both already take (§19) — so one of the two cannot be fixed while the
+other stays broken. It drops the selection and any drag with it.
+
+Dropping rather than mapping is the deliberate half. The engine's reflow is the only thing that knows
+where a given cell ended up, and it exposes no such map; reconstructing one would mean tracking each
+selected cell across a re-wrap that can split a row in two or join two into one. The cost of getting
+that wrong is silent: a plausible-looking highlight over text the user never chose. The cost of dropping
+it is one re-drag, which is what every terminal that reflows asks for.
+
+### The find bar is re-scanned instead (`app.rs`, `term/search.rs`)
+
+The bar is *not* dropped, because it does not need to be: its washes are rebuilt from the match list on
+every frame, and `Terminal::find` can produce a fresh list from the reflowed grid at any time — which is
+already what a step does before it moves (§35). So a resize re-scans the same query, and `refresh` keeps
+the current match by identity wherever it survived, falling back to the newest hit where it did not.
+Without the re-scan the washes stay put over moved text, which is the same lie as the selection's, drawn
+in a different colour. The revealed match's own highlight goes with the selection above; the next step
+puts it back.
+
+### Two smaller things the old grid owned (`app.rs`)
+
+- **The multi-click tally** (§42) counts presses that land on **one cell**, and that cell shows different
+  text now — so it starts over. Otherwise a press there within the 500 ms window would expand a word off
+  the back of a single click the user made on something else entirely.
+- **The hovered cell** is resolved again from the last known pointer position against the new grid,
+  exactly as a pointer move would (§10). The pointer has not moved, but the cell under it has, and a
+  press can arrive before the next move does — a keyboard resize, a window snap — which on a shrunken
+  grid would otherwise anchor at a row that no longer exists.
+
+### What is deliberately NOT here
+
+- **No remapping of a selection through the reflow**, for the reason above. `ponytail:` if the engine
+  ever exposes its reflow mapping, this is where a survived selection would be built from it.
+- **A height-only resize drops the selection too**, though only a *column* change re-wraps: dragging the
+  bottom edge of the window moves lines between the screen and the history without renumbering them.
+  Keying on any grid-size change keeps one rule here and the same rule `Terminal::resize` uses for the
+  marks and the pictures, at the cost of a selection that a vertical drag could have kept. `ponytail:`
+  the narrower condition.
+- **The scrollback cap's own drift is untouched.** Past `SCROLLBACK` lines the history stops growing and
+  `history_size + row` stops naming a fixed line, so every absolute anchor drifts as output arrives —
+  §34's marks, §41's images and the selection alike. That is a property of the coordinate, not of the
+  resize, and it takes 10 000 lines of output to reach.

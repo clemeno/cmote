@@ -3226,7 +3226,56 @@ impl Tab {
 			_ => false,
 		};
 		if changed {
+			// The grid the user was pointing at, selecting in and searching through is not the grid
+			// that exists now (§43).
+			self.on_grid_reflowed();
 			self.send_command(SshCommand::Resize { cols, rows });
+		}
+	}
+
+	/// Let go of what was anchored to the grid the resize just reflowed (§43).
+	///
+	/// The selection, the find bar's match list, the prompt ticks (§34) and the inline images (§41)
+	/// all name positions in *absolute document lines* (§40), and a reflow moves them: re-wrapping the
+	/// scrollback at a new width changes how many lines it holds, so a line number recorded before the
+	/// resize names other text after it. `Terminal::resize` already drops the marks and the pictures
+	/// for that reason — this is the same clean-up for the two things that live up here, and the one
+	/// place a reflow's fallout is handled, so a pane resize (§19) cannot be fixed while a window
+	/// resize stays broken.
+	///
+	/// The selection is **dropped** rather than mapped through the reflow. A highlight that survived
+	/// onto unrelated text would be worse than none: Copy would put text on the clipboard that the
+	/// user never selected, and nothing on screen would say so.
+	///
+	/// The find bar is **re-scanned** rather than dropped, which is what a step already does (§35).
+	/// Its washes are rebuilt from the match list on every frame, so a stale list paints hits over
+	/// whatever text the reflow moved onto those lines; a fresh scan of the same query is honest, and
+	/// `refresh` keeps the current match by identity wherever it survived. The revealed match's own
+	/// highlight goes with the selection above — the next step puts it back.
+	fn on_grid_reflowed(&mut self) {
+		self.selection = None;
+		self.selecting = false;
+		// The tally counts presses that land on ONE cell (§42), and that cell now shows different
+		// text — so the next press there starts a fresh count instead of expanding a word the user
+		// never clicked on once.
+		self.clicks = ui::selection::Clicks::default();
+		let Some(terminal) = self.terminal.as_ref() else {
+			return;
+		};
+		// The pointer has not moved, but the cell under it has: resolve it again from the last known
+		// position against the new grid, exactly as a move would (§10). Without this a press that
+		// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
+		// the shrunken grid no longer has.
+		let (rows, cols) = terminal.screen().size();
+		// Both reads off the reflowed screen happen here, while the borrow is still an immutable one:
+		// the scan below is `Terminal::find`'s, the same call a step makes.
+		let matches = self
+			.search
+			.as_ref()
+			.map(|search| terminal.find(&search.query));
+		self.hover_cell = ui::terminal::cell_at(self.pointer, rows, cols);
+		if let (Some(search), Some(matches)) = (self.search.as_mut(), matches) {
+			search.refresh(matches);
 		}
 	}
 
@@ -6927,6 +6976,81 @@ mod tests {
 		let screen = app.terminal.as_ref().unwrap().screen();
 		let selection = app.selection.expect("the triple click selected a line");
 		assert_eq!(selection.extract(screen), "cat /etc/hosts");
+	}
+
+	/// A resize reflows the scrollback, so an absolute document line recorded before it names other
+	/// text after it (§43). The selection is dropped rather than left pointing somewhere it no longer
+	/// belongs — a highlight that lies is worse than none, since Copy would then hand the clipboard
+	/// text the user never selected. The find bar keeps its query and is re-scanned instead, so its
+	/// washes follow the text they belong to.
+	#[test]
+	fn a_resize_drops_the_selection_and_rescans_the_find_bar() {
+		let (mut app, _rx) = app_with_terminal(16);
+		// The files pane starts open (§19) and takes its height out of the grid, so the window sizes
+		// here have to allow for it or the reflow lands on a one-row grid.
+		let reserved = app.files.reserved();
+		app.window_size = ui::terminal::window_size(80, 24, reserved);
+		app.terminal.as_mut().unwrap().process(b"hello world");
+
+		// A find bar with a hit, and a selection of the user's own over the same line.
+		let _focus = app.open_term_find();
+		app.term_find_query("hello".to_owned());
+		assert!(
+			app.search.as_ref().unwrap().current().is_some(),
+			"the query matched before the resize"
+		);
+		app.selection = Some(ui::selection::Selection::spanning(
+			ui::selection::Spot { line: 0, col: 0 },
+			ui::selection::Spot { line: 0, col: 4 },
+		));
+		app.selecting = true;
+
+		// The window narrows to 60 columns, which is what reflows the grid.
+		app.on_window_resized(ui::terminal::window_size(60, 24, reserved));
+
+		assert_eq!(
+			app.terminal.as_ref().unwrap().screen().size(),
+			(24, 60),
+			"the grid did reflow, or this test proves nothing"
+		);
+		assert!(app.selection.is_none(), "the stale selection is dropped");
+		assert!(!app.selecting, "and any drag with it");
+		let search = app.search.as_ref().expect("the find bar stays open");
+		assert_eq!(search.query, "hello", "with its query");
+		assert!(
+			search.current().is_some(),
+			"re-scanned, so the hit is where the reflow left it"
+		);
+	}
+
+	/// The multi-click tally starts over on a resize (§43): the cell it was counting presses on shows
+	/// different text once the grid has reflowed, so the next press there is a plain click and not the
+	/// second half of a double click the user never made (§42).
+	#[test]
+	fn a_resize_starts_the_multi_click_tally_over() {
+		let (mut app, _rx) = app_with_terminal(16);
+		let reserved = app.files.reserved();
+		app.window_size = ui::terminal::window_size(80, 24, reserved);
+		app.terminal.as_mut().unwrap().process(b"cat /etc/hosts");
+
+		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
+		app.pointer = iced::Point::new(50.0, 5.0);
+		app.hover_cell = ui::selection::Cell { row: 0, col: 6 };
+		app.on_grid_pressed();
+
+		app.on_window_resized(ui::terminal::window_size(60, 24, reserved));
+
+		// The pointer never moved, so the tally's cell is the one this press lands on — the second
+		// press would take the word if the resize had not reset the count.
+		assert_eq!(
+			app.hover_cell,
+			ui::selection::Cell { row: 0, col: 6 },
+			"the hovered cell is resolved again against the new grid"
+		);
+		app.on_grid_pressed();
+		let selection = app.selection.expect("a press anchors a selection");
+		assert!(selection.is_empty(), "a plain click, not a word");
+		assert!(app.selecting, "and it begins a drag");
 	}
 
 	/// Ctrl+Shift+F opens the scrollback find bar, and while it is open the bar owns the keyboard
