@@ -12,11 +12,18 @@ every gap as a `[bolt-on]` / `[engine]` split, because that crate was a delibera
 subset that could neither parse nor represent most of the spec. **That ceiling is gone.** What
 remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
+**State as of §36.** Every *engine-independent* item this document ever listed is now either shipped
+or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
+(§4) are closed, and what is open lives in **§5, the engine's own ceiling** — of which only graphics
+carries real UX value. §6 holds what cmote refuses on purpose. §36 also *corrected* this document:
+blink was listed as cmote's policy choice when in fact the engine drops the attribute entirely.
+
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
 mode newly honoured, a sequence newly rendered, or an engine bump that moves the ceiling. Editor,
 files-pane, and window-chrome work does **not** belong here. When terminal work does land, the edit
-is two places: the gap list in §2–§5 and the matching row in the §8 matrix.
+is two places: the gap list in §2–§5 (or §6, if the answer is a deliberate refusal — a decision is
+also an edit) and the matching row in the §8 matrix.
 
 Sources cited by tag:
 
@@ -39,8 +46,8 @@ unlike `vt100` — **generates host replies itself** (through `Event::PtyWrite`)
 "application stalls on a query timeout" class of bug is largely closed by construction. cmote
 wires the engine behind a cmote-owned seam (`term::screen`), drains the engine's replies
 through a `Replies` listener, and answers itself both the queries that need cmote's own data (its
-colour scheme, its cell pixel size) and the three identity queries the engine drops — XTVERSION,
-DECRQSS and XTGETTCAP, sniffed from the stream by `term::query` (§33). The old `term::compat` (cursor-move rewriter) and
+colour scheme, its cell pixel size) and the four identity queries the engine drops — XTVERSION,
+DECRQSS, XTGETTCAP and DA3, sniffed from the stream by `term::query` (§33, §36). The old `term::compat` (cursor-move rewriter) and
 `term::answer` (reply synthesizer) modules were **deleted** in the swap — the engine does both.
 
 Effort is now just *where the work lives*, not a hard wall:
@@ -48,7 +55,7 @@ Effort is now just *where the work lives*, not a hard wall:
 - **[keymap]** — cmote's input encoder (`term::keymap`); engine-independent.
 - **[reply]** — extend cmote's reply path (the `Replies` listener in `term::mod`, or the
   `term::query` stream scanner) for a query the engine does not answer itself — the route §33 took
-  for XTVERSION / DECRQSS / XTGETTCAP.
+  for XTVERSION / DECRQSS / XTGETTCAP and §36 for DA3.
 - **[seam+grid]** — surface a getter the engine already has through `term::screen`, then render
   it in the grid.
 - **[engine-limit]** — `alacritty_terminal` 0.26 itself does not parse or represent it; it would
@@ -83,12 +90,13 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   The **colour queries** (OSC 10 / 11 / 12 and OSC 4 palette) and the **pixel / text-area
   size** reports (`CSI 14t`, `CSI 18t`) are answered by cmote's listener from its own colour
   scheme and cell metrics — so a program probing the background to pick a light-vs-dark theme is
-  answered rather than left guessing. The three **identity queries** the engine drops — XTVERSION
-  (`CSI > q`), DECRQSS (`DCS $ q … ST`) and XTGETTCAP (`DCS + q … ST`) — are sniffed from the stream
-  and answered by cmote itself (`term::query`, §33), so a program fingerprinting the terminal or
-  reading back its SGR no longer stalls on a dropped query.
+  answered rather than left guessing. The four **identity queries** the engine drops — XTVERSION
+  (`CSI > q`), DECRQSS (`DCS $ q … ST`), XTGETTCAP (`DCS + q … ST`) and DA3 (`CSI = c`) — are sniffed
+  from the stream and answered by cmote itself (`term::query`, §33, §36), so a program fingerprinting
+  the terminal or reading back its SGR no longer stalls on a dropped query.
 - **Shows the window title** a program sets with OSC 0 / OSC 2 in the title bar (§23).
-- **Tracks and honours modes**: application-cursor DECCKM (arrows → SS3), bracketed paste
+- **Tracks and honours modes**: application-cursor DECCKM (arrows → SS3), application-keypad DECKPAM
+  (the unambiguous numpad keys → SS3, §36), bracketed paste
   `?2004`, cursor visibility `?25`, mouse `?9 / 1000 / 1002 / 1003` in SGR / UTF-8 / classic
   encodings, alternate screen, and **focus reporting `?1004`** (the shell hears `CSI I` / `CSI
   O` as it gains or loses focus).
@@ -107,37 +115,35 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
 
 ---
 
-## 2. Still open — input (all `[keymap]`, engine-independent)
+## 2. Input — closed (all `[keymap]`, engine-independent)
 
-Both `modifyOtherKeys` (§1) and the **kitty keyboard protocol** (§25, shipped) are now **done**.
-What is left:
-
-| Missing | What it unblocks | Tag | Src |
-|---|---|---|---|
-| **DECKPAM application keypad** — the numpad should send `ESC O p…y` while an app enables app-keypad mode | *near-nil value on a PC client* — see the note below | [seam+keymap] | [DEC] |
+`modifyOtherKeys` (§1), the **kitty keyboard protocol** (§25) and now **DECKPAM** (§36) are all
+**done**. Nothing in the input class is open.
 
 Kitty shipped by flipping the engine's `kitty_keyboard` config flag on — so the engine tracks the
 push/pop/query stack and answers `CSI ? u` itself — and writing the key-press → `CSI u` encoder
-(`term/kitty.rs`), the flag set read off the seam (`Screen::kitty_flags`). The one input gap that
-remains is DECKPAM.
+(`term/kitty.rs`), the flag set read off the seam (`Screen::kitty_flags`).
 
-**Why DECKPAM is deprioritised.** cmote already mirrors xterm's default `numLock: true`
-behaviour: with NumLock on the numpad sends its digit (the `pm2 ls` fix, keyed off the OS
-producing `text`), with NumLock off it is navigation following DECCKM. Every ncurses full-screen
-app sets DECKPAM as part of terminfo `smkx`, so *honouring it for the number keys would divert
-NumLock-on digits to `ESC O q…y` inside vim / less* — re-breaking the exact digit-typing the
-`pm2 ls` fix protects. The only genuinely safe DECKPAM wins on a PC are NumpadEnter → `ESC O M`
-and the operators `+ - * /` → `ESC O k/m/j/o` (no NumLock ambiguity), which is tiny value. So
-the "small, like DECCKM" framing does not hold here; it is parked below the higher-value items.
+**DECKPAM shipped for the keys that can safely take it (§36).** The engine tracks the mode bit, so
+this needed only a seam getter (`Screen::application_keypad`) and a branch in `keymap::encode`
+reading it out of the grouped `Modes`. Diverted: NumpadEnter `ESC O M`, and the operators
+`* + , - / =` → `ESC O j/k/l/m/o/X`. **Not** diverted, deliberately: the numpad **digits** and the
+decimal point. cmote mirrors xterm's default `numLock: true` behaviour — with NumLock on the numpad
+sends its digit (the `pm2 ls` fix, keyed off the OS producing `text`), with NumLock off it is
+navigation following DECCKM — and every ncurses app sets DECKPAM as part of terminfo `smkx`, so
+honouring it for the number keys would divert NumLock-on digits to `ESC O p…y` inside vim / less,
+re-breaking the exact digit-typing that fix protects. xterm's `numLock` resource makes the same call,
+so this is parity, not a shortcut. The navigation role needed nothing: `smkx` sets DECCKM *and*
+DECKPAM, so the `ESC O B`-style bytes a program expects are what DECCKM alone already produces.
 
 ---
 
-## 3. Still open — query → reply (niche; `[reply]`)
+## 3. Query → reply — closed (`[reply]`)
 
-The high-value query class is closed. DA / DSR / DECRQM are answered by the engine; the colour
-and pixel-size queries by cmote's listener; and **since §33** the three identity queries the engine
-drops are answered by cmote's own stream scanner (`term::query`), the same out-of-band tactic
-`cwd` / `modkeys` use for sequences the engine ignores:
+The whole query class is closed. DA1 / DA2 / DSR / DECRQM are answered by the engine; the colour
+and pixel-size queries by cmote's listener; and **since §33** (DA3 added in §36) the four identity
+queries the engine drops are answered by cmote's own stream scanner (`term::query`), the same
+out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
 
 - **XTVERSION** (`CSI > q`) → `DCS > | cmote(<ver>) ST` — full, a truthful name and build version.
 - **XTGETTCAP** (`DCS + q <hex> ST`) → states only the two caps cmote can give truthfully —
@@ -147,31 +153,33 @@ drops are answered by cmote's own stream scanner (`term::query`), the same out-o
   grid paints, rebuilt after the chunk advances so a set-then-query in one write is seen), and
   every other setting an honest `ps=0` (`DCS 0 $ r ST`) rather than a lie about state cmote renders
   fixed or cannot read.
+- **DA3 tertiary attributes** (`CSI = c`) → `DCS ! | 00434D45 ST` (§36). The engine's
+  `identify_terminal` handles the no-intermediate (DA1) and `>` (DA2) forms and drops the `=` one, so
+  this fell to the scanner too. The eight hex digits are a **constant** — site `00`, id `434D45`
+  (`CME` in ASCII): on DEC hardware they were a serial number, and a per-machine value would hand
+  every host a stable fingerprint of the user's computer off a query they never see. The reply
+  identifies the program, not the person. The "is this the default parameter form?" test is now shared
+  with XTVERSION (`default_params`), so the two arms cannot drift.
 
-What no layer answers, both low value:
-
-| Missing | What blocks on it | Reply shape | Tag | Src |
-|---|---|---|---|---|
-| **DA3 tertiary** (`CSI =c`) | terminal-id probes | `DCS !\|<hex> ST` | [reply] | [xterm] |
-| **Answerback** (ENQ `0x05`) | legacy identification | configurable string (usually empty) | [reply] | [ECMA-48] |
-
-The engine's `identify_terminal` handles the primary and secondary DA intermediates only — the
-`=` (tertiary) intermediate is dropped — so DA3 would fall to cmote if ever wanted. Both remaining
-gaps are low UX value: modern applications rely on the DA / DECRQM / XTVERSION answers that work.
+The one remaining reply-class sequence, **answerback (ENQ `0x05`)**, is refused as policy rather than
+carried as a gap — see §6.
 
 ---
 
-## 4. Still open — rendering / attributes
+## 4. Rendering / attributes — closed at this layer
 
 **OSC 8 hyperlinks are now done** (§24), **including the Ctrl-hover underline** (v3.x) — the seam
 surfaces the per-cell URI (`Cell::hyperlink`), Ctrl+click and a context-menu Open/Copy follow it,
 `link` gates the scheme to http/https/mailto before opening, and the grid now underlines the whole
-run of a link while Ctrl is held over it, so the link reveals itself before the click. What remains
-here is small and low-value:
+run of a link while Ctrl is held over it, so the link reveals itself before the click.
 
-| Missing | Note | Tag | Src |
-|---|---|---|---|
-| **Blink** (SGR 5/6) | the engine stores the bit; cmote draws steady **by choice** — it runs no animation timer (the same call made for the cursor). Could show a static marker; deliberately not animated | [policy] | [ECMA-48] |
+**Correction (§36): blink is not cmote's choice, it is the engine's ceiling.** Earlier editions of
+this table listed **blink (SGR 5/6)** as `[policy]` — "the engine stores the bit; cmote draws steady
+by choice". That was wrong, and re-checking it was part of §36: `vte` parses SGR 5/6 into
+`Attr::BlinkSlow` / `BlinkFast`, but `alacritty_terminal` 0.26's `terminal_attribute` has **no arm
+for either**, and its cell `Flags` carry **no blink bit at all** — the attribute is dropped before
+cmote can see it. The row moved to §5 as an `[engine-limit]`. (cmote's no-animation-timer policy is
+still true and still applies to the *cursor*, whose blink the engine does track.)
 
 **OSC 133 shell-integration is now done** (§34) — the stream scanner this row once anticipated
 (`term/osc133.rs`, beside the cwd tracker). It drives a per-tab command-status dot, jump-to-prompt
@@ -192,6 +200,11 @@ short, and only images are high value:
 - **Sixel / ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — the crate carries **no
   graphics support at all**, so this needs both engine work *and* a compositor in the renderer.
   `[DEC]` / `[vendor]`. The one genuinely high-value item here.
+- **Blink** (SGR 5/6) — `vte` parses it (`Attr::BlinkSlow` / `BlinkFast`), but the engine's
+  `terminal_attribute` has no arm for either and its cell `Flags` hold no blink bit, so the attribute
+  never reaches the grid (§36, moved here from §4). Showing it would take a per-cell scanner beside
+  the engine (as `modkeys` is) *plus* the repaint timer cmote deliberately does not run. `[ECMA-48]`,
+  low value.
 - **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
   (single wide glyphs are; whole-line doubling is not). `[DEC]`.
 - **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
@@ -213,17 +226,32 @@ poison the local clipboard, and cmote touches the clipboard only on an explicit 
 The **bell** and any remote colour *set* request are dropped for the same "no remote-driven side
 effects" reason. Answering an OSC 52 read query would be an injection vector and stays out.
 
+**Answerback (ENQ `0x05`)** — refused for the same reason, and this is why xterm ships it empty too
+(§36). The trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05`
+— a `cat` of a binary, a corrupt download, a stray progress stream — would type the answerback string
+into the shell's input as if the user had. That is a remote-driven side effect on the user's keyboard
+in exchange for legacy identification nobody asks for; the DA / DECRQM / XTVERSION / DA3 answers cover
+every probe a modern program makes.
+
 ---
 
 ## 7. Recommendation
 
-With the engine swap, `modifyOtherKeys`, OSC 8 hyperlinks and the kitty keyboard protocol all
-done, only one cheap, self-contained keymap win remains:
+**There is no A-sized item left.** Input (§2), query→reply (§3) and the rendering/attribute layer
+(§4) are all closed; what remains is the engine's own ceiling (§5) and the two sequences cmote refuses
+on purpose (§6). §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
+blink by deciding them (and, for blink, by correcting a wrong claim in this document: the engine drops
+the attribute, so it was never cmote's choice to make).
 
-1. **DECKPAM application keypad** — *not* the quick win the earlier edition claimed (see §2): on
-   a PC client it is a near-no-op at best and a `pm2 ls` regression at worst, so only the
-   NumpadEnter / operator forms are worth anything, and only marginally.
+So the only remaining ceiling-raiser worth planning is **graphics** (sixel / kitty images) — large,
+needing engine work *and* a compositor in the renderer. Everything else in §5 (blink, double-height
+lines, left/right margins, rectangular ops, synchronized output) is legacy, rare, or invisible in
+practice.
 
+The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
+in `keymap::encode` — the numpad keys with no NumLock meaning to lose, and explicitly *not* the digits
+(§2, §36). **DA3** shipped as a `CSI =` state in the same scanner that answers XTVERSION, with a
+constant unit id chosen so the reply cannot fingerprint the machine (§3, §36).
 The **kitty keyboard protocol** (was #1) shipped as `term::kitty` + a `keymap::encode` branch,
 the inverse of the modifyOtherKeys split: the engine already implements the whole control plane
 (push / pop / set / query, stack, alternate-screen swap), gated behind its `kitty_keyboard`
@@ -249,10 +277,11 @@ foundations, needing nothing of the engine beyond reads: `term::search` walks th
 (history included) for a query, and each hit is revealed by a scroll and handed to the UI as an
 ordinary selection — so it added no rendering, no reply path and no clipboard code.
 
-The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
-kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
-rectangular ops) are legacy and rare. For "support *any* documented app UX", graphics is the one
-outstanding ceiling-raiser; everything else above is A-sized and engine-independent.
+The `[engine-limit]` items are now the *only* remaining moves of any size, and only **images**
+(sixel / kitty graphics) carry real UX value — the rest (blink, double-height lines, left/right
+margins, rectangular ops) are legacy and rare. For "support *any* documented app UX", graphics is the
+one outstanding ceiling-raiser; every engine-independent item this document ever listed is either
+shipped or refused with its reason written down.
 
 ---
 
@@ -329,7 +358,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Set tab stop | ESC H | ✅ | |
 | Save / restore cursor | ESC 7 / ESC 8 | ✅ | |
 | Full reset | ESC c (RIS) | ✅ | |
-| Keypad app / numeric | ESC = / ESC > | ✅ | tracked; not yet used for numpad encoding (DECKPAM, §2) |
+| Keypad app / numeric | ESC = / ESC > | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
 | Screen alignment test | ESC #8 (DECALN) | ✅ | |
 | Designate charset G0 / G1 | ESC ( / ESC ) | ✅ | DEC line-drawing works |
 | Single shift G2 / G3 | ESC N / ESC O | ❌ | |
@@ -345,6 +374,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Request status string | DCS $ q (DECRQSS) | ⚠️ | SGR reported from the live pen; other settings honest `ps=0` (`term/query.rs`, §33) |
 | Termcap query | DCS + q (XTGETTCAP) | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
 | Terminal version | CSI > q (XTVERSION) | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
+| Tertiary device attributes | CSI = c (DA3 → DECRPTUI) | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
 | Sixel graphics | DCS … q | ❌ | no graphics (§5) |
 | tmux passthrough | DCS tmux; … | ❌ | |
 
@@ -356,7 +386,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Dim / faint | 2 | ✅ | faded toward bg |
 | Italic | 3 | ✅ | bundled IBM Plex Mono face |
 | Underline | 4 | ✅ | |
-| Slow / rapid blink | 5 / 6 | ⚠️ | tracked, **not shown** — no animation timer (§4) |
+| Slow / rapid blink | 5 / 6 | ❌ | **dropped by the engine** — `vte` parses it, `alacritty_terminal` has no arm and no cell flag, so it never reaches cmote (§5, §36) |
 | Reverse video | 7 | ✅ | |
 | Hidden / conceal | 8 | ✅ | copy still yields the text |
 | Strikethrough | 9 | ✅ | |
@@ -410,19 +440,20 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Title stack (CSI 22 / 23 t) | ✅ | `push_title` / `pop_title` |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9) |
-| ENQ answerback | ❌ | no answerback string (§3) |
+| ENQ answerback | ❌ | **refused on purpose** — a lone `0x05` in binary output would type a string into the shell (§6, §36) |
 | BEL | ⚠️ | accepted, **silent** — bell event dropped |
 | BS / HT / LF / CR | ✅ | |
 | SO / SI | ✅ | charset shift |
 
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
-colour, alternate screen, mouse, bracketed paste, focus, DA / DSR / DECRQM, DECSCUSR, REP, the
-kitty keyboard protocol, and — since §33 — the identity queries the engine dropped (XTVERSION,
-DECRQSS SGR, XTGETTCAP). Most of the ❌ column is **deliberate**: no images, no remote clipboard
-(OSC 52), no remote window control (CSI t), no blink animation, and a fixed colour scheme so
-dynamic-palette writes are query-only. The genuine plain gaps left are the newer private modes
-(2027 / 2031 / 2048), selective / rectangular editing, and left-right margins — all catalogued with
-their cost in §2–§5; of the identity queries only DA3 and answerback remain unanswered.
+colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
+kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
+query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3). Most of the ❌ column is
+**deliberate**: no images, no remote clipboard (OSC 52), no answerback, no remote window control
+(CSI t), no blink (the engine drops it), and a fixed colour scheme so dynamic-palette writes are
+query-only. The genuine plain gaps left are the newer private modes (2027 / 2031 / 2048),
+selective / rectangular editing, and left-right margins — all catalogued with their cost in §5, which
+is now the *only* section with anything open in it.
 
 ---
 
@@ -444,8 +475,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   (`report_keyboard_mode` writes `ESC [ ? <flags> u` as an `Event::PtyWrite`). The active flags
   fold into `TermMode` (`DISAMBIGUATE_ESC_CODES` `1<<18` … `REPORT_ASSOCIATED_TEXT` `1<<22`), which
   cmote reads through `Term::mode()` (`term/mod.rs:709`). So the encoding is cmote's only job (§25).
-- **DECKPAM**: `set_keypad_application_mode` (`term/mod.rs:2180`) — the engine tracks the
-  application-keypad mode.
+- **DECKPAM**: `set_keypad_application_mode` (`term/mod.rs:2180`) inserts `TermMode::APP_KEYPAD`
+  (`term/mod.rs:59`), `unset_keypad_application_mode` (`:2186`) removes it — the engine tracks the
+  mode, so cmote only reads it back and encodes (§36).
+- **No blink at all**: `vte-0.15.0/src/ansi.rs:1844-1845` parses SGR 5/6 into `Attr::BlinkSlow` /
+  `BlinkFast`, but `terminal_attribute` (`term/mod.rs:1885-1926`) has **no arm for either** and
+  `term/cell.rs` `Flags` declare **no blink bit**, so the attribute is dropped before the grid. This
+  corrects an earlier claim in §4 that the engine stored it (§36).
 - **XTWINOPS size reports**: `text_area_size_pixels` (`term/mod.rs:2259`) and
   `text_area_size_chars` (`term/mod.rs:2268`).
 - **OSC 8 hyperlinks**: stored per cell — `Cell::set_hyperlink` (`term/cell.rs:202`) and read
@@ -466,34 +502,44 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `Title` / `ResetTitle` (OSC 0 / 2, sanitized). **Dropped**: `ClipboardLoad` / `ClipboardStore`
   (OSC 52), the bell, and colour *set* requests. `SCROLLBACK = 10_000`. The seam hides the
   engine types behind `Terminal` + `ScrollMotion`. Since §33 `process` also drains the `term::query`
-  scanner (`term/mod.rs:142-167`): the chunk is scanned for identity queries *before* the engine
-  advances, then each completed query becomes a reply — XTVERSION / XTGETTCAP from static facts,
+  scanner: the chunk is scanned for identity queries *before* the engine advances, then each completed
+  query becomes a reply — XTVERSION / XTGETTCAP / DA3 from static facts (`VERSION`, `UNIT_ID`),
   `Decrqss(Sgr)` from the live pen via `pen_sgr(self.term.grid().cursor.template)`, built after the
   advance so a set-then-query in one write is seen.
-- **`term/query.rs`** — the identity-query scanner (§33), the same out-of-band tactic as `cwd` /
-  `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`,
-  empty/zero parameter only — a non-zero param is some other private query), **DECRQSS**
-  (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector `Unsupported`) and **XTGETTCAP**
-  (`DCS + q <hex>[;…] ST`). An unrecognised DCS is followed to its terminator (`DcsIgnore`) so sixel
-  data cannot masquerade as a query, and `MAX_PARAMS` / `MAX_DATA` bound a hostile stream (§12).
-  Reply builders `version_reply` / `decrqss_sgr_reply` / `decrqss_unsupported_reply` /
-  `gettcap_reply`; `known_capability` states only `TN=xterm-256color` and `Co`/`colors=256`.
-  Parse-only, no engine types, unit-tested per reply shape.
+- **`term/query.rs`** — the identity-query scanner (§33, §36), the same out-of-band tactic as `cwd` /
+  `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`),
+  **DA3** (`CSI = c`), **DECRQSS** (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector
+  `Unsupported`) and **XTGETTCAP** (`DCS + q <hex>[;…] ST`). Both private-CSI queries answer only in
+  their default parameter form — the shared `default_params` predicate (empty or all zeros), since a
+  non-zero param on the same final byte is a different private sequence. An unrecognised DCS is
+  followed to its terminator (`DcsIgnore`) so sixel data cannot masquerade as a query, and
+  `MAX_PARAMS` / `MAX_DATA` bound a hostile stream (§12). Reply builders `version_reply` /
+  `da3_reply` / `decrqss_sgr_reply` / `decrqss_unsupported_reply` / `gettcap_reply`;
+  `known_capability` states only `TN=xterm-256color` and `Co`/`colors=256`. `term/mod.rs` holds the
+  two identity constants — `VERSION` (`cmote(<crate version>)`) and `UNIT_ID` (`00434D45`, a
+  **constant** so a DA3 reply cannot fingerprint the machine). Parse-only, no engine types,
+  unit-tested per reply shape.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
   cell's OSC 8 URI, §24). `Screen` getters: `size`, `cursor_position`, `display_offset`,
-  `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `bracketed_paste`,
-  `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`, `kitty_flags` (the five active kitty
-  protocol flags, read off `Term::mode()`, §25). **Not yet surfaced**: application-keypad, blink.
+  `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `application_keypad`
+  (DECKPAM, §36), `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`,
+  `kitty_flags` (the five active kitty protocol flags, read off `Term::mode()`, §25). Nothing the
+  engine tracks is left unsurfaced now; blink it does not track at all (see above).
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`
   / `other_key_bytes` emit the `CSI 27;mod;code~` form when the level is on), the numpad NumLock
   heuristic, and the bracketed-paste terminator scrub. It now also carries an input-modes bundle
-  (`Modes` — DECCKM, the modifyOtherKeys level, the kitty flags) and a `KeyEvent` (press / repeat /
-  release), and **dispatches to `term/kitty.rs` whenever a kitty flag is active**, superseding the
-  legacy path; a legacy release yields nothing and a legacy repeat is a press. **Absent**: DECKPAM.
+  (`Modes` — DECCKM, DECKPAM, the modifyOtherKeys level, the kitty flags) and a `KeyEvent` (press /
+  repeat / release), and **dispatches to `term/kitty.rs` whenever a kitty flag is active**, superseding
+  the legacy path; a legacy release yields nothing and a legacy repeat is a press. **DECKPAM** (§36) is
+  `application_keypad_bytes`: SS3 for NumpadEnter `M` and the operators `* + , - / =` →
+  `j k l m o X`, taken after the kitty hand-off and only on the unmodified form; the digits and the
+  decimal point are deliberately excluded so a NumLock-on numpad still types numbers inside every
+  ncurses program (terminfo `smkx` sets DECKPAM, so the mode is on for their whole run) — xterm's
+  `numLock` default makes the same call.
 - **`term/kitty.rs`** — the kitty keyboard encoder (§25). `KittyFlags` (the five progressive flags)
   and `KeyEvent`; `encode` turns a key event into kitty's `CSI <keycode>[:<shifted>] ;
   <mods>[:<event>] ; <text> u`, keeping the legacy final byte for keys that had one (arrows,

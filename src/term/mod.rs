@@ -18,10 +18,11 @@
 // `term::compat` (the engine parses every cursor-move spelling) and `term::answer` (the engine
 // answers every query).
 //
-// Three identity queries the engine does NOT answer — its VT parser treats every DCS as a no-op
-// and has no arm for the version request — so cmote sniffs them out of the same stream and answers
-// them itself (`query`, §33): XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`) and XTGETTCAP
-// (`DCS + q … ST`). Only DECRQSS's SGR request needs live state; `process` fills it from the pen.
+// Four identity queries the engine does NOT answer — its VT parser treats every DCS as a no-op,
+// has no arm for the version request, and its device-attributes handler covers only DA1 and DA2 —
+// so cmote sniffs them out of the same stream and answers them itself (`query`, §33, §36):
+// XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`), XTGETTCAP (`DCS + q … ST`) and DA3 (`CSI = c`).
+// Only DECRQSS's SGR request needs live state; `process` fills it from the pen.
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
@@ -29,7 +30,7 @@ pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
-mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
+mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3 (§33, §36)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 
@@ -57,6 +58,14 @@ pub const DEFAULT_ROWS: u16 = 24;
 /// form is what xterm and kitty use and what a fingerprinting program pattern-matches on; the
 /// version is the crate's, stamped in at build time so the reply never drifts from the binary.
 const VERSION: &str = concat!("cmote(", env!("CARGO_PKG_VERSION"), ")");
+
+/// cmote's unit id, reported to a program that sends DA3 (`CSI = c`, §36). DECRPTUI wants eight hex
+/// digits: a two-digit manufacturing site code then a six-digit terminal id. cmote has no
+/// DEC-assigned site, so the site is `00` and the id spells `CME` in ASCII (43 4D 45) — a stable,
+/// recognisable constant. It is deliberately NOT derived from the machine (no serial, MAC or
+/// install id): a per-machine unit id would be a free fingerprint for every host the user logs into
+/// (see `query::da3_reply`). Kept beside `VERSION` so both identity facts live in one place.
+const UNIT_ID: &str = "00434D45";
 
 /// How many scrolled-off lines to retain (§23). Deep enough to scroll back over a long build
 /// or a `cat` of a big file; the engine grows the buffer lazily up to this cap, so the memory
@@ -197,6 +206,9 @@ impl Terminal {
 				query::Query::Capabilities(names) => {
 					out.extend_from_slice(&query::gettcap_reply(&names));
 				}
+				// DA3: cmote's constant unit id — an answer that identifies the program, never
+				// the machine (§36).
+				query::Query::UnitId => out.extend_from_slice(&query::da3_reply(UNIT_ID)),
 			}
 		}
 		out
@@ -976,6 +988,23 @@ mod tests {
 		assert_eq!(
 			terminal.process(b"\x1bP$qr\x1b\\"),
 			b"\x1bP0$r\x1b\\".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_tertiary_attributes_query_is_answered_with_a_constant_unit_id() {
+		// DA3 `CSI = c` -> `DCS ! | 00434D45 ST` (§36). The engine answers DA1 and DA2 but drops
+		// the `=` form, so this reply comes from cmote's scanner — and the id is the same constant
+		// on every install, deliberately not a per-machine value a host could fingerprint.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b[=c"),
+			b"\x1bP!|00434D45\x1b\\".to_vec()
+		);
+		// A second query gets the identical answer — nothing about it drifts with state.
+		assert_eq!(
+			terminal.process(b"\x1b[=c"),
+			b"\x1bP!|00434D45\x1b\\".to_vec()
 		);
 	}
 

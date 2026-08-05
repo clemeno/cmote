@@ -3740,13 +3740,14 @@ impl Tab {
 		event: term::kitty::KeyEvent,
 	) -> iced::Task<Message> {
 		// modifyOtherKeys is read off the terminal, not the screen view: the engine does not track
-		// that mode, so cmote scans the stream for it (§9). DECCKM and the kitty flags, by contrast,
-		// the engine does track, so they come off the screen seam (§25).
+		// that mode, so cmote scans the stream for it (§9). DECCKM, DECKPAM and the kitty flags, by
+		// contrast, the engine does track, so they come off the screen seam (§25, §36).
 		let modes = self
 			.terminal
 			.as_ref()
 			.map(|terminal| term::keymap::Modes {
 				application_cursor: terminal.screen().application_cursor(),
+				application_keypad: terminal.screen().application_keypad(),
 				modify_other_keys: terminal.modify_other_keys(),
 				kitty: terminal.screen().kitty_flags(),
 			})

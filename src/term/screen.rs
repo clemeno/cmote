@@ -258,6 +258,15 @@ impl<'a> Screen<'a> {
 		self.engine.mode().contains(TermMode::APP_CURSOR)
 	}
 
+	/// Whether application-keypad mode (DECKPAM, `ESC =`) is on — the numpad's own keys should
+	/// send SS3 sequences instead of their characters (§36). Every ncurses program turns it on as
+	/// part of terminfo's `smkx`, together with DECCKM (`application_cursor`), which is why cmote
+	/// honours it only for the numpad keys that carry no NumLock ambiguity: see
+	/// `keymap::application_keypad_bytes` for exactly which, and why the digits are left alone.
+	pub fn application_keypad(&self) -> bool {
+		self.engine.mode().contains(TermMode::APP_KEYPAD)
+	}
+
 	/// Which kitty keyboard protocol flags the remote program currently has in effect (§25).
 	/// The engine parses the push/pop/set sequences and folds the active flag set into its mode
 	/// bits (it is told to by `config.kitty_keyboard`, set in `Terminal::new`); cmote reads them
@@ -530,6 +539,19 @@ mod tests {
 		assert!(terminal.screen().focus_reporting());
 		terminal.process(b"\x1b[?1004l");
 		assert!(!terminal.screen().focus_reporting());
+	}
+
+	#[test]
+	fn application_keypad_follows_deckpam() {
+		// Off until a program asks; `ESC =` (DECKPAM) turns it on and `ESC >` (DECKPNM) back off —
+		// the pair terminfo's `smkx`/`rmkx` send around a full-screen session (§36). The engine
+		// tracks the mode bit, so this is a plain read off the seam, like DECCKM.
+		let mut terminal = Terminal::new(1, 8);
+		assert!(!terminal.screen().application_keypad());
+		terminal.process(b"\x1b=");
+		assert!(terminal.screen().application_keypad());
+		terminal.process(b"\x1b>");
+		assert!(!terminal.screen().application_keypad());
 	}
 
 	#[test]

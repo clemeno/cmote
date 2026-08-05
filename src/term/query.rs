@@ -2,13 +2,15 @@
 //
 // `alacritty_terminal` answers the queries that touch the grid itself — DSR, DA, DECRQM,
 // cursor-position and text-area reports — and cmote drains those replies straight through
-// (`term::mod`). Three queries it does NOT answer: its VT parser treats every DCS string as a
-// no-op (its `hook`/`put`/`unhook` just log at debug level), and it has no CSI arm for the
-// version request, so all three fall on the floor:
+// (`term::mod`). Four queries it does NOT answer: its VT parser treats every DCS string as a
+// no-op (its `hook`/`put`/`unhook` just log at debug level), it has no CSI arm for the version
+// request, and its device-attributes handler covers only the primary and secondary forms (the
+// `=` intermediate falls to a debug log), so all four fall on the floor:
 //
 //   CSI > q            XTVERSION  — "what terminal are you, and which version?"
 //   DCS $ q <sel> ST   DECRQSS    — "what is setting <sel> right now?" (Request Status String)
 //   DCS + q <hex> ST   XTGETTCAP  — "what is your value for terminfo capability <hex>?"
+//   CSI = c            DA3        — "what is your unit id?" (DECRQTSR / tertiary attributes, §36)
 //
 // A program that sends one waits for a reply; unanswered, it stalls until a timeout, and some
 // paste the unanswered bytes as literal garbage. So cmote sniffs these out of the stream itself —
@@ -25,9 +27,9 @@ const ESC: u8 = 0x1b;
 /// The bell, an alternate string terminator some programs use in place of the canonical `ESC \`.
 const BEL: u8 = 0x07;
 
-/// The longest parameter run we buffer inside a `CSI >` sequence. XTVERSION carries none (or a lone
-/// `0`); a longer run is some other private query, and refusing to grow past this keeps a hostile
-/// stream from ballooning our memory (§12).
+/// The longest parameter run we buffer inside a `CSI >` or `CSI =` sequence. XTVERSION and DA3
+/// carry none (or a lone `0`); a longer run is some other private query, and refusing to grow past
+/// this keeps a hostile stream from ballooning our memory (§12).
 const MAX_PARAMS: usize = 16;
 
 /// The longest data string we buffer inside a recognised DCS. A DECRQSS selector is one or two
@@ -56,9 +58,9 @@ pub enum Decrqss {
 	Unsupported,
 }
 
-/// A completed query the scanner found in the stream (§33). Usually none arrive in a chunk; when
-/// one does, `term::mod` turns it into reply bytes — `Version` and `Capabilities` from static
-/// facts about cmote, `Decrqss(Sgr)` from the live pen.
+/// A completed query the scanner found in the stream (§33, §36). Usually none arrive in a chunk;
+/// when one does, `term::mod` turns it into reply bytes — `Version`, `Capabilities` and `UnitId`
+/// from static facts about cmote, `Decrqss(Sgr)` from the live pen.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Query {
 	/// XTVERSION (`CSI > q`): answer with cmote's name and version.
@@ -68,11 +70,13 @@ pub enum Query {
 	/// XTGETTCAP (`DCS + q <hex>[;<hex>…] ST`): the raw hex-encoded capability names, each to be
 	/// answered from the small map of facts cmote can state (`known_capability`).
 	Capabilities(Vec<Vec<u8>>),
+	/// DA3, tertiary device attributes (`CSI = c`): answer with cmote's unit id (§36).
+	UnitId,
 }
 
-/// Where the scanner sits in the byte stream. Only the two shapes cmote answers are tracked in
-/// detail — `CSI >` up to its final byte, and a recognised `DCS $ q` / `DCS + q` up to its
-/// terminator; every other sequence resets straight back to `Text`. An unrecognised DCS is
+/// Where the scanner sits in the byte stream. Only the shapes cmote answers are tracked in
+/// detail — `CSI >` and `CSI =` up to their final byte, and a recognised `DCS $ q` / `DCS + q` up
+/// to its terminator; every other sequence resets straight back to `Text`. An unrecognised DCS is
 /// followed to its terminator all the same (`DcsIgnore`), so its arbitrary data — the one place a
 /// stream legitimately carries raw bytes — cannot masquerade as a fresh query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,10 +86,13 @@ enum Scan {
 	Text,
 	/// Saw ESC; a CSI starts on `[`, a DCS on `P`.
 	Esc,
-	/// Saw `ESC [`; the sequence is one we care about only if the next byte is the `>` marker.
+	/// Saw `ESC [`; the sequence is one we care about only if the next byte is the `>` or `=`
+	/// private marker.
 	Csi,
 	/// Inside `ESC [ > …`, collecting parameter digits until the final byte.
 	CsiGt,
+	/// Inside `ESC [ = …`, collecting parameter digits until the final byte (DA3, §36).
+	CsiEq,
 	/// Saw `ESC P`; a DCS we answer starts on the `$` or `+` intermediate.
 	Dcs,
 	/// Saw `ESC P $`; a DECRQSS request if the next byte is the `q` final.
@@ -139,8 +146,12 @@ impl Queries {
 							self.params.clear();
 							Scan::CsiGt
 						}
+						b'=' => {
+							self.params.clear();
+							Scan::CsiEq
+						}
 						ESC => Scan::Esc,
-						// Any other CSI (an SGR colour, a cursor move, `ESC [ c` DA) — not ours.
+						// Any other CSI (an SGR colour, a cursor move, `ESC [ c` DA1) — not ours.
 						_ => Scan::Text,
 					};
 				}
@@ -155,13 +166,35 @@ impl Queries {
 					b'q' => {
 						// XTVERSION is `CSI > q`, or `CSI > 0 q`. A non-zero parameter marks some
 						// other private query (a DA2 variant), so only the empty/zero form answers.
-						if self.params.is_empty() || self.params.iter().all(|&b| b == b'0') {
+						if self.default_params() {
 							found.push(Query::Version);
 						}
 						self.state = Scan::Text;
 					}
 					ESC => self.state = Scan::Esc,
 					// `m` (XTMODKEYS), `u` (kitty keyboard), `c` (DA2): handled by modkeys/engine.
+					_ => self.state = Scan::Text,
+				},
+				Scan::CsiEq => match byte {
+					b'0'..=b'9' | b';' => {
+						self.params.push(byte);
+						// Same bound as `CSI >`: a longer run is not a query we answer (§12).
+						if self.params.len() > MAX_PARAMS {
+							self.state = Scan::Text;
+						}
+					}
+					b'c' => {
+						// DA3 is `CSI = c`, or `CSI = 0 c` — the tertiary device-attributes request
+						// (§36). The engine's `identify_terminal` handles the no-intermediate (DA1)
+						// and `>` (DA2) forms and drops this one, so it falls to cmote. As with DA1
+						// and DA2, only the empty/zero parameter form is the request.
+						if self.default_params() {
+							found.push(Query::UnitId);
+						}
+						self.state = Scan::Text;
+					}
+					ESC => self.state = Scan::Esc,
+					// Any other `CSI =` final byte is a private sequence cmote does not answer.
 					_ => self.state = Scan::Text,
 				},
 				Scan::Dcs => {
@@ -230,6 +263,14 @@ impl Queries {
 		found
 	}
 
+	/// Whether the parameter run collected so far is the *default* one — empty, or nothing but
+	/// zeros. Both private queries cmote answers (XTVERSION `CSI > q`, DA3 `CSI = c`) are defined
+	/// only in that form; a non-zero parameter on the same final byte is a different private
+	/// sequence, so the scanner stays silent rather than answer a question it was not asked.
+	fn default_params(&self) -> bool {
+		self.params.is_empty() || self.params.iter().all(|&byte| byte == b'0')
+	}
+
 	/// Turn a finished DCS's data string into a `Query`. DECRQSS reads only the SGR setting from
 	/// real state; XTGETTCAP hands its (possibly several) hex-encoded capability names on whole.
 	fn complete_dcs(&mut self, kind: DcsKind, found: &mut Vec<Query>) {
@@ -264,6 +305,22 @@ pub fn version_reply(id: &str) -> Vec<u8> {
 	let mut reply = Vec::with_capacity(id.len() + 6);
 	reply.extend_from_slice(b"\x1bP>|");
 	reply.extend_from_slice(id.as_bytes());
+	reply.extend_from_slice(b"\x1b\\");
+	reply
+}
+
+/// The DA3 reply, DECRPTUI: `DCS ! | <unit id> ST` (§36). `unit_id` is eight hex digits — a
+/// two-digit manufacturing site followed by a six-digit terminal id — and comes from `term::mod`,
+/// so this module carries no identity detail (the same split `version_reply` uses).
+///
+/// SECURITY: on real DEC hardware those digits were the unit's serial number, which is exactly why
+/// a *constant* is the right answer here: a per-machine value would hand every remote host a stable
+/// fingerprint of the client machine for free, on a query the user never sees. cmote reports the
+/// same eight digits from every install, so the reply identifies the *program*, not the person.
+pub fn da3_reply(unit_id: &str) -> Vec<u8> {
+	let mut reply = Vec::with_capacity(unit_id.len() + 6);
+	reply.extend_from_slice(b"\x1bP!|");
+	reply.extend_from_slice(unit_id.as_bytes());
 	reply.extend_from_slice(b"\x1b\\");
 	reply
 }
@@ -389,6 +446,26 @@ mod tests {
 	}
 
 	#[test]
+	fn a_tertiary_attributes_request_is_recognised() {
+		// DA3 `CSI = c`, and the `CSI = 0 c` spelling with an explicit zero parameter (§36).
+		assert_eq!(scan(b"\x1b[=c"), vec![Query::UnitId]);
+		assert_eq!(scan(b"\x1b[=0c"), vec![Query::UnitId]);
+	}
+
+	#[test]
+	fn the_other_device_attributes_forms_are_left_to_the_engine() {
+		// DA1 (`CSI c`) and DA2 (`CSI > c`) the engine answers itself, so the scanner must not
+		// also claim them — a doubled reply would confuse the program that asked. And a
+		// parametered `CSI = 1 c` is some other private sequence, not the unit-id request.
+		assert!(scan(b"\x1b[c").is_empty());
+		assert!(scan(b"\x1b[0c").is_empty());
+		assert!(scan(b"\x1b[>c").is_empty());
+		assert!(scan(b"\x1b[=1c").is_empty());
+		// A `CSI =` sequence ending in some other final byte is not DA3 either.
+		assert!(scan(b"\x1b[=m").is_empty());
+	}
+
+	#[test]
 	fn a_decrqss_sgr_request_is_recognised() {
 		// `DCS $ q m ST` asks for the current SGR — the one DECRQSS setting cmote reports.
 		assert_eq!(scan(b"\x1bP$qm\x1b\\"), vec![Query::Decrqss(Decrqss::Sgr)]);
@@ -463,6 +540,12 @@ mod tests {
 			version_reply("cmote(3.1.0)"),
 			b"\x1bP>|cmote(3.1.0)\x1b\\".to_vec()
 		);
+	}
+
+	#[test]
+	fn the_unit_id_reply_frames_the_digits() {
+		// DECRPTUI: `DCS ! | <unit id> ST` around the eight hex digits (§36).
+		assert_eq!(da3_reply("00434D45"), b"\x1bP!|00434D45\x1b\\".to_vec());
 	}
 
 	#[test]

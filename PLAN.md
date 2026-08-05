@@ -3249,3 +3249,71 @@ reveal-scroll, and "a found thing becomes an ordinary selection".
 - **Searching the alternate screen's own scrollback.** There is none to search: a full-screen program
   (vim, less, tmux) manages its own pages and the engine keeps no history for it (§23), so the bar
   finds only what is on that screen. Its own search is the one to use there.
+
+---
+
+## 36. The last input and query gaps — DA3, and DECKPAM where it is safe (v3.x)
+
+With the engine swap (§23), `modifyOtherKeys`, kitty keyboard (§25), OSC 8 (§24), OSC 133 (§34) and
+scrollback search (§35) all done, the terminal-compatibility audit had four items left outside the
+engine's own ceiling: DA3, the answerback string, blink, and DECKPAM. This section closes all four —
+two by writing them, two by *deciding* them, with the evidence for the decision. Closing an item by
+refusing it is only honest if the refusal is written down beside the ones that shipped.
+
+### DA3, the tertiary device attributes (`CSI = c`)
+
+The engine's `identify_terminal` answers DA1 (no intermediate) and DA2 (`>`), and drops the `=`
+intermediate to a debug log — so, exactly like the three queries of §33, DA3 falls to cmote's own
+stream scanner (`term/query.rs`). The scanner gained a `CSI =` state beside its `CSI >` one, and the
+reply is DECRPTUI: `DCS ! | <eight hex digits> ST`.
+
+- **The parameter rule is shared.** Both private queries cmote answers are only *themselves* in their
+  default form (`CSI > q` / `CSI > 0 q`, `CSI = c` / `CSI = 0 c`); a non-zero parameter on the same
+  final byte is a different private sequence. That test now lives in one place (`default_params`), so
+  the two arms cannot drift apart.
+- **SECURITY — the unit id is a constant, on purpose.** On DEC hardware those eight digits were the
+  terminal's *serial number*. Reporting anything derived from the machine (a serial, a MAC, an install
+  id) would hand every host the user logs into a stable fingerprint of their computer, off a query
+  they never see. cmote answers `00434D45` from every install — site `00` (it has no DEC-assigned
+  site) and `434D45`, which is `CME` in ASCII. The reply identifies the *program*, never the person,
+  and the reasoning sits in the doc comment so nobody later "improves" it into a real id.
+
+### DECKPAM, for the keys that cannot lose a meaning (`ESC =`)
+
+Application-keypad mode asks for the numpad's own keys as SS3 sequences (`ESC O <final>`) instead of
+the characters they print, so a program can tell keypad Enter from main Enter. The engine tracks the
+mode bit, so this needed no scanner — only a seam getter (`Screen::application_keypad`) and a branch
+in the encoder, reading the mode out of the grouped `keymap::Modes` beside DECCKM.
+
+- **Only the unambiguous keys are diverted:** Enter `M`, `*` `j`, `+` `k`, `,` `l`, `-` `m`, `/` `o`,
+  `=` `X`. These keys never navigate, so honouring the mode on them takes nothing away.
+- **The digits and the decimal point are deliberately left out, and that is the whole design.** They
+  are the keys whose meaning flips with NumLock, and terminfo's `smkx` sets DECKPAM — so *every*
+  ncurses program has the mode on for its entire run. Diverting the digits to `ESC O p`…`y` would stop
+  a NumLock-on numpad from typing numbers inside vim, less and `pm2 ls`: precisely the regression the
+  NumLock digit fix (§9) exists to prevent. xterm makes the same call by default — its `numLock`
+  resource lets NumLock override application keypad mode — so this is parity, not a shortcut.
+- **The branch sits after the kitty hand-off and is guarded on the unmodified form.** Kitty has its
+  own, complete keypad story (§25), and a Ctrl/Alt/Logo combo on a numpad key keeps whatever the
+  ordinary paths make of it, so nothing a program bound for itself is swallowed by the mode.
+- **The navigation role needed nothing.** With NumLock off a numpad key already encodes as its
+  navigation key following DECCKM — and since `smkx` sets DECCKM *and* DECKPAM together, the bytes a
+  program expects (`ESC O B` for down, …) are the ones DECCKM alone already produces.
+
+### What is deliberately NOT here
+
+- **The answerback string (ENQ, `0x05`).** A legacy host sends ENQ and the terminal types a fixed
+  string back into the shell's input. cmote refuses it, for the reason its default is empty in xterm
+  too: the trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05` —
+  `cat` of a binary, a corrupt download, a stray progress stream — would inject characters into the
+  shell as if typed. That is a remote-driven side effect on the user's input, the same family as the
+  OSC 52 clipboard writes and the bell cmote already drops (§12, §23). Legacy identification is worth
+  far less than that. Recorded as policy, not as a gap.
+- **Blink (SGR 5 / 6).** The compatibility audit used to call this a cmote *choice* — "the engine
+  stores the bit, cmote draws steady". That was wrong, and checking it was part of this step: vte
+  parses SGR 5/6 into `Attr::BlinkSlow` / `BlinkFast`, but `alacritty_terminal` 0.26's
+  `terminal_attribute` has **no arm for them** and its cell `Flags` carry **no blink bit at all** — so
+  the attribute is dropped before cmote could see it. It is an engine limit, and the audit now says
+  so. Honouring it would take a scanner beside the engine (as `modkeys` is) tracking SGR 5/6 per cell
+  *and* a repaint timer cmote deliberately runs for nothing — the same call made for the cursor.
+- **DA3 as anything but a constant, and any other `CSI =` sequence.** See the security note above.

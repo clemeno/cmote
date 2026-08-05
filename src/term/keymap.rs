@@ -25,16 +25,19 @@ const ESC: u8 = 0x1b;
 const PASTE_START: &[u8] = b"\x1b[200~";
 const PASTE_END: &[u8] = b"\x1b[201~";
 
-/// The three remote input modes the encoder reads off the terminal, grouped so a key press does
-/// not have to thread them one by one (§9, §25). `app` fills this in from the emulator before every
-/// keystroke: DECCKM off the screen view, the modifyOtherKeys level off the terminal (the engine
-/// does not track it, so cmote scans the stream), and the kitty flag set off the screen view again
-/// (the engine does track that). `Default` — DECCKM off, modifyOtherKeys off, no kitty flags — is
-/// the plain xterm behaviour, and is what the tests run under.
+/// The remote input modes the encoder reads off the terminal, grouped so a key press does not have
+/// to thread them one by one (§9, §25, §36). `app` fills this in from the emulator before every
+/// keystroke: DECCKM and DECKPAM off the screen view, the modifyOtherKeys level off the terminal
+/// (the engine does not track it, so cmote scans the stream), and the kitty flag set off the screen
+/// view again (the engine does track that). `Default` — every mode off — is the plain xterm
+/// behaviour, and is what the tests run under.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Modes {
 	/// DECCKM: full-screen apps (vim, less, nano) turn it on and then expect the SS3 arrow form.
 	pub application_cursor: bool,
+	/// DECKPAM: the same apps turn this on too (terminfo `smkx` sends both), asking for the
+	/// numpad's own keys as SS3 sequences (§36).
+	pub application_keypad: bool,
 	/// The remote's `modifyOtherKeys` level, for the `CSI 27 ; mod ; code ~` reports (§9).
 	pub modify_other_keys: ModifyOtherKeys,
 	/// The active kitty keyboard protocol flags, which supersede the legacy encoding (§25).
@@ -102,6 +105,22 @@ pub fn encode(
 	// a repeat falls through the press path unchanged.
 	if event == KeyEvent::Release {
 		return None;
+	}
+
+	// DECKPAM application-keypad mode (§36): a program that sent `ESC =` expects the numpad's own
+	// keys as SS3 sequences (`ESC O <final>`) rather than the characters they print, so it can tell
+	// numpad Enter from main Enter and numpad `+` from a typed `+`. Only the unambiguous keys are
+	// diverted — the digits and the decimal keep the NumLock behaviour decided above, which is
+	// xterm's own `numLock: true` default (see `application_keypad_bytes`). Placed after the kitty
+	// hand-off, which has its own, complete keypad story, and guarded on the plain (unmodified) form:
+	// a Ctrl/Alt/Logo combo on a numpad key keeps whatever the ordinary paths make of it.
+	if modes.application_keypad
+		&& !modifiers.control()
+		&& !modifiers.alt()
+		&& !modifiers.logo()
+		&& let Some(bytes) = application_keypad_bytes(physical)
+	{
+		return Some(bytes);
 	}
 
 	// modifyOtherKeys first, so at level 2 it claims Ctrl+C before the C0 path turns it into
@@ -233,6 +252,33 @@ fn is_numpad_number(physical: Physical) -> bool {
 				| Code::NumpadDecimal
 		)
 	)
+}
+
+/// The SS3 sequence DECKPAM asks for on one numpad key (`ESC O <final>`), or `None` for a key cmote
+/// deliberately leaves on its ordinary path (§36). The finals are the VT100 keypad's, unchanged
+/// since: Enter `M`, `*` `j`, `+` `k`, `,` `l`, `-` `m`, `/` `o`, `=` `X`.
+///
+/// Only these keys are here, and that is the whole point of the feature's scope. The numpad DIGITS
+/// and the decimal point are the keys whose meaning flips with NumLock (`is_numpad_number`), and
+/// diverting them to their app-keypad forms (`ESC O p`…`y`, `ESC O n`) would break typing a digit
+/// inside every ncurses program — because terminfo's `smkx` sets DECKPAM, so vim, less and `pm2 ls`
+/// all have it on for their whole run. That is the same regression the NumLock digit fix in `encode`
+/// exists to prevent, and xterm makes the same call by default (its `numLock` resource lets NumLock
+/// override application keypad mode). The keys listed here have no second meaning to lose: they
+/// never navigate, so honouring DECKPAM on them costs nothing and gains the programs that
+/// distinguish keypad Enter.
+fn application_keypad_bytes(physical: Physical) -> Option<Vec<u8>> {
+	let final_byte = match physical {
+		Physical::Code(Code::NumpadEnter) => b'M',
+		Physical::Code(Code::NumpadMultiply) => b'j',
+		Physical::Code(Code::NumpadAdd) => b'k',
+		Physical::Code(Code::NumpadComma) => b'l',
+		Physical::Code(Code::NumpadSubtract) => b'm',
+		Physical::Code(Code::NumpadDivide) => b'o',
+		Physical::Code(Code::NumpadEqual) => b'X',
+		_ => return None,
+	};
+	Some(vec![ESC, b'O', final_byte])
 }
 
 /// The bytes for a named (non-character) key. Returns `None` for named keys we
@@ -457,6 +503,7 @@ mod tests {
 	) -> Option<Vec<u8>> {
 		let modes = Modes {
 			application_cursor,
+			application_keypad: false,
 			modify_other_keys,
 			kitty: KittyFlags::default(),
 		};
@@ -962,6 +1009,97 @@ mod tests {
 		);
 	}
 
+	// A press with DECKPAM on and nothing else set — the mode a full-screen program leaves the
+	// terminal in for its whole run (§36).
+	fn keypad_encode(key: &Key, physical: Physical, text: Option<&str>) -> Option<Vec<u8>> {
+		let modes = Modes {
+			application_keypad: true,
+			..Modes::default()
+		};
+		super::encode(key, physical, text, none(), modes, KeyEvent::Press)
+	}
+
+	#[test]
+	fn numpad_enter_sends_its_ss3_form_in_application_keypad_mode() {
+		// With DECKPAM on, keypad Enter is `ESC O M` — which is how a program tells it apart from
+		// the main Enter's carriage return.
+		let key = Key::Named(Named::Enter);
+		assert_eq!(
+			keypad_encode(&key, phys(Code::NumpadEnter), Some("\r")),
+			Some(b"\x1bOM".to_vec())
+		);
+	}
+
+	#[test]
+	fn the_numpad_operators_send_their_ss3_forms_in_application_keypad_mode() {
+		// The VT100 keypad finals: `*` j, `+` k, `-` m, `/` o, `=` X. None of these keys navigates,
+		// so honouring DECKPAM on them takes nothing away.
+		let cases: [(Code, &str, &[u8]); 5] = [
+			(Code::NumpadMultiply, "*", b"\x1bOj"),
+			(Code::NumpadAdd, "+", b"\x1bOk"),
+			(Code::NumpadSubtract, "-", b"\x1bOm"),
+			(Code::NumpadDivide, "/", b"\x1bOo"),
+			(Code::NumpadEqual, "=", b"\x1bOX"),
+		];
+		for (code, text, expected) in cases {
+			let key = Key::Character(text.into());
+			assert_eq!(
+				keypad_encode(&key, phys(code), Some(text)),
+				Some(expected.to_vec()),
+				"unexpected bytes for {code:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn a_numlock_digit_still_types_its_digit_in_application_keypad_mode() {
+		// The `pm2 ls` guard, under DECKPAM: every ncurses program sets the mode, so diverting the
+		// digits to `ESC O p`…`y` would stop a NumLock-on numpad from typing numbers inside vim or
+		// less. The digit wins — xterm's own `numLock` default — and so does the decimal point.
+		let key = Key::Named(Named::ArrowDown);
+		assert_eq!(
+			keypad_encode(&key, phys(Code::Numpad2), Some("2")),
+			Some(b"2".to_vec())
+		);
+		let key = Key::Named(Named::Delete);
+		assert_eq!(
+			keypad_encode(&key, phys(Code::NumpadDecimal), Some(".")),
+			Some(b".".to_vec())
+		);
+	}
+
+	#[test]
+	fn the_operators_keep_their_characters_when_application_keypad_is_off() {
+		// Without DECKPAM (the default, and every ordinary shell), a numpad `+` is just a `+`.
+		let key = Key::Character("+".into());
+		assert_eq!(
+			encode(&key, phys(Code::NumpadAdd), Some("+"), none(), false, off()),
+			Some(b"+".to_vec())
+		);
+	}
+
+	#[test]
+	fn a_modified_numpad_key_is_not_diverted_by_application_keypad_mode() {
+		// Ctrl+numpad-`-` stays on the ordinary paths (here the C0 control byte for Ctrl+`-`'s
+		// character), so a combo a program bound for itself is not swallowed by the mode.
+		let key = Key::Character("_".into());
+		let modes = Modes {
+			application_keypad: true,
+			..Modes::default()
+		};
+		assert_eq!(
+			super::encode(
+				&key,
+				phys(Code::NumpadSubtract),
+				Some("_"),
+				Modifiers::CTRL,
+				modes,
+				KeyEvent::Press,
+			),
+			Some(vec![0x1f])
+		);
+	}
+
 	#[test]
 	fn paste_without_bracketing_is_raw() {
 		assert_eq!(encode_paste("ls -la\n", false), b"ls -la\n".to_vec());
@@ -1013,6 +1151,7 @@ mod tests {
 		let key = Key::Character("c".into());
 		let modes = Modes {
 			application_cursor: false,
+			application_keypad: false,
 			modify_other_keys: ModifyOtherKeys::Level2,
 			kitty: kitty_on(),
 		};
