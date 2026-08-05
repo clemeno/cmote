@@ -128,7 +128,7 @@ Each decision below is a thing to learn from, not just a dependency.
 
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
-| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime. **`features = ["advanced"]`** since v2.3 — it unlocks the `Widget` trait, which the terminal grid is one of (§9) |
+| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime. **`features = ["advanced"]`** since v2.3 — it unlocks the `Widget` trait, which the terminal grid is one of (§9) — **plus `"image-without-codecs"`** since v3.x, which turns on the renderer's raster pipeline so that same widget can composite inline sixel images (§41). The `-without-codecs` spelling adds the `image` crate with *no* format decoders: cmote decodes sixel itself, so a PNG/JPEG parser would be attack surface for a format we never hand the renderer |
 | `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM; `ring` builds on both targets — prebuilt asm on Windows, via Xcode CLT `clang` on macOS) |
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `russh-sftp` | 2.3.0 | the sftp subsystem, for file upload (§17) | rides russh's `ChannelStream` — a protocol on the existing SSH stack, not a second one. Pure Rust, no C |
@@ -252,14 +252,16 @@ cmote/
     │   ├── upload.rs      file + recursive-folder upload over an sftp channel: batch pre-scan, stream, progress, per-file collisions (§17)
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
-    │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries (§9, §16, §23)
+    │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries, reserve the cells an inline image covers (§9, §16, §23, §41)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
+    │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
+    │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
     │   ├── kitty.rs       encode a key event in the kitty keyboard protocol's CSI u form (§25)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
     │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
-    │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
+    │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, and the viewport↔document line mapping (§9, §16, §23, §24, §25, §40)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
@@ -2118,14 +2120,18 @@ Alternatives weighed (grounded, not from memory):
 - **`wezterm-term`** is strictly richer — it adds text-**blink** and inline **images**
   (sixel / kitty / iTerm2) — **but it is not published to crates.io** (git dependency or a
   pre-1.0 single-maintainer fork only), which fails the reliable-and-publishable bar for a
-  portable app; and its image capability is unusable here without an image compositor we do
+  portable app; and its image capability was unusable here without an image compositor we did
   not have. Revisit only if images become a hard requirement *and* it gets published
-  (wezterm#6663, open, no ETA).
+  (wezterm#6663, open, no ETA). **§41 settled that question the other way**: sixel arrives as a
+  DCS this engine cleanly ignores, so cmote scans it out beside the engine and composites it
+  itself — the engine choice never had to be revisited at all.
 - **`termwiz`** alone is a parser + screen buffer, **not** a full emulator — using it would
   mean re-implementing the very state machine the swap exists to drop.
 
 **Trade accepted:** no inline images and no text-blink attribute — both marginal or unusable
-for us today. The major version bump to **v3.0** marks this core change.
+for us today. The major version bump to **v3.0** marks this core change. *(The images half of
+that trade was bought back in §41, without touching the engine; blink stands, because the engine
+drops the attribute before it can reach a cell — see the compatibility plan's §5.)*
 
 ### How — staged behind one seam, green at every commit
 
@@ -3631,3 +3637,157 @@ because a `Highlight` was *already* a projection.
 - **Nothing reads the document below `history_size + screen_lines`.** There is no persistence: what the
   engine has evicted at the scrollback cap (§23) is gone, and a selection reaching that far simply
   contributes nothing for those lines rather than pasting blanks in their place.
+
+---
+
+## 41. Inline images — sixel pictures in the scrollback (v3.x)
+
+The compatibility plan (§5, §7) had one item left with real UX value: **graphics**. A program that
+wants to show a picture in a terminal — `img2sixel`, `chafa -f sixel`, gnuplot's sixel terminal, timg,
+matplotlib's sixel backend, `lsix` — writes it into the byte stream as a sixel DCS. `alacritty_terminal`
+carries none of that, and the entry read as "needs an engine fork *and* a compositor in the renderer",
+which is why it sat at the bottom of the list for so long.
+
+Half of that was wrong, and the reason is worth writing down: **the engine's DCS hooks are no-op debug
+logs**. A sixel payload is already followed to its terminator and dropped, so it cannot corrupt the
+grid and there is nothing to fork. What was actually needed was the tactic cmote has used four times —
+*scan the sequence the engine ignores out of the same bytes* (the cwd §17, modifyOtherKeys §9, the
+identity queries §33, the OSC 133 marks §34) — plus the coordinate §40 had just finished building.
+
+So: **cmote decodes sixel itself and composites it over its own grid.** Both halves of a picture's
+position — where it is anchored, and which cells it owns — are things the tree already had.
+
+### The decoder, in-house (`term/sixel.rs`)
+
+Sixel is a self-describing palette format in printable ASCII: one character carries six vertical
+pixels, `#Pc;Pu;Px;Py;Pz` defines a colour register, `!Pn` repeats, `$` returns to the left edge of the
+band and `-` drops to the next. That is why **sixel is the format that needed no new dependency** — it
+is the one inline-image protocol whose payload is not a PNG or a JPEG. Decoding it in-house is the same
+call the `.ppk` parser is (§7): a small, fully specified format is cheaper to own than to depend on.
+
+- **Two passes over the payload, one grammar.** `walk` is the only place the command syntax is written
+  down; `canvas_size` measures through it and `paint` draws through it, so a measurement and a painting
+  of the same bytes cannot disagree. Measuring first means the canvas is allocated **once**, at a size
+  already checked against the caps — the alternative (growing a row-major RGBA buffer sideways as the
+  picture reveals its width) would restride every row on every growth *and* size an allocation from a
+  number the remote chose before checking it.
+- **The raster attributes are the sender's crop.** With `"Pan;Pad;Ph;Pv` present the canvas is `Ph×Pv`,
+  so a picture whose last band is two pixels tall reports 62 rather than the 66 its bands span. Without
+  them the extent of the pixels actually *painted* is used, measured from set bits only, so the trailing
+  blank columns emitters pad a band with do not widen the image.
+- **A colour introducer selects the register it defines.** Not obvious from the format's description —
+  the two `#` forms read like separate commands — but every emitter relies on it: `#0;2;100;0;0~`
+  defines red and expects the very next sixel to *be* red. Missing it painted whole pictures in one
+  colour, and a test caught exactly that.
+- **DEC's HLS measures hue from blue.** 0° blue, 120° red, 240° green, where every modern HSL formula
+  starts at red — so the angle is rotated by 240° onto the standard wheel. HLS payloads are rare, but a
+  picture drawn in the wrong primaries is unmistakable.
+- **An unset pixel is transparent, not black.** Sixel's `P2` nominally chooses between the two; cmote
+  draws over its own grid, so "the terminal's background shows through" *is* what background means here,
+  and it is the honest answer for the emitters that ask for transparency — which is most of them.
+
+### The picture is anchored in the document, and reserves real cells (`term/graphics.rs`, `term/mod.rs`)
+
+A placement is an **absolute document line** plus a column — the coordinate §40 made a first-class
+citizen. That single choice is what makes an image behave: scroll away and back and it is still on its
+own text, because nothing ever has to move it. It is the same coordinate the prompt ticks (§34) and the
+search hits (§35) live in.
+
+The cells underneath are then genuinely reserved, by feeding the engine sequences **as if the remote had
+sent them** — `CSI <cols> X` (ECH) to erase exactly the box the picture covers, then LF per row, then
+CR:
+
+- The engine knows nothing about images, so unless the cells are claimed the shell's next line of output
+  is written straight over the picture. With them claimed, the grid under an image is ordinary blank
+  cells: it scrolls, it evicts at the scrollback cap and it reflows exactly as text does.
+- Reserving through VT sequences rather than reaching into the grid means the reservation obeys the
+  scroll region, the autowrap mode and the character set precisely as the program's own output would —
+  and the cursor ends up at the left margin *below* the picture, which is why a prompt lands under an
+  image the way it does in a terminal with native sixel.
+- Both counts round **up**, so the reserved box is never smaller than the pixels; the renderer then
+  clips the picture to that box, so an under-reservation could only ever crop an image, never let it
+  creep onto the row below.
+
+`process` now has two scanners that fire mid-chunk, so their events are merged into one **offset-ordered**
+list (`splits`) — the engine can only be advanced forwards, and applying all the marks and then all the
+images would place the second kind at the wrong point in the stream. The two kinds want that offset on
+opposite sides of their own bytes, which is the subtlety in this section: a **picture** is applied *past*
+its DCS (it goes where the cursor is, which is only right once everything before it has been drawn),
+while an **erase** is applied *before* its sequence (which pictures it takes depends on where the screen
+ends and the scrollback begins, and `CSI 3 J` drops the engine's whole history — asking afterwards is
+asking a terminal that no longer remembers).
+
+### The renderer paints it, and only where it belongs (`ui/grid.rs`)
+
+`image_bounds` is the reverse of the run planner's projection: a document line back onto a row, against
+the frame's `top_line`. The row offset is **signed**, so a picture anchored above the viewport is drawn
+with its top off screen and a tall image scrolls smoothly through the view instead of popping into
+existence once its first line arrives. Each picture is drawn at its **native pixel size** (no scaling,
+so no resampling blur), snapped to the pixel grid, clipped to the intersection of its reserved box and
+the visible grid, and composited after the text so the row it sits on cannot hide it.
+
+The store holds an **iced image handle** rather than raw pixels — the one place `term/` looks up at the
+GUI, and a deliberate trade: the renderer caches its GPU texture against the handle's identity, and the
+widget is rebuilt every frame and can cache nothing itself, so minting the handle once at decode time is
+the difference between one upload per picture and one upload per picture *per frame*.
+
+### Programs have to be told, or none of it is used
+
+Two answers, both new, and without them the feature would work and never be reached:
+
+- **DA1 now advertises sixel.** The engine answers `CSI ? 6 c` itself, and attribute **4** is how a
+  terminal says it draws pictures — what chafa's auto mode, `lsix` and ranger's previewer read at
+  startup. So cmote *amends the engine's own reply* on its way out (`query::with_sixel_attribute`):
+  sending a second DA1 would leave the program parsing one of them as input, and suppressing the
+  engine's would mean cutting bytes out of an inbound stream mid-sequence.
+- **XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) is answered** from the limits the decoder actually enforces — 256
+  colour registers, and the largest image it will accept. A *set* is honestly refused (status 3) with the
+  value cmote will in fact keep to, and ReGIS (item 3) is answered "unknown item" rather than given a
+  geometry it could never honour.
+
+### Bounded, because every number comes off the wire
+
+Decoded pixels are the only unbounded memory a remote can hand cmote, so (§12): parameters saturate
+instead of wrapping; a payload past 16 MiB is abandoned while the DCS is still followed to its
+terminator; an image past 4096×4096 or 4 Mpx is **refused whole** rather than clipped, because a clip
+would show the user a silently truncated picture; painting is bounds-checked per pixel, so a raster
+attribute that disagrees with the payload can only lose pixels; and the store evicts oldest-first past
+64 pictures or 64 MiB. A picture cmote will not decode reserves no cells either, so a refusal leaves the
+screen exactly as it was.
+
+### Lifecycle — a picture goes when its text goes
+
+- **`CSI 2 J`** takes the pictures on the visible screen; **`CSI 3 J`** takes the ones in the scrollback.
+  A shell's `clear` sends both and leaves nothing, while a `2J` at a prompt leaves the plots further up
+  the history alone — the same split the erase makes in the text.
+- **RIS (`ESC c`)** takes everything: the session starts over.
+- **A resize** takes everything, because a reflow moves the document out from under every anchor — the
+  trade §34's prompt marks already make.
+- **The alternate screen** is sat out entirely: nothing is placed while it is up and nothing is drawn
+  over it. It keeps no history, so `history_size` is 0 and every line index there means something else.
+
+### What is deliberately NOT here
+
+- **No kitty graphics protocol and no iTerm2 inline images (OSC 1337).** Both carry PNG/JPEG payloads,
+  so both need an image-format decoder — a parser fed bytes straight off the wire, which is a security
+  decision and a dependency decision, not a rendering one. Sixel is the format that needed neither, and
+  it is what the sixel-capable tools already speak. The placement, reservation, compositing, eviction
+  and capability-advertising machinery here is protocol-agnostic: adding kitty later is a decoder plus a
+  scanner arm, not a rethink.
+- **No images on the alternate screen.** This is the real gap, and the one that costs: `ranger` previews
+  and `mpv --vo=sixel` draw there. Fixing it means placements anchored to the alternate page rather than
+  to a document line, and a second store discarded on the swap back — a second coordinate space, which
+  §40 spent its whole length collapsing to one. Deferred deliberately.
+- **A picture is not reflowed, it is dropped.** `ponytail:` a terminal with native graphics re-lays its
+  images on resize; cmote drops them rather than leave one floating over whatever text landed on its old
+  line.
+- **The pixel aspect ratio (`P1` and `Pan`/`Pad`) is ignored** — square pixels, as every modern terminal
+  draws. DECSDM (`?80`, sixel scrolling mode) is likewise not honoured: cmote always scrolls, which is
+  the modern default and what emitters assume.
+- **A selection over a picture copies nothing.** The reserved cells are blank, so an image region yields
+  blank text — truthful (there *is* no text there), but it means a copy cannot capture a picture. Saving
+  an image out of the scrollback would be its own feature.
+- **Nothing is drawn beyond the retained scrollback**, and past the `SCROLLBACK` cap the absolute anchors
+  drift for the same reason §34's marks do: once the history stops growing, `history_size + row` no
+  longer names a fixed line. It takes 10 000 lines of output to reach, and it is a property of the
+  coordinate, not of the images.

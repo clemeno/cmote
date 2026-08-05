@@ -12,15 +12,25 @@ every gap as a `[bolt-on]` / `[engine]` split, because that crate was a delibera
 subset that could neither parse nor represent most of the spec. **That ceiling is gone.** What
 remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
-**State as of §36.** Every *engine-independent* item this document ever listed is now either shipped
+**State as of §41.** Every *engine-independent* item this document ever listed is now either shipped
 or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
-(§4) are closed, and what is open lives in **§5, the engine's own ceiling** — of which only graphics
-carries real UX value. §6 holds what cmote refuses on purpose. §36 also *corrected* this document:
-blink was listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39
-touched this surface without moving a row** — the find bar's match washes are a local highlight, not a
-sequence answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space*
-the selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
+(§4) are closed. §6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
+listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39 touched this
+surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
+answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
+selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
 refactor of reads the engine already served; see the note in §4 and the `term/screen.rs` evidence.
+
+**§41 is the first change in a long while that DOES move rows — and it corrects this document's biggest
+standing claim.** §5 and §7 said the last item of real UX value, graphics, needed *both* an engine fork
+and a renderer compositor. The compositor half was true. The fork half was not: the engine's DCS hooks
+are no-op debug logs, so a sixel payload is already followed to its terminator and dropped, and the
+sequence can be scanned out of the same byte stream that reaches the engine — the tactic §17, §9, §33 and
+§34 all use. So **cmote now draws sixel images** (`term/sixel.rs`, `term/graphics.rs`, PLAN §41), answers
+**XTSMGRAPHICS**, and amends the engine's own **DA1** reply to advertise attribute 4. The rows that moved
+are listed in §5 and §8; kitty graphics, iTerm2 OSC 1337 and ReGIS stay ❌, and the reason has changed
+from "the engine cannot" to "their payloads are PNG/JPEG, which is a decoder dependency and an attack
+surface" (§5).
 
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
@@ -78,7 +88,10 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   full colour depth — 16 / 256 / 24-bit truecolor, fg and bg. Draws **braille** (U+2800–28FF)
   and **rounded box corners** (U+256D–2570) from geometry, since no bundled monospace font
   carries them. Cursor is drawn in the **shape a program picks with DECSCUSR** (block /
-  underline / bar / hollow), steady — cmote runs no animation timer, so blink is dropped.
+  underline / bar / hollow), steady — cmote runs no animation timer, so blink is dropped. Since §41 it
+  also **composites inline sixel images** over the cells they reserve — decoded in-house, anchored to a
+  document line so a picture rides the scrollback, and advertised to programs through DA1's attribute 4
+  and XTSMGRAPHICS.
 - **Keeps 10 000 lines of scrollback** with a thin, read-only scroll indicator (§23 Stage 8):
   the wheel and Shift+PageUp/PageDown/Home/End scroll the history, and typing snaps back to the
   live bottom. The alternate screen keeps no history, so scrolling is inert there by design. That
@@ -149,9 +162,9 @@ DECKPAM, so the `ESC O B`-style bytes a program expects are what DECCKM alone al
 ## 3. Query → reply — closed (`[reply]`)
 
 The whole query class is closed. DA1 / DA2 / DSR / DECRQM are answered by the engine; the colour
-and pixel-size queries by cmote's listener; and **since §33** (DA3 added in §36) the four identity
-queries the engine drops are answered by cmote's own stream scanner (`term::query`), the same
-out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
+and pixel-size queries by cmote's listener; and **since §33** (DA3 added in §36, XTSMGRAPHICS in §41)
+the identity queries the engine drops are answered by cmote's own stream scanner (`term::query`), the
+same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
 
 - **XTVERSION** (`CSI > q`) → `DCS > | cmote(<ver>) ST` — full, a truthful name and build version.
 - **XTGETTCAP** (`DCS + q <hex> ST`) → states only the two caps cmote can give truthfully —
@@ -168,6 +181,18 @@ out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   every host a stable fingerprint of the user's computer off a query they never see. The reply
   identifies the program, not the person. The "is this the default parameter form?" test is now shared
   with XTVERSION (`default_params`), so the two arms cannot drift.
+
+- **XTSMGRAPHICS** (`CSI ? Pi ; Pa ; Pv S`) → cmote's graphics limits (§41). The engine's only `S` is
+  SU with no intermediate, so the `?` form falls to the scanner. Answered from what the sixel decoder
+  actually enforces — 256 colour registers, 4096×4096 and 4 Mpx — so a program sizing a picture is told
+  a promise cmote keeps; a *set* (action 3) is honestly refused with the value cmote will keep to, and
+  ReGIS (item 3) is answered "unknown item" rather than given a geometry it could never honour.
+
+There is also one reply cmote does not *originate* but **amends**: the engine writes DA1 as `CSI ? 6 c`,
+and attribute **4** is how a terminal says it draws sixels — which is what chafa's auto mode, `lsix` and
+ranger's previewer read at startup. Since §41 cmote rewrites that reply on its way out
+(`query::with_sixel_attribute`) rather than sending a second DA1 (the program would parse one of them as
+input) or suppressing the engine's (that would mean cutting bytes out of an inbound stream mid-sequence).
 
 The one remaining reply-class sequence, **answerback (ENQ `0x05`)**, is refused as policy rather than
 carried as a gap — see §6.
@@ -215,17 +240,44 @@ It is recorded here because the mapping now lives on this document's surface (`t
 the one place a viewport row and a document line meet — the same coordinate the OSC 133 marks (§34) and
 the search matches (§35, §39) are already stored in.
 
+**§41 adds a THIRD layer to the grid, and this one does answer a sequence.** Inline sixel images
+(`term/sixel.rs`, `term/graphics.rs`, `ui/grid.rs`) are the first drawing cmote does on a remote
+program's instruction that the engine has no representation for at all — so unlike §39 and §40, rows
+move: the sixel DCS, XTSMGRAPHICS, DECSDM and DA1's attribute 4 (§3, §5, §8). Three things make it fit
+the layer rather than sit beside it:
+
+- **The picture's cells are real cells.** `term::mod` reserves them by feeding the engine ECH + LF, so
+  the grid under an image is ordinary blank scrollback: it scrolls, evicts and reflows as text does, and
+  a program that writes over the image's rows erases them the way it erases anything.
+- **It is drawn where its own text is**, from an absolute document line (§40) resolved back onto a row
+  per frame — the reverse of §39's projection, in the same coordinate.
+- **It is not drawn on the alternate screen**, which keeps no history and so has no such line. That is
+  the one real gap left (`ranger`, `mpv --vo=sixel`), and it is written down in PLAN §41 rather than
+  papered over.
+
 ---
 
 ## 5. The new engine's own ceiling (`[engine-limit]`)
 
 `alacritty_terminal` 0.26 does not parse or represent these, so they would need an engine
 fork/upgrade or a scanner bolted on beside it. This is the whole of the remaining hard ceiling —
-short, and only images are high value:
+short, and since §41 nothing left in it is high value:
 
-- **Sixel / ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — the crate carries **no
-  graphics support at all**, so this needs both engine work *and* a compositor in the renderer.
-  `[DEC]` / `[vendor]`. The one genuinely high-value item here.
+- **~~Sixel~~ — SHIPPED in §41, with no engine work at all.** This entry used to say graphics needed
+  "both engine work *and* a compositor in the renderer". The compositor was real; the engine work was
+  not. The crate's `hook`/`put`/`unhook` are no-op debug logs, so a sixel DCS is followed to its
+  terminator and dropped — it cannot reach the grid, and it can be scanned out of the same stream beside
+  the engine (`term/graphics.rs`) exactly as the cwd, modifyOtherKeys, the identity queries and the OSC
+  133 marks are. cmote decodes the payload itself (`term/sixel.rs` — sixel is printable ASCII, so no
+  image-format dependency), anchors the picture to an absolute document line (§40), reserves the cells
+  it covers by feeding the engine ECH + LF, and composites it in `ui/grid.rs`. See PLAN §41.
+- **ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — still ❌, but the reason has moved out
+  of this section's premise. Nothing about the engine blocks them either; kitty and iTerm2 carry
+  **PNG/JPEG** payloads, so each needs an image-format decoder — a parser fed bytes straight off the
+  wire, i.e. a dependency and a security decision rather than a rendering one — and ReGIS is a vector
+  language with no users worth the interpreter. `[DEC]` / `[vendor]`. The placement, reservation,
+  compositing and capability machinery §41 built is protocol-agnostic, so kitty would be a decoder plus
+  a scanner arm.
 - **Blink** (SGR 5/6) — `vte` parses it (`Attr::BlinkSlow` / `BlinkFast`), but the engine's
   `terminal_attribute` has no arm for either and its cell `Flags` hold no blink bit, so the attribute
   never reaches the grid (§36, moved here from §4). Showing it would take a per-cell scanner beside
@@ -269,10 +321,18 @@ on purpose (§6). §36 closed the last four items — DA3 and DECKPAM by writing
 blink by deciding them (and, for blink, by correcting a wrong claim in this document: the engine drops
 the attribute, so it was never cmote's choice to make).
 
-So the only remaining ceiling-raiser worth planning is **graphics** (sixel / kitty images) — large,
-needing engine work *and* a compositor in the renderer. Everything else in §5 (blink, double-height
-lines, left/right margins, rectangular ops, synchronized output) is legacy, rare, or invisible in
-practice.
+**§41 took the last ceiling-raiser, and it turned out not to need the engine at all.** This section
+used to name **graphics** as the one remaining item worth planning, "large, needing engine work *and* a
+compositor in the renderer". Half of that was a wrong premise: the engine's DCS hooks are no-op debug
+logs, so a sixel picture never reaches the grid and can be scanned out beside the engine like every other
+sequence it ignores. cmote now decodes sixel in-house, anchors each picture to an absolute document line
+(§40), reserves the cells it covers by feeding the engine ECH + LF, and composites it in the grid widget
+— plus the two answers that make programs *offer* pictures at all: **XTSMGRAPHICS**, and attribute 4
+added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows are in §5 and §8.
+
+What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
+and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
+decoder dependency — **no item of real UX value remains anywhere in this document.**
 
 The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
 in `keymap::encode` — the numpad keys with no NumLock meaning to lose, and explicitly *not* the digits
@@ -307,12 +367,17 @@ resolved to viewport rows (`Search::visible`) and washed per cell, the current o
 selection's fill. **§40 then took the last viewport-bound piece the other way**: the selection's own
 endpoints became absolute lines, so the grid projects a row onto a line to highlight it and the copy
 path reads the history directly — one more kind of read, still nothing of the engine beyond reads.
+**§41 is where that run of reads finally writes something back**: to reserve the cells a picture covers,
+cmote feeds the engine ECH + LF *as if the remote had sent them* — the reservation then obeys the scroll
+region, the autowrap mode and the character set exactly as the program's own output would, and the
+picture's cells become ordinary scrollback that scrolls, evicts and reflows like any other.
 
-The `[engine-limit]` items are now the *only* remaining moves of any size, and only **images**
-(sixel / kitty graphics) carry real UX value — the rest (blink, double-height lines, left/right
-margins, rectangular ops) are legacy and rare. For "support *any* documented app UX", graphics is the
-one outstanding ceiling-raiser; every engine-independent item this document ever listed is either
-shipped or refused with its reason written down.
+Every `[engine-limit]` item that carried real UX value is now shipped, and it was shipped **without
+touching the engine** — the same beside-the-engine tactic, one more time. What remains there (blink,
+double-height lines, left/right margins, rectangular ops, synchronized output, kitty/iTerm2 images) is
+legacy, invisible in practice, or a PNG/JPEG decoder dependency. For "support *any* documented app UX",
+there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
+refused with its reason written down.
 
 ---
 
@@ -347,7 +412,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
 | Kitty 21 | Colour by semantic name | ❌ | |
 | Kitty 99 | Rich notifications | ❌ | |
-| iTerm 1337 File | Inline images | ❌ | no image rendering (§5) |
+| iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
 | iTerm 1337 | Marks / vars / profiles | ❌ | |
 | 777 | urxvt notification | ❌ | |
 
@@ -375,8 +440,9 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Rectangular erase / fill / copy | $ z / $ x / $ v | ❌ | not represented (§5) |
 | Cursor style | Ps SP q (DECSCUSR) | ✅ | block / underline / bar; blink dropped |
 | Device status report | 5n / 6n | ✅ | |
-| Primary / secondary DA | c / > c | ✅ | unblocks vim / tmux startup |
-| Tertiary DA | = c | ❌ | `=` intermediate is a no-op (§3) |
+| Primary / secondary DA | c / > c | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
+| Tertiary DA | = c | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
+| Graphics attributes (XTSMGRAPHICS) | ? Pi;Pa;Pv S | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
 | Request mode (DECRQM) | ? Ps $ p | ✅ | engine answers |
 | Colour palette stack | # p / # q | ❌ | |
 
@@ -406,7 +472,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Termcap query | DCS + q (XTGETTCAP) | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
 | Terminal version | CSI > q (XTVERSION) | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
 | Tertiary device attributes | CSI = c (DA3 → DECRPTUI) | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
-| Sixel graphics | DCS … q | ❌ | no graphics (§5) |
+| Sixel graphics | DCS … q | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). Not on the alternate screen — no history there to anchor to |
 | tmux passthrough | DCS tmux; … | ❌ | |
 
 ### SGR — text styling
@@ -442,7 +508,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Show / hide cursor | 25 | ✅ | |
 | Reverse wrap | 45 | ❌ | |
 | Left / right margin | 69 | ❌ | |
-| Sixel scrolling | 80 | ❌ | |
+| Sixel scrolling (DECSDM) | 80 | ⚠️ | the mode is not tracked; cmote always scrolls — the modern default, and what emitters assume (§41) |
 | Alternate screen | 1049 | ✅ | no scrollback there, by design |
 | Mouse: normal / btn / any | 1000 / 1002 / 1003 | ✅ | `term/mouse.rs` |
 | Focus events | 1004 | ✅ | cmote sends CSI I / CSI O |
@@ -462,8 +528,11 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 
 | Feature | Status | Note |
 |---|---|---|
-| Sixel / kitty graphics / placeholders / animation | ❌ | cmote draws no images (§5) |
-| iTerm2 inline images | ❌ | |
+| Sixel images | ✅ | decoded and composited by cmote itself, no engine work (§41) |
+| Kitty graphics protocol / unicode placeholders / animation | ❌ | its payloads are PNG/RGBA chunks, so it needs an image-format decoder — a dependency and a security decision, not a rendering gap (§5, §41) |
+| ReGIS | ❌ | a vector language; no users worth an interpreter (§5) |
+| iTerm2 inline images (OSC 1337) | ❌ | same reason as kitty: a PNG/JPEG payload (§5, §41) |
+| Graphics capability report | ✅ | XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) answered from the decoder's real limits — 256 registers, 4096×4096 / 4 Mpx; a *set* honestly refused (`term/query.rs`, §41) |
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | ❌ | *(policy)* — cmote owns its tabbed window; remote can't drive it |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
@@ -523,6 +592,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
   crate source.
+- **Every DCS is a no-op, and that is what let §41 in.** `vte-0.15.0/src/ansi.rs`'s
+  `hook` (`:1311`), `put` (`:1319`) and `unhook` (`:1324`) are debug logs with no body, so a sixel
+  payload is followed to its terminator and dropped — it cannot reach the grid, and cmote can scan the
+  same bytes for it without racing the engine or filtering the stream. `CSI S` is dispatched only as
+  `('S', [])` (SU, `ansi.rs:1736`), so the `?`-prefixed XTSMGRAPHICS form falls through to the
+  unhandled arm and is cmote's to answer. `('X', [])` (ECH, `:1766`) and LF are what cmote feeds back
+  in to reserve a picture's cells.
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 
@@ -536,7 +612,14 @@ Audited file:line anchors behind the claims above, for later re-checking.
   scanner: the chunk is scanned for identity queries *before* the engine advances, then each completed
   query becomes a reply — XTVERSION / XTGETTCAP / DA3 from static facts (`VERSION`, `UNIT_ID`),
   `Decrqss(Sgr)` from the live pen via `pen_sgr(self.term.grid().cursor.template)`, built after the
-  advance so a set-then-query in one write is seen.
+  advance so a set-then-query in one write is seen. **§41 added the inline-image half**: `process` merges
+  the prompt marks and the image events of a chunk into one offset-ordered list (`splits`, since the
+  engine only advances forwards), `apply_graphics` anchors a picture at `history_size + cursor row` and
+  column — skipping the alternate screen, which has no such line — and `reserve_cells` feeds the engine
+  `CSI <cols> X` + LF per row and a closing CR, so the picture's box is erased, its cells become ordinary
+  scrollback and the cursor lands at the left margin below it. `set_cell_pixels` now also feeds the image
+  store (pixels → cells), `resize` clears the placements with the prompt marks, and the drained reply
+  buffer goes out through `query::with_sixel_attribute`. `Terminal::images` surfaces the placements.
 - **`term/query.rs`** — the identity-query scanner (§33, §36), the same out-of-band tactic as `cwd` /
   `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`),
   **DA3** (`CSI = c`), **DECRQSS** (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector
@@ -549,14 +632,45 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `known_capability` states only `TN=xterm-256color` and `Co`/`colors=256`. `term/mod.rs` holds the
   two identity constants — `VERSION` (`cmote(<crate version>)`) and `UNIT_ID` (`00434D45`, a
   **constant** so a DA3 reply cannot fingerprint the machine). Parse-only, no engine types,
-  unit-tested per reply shape.
+  unit-tested per reply shape. **§41 added a fifth query and one amendment**: a `CsiQuestion` state
+  reads **XTSMGRAPHICS** (`CSI ? Pi;Pa;Pv S`, every DECSET/DECRST passing through it unread on its own
+  final byte) and `graphics_reply` answers item 1 with the register count and item 2 with the max
+  geometry, status 3 for a *set* and status 1 for an unknown item — the numbers coming from
+  `term::sixel`'s own constants via `term/mod.rs`, so the reply cannot drift from what the decoder
+  enforces. `with_sixel_attribute` rewrites a DA1 reply the **engine** wrote (`CSI ? <params> c`) to
+  carry attribute `4`, leaving a reply that already names it, and every non-DA1 `CSI ?` reply
+  (DECRQM's `$y`, kitty's `u`), untouched.
+- **`term/sixel.rs`** — the payload decoder (§41), pure and engine-free. `walk` is the single place the
+  command grammar is written (`"` raster, `#` select/define, `!` repeat, `$` CR, `-` next band, and the
+  `?`..`~` sixel bytes); `canvas_size` measures through it — preferring the raster attributes as the
+  sender's crop, else the extent of *painted* pixels — and `paint` draws through it, so the two passes
+  cannot disagree. A colour introducer **selects** the register it defines (every emitter relies on it);
+  `#Pc;Pu;…` reads RGB as **percentages** and HLS from **DEC's blue hue origin** (rotated 240° onto the
+  standard wheel); an unset pixel stays fully transparent so the grid's own background shows through;
+  the 16 VT340 defaults are pre-loaded. Bounds (§12): `MAX_WIDTH`/`MAX_HEIGHT` 4096, `MAX_PIXELS` 4 Mpx
+  (an image past them is refused **whole**, never clipped), `COLOR_REGISTERS` 256 (a higher index
+  clamps), saturating parameters, and per-pixel bounds checks so a lying raster attribute can only lose
+  pixels. Unit-tested per command, per colour space and per cap.
+- **`term/graphics.rs`** — the image scanner and store (§41). `Images::feed` is the same chunk-safe byte
+  machine as `cwd`/`osc133`, recognising a sixel DCS (`ESC P <params> q … ST`, with BEL and 8-bit ST
+  accepted, and any other DCS followed silently so a DECRQSS payload cannot be read as a picture) plus
+  `CSI 2 J` / `CSI 3 J` / RIS. Its two event kinds report **opposite** offsets on purpose: a picture past
+  its DCS (the cursor is only right once everything before it has been drawn), an erase *before* its
+  sequence (`CSI 3 J` drops the engine's history, so which placements it takes must be decided first).
+  `Placement` carries the absolute `line`, `col`, the reserved `rows`/`cols`, the pixel `width`/`height`
+  and an **iced image handle** — minted once at decode so the renderer's texture cache keys off a stable
+  id instead of re-uploading every frame. Caps: `MAX_PAYLOAD` 16 MiB per picture (past it the DCS is
+  still followed, nothing decoded), `MAX_IMAGES` 64 and `MAX_TOTAL_BYTES` 64 MiB, evicted oldest-first;
+  `clear_screen` / `clear_scrollback` split on the first visible line, `clear` takes everything.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
   cell's OSC 8 URI, §24). `Screen` getters: `size`, `cursor_position`, `display_offset`,
   `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `application_keypad`
   (DECKPAM, §36), `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`,
-  `kitty_flags` (the five active kitty protocol flags, read off `Term::mode()`, §25). Nothing the
+  `kitty_flags` (the five active kitty protocol flags, read off `Term::mode()`, §25) and, since §41,
+  `is_alternate` (`TermMode::ALT_SCREEN` — the guard both the image placement and the image drawing take,
+  since the alternate screen keeps no history and so has no document line to anchor to). Nothing the
   engine tracks is left unsurfaced now; blink it does not track at all (see above). **§40 added the
   document readers**: `line_at(row)` is the single written-down form of `history_size + row -
   display_offset` (the viewport → document mapping §34's ticks and §39's washes are placed by), and
@@ -641,7 +755,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   find bar's per-frame match mask (§39, `match_mask`) and — since §40 — the **document-line
   projection of the selection**, `Marks::top_line` (`screen.line_at(0)`) plus the row being drawn,
   so `plan_runs` asks the selection about a *line*, once per row, and a scroll moves the highlight
-  with its text instead of leaving it on the rows it was dragged over.
+  with its text instead of leaving it on the rows it was dragged over. **§41 added the image
+  compositing**: `image_bounds` is that same projection run backwards — a placement's absolute line
+  minus the frame's `top_line`, **signed**, so a picture anchored above the viewport is drawn with its
+  top off screen — and `draw` paints each one after the text at its native pixel size, snapped, clipped
+  to the intersection of its reserved cell box and the visible grid, and only while `is_alternate` is
+  false. The handle is cloned out of the placement (a reference count, not the pixels), so the frame
+  costs no upload.
 - **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
   (the reply synthesizer) — the engine parses every spelling and answers every query they used
   to cover.

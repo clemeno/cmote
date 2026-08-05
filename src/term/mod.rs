@@ -18,21 +18,31 @@
 // `term::compat` (the engine parses every cursor-move spelling) and `term::answer` (the engine
 // answers every query).
 //
-// Four identity queries the engine does NOT answer — its VT parser treats every DCS as a no-op,
-// has no arm for the version request, and its device-attributes handler covers only DA1 and DA2 —
-// so cmote sniffs them out of the same stream and answers them itself (`query`, §33, §36):
-// XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`), XTGETTCAP (`DCS + q … ST`) and DA3 (`CSI = c`).
-// Only DECRQSS's SGR request needs live state; `process` fills it from the pen.
+// Five identity queries the engine does NOT answer — its VT parser treats every DCS as a no-op,
+// has no arm for the version request, its device-attributes handler covers only DA1 and DA2, and it
+// has none for the graphics-capability request — so cmote sniffs them out of the same stream and
+// answers them itself (`query`, §33, §36, §41): XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`),
+// XTGETTCAP (`DCS + q … ST`), DA3 (`CSI = c`) and XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`). Only DECRQSS's
+// SGR request needs live state; `process` fills it from the pen. The engine's OWN DA1 answer is then
+// amended on its way out to advertise sixel (`query::with_sixel_attribute`), because cmote draws
+// images the engine knows nothing about.
+//
+// Those images are the other thing the engine drops and cmote reads: a sixel picture arrives as a
+// DCS its parser ignores, so `graphics` scans it out of the same bytes, `sixel` decodes it, and
+// `process` reserves the cells it covers in the engine so the picture rides the grid as text does
+// (§41).
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
+pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
-mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3 (§33, §36)
+mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
+pub mod sixel; // decodes a sixel image's payload into pixels (§41)
 
 use std::sync::{Arc, Mutex};
 
@@ -148,6 +158,7 @@ impl Terminal {
 			modkeys: modkeys::ModKeys::default(),
 			queries: query::Queries::default(),
 			prompts: osc133::Prompts::default(),
+			graphics: graphics::Images::default(),
 		}
 	}
 
@@ -161,8 +172,9 @@ impl Terminal {
 	/// the cursor where the query sat — the engine gets that right where the old hand-rolled
 	/// answerer had to split the feed to. The same bytes also feed the cwd tracker (§17), which
 	/// reads the stream as it came off the wire for the working directory the shell announces, and
-	/// the OSC 133 prompt-mark scanner (§34) — for which `process` DOES split the advance, so each
-	/// mark is applied at the grid line the cursor is on when it arrives.
+	/// the OSC 133 prompt-mark scanner (§34) and the inline-image scanner (§41) — for both of which
+	/// `process` DOES split the advance, so each mark is applied at the grid line the cursor is on
+	/// when it arrives and each picture is placed where the stream put it.
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
 		self.modkeys.feed(bytes);
@@ -170,22 +182,29 @@ impl Terminal {
 		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
 		// for the usual flow where a program sets attributes and then queries in the same write.
 		let queries = self.queries.feed(bytes);
-		// OSC 133 shell-integration marks (§34): the engine ignores them, so scan them out and
-		// apply each at the point in the stream it sits. A prompt-start anchors to a grid line, so
-		// the engine is advanced up to the mark's offset FIRST — then the cursor is read exactly
-		// where the prompt begins. The common case (no marks in the chunk) is a single advance, so
-		// only a chunk that actually carries a prompt boundary pays for the split.
+		// OSC 133 shell-integration marks (§34) and inline images (§41): the engine ignores both, so
+		// scan them out and apply each at the point in the stream it sits. A prompt-start anchors to a
+		// grid line and an image anchors to the cursor's line and column, so the engine is advanced up
+		// to the event's offset FIRST — then the cursor is read exactly where the mark or the picture
+		// belongs. The common case (a chunk carrying neither) is a single advance, so only a chunk
+		// that actually carries one pays for the split.
 		let marks = self.prompts.feed(bytes);
-		if marks.is_empty() {
+		let images = self.graphics.feed(bytes);
+		if marks.is_empty() && images.is_empty() {
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, mark) in marks {
+			for (offset, split) in splits(marks, images) {
 				self.parser.advance(&mut self.term, &bytes[start..offset]);
 				start = offset;
-				let history = self.term.grid().history_size();
-				let (row, _) = self.screen().cursor_position();
-				self.prompts.apply(mark, history, row);
+				match split {
+					Split::Prompt(mark) => {
+						let history = self.term.grid().history_size();
+						let (row, _) = self.screen().cursor_position();
+						self.prompts.apply(mark, history, row);
+					}
+					Split::Graphics(event) => self.apply_graphics(event),
+				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
 		}
@@ -213,9 +232,89 @@ impl Terminal {
 				// DA3: cmote's constant unit id — an answer that identifies the program, never
 				// the machine (§36).
 				query::Query::UnitId => out.extend_from_slice(&query::da3_reply(UNIT_ID)),
+				// XTSMGRAPHICS: the limits the sixel decoder actually enforces (§41), so a program
+				// sizing a picture for cmote is told the truth rather than a hopeful maximum.
+				query::Query::Graphics(request) => {
+					out.extend_from_slice(&query::graphics_reply(
+						&request,
+						sixel::COLOR_REGISTERS as u16,
+						(sixel::MAX_WIDTH, sixel::MAX_HEIGHT),
+					));
+				}
 			}
 		}
-		out
+		// Last, amend the engine's own DA1 answer if this chunk asked for one: cmote draws sixels, so
+		// its device attributes have to say so (§41). Nothing else in `out` is touched.
+		query::with_sixel_attribute(out)
+	}
+
+	/// Act on something the image scanner found, at the point in the stream it sits (§41).
+	///
+	/// A picture is anchored to the cursor's own line and column and then RESERVES that many cells:
+	/// the engine knows nothing about images, so unless the cells are claimed the shell's next line of
+	/// output would be written straight over the picture. Reserving is `reserve_cells` — erase the box,
+	/// then feed the line feeds — which leaves the cursor below the image exactly as a terminal that
+	/// implements sixel natively does, so a prompt lands under the picture and not on it.
+	///
+	/// Nothing is placed while the ALTERNATE screen is up: it keeps no scrollback, so the absolute
+	/// line an anchor needs does not exist there (`Screen::is_alternate`). A full-screen program's
+	/// picture is therefore dropped rather than pinned to a line that means something else — see
+	/// PLAN §41 for why that is written down as a limit rather than papered over.
+	fn apply_graphics(&mut self, event: graphics::Event) {
+		match event {
+			graphics::Event::Image(image) => {
+				if self.screen().is_alternate() {
+					return;
+				}
+				// Absolute line = history + the cursor's row on the live screen (§40). Read before the
+				// reservation scrolls anything: scrolling grows the history by exactly as much as it
+				// moves the content up, so this line goes on naming the same text either way.
+				let history = self.term.grid().history_size() as u64;
+				let (row, col) = self.screen().cursor_position();
+				let (rows, cols) = self.graphics.place(image, history + u64::from(row), col);
+				self.reserve_cells(rows, cols);
+			}
+			// The two erases only take the pictures whose lines they erase, so a `CSI 2 J` at a prompt
+			// leaves the plots further up the scrollback alone. On the alternate screen neither says
+			// anything about the primary screen's pictures — and a full-screen program erases
+			// constantly — so both are ignored there.
+			graphics::Event::ClearScreen => {
+				if !self.screen().is_alternate() {
+					self.graphics
+						.clear_screen(self.term.grid().history_size() as u64);
+				}
+			}
+			graphics::Event::ClearScrollback => {
+				if !self.screen().is_alternate() {
+					self.graphics
+						.clear_scrollback(self.term.grid().history_size() as u64);
+				}
+			}
+			// RIS resets the terminal itself, so it takes everything wherever the session is.
+			graphics::Event::Reset => self.graphics.clear(),
+		}
+	}
+
+	/// Claim a `rows`×`cols` box of cells for an image just placed at the cursor (§41), leaving the
+	/// cursor at the left margin on the line below it.
+	///
+	/// Two sequences per row, fed to the engine as if the remote had sent them: ECH (`CSI Pn X`)
+	/// erases exactly `cols` characters from the cursor rightward — so a picture drawn over existing
+	/// text blanks what it covers and no more — and LF drops a line at the same column, scrolling the
+	/// screen when the cursor is already at the bottom, which is how the picture's cells become
+	/// ordinary scrollback. A closing CR puts the cursor at the left margin.
+	///
+	/// Injecting VT sequences rather than reaching into the grid is deliberate: erasing and scrolling
+	/// are the engine's business, and doing it this way means the reservation obeys the scroll region,
+	/// the autowrap mode and the character-set state exactly as the program's own output would.
+	fn reserve_cells(&mut self, rows: u16, cols: u16) {
+		let mut feed = Vec::new();
+		for _ in 0..rows {
+			feed.extend_from_slice(format!("\x1b[{cols}X").as_bytes());
+			feed.push(b'\n');
+		}
+		feed.push(b'\r');
+		self.parser.advance(&mut self.term, &feed);
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -260,6 +359,10 @@ impl Terminal {
 		// prompt on. `ponytail:` cleared on any resize, including a height-only one that would not
 		// actually reflow the columns.
 		self.prompts.clear();
+		// The inline images are anchored the same way and go for the same reason (§41): a reflowed
+		// document would leave each picture floating over whatever text ended up on its old line.
+		// `ponytail:` a terminal with native graphics reflows its images instead of dropping them.
+		self.graphics.clear();
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
@@ -282,12 +385,14 @@ impl Terminal {
 		self.term.scroll_display(scroll);
 	}
 
-	/// Tell the emulator the pixel size of one cell, so it can answer a program that asks for
-	/// its text area in pixels (CSI 14t). The GUI owns the cell metrics (§9), so it sets this
-	/// once after construction; the emulator treats the numbers as opaque and only echoes them
-	/// back. Until set they are zero, so the reply reads as a zero-sized area — harmless, since
-	/// only graphics-capable programs ask and cmote draws no graphics.
+	/// Tell the emulator the pixel size of one cell. The GUI owns the cell metrics (§9), so it sets
+	/// this once after construction, and two things read it back: a program asking for its text area
+	/// in pixels (CSI 14t) is answered from it, and an inline image's pixels are turned into the cells
+	/// it reserves by it (§41). Until set, the reply reads as a zero-sized area and the image store
+	/// falls back to its own approximation of a cell — the GUI measures before any output arrives, so
+	/// that window is a test's concern rather than a session's.
 	pub fn set_cell_pixels(&mut self, width: u16, height: u16) {
+		self.graphics.set_cell_pixels(width, height);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.cell_width = width;
 		buffer.cell_height = height;
@@ -297,6 +402,14 @@ impl Terminal {
 	/// app reads the grid only through this, so the engine stays behind `term/`.
 	pub fn screen(&self) -> screen::Screen<'_> {
 		screen::Screen::new(&self.term)
+	}
+
+	/// The inline images the session is holding, oldest first (§41). Each names the absolute document
+	/// line and column its top-left corner sits on, so the renderer resolves them against wherever
+	/// the viewport is parked — exactly as it does the selection (§40). Empty until a program sends a
+	/// picture, and on a session that never does, forever.
+	pub fn images(&self) -> &[graphics::Placement] {
+		self.graphics.placements()
 	}
 
 	/// Where the remote command cycle stands (§34), from the OSC 133 marks the shell emits. `Idle`
@@ -516,6 +629,41 @@ pub struct Terminal {
 	/// this one by splitting the advance at each mark, so a prompt is recorded at the grid line the
 	/// cursor is on when the mark arrives.
 	prompts: osc133::Prompts,
+	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
+	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
+	/// belongs at the cursor's line and column at the moment it arrived in the stream.
+	graphics: graphics::Images,
+}
+
+/// One thing `process` has to do part-way through a chunk (§34, §41). Both scanners report the byte
+/// offset their event sits at, and the engine can only be advanced forwards, so the two lists are
+/// merged into this single ordered one — otherwise applying all the marks and then all the images
+/// would place the second kind at the wrong point in the stream.
+enum Split {
+	Prompt(osc133::Mark),
+	Graphics(graphics::Event),
+}
+
+/// Merge the prompt marks and the image events of one chunk into offset order. Both lists arrive
+/// ascending, and the sort is stable, so two events at the very same offset keep the order they were
+/// scanned in — which is the only sensible tie-break, since neither scanner can see the other's.
+fn splits(
+	marks: Vec<(usize, osc133::Mark)>,
+	images: Vec<(usize, graphics::Event)>,
+) -> Vec<(usize, Split)> {
+	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(marks.len() + images.len());
+	merged.extend(
+		marks
+			.into_iter()
+			.map(|(offset, mark)| (offset, Split::Prompt(mark))),
+	);
+	merged.extend(
+		images
+			.into_iter()
+			.map(|(offset, event)| (offset, Split::Graphics(event))),
+	);
+	merged.sort_by_key(|(offset, _)| *offset);
+	merged
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
@@ -1156,6 +1304,185 @@ mod tests {
 		// The query is matched case-insensitively, and a query nothing carries finds nothing.
 		assert_eq!(terminal.find("BRAVO").len(), 1);
 		assert!(terminal.find("nowhere").is_empty());
+	}
+
+	/// A sixel DCS painting a solid red rectangle `width` pixels wide and `bands * 6` tall — the
+	/// smallest real picture a program could send, and enough to pin down every bit of geometry the
+	/// placement and the reservation depend on.
+	fn sixel_image(width: u16, bands: u16) -> Vec<u8> {
+		let mut out = b"\x1bPq#0;2;100;0;0".to_vec();
+		for band in 0..bands {
+			if band > 0 {
+				out.push(b'-');
+			}
+			out.extend_from_slice(format!("!{width}~").as_bytes());
+		}
+		out.extend_from_slice(b"\x1b\\");
+		out
+	}
+
+	/// A picture is anchored where the cursor was and reserves the cells it covers (§41), leaving the
+	/// cursor on the line below it — so the shell's next prompt lands under the image, not over it.
+	#[test]
+	fn a_sixel_image_is_placed_where_the_cursor_was_and_reserves_its_box() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"top\r\n");
+		// 21×30 pixels in a 7×14 cell: three columns and three rows, both rounded up.
+		terminal.process(&sixel_image(21, 5));
+
+		let placement = &terminal.images()[0];
+		assert_eq!((placement.line, placement.col), (1, 0));
+		assert_eq!((placement.rows, placement.cols), (3, 3));
+		assert_eq!((placement.width, placement.height), (21, 30));
+		// The reservation moved the cursor past the picture's three rows, back at the left margin.
+		terminal.process(b"after");
+		assert_eq!(read(&terminal, 4, 0, 5), "after");
+	}
+
+	/// The reserved box is ERASED, and only the box (§41): a picture drawn over existing text blanks
+	/// the cells it covers and leaves the rest of those rows alone.
+	#[test]
+	fn the_cells_an_image_covers_are_erased() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"AAAAAAAAAA\r\nBBBBBBBBBB\r\nCCCCCCCCCC\x1b[H");
+		terminal.process(&sixel_image(21, 5));
+
+		// Three columns of each of the three covered rows are gone; the seven after them are not.
+		assert_eq!(read(&terminal, 0, 0, 10), "AAAAAAA");
+		assert_eq!(read(&terminal, 2, 0, 10), "CCCCCCC");
+	}
+
+	/// An image's anchor is a DOCUMENT line (§40, §41), so later output scrolls the picture up the
+	/// screen and into the scrollback without anything having to move it.
+	#[test]
+	fn an_image_keeps_its_line_as_output_pushes_it_into_history() {
+		let mut terminal = Terminal::new(4, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(&sixel_image(7, 1));
+		assert_eq!(terminal.images()[0].line, 0);
+
+		let filler: Vec<u8> = (0..20).flat_map(|_| b"line\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		assert_eq!(
+			terminal.images()[0].line,
+			0,
+			"the anchor names the document, which has not changed"
+		);
+		assert!(
+			terminal.screen().line_at(0) > 0,
+			"while the viewport has moved a long way past it"
+		);
+	}
+
+	/// The alternate screen keeps no history, so a document line means nothing there: a picture sent
+	/// by a full-screen program is dropped rather than anchored to a line that means something else
+	/// (§41 — written down as a limit, not papered over).
+	#[test]
+	fn a_sixel_on_the_alternate_screen_is_not_placed() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"\x1b[?1049h");
+		terminal.process(&sixel_image(21, 5));
+		assert!(terminal.images().is_empty());
+	}
+
+	/// An erase takes only the pictures whose lines it erases (§41): `CSI 2 J` clears the screen, so a
+	/// plot further up the scrollback survives it, and `CSI 3 J` clears the scrollback, so that one
+	/// goes instead. A shell's `clear` sends both and leaves nothing.
+	#[test]
+	fn erasing_the_screen_leaves_the_pictures_in_history_alone() {
+		let mut terminal = Terminal::new(4, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(&sixel_image(7, 1));
+		let filler: Vec<u8> = (0..10).flat_map(|_| b"line\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		terminal.process(&sixel_image(7, 1));
+		assert_eq!(terminal.images().len(), 2);
+
+		terminal.process(b"\x1b[2J");
+		assert_eq!(terminal.images().len(), 1, "only the one on screen went");
+		assert_eq!(terminal.images()[0].line, 0, "the one in history stayed");
+		terminal.process(b"\x1b[3J");
+		assert!(terminal.images().is_empty());
+	}
+
+	/// A reset starts the session over, and a resize reflows the document out from under every
+	/// anchor: both drop the pictures whole (§41, the trade-off §34's prompt marks already make).
+	#[test]
+	fn a_reset_or_a_resize_drops_every_picture() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(&sixel_image(21, 5));
+		assert_eq!(terminal.images().len(), 1);
+		terminal.process(b"\x1bc");
+		assert!(terminal.images().is_empty(), "RIS clears them");
+
+		terminal.process(&sixel_image(21, 5));
+		assert_eq!(terminal.images().len(), 1);
+		terminal.resize(20, 60);
+		assert!(terminal.images().is_empty(), "a reflow clears them");
+	}
+
+	/// Two scanners can both fire inside one chunk, and the engine can only be advanced forwards, so
+	/// their events are applied in stream order (§41): the prompt mark after this picture lands on the
+	/// line BELOW it, which is only true if the image's reservation was applied first.
+	#[test]
+	fn a_picture_and_a_prompt_mark_in_one_chunk_are_applied_in_order() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		let mut chunk = b"top\r\n".to_vec();
+		chunk.extend_from_slice(&sixel_image(21, 5));
+		chunk.extend_from_slice(b"\x1b]133;A\x07$ ");
+		terminal.process(&chunk);
+
+		assert_eq!(terminal.images()[0].line, 1);
+		assert_eq!(
+			terminal.prompt_rows(),
+			vec![4],
+			"the prompt is below the picture, not on it"
+		);
+	}
+
+	/// DA1 now advertises sixel (§41). The engine writes `CSI ? 6 c` and knows nothing of images, so
+	/// cmote amends its own reply on the way out — without that `4`, the programs that pick a picture
+	/// format at startup fall back to text art and the images go unused.
+	#[test]
+	fn the_device_attributes_reply_advertises_sixel() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[c"), b"\x1b[?6;4c".to_vec());
+	}
+
+	/// XTSMGRAPHICS is answered from the limits the decoder actually enforces (§41), so a program
+	/// sizing a picture for cmote is told the truth: the colour register count, then the largest image
+	/// it will accept.
+	#[test]
+	fn a_graphics_capability_query_reports_the_decoders_limits() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1b[?1;1S"),
+			format!("\x1b[?1;0;{}S", sixel::COLOR_REGISTERS).into_bytes()
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[?2;4S"),
+			format!("\x1b[?2;0;{};{}S", sixel::MAX_WIDTH, sixel::MAX_HEIGHT).into_bytes()
+		);
+	}
+
+	/// A picture cmote will not decode leaves the screen exactly as it was (§41): no placement, and —
+	/// because the reservation is driven by the placement — no reserved cells either, so nothing about
+	/// the text moves.
+	#[test]
+	fn a_refused_picture_reserves_nothing() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"top\r\n");
+		// A raster attribute far past the decoder's caps: refused whole (§12).
+		terminal.process(b"\x1bPq\"1;1;9000;9000#0;2;100;0;0~\x1b\\");
+		assert!(terminal.images().is_empty());
+		terminal.process(b"after");
+		assert_eq!(read(&terminal, 1, 0, 5), "after", "the cursor never moved");
 	}
 
 	/// Revealing a match scrolls it onto the screen when it is off it, and leaves the view alone

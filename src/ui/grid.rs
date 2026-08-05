@@ -30,6 +30,7 @@ use std::ops::RangeInclusive;
 
 use crate::app::Message;
 use crate::palette;
+use crate::term::graphics::Placement;
 use crate::term::mouse as report;
 use crate::term::screen::{
 	Cell as ScreenCell, Color as CellColor, CursorShape, MouseMode, Screen, UnderlineStyle,
@@ -38,6 +39,7 @@ use crate::term::search::Highlight;
 use crate::ui::selection::{Cell, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
 use iced::advanced::Renderer as _;
+use iced::advanced::image::{Image as RasterImage, Renderer as _};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::Quad;
 use iced::advanced::text::Renderer as _;
@@ -191,21 +193,28 @@ pub struct Grid<'a> {
 	/// reason as `prompts`: it is a resolution of absolute document lines against wherever the
 	/// viewport happens to be parked, which changes with every scroll.
 	matches: Vec<Highlight>,
+	/// The inline images the session is holding (§41), each anchored to an absolute document line.
+	/// Borrowed, not owned: the pixels belong to the emulator for the whole session, and a frame only
+	/// needs to know where they go.
+	images: &'a [Placement],
 }
 
 /// Draw the emulator's current screen, highlighting `selection` if there is one, washing the find
-/// bar's on-screen `matches` (§39) and ticking the `prompts` rows in the left gutter (§34).
+/// bar's on-screen `matches` (§39), ticking the `prompts` rows in the left gutter (§34) and
+/// compositing the inline `images` over the cells they reserved (§41).
 pub fn grid<'a>(
 	screen: Screen<'a>,
 	selection: Option<&'a Selection>,
 	prompts: Vec<u16>,
 	matches: Vec<Highlight>,
+	images: &'a [Placement],
 ) -> Grid<'a> {
 	Grid {
 		screen,
 		selection,
 		prompts,
 		matches,
+		images,
 	}
 }
 
@@ -318,11 +327,13 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// mask the run planner reads — see `match_mask` for why it is a mask and not a list. Bound
 		// before `marks` so the mask outlives the borrow the planner takes of it.
 		let mask = match_mask(&self.matches, rows, cols);
+		// Where the viewport is parked, as a document line (§40) — the coordinate space the selection
+		// and the inline images are both stored in, so a row being drawn can be resolved into the line
+		// it shows and a picture onto the row its own line is at.
+		let top_line = self.screen.line_at(0);
 		let marks = Marks {
 			selection: self.selection,
-			// Where the viewport is parked, as a document line (§40) — the selection's own
-			// coordinate space, so the planner can resolve each row it draws into the line it shows.
-			top_line: self.screen.line_at(0),
+			top_line,
 			matches: &mask,
 		};
 
@@ -348,6 +359,34 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					link_hover.as_ref(),
 				) {
 					draw_run(renderer, run, origin.x, top, row_bounds);
+				}
+			}
+
+			// The inline images (§41), composited over the blank cells they reserved. After the text,
+			// so a picture is never hidden by the row it sits on, and inside the same clip, so one
+			// scrolled half off the top is cut at the grid's edge instead of drawn over the chrome.
+			//
+			// Nothing is drawn while the alternate screen is up: a placement's line is a PRIMARY-screen
+			// document line, and the alternate screen keeps no history, so every line index there means
+			// something else entirely (`Screen::is_alternate`). Sitting the pictures out is what keeps
+			// them from raining over vim.
+			if !self.screen.is_alternate() {
+				for placement in self.images {
+					let (pixels, reserved) = image_bounds(placement, origin, top_line);
+					// Clipped to the cells the picture reserved, so its own pixels can never bleed past
+					// the box the engine is holding for it — an image drawn a shade larger than its
+					// rounded-up box would otherwise creep onto the row below. A box entirely off the
+					// visible grid is skipped before any texture work is asked of the renderer.
+					let Some(clip) = reserved.intersection(&visible) else {
+						continue;
+					};
+					renderer.draw_image(
+						// Snapped to the pixel grid: a picture drawn at its native size on a
+						// half-pixel boundary would be resampled into a blur for no reason.
+						RasterImage::new(placement.handle.clone()).snap(true),
+						pixels,
+						clip,
+					);
 				}
 			}
 
@@ -1038,6 +1077,37 @@ fn prompt_tick_rect(bounds: Rectangle, row: u16) -> Rectangle {
 	}
 }
 
+/// Where an inline image lands on this frame (§41): the rectangle its PIXELS are drawn in, and the
+/// rectangle of CELLS it reserved. `origin` is the grid's first cell and `top_line` the document line
+/// the top visible row is showing, so this is the reverse of the projection the run planner does —
+/// a document line back onto a row (§40).
+///
+/// The row offset is signed: a picture anchored ABOVE the viewport gets a negative one and is drawn
+/// with its top off screen, which is what lets a tall image scroll smoothly through the view rather
+/// than pop into existence once its first line comes on screen. Split out from the draw for the same
+/// reason as the scroll thumb and the prompt tick — the geometry is the part that can be wrong, so it
+/// is worth testing without a renderer.
+fn image_bounds(placement: &Placement, origin: Point, top_line: u64) -> (Rectangle, Rectangle) {
+	// Signed, in i64: both lines are absolute document indices, so their difference is the row the
+	// picture's top edge sits at — which is negative for one scrolled past the top of the viewport.
+	let row = placement.line as i64 - top_line as i64;
+	let x = origin.x + f32::from(placement.col) * CELL_WIDTH;
+	let y = origin.y + row as f32 * CELL_HEIGHT;
+	let pixels = Rectangle {
+		x,
+		y,
+		width: f32::from(placement.width),
+		height: f32::from(placement.height),
+	};
+	let reserved = Rectangle {
+		x,
+		y,
+		width: f32::from(placement.cols) * CELL_WIDTH,
+		height: f32::from(placement.rows) * CELL_HEIGHT,
+	};
+	(pixels, reserved)
+}
+
 /// Which way a scroll went, as the protocol's wheel button. A horizontal-only scroll
 /// reports nothing — the protocol's wheel is vertical.
 fn wheel_button(delta: mouse::ScrollDelta) -> Option<report::Button> {
@@ -1561,6 +1631,39 @@ mod tests {
 		assert_eq!(runs.len(), 1);
 		assert_eq!(runs[0].content, "bbbbb");
 		assert_eq!(runs[0].style.bg, SELECTION_BG);
+	}
+
+	/// An inline image is drawn at the row its own document line is showing at, at its native pixel
+	/// size, inside the box of cells it reserved (§41). The projection is the reverse of the run
+	/// planner's, so scrolling moves the picture with its text — including off the top, where its row
+	/// goes negative and the visible part is what remains.
+	#[test]
+	fn an_image_is_drawn_at_the_row_its_line_is_showing_at() {
+		let placement = Placement {
+			line: 7,
+			col: 2,
+			rows: 3,
+			cols: 4,
+			width: 25,
+			height: 40,
+			handle: iced::advanced::image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+		};
+		let origin = Point::new(10.0, 20.0);
+
+		// The top visible row is showing line 5, so the picture's line 7 is two rows down.
+		let (pixels, reserved) = image_bounds(&placement, origin, 5);
+		assert_eq!(pixels.x, 10.0 + 2.0 * CELL_WIDTH);
+		assert_eq!(pixels.y, 20.0 + 2.0 * CELL_HEIGHT);
+		// Drawn at its own size, inside a box of whole cells that is never smaller than it.
+		assert_eq!((pixels.width, pixels.height), (25.0, 40.0));
+		assert_eq!(reserved.width, 4.0 * CELL_WIDTH);
+		assert_eq!(reserved.height, 3.0 * CELL_HEIGHT);
+		assert!(reserved.width >= pixels.width && reserved.height >= pixels.height);
+
+		// Scrolled down so the anchor is two rows ABOVE the viewport: the box hangs off the top and
+		// the clip against the grid is what leaves only the visible slice.
+		let (pixels, _) = image_bounds(&placement, origin, 9);
+		assert_eq!(pixels.y, 20.0 - 2.0 * CELL_HEIGHT);
 	}
 
 	#[test]

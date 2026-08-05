@@ -228,7 +228,13 @@ pub fn view<'a>(
 			)
 		})
 		.unwrap_or_default();
-	let grid = crate::ui::grid::grid(screen, selection, terminal.prompt_rows(), matches);
+	let grid = crate::ui::grid::grid(
+		screen,
+		selection,
+		terminal.prompt_rows(),
+		matches,
+		terminal.images(),
+	);
 
 	// It reacts to the mouse (§10): press-drag-release drives the text selection and a
 	// right-press opens the context menu. `on_move` reports a point local to the grid,

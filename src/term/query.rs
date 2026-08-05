@@ -2,15 +2,26 @@
 //
 // `alacritty_terminal` answers the queries that touch the grid itself — DSR, DA, DECRQM,
 // cursor-position and text-area reports — and cmote drains those replies straight through
-// (`term::mod`). Four queries it does NOT answer: its VT parser treats every DCS string as a
+// (`term::mod`). Five queries it does NOT answer: its VT parser treats every DCS string as a
 // no-op (its `hook`/`put`/`unhook` just log at debug level), it has no CSI arm for the version
-// request, and its device-attributes handler covers only the primary and secondary forms (the
-// `=` intermediate falls to a debug log), so all four fall on the floor:
+// request or for the graphics-capability one, and its device-attributes handler covers only the
+// primary and secondary forms (the `=` intermediate falls to a debug log), so all five fall on the
+// floor:
 //
 //   CSI > q            XTVERSION  — "what terminal are you, and which version?"
 //   DCS $ q <sel> ST   DECRQSS    — "what is setting <sel> right now?" (Request Status String)
 //   DCS + q <hex> ST   XTGETTCAP  — "what is your value for terminfo capability <hex>?"
 //   CSI = c            DA3        — "what is your unit id?" (DECRQTSR / tertiary attributes, §36)
+//   CSI ? Pi;Pa;Pv S   XTSMGRAPHICS — "how big a picture, and how many colours?" (§41)
+//
+// The graphics one is what makes inline images (§41) usable rather than merely supported: a program
+// deciding HOW to show a picture asks how many colour registers and how large an image the terminal
+// will take, and one that gets no answer falls back to text art or gives up. It is answered from the
+// limits `term::sixel` actually enforces, so the reply is a promise cmote keeps.
+//
+// One reply here is not to a query cmote sniffed but an AMENDMENT to one the engine wrote:
+// `with_sixel_attribute` adds the sixel capability to the engine's DA1 answer (see it for why that
+// is a rewrite rather than a second reply).
 //
 // A program that sends one waits for a reply; unanswered, it stalls until a timeout, and some
 // paste the unanswered bytes as literal garbage. So cmote sniffs these out of the stream itself —
@@ -58,9 +69,20 @@ pub enum Decrqss {
 	Unsupported,
 }
 
-/// A completed query the scanner found in the stream (§33, §36). Usually none arrive in a chunk;
-/// when one does, `term::mod` turns it into reply bytes — `Version`, `Capabilities` and `UnitId`
-/// from static facts about cmote, `Decrqss(Sgr)` from the live pen.
+/// An XTSMGRAPHICS request (`CSI ? Pi ; Pa ; Pv S`, §41): `item` is what is being asked about
+/// (1 colour registers, 2 sixel geometry, 3 ReGIS geometry) and `action` what is wanted of it
+/// (1 read, 2 reset to default, 3 set, 4 read the maximum). cmote's graphics limits are fixed, so a
+/// read of either kind is answered with the real number and a *set* is honestly refused — see
+/// `graphics_reply`. The trailing `Pv` values a set would carry are not kept for exactly that reason.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Graphics {
+	pub item: u16,
+	pub action: u16,
+}
+
+/// A completed query the scanner found in the stream (§33, §36, §41). Usually none arrive in a
+/// chunk; when one does, `term::mod` turns it into reply bytes — `Version`, `Capabilities`, `UnitId`
+/// and `Graphics` from static facts about cmote, `Decrqss(Sgr)` from the live pen.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Query {
 	/// XTVERSION (`CSI > q`): answer with cmote's name and version.
@@ -72,6 +94,8 @@ pub enum Query {
 	Capabilities(Vec<Vec<u8>>),
 	/// DA3, tertiary device attributes (`CSI = c`): answer with cmote's unit id (§36).
 	UnitId,
+	/// XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): answer with cmote's graphics limits (§41).
+	Graphics(Graphics),
 }
 
 /// Where the scanner sits in the byte stream. Only the shapes cmote answers are tracked in
@@ -93,6 +117,10 @@ enum Scan {
 	CsiGt,
 	/// Inside `ESC [ = …`, collecting parameter digits until the final byte (DA3, §36).
 	CsiEq,
+	/// Inside `ESC [ ? …`, collecting parameter digits until the final byte (XTSMGRAPHICS, §41).
+	/// Every DECSET/DECRST (`CSI ? 1049 h`) passes through here too and leaves on its own final
+	/// byte, unread — the engine owns those.
+	CsiQuestion,
 	/// Saw `ESC P`; a DCS we answer starts on the `$` or `+` intermediate.
 	Dcs,
 	/// Saw `ESC P $`; a DECRQSS request if the next byte is the `q` final.
@@ -150,6 +178,10 @@ impl Queries {
 							self.params.clear();
 							Scan::CsiEq
 						}
+						b'?' => {
+							self.params.clear();
+							Scan::CsiQuestion
+						}
 						ESC => Scan::Esc,
 						// Any other CSI (an SGR colour, a cursor move, `ESC [ c` DA1) — not ours.
 						_ => Scan::Text,
@@ -195,6 +227,30 @@ impl Queries {
 					}
 					ESC => self.state = Scan::Esc,
 					// Any other `CSI =` final byte is a private sequence cmote does not answer.
+					_ => self.state = Scan::Text,
+				},
+				Scan::CsiQuestion => match byte {
+					b'0'..=b'9' | b';' => {
+						self.params.push(byte);
+						// Same bound as the other private forms; a DECSET parameter list never
+						// approaches it (§12).
+						if self.params.len() > MAX_PARAMS {
+							self.state = Scan::Text;
+						}
+					}
+					b'S' => {
+						// XTSMGRAPHICS (§41). The engine has no arm for the `?` form of `CSI S` — its
+						// only `S` is SU, scroll-up, with no intermediate — so the whole request falls
+						// to cmote. A request naming neither an item nor an action is malformed and
+						// left unanswered rather than guessed at.
+						if let Some(request) = graphics_request(&self.params) {
+							found.push(Query::Graphics(request));
+						}
+						self.state = Scan::Text;
+					}
+					ESC => self.state = Scan::Esc,
+					// Every other `CSI ?` sequence — DECSET/DECRST (`h`/`l`), DECRQM (`$p`), the
+					// kitty keyboard query (`u`) — belongs to the engine.
 					_ => self.state = Scan::Text,
 				},
 				Scan::Dcs => {
@@ -296,6 +352,120 @@ impl Queries {
 			}
 		}
 	}
+}
+
+/// Read an XTSMGRAPHICS request out of a collected parameter run (§41). The first two parameters are
+/// the item and the action; anything after them belongs to a *set*, which cmote refuses, so it is
+/// not read. `None` when either is missing or unparseable — an unanswered malformed request is
+/// better than an answer about something the program did not ask for.
+fn graphics_request(params: &[u8]) -> Option<Graphics> {
+	let mut fields = params.split(|&byte| byte == b';');
+	let item = number(fields.next()?)?;
+	let action = number(fields.next()?)?;
+	Some(Graphics { item, action })
+}
+
+/// One decimal parameter as a number, or `None` when it is empty or too long to be one. Saturating
+/// digits, so a remote's overlong run clamps instead of wrapping into a small plausible value (§12).
+fn number(field: &[u8]) -> Option<u16> {
+	if field.is_empty() {
+		return None;
+	}
+	let mut value = 0u16;
+	for &byte in field {
+		let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
+		value = value.saturating_mul(10).saturating_add(u16::from(digit));
+	}
+	Some(value)
+}
+
+/// The XTSMGRAPHICS reply: `CSI ? Pi ; Ps ; Pv S`, where `Ps` is the status — 0 success, 1 an item
+/// this terminal knows nothing about, 3 a failure (§41).
+///
+/// cmote's graphics limits are fixed by the decoder (`term::sixel`), which is what makes the answers
+/// simple: a READ (action 1) or a read-of-the-maximum (action 4) reports the real number, and so does
+/// a RESET (action 2), since resetting a fixed capacity to its default lands on that same number. A
+/// SET (action 3) is refused with a status 3 and the unchanged value — the honest answer, and the one
+/// that leaves the program correctly believing what cmote will actually accept. Anything but the
+/// colour registers (item 1) and the sixel geometry (item 2) is answered "unknown item": cmote has no
+/// ReGIS (item 3) and never will, so claiming a geometry for it would be a lie a program could act on.
+pub fn graphics_reply(request: &Graphics, registers: u16, geometry: (u16, u16)) -> Vec<u8> {
+	// A set is the one action that cannot succeed; every other one reports the fixed truth.
+	let status = if request.action == 3 { 3 } else { 0 };
+	let (width, height) = geometry;
+	match request.item {
+		1 => format!("\x1b[?1;{status};{registers}S").into_bytes(),
+		2 => format!("\x1b[?2;{status};{width};{height}S").into_bytes(),
+		item => format!("\x1b[?{item};1S").into_bytes(),
+	}
+}
+
+/// Add the sixel capability to a DA1 reply the ENGINE wrote (§41).
+///
+/// DA1 (`CSI c`, "what terminal are you?") is one of the queries `alacritty_terminal` answers itself
+/// — `CSI ? 6 c`, a VT102 — and a terminal advertises inline images by listing attribute **4** in
+/// that answer. Programs that pick a picture format at startup (chafa's auto mode, lsix, ranger's
+/// previewer) read exactly that; without the 4 they fall back to text art, and cmote's images would
+/// go unused however well they work.
+///
+/// So this rewrites the engine's own reply instead of sending a second one: two DA1 answers to one
+/// query would leave the program parsing the second as input, and suppressing the engine's would mean
+/// cutting bytes out of the stream on their way IN — surgery on a byte stream a program is mid-
+/// sequence in. Amending what cmote is about to send is the same fact stated once, at the only point
+/// where both halves of the answer are known.
+///
+/// A reply that already names 4, and any other reply passing through (DECRQM, a cursor report, the
+/// kitty keyboard answer), is returned untouched: only `CSI ? <digits and semicolons> c` is a DA1.
+pub fn with_sixel_attribute(reply: Vec<u8>) -> Vec<u8> {
+	// The overwhelmingly common case is a chunk with no DA1 in it (usually no reply at all), so it
+	// costs one scan for the prefix and no allocation.
+	if !reply
+		.windows(DA1_PREFIX.len())
+		.any(|window| window == DA1_PREFIX)
+	{
+		return reply;
+	}
+	let mut out = Vec::with_capacity(reply.len() + SIXEL_ATTRIBUTE.len());
+	let mut index = 0;
+	while index < reply.len() {
+		let rest = &reply[index..];
+		if let Some(params) = rest.strip_prefix(DA1_PREFIX)
+			&& let Some(end) = da1_params_end(params)
+		{
+			let params = &params[..end];
+			out.extend_from_slice(DA1_PREFIX);
+			out.extend_from_slice(params);
+			// Already advertised (a future engine version might): say it once.
+			if !params
+				.split(|&byte| byte == b';')
+				.any(|field| field == b"4")
+			{
+				out.extend_from_slice(SIXEL_ATTRIBUTE);
+			}
+			out.push(b'c');
+			// Past the whole reply, terminator included.
+			index += DA1_PREFIX.len() + end + 1;
+			continue;
+		}
+		out.push(reply[index]);
+		index += 1;
+	}
+	out
+}
+
+/// How the engine opens a DA1 reply, and the parameter that says "this terminal draws sixels".
+/// Separated so `with_sixel_attribute` reads as the shape it is looking for.
+const DA1_PREFIX: &[u8] = b"\x1b[?";
+const SIXEL_ATTRIBUTE: &[u8] = b";4";
+
+/// How many bytes of `params` are a DA1's parameter run — i.e. the offset of its closing `c`, or
+/// `None` when what follows the `CSI ?` is not a DA1 at all (a DECRQM report ends in `$y`, a kitty
+/// keyboard report in `u`). Only digits and semicolons may precede the `c`.
+fn da1_params_end(params: &[u8]) -> Option<usize> {
+	params
+		.iter()
+		.position(|&byte| !matches!(byte, b'0'..=b'9' | b';'))
+		.filter(|&end| params[end] == b'c')
 }
 
 /// The XTVERSION reply for an identity string: `DCS > | <id> ST` (§33). `id` is cmote's name and
@@ -589,6 +759,119 @@ mod tests {
 		assert_eq!(
 			gettcap_reply(&[b"7A7A".to_vec()]),
 			b"\x1bP0+r7A7A\x1b\\".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_graphics_request_carries_its_item_and_action() {
+		// XTSMGRAPHICS `CSI ? 1 ; 1 S` — "read the colour register count" (§41). The trailing values
+		// a set would carry are not part of the request cmote answers.
+		assert_eq!(
+			scan(b"\x1b[?1;1S"),
+			vec![Query::Graphics(Graphics { item: 1, action: 1 })]
+		);
+		assert_eq!(
+			scan(b"\x1b[?2;4S"),
+			vec![Query::Graphics(Graphics { item: 2, action: 4 })]
+		);
+		assert_eq!(
+			scan(b"\x1b[?1;3;16S"),
+			vec![Query::Graphics(Graphics { item: 1, action: 3 })]
+		);
+	}
+
+	#[test]
+	fn the_engines_own_private_modes_are_not_graphics_requests() {
+		// The `CSI ?` prefix is shared with every DECSET/DECRST there is, plus DECRQM and the kitty
+		// keyboard query — all the engine's, and none of them ending in `S`. A request with too few
+		// parameters is malformed and stays unanswered.
+		assert!(scan(b"\x1b[?1049h").is_empty());
+		assert!(scan(b"\x1b[?25l").is_empty());
+		assert!(scan(b"\x1b[?2026$p").is_empty());
+		assert!(scan(b"\x1b[?u").is_empty());
+		assert!(scan(b"\x1b[?1S").is_empty());
+		assert!(scan(b"\x1b[?S").is_empty());
+	}
+
+	#[test]
+	fn the_graphics_reply_states_the_registers_and_the_geometry() {
+		// A read of item 1 reports the colour register count with a success status; a read of item 2
+		// reports the maximum image size (§41).
+		assert_eq!(
+			graphics_reply(&Graphics { item: 1, action: 1 }, 256, (4096, 4096)),
+			b"\x1b[?1;0;256S".to_vec()
+		);
+		assert_eq!(
+			graphics_reply(&Graphics { item: 2, action: 4 }, 256, (4096, 2048)),
+			b"\x1b[?2;0;4096;2048S".to_vec()
+		);
+	}
+
+	#[test]
+	fn setting_a_graphics_limit_is_refused_with_the_real_value() {
+		// cmote's limits are the decoder's, so a set cannot succeed: status 3, and the value it will
+		// in fact keep to — which leaves the program believing something true.
+		assert_eq!(
+			graphics_reply(&Graphics { item: 1, action: 3 }, 256, (4096, 4096)),
+			b"\x1b[?1;3;256S".to_vec()
+		);
+		// A reset lands on that same fixed number, so it succeeds.
+		assert_eq!(
+			graphics_reply(&Graphics { item: 1, action: 2 }, 256, (4096, 4096)),
+			b"\x1b[?1;0;256S".to_vec()
+		);
+	}
+
+	#[test]
+	fn an_unknown_graphics_item_is_answered_unknown() {
+		// Item 3 is ReGIS, which cmote has none of: status 1 rather than a geometry it cannot honour.
+		assert_eq!(
+			graphics_reply(&Graphics { item: 3, action: 1 }, 256, (4096, 4096)),
+			b"\x1b[?3;1S".to_vec()
+		);
+	}
+
+	#[test]
+	fn the_engines_da1_reply_gains_the_sixel_attribute() {
+		// The engine answers DA1 with `CSI ? 6 c`; cmote draws sixels, so the reply must say 4 (§41).
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[?6c".to_vec()),
+			b"\x1b[?6;4c".to_vec()
+		);
+		// A DA1 among other replies is amended in place, and the rest is passed through byte for byte.
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[0n\x1b[?6c\x1b[1;1R".to_vec()),
+			b"\x1b[0n\x1b[?6;4c\x1b[1;1R".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_reply_that_is_not_a_da1_is_left_exactly_as_it_was() {
+		// Other `CSI ?` replies share the prefix: a DECRQM report (`$y`) and the kitty keyboard
+		// report (`u`) must pass through untouched, or a program would read a mangled answer.
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[?2026;2$y".to_vec()),
+			b"\x1b[?2026;2$y".to_vec()
+		);
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[?1u".to_vec()),
+			b"\x1b[?1u".to_vec()
+		);
+		// And an empty reply — the usual case — is returned as it came.
+		assert!(with_sixel_attribute(Vec::new()).is_empty());
+	}
+
+	#[test]
+	fn a_da1_that_already_advertises_sixel_is_not_amended_twice() {
+		// If a future engine version lists 4 itself, the attribute is stated once — and `14` is not a
+		// `4`, so a reply carrying it still gains the real parameter.
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[?62;4;22c".to_vec()),
+			b"\x1b[?62;4;22c".to_vec()
+		);
+		assert_eq!(
+			with_sixel_attribute(b"\x1b[?62;14c".to_vec()),
+			b"\x1b[?62;14;4c".to_vec()
 		);
 	}
 

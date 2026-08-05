@@ -41,7 +41,14 @@ arboard = { version = "3", default-features = false }
 # `advanced` unlocks the `Widget` trait, so the terminal grid can be one custom widget
 # that draws every cell at an exact pixel position (PLAN §11) instead of a widget per
 # cell — the only way a fallback glyph cannot shift the row it is on.
-iced = { version = "0.14.0", features = ["advanced"] }
+# `image-without-codecs` turns on the renderer's raster-image pipeline, so that same widget can
+# composite the inline sixel images a remote program sends (PLAN §41). The `-without-codecs`
+# spelling is deliberate: it adds the `image` crate with NO default features, i.e. the pixel-buffer
+# types alone and not a single format decoder — cmote decodes sixel itself (`term::sixel`), so a
+# PNG/JPEG/GIF decoder would be attack surface (a parser fed bytes straight off the wire) and
+# build weight for a format we never hand the renderer. Pure Rust either way, so the
+# no-C-toolchain portable build holds (§11).
+iced = { version = "0.14.0", features = ["advanced", "image-without-codecs"] }
 # Opens an OSC 8 hyperlink in the OS's default browser (PLAN §24). Pure Rust, no C
 # toolchain, so the portable build holds (§11). Its default launcher hands the URI to
 # PowerShell `Start-Process` as an ENVIRONMENT VARIABLE (data, never shell code), falling

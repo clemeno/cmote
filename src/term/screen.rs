@@ -234,6 +234,16 @@ impl<'a> Screen<'a> {
 		self.engine.grid().history_size() as u16
 	}
 
+	/// Whether the ALTERNATE screen is the one on show — the page a full-screen program (vim, tmux,
+	/// less) swaps to with DECSET ?1049 / ?47 (§41). It keeps no scrollback, so an absolute document
+	/// line means nothing there: `history_size` is 0 and every row is line `row`, which is the same
+	/// coordinate the PRIMARY screen's oldest retained lines carry. Anything anchored in document
+	/// coordinates therefore has to sit out the alternate screen rather than be drawn against it —
+	/// which is what the inline images check, both when one arrives and when the grid paints.
+	pub fn is_alternate(&self) -> bool {
+		self.engine.mode().contains(TermMode::ALT_SCREEN)
+	}
+
 	/// Whether the cursor is hidden (DECTCEM off).
 	pub fn hide_cursor(&self) -> bool {
 		!self.engine.mode().contains(TermMode::SHOW_CURSOR)

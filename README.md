@@ -119,6 +119,15 @@ references below (§n) point into it.
 - **The cursor takes the shape a program asks for** — a block, an underline, or a thin bar,
   whichever the remote picks with DECSCUSR (vim's insert-mode bar, say); drawn steady, since
   cmote runs no blink timer (§23).
+- **Pictures show up in the terminal** — a program that sends a **sixel** image (`img2sixel`,
+  `chafa -f sixel`, gnuplot, timg, matplotlib's sixel backend, `lsix`) gets a real picture, not a
+  screenful of garbage. It is drawn over the cells it reserves, so the prompt lands underneath it and
+  it scrolls up into the history with the output around it — scroll back and the plot is still there,
+  on its own text. cmote also *tells* programs it can do this (the sixel device attribute and the
+  graphics-capability query), which is what makes the tools that auto-detect send a picture rather
+  than fall back to text art. Full-screen programs that draw on the alternate screen (`ranger`
+  previews, `mpv --vo=sixel`) are not covered yet, and kitty's and iTerm2's own image protocols are
+  not spoken (§41).
 - **The remote is told when focus changes** — a program that turns on focus reporting (`?1004`,
   as tmux and vim do) hears `CSI I` / `CSI O` as the window gains or loses focus, so it can
   undim or pause a spinner. Moving cmote's keyboard to a side panel counts as the shell losing
@@ -541,7 +550,11 @@ wiring end to end (an `f`-spelling move
 lands in its own cell, a wide glyph reserves two columns, and the engine's query replies are
 drained and sent back — device status, device attributes, a live cursor-position report, the
 save/jump/report/restore size-probe reporting the clamped corner, and a query split across
-two chunks answered on completion), pointer-event → mouse-report encoding (each encoding, each
+two chunks answered on completion), inline sixel images (the decoder per command, per colour space —
+RGB percentages, DEC's blue-origin HLS — and per memory cap, the stream scanner across chunk
+boundaries, the cells a picture reserves and erases, its anchor surviving the scroll into history,
+the erase and reset rules, the alternate-screen refusal, and the two capability answers §41),
+pointer-event → mouse-report encoding (each encoding, each
 mode's gating, the classic form's 223-column ceiling, the wheel, the modifier bits), the
 grid's run packing and the geometry of the glyphs it draws itself (a braille
 cell read back as its dot pattern, a rounded corner's arc and tails measured against a real
