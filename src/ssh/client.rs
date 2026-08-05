@@ -20,9 +20,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use russh::Channel;
 use russh::client;
 use russh::keys::PublicKey;
-use russh::{Channel, ChannelMsg};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -34,6 +34,7 @@ use crate::ssh::download;
 use crate::ssh::edit;
 use crate::ssh::forward;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
+use crate::ssh::shell;
 use crate::ssh::upload;
 use crate::term;
 
@@ -83,6 +84,48 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 					let _ = link
 						.to_session
 						.send(SessionMsg::Resize { cols, rows })
+						.await;
+				}
+			}
+			// The elevation commands (§45), all forwarded the same way as the rest: the session
+			// task owns its shells, so this loop only has to reach the right session.
+			SshCommand::Elevate { identity, command } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::Elevate { identity, command })
+						.await;
+				}
+			}
+			SshCommand::ElevateAnswer { identity, secret } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::ElevateAnswer { identity, secret })
+						.await;
+				}
+			}
+			SshCommand::SelectIdentity(identity) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::SelectIdentity(identity))
+						.await;
+				}
+			}
+			SshCommand::Reply { identity, bytes } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::Reply { identity, bytes })
+						.await;
+				}
+			}
+			SshCommand::CloseIdentity(identity) => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::CloseIdentity(identity))
 						.await;
 				}
 			}
@@ -260,8 +303,18 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 pub(crate) enum SessionMsg {
 	/// Keyboard bytes to write to the shell.
 	Data(Vec<u8>),
-	/// Terminal resized; reflow the remote pty.
+	/// Terminal resized; reflow every shell's remote pty (§45).
 	Resize { cols: u16, rows: u16 },
+	/// Open another shell on this connection, running `command` to become another account (§45).
+	Elevate { identity: u64, command: String },
+	/// One answer to an elevating shell's question (§45), written to its channel.
+	ElevateAnswer { identity: u64, secret: Secret },
+	/// Which shell typing belongs to from now on (§45).
+	SelectIdentity(u64),
+	/// A query reply for one named shell, whether or not it is the selected one (§23, §45).
+	Reply { identity: u64, bytes: Vec<u8> },
+	/// End one elevated shell (§45); the login shell is not closable this way.
+	CloseIdentity(u64),
 	/// A passphrase the user typed to unlock an encrypted key (§7).
 	Passphrase(Secret),
 	/// The user's answers to a keyboard-interactive request (§7), one per prompt in order.
@@ -462,13 +515,19 @@ async fn connect_and_run(
 /// The bidirectional pump: server output -> GUI, GUI input/resize -> server.
 /// Runs until either side closes. `session` is borrowed alongside the shell channel so
 /// an upload can open its own sftp channel on the same connection (§17).
+///
+/// The shell is no longer a single channel: `shell::Shells` holds every shell the session has —
+/// the login one and any account elevated into (§45) — and hands this loop one receiver for all of
+/// them, so the `select!` below stays the same shape however many are open.
 async fn stream(
-	mut channel: Channel<client::Msg>,
+	channel: Channel<client::Msg>,
 	session: &client::Handle<Handler>,
 	events: &mpsc::Sender<SshEvent>,
 	mut to_session_rx: mpsc::Receiver<SessionMsg>,
 	remote_forwards: forward::RemoteTable,
 ) -> Result<()> {
+	// The session's shells (§45), starting with the login one this loop was handed.
+	let (mut shells, mut from_shells) = shell::Shells::new(channel);
 	// The explorer's SFTP channel (§18): opened on the first listing and kept for the
 	// rest of the session, since a tree asks many small questions.
 	let mut sftp = browse::Sftp::default();
@@ -495,20 +554,13 @@ async fn stream(
 
 	loop {
 		tokio::select! {
-			// Something arrived from the server on the channel.
-			message = channel.wait() => {
-				match message {
-					Some(ChannelMsg::Data { data }) => {
-						let _ = events.send(SshEvent::Output(data.to_vec())).await;
-					}
-					// stderr of the remote shell; render it inline too.
-					Some(ChannelMsg::ExtendedData { data, .. }) => {
-						let _ = events.send(SshEvent::Output(data.to_vec())).await;
-					}
-					// Remote closed, or the shell exited: end the session.
-					Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | Some(ChannelMsg::ExitStatus { .. }) => break,
-					Some(_) => {}
-					None => break, // channel fully closed
+			// Something arrived on one of the session's shells (§45). Which one is in the message;
+			// `Shells` decides whether those bytes are terminal output or the next line of an
+			// elevation's credential conversation, and says when the SESSION is over — which only
+			// the login shell closing means.
+			Some(message) = from_shells.recv() => {
+				if shells.on_msg(message, events).await {
+					break;
 				}
 			}
 			// A local/dynamic forward accepted a connection (§27). Open its SSH channel here —
@@ -519,10 +571,23 @@ async fn stream(
 			// A command arrived from the GUI (via run()).
 			command = to_session_rx.recv() => {
 				match command {
-					Some(SessionMsg::Data(bytes)) => channel.data(&bytes[..]).await?,
-					Some(SessionMsg::Resize { cols, rows }) => {
-						channel.window_change(cols as u32, rows as u32, 0, 0).await?;
+					// Typing goes to the shell the user is looking at, and a resize to every one of
+					// them — they share a window, so they share a pty size (§45).
+					Some(SessionMsg::Data(bytes)) => shells.input(bytes).await,
+					Some(SessionMsg::Resize { cols, rows }) => shells.resize(cols, rows).await,
+					// Become another account on this same connection (§45): another shell, running
+					// the elevation program, which holds its own conversation on its own channel.
+					Some(SessionMsg::Elevate { identity, command }) => {
+						shells.elevate(session, events, identity, command).await;
 					}
+					Some(SessionMsg::ElevateAnswer { identity, secret }) => {
+						shells.answer(identity, secret).await;
+					}
+					Some(SessionMsg::SelectIdentity(identity)) => shells.select(identity),
+					Some(SessionMsg::Reply { identity, bytes }) => {
+						shells.reply(identity, bytes).await;
+					}
+					Some(SessionMsg::CloseIdentity(identity)) => shells.close(identity).await,
 					// Passphrase and keyboard-interactive answers only matter during auth;
 					// ignore any that arrive late, once the shell is already streaming.
 					Some(SessionMsg::Passphrase(_)) | Some(SessionMsg::Interactive(_)) => {}
@@ -618,9 +683,10 @@ async fn stream(
 					Some(SessionMsg::RemoveForward(id)) => {
 						forwards.remove(session, id).await;
 					}
-					// Explicit disconnect, or run() dropped the link.
+					// Explicit disconnect, or run() dropped the link. Every shell goes, not just the
+					// login one (§45) — an elevated shell left running would hold the connection.
 					Some(SessionMsg::Disconnect) | None => {
-						let _ = channel.eof().await;
+						shells.eof_all().await;
 						break;
 					}
 				}

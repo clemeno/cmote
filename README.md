@@ -148,6 +148,19 @@ references below (§n) point into it.
   than only where you are in it (§35, §39). The bar keeps up with a **live** shell: a hit printed while
   it is open joins the count and the washes on the next frame, without dragging the view off whatever
   you are reading (§44).
+- **Be root without logging in again** — right-click the grid and pick **Log in as…** to run `sudo -i`
+  (or `su -`) on the connection you already have. cmote types nothing at your prompt: the elevation runs
+  on a channel of its own, so the password can only ever reach `sudo`, never a shell, a running command
+  or your history. It asks whatever the remote asks, in the remote's own words — a password, then a
+  verification code if the machine wants one — and hands you a **root terminal of its own**, with its own
+  scrollback. Your `cme` shell is still there, still running whatever you left in it: the account name in
+  the status bar becomes a **select** once there are two, and switching brings back that shell's history,
+  cwd and find bar exactly as you left them. The sudo password is remembered for the connection so a
+  second account does not ask twice — in memory only, never written down, and dropped the moment you
+  disconnect; a one-time code is always asked for afresh. Any account works, not just root
+  (`postgres`, a deploy user), and typing `exit` at an elevated prompt drops you back to your own. The
+  folder tree and files pane still act as the account you logged in with — SFTP is a separate service
+  the server starts as that user, which `sudo` in a terminal cannot reach (§45).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
   selects a word** and **triple-click the whole line**: a word is generous about what belongs to
@@ -363,12 +376,13 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Gesture | What it does |
 |---|---|
 | Drag across the grid | Select text (highlighted in place) |
-| Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory); on a link cell, **Open link / Copy link** too |
+| Right-click | Context menu: Copy / Paste / Upload… (into the shell's directory) / **Log in as…**; on a link cell, **Open link / Copy link** too |
 | **Ctrl+click** a link | Open an OSC 8 hyperlink in the browser (http/https/mailto only) |
 | **Ctrl+C** | Copy the selection as styled HTML + plain text (rich paste keeps colours); with no selection, the shell's interrupt instead. Clears the selection after copying |
 | **Ctrl+Shift+C** | Copy the selection as plain text only |
 | **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
 | **Ctrl+Shift+F** | Open the scrollback find bar (pressed again, it refocuses the field). **↑** / **↓** step to the older / newer hit, wrapping; **Esc** or its ✕ closes it and leaves the last hit selected. Hits on screen are washed; the bar follows live output |
+| **Log in as…** (right-click, or the account select once there are two) | Run `sudo -i` / `su -` on this connection and get that account's own terminal; the select in the status bar switches between the accounts you are logged in as, each keeping its own scrollback (§45) |
 | **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
@@ -583,7 +597,14 @@ paths / URLs / endpoints / separators, a word and a copy carried across a line w
 logical line a triple click takes, plus §43's reflow clean-up: the selection dropped, the find bar
 re-scanned and the click tally started over, and §44's live find bar: output marking the match list
 stale rather than scanning per chunk, the deferred scan picking the new hit up, and a re-scan moving
-neither the viewport nor the selection), paste encoding (bracketed-paste
+neither the viewport nor the selection), §45's second account on one connection (the command built for
+`sudo` and `su`, an account name that could be read as a flag or as shell punctuation refused before it
+reaches a command line, a credential prompt told from a shell prompt from a finished line and from a
+coloured one, a whole view swapped and restored on a switch, a parked account's output filling its own
+scrollback and its queries answered on its own channel, the password reused once and dropped when it is
+refused, a one-time code always asked for, cancelling closing the shell it opened, a refusal quoted in
+the remote's own words, an elevated shell exiting falling back to the login account, and the dialog
+owning the keyboard while it holds a secret), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,

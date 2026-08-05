@@ -4011,3 +4011,133 @@ washes.
   The find bar is fixable here precisely because its list is derivable from the text.
 - **The bar does not open itself, and nothing searches while it is closed.** No background matching, no
   "N new matches" badge on the tab chip (§34's dot is a command status, not a search one).
+
+## §45 — More than one account on one connection (v3.x)
+
+`rec.michoacan` accepts `cme` and nothing else: root logs in over SSH nowhere sane. So the way to be
+root there is to become root **after** logging in — `sudo -i` — and until now cmote could only do that
+the way any terminal can: by the user typing it, into the one shell, and losing `cme` in the process.
+
+An SSH session authenticates ONCE, as one user, and everything on it runs as that user. Becoming
+another account is therefore not an SSH matter at all: it is a *program* (`sudo`, `su`) run on the
+connection, which holds a short conversation — a password, perhaps a one-time code — and then replaces
+itself with a login shell for the other account. This section makes that a first-class thing: a session
+holds a SET of shells, one per account, each with its own terminal, and the status bar says which one
+is on screen.
+
+What it deliberately does not do is pretend the file panes came along. They did not — see the NOT list.
+
+### One shell was one channel; now it is a set (`ssh/shell.rs`)
+
+`stream()` used to hold the shell channel, await it and write to it. `shell::Shells` now holds them all,
+keyed by an identity number the GUI assigns (`bridge::LOGIN_IDENTITY` for the account the session logged
+in as, then 1 upward). Two problems came with the set, and the shape is the answer to both:
+
+- **Awaiting N channels.** `Channel::wait` needs `&mut`, so awaiting several in one `select!` would hold
+  N mutable borrows across an await while the same loop wants to write to them. Every channel is
+  `split()` instead: the reading half moves into a task of its own that forwards each message down one
+  shared mpsc tagged with its identity, and the writing half stays in the map. The session loop awaits a
+  single receiver, and writing borrows nothing reading holds — so the `select!` keeps the shape it had
+  however many shells are open.
+- **Output that is not output.** While `sudo` is still asking, the channel's bytes are a credential
+  conversation, not something to draw. A shell is `Elevating` before it is `Live`, and only a `Live`
+  shell's bytes become `SshEvent::Output`.
+
+Three commands are untagged on purpose and one is newly tagged, which is the whole routing rule:
+`Input` goes to the SELECTED shell (the GUI says which with `SelectIdentity`, on the same ordered
+channel, so a switch and the keystrokes after it cannot cross); `Resize` goes to EVERY shell, since they
+share one window and an off-screen pty laid out for an old size would be wrong the moment it came
+forward; `Output` carries its identity, because the shells not on screen keep running and a build left
+in `cme`'s shell must go on filling `cme`'s scrollback. `Reply` is new and named: a query answer (§23)
+must reach the shell whose program is blocked on it, which is not necessarily the one being looked at.
+
+### Why the elevation gets its own channel, and not the shell it has (`elevate.rs`)
+
+The obvious implementation is to type `sudo -i` at the live prompt and watch for a password prompt. That
+is what makes it dangerous: if sudo never asks — already root, sudoers refuses, a slow command still
+running — the password goes to whatever owns the pty, which may echo it, log it, or take it as a command
+line. cmote runs the elevation with `exec` on a channel of its own, so the process on the other end IS
+`sudo` and nothing else. A secret written there cannot reach a shell, a running command or a history file.
+
+Recognising the questions is then only about labelling, and `elevate.rs` is the pure text of it —
+`&str` in, `String` out, no channel and no session, so the two judgements that carry risk are unit
+tested line by line:
+
+- **The password prompt is named by cmote itself.** `sudo -p 'cmote-password:'` turns the one question
+  that can be predicted into an exact string match, instead of guessing at `[sudo] password for cme:` in
+  whatever the remote's locale is. The user is shown "Password:" — the marker is an internal token.
+- **A second factor is recognised by its wording,** because a PAM module sudo knows nothing about asks
+  it. Only the tail after the last newline can be a question (a program asking leaves the cursor on the
+  line it asked on; a terminated line is output), it must end in `:` or `?` after escape sequences are
+  stripped, and it must contain a credential word.
+- **When in doubt, say nothing.** A shell prompt CAN end in a colon. Guessing "credential prompt" over
+  one would put a secret field in front of the user and land what they typed on a root shell's command
+  line; guessing the other way costs them one thing — typing the code into the terminal themselves,
+  exactly as they do today. So an unmatched prompt raises no dialog, and a tail ending in `$ # % >` ends
+  the conversation for good: from then on nothing on that channel is ever read as a question again.
+- **The account name is validated, not merely quoted** (`valid_user`). It is the one string in cmote
+  composed into a command that runs on a remote machine as another user; `root; rm -rf /` is refused at
+  the field, and quoting is the second line of defence rather than the only one.
+
+### Switching accounts is a swap, not a re-purposing (`app.rs`)
+
+An identity that is not on screen keeps its own `Workspace`: terminal, selection, drag state, click
+tally, find bar. The fields for whichever identity IS on screen stay exactly where they were — as
+`Tab`'s own fields — so the thousands of lines that read `self.terminal` never learn that identities
+exist; `Tab::exchange` moves a whole view in and the live one out in one step. That one function is the
+thing that has to be complete: a `Workspace` field without a line there would leak one account's state
+into another's pane, which is why it is a `swap` of every field rather than anything cleverer.
+
+The consequence worth having: `cme`'s scrollback, cwd, prompt marks and find bar are all still there
+when the user comes back to it, and a long build keeps printing into them while root's shell is on
+screen.
+
+### The switcher, and the two faces of the dialog (`ui/terminal.rs`)
+
+The status bar shows the account the grid belongs to. With ONE account it is plain text — a select with
+a single option is a control that does nothing — and with two or more it becomes a select whose entries
+are the live accounts plus one that is not an account at all, "Log in as…". Elevating with a single
+account open is the terminal's context menu, which is also where it is discoverable from at any time.
+
+The dialog is one conversation in two halves, and never both at once: a FORM (which account, `sudo` or
+`su`) until something is asked, then the remote's QUESTION worded exactly as the remote worded it with a
+masked field under it. A password field beside an editable account name would invite typing the answer
+into the wrong one. While it is open it owns the keyboard — a security property, not a nicety: its field
+holds a password or a one-time code, and a keystroke that also reached the shell would type that secret
+at a live prompt. Esc abandons, and abandoning closes any shell already opened, since a `sudo` parked on
+a prompt nobody will answer would hold a channel for the rest of the session.
+
+### The password is typed once; a one-time code never is
+
+The sudo password is kept for the connection's life in a `Secret` (redacted in `Debug`, wiped on drop)
+and dropped when the session ends — never to the vault, never to a profile: a sudo password is usually
+the account's own login password, and persisting it would turn a session-lifetime secret into one at
+rest (§12). A second elevation that asks for the same password is answered from it with no dialog. The
+same question asked TWICE means that cached password was just refused, so it is dropped and the user is
+asked — and the dialog says the last answer was refused, because sudo re-asks silently and a dialog that
+merely reappears looks like one that did nothing. A one-time code is asked for every single time, which
+is what "one-time" means.
+
+### What is deliberately NOT here
+
+- **The folder tree, the files pane and the transfers are still the LOGIN account's.** They do not go
+  through the shell at all: each opens its own channel and asks sshd for the `sftp` subsystem, which
+  sshd starts as the account the session authenticated as. `sudo` in a terminal cannot reach that
+  process, so root's terminal beside `cme`'s file panes is the honest state of things until §46 gives
+  the file layer its own elevation. `Workspace` deliberately does not park them: splitting one view per
+  identity now would only pretend they differ.
+- **A localized second-factor prompt may raise no dialog.** The vocabulary covers English plus a few
+  common spellings; anything else falls through and the question appears in the terminal, where the user
+  answers it directly. This is the safe direction of the two, and the reason the rule is written that
+  way round.
+- **A shell prompt ending in `:` with no second factor configured would be read as a question** if it
+  also contained a credential word (a cwd called `~/code`, say). `ponytail:` the residual case of the
+  heuristic above; the elevation still works, the user sees one spurious field and cancels it.
+- **Two sudos means two authentications.** sudo's credential cache is per-tty by default
+  (`tty_tickets`), and each shell has its own pty, so the cached password saves the typing but not the
+  second factor. This is what will make §46 ask for a code again.
+- **No keyboard shortcut, and no auto-elevate on connect.** The menu and the switcher are the two ways
+  in; a per-profile "elevate on connect" is §47, which is where the profile format changes.
+- **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
+  (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
+  prompt, or cancelling the dialog that opened it.

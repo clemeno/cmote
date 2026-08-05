@@ -14,6 +14,7 @@
 mod app; // iced application: State, Message, update, view, subscription
 mod bridge; // channel message types that cross the GUI <-> tokio boundary (§4)
 mod editor; // the in-tab text editor's model: encoding, changed-line diff, buffer state (§32)
+mod elevate; // becoming another account on the machine we are already logged in to (§45)
 mod explorer; // the remote folder tree's model: nodes, expansion, path arithmetic (§18)
 mod files; // the remote file browser's model: one directory, batched listings (§19)
 mod forward; // the pure port-forward spec: kind + bind/target, parse/validate/label (§27)

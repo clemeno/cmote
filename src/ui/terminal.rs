@@ -57,6 +57,11 @@ pub const SEARCH_INPUT_ID: &str = "term-find";
 const SEARCH_BAR_BORDER: Color = Color::from_rgb8(0x55, 0x55, 0x55);
 const SEARCH_BAR_INSET: f32 = 8.0;
 
+/// A notice inside a dialog that is not an error the user caused: a refused answer, a remote's own
+/// refusal (§45). Amber rather than red — it is a thing to read and act on, not an alarm — and the
+/// same family as the find bar's washes and the tab strip's running dot.
+const NOTICE_FG: Color = Color::from_rgb8(0xd7, 0xa8, 0x3a);
+
 /// The body copy for the disconnect confirmation dialog (§10). Public so `app` can
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
@@ -100,6 +105,48 @@ pub const DELETE_DIALOG_BODY: &str = "Delete these from the server? This cannot 
 /// this one, keep both (a -1 copy beside it), settle every later collision the same way at once,
 /// or cancel the whole transfer — files already copied stay.
 pub const CONFLICT_DIALOG_BODY: &str = "A file with this name is already at the destination. Choose what to do — replaced files are not recoverable. This applies as you go; \"all\" settles every remaining collision the same way.";
+
+/// The widget ids of the elevate dialog's two fields (§45), so `app` can focus whichever face of it
+/// is showing: the account to become while it is still a form, and the answer once the remote has
+/// asked something.
+pub const ELEVATE_USER_INPUT_ID: &str = "elevate-user";
+pub const ELEVATE_ANSWER_INPUT_ID: &str = "elevate-answer";
+
+/// The body of the elevate dialog's form (§45). Says the two things that are not obvious: this is
+/// not a second connection (so no host key, no second SSH login), and which password is being asked
+/// for depends on the program — `sudo` wants the caller's own, `su` wants the target account's.
+pub const ELEVATE_DIALOG_BODY: &str = "Open a shell as another account on this same connection — no second login, no new host key. sudo asks for YOUR password; su asks for the other account's. A second factor is asked for by the remote if it wants one.";
+
+/// Who the session is, for the status bar (§10, §45). One struct rather than three parameters
+/// because `view` is at its argument limit — and because they are one idea: the connection, the
+/// accounts it currently has shells for, and which of those is on screen.
+pub struct SessionView<'a> {
+	/// The `user@host:port` of the connection itself — the account it authenticated as, which does
+	/// not change when another identity is put on screen.
+	pub endpoint: &'a str,
+	/// Every account with a live shell, in the order they were opened (§45). One entry means one
+	/// account, and the bar then shows its name as plain text; two or more turn it into a select.
+	pub identities: Vec<crate::app::IdentityChoice>,
+	/// The account on screen, which is the select's current value.
+	pub current: u64,
+}
+
+/// The elevate dialog's state while it is open (§45): whichever face of it is showing. `prompt` is
+/// the remote's own current question, `None` while the form is up or an answer is in flight.
+#[derive(Debug, Clone, Copy)]
+pub struct ElevateView<'a> {
+	pub kind: crate::elevate::Kind,
+	pub user: &'a str,
+	pub prompt: Option<&'a str>,
+	pub answer: &'a str,
+	/// Whether the last answer was refused — the same question asked twice over.
+	pub refused: bool,
+	/// Why the elevation failed, in the remote's own words.
+	pub error: Option<&'a str>,
+	/// Whether a command has been sent and no question is outstanding: the remote is deciding, and
+	/// the dialog waits rather than offering a field to type into.
+	pub working: bool,
+}
 
 /// Everything the status bar and the modals need to know about the upload feature
 /// (§17), grouped so `view` keeps a readable signature. `file_count` is how many local
@@ -173,6 +220,10 @@ pub struct Modals<'a> {
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Floats over the
 	/// grid rather than pushing it down, so opening it never reflows the remote pty.
 	pub search: Option<&'a crate::term::search::Search>,
+	/// The elevate dialog while it is open, `None` when closed (§45). A modal like the rest: it
+	/// holds a secret field, so while it is up the keyboard is its own and nothing typed reaches
+	/// the shell behind it.
+	pub elevate: Option<ElevateView<'a>>,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -186,7 +237,7 @@ pub struct Modals<'a> {
 /// selection and the dialog body all share the returned element's lifetime.
 pub fn view<'a>(
 	terminal: &'a Terminal,
-	endpoint: &str,
+	session: SessionView<'a>,
 	selection: Option<&'a Selection>,
 	menu: Option<Point>,
 	modals: Modals<'a>,
@@ -210,6 +261,7 @@ pub fn view<'a>(
 		transfer_conflict,
 		forwards,
 		search,
+		elevate,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -273,7 +325,7 @@ pub fn view<'a>(
 	// view's `'a` lifetime.
 	let mut stacked = column![
 		status_bar(
-			endpoint,
+			session,
 			has_selection,
 			can_sync,
 			upload,
@@ -424,6 +476,13 @@ pub fn view<'a>(
 		layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
 		layers.push(crate::ui::forward::panel(forwards, drag));
 	}
+	// Becoming another account (§45). Last of the overlays, so it sits above anything else that
+	// happened to be open when it was asked for: it holds a secret field, and a field the user is
+	// typing a password into must not be the thing that is half covered.
+	if let Some(elevate) = elevate {
+		layers.push(crate::ui::dialog::backdrop(Message::ElevateCancel));
+		layers.push(elevate_panel(elevate, dialog_body, drag));
+	}
 
 	// ALWAYS a stack, even with nothing overlaid. iced keeps a widget's internal state
 	// (a scrollable's offset, here the folder tree's) against its position in the widget
@@ -445,7 +504,7 @@ pub fn view<'a>(
 /// zone shows its progress instead of the endpoint, and afterwards the outcome notice until
 /// the next upload.
 fn status_bar<'a>(
-	endpoint: &str,
+	session: SessionView<'a>,
 	has_selection: bool,
 	can_sync: bool,
 	upload: UploadView<'a>,
@@ -502,6 +561,9 @@ fn status_bar<'a>(
 		button(text(tunnels_label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed);
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
+	// The account switcher (§45), built before the zones so the endpoint label can be read off the
+	// same struct.
+	let account = account_control(&session);
 
 	// Three equal-width zones. Because each takes the same `Fill` share, the middle
 	// zone's centered label is centered in the *window*, not merely between the side
@@ -528,10 +590,13 @@ fn status_bar<'a>(
 	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
-	let center = container(center_zone(endpoint, upload))
+	let center = container(center_zone(session.endpoint, upload))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
-	let right = container(row![tree, pane, tunnels, disconnect].spacing(10))
+	// The account sits at the head of the right group, before the panel toggles: it says WHO the
+	// grid above belongs to, which is closer to the terminal's own identity than to the buttons that
+	// act on it.
+	let right = container(row![account, tree, pane, tunnels, disconnect].spacing(10))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Right);
 
@@ -551,6 +616,135 @@ fn status_bar<'a>(
 	.align_y(iced::alignment::Vertical::Center)
 	.padding(STATUS_BAR_PADDING)
 	.into()
+}
+
+/// The account control in the status bar (§45): which account the grid above belongs to, and — once
+/// there is more than one — the way to change it.
+///
+/// With ONE account it is plain text, because a select with a single option is a control that does
+/// nothing; there is nothing to switch between, and the way to make a second one is the terminal's
+/// context menu. With two or more it becomes a select, whose entries are the live accounts plus one
+/// that is not an account at all: "Log in as…", which opens the elevate dialog. Folding that into
+/// the picker keeps one control where one idea is, rather than adding a button that would sit there
+/// unused most of the time.
+fn account_control<'a>(session: &SessionView<'a>) -> Element<'a, Message> {
+	let current = session
+		.identities
+		.iter()
+		.find(
+			|choice| matches!(choice, crate::app::IdentityChoice::Use { id, .. } if *id == session.current),
+		)
+		.cloned();
+	if session.identities.len() < 2 {
+		// The one account's name, or nothing at all in the moment before the first shell is listed.
+		let label = current.map(|choice| choice.to_string()).unwrap_or_default();
+		return text(label)
+			.size(STATUS_BAR_TEXT)
+			.color(STATUS_BAR_FG)
+			.align_y(iced::alignment::Vertical::Center)
+			.height(Length::Fill)
+			.into();
+	}
+	let mut options = session.identities.clone();
+	options.push(crate::app::IdentityChoice::Elevate);
+	iced::widget::pick_list(options, current, Message::IdentityPicked)
+		.text_size(STATUS_BAR_TEXT)
+		.padding([2.0, 6.0])
+		.into()
+}
+
+/// The elevate dialog (§45), in the shared dialog chrome — with two faces, because it is one
+/// conversation in two halves.
+///
+/// While no question is outstanding it is a FORM: which account, and which program to get there.
+/// Once the remote asks something it is that QUESTION, worded exactly as the remote worded it, with
+/// a masked field under it. The two never show at once: a password field beside an editable account
+/// name would invite typing the answer into the wrong one.
+///
+/// Every dismissal route emits `ElevateCancel`, which also closes a shell already opened — a `sudo`
+/// left parked on a prompt nobody will answer would hold a channel for the rest of the session.
+fn elevate_panel<'a>(
+	view: ElevateView<'a>,
+	dialog_body: &'a text_editor::Content,
+	drag: crate::ui::dialog::Drag,
+) -> Element<'a, Message> {
+	let mut content = column![].spacing(12);
+	let mut footer: Vec<Element<'a, Message>> =
+		vec![button("Cancel").on_press(Message::ElevateCancel).into()];
+
+	match view.prompt {
+		// The remote has asked something: show its own words, and a masked field.
+		Some(question) => {
+			content = content.push(text(question).size(14.0));
+			if view.refused {
+				// sudo re-asks the same prompt silently after a wrong answer, so a dialog that just
+				// reappeared would look like one that did nothing.
+				content = content.push(
+					text("That was refused — try again.")
+						.size(13.0)
+						.color(NOTICE_FG),
+				);
+			}
+			content = content.push(
+				text_input("", view.answer)
+					.id(ELEVATE_ANSWER_INPUT_ID)
+					.secure(true)
+					.on_input(Message::ElevateAnswerChanged)
+					.on_submit(Message::ElevateSubmit),
+			);
+			footer.push(button("Send").on_press(Message::ElevateSubmit).into());
+		}
+		// Waiting on the remote to decide: nothing to type, and nothing to submit.
+		None if view.working => {
+			content = content.push(text("Working…").size(14.0));
+		}
+		// The form.
+		None => {
+			content = content.push(crate::ui::dialog::selectable_body(dialog_body));
+			content = content.push(
+				row![
+					iced::widget::radio(
+						"sudo",
+						crate::elevate::Kind::Sudo,
+						Some(view.kind),
+						Message::ElevateKindChanged,
+					)
+					.size(14.0)
+					.text_size(13.0),
+					iced::widget::radio(
+						"su",
+						crate::elevate::Kind::Su,
+						Some(view.kind),
+						Message::ElevateKindChanged,
+					)
+					.size(14.0)
+					.text_size(13.0),
+				]
+				.spacing(16),
+			);
+			content = content.push(
+				text_input("Account, e.g. root", view.user)
+					.id(ELEVATE_USER_INPUT_ID)
+					.on_input(Message::ElevateUserChanged)
+					.on_submit(Message::ElevateSubmit),
+			);
+			footer.push(button("Log in").on_press(Message::ElevateSubmit).into());
+		}
+	}
+
+	// A failure is shown wherever the dialog happens to be: the remote's own words about its own
+	// policy, which is what makes it actionable.
+	if let Some(error) = view.error {
+		content = content.push(text(error).size(13.0).color(NOTICE_FG));
+	}
+
+	crate::ui::dialog::dialog(
+		"Log in as another account".to_owned(),
+		Message::ElevateCancel,
+		content.into(),
+		footer,
+		drag,
+	)
 }
 
 /// What the middle of the status bar shows (§17). A running transfer takes priority — a
@@ -739,6 +933,10 @@ fn context_menu(
 		// Send local files into the shell's own working directory (§17): the picker opens,
 		// then the confirmation with that folder already filled in.
 		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
+		// Become another account on this same connection (§45). It lives here because with one
+		// account the status bar shows a name rather than a select, so the menu is the way in;
+		// once there are two, the select offers it as well.
+		crate::ui::menu::item("Log in as…".to_owned(), Some(Message::ElevateOpen)),
 	];
 	// On a link cell, follow or copy the link too (§24). Both carry the URI, so the menu is
 	// the one place the whole address is offered — handy when a link's visible text hides it.

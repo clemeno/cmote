@@ -28,6 +28,12 @@ use crate::ssh;
 /// (backpressure, §4). `ponytail:` a generous fixed bound; tune only if needed.
 const CHANNEL_BOUND: usize = 256;
 
+/// The identity of the shell a session opens for the account it authenticated as (§45). Every
+/// session has exactly this one to begin with, it is never elevated and never closes before the
+/// connection does — so it is a fixed number both sides can name, rather than something the GUI
+/// has to be told. Elevated identities are numbered from 1 upward by the tab that opens them.
+pub const LOGIN_IDENTITY: u64 = 0;
+
 /// How the user proves who they are (§7). Exactly one method per connection, so
 /// a sum type is the right shape: "password OR key, never both and never
 /// neither" becomes impossible to represent wrongly. Both variants carry their
@@ -160,9 +166,47 @@ pub enum SshCommand {
 	/// keeps the type uniform.
 	Interactive(Vec<Secret>),
 	/// Raw keyboard bytes to send down the channel (keystroke, escape seq, ...).
+	///
+	/// Untagged on purpose, even though a session can hold several shells (§45): typing goes to
+	/// whichever identity is SELECTED, and the SSH task is told which that is by
+	/// `SelectIdentity`. Both ride the same ordered channel, so a switch followed by a keystroke
+	/// can never be delivered the other way round — and the GUI never has to name a channel it
+	/// does not own.
 	Input(Vec<u8>),
 	/// The terminal view changed size; reflow the remote pty.
+	///
+	/// Untagged, and for the opposite reason to `Input`: a resize applies to EVERY shell on the
+	/// session (§45). They all draw into the same window, so they all need the same pty size —
+	/// including the ones not on screen, or switching to one would show a grid laid out for a
+	/// window that no longer exists.
 	Resize { cols: u16, rows: u16 },
+	/// Open another shell on this connection, running `command` to become another account (§45):
+	/// `sudo -u root -i` or `su - postgres`, built by `crate::elevate`. `identity` is the number
+	/// the GUI has assigned it, which every later event about this shell carries.
+	///
+	/// No new SSH authentication happens — this is a program run on the existing connection, which
+	/// holds its own conversation (a password, perhaps a one-time code) on its own channel. Until
+	/// that conversation ends the channel's output is NOT terminal output: it is answered through
+	/// `ElevateAnswer` and reported through `ElevatePrompt`.
+	Elevate { identity: u64, command: String },
+	/// One answer to an `ElevatePrompt` (§45), written to that shell's channel followed by a
+	/// newline. Rides in a `Secret` so a sudo password or a one-time code is redacted in logs and
+	/// wiped on drop (§12), exactly like the answers to an SSH keyboard-interactive request.
+	ElevateAnswer { identity: u64, secret: Secret },
+	/// Which identity typing now belongs to (§45). Sent when the user picks another account, ahead
+	/// of any input for it; the SSH task keeps the number and routes `Input` to that shell.
+	SelectIdentity(u64),
+	/// The emulator's answer to a status or identity query, written to ONE named shell (§23, §45).
+	///
+	/// Separate from `Input` because it is not the user typing: a program that sent a query blocks
+	/// reading its stdin until the reply arrives, and a background identity's program must be
+	/// answered on ITS channel — the typing path would deliver the reply to whichever account the
+	/// user happens to be looking at instead.
+	Reply { identity: u64, bytes: Vec<u8> },
+	/// Close one elevated identity's shell (§45) — EOF on its channel, which ends the login shell
+	/// and, with it, the elevation. The login identity is not closable this way; ending it is what
+	/// `Disconnect` does.
+	CloseIdentity(u64),
 	/// Upload a local file to the remote over SFTP (§17). `remote` is the destination
 	/// path the user confirmed — absolute when the shell's cwd is known, otherwise
 	/// relative, which the server resolves against the login directory. `overwrite` is
@@ -298,8 +342,33 @@ pub enum SshEvent {
 	},
 	/// Authentication succeeded and a shell is open — switch to the terminal.
 	Connected,
-	/// A chunk of terminal output to feed the vt100 parser (§9).
-	Output(Vec<u8>),
+	/// A chunk of terminal output to feed the vt100 parser (§9), and which shell said it (§45).
+	///
+	/// Tagged because a session can hold several shells at once and the ones NOT on screen keep
+	/// running: a build left in the login shell must go on filling that shell's scrollback while
+	/// the user works in root's. Untagged bytes would land in whichever grid happened to be
+	/// showing, which is the one thing a scrollback must never do.
+	Output { identity: u64, bytes: Vec<u8> },
+	/// An elevating shell is asking a question (§45): sudo's password prompt, or a second factor a
+	/// PAM module posed. `label` is the remote's own wording, stripped of escape sequences and
+	/// capped in length (`crate::elevate`), so the dialog asks exactly what the remote asked.
+	///
+	/// Answered with `SshCommand::ElevateAnswer`. A refusal re-asks (sudo gives three tries), so
+	/// several of these can arrive for one elevation.
+	ElevatePrompt { identity: u64, label: String },
+	/// An elevated shell is through its conversation and is now a live terminal (§45): its output
+	/// is ordinary output from here on, and typing may be routed to it.
+	IdentityReady { identity: u64 },
+	/// An elevated shell has gone (§45). `reason` is `Some` when it never opened or died on a
+	/// failure — the last thing the program said, which is the remote's own words about its own
+	/// policy ("not in the sudoers file", "3 incorrect password attempts") — and `None` when it
+	/// simply exited, which is what typing `exit` at an elevated prompt does.
+	///
+	/// The login identity never sends this; the session ending is `Disconnected`.
+	IdentityEnded {
+		identity: u64,
+		reason: Option<String>,
+	},
 	/// The upload's destination already holds a file (§17). Carries the path, so the
 	/// GUI can name it in the overwrite confirmation; nothing has been written.
 	UploadExists(String),
