@@ -367,15 +367,47 @@ impl<'a> Screen<'a> {
 	/// depend on where the viewport is parked, which is what lets a selection stored in document
 	/// coordinates be copied WHOLE — including the part of it scrolled off the screen, the one thing
 	/// §34's select-command-output could not do.
-	///
-	/// The engine keeps the scrolled-off lines on the NEGATIVE grid lines below the active screen's
-	/// line 0 (§23), so the document maps onto grid lines `-history_size ..= screen_lines - 1` by
-	/// subtracting `history_size`. A line outside that is one the session does not have: evicted
-	/// once the scrollback hit its cap, or simply never written.
 	pub fn line_cell(&self, line: u64, col: u16) -> Option<Cell> {
 		if col as usize >= self.engine.columns() {
 			return None;
 		}
+		let grid_line = self.grid_line(line)?;
+		let cell = &self.engine.grid()[grid_line][Column(col as usize)];
+		Some(build_cell(cell))
+	}
+
+	/// Whether document line `line` is CONTINUED by the line after it (§42) — one logical line of
+	/// output that ran past the right margin and carried on below, rather than two lines a newline
+	/// separated. The engine records it as a flag on the row's LAST cell, set at the moment output
+	/// wrapped, and keeps it correct through a reflow (that flag is exactly how it re-joins wrapped
+	/// rows at a new width).
+	///
+	/// It is what makes a whole-line selection and a copy behave like text rather than like rows: a
+	/// triple click takes the entire logical line however many rows it occupies, and a copy across a
+	/// wrap re-joins the halves instead of pasting a newline into the middle of a path. `false` for a
+	/// line the session no longer holds — nothing follows a line that is not there.
+	pub fn line_wrapped(&self, line: u64) -> bool {
+		let Some(grid_line) = self.grid_line(line) else {
+			return false;
+		};
+		// A zero-column grid has no last cell to carry the flag. `size` clamps to at least one
+		// column, so this is belt and braces rather than a case that arises.
+		let Some(last) = self.engine.columns().checked_sub(1) else {
+			return false;
+		};
+		self.engine.grid()[grid_line][Column(last)]
+			.flags
+			.contains(Flags::WRAPLINE)
+	}
+
+	/// An ABSOLUTE document line as the engine's own grid line, or `None` when the session does not
+	/// hold it (§40). The engine keeps the scrolled-off lines on the NEGATIVE grid lines below the
+	/// active screen's line 0 (§23), so the document maps onto grid lines
+	/// `-history_size ..= screen_lines - 1` by subtracting `history_size`. A line outside that is one
+	/// the session does not have: evicted once the scrollback hit its cap, or simply never written.
+	/// The single place that arithmetic is written down, so a cell read and a wrap check cannot
+	/// disagree about which line is which.
+	fn grid_line(&self, line: u64) -> Option<Line> {
 		let history = i64::from(self.history_size());
 		// A line past `i64::MAX` is not a line the engine has either, so the same `None` serves.
 		let grid_line = i64::try_from(line).ok()? - history;
@@ -384,8 +416,7 @@ impl<'a> Screen<'a> {
 		}
 		// Bounded by the check above, so the narrowing cast cannot wrap: both ends of the range are
 		// a grid dimension, and the engine's own line index is an `i32`.
-		let cell = &self.engine.grid()[Line(grid_line as i32)][Column(col as usize)];
-		Some(build_cell(cell))
+		Some(Line(grid_line as i32))
 	}
 }
 
@@ -663,6 +694,25 @@ mod tests {
 		// Past the last line the engine holds, and past the last column: both out of the document.
 		assert!(terminal.screen().line_cell(5, 0).is_none());
 		assert!(terminal.screen().line_cell(0, 8).is_none());
+	}
+
+	/// Output that ran past the right margin marks the row it left as continued, and a line a newline
+	/// ended does not (§42) — the flag a whole-line selection and an unwrapping copy both read.
+	#[test]
+	fn a_line_output_ran_past_the_margin_is_marked_as_continued() {
+		// An 8-column grid fed 12 characters: the first row fills up and wraps into the second, so
+		// line 0 is continued by line 1 and line 1 (where the writing stopped) is not.
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"abcdefghijkl");
+		assert!(terminal.screen().line_wrapped(0));
+		assert!(!terminal.screen().line_wrapped(1));
+
+		// A newline is not a wrap, however full the row it ends: two logical lines, neither continued.
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"abcdefgh\r\nij");
+		assert!(!terminal.screen().line_wrapped(0));
+		// And nothing follows a line the session does not hold.
+		assert!(!terminal.screen().line_wrapped(99));
 	}
 
 	#[test]

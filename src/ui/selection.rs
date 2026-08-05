@@ -25,8 +25,34 @@
 //
 // The pointer, of course, is still on screen. `Cell` is that on-screen position and `Cell::spot` is
 // the single door between the two spaces.
+//
+// A press can also select on its own, without any drag (§42): a double click takes the WORD under
+// the pointer and a triple click the whole LINE. Both are the same `Selection` a drag builds — the
+// grid highlights one and Copy copies one, whatever put it there, the same route §34's
+// select-command-output took — so the work here is deciding which cells the word or the line covers.
+// "Line" means the LOGICAL line: output that ran past the right margin occupies several rows, and a
+// triple click takes all of them. That same wrap flag (`Screen::line_wrapped`) is what stops a copy
+// across a wrap from pasting a newline into the middle of a path.
+
+use std::time::{Duration, Instant};
 
 use crate::term::screen::{Cell as ScreenCell, Screen};
+
+/// How long after a press a second one on the same cell still counts as part of the same multi-click
+/// (§42). Half a second is Windows' own default double-click time (`GetDoubleClickTime`), so cmote
+/// agrees with the rest of the desktop rather than inventing its own feel.
+const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
+/// The punctuation that counts as part of a word, on top of any alphanumeric character (§42). This
+/// is the whole of the double-click rule, and it is chosen for what an SSH session actually holds: a
+/// path (`/etc/ssh/sshd_config`), a URL, a `user@host:port`, a `KEY=value` and a dotted filename each
+/// come back WHOLE, which is almost always what is about to be pasted back into the shell.
+///
+/// Deliberately absent: the shell's own separators — space, quotes, brackets, `|`, `;` and `,` — so a
+/// double click inside a list or an argument takes the one item under the pointer. The trade is that
+/// a sentence's trailing `.` or `:` is swept up with the word before it (xterm does the same), which
+/// is a cheaper annoyance than a path arriving in pieces.
+const WORD_PUNCTUATION: &str = "_-./~+=@%&#?:";
 
 /// A single grid position ON SCREEN. `row`/`col` are 0-based viewport cells — row 0 is the top
 /// visible line — the same space `screen::Screen::cell`, the renderer and the pointer
@@ -72,6 +98,67 @@ impl Spot {
 	}
 }
 
+/// How many presses in a row landed on one cell (§42): one selects nothing on its own, two select
+/// the word under the pointer, three the whole logical line. A fourth starts the count over, so
+/// leaning on the button cycles rather than escalating forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Click {
+	Single,
+	Double,
+	Triple,
+}
+
+/// The multi-click counter (§42). `mouse_area` reports each press on its own and says nothing about
+/// how many came before it, so cmote keeps the tally: the last press's cell, when it happened, and
+/// what it counted as. Kept here rather than in `app` because it is pure timing arithmetic and worth
+/// a test — `press` takes the current instant instead of reading the clock itself for exactly that
+/// reason.
+///
+/// Consecutive presses must be on the SAME CELL, not merely within a few pixels as a general-purpose
+/// widget would ask: on a grid the cell IS the target, and it is the cell a word or line then expands
+/// from. Nudging the pointer inside one cell between two clicks must not break the double click, and
+/// crossing into the next cell must.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Clicks {
+	/// The last press: where it landed, when, and what it counted as. `None` until the first one.
+	last: Option<(Cell, Instant, Click)>,
+}
+
+impl Clicks {
+	/// Count a press on `cell` at `now`, returning what it is (§42). A press on another cell, or one
+	/// that came too late, is a fresh `Single`; each press inside the window escalates from the one
+	/// before it. `Instant::duration_since` saturates rather than panicking, so a clock that appears
+	/// to run backwards yields a zero gap — still inside the window, which is harmless here.
+	pub fn press(&mut self, cell: Cell, now: Instant) -> Click {
+		let kind = match self.last {
+			Some((last_cell, at, last))
+				if last_cell == cell && now.duration_since(at) <= MULTI_CLICK_WINDOW =>
+			{
+				match last {
+					Click::Single => Click::Double,
+					Click::Double => Click::Triple,
+					Click::Triple => Click::Single,
+				}
+			}
+			_ => Click::Single,
+		};
+		self.last = Some((cell, now, kind));
+		kind
+	}
+}
+
+/// What made a selection — the one thing that can tell two identical-looking ones apart (§42). A
+/// DRAG whose head never left its anchor selects nothing, because a bare click deselects in every
+/// terminal; a selection over a KNOWN RANGE that happens to be one cell wide — a one-letter word, a
+/// one-character search hit (§35), a command whose output is a single character (§34) — really does
+/// select that cell. Both have `anchor == head`, so only their origin separates them, and `is_empty`
+/// reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+	Drag,
+	Expanded,
+}
+
 /// A drag selection: `anchor` is the position the drag started on, `head` is where the
 /// pointer is now. Either can be the visually-earlier one (dragging up/left is
 /// allowed), so all queries normalize to an ordered (start, end) pair first. Both are document
@@ -80,6 +167,7 @@ impl Spot {
 pub struct Selection {
 	anchor: Spot,
 	head: Spot,
+	origin: Origin,
 }
 
 impl Selection {
@@ -90,6 +178,7 @@ impl Selection {
 		Self {
 			anchor,
 			head: anchor,
+			origin: Origin::Drag,
 		}
 	}
 
@@ -99,13 +188,89 @@ impl Selection {
 		Self {
 			anchor: self.anchor,
 			head,
+			origin: self.origin,
 		}
 	}
 
-	/// True when nothing is actually selected (the head never left the anchor cell).
-	/// Copy is disabled in this state and a plain click clears the selection.
+	/// A selection over a range something else already worked out, rather than one a pointer dragged:
+	/// a command's output (§34), a search hit (§35), a word or a line (§42). Inclusive of both ends,
+	/// and — unlike a drag — never empty, so a range one cell wide is highlighted and copyable instead
+	/// of reading as "nothing selected" (see `Origin`).
+	pub fn spanning(start: Spot, end: Spot) -> Self {
+		Self {
+			anchor: start,
+			head: end,
+			origin: Origin::Expanded,
+		}
+	}
+
+	/// The word around `spot`, as a double click selects it (§42), or `None` when there is no word
+	/// there — a blank cell, a separator, or a line the session no longer holds. Falling back to
+	/// `None` rather than to a one-cell span is deliberate: a double click on empty space should leave
+	/// the screen as it was, not select a space nobody asked for.
+	///
+	/// The run grows outward from the clicked cell over word characters (`is_word_char`) and CROSSES A
+	/// WRAP: output that ran past the right margin is one logical line, so a path broken across two
+	/// rows is still one word — and, because a copy re-joins wrapped rows, it comes back off the
+	/// clipboard in one piece.
+	pub fn word(screen: Screen<'_>, spot: Spot) -> Option<Self> {
+		if !is_word(screen, spot) {
+			return None;
+		}
+		let mut start = spot;
+		while let Some(previous) = step_left(screen, start) {
+			if !is_word(screen, previous) {
+				break;
+			}
+			start = previous;
+		}
+		let mut end = spot;
+		while let Some(next) = step_right(screen, end) {
+			if !is_word(screen, next) {
+				break;
+			}
+			end = next;
+		}
+		Some(Self::spanning(start, end))
+	}
+
+	/// The whole LOGICAL line through `spot`, as a triple click selects it (§42), or `None` for a line
+	/// the session no longer holds. Logical, not physical: the run walks back to the first row of a
+	/// wrapped line and on to its last, so one long command — or one long path — is taken in full
+	/// however many rows it occupies.
+	pub fn line(screen: Screen<'_>, spot: Spot) -> Option<Self> {
+		// A line with no cell at column 0 is not a line the document has (§40).
+		screen.line_cell(spot.line, 0)?;
+		let (_, cols) = screen.size();
+		// Back to the first row of the wrapped run: a line is a continuation when the one BEFORE it is
+		// marked as continued. A line the session dropped reports `false`, which ends the walk.
+		let mut first = spot.line;
+		while first > 0 && screen.line_wrapped(first - 1) {
+			first -= 1;
+		}
+		// And forward while this line continues into the next one the document actually has, so the
+		// walk cannot run off the end of the document.
+		let mut last = spot.line;
+		while screen.line_wrapped(last) && screen.line_cell(last + 1, 0).is_some() {
+			last += 1;
+		}
+		Some(Self::spanning(
+			Spot {
+				line: first,
+				col: 0,
+			},
+			Spot {
+				line: last,
+				col: cols.saturating_sub(1),
+			},
+		))
+	}
+
+	/// True when nothing is actually selected — a DRAG whose head never left its anchor cell. Copy is
+	/// disabled in this state and a plain click clears the selection. A word or line selection is
+	/// never empty, even when it covers a single cell (see `Origin`).
 	pub fn is_empty(&self) -> bool {
-		self.anchor == self.head
+		self.origin == Origin::Drag && self.anchor == self.head
 	}
 
 	/// The selection as an ordered `(start, end)` pair in reading order, so callers
@@ -145,7 +310,7 @@ impl Selection {
 	/// HTML copy (`ui::richcopy`), so the two can never disagree on which cells a selection
 	/// covers. It hands back owned cells (they are cheap and short-lived for a copy), keeping
 	/// this module free of any clipboard or HTML concern.
-	pub fn selected_rows(&self, screen: Screen<'_>) -> Vec<Vec<ScreenCell>> {
+	pub fn selected_rows(&self, screen: Screen<'_>) -> Vec<Row> {
 		if self.is_empty() {
 			return Vec::new();
 		}
@@ -153,7 +318,7 @@ impl Selection {
 		let (_, cols) = screen.size();
 		let last_col = cols.saturating_sub(1);
 
-		let mut rows: Vec<Vec<ScreenCell>> = Vec::new();
+		let mut rows: Vec<Row> = Vec::new();
 		for line in start.line..=end.line {
 			// A line the session no longer holds — the selection reached back past the scrollback cap,
 			// or a reflow moved the ground under it — contributes NOTHING, not an empty row: pasting
@@ -182,11 +347,17 @@ impl Selection {
 				cells.push(cell);
 				col += 1;
 			}
-			// Trim the row's trailing blank padding (see the doc comment).
-			while cells.last().is_some_and(|cell| !cell.has_contents()) {
-				cells.pop();
+			// Trim the row's trailing blank padding (see the doc comment) — but only on a line that
+			// actually ends there. A row that WRAPS into the next one has no padding to trim: every
+			// column of it is real output, and any blank in it is a space in the middle of a logical
+			// line, which trimming would swallow.
+			let wrapped = screen.line_wrapped(line);
+			if !wrapped {
+				while cells.last().is_some_and(|cell| !cell.has_contents()) {
+					cells.pop();
+				}
 			}
-			rows.push(cells);
+			rows.push(Row { cells, wrapped });
 		}
 		rows
 	}
@@ -195,24 +366,111 @@ impl Selection {
 	/// `selected_rows` geometry, reads each cell's glyph (a blank cell is a space), and joins
 	/// lines with `\n`. Trailing blanks are already trimmed by `selected_rows`, so copying never
 	/// pastes the grid's width-padding.
+	///
+	/// A row that WRAPS into the next one is joined to it with NO newline (§42): those two rows are one
+	/// logical line the terminal happened to fold, so a copied path or URL comes back in one piece
+	/// instead of arriving with a line break where the window's edge was. Every other terminal
+	/// unwraps on copy for the same reason — a pasted command has to be the command that ran.
 	pub fn extract(&self, screen: Screen<'_>) -> String {
-		let lines: Vec<String> = self
-			.selected_rows(screen)
-			.iter()
-			.map(|cells| {
-				let mut line = String::new();
-				for cell in cells {
-					if cell.has_contents() {
-						line.push_str(cell.contents());
-					} else {
-						line.push(' ');
-					}
+		let rows = self.selected_rows(screen);
+		let mut text = String::new();
+		for (index, row) in rows.iter().enumerate() {
+			// The break belongs to the row BEFORE this one: it gets a newline unless it wrapped.
+			if index > 0 && !rows[index - 1].wrapped {
+				text.push('\n');
+			}
+			for cell in &row.cells {
+				if cell.has_contents() {
+					text.push_str(cell.contents());
+				} else {
+					text.push(' ');
 				}
-				line
-			})
-			.collect();
-		lines.join("\n")
+			}
+		}
+		text
 	}
+}
+
+/// One line's contribution to a selection (§10): the cells it gives up, and whether the line is
+/// CONTINUED by the next one (§42). The flag is what tells a consumer whether to put a line break
+/// between this row and the one after it — `extract` and the HTML copy (`ui::richcopy`) both read it,
+/// so the two can never disagree about where the pasted text breaks.
+#[derive(Debug, Clone)]
+pub struct Row {
+	pub cells: Vec<ScreenCell>,
+	pub wrapped: bool,
+}
+
+/// Whether the cell at `spot` is part of a word (§42). A blank cell, a separator, and a cell the
+/// document does not have are all "no", which is what ends a double click's outward walk.
+///
+/// A wide glyph's trailing half carries no text of its own — the lead cell in the column before it
+/// owns the glyph — so the question is passed to that cell instead. Without this every CJK word would
+/// end after its first character.
+fn is_word(screen: Screen<'_>, spot: Spot) -> bool {
+	let Some(cell) = screen.line_cell(spot.line, spot.col) else {
+		return false;
+	};
+	let cell = if cell.is_wide_continuation() && spot.col > 0 {
+		match screen.line_cell(spot.line, spot.col - 1) {
+			Some(lead) => lead,
+			None => return false,
+		}
+	} else {
+		cell
+	};
+	// The BASE character decides: a grapheme's combining marks follow whatever it is, and a blank
+	// cell has no characters at all.
+	cell.contents().chars().next().is_some_and(is_word_char)
+}
+
+/// Whether one character belongs to a word (§42): any alphanumeric — in any script, so CJK and
+/// accented text work without a special case — plus the shell-friendly punctuation in
+/// `WORD_PUNCTUATION`.
+fn is_word_char(ch: char) -> bool {
+	ch.is_alphanumeric() || WORD_PUNCTUATION.contains(ch)
+}
+
+/// The position one cell before `spot` within its LOGICAL line (§42), or `None` at the start of one.
+/// At column 0 that means the last column of the line above — but only when the line above is marked
+/// as continuing into this one, otherwise the two are separate lines and the word ends here.
+fn step_left(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
+	if spot.col > 0 {
+		return Some(Spot {
+			line: spot.line,
+			col: spot.col - 1,
+		});
+	}
+	let previous = spot.line.checked_sub(1)?;
+	if !screen.line_wrapped(previous) {
+		return None;
+	}
+	let (_, cols) = screen.size();
+	Some(Spot {
+		line: previous,
+		col: cols.saturating_sub(1),
+	})
+}
+
+/// The position one cell after `spot` within its LOGICAL line (§42), or `None` at the end of one —
+/// the mirror of `step_left`, crossing into column 0 of the next line only when this one wraps into
+/// it and the document actually holds it.
+fn step_right(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
+	let (_, cols) = screen.size();
+	if spot.col + 1 < cols {
+		return Some(Spot {
+			line: spot.line,
+			col: spot.col + 1,
+		});
+	}
+	if !screen.line_wrapped(spot.line) {
+		return None;
+	}
+	let next = Spot {
+		line: spot.line + 1,
+		col: 0,
+	};
+	screen.line_cell(next.line, next.col).map(|_| next)
 }
 
 #[cfg(test)]
@@ -231,6 +489,18 @@ mod tests {
 		let mut terminal = Terminal::new(rows, cols);
 		terminal.process(input.as_bytes());
 		terminal
+	}
+
+	// An on-screen cell, for the multi-click tally (which counts cells, not document lines).
+	fn at(row: u16, col: u16) -> Cell {
+		Cell { row, col }
+	}
+
+	// The text a word selection around `col` on the first line copies, or `None` when there is no
+	// word there — the double click, end to end (§42).
+	fn word_at(terminal: &Terminal, line: u64, col: u16) -> Option<String> {
+		Selection::word(terminal.screen(), spot(line, col))
+			.map(|selection| selection.extract(terminal.screen()))
 	}
 
 	#[test]
@@ -344,5 +614,163 @@ mod tests {
 		let terminal = screen_with(2, 10, "one\r\ntwo");
 		let selection = Selection::new(spot(0, 0)).with_head(spot(9, 9));
 		assert_eq!(selection.extract(terminal.screen()), "one\ntwo");
+	}
+
+	/// Presses on one cell escalate single → double → triple, then start over (§42) — so leaning on
+	/// the button cycles instead of escalating for ever.
+	#[test]
+	fn presses_on_one_cell_escalate_and_then_start_over() {
+		let mut clicks = Clicks::default();
+		let start = Instant::now();
+		let cell = at(3, 7);
+		assert_eq!(clicks.press(cell, start), Click::Single);
+		assert_eq!(
+			clicks.press(cell, start + Duration::from_millis(100)),
+			Click::Double
+		);
+		assert_eq!(
+			clicks.press(cell, start + Duration::from_millis(200)),
+			Click::Triple
+		);
+		assert_eq!(
+			clicks.press(cell, start + Duration::from_millis(300)),
+			Click::Single
+		);
+	}
+
+	/// A press that came too late, or landed on another cell, is a fresh single click (§42).
+	#[test]
+	fn a_late_press_or_one_on_another_cell_starts_the_count_over() {
+		let mut clicks = Clicks::default();
+		let start = Instant::now();
+		assert_eq!(clicks.press(at(0, 0), start), Click::Single);
+		// Past the window — however deliberate the pair looked, it is two separate clicks.
+		assert_eq!(
+			clicks.press(at(0, 0), start + Duration::from_millis(501)),
+			Click::Single
+		);
+		// Inside it, the same cell escalates …
+		assert_eq!(
+			clicks.press(at(0, 0), start + Duration::from_millis(600)),
+			Click::Double
+		);
+		// … and the cell next door is another target, so it starts over.
+		assert_eq!(
+			clicks.press(at(0, 1), start + Duration::from_millis(650)),
+			Click::Single
+		);
+	}
+
+	/// A double click takes the word the pointer is in, whichever character of it was hit (§42).
+	#[test]
+	fn a_double_click_takes_the_word_under_the_pointer() {
+		let terminal = screen_with(1, 20, "cat file.txt now");
+		// The first character of the word, one in the middle, and its last: all the same word.
+		assert_eq!(word_at(&terminal, 0, 4).as_deref(), Some("file.txt"));
+		assert_eq!(word_at(&terminal, 0, 7).as_deref(), Some("file.txt"));
+		assert_eq!(word_at(&terminal, 0, 11).as_deref(), Some("file.txt"));
+	}
+
+	/// The word rule is chosen for what a shell session holds (§42): a path, a URL, an endpoint and a
+	/// `KEY=value` each come back whole, because a double click on one is nearly always about to be
+	/// pasted straight back into the shell.
+	#[test]
+	fn a_path_a_url_and_an_endpoint_are_each_one_word() {
+		let terminal = screen_with(1, 40, "vi /etc/ssh/sshd_config");
+		assert_eq!(
+			word_at(&terminal, 0, 8).as_deref(),
+			Some("/etc/ssh/sshd_config")
+		);
+
+		let terminal = screen_with(1, 40, "see https://example.com/a?b=1");
+		assert_eq!(
+			word_at(&terminal, 0, 10).as_deref(),
+			Some("https://example.com/a?b=1")
+		);
+
+		let terminal = screen_with(1, 40, "ssh root@10.0.0.1:22");
+		assert_eq!(
+			word_at(&terminal, 0, 6).as_deref(),
+			Some("root@10.0.0.1:22")
+		);
+	}
+
+	/// And it stops at the shell's own separators (§42) — space, quotes, brackets and commas — so a
+	/// double click inside a list or an argument takes the one item under the pointer.
+	#[test]
+	fn a_word_stops_at_the_shells_own_separators() {
+		let terminal = screen_with(1, 20, "ls 'a' (b) c,d");
+		assert_eq!(word_at(&terminal, 0, 4).as_deref(), Some("a"));
+		assert_eq!(word_at(&terminal, 0, 8).as_deref(), Some("b"));
+		assert_eq!(word_at(&terminal, 0, 11).as_deref(), Some("c"));
+		assert_eq!(word_at(&terminal, 0, 13).as_deref(), Some("d"));
+	}
+
+	/// A double click on blank space selects nothing rather than a space (§42): the screen is left as
+	/// it was, which is what a click on nothing should do.
+	#[test]
+	fn a_double_click_on_blank_space_selects_nothing() {
+		let terminal = screen_with(1, 10, "a b");
+		assert!(word_at(&terminal, 0, 1).is_none(), "the gap between words");
+		assert!(word_at(&terminal, 0, 6).is_none(), "the padding after them");
+	}
+
+	/// A one-character word really is a selection, unlike a drag that never left its anchor (§42) —
+	/// the two look identical (`anchor == head`) and only their origin tells them apart. The same holds
+	/// for any range something else worked out: a one-character search hit (§35), or a command that
+	/// printed a single character (§34).
+	#[test]
+	fn a_one_cell_word_is_a_real_selection() {
+		let terminal = screen_with(1, 10, "cd a");
+		let selection = Selection::word(terminal.screen(), spot(0, 3)).expect("a word is there");
+		assert!(!selection.is_empty());
+		assert_eq!(selection.extract(terminal.screen()), "a");
+		assert!(selection.contains(0, 3), "and it is highlighted");
+
+		// A one-cell range built directly reads the same way …
+		let hit = Selection::spanning(spot(0, 3), spot(0, 3));
+		assert!(!hit.is_empty());
+		assert_eq!(hit.extract(terminal.screen()), "a");
+
+		// … while the bare click on that cell still selects nothing, so it still deselects.
+		assert!(Selection::new(spot(0, 3)).is_empty());
+	}
+
+	/// A word broken across the right margin is still one word, and copies without the line break the
+	/// window's edge put in it (§42) — the whole reason the wrap flag is read at all.
+	#[test]
+	fn a_word_crosses_a_wrap_and_copies_in_one_piece() {
+		// Eight columns: "/etc/ssh" fills row 0 and "/sshd" carries on below it.
+		let terminal = screen_with(2, 8, "/etc/ssh/sshd");
+		assert_eq!(word_at(&terminal, 0, 2).as_deref(), Some("/etc/ssh/sshd"));
+		// Reached from the far side of the wrap, it is the same word.
+		assert_eq!(word_at(&terminal, 1, 3).as_deref(), Some("/etc/ssh/sshd"));
+	}
+
+	/// A triple click takes the whole LOGICAL line — every row a wrapped one occupies — and stops at
+	/// the next line, whichever row it was clicked on (§42).
+	#[test]
+	fn a_triple_click_takes_the_whole_logical_line() {
+		// "one two three" wraps over rows 0-1 on an eight-column screen; "next" is a line of its own.
+		let terminal = screen_with(3, 8, "one two three\r\nnext");
+		let line = |line: u64| {
+			Selection::line(terminal.screen(), spot(line, 2))
+				.expect("the document holds that line")
+				.extract(terminal.screen())
+		};
+		assert_eq!(line(0), "one two three");
+		assert_eq!(line(1), "one two three", "clicked on the second half");
+		assert_eq!(line(2), "next");
+		// A line the session does not hold selects nothing at all.
+		assert!(Selection::line(terminal.screen(), spot(99, 0)).is_none());
+	}
+
+	/// An ordinary drag across a wrap unwraps on copy too (§42): the break belongs to the line, not to
+	/// the row the window happened to fold it at.
+	#[test]
+	fn a_drag_across_a_wrap_copies_without_the_break() {
+		let terminal = screen_with(3, 8, "abcdefghij\r\nnext");
+		let selection = Selection::new(spot(0, 0)).with_head(spot(2, 7));
+		assert_eq!(selection.extract(terminal.screen()), "abcdefghij\nnext");
 	}
 }

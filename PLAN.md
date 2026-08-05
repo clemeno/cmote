@@ -234,7 +234,7 @@ cmote/
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
-    │   ├── selection.rs   stream text selection over the grid, in absolute document lines; text extraction (§10, §40)
+    │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
     │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
@@ -262,7 +262,7 @@ cmote/
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
     │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
-    │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, and the viewport↔document line mapping (§9, §16, §23, §24, §25, §40)
+    │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, the viewport↔document line mapping and whether a line wraps into the next (§9, §16, §23, §24, §25, §40, §42)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
@@ -3791,3 +3791,96 @@ screen exactly as it was.
   drift for the same reason §34's marks do: once the history stops growing, `history_size + row` no
   longer names a fixed line. It takes 10 000 lines of output to reach, and it is a property of the
   coordinate, not of the images.
+
+---
+
+## 42. Select by word and by line — the double and triple click (v3.x)
+
+Selecting text in cmote's grid needed a **drag**, and only a drag. Every terminal ever shipped also
+selects a **word** on a double click and a **line** on a triple, and its absence was the kind of gap
+nobody files a bug about — they just drag carefully across a path, every single time, and think less of
+the program for it.
+
+Nothing new had to be invented for it. §40 had already turned the selection into a pair of document
+positions, and §34 had already established that *anything* can build a selection and the grid will
+highlight it and Copy will copy it. So a double click is one question: **which cells is that word?**
+
+### Counting the presses is cmote's job (`ui/selection.rs`, `app.rs`)
+
+The grid sits inside a `mouse_area`, which reports each press on its own and counts nothing — so the
+tally lives here: `Clicks` remembers the last press's **cell**, when it happened and what it counted as,
+and escalates single → double → triple inside a **500 ms** window (Windows' own `GetDoubleClickTime`
+default, so cmote feels like the rest of the desktop rather than inventing a timing). A fourth press
+cycles back to single, so leaning on the button does not escalate forever.
+
+Consecutive presses must land on the **same cell**, not merely within a few pixels as a general-purpose
+widget asks: on a grid the cell *is* the target, and it is the cell the word then expands from. Nudging
+the pointer inside a cell must not break a double click; crossing into the next one must.
+
+`press` is handed the current instant rather than reading the clock itself, which is the only reason
+this timing has tests at all.
+
+### A word is what a shell session holds (`ui/selection.rs`)
+
+The whole double-click rule is one predicate: a word character is **any alphanumeric** — in any script,
+so CJK and accented text need no special case — plus the punctuation `_-./~+=@%&#?:`. That set is chosen
+for what is actually on an SSH session's screen, and it means a double click returns each of these
+**whole**:
+
+```
+/etc/ssh/sshd_config      https://example.com/a?b=1      root@10.0.0.1:22      KEY=value
+```
+
+which is nearly always what is about to be pasted straight back into the shell. Deliberately *absent*
+are the shell's own separators — space, quotes, brackets, `|`, `;` and `,` — so a double click inside a
+list or an argument takes the one item under the pointer. The trade is that a prose sentence's trailing
+`.` or `:` is swept up with the word before it; xterm does the same, and it is a far cheaper annoyance
+than a path arriving in three pieces.
+
+Two details the tests pin down. A double click on **blank space selects nothing** (`None`, not a
+one-cell span) — a click on nothing should leave the screen as it was. And a wide glyph's trailing half
+carries no text of its own, so the question is passed to the lead cell in the column before it;
+without that, every CJK word would end after its first character.
+
+### A line means the LOGICAL line, which is why the engine's wrap flag surfaced (`term/screen.rs`)
+
+Output that runs past the right margin occupies several rows and is still **one line**. A triple click
+that took only the row under the pointer would hand back half a command, so `Screen::line_wrapped(line)`
+is new on the seam: the engine sets a flag on a row's last cell at the moment output wrapped, and keeps
+it correct through a reflow — that flag is exactly how it re-joins wrapped rows at a new width. A
+whole-line selection walks back to the first row of the run and on to its last.
+
+Reading that flag also fixed something older, and quietly worse: **a copy across a wrap used to paste a
+newline into the middle of a path.** `extract` and the HTML copy now join a wrapped row to the next one
+with *nothing* (`Row::wrapped` carries the flag to both, so the two can never break in different
+places), and the trailing-blank trim is skipped on a wrapped row — there is no padding to trim there,
+and a blank in the middle of a logical line is a space, not padding. Every other terminal unwraps on
+copy for the same reason: a pasted command has to be the command that ran.
+
+### One cell can be a real selection (`ui/selection.rs`)
+
+`anchor == head` used to mean "nothing selected", which is right for a drag — a bare click deselects in
+every terminal — and wrong for a one-letter word (`cd a`). The two are indistinguishable by their
+positions, so a `Selection` now records **what made it**: a `Drag` collapses to empty, a `spanning`
+range does not. Copy stays disabled after a bare click and enabled on a one-character word.
+
+That distinction also **fixed two older one-cell blind spots**, both found by asking who else builds a
+selection from a range rather than a drag. A **one-character find-bar query** (§35) matches a single
+cell, and a **command that printed a single character** (§34) has a one-cell output: each was revealed
+or located correctly and then read as "nothing selected" — no highlight, Copy greyed out. Both now go
+through `Selection::spanning`, which is the same call the word and line expansions use.
+
+### What is deliberately NOT here
+
+- **Dragging on from a double click does not extend word by word.** xterm grows the selection a word at
+  a time when the pointer moves after a double click; cmote's word and line selections simply do not
+  drag (`selecting` is left false). Not laziness: the pointer is already parked on the word, so
+  extending from the press cell would collapse the whole span on the first stray pixel of movement.
+  `ponytail:` word-granular dragging.
+- **A double click on blank space or on a separator run selects nothing**, where some terminals select
+  the run of spaces. Nothing is the more useful answer at a terminal, and the cheaper one.
+- **No configurable word characters.** The set above is a constant with its reasoning written beside
+  it. A settings-file knob for it would be a preference nobody asked for yet (§13's rule).
+- **The wrap-aware copy is only as good as the engine's flag.** A line whose wrap flag a reflow moved is
+  re-joined wherever the flag now says — which is the engine's own reflow answer, and the same one its
+  own selection uses.

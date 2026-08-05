@@ -12,7 +12,7 @@ every gap as a `[bolt-on]` / `[engine]` split, because that crate was a delibera
 subset that could neither parse nor represent most of the spec. **That ceiling is gone.** What
 remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
-**State as of §41.** Every *engine-independent* item this document ever listed is now either shipped
+**State as of §42.** Every *engine-independent* item this document ever listed is now either shipped
 or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
 (§4) are closed. §6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
 listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39 touched this
@@ -31,6 +31,11 @@ sequence can be scanned out of the same byte stream that reaches the engine — 
 are listed in §5 and §8; kitty graphics, iTerm2 OSC 1337 and ReGIS stay ❌, and the reason has changed
 from "the engine cannot" to "their payloads are PNG/JPEG, which is a decoder dependency and an attack
 surface" (§5).
+
+**§42 moves no row back the other way, but it does fix a defect on this surface.** Word and line
+selection (PLAN §42) is local UX, yet it needed the engine's line-wrap flag — and reading it exposed
+that cmote's **copy across a wrapped line was inserting a newline** where every other terminal unwraps.
+See the note at the end of §4 and the `term/screen.rs` evidence for `line_wrapped`.
 
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
@@ -254,6 +259,19 @@ the layer rather than sit beside it:
 - **It is not drawn on the alternate screen**, which keeps no history and so has no such line. That is
   the one real gap left (`ranger`, `mpv --vo=sixel`), and it is written down in PLAN §41 rather than
   papered over.
+
+**§42 reads one more engine flag and answers no sequence.** Word (double-click) and line (triple-click)
+selection is local UX in the §39/§40 family — nothing a remote can ask for — but it appears here because
+it put a new reader on the seam: `Screen::line_wrapped(line)`, the engine's `WRAPLINE` flag, which says
+whether a document line is continued by the next. **No row of §2–§6 or the §8 matrix moves.** Worth
+recording anyway, because reading that flag corrected a real defect on this surface: a copy across a
+wrapped line used to paste a **newline into the middle of a logical line** (a long path, a long command),
+where every other terminal unwraps. `Selection::extract` and the HTML copy now join a wrapped row to the
+next with nothing, and skip the trailing-blank trim on a wrapped row — a blank in the middle of a
+logical line is a space, not the grid's width padding. It also fixed a one-cell blind spot on this
+surface: a **one-character find-bar hit** (§35) and a **command whose output is a single character** (§34)
+were both being revealed and then not highlighted, because a range one cell wide was indistinguishable
+from a click that had not dragged.
 
 ---
 
@@ -678,6 +696,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `-history_size ..= screen_lines - 1` grid lines and answering `None` for a line the session no longer
   has. `cell(row, col)` is now `line_cell(line_at(row), col)`, so the viewport and document readers
   cannot drift; the pair is what lets a selection be stored in document coordinates and copied whole.
+  **§42 added one more read**: `line_wrapped(line)` reports whether a document line is *continued* by the
+  next one — `Flags::WRAPLINE` on the row's last cell, which the engine sets in `Term::wrapline` when
+  output ran past the right margin (`term/mod.rs:968`) and rewrites during a reflow (`grid/resize.rs`).
+  It is what makes a triple click take a whole *logical* line and a copy across a wrap re-join its halves
+  instead of pasting a newline into the middle of a path. `grid_line(line)` is the shared private helper
+  both `line_cell` and `line_wrapped` resolve through, so a cell read and a wrap check cannot disagree
+  about which line is which.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`

@@ -31,7 +31,9 @@ struct Style {
 
 /// Serialise the current `selection` over `screen` to a styled HTML fragment (PLAN §10). Returns
 /// an empty string when nothing is selected. Rows are joined with a newline inside the <pre>, so
-/// the pasted block keeps the terminal's line breaks and monospaced columns.
+/// the pasted block keeps the terminal's line breaks and monospaced columns — except across a WRAP,
+/// where the two rows are one logical line the terminal folded and are joined with nothing (§42),
+/// exactly as the plain-text copy does.
 pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 	let rows = selection.selected_rows(screen);
 	if rows.is_empty() {
@@ -46,11 +48,12 @@ pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 		hex(palette::DEFAULT_BG),
 	);
 
-	for (index, cells) in rows.iter().enumerate() {
-		if index > 0 {
+	for (index, row) in rows.iter().enumerate() {
+		// The break belongs to the row BEFORE this one, and a wrapped row has none (§42).
+		if index > 0 && !rows[index - 1].wrapped {
 			html.push('\n');
 		}
-		emit_row(&mut html, cells);
+		emit_row(&mut html, &row.cells);
 	}
 
 	html.push_str("</pre>");
@@ -256,6 +259,17 @@ mod tests {
 		let selection = Selection::new(grid_cell(0, 0)).with_head(grid_cell(1, 5));
 		let html = to_html(&selection, terminal.screen());
 		assert!(html.contains("\">ab\ncd</pre>"));
+	}
+
+	/// Except across a wrap, where the two rows are one logical line the window folded (§42) — the
+	/// rich copy has to break in the same places the plain-text one does, or the two paste differently.
+	#[test]
+	fn a_wrapped_row_is_joined_to_the_next_without_a_break() {
+		// Eight columns fed ten characters: row 0 wraps into row 1.
+		let terminal = terminal_with(2, 8, "abcdefghij");
+		let selection = Selection::new(grid_cell(0, 0)).with_head(grid_cell(1, 7));
+		let html = to_html(&selection, terminal.screen());
+		assert!(html.contains("\">abcdefghij</pre>"), "{html}");
 	}
 
 	#[test]

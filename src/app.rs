@@ -1303,6 +1303,10 @@ pub struct Tab {
 	/// The grid cell currently under the pointer (§10). Updated on every pointer
 	/// move so a press can anchor the selection here.
 	hover_cell: ui::selection::Cell,
+	/// The multi-click tally over the grid (§42): how many presses in a row landed on one cell, so a
+	/// press knows whether it is a plain click, a word (double) or a line (triple). `mouse_area`
+	/// reports presses one at a time and counts nothing itself.
+	clicks: ui::selection::Clicks,
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Holds the query
 	/// and the match list; the current match is shown as an ordinary `selection`, so the highlight
 	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
@@ -4348,6 +4352,33 @@ impl Tab {
 			self.follow_link(&uri);
 			return;
 		}
+		// A double click selects the word under the pointer, a triple the whole logical line (§42).
+		// The count is kept here because `mouse_area` reports each press on its own; the expansion
+		// itself is `ui::selection`'s, and what it hands back is an ordinary selection — so the grid
+		// highlights it and Copy copies it with no further wiring, the same route §34 took.
+		let click = self
+			.clicks
+			.press(self.hover_cell, std::time::Instant::now());
+		// The screen is borrowed again here rather than kept from above: the gutter branch needs `self`
+		// mutably, so holding one borrow across both is what the borrow checker (rightly) refuses.
+		let expanded = self.terminal.as_ref().and_then(|terminal| match click {
+			ui::selection::Click::Single => None,
+			ui::selection::Click::Double => {
+				ui::selection::Selection::word(terminal.screen(), anchor)
+			}
+			ui::selection::Click::Triple => {
+				ui::selection::Selection::line(terminal.screen(), anchor)
+			}
+		});
+		if let Some(selection) = expanded {
+			self.selection = Some(selection);
+			// And NO drag from here. The pointer is already sitting on the word, so the next mouse-move
+			// would extend a selection anchored at the press cell — collapsing the span the double
+			// click just made on the first stray pixel of movement. `ponytail:` dragging on from a
+			// double click therefore does nothing rather than extending word by word, as xterm does.
+			self.selecting = false;
+			return;
+		}
 		self.selection = Some(ui::selection::Selection::new(anchor));
 		self.selecting = true;
 	}
@@ -4449,7 +4480,9 @@ impl Tab {
 			line: span.end_line,
 			col: span.last_col,
 		};
-		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
+		// A RANGE, not a drag (§42): an output exactly one cell long — a command that printed a single
+		// character — would otherwise read as "nothing selected" and be neither highlighted nor copyable.
+		self.selection = Some(ui::selection::Selection::spanning(start, head));
 		self.selecting = false;
 		self.menu = None;
 	}
@@ -4526,7 +4559,9 @@ impl Tab {
 			line: found.line,
 			col: found.end_col,
 		};
-		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
+		// A RANGE, not a drag (§42): a ONE-CHARACTER query matches a single cell, and as a drag that
+		// would read as "nothing selected" — the hit would be revealed and then not highlighted.
+		self.selection = Some(ui::selection::Selection::spanning(start, head));
 		self.selecting = false;
 		self.menu = None;
 	}
@@ -6860,6 +6895,38 @@ mod tests {
 			!app.selecting,
 			"a tick click is a discrete action, not a drag"
 		);
+	}
+
+	/// A double click on the grid selects the word under the pointer and a triple the whole line (§42),
+	/// counted from the presses themselves — and neither starts a drag, since the next pointer move
+	/// would otherwise collapse the span back to the cell that was pressed.
+	#[test]
+	fn a_double_click_selects_a_word_and_a_triple_the_line() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.terminal.as_mut().unwrap().process(b"cat /etc/hosts");
+
+		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
+		app.pointer = iced::Point::new(50.0, 5.0);
+		app.hover_cell = ui::selection::Cell { row: 0, col: 6 };
+
+		// One press selects nothing on its own …
+		app.on_grid_pressed();
+		let selection = app.selection.expect("a press anchors a selection");
+		assert!(selection.is_empty(), "a bare click selects nothing");
+		assert!(app.selecting, "and it does begin a drag");
+
+		// … a second on the same cell takes the word …
+		app.on_grid_pressed();
+		let screen = app.terminal.as_ref().unwrap().screen();
+		let selection = app.selection.expect("the double click selected a word");
+		assert_eq!(selection.extract(screen), "/etc/hosts");
+		assert!(!app.selecting, "a word selection is not a drag");
+
+		// … and a third the whole line.
+		app.on_grid_pressed();
+		let screen = app.terminal.as_ref().unwrap().screen();
+		let selection = app.selection.expect("the triple click selected a line");
+		assert_eq!(selection.extract(screen), "cat /etc/hosts");
 	}
 
 	/// Ctrl+Shift+F opens the scrollback find bar, and while it is open the bar owns the keyboard

@@ -141,7 +141,13 @@ references below (§n) point into it.
   are in the history and how deep it runs. A full-screen program (vim, tmux, less) keeps its own
   pages, so scrolling there is theirs, not cmote's (§23).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
-  **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Ctrl+C**
+  **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
+  selects a word** and **triple-click the whole line**: a word is generous about what belongs to
+  one, so a path, a URL, a `user@host:port` or a `KEY=value` comes back whole and is ready to paste
+  straight back into the shell, while spaces, quotes, brackets and commas end it. A line means the
+  *logical* line — a command too long for the window occupies several rows and is taken in full — and
+  copying across that fold gives you the line as it was typed, not with a line break where the
+  window's edge happened to be (§42). **Ctrl+C**
   copies (when a selection exists; otherwise it is the shell's interrupt) as **styled HTML**
   that keeps the terminal's colours and attributes when pasted into a rich editor, with a
   plain-text fallback; **Ctrl+Shift+C** copies plain text only. **Ctrl+V** / **Ctrl+Shift+V**
@@ -561,7 +567,9 @@ cell read back as its dot pattern, a rounded corner's arc and tails measured aga
 cell), the OSC 8 hyperlink surfaced on its cells and the link scheme allow-list (http/https/
 mailto through, `file:` / `vscode:` / `javascript:` and a scheme-less URI refused, §24), the grid-resize
 math, mouse-selection geometry and text extraction (wide
-glyphs, trailing-blank trimming, multi-row joins), paste encoding (bracketed-paste
+glyphs, trailing-blank trimming, multi-row joins, and — §42 — the multi-click tally, the word rule over
+paths / URLs / endpoints / separators, a word and a copy carried across a line wrap, and the whole
+logical line a triple click takes), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,
