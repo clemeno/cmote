@@ -70,7 +70,10 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   underline / bar / hollow), steady — cmote runs no animation timer, so blink is dropped.
 - **Keeps 10 000 lines of scrollback** with a thin, read-only scroll indicator (§23 Stage 8):
   the wheel and Shift+PageUp/PageDown/Home/End scroll the history, and typing snaps back to the
-  live bottom. The alternate screen keeps no history, so scrolling is inert there by design.
+  live bottom. The alternate screen keeps no history, so scrolling is inert there by design. That
+  history is **searchable** (§35): Ctrl+Shift+F floats a find bar over the grid, and each hit is
+  revealed (centred when off-screen) and turned into an ordinary selection, so Copy takes it
+  (`term::search`).
 - **Lets the engine interpret** the whole VT stream, no cmote papering-over: the **DEC
   line-drawing charset** (older programs box-draw with it), **origin mode** (so cursor reports
   are origin-correct), **custom tab stops** (HTS / TBC), the **autowrap toggle** (DECAWM),
@@ -241,7 +244,10 @@ A/B/C/D marks, prompts and command output ranges stored as absolute line indices
 scrollback, and the result drives a per-tab command-status dot, Ctrl+Shift+Up/Down jump-to-prompt,
 and select-command-output (Ctrl+Shift+O or a prompt-tick click turns the C→D range into a text
 selection) — the same scanner-beside-the-cwd tactic, but with each mark's grid line captured by
-splitting the engine advance at it.
+splitting the engine advance at it. **Scrollback search** (§35) then shipped on the same two
+foundations, needing nothing of the engine beyond reads: `term::search` walks the whole grid
+(history included) for a query, and each hit is revealed by a scroll and handed to the UI as an
+ordinary selection — so it added no rendering, no reply path and no clipboard code.
 
 The `[engine-limit]` items are the only remaining large moves, and only **images** (sixel /
 kitty graphics) carry real UX value — the rest (double-height lines, left/right margins,
@@ -512,6 +518,22 @@ Audited file:line anchors behind the claims above, for later re-checking.
   jumped by Ctrl+Shift+Up/Down (`app.rs::prompt_jump`); its output selected by Ctrl+Shift+O or a
   gutter-tick click, both building an ordinary `ui::selection::Selection` (`app.rs::set_output_selection`).
   Marks and command ranges are cleared on resize (reflow invalidates absolute lines).
+- **`term/search.rs`** — the scrollback find bar's core (§35). `Row` is one grid line flattened for
+  searching — its ASCII-lowered glyphs plus a **byte → column map** grown in lockstep by `push`, so a
+  hit found by `str::find` reports grid *columns* (what a selection addresses) and a wide glyph's
+  skipped trailing cell cannot shift the columns after it; `trim_end` drops the row's width-padding
+  first. `Search` holds the query, every match in document order and which is current: a new query
+  lands on the **newest** hit (`set_matches`), a re-scan keeps the current one **by identity**
+  (`refresh`), and `step` wraps both ways. Pure — no engine, no widgets, all unit-tested.
+  `Terminal::find` walks `-history_size ..= last screen row` (the engine keeps history on the negative
+  lines) stamping each hit with the absolute line `history_size + line`, the same coordinate
+  `osc133` uses; `Terminal::reveal_line` scrolls a line into view — **centred**, and left in place when
+  already visible — and returns its viewport row, which `app.rs::reveal_match` pairs with the match's
+  columns into an ordinary `ui::selection::Selection`. Opened by Ctrl+Shift+F, which then owns the
+  keyboard (the `self.search.is_some()` guard in `app.rs::on_key`, mirroring the inline rename fields);
+  drawn as a floating overlay (`ui/terminal.rs::search_bar`) rather than a bar that would reflow the pty.
+  `ponytail:` per-row matching, so a hit across a wrapped line's fold is missed; only the current match
+  is highlighted.
 - **`term/mouse.rs`** — modes `?9 / 1000 / 1002 / 1003`; encodings classic / UTF-8 / SGR.
 - **`link.rs`** — following an OSC 8 hyperlink (§24): `is_allowed` gates the scheme to
   http/https/mailto (pure, unit-tested), `open` hands an allowed URI to `open::that_detached`

@@ -1126,6 +1126,11 @@ pub struct Tab {
 	/// The grid cell currently under the pointer (§10). Updated on every pointer
 	/// move so a press can anchor the selection here.
 	hover_cell: ui::selection::Cell,
+	/// The scrollback find bar's state while it is open, `None` when closed (§35). Holds the query
+	/// and the match list; the current match is shown as an ordinary `selection`, so the highlight
+	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
+	/// keyboard, so nothing typed into it also reaches the remote.
+	search: Option<term::search::Search>,
 	/// The last pointer position, local to the grid, used to place the right-click
 	/// context menu — a right-press carries no coordinates of its own (§10).
 	pointer: iced::Point,
@@ -1516,6 +1521,18 @@ pub enum Message {
 	TerminalScroll(i32),
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
+	// --- scrollback find bar (§35) ---
+	/// Open the find bar over the grid and focus its field — Ctrl+Shift+F. Raised again while it
+	/// is already open, which simply refocuses the field.
+	TermFindOpen,
+	/// Close the find bar — Esc or its ✕. The current match stays SELECTED, so what was found can
+	/// still be copied once the bar is out of the way.
+	TermFindClose,
+	/// The find field's text changed: re-scan the scrollback and reveal the newest match.
+	TermFindQuery(String),
+	/// Step to the next match: `true` toward the live prompt (↓, newer), `false` back into history
+	/// (↑, older). Both wrap.
+	TermFindStep(bool),
 	/// Open an OSC 8 hyperlink from the terminal's context menu (§24). Carries the URI, so
 	/// the menu item stands alone; the Ctrl+click path opens straight from `on_grid_pressed`
 	/// and raises no message.
@@ -2103,6 +2120,10 @@ impl Tab {
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
 			Message::CopyPressed => return self.on_copy_rich(),
+			Message::TermFindOpen => return self.open_term_find(),
+			Message::TermFindClose => self.search = None,
+			Message::TermFindQuery(query) => self.term_find_query(query),
+			Message::TermFindStep(newer) => self.term_find_step(newer),
 			Message::LinkOpen(uri) => {
 				self.menu = None;
 				self.follow_link(&uri);
@@ -3589,6 +3610,31 @@ impl Tab {
 			return iced::Task::none();
 		}
 
+		// Ctrl+Shift+F opens the scrollback find bar and focuses its field (§35). Taken BEFORE the
+		// bar's own keyboard guard below, so pressing it again while the bar is up refocuses the
+		// field rather than being swallowed. Matched on the PHYSICAL key like the copy/paste
+		// bindings, so it holds on any layout; plain Ctrl+F belongs to the shell (readline's
+		// forward-char), which is why only the Shift form is cmote's.
+		if modifiers.control()
+			&& modifiers.shift()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& matches!(physical_key, Physical::Code(Code::KeyF))
+		{
+			return self.open_term_find();
+		}
+
+		// While the find bar is open it owns the keyboard (§35): its field types through the widget
+		// tree, so nothing here may ALSO reach the remote — otherwise searching the scrollback would
+		// be typing at the shell's prompt. Exactly the rule the inline rename fields above follow.
+		// Esc closes the bar; the current match stays selected, so it can still be copied.
+		if self.search.is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.search = None;
+			}
+			return iced::Task::none();
+		}
+
 		// Ctrl+Tab hands the keyboard on to the next panel, Ctrl+Shift+Tab to the previous
 		// one (§20). Taken before anything else on this screen: it is the way *out* of a
 		// panel that is swallowing keys, so nothing may shadow it.
@@ -4070,9 +4116,13 @@ impl Tab {
 	}
 
 	/// Begin a selection at the hovered cell (§10). Also closes any open context
-	/// menu — a fresh press on the grid dismisses it.
+	/// menu — a fresh press on the grid dismisses it — and the find bar (§35).
 	fn on_grid_pressed(&mut self) {
 		self.menu = None;
+		// The find bar closes on a click-away too, like the menus (§35). It holds the keyboard while
+		// it is open, and a press on the grid takes the focus off its field — so leaving it up would
+		// leave every keystroke swallowed by a field that no longer has the cursor.
+		self.search = None;
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
 		self.set_focus(Focus::Terminal);
 		if self.terminal.is_none() {
@@ -4202,6 +4252,81 @@ impl Tab {
 		self.menu = None;
 	}
 
+	/// Open the scrollback find bar and focus its field (§35) — Ctrl+Shift+F. Already open, it is
+	/// only refocused (and its query kept), so pressing the shortcut a second time puts the cursor
+	/// back in the field instead of doing nothing the user has to reach for the mouse to fix.
+	fn open_term_find(&mut self) -> iced::Task<Message> {
+		if self.search.is_none() {
+			self.search = Some(term::search::Search::default());
+		}
+		iced::widget::operation::focus(ui::terminal::SEARCH_INPUT_ID)
+	}
+
+	/// A new query in the find bar (§35): scan the whole scrollback and reveal the NEWEST match.
+	/// Find-as-you-type, like a browser's bar — there is no cursor at the remote prompt to yank
+	/// here (the field holds the keyboard while the bar is open), so showing the hit as it is typed
+	/// costs nothing and saves a keystroke. A session-less tab scans nothing and simply shows no
+	/// results.
+	fn term_find_query(&mut self, query: String) {
+		let matches = match self.terminal.as_ref() {
+			Some(terminal) => terminal.find(&query),
+			None => Vec::new(),
+		};
+		let Some(search) = self.search.as_mut() else {
+			return;
+		};
+		search.query = query;
+		search.set_matches(matches);
+		let found = search.current();
+		self.reveal_match(found);
+	}
+
+	/// Step to the neighbouring match (§35). The scan is REDONE first, so output that arrived since
+	/// the query was typed joins the list rather than being invisible until the query is retyped;
+	/// `refresh` keeps the current match by identity across that re-scan, so the step moves exactly
+	/// one hit even when the list grew underneath it.
+	fn term_find_step(&mut self, newer: bool) {
+		let Some(query) = self.search.as_ref().map(|search| search.query.clone()) else {
+			return;
+		};
+		let matches = match self.terminal.as_ref() {
+			Some(terminal) => terminal.find(&query),
+			None => Vec::new(),
+		};
+		let Some(search) = self.search.as_mut() else {
+			return;
+		};
+		search.refresh(matches);
+		let found = search.step(newer);
+		self.reveal_match(found);
+	}
+
+	/// Reveal a found match and select it (§35): the terminal scrolls it into view (centred, and
+	/// left alone when it is already on screen) and hands back the viewport row it landed on, which
+	/// with the match's own columns becomes an ordinary one-row selection. That is the whole reason
+	/// this feature needs no rendering or clipboard work — the grid highlights a selection and Copy
+	/// copies one, whatever put it there (§34 took the same route). A match whose line has since
+	/// scrolled past the retained history leaves the view and the selection as they were.
+	fn reveal_match(&mut self, found: Option<term::search::Match>) {
+		let (Some(found), Some(terminal)) = (found, self.terminal.as_mut()) else {
+			return;
+		};
+		let Some(row) = terminal.reveal_line(found.line) else {
+			return;
+		};
+		let start = ui::selection::Cell {
+			row,
+			col: found.start_col,
+		};
+		let head = ui::selection::Cell {
+			row,
+			col: found.end_col,
+		};
+		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
+		self.selecting = false;
+		self.menu = None;
+	}
+
 	/// Copy the current selection to the system clipboard (§10). Extracts the
 	/// selected cells' text and hands it to iced's async clipboard write. The
 	/// highlight is left in place — copying does not deselect. Nothing selected (or
@@ -4300,6 +4425,9 @@ impl Tab {
 		self.selection = None;
 		self.selecting = false;
 		self.menu = None;
+		// A find bar left open across a session change would be searching a scrollback that no
+		// longer exists, and would go on swallowing the keyboard (§35) — so it closes with the rest.
+		self.search = None;
 		self.confirm_disconnect = false;
 		self.transfer = None;
 		self.upload_files.clear();
@@ -5572,6 +5700,7 @@ impl Tab {
 								to: &self.forward_to,
 								error: self.forward_error.as_deref(),
 							},
+							search: self.search.as_ref(),
 							body: &self.dialog_body,
 							drag,
 						},
@@ -6448,6 +6577,118 @@ mod tests {
 			!app.selecting,
 			"a tick click is a discrete action, not a drag"
 		);
+	}
+
+	/// Ctrl+Shift+F opens the scrollback find bar, and while it is open the bar owns the keyboard
+	/// (§35): a keystroke searches instead of reaching the remote. Esc closes it and the shell has
+	/// the keyboard back — otherwise a search would leave the session mute.
+	#[test]
+	fn ctrl_shift_f_opens_the_find_bar_and_takes_the_keyboard() {
+		use iced::keyboard::key::{Code, Named, Physical};
+		use iced::keyboard::{Key, Location, Modifiers};
+
+		// A press carrying produced text, the way a real typed character arrives.
+		fn typed(
+			key: Key,
+			code: Code,
+			modifiers: Modifiers,
+			text: Option<&str>,
+		) -> iced::keyboard::Event {
+			iced::keyboard::Event::KeyPressed {
+				key: key.clone(),
+				modified_key: key,
+				physical_key: Physical::Code(code),
+				location: Location::Standard,
+				modifiers,
+				text: text.map(Into::into),
+				repeat: false,
+			}
+		}
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		let _ = app.on_key(typed(
+			Key::Character("f".into()),
+			Code::KeyF,
+			Modifiers::CTRL | Modifiers::SHIFT,
+			None,
+		));
+		assert!(app.search.is_some(), "the find bar opened");
+		assert_eq!(next_input(&mut rx), None, "the shortcut is cmote's own");
+
+		// A plain keystroke now belongs to the bar's field (which types through the widget tree),
+		// so nothing goes to the remote.
+		let x = typed(
+			Key::Character("x".into()),
+			Code::KeyX,
+			Modifiers::empty(),
+			Some("x"),
+		);
+		let _ = app.on_key(x.clone());
+		assert_eq!(next_input(&mut rx), None, "typing searched, not the shell");
+
+		// Esc closes the bar, and the very same keystroke reaches the shell again.
+		let _ = app.on_key(key_press(Named::Escape, Code::Escape, Modifiers::empty()));
+		assert!(app.search.is_none(), "Esc closed the find bar");
+		let _ = app.on_key(x);
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"x"[..]));
+
+		// A click on the grid closes it too (§35) — it takes the focus off the bar's field, so
+		// leaving the bar up would leave the keyboard swallowed by a field without the cursor.
+		let _ = app.on_key(typed(
+			Key::Character("f".into()),
+			Code::KeyF,
+			Modifiers::CTRL | Modifiers::SHIFT,
+			None,
+		));
+		assert!(app.search.is_some(), "reopened");
+		app.on_grid_pressed();
+		assert!(app.search.is_none(), "a grid press dismissed the find bar");
+	}
+
+	/// A query scans the WHOLE scrollback, lands on the newest match and selects it, and stepping ↑
+	/// walks back into history — scrolling the older hit into view (§35). The selection is an
+	/// ordinary one, which is what makes the existing highlight and Copy serve a search result.
+	#[test]
+	fn a_query_finds_the_newest_match_and_stepping_walks_back_into_history() {
+		let (mut app, _rx) = app_with_terminal(16);
+		{
+			let terminal = app.terminal.as_mut().unwrap();
+			// One hit far enough back to have scrolled off the 24-row screen, and one near the
+			// live bottom.
+			terminal.process(b"needle first\r\n");
+			let filler: Vec<u8> = (0..40).flat_map(|_| b"filler\r\n".to_vec()).collect();
+			terminal.process(&filler);
+			terminal.process(b"needle last\r\n");
+		}
+
+		let _ = app.open_term_find();
+		app.term_find_query("needle".to_owned());
+
+		let search = app.search.as_ref().expect("the bar is open");
+		assert_eq!(search.count(), 2, "both hits found, history included");
+		assert_eq!(search.ordinal(), 2, "a new query lands on the newest match");
+		let newest = search.current().expect("a current match").line;
+		assert_eq!(offset(&app), 0, "the newest hit was already on screen");
+		let text = app
+			.selection
+			.expect("the match is selected")
+			.extract(app.terminal.as_ref().unwrap().screen());
+		assert_eq!(text, "needle");
+
+		// Step ↑ (older): the earlier hit left the screen long ago, so the view climbs to it.
+		app.term_find_step(false);
+		let search = app.search.as_ref().expect("the bar is still open");
+		assert_eq!(search.ordinal(), 1);
+		assert!(
+			search.current().expect("a current match").line < newest,
+			"stepped back into history"
+		);
+		assert!(offset(&app) > 0, "the view climbed to show the older hit");
+		let text = app
+			.selection
+			.expect("the older match is selected")
+			.extract(app.terminal.as_ref().unwrap().screen());
+		assert_eq!(text, "needle");
 	}
 
 	#[test]

@@ -257,7 +257,10 @@ cmote/
     │   ├── kitty.rs       encode a key event in the kitty keyboard protocol's CSI u form (§25)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
-    │   └── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link + the kitty flags (§9, §16, §23, §24, §25)
+    │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
+    │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
+    │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link + the kitty flags (§9, §16, §23, §24, §25)
+    │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current (§35)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -3161,3 +3164,88 @@ OSC and ignores it, so cmote scans the same bytes itself.
   without integration configured shows no dots, no ticks, and jump-to-prompt finds nothing. cmote
   never rewrites the remote's shell init to turn it on — that is the user's to configure, exactly as
   the cwd (§17) is.
+
+---
+
+## 35. Finding text in the scrollback (v3.x)
+
+The terminal retains 10 000 lines of history (§23) and the wheel, Shift+Page and jump-to-prompt
+(§34) all move through it — but until now the only way to *find* something up there was to scroll
+and read it. Every real terminal has a find bar; this is cmote's. **Ctrl+Shift+F** opens a small bar
+over the grid, typing searches the whole document, and ↑ / ↓ walk the hits — each one revealed and
+**selected**, so the existing Copy takes it.
+
+It is deliberately built out of what §34 already established: absolute line coordinates, a
+reveal-scroll, and "a found thing becomes an ordinary selection".
+
+- **The pure core is a flattened row (`term/search.rs`).** A `Row` is one grid line's glyphs plus,
+  for every *byte* of that text, the *column* it came from — the two only ever grown together by
+  `push`, so they cannot drift. That map is the whole trick: it lets the search run over a plain
+  `str` (so it is `str::find`, ASCII-lowered on both sides exactly as the editor's find is, §32)
+  while reporting **columns**, which is what a selection addresses. It is also how a double-width
+  glyph's trailing cell — which holds no glyph of its own — is skipped without every column after it
+  sliding one to the left. `trim_end` drops the row's width-padding first, so a query of one space
+  does not "match" thousands of blank cells (the same reason a copy trims them, §10).
+- **`Terminal::find` walks history AND the live screen.** The engine stores scrolled-off lines on the
+  *negative* grid lines below the active screen's line 0, so the whole document is `-history_size ..=
+  the last screen row`, and a hit's line is recorded as `history_size + line` — the same
+  scrollback-stable **absolute** index the OSC 133 marks use (§34), so a match keeps pointing at its
+  own text as new output pushes the viewport down. The scan is a full grid walk (`history + rows` ×
+  `columns` cell reads — a few million at the cap), which is cheap enough to redo on every keystroke
+  and far simpler than an index that every scroll and reflow could invalidate. So there is nothing to
+  invalidate: the list is rebuilt on each query change **and before each step**, which is also how
+  output that arrived mid-search joins the results.
+- **The match list is a tiny state machine (`search::Search`).** The query, every match in document
+  order, and which is current. A **new query lands on the NEWEST match** — a terminal search almost
+  always means "where did that last happen", and the newest hit is nearest the live prompt the user
+  is already looking at. A **re-scan keeps the current match by identity** (same line, same columns),
+  not by index, so a list that grew underneath a step still steps exactly one hit; a current match
+  that did not survive the re-scan falls back to the newest. Stepping wraps both ways.
+- **Revealing reuses §34's scroll, then an ordinary selection (`Terminal::reveal_line` + `app`).** A
+  match already on screen is left exactly where it is — stepping between two hits on one screenful
+  must not jerk the view — and one that is off screen is **centred**, so it arrives with context
+  above and below it (an output span, by contrast, is scrolled to the *top*, since it is the start
+  that matters there). The terminal hands back only the viewport row; `app` pairs it with the match's
+  columns to build a one-row `Selection`. That is why this feature needs no rendering and no
+  clipboard work at all: the grid highlights a selection and Copy copies one, whatever put it there.
+- **The bar floats; it does not push (`ui/terminal.rs`).** The grid's row count *is* the remote pty's
+  size, so a bar that took height would resize the remote every time it opened. Instead it is an
+  overlay in the existing stack, anchored to the grid's top-right by the same transparent-container
+  trick the context menu uses (§10) — and since a container paints and captures nothing, a click or a
+  wheel anywhere outside the bar still reaches the grid below. It carries the query field, a live
+  `n / total` (or an explicit "No results"), the two steppers and the shared close ✕ (§10). The
+  arrows are drawn ↑ / ↓ rather than the editor's ‹ / › because in a scrollback the direction *is*
+  the meaning: ↑ walks back into history, ↓ forward toward the live prompt. **Enter steps ↑**, since a
+  new query already put the user on the newest hit, so back into history is where anything is left to
+  find.
+- **While the bar is open it owns the keyboard (`app.rs::on_key`).** The keyboard subscription fires
+  independently of widget focus, so without a guard every character typed into the field would ALSO
+  be sent to the remote — searching would type at the shell's prompt. The guard is the same one the
+  inline rename fields use (§18, §19): while `search` is `Some`, nothing reaches the channel, and Esc
+  closes the bar. Ctrl+Shift+F is matched on the *physical* key (so it holds on any layout, like the
+  copy/paste bindings) and taken *before* that guard, so pressing it again while the bar is up
+  refocuses the field. Plain Ctrl+F is left to the shell — it is readline's forward-char. Closing the
+  bar keeps the current match **selected**, so what was found can still be copied.
+- **A press on the grid dismisses it, like the menus (§10).** That press takes the focus off the
+  bar's field, and the guard above is blind to focus — so a bar left up would leave every keystroke
+  swallowed by a field without a cursor. Dismissing it there is what keeps "the keyboard is either
+  the bar's or the shell's" true at all times, with no third, dead state.
+- **A session change closes it.** `clear_grid_interaction` drops the bar with the selection and the
+  menus: a bar left open across a disconnect would be searching a scrollback that no longer exists,
+  and would go on swallowing the keyboard.
+
+### What is deliberately NOT here
+
+- **Highlighting every match at once.** Only the current hit is marked, because "marked" means the
+  one selection the grid already paints. Washing all the others would need a second, list-shaped
+  highlight in the renderer — worth it later, not needed to find a line.
+- **Matches across a wrapped line.** A hit is found within one grid *row*, so a phrase straddling the
+  wrap of a long logical line is missed (its halves are separate rows), and a cell's combining marks
+  are not searched — only its base glyph. Joining wrapped rows would mean a second coordinate space
+  between the search and the selection.
+- **Regular expressions, whole-word and case-sensitive toggles.** The narrow, predictable rule the
+  editor's find already sets (§32) — ASCII case-insensitive substring — is the whole vocabulary here
+  too, and for the same reason: it is the behaviour that never surprises.
+- **Searching the alternate screen's own scrollback.** There is none to search: a full-screen program
+  (vim, less, tmux) manages its own pages and the engine keeps no history for it (§23), so the bar
+  finds only what is on that screen. Its own search is the one to use there.

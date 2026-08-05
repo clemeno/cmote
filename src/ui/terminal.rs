@@ -47,6 +47,16 @@ const STATUS_BAR_PADDING: iced::Padding = iced::Padding {
 	left: 10.0,
 };
 
+/// The widget id of the scrollback find bar's query field, so Ctrl+Shift+F can focus it the instant
+/// the bar opens (§35) — the same discipline as the editor's find field (§32).
+pub const SEARCH_INPUT_ID: &str = "term-find";
+
+/// The find bar's outline, and how far its card sits in from the grid's top-right corner (§35). A
+/// hairline is what separates the bar from whatever output happens to be behind it, since both are
+/// dark; the inset keeps it clear of the corner rather than flush against it.
+const SEARCH_BAR_BORDER: Color = Color::from_rgb8(0x55, 0x55, 0x55);
+const SEARCH_BAR_INSET: f32 = 8.0;
+
 /// The body copy for the disconnect confirmation dialog (§10). Public so `app` can
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
@@ -135,10 +145,12 @@ pub struct Panels<'a> {
 	pub drop_hover: bool,
 }
 
-/// What every modal on this screen needs (§10): whether the Disconnect confirmation is
+/// What every overlay on this screen needs (§10): whether the Disconnect confirmation is
 /// open, the shared selectable body buffer whichever dialog is showing, and where the
 /// card sits. Grouped because they always travel together — and because each dialog
-/// added to this screen would otherwise widen `view`'s signature again.
+/// added to this screen would otherwise widen `view`'s signature again. The scrollback
+/// find bar rides along for that second reason: it is not a modal, but it is an overlay
+/// over the grid, and it would otherwise be `view`'s eighth argument.
 #[derive(Debug, Clone, Copy)]
 pub struct Modals<'a> {
 	pub confirm_disconnect: bool,
@@ -158,6 +170,9 @@ pub struct Modals<'a> {
 	/// modals because it is one — an overlay with the shared chrome — and it keeps `view` under
 	/// the argument limit.
 	pub forwards: crate::ui::forward::ForwardsView<'a>,
+	/// The scrollback find bar's state while it is open, `None` when closed (§35). Floats over the
+	/// grid rather than pushing it down, so opening it never reflows the remote pty.
+	pub search: Option<&'a crate::term::search::Search>,
 	pub body: &'a text_editor::Content,
 	pub drag: crate::ui::dialog::Drag,
 }
@@ -194,6 +209,7 @@ pub fn view<'a>(
 		pending_delete,
 		transfer_conflict,
 		forwards,
+		search,
 		body: dialog_body,
 		drag,
 	} = modals;
@@ -288,6 +304,12 @@ pub fn view<'a>(
 	// overlay layers are `'static`; the confirmation panel borrows `dialog_body`, so the
 	// vector — and the whole view — takes that `'a` lifetime.
 	let mut layers: Vec<Element<'a, Message>> = vec![base];
+	// The scrollback find bar (§35), floating over the grid's top-right corner. Pushed first of the
+	// overlays, so a context menu or a dialog opened while it is up still draws over it — and low
+	// enough that the grid underneath keeps every event the bar's own widgets do not take.
+	if let Some(search) = search {
+		layers.push(search_bar(search));
+	}
 	if let Some(point) = menu {
 		// A right-click on an OSC 8 link cell adds Open/Copy link to the menu (§24). The
 		// anchor is where the click landed, so the cell — and its link, if any — is read
@@ -595,6 +617,86 @@ fn link_at(terminal: &Terminal, point: Point) -> Option<String> {
 		.cell(cell.row, cell.col)?
 		.hyperlink()
 		.map(str::to_owned)
+}
+
+/// The scrollback find bar (§35): a query field with a live `n / total` count, ↑ / ↓ steppers and
+/// the shared close ✕. The arrows are drawn as directions rather than as the editor's ‹ / › because
+/// in a scrollback the direction IS the meaning — ↑ walks back into history, ↓ forward toward the
+/// live prompt. Enter in the field steps ↑, since a new query already lands on the newest match, so
+/// back into history is where anything is left to find; Esc closes the bar (`app` watches for it,
+/// as the field has no close of its own).
+///
+/// It floats over the grid's top-right corner instead of pushing the grid down: the grid's row
+/// count is the remote pty's, so a bar that took height would resize the remote every time it
+/// opened. The full-window container around it paints and captures nothing, so a click or a wheel
+/// anywhere outside the bar itself still reaches the grid below.
+fn search_bar(search: &crate::term::search::Search) -> Element<'_, Message> {
+	let query = text_input("Find in scrollback", &search.query)
+		.id(SEARCH_INPUT_ID)
+		.on_input(Message::TermFindQuery)
+		.on_submit(Message::TermFindStep(false))
+		.padding(iced::Padding::from([3.0, 8.0]))
+		.size(STATUS_BAR_TEXT)
+		.width(Length::Fixed(200.0));
+
+	// "3 / 12" once there are hits, an explicit "No results" once a query has none, and blank
+	// while the bar is still idle — the same three states the editor's find bar shows (§32).
+	let has_hits = search.count() > 0;
+	let count_label = if search.query.is_empty() {
+		String::new()
+	} else if has_hits {
+		format!("{} / {}", search.ordinal(), search.count())
+	} else {
+		"No results".to_owned()
+	};
+
+	let bar = row![
+		query,
+		text(count_label)
+			.size(11)
+			.color(STATUS_BAR_FG)
+			.width(Length::Fixed(76.0)),
+		step_button("\u{2191}", Message::TermFindStep(false), has_hits), // ↑ older
+		step_button("\u{2193}", Message::TermFindStep(true), has_hits),  // ↓ newer
+		crate::ui::dialog::close_button(Message::TermFindClose),
+	]
+	.spacing(6)
+	.align_y(iced::alignment::Vertical::Center);
+
+	let card = container(bar)
+		.padding(iced::Padding::from([5.0, 8.0]))
+		.style(|_theme| container::Style {
+			background: Some(STATUS_BAR_BG.into()),
+			border: iced::Border {
+				radius: 4.0.into(),
+				width: 1.0,
+				color: SEARCH_BAR_BORDER,
+			},
+			..container::Style::default()
+		});
+
+	// Placed by a full-size transparent container, the same trick the context menu uses — aligned
+	// right, and pushed down past the status bar so it sits inside the grid's own area.
+	container(card)
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Right)
+		.padding(iced::Padding {
+			top: STATUS_BAR_HEIGHT + SEARCH_BAR_INSET,
+			right: SEARCH_BAR_INSET,
+			bottom: 0.0,
+			left: 0.0,
+		})
+		.into()
+}
+
+/// One of the find bar's steppers (§35): a small square button, disabled (and dimmed by the chrome)
+/// while the query has no matches to step between.
+fn step_button(label: &str, message: Message, enabled: bool) -> Element<'_, Message> {
+	button(text(label).size(STATUS_BAR_TEXT))
+		.padding(iced::Padding::from([1.0, 6.0]))
+		.on_press_maybe(enabled.then_some(message))
+		.into()
 }
 
 /// The right-click context menu (§10): Copy selection and Paste in the shared menu

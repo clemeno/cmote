@@ -31,12 +31,14 @@ pub mod mouse; // maps pointer events to the reports a mouse-aware program expec
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
+pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
@@ -390,6 +392,86 @@ impl Terminal {
 			end_row: last.max(first) as u16,
 			last_col: (self.term.columns() as u16).saturating_sub(1),
 		})
+	}
+
+	/// Every occurrence of `query` in the whole document — the retained history AND the live screen
+	/// (§35) — in document order, oldest line first. Each hit carries an ABSOLUTE line index
+	/// (`history_size + row`, the coordinate the OSC 133 marks also use, §34) so it keeps pointing
+	/// at its own text as later output pushes the viewport down, plus the grid columns it covers,
+	/// which is what a selection addresses.
+	///
+	/// A row is flattened one glyph per cell, skipping a wide glyph's trailing cell (it holds no
+	/// glyph of its own) and trimming the width-padding at the end, then searched ASCII
+	/// case-insensitively by `search::Row` — the pure half of this, tested without an engine. The
+	/// scan is a full walk of the grid, so it costs `history + rows` × `columns` cell reads; that is
+	/// a few million at the SCROLLBACK cap, cheap enough to redo on each keystroke in the find bar
+	/// and far simpler than maintaining an index that every scroll and reflow could invalidate.
+	///
+	/// `ponytail:` matches are found within one grid ROW, so a hit that straddles the wrap of a
+	/// long logical line is not found (the two halves are separate rows), and a cell's combining
+	/// marks are not searched — only its base glyph. An empty query finds nothing.
+	pub fn find(&self, query: &str) -> Vec<search::Match> {
+		if query.is_empty() {
+			return Vec::new();
+		}
+		let grid = self.term.grid();
+		let history = grid.history_size() as i32;
+		let screen_lines = self.term.screen_lines() as i32;
+		let columns = self.term.columns();
+		let mut out = Vec::new();
+		// The engine stores history on the NEGATIVE lines below the active screen's line 0, so the
+		// whole document is `-history ..= the last screen line`; absolute = history + line puts line
+		// 0 (the top of the active screen) at absolute `history_size`, as `osc133` records it.
+		for line in -history..screen_lines {
+			let mut row = search::Row::new((history + line) as u64);
+			for col in 0..columns {
+				let cell = &grid[Line(line)][Column(col)];
+				// A wide glyph's trailing half carries no glyph — skipping it (rather than pushing a
+				// blank) is why the row keeps a byte -> column map instead of assuming they line up.
+				if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+					continue;
+				}
+				row.push(cell.c, col as u16);
+			}
+			row.trim_end();
+			out.extend(row.find(query));
+		}
+		out
+	}
+
+	/// Scroll the absolute line `absolute` into view and return the viewport row it now sits on
+	/// (§35), or `None` when it cannot be placed on screen at all (its line has scrolled past the
+	/// retained history). Used to reveal a search match; the caller turns the row plus the match's
+	/// columns into a selection, so the ordinary highlight and Copy paths serve it.
+	///
+	/// A line already on screen is left exactly where it is — a step between two matches on the
+	/// same screenful must not jerk the view. One that is not is CENTRED rather than put at the
+	/// top, so a match arrives with its surrounding output visible on both sides; the target offset
+	/// is clamped to the history the engine actually retains, so a match near either end simply
+	/// lands as close to the middle as the document allows.
+	pub fn reveal_line(&mut self, absolute: u64) -> Option<u16> {
+		let grid = self.term.grid();
+		let history = grid.history_size() as i64;
+		let screen_lines = self.term.screen_lines() as i64;
+		// Absolute line -> viewport row for a given display offset, the inverse of the mapping
+		// `Screen::cell` reads with (§23).
+		let to_row = |offset: i64| absolute as i64 - history + offset;
+
+		let offset = grid.display_offset() as i64;
+		if !(0..screen_lines).contains(&to_row(offset)) {
+			// The offset that puts this line in the middle of the screen: the offset that would put
+			// it at the top (history - absolute) plus half a screen of extra climb.
+			let target = (history - absolute as i64 + screen_lines / 2).clamp(0, history);
+			let delta = target - offset;
+			if delta != 0 {
+				self.term.scroll_display(Scroll::Delta(delta as i32));
+			}
+		}
+
+		// Map with the (possibly new) offset — the engine clamps a scroll, so this is the truth
+		// about where the line ended up rather than where we aimed it.
+		let row = to_row(self.term.grid().display_offset() as i64);
+		(0..screen_lines).contains(&row).then_some(row as u16)
 	}
 }
 
@@ -987,5 +1069,62 @@ mod tests {
 			"scrolled up to reveal the output"
 		);
 		assert!(span.start_row < 4 && span.end_row < 4, "span is on screen");
+	}
+
+	/// The find bar searches the WHOLE document, not just what is visible (§35): on a 2-row screen
+	/// fed five lines, a hit on the first (long since scrolled off) is still found, at the absolute
+	/// line it sits on and the columns it covers.
+	#[test]
+	fn the_search_reaches_lines_that_scrolled_off_the_screen() {
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"alpha\r\nbravo\r\ncharlie\r\ndelta\r\nalpha again");
+
+		// Three lines scrolled off, so the retained history is 3 and absolute line 0 is "alpha".
+		assert_eq!(terminal.screen().history_size(), 3);
+		let hits = terminal.find("alpha");
+		assert_eq!(
+			hits,
+			vec![
+				search::Match {
+					line: 0,
+					start_col: 0,
+					end_col: 4
+				},
+				search::Match {
+					line: 4,
+					start_col: 0,
+					end_col: 4
+				},
+			]
+		);
+		// The query is matched case-insensitively, and a query nothing carries finds nothing.
+		assert_eq!(terminal.find("BRAVO").len(), 1);
+		assert!(terminal.find("nowhere").is_empty());
+	}
+
+	/// Revealing a match scrolls it onto the screen when it is off it, and leaves the view alone
+	/// when it is already showing (§35) — a step between two hits on one screenful must not jerk.
+	#[test]
+	fn revealing_a_match_scrolls_only_when_it_is_off_screen() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"needle\r\n");
+		let filler: Vec<u8> = (0..30).flat_map(|_| b"filler\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		let hit = *terminal.find("needle").first().expect("the hit is found");
+		assert_eq!(terminal.screen().display_offset(), 0, "at the live bottom");
+
+		// Off screen: the view climbs into history and the returned row is on the visible grid.
+		let row = terminal.reveal_line(hit.line).expect("revealed on screen");
+		let offset = terminal.screen().display_offset();
+		assert!(offset > 0, "scrolled up to reveal the match");
+		assert!(row < 4, "the row is on the visible screen");
+
+		// Already visible: nothing moves, and the same row comes back.
+		assert_eq!(terminal.reveal_line(hit.line), Some(row));
+		assert_eq!(
+			terminal.screen().display_offset(),
+			offset,
+			"a visible match is revealed in place"
+		);
 	}
 }
