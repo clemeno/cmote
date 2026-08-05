@@ -3946,3 +3946,68 @@ puts it back.
   `history_size + row` stops naming a fixed line, so every absolute anchor drifts as output arrives —
   §34's marks, §41's images and the selection alike. That is a property of the coordinate, not of the
   resize, and it takes 10 000 lines of output to reach.
+
+---
+
+## 44. The find bar keeps up with live output (v3.x)
+
+§43 closed one half of a two-part hole: a match list is built once, and it describes the document *as
+it was at that moment*. A resize was the loud half. **Output arriving** is the quiet one, and it goes
+wrong in two ways at once:
+
+- **Hits the bar has never seen.** A `tail -f` or a long build prints the query again and again; none
+  of it joined the count, and none of it was washed (§39), until the user stepped or retyped the query.
+  The bar answered a question about the past while the answer scrolled by in front of it.
+- **Stored lines that stop pointing at their text.** Once the history is at its `SCROLLBACK` cap
+  (§23) it stops growing: each line that scrolls off drops the oldest one, so the text that was at
+  absolute line *N* is at *N-1*. Every stored match drifts one line further from its text per line of
+  output — and the washes drift with them, onto text that never matched. §43's *what is deliberately
+  NOT here* listed that drift as untouched; for the find bar, it now is, because a fresh scan re-derives
+  the lines rather than adjusting them.
+
+### Marked on output, scanned on the next frame (`app.rs`)
+
+The output arm does **not** scan. `Terminal::find` walks every retained line — up to 10 000 of them,
+cell by cell — and a flood of output arrives as dozens of `SshEvent::Output` chunks per frame, so a scan
+per chunk would spend the frame searching instead of drawing, exactly during the moment the terminal has
+the most to do. Instead the arm sets one flag, `Tab::search_stale`, and the flag subscribes to
+`iced::window::frames()` — so a burst of chunks collapses into **one** scan on the next frame.
+
+That is the same shape the copy toast has used since §10 and the quit drain since §30: the frame clock
+exists only while there is work for it, and clearing the flag is what removes it again. No timer is
+created and none has to be cancelled. Three details fall out of it:
+
+- **An empty query and a closed bar never start the clock**, so an ordinary session — no bar, or a bar
+  with nothing typed in it — pays nothing at all for this.
+- **Only the ACTIVE tab's flag is consulted.** A background tab's bar is not on screen; its flag stays
+  set and is honoured the moment the user comes back to it, which is the first frame that can show it.
+- **The flag is cleared unconditionally by the re-scan**, before anything else. A tick that arrives
+  after the bar closed in the same batch still has to stop the ticking.
+
+### A re-scan is not a step (`app.rs`)
+
+`rescan_find` rebuilds the list and nothing else: no reveal, no scroll, no selection. Three callers now
+share it — a reflow (§43), a frame tick with output waiting, and a step, which scans first so a hit
+printed since the query was typed can be stepped onto. Only the step reveals afterwards, because only
+the step is something the user asked for. A shell printing under an open bar must not drag the viewport
+about while the user is reading a hit up in the history; what changes on screen is the count and the
+washes.
+
+### What is deliberately NOT here
+
+- **No incremental scan.** Every re-scan is a full walk. The obvious optimisation — scan only the lines
+  that arrived — cannot fix the cap drift, because the engine reports no count of the lines it evicted,
+  so the older matches would still need renumbering by a figure nothing hands out. `ponytail:` the whole
+  document, once per frame, while a query is live and output is flowing.
+- **The current hit can jump at the cap.** Drift breaks the identity `refresh` keeps the current match
+  by (§35), so past 10 000 lines a re-scan falls back to the newest hit — the bar behaves as though the
+  query had just been typed. Correct rather than pretty, and the next ↑ walks back from there.
+- **A revealed match's selection is not re-pointed.** The selection is the user's, and it may not even
+  be the match any more — they can drag a new one with the bar open. Moving it on output the user did
+  not ask for would be the surprise; leaving it is the same drift §43 already documents, in the one case
+  (a full scrollback) that has it.
+- **§34's prompt marks and §41's images still drift at the cap.** Neither can be re-derived: they are
+  recorded from OSC events as they arrive, not read back off the grid, so there is nothing to re-scan.
+  The find bar is fixable here precisely because its list is derivable from the text.
+- **The bar does not open itself, and nothing searches while it is closed.** No background matching, no
+  "N new matches" badge on the tab chip (§34's dot is a command status, not a search one).

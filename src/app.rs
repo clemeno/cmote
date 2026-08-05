@@ -1137,6 +1137,14 @@ impl App {
 		if active.snackbar.is_some() {
 			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
 		}
+		// Output landed under an open find bar (§44): tick so the re-scan runs once on the next frame
+		// instead of once per output chunk. Only the ACTIVE tab's flag is consulted — a background
+		// tab's bar is not on screen, and its flag is still set when the user comes back to it, which
+		// is when this subscription appears and the scan happens. Same shape as the toast above: the
+		// clock exists only while there is work for it.
+		if active.search_stale {
+			subs.push(iced::window::frames().map(|_instant| Message::TermFindRescan));
+		}
 		match active.screen {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
@@ -1312,6 +1320,18 @@ pub struct Tab {
 	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
 	/// keyboard, so nothing typed into it also reaches the remote.
 	search: Option<term::search::Search>,
+	/// Output has landed since the find bar's match list was built, so the list describes a document
+	/// that no longer exists (§44). Two things go wrong at once: the fresh output can hold hits the
+	/// bar has never seen, and — once the scrollback is at its cap (§23) — every line that scrolls
+	/// off renumbers the ones above it, so a stored match's absolute line (§40) points one line
+	/// further from its text with each one.
+	///
+	/// It is a FLAG rather than a re-scan on the spot because a scan walks every retained line
+	/// (`Terminal::find`), and a flood of output arrives as dozens of chunks per frame: scanning per
+	/// chunk would spend the frame searching instead of drawing. Set by the output path, read one
+	/// window frame later, and cleared by whatever rebuilds the list — which is also what stops the
+	/// frame clock, exactly as the toast's dwell does (§10).
+	search_stale: bool,
 	/// The last pointer position, local to the grid, used to place the right-click
 	/// context menu — a right-press carries no coordinates of its own (§10).
 	pointer: iced::Point,
@@ -1714,6 +1734,11 @@ pub enum Message {
 	/// Step to the next match: `true` toward the live prompt (↓, newer), `false` back into history
 	/// (↑, older). Both wrap.
 	TermFindStep(bool),
+	/// A window-frame tick raised while output has landed under an open find bar (§44): rebuild the
+	/// match list so the count and the washes describe the document as it is now. Carries no payload
+	/// — the query is the bar's own — and, like `SnackbarTick`, is only subscribed to while there is
+	/// something to do, so a bar over an idle shell costs no frames at all.
+	TermFindRescan,
 	/// Open an OSC 8 hyperlink from the terminal's context menu (§24). Carries the URI, so
 	/// the menu item stands alone; the Ctrl+click path opens straight from `on_grid_pressed`
 	/// and raises no message.
@@ -2316,6 +2341,10 @@ impl Tab {
 			Message::TermFindClose => self.search = None,
 			Message::TermFindQuery(query) => self.term_find_query(query),
 			Message::TermFindStep(newer) => self.term_find_step(newer),
+			// A frame tick with output waiting under the bar (§44). Re-scanning clears the flag, which
+			// removes the `frames()` subscription next diff — so the ticking stops on its own once the
+			// output does, like the toast's.
+			Message::TermFindRescan => self.rescan_find(),
 			Message::LinkOpen(uri) => {
 				self.menu = None;
 				self.follow_link(&uri);
@@ -3008,6 +3037,18 @@ impl Tab {
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Input(replies));
 				}
+				// That chunk changed the document the find bar searched, so its match list is now a
+				// description of an older one (§44). Marked, not re-scanned here: the scan walks every
+				// retained line and this arm runs once per chunk of output, so a frame tick collapses a
+				// burst of them into one. An empty query has no list to invalidate, and a closed bar has
+				// no list at all — neither starts the clock.
+				if self
+					.search
+					.as_ref()
+					.is_some_and(|search| !search.query.is_empty())
+				{
+					self.search_stale = true;
+				}
 				// That chunk may have turned focus reporting on or off (§23); reconcile the
 				// remote to the shell's true focus, so a program enabling `?1004` while a side
 				// panel holds the keyboard is not left believing the shell is focused.
@@ -3259,24 +3300,15 @@ impl Tab {
 		// text — so the next press there starts a fresh count instead of expanding a word the user
 		// never clicked on once.
 		self.clicks = ui::selection::Clicks::default();
-		let Some(terminal) = self.terminal.as_ref() else {
-			return;
-		};
-		// The pointer has not moved, but the cell under it has: resolve it again from the last known
-		// position against the new grid, exactly as a move would (§10). Without this a press that
-		// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
-		// the shrunken grid no longer has.
-		let (rows, cols) = terminal.screen().size();
-		// Both reads off the reflowed screen happen here, while the borrow is still an immutable one:
-		// the scan below is `Terminal::find`'s, the same call a step makes.
-		let matches = self
-			.search
-			.as_ref()
-			.map(|search| terminal.find(&search.query));
-		self.hover_cell = ui::terminal::cell_at(self.pointer, rows, cols);
-		if let (Some(search), Some(matches)) = (self.search.as_mut(), matches) {
-			search.refresh(matches);
+		if let Some(terminal) = self.terminal.as_ref() {
+			// The pointer has not moved, but the cell under it has: resolve it again from the last known
+			// position against the new grid, exactly as a move would (§10). Without this a press that
+			// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
+			// the shrunken grid no longer has.
+			let (rows, cols) = terminal.screen().size();
+			self.hover_cell = ui::terminal::cell_at(self.pointer, rows, cols);
 		}
+		self.rescan_find();
 	}
 
 	/// The Disconnect button (§10): open the confirmation modal instead of dropping
@@ -4552,6 +4584,9 @@ impl Tab {
 	/// costs nothing and saves a keystroke. A session-less tab scans nothing and simply shows no
 	/// results.
 	fn term_find_query(&mut self, query: String) {
+		// The list built below describes the document as it is right now, so a re-scan left pending by
+		// output that landed a moment ago (§44) has nothing left to do.
+		self.search_stale = false;
 		let matches = match self.terminal.as_ref() {
 			Some(terminal) => terminal.find(&query),
 			None => Vec::new(),
@@ -4570,6 +4605,26 @@ impl Tab {
 	/// `refresh` keeps the current match by identity across that re-scan, so the step moves exactly
 	/// one hit even when the list grew underneath it.
 	fn term_find_step(&mut self, newer: bool) {
+		self.rescan_find();
+		let Some(search) = self.search.as_mut() else {
+			return;
+		};
+		let found = search.step(newer);
+		self.reveal_match(found);
+	}
+
+	/// Rebuild the open find bar's match list from the document as it stands, keeping the current hit
+	/// by identity wherever it survived (§35). Three callers, all of them the document changing under
+	/// the bar rather than the user asking for anything: a reflow (§43), output arriving (§44), and a
+	/// step, which scans first so that a hit printed since the query was typed can be stepped onto.
+	///
+	/// Nothing is revealed and nothing is selected. A step does both afterwards because the user asked
+	/// to move; the other two must not, or a shell printing under an open bar would drag the viewport
+	/// about while it is being read. What the user sees change is the count and the washes.
+	fn rescan_find(&mut self) {
+		// Cleared first and unconditionally, because this is what stops the frame clock (§44): a tick
+		// that finds nothing to do — the bar closed in the same batch — still has to end the ticking.
+		self.search_stale = false;
 		let Some(query) = self.search.as_ref().map(|search| search.query.clone()) else {
 			return;
 		};
@@ -4577,12 +4632,9 @@ impl Tab {
 			Some(terminal) => terminal.find(&query),
 			None => Vec::new(),
 		};
-		let Some(search) = self.search.as_mut() else {
-			return;
-		};
-		search.refresh(matches);
-		let found = search.step(newer);
-		self.reveal_match(found);
+		if let Some(search) = self.search.as_mut() {
+			search.refresh(matches);
+		}
 	}
 
 	/// Reveal a found match and select it (§35): the terminal scrolls it into view (centred, and
@@ -7211,6 +7263,102 @@ mod tests {
 		let selection = app.selection.expect("the current match is selected");
 		assert!(selection.contains(current.line, current.start_col));
 		assert!(selection.contains(current.line, current.end_col));
+	}
+
+	/// A hit printed while the bar is open joins the count and the washes on its own (§44) — the bar
+	/// keeps up with a `tail -f` instead of describing the scrollback as it was when the query was
+	/// typed. The scan is deferred to a frame tick rather than run per output chunk, so this comes in
+	/// two halves: the chunk marks the list stale, and the tick is what rebuilds it.
+	#[test]
+	fn output_under_an_open_find_bar_is_picked_up_on_the_next_frame() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.terminal.as_mut().unwrap().process(b"needle first\r\n");
+
+		let _focus = app.open_term_find();
+		app.term_find_query("needle".to_owned());
+		assert_eq!(
+			app.search.as_ref().unwrap().count(),
+			1,
+			"one hit when the query was typed"
+		);
+		assert!(
+			!app.search_stale,
+			"and the list is as fresh as the document"
+		);
+
+		// The shell prints a second hit. The chunk itself must not scan — a flood of them arrives per
+		// frame, and paying for a whole-document walk on each is what the flag exists to avoid.
+		let _ = app.on_ssh_event(SshEvent::Output(b"needle second\r\n".to_vec()));
+		assert!(app.search_stale, "the chunk marked the list stale");
+		assert_eq!(
+			app.search.as_ref().unwrap().count(),
+			1,
+			"and did not scan on the spot"
+		);
+
+		// The frame tick the flag subscribed to.
+		app.rescan_find();
+		let search = app.search.as_ref().expect("the bar stays open");
+		assert_eq!(search.count(), 2, "the hit that arrived is in the count");
+		assert_eq!(
+			search.ordinal(),
+			1,
+			"and the current hit stayed put rather than jumping to it"
+		);
+		assert!(!app.search_stale, "which stops the frame clock again");
+	}
+
+	/// A re-scan is not a step: it must not scroll, and it must not move the selection (§44). Output
+	/// arriving under a bar parked up in the history would otherwise drag the viewport to the newest
+	/// hit while the older one is being read.
+	#[test]
+	fn a_rescan_leaves_the_viewport_and_the_selection_where_they_are() {
+		let (mut app, _rx) = app_with_terminal(16);
+		{
+			let terminal = app.terminal.as_mut().unwrap();
+			// One hit far enough back that reaching it has to scroll the 24-row screen.
+			terminal.process(b"needle first\r\n");
+			let filler: Vec<u8> = (0..40).flat_map(|_| b"filler\r\n".to_vec()).collect();
+			terminal.process(&filler);
+			terminal.process(b"needle last\r\n");
+		}
+
+		let _focus = app.open_term_find();
+		app.term_find_query("needle".to_owned());
+		// Step back to the older hit, which climbs into the history and parks there.
+		app.term_find_step(false);
+		assert!(offset(&app) > 0, "parked up in the history");
+
+		let _ = app.on_ssh_event(SshEvent::Output(b"needle third\r\n".to_vec()));
+		// The offset is read AFTER the output: the engine moves the viewport itself to keep the same
+		// text on screen as lines scroll off, and that is not what this test is about.
+		let parked = offset(&app);
+		let selected = app.selection;
+
+		app.rescan_find();
+
+		assert_eq!(offset(&app), parked, "the re-scan did not scroll");
+		assert_eq!(app.selection, selected, "nor moved the selection");
+		assert_eq!(
+			app.search.as_ref().unwrap().count(),
+			3,
+			"it did pick the new hit up, though"
+		);
+	}
+
+	/// Nothing to re-scan starts no frame clock (§44): a closed bar has no match list, and an open one
+	/// with nothing typed in it has no matches. Output on an ordinary session must not put the window
+	/// into a per-frame scan it has no use for.
+	#[test]
+	fn output_with_no_query_starts_no_frame_clock() {
+		let (mut app, _rx) = app_with_terminal(16);
+
+		let _ = app.on_ssh_event(SshEvent::Output(b"hello\r\n".to_vec()));
+		assert!(!app.search_stale, "no bar, so no list to invalidate");
+
+		let _focus = app.open_term_find();
+		let _ = app.on_ssh_event(SshEvent::Output(b"hello again\r\n".to_vec()));
+		assert!(!app.search_stale, "an idle bar has nothing to re-scan");
 	}
 
 	#[test]

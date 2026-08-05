@@ -140,6 +140,14 @@ references below (§n) point into it.
   right edge while you are scrolled up and disappears at the live bottom — its bar shows where you
   are in the history and how deep it runs. A full-screen program (vim, tmux, less) keeps its own
   pages, so scrolling there is theirs, not cmote's (§23).
+- **Search the scrollback** — **Ctrl+Shift+F** floats a find bar over the grid. Typing searches all
+  10 000 lines as you go (case-insensitive) and lands on the **newest** hit, scrolling it into view and
+  selecting it, so Copy takes it with no extra step; **↑** / **↓** walk older and newer and wrap at
+  both ends, and **Esc** closes the bar leaving the last hit selected. Every other hit **on screen** is
+  washed in amber at the same time, so you can see how the query is spread through the output rather
+  than only where you are in it (§35, §39). The bar keeps up with a **live** shell: a hit printed while
+  it is open joins the count and the washes on the next frame, without dragging the view off whatever
+  you are reading (§44).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
   selects a word** and **triple-click the whole line**: a word is generous about what belongs to
@@ -360,6 +368,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+C** | Copy the selection as styled HTML + plain text (rich paste keeps colours); with no selection, the shell's interrupt instead. Clears the selection after copying |
 | **Ctrl+Shift+C** | Copy the selection as plain text only |
 | **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
+| **Ctrl+Shift+F** | Open the scrollback find bar (pressed again, it refocuses the field). **↑** / **↓** step to the older / newer hit, wrapping; **Esc** or its ✕ closes it and leaves the last hit selected. Hits on screen are washed; the bar follows live output |
 | **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
@@ -572,7 +581,9 @@ math, mouse-selection geometry and text extraction (wide
 glyphs, trailing-blank trimming, multi-row joins, and — §42 — the multi-click tally, the word rule over
 paths / URLs / endpoints / separators, a word and a copy carried across a line wrap, and the whole
 logical line a triple click takes, plus §43's reflow clean-up: the selection dropped, the find bar
-re-scanned and the click tally started over), paste encoding (bracketed-paste
+re-scanned and the click tally started over, and §44's live find bar: output marking the match list
+stale rather than scanning per chunk, the deferred scan picking the new hit up, and a re-scan moving
+neither the viewport nor the selection), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,
