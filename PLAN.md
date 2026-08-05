@@ -219,6 +219,7 @@ cmote/
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
+    ├── mru.rs            the tabs' activation order (ids, most recent last): a close falls back to the previous visit (§37)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
     ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
     ├── profiles.rs       load/save `targets.json`: saved connection profiles + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
@@ -2414,7 +2415,9 @@ its subscription from the batch — a clean teardown from one `Vec::remove`.
 on), tinted when active, each with a "×"; a trailing "+". **Mouse-only** (the chosen scope): a left
 click on a chip selects, "×" closes, "+" opens a fresh home tab. Closing a **live** tab first
 raises a confirmation (like Disconnect, closing is not undoable); an idle tab closes at once.
-Closing the last tab never leaves an empty window — a fresh home tab replaces it.
+Closing the last tab never leaves an empty window — it is a request to quit cmote, and takes the
+quit confirmation (§30). Which tab comes forward when the active one closes is §37's rule, not the
+strip's order.
 
 The strip has a fixed height (`STRIP_HEIGHT`), so the terminal below it lives in a window that much
 shorter. iced's `mouse_area` reports widget-local coordinates, so pointer math inside a tab is
@@ -3317,3 +3320,68 @@ in the encoder, reading the mode out of the grouped `keymap::Modes` beside DECCK
   so. Honouring it would take a scanner beside the engine (as `modkeys` is) tracking SGR 5/6 per cell
   *and* a repaint timer cmote deliberately runs for nothing — the same call made for the cursor.
 - **DA3 as anything but a constant, and any other `CSI =` sequence.** See the security note above.
+
+## 37. Closing a tab returns you to where you were (v3.x)
+
+Tabs (§26) kept `active` as an **index into the strip**, so closing the tab on screen fell back to
+strip arithmetic: keep the index, or step back one if the last tab went. With three or more tabs open
+that is nearly always wrong. Close the shell you were working in and the window lands on whichever
+chip happens to sit next door — frequently a home tab opened minutes ago and never looked at — while
+the session you were in *before* this one sits two chips away, untouched. The strip's order says
+where a tab **sits**; it says nothing about where the user has **been**.
+
+This section adds the second order — the activation order — and makes a close walk back along it.
+
+### The order is its own module, and it is pure
+
+`mru.rs` holds one type: `Mru`, a stack of tab **ids**, least recently activated first, the tab on
+screen last. It knows nothing else — no `Tab`, no strip index, no iced type — so the whole rule is
+unit-testable without a window, and `App` stays the only place that reconciles ids with positions.
+
+- **Ids, not indices.** Indices shift on every removal; a tab id is monotonic and never reused
+  (§26), so an entry in the order cannot silently come to mean a different tab.
+- **A stack of visits, not a log of them.** `touch` removes any existing entry before pushing, so
+  re-activating a tab re-dates its visit instead of leaving a stale one further down that would come
+  forward out of turn later. Length always equals the number of open tabs.
+- **A `Vec` and a linear scan, deliberately.** A window holds a handful of tabs; an index or a deque
+  would cost more to read than it saves to run.
+
+### One rule covers both close cases
+
+`forget(id)` drops the closed tab and returns the **top of what is left** — not "the tab before the
+closed one". That one answer is right in both directions, which is why there is no branch on whether
+the closed tab was active:
+
+- Closing the **active** tab pops the top, so the answer is the tab the user was on before it. This
+  is the whole point of the section.
+- Closing a **background** tab (its own "×", from a strip where another tab is on screen) leaves the
+  top where it is, so the answer is the active tab itself — and `App` re-activating what is already
+  on screen changes nothing. Closing a tab off-screen must never move the window.
+
+### Where it plugs in
+
+`App` gained one field (`recent: mru::Mru`) and touches it at the four places that already changed
+`active`: startup (the first home tab is the first visit), `open_tab`, `open_editor` (§32 — so
+closing an editor returns to the session the file was opened from) and `select_tab`. `remove_tab`
+asks `forget` which tab to bring forward and resolves that id to an index, keeping the old strip
+arithmetic as an unreachable fallback rather than leaving `active` pointing anywhere if the order and
+the `Vec` ever disagreed.
+
+`remove_tab` also now carries the window geometry (`window_size` / `window_focused` / `modifiers`)
+onto the tab it brings forward, exactly as `select_tab` does — read **before** the removal, since
+when the tab being dropped is the active one that is the last moment its copies exist. Without it, a
+tab brought forward by a close painted against whatever size it last saw until the next resize.
+
+### What is deliberately NOT here
+
+- **No keyboard shortcut.** A Ctrl+Tab "last tab" cycle is the obvious neighbour of this order and
+  costs almost nothing to add on top of it — but the strip is mouse-only by choice (§26), and every
+  keystroke cmote claims is one the remote shell no longer receives. Left for when it is asked for.
+- **Not persisted across runs.** cmote does not restore the tab set on startup, so an activation
+  order from the previous run would name ids that no longer exist. It is session state, and stays
+  out of `settings.json` (§31).
+- **No depth limit, and no visible history.** The order holds one entry per open tab and shrinks with
+  them, so it cannot grow without bound; and it is a fallback rule, not a feature with a UI. The
+  strip still shows exactly the tabs, in the order they were opened.
+- **The quit flow is untouched (§30).** Quitting closes every tab, so which one would have come
+  forward is moot; closing the *last* tab is still a request to quit, not a fallback.

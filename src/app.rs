@@ -11,10 +11,10 @@
 //
 // Tabs (§26): the state is two layers. `Tab` holds ONE session's whole state — everything a
 // single-session app once was — and carries its own `update`/`view`/`title`. `App` owns a
-// `Vec<Tab>` plus the active index and the shared target list / vault; its own
-// `update`/`view`/`subscription` pick the active tab, delegate to it, route each session's SSH
-// events to the tab that owns them, and draw the tab strip. Adding tabs did not disturb the
-// per-session logic — it moved wholesale onto `Tab`.
+// `Vec<Tab>` plus the active index, the tabs' activation order (§37) and the shared target list /
+// vault; its own `update`/`view`/`subscription` pick the active tab, delegate to it, route each
+// session's SSH events to the tab that owns them, and draw the tab strip. Adding tabs did not
+// disturb the per-session logic — it moved wholesale onto `Tab`.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -126,14 +126,20 @@ pub fn run() -> iced::Result {
 
 /// The application: a strip of independent tabs and the state they share (§26). Each `Tab` is a
 /// whole session (its own screen, terminal, panels and dialogs); `App` owns the `Vec<Tab>`, which
-/// one is active, and the single target list and secret vault every tab's home screen and connect
-/// flow act on. Its `update`/`view`/`subscription` pick the active tab and delegate, route each
+/// one is active, the order they were activated in (§37), and the single target list and secret
+/// vault every tab's home screen and connect flow act on. Its `update`/`view`/`subscription` pick the active tab and delegate, route each
 /// session's SSH events to the tab that owns them, and draw the tab strip on top.
 struct App {
 	/// The open tabs, in strip order. Never empty — closing the last one opens a fresh home tab.
 	tabs: Vec<Tab>,
 	/// Index into `tabs` of the tab on screen and holding the keyboard.
 	active: usize,
+	/// The order the open tabs were last activated in (§37), keyed by tab id — the strip's own
+	/// left-to-right order says where a tab *sits*, this one says where the user has *been*. Kept up
+	/// to date by every path that changes `active`, and consulted when a tab closes so the window
+	/// falls back to the tab the user was on before it rather than to a strip neighbour they may
+	/// never have opened.
+	recent: crate::mru::Mru,
 	/// The next tab id to hand out (§26). Monotonic and never reused, so a closed tab's id can
 	/// never collide with a worker still shutting down.
 	next_id: u64,
@@ -190,9 +196,13 @@ impl App {
 		let targets = Rc::new(RefCell::new(crate::profiles::Targets::load()));
 		let vault = Rc::new(RefCell::new(None));
 		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+		// The activation order starts with the tab already on screen (§37), so the very first close
+		// has a trail to walk back along rather than an empty one.
+		let recent = crate::mru::Mru::new(first.id);
 		let app = Self {
 			tabs: vec![first],
 			active: 0,
+			recent,
 			next_id: 1,
 			targets,
 			vault,
@@ -359,6 +369,9 @@ impl App {
 		tab.modifiers = modifiers;
 		self.tabs.push(tab);
 		self.active = self.tabs.len() - 1;
+		// A new tab opens active, which counts as a visit: it goes to the top of the order, so
+		// closing it straight away comes back to the tab it was opened from (§37).
+		self.recent.touch(id);
 		iced::Task::none()
 	}
 
@@ -377,6 +390,10 @@ impl App {
 		tab.window_size = size;
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
+		// This is the visit the whole order is built from: whichever tab is on screen is the top of
+		// it, so the tab now being left becomes the one a close falls back to (§37).
+		let id = tab.id;
+		self.recent.touch(id);
 		fit_terminal()
 	}
 
@@ -538,22 +555,50 @@ impl App {
 		self.remove_tab(index)
 	}
 
-	/// Drop the tab at `index`, keeping the strip non-empty and `active` in range (§26).
+	/// Drop the tab at `index`, keeping the strip non-empty and bringing forward the tab the user was
+	/// on before this one (§26, §37).
 	fn remove_tab(&mut self, index: usize) -> iced::Task<Message> {
 		// Save a live tab's session before it goes (§22) — the same snapshot a disconnect writes.
 		self.tabs[index].persist_session();
+		// The tab currently on screen holds the freshest window geometry / focus, and `select_tab`
+		// carries those onto whichever tab comes forward. Read them BEFORE the removal: when the tab
+		// being dropped IS the active one, this is the last moment they exist (§26).
+		let carried = (
+			self.active().window_size,
+			self.active().window_focused,
+			self.active().modifiers,
+		);
+		let closed = self.tabs[index].id;
 		self.tabs.remove(index);
+		// Take the tab out of the activation order, which names the one that should come forward:
+		// the most recently activated of those left (§37).
+		let forward = self.recent.forget(closed);
 		// Defensive: a last-tab close now routes to the quit flow (§30), so this path only ever
 		// runs with tabs to spare. If one ever slipped through, never leave the window empty.
 		if self.tabs.is_empty() {
 			return self.open_tab();
 		}
-		// Keep the active index valid and on a sensible neighbour.
-		if index < self.active {
-			self.active -= 1;
-		} else if self.active >= self.tabs.len() {
-			self.active = self.tabs.len() - 1;
+		match forward.and_then(|id| self.tabs.iter().position(|tab| tab.id == id)) {
+			// One rule covers both cases. Closing the ACTIVE tab pops the order's top, so this is the
+			// tab the user was last on — not whichever chip happens to sit next door in the strip.
+			// Closing a BACKGROUND tab leaves the top alone, so this resolves to the active tab
+			// itself, which is exactly right: closing a tab off-screen must not move the window.
+			Some(position) => self.active = position,
+			// Only reachable if a tab were opened without ever being activated, which no path does.
+			// Fall back to the old strip arithmetic rather than leave `active` pointing anywhere.
+			None => {
+				if index < self.active {
+					self.active -= 1;
+				} else if self.active >= self.tabs.len() {
+					self.active = self.tabs.len() - 1;
+				}
+			}
 		}
+		let (size, focused, modifiers) = carried;
+		let tab = self.active_mut();
+		tab.window_size = size;
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
 		fit_terminal()
 	}
 
@@ -584,6 +629,9 @@ impl App {
 		tab.modifiers = modifiers;
 		self.tabs.push(tab);
 		self.active = self.tabs.len() - 1;
+		// An editor tab opens active like any other (§37) — so closing it (its "×", or Save & close)
+		// returns to the session tab the file was opened from, which is where the user was.
+		self.recent.touch(id);
 
 		// Ask the parent session to read the file. If the parent is gone the editor opens straight
 		// into its "session closed" state rather than hanging on a load that can never arrive. The
@@ -7023,6 +7071,8 @@ mod tests {
 		App {
 			tabs: vec![first],
 			active: 0,
+			// The order starts on the tab already on screen — id 0, the home tab built above (§37).
+			recent: crate::mru::Mru::new(0),
 			next_id: 1,
 			targets,
 			vault,
@@ -7252,6 +7302,80 @@ mod tests {
 		assert!(app.overlay_pos.x <= max_x.max(0.0) + f32::EPSILON);
 		let max_y = 400.0 - ui::dialog::DIALOG_DRAG_MIN_VISIBLE;
 		assert!(app.overlay_pos.y <= max_y + f32::EPSILON);
+	}
+
+	#[test]
+	fn closing_the_active_tab_falls_back_to_the_previously_visited_one() {
+		let mut app = tab_app();
+		let _ = app.open_tab(); // 2 tabs, active = 1
+		let _ = app.open_tab(); // 3 tabs, active = 2
+		let last_visited = app.tabs[2].id;
+		// Go back to the leftmost tab, so the trail is now 1, 2, 0 — the visit order and the strip
+		// order disagree, which is the case strip arithmetic gets wrong (§37).
+		let _ = app.select_tab(0);
+		let closing = app.tabs[0].id;
+		let _ = app.request_close(closing);
+		assert_eq!(app.tabs.len(), 2);
+		assert_eq!(
+			app.tabs[app.active].id, last_visited,
+			"the tab the user was on before, not the strip neighbour"
+		);
+	}
+
+	#[test]
+	fn a_closed_tab_is_dropped_from_the_visit_order() {
+		let mut app = tab_app();
+		let _ = app.open_tab(); // 2 tabs, active = 1
+		let _ = app.open_tab(); // 3 tabs, active = 2 — trail 0, 1, 2
+		let first_id = app.tabs[0].id;
+		let middle_id = app.tabs[1].id;
+		let active_id = app.tabs[2].id;
+		// Close the middle tab from its own "×" while it is in the background: the window must not
+		// move, and that tab must be gone from the trail for good.
+		let _ = app.request_close(middle_id);
+		assert_eq!(app.tabs[app.active].id, active_id, "the screen is unmoved");
+		// Now close the active tab. The fallback skips the closed middle tab to the one before it.
+		let _ = app.request_close(active_id);
+		assert_eq!(app.tabs.len(), 1);
+		assert_eq!(
+			app.tabs[app.active].id, first_id,
+			"a closed tab never comes forward"
+		);
+	}
+
+	#[test]
+	fn revisiting_a_tab_re_dates_it_rather_than_queueing_it_twice() {
+		let mut app = tab_app();
+		let _ = app.open_tab(); // trail 0, 1
+		let _ = app.open_tab(); // trail 0, 1, 2
+		let first_id = app.tabs[0].id;
+		let second_id = app.tabs[1].id;
+		let third_id = app.tabs[2].id;
+		// Bounce back to the first tab, then away again: trail 1, 2, 0 then 1, 0, 2. The stale entry
+		// for tab 0 must not still be waiting further down, or the fallbacks come out in the wrong
+		// order (§37).
+		let _ = app.select_tab(0);
+		let _ = app.select_tab(2);
+		let _ = app.request_close(third_id);
+		assert_eq!(app.tabs[app.active].id, first_id, "the most recent visit");
+		let _ = app.request_close(first_id);
+		assert_eq!(app.tabs[app.active].id, second_id, "then the one before it");
+	}
+
+	#[test]
+	fn the_tab_brought_forward_by_a_close_inherits_the_window_geometry() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		// The active tab holds the latest window size (resizes only reach the tab on screen), so the
+		// tab a close brings forward must be handed it too — otherwise it paints against a stale one
+		// until the next resize (§26, §37).
+		let size = iced::Size::new(1234.0, 567.0);
+		app.tabs[app.active].window_size = size;
+		app.tabs[app.active].window_focused = false;
+		let closing = app.tabs[app.active].id;
+		let _ = app.request_close(closing);
+		assert_eq!(app.tabs[app.active].window_size, size);
+		assert!(!app.tabs[app.active].window_focused);
 	}
 
 	#[test]
