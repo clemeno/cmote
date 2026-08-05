@@ -84,6 +84,17 @@ pub enum ScrollMotion {
 	Bottom,
 }
 
+/// Where a command's output sits on the visible screen right now (§34), as the caller needs it to
+/// build a text selection: the first and last viewport rows it occupies (0-based from the top of
+/// the screen) and the grid's last column. Plain viewport coordinates, so `term/` hands the UI what
+/// it needs without depending on the UI's own selection type. `select_output_*` clamps the span to
+/// the visible rows, so `start_row <= end_row` and both are on screen.
+pub struct OutputSpan {
+	pub start_row: u16,
+	pub end_row: u16,
+	pub last_col: u16,
+}
+
 impl Terminal {
 	/// Create an emulator with a `rows`×`cols` grid, matching the remote pty.
 	pub fn new(rows: u16, cols: u16) -> Self {
@@ -311,6 +322,74 @@ impl Terminal {
 			self.term.scroll_display(Scroll::Delta(delta));
 		}
 		true
+	}
+
+	/// Reveal and locate the most recently finished command's output for a text selection (§34) —
+	/// the Ctrl+Shift+O keybind. Returns the viewport rows the output occupies (after scrolling it
+	/// into view if it was above the live screen), or `None` when no command has finished or the
+	/// last one printed nothing. The caller turns the span into a selection the ordinary Copy then
+	/// grabs.
+	pub fn select_output_latest(&mut self) -> Option<OutputSpan> {
+		let (start, end) = self.prompts.latest_output()?;
+		self.locate_output(start, end)
+	}
+
+	/// The same for the command whose prompt tick sits on viewport `row` (§34) — the gutter-click
+	/// path. The row is turned into the absolute prompt line it currently shows before the command
+	/// is looked up, so the click resolves against the scrollback-stable coordinate rather than the
+	/// scroll position. `None` when that row carries no finished command's prompt.
+	pub fn select_output_at_row(&mut self, row: u16) -> Option<OutputSpan> {
+		let grid = self.term.grid();
+		// Viewport row -> absolute line: absolute = row - display_offset + history_size. Done in
+		// i64 so a nonsensical row (offset deeper than row + history) yields no command rather than
+		// underflowing; an on-screen tick can never hit that.
+		let prompt = i64::from(row) + grid.history_size() as i64 - grid.display_offset() as i64;
+		if prompt < 0 {
+			return None;
+		}
+		let (start, end) = self.prompts.output_at_prompt(prompt as u64)?;
+		self.locate_output(start, end)
+	}
+
+	/// Turn an absolute output line range `[start, end)` into the on-screen span to select (§34).
+	/// The viewport is scrolled so the output's first line is at the top ONLY when that line is not
+	/// already visible, so a command already on screen is selected in place rather than jerking the
+	/// view. The returned rows are clamped to the visible screen; `None` when the range is off-screen
+	/// even after scrolling (it cannot be, since we scroll it into view, but the guard keeps the
+	/// mapping total). Output taller than the screen is clamped to the first screenful from its top —
+	/// the selection is viewport-bound, the same limit the mouse selection has. `ponytail:` a
+	/// command whose output overflows the screen copies only what is shown.
+	fn locate_output(&mut self, start: u64, end: u64) -> Option<OutputSpan> {
+		let grid = self.term.grid();
+		let history = grid.history_size() as i64;
+		let screen_lines = self.term.screen_lines() as i64;
+		// Absolute line -> viewport row for a given display offset.
+		let to_row = |offset: i64, absolute: u64| absolute as i64 - history + offset;
+
+		// Scroll the first output line to the top only when it is not already on screen.
+		let offset = grid.display_offset() as i64;
+		if !(0..screen_lines).contains(&to_row(offset, start)) {
+			let target = (history - start as i64).clamp(0, history);
+			let delta = target - offset;
+			if delta != 0 {
+				self.term.scroll_display(Scroll::Delta(delta as i32));
+			}
+		}
+
+		// Map with the (possibly new) offset. The last output line is `end - 1` (the range is
+		// half-open); if the whole span fell off either edge nothing is shown.
+		let offset = self.term.grid().display_offset() as i64;
+		let last_line = end.saturating_sub(1);
+		if to_row(offset, last_line) < 0 || to_row(offset, start) >= screen_lines {
+			return None;
+		}
+		let first = to_row(offset, start).clamp(0, screen_lines - 1);
+		let last = to_row(offset, last_line).clamp(0, screen_lines - 1);
+		Some(OutputSpan {
+			start_row: first as u16,
+			end_row: last.max(first) as u16,
+			last_col: (self.term.columns() as u16).saturating_sub(1),
+		})
 	}
 }
 
@@ -852,5 +931,61 @@ mod tests {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"line one\r\nline two\r\n\x1b]133;A\x07$ ");
 		assert_eq!(terminal.prompt_rows(), vec![2]);
+	}
+
+	#[test]
+	fn a_finished_commands_output_is_located_for_selection() {
+		// One command bracketed by OSC 133 marks with two lines of output (§34): the prompt and
+		// its echoed input on row 0, then `\r\n`, the C mark, output on rows 1 and 2, `\r\n`, the D
+		// mark on row 3. The output span [1, 3) maps to viewport rows 1..=2 at the live bottom.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07",
+		);
+		let span = terminal
+			.select_output_latest()
+			.expect("a finished command with output");
+		assert_eq!((span.start_row, span.end_row), (1, 2));
+		assert_eq!(span.last_col, 39);
+		// Clicking that command's prompt tick (viewport row 0) resolves to the same output.
+		let clicked = terminal
+			.select_output_at_row(0)
+			.expect("the prompt tick's command");
+		assert_eq!((clicked.start_row, clicked.end_row), (1, 2));
+	}
+
+	#[test]
+	fn a_command_that_printed_nothing_locates_no_output() {
+		// A bare Enter at the prompt: A, B, then D with no output in between (§34). There is no
+		// output line-span, so nothing is offered to select.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]133;A\x07$ \x1b]133;B\x07\r\n\x1b]133;D;0\x07");
+		assert!(terminal.select_output_latest().is_none());
+	}
+
+	#[test]
+	fn revealing_output_scrolls_it_into_view_when_it_is_off_screen() {
+		// A command's output on a small screen, then enough later output to push it up into history.
+		// Selecting it from the live bottom must scroll the viewport up so the output shows, and the
+		// span it returns must be on screen (rows within the grid).
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n\x1b]133;C\x07result\r\n\x1b]133;D;0\x07",
+		);
+		let filler: Vec<u8> = (0..20).flat_map(|_| b"later\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		assert_eq!(
+			terminal.screen().display_offset(),
+			0,
+			"starts at the live bottom"
+		);
+		let span = terminal
+			.select_output_latest()
+			.expect("the earlier command's output");
+		assert!(
+			terminal.screen().display_offset() > 0,
+			"scrolled up to reveal the output"
+		);
+		assert!(span.start_row < 4 && span.end_row < 4, "span is on screen");
 	}
 }

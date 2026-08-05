@@ -3091,10 +3091,11 @@ sequences — the FinalTerm/iTerm2 convention every modern terminal now reads:
     OSC 133 ; D [; N]  — the command finished, with exit code N
 
 From those four marks a terminal knows where every prompt sits, whether a command is running, and
-how the last one ended. cmote turns that into two things: a **per-tab status dot** (is a command
-running, did the last one succeed?) and **jump-to-prompt** (Ctrl+Shift+Up/Down walk the scrollback
-between prompts). Like the cwd (§17), modifyOtherKeys (§9) and the identity queries (§33), the
-engine treats OSC 133 as an unknown OSC and ignores it, so cmote scans the same bytes itself.
+how the last one ended. cmote turns that into three things: a **per-tab status dot** (is a command
+running, did the last one succeed?), **jump-to-prompt** (Ctrl+Shift+Up/Down walk the scrollback
+between prompts), and **select-command-output** (grab everything one command printed). Like the cwd
+(§17), modifyOtherKeys (§9) and the identity queries (§33), the engine treats OSC 133 as an unknown
+OSC and ignores it, so cmote scans the same bytes itself.
 
 - **A byte scanner that hands back marks with offsets (`term/osc133.rs`).** The same chunk-safe
   four-state machine as `cwd`, but where `cwd` keeps one latest value this one returns *a list* —
@@ -3130,6 +3131,19 @@ engine treats OSC 133 as an unknown OSC and ignores it, so cmote scans the same 
   focused, guarded on Ctrl+Shift together so a bare or singly-modified arrow still reaches the shell
   — the same discipline as the Shift+Page scrollback keys (§23). It moves cmote's own view; nothing
   is sent to the remote.
+- **Select-command-output has two triggers, one selection (`osc133.rs` + `term/mod.rs` + `app.rs`).**
+  Alongside the prompt lines, `Prompts` now files each finished command's output as an absolute
+  half-open line range `[output, end)` — the C mark's line to the D mark's — keyed by its prompt line
+  (the A mark). **Ctrl+Shift+O** selects the latest finished command's output; **clicking a prompt
+  tick** in the gutter (a press with the pointer inside `GRID_PADDING`) selects that command's. Both
+  resolve to a range, `Terminal::select_output_*` reveals it (scrolling it into view only if it had
+  left the live screen) and returns the viewport rows it fills as a plain `OutputSpan` — so `term/`
+  never touches the UI's selection type — and `app` turns that into an ordinary stream `Selection`.
+  Reusing the mouse selection means the existing Copy / Ctrl+C / rich-HTML copy all work unchanged.
+  (`ponytail:` the selection is viewport-bound, like the mouse's, so output taller than the screen
+  selects the first screenful from its top; and it copies only what is shown. Full-scrollback capture
+  of an over-long output stays deferred — it needs the copy path to read history directly, not just
+  the visible grid.)
 - **A resize drops the marks.** A resize reflows the grid, re-wrapping lines at the new width, so the
   line count of the history changes and the recorded absolute positions no longer line up. Rather
   than point a jump at the wrong reflowed line, `resize` clears the marks — the scrollback is kept,
@@ -3138,9 +3152,11 @@ engine treats OSC 133 as an unknown OSC and ignores it, so cmote scans the same 
 
 ### What is deliberately NOT here
 
-- **Select-command-output.** OSC 133;C/D bracket a command's output, so a terminal could offer
-  "select everything this command printed". That needs the C and D positions as a *range* and a way
-  to turn a scrollback range into a selection — a bigger feature than the prompt anchor, deferred.
+- **Full-scrollback capture of an over-long output.** Select-command-output (above) is viewport-bound:
+  a command whose output is taller than the screen selects and copies only the first screenful. Reading
+  the whole range straight from the engine's history — independent of the scroll position — is the
+  deferred upgrade, plus walking older commands on a repeated Ctrl+Shift+O (v1 always takes the latest;
+  clicking a specific tick already reaches any command).
 - **No injection of the marks.** cmote reads whatever the shell offers and adds nothing: a shell
   without integration configured shows no dots, no ticks, and jump-to-prompt finds nothing. cmote
   never rewrites the remote's shell init to turn it on — that is the user's to configure, exactly as

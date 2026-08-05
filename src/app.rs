@@ -3634,6 +3634,13 @@ impl Tab {
 				// remote shell, so there is no styled paste to distinguish (pasting escape codes
 				// would be a paste-injection hazard, the one the bracketed-paste strip guards).
 				Physical::Code(Code::KeyV) => return self.on_paste(),
+				// Ctrl+Shift+O selects the last finished command's output (§34), so the existing
+				// Copy then grabs it. Plain Ctrl+O has a readline meaning (the shell's), so only
+				// the Shift form is ours — the bare key falls through to the channel below.
+				Physical::Code(Code::KeyO) if modifiers.shift() => {
+					self.select_command_output();
+					return iced::Task::none();
+				}
 				_ => {}
 			}
 		}
@@ -4071,6 +4078,15 @@ impl Tab {
 		if self.terminal.is_none() {
 			return;
 		}
+		// A click on a prompt tick in the left padding gutter selects that command's output (§34)
+		// instead of starting a text selection. The ticks live inside `GRID_PADDING`; a press there
+		// on a row whose prompt has a finished command resolves to it, and anything else — the gutter
+		// beside a plain row — falls through to the ordinary selection below.
+		if self.pointer.x < ui::terminal::GRID_PADDING
+			&& self.select_output_at_gutter(self.hover_cell.row)
+		{
+			return;
+		}
 		// Ctrl+click follows an OSC 8 hyperlink instead of selecting (§24): the modifier is
 		// what most terminals use, and it keeps a plain click free to select the link's text.
 		// A cell with no link falls through to the ordinary selection, so Ctrl+click on
@@ -4139,6 +4155,51 @@ impl Tab {
 		if self.selection.is_some_and(|selection| selection.is_empty()) {
 			self.selection = None;
 		}
+	}
+
+	/// Select the most recently finished command's output as a text selection (§34) — the
+	/// Ctrl+Shift+O keybind. The terminal reveals the output (scrolling up to it when it has left the
+	/// live screen) and hands back the viewport rows it fills; those become a stream selection the
+	/// existing Copy path then copies. A no-op when no command has finished or the last printed
+	/// nothing.
+	fn select_command_output(&mut self) {
+		if let Some(terminal) = self.terminal.as_mut()
+			&& let Some(span) = terminal.select_output_latest()
+		{
+			self.set_output_selection(span);
+		}
+	}
+
+	/// The same for the command whose prompt tick was clicked in the left gutter (§34), returning
+	/// whether a command was found there — so a gutter press on a row with no finished command falls
+	/// through to an ordinary text selection.
+	fn select_output_at_gutter(&mut self, row: u16) -> bool {
+		let Some(terminal) = self.terminal.as_mut() else {
+			return false;
+		};
+		let Some(span) = terminal.select_output_at_row(row) else {
+			return false;
+		};
+		self.set_output_selection(span);
+		true
+	}
+
+	/// Turn a located output span (§34) into the active grid selection, replacing any mouse selection
+	/// and ending any drag — the one place both the keybind and the gutter click land, so the two can
+	/// never build the selection differently. Dismisses any open context menu too, as a fresh grid
+	/// interaction does.
+	fn set_output_selection(&mut self, span: term::OutputSpan) {
+		let start = ui::selection::Cell {
+			row: span.start_row,
+			col: 0,
+		};
+		let head = ui::selection::Cell {
+			row: span.end_row,
+			col: span.last_col,
+		};
+		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
+		self.selecting = false;
+		self.menu = None;
 	}
 
 	/// Copy the current selection to the system clipboard (§10). Extracts the
@@ -6329,6 +6390,63 @@ mod tests {
 		assert!(
 			offset(&app) < climbed,
 			"jumped back down toward the live prompt"
+		);
+	}
+
+	/// Ctrl+Shift+O selects the last finished command's output as a text selection (§34), so the
+	/// existing Copy grabs it — and sends nothing to the remote. One command bracketed by OSC 133
+	/// marks with two lines of output; after the keybind the selection extracts exactly that output.
+	#[test]
+	fn ctrl_shift_o_selects_the_last_commands_output() {
+		use iced::keyboard::key::{Code, Physical};
+		use iced::keyboard::{Key, Location, Modifiers};
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.terminal.as_mut().unwrap().process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07",
+		);
+
+		// Ctrl+Shift+O, matched on the physical key so the logical value does not matter.
+		let press = iced::keyboard::Event::KeyPressed {
+			key: Key::Character("o".into()),
+			modified_key: Key::Character("o".into()),
+			physical_key: Physical::Code(Code::KeyO),
+			location: Location::Standard,
+			modifiers: Modifiers::CTRL | Modifiers::SHIFT,
+			text: None,
+			repeat: false,
+		};
+		let _ = app.on_key(press);
+
+		let selection = app.selection.expect("the command's output is selected");
+		assert!(!selection.is_empty());
+		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		assert_eq!(text, "alpha\nbeta");
+		// The keybind is cmote's own view action — nothing reached the shell.
+		assert_eq!(next_input(&mut rx), None);
+	}
+
+	/// Clicking a prompt tick in the left gutter selects that command's output (§34) — the other
+	/// trigger. A press with the pointer inside `GRID_PADDING` on the prompt's row resolves to its
+	/// command and selects the output, as a discrete action (no drag begins).
+	#[test]
+	fn clicking_a_prompt_tick_selects_that_commands_output() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.terminal.as_mut().unwrap().process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07",
+		);
+
+		// The prompt sits on viewport row 0; a gutter press there (x < GRID_PADDING) selects it.
+		app.pointer = iced::Point::new(1.0, 1.0);
+		app.hover_cell = ui::selection::Cell { row: 0, col: 0 };
+		app.on_grid_pressed();
+
+		let selection = app.selection.expect("the tick click selected the output");
+		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		assert_eq!(text, "alpha\nbeta");
+		assert!(
+			!app.selecting,
+			"a tick click is a discrete action, not a drag"
 		);
 	}
 

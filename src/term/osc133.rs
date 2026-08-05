@@ -200,6 +200,41 @@ pub enum Direction {
 /// this the oldest is dropped, which caps the memory a very long session can hold.
 const MAX_MARKS: usize = 4096;
 
+/// The most finished commands we keep the output span of — the same bound and reasoning as
+/// `MAX_MARKS`: selecting an output only ever reaches a recent command, so a ring of the most
+/// recent is plenty and caps the memory a long session holds.
+const MAX_COMMANDS: usize = MAX_MARKS;
+
+/// One finished command's line span, in ABSOLUTE line indices (§34) — the same scrollback-stable
+/// coordinate the prompt marks use. `prompt` is the line the prompt sat on (the A mark, and so the
+/// gutter tick a click lands on); `output` the line its output began on (the C mark); `end` the
+/// line it finished on (the D mark, where the next prompt will draw). The output therefore occupies
+/// the half-open line range `output .. end`, so a command that printed nothing has `output == end`.
+#[derive(Debug, Clone, Copy)]
+struct Command {
+	prompt: u64,
+	output: u64,
+	end: u64,
+}
+
+impl Command {
+	/// This command's output as an absolute half-open `(start, end)` line range, or `None` when it
+	/// printed nothing (`output == end`, e.g. a bare Enter or a `cd`). The selection paths use this
+	/// so an output-less command resolves to nothing to select rather than an empty highlight.
+	fn range(self) -> Option<(u64, u64)> {
+		(self.output < self.end).then_some((self.output, self.end))
+	}
+}
+
+/// A command being stitched together as its marks arrive (§34): the prompt line is known at A, the
+/// output line at C, and the whole span is finished and filed at D. Held between marks because the
+/// three absolute lines are read at three different points in the stream.
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+	prompt: u64,
+	output: Option<u64>,
+}
+
 /// The whole OSC 133 model for one terminal (§34): the byte scanner, the command-cycle state, the
 /// last exit code, and the grid lines the prompts sit on. Positions are stored as ABSOLUTE line
 /// indices — line 0 is the first line the session ever showed — so a mark keeps meaning as output
@@ -219,6 +254,13 @@ pub struct Prompts {
 	marks: Vec<u64>,
 	state: CommandState,
 	last_exit: Option<i32>,
+	/// The finished commands' output spans (§34), a bounded ring like `marks`. Built from the C and
+	/// D marks so a command's output can be turned into a text selection; separate from `marks`,
+	/// which holds only the prompt-start lines the ticks and jumps use.
+	commands: Vec<Command>,
+	/// The command currently being assembled from its marks, if a prompt has started but not yet
+	/// finished (§34). `None` at rest and between commands.
+	pending: Option<Pending>,
 }
 
 impl Prompts {
@@ -233,18 +275,35 @@ impl Prompts {
 	/// and `row` describe where the cursor sits at the mark — needed only by `PromptStart`, which
 	/// anchors a prompt line; the others just move the command-cycle state.
 	pub fn apply(&mut self, mark: Mark, history_size: usize, row: u16) {
+		let absolute = history_size as u64 + row as u64;
 		match mark {
 			Mark::PromptStart => {
 				self.state = CommandState::Prompt;
 				self.record(history_size, row);
+				// Begin assembling this command's span (§34). A fresh prompt supersedes any
+				// half-built one — a previous command that never reported its output start or end.
+				self.pending = Some(Pending {
+					prompt: absolute,
+					output: None,
+				});
 			}
 			// The prompt is written and input begins; still the prompt phase as far as the glyph
 			// is concerned, so nothing changes.
 			Mark::PromptEnd => {}
-			Mark::OutputStart => self.state = CommandState::Running,
+			Mark::OutputStart => {
+				self.state = CommandState::Running;
+				// The command's output begins on this line; record it for the output selection.
+				if let Some(pending) = self.pending.as_mut() {
+					pending.output = Some(absolute);
+				}
+			}
 			Mark::CommandEnd(exit) => {
 				self.state = CommandState::Idle;
 				self.last_exit = exit;
+				// The command finished on this line: file its span so its output can be selected.
+				if let Some(pending) = self.pending.take() {
+					self.file_command(pending, absolute);
+				}
 			}
 		}
 	}
@@ -263,9 +322,49 @@ impl Prompts {
 		}
 	}
 
+	/// File a finished command's output span (§34), bounded like the prompt ring. `end` is the line
+	/// the D mark sat on; a command with no output start (a bare Enter) takes `end` as its output
+	/// line too, so its range comes out empty and it selects nothing — but it is still filed, so a
+	/// click on its prompt tick resolves (to nothing) rather than falling through to a stray text
+	/// selection.
+	fn file_command(&mut self, pending: Pending, end: u64) {
+		self.commands.push(Command {
+			prompt: pending.prompt,
+			output: pending.output.unwrap_or(end),
+			end,
+		});
+		if self.commands.len() > MAX_COMMANDS {
+			self.commands.remove(0);
+		}
+	}
+
+	/// The output line-span of the most recently finished command (§34), as absolute half-open
+	/// `(start, end)` lines, or `None` when no command has finished or the last one printed nothing.
+	/// Drives the "select the last command's output" keybind.
+	pub fn latest_output(&self) -> Option<(u64, u64)> {
+		self.commands.last().copied().and_then(Command::range)
+	}
+
+	/// The output line-span of the finished command whose prompt sat on absolute line `prompt`
+	/// (§34), or `None` when no finished command started there — the resolver behind clicking a
+	/// prompt's gutter tick. Searched newest-first so a reused line resolves to its most recent
+	/// command.
+	pub fn output_at_prompt(&self, prompt: u64) -> Option<(u64, u64)> {
+		self.commands
+			.iter()
+			.rev()
+			.find(|command| command.prompt == prompt)
+			.copied()
+			.and_then(Command::range)
+	}
+
 	/// Forget every prompt (a full reset — `ESC c` — or the screen cleared them out from under us).
+	/// The command spans and any half-built one go with them: their absolute lines no longer mean
+	/// anything once the grid is reflowed or reset.
 	pub fn clear(&mut self) {
 		self.marks.clear();
+		self.commands.clear();
+		self.pending = None;
 	}
 
 	/// Where the command cycle stands (§34), for the status glyph.
@@ -532,5 +631,73 @@ mod tests {
 		// Viewing with the prompt already on the top row (offset = history - 5): nothing above it.
 		assert_eq!(prompts.jump(Direction::Previous, 5, 0), None);
 		assert_eq!(prompts.jump(Direction::Next, 5, 0), None);
+	}
+
+	#[test]
+	fn a_finished_command_records_its_output_span() {
+		// A whole cycle with two lines of output: prompt on absolute line 0, output begins on line
+		// 1 (the C mark), the command finishes on line 3 (the D mark). The output is the half-open
+		// range [1, 3), so lines 1 and 2.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::OutputStart, 0, 1);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 3);
+		assert_eq!(prompts.latest_output(), Some((1, 3)));
+	}
+
+	#[test]
+	fn output_is_found_by_the_prompt_line_a_click_lands_on() {
+		// Two commands, one after another; clicking a prompt tick resolves to that command's output,
+		// not merely the latest. First: prompt line 0, output 1..2. Second: prompt line 5, output
+		// 6..8.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::OutputStart, 0, 1);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 2);
+		prompts.apply(Mark::PromptStart, 5, 0);
+		prompts.apply(Mark::OutputStart, 5, 1);
+		prompts.apply(Mark::CommandEnd(Some(0)), 5, 3);
+		assert_eq!(prompts.output_at_prompt(0), Some((1, 2)));
+		assert_eq!(prompts.output_at_prompt(5), Some((6, 8)));
+		assert_eq!(prompts.latest_output(), Some((6, 8)));
+		// A prompt line no command started at resolves to nothing.
+		assert_eq!(prompts.output_at_prompt(99), None);
+	}
+
+	#[test]
+	fn a_command_that_printed_nothing_selects_nothing() {
+		// A bare Enter: the prompt starts and the command ends on the same line with no output start
+		// between. Its span is empty, so it resolves to nothing to select — but it was still filed,
+		// so its prompt line is a known command (returning `None`), not an unknown one.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 0);
+		assert_eq!(prompts.latest_output(), None);
+		assert_eq!(prompts.output_at_prompt(0), None);
+	}
+
+	#[test]
+	fn an_unfinished_command_files_nothing_until_it_ends() {
+		// A prompt has started and its output is streaming (C seen, no D yet): there is no finished
+		// command, so nothing is selectable. The D mark is what files the span.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::OutputStart, 0, 1);
+		assert_eq!(prompts.latest_output(), None);
+		prompts.apply(Mark::CommandEnd(None), 0, 2);
+		assert_eq!(prompts.latest_output(), Some((1, 2)));
+	}
+
+	#[test]
+	fn clearing_forgets_the_command_spans() {
+		// A reset drops the filed commands along with the prompt marks (§34): their absolute lines
+		// no longer line up after the grid is reflowed.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::OutputStart, 0, 1);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 2);
+		assert_eq!(prompts.latest_output(), Some((1, 2)));
+		prompts.clear();
+		assert_eq!(prompts.latest_output(), None);
 	}
 }
