@@ -236,7 +236,7 @@ cmote/
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
-    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26)
+    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
@@ -2413,7 +2413,8 @@ its subscription from the batch — a clean teardown from one `Vec::remove`.
 
 `ui/tabs.rs` draws the strip: one chip per tab (its endpoint once connected, else the screen it is
 on), tinted when active, each with a "×"; a trailing "+". **Mouse-only** (the chosen scope): a left
-click on a chip selects, "×" closes, "+" opens a fresh home tab. Closing a **live** tab first
+click on a chip selects (and grabs it, so the same press can drag the tab to another slot, §38), "×"
+closes, "+" opens a fresh home tab. Closing a **live** tab first
 raises a confirmation (like Disconnect, closing is not undoable); an idle tab closes at once.
 Closing the last tab never leaves an empty window — it is a request to quit cmote, and takes the
 quit confirmation (§30). Which tab comes forward when the active one closes is §37's rule, not the
@@ -2824,8 +2825,8 @@ Same three-way split as the panels (§18, §19): a pure model (`editor.rs`), a p
   (files only, disabled on a directory or a multiple selection), and a **double-click on a file** —
   which until now did nothing (double-click only browsed *into* a directory). Both emit
   `FilesMessage::EditStarted(path)`, which the tab turns into an App-level `EditorOpen` carrying the
-  parent session id and the path; `App` creates the editor tab, makes it active, and sends
-  `EditLoad` on the parent's channel.
+  parent session id and the path; `App` creates the editor tab **right beside the session it came
+  from** (§38), makes it active, and sends `EditLoad` on the parent's channel.
 - **A size ceiling.** The whole file is held in memory as one editable buffer, so a file over
   `edit::MAX_SIZE` (**8 MiB**) is refused before it is pulled — a text editor is not a way to open a
   disk image. The refusal is a message, not a crash.
@@ -3385,3 +3386,83 @@ tab brought forward by a close painted against whatever size it last saw until t
   strip still shows exactly the tabs, in the order they were opened.
 - **The quit flow is untouched (§30).** Quitting closes every tab, so which one would have come
   forward is moot; closing the *last* tab is still a request to quit, not a fallback.
+
+## 38. The strip's order is the user's — files beside their session, and drag to rearrange (v3.x)
+
+§37 fixed *which* tab a close brings forward. This section is about the other half of the strip's
+order: **where a tab sits**, and who decides. Two changes, both of them the same idea — the strip
+should read the way the user thinks about their work, not the order events happened to arrive in.
+
+### An editor tab opens beside the session it came from
+
+An editor tab (§32) went on the **end** of the strip, however far that was from the session whose
+file it holds. Open a file from the leftmost of four sessions and its chip landed fifth, with three
+unrelated sessions between the file and the shell it belongs to — and every subsequent tab pushed
+them further apart. `open_editor` now inserts at `editor_slot(session)`: **just past the session's own
+chip, and past any editor tabs already grouped there.**
+
+- **Past the existing group, not immediately after the session.** Opening three files in a row reads
+  left to right in the order they were opened. Inserting each one directly after the session would
+  stack them up backwards, which is the wrong answer for "I'll open these three and work through
+  them".
+- **The group ends at the first chip that is not its own.** The scan only skips editor tabs whose
+  `editor.session` is *this* session, so another session's tab — or an editor the user has dragged in
+  (below) — stops it. A group is a run, not a claim on the rest of the strip.
+- **A file whose session has already gone takes the end**, as it used to: there is no chip to sit
+  beside (the tab closed while the load was in flight), and a guessed slot would be worse than the
+  end.
+
+### Drag a chip to move it
+
+The strip was fixed in opening order. Now **the press that selects a tab also grabs it**: travel to
+another chip and release, and the grabbed tab takes that chip's slot. No separate handle, no modifier
+— dragging a tab is the same gesture as clicking one, continued.
+
+- **The gesture is reported by per-chip pointer events, not pixel arithmetic.** `on_press` grabs,
+  `on_enter` names the chip under the pointer, `on_release` drops. `ui/tabs.rs` never needs to know
+  how wide a chip laid out — which matters, because iced does not expose a widget's laid-out bounds
+  (the same wall §10's dialog centring works around).
+- **The reorder happens once, on the drop — deliberately.** Shuffling the chips live under the
+  pointer is the flashier option and is the reason the bounds problem bites: chip widths vary with the
+  label, so moving a wide tab onto a narrow one (or the reverse) can leave the pointer sitting over
+  the slot it just came from, which swaps it back, which puts it under the first slot again — a
+  ping-pong between two positions with the pointer perfectly still. Committing on release cannot
+  oscillate. The chip that would receive the drop wears a blue outline instead, so the target is
+  visible without the strip rearranging itself under the hand.
+- **The drag's state is ids, not positions.** `TabDrag { grabbed, over }` holds two tab ids and they
+  are resolved to strip positions only at the moment of the drop, so a tab closing mid-gesture (the
+  "×" is *inside* the chip being dragged) can never move the wrong tab — it just resolves to nothing
+  and the drop is dropped.
+- **`remove` + `insert` for the move**, which gives the familiar feel in both directions: dragged
+  right, the tab lands where the hovered chip was and the chips it passed shuffle left; dragged left,
+  the reverse.
+- **`active` is a strip position, so it is re-found after the move** by the id of the tab that was on
+  screen — not by assuming that is the grabbed one. Ordinarily it is (the press selected it), but a
+  close confirmation can leave another tab active, and following the id costs one `position` call.
+- **Two ways out of a gesture, both cheap.** A release anywhere over the bar drops (the last chip
+  hovered wins the slot, so a drop on the padding or in the gap between two chips still lands
+  somewhere sensible); the pointer *leaving* the strip abandons the move entirely. Dragging back onto
+  the grabbed chip clears the target, so changing your mind mid-drag also leaves the order alone.
+- **A press that never travels is just a click.** The drag arms with no target, so press-and-release
+  on one chip selects and reorders nothing — the gesture costs the old behaviour nothing.
+- **The hover report is only wired up while a drag is in flight.** `App` would ignore it at rest
+  anyway, but not asking means moving the pointer across the strip publishes no messages at all when
+  there is nothing to move. The cursor still advertises the affordance: an open hand over a chip, a
+  closed one while a tab is in flight.
+- **The activation order (§37) is untouched by a reorder**, because it is keyed by tab id. Where a tab
+  *sits* and where the user has *been* stay independent — which is exactly why §37 used ids.
+
+### What is deliberately NOT here
+
+- **No live shuffle, and no floating "ghost" chip.** See the ping-pong above for the shuffle. A ghost
+  that follows the pointer would need the drag's pixel position and the chips' widths, i.e. the
+  measurement iced does not give — a custom strip widget's worth of work for polish, not function.
+- **No dragging a tab out into its own window.** cmote is one window (§26); tear-off would mean a
+  second window, a second grid, and splitting the shared vault / target list across both.
+- **No keyboard reordering, and no "move left/right" menu item.** Same reasoning as §37's missing
+  Ctrl+Tab: the strip is mouse-only by choice, and every shortcut cmote claims is one the remote
+  shell no longer receives.
+- **The order is not persisted.** cmote does not restore the tab set between runs, so there is no
+  order to restore (§31).
+- **Nothing groups or sorts the strip for the user.** The editor rule above places a *new* tab; it
+  never rearranges existing ones. Once the user has dragged a chip somewhere, that is where it stays.

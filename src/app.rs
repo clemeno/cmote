@@ -140,6 +140,10 @@ struct App {
 	/// falls back to the tab the user was on before it rather than to a strip neighbour they may
 	/// never have opened.
 	recent: crate::mru::Mru,
+	/// The strip drag in flight (§38), or `None` when the pointer is not moving a tab. Armed by a
+	/// press on any chip — the same press that selects it — so a plain click leaves it holding a
+	/// grabbed tab with no target, which drops nothing.
+	tab_drag: Option<TabDrag>,
 	/// The next tab id to hand out (§26). Monotonic and never reused, so a closed tab's id can
 	/// never collide with a worker still shutting down.
 	next_id: u64,
@@ -171,6 +175,18 @@ struct App {
 	/// rather than per-tab because there is one window whatever tab is on show; updated on
 	/// every resize and written to `settings.json` on the way out (`exit_app`).
 	settings: crate::settings::Settings,
+}
+
+/// A tab being dragged along the strip (§38). Both halves are **ids, not strip positions**: the
+/// grabbed tab keeps its identity across a reorder, and a tab could in principle close mid-gesture
+/// (its own "×", a session ending), which would renumber every position after it. Resolving ids to
+/// positions only at the moment of the drop means a stale index can never move the wrong tab.
+struct TabDrag {
+	/// The tab the press grabbed.
+	grabbed: u64,
+	/// The tab last hovered — the slot the grabbed tab drops into — or `None` while the pointer has
+	/// not left the grabbed chip, which is what makes an ordinary click reorder nothing.
+	over: Option<u64>,
 }
 
 /// Where the app is in the quit flow (§30). Distinct from a single tab's close confirmation
@@ -206,6 +222,7 @@ impl App {
 			next_id: 1,
 			targets,
 			vault,
+			tab_drag: None,
 			pending_close: None,
 			pending_editor_close: None,
 			quit: None,
@@ -275,7 +292,18 @@ impl App {
 				task
 			}
 			Message::TabNew => self.open_tab(),
-			Message::TabSelected(index) => self.select_tab(index),
+			Message::TabSelected(index) => self.grab_tab(index),
+			Message::TabDraggedOver(index) => {
+				self.hover_tab(index);
+				iced::Task::none()
+			}
+			Message::TabDropped => self.drop_tab(),
+			// The pointer left the strip: the gesture is over and nothing moves. Also fires when the
+			// pointer merely wanders off the strip with no drag armed, which is a harmless no-op.
+			Message::TabDragCancelled => {
+				self.tab_drag = None;
+				iced::Task::none()
+			}
 			Message::TabCloseRequested(id) => self.request_close(id),
 			Message::TabCloseConfirmed => self.close_confirmed(),
 			Message::TabCloseCancelled => {
@@ -395,6 +423,74 @@ impl App {
 		let id = tab.id;
 		self.recent.touch(id);
 		fit_terminal()
+	}
+
+	/// A press on a chip (§38): make that tab active — a press IS a selection, as it always was —
+	/// and arm a drag on it. The drag starts with no target, so a press-and-release on the same chip
+	/// reorders nothing; only travelling to another chip gives the gesture somewhere to drop.
+	fn grab_tab(&mut self, index: usize) -> iced::Task<Message> {
+		if let Some(tab) = self.tabs.get(index) {
+			self.tab_drag = Some(TabDrag {
+				grabbed: tab.id,
+				over: None,
+			});
+		}
+		self.select_tab(index)
+	}
+
+	/// The pointer moved over the chip at `index` (§38). While a drag is armed that chip becomes the
+	/// drop slot; hovering the grabbed chip itself clears the target again, so dragging out and back
+	/// leaves the strip alone. With no drag in flight this is a no-op — the strip only reacts to a
+	/// hover during a gesture, so ordinary mousing across the chips costs nothing but the message.
+	fn hover_tab(&mut self, index: usize) {
+		if self.tab_drag.is_none() {
+			return;
+		}
+		// Read the hovered tab's id before touching the drag, so the shared borrow of `tabs` is over
+		// before the mutable borrow of `tab_drag` begins.
+		let Some(hovered) = self.tabs.get(index).map(|tab| tab.id) else {
+			return;
+		};
+		if let Some(drag) = self.tab_drag.as_mut() {
+			drag.over = (hovered != drag.grabbed).then_some(hovered);
+		}
+	}
+
+	/// The button was released over the strip (§38): move the grabbed tab into the hovered tab's
+	/// slot. `remove` + `insert` gives the familiar feel in both directions — dragged right, the tab
+	/// lands where the hovered chip was and that chip shuffles left; dragged left, the reverse.
+	///
+	/// Every early return is a real case, not a guard against the impossible: no drag armed (a
+	/// release with nothing grabbed), no target (a plain click), and either id no longer in the strip
+	/// (its tab closed mid-gesture — the "×" is inside the chip being dragged).
+	fn drop_tab(&mut self) -> iced::Task<Message> {
+		let Some(drag) = self.tab_drag.take() else {
+			return iced::Task::none();
+		};
+		let Some(target) = drag.over else {
+			return iced::Task::none();
+		};
+		let Some(from) = self.tabs.iter().position(|tab| tab.id == drag.grabbed) else {
+			return iced::Task::none();
+		};
+		let Some(to) = self.tabs.iter().position(|tab| tab.id == target) else {
+			return iced::Task::none();
+		};
+		if from == to {
+			return iced::Task::none();
+		}
+		// `active` is a strip POSITION, so it has to be re-found after the move. Following the active
+		// tab's id rather than assuming it is the grabbed one keeps this right even where the two are
+		// not the same tab — a close confirmation, say, can leave another tab on screen.
+		let active_id = self.active().id;
+		let tab = self.tabs.remove(from);
+		self.tabs.insert(to, tab);
+		if let Some(index) = self.tabs.iter().position(|tab| tab.id == active_id) {
+			self.active = index;
+		}
+		// Nothing about the window changed — same tab on screen, same strip height — so there is no
+		// refit to do. The activation order (§37) is keyed by id, so it is untouched by a reorder.
+		iced::Task::none()
 	}
 
 	/// A tab's "×" (§26): confirm first if it holds a live session — like the Disconnect button,
@@ -627,8 +723,12 @@ impl App {
 		let mut tab = Tab::new_editor(id, session, path.clone(), size, theme);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
-		self.tabs.push(tab);
-		self.active = self.tabs.len() - 1;
+		// Not at the end of the strip: right beside the session the file came from (§38), so a
+		// session and the files opened out of it stay one group instead of drifting apart as other
+		// sessions are opened.
+		let slot = self.editor_slot(session);
+		self.tabs.insert(slot, tab);
+		self.active = slot;
 		// An editor tab opens active like any other (§37) — so closing it (its "×", or Save & close)
 		// returns to the session tab the file was opened from, which is where the user was.
 		self.recent.touch(id);
@@ -653,6 +753,30 @@ impl App {
 			);
 		}
 		iced::Task::none()
+	}
+
+	/// The strip position a new editor tab for `session` should take (§38): just past that session's
+	/// own chip, and past any editor tabs already grouped there — so opening three files in a row
+	/// reads left to right in the order they were opened, rather than stacking up backwards.
+	///
+	/// Only a run of editor tabs belonging to THIS session is skipped, so the group ends at the first
+	/// chip that belongs to something else: another session's tab, or an editor the user has dragged
+	/// in (§38). A session whose tab has gone — closed while a load was in flight — has nothing to sit
+	/// beside, so its editor goes to the end of the strip as it used to.
+	fn editor_slot(&self, session: u64) -> usize {
+		let Some(parent) = self.tabs.iter().position(|tab| tab.id == session) else {
+			return self.tabs.len();
+		};
+		let mut slot = parent + 1;
+		while self
+			.tabs
+			.get(slot)
+			.and_then(|tab| tab.editor.as_ref())
+			.is_some_and(|editor| editor.session == session)
+		{
+			slot += 1;
+		}
+		slot
 	}
 
 	/// Send an editor tab's buffer to its parent session for saving (§32). Raised by the tab after a
@@ -814,6 +938,9 @@ impl App {
 	/// Draw the tab strip, then the active tab's view beneath it, then — if a quit is pending or a
 	/// live tab's close is pending — the confirmation over everything (§26, §30).
 	fn view(&self) -> Element<'_, Message> {
+		// The slot a drag would drop into, if one is in flight (§38): that chip wears the drop mark,
+		// and every chip switches to the "grabbing" cursor so the whole strip reads as in motion.
+		let drop_target = self.tab_drag.as_ref().and_then(|drag| drag.over);
 		let chips: Vec<ui::tabs::Chip> = self
 			.tabs
 			.iter()
@@ -823,9 +950,11 @@ impl App {
 				label: tab.strip_label(),
 				active: index == self.active,
 				status: tab.prompt_status(),
+				drop_target: drop_target == Some(tab.id),
 			})
 			.collect();
-		let body = iced::widget::column![ui::tabs::strip(&chips), self.active().view()]
+		let strip = ui::tabs::strip(&chips, self.tab_drag.is_some());
+		let body = iced::widget::column![strip, self.active().view()]
 			.width(iced::Length::Fill)
 			.height(iced::Length::Fill);
 
@@ -1700,11 +1829,22 @@ pub enum Message {
 	/// `App` feeds it to the right session even when that tab is in the background — a shell
 	/// there keeps drawing while another is on screen.
 	Ssh(u64, SshEvent),
-	// --- tab strip (§26). Mouse-only: click a tab to switch, "+" to open, "×" to close. ---
+	// --- tab strip (§26, §38). Mouse-only: click a tab to switch, drag one to move it along the
+	// strip, "+" to open, "×" to close. ---
 	/// The "+" button — open a new tab on the home screen and make it active.
 	TabNew,
-	/// A tab was clicked — make it active (payload: its position in the strip).
+	/// A tab was pressed — make it active AND arm a strip drag (§38). One press does both, so
+	/// rearranging tabs needs no separate handle: a press that never travels to another chip is
+	/// simply a click. Payload: its position in the strip.
 	TabSelected(usize),
+	/// The pointer entered the chip at this strip position (§38). While a drag is armed, that chip
+	/// is the slot the grabbed tab will drop into; with no drag in flight it is ignored.
+	TabDraggedOver(usize),
+	/// The button was released over the strip (§38) — move the grabbed tab into the hovered slot, or
+	/// do nothing when the press never travelled to another chip.
+	TabDropped,
+	/// The pointer left the strip mid-drag (§38) — abandon the move; the strip keeps its order.
+	TabDragCancelled,
 	/// A tab's "×" (or a middle-click) — close it (payload: its id). A live session first
 	/// raises the Disconnect confirmation; an idle tab closes at once.
 	TabCloseRequested(u64),
@@ -2298,6 +2438,9 @@ impl Tab {
 			// tab never sees them. The arms exist only to keep the match total (§26).
 			Message::TabNew
 			| Message::TabSelected(_)
+			| Message::TabDraggedOver(_)
+			| Message::TabDropped
+			| Message::TabDragCancelled
 			| Message::TabCloseRequested(_)
 			| Message::TabCloseConfirmed
 			| Message::TabCloseCancelled
@@ -7073,6 +7216,7 @@ mod tests {
 			active: 0,
 			// The order starts on the tab already on screen — id 0, the home tab built above (§37).
 			recent: crate::mru::Mru::new(0),
+			tab_drag: None,
 			next_id: 1,
 			targets,
 			vault,
@@ -7376,6 +7520,173 @@ mod tests {
 		let _ = app.request_close(closing);
 		assert_eq!(app.tabs[app.active].window_size, size);
 		assert!(!app.tabs[app.active].window_focused);
+	}
+
+	// The path of an editor tab's file, for asserting where in the strip it landed (§38).
+	fn editor_path(app: &App, index: usize) -> String {
+		app.tabs[index]
+			.editor
+			.as_ref()
+			.expect("an editor tab")
+			.path
+			.clone()
+	}
+
+	#[test]
+	fn an_editor_tab_opens_beside_the_session_it_came_from() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let _ = app.open_tab(); // 3 tabs; the file is opened from the LEFTMOST one
+		let session = app.tabs[0].id;
+		let _ = app.open_editor(session, "/home/user/notes.txt".to_owned());
+		assert_eq!(app.tabs.len(), 4);
+		assert_eq!(app.active, 1, "right after its session, not at the far end");
+		assert_eq!(editor_path(&app, 1), "/home/user/notes.txt");
+	}
+
+	#[test]
+	fn files_opened_from_one_session_stay_grouped_in_the_order_they_were_opened() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let session = app.tabs[0].id;
+		let _ = app.open_editor(session, "first.txt".to_owned());
+		let _ = app.open_editor(session, "second.txt".to_owned());
+		// The second file goes after the first, not between it and its session — so the group reads
+		// left to right in the order the files were opened (§38).
+		assert_eq!(editor_path(&app, 1), "first.txt");
+		assert_eq!(editor_path(&app, 2), "second.txt");
+		assert_eq!(app.active, 2);
+	}
+
+	#[test]
+	fn each_session_keeps_its_own_group_of_files() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let first_session = app.tabs[0].id;
+		let second_session = app.tabs[1].id;
+		let _ = app.open_editor(first_session, "one.txt".to_owned());
+		// The second session's file goes beside IT, so the run of editors after the first session
+		// ends at the first chip that is not one of its own (§38).
+		let _ = app.open_editor(second_session, "two.txt".to_owned());
+		assert_eq!(editor_path(&app, 1), "one.txt");
+		assert_eq!(app.tabs[2].id, second_session);
+		assert_eq!(editor_path(&app, 3), "two.txt");
+	}
+
+	#[test]
+	fn a_file_whose_session_has_gone_opens_at_the_end() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		// The session tab closed while the load was in flight: there is nothing to sit beside, so the
+		// editor takes the end of the strip rather than a guessed slot (§38).
+		let _ = app.open_editor(9_999, "orphan.txt".to_owned());
+		assert_eq!(app.active, app.tabs.len() - 1);
+		assert_eq!(editor_path(&app, app.active), "orphan.txt");
+	}
+
+	#[test]
+	fn dragging_a_chip_onto_another_moves_it_into_that_slot() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let _ = app.open_tab();
+		let grabbed = app.tabs[0].id;
+		let passed = app.tabs[1].id;
+		// Press the leftmost chip, travel to the rightmost, release: the grabbed tab lands where that
+		// chip was and the ones it passed shuffle left (§38).
+		let _ = app.update(Message::TabSelected(0));
+		let _ = app.update(Message::TabDraggedOver(2));
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(app.tabs[2].id, grabbed);
+		assert_eq!(app.tabs[0].id, passed, "the tabs it passed moved left");
+		assert_eq!(app.active, 2, "the tab on screen followed its own move");
+		assert!(app.tab_drag.is_none(), "the gesture is over");
+	}
+
+	#[test]
+	fn a_press_that_never_leaves_its_chip_is_only_a_click() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let first = app.tabs[0].id;
+		// Press and release on the same chip: it selects, and the strip keeps its order — a drag with
+		// no target drops nothing (§38).
+		let _ = app.update(Message::TabSelected(0));
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(app.tabs[0].id, first);
+		assert_eq!(app.active, 0, "it did still select");
+	}
+
+	#[test]
+	fn leaving_the_strip_abandons_the_move() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let first = app.tabs[0].id;
+		let _ = app.update(Message::TabSelected(0));
+		let _ = app.update(Message::TabDraggedOver(1));
+		// The pointer wanders off the strip: the gesture is called off, so a release afterwards (over
+		// the terminal, say) must not still reorder anything (§38).
+		let _ = app.update(Message::TabDragCancelled);
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(app.tabs[0].id, first);
+	}
+
+	#[test]
+	fn dragging_back_onto_the_grabbed_chip_clears_the_target() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let first = app.tabs[0].id;
+		// Out to the neighbour and back again: changing your mind mid-drag leaves the order alone.
+		let _ = app.update(Message::TabSelected(0));
+		let _ = app.update(Message::TabDraggedOver(1));
+		let _ = app.update(Message::TabDraggedOver(0));
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(app.tabs[0].id, first);
+	}
+
+	#[test]
+	fn hovering_the_strip_at_rest_moves_nothing() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let first = app.tabs[0].id;
+		// No press, so no drag: the pointer crossing the chips and a stray release are both inert.
+		let _ = app.update(Message::TabDraggedOver(0));
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(app.tabs[0].id, first);
+		assert!(app.tab_drag.is_none());
+	}
+
+	#[test]
+	fn a_reorder_keeps_whatever_tab_is_on_screen_on_screen() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let _ = app.open_tab();
+		let on_screen = app.tabs[app.active].id;
+		// A drag armed on a tab that is NOT the one on screen — a close confirmation can leave another
+		// tab active. `active` is a strip position, so it has to follow its own tab's id (§38).
+		app.tab_drag = Some(TabDrag {
+			grabbed: app.tabs[0].id,
+			over: Some(app.tabs[1].id),
+		});
+		let _ = app.drop_tab();
+		assert_eq!(app.tabs[app.active].id, on_screen);
+	}
+
+	#[test]
+	fn a_reorder_leaves_the_visit_order_alone() {
+		let mut app = tab_app();
+		let _ = app.open_tab();
+		let _ = app.open_tab(); // trail 0, 1, 2 — the third tab is on screen
+		let third = app.tabs[2].id;
+		// Grab the leftmost tab (which selects it, so the trail becomes 1, 2, 0) and drop it at the
+		// end. The activation order is keyed by id, so shuffling positions must not disturb it (§37).
+		let _ = app.update(Message::TabSelected(0));
+		let _ = app.update(Message::TabDraggedOver(2));
+		let _ = app.update(Message::TabDropped);
+		let moved = app.tabs[app.active].id;
+		let _ = app.request_close(moved);
+		assert_eq!(
+			app.tabs[app.active].id, third,
+			"the fallback is still the tab visited before it, wherever the strip has put it"
+		);
 	}
 
 	#[test]

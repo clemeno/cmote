@@ -5,6 +5,15 @@
 // and "+" opens a fresh home tab. `App` draws this strip above the active tab's own view and
 // swaps which tab it renders beneath when the active one changes.
 //
+// The same press that selects also GRABS the chip (§38), so a tab can be dragged along the strip to
+// a new position with no separate handle. The gesture is reported entirely through per-chip pointer
+// events — `on_press` grabs, `on_enter` names the slot under the pointer, `on_release` drops — so it
+// needs no pixel arithmetic here and no knowledge of how wide any chip laid out. The strip is
+// reordered once, on the drop; iced does not expose a widget's laid-out bounds, so shuffling the
+// chips live under the pointer could ping-pong between two slots when their widths differ. `App`
+// holds the whole gesture's state (which tab is grabbed, which slot it is over) and hands back the
+// one piece the strip has to draw: a mark on the chip that would receive the drop.
+//
 // The strip has a fixed height (`STRIP_HEIGHT`), which the terminal below it must account for: it
 // sits in a sub-region of the window that is exactly that much shorter. `App` hands each tab a
 // window size already reduced by `STRIP_HEIGHT`, so every layout and pointer coordinate inside a
@@ -61,25 +70,37 @@ impl Status {
 	}
 }
 
+/// The drop mark's colour (§38): the border drawn round the chip a dragged tab would land on. A
+/// muted blue, the same family as the selection fills elsewhere, so it reads as "here" rather than
+/// as a warning.
+const DROP_BORDER: Color = Color::from_rgb8(0x5c, 0x8a, 0xc8);
+
 /// The longest label a chip shows before the middle is elided (§22), so one long endpoint cannot
 /// push the "+" off the strip.
 const MAX_LABEL_CHARS: usize = 48;
 
 /// One chip's data: the owning tab's id (for the close message), the label to show, whether it is
-/// the active tab (which tints its fill and brightens its text), and its command-status dot (§34).
+/// the active tab (which tints its fill and brightens its text), its command-status dot (§34), and
+/// whether a drag in flight would drop onto this chip's slot (§38), which outlines it.
 pub struct Chip {
 	pub id: u64,
 	pub label: String,
 	pub active: bool,
 	pub status: Option<Status>,
+	pub drop_target: bool,
 }
 
 /// Build the tab strip from the chips, in strip order. Returns an owned (`'static`) element —
 /// every label is cloned into its widget, so nothing is borrowed from the caller.
-pub fn strip(chips: &[Chip]) -> Element<'static, Message> {
+///
+/// `dragging` says a tab is being moved right now (§38): it only changes the cursor, which becomes
+/// the "grabbing" hand over every chip, so the gesture reads as in progress wherever the pointer has
+/// got to. The bar itself catches the release (a drop on the gap between chips still counts) and the
+/// pointer leaving the strip, which abandons the move.
+pub fn strip(chips: &[Chip], dragging: bool) -> Element<'static, Message> {
 	let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(chips.len() + 1);
 	for (index, chip) in chips.iter().enumerate() {
-		items.push(chip_view(index, chip));
+		items.push(chip_view(index, chip, dragging));
 	}
 	// The trailing "+" opens a new tab on the home screen.
 	items.push(
@@ -93,21 +114,31 @@ pub fn strip(chips: &[Chip]) -> Element<'static, Message> {
 			.into(),
 	);
 
-	container(row(items).spacing(2).align_y(Vertical::Center))
+	let bar = container(row(items).spacing(2).align_y(Vertical::Center))
 		.width(Length::Fill)
 		.height(Length::Fixed(STRIP_HEIGHT))
 		.padding(4)
 		.style(|_theme| container::Style {
 			background: Some(BAR_BG.into()),
 			..container::Style::default()
-		})
+		});
+
+	// The bar backs the chips up on both ends of a drag (§38). Its release catches a drop that lands
+	// on the padding or the gap between two chips — the last chip hovered still wins the slot — and
+	// its exit ends a gesture that wanders off the strip, so a drag can always be called off by
+	// moving away. Neither event is captured by the chips above (iced's `mouse_area` only captures
+	// presses), so both layers see them and the chip's own handler still fires first.
+	mouse_area(bar)
+		.on_release(Message::TabDropped)
+		.on_exit(Message::TabDragCancelled)
 		.into()
 }
 
 /// One chip: the (elided) label with a "×" beside it, tinted when active. The whole chip is a
-/// `mouse_area` whose left press selects the tab; the "×" is a nested button that captures its own
-/// press (children handle events first), so closing does not also select.
-fn chip_view(index: usize, chip: &Chip) -> Element<'static, Message> {
+/// `mouse_area` whose left press selects the tab AND grabs it for a drag (§38); the "×" is a nested
+/// button that captures its own press (children handle events first), so closing does not also
+/// select. The pointer entering the chip names it as the drop slot, and a release over it drops.
+fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Message> {
 	let label = crate::ui::elide_middle(&chip.label, MAX_LABEL_CHARS);
 	let fg = if chip.active { ACTIVE_FG } else { INACTIVE_FG };
 
@@ -131,6 +162,7 @@ fn chip_view(index: usize, chip: &Chip) -> Element<'static, Message> {
 
 	contents = contents.push(close);
 	let active = chip.active;
+	let drop_target = chip.drop_target;
 	let cell = container(contents)
 		.height(Length::Fixed(CHIP_HEIGHT))
 		.padding([0.0, 8.0])
@@ -146,10 +178,33 @@ fn chip_view(index: usize, chip: &Chip) -> Element<'static, Message> {
 			if active {
 				style.background = Some(ACTIVE_BG.into());
 			}
+			// The drop mark (§38): an outline on the chip a release would drop onto. Drawn over the
+			// active tint rather than instead of it, so the strip never stops saying which tab is on
+			// screen while a tab is being moved.
+			if drop_target {
+				style.border.color = DROP_BORDER;
+				style.border.width = 1.0;
+			}
 			style
 		});
 
-	mouse_area(cell)
+	// The whole chip is the drag handle (§38). `on_press` selects and grabs; `on_release` drops. The
+	// cursor advertises the gesture: an open hand at rest, a closed one while a tab is in flight.
+	let area = mouse_area(cell)
 		.on_press(Message::TabSelected(index))
-		.into()
+		.on_release(Message::TabDropped)
+		.interaction(if dragging {
+			iced::mouse::Interaction::Grabbing
+		} else {
+			iced::mouse::Interaction::Grab
+		});
+
+	// The hover report — which slot the pointer is over — is wired up ONLY while a tab is actually
+	// being dragged. `App` would ignore it at rest anyway, but not asking for it means moving the
+	// pointer across the strip publishes no messages at all when there is nothing to move.
+	if dragging {
+		area.on_enter(Message::TabDraggedOver(index)).into()
+	} else {
+		area.into()
+	}
 }
