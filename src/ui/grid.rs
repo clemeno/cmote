@@ -320,6 +320,9 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		let mask = match_mask(&self.matches, rows, cols);
 		let marks = Marks {
 			selection: self.selection,
+			// Where the viewport is parked, as a document line (§40) — the selection's own
+			// coordinate space, so the planner can resolve each row it draws into the line it shows.
+			top_line: self.screen.line_at(0),
 			matches: &mask,
 		};
 
@@ -1119,6 +1122,10 @@ fn link_run_at(
 #[derive(Default, Clone, Copy)]
 struct Marks<'a> {
 	selection: Option<&'a Selection>,
+	/// The absolute document line the TOP visible row is showing (§40). The selection is stored in
+	/// document coordinates, so this is what turns the row being drawn into the line to ask about —
+	/// carried here rather than read off the screen per cell, since it is one number for the frame.
+	top_line: u64,
 	/// The row-major "this cell is inside a match" mask over the visible grid (see `match_mask`).
 	/// Empty when the find bar is shut, or open with no hits on screen.
 	matches: &'a [bool],
@@ -1177,6 +1184,10 @@ fn plan_runs(
 	// The open run: its style, the column it starts at, its span so far, and whether it is
 	// sealed (nothing may join it). `None` means no run is open yet.
 	let mut current: Option<(CellStyle, u16, u16, bool)> = None;
+	// The document line this viewport row is showing (§40). The selection lives in document
+	// coordinates so that scrolling moves it with its text; resolving that here — once per row, not
+	// once per cell — is the whole cost of the projection on the drawing side.
+	let line = marks.top_line + u64::from(row);
 
 	for col in 0..cols {
 		let cell = screen.cell(row, col);
@@ -1199,7 +1210,7 @@ fn plan_runs(
 		let is_cursor = on_cursor_row && col == cursor_col;
 		let is_selected = marks
 			.selection
-			.is_some_and(|selection| selection.contains(row, col));
+			.is_some_and(|selection| selection.contains(line, col));
 		// This cell's row-major index, matched against the find bar's match mask (§39) and the
 		// Ctrl-hover link's span (§24) — both live in this one index space.
 		let index = usize::from(row) * usize::from(cols) + usize::from(col);
@@ -1358,6 +1369,7 @@ const fn rgb((r, g, b): (u8, u8, u8)) -> Color {
 mod tests {
 	use super::*;
 	use crate::term::Terminal;
+	use crate::ui::selection::Spot;
 
 	// Pack row 0 of a grid after feeding `input` to a fresh emulator. The cursor is left
 	// out (`on_cursor_row = false`) so the tests exercise the column packing alone, not
@@ -1506,10 +1518,11 @@ mod tests {
 		// highlight is both applied and isolated to the selection.
 		let mut terminal = Terminal::new(1, 5);
 		terminal.process(b"abcde");
-		let selection = Selection::new(Cell { row: 0, col: 1 }).with_head(Cell { row: 0, col: 2 });
+		let selection =
+			Selection::new(Spot { line: 0, col: 1 }).with_head(Spot { line: 0, col: 2 });
 		let marks = Marks {
 			selection: Some(&selection),
-			matches: &[],
+			..Marks::default()
 		};
 		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, marks, None);
 
@@ -1519,6 +1532,35 @@ mod tests {
 		assert_eq!(runs[1].style.bg, SELECTION_BG);
 		assert_ne!(runs[0].style.bg, SELECTION_BG);
 		assert_ne!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	/// The selection is highlighted on whichever row is showing its line right now (§40): the
+	/// planner adds the row to the viewport's top line, so scrolling moves the highlight WITH the
+	/// text rather than leaving it on the row it was dragged over.
+	#[test]
+	fn the_selection_highlight_follows_its_line_as_the_view_scrolls() {
+		// A two-row screen fed four lines: two scrolled off, so the visible rows show lines 2 and 3.
+		let mut terminal = Terminal::new(2, 5);
+		terminal.process(b"aaaaa\r\nbbbbb\r\nccccc\r\nddddd");
+		// Line 1 ("bbbbb") is selected whole — up in the history, off the screen.
+		let selection =
+			Selection::new(Spot { line: 1, col: 0 }).with_head(Spot { line: 1, col: 4 });
+
+		// At the live bottom the top row shows line 2, so nothing on screen is selected.
+		let marks = |terminal: &Terminal| Marks {
+			selection: Some(&selection),
+			top_line: terminal.screen().line_at(0),
+			matches: &[],
+		};
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, marks(&terminal), None);
+		assert!(runs.iter().all(|run| run.style.bg != SELECTION_BG));
+
+		// Scrolled up one line the top row shows line 1, and the whole row draws in the fill.
+		terminal.scroll(crate::term::ScrollMotion::Lines(1));
+		let runs = plan_runs(terminal.screen(), 0, 5, false, 0, marks(&terminal), None);
+		assert_eq!(runs.len(), 1);
+		assert_eq!(runs[0].content, "bbbbb");
+		assert_eq!(runs[0].style.bg, SELECTION_BG);
 	}
 
 	#[test]
@@ -1540,10 +1582,12 @@ mod tests {
 				end_col: 4,
 			},
 		];
-		let selection = Selection::new(Cell { row: 0, col: 3 }).with_head(Cell { row: 0, col: 4 });
+		let selection =
+			Selection::new(Spot { line: 0, col: 3 }).with_head(Spot { line: 0, col: 4 });
 		let mask = match_mask(&hits, 1, 5);
 		let marks = Marks {
 			selection: Some(&selection),
+			top_line: 0,
 			matches: &mask,
 		};
 

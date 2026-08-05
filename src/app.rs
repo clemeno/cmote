@@ -4298,12 +4298,18 @@ impl Tab {
 		let Some(terminal) = self.terminal.as_ref() else {
 			return;
 		};
-		let (rows, cols) = terminal.screen().size();
-		self.hover_cell = ui::terminal::cell_at(point, rows, cols);
+		let screen = terminal.screen();
+		let (rows, cols) = screen.size();
+		let hovered = ui::terminal::cell_at(point, rows, cols);
+		// The head is resolved to a DOCUMENT position here (§40), where the viewport's own numbers are
+		// still to hand: the pointer is over a screen row, but what it selects is the line that row is
+		// showing — so the selection keeps covering that text however the scrollback then moves.
+		let head = hovered.spot(screen);
+		self.hover_cell = hovered;
 		if self.selecting
 			&& let Some(selection) = self.selection
 		{
-			self.selection = Some(selection.with_head(self.hover_cell));
+			self.selection = Some(selection.with_head(head));
 		}
 	}
 
@@ -4317,9 +4323,12 @@ impl Tab {
 		self.search = None;
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
 		self.set_focus(Focus::Terminal);
-		if self.terminal.is_none() {
+		let Some(terminal) = self.terminal.as_ref() else {
 			return;
-		}
+		};
+		// The cell pressed on, as the document position it is showing (§40) — resolved before any of
+		// the branches below, so the one place a mouse selection is anchored reads the viewport once.
+		let anchor = self.hover_cell.spot(terminal.screen());
 		// A click on a prompt tick in the left padding gutter selects that command's output (§34)
 		// instead of starting a text selection. The ticks live inside `GRID_PADDING`; a press there
 		// on a row whose prompt has a finished command resolves to it, and anything else — the gutter
@@ -4339,7 +4348,7 @@ impl Tab {
 			self.follow_link(&uri);
 			return;
 		}
-		self.selection = Some(ui::selection::Selection::new(self.hover_cell));
+		self.selection = Some(ui::selection::Selection::new(anchor));
 		self.selecting = true;
 	}
 
@@ -4429,14 +4438,15 @@ impl Tab {
 	/// Turn a located output span (§34) into the active grid selection, replacing any mouse selection
 	/// and ending any drag — the one place both the keybind and the gutter click land, so the two can
 	/// never build the selection differently. Dismisses any open context menu too, as a fresh grid
-	/// interaction does.
+	/// interaction does. The span is already in document lines (§40), so an output taller than the
+	/// screen is selected — and copied — in full.
 	fn set_output_selection(&mut self, span: term::OutputSpan) {
-		let start = ui::selection::Cell {
-			row: span.start_row,
+		let start = ui::selection::Spot {
+			line: span.start_line,
 			col: 0,
 		};
-		let head = ui::selection::Cell {
-			row: span.end_row,
+		let head = ui::selection::Spot {
+			line: span.end_line,
 			col: span.last_col,
 		};
 		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
@@ -4494,24 +4504,26 @@ impl Tab {
 	}
 
 	/// Reveal a found match and select it (§35): the terminal scrolls it into view (centred, and
-	/// left alone when it is already on screen) and hands back the viewport row it landed on, which
-	/// with the match's own columns becomes an ordinary one-row selection. That is the whole reason
-	/// this feature needs no rendering or clipboard work — the grid highlights a selection and Copy
-	/// copies one, whatever put it there (§34 took the same route). A match whose line has since
-	/// scrolled past the retained history leaves the view and the selection as they were.
+	/// left alone when it is already on screen), and the match's own coordinates — an absolute line
+	/// and its columns — become an ordinary one-line selection. That is the whole reason this feature
+	/// needs no rendering or clipboard work: the grid highlights a selection and Copy copies one,
+	/// whatever put it there (§34 took the same route). Since §40 the selection speaks the same
+	/// absolute lines a match does, so nothing is converted here at all. A match whose line has
+	/// scrolled past the retained history cannot be shown, and leaves the view and the selection as
+	/// they were.
 	fn reveal_match(&mut self, found: Option<term::search::Match>) {
 		let (Some(found), Some(terminal)) = (found, self.terminal.as_mut()) else {
 			return;
 		};
-		let Some(row) = terminal.reveal_line(found.line) else {
+		if !terminal.reveal_line(found.line) {
 			return;
-		};
-		let start = ui::selection::Cell {
-			row,
+		}
+		let start = ui::selection::Spot {
+			line: found.line,
 			col: found.start_col,
 		};
-		let head = ui::selection::Cell {
-			row,
+		let head = ui::selection::Spot {
+			line: found.line,
 			col: found.end_col,
 		};
 		self.selection = Some(ui::selection::Selection::new(start).with_head(head));
@@ -6747,6 +6759,85 @@ mod tests {
 		assert_eq!(next_input(&mut rx), None);
 	}
 
+	/// Ctrl+Shift+O grabs a command's WHOLE output, even one taller than the screen (§40). This is the
+	/// viewport-bound capture §34 shipped with and wrote down as deferred: the span is now document
+	/// lines and the copy reads the history directly, so the screenful that happens to show no longer
+	/// bounds what is selected.
+	#[test]
+	fn ctrl_shift_o_selects_output_taller_than_the_screen() {
+		let (mut app, _rx) = app_with_terminal(16);
+		{
+			let terminal = app.terminal.as_mut().unwrap();
+			terminal.process(b"\x1b]133;A\x07$ \x1b]133;B\x07seq\r\n\x1b]133;C\x07");
+			// Forty lines of output on a 24-row screen: most of it is up in the history by the time
+			// the command finishes.
+			let output: Vec<u8> = (0..40)
+				.flat_map(|n| format!("out {n}\r\n").into_bytes())
+				.collect();
+			terminal.process(&output);
+			terminal.process(b"\x1b]133;D;0\x07");
+		}
+
+		app.select_command_output();
+
+		let selection = app.selection.expect("the command's output is selected");
+		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		let lines: Vec<&str> = text.lines().collect();
+		assert_eq!(
+			lines.len(),
+			40,
+			"every printed line is copied, not just the screenful on show"
+		);
+		assert_eq!(lines.first(), Some(&"out 0"));
+		assert_eq!(lines.last(), Some(&"out 39"));
+	}
+
+	/// A mouse drag anchors and extends in DOCUMENT coordinates (§40), so a selection made while
+	/// scrolled back into history keeps covering the lines it was dragged over — and copies them —
+	/// once the view has moved on. Under viewport coordinates the same selection would stay on its
+	/// rows and copy whatever later slid into them.
+	#[test]
+	fn a_drag_selects_the_lines_it_covered_not_the_rows_it_covered() {
+		let (mut app, _rx) = app_with_terminal(16);
+		{
+			let terminal = app.terminal.as_mut().unwrap();
+			let output: Vec<u8> = (0..60)
+				.flat_map(|n| format!("line {n}\r\n").into_bytes())
+				.collect();
+			terminal.process(&output);
+		}
+
+		// The pointer, in grid-local pixels, over a given cell.
+		let point = |row: u16, col: u16| {
+			iced::Point::new(
+				ui::terminal::GRID_PADDING + f32::from(col) * ui::terminal::CELL_WIDTH + 0.5,
+				ui::terminal::GRID_PADDING + f32::from(row) * ui::terminal::CELL_HEIGHT + 0.5,
+			)
+		};
+		// Scroll back into the history, then drag across the seven cells of the top visible row.
+		app.on_terminal_scroll(20);
+		app.on_grid_moved(point(0, 0));
+		app.on_grid_pressed();
+		app.on_grid_moved(point(0, 6));
+		app.on_grid_released();
+
+		let selection = app.selection.expect("the drag selected a run of cells");
+		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		assert!(
+			text.starts_with("line "),
+			"a numbered line was dragged over"
+		);
+
+		// Back at the live bottom, other lines are on that row — and the selection still extracts
+		// exactly the text it was dragged over.
+		app.on_terminal_scroll(-20);
+		assert_eq!(offset(&app), 0, "returned to the live bottom");
+		assert_eq!(
+			selection.extract(app.terminal.as_ref().unwrap().screen()),
+			text
+		);
+	}
+
 	/// Clicking a prompt tick in the left gutter selects that command's output (§34) — the other
 	/// trigger. A press with the pointer inside `GRID_PADDING` on the prompt's row resolves to its
 	/// command and selects the output, as a discrete action (no drag begins).
@@ -6922,15 +7013,13 @@ mod tests {
 				.all(|found| (found.start_col, found.end_col) == (0, 5))
 		);
 		assert_ne!(visible[0].row, visible[1].row);
-		// The current hit is among them, and the selection covers the same cells — which is what
-		// makes the current one draw in the selection's colour over the wash rather than beside it.
+		// The current hit is selected, over its own cells — which is what makes it draw in the
+		// selection's colour over the wash rather than beside it. Both speak absolute lines (§40), so
+		// the check needs no mapping of its own.
+		let current = search.current().expect("a current match");
 		let selection = app.selection.expect("the current match is selected");
-		assert!(
-			visible
-				.iter()
-				.any(|found| selection.contains(found.row, found.start_col)
-					&& selection.contains(found.row, found.end_col))
-		);
+		assert!(selection.contains(current.line, current.start_col));
+		assert!(selection.contains(current.line, current.end_col));
 	}
 
 	#[test]

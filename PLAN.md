@@ -234,7 +234,7 @@ cmote/
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
-    │   ├── selection.rs   stream text selection over the grid; text extraction (§10)
+    │   ├── selection.rs   stream text selection over the grid, in absolute document lines; text extraction (§10, §40)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
     │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
@@ -260,7 +260,7 @@ cmote/
     │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
     │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP (§33)
-    │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link + the kitty flags (§9, §16, §23, §24, §25)
+    │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, and the viewport↔document line mapping (§9, §16, §23, §24, §25, §40)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
@@ -3144,13 +3144,12 @@ OSC and ignores it, so cmote scans the same bytes itself.
   (the A mark). **Ctrl+Shift+O** selects the latest finished command's output; **clicking a prompt
   tick** in the gutter (a press with the pointer inside `GRID_PADDING`) selects that command's. Both
   resolve to a range, `Terminal::select_output_*` reveals it (scrolling it into view only if it had
-  left the live screen) and returns the viewport rows it fills as a plain `OutputSpan` — so `term/`
-  never touches the UI's selection type — and `app` turns that into an ordinary stream `Selection`.
-  Reusing the mouse selection means the existing Copy / Ctrl+C / rich-HTML copy all work unchanged.
-  (`ponytail:` the selection is viewport-bound, like the mouse's, so output taller than the screen
-  selects the first screenful from its top; and it copies only what is shown. Full-scrollback capture
-  of an over-long output stays deferred — it needs the copy path to read history directly, not just
-  the visible grid.)
+  left the live screen) and returns the lines it fills as a plain `OutputSpan` — so `term/` never
+  touches the UI's selection type — and `app` turns that into an ordinary stream `Selection`. Reusing
+  the mouse selection means the existing Copy / Ctrl+C / rich-HTML copy all work unchanged. (As
+  shipped here the span was viewport *rows*, so an output taller than the screen selected only the
+  first screenful from its top. **§40 made both the span and the selection absolute lines**, and the
+  copy now reads the document, so a long output is grabbed whole.)
 - **A resize drops the marks.** A resize reflows the grid, re-wrapping lines at the new width, so the
   line count of the history changes and the recorded absolute positions no longer line up. Rather
   than point a jump at the wrong reflowed line, `resize` clears the marks — the scrollback is kept,
@@ -3159,11 +3158,12 @@ OSC and ignores it, so cmote scans the same bytes itself.
 
 ### What is deliberately NOT here
 
-- **Full-scrollback capture of an over-long output.** Select-command-output (above) is viewport-bound:
-  a command whose output is taller than the screen selects and copies only the first screenful. Reading
-  the whole range straight from the engine's history — independent of the scroll position — is the
-  deferred upgrade, plus walking older commands on a repeated Ctrl+Shift+O (v1 always takes the latest;
-  clicking a specific tick already reaches any command).
+- ~~**Full-scrollback capture of an over-long output.**~~ **Shipped in §40.** As built here
+  select-command-output was viewport-bound — a command whose output was taller than the screen selected
+  and copied only the first screenful — because the selection itself addressed viewport rows. §40 moved
+  the selection to absolute document lines and gave the copy path a history read, so the whole range
+  comes back whatever the scroll position. Still deferred: **walking older commands on a repeated
+  Ctrl+Shift+O** (it always takes the latest; clicking a specific tick already reaches any command).
 - **No injection of the marks.** cmote reads whatever the shell offers and adds nothing: a shell
   without integration configured shows no dots, no ticks, and jump-to-prompt finds nothing. cmote
   never rewrites the remote's shell init to turn it on — that is the user's to configure, exactly as
@@ -3209,9 +3209,11 @@ reveal-scroll, and "a found thing becomes an ordinary selection".
   match already on screen is left exactly where it is — stepping between two hits on one screenful
   must not jerk the view — and one that is off screen is **centred**, so it arrives with context
   above and below it (an output span, by contrast, is scrolled to the *top*, since it is the start
-  that matters there). The terminal hands back only the viewport row; `app` pairs it with the match's
-  columns to build a one-row `Selection`. That is why this feature needs no rendering and no
+  that matters there). The terminal only says whether the line could be shown; the match's own
+  absolute line and columns are what `app` selects. That is why this feature needs no rendering and no
   clipboard work at all: the grid highlights a selection and Copy copies one, whatever put it there.
+  (As shipped here `reveal_line` handed back the viewport row, because a selection addressed rows;
+  since §40 it addresses lines, so a match's coordinates go straight into one untranslated.)
 - **The bar floats; it does not push (`ui/terminal.rs`).** The grid's row count *is* the remote pty's
   size, so a bar that took height would resize the remote every time it opened. Instead it is an
   overlay in the existing stack, anchored to the grid's top-right by the same transparent-container
@@ -3553,3 +3555,79 @@ unchanged apart from a test**: the wash is a pure function of state the view alr
 - **Nothing dims the unmatched text.** A "focus mode" that fades everything but the hits would have to
   rewrite every cell's foreground, which is the one thing the renderer must not do — a program's own
   colours are its own (§9).
+
+---
+
+## 40. The selection speaks document lines — text that scrolls stays selected (v3.x)
+
+Three features had grown into absolute document coordinates — the OSC 133 prompt marks (§34), the
+search matches (§35), the washes over them (§39) — while the thing they all end up *becoming*, the text
+selection, still addressed **viewport rows**. That mismatch had visible costs. Drag over some output,
+scroll, and the highlight stayed parked on the rows while their contents slid out from under it. Select
+a command's output taller than the screen and only the first screenful was selected, because rows off
+the screen had no coordinates to be selected *by*. Copy read the visible grid, so a copy could never
+say more than the screen did.
+
+So `Selection`'s endpoints are now document positions: `Spot { line, col }`, where `line` is the same
+absolute index the marks and the matches use. Nothing about the *shape* of the selection changed — it is
+still a stream selection in reading order — and no widget, message or keybind moved.
+
+### The one door between the two spaces (`term/screen.rs`)
+
+The pointer is on screen and the text is in the document, so exactly one conversion has to exist, and
+it now exists exactly once: **`Screen::line_at(row)`** = `history_size + row - display_offset`. It is
+the same arithmetic §34's ticks and §39's washes are placed by, written down in one function that both
+`Screen::cell` and `ui::selection::Cell::spot` read through.
+
+- **`Screen::line_cell(line, col)` is the read that does not care where the viewport is.** The engine
+  keeps scrolled-off lines on the *negative* grid lines below the live screen's line 0 (§23), so a
+  document line maps onto the grid by subtracting `history_size`; anything outside `-history_size ..=
+  screen_lines - 1` is a line the session no longer has. `Screen::cell` — the renderer's per-cell read
+  — is now `line_cell(line_at(row), col)`, so the viewport and document readers cannot drift apart.
+- **`Cell` and `Spot` are two types, and that is the point.** `Cell` is where the pointer is (row 0 is
+  the top visible line); `Spot` is where the text is. `Cell::spot(screen)` is the only crossing, so a
+  viewport row cannot reach a selection without passing through the conversion — the same discipline
+  `Match` / `Highlight` keep (§39), and the reason this refactor was a series of compile errors rather
+  than a hunt for wrong highlights.
+
+### The renderer resolves the other way, once per row (`ui/grid.rs`)
+
+`plan_runs` asks the selection about a document line, so `Marks` carries the frame's `top_line`
+(`screen.line_at(0)`) and the planner adds the row it is drawing. One addition per row, not per cell;
+`Marks` already existed to group the fills (§39), and this is the coordinate they are resolved against.
+Nothing else in the renderer moved — a selected cell still seals into its own run through `CellStyle`,
+the fill order (match, then selection) is untouched, and the wash layer needed no change at all,
+because a `Highlight` was *already* a projection.
+
+### What that buys, feature by feature
+
+- **A drag holds its text.** `on_grid_pressed` anchors at `hover_cell.spot(screen)` and `on_grid_moved`
+  extends to the same, so the endpoints are lines from the moment they are made. Scroll away and back:
+  the highlight is on its own text, and Copy takes what was dragged over, not what is now on those rows.
+- **Select-command-output is whole (§34's deferred item, closed).** `OutputSpan` carries absolute
+  `start_line` / `end_line`, and `locate_output` no longer clamps to the visible rows — revealing (which
+  screenful you are looking at) and selecting (which lines are selected) became separate concerns, which
+  is all that limit ever was. A forty-line output on a twenty-four-row screen copies forty lines.
+- **A search match needs no translation.** `reveal_line` returns *whether* the line could be shown
+  rather than which row it landed on, and the match's own line and columns become the selection (§35).
+- **The copy path reads the document.** `selected_rows` walks `start.line ..= end.line` through
+  `line_cell`, so both the plain-text and the styled-HTML copy (§10) reach into the history unchanged —
+  they share that geometry, which is exactly why neither had to be touched.
+
+### What is deliberately NOT here
+
+- **No auto-scroll while dragging past the screen edge.** The head can only be a cell the pointer is
+  over, so a selection still cannot be *extended* beyond the visible rows by dragging — you scroll,
+  then drag further. What §40 fixes is that such a selection now survives the scroll; growing it by
+  hovering the edge is a timer-driven behaviour and its own feature.
+- **A resize still invalidates a live selection.** A reflow re-wraps the history, so the line count
+  changes and the recorded lines no longer point at the same text — the reason §34 drops the prompt
+  marks on resize. The selection is left alone rather than cleared (as it was before, when it pointed
+  at whatever reflowed onto its rows). `ponytail:` clearing it on a reflow would be the honest thing;
+  it needs a decision about the far more common height-only resize, which reflows nothing.
+- **No word / line double- and triple-click selection.** Still the drag, the output span and the search
+  match. Absolute coordinates make it *easier* (a word is a run on one line), but it is a new gesture
+  and a new set of boundary rules, not part of the coordinate change.
+- **Nothing reads the document below `history_size + screen_lines`.** There is no persistence: what the
+  engine has evicted at the scrollback cap (§23) is gone, and a selection reaching that far simply
+  contributes nothing for those lines rather than pasting blanks in their place.

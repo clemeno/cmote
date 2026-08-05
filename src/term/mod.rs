@@ -95,14 +95,18 @@ pub enum ScrollMotion {
 	Bottom,
 }
 
-/// Where a command's output sits on the visible screen right now (§34), as the caller needs it to
-/// build a text selection: the first and last viewport rows it occupies (0-based from the top of
-/// the screen) and the grid's last column. Plain viewport coordinates, so `term/` hands the UI what
-/// it needs without depending on the UI's own selection type. `select_output_*` clamps the span to
-/// the visible rows, so `start_row <= end_row` and both are on screen.
+/// Where a command's output sits in the DOCUMENT (§34, §40), as the caller needs it to build a text
+/// selection: the absolute first and last lines it occupies — inclusive, which is what a selection's
+/// head wants — and the grid's last column, since a whole-output selection runs the full width.
+/// Plain numbers, so `term/` hands the UI what it needs without depending on the UI's own selection
+/// type.
+///
+/// These are absolute lines rather than viewport rows (as this was until §40), so an output taller
+/// than the screen is selected WHOLE: the copy path reads the document, not the visible grid. `start_line
+/// <= end_line` always, and revealing only decides what the user is looking at, never what is selected.
 pub struct OutputSpan {
-	pub start_row: u16,
-	pub end_row: u16,
+	pub start_line: u64,
+	pub end_line: u64,
 	pub last_col: u16,
 }
 
@@ -339,13 +343,13 @@ impl Terminal {
 	}
 
 	/// Reveal and locate the most recently finished command's output for a text selection (§34) —
-	/// the Ctrl+Shift+O keybind. Returns the viewport rows the output occupies (after scrolling it
-	/// into view if it was above the live screen), or `None` when no command has finished or the
-	/// last one printed nothing. The caller turns the span into a selection the ordinary Copy then
-	/// grabs.
+	/// the Ctrl+Shift+O keybind. Returns the document lines the output occupies (after scrolling its
+	/// start into view if it was above the live screen), or `None` when no command has finished or
+	/// the last one printed nothing. The caller turns the span into a selection the ordinary Copy
+	/// then grabs — all of it, however tall it is (§40).
 	pub fn select_output_latest(&mut self) -> Option<OutputSpan> {
 		let (start, end) = self.prompts.latest_output()?;
-		self.locate_output(start, end)
+		Some(self.locate_output(start, end))
 	}
 
 	/// The same for the command whose prompt tick sits on viewport `row` (§34) — the gutter-click
@@ -362,18 +366,20 @@ impl Terminal {
 			return None;
 		}
 		let (start, end) = self.prompts.output_at_prompt(prompt as u64)?;
-		self.locate_output(start, end)
+		Some(self.locate_output(start, end))
 	}
 
-	/// Turn an absolute output line range `[start, end)` into the on-screen span to select (§34).
-	/// The viewport is scrolled so the output's first line is at the top ONLY when that line is not
-	/// already visible, so a command already on screen is selected in place rather than jerking the
-	/// view. The returned rows are clamped to the visible screen; `None` when the range is off-screen
-	/// even after scrolling (it cannot be, since we scroll it into view, but the guard keeps the
-	/// mapping total). Output taller than the screen is clamped to the first screenful from its top —
-	/// the selection is viewport-bound, the same limit the mouse selection has. `ponytail:` a
-	/// command whose output overflows the screen copies only what is shown.
-	fn locate_output(&mut self, start: u64, end: u64) -> Option<OutputSpan> {
+	/// Reveal an absolute output line range `[start, end)` and return it as the span to select (§34,
+	/// §40). The viewport is scrolled so the output's first line is at the top ONLY when that line is
+	/// not already visible, so a command already on screen is selected in place rather than jerking
+	/// the view.
+	///
+	/// Revealing and selecting are now separate concerns: the span handed back is the range itself,
+	/// in document coordinates, so an output taller than the screen is selected — and copied —
+	/// whole, while the scroll only decides which screenful of it the user is looking at. Until §40
+	/// the span was viewport rows, which forced the two together and clipped a long output to the
+	/// screenful that showed.
+	fn locate_output(&mut self, start: u64, end: u64) -> OutputSpan {
 		let grid = self.term.grid();
 		let history = grid.history_size() as i64;
 		let screen_lines = self.term.screen_lines() as i64;
@@ -390,20 +396,13 @@ impl Terminal {
 			}
 		}
 
-		// Map with the (possibly new) offset. The last output line is `end - 1` (the range is
-		// half-open); if the whole span fell off either edge nothing is shown.
-		let offset = self.term.grid().display_offset() as i64;
-		let last_line = end.saturating_sub(1);
-		if to_row(offset, last_line) < 0 || to_row(offset, start) >= screen_lines {
-			return None;
-		}
-		let first = to_row(offset, start).clamp(0, screen_lines - 1);
-		let last = to_row(offset, last_line).clamp(0, screen_lines - 1);
-		Some(OutputSpan {
-			start_row: first as u16,
-			end_row: last.max(first) as u16,
+		// The range is half-open, so its last line is `end - 1`; `max(start)` keeps the span ordered
+		// even for the degenerate `end == start` a shell could in principle mark.
+		OutputSpan {
+			start_line: start,
+			end_line: end.saturating_sub(1).max(start),
 			last_col: (self.term.columns() as u16).saturating_sub(1),
-		})
+		}
 	}
 
 	/// Every occurrence of `query` in the whole document — the retained history AND the live screen
@@ -451,17 +450,17 @@ impl Terminal {
 		out
 	}
 
-	/// Scroll the absolute line `absolute` into view and return the viewport row it now sits on
-	/// (§35), or `None` when it cannot be placed on screen at all (its line has scrolled past the
-	/// retained history). Used to reveal a search match; the caller turns the row plus the match's
-	/// columns into a selection, so the ordinary highlight and Copy paths serve it.
+	/// Scroll the absolute line `absolute` into view, returning whether it could be placed on screen
+	/// at all — `false` when its line has scrolled past the retained history, so the caller can leave
+	/// both the view and the selection as they were. Used to reveal a search match; the match's own
+	/// absolute coordinates are what the caller then selects (§35, §40), so no row comes back.
 	///
 	/// A line already on screen is left exactly where it is — a step between two matches on the
 	/// same screenful must not jerk the view. One that is not is CENTRED rather than put at the
 	/// top, so a match arrives with its surrounding output visible on both sides; the target offset
 	/// is clamped to the history the engine actually retains, so a match near either end simply
 	/// lands as close to the middle as the document allows.
-	pub fn reveal_line(&mut self, absolute: u64) -> Option<u16> {
+	pub fn reveal_line(&mut self, absolute: u64) -> bool {
 		let grid = self.term.grid();
 		let history = grid.history_size() as i64;
 		let screen_lines = self.term.screen_lines() as i64;
@@ -483,7 +482,7 @@ impl Terminal {
 		// Map with the (possibly new) offset — the engine clamps a scroll, so this is the truth
 		// about where the line ended up rather than where we aimed it.
 		let row = to_row(self.term.grid().display_offset() as i64);
-		(0..screen_lines).contains(&row).then_some(row as u16)
+		(0..screen_lines).contains(&row)
 	}
 }
 
@@ -1047,8 +1046,8 @@ mod tests {
 	#[test]
 	fn a_finished_commands_output_is_located_for_selection() {
 		// One command bracketed by OSC 133 marks with two lines of output (§34): the prompt and
-		// its echoed input on row 0, then `\r\n`, the C mark, output on rows 1 and 2, `\r\n`, the D
-		// mark on row 3. The output span [1, 3) maps to viewport rows 1..=2 at the live bottom.
+		// its echoed input on line 0, then `\r\n`, the C mark, output on lines 1 and 2, `\r\n`, the D
+		// mark on line 3. Nothing has scrolled off, so the output span [1, 3) is document lines 1..=2.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(
 			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07",
@@ -1056,13 +1055,36 @@ mod tests {
 		let span = terminal
 			.select_output_latest()
 			.expect("a finished command with output");
-		assert_eq!((span.start_row, span.end_row), (1, 2));
+		assert_eq!((span.start_line, span.end_line), (1, 2));
 		assert_eq!(span.last_col, 39);
 		// Clicking that command's prompt tick (viewport row 0) resolves to the same output.
 		let clicked = terminal
 			.select_output_at_row(0)
 			.expect("the prompt tick's command");
-		assert_eq!((clicked.start_row, clicked.end_row), (1, 2));
+		assert_eq!((clicked.start_line, clicked.end_line), (1, 2));
+	}
+
+	/// An output taller than the screen is located WHOLE (§40): the span is document lines, so the
+	/// selection covers every line the command printed and not just the screenful that shows. This is
+	/// the limit §34 shipped with and had to write down as deferred.
+	#[test]
+	fn an_output_taller_than_the_screen_is_located_whole() {
+		// A four-row screen; the command prints ten lines, so most of its output is above the top by
+		// the time the D mark lands.
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1b]133;A\x07$ \x1b]133;B\x07seq\r\n\x1b]133;C\x07");
+		let output: Vec<u8> = (0..10).flat_map(|_| b"line\r\n".to_vec()).collect();
+		terminal.process(&output);
+		terminal.process(b"\x1b]133;D;0\x07");
+
+		let span = terminal
+			.select_output_latest()
+			.expect("a finished command with output");
+		assert_eq!(
+			span.end_line - span.start_line + 1,
+			10,
+			"every printed line is in the span, not just the visible four"
+		);
 	}
 
 	#[test]
@@ -1077,8 +1099,9 @@ mod tests {
 	#[test]
 	fn revealing_output_scrolls_it_into_view_when_it_is_off_screen() {
 		// A command's output on a small screen, then enough later output to push it up into history.
-		// Selecting it from the live bottom must scroll the viewport up so the output shows, and the
-		// span it returns must be on screen (rows within the grid).
+		// Selecting it from the live bottom must scroll the viewport up so the output shows — and the
+		// span's first line must be one of the visible rows once it has (§40: the span itself is
+		// document lines, so "revealed" is a fact about the viewport, not about the span).
 		let mut terminal = Terminal::new(4, 40);
 		terminal.process(
 			b"\x1b]133;A\x07$ \x1b]133;B\x07cmd\r\n\x1b]133;C\x07result\r\n\x1b]133;D;0\x07",
@@ -1097,7 +1120,11 @@ mod tests {
 			terminal.screen().display_offset() > 0,
 			"scrolled up to reveal the output"
 		);
-		assert!(span.start_row < 4 && span.end_row < 4, "span is on screen");
+		let screen = terminal.screen();
+		assert!(
+			(0..4).any(|row| screen.line_at(row) == span.start_line),
+			"the output's first line is showing on one of the visible rows"
+		);
 	}
 
 	/// The find bar searches the WHOLE document, not just what is visible (§35): on a 2-row screen
@@ -1142,14 +1169,18 @@ mod tests {
 		let hit = *terminal.find("needle").first().expect("the hit is found");
 		assert_eq!(terminal.screen().display_offset(), 0, "at the live bottom");
 
-		// Off screen: the view climbs into history and the returned row is on the visible grid.
-		let row = terminal.reveal_line(hit.line).expect("revealed on screen");
+		// Off screen: the view climbs into history until the hit's line is one of the visible rows.
+		assert!(terminal.reveal_line(hit.line), "revealed on screen");
 		let offset = terminal.screen().display_offset();
 		assert!(offset > 0, "scrolled up to reveal the match");
-		assert!(row < 4, "the row is on the visible screen");
+		let screen = terminal.screen();
+		assert!(
+			(0..4).any(|row| screen.line_at(row) == hit.line),
+			"the hit's line is showing on one of the visible rows"
+		);
 
-		// Already visible: nothing moves, and the same row comes back.
-		assert_eq!(terminal.reveal_line(hit.line), Some(row));
+		// Already visible: nothing moves.
+		assert!(terminal.reveal_line(hit.line));
 		assert_eq!(
 			terminal.screen().display_offset(),
 			offset,

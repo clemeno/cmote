@@ -326,18 +326,55 @@ impl<'a> Screen<'a> {
 		}
 	}
 
+	/// The ABSOLUTE document line viewport row `row` is showing right now (§40). Line 0 is the
+	/// oldest line the engine still retains and `history_size` is the top of the live screen, so the
+	/// whole document is `0 ..= history_size + screen_lines - 1` — the same scrollback-stable
+	/// coordinate the OSC 133 prompt marks (§34) and the search matches (§35) are stored in.
+	///
+	/// This is the one place the mapping `history_size + row - display_offset` is written down.
+	/// `cell` reads through it, and a click resolves through it (`ui::selection::Cell::spot`), so a
+	/// clicked cell, a prompt tick and a found match cannot disagree about what "line 12" means.
+	/// The subtraction cannot underflow — the engine clamps the display offset to the history it
+	/// actually retains, so it is never deeper than `history_size` — and `saturating_sub` says as
+	/// much without the reader having to take it on trust.
+	pub fn line_at(&self, row: u16) -> u64 {
+		(u64::from(self.history_size()) + u64::from(row))
+			.saturating_sub(u64::from(self.display_offset()))
+	}
+
 	/// The cell at `(row, col)`, or `None` when it is out of bounds. `row`/`col` are in the
-	/// same visible-viewport coordinates the renderer walks.
+	/// same visible-viewport coordinates the renderer walks — this is the read the grid does for
+	/// every cell of every frame. `line_cell` is the same read addressed by document line instead.
 	pub fn cell(&self, row: u16, col: u16) -> Option<Cell> {
-		if row as usize >= self.engine.screen_lines() || col as usize >= self.engine.columns() {
+		if row as usize >= self.engine.screen_lines() {
 			return None;
 		}
-		// A viewport row maps to a grid line by subtracting the display offset: at the live
-		// bottom (offset 0) row 0 is grid line 0, and scrolling back walks the window into the
-		// negative lines the engine stores history on (§23). The engine clamps the offset to the
-		// retained history depth, so the resulting line is always within the stored grid.
-		let line = i32::from(row) - i32::from(self.display_offset());
-		let cell = &self.engine.grid()[Line(line)][Column(col as usize)];
+		self.line_cell(self.line_at(row), col)
+	}
+
+	/// The cell on ABSOLUTE document line `line` at column `col`, or `None` when the engine no
+	/// longer holds that line or the column is off the grid (§40). Unlike `cell` this does not
+	/// depend on where the viewport is parked, which is what lets a selection stored in document
+	/// coordinates be copied WHOLE — including the part of it scrolled off the screen, the one thing
+	/// §34's select-command-output could not do.
+	///
+	/// The engine keeps the scrolled-off lines on the NEGATIVE grid lines below the active screen's
+	/// line 0 (§23), so the document maps onto grid lines `-history_size ..= screen_lines - 1` by
+	/// subtracting `history_size`. A line outside that is one the session does not have: evicted
+	/// once the scrollback hit its cap, or simply never written.
+	pub fn line_cell(&self, line: u64, col: u16) -> Option<Cell> {
+		if col as usize >= self.engine.columns() {
+			return None;
+		}
+		let history = i64::from(self.history_size());
+		// A line past `i64::MAX` is not a line the engine has either, so the same `None` serves.
+		let grid_line = i64::try_from(line).ok()? - history;
+		if grid_line < -history || grid_line >= self.engine.screen_lines() as i64 {
+			return None;
+		}
+		// Bounded by the check above, so the narrowing cast cannot wrap: both ends of the range are
+		// a grid dimension, and the engine's own line index is an `i32`.
+		let cell = &self.engine.grid()[Line(grid_line as i32)][Column(col as usize)];
 		Some(build_cell(cell))
 	}
 }
@@ -572,6 +609,50 @@ mod tests {
 		assert!(flags.report_all);
 		terminal.process(b"\x1b[<u");
 		assert!(!terminal.screen().kitty_flags().report_all);
+	}
+
+	/// A viewport row resolves to the document line it is showing, and scrolling back changes that
+	/// mapping — not the document (§40). This is the arithmetic every absolute coordinate in cmote
+	/// (prompt marks, search matches, the selection) is anchored by, so it is worth pinning down.
+	#[test]
+	fn a_viewport_row_resolves_to_the_line_it_shows() {
+		// A two-row screen fed five lines: three scrolled off, so the live screen's top row is
+		// absolute line 3 and its bottom row line 4.
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+		assert_eq!(terminal.screen().line_at(0), 3);
+		assert_eq!(terminal.screen().line_at(1), 4);
+		// Scrolled up two lines, the same two rows show two older lines.
+		terminal.scroll(crate::term::ScrollMotion::Lines(2));
+		assert_eq!(terminal.screen().line_at(0), 1);
+		assert_eq!(terminal.screen().line_at(1), 2);
+	}
+
+	/// A line is readable by its absolute index whether or not it is on screen (§40) — the read the
+	/// copy path uses, so a selection taller than the screen can be extracted whole.
+	#[test]
+	fn a_document_line_is_readable_wherever_the_viewport_sits() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+
+		// Line 0 is the oldest retained line, long gone from the two visible rows.
+		let read = |terminal: &Terminal, line: u64, len: u16| -> String {
+			let screen = terminal.screen();
+			(0..len)
+				.filter_map(|col| screen.line_cell(line, col))
+				.map(|cell| cell.contents().to_owned())
+				.collect()
+		};
+		assert_eq!(read(&terminal, 0, 3), "one");
+		assert_eq!(read(&terminal, 4, 4), "five");
+		// And it reads the same with the viewport moved: the document does not shift under it.
+		terminal.scroll(crate::term::ScrollMotion::Top);
+		assert_eq!(read(&terminal, 0, 3), "one");
+		assert_eq!(read(&terminal, 4, 4), "five");
+
+		// Past the last line the engine holds, and past the last column: both out of the document.
+		assert!(terminal.screen().line_cell(5, 0).is_none());
+		assert!(terminal.screen().line_cell(0, 8).is_none());
 	}
 
 	#[test]

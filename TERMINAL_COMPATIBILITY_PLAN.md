@@ -18,7 +18,9 @@ or refused with its reason recorded: input (§2), query→reply (§3) and the re
 carries real UX value. §6 holds what cmote refuses on purpose. §36 also *corrected* this document:
 blink was listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39
 touched this surface without moving a row** — the find bar's match washes are a local highlight, not a
-sequence answered; see the note in §4.
+sequence answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space*
+the selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
+refactor of reads the engine already served; see the note in §4 and the `term/screen.rs` evidence.
 
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
@@ -83,7 +85,10 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   history is **searchable** (§35): Ctrl+Shift+F floats a find bar over the grid, and each hit is
   revealed (centred when off-screen) and turned into an ordinary selection, so Copy takes it
   (`term::search`). **Every hit on the visible screen is washed** in a second highlight colour (§39),
-  the current one keeping the selection's own fill, so the bar shows where else the query is.
+  the current one keeping the selection's own fill, so the bar shows where else the query is. The
+  history is also **selectable and copyable as a document** (§40): a selection's endpoints are absolute
+  line indices, so scrolling moves the highlight with its text and a copy — plain or styled HTML — reads
+  the retained history rather than only the visible grid.
 - **Lets the engine interpret** the whole VT stream, no cmote papering-over: the **DEC
   line-drawing charset** (older programs box-draw with it), **origin mode** (so cursor reports
   are origin-correct), **custom tab stops** (HTS / TBC), the **autowrap toggle** (DECAWM),
@@ -189,8 +194,9 @@ still true and still applies to the *cursor*, whose blink the engine does track.
 (Ctrl+Shift+Up/Down), and select-command-output (Ctrl+Shift+O, or clicking a prompt tick, turns a
 command's C→D range into an ordinary text selection). Prompt lines and command output ranges are
 stored as absolute line indices so they ride the scrollback, captured by splitting the engine
-advance at each mark. The one piece left for later is full-scrollback capture of an output taller
-than the screen — the selection is viewport-bound, like the mouse's.
+advance at each mark. Capture of an output taller than the screen — the one piece this listed as left
+for later — landed in §40, when the selection itself moved to absolute lines; what is still deferred is
+walking *older* commands from the keybind (a prompt-tick click already reaches any of them).
 
 **The grid now carries a second highlight layer (§39), and it answers no sequence.** The find bar's
 on-screen matches are washed per cell (`ui/grid.rs::match_mask`, a row-major mask built once per frame
@@ -199,6 +205,15 @@ only because it touches this document's surface — `src/term/` and `ui/grid.rs`
 that **no row of §2–§6 or the §8 matrix moves**: no host request produces it, no attribute is newly
 honoured, and nothing about what a remote program can ask for changed. A local highlight over cells the
 program already painted is cmote's own UX, like the selection it sits under.
+
+**§40 moved the selection into document coordinates, and that answers no sequence either.** A
+selection's endpoints are now absolute line indices instead of viewport rows, so the grid resolves the
+row it is drawing into the line that row shows (`Marks::top_line` + `Screen::line_at`) and the copy path
+reads lines straight out of the retained history (`Screen::line_cell`) rather than only the visible
+grid. The engine is read in one more way and driven in none: **no row of §2–§6 or the §8 matrix moves**.
+It is recorded here because the mapping now lives on this document's surface (`term/screen.rs`) and is
+the one place a viewport row and a document line meet — the same coordinate the OSC 133 marks (§34) and
+the search matches (§35, §39) are already stored in.
 
 ---
 
@@ -289,7 +304,9 @@ foundations, needing nothing of the engine beyond reads: `term::search` walks th
 ordinary selection — so it added no reply path and no clipboard code, and at first no rendering
 either. **§39 then added the one rendering piece**: the hits that fall on the visible screen are
 resolved to viewport rows (`Search::visible`) and washed per cell, the current one still keeping the
-selection's fill. Still nothing of the engine beyond reads.
+selection's fill. **§40 then took the last viewport-bound piece the other way**: the selection's own
+endpoints became absolute lines, so the grid projects a row onto a line to highlight it and the copy
+path reads the history directly — one more kind of read, still nothing of the engine beyond reads.
 
 The `[engine-limit]` items are now the *only* remaining moves of any size, and only **images**
 (sixel / kitty graphics) carry real UX value — the rest (blink, double-height lines, left/right
@@ -540,7 +557,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `application_keypad`
   (DECKPAM, §36), `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`,
   `kitty_flags` (the five active kitty protocol flags, read off `Term::mode()`, §25). Nothing the
-  engine tracks is left unsurfaced now; blink it does not track at all (see above).
+  engine tracks is left unsurfaced now; blink it does not track at all (see above). **§40 added the
+  document readers**: `line_at(row)` is the single written-down form of `history_size + row -
+  display_offset` (the viewport → document mapping §34's ticks and §39's washes are placed by), and
+  `line_cell(line, col)` reads a cell by **absolute line** — mapping the document onto the engine's
+  `-history_size ..= screen_lines - 1` grid lines and answering `None` for a line the session no longer
+  has. `cell(row, col)` is now `line_cell(line_at(row), col)`, so the viewport and document readers
+  cannot drift; the pair is what lets a selection be stored in document coordinates and copied whole.
 - **`term/keymap.rs`** — printable + layout, Ctrl → C0, Alt-as-meta, named keys including
   **F1–F24** and the **modified named keys** (`modifier_param` computes the xterm parameter,
   `letter_key` / `tilde_key` shape the two key families), **modifyOtherKeys** (`modify_other_key`
@@ -576,7 +599,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `Terminal::{command_state,last_exit,prompt_rows,jump_prompt,select_output_latest,select_output_at_row}`;
   drawn as a per-tab dot (`ui/tabs.rs`) and a left-gutter tick (`ui/grid.rs::prompt_tick_rect`);
   jumped by Ctrl+Shift+Up/Down (`app.rs::prompt_jump`); its output selected by Ctrl+Shift+O or a
-  gutter-tick click, both building an ordinary `ui::selection::Selection` (`app.rs::set_output_selection`).
+  gutter-tick click, both building an ordinary `ui::selection::Selection` (`app.rs::set_output_selection`)
+  from an `OutputSpan` that carries **absolute lines** since §40 — so revealing decides what is on screen
+  and the span decides what is selected, and an output taller than the screen is copied whole.
   Marks and command ranges are cleared on resize (reflow invalidates absolute lines).
 - **`term/search.rs`** — the scrollback find bar's core (§35). `Row` is one grid line flattened for
   searching — its ASCII-lowered glyphs plus a **byte → column map** grown in lockstep by `push`, so a
@@ -588,8 +613,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `Terminal::find` walks `-history_size ..= last screen row` (the engine keeps history on the negative
   lines) stamping each hit with the absolute line `history_size + line`, the same coordinate
   `osc133` uses; `Terminal::reveal_line` scrolls a line into view — **centred**, and left in place when
-  already visible — and returns its viewport row, which `app.rs::reveal_match` pairs with the match's
-  columns into an ordinary `ui::selection::Selection`. Opened by Ctrl+Shift+F, which then owns the
+  already visible — and reports only *whether* it could be shown: since §40 `app.rs::reveal_match`
+  selects the match's own absolute line and columns, with no conversion at all.
+  Opened by Ctrl+Shift+F, which then owns the
   keyboard (the `self.search.is_some()` guard in `app.rs::on_key`, mirroring the inline rename fields);
   drawn as a floating overlay (`ui/terminal.rs::search_bar`) rather than a bar that would reflow the pty.
   **`Search::visible` (§39)** projects the hits onto the screen as it is scrolled — `absolute -
@@ -611,7 +637,11 @@ Audited file:line anchors behind the claims above, for later re-checking.
   same-URI reading-order run under a cell (pure, unit-tested), `hovered_link_run` gates it on Ctrl
   being held and the pointer being over the grid (read from the widget's own `State.modifiers` and
   the `draw` cursor), and `cell_style` gives a plain link cell in that run a single foreground
-  underline while it is the hover target.
+  underline while it is the hover target. Also the two local highlight layers over the cells: the
+  find bar's per-frame match mask (§39, `match_mask`) and — since §40 — the **document-line
+  projection of the selection**, `Marks::top_line` (`screen.line_at(0)`) plus the row being drawn,
+  so `plan_runs` asks the selection about a *line*, once per row, and a scroll moves the highlight
+  with its text instead of leaving it on the rows it was dragged over.
 - **Deleted in the swap**: `term/compat.rs` (the cursor-move rewriter) and `term/answer.rs`
   (the reply synthesizer) — the engine parses every spelling and answers every query they used
   to cover.
