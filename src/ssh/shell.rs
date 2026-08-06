@@ -60,13 +60,32 @@ enum State {
 	/// — cleared at each question, so a stale prompt is never mistaken for a fresh one — `asked`
 	/// counts the questions put to the user, and `pending` is set while one is unanswered so the
 	/// same prompt cannot raise two dialogs.
+	///
+	/// `password` records whether the outstanding question is the one cmote NAMED itself (`-p
+	/// MARKER`), which is the only question whose answer may be kept: it is the caller's own
+	/// password, and the file layer needs the same one to authenticate sudo on a file channel
+	/// (§46). Anything else — a second factor, `su`'s prompt for another account's password — is
+	/// answered and forgotten.
 	Elevating {
 		buffer: String,
 		asked: u32,
 		pending: bool,
+		password: bool,
 	},
 	/// A live terminal: bytes are output, keystrokes may be routed here.
 	Live,
+}
+
+/// What one shell message meant for the session as a whole (§45, §46) — the session loop acts on
+/// this rather than reading the shells' internals.
+pub enum After {
+	/// It concerned that shell alone; carry on.
+	Nothing,
+	/// That identity's shell has gone — the user typed `exit`, or the elevation was refused. Its
+	/// file access goes with it, which is what closes the elevated `sftp-server` running for it.
+	Ended(u64),
+	/// The LOGIN shell closed, which is the session itself ending.
+	SessionOver,
 }
 
 /// One shell: the writing half of its channel, and what it is currently doing.
@@ -201,28 +220,28 @@ impl Shells {
 				buffer: String::new(),
 				asked: 0,
 				pending: false,
+				password: false,
 			},
 		);
 		Ok(())
 	}
 
-	/// Handle one message from one shell. Returns `true` when the SESSION is over — which only the
-	/// login shell closing means; an elevated shell ending is just one identity going away.
-	pub async fn on_msg(&mut self, msg: ShellMsg, events: &mpsc::Sender<SshEvent>) -> bool {
+	/// Handle one message from one shell, and say what it meant for the session as a whole.
+	pub async fn on_msg(&mut self, msg: ShellMsg, events: &mpsc::Sender<SshEvent>) -> After {
 		let ShellMsg { identity, msg } = msg;
 		match msg {
 			// Both streams are the shell talking: a pty merges them anyway, and cmote renders
 			// stderr inline, so they are handled identically.
 			ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
 				self.on_data(identity, data.to_vec(), events).await;
-				false
+				After::Nothing
 			}
 			// The channel is finished. For the login shell that ends the session; for an elevated
 			// one it ends that identity — either because the user typed `exit`, or because the
 			// elevation was refused, which is the difference the reason carries.
 			ChannelMsg::Eof | ChannelMsg::Close | ChannelMsg::ExitStatus { .. } => {
 				if identity == LOGIN_IDENTITY {
-					return true;
+					return After::SessionOver;
 				}
 				// A channel reports its end more than once (an exit status, then a close), so the
 				// removal is what makes this idempotent: the second message finds no shell and
@@ -242,9 +261,12 @@ impl Shells {
 						.send(SshEvent::IdentityEnded { identity, reason })
 						.await;
 				}
-				false
+				// Said even for a repeat message: `Accounts::remove` is idempotent, and an account
+				// whose file access outlived its shell would keep an elevated `sftp-server` running on
+				// the remote (§46).
+				After::Ended(identity)
 			}
-			_ => false,
+			_ => After::Nothing,
 		}
 	}
 
@@ -262,6 +284,7 @@ impl Shells {
 				buffer,
 				asked,
 				pending,
+				password,
 			} => {
 				// Lossy on purpose: a chunk can end mid-UTF-8, and this text is only ever compared
 				// against prompt shapes — the terminal, which does care, never sees it.
@@ -291,6 +314,10 @@ impl Shells {
 					return;
 				}
 				if let Some(label) = elevate::prompt(buffer) {
+					// Whether this is cmote's OWN password question, decided before the buffer is
+					// cleared: the answer to that one is the caller password the file layer will need
+					// (§46), and to any other question it is a secret to use once and forget.
+					*password = buffer.contains(elevate::MARKER);
 					*pending = true;
 					*asked += 1;
 					// Cleared now: the question has been put, so these bytes are spent. What
@@ -311,24 +338,33 @@ impl Shells {
 	/// Ignored unless that shell is actually mid-conversation. That guard is the whole safety
 	/// property: a secret can only ever be written to a channel that is running `sudo` and has just
 	/// asked for one, never to a live shell.
-	pub async fn answer(&mut self, identity: u64, secret: Secret) {
+	///
+	/// Answers `true` when what was just answered is the password cmote itself asked for by name —
+	/// the caller's own, which the file layer needs to authenticate sudo on a file channel (§46). Any
+	/// other question answers `false`, so a one-time code is used once and never kept.
+	pub async fn answer(&mut self, identity: u64, secret: Secret) -> bool {
 		let Some(shell) = self.shells.get_mut(&identity) else {
-			return;
+			return false;
 		};
 		let State::Elevating {
-			buffer, pending, ..
+			buffer,
+			pending,
+			password,
+			..
 		} = &mut shell.state
 		else {
-			return;
+			return false;
 		};
 		if !*pending {
-			return;
+			return false;
 		}
 		*pending = false;
+		let was_password = *password;
 		buffer.clear();
 		let mut line = secret.expose().as_bytes().to_vec();
 		line.push(b'\n');
 		let _ = shell.write.data_bytes(line).await;
+		was_password
 	}
 
 	/// Send keystrokes to the shell the user is looking at (§45).

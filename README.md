@@ -158,9 +158,18 @@ references below (§n) point into it.
   cwd and find bar exactly as you left them. The sudo password is remembered for the connection so a
   second account does not ask twice — in memory only, never written down, and dropped the moment you
   disconnect; a one-time code is always asked for afresh. Any account works, not just root
-  (`postgres`, a deploy user), and typing `exit` at an elevated prompt drops you back to your own. The
-  folder tree and files pane still act as the account you logged in with — SFTP is a separate service
-  the server starts as that user, which `sudo` in a terminal cannot reach (§45).
+  (`postgres`, a deploy user), and typing `exit` at an elevated prompt drops you back to your own (§45).
+- **The folder tree and files pane switch with it** — become root and both panes read the same folder
+  again through root's eyes: the files you could not list, the config you could not open, the transfer
+  that needed the ownership. cmote does not put `sudo` in front of SFTP, because it cannot: sshd starts
+  that subsystem itself, as the account you logged in with. Instead it runs the very same program
+  (`sftp-server`) as the other account on a channel of its own, so **everything** built on it comes
+  along unchanged — the tree, the pane's sort and details, resume, whole-folder transfers, and the
+  editor's atomic save. It finds the program wherever the distribution keeps it, and where a server has
+  none, falls back to reading through plain shell commands. What it never does is quietly show you your
+  own files under root's name: if the elevation cannot reach the files at all, the panes stay empty and
+  say why, in the remote's own words. A file opened in the editor keeps the account it was opened as, so
+  a root-owned config still saves as root after you have switched back (§46).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
   selects a word** and **triple-click the whole line**: a word is generous about what belongs to
@@ -382,7 +391,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+Shift+C** | Copy the selection as plain text only |
 | **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
 | **Ctrl+Shift+F** | Open the scrollback find bar (pressed again, it refocuses the field). **↑** / **↓** step to the older / newer hit, wrapping; **Esc** or its ✕ closes it and leaves the last hit selected. Hits on screen are washed; the bar follows live output |
-| **Log in as…** (right-click, or the account select once there are two) | Run `sudo -i` / `su -` on this connection and get that account's own terminal; the select in the status bar switches between the accounts you are logged in as, each keeping its own scrollback (§45) |
+| **Log in as…** (right-click, or the account select once there are two) | Run `sudo -i` / `su -` on this connection and get that account's own terminal; the select in the status bar switches between the accounts you are logged in as, each keeping its own scrollback (§45). The folder tree and files pane switch with it, re-reading the folder you are in as that account (§46) |
 | **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
@@ -604,7 +613,12 @@ coloured one, a whole view swapped and restored on a switch, a parked account's 
 scrollback and its queries answered on its own channel, the password reused once and dropped when it is
 refused, a one-time code always asked for, cancelling closing the shell it opened, a refusal quoted in
 the remote's own words, an elevated shell exiting falling back to the login account, and the dialog
-owning the keyboard while it holds a secret), paste encoding (bracketed-paste
+owning the keyboard while it holds a secret), §46's file panes following that account (a password
+written only after sudo has been refused for the want of one and never on a guess, the `sftp-server`
+path taken from the remote's own configuration only when it whitelists as a program, `internal-sftp`
+and a doctored path refused, the login account's commands still going out byte for byte, both panes
+re-read on a switch with the other account's names dropped and the folder kept, and a file opened as
+root still saved as root after switching back), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,

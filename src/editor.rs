@@ -477,6 +477,12 @@ pub enum EditorMessage {
 pub struct Editor {
 	/// The parent session tab this file was opened from — the channel its SFTP load/save ride (§32).
 	pub session: u64,
+	/// The ACCOUNT on that session the file was opened as (§45's identity, §46). Fixed for the
+	/// editor's whole life rather than following the session's current selection: a file opened as
+	/// root is a root-owned file, and its save has to reach it as root however the panes have moved
+	/// on. Reading it as whoever happens to be on screen at save time would fail — or, worse,
+	/// succeed against a different file of the same path in another account's chroot.
+	pub identity: u64,
 	/// The remote path being edited. Save As re-points this at a new path.
 	pub path: String,
 	/// How the file was opened, and how it saves back (§32).
@@ -533,12 +539,14 @@ pub struct Editor {
 }
 
 impl Editor {
-	/// A fresh editor waiting on its bytes (§32): an empty buffer, `Loading`, parented to `session`,
-	/// painting with `theme` (the scheme `App` remembers for this file's extension). The encoding is a
-	/// placeholder until `set_loaded` learns the real one.
-	pub fn loading(session: u64, path: String, theme: EditorTheme) -> Self {
+	/// A fresh editor waiting on its bytes (§32): an empty buffer, `Loading`, parented to `session`
+	/// and opened as the account `identity` names on it (§46), painting with `theme` (the scheme
+	/// `App` remembers for this file's extension). The encoding is a placeholder until `set_loaded`
+	/// learns the real one.
+	pub fn loading(session: u64, identity: u64, path: String, theme: EditorTheme) -> Self {
 		Self {
 			session,
+			identity,
 			path,
 			encoding: Encoding::UTF8_NO_BOM,
 			content: text_editor::Content::new(),

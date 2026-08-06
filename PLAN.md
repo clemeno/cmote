@@ -4141,3 +4141,125 @@ is what "one-time" means.
 - **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
   prompt, or cancelling the dialog that opened it.
+
+## §46 — The file panes follow the account you switched to (v3.x)
+
+§45 left a session with more than one shell but only one set of eyes on the filesystem: elevating gave
+a root terminal and left the folder tree, the files pane, every transfer and the editor reading as the
+login account. That was not an oversight in the implementation — it is what SSH does — and closing the
+gap is this section.
+
+### Why sudo in the terminal could never fix it
+
+The file panes never touch a shell. Each opens a channel of its own and asks sshd for the **`sftp`
+subsystem**, and sshd starts that subsystem itself, as the account the session authenticated as. There
+is no command line in that path to put `sudo` in front of. So the only way to read files as another
+account is to stop asking sshd for the subsystem and run the same program ourselves:
+
+    sudo -n -u root -- /usr/lib/openssh/sftp-server
+
+`sftp-server` speaks the SFTP protocol on its stdin and stdout, which is exactly what the subsystem
+provides. Run it that way and every feature built on SFTP — the tree, the pane, resume, tree transfers,
+the editor's atomic save — works unchanged, as the other account, with no second authentication to the
+server. Three things had to be solved to make that real: finding the binary, authenticating sudo without
+a terminal, and a fallback for a remote that has no such binary to run.
+
+**Finding it.** Packaging moves it (`/usr/lib/openssh`, `/usr/libexec/openssh`, `/usr/lib/ssh`,
+`/usr/libexec`, …), so cmote looks in the usual places and then asks sshd's own configuration —
+`Subsystem sftp` names the program it starts for the login user. The path that comes back from
+`sshd_config` is REMOTE-CONTROLLED text about to be composed into a command that runs as another
+account, so `elevate::valid_program` whitelists it rather than escaping it: absolute, ordinary path
+characters, no `..`, and a file name that mentions `sftp`. `internal-sftp` — sftp implemented inside
+sshd — is refused, because it is not a program and cannot be run as anyone.
+
+**Authenticating it.** There is no pty on that channel, deliberately: SFTP is binary, and a pty would
+translate line endings and interpret control bytes in the middle of it. So sudo cannot prompt, and
+`sudo -S` is used instead — it reads the password from stdin one byte at a time, stopping at the
+newline, which leaves the rest of the stream to the program it execs. The ORDER is the safety property,
+and it is written as a list of attempts (`Entry::attempts`):
+
+> The password is written **only after** a non-interactive (`-n`) attempt has been refused for the want
+> of one.
+
+Because sudo holding a valid credential — a cached ticket, NOPASSWD — does not read its stdin at all. A
+password sent on a guess would therefore not reach sudo: it would land in `sftp-server`'s input, as
+protocol garbage, on a process running as root. Getting that order wrong is the one way this feature
+could have leaked a secret, so the verdict is only ever set by an OBSERVED refusal, and it is remembered
+per account so the wasted first attempt is paid once rather than per click. The password itself is the
+one §45 already keeps in memory for the connection: `ssh::shell` now reports whether an answer was the
+question cmote NAMED itself (`-p cmote-password:`), and only that one is kept. A one-time code never is.
+
+### The chain, and what each link costs
+
+1. **Elevated SFTP** (`asuser`) — the whole feature set: typed listings, metadata, atomic saves.
+2. **Shell commands** (`shellfs`) — for a remote with no `sftp-server` binary to run. `ls`, `cat`,
+   `wc -c`, `find`, `mkdir`, `mv`, `rm` under the same sudo. The bytes need no encoding: an exec channel
+   is binary and there is no pty, so `cat file` puts the file's exact bytes on the channel and
+   `cat > file` writes exactly what is sent — no base64 layer, no new dependency. It costs metadata
+   (`ls` text carries no owner, size or time into the pane) and the timestamps and mode a copy would
+   have been stamped with, and it inherits the text-is-a-guess caveats the pre-§46 `ls` fallback had.
+3. **Nothing, said plainly.** Where sudo itself refuses, every operation fails with the remote's own
+   words and the panes list nothing. They never quietly fall back to the login account's files while the
+   terminal says root: a pane that lies about whose eyes it is using is worse than an empty one.
+
+### What moves when you switch account
+
+The panes are NOT parked per account the way the terminal is, and that is a deliberate difference. A
+scrollback is a record of what an account did, so it belongs to that account; a folder is a **place**,
+and the ordinary reason to become root is a file in the folder you are already looking at. So the path
+stays and the contents are read again through the new account's eyes (`Explorer::reread`,
+`App::reread_panes`). Both panes are emptied first — `cme` cannot see inside `/root`, root sees keys in
+`/etc/ssl/private` that `cme` cannot — so nothing another account listed is on screen while the new
+listing is in flight, and a failure leaves them empty beside the reason. The re-listings are sent AFTER
+`SelectIdentity` on the one ordered channel, so a listing can never be answered by the account being
+left.
+
+The editor is the exception, and the interesting one: an editor tab keeps the identity it was OPENED as
+for its whole life (`Editor::identity`), and its save names that account. A file read as root is a
+root-owned file; saving it as whoever happens to be on screen minutes later would fail — or, on a
+chrooted server, succeed against a different file of the same path.
+
+### Structure
+
+`Accounts` (in `ssh::asuser`) holds one entry per identity and is where everything LEARNED about an
+account lives: its sftp session (one per account, kept for the connection, since a tree asks many small
+questions), where `sftp-server` is, whether sudo wants a password, whether SFTP works at all. Every file
+command in the session loop now begins by resolving that account into one `Browse` / `Files` value, so
+`browse`, `upload`, `download` and `edit` never learn that accounts exist — they match on a backend,
+exactly as they used to match on "sftp session or exec channel".
+
+One structural rule came out of russh: `client::Handle` is not `Clone`, so a spawned task cannot open a
+channel for itself. The shell backend needs one channel per command, so `asuser::Channels` lets a task
+ASK the session loop for one (the reverse of the pattern §27's forwards already use). Which brings the
+one way to deadlock this design, written at the top of `asuser.rs`: a `Runner` may only be awaited from
+a spawned task, never from the loop that serves it. Work that must happen inline — the discovery probe,
+opening an sftp session — uses `exec_inline`, which borrows the loop's own handle.
+
+### What is deliberately NOT here
+
+- **`su` cannot serve the file layer.** It reads a password from a terminal only, and this channel has
+  no pty by design. A `su` identity whose account needs no password works; otherwise the panes report it
+  and stay empty. `sudo` is the supported path.
+- **`requiretty` in sudoers blocks it too**, for the same reason — a pty would corrupt the protocol, so
+  cmote will not request one to work around it. It falls to the shell backend, which fails the same way,
+  and the reason shown is sudo's own.
+- **Two sudos, two authentications**, as §45 predicted: the terminal's sudo and the file layer's sudo
+  have separate credential caches (`tty_tickets`, and the file channel has no tty at all). The cached
+  password covers it silently; a server that also demands a one-time code will ask again on the first
+  file operation, because that is what a second factor is for.
+- **The shell backend has its own copy loops**, not the SFTP ones made generic. `ponytail:` making
+  `upload`/`download` generic over a filesystem trait would have meant rewriting working transfer,
+  resume and conflict code (§16, §17, §19) with no way to test it against a real server — so the
+  duplication went into the path that runs on almost no server, rather than the risk into the path that
+  runs on all of them.
+- **No metadata on the shell backend.** No owner or size in the pane, no mtime/mode stamped on a copy;
+  a listing that way is names and types. The reason is in `shellfs`'s header.
+- **The panes do not label themselves with the account.** The status bar's account control already says
+  which one the session is showing, and the panes always agree with it — so a second label would only be
+  a second thing to keep in step. A FAILURE names the account and the remote's reason, which is the case
+  where it matters.
+- **Nothing is cached across a switch.** Going to root and back re-lists both panes each time, one round
+  trip per open folder. Correct and simple; a per-account listing cache is the obvious optimisation if it
+  is ever felt.
+- **Still no auto-elevate on connect, and no vault-stored sudo password.** Both are §47, which is where
+  the profile format changes.

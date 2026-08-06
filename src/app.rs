@@ -720,7 +720,15 @@ impl App {
 		let theme = self
 			.settings
 			.editor_theme(&crate::editor::extension_key(&path));
-		let mut tab = Tab::new_editor(id, session, path.clone(), size, theme);
+		// The account the file is being opened as (§46) — the one the parent session is SHOWING right
+		// now. Fixed into the editor here rather than read again at save time: the file belongs to
+		// that account, and the panes may well have switched to another by the time it is saved.
+		let identity = self
+			.tabs
+			.iter()
+			.find(|tab| tab.id == session)
+			.map_or(bridge::LOGIN_IDENTITY, |tab| tab.identity);
+		let mut tab = Tab::new_editor(id, session, identity, path.clone(), size, theme);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
 		// Not at the end of the strip: right beside the session the file came from (§38), so a
@@ -740,6 +748,7 @@ impl App {
 		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
 			Some(parent) if parent.command_tx.is_some() => {
 				parent.send_command(SshCommand::EditLoad {
+					identity,
 					editor_id: id,
 					path,
 				})
@@ -783,17 +792,27 @@ impl App {
 	/// Save / Save As; only the App can reach across to the parent's channel. A parent that has gone
 	/// away leaves the editor's save marked failed rather than hanging on a reply that never comes.
 	fn flush_editor_save(&mut self, editor_id: u64) -> iced::Task<Message> {
-		let Some((session, path, bytes)) = self
+		// The identity comes from the EDITOR, not from what the session is showing now (§46): the file
+		// was read as that account and has to be written back as the same one.
+		let Some((session, identity, path, bytes)) = self
 			.tabs
 			.iter()
 			.find(|tab| tab.id == editor_id)
 			.and_then(|tab| tab.editor.as_ref())
-			.map(|editor| (editor.session, editor.path.clone(), editor.save_bytes()))
+			.map(|editor| {
+				(
+					editor.session,
+					editor.identity,
+					editor.path.clone(),
+					editor.save_bytes(),
+				)
+			})
 		else {
 			return iced::Task::none();
 		};
 		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
 			Some(parent) => parent.send_command(SshCommand::EditSave {
+				identity,
 				editor_id,
 				path,
 				bytes,
@@ -2119,6 +2138,7 @@ impl Tab {
 	fn new_editor(
 		id: u64,
 		session: u64,
+		identity: u64,
 		path: String,
 		window_size: iced::Size,
 		theme: crate::editor::EditorTheme,
@@ -2126,7 +2146,9 @@ impl Tab {
 		Self {
 			id,
 			screen: Screen::Editor,
-			editor: Some(crate::editor::Editor::loading(session, path, theme)),
+			editor: Some(crate::editor::Editor::loading(
+				session, identity, path, theme,
+			)),
 			window_size,
 			window_focused: true,
 			shell_focus_reported: true,
@@ -4946,9 +4968,12 @@ impl Tab {
 			ready: false,
 			work: Workspace::default(),
 		});
+		// The account, not a command line: the SSH side builds the command (one place composes what
+		// runs on a remote), and it needs these same two values to read FILES as this account (§46).
 		self.send_command(SshCommand::Elevate {
 			identity,
-			command: kind.command(&user),
+			kind,
+			user,
 		});
 		iced::Task::none()
 	}
@@ -5018,10 +5043,31 @@ impl Tab {
 		}
 		self.identity = to;
 		self.send_command(SshCommand::SelectIdentity(to));
+		// The file panes follow the same switch (§46) — and are announced AFTER `SelectIdentity`, on
+		// the same ordered channel, so the listings cannot be answered by the account being left.
+		self.reread_panes();
 		// Nothing about the account switch belongs to the grid the user was on: a half-made
 		// selection, a drag in flight, a click tally. They are all parked with it and the arriving
 		// view brings its own.
 		fit_terminal()
+	}
+
+	/// Read the tree and the files pane again as the account now selected (§46).
+	///
+	/// The panes are NOT parked per account the way the terminal is, and that is the deliberate
+	/// choice: a scrollback is a record of what that account did, but a folder is a place, and the
+	/// reason to become root is usually a file in the folder you are already looking at. So the path
+	/// stays and the contents are re-read through the new account's eyes.
+	///
+	/// Both panes are emptied first. Until the new listing lands there is nothing on screen that
+	/// belongs to the account just left — and if the new one cannot list at all, they stay empty
+	/// beside the remote's own reason rather than quietly showing another account's files.
+	fn reread_panes(&mut self) {
+		let needed = self.explorer.reread();
+		self.list_dirs(needed);
+		if let Some(request) = self.files.refresh() {
+			self.list_files(request);
+		}
 	}
 
 	/// Swap the live terminal-side view with `other` (§45).
@@ -7982,6 +8028,111 @@ mod tests {
 		id
 	}
 
+	/// Switching accounts moves the FILE panes too (§46), and reads them again as the account now
+	/// selected: the path stays — elevating because a folder would not open is the ordinary reason to
+	/// do it — but nothing another account listed is left on screen while the new listing is awaited.
+	#[test]
+	fn switching_accounts_reads_the_file_panes_again_as_the_new_account() {
+		let (mut app, mut rx) = app_with_login_identity();
+		// A tree with a listed, open folder and a pane showing it — `cme`'s view of /etc.
+		let _fetch = app.explorer.expand("/etc", false);
+		app.explorer.listed("/etc", vec!["ssl".to_owned()]);
+		if let Some(request) = app.files.show("/etc") {
+			app.list_files(request);
+		}
+		// Becoming root puts root's shell on screen, and that same switch moves the panes.
+		let root = elevate_to(&mut app, "root");
+		assert_eq!(app.identity, root);
+
+		let sent = drain(&mut rx);
+		// The account is announced BEFORE the listings, on the one ordered channel, so a listing can
+		// never be answered by the account being left.
+		let select = sent
+			.iter()
+			.position(|command| matches!(command, SshCommand::SelectIdentity(id) if *id == root))
+			.expect("the switch is announced");
+		let listed = sent
+			.iter()
+			.position(|command| matches!(command, SshCommand::ListDir(path) if path == "/etc"))
+			.expect("the open folder is read again");
+		assert!(select < listed, "the account is named first");
+		assert!(
+			sent.iter().any(
+				|command| matches!(command, SshCommand::ListFiles { path, .. } if path == "/etc")
+			),
+			"and so is the pane's own folder"
+		);
+		// Nothing `cme` listed is on screen in the meantime: the rows stand empty under the spinner
+		// until root's own listing lands.
+		assert!(
+			app.explorer.rows().iter().all(|row| row.path != "/etc/ssl"),
+			"another account's children must not survive the switch"
+		);
+		assert_eq!(app.files.count(), 0, "nor its files");
+
+		// And it happens in both directions: going back to `cme` re-reads what root had listed.
+		app.explorer.listed("/etc", vec!["shadow.d".to_owned()]);
+		let _task = app.switch_identity(bridge::LOGIN_IDENTITY);
+		let back = drain(&mut rx);
+		assert!(
+			back.iter()
+				.any(|command| matches!(command, SshCommand::ListDir(path) if path == "/etc")),
+			"the folder is read again as the login account too"
+		);
+		assert!(
+			app.explorer
+				.rows()
+				.iter()
+				.all(|row| row.path != "/etc/shadow.d"),
+			"and root's children go with the switch"
+		);
+	}
+
+	/// A file opened as root belongs to root for as long as the editor lives (§46): its save names
+	/// that account, not whichever one the session happens to be showing when Save is pressed.
+	#[test]
+	fn a_file_opened_as_root_is_still_saved_as_root_after_switching_back() {
+		let (mut session, rx) = app_with_login_identity();
+		let root = elevate_to(&mut session, "root");
+		let mut app = tab_app();
+		let id = session.id;
+		app.tabs.clear();
+		app.tabs.push(session);
+		app.active = 0;
+		app.next_id = id + 1;
+
+		let _task = app.open_editor(id, "/root/.ssh/authorized_keys".to_owned());
+		let editor = app
+			.tabs
+			.iter()
+			.find_map(|tab| tab.editor.as_ref())
+			.expect("the editor tab is open");
+		assert_eq!(editor.identity, root, "opened as the account on screen");
+
+		// The session goes back to `cme` while the file is still open, and the save still names root.
+		let editor_id = app
+			.tabs
+			.iter()
+			.find(|tab| tab.editor.is_some())
+			.map(|tab| tab.id)
+			.expect("the editor tab has an id");
+		if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.id == id) {
+			let _task = tab.switch_identity(bridge::LOGIN_IDENTITY);
+		}
+		let mut rx = rx;
+		let _drained = drain(&mut rx);
+		let _task = app.flush_editor_save(editor_id);
+
+		let saved = drain(&mut rx)
+			.into_iter()
+			.find_map(|command| match command {
+				SshCommand::EditSave { identity, .. } => Some(identity),
+				_ => None,
+			})
+			.expect("the save was sent");
+		assert_eq!(saved, root, "written back as the account that read it");
+	}
+
 	// The commands queued for the SSH task, drained in order.
 	fn drain(rx: &mut mpsc::Receiver<SshCommand>) -> Vec<SshCommand> {
 		let mut out = Vec::new();
@@ -8012,22 +8163,31 @@ mod tests {
 		);
 	}
 
-	/// The command cmote runs names its own password prompt and its target account (§45), so the
-	/// reply can be recognised exactly rather than guessed at.
+	/// The elevation names the ACCOUNT rather than a command line (§45, §46): the SSH side composes
+	/// what runs on the remote — the one place that vets it — and the file layer needs the same two
+	/// values to read files as that account.
 	#[test]
-	fn submitting_the_form_runs_the_elevation_command() {
+	fn submitting_the_form_asks_for_the_account_not_a_command_line() {
 		let (mut app, mut rx) = app_with_login_identity();
 		let _focus = app.open_elevate();
 		let _task = app.update(Message::ElevateUserChanged("root".to_owned()));
 		let _task = app.update(Message::ElevateSubmit);
 
 		let sent = drain(&mut rx);
-		let SshCommand::Elevate { identity, command } =
-			sent.first().expect("the elevation was asked for")
+		let SshCommand::Elevate {
+			identity,
+			kind,
+			user,
+		} = sent.first().expect("the elevation was asked for")
 		else {
 			panic!("the first command is the elevation");
 		};
 		assert_eq!(*identity, 1, "numbered after the login shell");
+		assert_eq!(*kind, crate::elevate::Kind::Sudo);
+		assert_eq!(user, "root");
+		// And what that turns into still names cmote's own prompt, so the reply is recognised
+		// exactly rather than guessed at.
+		let command = kind.command(user);
 		assert!(command.contains(crate::elevate::MARKER));
 		assert!(command.contains("-u 'root'"));
 		// Listed but not yet switchable: there is no shell behind it until the remote says so.

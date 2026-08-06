@@ -28,6 +28,7 @@ use tokio::time::timeout;
 
 use crate::bridge::{ConflictChoice, ConnectParams, HostKeyChoice, SshCommand, SshEvent};
 use crate::secret::Secret;
+use crate::ssh::asuser;
 use crate::ssh::auth;
 use crate::ssh::browse;
 use crate::ssh::download;
@@ -89,11 +90,19 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 			}
 			// The elevation commands (§45), all forwarded the same way as the rest: the session
 			// task owns its shells, so this loop only has to reach the right session.
-			SshCommand::Elevate { identity, command } => {
+			SshCommand::Elevate {
+				identity,
+				kind,
+				user,
+			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::Elevate { identity, command })
+						.send(SessionMsg::Elevate {
+							identity,
+							kind,
+							user,
+						})
 						.await;
 				}
 			}
@@ -221,15 +230,24 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
-			SshCommand::EditLoad { editor_id, path } => {
+			SshCommand::EditLoad {
+				identity,
+				editor_id,
+				path,
+			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::EditLoad { editor_id, path })
+						.send(SessionMsg::EditLoad {
+							identity,
+							editor_id,
+							path,
+						})
 						.await;
 				}
 			}
 			SshCommand::EditSave {
+				identity,
 				editor_id,
 				path,
 				bytes,
@@ -238,6 +256,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 					let _ = link
 						.to_session
 						.send(SessionMsg::EditSave {
+							identity,
 							editor_id,
 							path,
 							bytes,
@@ -306,7 +325,11 @@ pub(crate) enum SessionMsg {
 	/// Terminal resized; reflow every shell's remote pty (§45).
 	Resize { cols: u16, rows: u16 },
 	/// Open another shell on this connection, running `command` to become another account (§45).
-	Elevate { identity: u64, command: String },
+	Elevate {
+		identity: u64,
+		kind: crate::elevate::Kind,
+		user: String,
+	},
 	/// One answer to an elevating shell's question (§45), written to its channel.
 	ElevateAnswer { identity: u64, secret: Secret },
 	/// Which shell typing belongs to from now on (§45).
@@ -353,10 +376,16 @@ pub(crate) enum SessionMsg {
 		local: PathBuf,
 		resume: bool,
 	},
-	/// Read a whole remote file into the in-tab text editor (§32). `editor_id` routes the reply.
-	EditLoad { editor_id: u64, path: String },
-	/// Write the editor's buffer back to the remote, atomically (§32).
+	/// Read a whole remote file into the in-tab text editor (§32), as the account named by
+	/// `identity` (§46). `editor_id` routes the reply.
+	EditLoad {
+		identity: u64,
+		editor_id: u64,
+		path: String,
+	},
+	/// Write the editor's buffer back to the remote, atomically (§32), as the account that opened it.
 	EditSave {
+		identity: u64,
 		editor_id: u64,
 		path: String,
 		bytes: Vec<u8>,
@@ -528,9 +557,15 @@ async fn stream(
 ) -> Result<()> {
 	// The session's shells (§45), starting with the login one this loop was handed.
 	let (mut shells, mut from_shells) = shell::Shells::new(channel);
-	// The explorer's SFTP channel (§18): opened on the first listing and kept for the
-	// rest of the session, since a tree asks many small questions.
-	let mut sftp = browse::Sftp::default();
+	// The accounts this session can read FILES as (§46): the login one, plus each account elevated
+	// into. It owns what used to be a single `browse::Sftp` here — one sftp session per account,
+	// opened on that account's first listing and kept, since a tree asks many small questions (§18).
+	//
+	// `channels` is the other half of the same feature: a shell-backend operation runs one command
+	// per channel and cannot open one itself (russh's handle is not `Clone` and lives here), so it
+	// asks this loop, which serves the request in the arm below.
+	let (channels, mut channel_requests) = asuser::Channels::new();
+	let mut accounts = asuser::Accounts::new(channels);
 
 	// The port forwards on this session (§27). A local/dynamic listener cannot open its own SSH
 	// channel (the session `Handle` is not `Sync`), so it hands each accepted socket back here on
@@ -559,14 +594,28 @@ async fn stream(
 			// elevation's credential conversation, and says when the SESSION is over — which only
 			// the login shell closing means.
 			Some(message) = from_shells.recv() => {
-				if shells.on_msg(message, events).await {
-					break;
+				match shells.on_msg(message, events).await {
+					shell::After::Nothing => {}
+					// That account's shell has gone, so its file access goes too (§46): dropping its
+					// entry closes the sftp session it held, which ends the elevated `sftp-server`.
+					shell::After::Ended(identity) => accounts.remove(identity),
+					shell::After::SessionOver => break,
 				}
 			}
 			// A local/dynamic forward accepted a connection (§27). Open its SSH channel here —
 			// the one place allowed to — and let the pump run detached.
 			Some(accepted) = accepted_rx.recv() => {
 				forward::open_local_tunnel(session, accepted, events.clone()).await;
+			}
+			// A file operation running as another account wants a channel to run a command on (§46).
+			// Same reason as the forward above: this loop is the only place holding the session
+			// handle, so it is the only place that can open one. The requester waits on the one-shot.
+			Some(asuser::ChannelRequest(reply)) = channel_requests.recv() => {
+				let opened = session
+					.channel_open_session()
+					.await
+					.map_err(|error| format!("{error}"));
+				let _ = reply.send(opened);
 			}
 			// A command arrived from the GUI (via run()).
 			command = to_session_rx.recv() => {
@@ -577,13 +626,26 @@ async fn stream(
 					Some(SessionMsg::Resize { cols, rows }) => shells.resize(cols, rows).await,
 					// Become another account on this same connection (§45): another shell, running
 					// the elevation program, which holds its own conversation on its own channel.
-					Some(SessionMsg::Elevate { identity, command }) => {
-						shells.elevate(session, events, identity, command).await;
+					// The account is registered for FILE work at the same time (§46), so the panes
+					// can read as it the moment its shell is live.
+					Some(SessionMsg::Elevate { identity, kind, user }) => {
+						accounts.add(identity, kind, user.clone());
+						shells.elevate(session, events, identity, kind.command(&user)).await;
 					}
 					Some(SessionMsg::ElevateAnswer { identity, secret }) => {
-						shells.answer(identity, secret).await;
+						// A `true` here means that answer was the password cmote itself asked for by
+						// name — so it is the one sudo will want on a file channel too, and it is kept
+						// for this connection (§46). A one-time code answers `false` and is never kept.
+						if shells.answer(identity, secret.clone()).await {
+							accounts.set_secret(identity, secret);
+						}
 					}
-					Some(SessionMsg::SelectIdentity(identity)) => shells.select(identity),
+					// Both halves of "which account is on screen" move together (§45, §46): typing
+					// goes to that shell, and every file operation from now on reads as that account.
+					Some(SessionMsg::SelectIdentity(identity)) => {
+						shells.select(identity);
+						accounts.select(identity);
+					}
 					Some(SessionMsg::Reply { identity, bytes }) => {
 						shells.reply(identity, bytes).await;
 					}
@@ -596,30 +658,45 @@ async fn stream(
 					Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
 						let flag = Arc::new(AtomicBool::new(false));
 						cancel = Some(flag.clone());
-						upload::start(session, events, local, remote, overwrite, resume, flag).await;
+						let backend = accounts.files(session).await;
+						upload::start(backend, events, local, remote, overwrite, resume, flag).await;
 					}
 					// The batch collision pre-scan (§17): a couple of round trips on its own
 					// channel before the first byte, so the "some are already there" question
 					// is asked once for the whole batch.
 					Some(SessionMsg::CheckUploads { dir, names }) => {
-						upload::precheck(session, events, dir, names).await;
+						let backend = accounts.files(session).await;
+						upload::precheck(backend, events, dir, names).await;
 					}
 					// Listings, renames and downloads also run on their own channel and
 					// their own task, so a slow directory or a big file never holds up
-					// the terminal (§18, §19).
+					// the terminal (§18, §19). Which ACCOUNT each one reads as is settled here,
+					// before the work starts (§46): `accounts` answers with the best backend that
+					// account has — its own sftp session, shell commands, or a reason it has neither.
 					Some(SessionMsg::ListDir(path)) => {
-						browse::list(session, &mut sftp, events, path).await;
+						let backend = accounts.browse(session).await;
+						browse::list(backend, events, path).await;
 					}
 					Some(SessionMsg::ListFiles { path, request }) => {
-						browse::list_all(session, &mut sftp, events, path, request).await;
+						// The pane shows modification times, and a time needs the server's zone to be
+						// read as the server's own clock (§20). Asked once per session, alongside the
+						// first listing — as the login account, since a machine's timezone needs no
+						// privilege and the answer belongs to the machine, not to an account.
+						if accounts.take_zone_probe() {
+							browse::probe_zone(accounts.login_runner(), events);
+						}
+						let backend = accounts.browse(session).await;
+						browse::list_all(backend, events, path, request).await;
 					}
 					Some(SessionMsg::ReadLink(path)) => {
-						browse::read_link(session, &mut sftp, events, path).await;
+						let backend = accounts.browse(session).await;
+						browse::read_link(backend, events, path).await;
 					}
 					Some(SessionMsg::Download { remote, local, resume }) => {
 						let flag = Arc::new(AtomicBool::new(false));
 						cancel = Some(flag.clone());
-						download::start(session, events, remote, local, resume, flag).await;
+						let backend = accounts.files(session).await;
+						download::start(backend, events, remote, local, resume, flag).await;
 					}
 					// A recursive transfer runs on its own channel and task like a single file,
 					// but it can pause to ask about a collision — so a fresh reply channel is made
@@ -630,22 +707,30 @@ async fn stream(
 						conflict_tx = Some(answers_tx);
 						let flag = Arc::new(AtomicBool::new(false));
 						cancel = Some(flag.clone());
-						upload::start_tree(session, events, local, remote, resume, answers_rx, flag).await;
+						let backend = accounts.files(session).await;
+						upload::start_tree(backend, events, local, remote, resume, answers_rx, flag).await;
 					}
 					Some(SessionMsg::DownloadTree { remote, local, resume }) => {
 						let (answers_tx, answers_rx) = mpsc::channel::<ConflictChoice>(8);
 						conflict_tx = Some(answers_tx);
 						let flag = Arc::new(AtomicBool::new(false));
 						cancel = Some(flag.clone());
-						download::start_tree(session, events, remote, local, resume, answers_rx, flag).await;
+						let backend = accounts.files(session).await;
+						download::start_tree(backend, events, remote, local, resume, answers_rx, flag).await;
 					}
 					// The editor reads and writes a whole remote file on its own sftp channel, like a
 					// transfer, but buffer-shaped and reply-routed by the editor tab's id (§32).
-					Some(SessionMsg::EditLoad { editor_id, path }) => {
-						edit::load(session, events, editor_id, path).await;
+					//
+					// It names its own account rather than using the selected one (§46): a file opened
+					// as root must be read and saved as root, whichever account the panes have moved on
+					// to while it was being edited.
+					Some(SessionMsg::EditLoad { identity, editor_id, path }) => {
+						let backend = accounts.files_as(session, identity).await;
+						edit::load(backend, events, editor_id, path).await;
 					}
-					Some(SessionMsg::EditSave { editor_id, path, bytes }) => {
-						edit::save(session, events, editor_id, path, bytes).await;
+					Some(SessionMsg::EditSave { identity, editor_id, path, bytes }) => {
+						let backend = accounts.files_as(session, identity).await;
+						edit::save(backend, events, editor_id, path, bytes).await;
 					}
 					// Forward a collision answer to the transfer parked on it. A send that fails —
 					// the transfer already finished, or there was never a recursive one — is
@@ -666,13 +751,16 @@ async fn stream(
 					// Creating and deleting share the browse session with the listings, the same
 					// as rename — one channel for all the tree's small operations (§18).
 					Some(SessionMsg::MakeDir(path)) => {
-						browse::make_dir(session, &mut sftp, events, path).await;
+						let backend = accounts.browse(session).await;
+						browse::make_dir(backend, events, path).await;
 					}
 					Some(SessionMsg::Delete(paths)) => {
-						browse::remove(session, &mut sftp, events, paths).await;
+						let backend = accounts.browse(session).await;
+						browse::remove(backend, events, paths).await;
 					}
 					Some(SessionMsg::RenameDir { from, to }) => {
-						browse::rename(session, &mut sftp, events, from, to).await;
+						let backend = accounts.browse(session).await;
+						browse::rename(backend, events, from, to).await;
 					}
 					// Start / stop a port forward on this connection (§27). Add spawns a local
 					// listener or asks the server to listen; remove aborts / cancels it. Both run

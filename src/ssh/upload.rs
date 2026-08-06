@@ -1,4 +1,4 @@
-// ssh/upload.rs — send a local file to the remote over SFTP (PLAN §17).
+// ssh/upload.rs — send a local file to the remote over SFTP (PLAN §17, §46).
 //
 // The interactive shell is a pty channel: perfect for keystrokes, wrong for file
 // bytes (everything is echoed back, binary needs encoding, and the terminal would
@@ -18,7 +18,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
-use russh::client;
 use russh_sftp::client::SftpSession;
 use russh_sftp::client::fs::File;
 use russh_sftp::protocol::OpenFlags;
@@ -27,6 +26,8 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
+use crate::ssh::asuser::{Files, Runner};
+use crate::ssh::shellfs;
 use crate::ssh::transfer::{
 	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, TreePlan, resume_start,
 };
@@ -40,15 +41,12 @@ const CHUNK: usize = 32 * 1024;
 /// the bar moving smoothly without the flood.
 const PROGRESS_STEP: u64 = 256 * 1024;
 
-/// Open the SFTP channel and hand the transfer to a background task (§17). Opening
-/// costs a couple of round trips and happens inline — the shell pauses for them — while
-/// the transfer itself runs detached, so the terminal stays live throughout.
-///
-/// The session handle is borrowed, which is why the split exists: a spawned task cannot
-/// hold a borrow, so the channel is opened here and only the owned `SftpSession` moves
-/// into the task.
-pub async fn start<H: client::Handler>(
-	session: &client::Handle<H>,
+/// Hand the transfer to a background task (§17) over whichever backend the account it writes as
+/// could offer (§46). Opening a channel borrows the session handle, which is why that already
+/// happened in the session loop: a spawned task cannot hold a borrow, so only owned values move
+/// into it and the terminal stays live throughout.
+pub async fn start(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	local: PathBuf,
 	remote: String,
@@ -56,8 +54,8 @@ pub async fn start<H: client::Handler>(
 	resume: bool,
 	cancel: Arc<AtomicBool>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
+	match backend {
+		Files::Sftp(sftp) => {
 			tokio::spawn(transfer(
 				sftp,
 				local,
@@ -68,15 +66,24 @@ pub async fn start<H: client::Handler>(
 				cancel,
 			));
 		}
-		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
-			let _ = events
-				.send(SshEvent::UploadFailed(
-					"Could not open an SFTP channel — the server may not offer the sftp \
-					 subsystem."
-						.to_string(),
-				))
-				.await;
+		Files::Shell(runner) => {
+			let events = events.clone();
+			tokio::spawn(async move {
+				// The same question the SFTP path asks first, and for the same reason: a write
+				// truncates, so a file already there has to be a question rather than a casualty.
+				if !overwrite && shellfs::exists(&runner, &remote).await {
+					let _ = events.send(SshEvent::UploadExists(remote)).await;
+					return;
+				}
+				let outcome =
+					shellfs::send(&runner, &local, &remote, resume, &events, &cancel).await;
+				// No stamp and no canonicalize on this backend (see `shellfs`): the copy lands with
+				// what the remote's own umask gives it, and the path reported is the one written to.
+				report(outcome, &remote, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 		}
 	}
 }
@@ -96,21 +103,28 @@ const FREE_NAME_TRIES: u32 = 100;
 /// listing session. A server that will not answer an existence check fails the whole scan
 /// rather than guessing a path is free — guessing would let the batch overwrite silently, the
 /// same caution the transfer itself takes (§17).
-pub async fn precheck<H: client::Handler>(
-	session: &client::Handle<H>,
+pub async fn precheck(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	dir: String,
 	names: Vec<String>,
 ) {
-	let sftp = match super::open_sftp(session).await {
-		Ok(sftp) => sftp,
-		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
-			let _ = events
-				.send(SshEvent::UploadFailed(
-					"Could not open an SFTP channel to check the destination.".to_string(),
-				))
-				.await;
+	let sftp = match backend {
+		Files::Sftp(sftp) => sftp,
+		// The shell backend answers the same question with `[ -e path ]`, one command per name.
+		Files::Shell(runner) => {
+			let mut collisions: Vec<(String, String)> = Vec::new();
+			for name in &names {
+				let remote = crate::explorer::join(&dir, name);
+				if shellfs::exists(&runner, &remote).await {
+					collisions.push((name.clone(), shellfs::free_name(&runner, &dir, name).await));
+				}
+			}
+			let _ = events.send(SshEvent::UploadPrescan { collisions }).await;
+			return;
+		}
+		Files::Denied(reason) => {
+			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 			return;
 		}
 	};
@@ -200,6 +214,8 @@ async fn transfer(
 	}
 
 	match copy(&sftp, &local, &remote, resume, &events, &cancel).await {
+		// Only this backend can stamp and canonicalize, so only this arm is written here; the other
+		// two outcomes read the same for both and are reported by `report`.
 		Ok(CopyOutcome::Done) => {
 			// Best-effort, before announcing it: stamp the copy with the source's timestamps and,
 			// from a Unix source, its permission bits (§17). A re-stat here is a cheap local call,
@@ -217,6 +233,19 @@ async fn transfer(
 				.await
 				.unwrap_or_else(|_| remote.clone());
 			let _ = events.send(SshEvent::UploadDone(resolved)).await;
+		}
+		outcome => report(outcome, &remote, &events).await,
+	}
+	let _ = sftp.close().await;
+}
+
+/// Turn one copy's outcome into exactly one terminal event, for either backend (§46). The SFTP path
+/// handles its own success (it can stamp the copy and resolve the path it landed on); everything
+/// else reads the same whichever backend carried the bytes.
+async fn report(outcome: Result<CopyOutcome>, remote: &str, events: &mpsc::Sender<SshEvent>) {
+	match outcome {
+		Ok(CopyOutcome::Done) => {
+			let _ = events.send(SshEvent::UploadDone(remote.to_owned())).await;
 		}
 		// The user pressed ✕ (§16): the copy loop already deleted the partial, so this is a
 		// neutral end, not an error — a message the status bar shows without crying failure.
@@ -236,7 +265,6 @@ async fn transfer(
 				.await;
 		}
 	}
-	let _ = sftp.close().await;
 }
 
 /// The copy loop: local file in, remote file out, a progress event every
@@ -397,8 +425,8 @@ async fn stamp_remote(
 /// of `start` for a single file, but the transfer may PAUSE mid-way to ask the user about a file
 /// whose destination is already taken — so it is handed the `answers` receiver `run()` keeps the
 /// other end of, and parks on it while the shell keeps flowing behind the prompt.
-pub async fn start_tree<H: client::Handler>(
-	session: &client::Handle<H>,
+pub async fn start_tree(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	local: PathBuf,
 	remote: String,
@@ -406,8 +434,8 @@ pub async fn start_tree<H: client::Handler>(
 	answers: mpsc::Receiver<ConflictChoice>,
 	cancel: Arc<AtomicBool>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
+	match backend {
+		Files::Sftp(sftp) => {
 			tokio::spawn(transfer_tree(
 				sftp,
 				local,
@@ -418,17 +446,72 @@ pub async fn start_tree<H: client::Handler>(
 				cancel,
 			));
 		}
-		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
-			let _ = events
-				.send(SshEvent::UploadFailed(
-					"Could not open an SFTP channel — the server may not offer the sftp \
-					 subsystem."
-						.to_string(),
-				))
+		Files::Shell(runner) => {
+			let events = events.clone();
+			let mut answers = answers;
+			tokio::spawn(async move {
+				let outcome = shell_tree(
+					&runner,
+					&local,
+					&remote,
+					resume,
+					&events,
+					&mut answers,
+					&cancel,
+				)
 				.await;
+				report_tree(outcome, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 		}
 	}
+}
+
+/// The shell backend's tree upload (§46): walk the local folder as the SFTP path does, then create
+/// each directory with `mkdir -p` and send each file through `cat`. The folder keeps its own name
+/// inside the destination, and the plan's total is announced up front so the bar has a target.
+async fn shell_tree(
+	runner: &Runner,
+	local_root: &Path,
+	remote_dir: &str,
+	resume: bool,
+	events: &mpsc::Sender<SshEvent>,
+	answers: &mut mpsc::Receiver<ConflictChoice>,
+	cancel: &Arc<AtomicBool>,
+) -> Result<Option<String>> {
+	let name = local_root
+		.file_name()
+		.map(|name| name.to_string_lossy().into_owned())
+		.context("the folder has no name")?;
+	let remote_target = crate::explorer::join(remote_dir, &name);
+	let plan = walk_local(local_root)
+		.await
+		.with_context(|| format!("could not read {}", local_root.display()))?;
+	let _ = events
+		.send(SshEvent::TransferProgress {
+			sent: 0,
+			total: plan.total(),
+		})
+		.await;
+	let outcome = shellfs::send_tree(
+		runner,
+		&plan,
+		local_root,
+		&remote_target,
+		resume,
+		shellfs::TreeRun {
+			events,
+			answers,
+			cancel,
+		},
+	)
+	.await?;
+	Ok(match outcome {
+		CopyOutcome::Done => Some(remote_target),
+		CopyOutcome::Cancelled => None,
+	})
 }
 
 /// Send the local folder to the remote, reporting one terminal event (§17). A clean run ends in
@@ -443,7 +526,7 @@ async fn transfer_tree(
 	mut answers: mpsc::Receiver<ConflictChoice>,
 	cancel: Arc<AtomicBool>,
 ) {
-	match send_tree(
+	let outcome = send_tree(
 		&sftp,
 		&local_root,
 		&remote_dir,
@@ -452,8 +535,14 @@ async fn transfer_tree(
 		&mut answers,
 		&cancel,
 	)
-	.await
-	{
+	.await;
+	report_tree(outcome, &events).await;
+	let _ = sftp.close().await;
+}
+
+/// Turn a tree upload's outcome into exactly one terminal event, for either backend (§46).
+async fn report_tree(outcome: Result<Option<String>>, events: &mpsc::Sender<SshEvent>) {
+	match outcome {
 		Ok(Some(path)) => {
 			let _ = events.send(SshEvent::UploadDone(path)).await;
 		}
@@ -479,7 +568,6 @@ async fn transfer_tree(
 				.await;
 		}
 	}
-	let _ = sftp.close().await;
 }
 
 /// The tree upload itself: recreate the folder under `remote_dir`, then copy every file into it,

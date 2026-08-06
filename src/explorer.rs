@@ -556,6 +556,34 @@ impl Explorer {
 		needed
 	}
 
+	/// Drop every folder's cached children but keep the SHAPE of the tree — which folders are open
+	/// and which one is selected — and return the open ones to re-list (§46).
+	///
+	/// This is what an account switch needs, and it is deliberately harsher than `refresh_open`: a
+	/// refresh leaves the old names on screen under a spinner because they are still that folder's
+	/// names, only possibly stale. Here they are ANOTHER ACCOUNT's names. `cme` cannot see inside
+	/// `/root`, root sees files in `/etc/ssl/private` that `cme` does not, and showing either set
+	/// under the other account's name would be a lie about who is looking. So the contents go at
+	/// once and the rows stand empty until the new account's listing lands — or, if it cannot list
+	/// at all, stay empty beside the reason (§46).
+	///
+	/// The path a user was working in is kept on purpose: elevating BECAUSE a folder would not open
+	/// is the ordinary reason to do it, so the same folder is exactly where they want to land.
+	pub fn reread(&mut self) -> Vec<String> {
+		let mut needed = Vec::new();
+		for (path, node) in self.nodes.iter_mut() {
+			node.children = None;
+			node.loading = node.open;
+			if node.open {
+				needed.push(path.clone());
+			}
+		}
+		// The notice belonged to the account that has just been left — its "permission denied" is
+		// answered by the switch itself.
+		self.notice = None;
+		needed
+	}
+
 	/// Forget a folder and everything beneath it (§18): its subtree was just deleted, so those
 	/// rows must go. A selection anywhere inside the gone subtree is dropped too, so the menu and
 	/// the keyboard never point at a row that is no longer there. The parent's own cached child
@@ -727,6 +755,36 @@ pub fn shell_quote(path: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Re-reading for another account (§46) keeps WHERE the user is — the open folders, the selection
+	/// — and drops WHAT was in them, because that was the other account's view of it.
+	#[test]
+	fn rereading_keeps_the_open_shape_and_drops_every_listed_child() {
+		let mut explorer = tree(&["etc", "home"]);
+		let _fetch = explorer.expand("/etc", false);
+		explorer.listed("/etc", vec!["ssl".to_owned()]);
+		explorer.select("/etc");
+		// A folder that was listed but is CLOSED: nothing of it is on screen, so it is not re-fetched.
+		let _fetch = explorer.expand("/home", false);
+		explorer.listed("/home", vec!["cme".to_owned()]);
+		explorer.collapse("/home");
+
+		let needed = explorer.reread();
+
+		assert!(needed.contains(&ROOT.to_owned()), "the root is open");
+		assert!(needed.contains(&"/etc".to_owned()), "and so is /etc");
+		assert!(
+			!needed.contains(&"/home".to_owned()),
+			"a closed folder shows nothing, so it waits until it is opened"
+		);
+		// Not one child name survives — the rows stand empty until the new account's listing lands.
+		assert!(explorer.rows().iter().all(|row| row.path == ROOT));
+		assert_eq!(
+			explorer.selected(),
+			Some("/etc"),
+			"where the user was working is kept: it is usually why they elevated"
+		);
+	}
 
 	/// A tree with `/` listed and open, holding the given child folders.
 	fn tree(children: &[&str]) -> Explorer {

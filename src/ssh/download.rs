@@ -1,8 +1,14 @@
-// ssh/download.rs — pull a remote file down to this machine over SFTP (PLAN §19).
+// ssh/download.rs — pull a remote file down to this machine over SFTP (PLAN §19, §46).
 //
 // The mirror image of `upload` (§17), and built the same way: its own sftp channel so
 // the interactive shell is untouched, the transfer spawned so a large file never stalls
 // the shell pump, and progress reported through the session's own event channel.
+//
+// Since §46 that channel is not necessarily the LOGIN account's, and not necessarily SFTP: the
+// caller resolves which account the transfer reads as into one `Files` value, and a remote with no
+// `sftp-server` to run as that account arrives here as `Files::Shell` — the same transfer, driven
+// by `cat` and `wc` instead (`shellfs`). Both backends report their outcome identically, which is
+// why that reporting is factored out of the two paths rather than written twice.
 //
 // There is no overwrite prompt here on purpose. The destination comes from the native
 // save dialog, which already asks before replacing a local file — a second question in
@@ -15,7 +21,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use russh::client;
 use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::FileAttributes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -23,6 +28,8 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
+use crate::ssh::asuser::{Files, Runner};
+use crate::ssh::shellfs;
 use crate::ssh::transfer::{
 	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, TreePlan, resume_start,
 };
@@ -32,30 +39,31 @@ use crate::ssh::transfer::{
 const CHUNK: usize = 32 * 1024;
 const PROGRESS_STEP: u64 = 256 * 1024;
 
-/// Open the SFTP channel and hand the transfer to a background task (§19). Opening
-/// borrows the session handle, so it happens inline; only the owned `SftpSession` moves
-/// into the spawned task.
-pub async fn start<H: client::Handler>(
-	session: &client::Handle<H>,
+/// Hand the transfer to a background task (§19), over whichever backend the account it runs as
+/// could offer (§46). Opening a channel borrows the session handle, so that already happened in the
+/// session loop; only owned values move into the spawned task.
+pub async fn start(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	remote: String,
 	local: PathBuf,
 	resume: bool,
 	cancel: Arc<AtomicBool>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
+	match backend {
+		Files::Sftp(sftp) => {
 			tokio::spawn(fetch(sftp, remote, local, resume, events.clone(), cancel));
 		}
-		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
-			let _ = events
-				.send(SshEvent::DownloadFailed(
-					"Could not open an SFTP channel — the server may not offer the sftp \
-					 subsystem."
-						.to_string(),
-				))
-				.await;
+		Files::Shell(runner) => {
+			let events = events.clone();
+			tokio::spawn(async move {
+				let outcome =
+					shellfs::fetch(&runner, &remote, &local, resume, &events, &cancel).await;
+				report(outcome, &local, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events.send(SshEvent::DownloadFailed(reason)).await;
 		}
 	}
 }
@@ -70,7 +78,15 @@ async fn fetch(
 	events: mpsc::Sender<SshEvent>,
 	cancel: Arc<AtomicBool>,
 ) {
-	match copy(&sftp, &remote, &local, resume, &events, &cancel).await {
+	let outcome = copy(&sftp, &remote, &local, resume, &events, &cancel).await;
+	report(outcome, &local, &events).await;
+	let _ = sftp.close().await;
+}
+
+/// Turn one copy's outcome into exactly one terminal event. Shared by both backends (§46), so a
+/// download reads the same in the status bar whichever one carried it.
+async fn report(outcome: Result<CopyOutcome>, local: &Path, events: &mpsc::Sender<SshEvent>) {
+	match outcome {
 		Ok(CopyOutcome::Done) => {
 			let _ = events
 				.send(SshEvent::DownloadDone(local.display().to_string()))
@@ -96,7 +112,6 @@ async fn fetch(
 				.await;
 		}
 	}
-	let _ = sftp.close().await;
 }
 
 /// The copy loop: remote file in, local file out, a progress event every `PROGRESS_STEP` bytes.
@@ -314,8 +329,8 @@ const FREE_NAME_TRIES: u32 = 100;
 /// Open the SFTP channel and hand a whole-folder download to a background task (§19). The mirror
 /// of `start_tree` on the upload side: the transfer may pause to ask the user about a local file
 /// already there, so it is handed the `answers` receiver `run()` keeps the other end of.
-pub async fn start_tree<H: client::Handler>(
-	session: &client::Handle<H>,
+pub async fn start_tree(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	remote: String,
 	local: PathBuf,
@@ -323,8 +338,8 @@ pub async fn start_tree<H: client::Handler>(
 	answers: mpsc::Receiver<ConflictChoice>,
 	cancel: Arc<AtomicBool>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
+	match backend {
+		Files::Sftp(sftp) => {
 			tokio::spawn(fetch_tree(
 				sftp,
 				remote,
@@ -335,17 +350,68 @@ pub async fn start_tree<H: client::Handler>(
 				cancel,
 			));
 		}
-		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
-			let _ = events
-				.send(SshEvent::DownloadFailed(
-					"Could not open an SFTP channel — the server may not offer the sftp \
-					 subsystem."
-						.to_string(),
-				))
+		Files::Shell(runner) => {
+			let events = events.clone();
+			let mut answers = answers;
+			tokio::spawn(async move {
+				let outcome = shell_tree(
+					&runner,
+					&remote,
+					&local,
+					resume,
+					&events,
+					&mut answers,
+					&cancel,
+				)
 				.await;
+				report_tree(outcome, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events.send(SshEvent::DownloadFailed(reason)).await;
 		}
 	}
+}
+
+/// The shell backend's tree download (§46): walk the remote with `find`, then copy each file with
+/// `cat`. The folder keeps its own name inside the destination, exactly as the SFTP path has it, and
+/// the plan's total is announced up front so the progress bar has something to fill.
+async fn shell_tree(
+	runner: &Runner,
+	remote_root: &str,
+	local_dir: &Path,
+	resume: bool,
+	events: &mpsc::Sender<SshEvent>,
+	answers: &mut mpsc::Receiver<ConflictChoice>,
+	cancel: &Arc<AtomicBool>,
+) -> Result<Option<String>> {
+	let local_target = local_dir.join(explorer::name(remote_root));
+	let plan = shellfs::walk(runner, remote_root)
+		.await
+		.with_context(|| format!("could not read {remote_root}"))?;
+	let _ = events
+		.send(SshEvent::TransferProgress {
+			sent: 0,
+			total: plan.total(),
+		})
+		.await;
+	let outcome = shellfs::fetch_tree(
+		runner,
+		&plan,
+		remote_root,
+		&local_target,
+		resume,
+		shellfs::TreeRun {
+			events,
+			answers,
+			cancel,
+		},
+	)
+	.await?;
+	Ok(match outcome {
+		CopyOutcome::Done => Some(local_target.display().to_string()),
+		CopyOutcome::Cancelled => None,
+	})
 }
 
 /// Fetch the remote folder to this machine, reporting one terminal event (§19). Like the upload
@@ -360,7 +426,7 @@ async fn fetch_tree(
 	mut answers: mpsc::Receiver<ConflictChoice>,
 	cancel: Arc<AtomicBool>,
 ) {
-	match receive_tree(
+	let outcome = receive_tree(
 		&sftp,
 		&remote_root,
 		&local_dir,
@@ -369,8 +435,14 @@ async fn fetch_tree(
 		&mut answers,
 		&cancel,
 	)
-	.await
-	{
+	.await;
+	report_tree(outcome, &events).await;
+	let _ = sftp.close().await;
+}
+
+/// Turn a tree download's outcome into exactly one terminal event, for either backend (§46).
+async fn report_tree(outcome: Result<Option<String>>, events: &mpsc::Sender<SshEvent>) {
+	match outcome {
 		Ok(Some(path)) => {
 			let _ = events.send(SshEvent::DownloadDone(path)).await;
 		}
@@ -394,7 +466,6 @@ async fn fetch_tree(
 				.await;
 		}
 	}
-	let _ = sftp.close().await;
 }
 
 /// The tree download itself: recreate the remote folder under `local_dir`, then pull every file

@@ -10,12 +10,13 @@
 // side (`editor`), so this layer never needs to know a file's charset.
 
 use anyhow::{Context, Result, bail};
-use russh::client;
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
+use crate::ssh::asuser::Files;
+use crate::ssh::shellfs;
 
 /// The largest file the editor will open (§32). The whole file becomes one editable in-memory
 /// buffer, laid out every frame, so this is a guard against opening a disk image by accident, not a
@@ -33,44 +34,53 @@ const TEMP_SUFFIX: &str = "~cmote.tmp";
 /// Open an sftp channel and read a whole remote file for the editor (§32), reporting `EditLoaded`
 /// with its bytes or `EditLoadFailed` with a reason. `editor_id` is echoed back so the reply routes
 /// to the editor tab that asked, not the session tab whose channel carried it.
-pub async fn load<H: client::Handler>(
-	session: &client::Handle<H>,
-	events: &mpsc::Sender<SshEvent>,
+pub async fn load(backend: Files, events: &mpsc::Sender<SshEvent>, editor_id: u64, path: String) {
+	let events = events.clone();
+	match backend {
+		Files::Sftp(sftp) => {
+			tokio::spawn(async move {
+				let outcome = read_file(&sftp, &path).await;
+				let _ = sftp.close().await;
+				report_load(outcome, editor_id, path, &events).await;
+			});
+		}
+		// Same file, read with `cat` under the elevation instead (§46).
+		Files::Shell(runner) => {
+			tokio::spawn(async move {
+				let outcome = shellfs::read_all(&runner, &path).await;
+				report_load(outcome, editor_id, path, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events
+				.send(SshEvent::EditLoadFailed { editor_id, reason })
+				.await;
+		}
+	}
+}
+
+/// Report a load's outcome to the editor tab that asked for it, whichever backend read the file.
+async fn report_load(
+	outcome: Result<Vec<u8>>,
 	editor_id: u64,
 	path: String,
+	events: &mpsc::Sender<SshEvent>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
-			let outcome = read_file(&sftp, &path).await;
-			let _ = sftp.close().await;
-			match outcome {
-				Ok(bytes) => {
-					let _ = events
-						.send(SshEvent::EditLoaded {
-							editor_id,
-							path,
-							bytes,
-						})
-						.await;
-				}
-				Err(error) => {
-					let _ = events
-						.send(SshEvent::EditLoadFailed {
-							editor_id,
-							reason: format!("{error}"),
-						})
-						.await;
-				}
-			}
+	match outcome {
+		Ok(bytes) => {
+			let _ = events
+				.send(SshEvent::EditLoaded {
+					editor_id,
+					path,
+					bytes,
+				})
+				.await;
 		}
 		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
 			let _ = events
 				.send(SshEvent::EditLoadFailed {
 					editor_id,
-					reason: "Could not open an SFTP channel — the server may not offer the sftp \
-					         subsystem."
-						.to_string(),
+					reason: format!("{error}"),
 				})
 				.await;
 		}
@@ -117,37 +127,54 @@ async fn read_file(sftp: &SftpSession, path: &str) -> Result<Vec<u8>> {
 /// Open an sftp channel and write the editor's buffer back to the remote (§32), reporting `EditSaved`
 /// or `EditSaveFailed`. The write is atomic: the bytes go to a temp sibling first and only a rename
 /// makes them the file, so a connection dropped mid-write cannot leave a half-written file.
-pub async fn save<H: client::Handler>(
-	session: &client::Handle<H>,
+pub async fn save(
+	backend: Files,
 	events: &mpsc::Sender<SshEvent>,
 	editor_id: u64,
 	path: String,
 	bytes: Vec<u8>,
 ) {
-	match super::open_sftp(session).await {
-		Ok(sftp) => {
-			let outcome = write_atomic(&sftp, &path, &bytes).await;
-			let _ = sftp.close().await;
-			match outcome {
-				Ok(()) => {
-					let _ = events.send(SshEvent::EditSaved { editor_id, path }).await;
-				}
-				Err(error) => {
-					let _ = events
-						.send(SshEvent::EditSaveFailed {
-							editor_id,
-							reason: format!("{error}"),
-						})
-						.await;
-				}
-			}
+	let events = events.clone();
+	match backend {
+		Files::Sftp(sftp) => {
+			tokio::spawn(async move {
+				let outcome = write_atomic(&sftp, &path, &bytes).await;
+				let _ = sftp.close().await;
+				report_save(outcome, editor_id, path, &events).await;
+			});
+		}
+		// The shell backend writes to a temp sibling and `mv`s it over the target, which is the same
+		// commit point by a different name (§46).
+		Files::Shell(runner) => {
+			tokio::spawn(async move {
+				let outcome = shellfs::write_all(&runner, &path, &bytes).await;
+				report_save(outcome, editor_id, path, &events).await;
+			});
+		}
+		Files::Denied(reason) => {
+			let _ = events
+				.send(SshEvent::EditSaveFailed { editor_id, reason })
+				.await;
+		}
+	}
+}
+
+/// Report a save's outcome to the editor tab that asked for it, whichever backend wrote the file.
+async fn report_save(
+	outcome: Result<()>,
+	editor_id: u64,
+	path: String,
+	events: &mpsc::Sender<SshEvent>,
+) {
+	match outcome {
+		Ok(()) => {
+			let _ = events.send(SshEvent::EditSaved { editor_id, path }).await;
 		}
 		Err(error) => {
-			eprintln!("sftp channel failed: {error:#}");
 			let _ = events
 				.send(SshEvent::EditSaveFailed {
 					editor_id,
-					reason: "Could not open an SFTP channel to save.".to_string(),
+					reason: format!("{error}"),
 				})
 				.await;
 		}
@@ -204,7 +231,7 @@ async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<()
 
 /// A file size in the terse `4.0 KB` / `8.0 MB` form the refusal message shows (§32). Local to this
 /// module so the network layer carries no dependency on the files pane's own formatter.
-fn human_size(bytes: u64) -> String {
+pub(crate) fn human_size(bytes: u64) -> String {
 	const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
 	let mut value = bytes as f64;
 	let mut unit = 0;

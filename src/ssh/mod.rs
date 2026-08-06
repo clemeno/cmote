@@ -12,10 +12,13 @@
 //   forward — run local / remote / dynamic port forwards over the live connection (§27)
 //   browse  — read, rename, create and delete remote folders for the explorer tree (§18)
 //   shell   — the shells running on one connection, and elevating into another account (§45)
+//   asuser  — reading and writing files as an account the session did not log in as (§46)
+//   shellfs — the same, built out of shell commands, where no sftp-server can be run (§46)
 //   transfer— the shared spine of a recursive transfer: the tree plan and the per-file
 //             collision protocol both directions use (§17, §19)
 
 pub mod agent;
+pub mod asuser;
 pub mod auth;
 pub mod browse;
 pub mod client;
@@ -25,6 +28,7 @@ pub mod forward;
 pub mod hostkey;
 pub mod keyfile;
 pub mod shell;
+pub mod shellfs;
 pub mod transfer;
 pub mod upload;
 

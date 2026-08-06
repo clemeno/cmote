@@ -180,15 +180,24 @@ pub enum SshCommand {
 	/// including the ones not on screen, or switching to one would show a grid laid out for a
 	/// window that no longer exists.
 	Resize { cols: u16, rows: u16 },
-	/// Open another shell on this connection, running `command` to become another account (§45):
-	/// `sudo -u root -i` or `su - postgres`, built by `crate::elevate`. `identity` is the number
-	/// the GUI has assigned it, which every later event about this shell carries.
+	/// Open another shell on this connection to become another account (§45): `sudo -u root -i` or
+	/// `su - postgres`. `identity` is the number the GUI has assigned it, which every later event
+	/// about this shell carries.
+	///
+	/// The ACCOUNT is sent rather than the command line, and `crate::elevate` builds the command on
+	/// the SSH side. Two reasons: the one place that composes a remote command line stays the one
+	/// place that vets what goes into it, and the file layer needs the same two values to read files
+	/// as that account (§46) — a command string would have to be taken apart again to get them.
 	///
 	/// No new SSH authentication happens — this is a program run on the existing connection, which
 	/// holds its own conversation (a password, perhaps a one-time code) on its own channel. Until
 	/// that conversation ends the channel's output is NOT terminal output: it is answered through
 	/// `ElevateAnswer` and reported through `ElevatePrompt`.
-	Elevate { identity: u64, command: String },
+	Elevate {
+		identity: u64,
+		kind: crate::elevate::Kind,
+		user: String,
+	},
 	/// One answer to an `ElevatePrompt` (§45), written to that shell's channel followed by a
 	/// newline. Rides in a `Secret` so a sudo password or a one-time code is redacted in logs and
 	/// wiped on drop (§12), exactly like the answers to an SSH keyboard-interactive request.
@@ -264,12 +273,25 @@ pub enum SshCommand {
 	/// id, echoed back on `EditLoaded` / `EditLoadFailed` so the reply routes to the tab that asked
 	/// — not the session tab whose channel carried it (an editor has no channel of its own). The
 	/// whole file is one in-memory buffer, so the read is bounded by `edit::MAX_SIZE`.
-	EditLoad { editor_id: u64, path: String },
+	///
+	/// `identity` names the ACCOUNT to read as (§46), rather than letting the read follow whichever
+	/// account the panes are showing: a file opened as root belongs to that account for as long as
+	/// the editor tab lives, and the save has to reach the same file it came from.
+	EditLoad {
+		identity: u64,
+		editor_id: u64,
+		path: String,
+	},
 	/// Write the editor's buffer back to the remote (§32). `editor_id` routes the reply; `path` is
 	/// the destination (a Save As names a new one); `bytes` are already encoded as the file was
 	/// opened (BOM and all — the GUI side owns the encoding). Written atomically: a temp sibling
 	/// then a rename over the target, so a drop mid-write cannot truncate the user's file.
+	///
+	/// `identity` is the account the file was opened as (§46), carried so a save lands as the same
+	/// account that read it — root-owned files stay writable, and nothing is written as an account
+	/// that only happens to be on screen now.
 	EditSave {
+		identity: u64,
 		editor_id: u64,
 		path: String,
 		bytes: Vec<u8>,

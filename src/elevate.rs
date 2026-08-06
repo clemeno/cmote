@@ -81,6 +81,123 @@ impl Kind {
 	}
 }
 
+/// The places an OpenSSH installation keeps the `sftp-server` binary, in the order they are
+/// tried (§46). The file layer runs THIS program as the other account to browse and transfer
+/// files as them — see `program_command` — because the sftp *subsystem* is started by sshd as
+/// the account that authenticated, and no amount of sudo in a shell can change that.
+///
+/// A list rather than one path because it is packaging, not standard: Debian and Ubuntu put it
+/// under `/usr/lib/openssh`, Red Hat under `/usr/libexec/openssh`, Arch and Alpine under
+/// `/usr/lib/ssh`, the BSDs under `/usr/libexec`. The list is only a fast path — `discover`
+/// falls back to asking sshd's own configuration.
+const SFTP_SERVERS: [&str; 6] = [
+	"/usr/lib/openssh/sftp-server",
+	"/usr/libexec/openssh/sftp-server",
+	"/usr/lib/ssh/sftp-server",
+	"/usr/libexec/sftp-server",
+	"/usr/lib/sftp-server",
+	"/usr/local/libexec/sftp-server",
+];
+
+/// The shell snippet that finds the remote's `sftp-server` binary (§46), printing its path or
+/// nothing at all.
+///
+/// Run as the LOGIN account, not as the account being elevated to: a path is public information
+/// (`-x` on a program every user may run), so finding it needs no privilege — and a probe that
+/// needed sudo could not tell "no sftp-server here" from "sudo said no".
+///
+/// The `sed` is the fallback that matters on a server whose packaging we do not know: sshd's own
+/// `Subsystem sftp` line names the program it starts for the login user, so if the binary exists
+/// anywhere it is named there. It can also say `internal-sftp` — sftp implemented INSIDE sshd,
+/// with no binary to run — which `parse_program` rejects, because there is nothing to exec.
+pub fn discover() -> String {
+	let candidates = SFTP_SERVERS.join(" ");
+	format!(
+		"for p in {candidates}; do if [ -x \"$p\" ]; then echo \"$p\"; exit 0; fi; done; \
+		 sed -n 's/^[Ss]ubsystem[[:space:]]\\{{1,\\}}sftp[[:space:]]\\{{1,\\}}\\([^[:space:]]\\{{1,\\}}\\).*/\\1/p' \
+		 /etc/ssh/sshd_config 2>/dev/null | head -n 1"
+	)
+}
+
+/// The `sftp-server` path in `discover`'s output, if it named a usable one.
+///
+/// Pure so the judgement can be tested without a server, and separate from `discover` because
+/// this is the half that carries the risk: the answer may come from `/etc/ssh/sshd_config`, so it
+/// is remote-controlled text about to be composed into a command that runs as ANOTHER account.
+/// `valid_program` is therefore a whitelist, not an escape.
+pub fn parse_program(output: &str) -> Option<String> {
+	output
+		.lines()
+		.map(str::trim)
+		.find(|line| valid_program(line))
+		.map(str::to_owned)
+}
+
+/// Whether `path` is something cmote will run as another account (§46).
+///
+/// Deliberately narrow, and checked instead of quoted: an absolute path, of ordinary path
+/// characters only, whose file name mentions `sftp` — so a doctored `Subsystem` line naming
+/// something else entirely (or `internal-sftp`, which is not a program at all) never becomes a
+/// command. Quoting alone would faithfully run whatever it was told to.
+pub fn valid_program(path: &str) -> bool {
+	let name = path.rsplit('/').next().unwrap_or_default();
+	path.starts_with('/')
+		&& path.len() <= 128
+		&& !path.contains("..")
+		&& path
+			.chars()
+			.all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-'))
+		&& name.contains("sftp")
+		&& name != "internal-sftp"
+}
+
+/// The command that runs ONE program as another account, for a file-layer channel (§46).
+///
+/// No shell is involved on purpose: `sudo` is given the program to exec directly, so the only
+/// strings on that command line are a name `valid_user` has vetted and a path `valid_program`
+/// has vetted. `password` picks how sudo will authenticate:
+///
+///   * `false` — `-n`, non-interactive: sudo either has a valid credential (a cached ticket or
+///     NOPASSWD) or fails immediately. Nothing is written to the channel, so nothing can be
+///     misread as the program's own input.
+///   * `true` — `-S`, read the password from stdin: the caller writes it as the first line, and
+///     the program's data follows. Safe because sudo reads that line one byte at a time and stops
+///     at the newline, leaving the rest of the stream to the program it execs.
+///
+/// The order matters and is why the caller must PROBE before choosing: writing a password to a
+/// sudo that does not want one would push it into `sftp-server`'s input as protocol garbage.
+///
+/// `su` is offered for completeness only. It reads a password from a terminal and this channel
+/// deliberately has none (a pty would mangle the binary protocol), so it works for an account
+/// that needs no password and fails cleanly otherwise — see the NOT list in PLAN §46.
+pub fn program_command(kind: Kind, user: &str, program: &str, password: bool) -> String {
+	let account = crate::explorer::shell_quote(user);
+	let path = crate::explorer::shell_quote(program);
+	match kind {
+		Kind::Sudo if password => format!("sudo -S -p '' -u {account} -- {path}"),
+		Kind::Sudo => format!("sudo -n -u {account} -- {path}"),
+		Kind::Su => format!("su - {account} -c {path}"),
+	}
+}
+
+/// The command that runs a shell SNIPPET as another account (§46) — the fallback file backend,
+/// where each operation is `ls`, `cat`, `mkdir` and friends rather than an sftp packet.
+///
+/// The snippet is quoted as one argument to `/bin/sh -c`, so everything cmote composes into it
+/// (always through `crate::explorer::shell_quote`) stays data. Authentication works exactly as in
+/// `program_command`, including the stdin rule: after sudo has taken its password line, the rest
+/// of the channel belongs to the snippet — which is what lets a file be written by piping its
+/// bytes into `cat`.
+pub fn shell_command(kind: Kind, user: &str, snippet: &str, password: bool) -> String {
+	let account = crate::explorer::shell_quote(user);
+	let script = crate::explorer::shell_quote(snippet);
+	match kind {
+		Kind::Sudo if password => format!("sudo -S -p '' -u {account} -- /bin/sh -c {script}"),
+		Kind::Sudo => format!("sudo -n -u {account} -- /bin/sh -c {script}"),
+		Kind::Su => format!("su - {account} -c {script}"),
+	}
+}
+
 /// Whether `user` is a plausible account name, checked before it is put in a command line.
 ///
 /// Deliberately narrower than what a system will accept: letters, digits, and `._-`, not starting
@@ -327,6 +444,88 @@ mod tests {
 		// A credential question is not a shell prompt, whatever else it looks like.
 		assert!(!looks_like_shell("Verification code: "));
 		assert!(!looks_like_shell(MARKER));
+	}
+
+	#[test]
+	fn a_file_channel_runs_the_program_itself_with_no_shell_around_it() {
+		// The whole point of the direct form: the only strings on this command line are a vetted
+		// account name and a vetted path, so there is no shell to quote for a second time.
+		let command = program_command(Kind::Sudo, "root", "/usr/lib/openssh/sftp-server", false);
+		assert_eq!(
+			command,
+			"sudo -n -u 'root' -- '/usr/lib/openssh/sftp-server'"
+		);
+		assert!(!command.contains("sh -c"), "no shell in the way");
+	}
+
+	#[test]
+	fn a_password_is_read_from_stdin_only_when_the_caller_asks_for_it() {
+		// `-n` writes nothing to the channel, so nothing can be mistaken for the program's input;
+		// `-S` is the deliberate opposite, chosen only once sudo has refused for want of a password.
+		assert!(program_command(Kind::Sudo, "root", "/x/sftp-server", false).contains(" -n "));
+		let asked = program_command(Kind::Sudo, "root", "/x/sftp-server", true);
+		assert!(asked.contains(" -S "), "reads the password from stdin");
+		assert!(asked.contains("-p ''"), "and prints no prompt of its own");
+		assert!(!asked.contains(" -n "), "the two flags are exclusive");
+	}
+
+	#[test]
+	fn a_shell_snippet_reaches_the_other_account_as_one_argument() {
+		// A snippet IS shell text, so it is quoted whole: everything cmote composes into it stays
+		// data no matter what a path inside it contains.
+		let command = shell_command(Kind::Sudo, "root", "ls -1Ap -- '/etc'", false);
+		assert_eq!(
+			command,
+			"sudo -n -u 'root' -- /bin/sh -c 'ls -1Ap -- '\\''/etc'\\'''"
+		);
+	}
+
+	#[test]
+	fn only_a_real_sftp_server_path_is_ever_run() {
+		assert!(valid_program("/usr/lib/openssh/sftp-server"));
+		assert!(valid_program("/usr/libexec/sftp-server"));
+		// The three that matter, all of which could arrive from a remote sshd_config: a relative
+		// path, a program that is not an sftp server at all, and sftp implemented inside sshd —
+		// which is not a program and cannot be run as anyone.
+		assert!(!valid_program("sftp-server"));
+		assert!(!valid_program("/usr/bin/curl"));
+		assert!(!valid_program("internal-sftp"));
+		assert!(!valid_program("/usr/lib/openssh/internal-sftp"));
+		// And the shell-injection shapes, refused rather than quoted.
+		assert!(!valid_program("/x/sftp-server; rm -rf /"));
+		assert!(!valid_program("/x/$(id)/sftp-server"));
+		assert!(!valid_program("/x/../../sftp-server"));
+	}
+
+	#[test]
+	fn discovery_reads_the_first_usable_path_it_is_offered() {
+		// The `for` loop prints one path; the sshd_config fallback may print anything, so the
+		// parsing — not the snippet — is what decides.
+		assert_eq!(
+			parse_program("/usr/lib/openssh/sftp-server\n").as_deref(),
+			Some("/usr/lib/openssh/sftp-server")
+		);
+		// An sshd that implements sftp itself names no program: there is nothing to elevate.
+		assert_eq!(parse_program("internal-sftp\n"), None);
+		assert_eq!(parse_program(""), None);
+		// A line that cannot be a program is skipped rather than taken and quoted.
+		assert_eq!(
+			parse_program("sed: /etc/ssh/sshd_config: Permission denied\n/usr/libexec/sftp-server")
+				.as_deref(),
+			Some("/usr/libexec/sftp-server")
+		);
+	}
+
+	#[test]
+	fn the_discovery_snippet_covers_the_common_packagings_and_asks_sshd_last() {
+		let snippet = discover();
+		for path in SFTP_SERVERS {
+			assert!(snippet.contains(path), "{path} is not looked for");
+		}
+		assert!(
+			snippet.contains("/etc/ssh/sshd_config"),
+			"an unknown packaging still has sshd's own answer"
+		);
 	}
 
 	#[test]

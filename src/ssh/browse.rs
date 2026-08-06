@@ -1,4 +1,4 @@
-// ssh/browse.rs — read (and rename) remote folders for the explorer panel (PLAN §18).
+// ssh/browse.rs — read (and rename) remote folders for the explorer panel (PLAN §18, §46).
 //
 // The tree needs one thing from the server: "what folders are inside this one?".
 // Two ways to ask, tried in that order:
@@ -11,207 +11,111 @@
 //     `RawSftpSession` rather than the friendly `SftpSession`: the details popup wants the
 //     owner and group *names*, which live only in each entry's `longname` — the `ls -l`
 //     line the server resolved itself — and `read_dir` discards it (§20).
-//   * **`ls` over an exec channel** — the fallback for a server with the sftp subsystem
-//     switched off. It is text, so it is a guess; see the `ponytail:` note on `list_exec`.
+//   * **`ls` over an exec channel** (`shellfs`) — the fallback for a server with the sftp
+//     subsystem switched off. It is text, so it is a guess; see the `ponytail:` note there.
+//
+// Since §46 neither is necessarily the LOGIN account's. Which account a listing reads as, and
+// which of the two ways is available for it, is decided by `asuser::Accounts` before the work
+// starts and arrives here as one `Browse` value — so nothing in this file has to know that
+// accounts exist. A third case comes with it: `Browse::Denied`, for an account whose files cannot
+// be reached at all, which is reported as the listing failing rather than silently answered by
+// some other account.
 //
 // Either way the listing runs in a **spawned** task: the shell pump (`client::stream`)
-// must stay free to move terminal bytes while a slow directory is being read. Only the
-// channel opening happens inline, because that borrows the session handle — the same
-// split `upload` makes, and for the same reason.
+// must stay free to move terminal bytes while a slow directory is being read.
 
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
-use russh::{Channel, ChannelMsg, client};
+use anyhow::{Context, Result};
 use russh_sftp::client::RawSftpSession;
 use russh_sftp::client::error::Error as SftpError;
 use russh_sftp::protocol::{File, FileAttributes, StatusCode};
 use tokio::sync::mpsc;
 
+use super::asuser::{Browse, Runner};
+use super::shellfs;
 use crate::bridge::SshEvent;
-use crate::explorer::{join, shell_quote};
+use crate::explorer::join;
 use crate::files::{self, Entry, Kind, Meta};
 
-/// The most `ls` output the fallback will hold. A directory with a million entries (or a
-/// server answering with something that is not a listing at all) must not grow our
-/// memory without bound (§12); past this the listing fails cleanly instead.
-const MAX_OUTPUT: usize = 1024 * 1024;
-
-/// The session's SFTP channel for browsing, opened the first time a listing is asked for
-/// and reused from then on. `refused` records a server that will not give us the
-/// subsystem, so we ask once and fall back forever after rather than paying a failed
-/// channel open per click.
-///
-/// The upload path (§17) deliberately keeps its own short-lived channel: it closes the
-/// session when the transfer ends, which would take this one down with it.
-#[derive(Default)]
-pub struct Sftp {
-	session: Option<Arc<RawSftpSession>>,
-	refused: bool,
-	/// Whether the timezone probe has been sent for this session (§20). Asked once, on
-	/// the first files-pane listing — every mtime in the pane is rendered against it.
-	zone_asked: bool,
-}
-
-impl Sftp {
-	/// The shared SFTP session, opening it on first use. `None` means the server does
-	/// not offer the subsystem — the caller then falls back to `ls`.
-	async fn get<H: client::Handler>(
-		&mut self,
-		session: &client::Handle<H>,
-	) -> Option<Arc<RawSftpSession>> {
-		if self.refused {
-			return None;
+/// List the folders inside `path` and report them as one `DirListed` (or one `DirFailed`),
+/// reading as whichever account `backend` belongs to (§46).
+pub async fn list(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(list_sftp(sftp, path, events.clone()));
 		}
-		if let Some(sftp) = self.session.as_ref() {
-			return Some(sftp.clone());
+		Browse::Shell(runner) => {
+			tokio::spawn(list_shell(runner, path, events.clone()));
 		}
-		match super::open_raw_sftp(session).await {
-			Ok(sftp) => {
-				let sftp = Arc::new(sftp);
-				self.session = Some(sftp.clone());
-				Some(sftp)
-			}
-			Err(error) => {
-				eprintln!("sftp browse channel unavailable, falling back to ls: {error:#}");
-				self.refused = true;
-				None
-			}
-		}
-	}
-}
-
-/// List the folders inside `path` and report them as one `DirListed` (or one
-/// `DirFailed`). Opens whatever channel it needs inline, then hands the work to a
-/// spawned task so the shell keeps flowing.
-pub async fn list<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-	path: String,
-) {
-	if let Some(handle) = sftp.get(session).await {
-		tokio::spawn(list_sftp(handle, path, events.clone()));
-		return;
-	}
-	match session.channel_open_session().await {
-		Ok(channel) => {
-			tokio::spawn(list_exec(channel, path, events.clone()));
-		}
-		Err(error) => fail_dir(events, path, format!("Could not ask the server: {error}")).await,
+		Browse::Denied(reason) => fail_dir(events, path, reason).await,
 	}
 }
 
 /// List EVERY entry inside `path` — files included — for the files pane (§19), and
 /// report them as batches of `files::BATCH`. `request` identifies the listing so the
 /// pane can drop batches for a directory it has already left.
-pub async fn list_all<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
+pub async fn list_all(
+	backend: Browse,
 	events: &mpsc::Sender<SshEvent>,
 	path: String,
 	request: u64,
 ) {
-	// The pane shows modification times, and a time needs the server's zone to be read
-	// as the server's own clock (§20). Asked once, alongside the first listing.
-	probe_zone(session, sftp, events).await;
-	if let Some(handle) = sftp.get(session).await {
-		tokio::spawn(all_sftp(handle, path, request, events.clone()));
-		return;
-	}
-	match session.channel_open_session().await {
-		Ok(channel) => {
-			tokio::spawn(all_exec(channel, path, request, events.clone()));
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(all_sftp(sftp, path, request, events.clone()));
 		}
-		Err(error) => {
-			fail_files(
-				events,
-				request,
-				format!("Could not ask the server: {error}"),
-			)
-			.await;
+		Browse::Shell(runner) => {
+			tokio::spawn(all_shell(runner, path, request, events.clone()));
+		}
+		Browse::Denied(reason) => fail_files(events, request, reason).await,
+	}
+}
+
+/// Rename a folder on the server, reporting `RenameDone` or `RenameFailed`.
+pub async fn rename(backend: Browse, events: &mpsc::Sender<SshEvent>, from: String, to: String) {
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(rename_sftp(sftp, from, to, events.clone()));
+		}
+		Browse::Shell(runner) => {
+			tokio::spawn(rename_shell(runner, from, to, events.clone()));
+		}
+		Browse::Denied(reason) => {
+			let _ = events.send(SshEvent::RenameFailed(reason)).await;
 		}
 	}
 }
 
-/// Rename a folder on the server, reporting `RenameDone` or `RenameFailed`. Same
-/// channel choice as `list`.
-pub async fn rename<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-	from: String,
-	to: String,
-) {
-	if let Some(handle) = sftp.get(session).await {
-		tokio::spawn(rename_sftp(handle, from, to, events.clone()));
-		return;
-	}
-	match session.channel_open_session().await {
-		Ok(channel) => {
-			tokio::spawn(rename_exec(channel, from, to, events.clone()));
+/// Create a new folder on the server, reporting `MakeDirDone` or `MakeDirFailed` (§18).
+pub async fn make_dir(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(make_dir_sftp(sftp, path, events.clone()));
 		}
-		Err(error) => {
-			let _ = events
-				.send(SshEvent::RenameFailed(format!(
-					"Could not ask the server: {error}"
-				)))
-				.await;
+		Browse::Shell(runner) => {
+			tokio::spawn(make_dir_shell(runner, path, events.clone()));
 		}
-	}
-}
-
-/// Create a new folder on the server, reporting `MakeDirDone` or `MakeDirFailed` (§18). Same
-/// channel choice as `list`: the shared SFTP session when there is one, an `mkdir` over an exec
-/// channel otherwise.
-pub async fn make_dir<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-	path: String,
-) {
-	if let Some(handle) = sftp.get(session).await {
-		tokio::spawn(make_dir_sftp(handle, path, events.clone()));
-		return;
-	}
-	match session.channel_open_session().await {
-		Ok(channel) => {
-			tokio::spawn(make_dir_exec(channel, path, events.clone()));
-		}
-		Err(error) => {
-			let _ = events
-				.send(SshEvent::MakeDirFailed(format!(
-					"Could not ask the server: {error}"
-				)))
-				.await;
+		Browse::Denied(reason) => {
+			let _ = events.send(SshEvent::MakeDirFailed(reason)).await;
 		}
 	}
 }
 
 /// Delete remote entries, reporting one `DeleteDone` for the whole set or one `DeleteFailed`
 /// (§18). Each path is removed whatever it is — a file, a symlink (unlinked, never followed), or
-/// a folder and its whole subtree. Same channel choice as `list`; on the SFTP path the removal
-/// is a walk this module drives, on the exec fallback a single `rm -rf`.
-pub async fn remove<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-	paths: Vec<String>,
-) {
-	if let Some(handle) = sftp.get(session).await {
-		tokio::spawn(remove_sftp(handle, paths, events.clone()));
-		return;
-	}
-	match session.channel_open_session().await {
-		Ok(channel) => {
-			tokio::spawn(remove_exec(channel, paths, events.clone()));
+/// a folder and its whole subtree. On the SFTP path the removal is a walk this module drives, on
+/// the shell fallback a single `rm -rf`.
+pub async fn remove(backend: Browse, events: &mpsc::Sender<SshEvent>, paths: Vec<String>) {
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(remove_sftp(sftp, paths, events.clone()));
 		}
-		Err(error) => {
-			let _ = events
-				.send(SshEvent::DeleteFailed(format!(
-					"Could not ask the server: {error}"
-				)))
-				.await;
+		Browse::Shell(runner) => {
+			tokio::spawn(remove_shell(runner, paths, events.clone()));
+		}
+		Browse::Denied(reason) => {
+			let _ = events.send(SshEvent::DeleteFailed(reason)).await;
 		}
 	}
 }
@@ -379,56 +283,6 @@ async fn send_batches(events: &mpsc::Sender<SshEvent>, request: u64, entries: Ve
 	}
 }
 
-/// The `ls` fallback for the files pane. `-F` appends a type indicator — `/` directory,
-/// `@` symlink, and `*`/`|`/`=` for executables, fifos and sockets, which are all files
-/// as far as this pane is concerned.
-///
-/// `ponytail:` same caveat as `list_exec` — this is text, so a name containing a newline
-/// is read as two entries, and a name genuinely ending in one of the indicator characters
-/// loses it. Correct on the SFTP path, which is what runs unless the server refuses the
-/// subsystem.
-async fn all_exec(
-	channel: Channel<client::Msg>,
-	path: String,
-	request: u64,
-	events: mpsc::Sender<SshEvent>,
-) {
-	let command = format!("ls -1AF -- {}", shell_quote(&path));
-	match exec(channel, command).await {
-		Ok(output) => {
-			let mut entries: Vec<Entry> = output
-				.lines()
-				.filter(|line| !line.is_empty())
-				// No size, time or owner on this path: `ls -1AF` reports none of it, and
-				// asking for them would be a second, differently-shaped listing to parse.
-				// The details popup shows the type and leaves the rest blank (§20).
-				.map(|line| match line.strip_suffix('/') {
-					Some(name) => Entry {
-						name: name.to_owned(),
-						kind: Kind::Dir,
-						meta: Meta::default(),
-					},
-					None => match line.strip_suffix('@') {
-						Some(name) => Entry {
-							name: name.to_owned(),
-							kind: Kind::Link,
-							meta: Meta::default(),
-						},
-						None => Entry {
-							name: line.trim_end_matches(['*', '|', '=']).to_owned(),
-							kind: Kind::File,
-							meta: Meta::default(),
-						},
-					},
-				})
-				.collect();
-			files::sort(&mut entries);
-			send_batches(&events, request, entries).await;
-		}
-		Err(error) => fail_files(&events, request, format!("Could not list {error}")).await,
-	}
-}
-
 /// The SFTP rename. The destination is checked **first**: SFTP's own rename refuses an
 /// occupied path on most servers but not all, and a folder quietly replaced is not
 /// something the user can undo.
@@ -555,52 +409,48 @@ async fn remove_subtree(sftp: &RawSftpSession, root: &str) -> Result<()> {
 /// simply leaves the popup without that line.
 ///
 /// One link at a time, on the user's selection: doing it for every entry in a listing is
-/// a round trip per link, which is the cost the pane exists to avoid (§19). No `ls`
-/// fallback either — `readlink` is SFTP's own, and the text fallback has no metadata to
-/// show this beside.
-pub async fn read_link<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-	path: String,
-) {
-	let Some(handle) = sftp.get(session).await else {
-		return;
-	};
+/// a round trip per link, which is the cost the pane exists to avoid (§19).
+pub async fn read_link(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
 	let events = events.clone();
-	tokio::spawn(async move {
-		let Ok(name) = handle.readlink(path.clone()).await else {
-			return;
-		};
-		if let Some(file) = name.files.first() {
-			let _ = events
-				.send(SshEvent::LinkTarget {
-					path,
-					target: file.filename.clone(),
-				})
-				.await;
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(async move {
+				let Ok(name) = sftp.readlink(path.clone()).await else {
+					return;
+				};
+				if let Some(file) = name.files.first() {
+					report_link(&events, path, file.filename.clone()).await;
+				}
+			});
 		}
-	});
+		Browse::Shell(runner) => {
+			tokio::spawn(async move {
+				if let Some(target) = shellfs::read_link(&runner, &path).await {
+					report_link(&events, path, target).await;
+				}
+			});
+		}
+		// A link whose target cannot be read leaves the popup without that line, which is
+		// exactly what a broken link does — nothing to report.
+		Browse::Denied(_) => {}
+	}
 }
 
-/// Ask the server what timezone it is in, once per session (§20): `date +'%z %Z'` on an
-/// exec channel. Nothing is reported when the probe fails — the pane then renders its
-/// times as UTC, which is right about the instant if not about the wall clock.
-async fn probe_zone<H: client::Handler>(
-	session: &client::Handle<H>,
-	sftp: &mut Sftp,
-	events: &mpsc::Sender<SshEvent>,
-) {
-	if sftp.zone_asked {
-		return;
-	}
-	sftp.zone_asked = true;
-	let Ok(channel) = session.channel_open_session().await else {
-		return;
-	};
+/// Send one resolved symlink to the GUI.
+async fn report_link(events: &mpsc::Sender<SshEvent>, path: String, target: String) {
+	let _ = events.send(SshEvent::LinkTarget { path, target }).await;
+}
+
+/// Ask the server what timezone it is in, once per session (§20): `date +'%z %Z'`. Nothing is
+/// reported when the probe fails — the pane then renders its times as UTC, which is right about
+/// the instant if not about the wall clock.
+///
+/// Runs as whichever account is selected, because it needs no privilege either way; the zone
+/// belongs to the machine, so `asuser::Accounts` only ever lets this be asked once.
+pub fn probe_zone(runner: Runner, events: &mpsc::Sender<SshEvent>) {
 	let events = events.clone();
 	tokio::spawn(async move {
-		let Ok(output) = exec(channel, "date +'%z %Z'".to_owned()).await else {
+		let Ok(output) = runner.stdout("date +'%z %Z'").await else {
 			return;
 		};
 		if let Some(zone) = files::parse_zone(&output) {
@@ -609,136 +459,49 @@ async fn probe_zone<H: client::Handler>(
 	});
 }
 
-/// The `ls` fallback: one line per entry, with `/` appended to directories (`-p`),
-/// dot-entries included but `.`/`..` left out (`-A`), and `--` so a path starting with a
-/// dash is a path and not a flag.
-///
-/// `ponytail:` this is text, and text lies. A folder whose name contains a newline is
-/// read as two entries, and a symlink pointing at a directory is missed (`-p` marks only
-/// real directories, and `-L` would turn every broken link into an error). Both are
-/// correct on the SFTP path, which is what runs unless the server refuses the subsystem.
-/// Upgrade path: `find -maxdepth 1 -type d -print0` where the server has it.
-async fn list_exec(channel: Channel<client::Msg>, path: String, events: mpsc::Sender<SshEvent>) {
-	let command = format!("ls -1Ap -- {}", shell_quote(&path));
-	match exec(channel, command).await {
-		Ok(output) => {
-			let dirs = output
-				.lines()
-				.filter_map(|line| line.strip_suffix('/'))
-				.map(str::to_owned)
-				.collect();
+/// The shell-backend listing for the tree: `ls` under whichever account this is (§46).
+async fn list_shell(runner: Runner, path: String, events: mpsc::Sender<SshEvent>) {
+	match shellfs::dirs(&runner, &path).await {
+		Ok(dirs) => {
 			let _ = events.send(SshEvent::DirListed { path, dirs }).await;
 		}
-		Err(error) => fail_dir(&events, path, format!("Could not list {error}")).await,
+		Err(error) => fail_dir(&events, path, format!("{error}")).await,
 	}
 }
 
-/// The `mv` fallback. The existence test and the move are one command so nothing can
-/// slip into the destination between them, and `-e` catches a file, a folder or a
-/// dangling symlink sitting there.
-async fn rename_exec(
-	channel: Channel<client::Msg>,
-	from: String,
-	to: String,
-	events: mpsc::Sender<SshEvent>,
-) {
-	let command = format!(
-		"if [ -e {to} ]; then echo 'already exists' >&2; exit 1; fi; mv -- {from} {to}",
-		from = shell_quote(&from),
-		to = shell_quote(&to),
-	);
-	let event = match exec(channel, command).await {
-		Ok(_) => SshEvent::RenameDone { from, to },
+/// The shell-backend listing for the files pane.
+async fn all_shell(runner: Runner, path: String, request: u64, events: mpsc::Sender<SshEvent>) {
+	match shellfs::entries(&runner, &path).await {
+		Ok(entries) => send_batches(&events, request, entries).await,
+		Err(error) => fail_files(&events, request, format!("{error}")).await,
+	}
+}
+
+/// The shell-backend rename: `mv`, refusing an occupied destination.
+async fn rename_shell(runner: Runner, from: String, to: String, events: mpsc::Sender<SshEvent>) {
+	let event = match shellfs::rename(&runner, &from, &to).await {
+		Ok(()) => SshEvent::RenameDone { from, to },
 		Err(error) => SshEvent::RenameFailed(format!("Could not rename: {error}")),
 	};
 	let _ = events.send(event).await;
 }
 
-/// The `mkdir` fallback. The existence test and the create are one command so nothing can slip
-/// into the path between them, and `-e` catches a file, a folder or a dangling symlink already
-/// sitting there — the same guard `rename_exec` uses.
-async fn make_dir_exec(
-	channel: Channel<client::Msg>,
-	path: String,
-	events: mpsc::Sender<SshEvent>,
-) {
-	let quoted = shell_quote(&path);
-	let command = format!(
-		"if [ -e {quoted} ]; then echo 'already exists' >&2; exit 1; fi; mkdir -- {quoted}"
-	);
-	let event = match exec(channel, command).await {
-		Ok(_) => SshEvent::MakeDirDone(path),
+/// The shell-backend folder creation: `mkdir`, refusing an occupied path.
+async fn make_dir_shell(runner: Runner, path: String, events: mpsc::Sender<SshEvent>) {
+	let event = match shellfs::make_dir(&runner, &path).await {
+		Ok(()) => SshEvent::MakeDirDone(path),
 		Err(error) => SshEvent::MakeDirFailed(format!("Could not create the folder: {error}")),
 	};
 	let _ = events.send(event).await;
 }
 
-/// The `rm -rf` fallback: one command removes the whole set, folders and their contents included.
-/// Each path is quoted so a name carrying a space or a quote stays one argument, and `--` stops a
-/// name that starts with a dash being read as a flag — the deletion is a blunt instrument, so
-/// making sure it only ever sees paths and never options matters (§18).
-async fn remove_exec(
-	channel: Channel<client::Msg>,
-	paths: Vec<String>,
-	events: mpsc::Sender<SshEvent>,
-) {
-	let quoted = paths
-		.iter()
-		.map(|path| shell_quote(path))
-		.collect::<Vec<_>>()
-		.join(" ");
-	let event = match exec(channel, format!("rm -rf -- {quoted}")).await {
-		Ok(_) => SshEvent::DeleteDone(paths),
+/// The shell-backend delete: one `rm -rf` for the whole set.
+async fn remove_shell(runner: Runner, paths: Vec<String>, events: mpsc::Sender<SshEvent>) {
+	let event = match shellfs::remove(&runner, &paths).await {
+		Ok(()) => SshEvent::DeleteDone(paths),
 		Err(error) => SshEvent::DeleteFailed(format!("Could not delete: {error}")),
 	};
 	let _ = events.send(event).await;
-}
-
-/// Run one command on its own channel and collect its stdout. A non-zero exit becomes
-/// an error carrying the command's own stderr, which is the part worth showing the user.
-async fn exec(mut channel: Channel<client::Msg>, command: String) -> Result<String> {
-	channel
-		.exec(true, command)
-		.await
-		.context("the server refused to run a command")?;
-
-	let mut out: Vec<u8> = Vec::new();
-	let mut err: Vec<u8> = Vec::new();
-	let mut status: Option<u32> = None;
-	while let Some(message) = channel.wait().await {
-		match message {
-			ChannelMsg::Data { data } => {
-				out.extend_from_slice(&data);
-				if out.len() > MAX_OUTPUT {
-					bail!("the listing is too large to read");
-				}
-			}
-			ChannelMsg::ExtendedData { data, .. } => {
-				// stderr is only ever shown as a short reason, so a cap well under the
-				// stdout one is plenty.
-				if err.len() < 4096 {
-					err.extend_from_slice(&data);
-				}
-			}
-			ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
-			ChannelMsg::Eof | ChannelMsg::Close => break,
-			_ => {}
-		}
-	}
-
-	if status.is_some_and(|code| code != 0) {
-		let reason = String::from_utf8_lossy(&err);
-		let reason = reason.trim();
-		bail!(
-			"{}",
-			if reason.is_empty() {
-				"the command failed"
-			} else {
-				reason
-			}
-		);
-	}
-	Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
 /// Report a listing failure for one folder. The path is the user's own, so naming it is
