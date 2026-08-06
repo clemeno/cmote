@@ -25,14 +25,16 @@ use crate::paths;
 const FILE: &str = "settings.json";
 
 /// The bounds a remembered window size is held to. The floor keeps a hand-edited tiny value
-/// from opening an unusable sliver of a window.
+/// from opening an unusable sliver of a window — and, since §48 lets the app resize its own
+/// window when a split closes, it is public so that path can clamp to the same floor instead
+/// of shrinking to a size this file would then refuse to remember.
 ///
 /// The ceiling is not cosmetic: it is a hard renderer limit. wgpu guarantees a maximum
 /// texture dimension of only 8192 PHYSICAL pixels, and a surface is measured in physical
 /// pixels, so a 2× (HiDPI) display doubles whatever is asked for here. 4096 LOGICAL points
 /// leaves that margin and is already larger than any real display — so a stored size, however
 /// it got there, can never crash the renderer at launch inside `Surface::configure`.
-const MIN_WINDOW: f32 = 480.0;
+pub const MIN_WINDOW: f32 = 480.0;
 const MAX_WINDOW: f32 = 4096.0;
 
 /// What survives a restart, app-wide: the OS window size (§31) and the per-extension editor theme

@@ -713,6 +713,22 @@ impl App {
 		iced::Task::batch(tasks)
 	}
 
+	/// Whether the window may be cut right now (§48) — true only while it is whole.
+	///
+	/// This is one rule serving two purposes, which is why it is a function and not two conditions.
+	/// A strip asks it to decide whether to draw the split controls at all, and `apply_split` asks it
+	/// again to refuse a cut that got past them. The user's two rules — the controls belong to the
+	/// first region, and there is at most one split — meet in the same count: a window with one region
+	/// has only the original to offer them from, and a window with two has had its cut.
+	///
+	/// Counting the tree rather than remembering a flag is what keeps this honest through the other
+	/// end of the feature. Closing a region's last tab closes the region (§48), and the window is
+	/// whole again the instant that happens — including when it is the ORIGINAL region that goes and
+	/// the split one inherits the whole window. It is the top-left region then, and it may split.
+	fn splittable(&self) -> bool {
+		self.regions.len() == 1
+	}
+
 	/// The strip's split button (§48): find out how much screen there is, then cut `pane` in two.
 	///
 	/// Two steps, because the first thing the split needs is an answer that only arrives
@@ -767,6 +783,14 @@ impl App {
 		if self.regions.get(pane).is_none() {
 			return iced::Task::none();
 		}
+		// One cut, and only from the undivided window (§48). The strip stops offering the controls the
+		// moment a split lands, but that is not enough on its own: the monitor is measured
+		// asynchronously, so two quick presses both leave while the window is still whole and the
+		// second arrives here to find it is not. Refusing on arrival is what makes the rule hold —
+		// checking it in `request_split` would check it before the race, not after.
+		if !self.splittable() {
+			return iced::Task::none();
+		}
 		let id = self.next_id;
 		self.next_id += 1;
 		// The new tab inherits the window focus and modifier state from the region being split, so
@@ -809,22 +833,57 @@ impl App {
 	}
 
 	/// A region closed because its last tab did (§48). The room it held goes back to the region
-	/// beside it, and the keyboard follows if it was here.
+	/// beside it, the keyboard follows if it was here, and the window gives the OS back the space the
+	/// split asked it for.
 	///
-	/// The window is deliberately NOT shrunk back by half. A split grows it because the user asked
-	/// for the split; nothing here was asked for, and the window may well have been resized by hand
-	/// since, which would make halving it the wrong arithmetic against a number the user chose.
+	/// The shrink is the exact mirror of the grow, and by the same rule: **the surviving region keeps
+	/// the box it already has.** A split hands the region being cut its own size back and adds an
+	/// equal one beside it, so nothing already on screen reflows; a close takes the departing
+	/// region's share and the seam away again, and nothing reflows either. The survivor's rectangle
+	/// IS the new window size, with no axis test needed to work that out: with two regions the
+	/// survivor already spans the whole window along the axis they share, so its own box differs from
+	/// the window on exactly the axis the split was made along.
+	///
+	/// That is also why this is not "halve the window". The window may have been resized by hand and
+	/// the divider dragged well off centre since the split, and halving would be arithmetic on a
+	/// number the user chose. Measuring the survivor respects both.
 	///
 	/// `pane_grid` refuses to close the LAST region, and closing the last tab of the last region is a
 	/// quit (§30), so the `None` arm is unreachable through the UI — it opens a fresh home tab rather
 	/// than leave the window showing nothing.
 	fn close_region(&mut self, pane: pane_grid::Pane) -> iced::Task<Message> {
+		// Measured BEFORE the close, while the region being closed still has its share: afterwards the
+		// survivor's rectangle is the whole window and there is nothing left to read the shrink off.
+		let survivor = ui::split::regions(&self.regions, self.window);
 		match self.regions.close(pane) {
 			Some((_closed, sibling)) => {
 				if self.focus == pane {
 					self.focus = sibling;
 				}
-				self.relayout()
+				let shrunk = survivor.get(&sibling).map(|rect| {
+					// Clamped to the floor the settings file holds a remembered size to: a divider
+					// dragged near the end of its travel can leave a survivor narrower than the
+					// smallest window cmote will reopen, and a window it refuses to remember is one
+					// that jumps back to its old size on the next run.
+					iced::Size::new(
+						rect.width.max(crate::settings::MIN_WINDOW),
+						rect.height.max(crate::settings::MIN_WINDOW),
+					)
+				});
+				let Some(shrunk) = shrunk else {
+					// Unreachable in practice — the sibling was in the tree a line ago. Leaving the
+					// window as it is costs a stretched region, which the relayout below still fits.
+					return self.relayout();
+				};
+				self.window = shrunk;
+				self.settings.set_window(shrunk.width, shrunk.height);
+				// Measured against the size the window is ASKED for, exactly as a split is: if the OS
+				// grants something else the resize event that follows corrects every region, and if it
+				// grants it silently there is no event to correct anything with.
+				let relayout = self.relayout();
+				let resize = iced::window::latest()
+					.and_then(move |window| iced::window::resize(window, shrunk));
+				iced::Task::batch([relayout, resize])
 			}
 			None => self.open_tab(pane),
 		}
@@ -1383,8 +1442,11 @@ impl App {
 		// Copied out rather than read through `self` inside the closure, so nothing borrows the App
 		// for longer than the regions themselves do.
 		let focus = self.focused_pane();
+		// Whether any strip shows the split controls (§48). Read once for the whole frame: it is a fact
+		// about the window, not about a region, and every region has to agree on it.
+		let splittable = self.splittable();
 		let body = ui::split::frame(&self.regions, move |pane, region| {
-			Self::region_view(pane, region, pane == focus)
+			Self::region_view(pane, region, pane == focus, splittable)
 		});
 
 		// The app-wide quit dialog outranks a single tab's close: it floats over the whole window,
@@ -1481,8 +1543,13 @@ impl App {
 	/// touching a single one of them: the wrapper carries the one fact they would have needed.
 	///
 	/// An associated function rather than a method so the closure `view` hands to `ui::split::frame`
-	/// captures nothing but a `Pane` and a `bool`, and so cannot borrow the App a second time.
-	fn region_view(pane: pane_grid::Pane, region: &Region, focused: bool) -> Element<'_, Message> {
+	/// captures nothing but a `Pane` and two `bool`s, and so cannot borrow the App a second time.
+	fn region_view(
+		pane: pane_grid::Pane,
+		region: &Region,
+		focused: bool,
+		splittable: bool,
+	) -> Element<'_, Message> {
 		// The slot a drag would drop into, if one is in flight (§38): that chip wears the drop mark,
 		// and every chip switches to the "grabbing" cursor so the whole strip reads as in motion.
 		let drop_target = region.tab_drag.as_ref().and_then(|drag| drag.over);
@@ -1498,7 +1565,7 @@ impl App {
 				drop_target: drop_target == Some(tab.id),
 			})
 			.collect();
-		let strip = ui::tabs::strip(&chips, region.tab_drag.is_some(), focused);
+		let strip = ui::tabs::strip(&chips, region.tab_drag.is_some(), focused, splittable);
 		let stacked = iced::widget::column![strip, region.active().view()]
 			.width(iced::Length::Fill)
 			.height(iced::Length::Fill);
@@ -9884,6 +9951,53 @@ mod tests {
 	}
 
 	#[test]
+	fn only_the_whole_window_offers_a_split() {
+		let mut app = tab_app();
+		assert!(
+			app.splittable(),
+			"undivided, and its one region is the original — the controls are on its strip"
+		);
+		let fresh = {
+			let _ = split(&mut app, ui::split::Way::Horizontal);
+			app.focus
+		};
+		assert!(
+			!app.splittable(),
+			"one cut is all there is: neither strip offers another"
+		);
+		// Give the room back and the offer returns — this is the only way to get a different split,
+		// so it has to come back rather than be spent for the life of the window.
+		let _ = app.close_region(fresh);
+		assert_eq!(region_count(&app), 1);
+		assert!(app.splittable());
+	}
+
+	#[test]
+	fn the_split_region_may_split_again_once_the_original_region_goes() {
+		let mut app = tab_app();
+		let original = app.focus;
+		let _ = split(&mut app, ui::split::Way::Vertical);
+		// Close the region the split was made FROM. The one that was below inherits the whole window,
+		// which makes it the top-left region — and the rule follows the shape, not the history.
+		let _ = app.close_region(original);
+		assert_eq!(region_count(&app), 1);
+		assert_ne!(app.focus, original, "the keyboard moved to the survivor");
+		assert!(app.splittable());
+	}
+
+	#[test]
+	fn a_second_split_is_refused_even_when_it_was_already_in_flight() {
+		let mut app = tab_app();
+		// Two quick presses: both leave while the window is whole, because the monitor is measured
+		// asynchronously. The second arrives after the first has landed and must do nothing at all —
+		// not add a third region, and not double the window a second time.
+		let grown = split(&mut app, ui::split::Way::Horizontal);
+		let _ = split(&mut app, ui::split::Way::Vertical);
+		assert_eq!(region_count(&app), 2, "still one cut");
+		assert_eq!(app.window, grown, "and the window grew only once");
+	}
+
+	#[test]
 	fn a_split_opens_a_second_region_on_the_target_list_and_gives_it_the_keyboard() {
 		let mut app = tab_app();
 		let first = app.focus;
@@ -10003,8 +10117,16 @@ mod tests {
 	#[test]
 	fn closing_a_regions_last_tab_closes_the_region_and_hands_back_its_room() {
 		let mut app = tab_app();
+		let kept = app.focus;
 		let _ = split(&mut app, ui::split::Way::Horizontal);
 		let fresh = app.focus;
+		// What the survivor is showing right now, so the close can be held to leaving it alone.
+		let before = app
+			.regions
+			.get(kept)
+			.expect("the region that was split")
+			.active()
+			.window_size;
 		let only_tab = strip(&app)[0].id;
 		let _ = app.request_close(only_tab);
 		assert_eq!(region_count(&app), 1, "the region went with its last tab");
@@ -10012,13 +10134,63 @@ mod tests {
 			app.regions.get(fresh).is_none(),
 			"and it is the region that was closed"
 		);
-		// The keyboard followed, and the surviving region has the whole window back.
+		assert_eq!(app.focused_pane(), kept, "the keyboard followed");
+		// The window gave the space back, so the survivor spans it exactly as it did before — the
+		// mirror of the grow, and the reason nothing in it reflows either way (§48).
+		assert_eq!(app.window.height, 800.0, "the other axis is untouched");
+		assert!(
+			(app.window.width - (1200.0 - ui::split::SPACING / 2.0)).abs() < 1.0,
+			"back to its pre-split width, less the half seam the split cost it: {}",
+			app.window.width
+		);
 		let boxes = ui::split::regions(&app.regions, app.window);
-		let survivor = boxes[&app.focused_pane()];
-		assert_eq!(survivor.width, app.window.width);
-		// The window itself is deliberately NOT shrunk back (§48): a split grows it because the user
-		// asked, and nobody asked for this.
-		assert_eq!(app.window.width, 2400.0);
+		assert_eq!(boxes[&kept].width, app.window.width, "and it has all of it");
+		assert_eq!(
+			app.regions
+				.get(kept)
+				.expect("the survivor")
+				.active()
+				.window_size,
+			before,
+			"measured to the same box it already had, so its grid never reflowed"
+		);
+		// And the size the next run opens at is the shrunk one, not the split's.
+		assert_eq!(
+			app.settings.window_size().map(|size| size.width),
+			Some(app.window.width)
+		);
+	}
+
+	#[test]
+	fn closing_a_stacked_region_gives_the_height_back_not_the_width() {
+		let mut app = tab_app();
+		let kept = app.focus;
+		let _ = split(&mut app, ui::split::Way::Vertical);
+		let only_tab = strip(&app)[0].id;
+		let _ = app.request_close(only_tab);
+		assert_eq!(app.window.width, 1200.0, "the other axis is untouched");
+		assert!(
+			(app.window.height - (800.0 - ui::split::SPACING / 2.0)).abs() < 1.0,
+			"back to its pre-split height: {}",
+			app.window.height
+		);
+		assert_eq!(app.focused_pane(), kept);
+	}
+
+	#[test]
+	fn the_shrink_stops_at_the_smallest_window_that_can_be_remembered() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		// The user narrows the split window by hand afterwards, leaving each region a sliver. The
+		// close must not hand back so much room that the window ends up smaller than the smallest one
+		// cmote will reopen — a size the settings file refuses to remember is one that jumps back on
+		// the next run (§31).
+		let _ = app.update(Message::WindowResized(iced::Size::new(700.0, 600.0)));
+		let only_tab = strip(&app)[0].id;
+		let _ = app.request_close(only_tab);
+		assert_eq!(region_count(&app), 1);
+		assert_eq!(app.window.width, crate::settings::MIN_WINDOW);
+		assert_eq!(app.window.height, 600.0, "the untouched axis is not raised");
 	}
 
 	#[test]

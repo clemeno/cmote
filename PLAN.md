@@ -4277,6 +4277,32 @@ it, or **below** it. The fresh region opens as a whole small application — one
 target list — because the reason to ask for a split is almost always to go somewhere else, and that is
 where going somewhere else starts.
 
+### One cut, offered from one place
+
+A window holds **at most one split**: one region beside the original, or one below it, never both and never
+a split of a split. The two buttons appear only while the window is whole — which is also the only time
+there is a single region to offer them from, the original one at the top left. Make the cut and they go
+from both strips; close the second region and they come back.
+
+Two windows' worth of work side by side is the case this section was asked for. A grid of four is a
+different tool: at that point the regions are small enough that a terminal in one is a few columns wide, the
+tint that says which region has the keyboard is competing with three others, and every question below —
+where a dropped file goes, what the title bar names, which region a picker's answer belongs to — gets an
+answer that is right less often. Refusing the second cut is what keeps all of those answers cheap.
+
+`App::splittable` is the one place the rule lives, and it is a **count of the region tree** rather than a
+flag: `regions.len() == 1`. Counting cannot fall out of step with the thing it counts. It also gets the far
+end of the feature right for free — close the *original* region and the split one inherits the whole window,
+which makes it the top-left region, and it may split. The rule follows the shape of the window, not the
+history of how it got there.
+
+The controls are **absent rather than greyed out**, so whenever one is on the strip it works. And the rule
+is checked twice, in two different places, for two different reasons: `view` asks it to decide whether to
+draw the buttons at all, and `apply_split` asks it again to refuse a cut that got past them. The second is
+not belt-and-braces — the monitor is measured asynchronously, so two quick presses both leave while the
+window is still whole, and the second arrives to find that it is not. Refusing on arrival is what makes the
+rule hold; checking it in `request_split` would check it before the race rather than after.
+
 ### The window grows; it does not divide what you had
 
 A split asks the OS to **double the window** along the way it cuts: beside → twice as wide, below → twice
@@ -4366,9 +4392,31 @@ down exactly once:
 
 ### What closing does
 
-Closing a region's **last tab** closes the region, and its room goes back to the region beside it. Closing
-the last tab of the **only** region is still a quit (§30) — it would empty the window otherwise. The live
-session and unsaved editor confirmations sit in front of both, unchanged.
+Closing a region's **last tab** closes the region, its room goes back to the region beside it, and the
+window **gives the OS back the space the split asked for**. Closing the last tab of the **only** region is
+still a quit (§30) — it would empty the window otherwise. The live session and unsaved editor confirmations
+sit in front of both, unchanged.
+
+The shrink is the exact mirror of the grow, and it follows from the same rule: **the surviving region keeps
+the box it already has.** A split hands the region being cut its own size back and puts an equal one beside
+it; a close takes the departing region's share and the seam away again. Nothing on screen reflows in either
+direction.
+
+Which axis to shrink along never has to be worked out, because the survivor's own rectangle **is** the new
+window size. With two regions the survivor already spans the whole window along the axis they share, so its
+box differs from the window on exactly the axis the split was made along, and on that axis by exactly what
+the split added. One measurement answers both questions.
+
+This is deliberately *not* "halve the window". Between the split and the close the window may have been
+resized by hand and the divider dragged well off centre, and halving would be arithmetic performed on a
+number the user chose. Measuring the survivor respects both, at the cost of one read of the layout node
+before the region goes — after it, the survivor's rectangle is already the whole window and there is
+nothing left to read the shrink off.
+
+The one clamp is `settings::MIN_WINDOW`: a divider dragged near the end of its travel can leave a survivor
+narrower than the smallest window cmote will reopen, and a size the settings file refuses to remember (§31)
+is a window that jumps back to its old size on the next run. The floor is shared rather than restated for
+exactly that reason.
 
 There is no separate "close this split" button. A region is defined by the tabs in it, so closing them is
 closing it; a button that discarded several at once would need a confirmation of its own and a rule for
@@ -4385,6 +4433,8 @@ what it does to their sessions.
 - `ui/tabs.rs` — two buttons at the right end of the bar, and a dimmer fill for a region that does not hold
   the keyboard. The buttons are pushed to the far right rather than sitting by the "+", because chips grow
   with their labels and a control that can be pushed out of reach is one a user has to close a tab to get at.
+  A strip is *told* whether to draw them (`splittable`) rather than working it out: whether the window may be
+  cut is a fact about the window, and a strip can only see its own region.
 
 Tab ids stay **app-wide** and are never reused, so an id names exactly one tab however the window is split.
 That is what lets a session's events, an editor's parent and the quit drain all keep working by identity
@@ -4392,12 +4442,12 @@ while positions moved underneath them.
 
 ### What is deliberately NOT here
 
-- **The window is not shrunk back when a region closes.** A split grows it because the user asked for the
-  split; nothing asks for this, and the window may well have been resized by hand since, which would make
-  halving it the wrong arithmetic against a number the user chose.
-- **The split layout is not remembered between runs.** `settings.json` keeps the window size (§31) and now
-  gets the grown one, so a restart comes back the size it was left — with one region. Persisting the tree
-  would mean persisting which tab is in which region, and a tab is a session that no longer exists.
+- **No second split, and so no grid of regions** — one cut, from the undivided window, for the reasons above.
+  `pane_grid` would nest them arbitrarily deep; the refusal is cmote's, not the widget's.
+- **The split layout is not remembered between runs.** `settings.json` keeps the window size (§31) and is
+  told about both the grow and the shrink, so a restart comes back the size the window was left — with one
+  region. Persisting the tree would mean persisting which tab is in which region, and a tab is a session
+  that no longer exists.
 - **No keyboard shortcut for splitting**, matching the strip's mouse-only rule (§26). Every modifier
   combination is a key the shell has a claim on, and inventing a global one is a decision about what to take
   away from the remote.

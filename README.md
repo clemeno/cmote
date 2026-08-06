@@ -32,14 +32,17 @@ references below (§n) point into it.
   **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
   targets and the unlocked vault are shared across every tab.
 - **Split the window — two sessions side by side.** The two buttons at the right of the strip cut
-  the window in half **beside** or **below**, and the new half is a whole small cmote: its own tab
-  strip, its own tab, opened on the saved target list ready to connect somewhere. Splitting
+  the window **beside** or **below**, and the new half is a whole small cmote: its own tab
+  strip, its own tab, opened on the saved target list ready to connect somewhere. **One split, no
+  more:** the buttons are there while the window is whole and gone once it is cut, so there is never
+  a grid of regions too narrow to read. Close the second region and they come back. Splitting
   **doubles the window** in the direction you asked for, so the session already on screen keeps the
   size it had and does not reflow. **Drag a divider** to re-share the room; the share is kept as a
   proportion, so it survives resizing the window. A **click** anywhere in a region gives it the
   keyboard and lights its strip, and that same click still lands where you aimed it. Closing a
-  region's last tab closes the region and gives its room back; closing the last tab of the last
-  region still asks to quit.
+  region's last tab closes the region and **shrinks the window back**, so the region you kept stays
+  exactly the size it was — however you had dragged the divider or resized the window meanwhile.
+  Closing the last tab of the last region still asks to quit.
 - **Confirmed, clean quit.** Closing the **last** tab, or clicking the window's title-bar **×**,
   asks **Quit cmote?** first — telling you how many live sessions it will disconnect — so a stray
   click never drops your work. On confirm, every session is **disconnected cleanly** (a proper SSH
@@ -385,7 +388,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 |---|---|
 | **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous panel — shell, folder tree, files pane (hidden panels are skipped) |
 | Click a panel | Focus it |
-| **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way |
+| **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way. Shown only while the window is whole: one split is the limit |
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
 | **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead |

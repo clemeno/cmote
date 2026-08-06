@@ -130,7 +130,17 @@ pub struct Chip {
 /// `focused` says this strip's region holds the keyboard (§48), which only tints the bar. A window
 /// with no split has exactly one region and it is always focused, so that window looks as it always
 /// did and the tint is a cost paid only once the user asks for a split.
-pub fn strip(chips: &[Chip], dragging: bool, focused: bool) -> Element<'static, Message> {
+///
+/// `splittable` says this strip may OFFER a split, and only the undivided window's one strip ever
+/// does (§48). One cut is all there is, so once it has been made neither strip shows the controls
+/// again until the split region closes — a control that cannot do anything is worse than an absent
+/// one, because the only way to find out is to press it.
+pub fn strip(
+	chips: &[Chip],
+	dragging: bool,
+	focused: bool,
+	splittable: bool,
+) -> Element<'static, Message> {
 	let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(chips.len() + 4);
 	for (index, chip) in chips.iter().enumerate() {
 		items.push(chip_view(index, chip, dragging));
@@ -149,16 +159,19 @@ pub fn strip(chips: &[Chip], dragging: bool, focused: bool) -> Element<'static, 
 	// The split controls are pushed to the FAR RIGHT rather than left where the "+" sits (§48).
 	// Chips grow with their labels, so a strip with several long endpoints in it would otherwise
 	// walk these two off the bar — and a control that can be pushed out of reach is one a user has
-	// to close a tab to get at.
+	// to close a tab to get at. The spacer goes in either way: without it a strip that is not
+	// offering a split would let its chips spread across the bar and then pull back once one was.
 	items.push(space().width(Length::Fill).into());
-	items.push(split_button(
-		SPLIT_BESIDE_GLYPH,
-		Message::Split(split::Way::Horizontal),
-	));
-	items.push(split_button(
-		SPLIT_BELOW_GLYPH,
-		Message::Split(split::Way::Vertical),
-	));
+	if splittable {
+		items.push(split_button(
+			SPLIT_BESIDE_GLYPH,
+			Message::Split(split::Way::Horizontal),
+		));
+		items.push(split_button(
+			SPLIT_BELOW_GLYPH,
+			Message::Split(split::Way::Vertical),
+		));
+	}
 
 	let fill = if focused { BAR_BG } else { BAR_UNFOCUSED_BG };
 	// The row is told to FILL, not left to shrink to its chips: the spacer above only pushes the split
@@ -192,8 +205,10 @@ pub fn strip(chips: &[Chip], dragging: bool, focused: bool) -> Element<'static, 
 /// fresh one beside it or below it. Muted at rest and lit on hover, like the "×" in a chip — a
 /// control that changes the shape of the whole window should not be the loudest thing on the strip.
 ///
-/// Always live. A split cannot fail: the window asks the OS to grow to make the room, and if the
-/// screen has none left to give, the two regions share what this one already had.
+/// Never disabled, only absent (§48): it is drawn on the undivided window's strip and nowhere else,
+/// so whenever it is there it works. A split itself cannot fail — the window asks the OS to grow to
+/// make the room, and if the screen has none left to give, the two regions share what it already
+/// had. A greyed-out button would have had to explain which of those two it was.
 fn split_button(glyph: char, message: Message) -> Element<'static, Message> {
 	button(
 		text(glyph.to_string())
