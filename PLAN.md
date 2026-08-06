@@ -4263,3 +4263,160 @@ opening an sftp session — uses `exec_inline`, which borrows the loop's own han
   is ever felt.
 - **Still no auto-elevate on connect, and no vault-stored sudo password.** Both are §47, which is where
   the profile format changes.
+
+## §48 — Splitting the window (v3.x)
+
+Tabs (§26) gave the window many sessions and showed one at a time. That is the right trade when the work
+is sequential — read a log, then go and fix the thing — and the wrong one when it is not: watching a build
+on one host while editing on another meant clicking back and forth and holding the other side in your
+head. This section makes the window divisible. A split cuts it into **regions**, each with its own tab
+strip and its own tab on screen, so two sessions can be watched at once.
+
+The strip gained two buttons at its right-hand end: cut this region in two and put a fresh one **beside**
+it, or **below** it. The fresh region opens as a whole small application — one tab, sitting on the saved
+target list — because the reason to ask for a split is almost always to go somewhere else, and that is
+where going somewhere else starts.
+
+### The window grows; it does not divide what you had
+
+A split asks the OS to **double the window** along the way it cuts: beside → twice as wide, below → twice
+as tall. So the region being split keeps the size it had, and the new one is its equal.
+
+This is the difference between a split being free and a split being disruptive. Halving would reflow the
+shell already on screen to half a window — a hard reflow, which drops the selection, throws away the find
+bar's match list and re-wraps every line of scrollback (§43). Growing costs the old region half a
+divider's width and nothing else.
+
+The size asked for is **clamped to the monitor** first, which is why the flow is two steps rather than one:
+`Message::Split` asks the OS how big the screen is, and `Message::SplitSized` does the cutting once the
+answer is back. Past the edge of the screen there is no way to reach a region and — since a region's only
+handle is the region itself — no way to drag the divider back either. A screen that cannot be measured is
+not a reason to refuse the split, only a reason not to clamp against a number we do not have.
+
+### Routing: an event belongs where it happened, not where the keyboard is
+
+This is the one genuinely new idea in the section, and everything else follows from it.
+
+Every region is on screen at once, so "which region is this event for?" stops being answerable from the
+layout. The obvious answer — send it to the region holding the keyboard — is **wrong**, and wrong in a way
+that would have been easy to ship. A left press inside an unfocused region produces two messages: the
+press itself, and the focus change. The press arrives **first**, because `pane_grid` lets a region's own
+widgets see an event before it looks at the event itself. Routed by focus, that first click into a split
+would land in the *previously* focused region's terminal — clobbering a selection there and starting a drag
+nobody asked for.
+
+So `view` wraps everything a region draws in `Message::In(pane, …)`, using iced's `Element::map`. Every
+message a region's widgets raise carries the region it came from, and `App::update` applies it there.
+`update_in(pane, message)` is the match `update` used to be, with "the active tab" now meaning "the active
+tab OF THIS REGION".
+
+The shape of a message is what says where it goes, and there are three shapes:
+
+| Shape | Where it goes | Examples |
+|---|---|---|
+| `Message::In(pane, …)` | that region | every click, every strip gesture, every dialog inside a region |
+| the App's own, unwrapped | the App, sometimes fanned out to every region | SSH events (by tab id), window resize / focus, the frame clocks, the quit flow, the split gestures |
+| anything else, unwrapped | the region holding the keyboard | the keyboard, above all — a subscription has no region of its own |
+
+A pleasant consequence: **nothing inside a region had to change.** Not the strip, not the terminal, not a
+dialog, not the file panes. The wrapper carries the one fact any of them would have needed, which is why
+§48 touched `ui/tabs.rs` for two buttons and a tint and left every other view file alone.
+
+Two kinds of message had to learn to **fan out** rather than pick a region. The OS window's focus, because
+focus reporting is a promise made to the program in each shell (§23) and there is now one visible shell per
+region; and the two frame clocks — the copy toast's dwell (§10) and the find bar's re-scan (§44) — because a
+region left un-ticked would keep a toast on screen for good. Both are clocks or facts about the window, not
+gestures, so neither has a region to belong to.
+
+### Geometry: one place turns a window into a row and column count
+
+`ui::split::regions` asks `pane_grid`'s own layout node for each region's rectangle, and `App::relayout`
+hands every region's on-screen tab that rectangle **less the strip above it**. It runs after anything that
+can change a region's shape: a window resize, a divider drag, a split, a region closing, a tab coming
+forward.
+
+Using the widget's own node to measure is the whole reason `pane_grid` is under this feature rather than a
+hand-built tree of rows and columns. A terminal cannot exist until something tells it the exact pixel box
+it fills, because that is what fixes its size (§9); a hand-rolled tree would have had to do that arithmetic
+twice, once to draw and once to measure, and the two copies would drift the first time a constant moved.
+`SPACING` and `MIN_SIZE` are constants rather than arguments for the same reason — a divider drawn at one
+spacing and measured at another leaves every grid a column short of its region.
+
+A divider drag stores only the **ratio**, never a pixel count, so a share of the window survives a window
+resize instead of becoming a stale measurement of a size the window no longer is.
+
+The pointer needed no work at all, and that is worth saying because it is the thing most likely to have
+broken. Every pointer coordinate in cmote was already **widget-local**: `mouse_area::on_move` reports
+`position_in(bounds)`, and the two places the grid widget reads the raw cursor immediately subtract its own
+laid-out bounds. Both are still right inside a region, because a region's bounds are just a smaller
+rectangle. The dialog drags are the same story — they apply pointer *deltas* and clamp against the space
+they are drawn in, which is now a region rather than the window, and the App-level overlays (§26, §30) go on
+being measured against the whole window because that is still what they float over.
+
+### Two inversions, each contained in one place
+
+Neither is avoidable and both are a standing invitation to an off-by-ninety-degrees bug, so each is written
+down exactly once:
+
+- **iced names a split after its divider.** Two regions side by side are parted by a *vertical* line, so a
+  user's "split horizontally" is `pane_grid::Axis::Vertical`. `ui::split::Way::axis` is the only place the
+  two vocabularies meet.
+- **Material Icons does the same with its glyphs.** `vertical_split` is the picture of two regions side by
+  side. The constants in `ui/tabs.rs` are named for what the button *does*, with the codepoint beside them.
+
+### What closing does
+
+Closing a region's **last tab** closes the region, and its room goes back to the region beside it. Closing
+the last tab of the **only** region is still a quit (§30) — it would empty the window otherwise. The live
+session and unsaved editor confirmations sit in front of both, unchanged.
+
+There is no separate "close this split" button. A region is defined by the tabs in it, so closing them is
+closing it; a button that discarded several at once would need a confirmation of its own and a rule for
+what it does to their sessions.
+
+### Structure
+
+- `ui/split.rs` (new) — the frame. `Way` and its inversion, the seam metrics, `regions` for measuring and
+  `frame` for drawing. Knows nothing about tabs.
+- `app.rs` — `Region` is new and almost entirely **lifted, not written**: a window used to *be* a strip of
+  tabs, so the tab list, which one is on screen, the activation order (§37) and the strip drag (§38) moved
+  off `App` onto `Region` unchanged. `App` kept what there is genuinely one of — the region tree, the focus,
+  the window size, the target list, the vault, the id counter, the quit flow.
+- `ui/tabs.rs` — two buttons at the right end of the bar, and a dimmer fill for a region that does not hold
+  the keyboard. The buttons are pushed to the far right rather than sitting by the "+", because chips grow
+  with their labels and a control that can be pushed out of reach is one a user has to close a tab to get at.
+
+Tab ids stay **app-wide** and are never reused, so an id names exactly one tab however the window is split.
+That is what lets a session's events, an editor's parent and the quit drain all keep working by identity
+while positions moved underneath them.
+
+### What is deliberately NOT here
+
+- **The window is not shrunk back when a region closes.** A split grows it because the user asked for the
+  split; nothing asks for this, and the window may well have been resized by hand since, which would make
+  halving it the wrong arithmetic against a number the user chose.
+- **The split layout is not remembered between runs.** `settings.json` keeps the window size (§31) and now
+  gets the grown one, so a restart comes back the size it was left — with one region. Persisting the tree
+  would mean persisting which tab is in which region, and a tab is a session that no longer exists.
+- **No keyboard shortcut for splitting**, matching the strip's mouse-only rule (§26). Every modifier
+  combination is a key the shell has a claim on, and inventing a global one is a decision about what to take
+  away from the remote.
+- **A region cannot be dragged onto another**, though `pane_grid` offers it. Both regions are strips of tabs,
+  and the gesture would have to say what happens to both.
+- **A tab cannot be dragged from one region's strip to another's.** The drag is reported by the chips' own
+  pointer events (§38) and a chip belongs to one strip, so a pointer that wanders into another region's strip
+  reports nothing there and the release drops the tab where it was. Correct, but a real limitation: moving
+  work between regions means opening it again.
+- **A dropped file goes to the region holding the keyboard**, not the region it was dropped on. iced's
+  `FileDropped` window event carries no position, so there is nothing to route on.
+- **A file picker's answer goes to the region holding the keyboard.** In practice that is the right region,
+  because the click that opened the picker also focused it, and a native dialog holds the input while it is
+  up. It would be wrong only if the focus moved between opening the picker and answering it.
+- **A region can be dragged narrower than a usable terminal, down to `MIN_SIZE`.** `grid_size` clamps to at
+  least one cell from there, exactly as it always did for a window dragged down to nothing. A window too
+  small to divide at all is left to that same clamp rather than given a new refusal path of its own.
+- **No maximize-this-region.** `pane_grid` has one; the dividers already do the job, and a maximized region
+  would be a second kind of "which one is showing" to keep in step with the focus.
+- **The regions do not label themselves.** The focused region's strip is lit and the others are dimmed, and
+  the title bar names the focused region's session (§17) — a window has one title bar however many regions
+  are in it. A per-region caption would be a third thing saying the same as the tint and the chip.

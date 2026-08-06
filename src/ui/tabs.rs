@@ -18,12 +18,20 @@
 // sits in a sub-region of the window that is exactly that much shorter. `App` hands each tab a
 // window size already reduced by `STRIP_HEIGHT`, so every layout and pointer coordinate inside a
 // tab is measured against the region it actually occupies.
+//
+// Since §48 the window can hold MORE THAN ONE of these strips: a split gives each region its own,
+// and the region a strip belongs to is not in this file at all. `App` maps every message a region's
+// widgets raise so it names its own region, which is why nothing here takes a region as an
+// argument — a chip press means "this strip's tab", and the wrapper says whose strip that was. The
+// one thing a strip does have to be told is whether its region holds the KEYBOARD, since with
+// several strips on screen "which one am I typing into" is no longer answerable from the layout.
 
 use iced::alignment::Vertical;
-use iced::widget::{button, container, mouse_area, row, text};
-use iced::{Border, Color, Element, Length};
+use iced::widget::{button, container, mouse_area, row, space, text};
+use iced::{Border, Color, Element, Font, Length};
 
 use crate::app::Message;
+use crate::ui::split;
 
 /// The strip's fixed height in pixels — the chip height plus the bar's padding top and bottom.
 /// `app` subtracts this from the window height it gives each tab, so the terminal grid fits the
@@ -36,6 +44,27 @@ const BAR_BG: Color = Color::from_rgb8(0x22, 0x22, 0x22);
 const ACTIVE_BG: Color = Color::from_rgb8(0x3a, 0x3a, 0x3a);
 const INACTIVE_FG: Color = Color::from_rgb8(0xa0, 0xa0, 0xa0);
 const ACTIVE_FG: Color = Color::from_rgb8(0xf0, 0xf0, 0xf0);
+
+/// The bar's fill in a region that does NOT hold the keyboard (§48). Darker than `BAR_BG`, not
+/// lighter: the region being typed into should be the one that looks lit, and with one region — the
+/// only case before §48 — this colour never appears at all, so an unsplit window is unchanged.
+const BAR_UNFOCUSED_BG: Color = Color::from_rgb8(0x18, 0x18, 0x18);
+
+/// The Material Icons face, bundled in the binary (`app::ICON_FONT`) and already loaded by the
+/// file panes (§19). Named again here rather than shared so the strip's chrome carries the strip's
+/// own palette instead of inheriting a panel's.
+const ICON_FONT: Font = Font::with_name("Material Icons");
+
+/// The split buttons' glyphs (§48), and a second inversion to keep straight: Material Icons names
+/// its two split icons after the DIVIDING LINE, so `vertical_split` (a box parted by an upright
+/// line) is the picture of two regions SIDE BY SIDE. The names below say what the button does, and
+/// the codepoints are the pictures that show it.
+const SPLIT_BESIDE_GLYPH: char = '\u{e949}';
+const SPLIT_BELOW_GLYPH: char = '\u{e947}';
+
+/// The split buttons' glyph size — a touch under the chip height so the two read as toolbar
+/// controls sitting in the bar rather than as chips of their own.
+const SPLIT_ICON_SIZE: f32 = 17.0;
 
 /// Each chip's fixed height, so the bar's own height (`STRIP_HEIGHT`) is predictable.
 const CHIP_HEIGHT: f32 = 30.0;
@@ -97,8 +126,12 @@ pub struct Chip {
 /// the "grabbing" hand over every chip, so the gesture reads as in progress wherever the pointer has
 /// got to. The bar itself catches the release (a drop on the gap between chips still counts) and the
 /// pointer leaving the strip, which abandons the move.
-pub fn strip(chips: &[Chip], dragging: bool) -> Element<'static, Message> {
-	let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(chips.len() + 1);
+///
+/// `focused` says this strip's region holds the keyboard (§48), which only tints the bar. A window
+/// with no split has exactly one region and it is always focused, so that window looks as it always
+/// did and the tint is a cost paid only once the user asks for a split.
+pub fn strip(chips: &[Chip], dragging: bool, focused: bool) -> Element<'static, Message> {
+	let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(chips.len() + 4);
 	for (index, chip) in chips.iter().enumerate() {
 		items.push(chip_view(index, chip, dragging));
 	}
@@ -113,15 +146,36 @@ pub fn strip(chips: &[Chip], dragging: bool) -> Element<'static, Message> {
 			})
 			.into(),
 	);
+	// The split controls are pushed to the FAR RIGHT rather than left where the "+" sits (§48).
+	// Chips grow with their labels, so a strip with several long endpoints in it would otherwise
+	// walk these two off the bar — and a control that can be pushed out of reach is one a user has
+	// to close a tab to get at.
+	items.push(space().width(Length::Fill).into());
+	items.push(split_button(
+		SPLIT_BESIDE_GLYPH,
+		Message::Split(split::Way::Horizontal),
+	));
+	items.push(split_button(
+		SPLIT_BELOW_GLYPH,
+		Message::Split(split::Way::Vertical),
+	));
 
-	let bar = container(row(items).spacing(2).align_y(Vertical::Center))
-		.width(Length::Fill)
-		.height(Length::Fixed(STRIP_HEIGHT))
-		.padding(4)
-		.style(|_theme| container::Style {
-			background: Some(BAR_BG.into()),
-			..container::Style::default()
-		});
+	let fill = if focused { BAR_BG } else { BAR_UNFOCUSED_BG };
+	// The row is told to FILL, not left to shrink to its chips: the spacer above only pushes the split
+	// buttons to the far end if there is a full bar's width for it to take up (§48).
+	let bar = container(
+		row(items)
+			.spacing(2)
+			.align_y(Vertical::Center)
+			.width(Length::Fill),
+	)
+	.width(Length::Fill)
+	.height(Length::Fixed(STRIP_HEIGHT))
+	.padding(4)
+	.style(move |_theme| container::Style {
+		background: Some(fill.into()),
+		..container::Style::default()
+	});
 
 	// The bar backs the chips up on both ends of a drag (§38). Its release catches a drop that lands
 	// on the padding or the gap between two chips — the last chip hovered still wins the slot — and
@@ -132,6 +186,36 @@ pub fn strip(chips: &[Chip], dragging: bool) -> Element<'static, Message> {
 		.on_release(Message::TabDropped)
 		.on_exit(Message::TabDragCancelled)
 		.into()
+}
+
+/// One of the two split controls at the right of the bar (§48): cut this region in two and put a
+/// fresh one beside it or below it. Muted at rest and lit on hover, like the "×" in a chip — a
+/// control that changes the shape of the whole window should not be the loudest thing on the strip.
+///
+/// Always live. A split cannot fail: the window asks the OS to grow to make the room, and if the
+/// screen has none left to give, the two regions share what this one already had.
+fn split_button(glyph: char, message: Message) -> Element<'static, Message> {
+	button(
+		text(glyph.to_string())
+			.font(ICON_FONT)
+			.size(SPLIT_ICON_SIZE)
+			.color(INACTIVE_FG),
+	)
+	.padding([0.0, 4.0])
+	.on_press(message)
+	.style(|_theme, status| button::Style {
+		background: match status {
+			button::Status::Hovered | button::Status::Pressed => Some(ACTIVE_BG.into()),
+			_ => None,
+		},
+		text_color: INACTIVE_FG,
+		border: Border {
+			radius: 4.0.into(),
+			..Border::default()
+		},
+		..button::Style::default()
+	})
+	.into()
 }
 
 /// One chip: the (elided) label with a "×" beside it, tinted when active. The whole chip is a

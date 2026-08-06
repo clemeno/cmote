@@ -9,19 +9,31 @@
 // There is no hidden widget tree and no global mutable state. Every change
 // flows through `update`, and the compiler forces us to handle each `Message`.
 //
-// Tabs (§26): the state is two layers. `Tab` holds ONE session's whole state — everything a
-// single-session app once was — and carries its own `update`/`view`/`title`. `App` owns a
-// `Vec<Tab>` plus the active index, the tabs' activation order (§37) and the shared target list /
-// vault; its own `update`/`view`/`subscription` pick the active tab, delegate to it, route each
-// session's SSH events to the tab that owns them, and draw the tab strip. Adding tabs did not
-// disturb the per-session logic — it moved wholesale onto `Tab`.
+// Tabs (§26), then splits (§48): the state is THREE layers, and each one was added without
+// disturbing the layer below it.
+//   * `Tab`    — ONE session's whole state, everything a single-session app once was, with its own
+//                `update`/`view`/`title`.
+//   * `Region` — one split region of the window: a strip of tabs and which of them is on screen.
+//                This is the layer `App` itself used to be, lifted out whole when a window stopped
+//                being a single strip.
+//   * `App`    — the tree of regions, which one holds the keyboard, the window, and the things
+//                there is genuinely one of: the target list, the vault, the id counter, the quit
+//                flow. Its `update`/`view`/`subscription` pick the region a message came from,
+//                delegate into it, and route each session's SSH events to the tab that owns them
+//                wherever that tab now sits.
+//
+// The routing is worth reading before the rest (§48). Every element a region draws is `map`ped so
+// the messages it raises name their own region (`Message::In`), which means an event is applied
+// WHERE IT HAPPENED rather than wherever the keyboard is. Without that, the first click into an
+// unfocused split would land in the focused split's terminal — the click and the focus change
+// arrive as two messages, and the click comes first.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use iced::Element;
-use iced::widget::{text, text_editor};
+use iced::widget::{pane_grid, text, text_editor};
 use tokio::sync::mpsc;
 
 use crate::bridge::{self, HostKeyChoice, SshCommand, SshEvent};
@@ -124,28 +136,61 @@ pub fn run() -> iced::Result {
 		.run()
 }
 
-/// The application: a strip of independent tabs and the state they share (§26). Each `Tab` is a
-/// whole session (its own screen, terminal, panels and dialogs); `App` owns the `Vec<Tab>`, which
-/// one is active, the order they were activated in (§37), and the single target list and secret
-/// vault every tab's home screen and connect flow act on. Its `update`/`view`/`subscription` pick the active tab and delegate, route each
-/// session's SSH events to the tab that owns them, and draw the tab strip on top.
-struct App {
-	/// The open tabs, in strip order. Never empty — closing the last one opens a fresh home tab.
+/// One split region of the window (§48): its own strip of tabs, whichever of them is on screen, and
+/// the strip gesture in flight there.
+///
+/// This is the state that used to sit directly on `App`, because a window WAS a strip of tabs. A
+/// split makes several strips, and everything in here is what has to exist once per REGION rather
+/// than once per window: the tabs are different tabs, the one on screen is a different tab, and a
+/// drag along one strip must not move a chip on another. What stayed on `App` is what there is
+/// genuinely one of — the window, the target list, the vault, the id counter, the quit flow.
+///
+/// Nothing in here knows which region it is. `App` holds the tree and stamps every message a region
+/// raises with the region it came from, so a `Region` never has to carry its own name around.
+#[derive(Debug)]
+struct Region {
+	/// The open tabs, in strip order. Never empty: a region whose last tab closes is closed with it
+	/// (§48), and the last tab of the LAST region is a quit (§30).
 	tabs: Vec<Tab>,
-	/// Index into `tabs` of the tab on screen and holding the keyboard.
+	/// Index into `tabs` of the tab this region shows — and, while the region holds the keyboard,
+	/// the tab the keyboard is talking to.
 	active: usize,
-	/// The order the open tabs were last activated in (§37), keyed by tab id — the strip's own
+	/// The order this region's tabs were last activated in (§37), keyed by tab id — the strip's own
 	/// left-to-right order says where a tab *sits*, this one says where the user has *been*. Kept up
-	/// to date by every path that changes `active`, and consulted when a tab closes so the window
+	/// to date by every path that changes `active`, and consulted when a tab closes so the region
 	/// falls back to the tab the user was on before it rather than to a strip neighbour they may
 	/// never have opened.
 	recent: crate::mru::Mru,
 	/// The strip drag in flight (§38), or `None` when the pointer is not moving a tab. Armed by a
 	/// press on any chip — the same press that selects it — so a plain click leaves it holding a
-	/// grabbed tab with no target, which drops nothing.
+	/// grabbed tab with no target, which drops nothing. Per-region since §48: two strips can be
+	/// dragged along one after the other, and neither gesture may reach into the other's tabs.
 	tab_drag: Option<TabDrag>,
+}
+
+/// The application: the window's split regions and the state they share (§26, §48). Each `Region` is
+/// a strip of tabs; each `Tab` in one is a whole session (its own screen, terminal, panels and
+/// dialogs). `App` owns the tree of regions, which one holds the keyboard, the OS window's size, and
+/// the single target list and secret vault every tab's home screen and connect flow act on. Its
+/// `update`/`view`/`subscription` pick the region a message came from and delegate into it, route
+/// each session's SSH events to the tab that owns them wherever it sits, and draw the frame round it
+/// all.
+struct App {
+	/// The window's split regions and the dividers between them (§48). Never empty: `pane_grid`
+	/// refuses to close the last region, and the last tab of the last region raises a quit instead.
+	regions: pane_grid::State<Region>,
+	/// The region that holds the keyboard (§48). This cannot be read off the layout the way "which
+	/// tab is on screen" can, because EVERY region is on screen at once — it is the region last
+	/// clicked in, and its strip is tinted so the window says which that is.
+	focus: pane_grid::Pane,
+	/// The OS window's logical size (§48). Held here rather than derived from a region, because it
+	/// is the other way round: `ui::split::regions` divides this up and hands each region's
+	/// on-screen tab the box it fills. It is also what the App-level overlay cards are centred and
+	/// clamped against, since those float over the whole window, splits and all.
+	window: iced::Size,
 	/// The next tab id to hand out (§26). Monotonic and never reused, so a closed tab's id can
-	/// never collide with a worker still shutting down.
+	/// never collide with a worker still shutting down. App-wide, not per-region, so an id still
+	/// names exactly one tab however the window is split (§48).
 	next_id: u64,
 	/// The one app-wide saved-target list, shared into every tab (§14) — one file on disk.
 	targets: Rc<RefCell<crate::profiles::Targets>>,
@@ -164,8 +209,10 @@ struct App {
 	/// is still outstanding. Reached from the OS window's × or from closing the last tab.
 	quit: Option<QuitPhase>,
 	/// The drag state of the App-level overlay card — the live-tab close confirmation (§26) and the
-	/// quit dialog (§30). Unlike a tab's own dialogs, these float over the WHOLE window (the strip
-	/// included), so their drag cannot live on any one tab; it lives here. `overlay_pos` is the
+	/// quit dialog (§30). Unlike a tab's own dialogs, these float over the WHOLE window (every split
+	/// and strip included), so their drag cannot live on any one tab; it lives here. Their messages
+	/// therefore arrive UNWRAPPED, which is what tells them apart from the identically named ones a
+	/// tab's own dialog raises inside a region (§48). `overlay_pos` is the
 	/// card's top-left, seeded to centre when the overlay opens; `overlay_dragging` /
 	/// `overlay_drag_last` track a header drag in progress, exactly as a tab's `dialog_*` do (§10).
 	overlay_pos: iced::Point,
@@ -181,6 +228,7 @@ struct App {
 /// grabbed tab keeps its identity across a reorder, and a tab could in principle close mid-gesture
 /// (its own "×", a session ending), which would renumber every position after it. Resolving ids to
 /// positions only at the moment of the drop means a stale index can never move the wrong tab.
+#[derive(Debug)]
 struct TabDrag {
 	/// The tab the press grabbed.
 	grabbed: u64,
@@ -204,238 +252,46 @@ enum QuitPhase {
 	},
 }
 
-impl App {
-	/// Construct the initial state and the first `Task`. iced calls this once at startup: load the
-	/// shared target list, start with one home tab, and fetch the window size right away so a
-	/// dialog opened before the first resize is still centred (§10, §26).
-	fn new() -> (Self, iced::Task<Message>) {
-		let targets = Rc::new(RefCell::new(crate::profiles::Targets::load()));
-		let vault = Rc::new(RefCell::new(None));
-		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+impl Region {
+	/// A region holding one tab, which is the only way a region is ever born (§48): the app's very
+	/// first one, and each fresh half a split opens.
+	fn new(first: Tab) -> Self {
 		// The activation order starts with the tab already on screen (§37), so the very first close
 		// has a trail to walk back along rather than an empty one.
 		let recent = crate::mru::Mru::new(first.id);
-		let app = Self {
+		Self {
 			tabs: vec![first],
 			active: 0,
 			recent,
-			next_id: 1,
-			targets,
-			vault,
 			tab_drag: None,
-			pending_close: None,
-			pending_editor_close: None,
-			quit: None,
-			// Re-seeded to centre each time an overlay opens; the origin is only a placeholder.
-			overlay_pos: iced::Point::ORIGIN,
-			overlay_dragging: false,
-			overlay_drag_last: None,
-			// The same file `run` sized the window from (§31). Loaded again here — a tiny read
-			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
-			// first (synthetic) resize event overwrites `window` with the size actually granted.
-			settings: crate::settings::Settings::load(),
-		};
-		let size = iced::window::latest()
-			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
-		(app, size)
+		}
 	}
 
-	/// The active tab (there is always one).
+	/// The tab this region shows (there is always one).
 	fn active(&self) -> &Tab {
 		&self.tabs[self.active]
 	}
 
-	/// The active tab, mutably.
+	/// The tab this region shows, mutably.
 	fn active_mut(&mut self) -> &mut Tab {
 		&mut self.tabs[self.active]
 	}
 
-	/// Apply one message. Tab-strip management and a session's SSH events are handled here; a
-	/// window resize is trimmed to the region below the strip; everything else is for the tab on
-	/// screen and is delegated to it (§26).
-	fn update(&mut self, message: Message) -> iced::Task<Message> {
-		// The quit confirmation is modal app-wide (§30): while it is up, Esc cancels and Enter
-		// confirms, and every other keystroke is swallowed so none reaches the shell beneath it.
-		// Non-key messages (button presses, SSH events, ticks, resizes) pass straight through.
-		if self.quit.is_some()
-			&& let Some(task) = self.quit_key_intercept(&message)
-		{
-			return task;
-		}
-		match message {
-			// Route a session's event to the tab that owns it — maybe a background one, so its
-			// shell keeps drawing off-screen. An event for a tab already closed is dropped.
-			Message::Ssh(id, event) => {
-				// An editor's load/save reply rides the SESSION's stream (it has no channel of its
-				// own) but belongs to the EDITOR tab that asked — route it there by editor id (§32).
-				if let Some(editor_id) = event.editor_target() {
-					return match self.tabs.iter_mut().find(|tab| tab.id == editor_id) {
-						Some(tab) => tab.on_edit_event(event),
-						None => iced::Task::none(),
-					};
-				}
-				// A session going down is what a quit drain waits for: note it BEFORE the event is
-				// consumed, then let the owning tab do its own clean-up (persist, back to home).
-				let ended = matches!(event, SshEvent::Disconnected | SshEvent::Error(_));
-				let task = match self.tabs.iter_mut().find(|tab| tab.id == id) {
-					Some(tab) => tab.on_ssh_event(event),
-					None => iced::Task::none(),
-				};
-				if ended {
-					// Any editors opened from this session can no longer save — mark them so (§32).
-					self.orphan_editors(id);
-					// One fewer session to wait on; once the last is down the process exits (§30).
-					if let Some(exit) = self.note_drained(id) {
-						return exit;
-					}
-				}
-				task
-			}
-			Message::TabNew => self.open_tab(),
-			Message::TabSelected(index) => self.grab_tab(index),
-			Message::TabDraggedOver(index) => {
-				self.hover_tab(index);
-				iced::Task::none()
-			}
-			Message::TabDropped => self.drop_tab(),
-			// The pointer left the strip: the gesture is over and nothing moves. Also fires when the
-			// pointer merely wanders off the strip with no drag armed, which is a harmless no-op.
-			Message::TabDragCancelled => {
-				self.tab_drag = None;
-				iced::Task::none()
-			}
-			Message::TabCloseRequested(id) => self.request_close(id),
-			Message::TabCloseConfirmed => self.close_confirmed(),
-			Message::TabCloseCancelled => {
-				self.pending_close = None;
-				iced::Task::none()
-			}
-			// The in-tab editor (§32). Opening, saving and closing all need cross-tab reach — an
-			// editor saves through the session it was opened from — so they are handled here, at the
-			// App, not delegated to the tab. In-buffer editing (`Message::Editor`) and the editor
-			// shortcuts (`Message::EditorKey`) fall through to the active tab below.
-			Message::EditorOpen { session, path } => self.open_editor(session, path),
-			Message::EditorFlush(id) => self.flush_editor_save(id),
-			Message::EditorCloseSave => self.editor_close_save(),
-			Message::EditorCloseDiscard => self.editor_close_discard(),
-			Message::EditorCloseCancelled => {
-				self.pending_editor_close = None;
-				iced::Task::none()
-			}
-			Message::EditorCloseNow(id) => {
-				if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
-					return self.remove_tab(index);
-				}
-				iced::Task::none()
-			}
-			Message::EditorThemeSelected(theme) => self.set_editor_theme(theme),
-			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
-			// confirming drains every session cleanly, then the process exits.
-			Message::QuitRequested => self.request_quit(),
-			Message::QuitConfirmed => self.quit_confirmed(),
-			Message::QuitCancelled => self.quit_cancelled(),
-			Message::QuitTick => self.quit_tick(),
-			// The overlay dialogs (a live tab's close confirmation, §26; the quit card, §30) float
-			// over the WHOLE window, so their header drag is the App's to track — the very same
-			// DialogGrabbed / DialogDragged / DialogReleased the tab dialogs use, but caught here so
-			// the floating card moves, not the hidden tab dialog beneath it. The guard means that
-			// when NO overlay is up these fall through to the tab, which drives its own dialogs.
-			Message::DialogGrabbed if self.overlay_open() => {
-				self.overlay_dragging = true;
-				self.overlay_drag_last = None;
-				iced::Task::none()
-			}
-			Message::DialogDragged(pointer) if self.overlay_open() => {
-				self.on_overlay_dragged(pointer);
-				iced::Task::none()
-			}
-			Message::DialogReleased if self.overlay_open() => {
-				self.overlay_dragging = false;
-				self.overlay_drag_last = None;
-				iced::Task::none()
-			}
-			// A resize is global to the OS window; hand the active tab the region BELOW the strip,
-			// so its grid fits the space it actually has rather than overrunning it by a row (§26).
-			Message::WindowResized(size) => {
-				// Remember the whole OS window's size for the next run (§31); saved on the way
-				// out. This is the raw window size, before the strip is subtracted below.
-				self.settings.set_window(size.width, size.height);
-				let inner = iced::Size {
-					width: size.width,
-					height: (size.height - ui::tabs::STRIP_HEIGHT).max(0.0),
-				};
-				let task = self.active_mut().update(Message::WindowResized(inner));
-				// A card dragged before the window shrank could fall off-screen; clamp it back into
-				// the new bounds so its header stays reachable (§26). Harmless when none is open.
-				if self.overlay_open() {
-					self.overlay_pos = self.clamp_overlay_pos(self.overlay_pos);
-				}
-				task
-			}
-			// Everything else is for the tab on screen.
-			other => self.active_mut().update(other),
-		}
-	}
-
-	/// Open a new tab on the home screen and make it active (§26). It inherits the window
-	/// geometry / focus so its first paint is sized right.
-	fn open_tab(&mut self) -> iced::Task<Message> {
-		let id = self.next_id;
-		self.next_id += 1;
-		// Inherit the window geometry / focus from the active tab if there is one; an empty strip
-		// (the last tab was just closed) starts from defaults, corrected by the next resize (§26).
-		let (size, focused, modifiers) = match self.tabs.get(self.active) {
+	/// The window geometry and focus to stamp onto a tab arriving in this region — the tab on screen
+	/// holds the freshest copy of all three (§26).
+	///
+	/// The `None` arm is not defensive padding: this is called mid-removal, with the region's strip
+	/// momentarily empty, and once with a brand-new region whose only tab is being built right now.
+	/// Defaults there are corrected by the relayout that follows on the same turn.
+	fn carried(&self) -> (iced::Size, bool, iced::keyboard::Modifiers) {
+		match self.tabs.get(self.active) {
 			Some(tab) => (tab.window_size, tab.window_focused, tab.modifiers),
 			None => (
 				iced::Size::default(),
 				true,
 				iced::keyboard::Modifiers::default(),
 			),
-		};
-		let mut tab = Tab::home(self.targets.clone(), self.vault.clone(), id, size);
-		tab.window_focused = focused;
-		tab.modifiers = modifiers;
-		self.tabs.push(tab);
-		self.active = self.tabs.len() - 1;
-		// A new tab opens active, which counts as a visit: it goes to the top of the order, so
-		// closing it straight away comes back to the tab it was opened from (§37).
-		self.recent.touch(id);
-		iced::Task::none()
-	}
-
-	/// Switch to the tab at `index` (§26). Carry the window geometry / focus onto it (the outgoing
-	/// tab held the latest) and refit its terminal, in case the window resized while it was in the
-	/// background.
-	fn select_tab(&mut self, index: usize) -> iced::Task<Message> {
-		if index >= self.tabs.len() || index == self.active {
-			return iced::Task::none();
 		}
-		let size = self.active().window_size;
-		let focused = self.active().window_focused;
-		let modifiers = self.active().modifiers;
-		self.active = index;
-		let tab = self.active_mut();
-		tab.window_size = size;
-		tab.window_focused = focused;
-		tab.modifiers = modifiers;
-		// This is the visit the whole order is built from: whichever tab is on screen is the top of
-		// it, so the tab now being left becomes the one a close falls back to (§37).
-		let id = tab.id;
-		self.recent.touch(id);
-		fit_terminal()
-	}
-
-	/// A press on a chip (§38): make that tab active — a press IS a selection, as it always was —
-	/// and arm a drag on it. The drag starts with no target, so a press-and-release on the same chip
-	/// reorders nothing; only travelling to another chip gives the gesture somewhere to drop.
-	fn grab_tab(&mut self, index: usize) -> iced::Task<Message> {
-		if let Some(tab) = self.tabs.get(index) {
-			self.tab_drag = Some(TabDrag {
-				grabbed: tab.id,
-				over: None,
-			});
-		}
-		self.select_tab(index)
 	}
 
 	/// The pointer moved over the chip at `index` (§38). While a drag is armed that chip becomes the
@@ -463,21 +319,25 @@ impl App {
 	/// Every early return is a real case, not a guard against the impossible: no drag armed (a
 	/// release with nothing grabbed), no target (a plain click), and either id no longer in the strip
 	/// (its tab closed mid-gesture — the "×" is inside the chip being dragged).
-	fn drop_tab(&mut self) -> iced::Task<Message> {
+	///
+	/// A drag never leaves the region it started in (§48). The gesture is reported by the chips'
+	/// own pointer events, and a chip belongs to exactly one strip, so a pointer that wanders into
+	/// another region's strip reports nothing there and the release drops the tab where it was.
+	fn drop_tab(&mut self) {
 		let Some(drag) = self.tab_drag.take() else {
-			return iced::Task::none();
+			return;
 		};
 		let Some(target) = drag.over else {
-			return iced::Task::none();
+			return;
 		};
 		let Some(from) = self.tabs.iter().position(|tab| tab.id == drag.grabbed) else {
-			return iced::Task::none();
+			return;
 		};
 		let Some(to) = self.tabs.iter().position(|tab| tab.id == target) else {
-			return iced::Task::none();
+			return;
 		};
 		if from == to {
-			return iced::Task::none();
+			return;
 		}
 		// `active` is a strip POSITION, so it has to be re-found after the move. Following the active
 		// tab's id rather than assuming it is the grabbed one keeps this right even where the two are
@@ -490,40 +350,602 @@ impl App {
 		}
 		// Nothing about the window changed — same tab on screen, same strip height — so there is no
 		// refit to do. The activation order (§37) is keyed by id, so it is untouched by a reorder.
+	}
+
+	/// The strip position a new editor tab for `session` should take (§38): just past that session's
+	/// own chip, and past any editor tabs already grouped there — so opening three files in a row
+	/// reads left to right in the order they were opened, rather than stacking up backwards.
+	///
+	/// Only a run of editor tabs belonging to THIS session is skipped, so the group ends at the first
+	/// chip that belongs to something else: another session's tab, or an editor the user has dragged
+	/// in (§38). A session whose tab has gone — closed while a load was in flight — has nothing to sit
+	/// beside, so its editor goes to the end of the strip as it used to.
+	fn editor_slot(&self, session: u64) -> usize {
+		let Some(parent) = self.tabs.iter().position(|tab| tab.id == session) else {
+			return self.tabs.len();
+		};
+		let mut slot = parent + 1;
+		while self
+			.tabs
+			.get(slot)
+			.and_then(|tab| tab.editor.as_ref())
+			.is_some_and(|editor| editor.session == session)
+		{
+			slot += 1;
+		}
+		slot
+	}
+}
+
+impl App {
+	/// Construct the initial state and the first `Task`. iced calls this once at startup: load the
+	/// shared target list, start with one region holding one home tab, and fetch the window size
+	/// right away so a dialog opened before the first resize is still centred (§10, §26, §48).
+	fn new() -> (Self, iced::Task<Message>) {
+		let targets = Rc::new(RefCell::new(crate::profiles::Targets::load()));
+		let vault = Rc::new(RefCell::new(None));
+		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+		// One region, undivided — which is the whole window until the user asks for a split (§48).
+		let (regions, focus) = pane_grid::State::new(Region::new(first));
+		let app = Self {
+			regions,
+			focus,
+			// Corrected by the resize fetched below, which is the first thing this task does.
+			window: iced::Size::default(),
+			next_id: 1,
+			targets,
+			vault,
+			pending_close: None,
+			pending_editor_close: None,
+			quit: None,
+			// Re-seeded to centre each time an overlay opens; the origin is only a placeholder.
+			overlay_pos: iced::Point::ORIGIN,
+			overlay_dragging: false,
+			overlay_drag_last: None,
+			// The same file `run` sized the window from (§31). Loaded again here — a tiny read
+			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
+			// first (synthetic) resize event overwrites `window` with the size actually granted.
+			settings: crate::settings::Settings::load(),
+		};
+		let size = iced::window::latest()
+			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
+		(app, size)
+	}
+
+	/// The region holding the keyboard (§48). `focus` is kept valid by every path that changes the
+	/// tree — a closed region hands the keyboard to the sibling that takes its room — and `pane_grid`
+	/// never lets the tree empty, so the fallback exists only so a bug cannot become a panic.
+	fn region(&self) -> &Region {
+		self.regions
+			.get(self.focus)
+			.or_else(|| self.regions.iter().next().map(|(_, region)| region))
+			.expect("the window always has at least one region")
+	}
+
+	/// The pane `focus` names, corrected to a real one if it ever went stale (§48).
+	fn focused_pane(&self) -> pane_grid::Pane {
+		if self.regions.get(self.focus).is_some() {
+			return self.focus;
+		}
+		self.regions
+			.iter()
+			.next()
+			.map(|(pane, _)| *pane)
+			.expect("the window always has at least one region")
+	}
+
+	/// The tab on screen in the region holding the keyboard — the one a keystroke is for (§48).
+	fn active(&self) -> &Tab {
+		self.region().active()
+	}
+
+	/// Every open tab in the window, in region then strip order (§48). Used by everything that has
+	/// to reach a tab by IDENTITY rather than by position: routing a session's events, counting live
+	/// sessions for the quit drain, starting one SSH worker per tab.
+	fn tabs(&self) -> impl Iterator<Item = &Tab> {
+		self.regions
+			.iter()
+			.flat_map(|(_, region)| region.tabs.iter())
+	}
+
+	/// Every open tab in the window, mutably (§48).
+	fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
+		self.regions
+			.iter_mut()
+			.flat_map(|(_, region)| region.tabs.iter_mut())
+	}
+
+	/// The tab with this id, mutably, wherever in the window it sits (§48).
+	fn tab_mut(&mut self, id: u64) -> Option<&mut Tab> {
+		self.tabs_mut().find(|tab| tab.id == id)
+	}
+
+	/// Where the tab with this id sits: which region, and its position in that region's strip (§48).
+	/// Tab ids are app-wide and never reused (§26), so at most one region can answer.
+	fn locate(&self, id: u64) -> Option<(pane_grid::Pane, usize)> {
+		self.regions.iter().find_map(|(pane, region)| {
+			region
+				.tabs
+				.iter()
+				.position(|tab| tab.id == id)
+				.map(|index| (*pane, index))
+		})
+	}
+
+	/// Apply one message, deciding first WHICH REGION it is for (§48).
+	///
+	/// Three kinds of message arrive here and they are told apart by their shape, not by a flag:
+	///
+	///  * `Message::In(pane, …)` — raised by one region's own widgets, which `view` stamped with the
+	///    region they belong to. It is applied THERE. This is what makes a click in an unfocused
+	///    split land where it was aimed: the click and the focus change are two separate messages
+	///    and the click arrives first, so routing by focus would spend it on the wrong terminal.
+	///  * The App's own — a session's SSH events, the OS window's geometry and focus, the quit flow,
+	///    the split gestures, and the overlay cards that float outside every region. These come
+	///    unwrapped, and being unwrapped is precisely what tells an overlay card's `DialogGrabbed`
+	///    apart from the identical message a tab's own dialog raises inside a region.
+	///  * Everything else unwrapped — the keyboard, chiefly, which comes from a subscription and
+	///    therefore has no region of its own. It goes to the region holding the keyboard.
+	fn update(&mut self, message: Message) -> iced::Task<Message> {
+		// The quit confirmation is modal app-wide (§30): while it is up, Esc cancels and Enter
+		// confirms, and every other keystroke is swallowed so none reaches the shell beneath it.
+		// Non-key messages (button presses, SSH events, ticks, resizes) pass straight through.
+		if self.quit.is_some()
+			&& let Some(task) = self.quit_key_intercept(&message)
+		{
+			return task;
+		}
+		match message {
+			// A region's own widgets named their region; honour it (§48).
+			Message::In(pane, inner) => self.update_in(pane, *inner),
+			// Route a session's event to the tab that owns it — maybe a tab in another region, or a
+			// background one, so its shell keeps drawing off-screen. An event for a tab already
+			// closed is dropped.
+			Message::Ssh(id, event) => self.route_ssh(id, event),
+			// A resize is the whole window's, and every region has to be re-measured against it (§48).
+			Message::WindowResized(size) => self.on_window_resized(size),
+			// The OS window gaining or losing focus is every VISIBLE shell's business, and since §48
+			// that is one per region rather than one in total.
+			Message::WindowFocus(focused) => self.broadcast(&Message::WindowFocus(focused)),
+			// A frame tick is a clock, not a gesture (§10, §44): it belongs to every region that
+			// asked for one, not to whichever region happens to hold the keyboard.
+			Message::SnackbarTick => self.broadcast(&Message::SnackbarTick),
+			Message::TermFindRescan => self.broadcast(&Message::TermFindRescan),
+			// The split gestures (§48). `Split` itself arrives wrapped — it is a strip button, so it
+			// names its own region — and is handled in `update_in`; these three do not.
+			Message::SplitSized {
+				pane,
+				way,
+				window,
+				size,
+			} => self.apply_split(pane, way, window, size),
+			Message::SplitFocused(pane) => {
+				self.focus = pane;
+				iced::Task::none()
+			}
+			Message::SplitResized { split, ratio } => self.on_divider_dragged(split, ratio),
+			// The overlay dialogs (a live tab's close confirmation, §26; the quit card, §30) float
+			// over the WHOLE window, outside every region, so their messages arrive unwrapped and
+			// their header drag is the App's to track — the very same DialogGrabbed / DialogDragged /
+			// DialogReleased a tab's dialog uses, but caught here so the floating card moves. The
+			// guard is belt and braces now that the wrapper distinguishes them: with no overlay up
+			// these fall through to the focused region, which drives its own dialogs.
+			Message::DialogGrabbed if self.overlay_open() => {
+				self.overlay_dragging = true;
+				self.overlay_drag_last = None;
+				iced::Task::none()
+			}
+			Message::DialogDragged(pointer) if self.overlay_open() => {
+				self.on_overlay_dragged(pointer);
+				iced::Task::none()
+			}
+			Message::DialogReleased if self.overlay_open() => {
+				self.overlay_dragging = false;
+				self.overlay_drag_last = None;
+				iced::Task::none()
+			}
+			// Everything else has no region of its own — the keyboard, above all — so it is for the
+			// region holding the keyboard.
+			other => {
+				let pane = self.focused_pane();
+				self.update_in(pane, other)
+			}
+		}
+	}
+
+	/// Apply one message that belongs to the region `pane` (§48).
+	///
+	/// This is the match `update` used to be: tab-strip management, the editor's cross-tab work and
+	/// the quit flow are handled here at the App, and everything left is for the tab that region has
+	/// on screen. The only difference is that "the active tab" now means "the active tab OF THIS
+	/// REGION", so the region is threaded through rather than read from `focus`.
+	fn update_in(&mut self, pane: pane_grid::Pane, message: Message) -> iced::Task<Message> {
+		match message {
+			// Already unwrapped once; a region's widgets never wrap twice, so this cannot arrive.
+			Message::In(_, inner) => self.update_in(pane, *inner),
+			Message::Ssh(id, event) => self.route_ssh(id, event),
+			// The strip's split buttons (§48): cut THIS region, whichever one the button was on.
+			Message::Split(way) => self.request_split(pane, way),
+			Message::TabNew => self.open_tab(pane),
+			Message::TabSelected(index) => self.grab_tab(pane, index),
+			Message::TabDraggedOver(index) => {
+				if let Some(region) = self.regions.get_mut(pane) {
+					region.hover_tab(index);
+				}
+				iced::Task::none()
+			}
+			Message::TabDropped => {
+				if let Some(region) = self.regions.get_mut(pane) {
+					region.drop_tab();
+				}
+				iced::Task::none()
+			}
+			// The pointer left the strip: the gesture is over and nothing moves. Also fires when the
+			// pointer merely wanders off the strip with no drag armed, which is a harmless no-op.
+			Message::TabDragCancelled => {
+				if let Some(region) = self.regions.get_mut(pane) {
+					region.tab_drag = None;
+				}
+				iced::Task::none()
+			}
+			Message::TabCloseRequested(id) => self.request_close(id),
+			Message::TabCloseConfirmed => self.close_confirmed(),
+			Message::TabCloseCancelled => {
+				self.pending_close = None;
+				iced::Task::none()
+			}
+			// The in-tab editor (§32). Opening, saving and closing all need cross-tab reach — an
+			// editor saves through the session it was opened from — so they are handled here, at the
+			// App, not delegated to the tab. In-buffer editing (`Message::Editor`) and the editor
+			// shortcuts (`Message::EditorKey`) fall through to the active tab below.
+			Message::EditorOpen { session, path } => self.open_editor(pane, session, path),
+			Message::EditorFlush(id) => self.flush_editor_save(id),
+			Message::EditorCloseSave => self.editor_close_save(),
+			Message::EditorCloseDiscard => self.editor_close_discard(),
+			Message::EditorCloseCancelled => {
+				self.pending_editor_close = None;
+				iced::Task::none()
+			}
+			Message::EditorCloseNow(id) => self.force_close(id),
+			Message::EditorThemeSelected(theme) => self.set_editor_theme(pane, theme),
+			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
+			// confirming drains every session cleanly, then the process exits.
+			Message::QuitRequested => self.request_quit(),
+			Message::QuitConfirmed => self.quit_confirmed(),
+			Message::QuitCancelled => self.quit_cancelled(),
+			Message::QuitTick => self.quit_tick(),
+			// A window resize reaches `update` unwrapped and never gets here; if one ever did, it
+			// would still be the whole window's rather than this region's, so it is handled the same
+			// way (§48).
+			Message::WindowResized(size) => self.on_window_resized(size),
+			// Everything else is for the tab this region has on screen. A region that has just gone
+			// — its last tab closed while a message for it was still in the queue — has no tab to
+			// take it, which is the one case this `Option` covers (§48).
+			other => match self.regions.get_mut(pane) {
+				Some(region) => region.active_mut().update(other),
+				None => iced::Task::none(),
+			},
+		}
+	}
+
+	/// Route one session's event to the tab that owns it, wherever in the window that tab now sits
+	/// (§26, §48). Lifted out of `update` so both the wrapped and unwrapped paths share it.
+	fn route_ssh(&mut self, id: u64, event: SshEvent) -> iced::Task<Message> {
+		// An editor's load/save reply rides the SESSION's stream (it has no channel of its own) but
+		// belongs to the EDITOR tab that asked — route it there by editor id (§32).
+		if let Some(editor_id) = event.editor_target() {
+			return match self.tab_mut(editor_id) {
+				Some(tab) => tab.on_edit_event(event),
+				None => iced::Task::none(),
+			};
+		}
+		// A session going down is what a quit drain waits for: note it BEFORE the event is consumed,
+		// then let the owning tab do its own clean-up (persist, back to home).
+		let ended = matches!(event, SshEvent::Disconnected | SshEvent::Error(_));
+		let task = match self.tab_mut(id) {
+			Some(tab) => tab.on_ssh_event(event),
+			None => iced::Task::none(),
+		};
+		if ended {
+			// Any editors opened from this session can no longer save — mark them so (§32).
+			self.orphan_editors(id);
+			// One fewer session to wait on; once the last is down the process exits (§30).
+			if let Some(exit) = self.note_drained(id) {
+				return exit;
+			}
+		}
+		task
+	}
+
+	/// Hand the same message to the on-screen tab of EVERY region (§48).
+	///
+	/// For the messages that are not gestures and so have no one region they belong to: the OS
+	/// window's focus, which every visible shell has to hear about because focus reporting is a
+	/// promise made to the program in it (§23), and the frame clocks, which are the toast's dwell
+	/// (§10) and the find bar's re-scan (§44) — a region left un-ticked would keep a toast on screen
+	/// for ever. Before §48 there was one visible tab and "the active tab" was the whole answer.
+	fn broadcast(&mut self, message: &Message) -> iced::Task<Message> {
+		let tasks: Vec<iced::Task<Message>> = self
+			.regions
+			.iter_mut()
+			.map(|(_, region)| region.active_mut().update(message.clone()))
+			.collect();
+		iced::Task::batch(tasks)
+	}
+
+	/// The OS window was resized (§26, §48): remember it, then re-measure every region against it.
+	fn on_window_resized(&mut self, size: iced::Size) -> iced::Task<Message> {
+		self.window = size;
+		// Remember the whole OS window's size for the next run (§31); saved on the way out.
+		self.settings.set_window(size.width, size.height);
+		let task = self.relayout();
+		// A card dragged before the window shrank could fall off-screen; clamp it back into the new
+		// bounds so its header stays reachable (§26). Harmless when none is open.
+		if self.overlay_open() {
+			self.overlay_pos = self.clamp_overlay_pos(self.overlay_pos);
+		}
+		task
+	}
+
+	/// Hand every region's on-screen tab the box it now fills (§48).
+	///
+	/// This is the one place the window's size becomes a terminal's row and column count, and it runs
+	/// after anything that can change a region's shape: a window resize, a divider drag, a split, a
+	/// region closing. Each tab is given its region MINUS the strip above it, exactly as the single
+	/// tab used to be given the window minus the strip — so every layout and pointer coordinate
+	/// inside a tab is still measured against the space that tab actually occupies.
+	///
+	/// A degenerate width or height (a window too small to divide) is floored at zero rather than
+	/// passed on negative; `ui::terminal::grid_size` clamps to at least one cell from there, which
+	/// is the same thing that already happened to a window dragged down to nothing.
+	fn relayout(&mut self) -> iced::Task<Message> {
+		let boxes = ui::split::regions(&self.regions, self.window);
+		let mut tasks: Vec<iced::Task<Message>> = Vec::with_capacity(boxes.len());
+		for (pane, rect) in boxes {
+			let inner = iced::Size {
+				width: rect.width.max(0.0),
+				height: (rect.height - ui::tabs::STRIP_HEIGHT).max(0.0),
+			};
+			if let Some(region) = self.regions.get_mut(pane) {
+				tasks.push(region.active_mut().update(Message::WindowResized(inner)));
+			}
+		}
+		iced::Task::batch(tasks)
+	}
+
+	/// The strip's split button (§48): find out how much screen there is, then cut `pane` in two.
+	///
+	/// Two steps, because the first thing the split needs is an answer that only arrives
+	/// asynchronously — how big the monitor is. Doubling blind would put most of the new region past
+	/// the edge of the screen, where there is no way to reach it and, since a region's only handle is
+	/// the region itself, no way to drag the divider back either.
+	///
+	/// A screen that cannot be measured is not a reason to refuse the split; it is a reason not to
+	/// clamp against a number we do not have.
+	fn request_split(&mut self, pane: pane_grid::Pane, way: ui::split::Way) -> iced::Task<Message> {
+		let wanted = way.grown(self.window);
+		iced::window::latest().and_then(move |window| {
+			iced::window::monitor_size(window).then(move |screen| {
+				let size = match screen {
+					Some(screen) => iced::Size::new(
+						wanted.width.min(screen.width),
+						wanted.height.min(screen.height),
+					),
+					None => wanted,
+				};
+				iced::Task::done(Message::SplitSized {
+					pane,
+					way,
+					window,
+					size,
+				})
+			})
+		})
+	}
+
+	/// Cut `pane` in two now the window size the split will run at is known (§48).
+	///
+	/// The fresh region opens on the target list, which is what makes a split useful straight away:
+	/// the point of asking for one is almost always to connect somewhere else, and the list is where
+	/// that starts. It also takes the keyboard, for the same reason.
+	///
+	/// The window is asked to grow in the same turn, and the regions are measured against the size it
+	/// was ASKED for rather than the size it has. If the OS grants less — the screen was already
+	/// full — the resize event that follows corrects every region; if it grants nothing at all (a
+	/// window already filling the monitor) there is no event, and measuring against the asked-for
+	/// size would have been wrong, which is why `size` is clamped to the screen before it gets here.
+	fn apply_split(
+		&mut self,
+		pane: pane_grid::Pane,
+		way: ui::split::Way,
+		window: iced::window::Id,
+		size: iced::Size,
+	) -> iced::Task<Message> {
+		// The region may have gone while the monitor was being asked — its last tab closed, which
+		// closes the region (§48). Nothing to cut, and the window must not grow for a split that is
+		// not going to happen.
+		if self.regions.get(pane).is_none() {
+			return iced::Task::none();
+		}
+		let id = self.next_id;
+		self.next_id += 1;
+		// The new tab inherits the window focus and modifier state from the region being split, so
+		// its first paint agrees with the rest of the window. Its SIZE is left at the default on
+		// purpose: the region it will live in does not exist yet, and the relayout below is what
+		// hands it the box it actually fills.
+		let (_, focused, modifiers) = self.region_at(pane).carried();
+		let mut tab = Tab::home(
+			self.targets.clone(),
+			self.vault.clone(),
+			id,
+			iced::Size::default(),
+		);
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		// `split` only fails on a pane that is not in the tree, which was just ruled out. If it ever
+		// did, the id above is simply never used — ids are monotonic and skipping one is harmless.
+		let Some((fresh, _split)) = self.regions.split(way.axis(), pane, Region::new(tab)) else {
+			return iced::Task::none();
+		};
+		self.focus = fresh;
+		self.window = size;
+		self.settings.set_window(size.width, size.height);
+		// Both halves are new shapes, so both terminals have to be re-measured — including the one
+		// that was already there, which now has a divider beside it (§48).
+		let relayout = self.relayout();
+		iced::Task::batch([relayout, iced::window::resize(window, size)])
+	}
+
+	/// A divider was dragged (§48): the two regions either side of it re-share their room.
+	///
+	/// Only the RATIO is stored, never a pixel count, so the share survives a window resize instead
+	/// of becoming a stale measurement of a window that is no longer that size.
+	fn on_divider_dragged(&mut self, split: pane_grid::Split, ratio: f32) -> iced::Task<Message> {
+		self.regions.resize(split, ratio);
+		// Both regions changed size, so both grids have to be told: a terminal is only ever as big as
+		// it was last told to be (§9). `Tab::on_window_resized` reflows only when the row/column count
+		// actually changes, which is what keeps a drag from resizing the remote pty every frame.
+		self.relayout()
+	}
+
+	/// A region closed because its last tab did (§48). The room it held goes back to the region
+	/// beside it, and the keyboard follows if it was here.
+	///
+	/// The window is deliberately NOT shrunk back by half. A split grows it because the user asked
+	/// for the split; nothing here was asked for, and the window may well have been resized by hand
+	/// since, which would make halving it the wrong arithmetic against a number the user chose.
+	///
+	/// `pane_grid` refuses to close the LAST region, and closing the last tab of the last region is a
+	/// quit (§30), so the `None` arm is unreachable through the UI — it opens a fresh home tab rather
+	/// than leave the window showing nothing.
+	fn close_region(&mut self, pane: pane_grid::Pane) -> iced::Task<Message> {
+		match self.regions.close(pane) {
+			Some((_closed, sibling)) => {
+				if self.focus == pane {
+					self.focus = sibling;
+				}
+				self.relayout()
+			}
+			None => self.open_tab(pane),
+		}
+	}
+
+	/// The region `pane`, or the focused one if it has gone (§48). Reading a region that a message
+	/// still names but that has since closed is a real case — the split flow asks the OS a question
+	/// and comes back a turn later — and this keeps every caller from having to say so again.
+	fn region_at(&self, pane: pane_grid::Pane) -> &Region {
+		self.regions.get(pane).unwrap_or_else(|| self.region())
+	}
+
+	/// Open a new tab on the home screen in `pane` and make it the one on screen (§26, §48). It
+	/// inherits the window geometry / focus so its first paint is sized right.
+	fn open_tab(&mut self, pane: pane_grid::Pane) -> iced::Task<Message> {
+		let id = self.next_id;
+		self.next_id += 1;
+		// Inherit the window geometry / focus from the tab on screen if there is one; an empty strip
+		// (the last tab was just closed) starts from defaults, corrected by the next resize (§26).
+		let (size, focused, modifiers) = self.region_at(pane).carried();
+		let mut tab = Tab::home(self.targets.clone(), self.vault.clone(), id, size);
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		let Some(region) = self.regions.get_mut(pane) else {
+			return iced::Task::none();
+		};
+		region.tabs.push(tab);
+		region.active = region.tabs.len() - 1;
+		// A new tab opens active, which counts as a visit: it goes to the top of the order, so
+		// closing it straight away comes back to the tab it was opened from (§37).
+		region.recent.touch(id);
+		// A "+" press also means "I am working here" (§48): the strip that was clicked takes the
+		// keyboard, so typing goes into the tab that just opened rather than into another region.
+		self.focus = pane;
 		iced::Task::none()
+	}
+
+	/// Switch `pane` to the tab at `index` (§26). Carry the window geometry / focus onto it (the
+	/// outgoing tab held the latest) and refit its terminal, in case the window resized while it was
+	/// in the background.
+	fn select_tab(&mut self, pane: pane_grid::Pane, index: usize) -> iced::Task<Message> {
+		// The strip that was clicked takes the keyboard (§48), whether or not the click changes which
+		// tab is on screen — clicking the chip already showing is how a user says "type in here".
+		self.focus = pane;
+		let Some(region) = self.regions.get_mut(pane) else {
+			return iced::Task::none();
+		};
+		if index >= region.tabs.len() || index == region.active {
+			return iced::Task::none();
+		}
+		let (size, focused, modifiers) = region.carried();
+		region.active = index;
+		let tab = region.active_mut();
+		tab.window_size = size;
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		// This is the visit the whole order is built from: whichever tab is on screen is the top of
+		// it, so the tab now being left becomes the one a close falls back to (§37).
+		let id = tab.id;
+		region.recent.touch(id);
+		// Re-measure rather than trust the carried size: the tab arriving may have been in the
+		// background across a window resize or a divider drag (§48).
+		self.relayout()
+	}
+
+	/// A press on a chip (§38): make that tab active — a press IS a selection, as it always was —
+	/// and arm a drag on it. The drag starts with no target, so a press-and-release on the same chip
+	/// reorders nothing; only travelling to another chip gives the gesture somewhere to drop.
+	fn grab_tab(&mut self, pane: pane_grid::Pane, index: usize) -> iced::Task<Message> {
+		if let Some(region) = self.regions.get_mut(pane)
+			&& let Some(tab) = region.tabs.get(index)
+		{
+			region.tab_drag = Some(TabDrag {
+				grabbed: tab.id,
+				over: None,
+			});
+		}
+		self.select_tab(pane, index)
 	}
 
 	/// A tab's "×" (§26): confirm first if it holds a live session — like the Disconnect button,
 	/// closing is not undoable — otherwise drop it at once. The tab being closed is brought to the
 	/// front so the confirmation reads against the session it dismisses.
 	fn request_close(&mut self, id: u64) -> iced::Task<Message> {
-		let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+		let Some((pane, index)) = self.locate(id) else {
 			return iced::Task::none();
 		};
-		// Closing the LAST tab would empty the window — that is really a request to quit cmote, so
-		// it takes the quit confirmation (which also disconnects every session cleanly) rather than
-		// silently reopening a fresh home tab as it used to (§30).
-		if self.tabs.len() == 1 {
+		let Some(region) = self.regions.get(pane) else {
+			return iced::Task::none();
+		};
+		// Closing the last tab of the ONLY region would empty the window — that is really a request to
+		// quit cmote, so it takes the quit confirmation (which also disconnects every session cleanly)
+		// rather than silently reopening a fresh home tab as it used to (§30). With a split open it is
+		// instead a request to close that region (§48), which `remove_tab` does once the strip empties,
+		// so the confirmations below still guard a live session or unsaved edits on the way.
+		if self.regions.len() == 1 && region.tabs.len() == 1 {
 			return self.request_quit();
 		}
-		if self.tabs[index].is_live() {
+		let (live, dirty, on_screen) = (
+			region.tabs[index].is_live(),
+			region.tabs[index].is_dirty_editor(),
+			region.active,
+		);
+		if live {
 			self.pending_close = Some(id);
 			self.seed_overlay();
-			if index != self.active {
-				return self.select_tab(index);
+			if index != on_screen {
+				return self.select_tab(pane, index);
 			}
 			iced::Task::none()
-		} else if self.tabs[index].is_dirty_editor() {
+		} else if dirty {
 			// A dirty editor is as protected as a live session (§32): its "×" raises the
 			// unsaved-changes prompt (Save & close / Discard / Cancel) rather than dropping the edits.
 			self.pending_editor_close = Some(id);
 			self.seed_overlay();
-			if index != self.active {
-				return self.select_tab(index);
+			if index != on_screen {
+				return self.select_tab(pane, index);
 			}
 			iced::Task::none()
 		} else {
-			self.remove_tab(index)
+			self.remove_tab(pane, index)
 		}
 	}
 
@@ -545,16 +967,17 @@ impl App {
 	/// connection is cut mid-flight. With nothing live there is nothing to drain, so exit at once;
 	/// otherwise the frame clock (subscribed while draining) polls the timeout as a safety net.
 	fn quit_confirmed(&mut self) -> iced::Task<Message> {
+		// Every live session in the WINDOW, splits and all (§48) — a quit closes the process, so a
+		// session in a region the user is not looking at has to come down as cleanly as the rest.
 		let pending: Vec<u64> = self
-			.tabs
-			.iter()
+			.tabs()
 			.filter(|tab| tab.is_live())
 			.map(|tab| tab.id)
 			.collect();
 		if pending.is_empty() {
 			return self.exit_app();
 		}
-		for tab in self.tabs.iter_mut().filter(|tab| tab.is_live()) {
+		for tab in self.tabs_mut().filter(|tab| tab.is_live()) {
 			// Saves each session before it goes (§22), the same snapshot a disconnect writes.
 			tab.persist_session();
 			tab.send_command(SshCommand::Disconnect);
@@ -642,78 +1065,88 @@ impl App {
 		let Some(id) = self.pending_close.take() else {
 			return iced::Task::none();
 		};
-		let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+		let Some((pane, index)) = self.locate(id) else {
 			return iced::Task::none();
 		};
 		// Tear the session down cleanly first: the Disconnect closes the remote side; dropping the
 		// tab then drops its command sender, which ends its worker loop (§4, §26).
-		self.tabs[index].send_command(SshCommand::Disconnect);
-		self.remove_tab(index)
+		if let Some(region) = self.regions.get_mut(pane) {
+			region.tabs[index].send_command(SshCommand::Disconnect);
+		}
+		self.remove_tab(pane, index)
 	}
 
-	/// Drop the tab at `index`, keeping the strip non-empty and bringing forward the tab the user was
-	/// on before this one (§26, §37).
-	fn remove_tab(&mut self, index: usize) -> iced::Task<Message> {
+	/// Drop the tab at `index` of the region `pane`, bringing forward the tab the user was on before
+	/// this one (§26, §37) — or closing the region itself if that was its last tab (§48).
+	fn remove_tab(&mut self, pane: pane_grid::Pane, index: usize) -> iced::Task<Message> {
+		let Some(region) = self.regions.get_mut(pane) else {
+			return iced::Task::none();
+		};
+		if index >= region.tabs.len() {
+			return iced::Task::none();
+		}
 		// Save a live tab's session before it goes (§22) — the same snapshot a disconnect writes.
-		self.tabs[index].persist_session();
-		// The tab currently on screen holds the freshest window geometry / focus, and `select_tab`
-		// carries those onto whichever tab comes forward. Read them BEFORE the removal: when the tab
-		// being dropped IS the active one, this is the last moment they exist (§26).
-		let carried = (
-			self.active().window_size,
-			self.active().window_focused,
-			self.active().modifiers,
-		);
-		let closed = self.tabs[index].id;
-		self.tabs.remove(index);
+		region.tabs[index].persist_session();
+		// The tab currently on screen holds the freshest window geometry / focus, and the tab coming
+		// forward is given them. Read them BEFORE the removal: when the tab being dropped IS the one
+		// on screen, this is the last moment they exist (§26).
+		let carried = region.carried();
+		let closed = region.tabs[index].id;
+		region.tabs.remove(index);
 		// Take the tab out of the activation order, which names the one that should come forward:
 		// the most recently activated of those left (§37).
-		let forward = self.recent.forget(closed);
-		// Defensive: a last-tab close now routes to the quit flow (§30), so this path only ever
-		// runs with tabs to spare. If one ever slipped through, never leave the window empty.
-		if self.tabs.is_empty() {
-			return self.open_tab();
+		let forward = region.recent.forget(closed);
+		// The strip is empty, so the region has nothing to show. With a split open the region closes
+		// and gives its room back to the one beside it (§48); with no split this is unreachable,
+		// because the last tab of the only region raises a quit instead (§30).
+		if region.tabs.is_empty() {
+			return self.close_region(pane);
 		}
-		match forward.and_then(|id| self.tabs.iter().position(|tab| tab.id == id)) {
-			// One rule covers both cases. Closing the ACTIVE tab pops the order's top, so this is the
-			// tab the user was last on — not whichever chip happens to sit next door in the strip.
-			// Closing a BACKGROUND tab leaves the top alone, so this resolves to the active tab
-			// itself, which is exactly right: closing a tab off-screen must not move the window.
-			Some(position) => self.active = position,
+		match forward.and_then(|id| region.tabs.iter().position(|tab| tab.id == id)) {
+			// One rule covers both cases. Closing the tab ON SCREEN pops the order's top, so this is
+			// the tab the user was last on — not whichever chip happens to sit next door in the strip.
+			// Closing a BACKGROUND tab leaves the top alone, so this resolves to the on-screen tab
+			// itself, which is exactly right: closing a tab off-screen must not change what is shown.
+			Some(position) => region.active = position,
 			// Only reachable if a tab were opened without ever being activated, which no path does.
 			// Fall back to the old strip arithmetic rather than leave `active` pointing anywhere.
 			None => {
-				if index < self.active {
-					self.active -= 1;
-				} else if self.active >= self.tabs.len() {
-					self.active = self.tabs.len() - 1;
+				if index < region.active {
+					region.active -= 1;
+				} else if region.active >= region.tabs.len() {
+					region.active = region.tabs.len() - 1;
 				}
 			}
 		}
 		let (size, focused, modifiers) = carried;
-		let tab = self.active_mut();
+		let tab = region.active_mut();
 		tab.window_size = size;
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
-		fit_terminal()
+		// Re-measure rather than trust the carried size: the tab coming forward may have been in the
+		// background across a window resize or a divider drag (§48).
+		self.relayout()
 	}
 
 	/// Open a remote file in a new editor tab (§32), parented to the session it was opened from, and
 	/// send the load on THAT session's channel. The editor tab has no worker of its own; its reply
 	/// (`EditLoaded` / `EditLoadFailed`) rides the parent's stream and routes back here by editor id.
-	fn open_editor(&mut self, session: u64, path: String) -> iced::Task<Message> {
+	///
+	/// The editor opens in `pane`, the region the file was clicked in (§48) — beside its own session's
+	/// chip, in the same strip. It could be argued the other way, that a file wants a region of its
+	/// own, but the tab it is grouped with is the one it saves through: keeping the two in one strip
+	/// keeps that relationship visible instead of scattering a session's files across the window.
+	fn open_editor(
+		&mut self,
+		pane: pane_grid::Pane,
+		session: u64,
+		path: String,
+	) -> iced::Task<Message> {
 		let id = self.next_id;
 		self.next_id += 1;
-		// Inherit the window geometry / focus from the active tab so the first paint is sized right,
-		// exactly as `open_tab` does for a home tab (§26).
-		let (size, focused, modifiers) = match self.tabs.get(self.active) {
-			Some(tab) => (tab.window_size, tab.window_focused, tab.modifiers),
-			None => (
-				iced::Size::default(),
-				true,
-				iced::keyboard::Modifiers::default(),
-			),
-		};
+		// Inherit the window geometry / focus from the region's on-screen tab so the first paint is
+		// sized right, exactly as `open_tab` does for a home tab (§26).
+		let (size, focused, modifiers) = self.region_at(pane).carried();
 		// Open in the scheme this file type was last edited in (§32); an unseen extension starts on
 		// the default. The choice is recorded back in `settings` when the toolbar's select changes
 		// it, and now rides `settings.json`, so the type keeps its scheme across a restart (§31).
@@ -724,28 +1157,33 @@ impl App {
 		// now. Fixed into the editor here rather than read again at save time: the file belongs to
 		// that account, and the panes may well have switched to another by the time it is saved.
 		let identity = self
-			.tabs
-			.iter()
+			.tabs()
 			.find(|tab| tab.id == session)
 			.map_or(bridge::LOGIN_IDENTITY, |tab| tab.identity);
 		let mut tab = Tab::new_editor(id, session, identity, path.clone(), size, theme);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
+		let Some(region) = self.regions.get_mut(pane) else {
+			return iced::Task::none();
+		};
 		// Not at the end of the strip: right beside the session the file came from (§38), so a
 		// session and the files opened out of it stay one group instead of drifting apart as other
 		// sessions are opened.
-		let slot = self.editor_slot(session);
-		self.tabs.insert(slot, tab);
-		self.active = slot;
+		let slot = region.editor_slot(session);
+		region.tabs.insert(slot, tab);
+		region.active = slot;
 		// An editor tab opens active like any other (§37) — so closing it (its "×", or Save & close)
 		// returns to the session tab the file was opened from, which is where the user was.
-		self.recent.touch(id);
+		region.recent.touch(id);
+		// The region it opened in takes the keyboard, so Ctrl+S reaches the buffer that just opened
+		// rather than whatever another region had on screen (§48).
+		self.focus = pane;
 
 		// Ask the parent session to read the file. If the parent is gone the editor opens straight
 		// into its "session closed" state rather than hanging on a load that can never arrive. The
 		// match resolves to a plain `bool` so the parent borrow is released before the fallback,
 		// which borrows the tabs again to reach the just-opened editor.
-		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
+		let sent = match self.tab_mut(session) {
 			Some(parent) if parent.command_tx.is_some() => {
 				parent.send_command(SshCommand::EditLoad {
 					identity,
@@ -761,42 +1199,20 @@ impl App {
 				"The session this file was opened from is no longer available.".to_owned(),
 			);
 		}
-		iced::Task::none()
-	}
-
-	/// The strip position a new editor tab for `session` should take (§38): just past that session's
-	/// own chip, and past any editor tabs already grouped there — so opening three files in a row
-	/// reads left to right in the order they were opened, rather than stacking up backwards.
-	///
-	/// Only a run of editor tabs belonging to THIS session is skipped, so the group ends at the first
-	/// chip that belongs to something else: another session's tab, or an editor the user has dragged
-	/// in (§38). A session whose tab has gone — closed while a load was in flight — has nothing to sit
-	/// beside, so its editor goes to the end of the strip as it used to.
-	fn editor_slot(&self, session: u64) -> usize {
-		let Some(parent) = self.tabs.iter().position(|tab| tab.id == session) else {
-			return self.tabs.len();
-		};
-		let mut slot = parent + 1;
-		while self
-			.tabs
-			.get(slot)
-			.and_then(|tab| tab.editor.as_ref())
-			.is_some_and(|editor| editor.session == session)
-		{
-			slot += 1;
-		}
-		slot
+		// The strip gained a chip, which changes nothing about the region's box — but the tab that
+		// just came on screen has never been measured, so it is given one (§48).
+		self.relayout()
 	}
 
 	/// Send an editor tab's buffer to its parent session for saving (§32). Raised by the tab after a
-	/// Save / Save As; only the App can reach across to the parent's channel. A parent that has gone
-	/// away leaves the editor's save marked failed rather than hanging on a reply that never comes.
+	/// Save / Save As; only the App can reach across to the parent's channel — across regions too
+	/// since §48, since an editor and its session can be dragged apart. A parent that has gone away
+	/// leaves the editor's save marked failed rather than hanging on a reply that never comes.
 	fn flush_editor_save(&mut self, editor_id: u64) -> iced::Task<Message> {
 		// The identity comes from the EDITOR, not from what the session is showing now (§46): the file
 		// was read as that account and has to be written back as the same one.
 		let Some((session, identity, path, bytes)) = self
-			.tabs
-			.iter()
+			.tabs()
 			.find(|tab| tab.id == editor_id)
 			.and_then(|tab| tab.editor.as_ref())
 			.map(|editor| {
@@ -810,7 +1226,7 @@ impl App {
 		else {
 			return iced::Task::none();
 		};
-		let sent = match self.tabs.iter_mut().find(|tab| tab.id == session) {
+		let sent = match self.tab_mut(session) {
 			Some(parent) => parent.send_command(SshCommand::EditSave {
 				identity,
 				editor_id,
@@ -829,7 +1245,7 @@ impl App {
 	/// Mark every editor opened from session `id` as orphaned (§32): its parent is gone, so it can no
 	/// longer save. The buffer stays open to read and copy; the toolbar disables Save with a note.
 	fn orphan_editors(&mut self, id: u64) {
-		for tab in self.tabs.iter_mut() {
+		for tab in self.tabs_mut() {
 			if let Some(editor) = tab.editor.as_mut()
 				&& editor.session == id
 			{
@@ -862,22 +1278,30 @@ impl App {
 		self.force_close(id)
 	}
 
-	/// Drop the tab with this id if it is still there (§32) — the shared tail of the discard and the
-	/// after-save auto-close.
+	/// Drop the tab with this id if it is still there (§32) — the shared tail of the discard, the
+	/// after-save auto-close and the editor's own Ctrl+W.
 	fn force_close(&mut self, id: u64) -> iced::Task<Message> {
-		match self.tabs.iter().position(|tab| tab.id == id) {
-			Some(index) => self.remove_tab(index),
+		match self.locate(id) {
+			Some((pane, index)) => self.remove_tab(pane, index),
 			None => iced::Task::none(),
 		}
 	}
 
-	/// Apply a theme pick from the active editor's toolbar (§32): paint that editor in the new scheme
-	/// and remember it against the file's extension, so the next editor opened on that type inherits
-	/// it. The toolbar that raised this belongs to the ACTIVE tab, so that is the editor it sets.
-	fn set_editor_theme(&mut self, theme: crate::editor::EditorTheme) -> iced::Task<Message> {
-		if let Some(editor) = self
+	/// Apply a theme pick from an editor's toolbar (§32): paint that editor in the new scheme and
+	/// remember it against the file's extension, so the next editor opened on that type inherits it.
+	/// The toolbar that raised this belongs to the tab on screen in `pane` — the region the pick was
+	/// made in (§48) — so that is the editor it sets.
+	fn set_editor_theme(
+		&mut self,
+		pane: pane_grid::Pane,
+		theme: crate::editor::EditorTheme,
+	) -> iced::Task<Message> {
+		let Some(region) = self.regions.get_mut(pane) else {
+			return iced::Task::none();
+		};
+		if let Some(editor) = region
 			.tabs
-			.get_mut(self.active)
+			.get_mut(region.active)
 			.and_then(|tab| tab.editor.as_mut())
 		{
 			editor.set_theme(theme);
@@ -889,22 +1313,19 @@ impl App {
 		iced::Task::none()
 	}
 
-	/// The editor on the tab with this id, mutably (§32).
+	/// The editor on the tab with this id, mutably (§32), wherever in the window that tab sits.
 	fn editor_mut(&mut self, id: u64) -> Option<&mut crate::editor::Editor> {
-		self.tabs
-			.iter_mut()
-			.find(|tab| tab.id == id)
-			.and_then(|tab| tab.editor.as_mut())
+		self.tab_mut(id).and_then(|tab| tab.editor.as_mut())
 	}
 
 	/// Centre the close-confirmation card in the window (§26). The card floats over the WHOLE
-	/// window (strip included), so the full height is the active tab's inner height plus the strip.
+	/// window — every split and strip included — so it is measured against the OS window itself
+	/// rather than against any one region (§48).
 	fn close_dialog_pos(&self) -> iced::Point {
-		let size = self.active().window_size;
+		let size = self.window;
 		iced::Point::new(
 			((size.width - ui::dialog::DIALOG_WIDTH) / 2.0).max(0.0),
-			((size.height + ui::tabs::STRIP_HEIGHT - ui::dialog::DIALOG_HEIGHT_ESTIMATE) / 2.0)
-				.max(0.0),
+			((size.height - ui::dialog::DIALOG_HEIGHT_ESTIMATE) / 2.0).max(0.0),
 		)
 	}
 
@@ -925,14 +1346,14 @@ impl App {
 	}
 
 	/// Clamp the overlay card's top-left so it stays reachable (§26). Mirrors a tab's
-	/// `clamp_dialog_pos`, but the height baseline includes the strip, since the overlay floats
-	/// over the whole window: horizontal is exact against the fixed width, vertical keeps at least
-	/// the header (`DIALOG_DRAG_MIN_VISIBLE`) on screen so the card can be dragged near the bottom.
+	/// `clamp_dialog_pos`, but measured against the OS WINDOW rather than a region, since the overlay
+	/// floats over the whole of it (§48): horizontal is exact against the fixed width, vertical keeps
+	/// at least the header (`DIALOG_DRAG_MIN_VISIBLE`) on screen so the card can be dragged near the
+	/// bottom.
 	fn clamp_overlay_pos(&self, pos: iced::Point) -> iced::Point {
-		let size = self.active().window_size;
-		let full_height = size.height + ui::tabs::STRIP_HEIGHT;
+		let size = self.window;
 		let max_x = (size.width - ui::dialog::DIALOG_WIDTH).max(0.0);
-		let max_y = (full_height - ui::dialog::DIALOG_DRAG_MIN_VISIBLE).max(0.0);
+		let max_y = (size.height - ui::dialog::DIALOG_DRAG_MIN_VISIBLE).max(0.0);
 		iced::Point::new(pos.x.clamp(0.0, max_x), pos.y.clamp(0.0, max_y))
 	}
 
@@ -949,47 +1370,35 @@ impl App {
 		self.overlay_drag_last = Some(pointer);
 	}
 
-	/// The window title, from the active tab (its endpoint and shell directory, §17).
+	/// The window title, from the tab on screen in the region holding the keyboard (its endpoint and
+	/// shell directory, §17). One window has one title bar however many regions are in it, so the
+	/// focused region is the one that gets to name it (§48).
 	fn title(&self) -> String {
 		self.active().title()
 	}
 
-	/// Draw the tab strip, then the active tab's view beneath it, then — if a quit is pending or a
-	/// live tab's close is pending — the confirmation over everything (§26, §30).
+	/// Draw the split frame — every region's strip and the tab beneath it — then, if a quit or a
+	/// live tab's close is pending, the confirmation over everything (§26, §30, §48).
 	fn view(&self) -> Element<'_, Message> {
-		// The slot a drag would drop into, if one is in flight (§38): that chip wears the drop mark,
-		// and every chip switches to the "grabbing" cursor so the whole strip reads as in motion.
-		let drop_target = self.tab_drag.as_ref().and_then(|drag| drag.over);
-		let chips: Vec<ui::tabs::Chip> = self
-			.tabs
-			.iter()
-			.enumerate()
-			.map(|(index, tab)| ui::tabs::Chip {
-				id: tab.id,
-				label: tab.strip_label(),
-				active: index == self.active,
-				status: tab.prompt_status(),
-				drop_target: drop_target == Some(tab.id),
-			})
-			.collect();
-		let strip = ui::tabs::strip(&chips, self.tab_drag.is_some());
-		let body = iced::widget::column![strip, self.active().view()]
-			.width(iced::Length::Fill)
-			.height(iced::Length::Fill);
+		// Copied out rather than read through `self` inside the closure, so nothing borrows the App
+		// for longer than the regions themselves do.
+		let focus = self.focused_pane();
+		let body = ui::split::frame(&self.regions, move |pane, region| {
+			Self::region_view(pane, region, pane == focus)
+		});
 
 		// The app-wide quit dialog outranks a single tab's close: it floats over the whole window,
-		// strip and all (§30). While confirming it offers Cancel / Quit; while draining it just
-		// reports progress with no buttons, since there is nothing left to cancel.
+		// every split and strip included (§30, §48). While confirming it offers Cancel / Quit; while
+		// draining it just reports progress with no buttons, since there is nothing left to cancel.
 		if let Some(quit) = &self.quit {
-			return self.quit_overlay(body.into(), quit);
+			return self.quit_overlay(body, quit);
 		}
 
 		// A dirty editor's close waits on a three-way prompt (§32): Save & close / Discard / Cancel.
 		// Ranked below the app-wide quit but, like the live-session close, over the whole window.
 		if let Some(id) = self.pending_editor_close {
 			let name = self
-				.tabs
-				.iter()
+				.tabs()
 				.find(|tab| tab.id == id)
 				.and_then(|tab| tab.editor.as_ref())
 				.map_or_else(
@@ -1030,7 +1439,7 @@ impl App {
 		}
 
 		if self.pending_close.is_none() {
-			return body.into();
+			return body;
 		}
 
 		// A live tab's close waits on this confirmation, floated over the whole window (§26). Its
@@ -1063,6 +1472,39 @@ impl App {
 			.into()
 	}
 
+	/// Everything one region shows (§48): its own tab strip, and the tab it has on screen beneath it.
+	///
+	/// The `map` at the end is the load-bearing line. Every message the region's widgets raise is
+	/// stamped with the region it came from, so `update` can apply it THERE rather than wherever the
+	/// keyboard happens to be. It also means nothing inside a region — not the strip, not the
+	/// terminal, not a dialog — has to know a region exists, which is why §48 could be built without
+	/// touching a single one of them: the wrapper carries the one fact they would have needed.
+	///
+	/// An associated function rather than a method so the closure `view` hands to `ui::split::frame`
+	/// captures nothing but a `Pane` and a `bool`, and so cannot borrow the App a second time.
+	fn region_view(pane: pane_grid::Pane, region: &Region, focused: bool) -> Element<'_, Message> {
+		// The slot a drag would drop into, if one is in flight (§38): that chip wears the drop mark,
+		// and every chip switches to the "grabbing" cursor so the whole strip reads as in motion.
+		let drop_target = region.tab_drag.as_ref().and_then(|drag| drag.over);
+		let chips: Vec<ui::tabs::Chip> = region
+			.tabs
+			.iter()
+			.enumerate()
+			.map(|(index, tab)| ui::tabs::Chip {
+				id: tab.id,
+				label: tab.strip_label(),
+				active: index == region.active,
+				status: tab.prompt_status(),
+				drop_target: drop_target == Some(tab.id),
+			})
+			.collect();
+		let strip = ui::tabs::strip(&chips, region.tab_drag.is_some(), focused);
+		let stacked = iced::widget::column![strip, region.active().view()]
+			.width(iced::Length::Fill)
+			.height(iced::Length::Fill);
+		Element::from(stacked).map(move |inner| Message::In(pane, Box::new(inner)))
+	}
+
 	/// Float the quit confirmation / drain card over the whole window (§30). Confirming: how many
 	/// sessions the quit will disconnect, with Cancel / Quit. Draining: a bare "closing sessions"
 	/// note with no buttons — the backdrop's dismiss message is `QuitCancelled`, which is inert
@@ -1080,7 +1522,9 @@ impl App {
 		};
 		let (heading, detail, footer): (&str, String, Vec<Element<'a, Message>>) = match quit {
 			QuitPhase::Confirming => {
-				let live = self.tabs.iter().filter(|tab| tab.is_live()).count();
+				// Every region's tabs, not just the focused one's (§48): a quit ends the process, so
+				// the count has to be honest about what it is about to disconnect.
+				let live = self.tabs().filter(|tab| tab.is_live()).count();
 				let detail = if live == 0 {
 					"Close cmote and all its tabs?".to_owned()
 				} else {
@@ -1118,14 +1562,13 @@ impl App {
 			.into()
 	}
 
-	/// The streams the app listens to (§4, §26). One SSH worker PER tab, tagged with the tab id so
-	/// its events route back to the right session; the window geometry / focus streams, global to
-	/// the OS window; and — keyed on the ACTIVE tab's screen — its keyboard listener and, while a
-	/// copy toast is up, the frame clock.
+	/// The streams the app listens to (§4, §26, §48). One SSH worker PER tab wherever it sits, tagged
+	/// with the tab id so its events route back to the right session; the window geometry / focus
+	/// streams, global to the OS window; the frame clock while ANY region has work for it; and — keyed
+	/// on the FOCUSED region's on-screen tab — the keyboard listener.
 	fn subscription(&self) -> iced::Subscription<Message> {
 		let mut subs: Vec<iced::Subscription<Message>> = self
-			.tabs
-			.iter()
+			.tabs()
 			// An editor tab has no session of its own (§32): it saves through the tab it was opened
 			// from, so it starts NO worker — opening editors costs no network threads.
 			.filter(|tab| tab.editor.is_none())
@@ -1139,7 +1582,8 @@ impl App {
 			})
 			.collect();
 
-		// Window size and focus are global — the active tab is the one that reacts to them (§10, §23).
+		// Window size and focus are the OS window's, so they are handled at the App and shared out to
+		// every region rather than reacted to by one tab (§10, §23, §48).
 		subs.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
 		subs.push(focus_events());
 		subs.push(file_drop_events());
@@ -1152,19 +1596,24 @@ impl App {
 			subs.push(iced::window::frames().map(|_instant| Message::QuitTick));
 		}
 
-		let active = self.active();
-		if active.snackbar.is_some() {
+		// The two frame clocks below are asked for if ANY region needs one, and the tick then goes to
+		// every region (§48). Before splits there was one visible tab and only its flags could matter;
+		// now a toast in the region beside this one is just as much on screen, and a clock that
+		// skipped it would leave that toast up for good.
+		let on_screen = || self.regions.iter().map(|(_, region)| region.active());
+		if on_screen().any(|tab| tab.snackbar.is_some()) {
 			subs.push(iced::window::frames().map(|_instant| Message::SnackbarTick));
 		}
 		// Output landed under an open find bar (§44): tick so the re-scan runs once on the next frame
-		// instead of once per output chunk. Only the ACTIVE tab's flag is consulted — a background
-		// tab's bar is not on screen, and its flag is still set when the user comes back to it, which
-		// is when this subscription appears and the scan happens. Same shape as the toast above: the
+		// instead of once per output chunk. Only an ON-SCREEN tab's flag is consulted — a background
+		// tab's bar is not visible, and its flag is still set when the user comes back to it, which is
+		// when this subscription appears and the scan happens. Same shape as the toast above: the
 		// clock exists only while there is work for it.
-		if active.search_stale {
+		if on_screen().any(|tab| tab.search_stale) {
 			subs.push(iced::window::frames().map(|_instant| Message::TermFindRescan));
 		}
-		match active.screen {
+		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
+		match self.active().screen {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
 			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
@@ -2049,6 +2498,40 @@ pub enum Message {
 	TabCloseConfirmed,
 	/// The close confirmation was dismissed — keep the tab.
 	TabCloseCancelled,
+	// --- the window's split regions (§48). Mouse-only, like the strip the buttons live on. ---
+	/// A message raised by ONE region's widgets, carrying the region it came from.
+	///
+	/// `view` wraps everything a region draws in this, so an event is applied WHERE IT HAPPENED
+	/// rather than wherever the keyboard is. That is not a tidiness point: a left press inside an
+	/// unfocused region produces two messages — the press itself and the focus change — and the press
+	/// arrives FIRST, because `pane_grid` lets a region's own widgets see an event before it looks at
+	/// it. Routed by focus, that press would land in the previously focused region's terminal,
+	/// clobbering a selection there and starting a drag nobody asked for.
+	///
+	/// Boxed because a `Message` cannot contain itself by value.
+	In(pane_grid::Pane, Box<Message>),
+	/// A strip's split button — cut the region that strip belongs to in two, and open a fresh region
+	/// beside it or below it. Arrives wrapped in `In`, which is what names the region to cut.
+	Split(ui::split::Way),
+	/// The second half of a split, once the monitor has been measured: `size` is the grown window
+	/// clamped to the screen, `window` is the window to ask for it, and `pane` is the region to cut —
+	/// carried rather than re-read from the focus, which could have moved while the OS was being
+	/// asked.
+	SplitSized {
+		pane: pane_grid::Pane,
+		way: ui::split::Way,
+		window: iced::window::Id,
+		size: iced::Size,
+	},
+	/// A left press landed in this region — it takes the keyboard. Raised by `pane_grid` itself, so
+	/// it arrives unwrapped and already naming its region.
+	SplitFocused(pane_grid::Pane),
+	/// A divider was dragged — the two regions either side of it re-share their room, as a ratio
+	/// rather than a pixel count so the share survives a window resize.
+	SplitResized {
+		split: pane_grid::Split,
+		ratio: f32,
+	},
 	// --- quitting cmote (§30): the last-tab close or the OS window's × ---
 	/// Quit was requested — from the window's title-bar × or from closing the last tab. Raises
 	/// the "Quit cmote?" confirmation; nothing is torn down until it is accepted.
@@ -2688,7 +3171,15 @@ impl Tab {
 			| Message::EditorCloseDiscard
 			| Message::EditorCloseCancelled
 			| Message::EditorCloseNow(_)
-			| Message::EditorThemeSelected(_) => {}
+			| Message::EditorThemeSelected(_)
+			// Splitting the window is `App`'s job too (§48): a tab has no idea it sits in a region,
+			// and `In` is the wrapper `App` puts round these on the way OUT of `view` — a tab is
+			// handed the message already unwrapped, so it never sees one.
+			| Message::In(_, _)
+			| Message::Split(_)
+			| Message::SplitSized { .. }
+			| Message::SplitFocused(_)
+			| Message::SplitResized { .. } => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			Message::ForwardsClosed => self.forward_dialog = false,
@@ -8096,27 +8587,26 @@ mod tests {
 		let root = elevate_to(&mut session, "root");
 		let mut app = tab_app();
 		let id = session.id;
-		app.tabs.clear();
-		app.tabs.push(session);
-		app.active = 0;
+		let region = strip_mut(&mut app);
+		region.tabs.clear();
+		region.tabs.push(session);
+		region.active = 0;
 		app.next_id = id + 1;
 
-		let _task = app.open_editor(id, "/root/.ssh/authorized_keys".to_owned());
+		let _task = app.open_editor(app.focus, id, "/root/.ssh/authorized_keys".to_owned());
 		let editor = app
-			.tabs
-			.iter()
+			.tabs()
 			.find_map(|tab| tab.editor.as_ref())
 			.expect("the editor tab is open");
 		assert_eq!(editor.identity, root, "opened as the account on screen");
 
 		// The session goes back to `cme` while the file is still open, and the save still names root.
 		let editor_id = app
-			.tabs
-			.iter()
+			.tabs()
 			.find(|tab| tab.editor.is_some())
 			.map(|tab| tab.id)
 			.expect("the editor tab has an id");
-		if let Some(tab) = app.tabs.iter_mut().find(|tab| tab.id == id) {
+		if let Some(tab) = app.tab_mut(id) {
 			let _task = tab.switch_identity(bridge::LOGIN_IDENTITY);
 		}
 		let mut rx = rx;
@@ -8826,19 +9316,21 @@ mod tests {
 		assert_eq!(drop_outcome(true, false, false, None), DropOutcome::NoDir);
 	}
 
-	// A bare app with one home tab and empty shared state, so the tab-strip bookkeeping (§26) is
-	// exercised without an iced runtime or the disk. The `Task`s these calls return are dropped —
-	// only the tab list and active index are under test.
+	// A bare app with one undivided region holding one home tab, and empty shared state, so the
+	// tab-strip bookkeeping (§26) is exercised without an iced runtime or the disk. The `Task`s these
+	// calls return are dropped — only the tab list and active index are under test.
 	fn tab_app() -> App {
 		let targets = Rc::new(RefCell::new(crate::profiles::Targets::default()));
 		let vault = Rc::new(RefCell::new(None));
 		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
+		// The order starts on the tab already on screen — id 0, the home tab built above (§37).
+		let (regions, focus) = pane_grid::State::new(Region::new(first));
 		App {
-			tabs: vec![first],
-			active: 0,
-			// The order starts on the tab already on screen — id 0, the home tab built above (§37).
-			recent: crate::mru::Mru::new(0),
-			tab_drag: None,
+			regions,
+			focus,
+			// A plausible window, so the split tests have room to divide and the overlay tests have
+			// bounds to be clamped into (§48).
+			window: iced::Size::new(1200.0, 800.0),
 			next_id: 1,
 			targets,
 			vault,
@@ -8854,28 +9346,52 @@ mod tests {
 		}
 	}
 
+	/// The tabs of the region holding the keyboard (§48). The strip assertions below read through
+	/// this so they still say "the strip" and mean the strip the test set up; a test that splits
+	/// deliberately names its regions instead.
+	fn strip(app: &App) -> &[Tab] {
+		&app.region().tabs
+	}
+
+	/// Which of that region's tabs is on screen (§48).
+	fn on_screen(app: &App) -> usize {
+		app.region().active
+	}
+
+	/// That region, mutably, for the tests that arrange a strip rather than assert on one (§48).
+	fn strip_mut(app: &mut App) -> &mut Region {
+		let pane = app.focused_pane();
+		app.regions.get_mut(pane).expect("the focused region")
+	}
+
+	/// How many regions the window is divided into (§48).
+	fn region_count(app: &App) -> usize {
+		app.regions.len()
+	}
+
 	#[test]
 	fn opening_a_tab_adds_a_fresh_home_tab_and_activates_it() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		assert_eq!(app.tabs.len(), 2);
-		assert_eq!(app.active, 1, "the new tab is the active one");
-		assert_ne!(app.tabs[0].id, app.tabs[1].id, "ids are never reused");
-		assert!(matches!(app.tabs[1].screen, Screen::Home));
+		let _ = app.open_tab(app.focus);
+		assert_eq!(strip(&app).len(), 2);
+		assert_eq!(on_screen(&app), 1, "the new tab is the active one");
+		assert_ne!(strip(&app)[0].id, strip(&app)[1].id, "ids are never reused");
+		assert!(matches!(strip(&app)[1].screen, Screen::Home));
 	}
 
 	#[test]
 	fn closing_an_idle_tab_keeps_the_active_tab_the_same() {
 		let mut app = tab_app();
-		let _ = app.open_tab(); // 2 tabs, active = 1
-		let _ = app.open_tab(); // 3 tabs, active = 2
-		let first_id = app.tabs[0].id;
-		let active_id = app.tabs[app.active].id;
+		let _ = app.open_tab(app.focus); // 2 tabs, active = 1
+		let _ = app.open_tab(app.focus); // 3 tabs, active = 2
+		let first_id = strip(&app)[0].id;
+		let active_id = strip(&app)[on_screen(&app)].id;
 		// Closing an idle tab BEFORE the active one shifts indices but must leave the same tab active.
 		let _ = app.request_close(first_id);
-		assert_eq!(app.tabs.len(), 2);
+		assert_eq!(strip(&app).len(), 2);
 		assert_eq!(
-			app.tabs[app.active].id, active_id,
+			strip(&app)[on_screen(&app)].id,
+			active_id,
 			"same tab still on screen"
 		);
 	}
@@ -8883,14 +9399,15 @@ mod tests {
 	#[test]
 	fn closing_the_last_tab_asks_to_quit_instead_of_replacing_it() {
 		let mut app = tab_app();
-		let only_id = app.tabs[0].id;
+		let only_id = strip(&app)[0].id;
 		let _ = app.request_close(only_id);
 		// Closing the last tab would empty the window, so it raises the quit confirmation and keeps
 		// the tab exactly as it was — the app leaves only once that is accepted (§30).
 		assert!(matches!(app.quit, Some(QuitPhase::Confirming)));
-		assert_eq!(app.tabs.len(), 1);
+		assert_eq!(strip(&app).len(), 1);
 		assert_eq!(
-			app.tabs[0].id, only_id,
+			strip(&app)[0].id,
+			only_id,
 			"the tab is untouched, not replaced"
 		);
 	}
@@ -8932,7 +9449,7 @@ mod tests {
 	fn requesting_quit_supersedes_a_pending_single_tab_close() {
 		let mut app = tab_app();
 		// Quitting closes every tab, so a lone tab's close confirmation is dropped in its favour.
-		app.pending_close = Some(app.tabs[0].id);
+		app.pending_close = Some(strip(&app)[0].id);
 		let _ = app.request_quit();
 		assert!(app.pending_close.is_none());
 		assert!(matches!(app.quit, Some(QuitPhase::Confirming)));
@@ -9008,7 +9525,7 @@ mod tests {
 	#[test]
 	fn the_overlay_card_opens_centred_and_at_rest() {
 		let mut app = tab_app();
-		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		strip_mut(&mut app).tabs[0].window_size = iced::Size::new(1000.0, 800.0);
 		let _ = app.request_quit();
 		// The quit / close card shares one draggable position; on open it sits centred and is not
 		// mid-drag, so a spot dragged into during a previous overlay never carries across (§26, §30).
@@ -9020,7 +9537,7 @@ mod tests {
 	#[test]
 	fn dragging_the_overlay_card_follows_the_pointer() {
 		let mut app = tab_app();
-		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		strip_mut(&mut app).tabs[0].window_size = iced::Size::new(1000.0, 800.0);
 		let _ = app.request_quit();
 		let start = app.overlay_pos;
 		// Grab, then the first move only anchors (no jump), and the second applies its delta — the
@@ -9050,13 +9567,16 @@ mod tests {
 		// not the App-level card — the guard keeps the two drag states from crossing wires.
 		let _ = app.update(Message::DialogGrabbed);
 		assert!(!app.overlay_dragging, "the App-level card is untouched");
-		assert!(app.tabs[0].dialog_dragging, "the tab drives its own dialog");
+		assert!(
+			strip(&app)[0].dialog_dragging,
+			"the tab drives its own dialog"
+		);
 	}
 
 	#[test]
 	fn shrinking_the_window_pulls_a_dragged_overlay_back_into_reach() {
 		let mut app = tab_app();
-		app.tabs[0].window_size = iced::Size::new(1000.0, 800.0);
+		strip_mut(&mut app).tabs[0].window_size = iced::Size::new(1000.0, 800.0);
 		let _ = app.request_quit();
 		// Fling the card to the far corner, then shrink the window under it: the card must not be
 		// left stranded off-screen — its header stays reachable inside the new bounds (§26).
@@ -9073,17 +9593,18 @@ mod tests {
 	#[test]
 	fn closing_the_active_tab_falls_back_to_the_previously_visited_one() {
 		let mut app = tab_app();
-		let _ = app.open_tab(); // 2 tabs, active = 1
-		let _ = app.open_tab(); // 3 tabs, active = 2
-		let last_visited = app.tabs[2].id;
+		let _ = app.open_tab(app.focus); // 2 tabs, active = 1
+		let _ = app.open_tab(app.focus); // 3 tabs, active = 2
+		let last_visited = strip(&app)[2].id;
 		// Go back to the leftmost tab, so the trail is now 1, 2, 0 — the visit order and the strip
 		// order disagree, which is the case strip arithmetic gets wrong (§37).
-		let _ = app.select_tab(0);
-		let closing = app.tabs[0].id;
+		let _ = app.select_tab(app.focus, 0);
+		let closing = strip(&app)[0].id;
 		let _ = app.request_close(closing);
-		assert_eq!(app.tabs.len(), 2);
+		assert_eq!(strip(&app).len(), 2);
 		assert_eq!(
-			app.tabs[app.active].id, last_visited,
+			strip(&app)[on_screen(&app)].id,
+			last_visited,
 			"the tab the user was on before, not the strip neighbour"
 		);
 	}
@@ -9091,20 +9612,25 @@ mod tests {
 	#[test]
 	fn a_closed_tab_is_dropped_from_the_visit_order() {
 		let mut app = tab_app();
-		let _ = app.open_tab(); // 2 tabs, active = 1
-		let _ = app.open_tab(); // 3 tabs, active = 2 — trail 0, 1, 2
-		let first_id = app.tabs[0].id;
-		let middle_id = app.tabs[1].id;
-		let active_id = app.tabs[2].id;
+		let _ = app.open_tab(app.focus); // 2 tabs, active = 1
+		let _ = app.open_tab(app.focus); // 3 tabs, active = 2 — trail 0, 1, 2
+		let first_id = strip(&app)[0].id;
+		let middle_id = strip(&app)[1].id;
+		let active_id = strip(&app)[2].id;
 		// Close the middle tab from its own "×" while it is in the background: the window must not
 		// move, and that tab must be gone from the trail for good.
 		let _ = app.request_close(middle_id);
-		assert_eq!(app.tabs[app.active].id, active_id, "the screen is unmoved");
+		assert_eq!(
+			strip(&app)[on_screen(&app)].id,
+			active_id,
+			"the screen is unmoved"
+		);
 		// Now close the active tab. The fallback skips the closed middle tab to the one before it.
 		let _ = app.request_close(active_id);
-		assert_eq!(app.tabs.len(), 1);
+		assert_eq!(strip(&app).len(), 1);
 		assert_eq!(
-			app.tabs[app.active].id, first_id,
+			strip(&app)[on_screen(&app)].id,
+			first_id,
 			"a closed tab never comes forward"
 		);
 	}
@@ -9112,41 +9638,55 @@ mod tests {
 	#[test]
 	fn revisiting_a_tab_re_dates_it_rather_than_queueing_it_twice() {
 		let mut app = tab_app();
-		let _ = app.open_tab(); // trail 0, 1
-		let _ = app.open_tab(); // trail 0, 1, 2
-		let first_id = app.tabs[0].id;
-		let second_id = app.tabs[1].id;
-		let third_id = app.tabs[2].id;
+		let _ = app.open_tab(app.focus); // trail 0, 1
+		let _ = app.open_tab(app.focus); // trail 0, 1, 2
+		let first_id = strip(&app)[0].id;
+		let second_id = strip(&app)[1].id;
+		let third_id = strip(&app)[2].id;
 		// Bounce back to the first tab, then away again: trail 1, 2, 0 then 1, 0, 2. The stale entry
 		// for tab 0 must not still be waiting further down, or the fallbacks come out in the wrong
 		// order (§37).
-		let _ = app.select_tab(0);
-		let _ = app.select_tab(2);
+		let _ = app.select_tab(app.focus, 0);
+		let _ = app.select_tab(app.focus, 2);
 		let _ = app.request_close(third_id);
-		assert_eq!(app.tabs[app.active].id, first_id, "the most recent visit");
+		assert_eq!(
+			strip(&app)[on_screen(&app)].id,
+			first_id,
+			"the most recent visit"
+		);
 		let _ = app.request_close(first_id);
-		assert_eq!(app.tabs[app.active].id, second_id, "then the one before it");
+		assert_eq!(
+			strip(&app)[on_screen(&app)].id,
+			second_id,
+			"then the one before it"
+		);
 	}
 
 	#[test]
-	fn the_tab_brought_forward_by_a_close_inherits_the_window_geometry() {
+	fn the_tab_brought_forward_by_a_close_is_measured_and_inherits_the_window_focus() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		// The active tab holds the latest window size (resizes only reach the tab on screen), so the
-		// tab a close brings forward must be handed it too — otherwise it paints against a stale one
-		// until the next resize (§26, §37).
-		let size = iced::Size::new(1234.0, 567.0);
-		app.tabs[app.active].window_size = size;
-		app.tabs[app.active].window_focused = false;
-		let closing = app.tabs[app.active].id;
+		let _ = app.open_tab(app.focus);
+		// The tab a close brings forward must not paint against a stale geometry (§26, §37). Since
+		// §48 the SIZE comes from re-measuring the region rather than from the outgoing tab, which is
+		// strictly better: the outgoing tab's copy could itself be stale, because a background tab
+		// misses a window resize and a divider drag alike. The window FOCUS is still carried, since
+		// nothing measures that.
+		let stale = iced::Size::new(1234.0, 567.0);
+		let region = strip_mut(&mut app);
+		let showing = region.active;
+		region.tabs[showing].window_size = stale;
+		region.tabs[showing].window_focused = false;
+		let closing = strip(&app)[on_screen(&app)].id;
 		let _ = app.request_close(closing);
-		assert_eq!(app.tabs[app.active].window_size, size);
-		assert!(!app.tabs[app.active].window_focused);
+		// The one region fills the whole window, less the strip above the tab.
+		let expected = iced::Size::new(1200.0, 800.0 - ui::tabs::STRIP_HEIGHT);
+		assert_eq!(strip(&app)[on_screen(&app)].window_size, expected);
+		assert!(!strip(&app)[on_screen(&app)].window_focused);
 	}
 
 	// The path of an editor tab's file, for asserting where in the strip it landed (§38).
 	fn editor_path(app: &App, index: usize) -> String {
-		app.tabs[index]
+		strip(app)[index]
 			.editor
 			.as_ref()
 			.expect("an editor tab")
@@ -9157,156 +9697,166 @@ mod tests {
 	#[test]
 	fn an_editor_tab_opens_beside_the_session_it_came_from() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let _ = app.open_tab(); // 3 tabs; the file is opened from the LEFTMOST one
-		let session = app.tabs[0].id;
-		let _ = app.open_editor(session, "/home/user/notes.txt".to_owned());
-		assert_eq!(app.tabs.len(), 4);
-		assert_eq!(app.active, 1, "right after its session, not at the far end");
+		let _ = app.open_tab(app.focus);
+		let _ = app.open_tab(app.focus); // 3 tabs; the file is opened from the LEFTMOST one
+		let session = strip(&app)[0].id;
+		let _ = app.open_editor(app.focus, session, "/home/user/notes.txt".to_owned());
+		assert_eq!(strip(&app).len(), 4);
+		assert_eq!(
+			on_screen(&app),
+			1,
+			"right after its session, not at the far end"
+		);
 		assert_eq!(editor_path(&app, 1), "/home/user/notes.txt");
 	}
 
 	#[test]
 	fn files_opened_from_one_session_stay_grouped_in_the_order_they_were_opened() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let session = app.tabs[0].id;
-		let _ = app.open_editor(session, "first.txt".to_owned());
-		let _ = app.open_editor(session, "second.txt".to_owned());
+		let _ = app.open_tab(app.focus);
+		let session = strip(&app)[0].id;
+		let _ = app.open_editor(app.focus, session, "first.txt".to_owned());
+		let _ = app.open_editor(app.focus, session, "second.txt".to_owned());
 		// The second file goes after the first, not between it and its session — so the group reads
 		// left to right in the order the files were opened (§38).
 		assert_eq!(editor_path(&app, 1), "first.txt");
 		assert_eq!(editor_path(&app, 2), "second.txt");
-		assert_eq!(app.active, 2);
+		assert_eq!(on_screen(&app), 2);
 	}
 
 	#[test]
 	fn each_session_keeps_its_own_group_of_files() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let first_session = app.tabs[0].id;
-		let second_session = app.tabs[1].id;
-		let _ = app.open_editor(first_session, "one.txt".to_owned());
+		let _ = app.open_tab(app.focus);
+		let first_session = strip(&app)[0].id;
+		let second_session = strip(&app)[1].id;
+		let _ = app.open_editor(app.focus, first_session, "one.txt".to_owned());
 		// The second session's file goes beside IT, so the run of editors after the first session
 		// ends at the first chip that is not one of its own (§38).
-		let _ = app.open_editor(second_session, "two.txt".to_owned());
+		let _ = app.open_editor(app.focus, second_session, "two.txt".to_owned());
 		assert_eq!(editor_path(&app, 1), "one.txt");
-		assert_eq!(app.tabs[2].id, second_session);
+		assert_eq!(strip(&app)[2].id, second_session);
 		assert_eq!(editor_path(&app, 3), "two.txt");
 	}
 
 	#[test]
 	fn a_file_whose_session_has_gone_opens_at_the_end() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
+		let _ = app.open_tab(app.focus);
 		// The session tab closed while the load was in flight: there is nothing to sit beside, so the
 		// editor takes the end of the strip rather than a guessed slot (§38).
-		let _ = app.open_editor(9_999, "orphan.txt".to_owned());
-		assert_eq!(app.active, app.tabs.len() - 1);
-		assert_eq!(editor_path(&app, app.active), "orphan.txt");
+		let _ = app.open_editor(app.focus, 9_999, "orphan.txt".to_owned());
+		assert_eq!(on_screen(&app), strip(&app).len() - 1);
+		assert_eq!(editor_path(&app, on_screen(&app)), "orphan.txt");
 	}
 
 	#[test]
 	fn dragging_a_chip_onto_another_moves_it_into_that_slot() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let _ = app.open_tab();
-		let grabbed = app.tabs[0].id;
-		let passed = app.tabs[1].id;
+		let _ = app.open_tab(app.focus);
+		let _ = app.open_tab(app.focus);
+		let grabbed = strip(&app)[0].id;
+		let passed = strip(&app)[1].id;
 		// Press the leftmost chip, travel to the rightmost, release: the grabbed tab lands where that
 		// chip was and the ones it passed shuffle left (§38).
 		let _ = app.update(Message::TabSelected(0));
 		let _ = app.update(Message::TabDraggedOver(2));
 		let _ = app.update(Message::TabDropped);
-		assert_eq!(app.tabs[2].id, grabbed);
-		assert_eq!(app.tabs[0].id, passed, "the tabs it passed moved left");
-		assert_eq!(app.active, 2, "the tab on screen followed its own move");
-		assert!(app.tab_drag.is_none(), "the gesture is over");
+		assert_eq!(strip(&app)[2].id, grabbed);
+		assert_eq!(strip(&app)[0].id, passed, "the tabs it passed moved left");
+		assert_eq!(
+			on_screen(&app),
+			2,
+			"the tab on screen followed its own move"
+		);
+		assert!(app.region().tab_drag.is_none(), "the gesture is over");
 	}
 
 	#[test]
 	fn a_press_that_never_leaves_its_chip_is_only_a_click() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let first = app.tabs[0].id;
+		let _ = app.open_tab(app.focus);
+		let first = strip(&app)[0].id;
 		// Press and release on the same chip: it selects, and the strip keeps its order — a drag with
 		// no target drops nothing (§38).
 		let _ = app.update(Message::TabSelected(0));
 		let _ = app.update(Message::TabDropped);
-		assert_eq!(app.tabs[0].id, first);
-		assert_eq!(app.active, 0, "it did still select");
+		assert_eq!(strip(&app)[0].id, first);
+		assert_eq!(on_screen(&app), 0, "it did still select");
 	}
 
 	#[test]
 	fn leaving_the_strip_abandons_the_move() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let first = app.tabs[0].id;
+		let _ = app.open_tab(app.focus);
+		let first = strip(&app)[0].id;
 		let _ = app.update(Message::TabSelected(0));
 		let _ = app.update(Message::TabDraggedOver(1));
 		// The pointer wanders off the strip: the gesture is called off, so a release afterwards (over
 		// the terminal, say) must not still reorder anything (§38).
 		let _ = app.update(Message::TabDragCancelled);
 		let _ = app.update(Message::TabDropped);
-		assert_eq!(app.tabs[0].id, first);
+		assert_eq!(strip(&app)[0].id, first);
 	}
 
 	#[test]
 	fn dragging_back_onto_the_grabbed_chip_clears_the_target() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let first = app.tabs[0].id;
+		let _ = app.open_tab(app.focus);
+		let first = strip(&app)[0].id;
 		// Out to the neighbour and back again: changing your mind mid-drag leaves the order alone.
 		let _ = app.update(Message::TabSelected(0));
 		let _ = app.update(Message::TabDraggedOver(1));
 		let _ = app.update(Message::TabDraggedOver(0));
 		let _ = app.update(Message::TabDropped);
-		assert_eq!(app.tabs[0].id, first);
+		assert_eq!(strip(&app)[0].id, first);
 	}
 
 	#[test]
 	fn hovering_the_strip_at_rest_moves_nothing() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let first = app.tabs[0].id;
+		let _ = app.open_tab(app.focus);
+		let first = strip(&app)[0].id;
 		// No press, so no drag: the pointer crossing the chips and a stray release are both inert.
 		let _ = app.update(Message::TabDraggedOver(0));
 		let _ = app.update(Message::TabDropped);
-		assert_eq!(app.tabs[0].id, first);
-		assert!(app.tab_drag.is_none());
+		assert_eq!(strip(&app)[0].id, first);
+		assert!(app.region().tab_drag.is_none());
 	}
 
 	#[test]
 	fn a_reorder_keeps_whatever_tab_is_on_screen_on_screen() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let _ = app.open_tab();
-		let on_screen = app.tabs[app.active].id;
+		let _ = app.open_tab(app.focus);
+		let _ = app.open_tab(app.focus);
+		let showing = strip(&app)[on_screen(&app)].id;
 		// A drag armed on a tab that is NOT the one on screen — a close confirmation can leave another
 		// tab active. `active` is a strip position, so it has to follow its own tab's id (§38).
-		app.tab_drag = Some(TabDrag {
-			grabbed: app.tabs[0].id,
-			over: Some(app.tabs[1].id),
+		let (grabbed, over) = (strip(&app)[0].id, strip(&app)[1].id);
+		strip_mut(&mut app).tab_drag = Some(TabDrag {
+			grabbed,
+			over: Some(over),
 		});
-		let _ = app.drop_tab();
-		assert_eq!(app.tabs[app.active].id, on_screen);
+		strip_mut(&mut app).drop_tab();
+		assert_eq!(strip(&app)[on_screen(&app)].id, showing);
 	}
 
 	#[test]
 	fn a_reorder_leaves_the_visit_order_alone() {
 		let mut app = tab_app();
-		let _ = app.open_tab();
-		let _ = app.open_tab(); // trail 0, 1, 2 — the third tab is on screen
-		let third = app.tabs[2].id;
+		let _ = app.open_tab(app.focus);
+		let _ = app.open_tab(app.focus); // trail 0, 1, 2 — the third tab is on screen
+		let third = strip(&app)[2].id;
 		// Grab the leftmost tab (which selects it, so the trail becomes 1, 2, 0) and drop it at the
 		// end. The activation order is keyed by id, so shuffling positions must not disturb it (§37).
 		let _ = app.update(Message::TabSelected(0));
 		let _ = app.update(Message::TabDraggedOver(2));
 		let _ = app.update(Message::TabDropped);
-		let moved = app.tabs[app.active].id;
+		let moved = strip(&app)[on_screen(&app)].id;
 		let _ = app.request_close(moved);
 		assert_eq!(
-			app.tabs[app.active].id, third,
+			strip(&app)[on_screen(&app)].id,
+			third,
 			"the fallback is still the tab visited before it, wherever the strip has put it"
 		);
 	}
@@ -9314,11 +9864,292 @@ mod tests {
 	#[test]
 	fn selecting_switches_the_active_tab_and_ignores_bad_indices() {
 		let mut app = tab_app();
-		let _ = app.open_tab(); // active = 1
-		let _ = app.select_tab(0);
-		assert_eq!(app.active, 0);
+		let _ = app.open_tab(app.focus); // active = 1
+		let _ = app.select_tab(app.focus, 0);
+		assert_eq!(on_screen(&app), 0);
 		// Out of range or the current tab is a no-op.
-		let _ = app.select_tab(9);
-		assert_eq!(app.active, 0);
+		let _ = app.select_tab(app.focus, 9);
+		assert_eq!(on_screen(&app), 0);
+	}
+
+	// --- splitting the window (§48) ---
+
+	/// Apply a split the way the UI does, but with the monitor step already answered — the real flow
+	/// asks the OS how big the screen is and comes back a turn later, which no test can await.
+	fn split(app: &mut App, way: ui::split::Way) -> iced::Size {
+		let pane = app.focus;
+		let grown = way.grown(app.window);
+		let _ = app.apply_split(pane, way, iced::window::Id::unique(), grown);
+		grown
+	}
+
+	#[test]
+	fn a_split_opens_a_second_region_on_the_target_list_and_gives_it_the_keyboard() {
+		let mut app = tab_app();
+		let first = app.focus;
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		assert_eq!(region_count(&app), 2, "the window is divided in two");
+		assert_ne!(app.focus, first, "the fresh region takes the keyboard");
+		// A fresh application layout: one tab, and it is sitting on the saved-target list.
+		assert_eq!(strip(&app).len(), 1);
+		assert!(matches!(strip(&app)[0].screen, Screen::Home));
+		// Tab ids stay app-wide, so the new region's tab cannot collide with the old region's (§26).
+		let ids: Vec<u64> = app.tabs().map(|tab| tab.id).collect();
+		assert_eq!(ids.len(), 2);
+		assert_ne!(ids[0], ids[1]);
+	}
+
+	#[test]
+	fn a_split_doubles_the_window_the_way_it_cuts_and_the_old_region_keeps_its_size() {
+		let mut app = tab_app();
+		let before = app.window;
+		let old = app.focus;
+		let grown = split(&mut app, ui::split::Way::Horizontal);
+		assert_eq!(grown.width, before.width * 2.0, "twice as wide");
+		assert_eq!(grown.height, before.height, "no taller");
+		assert_eq!(
+			app.window, grown,
+			"the app measures against the grown window"
+		);
+		// The point of growing rather than halving: the region that was already there is left the
+		// size it was, so the shell in it does not reflow. Half a seam is lost to the divider.
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let kept = boxes[&old];
+		assert!(
+			(kept.width - (before.width - ui::split::SPACING / 2.0)).abs() < 1.0,
+			"the split region kept its width, less its half of the seam: {}",
+			kept.width
+		);
+	}
+
+	#[test]
+	fn a_vertical_split_grows_the_window_downwards_instead() {
+		let mut app = tab_app();
+		let before = app.window;
+		let grown = split(&mut app, ui::split::Way::Vertical);
+		assert_eq!(grown.width, before.width);
+		assert_eq!(grown.height, before.height * 2.0);
+	}
+
+	#[test]
+	fn every_region_is_measured_against_its_own_box_not_the_whole_window() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		// Each region's on-screen tab is handed its own box less the strip above it, so the terminal
+		// in there picks a column count for the half it occupies rather than for the whole window.
+		let boxes = ui::split::regions(&app.regions, app.window);
+		for (pane, rect) in &boxes {
+			let region = app.regions.get(*pane).expect("a live region");
+			assert_eq!(region.active().window_size.width, rect.width);
+			assert_eq!(
+				region.active().window_size.height,
+				rect.height - ui::tabs::STRIP_HEIGHT
+			);
+		}
+		// And they really are halves, not two copies of the window.
+		let widths: Vec<f32> = boxes.values().map(|rect| rect.width).collect();
+		assert!(widths.iter().all(|width| *width < app.window.width));
+	}
+
+	#[test]
+	fn a_region_event_is_applied_where_it_happened_not_where_the_keyboard_is() {
+		let mut app = tab_app();
+		let old = app.focus;
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		assert_ne!(old, fresh);
+		// A "+" pressed on the OTHER region's strip arrives wrapped in that region's name. Routed by
+		// focus it would open a tab in the region holding the keyboard — which is the bug the wrapper
+		// exists to prevent (§48).
+		let _ = app.update(Message::In(old, Box::new(Message::TabNew)));
+		assert_eq!(
+			app.regions.get(old).expect("the split region").tabs.len(),
+			2,
+			"the tab opened in the region the press came from"
+		);
+	}
+
+	#[test]
+	fn a_divider_drag_re_shares_the_room_and_re_measures_both_regions() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let (split_id, _) = *app
+			.regions
+			.layout()
+			.split_regions(ui::split::SPACING, ui::split::MIN_SIZE, app.window)
+			.iter()
+			.next()
+			.map(|(id, value)| (*id, *value))
+			.as_ref()
+			.expect("one divider");
+		let _ = app.update(Message::SplitResized {
+			split: split_id,
+			ratio: 0.25,
+		});
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let mut widths: Vec<f32> = boxes.values().map(|rect| rect.width).collect();
+		widths.sort_by(f32::total_cmp);
+		assert!(
+			widths[0] < widths[1],
+			"the drag left one region narrower than the other: {widths:?}"
+		);
+		// Every region's tab agrees with its new box — the drag is not finished until the grids know.
+		for (pane, rect) in &boxes {
+			let region = app.regions.get(*pane).expect("a live region");
+			assert_eq!(region.active().window_size.width, rect.width);
+		}
+	}
+
+	#[test]
+	fn closing_a_regions_last_tab_closes_the_region_and_hands_back_its_room() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		let only_tab = strip(&app)[0].id;
+		let _ = app.request_close(only_tab);
+		assert_eq!(region_count(&app), 1, "the region went with its last tab");
+		assert!(
+			app.regions.get(fresh).is_none(),
+			"and it is the region that was closed"
+		);
+		// The keyboard followed, and the surviving region has the whole window back.
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let survivor = boxes[&app.focused_pane()];
+		assert_eq!(survivor.width, app.window.width);
+		// The window itself is deliberately NOT shrunk back (§48): a split grows it because the user
+		// asked, and nobody asked for this.
+		assert_eq!(app.window.width, 2400.0);
+	}
+
+	#[test]
+	fn closing_the_last_tab_of_the_last_region_is_a_quit_not_an_empty_window() {
+		let mut app = tab_app();
+		let only_tab = strip(&app)[0].id;
+		let _ = app.request_close(only_tab);
+		assert!(
+			matches!(app.quit, Some(QuitPhase::Confirming)),
+			"an undivided window with one tab left raises the quit confirmation (§30)"
+		);
+		assert_eq!(region_count(&app), 1);
+		assert_eq!(strip(&app).len(), 1, "and nothing was closed yet");
+	}
+
+	#[test]
+	fn a_split_of_a_region_that_has_already_gone_changes_nothing() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		let only_tab = strip(&app)[0].id;
+		let _ = app.request_close(only_tab); // the region closes with it
+		let before = (region_count(&app), app.window, app.next_id);
+		// The monitor answer comes back naming a region that no longer exists. Nothing must happen —
+		// above all the window must not grow for a split that cannot be made (§48).
+		let _ = app.apply_split(
+			fresh,
+			ui::split::Way::Horizontal,
+			iced::window::Id::unique(),
+			iced::Size::new(9999.0, 9999.0),
+		);
+		assert_eq!((region_count(&app), app.window, app.next_id), before);
+	}
+
+	#[test]
+	fn a_window_resize_reaches_every_region_not_just_the_focused_one() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Vertical);
+		let _ = app.update(Message::WindowResized(iced::Size::new(1000.0, 900.0)));
+		assert_eq!(app.window, iced::Size::new(1000.0, 900.0));
+		let boxes = ui::split::regions(&app.regions, app.window);
+		for (pane, rect) in &boxes {
+			let region = app.regions.get(*pane).expect("a live region");
+			assert_eq!(
+				region.active().window_size,
+				iced::Size::new(rect.width, rect.height - ui::tabs::STRIP_HEIGHT),
+				"a background region's grid would otherwise keep painting at the old size"
+			);
+		}
+	}
+
+	#[test]
+	fn losing_the_window_focus_is_told_to_every_visible_shell() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let _ = app.update(Message::WindowFocus(false));
+		// Focus reporting is a promise to the program in each shell (§23), and since §48 there is one
+		// visible shell per region — a region left un-told would keep reporting the window as focused.
+		for (_, region) in app.regions.iter() {
+			assert!(!region.active().window_focused);
+		}
+	}
+
+	#[test]
+	fn a_press_in_a_region_gives_it_the_keyboard() {
+		let mut app = tab_app();
+		let old = app.focus;
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		assert_ne!(app.focus, old);
+		let _ = app.update(Message::SplitFocused(old));
+		assert_eq!(app.focus, old, "a click moves the keyboard back");
+	}
+
+	#[test]
+	fn a_strip_drag_never_reaches_another_regions_tabs() {
+		let mut app = tab_app();
+		let old = app.focus;
+		let _ = app.open_tab(old); // the left region has two tabs
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		let left_order: Vec<u64> = app
+			.regions
+			.get(old)
+			.expect("the split region")
+			.tabs
+			.iter()
+			.map(|tab| tab.id)
+			.collect();
+		// Grab a chip in the left region, then hover and drop over the RIGHT region's only slot. The
+		// gesture belongs to the strip it started on, so the drop finds no target there and moves
+		// nothing — in either region.
+		let _ = app.update(Message::In(old, Box::new(Message::TabSelected(0))));
+		let _ = app.update(Message::In(fresh, Box::new(Message::TabDraggedOver(0))));
+		let _ = app.update(Message::In(fresh, Box::new(Message::TabDropped)));
+		let after: Vec<u64> = app
+			.regions
+			.get(old)
+			.expect("the split region")
+			.tabs
+			.iter()
+			.map(|tab| tab.id)
+			.collect();
+		assert_eq!(after, left_order, "the left strip kept its order");
+		assert_eq!(
+			app.regions.get(fresh).expect("the fresh region").tabs.len(),
+			1,
+			"and nothing landed in the right one"
+		);
+	}
+
+	#[test]
+	fn a_quit_counts_and_drains_the_sessions_in_every_region() {
+		let mut app = tab_app();
+		// Two live sessions, one in each region, so the count the confirmation quotes and the drain
+		// list it builds both have to see past the focused region (§30, §48).
+		let (mut left, _left_rx) = app_with_terminal(4);
+		let (mut right, _right_rx) = app_with_terminal(4);
+		// `is_live` is "a shell is on screen", which is the terminal screen — the helper above builds
+		// the emulator and the channel but leaves the tab on its default screen.
+		left.screen = Screen::Terminal;
+		right.screen = Screen::Terminal;
+		let old = app.focus;
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		app.regions.get_mut(old).expect("the left region").tabs[0] = left;
+		app.regions.get_mut(fresh).expect("the right region").tabs[0] = right;
+		assert_eq!(app.tabs().filter(|tab| tab.is_live()).count(), 2);
+		let _ = app.quit_confirmed();
+		match &app.quit {
+			Some(QuitPhase::Draining { pending, .. }) => assert_eq!(pending.len(), 2),
+			_ => panic!("the quit must wait for both sessions to report down"),
+		}
 	}
 }

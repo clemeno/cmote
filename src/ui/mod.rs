@@ -16,6 +16,7 @@ pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss
 pub mod richcopy; // serialise a selection to styled HTML for a rich Ctrl+C (§10)
 pub mod selection; // mouse text selection over the grid
 pub mod snackbar; // the copy-confirmation toast (§10)
+pub mod split; // the window cut into side-by-side / stacked regions, and their dividers (§48)
 pub mod syntax; // syntect-backed syntax highlighting for the editor's CME theme (§32)
 pub mod tabs; // the tab strip across the top of the window (§26)
 pub mod terminal; // the live shell grid

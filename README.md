@@ -13,8 +13,9 @@ navigable, with a details popup and rubber-band multi-selection), the remote wor
 directory in the title bar, and file transfer both ways. Full-screen programs — btop,
 vim, htop, midnight commander — draw properly and take the mouse. Reconnect to a saved
 target and the shell and both panels come back to the directories you left them in. Open
-as many sessions as you like in **tabs** — each fully independent, all in one window. Tunnel
-ports through the connection — local, remote or a SOCKS proxy — and they come back on reconnect.
+as many sessions as you like in **tabs** — each fully independent, all in one window — and
+**split** that window to watch two of them at once. Tunnel ports through the connection — local,
+remote or a SOCKS proxy — and they come back on reconnect.
 
 This is a **learning project**. The code is meant to be read as much as run, so it is
 written didactically: it favours idiomatic Rust, explains *why* each choice was made,
@@ -30,6 +31,15 @@ references below (§n) point into it.
   arriving while you work in another. Mouse-only strip across the top: **click** a tab to switch,
   **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
   targets and the unlocked vault are shared across every tab.
+- **Split the window — two sessions side by side.** The two buttons at the right of the strip cut
+  the window in half **beside** or **below**, and the new half is a whole small cmote: its own tab
+  strip, its own tab, opened on the saved target list ready to connect somewhere. Splitting
+  **doubles the window** in the direction you asked for, so the session already on screen keeps the
+  size it had and does not reflow. **Drag a divider** to re-share the room; the share is kept as a
+  proportion, so it survives resizing the window. A **click** anywhere in a region gives it the
+  keyboard and lights its strip, and that same click still lands where you aimed it. Closing a
+  region's last tab closes the region and gives its room back; closing the last tab of the last
+  region still asks to quit.
 - **Confirmed, clean quit.** Closing the **last** tab, or clicking the window's title-bar **×**,
   asks **Quit cmote?** first — telling you how many live sessions it will disconnect — so a stray
   click never drops your work. On confirm, every session is **disconnected cleanly** (a proper SSH
@@ -250,7 +260,7 @@ references below (§n) point into it.
   **Open in terminal**, or the status bar's **Sync**, which brings the shell (and with it the
   tree and the title) to the folder the pane is showing. Sync is disabled when the two already
   agree (§19).
-- **Keyboard focus across the three regions** — the shell, the folder tree and the files
+- **Keyboard focus across the three panels** — the shell, the folder tree and the files
   pane each take the keyboard. A session starts at the shell; a click focuses whatever was
   clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
   skipped), and the focused panel wears a ring so it is never a guess. In a panel the
@@ -366,15 +376,18 @@ references below (§n) point into it.
 
 ## Gestures and shortcuts
 
-Everything the mouse and the keyboard do, by region. The **focused** region is the one that
+Everything the mouse and the keyboard do, by panel. The **focused** panel is the one that
 gets a keystroke; a click focuses what it lands on, and the ring shows where the keyboard is.
 
 **Anywhere in the window**
 
 | Gesture | What it does |
 |---|---|
-| **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous region — shell, folder tree, files pane (hidden panels are skipped) |
-| Click a region | Focus it |
+| **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous panel — shell, folder tree, files pane (hidden panels are skipped) |
+| Click a panel | Focus it |
+| **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way |
+| Click a region | Give it the keyboard; its strip lights up |
+| Drag a divider | Re-share the room between the two regions either side of it |
 | **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead |
 | Window title-bar **×** | Ask **Quit cmote?**, then disconnect every session cleanly and exit |
 | Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |
