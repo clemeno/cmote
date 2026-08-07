@@ -1351,9 +1351,9 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   *screen* — that would tear down a healthy shell over a file that never left. Unlike an auth
   failure (§12), the detail here is the user's own path, so showing it is what makes the error
   actionable. A failure *before any bytes move* (the sftp channel would not open, the source would
-  not read) has nothing to resume, so the queue moves to the next file as it always did; a failure
-  *mid-copy* keeps its partial and pauses the batch for a **Resume** instead (§16 cancel/resume,
-  below).
+  not read, **the destination refused to be created** — a folder this account cannot write to) has
+  nothing to resume, so the queue moves to the next file as it always did; a failure *mid-copy*
+  keeps its partial and pauses the batch for a **Resume** instead (§16 cancel/resume, below).
 - **Success clears the batch.** Once the queue drains, the picked files are cleared, which
   disables the Upload button, so a stray click cannot re-send what just landed. The reported
   destination is the server's `canonicalize` of the path, so the user sees where the bytes
@@ -1412,6 +1412,15 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
   never re-prompts. This is size-based, trusting the existing prefix to be the file's own (`ponytail:`
   no checksum — the same assumption `curl -C -` and rsync's naive mode make). A batch resumes its
   failed file, then drains the rest as usual.
+- **A refusal is not an interruption.** Uploading into a folder the account cannot write to fails at
+  the `create`, before a byte exists on the far side — so there is no partial, and a Resume would run
+  that very same refused create again. The few places that make or open a destination (both
+  backends, both directions: the file `create`/open, the tree's `mkdir`) mark their failure with
+  `transfer::refused`, an error wrapper the reporting end reads back with `transfer::was_refused`.
+  A marked failure reports as a plain `*Failed` — the server's own reason in the status bar, the
+  queue behind it moving on, no Resume — and the mark rides under any context added on the way up,
+  so it cannot be lost between the refusal and the report. Everything past the line that opened the
+  destination stays resumable, because past that line there is somewhere for bytes to survive.
 
 Both live inside one connection: a transfer whose *session* drops tears down to the error screen, so
 its state is gone — resuming across a reconnect is the deferred upgrade path (§16).

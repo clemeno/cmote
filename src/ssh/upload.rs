@@ -254,6 +254,15 @@ async fn report(outcome: Result<CopyOutcome>, remote: &str, events: &mpsc::Sende
 				.send(SshEvent::UploadFailed("Upload cancelled.".to_string()))
 				.await;
 		}
+		// The destination refused to be created at all (§16): no partial exists, so this ends the
+		// same way a file that never left does — the reason in the status bar, the queue behind it
+		// moving on, and NO Resume, which could only run the same refused create again.
+		Err(error) if transfer::was_refused(&error) => {
+			eprintln!("upload refused: {error}");
+			let _ = events
+				.send(SshEvent::UploadFailed(format!("Upload failed: {error}")))
+				.await;
+		}
 		// A mid-flight failure keeps its partial (§16), so this is resumable rather than final:
 		// the GUI offers a Resume that re-sends only the bytes still missing.
 		Err(error) => {
@@ -365,12 +374,19 @@ async fn open_remote_at(sftp: &SftpSession, remote: &str, offset: u64) -> Result
 		return sftp
 			.create(remote.to_owned())
 			.await
-			.with_context(|| format!("could not create {remote} on the server"));
+			.with_context(|| format!("could not create {remote} on the server"))
+			// A destination that was never created holds no bytes to continue from, and asking a
+			// second time would be refused the same way — so this failure is final, not resumable
+			// (§16). The commonest case by far: uploading into a folder this account cannot write.
+			.map_err(transfer::refused);
 	}
 	let mut file = sftp
 		.open_with_flags(remote.to_owned(), OpenFlags::WRITE | OpenFlags::CREATE)
 		.await
-		.with_context(|| format!("could not open {remote} on the server to resume"))?;
+		.with_context(|| format!("could not open {remote} on the server to resume"))
+		// The partial is there, but out of reach: a further Resume would ask for exactly this and
+		// be refused exactly the same, so there is nothing to offer.
+		.map_err(transfer::refused)?;
 	file.seek(SeekFrom::Start(offset))
 		.await
 		.with_context(|| format!("could not seek {remote} to the resume point"))?;
@@ -554,6 +570,17 @@ async fn report_tree(outcome: Result<Option<String>>, events: &mpsc::Sender<SshE
 				.send(SshEvent::UploadFailed(
 					"Folder upload cancelled.".to_string(),
 				))
+				.await;
+		}
+		// The destination refused to be made (§16) — the folder itself, or one inside it, before a
+		// single file was copied. Nothing to pick up, so the tree ends cleanly rather than offering
+		// a Resume that would be refused at the same `mkdir`.
+		Err(error) if transfer::was_refused(&error) => {
+			eprintln!("folder upload refused: {error}");
+			let _ = events
+				.send(SshEvent::UploadFailed(format!(
+					"Folder upload failed: {error}"
+				)))
 				.await;
 		}
 		// A mid-flight failure keeps every byte already copied (§16): a Resume re-walks the tree
@@ -758,6 +785,9 @@ async fn ensure_remote_dir(sftp: &SftpSession, path: &str) -> Result<()> {
 	sftp.create_dir(path)
 		.await
 		.with_context(|| format!("could not create {path} on the server"))
+		// Every directory is made before any file goes into one, so a refusal here means the tree
+		// has not copied a byte — nothing to resume, and the same `mkdir` would be refused again.
+		.map_err(transfer::refused)
 }
 
 /// Walk a local directory tree into the plan both transfer directions share (§17). Iterative,

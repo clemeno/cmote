@@ -93,12 +93,56 @@ pub(crate) enum FileAction {
 /// How a copy loop ended when it was NOT an error (§16 cancel/resume). `Done` is the whole file
 /// across; `Cancelled` is the user pressing the status bar's ✕ mid-flight — the loop notices the
 /// shared flag, deletes the partial it was writing, and stops. A real I/O failure is the third
-/// outcome, but it travels as the loop's `Err`, not here: a failure keeps its partial so the
-/// transfer can be resumed, whereas a cancel throws it away, so the two must not be confused.
+/// outcome, but it travels as the loop's `Err`, not here: a failure mid-flight keeps its partial so
+/// the transfer can be resumed, whereas a cancel throws it away, so the two must not be confused.
+/// A failure with no partial to keep is a fourth ending again — see [`Refused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CopyOutcome {
 	Done,
 	Cancelled,
+}
+
+/// A failure the destination refused outright, before there was anywhere to put a single byte
+/// (§16, §17) — uploading into a folder the account cannot write to, saving into a protected local
+/// one, or a `mkdir` the server says no to.
+///
+/// The two ways a transfer can fail are not the same ending, and the status bar must not offer the
+/// same thing for both. A copy that stopped MID-FLIGHT left a partial on the far side, so a Resume
+/// is real work: it sends only the tail that is still missing. A `create` answered with "permission
+/// denied" left NOTHING — there is no partial, and a Resume would run that very same refused create
+/// again. Offering it puts a button that can only fail where the plain "it did not happen" belongs,
+/// and leaves the transfer looking half-done when it never started.
+///
+/// So the few places that make or open the destination wrap their failure in this, and the
+/// reporting end reads it back with [`was_refused`] to end the transfer cleanly instead: the notice
+/// says what the server said, the batch behind it carries on, and no Resume appears.
+#[derive(Debug)]
+pub(crate) struct Refused(anyhow::Error);
+
+impl std::fmt::Display for Refused {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// `{:#}` prints the whole chain on one line. Plain `{}` would print only the outermost
+		// context — "could not create /srv/data/notes.txt on the server" — which is the half that
+		// says what was attempted, dropping the half that says why it was refused.
+		write!(formatter, "{:#}", self.0)
+	}
+}
+
+impl std::error::Error for Refused {}
+
+/// Mark a failure as the destination's refusal — see [`Refused`]. A function rather than a method
+/// so a call site reads `.map_err(transfer::refused)` on the very line that makes or opens the
+/// destination: past that line there IS somewhere for bytes to survive, so past that line a failure
+/// is resumable again.
+pub(crate) fn refused(error: anyhow::Error) -> anyhow::Error {
+	anyhow::Error::new(Refused(error))
+}
+
+/// Whether this failure was the destination's refusal. Walks the whole chain rather than testing
+/// only the outermost link, so a caller between the refusal and the report stays free to add its
+/// own context without hiding the class underneath it.
+pub(crate) fn was_refused(error: &anyhow::Error) -> bool {
+	error.chain().any(|link| link.is::<Refused>())
 }
 
 /// Where a copy should begin, given whether this is a resume and how big the destination already
@@ -308,6 +352,49 @@ mod tests {
 		assert_eq!(attrs.mtime, Some(100));
 		assert_eq!(attrs.atime, Some(100));
 		assert_eq!(attrs.permissions, None);
+	}
+
+	#[test]
+	fn an_ordinary_failure_is_not_a_refusal() {
+		// The default direction, and the safe one: a failure says nothing about the destination
+		// unless the code that touched the destination said so, and an unmarked failure keeps the
+		// resume it always had.
+		let error = anyhow::anyhow!("write failed");
+		assert!(!super::was_refused(&error));
+	}
+
+	#[test]
+	fn a_refused_destination_is_recognised_as_one() {
+		let error = super::refused(anyhow::anyhow!("could not create /srv/data on the server"));
+		assert!(super::was_refused(&error));
+	}
+
+	#[test]
+	fn a_refusal_survives_the_context_added_on_its_way_up() {
+		// The mark goes on where the `create` failed, but the report that reads it back is several
+		// frames higher, and every frame in between may add its own context. The class must ride
+		// under all of it — a refusal that a `.context()` could hide would be a Resume button back.
+		use anyhow::Context;
+		let error = Err::<(), _>(super::refused(anyhow::anyhow!("permission denied")))
+			.context("could not upload notes.txt")
+			.unwrap_err();
+		assert!(super::was_refused(&error));
+	}
+
+	#[test]
+	fn a_refusal_reads_out_with_the_reason_that_was_refused() {
+		// What the status bar ends up showing. The wrapped chain prints whole, so the notice names
+		// both what was attempted and why the server said no — one without the other is not
+		// actionable.
+		use anyhow::Context;
+		let inner = Err::<(), _>(anyhow::anyhow!("permission denied"))
+			.context("could not create /srv/data/notes.txt on the server")
+			.unwrap_err();
+		let error = super::refused(inner);
+		assert_eq!(
+			error.to_string(),
+			"could not create /srv/data/notes.txt on the server: permission denied"
+		);
 	}
 
 	#[test]

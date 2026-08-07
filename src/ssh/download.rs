@@ -99,6 +99,17 @@ async fn report(outcome: Result<CopyOutcome>, local: &Path, events: &mpsc::Sende
 				.send(SshEvent::DownloadFailed("Download cancelled.".to_string()))
 				.await;
 		}
+		// The local destination refused to be created (§16): nothing is on disk to continue from,
+		// so this is a plain failure — the reason in the status bar, the rest of the batch moving
+		// on, and no Resume, which would be refused at the same create.
+		Err(error) if transfer::was_refused(&error) => {
+			eprintln!("download refused: {error}");
+			let _ = events
+				.send(SshEvent::DownloadFailed(format!(
+					"Download failed: {error}"
+				)))
+				.await;
+		}
 		// A mid-flight failure keeps the partial (§16): a Resume reads the remote from the local
 		// file's size and appends the rest.
 		Err(error) => {
@@ -236,7 +247,11 @@ async fn open_local_at(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 	if offset == 0 {
 		return tokio::fs::File::create(local)
 			.await
-			.with_context(|| format!("could not create {}", local.display()));
+			.with_context(|| format!("could not create {}", local.display()))
+			// A local file that could not be created — a folder this account cannot write into, a
+			// read-only volume — holds nothing to continue from, and the same create would be
+			// refused again: final, not resumable (§16).
+			.map_err(transfer::refused);
 	}
 	let mut file = tokio::fs::OpenOptions::new()
 		.write(true)
@@ -246,7 +261,9 @@ async fn open_local_at(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 		.truncate(false)
 		.open(local)
 		.await
-		.with_context(|| format!("could not open {} to resume", local.display()))?;
+		.with_context(|| format!("could not open {} to resume", local.display()))
+		// The partial is on disk but unreachable, so a further Resume would be refused identically.
+		.map_err(transfer::refused)?;
 	file.seek(SeekFrom::Start(offset))
 		.await
 		.with_context(|| format!("could not seek {} to the resume point", local.display()))?;
@@ -455,6 +472,16 @@ async fn report_tree(outcome: Result<Option<String>>, events: &mpsc::Sender<SshE
 				))
 				.await;
 		}
+		// The local tree refused to be made (§16), before a byte was pulled into it: a clean end,
+		// not an offer to continue something that never began.
+		Err(error) if transfer::was_refused(&error) => {
+			eprintln!("folder download refused: {error}");
+			let _ = events
+				.send(SshEvent::DownloadFailed(format!(
+					"Folder download failed: {error}"
+				)))
+				.await;
+		}
 		// A mid-flight failure keeps every byte already pulled (§16): a Resume re-walks the tree
 		// and size-compares, sending down only what is still missing.
 		Err(error) => {
@@ -489,14 +516,18 @@ async fn receive_tree(
 
 	// Create the destination and every subdirectory. `create_dir_all` makes parents too, so the
 	// order the walk found them in does not matter here.
+	// A folder that cannot be made here is a refusal, not an interruption: this runs before any
+	// file is pulled, so nothing has landed and nothing can be resumed (§16).
 	tokio::fs::create_dir_all(&local_target)
 		.await
-		.with_context(|| format!("could not create {}", local_target.display()))?;
+		.with_context(|| format!("could not create {}", local_target.display()))
+		.map_err(transfer::refused)?;
 	for rel in &plan.dirs {
 		let dir = transfer::local_join(&local_target, rel);
 		tokio::fs::create_dir_all(&dir)
 			.await
-			.with_context(|| format!("could not create {}", dir.display()))?;
+			.with_context(|| format!("could not create {}", dir.display()))
+			.map_err(transfer::refused)?;
 	}
 
 	let mut received = 0u64;

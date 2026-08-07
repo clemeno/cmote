@@ -148,6 +148,10 @@ pub async fn make_dirs(runner: &Runner, path: &str) -> Result<()> {
 		.stdout(&format!("mkdir -p -- {}", shell_quote(path)))
 		.await
 		.map(|_| ())
+		// Every directory is made before any file is copied into one, so a refusal here means the
+		// transfer has not written a byte: a clean failure, not something to offer a Resume for
+		// (§16). The `mkdir` would be refused the same way next time.
+		.map_err(transfer::refused)
 }
 
 /// Rename, refusing an occupied destination (§18) — again as one command, for the same reason.
@@ -463,13 +467,17 @@ async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 	if offset == 0 {
 		return tokio::fs::File::create(local)
 			.await
-			.context("could not create the local file");
+			.context("could not create the local file")
+			// Same classing as the SFTP backend's `open_local_at`: a destination that was never
+			// created has no partial, so the failure is final rather than resumable (§16).
+			.map_err(transfer::refused);
 	}
 	let file = tokio::fs::OpenOptions::new()
 		.write(true)
 		.open(local)
 		.await
-		.context("could not open the local partial")?;
+		.context("could not open the local partial")
+		.map_err(transfer::refused)?;
 	use tokio::io::AsyncSeekExt;
 	let mut file = file;
 	file.seek(std::io::SeekFrom::Start(offset))
@@ -590,7 +598,8 @@ pub async fn fetch_tree(
 		let dir = transfer::local_join(local_root, rel);
 		tokio::fs::create_dir_all(&dir)
 			.await
-			.with_context(|| format!("could not create {}", dir.display()))?;
+			.with_context(|| format!("could not create {}", dir.display()))
+			.map_err(transfer::refused)?;
 	}
 	for file in &plan.files {
 		if cancel.load(Ordering::Relaxed) {

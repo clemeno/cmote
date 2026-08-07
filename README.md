@@ -288,8 +288,9 @@ references below (§n) point into it.
   on the server; if some are already there, **one dialog asks about the whole batch** —
   **Replace**, **Skip**, **Keep both** (`name-1.txt`) or **Cancel**. The files then go one at
   a time behind the status bar's progress bar, closing with `Uploaded N files`. A failure names
-  its reason: one *before any bytes move* skips to the next file, and one *mid-copy* keeps its
-  partial and offers **Resume** (below) (§17). When the batch lands, the files pane (and the
+  its reason: one *before any bytes move* — a folder this account cannot write to, say — ends that
+  file cleanly and skips to the next, and one *mid-copy* keeps its partial and offers **Resume**
+  (below) (§17). When the batch lands, the files pane (and the
   tree) **re-list the destination folder** if they are showing it, so what you just sent appears in
   place without a manual Refresh (§29).
 - **Create and delete remote entries** — **New folder…** (on the tree and the pane's
@@ -311,7 +312,9 @@ references below (§n) point into it.
   exactly where it stopped — a byte-offset append for a single file, and for a folder a re-walk that
   size-compares every file so only the missing ones and the interrupted file's tail cross again.
   Resume works within one live session; a dropped *connection* tears down the session, so that is
-  not resumable (§16, §17).
+  not resumable (§16, §17). A transfer the destination **refused** — no write permission on the
+  folder — gets no Resume either: nothing was created, so there is nothing to pick up, and the
+  notice simply says what the server said.
 - **Timestamps are kept** — a transferred file keeps its **modification time** instead of being
   re-dated to "now", both when you upload and when you download, so a folder still sorts by date and
   a build still sees the right ages. Between two Unix machines the **permission bits** ride along too
