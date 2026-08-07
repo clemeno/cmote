@@ -4027,6 +4027,24 @@ is on screen.
 
 What it deliberately does not do is pretend the file panes came along. They did not — see the NOT list.
 
+> **STATUS: the UX is withdrawn; the machinery stays.** There is no way to START an elevation from the
+> app any more — the "Log in as…" button, the context-menu item, the elevate dialog and the account
+> switcher are all gone, and with them the app-side state they fed (`ElevateDialog`, the `Elevate*`
+> messages, `IdentityChoice`, the cached sudo password). The approach is being reconsidered after §46
+> met a two-factor server: the terminal handled it, but the file side could not (see §46's NOT list),
+> and the shape of the dialog is entangled with assumptions that may not survive the rethink.
+>
+> Everything below the UI line is untouched and still compiled: `elevate.rs`, `ssh/asuser.rs`,
+> `ssh/shellfs.rs`, the shell SET and its credential conversation in `ssh/shell.rs`, the `Elevate*`
+> commands and events in `bridge.rs`, and the app-side identity list, parked `Workspace`s and switch.
+> Their tests stay too, driven directly rather than through a dialog — they are what will keep the next
+> attempt honest. `elevate::valid_user` carries an `#[allow(dead_code)]` and a note saying why it was
+> kept rather than deleted.
+>
+> One thing survived above the line: the status bar's **read-only account label**. It says who the grid
+> belongs to, which is worth its width on its own — several people on one shared account, or an agent
+> key you are not certain which identity it offered.
+
 ### One shell was one channel; now it is a set (`ssh/shell.rs`)
 
 `stream()` used to hold the shell channel, await it and write to it. `shell::Shells` now holds them all,
@@ -4098,32 +4116,28 @@ The consequence worth having: `cme`'s scrollback, cwd, prompt marks and find bar
 when the user comes back to it, and a long build keeps printing into them while root's shell is on
 screen.
 
-### The switcher, and the two faces of the dialog (`ui/terminal.rs`)
+### The status bar's account label (`ui/terminal.rs`)
 
-The status bar shows the account the grid belongs to, and beside it a **"Log in as…" button**. Two
-widgets, because they answer two questions: *who* — plain text with ONE account, since a select with a
-single option is a control that does nothing, and a select once there are two or more — and *what else*,
-which is the button, there either way.
+All that is left of this section above the UI line: `account_label` draws the account whose shell is on
+screen, as plain text, from `Tab::current_user` — the identity list's entry for the identity on screen,
+falling back to the account the session authenticated as for the moment before the first shell is
+listed.
 
-The button was first folded in as an extra entry inside the select, which read well on paper and badly
-in the hand. The select only exists once a second account does, so the one way in from the bar appeared
-only *after* it had already been used, and until then the right-click menu was the only door — findable
-only by someone who already knew to look. A button beside the name says what it does before it is
-opened, sits in the same place whatever the account count, and leaves the select meaning exactly one
-thing: which account the grid belongs to. That is also why `IdentityChoice` is a struct and not an enum
-any more: every entry in the picker is an account, so there is no variant to say which kind it is. Both
-doors raise the same `ElevateOpen`, and the button is never disabled — whether elevation is possible at
-all is the remote's answer to give, in the remote's own words.
-
-The dialog is one conversation in two halves, and never both at once: a FORM (which account, `sudo` or
-`su`) until something is asked, then the remote's QUESTION worded exactly as the remote worded it with a
-masked field under it. A password field beside an editable account name would invite typing the answer
-into the wrong one. While it is open it owns the keyboard — a security property, not a nicety: its field
-holds a password or a one-time code, and a keystroke that also reached the shell would type that secret
-at a live prompt. Esc abandons, and abandoning closes any shell already opened, since a `sudo` parked on
-a prompt nobody will answer would hold a channel for the rest of the session.
+What stood here, and is now withdrawn: a "Log in as…" button beside that label and the same item in the
+terminal's context menu, both raising `ElevateOpen`; a select in place of the label once a session held
+two accounts; and the elevate dialog itself — one conversation in two faces, a FORM (which account,
+`sudo` or `su`) until something was asked and then the remote's QUESTION with a masked field under it,
+owning the keyboard while it held a secret so that nothing typed into it also reached the shell behind
+it. The reasoning is preserved in git (`feat: a Log in as… button, and an elevation that survives two
+factors`), which is where the next attempt should start reading: the keyboard-ownership rule and the
+"never a password field over a live prompt" rule are properties of the problem, not of that dialog.
 
 ### The password is typed once; a one-time code never is
+
+*Half of this is withdrawn with the dialog: the GUI's own cached password went with `ElevateDialog`,
+since nothing can ask for one now. The SESSION's copy stays — `Shells::answer` still reports whether an
+answer was the first factor's, and `Accounts::set_secret` still keeps it for `sudo -S` on a file channel
+(§46). The rules below are why they are shaped the way they are, and the next attempt inherits them.*
 
 The sudo password is kept for the connection's life in a `Secret` (redacted in `Debug`, wiped on drop)
 and dropped when the session ends — never to the vault, never to a profile: a sudo password is usually
@@ -4190,9 +4204,9 @@ notice amber — nothing is wrong.
 - **Two sudos means two authentications.** sudo's credential cache is per-tty by default
   (`tty_tickets`), and each shell has its own pty, so the cached password saves the typing but not the
   second factor. This is what will make §46 ask for a code again.
-- **No keyboard shortcut, and no auto-elevate on connect.** The right-click menu and the status bar's
-  button are the two ways in; a per-profile "elevate on connect" is §47, which is where the profile
-  format changes.
+- **No way in at all, for now.** The right-click item and the status bar's button were the two, and both
+  are withdrawn — see the status note at the top. A per-profile "elevate on connect" was §47, which is
+  part of what the rethink covers.
 - **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
   prompt, or cancelling the dialog that opened it.
@@ -4203,6 +4217,13 @@ notice amber — nothing is wrong.
 a root terminal and left the folder tree, the files pane, every transfer and the editor reading as the
 login account. That was not an oversight in the implementation — it is what SSH does — and closing the
 gap is this section.
+
+> **STATUS: reachable only when §45's UX returns.** Nothing here was removed and nothing here changed:
+> `Accounts`, the elevated `sftp-server` channel, the shell fallback and the per-account backends are
+> all still compiled and still tested. But no account can be elevated into any more, so every listing
+> runs as the login account and the code below waits. A two-factor server is part of why the UX is being
+> reconsidered — see the second-factor bullet in the NOT list, which is the sharpest constraint any new
+> approach has to answer.
 
 ### Why sudo in the terminal could never fix it
 

@@ -205,8 +205,15 @@ pub fn shell_command(kind: Kind, user: &str, snippet: &str, password: bool) -> S
 ///
 /// Deliberately narrower than what a system will accept: letters, digits, and `._-`, not starting
 /// with `-` (which a command would read as an option) and not empty. A name outside this set is
-/// refused in the dialog rather than quoted and hoped for — the field feeds a command that runs on
+/// refused at the field rather than quoted and hoped for — that field feeds a command that runs on
 /// a remote machine as another user, which is exactly the boundary to validate at, not near.
+///
+/// `allow(dead_code)`: nothing calls it while there is no UI that types an account name — the
+/// elevate dialog was withdrawn pending a different approach — and this is deliberately kept rather
+/// than deleted. It is a security boundary with its own tests, and whatever replaces that dialog
+/// will need exactly this check before it composes a command. Deleting it would invite the next
+/// implementation to quote and hope.
+#[allow(dead_code)]
 pub fn valid_user(user: &str) -> bool {
 	!user.is_empty()
 		&& !user.starts_with('-')
