@@ -36,9 +36,12 @@ pub(crate) struct TreePlan {
 	/// Every regular file — its place in the tree, its size, and the source metadata to stamp
 	/// onto the copy once it lands (§17).
 	pub files: Vec<PlannedFile>,
-	/// Symbolic links found and left out (§17): following one risks a cycle and copying the link
-	/// itself is not what SFTP's byte copy does, so a recursive transfer skips them and says how
-	/// many in its closing notice rather than failing the whole tree over one.
+	/// Symbolic links the walk could NOT follow (§17). A link is followed by default — what it
+	/// points at is copied as if it sat there itself — so this counts only the two cases where
+	/// there is nothing to follow it to: a **dangling** link, whose target is not there to read,
+	/// and a link that **leads back up its own tree** ([`loops_back`]), which walking into would
+	/// never end. Counted rather than fatal: one bad link should not lose the other ten thousand
+	/// files, so the transfer finishes and says how many it left behind.
 	pub skipped_links: usize,
 }
 
@@ -68,6 +71,33 @@ impl TreePlan {
 	pub fn total(&self) -> u64 {
 		self.files.iter().map(|file| file.size).sum()
 	}
+}
+
+/// Whether following a directory symlink would walk the tree into itself (§17) — the one question
+/// that decides whether a link is followed or only counted.
+///
+/// `target` is where the link points, `here` is the directory the link was found in, and both are
+/// CANONICAL paths (`realpath` on the remote, `canonicalize` locally), so every link on the way to
+/// either one is already resolved. Written that way the rule is short: a link is a cycle exactly
+/// when its target is the directory holding it, or one above it. Walking in would come straight
+/// back out through the same link, and again, forever. Every other link — sideways into a sibling
+/// folder, or right out of the tree altogether — leads somewhere that ends, so it is followed. That
+/// costs a folder reached two ways being copied twice, which is what `cp -L` does too, and which a
+/// user can see and undo; a walk that never returns is neither.
+///
+/// The comparison is by PATH COMPONENT, not by text: `/home/ab` must not read as sitting inside
+/// `/home/a`, which a plain string prefix would claim it does. The local walk asks the same question
+/// of `std::path::Path::starts_with`, which already compares that way — this is the remote's `/`
+/// paths, which have no `Path` to ask.
+pub(crate) fn loops_back(target: &str, here: &str) -> bool {
+	let mut here = here.split('/').filter(|part| !part.is_empty());
+	// Every component of the target must be the next one of `here` for the target to be an
+	// ancestor. A target LONGER than `here` runs `here` out and fails on the `None`, which is the
+	// right answer: something deeper cannot contain what it sits in.
+	target
+		.split('/')
+		.filter(|part| !part.is_empty())
+		.all(|part| here.next() == Some(part))
 }
 
 /// A collision answer that outlives the one file it was given for (§17): "overwrite everything"
@@ -281,7 +311,39 @@ pub(crate) fn local_join(root: &Path, rel: &[String]) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use super::{Start, resume_start};
+	use super::{Start, loops_back, resume_start};
+
+	#[test]
+	fn a_link_pointing_at_its_own_folder_loops() {
+		// The shortest cycle there is: `/srv/data/here` -> `/srv/data`. Walking in lists the same
+		// folder again, finds the same link, and never stops.
+		assert!(loops_back("/srv/data", "/srv/data"));
+		assert!(loops_back("/srv", "/srv/data"));
+		assert!(loops_back("/", "/srv/data/deep"));
+	}
+
+	#[test]
+	fn a_link_pointing_sideways_or_out_is_followed() {
+		// A sibling, a cousin, and somewhere else entirely: each ends, so each is copied.
+		assert!(!loops_back("/srv/other", "/srv/data"));
+		assert!(!loops_back("/srv/data/inner", "/srv/data"));
+		assert!(!loops_back("/etc", "/srv/data"));
+	}
+
+	#[test]
+	fn a_shared_prefix_is_not_a_shared_path() {
+		// `/srv/da` is not `/srv/data`'s parent — it is a different folder whose name happens to
+		// start the same way. A text prefix would call this a cycle and drop a good link.
+		assert!(!loops_back("/srv/da", "/srv/data"));
+		assert!(!loops_back("/srv/data2", "/srv/data"));
+	}
+
+	#[test]
+	fn trailing_and_doubled_slashes_do_not_change_the_answer() {
+		// Servers spell the same path several ways; the components are what the rule is about.
+		assert!(loops_back("/srv/data/", "/srv/data"));
+		assert!(loops_back("//srv//data", "/srv/data/"));
+	}
 
 	#[test]
 	fn a_fresh_transfer_always_starts_at_zero() {

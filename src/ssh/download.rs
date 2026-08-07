@@ -600,7 +600,10 @@ async fn receive_tree(
 		})
 		.await;
 	if plan.skipped_links > 0 {
-		eprintln!("folder download skipped {} symlink(s)", plan.skipped_links);
+		eprintln!(
+			"folder download could not follow {} symlink(s)",
+			plan.skipped_links
+		);
 	}
 	Ok(Some(local_target.display().to_string()))
 }
@@ -689,12 +692,29 @@ async fn receive_file(
 
 /// Walk a remote directory tree into the plan both directions share (§19). Iterative like the
 /// local walk, using SFTP's typed listing so a directory is a directory because the server said
-/// so; `.`/`..` are dropped and symlinks counted-and-skipped rather than followed (a link to a
-/// folder would otherwise walk into somewhere outside the tree, or loop).
+/// so, and dropping `.`/`..`.
+///
+/// **Symlinks are followed**, the mirror of the upload's walk (§17): a link to a file downloads
+/// the file's bytes, a link to a folder downloads that folder, and what lands here is real. Two
+/// round trips buy that per link — a `stat` (the listing's own attributes come from `lstat`, so
+/// they describe the link, not what it points at) and, for a link to a directory, a `realpath` so
+/// `transfer::loops_back` can tell a link leading back up its own tree from one leading anywhere
+/// else. A tree with no symlinks in it makes neither call.
 async fn walk_remote(sftp: &SftpSession, root: &str) -> Result<TreePlan> {
 	let mut plan = TreePlan::default();
-	let mut frontier: Vec<(String, Vec<String>)> = vec![(root.to_owned(), Vec::new())];
-	while let Some((dir, rel)) = frontier.pop() {
+	// Alongside each directory to read and its path relative to the root, the CANONICAL path the
+	// server knows it by — what a link's target is compared against.
+	// `realpath` is a mandatory SFTP request — it is how any client resolves the home directory —
+	// so a server refusing it here is a server that will refuse the walk too. Fatal for the same
+	// reason as the local walk's: a cycle test with no real footing can miss a cycle, and a missed
+	// cycle never ends.
+	let root_here = sftp
+		.canonicalize(root.to_owned())
+		.await
+		.with_context(|| format!("could not resolve {root}"))?;
+	let mut frontier: Vec<(String, Vec<String>, String)> =
+		vec![(root.to_owned(), Vec::new(), root_here)];
+	while let Some((dir, rel, here)) = frontier.pop() {
 		let entries = sftp
 			.read_dir(dir.clone())
 			.await
@@ -705,27 +725,75 @@ async fn walk_remote(sftp: &SftpSession, root: &str) -> Result<TreePlan> {
 				continue;
 			}
 			let meta = entry.metadata();
+			let path = explorer::join(&dir, &name);
 			let mut child_rel = rel.clone();
 			child_rel.push(name.clone());
 			if meta.is_symlink() {
-				plan.skipped_links += 1;
+				walk_remote_link(sftp, &mut plan, &mut frontier, path, child_rel, &here).await;
 			} else if meta.is_dir() {
 				plan.dirs.push(child_rel.clone());
-				frontier.push((explorer::join(&dir, &name), child_rel));
+				// No link on the way down, so this directory's canonical path is its parent's plus
+				// its name — the server need not be asked again.
+				let child_here = explorer::join(&here, &name);
+				frontier.push((path, child_rel, child_here));
 			} else {
 				// Capture the remote's metadata here, off the same listing, so the copy can be
 				// stamped to match without a second round trip per file (§19).
-				plan.files.push(PlannedFile {
-					rel: child_rel,
-					size: meta.len(),
-					mtime: meta.mtime,
-					atime: meta.atime,
-					mode: remote_mode(&meta),
-				});
+				plan.files.push(planned_remote(child_rel, &meta));
 			}
 		}
 	}
 	Ok(plan)
+}
+
+/// Follow one remote symlink into the plan (§19), or count it when it leads nowhere the walk can
+/// go. The twin of the upload's `walk_link`, with the two local system calls replaced by their
+/// SFTP round trips: `metadata` is `stat`, which resolves the link (`symlink_metadata` is the
+/// `lstat` the listing already gave us), and `canonicalize` is `realpath`.
+async fn walk_remote_link(
+	sftp: &SftpSession,
+	plan: &mut TreePlan,
+	frontier: &mut Vec<(String, Vec<String>, String)>,
+	path: String,
+	rel: Vec<String>,
+	here: &str,
+) {
+	let Ok(meta) = sftp.metadata(path.clone()).await else {
+		// Dangling, or pointing somewhere this account cannot stat. Counted, not fatal — one link
+		// the server will not resolve must not cost the rest of the tree.
+		plan.skipped_links += 1;
+		return;
+	};
+	if meta.is_dir() {
+		let Ok(target) = sftp.canonicalize(path.clone()).await else {
+			plan.skipped_links += 1;
+			return;
+		};
+		if transfer::loops_back(&target, here) {
+			plan.skipped_links += 1;
+			return;
+		}
+		plan.dirs.push(rel.clone());
+		// The frontier walks the LINK's path, not its target's: the server resolves it on the way
+		// in, and keeping the path the tree was walked by keeps the listing errors readable.
+		frontier.push((path, rel, target));
+	} else {
+		// The `stat` above already fetched the target's size and stamp, so planning it costs no
+		// round trip beyond the one that identified it.
+		plan.files.push(planned_remote(rel, &meta));
+	}
+}
+
+/// One remote file as the plan describes it (§19) — its place in the tree plus the size and stamp
+/// read off whichever call identified it, the listing for a plain file or the `stat` for a link.
+fn planned_remote(rel: Vec<String>, meta: &FileAttributes) -> PlannedFile {
+	PlannedFile {
+		rel,
+		size: meta.len(),
+		mtime: meta.mtime,
+		atime: meta.atime,
+		mode: remote_mode(meta),
+	}
 }
 
 /// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§19) — the

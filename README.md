@@ -304,8 +304,11 @@ references below (§n) point into it.
   other side and **merging** into a destination that already exists. When a file inside the tree
   would land on one already there, cmote asks **one file at a time**: **Overwrite**, **Keep both**
   (`name-1`), or **Skip** just this one; **Overwrite all** or **Skip all** to settle every later
-  clash the same way; or **Cancel** the whole transfer (files already copied stay). Symlinks are
-  skipped, never followed, so a cyclic link can't loop it (§17, §19).
+  clash the same way; or **Cancel** the whole transfer (files already copied stay). **Symlinks are
+  followed**: a link to a file sends the file, a link to a folder sends that folder's contents, and
+  what lands on the other side is real files and real folders — the same thing `cp -L` gives you. A
+  link that leads back up its own tree would never end, so that one is counted and left, as is a
+  link pointing at something that isn't there; the notice says how many (§17, §19).
 - **Cancel or resume a transfer** — while one is running the status bar shows a **✕**: press it to
   stop now — the partial file it was writing is deleted and the rest of a batch is dropped, since a
   deliberate cancel is final. If a transfer instead **fails mid-flight** (a hiccup on the link, not

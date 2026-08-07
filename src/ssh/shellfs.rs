@@ -490,14 +490,25 @@ async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 ///
 /// Two `find` runs rather than one clever one: the directories, then the files with their sizes.
 /// `find -exec wc -c {} +` prints `size path` per file, which is exact — the size a progress bar
-/// totals over should not be guessed from a listing's columns. Symlinks are counted and skipped,
-/// exactly as the SFTP walk does: following one risks a cycle.
+/// totals over should not be guessed from a listing's columns.
+///
+/// **`-L` makes every run follow symlinks**, exactly as the SFTP walk does since §17: a link to a
+/// folder is walked as a folder and a link to a file is measured and copied as a file. It also
+/// changes what `-type l` still matches — under `-L` a link that resolves has become its target,
+/// so only the DANGLING ones are left, which is precisely the count `skipped_links` wants.
+///
+/// `ponytail:` the cycle is `find`'s problem here, not ours. GNU find under `-L` notices a
+/// directory it is already inside and refuses to descend, printing "File system loop detected" on
+/// stderr — which is why stderr is dropped from these runs, it is a warning about the tree and not
+/// an error about the command. A `find` without that check would spin instead. The SFTP path,
+/// which is what runs unless the server has no sftp subsystem, decides this itself with `realpath`
+/// and `transfer::loops_back`. Upgrade path: `find -L ... -printf` the inode and cut cycles here.
 pub async fn walk(runner: &Runner, root: &str) -> Result<TreePlan> {
 	let quoted = shell_quote(root);
 	let mut plan = TreePlan::default();
 
 	let dirs = runner
-		.stdout(&format!("find {quoted} -type d -print"))
+		.stdout(&format!("find -L {quoted} -type d -print 2>/dev/null"))
 		.await?;
 	// `find` lists a parent before its children, which is the order the plan promises.
 	for line in dirs.lines().filter(|line| !line.is_empty()) {
@@ -512,7 +523,7 @@ pub async fn walk(runner: &Runner, root: &str) -> Result<TreePlan> {
 
 	let files = runner
 		.stdout(&format!(
-			"find {quoted} -type f -exec wc -c {{}} + 2>/dev/null"
+			"find -L {quoted} -type f -exec wc -c {{}} + 2>/dev/null"
 		))
 		.await?;
 	for line in files.lines().filter(|line| !line.trim().is_empty()) {
@@ -536,8 +547,9 @@ pub async fn walk(runner: &Runner, root: &str) -> Result<TreePlan> {
 		}
 	}
 
+	// Under `-L` this finds only the links that did NOT resolve — see the note above.
 	let links = runner
-		.stdout(&format!("find {quoted} -type l -print"))
+		.stdout(&format!("find -L {quoted} -type l -print 2>/dev/null"))
 		.await
 		.unwrap_or_default();
 	plan.skipped_links = links.lines().filter(|line| !line.is_empty()).count();

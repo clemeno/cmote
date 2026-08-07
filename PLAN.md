@@ -1199,10 +1199,11 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   the error screen, so its transfer state is gone), aiming a drop at a PARTICULAR folder — the
   gesture itself now takes any number of files or a whole folder (§29, v4.0.0), but iced's drop
   events carry no pointer position, so every drop lands in the pane's own directory — two transfers
-  at once (a batch queues instead, §17, §21), preserving the *access* time as its own attribute
-  (SFTP couples it with mtime, so an upload sends the pair but does not treat atime as a goal), and
-  following symlinks inside a recursive walk (they are counted and skipped, never followed, so a
-  cyclic link cannot loop the transfer).
+  at once (a batch queues instead, §17, §21), and preserving the *access* time as its own attribute
+  (SFTP couples it with mtime, so an upload sends the pair but does not treat atime as a goal).
+  v4.0.0 also began **following symlinks** inside a recursive walk (§17): a link is copied as what
+  it points at, and only a link that leads back up its own tree — or nowhere at all — is counted and
+  left, so a cycle still cannot loop the transfer.
 - **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
   remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
   dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). v4.0.0
@@ -1411,9 +1412,34 @@ on the server, or the remote one recreated on this machine. Both directions shar
   children) and the files with their sizes, so the one progress bar has a real total — held in
   memory before a byte moves (`ponytail:` fine for an ordinary folder, felt for one of millions;
   the upgrade path is to stream the walk and the copy together, the way the pane's listing already
-  batches, §19). The walk is **iterative, not recursive**, so a deep tree costs heap not stack,
-  and **symlinks are counted and skipped, never followed** — that is what stops a cyclic link
-  looping the transfer. Missing destination directories are created; existing ones are merged into.
+  batches, §19). The walk is **iterative, not recursive**, so a deep tree costs heap not stack.
+  Missing destination directories are created; existing ones are merged into.
+- **Symlinks are followed** *(v4.0.0)*. "Send this folder" means send what is in it, so a link to a
+  file copies the file's bytes and a link to a folder copies that folder's contents: the far side
+  gets real files and real directories, which is what `cp -L` / `rsync -L` produce. Nothing writes a
+  *link* on the destination — a link's target is a path on the SOURCE machine and would point at
+  nothing over there. What that costs is one extra call per symlink and none at all for a tree
+  without any: a `stat` (the listing's own attributes come from `lstat`, so they describe the link,
+  not what it points at), plus a `realpath` for a link to a directory.
+  - **The cycle is the only real danger**, and one rule settles it (`transfer::loops_back`, unit
+    tested): a link is followed unless its **canonical target is the directory holding it or one
+    above it**, because walking in there would come straight back out through the same link,
+    forever. Each frontier item therefore carries the canonical path of the directory it is — free
+    for a real subdirectory (its parent's canonical path plus its name), asked of the filesystem
+    only when a link was followed to get there. The test compares by **path component**, not text,
+    so `/home/ab` does not read as sitting inside `/home/a`.
+  - **A link sideways is followed** even though the folder it reaches may already be in the tree,
+    so its content is copied twice. That is what `cp -L` does, it ends, and a user can see it and
+    delete one — a walk that never returns is none of those things.
+  - **A link that leads nowhere is counted, not fatal**: a dangling target, a target this account
+    cannot stat, or the cycle above. One bad link in a corner of a tree must not lose the other ten
+    thousand files, so the transfer finishes and reports how many it could not follow.
+  - **The shell fallback delegates it** (§46): `find -L` for all three of its runs. `-L` also
+    changes what `-type l` still matches — a link that resolves has become its target, so only the
+    dangling ones are left, which is exactly the count wanted. `ponytail:` the cycle is then GNU
+    find's check (it prints "File system loop detected" and refuses to descend, which is why stderr
+    is dropped from those runs), not ours; a `find` without it would spin. The SFTP path, which is
+    what runs unless the server has no sftp subsystem, decides for itself.
 - **Per-file collisions, mid-transfer.** A tree cannot be pre-scanned into one list a user would
   read, so each file whose destination is already taken **parks the transfer and asks** — the
   spawned transfer sends `SshEvent::TransferConflict` and awaits a `ResolveConflict` reply on a

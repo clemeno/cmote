@@ -690,7 +690,10 @@ async fn send_tree(
 		.send(SshEvent::TransferProgress { sent, total })
 		.await;
 	if plan.skipped_links > 0 {
-		eprintln!("folder upload skipped {} symlink(s)", plan.skipped_links);
+		eprintln!(
+			"folder upload could not follow {} symlink(s)",
+			plan.skipped_links
+		);
 	}
 	Ok(Some(remote_target))
 }
@@ -791,18 +794,36 @@ async fn ensure_remote_dir(sftp: &SftpSession, path: &str) -> Result<()> {
 }
 
 /// Walk a local directory tree into the plan both transfer directions share (§17). Iterative,
-/// not recursive, so a deep tree costs heap not stack; symlinks are counted and skipped rather
-/// than followed, which is what keeps a cyclic link from walking forever.
+/// not recursive, so a deep tree costs heap not stack.
+///
+/// **Symlinks are followed** (§17), which is what a user dropping a folder means by "send this
+/// folder": a link to a file sends the file's bytes, a link to a folder sends that folder's
+/// contents, and the far side gets real files and real directories — the same thing `cp -L` or
+/// `rsync -L` produces. Nothing writes a link on the remote, because a link's target is a path
+/// on THIS machine and would point at nothing over there.
+///
+/// The danger that keeps is a cycle: a link back up its own tree makes an endless walk. Each
+/// frontier item therefore carries the CANONICAL path of the directory it is, and a directory
+/// link is followed only when `transfer::loops_back` says its target is not that directory or one
+/// above it. `Path::starts_with` asks it here, component-wise, because both paths are `Path`s.
 ///
 /// `ponytail:` the whole listing is held in memory before a byte is sent — fine for an ordinary
 /// folder, but a tree of millions of files would be felt. Upgrade path: stream the walk and the
 /// transfer together, the way the files pane's batched listing does (§19).
 async fn walk_local(root: &Path) -> Result<TreePlan> {
 	let mut plan = TreePlan::default();
-	// Each frontier item is a directory to read and its path RELATIVE to the root (empty for the
-	// root itself, which is created by the caller, not listed here).
-	let mut frontier: Vec<(PathBuf, Vec<String>)> = vec![(root.to_path_buf(), Vec::new())];
-	while let Some((dir, rel)) = frontier.pop() {
+	// Each frontier item is a directory to read, its path RELATIVE to the root (empty for the root
+	// itself, which is created by the caller, not listed here), and its CANONICAL path — the one
+	// the cycle test compares a link's target against.
+	// Fatal rather than guessed: without the root's real path every cycle test below compares
+	// against something that may not mean what it says, and a missed cycle is a walk that never
+	// returns. A folder the user just picked resolves, so this is the "it vanished" case.
+	let root_here = tokio::fs::canonicalize(root)
+		.await
+		.with_context(|| format!("could not resolve {}", root.display()))?;
+	let mut frontier: Vec<(PathBuf, Vec<String>, PathBuf)> =
+		vec![(root.to_path_buf(), Vec::new(), root_here)];
+	while let Some((dir, rel, here)) = frontier.pop() {
 		let mut reader = tokio::fs::read_dir(&dir)
 			.await
 			.with_context(|| format!("could not read {}", dir.display()))?;
@@ -816,6 +837,7 @@ async fn walk_local(root: &Path) -> Result<TreePlan> {
 				// leave it rather than invent one.
 				continue;
 			};
+			let child_here = here.join(&name);
 			let mut child_rel = rel.clone();
 			child_rel.push(name);
 			let file_type = entry
@@ -823,30 +845,250 @@ async fn walk_local(root: &Path) -> Result<TreePlan> {
 				.await
 				.context("could not read a file type")?;
 			if file_type.is_symlink() {
-				plan.skipped_links += 1;
+				walk_link(&mut plan, &mut frontier, entry.path(), child_rel, &here).await;
 			} else if file_type.is_dir() {
 				plan.dirs.push(child_rel.clone());
-				frontier.push((entry.path(), child_rel));
+				// No link on the way, so the canonical path of a real subdirectory is its parent's
+				// canonical path plus its name — no `canonicalize` call needed to know it.
+				frontier.push((entry.path(), child_rel, child_here));
 			} else if file_type.is_file() {
 				// Read the source's size and metadata once, here, so the transfer can stamp each
 				// copy to match without a second stat when it reaches the file (§17).
-				let (size, mtime, atime, mode) = match entry.metadata().await {
-					Ok(meta) => {
-						let (mtime, atime, mode) = source_stamp(&meta);
-						(meta.len(), mtime, atime, mode)
-					}
-					Err(_) => (0, None, None, None),
-				};
-				plan.files.push(PlannedFile {
-					rel: child_rel,
-					size,
-					mtime,
-					atime,
-					mode,
-				});
+				plan.files.push(planned_local(
+					child_rel,
+					entry.metadata().await.ok().as_ref(),
+				));
 			}
 			// Anything else — a fifo, a socket, a device node — is not a file to send.
 		}
 	}
 	Ok(plan)
+}
+
+/// Follow one local symlink and put what it points at into the plan (§17), or count it when there
+/// is nothing to follow it to. Split out of `walk_local` so the ordinary entries above stay one
+/// glance wide, and because this is where every extra system call a link costs is paid:
+///
+///   * `metadata` follows the link — `DirEntry::metadata` does NOT, it reports the link itself —
+///     and its failure IS the dangling case, so the answer and the error are the same call; and
+///   * `canonicalize`, only for a link to a directory, resolves the whole chain so the cycle test
+///     compares two paths that mean what they say.
+///
+/// Both are per-symlink: a tree without one pays neither.
+async fn walk_link(
+	plan: &mut TreePlan,
+	frontier: &mut Vec<(PathBuf, Vec<String>, PathBuf)>,
+	path: PathBuf,
+	rel: Vec<String>,
+	here: &Path,
+) {
+	let Ok(meta) = tokio::fs::metadata(&path).await else {
+		// Dangling — nothing to read and nowhere to walk. Counted, not fatal: a broken link in one
+		// corner of a tree must not lose the rest of it.
+		plan.skipped_links += 1;
+		return;
+	};
+	if meta.is_dir() {
+		let Ok(target) = tokio::fs::canonicalize(&path).await else {
+			plan.skipped_links += 1;
+			return;
+		};
+		// The cycle test, `transfer::loops_back` in `Path` form: walking into a folder that holds
+		// this very link would come back out through it forever.
+		if here.starts_with(&target) {
+			plan.skipped_links += 1;
+			return;
+		}
+		plan.dirs.push(rel.clone());
+		frontier.push((path, rel, target));
+	} else if meta.is_file() {
+		// The metadata is the TARGET's, already in hand from the follow above, so the stamp costs
+		// no further call than the one that decided the link was worth following.
+		plan.files.push(planned_local(rel, Some(&meta)));
+	}
+	// A link to a fifo, a socket or a device node is no more sendable than the thing itself.
+}
+
+/// One local file as the plan describes it (§17). Metadata the filesystem refused leaves a
+/// zero-sized, unstamped entry rather than failing the walk: the bytes still copy, and the progress
+/// total is only short by whatever that one file weighs.
+fn planned_local(rel: Vec<String>, meta: Option<&std::fs::Metadata>) -> PlannedFile {
+	let (size, mtime, atime, mode) = match meta {
+		Some(meta) => {
+			let (mtime, atime, mode) = source_stamp(meta);
+			(meta.len(), mtime, atime, mode)
+		}
+		None => (0, None, None, None),
+	};
+	PlannedFile {
+		rel,
+		size,
+		mtime,
+		atime,
+		mode,
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::path::Path;
+
+	use super::{TreePlan, walk_local};
+
+	/// Make a symlink for a test, saying whether this machine allowed it. Windows only lets an
+	/// unprivileged process create one with Developer Mode on, so the link tests below check this
+	/// and step aside rather than fail on a machine that simply cannot hold the fixture.
+	fn link(target: &Path, at: &Path, folder: bool) -> bool {
+		#[cfg(unix)]
+		{
+			let _ = folder;
+			std::os::unix::fs::symlink(target, at).is_ok()
+		}
+		#[cfg(windows)]
+		{
+			if folder {
+				std::os::windows::fs::symlink_dir(target, at).is_ok()
+			} else {
+				std::os::windows::fs::symlink_file(target, at).is_ok()
+			}
+		}
+	}
+
+	/// Say a link could not be made here, so a run with `--nocapture` shows which tests did not
+	/// actually get to prove anything on this machine.
+	fn no_links(what: &str) {
+		eprintln!("skipped {what}: this machine will not create a symlink");
+	}
+
+	/// The plan's directories as sorted `a/b` strings, which read like the tree they describe.
+	fn dirs(plan: &TreePlan) -> Vec<String> {
+		let mut out: Vec<String> = plan.dirs.iter().map(|rel| rel.join("/")).collect();
+		out.sort();
+		out
+	}
+
+	/// The plan's files as sorted `path=size` strings — the size is in because a followed link is
+	/// only right if it planned the TARGET's bytes rather than the link's own.
+	fn files(plan: &TreePlan) -> Vec<String> {
+		let mut out: Vec<String> = plan
+			.files
+			.iter()
+			.map(|file| format!("{}={}", file.rel.join("/"), file.size))
+			.collect();
+		out.sort();
+		out
+	}
+
+	#[tokio::test]
+	async fn a_plain_tree_is_walked_into_its_folders_and_files() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::create_dir(root.join("sub")).unwrap();
+		std::fs::write(root.join("top.txt"), b"abc").unwrap();
+		std::fs::write(root.join("sub").join("deep.txt"), b"de").unwrap();
+
+		let plan = walk_local(root).await.unwrap();
+
+		// The root itself is not listed — the caller creates it — so only `sub` is here.
+		assert_eq!(dirs(&plan), vec!["sub".to_owned()]);
+		assert_eq!(files(&plan), vec!["sub/deep.txt=2", "top.txt=3"]);
+		assert_eq!(plan.skipped_links, 0);
+	}
+
+	#[tokio::test]
+	async fn a_link_to_a_file_is_planned_as_the_file_it_points_at() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::write(root.join("real.txt"), b"hello").unwrap();
+		if !link(&root.join("real.txt"), &root.join("shortcut.txt"), false) {
+			no_links("a_link_to_a_file_is_planned_as_the_file_it_points_at");
+			return;
+		}
+
+		let plan = walk_local(root).await.unwrap();
+
+		// Both names, both five bytes: the link is planned as a plain file carrying the target's
+		// content, which is what lands on the remote.
+		assert_eq!(files(&plan), vec!["real.txt=5", "shortcut.txt=5"]);
+		assert_eq!(plan.skipped_links, 0);
+	}
+
+	#[tokio::test]
+	async fn a_link_to_a_folder_is_walked_into() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::create_dir(root.join("real")).unwrap();
+		std::fs::write(root.join("real").join("inside.txt"), b"x").unwrap();
+		if !link(&root.join("real"), &root.join("shortcut"), true) {
+			no_links("a_link_to_a_folder_is_walked_into");
+			return;
+		}
+
+		let plan = walk_local(root).await.unwrap();
+
+		// The linked folder is a folder in the plan and its content is planned underneath it — the
+		// same tree twice, which is what following a link means and what `cp -L` produces.
+		assert_eq!(dirs(&plan), vec!["real".to_owned(), "shortcut".to_owned()]);
+		assert_eq!(
+			files(&plan),
+			vec!["real/inside.txt=1", "shortcut/inside.txt=1"]
+		);
+		assert_eq!(plan.skipped_links, 0);
+	}
+
+	#[tokio::test]
+	async fn a_link_back_up_the_tree_is_counted_not_followed() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::create_dir(root.join("sub")).unwrap();
+		std::fs::write(root.join("sub").join("inside.txt"), b"x").unwrap();
+		// The classic cycle: a link inside the tree pointing at the tree's own top.
+		if !link(root, &root.join("sub").join("loop"), true) {
+			no_links("a_link_back_up_the_tree_is_counted_not_followed");
+			return;
+		}
+
+		let plan = walk_local(root).await.unwrap();
+
+		// Walking in would find `sub/loop` again, and again. The walk RETURNS, having counted the
+		// one link it would not take, and everything else in the tree is still planned.
+		assert_eq!(dirs(&plan), vec!["sub".to_owned()]);
+		assert_eq!(files(&plan), vec!["sub/inside.txt=1"]);
+		assert_eq!(plan.skipped_links, 1);
+	}
+
+	#[tokio::test]
+	async fn a_link_to_its_own_folder_is_counted_not_followed() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::create_dir(root.join("sub")).unwrap();
+		// The shortest cycle of all: a link in `sub` pointing at `sub`.
+		if !link(&root.join("sub"), &root.join("sub").join("self"), true) {
+			no_links("a_link_to_its_own_folder_is_counted_not_followed");
+			return;
+		}
+
+		let plan = walk_local(root).await.unwrap();
+
+		assert_eq!(dirs(&plan), vec!["sub".to_owned()]);
+		assert_eq!(plan.skipped_links, 1);
+	}
+
+	#[tokio::test]
+	async fn a_dangling_link_is_counted_not_followed() {
+		let temp = tempfile::tempdir().unwrap();
+		let root = temp.path();
+		std::fs::write(root.join("real.txt"), b"ok").unwrap();
+		if !link(&root.join("gone.txt"), &root.join("broken.txt"), false) {
+			no_links("a_dangling_link_is_counted_not_followed");
+			return;
+		}
+
+		let plan = walk_local(root).await.unwrap();
+
+		// Nothing to read and nowhere to walk, so it is counted — and the file beside it still
+		// goes, because one broken link must not cost the rest of the tree.
+		assert_eq!(files(&plan), vec!["real.txt=2"]);
+		assert_eq!(plan.skipped_links, 1);
+	}
 }
