@@ -22,7 +22,7 @@
 use std::collections::BTreeMap;
 
 use iced::widget::{container, pane_grid};
-use iced::{Color, Element, Length, Rectangle, Size};
+use iced::{Color, Element, Length, Point, Rectangle, Size};
 
 use crate::app::Message;
 
@@ -107,6 +107,43 @@ pub fn regions<T>(
 	window: Size,
 ) -> BTreeMap<pane_grid::Pane, Rectangle> {
 	state.layout().pane_regions(SPACING, MIN_SIZE, window)
+}
+
+/// The share a double-clicked seam is put back to: half the room each (§48).
+///
+/// A ratio rather than a pixel count, like every other thing said about a divider here — so
+/// "even" keeps meaning even when the window is resized afterwards.
+pub const EVEN: f32 = 0.5;
+
+/// The seam under `pointer`, or `None` if the pointer is not on one (§48).
+///
+/// This is the hit test `pane_grid` runs on its own presses, borrowed rather than reinvented:
+/// `split_line_bounds` is what turns a split's region and ratio into the band the divider occupies,
+/// and widening it by `LEEWAY` is what the widget does to make a four-pixel seam grabbable. Asking
+/// the same question the same way is what stops a double-click landing where a drag would not.
+///
+/// It exists because `pane_grid` reports a seam PRESS to nobody: a press on a divider starts its own
+/// resize gesture and publishes nothing, so a double-click on one cannot arrive as a message the way
+/// every other click in the window does. cmote sees the raw press instead (`App::on_pointer_pressed`)
+/// and asks this where it landed. `pointer` is therefore in WINDOW coordinates, which is the same
+/// space `regions` measures in, because the frame fills the window.
+///
+/// A window with no split has no seam and answers `None` everywhere — the map is empty, so the
+/// question costs nothing to ask.
+pub fn seam_at<T>(
+	state: &pane_grid::State<T>,
+	window: Size,
+	pointer: Point,
+) -> Option<pane_grid::Split> {
+	state
+		.layout()
+		.split_regions(SPACING, MIN_SIZE, window)
+		.into_iter()
+		.find(|(_, (axis, region, ratio))| {
+			axis.split_line_bounds(*region, *ratio, SPACING + LEEWAY)
+				.contains(pointer)
+		})
+		.map(|(split, _)| split)
 }
 
 /// Build the frame from one element per region (§48).
@@ -238,6 +275,111 @@ mod tests {
 		assert_eq!((top.width, bottom.width), (1000.0, 1000.0));
 		assert!((top.height + bottom.height + SPACING - 600.0).abs() < 0.5);
 		assert!(bottom.y > top.y);
+	}
+
+	#[test]
+	fn an_undivided_window_has_no_seam_anywhere_in_it() {
+		let (state, _first) = pane_grid::State::new(());
+		let window = Size::new(1000.0, 600.0);
+		// Nothing to double-click: with one region there is no divider, so every point in the
+		// window — including the middle, where one WOULD be after a cut — answers no (§48).
+		assert_eq!(seam_at(&state, window, Point::new(500.0, 300.0)), None);
+		assert_eq!(seam_at(&state, window, Point::new(0.0, 0.0)), None);
+	}
+
+	#[test]
+	fn the_seam_between_two_regions_is_found_at_the_middle() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (_second, split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		let window = Size::new(1000.0, 600.0);
+		assert_eq!(
+			seam_at(&state, window, Point::new(500.0, 300.0)),
+			Some(split)
+		);
+	}
+
+	#[test]
+	fn a_press_inside_a_region_is_not_a_press_on_the_seam() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (second, _split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		let window = Size::new(1000.0, 600.0);
+		let regions = regions(&state, window);
+		// The middle of each region, which is where an ordinary click lands — in a terminal, on a
+		// chip. Neither may be mistaken for the divider, or a double click in a shell would throw
+		// away a divider the user had placed (§48).
+		for pane in [first, second] {
+			let rect = regions[&pane];
+			let middle = Point::new(rect.x + rect.width / 2.0, rect.y + rect.height / 2.0);
+			assert_eq!(seam_at(&state, window, middle), None);
+		}
+	}
+
+	#[test]
+	fn the_seam_can_be_hit_from_a_little_either_side_of_where_it_is_drawn() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (_second, split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		let window = Size::new(1000.0, 600.0);
+		// `LEEWAY` exists because a four-pixel target is a fussy thing to hit: what is DRAWN stays
+		// `SPACING` wide, what can be GRABBED is `SPACING + LEEWAY`. Just inside that band hits,
+		// and a pixel past it misses — the same band the drag itself uses.
+		let inside = (SPACING + LEEWAY) / 2.0 - 1.0;
+		let outside = (SPACING + LEEWAY) / 2.0 + 1.0;
+		assert_eq!(
+			seam_at(&state, window, Point::new(500.0 - inside, 300.0)),
+			Some(split)
+		);
+		assert_eq!(
+			seam_at(&state, window, Point::new(500.0 + inside, 300.0)),
+			Some(split)
+		);
+		assert_eq!(
+			seam_at(&state, window, Point::new(500.0 - outside, 300.0)),
+			None
+		);
+		assert_eq!(
+			seam_at(&state, window, Point::new(500.0 + outside, 300.0)),
+			None
+		);
+	}
+
+	#[test]
+	fn a_seam_dragged_off_centre_is_found_where_it_now_is() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (_second, split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		let window = Size::new(1000.0, 600.0);
+		state.resize(split, 0.3);
+		// The seam moved with the drag, so the hit test has to follow it — testing the middle would
+		// pass for the wrong reason. Its old home is now ordinary region, and must answer so.
+		assert_eq!(
+			seam_at(&state, window, Point::new(300.0, 300.0)),
+			Some(split)
+		);
+		assert_eq!(seam_at(&state, window, Point::new(500.0, 300.0)), None);
+	}
+
+	#[test]
+	fn evening_the_shares_puts_the_two_regions_back_to_the_same_size() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (second, split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		let window = Size::new(1000.0, 600.0);
+		state.resize(split, 0.8);
+		let lopsided = regions(&state, window);
+		assert!(lopsided[&first].width > lopsided[&second].width);
+		// What a double-click on the seam does (§48): the ratio goes back to `EVEN`, and the two
+		// regions come out the same width to within the seam that sits between them.
+		state.resize(split, EVEN);
+		let evened = regions(&state, window);
+		assert!((evened[&first].width - evened[&second].width).abs() < 0.5);
 	}
 
 	#[test]

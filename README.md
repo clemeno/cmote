@@ -38,7 +38,8 @@ references below (§n) point into it.
   a grid of regions too narrow to read. Close the second region and they come back. Splitting
   **doubles the window** in the direction you asked for, so the session already on screen keeps the
   size it had and does not reflow. **Drag a divider** to re-share the room; the share is kept as a
-  proportion, so it survives resizing the window. A **click** anywhere in a region gives it the
+  proportion, so it survives resizing the window, and a **double-click on the divider** puts the two
+  halves back to even. A **click** anywhere in a region gives it the
   keyboard and lights its strip, and that same click still lands where you aimed it. Closing a
   region's last tab closes the region and **shrinks the window back**, so the region you kept stays
   exactly the size it was — however you had dragged the divider or resized the window meanwhile.
@@ -376,6 +377,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way. Shown only while the window is whole: one split is the limit |
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
+| Double-click a divider | Put the two regions back to an even share |
 | **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead |
 | Window title-bar **×** | Ask **Quit cmote?**, then disconnect every session cleanly and exit |
 | Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |

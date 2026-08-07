@@ -222,6 +222,16 @@ struct App {
 	/// rather than per-tab because there is one window whatever tab is on show; updated on
 	/// every resize and written to `settings.json` on the way out (`exit_app`).
 	settings: crate::settings::Settings,
+	/// Where the pointer is in the window, tracked ONLY while the window is split (§48). A divider
+	/// double-click has to know where the press landed, and a press on a divider is the one click in
+	/// the window that reaches no widget: `pane_grid` swallows it to start its own drag. So the raw
+	/// event stream supplies both halves — this position, and the press that reads it — and the
+	/// subscription that fills it is asked for only when there is a seam to hit (`divider_events`).
+	/// Stale between splits, and harmless: nothing reads it while `regions` holds one region.
+	pointer: iced::Point,
+	/// The multi-click tally over the window's dividers (§48), the twin of a tab's `clicks` over the
+	/// grid (§42) — same counter, and the seam is the target instead of the cell.
+	seam_clicks: ui::selection::Clicks<pane_grid::Split>,
 }
 
 /// A tab being dragged along the strip (§38). Both halves are **ids, not strip positions**: the
@@ -406,6 +416,9 @@ impl App {
 			// that cannot fail — so the app owns a copy to update on resize and save on quit; the
 			// first (synthetic) resize event overwrites `window` with the size actually granted.
 			settings: crate::settings::Settings::load(),
+			// No seam to hit until the window is cut, so nothing reads these until then (§48).
+			pointer: iced::Point::ORIGIN,
+			seam_clicks: ui::selection::Clicks::default(),
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
@@ -524,6 +537,14 @@ impl App {
 				iced::Task::none()
 			}
 			Message::SplitResized { split, ratio } => self.on_divider_dragged(split, ratio),
+			// The two halves of a divider double-click (§48). Both come off the raw event stream
+			// rather than from a widget, because a press on a seam is the one click in the window
+			// that reaches no widget at all — `pane_grid` swallows it to start its own drag.
+			Message::PointerMoved(pointer) => {
+				self.pointer = pointer;
+				iced::Task::none()
+			}
+			Message::PointerPressed => self.on_pointer_pressed(),
 			// The overlay dialogs (a live tab's close confirmation, §26; the quit card, §30) float
 			// over the WHOLE window, outside every region, so their messages arrive unwrapped and
 			// their header drag is the App's to track — the very same DialogGrabbed / DialogDragged /
@@ -825,10 +846,51 @@ impl App {
 	/// Only the RATIO is stored, never a pixel count, so the share survives a window resize instead
 	/// of becoming a stale measurement of a window that is no longer that size.
 	fn on_divider_dragged(&mut self, split: pane_grid::Split, ratio: f32) -> iced::Task<Message> {
+		// The press holding this drag can no longer be half of a double click (§48): a drag ends with
+		// the pointer still on the seam, so two quick nudges of a divider — an ordinary way to place
+		// one — would otherwise read as a double click and throw away the share just being set.
+		// Forgetting the press rather than blocking the next one is what keeps the gesture available:
+		// the double click AFTER a drag is two fresh presses, and it works.
+		self.seam_clicks = ui::selection::Clicks::default();
 		self.regions.resize(split, ratio);
 		// Both regions changed size, so both grids have to be told: a terminal is only ever as big as
 		// it was last told to be (§9). `Tab::on_window_resized` reflows only when the row/column count
 		// actually changes, which is what keeps a drag from resizing the remote pty every frame.
+		self.relayout()
+	}
+
+	/// A left press landed somewhere in the window — even the shares if it was the second one on a
+	/// divider (§48).
+	///
+	/// A dragged divider is a share the user placed by hand, and there is no way back to the middle
+	/// once it has moved: the window is grown by a split, never divided, so nothing else ever
+	/// re-centres a seam. A double click on it is that way back, and it is the gesture every desktop
+	/// already uses for "reset this handle".
+	///
+	/// The press has to be caught here, off the raw event stream, because a press on a seam is the
+	/// one click in the window that reaches no widget: `pane_grid` captures it to start its own
+	/// resize gesture and publishes nothing, so there is no `on_double_click` to hang this on. What
+	/// arrives is therefore EVERY left press in the window, and the geometry decides — a press that
+	/// is not on a seam breaks the run, exactly as a press on another cell breaks the grid's (§42).
+	///
+	/// A drag cannot be half of this gesture, and `on_divider_dragged` is where that is enforced: it
+	/// forgets the press holding it, so the nudge-nudge of placing a divider by hand never reads as a
+	/// double click, while a real double click after a drag — two fresh presses — still does.
+	fn on_pointer_pressed(&mut self) -> iced::Task<Message> {
+		let Some(split) = ui::split::seam_at(&self.regions, self.window, self.pointer) else {
+			// Somewhere else in the window: whatever was being counted on a seam is over.
+			self.seam_clicks = ui::selection::Clicks::default();
+			return iced::Task::none();
+		};
+		// A third press is `Triple` and does nothing: the shares are already even, and leaning on the
+		// button should not keep re-doing it (§42's counter cycles for the same reason).
+		if self.seam_clicks.press(split, std::time::Instant::now()) != ui::selection::Click::Double
+		{
+			return iced::Task::none();
+		}
+		self.regions.resize(split, ui::split::EVEN);
+		// Both regions changed size, so both terminals have to be re-measured — the same thing a drag
+		// does, since this IS a drag, straight to the middle (§9, §48).
 		self.relayout()
 	}
 
@@ -1654,6 +1716,13 @@ impl App {
 		subs.push(iced::window::resize_events().map(|(_id, size)| Message::WindowResized(size)));
 		subs.push(focus_events());
 		subs.push(file_drop_events());
+		// The raw pointer, asked for ONLY while there is a divider to double-click (§48). It is the
+		// one stream in cmote that carries a message per pointer move, so it is switched off the
+		// moment the window is whole again — an undivided window pays nothing for a gesture it
+		// cannot perform, and the split one pays a field store per move.
+		if self.regions.len() > 1 {
+			subs.push(divider_events());
+		}
 		// The OS window's title-bar × arrives here rather than closing the window, because
 		// `exit_on_close_request(false)` held it back — so cmote can quit on its own terms (§30).
 		subs.push(iced::window::close_requests().map(|_id| Message::QuitRequested));
@@ -1801,7 +1870,7 @@ struct Workspace {
 	selection: Option<ui::selection::Selection>,
 	selecting: bool,
 	hover_cell: ui::selection::Cell,
-	clicks: ui::selection::Clicks,
+	clicks: ui::selection::Clicks<ui::selection::Cell>,
 	search: Option<term::search::Search>,
 	search_stale: bool,
 }
@@ -1894,7 +1963,7 @@ pub struct Tab {
 	/// The multi-click tally over the grid (§42): how many presses in a row landed on one cell, so a
 	/// press knows whether it is a plain click, a word (double) or a line (triple). `mouse_area`
 	/// reports presses one at a time and counts nothing itself.
-	clicks: ui::selection::Clicks,
+	clicks: ui::selection::Clicks<ui::selection::Cell>,
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Holds the query
 	/// and the match list; the current match is shown as an ordinary `selection`, so the highlight
 	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
@@ -2515,6 +2584,12 @@ pub enum Message {
 		split: pane_grid::Split,
 		ratio: f32,
 	},
+	/// The pointer moved, in window coordinates. Raised from the raw event stream, and ONLY while
+	/// the window is split (§48) — it exists to give the press below somewhere to have landed.
+	PointerMoved(iced::Point),
+	/// A left button went down somewhere in the window. Carries no position, because iced's raw
+	/// press event has none: `PointerMoved` above is the position, and this is the moment (§48).
+	PointerPressed,
 	// --- quitting cmote (§30): the last-tab close or the OS window's × ---
 	/// Quit was requested — from the window's title-bar × or from closing the last tab. Raises
 	/// the "Quit cmote?" confirmation; nothing is torn down until it is accepted.
@@ -3135,7 +3210,11 @@ impl Tab {
 			| Message::Split(_)
 			| Message::SplitSized { .. }
 			| Message::SplitFocused(_)
-			| Message::SplitResized { .. } => {}
+			| Message::SplitResized { .. }
+			// The raw pointer stream belongs to the window, not to anything inside a region: it
+			// exists to catch the press on a divider, which sits BETWEEN two regions (§48).
+			| Message::PointerMoved(_)
+			| Message::PointerPressed => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			Message::ForwardsClosed => self.forward_dialog = false,
@@ -7029,6 +7108,35 @@ fn file_drop_events() -> iced::Subscription<Message> {
 	})
 }
 
+/// The raw pointer, for the divider double-click (§48): where it is, and when a left button goes
+/// down on it.
+///
+/// Two events rather than one because iced's press event carries no position — the position comes
+/// from the move stream, and the press is only the moment. Everything else is dropped here, the same
+/// discipline `focus_events` and `file_drop_events` keep.
+///
+/// This is the one subscription in cmote that raises a message per pointer MOVE, which is why
+/// `subscription` asks for it only while the window is split: with one region there is no seam to
+/// hit, so there is nothing for the position to be tested against. The handler on the other end
+/// stores a `Point` and returns no task, so a move costs a field write and the repaint iced was
+/// already going to do.
+///
+/// It has to be the raw stream because a press on a divider is the one click in the window that
+/// reaches no widget: `pane_grid` captures it to start its own resize gesture and publishes nothing,
+/// so there is no widget event to listen for and `mouse_area`'s own `on_double_click` would never
+/// fire — its child has already captured the press by the time it looks.
+fn divider_events() -> iced::Subscription<Message> {
+	iced::event::listen_with(|event, _status, _window| match event {
+		iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+			Some(Message::PointerMoved(position))
+		}
+		iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)) => {
+			Some(Message::PointerPressed)
+		}
+		_ => None,
+	})
+}
+
 /// The scrollback motion a Shift+navigation key asks for, or `None` for a key that does not
 /// scroll (§23). PageUp/PageDown page through history, Home/End jump to the oldest retained
 /// line and back to the live bottom — the xterm shifted-navigation set the terminal owns.
@@ -8919,6 +9027,10 @@ mod tests {
 			// Default (nothing remembered): `save` is a no-op on default, so a quit test never
 			// touches the disk (§31).
 			settings: crate::settings::Settings::default(),
+			// The pointer has not moved and no seam has been pressed — the state a divider
+			// double-click starts from (§48).
+			pointer: iced::Point::ORIGIN,
+			seam_clicks: ui::selection::Clicks::default(),
 		}
 	}
 
@@ -9732,6 +9844,131 @@ mod tests {
 			iced::Size::new(9999.0, 9999.0),
 		);
 		assert_eq!((region_count(&app), app.window, app.next_id), before);
+	}
+
+	/// The widths of the two regions, in `Pane` order — what a divider gesture is judged by.
+	fn shares(app: &App) -> Vec<f32> {
+		ui::split::regions(&app.regions, app.window)
+			.values()
+			.map(|rect| rect.width)
+			.collect()
+	}
+
+	/// Where the seam is right now, in window coordinates: the gap between the two regions.
+	fn seam_middle(app: &App) -> iced::Point {
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let left = boxes.values().next().expect("a first region");
+		iced::Point::new(
+			left.x + left.width + ui::split::SPACING / 2.0,
+			left.y + 10.0,
+		)
+	}
+
+	/// Press the left button at `pointer`, in the two events the raw stream reports it as (§48).
+	fn press_at(app: &mut App, pointer: iced::Point) {
+		let _ = app.update(Message::PointerMoved(pointer));
+		let _ = app.update(Message::PointerPressed);
+	}
+
+	/// Press the left button on the seam, wherever it is right now — a divider that has just been
+	/// dragged is no longer in the middle, and the pointer that dragged it is on it.
+	fn press_seam(app: &mut App) {
+		let seam = seam_middle(app);
+		press_at(app, seam);
+	}
+
+	#[test]
+	fn a_double_click_on_the_divider_evens_the_shares() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let split_id = ui::split::seam_at(&app.regions, app.window, seam_middle(&app))
+			.expect("a split window has a seam");
+		// Drag it well off centre, as a user placing the divider by hand would.
+		let _ = app.on_divider_dragged(split_id, 0.75);
+		let lopsided = shares(&app);
+		assert!(lopsided[0] > lopsided[1], "the drag took effect");
+		// Two presses on the seam, close enough together to be one gesture — the drag before them
+		// forgot its own press, so these two are a whole double click of their own.
+		let seam = seam_middle(&app);
+		press_at(&mut app, seam);
+		press_at(&mut app, seam);
+		let evened = shares(&app);
+		assert!(
+			(evened[0] - evened[1]).abs() < 0.5,
+			"a double-clicked divider goes back to the middle: {evened:?}"
+		);
+	}
+
+	#[test]
+	fn one_press_on_the_divider_leaves_the_shares_alone() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let split_id = ui::split::seam_at(&app.regions, app.window, seam_middle(&app))
+			.expect("a split window has a seam");
+		let _ = app.on_divider_dragged(split_id, 0.75);
+		let placed = shares(&app);
+		// A single click is how a drag STARTS. If one press evened the shares, no divider could ever
+		// be dragged anywhere (§48).
+		press_seam(&mut app);
+		assert_eq!(shares(&app), placed);
+	}
+
+	#[test]
+	fn a_press_that_follows_a_drag_cannot_complete_a_double_click() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let split_id = ui::split::seam_at(&app.regions, app.window, seam_middle(&app))
+			.expect("a split window has a seam");
+		// Nudge, nudge: press, drag, press again straight away — the ordinary way a divider is
+		// placed. The second press is on the same seam inside the double-click window, so only the
+		// drag in between stops it throwing away the share just set (§48).
+		press_seam(&mut app);
+		let _ = app.on_divider_dragged(split_id, 0.7);
+		let placed = shares(&app);
+		press_seam(&mut app);
+		assert_eq!(
+			shares(&app),
+			placed,
+			"a nudge after a nudge must not read as a double click"
+		);
+	}
+
+	#[test]
+	fn two_presses_inside_a_region_do_not_touch_the_divider() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let split_id = ui::split::seam_at(&app.regions, app.window, seam_middle(&app))
+			.expect("a split window has a seam");
+		let _ = app.on_divider_dragged(split_id, 0.75);
+		let placed = shares(&app);
+		// A double click in a terminal takes a word (§42) and must do nothing else. The raw stream
+		// reports every press in the window, so this is the case the geometry has to rule out.
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let first = *boxes.values().next().expect("a first region");
+		let inside = iced::Point::new(first.x + first.width / 2.0, first.y + first.height / 2.0);
+		press_at(&mut app, inside);
+		press_at(&mut app, inside);
+		assert_eq!(shares(&app), placed);
+	}
+
+	#[test]
+	fn a_press_elsewhere_between_two_seam_presses_breaks_the_double_click() {
+		let mut app = tab_app();
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let split_id = ui::split::seam_at(&app.regions, app.window, seam_middle(&app))
+			.expect("a split window has a seam");
+		let _ = app.on_divider_dragged(split_id, 0.75);
+		let placed = shares(&app);
+		let boxes = ui::split::regions(&app.regions, app.window);
+		let first = *boxes.values().next().expect("a first region");
+		press_seam(&mut app);
+		// A click into the shell in between — the run is over, whatever the clock says (§42).
+		press_at(
+			&mut app,
+			iced::Point::new(first.x + first.width / 2.0, first.y + first.height / 2.0),
+		);
+		press_seam(&mut app);
+		assert_eq!(shares(&app), placed);
 	}
 
 	#[test]

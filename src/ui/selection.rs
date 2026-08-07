@@ -38,9 +38,10 @@ use std::time::{Duration, Instant};
 
 use crate::term::screen::{Cell as ScreenCell, Screen};
 
-/// How long after a press a second one on the same cell still counts as part of the same multi-click
-/// (§42). Half a second is Windows' own default double-click time (`GetDoubleClickTime`), so cmote
-/// agrees with the rest of the desktop rather than inventing its own feel.
+/// How long after a press a second one on the same target still counts as part of the same
+/// multi-click (§42). Half a second is Windows' own default double-click time
+/// (`GetDoubleClickTime`), so cmote agrees with the rest of the desktop rather than inventing its
+/// own feel.
 const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(500);
 
 /// The punctuation that counts as part of a word, on top of any alphanumeric character (§42). This
@@ -108,31 +109,43 @@ pub enum Click {
 	Triple,
 }
 
-/// The multi-click counter (§42). `mouse_area` reports each press on its own and says nothing about
-/// how many came before it, so cmote keeps the tally: the last press's cell, when it happened, and
-/// what it counted as. Kept here rather than in `app` because it is pure timing arithmetic and worth
-/// a test — `press` takes the current instant instead of reading the clock itself for exactly that
-/// reason.
+/// The multi-click counter (§42, §48). The toolkit reports each press on its own and says nothing
+/// about how many came before it, so cmote keeps the tally: the last press's target, when it
+/// happened, and what it counted as. Kept here rather than in `app` because it is pure timing
+/// arithmetic and worth a test — `press` takes the current instant instead of reading the clock
+/// itself for exactly that reason.
 ///
-/// Consecutive presses must be on the SAME CELL, not merely within a few pixels as a general-purpose
-/// widget would ask: on a grid the cell IS the target, and it is the cell a word or line then expands
-/// from. Nudging the pointer inside one cell between two clicks must not break the double click, and
-/// crossing into the next cell must.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Clicks {
-	/// The last press: where it landed, when, and what it counted as. `None` until the first one.
-	last: Option<(Cell, Instant, Click)>,
+/// Consecutive presses must be on the SAME TARGET, not merely within a few pixels as a
+/// general-purpose widget would ask, and `T` is what "the same" means. The grid counts presses on a
+/// [`Cell`] (§42): the cell IS the target there, and it is the cell a word or line then expands
+/// from, so nudging the pointer inside one cell between two clicks must not break the double click
+/// and crossing into the next cell must. The window's dividers count presses on a
+/// `pane_grid::Split` (§48), where the seam is the target the same way — the pointer may wander
+/// anywhere along a divider that is hundreds of pixels long and still be double-clicking the same
+/// one.
+#[derive(Debug, Clone, Copy)]
+pub struct Clicks<T> {
+	/// The last press: what it landed on, when, and what it counted as. `None` until the first one.
+	last: Option<(T, Instant, Click)>,
 }
 
-impl Clicks {
-	/// Count a press on `cell` at `now`, returning what it is (§42). A press on another cell, or one
-	/// that came too late, is a fresh `Single`; each press inside the window escalates from the one
-	/// before it. `Instant::duration_since` saturates rather than panicking, so a clock that appears
-	/// to run backwards yields a zero gap — still inside the window, which is harmless here.
-	pub fn press(&mut self, cell: Cell, now: Instant) -> Click {
+/// Written out rather than derived because deriving would demand `T: Default`, which is a promise
+/// the counter never needs: it starts having seen nothing at all, whatever it counts.
+impl<T> Default for Clicks<T> {
+	fn default() -> Self {
+		Self { last: None }
+	}
+}
+
+impl<T: Copy + PartialEq> Clicks<T> {
+	/// Count a press on `target` at `now`, returning what it is (§42). A press on another target, or
+	/// one that came too late, is a fresh `Single`; each press inside the window escalates from the
+	/// one before it. `Instant::duration_since` saturates rather than panicking, so a clock that
+	/// appears to run backwards yields a zero gap — still inside the window, which is harmless here.
+	pub fn press(&mut self, target: T, now: Instant) -> Click {
 		let kind = match self.last {
-			Some((last_cell, at, last))
-				if last_cell == cell && now.duration_since(at) <= MULTI_CLICK_WINDOW =>
+			Some((last_target, at, last))
+				if last_target == target && now.duration_since(at) <= MULTI_CLICK_WINDOW =>
 			{
 				match last {
 					Click::Single => Click::Double,
@@ -142,7 +155,7 @@ impl Clicks {
 			}
 			_ => Click::Single,
 		};
-		self.last = Some((cell, now, kind));
+		self.last = Some((target, now, kind));
 		kind
 	}
 }

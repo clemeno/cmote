@@ -4470,7 +4470,7 @@ The shape of a message is what says where it goes, and there are three shapes:
 | Shape | Where it goes | Examples |
 |---|---|---|
 | `Message::In(pane, …)` | that region | every click, every strip gesture, every dialog inside a region |
-| the App's own, unwrapped | the App, sometimes fanned out to every region | SSH events (by tab id), window resize / focus, the frame clocks, the quit flow, the split gestures |
+| the App's own, unwrapped | the App, sometimes fanned out to every region | SSH events (by tab id), window resize / focus, the frame clocks, the quit flow, the split gestures, the raw pointer that catches a divider double-click |
 | anything else, unwrapped | the region holding the keyboard | the keyboard, above all — a subscription has no region of its own |
 
 A pleasant consequence: **nothing inside a region had to change.** Not the strip, not the terminal, not a
@@ -4507,6 +4507,47 @@ laid-out bounds. Both are still right inside a region, because a region's bounds
 rectangle. The dialog drags are the same story — they apply pointer *deltas* and clamp against the space
 they are drawn in, which is now a region rather than the window, and the App-level overlays (§26, §30) go on
 being measured against the whole window because that is still what they float over.
+
+### A double-clicked divider goes back to the middle
+
+A share dragged by hand has no way back. The window is **grown** by a split and never divided, so nothing
+in the feature ever re-centres a seam once it has moved — the only route to an even split was to close the
+region and cut again. A **double-click on the divider** is that way back, and it is the gesture every
+desktop already spends on "reset this handle".
+
+Catching it is the interesting part, and it is the one press in the whole window that reaches no widget.
+`pane_grid` **captures** a press on a seam to start its own resize gesture and publishes nothing — no
+`on_click`, no `on_resize` until the pointer actually moves. So there is nothing to hang an
+`on_double_click` on: a `mouse_area` wrapped round the frame never sees the press, because iced hands the
+event to the child first and a captured event stops there; an overlay strip drawn *over* the seam sees it
+first instead and would then have to reimplement the drag it just stole.
+
+So the press is taken off the **raw event stream**, the same `event::listen_with` that already catches
+window focus (§23) and the file drop (§29), and the geometry decides what it was: `ui::split::seam_at`
+runs `pane_grid`'s own hit test — `split_line_bounds`, widened by the same `LEEWAY` the drag uses — so a
+double-click lands exactly where a drag would have. A press anywhere else in the window breaks the run,
+which is what keeps a double-click in a shell (§42) from touching the divider.
+
+Two details are the whole of the care here:
+
+- **The position and the moment arrive separately.** iced's press event carries no coordinates, so the
+  move stream supplies where the pointer is and the press supplies when. That means one message per
+  pointer move — the only such stream in cmote — so `subscription` asks for it **only while the window is
+  split**. An undivided window has no seam to hit and pays nothing; a split one pays a field store per
+  move, and the repaint iced was going to do anyway.
+- **A drag cannot be half of the gesture.** A drag ends with the pointer still on the seam it moved, so
+  the nudge-nudge of placing a divider by hand would otherwise read as a double click and throw away the
+  share just set. `on_divider_dragged` therefore **forgets the press holding it** rather than blocking the
+  next one — the counter is reset, so the double click *after* a drag is two fresh presses and still
+  works. Blocking would have cost the user a whole extra click every time they had touched a divider.
+
+The tally itself is `ui::selection::Clicks`, §42's own multi-click counter, made generic over what it
+counts: a grid **cell** there, a **seam** here. The rule is the same in both — consecutive presses must be
+on the same target, not merely within a few pixels — and a seam is the better target of the two, since a
+divider is hundreds of pixels long and the pointer may wander anywhere along it between the two presses.
+
+A third press is a `Triple` and does nothing: the shares are already even, and leaning on the button
+should not keep re-doing it.
 
 ### Two inversions, each contained in one place
 
@@ -4553,12 +4594,16 @@ what it does to their sessions.
 
 ### Structure
 
-- `ui/split.rs` (new) — the frame. `Way` and its inversion, the seam metrics, `regions` for measuring and
-  `frame` for drawing. Knows nothing about tabs.
+- `ui/split.rs` (new) — the frame. `Way` and its inversion, the seam metrics, `regions` for measuring,
+  `frame` for drawing, and `seam_at` for asking which divider a raw press landed on. Knows nothing about
+  tabs.
 - `app.rs` — `Region` is new and almost entirely **lifted, not written**: a window used to *be* a strip of
   tabs, so the tab list, which one is on screen, the activation order (§37) and the strip drag (§38) moved
   off `App` onto `Region` unchanged. `App` kept what there is genuinely one of — the region tree, the focus,
-  the window size, the target list, the vault, the id counter, the quit flow.
+  the window size, the target list, the vault, the id counter, the quit flow — and, for the divider
+  double-click, the pointer's window position and the seam click tally.
+- `ui/selection.rs` — `Clicks` became generic over what it counts, so §42's grid cells and §48's seams share
+  one piece of timing arithmetic instead of two.
 - `ui/tabs.rs` — two buttons at the right end of the bar, and a dimmer fill for a region that does not hold
   the keyboard. The buttons are pushed to the far right rather than sitting by the "+", because chips grow
   with their labels and a control that can be pushed out of reach is one a user has to close a tab to get at.
