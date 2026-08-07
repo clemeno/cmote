@@ -11,7 +11,7 @@ plan is didactic. It explains *why* each choice was made (idiomatic Rust, async,
 security) and marks every deliberate shortcut with a `ponytail:` note so "simple"
 reads as intent, not ignorance.
 
-Status: **shipping — v3.1.0** (v1 feature set complete; v1.3 adds saved connection
+Status: **shipping — v4.0.0** (v1 feature set complete; v1.3 adds saved connection
 targets on a home screen — profiles only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
@@ -43,10 +43,23 @@ keyboard protocol — the `CSI u` encoding
 for disambiguate, press / repeat / release events, report-all and associated text, superseding
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
-3.0.0; **v3.1.0** adds a basic remote text editor that opens in its own tab — line-numbered,
-encoding- and line-ending-aware (BOM-detected, saved as opened), with changed-line marks and save /
-save-as / close over SFTP, §32. Both targets are supported first-class, and each has a verified
-toolchain on its host:
+3.0.0; and everything since *that* lands the same way in the one **v4.0.0** major release —
+§32 through §48, with no point increments in between (the 3.1.0 the manifest carried for a
+while was work in progress, never tagged, and is folded in here). What earns the major number
+is that two of them change what a cmote window *is*: it can be **split** in two, each half with
+its own tab strip and its own session on screen at once (§48), and one connection can hold
+**more than one account**, with the file panes following the account you switched to (§45, §46).
+The rest of the release: a **remote text editor** in its own tab — line-numbered, encoding- and
+line-ending-aware (BOM-detected, saved as opened), with changed-line marks and save / save-as /
+close over SFTP (§32); **inline sixel images** in the scrollback, decoded in-house and anchored to
+the document so they scroll with it (§41); **finding text** in the whole scrollback, every match
+on screen washed and the list kept up to date under live output (§35, §39, §44); **shell-integration
+prompt marks** driving a per-tab command-status dot, jump-to-prompt and select-command-output
+(§34); a **selection that speaks document lines**, so text stays selected as it scrolls (§40),
+with **double- and triple-click** to take a word or a line (§42); the **identity and input queries**
+the engine drops, answered beside it (§33, §36); a **tab strip the user orders**, with files beside
+their session and drag to rearrange (§38), and a close that **returns you where you were** (§37).
+Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
   `x86_64-apple-darwin`, Xcode Command Line Tools `clang` 17.
@@ -128,7 +141,7 @@ Each decision below is a thing to learn from, not just a dependency.
 
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
-| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime. **`features = ["advanced"]`** since v2.3 — it unlocks the `Widget` trait, which the terminal grid is one of (§9) — **plus `"image-without-codecs"`** since v3.x, which turns on the renderer's raster pipeline so that same widget can composite inline sixel images (§41). The `-without-codecs` spelling adds the `image` crate with *no* format decoders: cmote decodes sixel itself, so a PNG/JPEG parser would be attack surface for a format we never hand the renderer |
+| `iced` | 0.14.0 | GUI (Elm architecture, `Task`, `Subscription`) | pure Rust; wgpu/tiny-skia renderer, no web runtime. **`features = ["advanced"]`** since v2.3 — it unlocks the `Widget` trait, which the terminal grid is one of (§9) — **plus `"image-without-codecs"`** since v4.0.0, which turns on the renderer's raster pipeline so that same widget can composite inline sixel images (§41). The `-without-codecs` spelling adds the `image` crate with *no* format decoders: cmote decodes sixel itself, so a PNG/JPEG parser would be attack surface for a format we never hand the renderer |
 | `russh` | 0.62.4 | async SSH client | tokio-based; `client::Handler` trait. **`default-features = false` + `ring`** backend (not the default `aws-lc-rs`, which needs NASM; `ring` builds on both targets — prebuilt asm on Windows, via Xcode CLT `clang` on macOS) |
 | `russh::keys` | (with russh) | key loading + `known_hosts` | `load_secret_key`, `decode_secret_key`, `check_known_hosts_path` |
 | `russh-sftp` | 2.3.0 | the sftp subsystem, for file upload (§17) | rides russh's `ChannelStream` — a protocol on the existing SSH stack, not a second one. Pure Rust, no C |
@@ -781,7 +794,7 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
     the very paste-injection the bracketed-paste strip guards against (§9). The context menu's
     and status bar's **Copy** now route through the rich path too, for one copy behaviour
     whatever the trigger.
-  - **Folder tree beside the files pane** (done, v2.0; moved v3.x): the right end of the
+  - **Folder tree beside the files pane** (done, v2.0; moved v4.0.0): the right end of the
     bottom browser strip holds the remote folder explorer, with a draggable splitter between
     it and the files pane and a status-bar button that hides it. Its width comes out of the
     *pane's* now, not the grid's — the terminal keeps the full width above the strip — so a
@@ -1002,9 +1015,10 @@ therefore does two deliberately different things on two architectures:
   `cargo build --target x86_64-apple-darwin`; take it when CI starts producing Intel
   artifacts.
 
-Only the live-SSH end-to-end path stays manual — there is still no CI SSH server. CI
-builds no release artifact; publishing the portable binaries stays a manual step (§16,
-code signing / release automation).
+Only the live-SSH end-to-end path stays manual — there is still no CI SSH server. A tag
+push does build and attach the portable binaries (`release.yml`, §16); the manual step left
+is **publishing the draft**, which is a human review on purpose, not a gap. The artifacts are
+unsigned by decision (§16), so nothing here is waiting on a signing step either.
 
 ---
 
@@ -1146,7 +1160,7 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   primary method (§7). Agent-held *certificate* identities are still deferred (the file-based
   certificate path is done — §7, §16); an agent's plain public keys are what is offered here.
   See §7 and `ssh/agent.rs`.
-- **Certificate auth** — *done (v3.x), file-based*. An OpenSSH user certificate is presented
+- **Certificate auth** — *done (v4.0.0), file-based*. An OpenSSH user certificate is presented
   alongside a key as an add-on to key auth (§7): under key auth an optional **Certificate** file
   sits beside the key file, auto-filled from the `<key>-cert.pub` sibling and clearable, loaded at
   connect time and sent via russh's `authenticate_openssh_cert`. It is remembered with the target
@@ -1170,12 +1184,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   destination and asking about every colliding *file* one at a time (overwrite / keep both / skip
   this one, overwrite-all / skip-all, or cancel the lot), the per-file mirror of the flat batch's
   up-front question (§17, §19). All of it is SFTP-first with an `mkdir`/`rm -rf`/exec fallback,
-  like the listings. v3.x then added **cancel and resume** (§16 below, wired in §17): the status
+  like the listings. v4.0.0 then added **cancel and resume** (§16 below, wired in §17): the status
   bar's ✕ stops the running transfer — the worker deletes the partial it was writing and drops the
   rest of the batch, since a deliberate cancel is final — and a mid-flight *failure* instead keeps
   its partial and offers a **Resume** that re-sends only the bytes still missing (a byte-offset
   append for a single file; a whole tree re-walked and size-compared so only the gaps and the
-  interrupted file's tail cross again). v3.x also began **preserving file metadata** across a copy
+  interrupted file's tail cross again). v4.0.0 also began **preserving file metadata** across a copy
   (§17, §19): every finished file is stamped, best-effort, with the source's **modification time**
   — the one attribute meaningful in the everyday Windows case, where the client neither has a Unix
   mode to send nor can apply one — and, when both ends are Unix, its **permission bits** too (so a
@@ -1189,12 +1203,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   cyclic link cannot loop the transfer).
 - **Port forwarding (local/remote/dynamic)** — *done (v3.0.0)*. All three — `-L` local, `-R`
   remote, `-D` dynamic (a SOCKS5 proxy) — run over the live connection, managed from a **Tunnels**
-  dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). v3.x
+  dialog on the status bar and remembered per target so a reconnect re-establishes them (§27). v4.0.0
   then added the **server-assigned remote port** (`-R 0`): a remote forward may bind port 0, the
   server picks a free port, and the row shows the port it chose while the saved spec keeps 0 so a
-  reconnect asks afresh (§27). v3.x also made the dialog a **live monitor** — each active row shows
+  reconnect asks afresh (§27). v4.0.0 also made the dialog a **live monitor** — each active row shows
   `N open · M total`, the connections crossing the tunnel now and in all, driven from the byte pumps
-  themselves (§27). v3.x then closed the last gap by accepting **bracketed-IPv6 addresses** on either
+  themselves (§27). v4.0.0 then closed the last gap by accepting **bracketed-IPv6 addresses** on either
   side — `[::1]:8080`, exactly as a URL or OpenSSH writes them — with an unbracketed IPv6 refused with
   a message pointing at the bracket form rather than mis-split on its last colon (§27). That was the
   last port-forward follow-up, so the chapter is complete.
@@ -1244,7 +1258,7 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   on a loud, reject-by-default dialog showing both SHA-256 fingerprints, with **Reject** /
   **Trust once** / **Replace key**. Never auto-trusted — every override is one explicit, informed
   click (§28).
-- **Release pipeline** — *done (v3.x)*. A tag-triggered `release.yml` sits beside `ci.yml`
+- **Release pipeline** — *done (v4.0.0)*. A tag-triggered `release.yml` sits beside `ci.yml`
   in `.github/workflows/`: a bare `MAJOR.MINOR.PATCH` tag (the repo's convention — `2.3.0`,
   not `v2.3.0`) builds the optimized binary on both targets, packages each the platform way
   — a portable `cmote.exe`, a zipped Finder-launchable `cmote.app` (`bundle-macos.sh`, whose
@@ -1253,10 +1267,31 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   Release for a human to review and publish. A manual `workflow_dispatch` run builds both
   targets *without* publishing, to exercise the pipeline before cutting a tag. The publish
   job is the only one granted `contents: write`; the builds stay read-only.
-- **Code signing + auto-update** — *still deferred*. Sign the exe (Authenticode) so Win11
-  SmartScreen trusts it, and `codesign` + notarize the macOS binary/`.app` so Gatekeeper
-  allows it; then add a signed update channel. Until then a fresh download from the release
-  above trips SmartScreen / Gatekeeper, and the `SHA256SUMS` file is the integrity check.
+- **Code signing + auto-update** — **decided: NO, not deferred.** This used to read "still
+  deferred", which kept it on every remaining-work list as a thing about to happen. It is not:
+  cmote will not be Authenticode-signed, `codesign`ed or notarized, and there will be no update
+  channel, until that decision is explicitly reversed. Three reasons, worth writing down so the
+  question stops being reopened:
+  - **A certificate would not buy what it looks like it buys.** Win11 SmartScreen warns on
+    *reputation*, not on the presence of a signature, so an ordinary OV certificate leaves the
+    first-download prompt exactly where it is — only an EV certificate skips it, and only until
+    each new binary has been downloaded enough times. The prompt one pays to remove would still
+    be there.
+  - **The signing key is a new high-value secret, and it would live in CI.** The release builds
+    from a committed lockfile on a runner nobody logs into; adding a key that can vouch for "this
+    is cmote" turns that pipeline into something worth attacking, and gives it an authority the
+    project does not otherwise have. A yearly-renewed identity-bound certificate is also the one
+    part of the build that cannot be reproduced from this repository.
+  - **Auto-update rides on signing, and cmote does not want the update channel either.** An
+    updater is a program that downloads and runs code on the user's machine on its own initiative
+    — for a portable exe carried on a USB stick (§11) that is the wrong shape entirely. The update
+    path is: download the next release yourself.
+
+  What stands in its place: the release attaches **`SHA256SUMS`**, and that is the sanctioned
+  integrity check — verify the download against it (`sha256sum -c SHA256SUMS`, or `shasum -a 256
+  -c SHA256SUMS`). The cost is honest and stays: a fresh download trips SmartScreen ("More info"
+  → "Run anyway") and macOS Gatekeeper (right-click → **Open** the first time). Reversing this
+  means saying so explicitly; nothing else here is waiting on it.
 - **GNU toolchain build** — only if a fully MSVC-CRT-free static exe is ever required.
 - **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
   architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
@@ -1387,7 +1422,7 @@ on the server, or the remote one recreated on this machine. Both directions shar
   whole transfer — files already copied stay. This is the per-file mirror of the flat batch's
   up-front question above; the flat paths are untouched.
 
-### Cancel and resume (v3.x)
+### Cancel and resume (v4.0.0)
 
 A running transfer can be **stopped** (the status bar's ✕) and, after a mid-flight *failure*, can be
 **resumed** (a Resume beside the failure notice). The two are deliberately different endings:
@@ -1425,7 +1460,7 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
 Both live inside one connection: a transfer whose *session* drops tears down to the error screen, so
 its state is gone — resuming across a reconnect is the deferred upgrade path (§16).
 
-### Preserving file metadata (v3.x)
+### Preserving file metadata (v4.0.0)
 
 Every finished file is **stamped to match its source**, best-effort, so a copy is not silently
 re-dated to "now". What is meaningful depends on the two ends, and cmote's everyday case is a
@@ -2275,7 +2310,7 @@ cmote's job is only to **surface** it and **act** on a click:
   A **right-click** on a link cell adds **Open link** and **Copy link** to the terminal's
   context menu (`ui/terminal.rs`), both carrying the URI — the one place the whole address is
   offered, handy when the visible text hides it.
-- **Hover affordance** (`ui/grid.rs`, v3.x): while **Ctrl is held** and the pointer is over a link,
+- **Hover affordance** (`ui/grid.rs`, v4.0.0): while **Ctrl is held** and the pointer is over a link,
   the grid underlines the link's whole run — so the link reveals itself as one *before* the
   Ctrl+click that opens it, the reveal and the action sharing the one modifier. The grid finds the
   run by walking outward from the hovered cell while the OSC 8 URI stays the same (`link_run_at`);
@@ -2747,7 +2782,7 @@ the chosen feel.)
 - `ponytail:` the drain waits on the **live (Terminal-screen) tabs only**. A tab still handshaking has
   no shell to disconnect and its worker unwinds when its link drops; the timeout covers any straggler.
 
-## 31. App-wide window size, and pane-handle feedback (v3.x)
+## 31. App-wide window size, and pane-handle feedback (v4.0.0)
 
 Two small layout niceties. cmote already remembered the panel sizes per target (§22); it did
 not remember the WINDOW, so every launch opened at the built-in default however the user last
@@ -2802,7 +2837,7 @@ that they were grabbable at all was something you learned by trying. This sectio
 
 ---
 
-## 32. Remote text editor in a tab (v3.1.0)
+## 32. Remote text editor in a tab (v4.0.0)
 
 A **basic text editor** for a remote file, opened in **its own tab** in the strip (§26). Until now
 a tab was always a session (a home list or a live shell); now a tab can also be an editor, so the
@@ -2984,7 +3019,7 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   `keep_visible` over the cursor line — `cursor().position.line` × the fixed `LINE_HEIGHT` — and issues
   a `scroll_to` on the buffer's id. The same follow serves a Find jump, so a match off-screen is
   scrolled onto it.
-- **Horizontal scrolling — the last long-line gap closed (v3.x).** The buffer now has a real
+- **Horizontal scrolling — the last long-line gap closed (v4.0.0).** The buffer now has a real
   **horizontal scrollbar** and wheel, so a line wider than the pane is reachable without arrowing the
   cursor into it. It could not be a bar synced to the widget's *own* horizontal scroll — iced hides that
   offset exactly as it hides the vertical one — so the same trick the height uses is applied to the
@@ -3053,7 +3088,7 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   syntect-backed `Highlighter` and the CME `syntect::Theme` (behind the `two-face` dependency, pure-Rust
   `fancy-regex`); **`ui/files.rs`** adds the Edit… item and the double-click-a-file path.
 
-## 33. Answering the identity queries the engine drops (v3.x)
+## 33. Answering the identity queries the engine drops (v4.0.0)
 
 The terminal engine (`alacritty_terminal`, §23) answers the queries that touch the grid — DSR,
 DA, DECRQM, cursor-position and text-area reports — and cmote drains those replies straight through
@@ -3102,7 +3137,7 @@ ignores — and formats a reply.
   query.rs`** is the scanner, the reply formatters, the small capability map and the hex codec — free
   of any engine type, so every parse and every reply shape is unit-tested with no terminal.
 
-## 34. Shell-integration prompt marks — OSC 133 (v3.x)
+## 34. Shell-integration prompt marks — OSC 133 (v4.0.0)
 
 A shell with "shell integration" configured brackets every command it runs with OSC 133 escape
 sequences — the FinalTerm/iTerm2 convention every modern terminal now reads:
@@ -3186,7 +3221,7 @@ OSC and ignores it, so cmote scans the same bytes itself.
 
 ---
 
-## 35. Finding text in the scrollback (v3.x)
+## 35. Finding text in the scrollback (v4.0.0)
 
 The terminal retains 10 000 lines of history (§23) and the wheel, Shift+Page and jump-to-prompt
 (§34) all move through it — but until now the only way to *find* something up there was to scroll
@@ -3274,7 +3309,7 @@ reveal-scroll, and "a found thing becomes an ordinary selection".
 
 ---
 
-## 36. The last input and query gaps — DA3, and DECKPAM where it is safe (v3.x)
+## 36. The last input and query gaps — DA3, and DECKPAM where it is safe (v4.0.0)
 
 With the engine swap (§23), `modifyOtherKeys`, kitty keyboard (§25), OSC 8 (§24), OSC 133 (§34) and
 scrollback search (§35) all done, the terminal-compatibility audit had four items left outside the
@@ -3340,7 +3375,7 @@ in the encoder, reading the mode out of the grouped `keymap::Modes` beside DECCK
   *and* a repaint timer cmote deliberately runs for nothing — the same call made for the cursor.
 - **DA3 as anything but a constant, and any other `CSI =` sequence.** See the security note above.
 
-## 37. Closing a tab returns you to where you were (v3.x)
+## 37. Closing a tab returns you to where you were (v4.0.0)
 
 Tabs (§26) kept `active` as an **index into the strip**, so closing the tab on screen fell back to
 strip arithmetic: keep the index, or step back one if the last tab went. With three or more tabs open
@@ -3405,7 +3440,7 @@ tab brought forward by a close painted against whatever size it last saw until t
 - **The quit flow is untouched (§30).** Quitting closes every tab, so which one would have come
   forward is moot; closing the *last* tab is still a request to quit, not a fallback.
 
-## 38. The strip's order is the user's — files beside their session, and drag to rearrange (v3.x)
+## 38. The strip's order is the user's — files beside their session, and drag to rearrange (v4.0.0)
 
 §37 fixed *which* tab a close brings forward. This section is about the other half of the strip's
 order: **where a tab sits**, and who decides. Two changes, both of them the same idea — the strip
@@ -3487,7 +3522,7 @@ another chip and release, and the grabbed tab takes that chip's slot. No separat
 
 ---
 
-## 39. Every match on screen, washed — the find bar shows where else the query is (v3.x)
+## 39. Every match on screen, washed — the find bar shows where else the query is (v4.0.0)
 
 §35 shipped the scrollback find bar with one hit marked: the current one, revealed and turned into an
 ordinary selection so the existing highlight and Copy served it with no rendering work at all. That
@@ -3573,7 +3608,7 @@ unchanged apart from a test**: the wash is a pure function of state the view alr
 
 ---
 
-## 40. The selection speaks document lines — text that scrolls stays selected (v3.x)
+## 40. The selection speaks document lines — text that scrolls stays selected (v4.0.0)
 
 Three features had grown into absolute document coordinates — the OSC 133 prompt marks (§34), the
 search matches (§35), the washes over them (§39) — while the thing they all end up *becoming*, the text
@@ -3649,7 +3684,7 @@ because a `Highlight` was *already* a projection.
 
 ---
 
-## 41. Inline images — sixel pictures in the scrollback (v3.x)
+## 41. Inline images — sixel pictures in the scrollback (v4.0.0)
 
 The compatibility plan (§5, §7) had one item left with real UX value: **graphics**. A program that
 wants to show a picture in a terminal — `img2sixel`, `chafa -f sixel`, gnuplot's sixel terminal, timg,
@@ -3803,7 +3838,7 @@ screen exactly as it was.
 
 ---
 
-## 42. Select by word and by line — the double and triple click (v3.x)
+## 42. Select by word and by line — the double and triple click (v4.0.0)
 
 Selecting text in cmote's grid needed a **drag**, and only a drag. Every terminal ever shipped also
 selects a **word** on a double click and a **line** on a triple, and its absence was the kind of gap
@@ -3896,7 +3931,7 @@ through `Selection::spanning`, which is the same call the word and line expansio
 
 ---
 
-## 43. A resize invalidates what was anchored to the grid (v3.x)
+## 43. A resize invalidates what was anchored to the grid (v4.0.0)
 
 Everything §40 gained by anchoring the selection in **absolute document lines** rests on those numbers
 meaning the same thing from one frame to the next. A **resize** is where they stop: re-wrapping the
@@ -3958,7 +3993,7 @@ puts it back.
 
 ---
 
-## 44. The find bar keeps up with live output (v3.x)
+## 44. The find bar keeps up with live output (v4.0.0)
 
 §43 closed one half of a two-part hole: a match list is built once, and it describes the document *as
 it was at that moment*. A resize was the loud half. **Output arriving** is the quiet one, and it goes
@@ -4021,7 +4056,7 @@ washes.
 - **The bar does not open itself, and nothing searches while it is closed.** No background matching, no
   "N new matches" badge on the tab chip (§34's dot is a command status, not a search one).
 
-## §45 — More than one account on one connection (v3.x)
+## §45 — More than one account on one connection (v4.0.0)
 
 `rec.michoacan` accepts `cme` and nothing else: root logs in over SSH nowhere sane. So the way to be
 root there is to become root **after** logging in — `sudo -i` — and until now cmote could only do that
@@ -4220,7 +4255,7 @@ notice amber — nothing is wrong.
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
   prompt, or cancelling the dialog that opened it.
 
-## §46 — The file panes follow the account you switched to (v3.x)
+## §46 — The file panes follow the account you switched to (v4.0.0)
 
 §45 left a session with more than one shell but only one set of eyes on the filesystem: elevating gave
 a root terminal and left the folder tree, the files pane, every transfer and the editor reading as the
@@ -4358,7 +4393,7 @@ opening an sftp session — uses `exec_inline`, which borrows the loop's own han
 - **Still no auto-elevate on connect, and no vault-stored sudo password.** Both are §47, which is where
   the profile format changes.
 
-## §48 — Splitting the window (v3.x)
+## §48 — Splitting the window (v4.0.0)
 
 Tabs (§26) gave the window many sessions and showed one at a time. That is the right trade when the work
 is sequential — read a log, then go and fix the thing — and the wrong one when it is not: watching a build

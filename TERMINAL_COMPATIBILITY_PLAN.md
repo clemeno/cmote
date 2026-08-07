@@ -206,7 +206,7 @@ carried as a gap — see §6.
 
 ## 4. Rendering / attributes — closed at this layer
 
-**OSC 8 hyperlinks are now done** (§24), **including the Ctrl-hover underline** (v3.x) — the seam
+**OSC 8 hyperlinks are now done** (§24), **including the Ctrl-hover underline** (v4.0.0) — the seam
 surfaces the per-cell URI (`Cell::hyperlink`), Ctrl+click and a context-menu Open/Copy follow it,
 `link` gates the scheme to http/https/mailto before opening, and the grid now underlines the whole
 run of a link while Ctrl is held over it, so the link reveals itself before the click.
@@ -365,7 +365,7 @@ flags off the seam (`Screen::kitty_flags`) to drive the `CSI u` encoder. Disambi
 encoded; alternate keys best-effort (§25). `OSC 8 hyperlinks` (an earlier #1) shipped as a seam
 getter (`Cell::hyperlink`) plus the `link` module: **Ctrl+click** or a right-click **Open link /
 Copy link** follows it, the scheme gated to http/https/mailto and the URI handed to a launcher
-that never builds a shell command line (§24); v3.x added the **Ctrl-hover underline** — the grid
+that never builds a shell command line (§24); v4.0.0 added the **Ctrl-hover underline** — the grid
 finds the pointer's link run (`link_run_at`) and underlines it while Ctrl is held, driven off the
 repaints the app already emits on a hover move or a modifier change, so it needs no new plumbing. `modifyOtherKeys` (an earlier #2) shipped as
 `term::modkeys` + a `keymap::encode` branch: the stream is scanned for `CSI > 4 ; p m`, and a

@@ -488,12 +488,13 @@ open target/release/cmote.app
 ```
 
 `cmote.app` is self-contained and relocatable — no installer or external runtime. It
-is not code-signed or notarized yet (deferred — §12), so the first launch needs a
-right-click → **Open** to clear Gatekeeper's "unidentified developer" prompt.
+is not code-signed or notarized, and will not be (a decision, not a to-do — §16), so the
+first launch needs a right-click → **Open** to clear Gatekeeper's "unidentified developer"
+prompt.
 
 ## Releases
 
-Pushing a version tag (bare `MAJOR.MINOR.PATCH`, e.g. `3.0.0` — no `v` prefix, matching
+Pushing a version tag (bare `MAJOR.MINOR.PATCH`, e.g. `4.0.0` — no `v` prefix, matching
 the repo's tags) runs [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which builds the optimized binary on both targets and attaches these to a **draft** GitHub
 Release:
@@ -504,8 +505,13 @@ Release:
   SHA256SUMS`, or `shasum -a 256 -c SHA256SUMS` on macOS).
 
 The release is left as a **draft** to review before publishing. The artifacts are **not**
-code-signed or notarized yet (deferred — §16), so a fresh download trips SmartScreen /
-Gatekeeper until then; the checksums are the integrity check in the meantime.
+code-signed or notarized, and this is a decision rather than a pending task (§16): an ordinary
+certificate would not silence SmartScreen anyway (it warns on reputation, not on the absence of
+a signature), and a signing key in CI is a secret worth more than it saves. So `SHA256SUMS` is
+**the** integrity check, not a stand-in for one — verify the download against it. The cost is
+that a fresh download trips SmartScreen ("More info" → "Run anyway") and, on macOS, Gatekeeper
+(right-click → **Open** the first time). There is no auto-update for the same reason: the update
+path is to download the next release.
 
 ### Cutting a release
 
@@ -520,8 +526,8 @@ So always start from the tag:
 3. Tag the release commit and push — **this is what fires the workflow**:
 
    ```sh
-   git tag -a 3.0.0 -m "cmote 3.0.0"
-   git push origin 3.0.0
+   git tag -a 4.0.0 -m "cmote 4.0.0"
+   git push origin 4.0.0
    ```
 
 4. The workflow builds both targets and opens a **draft** Release with the three assets above.
