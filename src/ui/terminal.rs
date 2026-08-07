@@ -126,6 +126,7 @@ pub struct SessionView<'a> {
 	pub endpoint: &'a str,
 	/// Every account with a live shell, in the order they were opened (§45). One entry means one
 	/// account, and the bar then shows its name as plain text; two or more turn it into a select.
+	/// Accounts only — the "Log in as…" button beside them is not one of these.
 	pub identities: Vec<crate::app::IdentityChoice>,
 	/// The account on screen, which is the select's current value.
 	pub current: u64,
@@ -139,8 +140,12 @@ pub struct ElevateView<'a> {
 	pub user: &'a str,
 	pub prompt: Option<&'a str>,
 	pub answer: &'a str,
-	/// Whether the last answer was refused — the same question asked twice over.
-	pub refused: bool,
+	/// What the remote said about the last answer when it refused it, in the remote's own words.
+	/// `None` when it refused nothing — a further factor is a new question, not a rejection.
+	pub notice: Option<&'a str>,
+	/// Whether this question is a further one and nothing was refused, so the dialog can say so: two
+	/// factors can arrive under one wording, and "Password:" a second time needs explaining.
+	pub again: bool,
 	/// Why the elevation failed, in the remote's own words.
 	pub error: Option<&'a str>,
 	/// Whether a command has been sent and no question is outstanding: the remote is deciding, and
@@ -568,7 +573,9 @@ fn status_bar<'a>(
 	// Three equal-width zones. Because each takes the same `Fill` share, the middle
 	// zone's centered label is centered in the *window*, not merely between the side
 	// groups — so the host info stays put no matter how wide the buttons are.
-	let mut buttons = row![copy, paste, pick, send].spacing(10);
+	let mut buttons = row![copy, paste, pick, send]
+		.spacing(10)
+		.align_y(iced::alignment::Vertical::Center);
 	// Say what is picked right after Upload — the button it belongs to — so Upload never
 	// sends a mystery: a lone file by name, a batch by count, and nothing when none is picked.
 	let picked = match upload.file_count {
@@ -577,13 +584,8 @@ fn status_bar<'a>(
 		count => Some(format!("{count} files")),
 	};
 	if let Some(picked) = picked {
-		buttons = buttons.push(
-			text(picked)
-				.size(STATUS_BAR_TEXT)
-				.color(STATUS_BAR_FG)
-				.align_y(iced::alignment::Vertical::Center)
-				.height(Length::Fill),
-		);
+		// Its own height, like the account label beside it: the row centres it against the buttons.
+		buttons = buttons.push(text(picked).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG));
 	}
 	// Sync closes the left group, after the upload controls it is unrelated to.
 	buttons = buttons.push(sync);
@@ -596,9 +598,16 @@ fn status_bar<'a>(
 	// The account sits at the head of the right group, before the panel toggles: it says WHO the
 	// grid above belongs to, which is closer to the terminal's own identity than to the buttons that
 	// act on it.
-	let right = container(row![account, tree, pane, tunnels, disconnect].spacing(10))
-		.width(Length::Fill)
-		.align_x(iced::alignment::Horizontal::Right);
+	// `align_y` on each group, not only on the row of groups: a row aligns its own children to each
+	// other, so without it these settle at the top of whichever child is tallest. That is invisible
+	// while a group is all buttons of one height, and shows the moment a label or a select joins them.
+	let right = container(
+		row![account, tree, pane, tunnels, disconnect]
+			.spacing(10)
+			.align_y(iced::alignment::Vertical::Center),
+	)
+	.width(Length::Fill)
+	.align_x(iced::alignment::Horizontal::Right);
 
 	container(
 		row![left, center, right]
@@ -618,38 +627,50 @@ fn status_bar<'a>(
 	.into()
 }
 
-/// The account control in the status bar (§45): which account the grid above belongs to, and — once
-/// there is more than one — the way to change it.
+/// The account control in the status bar (§45): which account the grid above belongs to, the way to
+/// change it once there is more than one, and — always — the way to add one.
 ///
-/// With ONE account it is plain text, because a select with a single option is a control that does
-/// nothing; there is nothing to switch between, and the way to make a second one is the terminal's
-/// context menu. With two or more it becomes a select, whose entries are the live accounts plus one
-/// that is not an account at all: "Log in as…", which opens the elevate dialog. Folding that into
-/// the picker keeps one control where one idea is, rather than adding a button that would sit there
-/// unused most of the time.
+/// Two widgets, because they answer two different questions. WHO is a label while there is one
+/// account (a select with a single option is a control that does nothing) and a select once there
+/// are two or more. WHAT ELSE is a "Log in as…" button, and it is there either way.
+///
+/// The button used to be an extra entry folded into the select instead, which read well on paper and
+/// badly in the hand: the select only exists once a second account does, so the one way in from the
+/// bar appeared only after it had already been used, and until then the right-click menu was the
+/// only door — findable only by someone who already knew to look. A button beside the name says what
+/// it does before it is opened, it is in the same place whatever the account count, and it leaves
+/// the select meaning exactly one thing: which account the grid belongs to.
 fn account_control<'a>(session: &SessionView<'a>) -> Element<'a, Message> {
 	let current = session
 		.identities
 		.iter()
-		.find(
-			|choice| matches!(choice, crate::app::IdentityChoice::Use { id, .. } if *id == session.current),
-		)
+		.find(|choice| choice.id == session.current)
 		.cloned();
-	if session.identities.len() < 2 {
+	let who: Element<'a, Message> = if session.identities.len() < 2 {
 		// The one account's name, or nothing at all in the moment before the first shell is listed.
-		let label = current.map(|choice| choice.to_string()).unwrap_or_default();
-		return text(label)
+		// It takes only the height its glyphs need — NOT `Length::Fill`, which it used to when it was
+		// the whole control: a Fill child stretches this row to the bar's full height, and the row of
+		// buttons it now sits in would then align its neighbours to the top of that stretch rather than
+		// to each other. Height here belongs to the tallest real widget in the pair, the button.
+		let label = current.map(|choice| choice.user).unwrap_or_default();
+		text(label)
 			.size(STATUS_BAR_TEXT)
 			.color(STATUS_BAR_FG)
-			.align_y(iced::alignment::Vertical::Center)
-			.height(Length::Fill)
-			.into();
-	}
-	let mut options = session.identities.clone();
-	options.push(crate::app::IdentityChoice::Elevate);
-	iced::widget::pick_list(options, current, Message::IdentityPicked)
-		.text_size(STATUS_BAR_TEXT)
-		.padding([2.0, 6.0])
+			.into()
+	} else {
+		iced::widget::pick_list(session.identities.clone(), current, Message::IdentityPicked)
+			.text_size(STATUS_BAR_TEXT)
+			.padding([2.0, 6.0])
+			.into()
+	};
+	// The same message the context menu's item raises, so the two doors lead to one dialog — and the
+	// button is never disabled: whether elevation is possible at all is the remote's answer to give,
+	// in the remote's own words, and a greyed button here would be cmote guessing it.
+	let elevate = button(text("Log in as…").size(STATUS_BAR_TEXT)).on_press(Message::ElevateOpen);
+	// Tighter than the bar's own 10 so the pair reads as one group rather than two neighbours.
+	row![who, elevate]
+		.spacing(6)
+		.align_y(iced::alignment::Vertical::Center)
 		.into()
 }
 
@@ -676,13 +697,23 @@ fn elevate_panel<'a>(
 		// The remote has asked something: show its own words, and a masked field.
 		Some(question) => {
 			content = content.push(text(question).size(14.0));
-			if view.refused {
-				// sudo re-asks the same prompt silently after a wrong answer, so a dialog that just
-				// reappeared would look like one that did nothing.
+			if let Some(notice) = view.notice {
+				// The remote's own line about the answer it just refused, so a question asked twice
+				// does not look like a dialog that did nothing. Its words rather than cmote's: "Sorry,
+				// try again." and "Sorry, user cme is not allowed to execute…" ask entirely different
+				// things of the user. Absent when the remote refused nothing — a second factor is the
+				// next question, not a verdict on the last answer.
+				content = content.push(text(notice).size(13.0).color(NOTICE_FG));
+			} else if view.again {
+				// Which is exactly that case: something has been answered, nothing was refused, and the
+				// remote is asking again — on a two-factor machine, under the SAME wording as the
+				// password, since sudo re-labels every standard prompt in its stack. cmote cannot name
+				// the factor, so it says only what it knows. Drawn in the ordinary text colour, not the
+				// notice amber, because these are cmote's words and nothing is wrong.
 				content = content.push(
-					text("That was refused — try again.")
+					text("Nothing was refused — the remote is asking for one more answer.")
 						.size(13.0)
-						.color(NOTICE_FG),
+						.color(STATUS_BAR_FG),
 				);
 			}
 			content = content.push(
@@ -933,9 +964,9 @@ fn context_menu(
 		// Send local files into the shell's own working directory (§17): the picker opens,
 		// then the confirmation with that folder already filled in.
 		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
-		// Become another account on this same connection (§45). It lives here because with one
-		// account the status bar shows a name rather than a select, so the menu is the way in;
-		// once there are two, the select offers it as well.
+		// Become another account on this same connection (§45). Kept here as well as in the status
+		// bar's own button: this is where the hand already is on a right-click, and the three items
+		// above it are grid actions too. Both raise the same `ElevateOpen`.
 		crate::ui::menu::item("Log in as…".to_owned(), Some(Message::ElevateOpen)),
 	];
 	// On a link cell, follow or copy the link too (§24). Both carry the URI, so the menu is

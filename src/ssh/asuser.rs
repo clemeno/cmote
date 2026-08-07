@@ -469,6 +469,10 @@ struct Entry {
 	/// Why SFTP as this account will not work, once that is settled — so the fallback is chosen
 	/// once instead of a failed channel being opened per click.
 	broken: Option<String>,
+	/// Why NOTHING will work as this account, when that is known before anything is tried. Distinct
+	/// from `broken`, which sends the work to the shell backend: this refuses both, because both
+	/// authenticate the same way and there is no credential to authenticate with.
+	denied: Option<String>,
 }
 
 impl Accounts {
@@ -508,6 +512,25 @@ impl Accounts {
 		}
 	}
 
+	/// Say that this account's files are out of reach before anything is attempted (§46), because
+	/// logging in as it took more than one factor.
+	///
+	/// A file channel can replay a password to `sudo -S` and nothing else: it cannot ask for a second
+	/// factor (there is no dialog on that side, and the stream carries a binary protocol), and a
+	/// one-time code is spent the moment the terminal used it. So the two sftp attempts and the shell
+	/// fallback would each authenticate with a credential that cannot be enough — and what the user saw
+	/// for it was two ten-second handshake timeouts, a burnt channel apiece, and then empty panes that
+	/// said nothing. Knowing it up front turns all of that into one sentence.
+	pub fn deny_second_factor(&mut self, identity: u64) {
+		if let Some(entry) = self.entries.get_mut(&identity) {
+			entry.denied = Some(
+				"Logging in as this account needed a second factor. Files cannot be read as it: a \
+				 file channel can repeat a password to sudo, but it cannot ask for a code."
+					.to_owned(),
+			);
+		}
+	}
+
 	/// Point the panes at another account (§46). The selected identity is what every later file
 	/// operation runs as.
 	pub fn select(&mut self, identity: u64) {
@@ -538,6 +561,11 @@ impl Accounts {
 		let Some(entry) = self.entries.get_mut(&self.selected) else {
 			return Browse::Denied("That account is no longer open.".to_owned());
 		};
+		// Refused outright rather than fallen back on: the shell backend authenticates the same way
+		// and would fail the same way, one channel and one timeout at a time.
+		if let Some(denied) = entry.denied.as_ref() {
+			return Browse::Denied(denied.clone());
+		}
 		if let Some(sftp) = entry.sftp.as_ref() {
 			return Browse::Sftp(sftp.clone());
 		}
@@ -566,6 +594,9 @@ impl Accounts {
 		let Some(entry) = self.entries.get_mut(&identity) else {
 			return Files::Denied("That account is no longer open.".to_owned());
 		};
+		if let Some(denied) = entry.denied.as_ref() {
+			return Files::Denied(denied.clone());
+		}
 		match entry.open_sftp(session).await {
 			Ok(sftp) => Files::Sftp(sftp),
 			Err(reason) => Files::Shell(entry.fall_back(reason)),
@@ -581,6 +612,7 @@ impl Entry {
 			program: None,
 			discovered: false,
 			broken: None,
+			denied: None,
 		}
 	}
 
@@ -751,7 +783,9 @@ fn handshake_failed(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-	use super::{Channels, Entry, Kind, Output, Runner, Secret, wants_password};
+	use super::{
+		Accounts, Channels, Entry, Kind, LOGIN_IDENTITY, Output, Runner, Secret, wants_password,
+	};
 
 	/// An entry for an elevated account, with or without a cached password. No session and no
 	/// network: `Channels` is only an mpsc sender, so the DECISIONS in here are testable on their own
@@ -783,6 +817,28 @@ mod tests {
 		let entry = entry(Some("hunter2"));
 		entry.runner.remember_password();
 		assert_eq!(entry.attempts(), &[true]);
+	}
+
+	#[test]
+	fn an_account_that_took_two_factors_has_its_files_refused_before_anything_is_tried() {
+		// A file channel can repeat a password to `sudo -S` and nothing else, so an account whose
+		// elevation needed a code has no credential this side can use. Said up front, because finding
+		// out by trying costs two ten-second handshake timeouts and a channel apiece — and then leaves
+		// the panes empty anyway.
+		let (channels, _requests) = Channels::new();
+		let mut accounts = Accounts::new(channels);
+		accounts.add(7, Kind::Sudo, "root".to_owned());
+		accounts.deny_second_factor(7);
+		let denied = accounts.entries[&7]
+			.denied
+			.as_deref()
+			.expect("the account is refused");
+		assert!(
+			denied.contains("second factor"),
+			"and it says why, not merely that it failed: {denied}"
+		);
+		// The login account is never touched by this: its file access needs no credential at all.
+		assert!(accounts.entries[&LOGIN_IDENTITY].denied.is_none());
 	}
 
 	#[test]

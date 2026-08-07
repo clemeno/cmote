@@ -161,14 +161,15 @@ references below (§n) point into it.
   than only where you are in it (§35, §39). The bar keeps up with a **live** shell: a hit printed while
   it is open joins the count and the washes on the next frame, without dragging the view off whatever
   you are reading (§44).
-- **Be root without logging in again** — right-click the grid and pick **Log in as…** to run `sudo -i`
+- **Be root without logging in again** — press **Log in as…** beside your account name in the status bar
+  (or right-click the grid and pick the same) to run `sudo -i`
   (or `su -`) on the connection you already have. cmote types nothing at your prompt: the elevation runs
   on a channel of its own, so the password can only ever reach `sudo`, never a shell, a running command
   or your history. It asks whatever the remote asks, in the remote's own words — a password, then a
   verification code if the machine wants one — and hands you a **root terminal of its own**, with its own
   scrollback. Your `cme` shell is still there, still running whatever you left in it: the account name in
-  the status bar becomes a **select** once there are two, and switching brings back that shell's history,
-  cwd and find bar exactly as you left them. The sudo password is remembered for the connection so a
+  the status bar becomes a **select** once there are two — the button stays put beside it — and switching
+  brings back that shell's history, cwd and find bar exactly as you left them. The sudo password is remembered for the connection so a
   second account does not ask twice — in memory only, never written down, and dropped the moment you
   disconnect; a one-time code is always asked for afresh. Any account works, not just root
   (`postgres`, a deploy user), and typing `exit` at an elevated prompt drops you back to your own (§45).
@@ -181,7 +182,10 @@ references below (§n) point into it.
   editor's atomic save. It finds the program wherever the distribution keeps it, and where a server has
   none, falls back to reading through plain shell commands. What it never does is quietly show you your
   own files under root's name: if the elevation cannot reach the files at all, the panes stay empty and
-  say why, in the remote's own words. A file opened in the editor keeps the account it was opened as, so
+  say why, in the remote's own words. **A machine that wants a second factor is one such case**, and cmote
+  says so at once rather than hanging: your root *terminal* works — it can answer anything the remote
+  asks — but a file channel can only repeat a password to sudo, never ask for a code, so the panes stay
+  with the account you logged in as. A file opened in the editor keeps the account it was opened as, so
   a root-owned config still saves as root after you have switched back (§46).
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
@@ -407,7 +411,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+Shift+C** | Copy the selection as plain text only |
 | **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
 | **Ctrl+Shift+F** | Open the scrollback find bar (pressed again, it refocuses the field). **↑** / **↓** step to the older / newer hit, wrapping; **Esc** or its ✕ closes it and leaves the last hit selected. Hits on screen are washed; the bar follows live output |
-| **Log in as…** (right-click, or the account select once there are two) | Run `sudo -i` / `su -` on this connection and get that account's own terminal; the select in the status bar switches between the accounts you are logged in as, each keeping its own scrollback (§45). The folder tree and files pane switch with it, re-reading the folder you are in as that account (§46) |
+| **Log in as…** (the status-bar button, beside your account name — or right-click) | Run `sudo -i` / `su -` on this connection and get that account's own terminal; the select in the status bar switches between the accounts you are logged in as, each keeping its own scrollback (§45). The folder tree and files pane switch with it, re-reading the folder you are in as that account (§46) |
 | **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |
@@ -626,15 +630,19 @@ neither the viewport nor the selection), §45's second account on one connection
 `sudo` and `su`, an account name that could be read as a flag or as shell punctuation refused before it
 reaches a command line, a credential prompt told from a shell prompt from a finished line and from a
 coloured one, a whole view swapped and restored on a switch, a parked account's output filling its own
-scrollback and its queries answered on its own channel, the password reused once and dropped when it is
-refused, a one-time code always asked for, cancelling closing the shell it opened, a refusal quoted in
-the remote's own words, an elevated shell exiting falling back to the login account, and the dialog
-owning the keyboard while it holds a secret), §46's file panes following that account (a password
+scrollback and its queries answered on its own channel, the password reused once and dropped when the
+remote says it was refused, a second factor asked under the very same wording not mistaken for a refusal
+— nor answered from the cache, nor cached in the password's place — a refusal read from the program's own
+line rather than from a question repeating, a one-time code always asked for, cancelling closing the shell it opened, a refusal quoted in
+the remote's own words, an elevated shell exiting falling back to the login account, the dialog owning
+the keyboard while it holds a secret, and the bar opening it with a single account open while its
+switcher holds accounts and nothing else), §46's file panes following that account (a password
 written only after sudo has been refused for the want of one and never on a guess, the `sftp-server`
 path taken from the remote's own configuration only when it whitelists as a program, `internal-sftp`
 and a doctored path refused, the login account's commands still going out byte for byte, both panes
-re-read on a switch with the other account's names dropped and the folder kept, and a file opened as
-root still saved as root after switching back), paste encoding (bracketed-paste
+re-read on a switch with the other account's names dropped and the folder kept, an account that needed a
+second factor having its files refused up front with a reason instead of two dead handshakes, and a file
+opened as root still saved as root after switching back), paste encoding (bracketed-paste
 wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,

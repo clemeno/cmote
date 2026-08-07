@@ -1826,34 +1826,40 @@ struct ElevateDialog {
 	prompt: Option<String>,
 	/// The answer being typed. Always masked, and moved into a `Secret` on submit (§12).
 	answer: String,
-	/// The previous question's wording, so a REPEAT of it can be told from a new factor: sudo
-	/// re-asks the same prompt after a wrong password, whereas a second factor asks something else.
+	/// The wording of the question cmote most recently ANSWERED, `None` until one has been. Two rules
+	/// read it, and neither of them any longer tries to tell a repeat from a new factor by the
+	/// wording — sudo puts its own `-p` text on every standard prompt in the PAM stack, so a password
+	/// and a second factor arrive under one label on a two-factor machine (§45). It says whether
+	/// anything has been answered yet (only the first question may be answered from the cache), and
+	/// what kind the refused one was (only a refused PASSWORD invalidates the cached password).
 	last: Option<String>,
-	/// Whether the last answer was refused — the same question asked twice — so the dialog can say
-	/// so instead of looking as though nothing happened.
-	refused: bool,
+	/// What the remote said about the last answer when it refused it, in the remote's own words —
+	/// `None` when it simply asked something else, which is what a second factor does. Comes off the
+	/// `ElevatePrompt` event rather than being inferred here.
+	notice: Option<String>,
 	/// Why the elevation failed, in the remote's own words, when it did (§45).
 	error: Option<String>,
 }
 
-/// One entry in the status bar's account switcher (§45). Carries the identity to switch to, or the
-/// one extra choice that is not an account at all: opening the elevate dialog.
+/// One entry in the status bar's account switcher (§45): an account to put on screen.
+///
+/// It used to be an enum, because the picker carried one entry that was not an account at all —
+/// "Log in as…", which opened the elevate dialog. That entry is now a button of its own beside the
+/// control, so every entry here is an account again and picking one only ever switches. A picker
+/// that means exactly one thing needs no variant to say which meaning is in play.
 ///
 /// `Display` is what the picker renders, so the wording lives here beside the value.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum IdentityChoice {
-	/// Put this account's terminal on screen.
-	Use { id: u64, user: String },
-	/// Become another account: open the elevate dialog.
-	Elevate,
+pub struct IdentityChoice {
+	/// The identity to put on screen, as `bridge` numbers them.
+	pub id: u64,
+	/// The account's name — what the picker shows, and all it shows.
+	pub user: String,
 }
 
 impl std::fmt::Display for IdentityChoice {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			IdentityChoice::Use { user, .. } => f.write_str(user),
-			IdentityChoice::Elevate => f.write_str("Log in as…"),
-		}
+		f.write_str(&self.user)
 	}
 }
 
@@ -2402,8 +2408,8 @@ pub enum Message {
 	/// something to do, so a bar over an idle shell costs no frames at all.
 	TermFindRescan,
 	// --- becoming another account on the same connection (§45) ---
-	/// Open the elevate dialog — from the terminal's context menu, or by picking "Log in as…" in
-	/// the account switcher. Raised again while it is open simply refocuses its field.
+	/// Open the elevate dialog — from the terminal's context menu, or from the "Log in as…" button
+	/// beside the account in the status bar. Raised again while it is open simply refocuses its field.
 	ElevateOpen,
 	/// The account name being typed in the dialog's form.
 	ElevateUserChanged(String),
@@ -2420,8 +2426,8 @@ pub enum Message {
 	/// for it, it is closed: a half-authenticated `sudo` left waiting on a prompt nobody will ever
 	/// answer would hold a channel open for nothing.
 	ElevateCancel,
-	/// The account switcher's selection: put another identity's terminal on screen, or — for the
-	/// one entry that is not an account — open the elevate dialog.
+	/// The account switcher's selection: put that identity's terminal on screen. Only ever an
+	/// account — becoming a new one is `ElevateOpen`, raised by the button beside the switcher.
 	IdentityPicked(IdentityChoice),
 	/// Open an OSC 8 hyperlink from the terminal's context menu (§24). Carries the URI, so
 	/// the menu item stands alone; the Ctrl+click path opens straight from `on_grid_pressed`
@@ -3089,10 +3095,7 @@ impl Tab {
 			}
 			Message::ElevateSubmit => return self.elevate_submit(),
 			Message::ElevateCancel => self.cancel_elevate(),
-			Message::IdentityPicked(choice) => match choice {
-				IdentityChoice::Use { id, .. } => return self.switch_identity(id),
-				IdentityChoice::Elevate => return self.open_elevate(),
-			},
+			Message::IdentityPicked(choice) => return self.switch_identity(choice.id),
 			Message::LinkOpen(uri) => {
 				self.menu = None;
 				self.follow_link(&uri);
@@ -3791,12 +3794,21 @@ impl Tab {
 			// until it is (§23) — and answered to THAT shell by name, not down the typing path,
 			// which goes to whichever identity is selected.
 			SshEvent::Output { identity, bytes } if identity != self.identity => {
+				// An emulator is made here if that account has none yet, rather than the bytes being
+				// dropped: an elevation's last words — the greeting and the first prompt, flushed as the
+				// program hands the channel to the shell — can arrive before `IdentityReady` has been
+				// acted on, and dropping them left a freshly elevated terminal blank (§45).
 				let replies = self
 					.identities
 					.iter_mut()
 					.find(|entry| entry.id == identity)
-					.and_then(|entry| entry.work.terminal.as_mut())
-					.map(|terminal| terminal.process(&bytes))
+					.map(|entry| {
+						entry
+							.work
+							.terminal
+							.get_or_insert_with(new_emulator)
+							.process(&bytes)
+					})
 					.unwrap_or_default();
 				if !replies.is_empty() {
 					self.send_command(SshCommand::Reply {
@@ -3863,8 +3875,12 @@ impl Tab {
 				}
 			}
 			// The elevation conversation and its outcome (§45).
-			SshEvent::ElevatePrompt { identity, label } => {
-				return self.on_elevate_prompt(identity, label);
+			SshEvent::ElevatePrompt {
+				identity,
+				label,
+				refusal,
+			} => {
+				return self.on_elevate_prompt(identity, label, refusal);
 			}
 			SshEvent::IdentityReady { identity } => return self.on_identity_ready(identity),
 			SshEvent::IdentityEnded { identity, reason } => {
@@ -5474,11 +5490,22 @@ impl Tab {
 		if let Some(question) = dialog.prompt.take() {
 			let identity = dialog.identity;
 			let answer = std::mem::take(&mut dialog.answer);
+			// Whatever the remote said about the previous answer no longer applies to this one.
+			dialog.notice = None;
+			// Whether this is the first question of the elevation, which is the only one whose answer
+			// may be kept — see below.
+			let first = dialog.last.is_none();
 			let secret = Secret::new(answer);
 			// Remember a PASSWORD for the rest of the connection, so a second elevation does not
 			// ask for it again (§45). Never a one-time code: re-sending one of those would fail by
 			// design, and storing it would be pointless as well as wrong.
-			if is_password_prompt(&question) {
+			//
+			// "Is it a password" is not enough to tell those apart, which is why `first` is in the
+			// condition: sudo puts its own `-p` wording on every standard prompt in the PAM stack, so
+			// on a two-factor machine the CODE is asked for under the label "Password:" too. Caching
+			// that code would hand it to sudo on a file channel later (§46), where a used one-time
+			// code is guaranteed to be refused — and the real password would have been forgotten.
+			if first && is_password_prompt(&question) {
 				self.sudo_secret = Some(secret.clone());
 			}
 			if let Some(dialog) = self.elevate.as_mut() {
@@ -5516,7 +5543,7 @@ impl Tab {
 		dialog.identity = Some(identity);
 		dialog.error = None;
 		dialog.last = None;
-		dialog.refused = false;
+		dialog.notice = None;
 		// Listed straight away, before the remote has said anything: a failure then has an entry to
 		// report against, and the switcher can show the account as still opening rather than have it
 		// appear out of nowhere once it works.
@@ -5644,13 +5671,27 @@ impl Tab {
 		std::mem::swap(&mut self.search_stale, &mut other.search_stale);
 	}
 
+	/// Whether the outstanding question is a FURTHER one rather than the first, with nothing refused
+	/// (§45) — so the dialog can say as much.
+	///
+	/// Worth saying because two factors can arrive under one wording: sudo re-labels every standard
+	/// prompt in its PAM stack with its own `-p` text, so a user shown "Password:" for the second time
+	/// has no way to tell what the remote now wants. cmote cannot name the factor either, but it knows
+	/// these two things — something was answered already, and the remote did not refuse it — and
+	/// between them they say "type the next one" without pretending to know which it is.
+	fn elevate_asked_again(&self) -> bool {
+		self.elevate.as_ref().is_some_and(|dialog| {
+			dialog.prompt.is_some() && dialog.last.is_some() && dialog.notice.is_none()
+		})
+	}
+
 	/// The switcher's entries (§45): every account whose shell is live, in the order they were
 	/// opened. The ones still elevating are left out — there is nothing to switch to yet.
 	fn identity_choices(&self) -> Vec<IdentityChoice> {
 		self.identities
 			.iter()
 			.filter(|identity| identity.ready)
-			.map(|identity| IdentityChoice::Use {
+			.map(|identity| IdentityChoice {
 				id: identity.id,
 				user: identity.user.clone(),
 			})
@@ -5661,25 +5702,49 @@ impl Tab {
 	///
 	/// The remote's own wording is used verbatim (already stripped of escape sequences by
 	/// `elevate`), because it is the only thing that knows what it wants — `[sudo] password for
-	/// cme:`, `Verification code:`, a Duo menu. The same wording arriving twice means the last
-	/// answer was refused, which is worth saying: sudo re-asks silently otherwise, and a dialog that
-	/// simply reappears looks like one that did nothing.
-	fn on_elevate_prompt(&mut self, identity: u64, label: String) -> iced::Task<Message> {
+	/// cme:`, `Verification code:`, a Duo menu.
+	///
+	/// Whether the last answer was REFUSED is the remote's statement too, carried on the event, and
+	/// not a thing to work out from the wording. This used to read "the same label twice" as a
+	/// refusal, which is wrong on exactly the machines the feature exists for: a two-factor stack asks
+	/// for the password and then for the code, and sudo dresses every standard prompt in the stack in
+	/// its own `-p` text, so one label arrives twice in a conversation that is going perfectly well.
+	/// The dialog then said a good password had been rejected, threw that password away, and left the
+	/// user retyping it into what was really the second factor's field — three wrong things from one
+	/// inference.
+	fn on_elevate_prompt(
+		&mut self,
+		identity: u64,
+		label: String,
+		refusal: Option<String>,
+	) -> iced::Task<Message> {
 		let Some(dialog) = self.elevate.as_mut() else {
 			return iced::Task::none();
 		};
 		if dialog.identity != Some(identity) {
 			return iced::Task::none();
 		}
-		let repeat = dialog.last.as_deref() == Some(label.as_str());
-		dialog.refused = repeat;
+		let refused = refusal.is_some();
+		dialog.notice = refusal;
 		dialog.answer.clear();
+		// The question cmote last answered — `None` when this is the first of the elevation. It says
+		// both of the things the two rules below need, which is why it is read once here.
+		let answered = dialog.last.clone();
 
-		// A password this connection has already established, asked for again on the FIRST try: send
-		// it without troubling the user (§45). Only for a first try — a repeat means that very
-		// password was just refused, so the cached copy is wrong and is dropped.
-		if is_password_prompt(&label)
-			&& !repeat
+		// A refused PASSWORD is a wrong password, so the copy kept for the connection goes: leaving it
+		// would have the next elevation answer with it silently and fail the same way. A refused CODE
+		// says nothing about the password, and a question that is merely the next one says nothing
+		// about anything.
+		if refused && answered.as_deref().is_some_and(is_password_prompt) {
+			self.sudo_secret = None;
+		}
+
+		// A password this connection has already established, asked for again: send it without
+		// troubling the user (§45) — but only as the FIRST question of this elevation. Every later
+		// question is another factor, whatever wording it arrives in, and answering one from the cache
+		// would spend an attempt on a certain refusal.
+		if answered.is_none()
+			&& is_password_prompt(&label)
 			&& let Some(secret) = self.sudo_secret.clone()
 		{
 			if let Some(dialog) = self.elevate.as_mut() {
@@ -5687,9 +5752,6 @@ impl Tab {
 			}
 			self.send_command(SshCommand::ElevateAnswer { identity, secret });
 			return iced::Task::none();
-		}
-		if repeat && is_password_prompt(&label) {
-			self.sudo_secret = None;
 		}
 		if let Some(dialog) = self.elevate.as_mut() {
 			dialog.prompt = Some(label);
@@ -5710,7 +5772,13 @@ impl Tab {
 		entry.ready = true;
 		// Its own emulator, parked until the switch below brings it forward. Built exactly like the
 		// login shell's, so an elevated terminal is in every way the same terminal (§9).
-		entry.work.terminal = Some(new_emulator());
+		//
+		// `get_or_insert_with`, not an assignment: output for this identity may already have built one
+		// and put bytes in it. The session sends this event before the flush that carries the account's
+		// greeting and first prompt precisely so it does not have to (`ssh::shell`), but a plain
+		// assignment here would silently discard anything that did arrive first — which is the bug that
+		// left an elevated terminal blank. Two ways of not losing it are better than one.
+		entry.work.terminal.get_or_insert_with(new_emulator);
 		if self
 			.elevate
 			.as_ref()
@@ -5743,7 +5811,7 @@ impl Tab {
 				dialog.identity = None;
 				dialog.prompt = None;
 				dialog.last = None;
-				dialog.refused = false;
+				dialog.notice = None;
 				dialog.answer.clear();
 				dialog.error = Some(reason);
 			}
@@ -7191,7 +7259,8 @@ impl Tab {
 									user: &dialog.user,
 									prompt: dialog.prompt.as_deref(),
 									answer: &dialog.answer,
-									refused: dialog.refused,
+									notice: dialog.notice.as_deref(),
+									again: self.elevate_asked_again(),
 									error: dialog.error.as_deref(),
 									working: dialog.identity.is_some() && dialog.prompt.is_none(),
 								}
@@ -8867,6 +8936,7 @@ mod tests {
 		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
 			identity: first,
 			label: "Password:".to_owned(),
+			refusal: None,
 		});
 		let _task = app.update(Message::ElevateAnswerChanged("hunter2".to_owned()));
 		let _task = app.update(Message::ElevateSubmit);
@@ -8883,6 +8953,7 @@ mod tests {
 		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
 			identity: second,
 			label: "Password:".to_owned(),
+			refusal: None,
 		});
 
 		let sent = drain(&mut rx);
@@ -8897,18 +8968,113 @@ mod tests {
 			"so no password field was ever put in front of the user"
 		);
 
-		// The same question a second time means that cached password was refused: it is dropped and
-		// the user is asked, rather than the same wrong answer being sent for ever.
+		// The remote says it refused that cached password: it is dropped and the user is asked, rather
+		// than the same wrong answer being sent for ever. The refusal comes from the remote's own
+		// line, not from the question being repeated — see the next test for why that matters.
 		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
 			identity: second,
 			label: "Password:".to_owned(),
+			refusal: Some("Sorry, try again.".to_owned()),
 		});
 		assert!(app.sudo_secret.is_none(), "a refused password is not kept");
 		let dialog = app.elevate.as_ref().unwrap();
 		assert_eq!(dialog.prompt.as_deref(), Some("Password:"));
+		assert_eq!(
+			dialog.notice.as_deref(),
+			Some("Sorry, try again."),
+			"and the dialog says so in the remote's own words"
+		);
+	}
+
+	/// A two-factor machine asks twice under ONE wording (§45): sudo dresses every standard prompt in
+	/// its PAM stack in its own `-p` text, so the code is asked for under "Password:" as well. The
+	/// repetition is therefore not a refusal, and every conclusion cmote used to draw from it was
+	/// wrong — it said a good password had been rejected, threw that password away, and would have
+	/// cached the one-time code in its place.
+	#[test]
+	fn a_second_factor_wearing_the_same_wording_is_not_a_refusal() {
+		let (mut app, mut rx) = app_with_login_identity();
+		let _focus = app.open_elevate();
+		let _task = app.update(Message::ElevateUserChanged("root".to_owned()));
+		let _task = app.update(Message::ElevateSubmit);
+		let identity = app.identities.last().unwrap().id;
+
+		// Factor one: the password, answered by the user and kept for the connection.
+		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: "Password:".to_owned(),
+			refusal: None,
+		});
+		let _task = app.update(Message::ElevateAnswerChanged("hunter2".to_owned()));
+		let _task = app.update(Message::ElevateSubmit);
+		let _ = drain(&mut rx);
+
+		// Factor two, in the same words and with nothing said about the last answer.
+		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: "Password:".to_owned(),
+			refusal: None,
+		});
+		let dialog = app.elevate.as_ref().unwrap();
+		assert_eq!(
+			dialog.prompt.as_deref(),
+			Some("Password:"),
+			"the question is put to the user"
+		);
 		assert!(
-			dialog.refused,
-			"and the dialog says the last one was refused"
+			dialog.notice.is_none(),
+			"and nothing claims their password was rejected"
+		);
+		assert!(
+			drain(&mut rx).is_empty(),
+			"the cached password is NOT spent on a second factor"
+		);
+		assert!(
+			app.elevate_asked_again(),
+			"and the dialog says the remote wants one more answer, since the wording cannot"
+		);
+		assert_eq!(
+			app.sudo_secret.as_ref().map(|secret| secret.expose()),
+			Some("hunter2"),
+			"nor is it thrown away"
+		);
+
+		// And the answer to that second question is a one-time code, whatever label it arrived under:
+		// caching it would hand it to sudo on a file channel later (§46), where it must fail.
+		let _task = app.update(Message::ElevateAnswerChanged("123456".to_owned()));
+		let _task = app.update(Message::ElevateSubmit);
+		assert_eq!(
+			app.sudo_secret.as_ref().map(|secret| secret.expose()),
+			Some("hunter2"),
+			"the password is still the password"
+		);
+	}
+
+	/// The words an elevation ends with are the account's own greeting and its first prompt, flushed as
+	/// the program hands the channel over (§45). They must survive arriving BEFORE the identity has an
+	/// emulator — dropping them is what left a freshly elevated terminal blank but for its caret.
+	#[test]
+	fn the_greeting_an_elevation_ends_with_is_not_lost_to_the_order_it_arrives_in() {
+		let (mut app, _rx) = app_with_login_identity();
+		let _focus = app.open_elevate();
+		let _task = app.update(Message::ElevateUserChanged("root".to_owned()));
+		let _task = app.update(Message::ElevateSubmit);
+		let root = app.identities.last().unwrap().id;
+
+		// The flush, arriving while root is still off screen and has no terminal of its own.
+		let _task = app.on_ssh_event(SshEvent::Output {
+			identity: root,
+			bytes: b"root@rec:~# ".to_vec(),
+		});
+		let _task = app.on_ssh_event(SshEvent::IdentityReady { identity: root });
+		assert_eq!(app.identity, root, "and it is brought forward");
+		assert!(
+			!app.terminal
+				.as_ref()
+				.expect("root has a terminal")
+				.find("root@rec")
+				.is_empty(),
+			"the prompt it printed is on screen, not swallowed"
 		);
 	}
 
@@ -8926,6 +9092,7 @@ mod tests {
 		let _task = app.on_ssh_event(SshEvent::ElevatePrompt {
 			identity,
 			label: "Verification code:".to_owned(),
+			refusal: None,
 		});
 		assert_eq!(
 			app.elevate.as_ref().unwrap().prompt.as_deref(),
@@ -8986,6 +9153,44 @@ mod tests {
 			1,
 			"the switcher stays a label"
 		);
+	}
+
+	/// The status bar's own way in is a BUTTON, not an entry inside the switcher (§45), so it is there
+	/// with a single account — when the switcher is still a label and there is nothing to pick from at
+	/// all — and the switcher itself holds accounts and nothing else.
+	#[test]
+	fn the_bar_offers_the_dialog_with_one_account_and_the_switcher_holds_only_accounts() {
+		let (mut app, _rx) = app_with_login_identity();
+		let choices = app.identity_choices();
+		assert_eq!(choices.len(), 1, "one account, so one entry");
+		assert_eq!(choices[0].user, "cme");
+		// The button raises the same message the context menu's item does, and it reaches the dialog
+		// from a bar that is showing a plain name.
+		let _task = app.update(Message::ElevateOpen);
+		assert!(
+			app.elevate.is_some(),
+			"openable with one account on the bar"
+		);
+		app.cancel_elevate();
+
+		// With two accounts the switcher grows by the account and by nothing else, and picking one only
+		// ever switches — the way to add a third is still the button beside it.
+		let root = elevate_to(&mut app, "root");
+		assert_eq!(app.identity, root);
+		let choices = app.identity_choices();
+		assert_eq!(
+			choices.len(),
+			2,
+			"both accounts, and no entry that is not one"
+		);
+		let _task = app.update(Message::IdentityPicked(choices[0].clone()));
+		assert_eq!(
+			app.identity,
+			bridge::LOGIN_IDENTITY,
+			"a picked name switches to it"
+		);
+		let _task = app.update(Message::ElevateOpen);
+		assert!(app.elevate.is_some(), "and the button is still the way in");
 	}
 
 	/// An elevated shell exiting brings the login account forward with its view intact (§45), and

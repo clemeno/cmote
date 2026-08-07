@@ -4041,7 +4041,13 @@ in as, then 1 upward). Two problems came with the set, and the shape is the answ
   however many shells are open.
 - **Output that is not output.** While `sudo` is still asking, the channel's bytes are a credential
   conversation, not something to draw. A shell is `Elevating` before it is `Live`, and only a `Live`
-  shell's bytes become `SshEvent::Output`.
+  shell's bytes become `SshEvent::Output`. What was buffered when the conversation ends is flushed as
+  output, so the account's greeting and its first prompt are drawn rather than swallowed — and
+  `IdentityReady` goes out **first**, because the GUI builds that identity's emulator when it hears it
+  and output for an identity that has none was dropped. Sending the flush first therefore lost exactly
+  the two things it exists to carry, and left a freshly elevated terminal blank but for its caret. The
+  GUI now also builds an emulator on demand for an identity that has none, so neither side alone can
+  lose those bytes.
 
 Three commands are untagged on purpose and one is newly tagged, which is the whole routing rule:
 `Input` goes to the SELECTED shell (the GUI says which with `SelectIdentity`, on the same ordered
@@ -4094,10 +4100,20 @@ screen.
 
 ### The switcher, and the two faces of the dialog (`ui/terminal.rs`)
 
-The status bar shows the account the grid belongs to. With ONE account it is plain text — a select with
-a single option is a control that does nothing — and with two or more it becomes a select whose entries
-are the live accounts plus one that is not an account at all, "Log in as…". Elevating with a single
-account open is the terminal's context menu, which is also where it is discoverable from at any time.
+The status bar shows the account the grid belongs to, and beside it a **"Log in as…" button**. Two
+widgets, because they answer two questions: *who* — plain text with ONE account, since a select with a
+single option is a control that does nothing, and a select once there are two or more — and *what else*,
+which is the button, there either way.
+
+The button was first folded in as an extra entry inside the select, which read well on paper and badly
+in the hand. The select only exists once a second account does, so the one way in from the bar appeared
+only *after* it had already been used, and until then the right-click menu was the only door — findable
+only by someone who already knew to look. A button beside the name says what it does before it is
+opened, sits in the same place whatever the account count, and leaves the select meaning exactly one
+thing: which account the grid belongs to. That is also why `IdentityChoice` is a struct and not an enum
+any more: every entry in the picker is an account, so there is no variant to say which kind it is. Both
+doors raise the same `ElevateOpen`, and the button is never disabled — whether elevation is possible at
+all is the remote's answer to give, in the remote's own words.
 
 The dialog is one conversation in two halves, and never both at once: a FORM (which account, `sudo` or
 `su`) until something is asked, then the remote's QUESTION worded exactly as the remote worded it with a
@@ -4112,11 +4128,39 @@ a prompt nobody will answer would hold a channel for the rest of the session.
 The sudo password is kept for the connection's life in a `Secret` (redacted in `Debug`, wiped on drop)
 and dropped when the session ends — never to the vault, never to a profile: a sudo password is usually
 the account's own login password, and persisting it would turn a session-lifetime secret into one at
-rest (§12). A second elevation that asks for the same password is answered from it with no dialog. The
-same question asked TWICE means that cached password was just refused, so it is dropped and the user is
-asked — and the dialog says the last answer was refused, because sudo re-asks silently and a dialog that
-merely reappears looks like one that did nothing. A one-time code is asked for every single time, which
-is what "one-time" means.
+rest (§12). A second elevation that asks for the same password is answered from it with no dialog. A
+one-time code is asked for every single time, which is what "one-time" means.
+
+**Which question is which cannot be read off the wording**, and getting that wrong was a real bug on
+exactly the machines this feature exists for. sudo substitutes its own `-p` text for every *standard*
+prompt in its PAM stack, so on a two-factor server the second factor is asked for under `cmote-password:`
+as well — one label, twice, in a conversation going perfectly well. cmote used to read the repetition as
+"that was refused", and drew three wrong conclusions from it: the dialog told the user their good
+password had been rejected, the cached password was thrown away, and the code they then typed would have
+been cached in its place — from where §46's file layer would have fed a spent one-time code to `sudo -S`.
+
+Two rules replace the inference, and neither looks at the wording:
+
+- **A refusal is what the program SAID.** `elevate::refusal` reads the lines printed between the last
+  answer and the next question, and reports the remote's own line when one of them reads as a rejection
+  ("Sorry, try again.", "Authentication failure"). A further factor prints no such thing. It rides the
+  `ElevatePrompt` event, so the GUI is told rather than guessing, and the dialog shows the remote's words
+  rather than a canned sentence — "Sorry, try again." and "user cme is not allowed to execute…" ask
+  completely different things of the user. Matching nothing shows nothing, which is the safe direction.
+- **Only the FIRST FACTOR of an elevation is a password.** The cache answers that one and no later one,
+  and only that one's answer is cached — on both sides: the GUI's copy for the next elevation, and the
+  session's copy that `sudo -S` replays on a file channel (§46). A later factor is a code whatever it is
+  dressed in, so caching it once had a spent one-time code standing in for the connection's password.
+  *Factor*, not *question*: a question the program re-put after refusing the answer is the same factor
+  again, so `ssh::shell` counts only the questions that follow no refusal. That is what lets a password
+  corrected on the second go still be kept, and it is the same count §46 reads to decide whether the file
+  side can follow the account at all.
+
+And because the wording cannot say it, the dialog does: a further question with nothing refused carries
+the line *"Nothing was refused — the remote is asking for one more answer."* cmote cannot name the factor,
+but it knows those two facts, and together they are the difference between a user who types their code and
+one who retypes their password at a prompt that has already had it. In cmote's own colour, not the
+notice amber — nothing is wrong.
 
 ### What is deliberately NOT here
 
@@ -4126,18 +4170,29 @@ is what "one-time" means.
   process, so root's terminal beside `cme`'s file panes is the honest state of things until §46 gives
   the file layer its own elevation. `Workspace` deliberately does not park them: splitting one view per
   identity now would only pretend they differ.
-- **A localized second-factor prompt may raise no dialog.** The vocabulary covers English plus a few
-  common spellings; anything else falls through and the question appears in the terminal, where the user
-  answers it directly. This is the safe direction of the two, and the reason the rule is written that
-  way round.
+- **A localized second-factor prompt may raise no dialog, and that costs the elevation.** The vocabulary
+  covers English plus a few common spellings; anything else falls through. This is the safe direction of
+  the two — the alternative is a password field over a live root prompt — but the earlier claim here, that
+  the question then "appears in the terminal where the user answers it directly", was simply false: an
+  `Elevating` channel draws nothing and takes no keystrokes, so an unrecognised question leaves the dialog
+  waiting until it is cancelled. Handing an unrecognised conversation to the grid is a real gap, not a
+  decision, and it is not built.
+- **A refusal cmote cannot see is a question asked twice with no explanation.** `refusal` reads the
+  program's own words, so a sudo configured with no failure message (or one worded outside the list)
+  re-asks silently. The user sees the same question again — exactly what a terminal shows — and answers it.
+  What that costs is the cache: the wrong password is not dropped, and the corrected one is not stored in
+  its place, because a re-ask and a further factor are indistinguishable without that line. So the next
+  elevation offers the stale password once (of sudo's three tries) before asking. Erring this way is
+  deliberate: the other way round would cache a one-time code as the connection's password.
 - **A shell prompt ending in `:` with no second factor configured would be read as a question** if it
   also contained a credential word (a cwd called `~/code`, say). `ponytail:` the residual case of the
   heuristic above; the elevation still works, the user sees one spurious field and cancels it.
 - **Two sudos means two authentications.** sudo's credential cache is per-tty by default
   (`tty_tickets`), and each shell has its own pty, so the cached password saves the typing but not the
   second factor. This is what will make §46 ask for a code again.
-- **No keyboard shortcut, and no auto-elevate on connect.** The menu and the switcher are the two ways
-  in; a per-profile "elevate on connect" is §47, which is where the profile format changes.
+- **No keyboard shortcut, and no auto-elevate on connect.** The right-click menu and the status bar's
+  button are the two ways in; a per-profile "elevate on connect" is §47, which is where the profile
+  format changes.
 - **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
   prompt, or cancelling the dialog that opened it.
@@ -4245,8 +4300,17 @@ opening an sftp session — uses `exec_inline`, which borrows the loop's own han
   and the reason shown is sudo's own.
 - **Two sudos, two authentications**, as §45 predicted: the terminal's sudo and the file layer's sudo
   have separate credential caches (`tty_tickets`, and the file channel has no tty at all). The cached
-  password covers it silently; a server that also demands a one-time code will ask again on the first
-  file operation, because that is what a second factor is for.
+  password covers it silently.
+- **A second factor puts the files out of reach, and is said so up front.** The earlier claim here — that
+  such a server "will ask again on the first file operation" — was false: there is nowhere to ask. That
+  channel has no dialog behind it and carries a binary protocol, and the code the terminal used is spent.
+  What actually happened was two ten-second handshake timeouts per account, a channel burnt on each (which
+  on a server near its `MaxSessions` took the LOGIN account's file access down with it: `Failed to open
+  channel (ConnectFailed)`), and then empty panes that said nothing. So `ssh::shell` counts the FACTORS an
+  elevation took — distinct questions, not questions asked, since a refused one is the same factor over
+  again — and more than one has the session mark that account `denied` in `Accounts` before any listing.
+  Both backends are refused with one sentence saying why, which is what the panes then show. The terminal
+  is unaffected: it holds a real conversation and can answer anything.
 - **The shell backend has its own copy loops**, not the SFTP ones made generic. `ponytail:` making
   `upload`/`download` generic over a filesystem trait would have meant rewriting working transfer,
   resume and conflict code (§16, §17, §19) with no way to test it against a real server — so the

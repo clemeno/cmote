@@ -14,10 +14,13 @@
 // them: `app` builds the command, `ssh::shell` reads the replies.
 //
 // The one rule that matters most here: when cmote is not SURE a line is a credential prompt, it
-// says nothing and lets the bytes through to the terminal. Guessing wrong in the other direction
-// means putting a secret dialog in front of the user for a line that was really the root shell's
-// own prompt — and whatever they typed would land on that shell's command line. A missed prompt
-// costs the user one thing: typing the code into the terminal themselves, exactly as they do today.
+// says nothing. Guessing wrong in the other direction means putting a secret dialog in front of the
+// user for a line that was really the root shell's own prompt — and whatever they typed would land
+// on that shell's command line. What a missed prompt costs is the elevation: an `Elevating` channel
+// draws nothing and takes no typing (`ssh::shell`), so an unrecognised question leaves the dialog
+// waiting until it is cancelled. Vocabulary is therefore the whole game, and so is `refusal` below:
+// a question asked again is not the same event as an answer refused, and only the program's own
+// words in between tell them apart.
 
 /// The text cmote makes `sudo` use for its password prompt, via `-p`. A prompt is otherwise the
 /// remote's own wording — localized, `[sudo] password for cme:`, `Password:`, whatever sudoers
@@ -236,6 +239,32 @@ const CREDENTIAL_WORDS: [&str; 12] = [
 	"kennwort",
 ];
 
+/// The words that mark a line as the program REJECTING the answer it was just given, rather than
+/// getting on with the conversation (§45). Lower-case, matched as substrings against the lines a
+/// program printed between one answer and its next question.
+///
+/// This list exists because "the same question twice" is NOT the same thing as "that was wrong".
+/// A two-factor stack asks for the password and then for the code, and when the second module's
+/// prompt is the standard one, sudo substitutes its own `-p` text for BOTH — so cmote sees one
+/// label arrive twice in a conversation that is going perfectly well. Reading the repetition as a
+/// refusal told the user their good password had been rejected, threw that password away, and left
+/// them retyping it into what was really the second factor's field.
+///
+/// What actually separates the two cases is what the program says in between: a rejection is
+/// announced ("Sorry, try again.", "Authentication failure"), a further factor is not. Matching
+/// nothing means no notice and nothing discarded, which is the safe direction — the user sees the
+/// question asked again, exactly as a terminal would have shown it.
+const REFUSAL_WORDS: [&str; 8] = [
+	"sorry",
+	"try again",
+	"incorrect",
+	"failure",
+	"failed",
+	"denied",
+	"invalid",
+	"not allowed",
+];
+
 /// The characters a shell prompt ends with. Seeing one of these is how `ssh::shell` knows the
 /// conversation is over and the account's own shell is talking (§45) — after that, nothing on the
 /// channel is ever treated as a credential question again.
@@ -278,6 +307,30 @@ pub fn prompt(buffer: &str) -> Option<String> {
 		.iter()
 		.any(|word| lowered.contains(word))
 		.then(|| label.to_owned())
+}
+
+/// What the program said between the last answer and the question it is now asking, when what it
+/// said was that the answer is refused (§45). `None` when it simply asked something else.
+///
+/// `buffer` is everything said since the last answer, so its TAIL is the new question and every line
+/// before it is what the program printed on the way to it. The tail is dropped before the search: a
+/// question is not a verdict on the answer before it, and `Password:` itself contains no refusal
+/// word only by luck of vocabulary.
+///
+/// The remote's own wording comes back rather than a bare flag, because "Sorry, try again." and
+/// "Sorry, user cme is not allowed to execute…" ask completely different things of the user, and only
+/// the remote knows which of them it means.
+pub fn refusal(buffer: &str) -> Option<String> {
+	let mut lines: Vec<&str> = buffer.split('\n').collect();
+	lines.pop();
+	lines
+		.into_iter()
+		.rev()
+		.map(|line| sanitize(line).trim().to_owned())
+		.find(|line| {
+			let lowered = line.to_lowercase();
+			REFUSAL_WORDS.iter().any(|word| lowered.contains(word))
+		})
 }
 
 /// Whether the tail of `buffer` is a shell's own prompt — the sign that the elevation succeeded
@@ -525,6 +578,41 @@ mod tests {
 		assert!(
 			snippet.contains("/etc/ssh/sshd_config"),
 			"an unknown packaging still has sshd's own answer"
+		);
+	}
+
+	#[test]
+	fn a_refusal_is_what_the_program_said_between_the_answer_and_the_next_question() {
+		// The case this exists for: a wrong password, announced, then asked again.
+		assert_eq!(
+			refusal("\r\nSorry, try again.\r\ncmote-password:").as_deref(),
+			Some("Sorry, try again.")
+		);
+		assert_eq!(
+			refusal("Authentication failure\r\nPassword: ").as_deref(),
+			Some("Authentication failure")
+		);
+		// And the case that used to be mistaken for it: a SECOND FACTOR, asked under the very same
+		// wording because sudo puts its own `-p` text on every standard prompt in the stack. Nothing
+		// was refused, so nothing is said — the user is not told their good password was rejected.
+		assert_eq!(refusal("\r\ncmote-password:"), None);
+		assert_eq!(refusal("Password: "), None);
+		// A banner on the way to the next question is not a refusal either.
+		assert_eq!(
+			refusal("Duo two-factor login for cme\r\n\r\nPasscode: "),
+			None
+		);
+	}
+
+	#[test]
+	fn the_question_itself_is_never_read_as_a_verdict_on_the_answer_before_it() {
+		// The tail is the new question, so a prompt whose own wording carries a refusal word must not
+		// make cmote claim the last answer was refused.
+		assert_eq!(refusal("Invalid code, enter another:"), None);
+		// On its own line, though, that same sentence IS the program's verdict.
+		assert_eq!(
+			refusal("Invalid code, enter another\r\nPasscode: ").as_deref(),
+			Some("Invalid code, enter another")
 		);
 	}
 

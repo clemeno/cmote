@@ -66,9 +66,17 @@ enum State {
 	/// password, and the file layer needs the same one to authenticate sudo on a file channel
 	/// (§46). Anything else — a second factor, `su`'s prompt for another account's password — is
 	/// answered and forgotten.
+	///
+	/// `factors` counts the DISTINCT things asked for, which is not the same as `asked`: a question
+	/// the program re-put after refusing the answer is the same factor over again, so only a question
+	/// that follows no refusal increments it. That distinction carries two decisions. A corrected
+	/// password is still a password and is worth keeping (`factors` is still 1), and an account that
+	/// took more than one factor to log in as cannot have its FILES read as it (§46) — a file channel
+	/// can replay a password to sudo but can neither ask for a second factor nor reuse a spent one.
 	Elevating {
 		buffer: String,
 		asked: u32,
+		factors: u32,
 		pending: bool,
 		password: bool,
 	},
@@ -81,6 +89,11 @@ enum State {
 pub enum After {
 	/// It concerned that shell alone; carry on.
 	Nothing,
+	/// An elevation is through and that shell is a live terminal now (§45). `factors` is how many
+	/// distinct things the program asked for on the way, which is what says whether the FILE side can
+	/// follow this account (§46): one is a password, which a file channel can replay to sudo; more than
+	/// one means a second factor, which it can neither ask for nor reuse.
+	Live { identity: u64, factors: u32 },
 	/// That identity's shell has gone — the user typed `exit`, or the elevation was refused. Its
 	/// file access goes with it, which is what closes the elevated `sftp-server` running for it.
 	Ended(u64),
@@ -219,6 +232,7 @@ impl Shells {
 			State::Elevating {
 				buffer: String::new(),
 				asked: 0,
+				factors: 0,
 				pending: false,
 				password: false,
 			},
@@ -233,8 +247,7 @@ impl Shells {
 			// Both streams are the shell talking: a pty merges them anyway, and cmote renders
 			// stderr inline, so they are handled identically.
 			ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
-				self.on_data(identity, data.to_vec(), events).await;
-				After::Nothing
+				self.on_data(identity, data.to_vec(), events).await
 			}
 			// The channel is finished. For the login shell that ends the session; for an elevated
 			// one it ends that identity — either because the user typed `exit`, or because the
@@ -271,18 +284,25 @@ impl Shells {
 	}
 
 	/// Bytes arrived on `identity`'s channel: draw them, or read them as the elevation's next line.
-	async fn on_data(&mut self, identity: u64, bytes: Vec<u8>, events: &mpsc::Sender<SshEvent>) {
+	async fn on_data(
+		&mut self,
+		identity: u64,
+		bytes: Vec<u8>,
+		events: &mpsc::Sender<SshEvent>,
+	) -> After {
 		let Some(shell) = self.shells.get_mut(&identity) else {
-			return; // a late chunk for a shell already gone
+			return After::Nothing; // a late chunk for a shell already gone
 		};
 		match &mut shell.state {
 			// A live shell's bytes are terminal output, tagged so the GUI feeds the right grid.
 			State::Live => {
 				let _ = events.send(SshEvent::Output { identity, bytes }).await;
+				After::Nothing
 			}
 			State::Elevating {
 				buffer,
 				asked,
+				factors,
 				pending,
 				password,
 			} => {
@@ -296,38 +316,62 @@ impl Shells {
 				// its first prompt appear in the grid rather than being swallowed.
 				if elevate::looks_like_shell(buffer) {
 					let flush = std::mem::take(buffer).into_bytes();
+					let factors = *factors;
 					shell.state = State::Live;
+					// READY FIRST, then the bytes. The GUI builds this identity's emulator when it
+					// hears `IdentityReady` (§45), and output for an identity that has none yet is
+					// dropped — so sending the flush first lost exactly the two things it exists to
+					// carry: the account's greeting and its first prompt. That is what left a freshly
+					// elevated terminal empty but for a caret.
+					let _ = events.send(SshEvent::IdentityReady { identity }).await;
 					let _ = events
 						.send(SshEvent::Output {
 							identity,
 							bytes: flush,
 						})
 						.await;
-					let _ = events.send(SshEvent::IdentityReady { identity }).await;
-					return;
+					return After::Live { identity, factors };
 				}
 
 				// Otherwise: is it asking something? Only while no question is already outstanding
 				// — the same buffer arriving in two chunks must not raise two dialogs — and only up
 				// to a bound, so a program that asks for ever cannot pin the user in a dialog loop.
 				if *pending || *asked >= MAX_PROMPTS {
-					return;
+					return After::Nothing;
 				}
 				if let Some(label) = elevate::prompt(buffer) {
+					// Whether the program rejected the PREVIOUS answer, in its own words. Read here
+					// for the same reason as `password` below — the buffer is about to be cleared, and
+					// what it holds between one answer and the next question is the only evidence
+					// there is. The alternative the GUI used to rely on, "the same wording twice means
+					// refused", is wrong on a two-factor machine (§45).
+					let refusal = elevate::refusal(buffer);
 					// Whether this is cmote's OWN password question, decided before the buffer is
 					// cleared: the answer to that one is the caller password the file layer will need
 					// (§46), and to any other question it is a secret to use once and forget.
 					*password = buffer.contains(elevate::MARKER);
 					*pending = true;
 					*asked += 1;
+					// A question the program put again after refusing the answer is the same factor
+					// over again, so only one that follows no refusal counts as a new one. This is the
+					// number both credential rules turn on — see `State::Elevating` — and it is why a
+					// corrected password is still cacheable while a second factor never is.
+					if refusal.is_none() {
+						*factors += 1;
+					}
 					// Cleared now: the question has been put, so these bytes are spent. What
 					// arrives next is either the answer's outcome or the next question, and
 					// neither should be read against text that has already been dealt with.
 					buffer.clear();
 					let _ = events
-						.send(SshEvent::ElevatePrompt { identity, label })
+						.send(SshEvent::ElevatePrompt {
+							identity,
+							label,
+							refusal,
+						})
 						.await;
 				}
+				After::Nothing
 			}
 		}
 	}
@@ -342,12 +386,20 @@ impl Shells {
 	/// Answers `true` when what was just answered is the password cmote itself asked for by name —
 	/// the caller's own, which the file layer needs to authenticate sudo on a file channel (§46). Any
 	/// other question answers `false`, so a one-time code is used once and never kept.
+	///
+	/// Being cmote's own prompt is necessary but NOT sufficient, which is why `factors` is in the
+	/// test: sudo substitutes its `-p` text for every standard prompt in its PAM stack, so on a
+	/// two-factor machine the code is asked for under the marker too. Answering `true` there handed
+	/// the one-time code to the file layer as the connection's sudo password, from where it could only
+	/// ever be refused. The FIRST factor's answer is the password — including when it took two goes,
+	/// since a refused question is the same factor asked again.
 	pub async fn answer(&mut self, identity: u64, secret: Secret) -> bool {
 		let Some(shell) = self.shells.get_mut(&identity) else {
 			return false;
 		};
 		let State::Elevating {
 			buffer,
+			factors,
 			pending,
 			password,
 			..
@@ -359,7 +411,7 @@ impl Shells {
 			return false;
 		}
 		*pending = false;
-		let was_password = *password;
+		let was_password = *password && *factors == 1;
 		buffer.clear();
 		let mut line = secret.expose().as_bytes().to_vec();
 		line.push(b'\n');

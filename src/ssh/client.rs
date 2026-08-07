@@ -596,6 +596,16 @@ async fn stream(
 			Some(message) = from_shells.recv() => {
 				match shells.on_msg(message, events).await {
 					shell::After::Nothing => {}
+					// An elevation is through. How many factors it took decides whether the FILE side
+					// can follow that account (§46): one is a password, which a file channel replays to
+					// `sudo -S`; more than one means a second factor, which that channel can neither
+					// ask for nor reuse. Settled here, once, rather than discovered by two sftp
+					// handshakes timing out on every listing.
+					shell::After::Live { identity, factors } => {
+						if factors > 1 {
+							accounts.deny_second_factor(identity);
+						}
+					}
 					// That account's shell has gone, so its file access goes too (§46): dropping its
 					// entry closes the sftp session it held, which ends the elevated `sftp-server`.
 					shell::After::Ended(identity) => accounts.remove(identity),

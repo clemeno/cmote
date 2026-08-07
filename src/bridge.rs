@@ -375,9 +375,18 @@ pub enum SshEvent {
 	/// PAM module posed. `label` is the remote's own wording, stripped of escape sequences and
 	/// capped in length (`crate::elevate`), so the dialog asks exactly what the remote asked.
 	///
-	/// Answered with `SshCommand::ElevateAnswer`. A refusal re-asks (sudo gives three tries), so
-	/// several of these can arrive for one elevation.
-	ElevatePrompt { identity: u64, label: String },
+	/// Answered with `SshCommand::ElevateAnswer`. Several of these arrive for one elevation, and for
+	/// two quite different reasons: another factor is being asked for, or the last answer was
+	/// refused and the question is being put again. `refusal` is which — the program's own words
+	/// about the previous answer, taken from what it printed between it and this question, and `None`
+	/// when it printed no such thing. The GUI cannot tell them apart from the wording alone: sudo
+	/// dresses every standard prompt in the stack in its own `-p` text, so a password and a second
+	/// factor can arrive under one label.
+	ElevatePrompt {
+		identity: u64,
+		label: String,
+		refusal: Option<String>,
+	},
 	/// An elevated shell is through its conversation and is now a live terminal (§45): its output
 	/// is ordinary output from here on, and typing may be routed to it.
 	IdentityReady { identity: u64 },
