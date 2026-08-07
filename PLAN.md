@@ -1196,8 +1196,10 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   script keeps its `+x`). It never fails a transfer: a server that refuses `setstat` or a filesystem
   that will not take the timestamp is logged and the bytes stand. Still deferred: resuming across a
   *dropped connection* (cancel/resume live inside one live session — a lost session tears down to
-  the error screen, so its transfer state is gone), drag-and-drop onto a folder, two transfers at
-  once (a batch queues instead, §17, §21), preserving the *access* time as its own attribute
+  the error screen, so its transfer state is gone), aiming a drop at a PARTICULAR folder — the
+  gesture itself now takes any number of files or a whole folder (§29, v4.0.0), but iced's drop
+  events carry no pointer position, so every drop lands in the pane's own directory — two transfers
+  at once (a batch queues instead, §17, §21), preserving the *access* time as its own attribute
   (SFTP couples it with mtime, so an upload sends the pair but does not treat atime as a goal), and
   following symlinks inside a recursive walk (they are counted and skipped, never followed, so a
   cyclic link cannot loop the transfer).
@@ -2634,9 +2636,10 @@ locked by tests (two hosts, so the line is not trivially 1).
 ## 29. Drag-and-drop upload (v3.0.0)
 
 Uploading already had four doors (§17) — all of them a picker or a menu. This adds the obvious
-fifth: drag a file off the desktop and drop it onto the window, and it uploads into the files
-pane's current directory. One file this iteration; folders and multi-file drops are deliberately
-out of scope (there is a menu **Upload folder…** for a whole tree, §17).
+fifth: drag files off the desktop and drop them onto the window, and they upload into the files
+pane's current directory. As first shipped it took **one file** per drop; v4.0.0 lifted that to
+**any number of files and folders at once**, each folder going tree-and-all — see "A drop is a set,
+not a file" below.
 
 ### One direction only, on purpose
 
@@ -2657,18 +2660,20 @@ the window-event stream down to the three drag events. It is global (like focus 
 - `FileHovered` → `Message::FileHovered` → light the pane's **drop ring** (a green border, distinct
   from the blue focus ring), but only with a live session — a hover over a home tab lights nothing.
 - `FilesHoveredLeft` → `Message::FileDropLeft` → put the ring out.
-- `FileDropped(path)` → `Message::FileDropped` → `Tab::on_file_dropped`.
+- `FileDropped(path)` → `Message::FileDropped` → the path is **gathered**, not acted on.
+- the next frame → `Message::FileDropSettled` → `Tab::on_drop_settled` reads the whole set.
 
 The drop events carry **no pointer position** (iced does not report one), so a drop cannot be aimed
 at a widget — but it does not need to be: every drop targets the pane's own directory by definition,
 which is the whole contract. So position is irrelevant and a drop anywhere on the window uploads
 into the pane's folder.
 
-`on_file_dropped` reuses the entire §17 upload pipeline. It seeds a one-file batch
-(`upload_files` / `upload_dir` = the pane's directory) and calls `on_upload_confirmed` — the same
-entry point the destination-confirm dialog calls — so the destination is **pre-scanned** and, on a
-name already taken, the **same Overwrite / Keep both / Skip / Cancel dialog** opens (reused, not a
-new one). There is no destination-confirm step: the drop already said where.
+`on_drop_settled` reuses the entire §17 upload pipeline. It seeds the batch (`upload_files` /
+`upload_dir` = the pane's directory) and calls `on_upload_confirmed` — the same entry point the
+destination-confirm dialog calls — so the destination is **pre-scanned** and, on a name already
+taken, the **same Overwrite / Keep both / Skip / Cancel dialog** opens (reused, not a new one).
+There is no destination-confirm step: the drop already said where. A dropped **folder** goes the
+other way, into `start_upload_tree` — again the same call the menu's "Upload folder…" makes.
 
 **Every upload now re-lists its destination.** When a batch (or a folder-tree upload) lands, the
 completion calls `refresh_remote_dir(upload_dir)` — the same helper a create or delete uses — so if
@@ -2679,24 +2684,64 @@ drag-drop's most confusing gap: a file you drop onto the pane you are looking at
 The tree-upload flow keeps no queue, so it stashes its destination in `upload_dir` on start for the
 same completion to read.
 
+### A drop is a set, not a file
+
+The OS reports a drop of five files as **five events**, one per path, and says nothing about which
+is the last. Acting on each as it arrives is what made the first cut single-file: the first path
+would start a batch, and every sibling behind it would then be declined as "a transfer is already
+running" — a drop of five files uploading exactly one, with a misleading notice for the rest.
+
+So a `FileDropped` now only **gathers** its path, and a **frame clock** settles the drop: while
+`dropped` is non-empty the tab asks for `window::frames()`, and the tick reads the whole set at
+once. It is the same shape as the toast's dwell and the find bar's re-scan (§10, §44) — a clock
+that exists only while there is work for it — and it costs one frame, which is invisible against a
+gesture that ends with a mouse button coming up. What it buys is that the *set* is what gets
+decided about, which is the only way "these five files" can be one batch.
+
+With the whole set in hand, each path joins the queue for its own kind: **files** seed the ordinary
+batch (pre-scan, one collision question, queue), and **folders** go into `upload_trees`, each to
+travel tree-and-all through `start_upload_tree`. Both pipelines were already there; the drop reaches
+them both, and **a drop may carry any mixture of the two**.
+
+**Two queues, one slot.** A file and a folder are different transfers — a queued `(local, remote)`
+pair against a whole recursive walk that asks its own collision questions as it goes — and there is
+one progress bar, one cancel and one resume between them (§16, §17). So `pump_uploads` became the
+one place that decides what runs next: it drains the file batch first, then starts the folders one
+at a time, each on the `UploadDone` of the last. Files first because the batch's collision question
+is answered **up front**, before a byte moves, so putting it first gets the whole of the user's
+input out of the way; a tree asks as it walks and can be left to run.
+
+Nothing else had to learn about the second queue, because a tree reports the same `UploadDone` a
+file does — so the existing completion path already walks the queue. The three things that did
+change are the ones that count or clear: the closing notice (`upload_summary`, which names both
+kinds rather than adding them into a meaningless total), `finish_batch*` (which must not close while
+folders are still waiting, since it clears the destination they are going to), and the two cancels
+(a deliberate cancel takes the whole drop, not just the item on the wire).
+
 ### The decision is pure
 
-The guard logic is pulled into `drop_outcome(connected, busy, is_dir, pane_dir) -> DropOutcome`,
-free of `self` so it is unit-tested like `plan_uploads` and `band_hits`. The order is deliberate:
+The guard logic is pulled into `drop_outcome(connected, busy, items, pane_dir) -> DropOutcome`, free
+of `self` so it is unit-tested like `plan_uploads` and `band_hits`. It takes a **count**, not paths:
+whether there is anything to send at all is the whole of what it decides, and sorting files from
+folders is the caller's business. The order is deliberate:
 
-- **no session** outranks everything — a folder dropped onto a home tab is a silent `Ignore`, not a
-  "folders aren't supported" notice about something that could never have uploaded;
-- a **busy** transfer (or a batch mid-setup — `upload_files` still non-empty catches the *second*
-  file of a multi-file drop, since each file arrives as its own event) is declined, one flow at a
-  time behind the single progress bar;
-- a **folder** is declined this iteration;
-- a plain file with a **real pane directory** becomes an `Upload`; without one (nothing listed yet)
-  it is `NoDir`, and the user is told to open a folder rather than the file landing on a guess.
+- **no session** outranks everything — a drop onto a home tab is a silent `Ignore`, not a notice
+  about something that could never have uploaded;
+- a **busy** transfer (or a batch mid-setup — `upload_files` still non-empty catches a menu upload
+  waiting on its confirmation) is declined, one flow at a time behind the single progress bar;
+- an **empty** set is silent: every dropped path would have had to vanish between the drop and the
+  frame that reads it, which is not a mistake the user made;
+- with a **real pane directory** it is an `Upload`; without one (nothing listed yet) it is `NoDir`,
+  and the user is told to open a folder rather than the drop landing on a guess.
 
 ### What is deliberately NOT here
 
 - **No drag-out** (pane → desktop): iced cannot originate an OS drag; see above.
-- **No folders, no multi-file** drop yet — single files only this iteration.
+- ~~**No folders, no multi-file** drop yet — single files only this iteration.~~ **Shipped in
+  v4.0.0** — any number of files and folders, in any mixture; see "A drop is a set" above.
+- **Still one transfer at a time.** The drop's own items queue, but a drop arriving while another
+  transfer runs is declined as it always was (§16, §17): two progress bars, two cancels and two
+  resumes are a different feature, not a bigger queue.
 - **No positional targeting**: iced's drop events carry no coordinates, and the pane's folder is the
   only meaningful destination anyway, so a drop lands there wherever on the window it is released.
 - `ponytail:` the drop ring lights on *any* hover over the window while connected, since the event

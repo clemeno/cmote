@@ -322,12 +322,13 @@ references below (§n) point into it.
   (a script stays executable); a Windows file has no Unix mode to carry, so only the timestamp
   travels. It is always on and never gets in the way — a server or disk that refuses the stamp is
   quietly skipped and the file itself is untouched (§17, §19).
-- **Drag a file in to upload it** — drag a file off the desktop and drop it anywhere on the
-  window; it uploads into the **files pane's current directory**, reusing the same pre-scan and, on
+- **Drag files in to upload them** — drag them off the desktop and drop them anywhere on the
+  window; they upload into the **files pane's current directory**, reusing the same pre-scan and, on
   a name already there, the same **Overwrite / Keep both / Skip / Cancel** dialog the menu upload
-  uses. While a file is dragged over the window the pane wears a **green ring** to say where the
-  drop will land. One file at a time this iteration — a folder or a second file is declined with a
-  note (use **Upload folder…** for a whole tree). Dragging a remote file *out* onto the desktop is
+  uses. While a drag is over the window the pane wears a **green ring** to say where the drop will
+  land. Drop **any number of files and folders at once**: the files go as one batch, then each
+  folder follows tree-and-all, one after another through the single progress bar — so a whole
+  selection out of Explorer lands in one gesture. Dragging a remote file *out* onto the desktop is
   not offered: the GUI toolkit can receive an OS drop but cannot start one, so pulling files down
   stays the right-click **Download…** (§29).
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
@@ -433,7 +434,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+A** | Select every entry on show |
 | Right-click an entry | The entry's menu — on a multiple selection it acts on all of it |
 | Right-click empty space | Upload… here / Refresh |
-| **Drag a file from the desktop onto the window** | Upload it into the folder on show (one file); the pane rings green while it hovers |
+| **Drag files from the desktop onto the window** | Upload them into the folder on show — any number of files and folders at once, the files as one batch then each folder tree-and-all; the pane rings green while they hover |
 | Copy button in the details popup | Copy the whole details card |
 | **←** / **→** | Move one cell; **↑** / **↓** move a whole row |
 | **Shift** + those arrows | Extend the selection instead of moving it |
@@ -790,13 +791,16 @@ no such hook shows no directory in the title and leaves the command history unto
   (the pane's directory, so point the pane elsewhere with the tree first and confirm the
   destination follows the *pane*, not the shell), and right-click a **folder in the tree** →
   **Upload…** (that folder).
-- **Drag a file in.** Point the pane at a folder (a tree click, or `cd` in the shell), then drag a
-  file from the OS file manager over the window — the pane rings **green** — and drop it. It uploads
-  into the pane's folder with no destination dialog, and **the pane re-lists on its own** so the new
-  file appears in the grid without a manual Refresh (`ls` there confirms it). Drop a file whose name is
-  already there → the same **Overwrite / Keep both / Skip / Cancel** dialog. Drop a **folder** → a
-  note declines it (single files only). Drop while a transfer is running → declined with the busy
-  note. (Dragging a file *out* of the pane onto the desktop is not offered — use **Download…**.)
+- **Drag files in.** Point the pane at a folder (a tree click, or `cd` in the shell), then drag
+  files from the OS file manager over the window — the pane rings **green** — and drop them. They
+  upload into the pane's folder with no destination dialog, and **the pane re-lists on its own** so
+  the new files appear in the grid without a manual Refresh (`ls` there confirms it). Drop several
+  at once → one batch, one collision question. Drop a file whose name is already there → the same
+  **Overwrite / Keep both / Skip / Cancel** dialog. Drop **folders** → each uploads tree-and-all,
+  exactly as **Upload folder…** does, one after the other. Drop files and folders **together** →
+  the files go first, then the folders; the closing notice says how many of each landed. Drop while
+  a transfer is running → declined with the busy note. (Dragging a file *out* of the pane onto the
+  desktop is not offered — use **Download…**.)
 - Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
   status bar shows the failure and the shell stays open.
 - Start a shell that does **not** announce its directory (a plain `bash --norc`, or

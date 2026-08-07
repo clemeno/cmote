@@ -1748,6 +1748,13 @@ impl App {
 		if on_screen().any(|tab| tab.search_stale) {
 			subs.push(iced::window::frames().map(|_instant| Message::TermFindRescan));
 		}
+		// A drop has landed and its paths are still arriving, one event each (§29): tick once so the
+		// whole set is read together. Same shape as the two clocks above — the clock exists only
+		// while there is work for it, and the tick goes to every region since the tab that caught
+		// the drop is the one with paths waiting.
+		if on_screen().any(|tab| !tab.dropped.is_empty()) {
+			subs.push(iced::window::frames().map(|_instant| Message::FileDropSettled));
+		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		match self.active().screen {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
@@ -2048,8 +2055,16 @@ pub struct Tab {
 	/// runs at a time, so the files queue here and every `UploadDone` starts the next — the
 	/// mirror of the download queue (§21).
 	uploads: std::collections::VecDeque<(PathBuf, String)>,
+	/// The FOLDERS waiting to go, tree-and-all, into `upload_dir` (§29). A drop can carry both kinds
+	/// at once, and the two travel by different routes — a file joins the `uploads` queue above, a
+	/// folder is a whole recursive transfer of its own — so they queue separately and run one after
+	/// another through the single transfer slot. Empty except while a drop's folders are draining.
+	upload_trees: std::collections::VecDeque<PathBuf>,
 	/// How many of the batch have landed, for its closing notice (§17).
 	uploaded: usize,
+	/// How many whole FOLDERS have landed, counted apart from the files so the closing notice can
+	/// say what actually went (§29) — "3 files and 2 folders" rather than five of something.
+	uploaded_trees: usize,
 	/// Whether the batch sends with overwrite set — true only when the user answered the
 	/// collision question with "replace" (§17). Decided once, applied to every file; a
 	/// free or "keep both" destination is written with it off and its own name.
@@ -2066,6 +2081,11 @@ pub struct Tab {
 	/// files pane as the drop target while true; set by `FileHovered`, cleared when the drag leaves
 	/// or drops. Purely a visual cue — the drop itself reads the pane's directory, not this flag.
 	drop_hover: bool,
+	/// The paths of a drop that has just landed, gathering (§29). The OS reports a multi-file drop
+	/// as one event PER PATH, with nothing to say the last has arrived — so they are collected here
+	/// and read once on the next frame, when the whole drop is known. Empty at rest, which is also
+	/// what tells `subscription` there is no settling to wait for.
+	dropped: Vec<PathBuf>,
 	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
 	/// width, expansion state and selection; `app` only relays its events and turns the
 	/// paths it asks for into `SshCommand::ListDir`.
@@ -2362,10 +2382,13 @@ pub enum Message {
 	FileHovered,
 	/// The OS drag left the window without dropping (§29): put the pane's drop highlight out.
 	FileDropLeft,
-	/// A file was dropped onto the window from the OS (§29): upload it into the files pane's
-	/// current directory. One file this iteration — a folder, or a drop with no session or no
-	/// directory to land in, is declined with a notice.
+	/// A path was dropped onto the window from the OS (§29). One event PER PATH: a drop of five
+	/// files arrives as five of these, and nothing says which is the last — so each is only
+	/// gathered, and `FileDropSettled` below is what reads them.
 	FileDropped(PathBuf),
+	/// The frame after a drop landed (§29): the whole set of paths is known now, so decide what it
+	/// is — a batch of files, one folder, or a mixture to decline — and start it.
+	FileDropSettled,
 	/// The user clicked Disconnect in the terminal status bar — ask to confirm (§10).
 	DisconnectPressed,
 	/// The user confirmed Disconnect in the modal — tear the session down.
@@ -3038,7 +3061,13 @@ impl Tab {
 			// shell open lights nothing.
 			Message::FileHovered => self.drop_hover = self.terminal.is_some(),
 			Message::FileDropLeft => self.drop_hover = false,
-			Message::FileDropped(path) => return self.on_file_dropped(path),
+			// One event per PATH, so nothing is decided here: the paths gather and the next frame
+			// reads the whole drop at once (§29).
+			Message::FileDropped(path) => {
+				self.drop_hover = false;
+				self.dropped.push(path);
+			}
+			Message::FileDropSettled => return self.on_drop_settled(),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
 			Message::DisconnectCancelled => self.confirm_disconnect = false,
@@ -3947,20 +3976,24 @@ impl Tab {
 				}
 			}
 			SshEvent::UploadDone(path) => {
-				// One file landed; count it and start the next. The closing notice, and
-				// clearing the picked files, wait until the whole batch has drained (§17).
+				// One file — or one whole folder — landed; count it and start the next. The closing
+				// notice, and clearing the picked files, wait until everything has drained (§17).
+				// Which of the two it was is read off `in_flight` before that is cleared: a tree
+				// reports the same `UploadDone` its files do, and the closing notice says what went.
+				let was_tree = matches!(self.in_flight, Some(Resumable::UploadTree { .. }));
 				self.transfer = None;
 				// Landed, so nothing to resume; `pump_uploads` remembers the next file itself.
 				self.in_flight = None;
 				self.resumable = None;
-				self.uploaded += 1;
+				if was_tree {
+					self.uploaded_trees += 1;
+				} else {
+					self.uploaded += 1;
+				}
 				self.pump_uploads();
 				if self.transfer.is_none() && self.uploads.is_empty() {
-					self.transfer_notice = Some(if self.uploaded > 1 {
-						format!("Uploaded {} files", self.uploaded)
-					} else {
-						format!("Uploaded to {path}")
-					});
+					self.transfer_notice =
+						Some(upload_summary(self.uploaded, self.uploaded_trees, &path));
 					// Show what just landed: if the pane (or the tree) is on the folder we uploaded
 					// into, re-list it so the new file — or folder — appears without a manual Refresh
 					// (§29). Captured before `finish_batch`, which clears `upload_dir`.
@@ -5884,6 +5917,17 @@ impl Tab {
 		if self.transfer.is_some() {
 			return;
 		}
+		// Files first, then the folders behind them (§29). Both queues share the one transfer slot,
+		// so this is the only place that decides what runs next — and it drains the batch before
+		// starting a tree, because the batch's collision question was answered up front (§17) while
+		// a tree asks its own as it walks.
+		if self.uploads.is_empty()
+			&& let Some(local) = self.upload_trees.pop_front()
+		{
+			let dir = self.upload_dir.clone();
+			self.start_upload_tree(Some(local), dir);
+			return;
+		}
 		if let Some((local, remote)) = self.uploads.pop_front() {
 			let total = std::fs::metadata(&local)
 				.map(|meta| meta.len())
@@ -5914,7 +5958,7 @@ impl Tab {
 	/// so a stray click cannot re-send what just landed. The closing notice is set by the
 	/// caller that noticed the last file land.
 	fn finish_batch_if_drained(&mut self) {
-		if self.transfer.is_none() && self.uploads.is_empty() {
+		if self.transfer.is_none() && self.uploads.is_empty() && self.upload_trees.is_empty() {
 			self.finish_batch();
 		}
 	}
@@ -5924,7 +5968,9 @@ impl Tab {
 		self.upload_files.clear();
 		self.upload_dir.clear();
 		self.uploads.clear();
+		self.upload_trees.clear();
 		self.uploaded = 0;
+		self.uploaded_trees = 0;
 		self.upload_overwrite = false;
 	}
 
@@ -5934,7 +5980,9 @@ impl Tab {
 	fn cancel_upload(&mut self) {
 		self.upload_clash = None;
 		self.uploads.clear();
+		self.upload_trees.clear();
 		self.uploaded = 0;
+		self.uploaded_trees = 0;
 		self.upload_overwrite = false;
 		self.upload_files.clear();
 		self.upload_dir.clear();
@@ -5951,8 +5999,12 @@ impl Tab {
 	/// not flicker between the click and the worker winding down.
 	fn cancel_transfer(&mut self) {
 		self.uploads.clear();
+		// The folders queued behind this transfer go with it: a deliberate cancel takes the whole
+		// drop, not just the item on the wire (§16, §29).
+		self.upload_trees.clear();
 		self.downloads.clear();
 		self.uploaded = 0;
+		self.uploaded_trees = 0;
 		self.downloaded = 0;
 		self.resumable = None;
 		self.in_flight = None;
@@ -6004,26 +6056,32 @@ impl Tab {
 		iced::Task::none()
 	}
 
-	/// A local file was dropped onto the window from the OS (§29). Send it into the files pane's
-	/// current directory, reusing the whole upload pipeline — the destination pre-scan and, on a
-	/// name already taken, the same Overwrite / Keep both / Skip / Cancel dialog a menu upload
-	/// opens (§17). One file this iteration: a folder, a drop with no session, or one with no pane
-	/// directory to land in is declined rather than guessed at. The drop already says where the
-	/// bytes go — the pane's own folder — so there is no destination confirmation, unlike the menu
-	/// upload; it goes straight to the pre-scan.
-	fn on_file_dropped(&mut self, local: PathBuf) -> iced::Task<Message> {
-		// Whatever we decide, the drag is over: the target highlight goes out with it.
-		self.drop_hover = false;
-
+	/// A drop landed and the frame after it has come round, so the whole set of paths is in hand
+	/// (§29). Send it into the files pane's current directory, reusing the upload pipeline whole —
+	/// the destination pre-scan and, on a name already taken, the same Overwrite / Keep both / Skip
+	/// / Cancel dialog a menu upload opens (§17). The drop already said where the bytes go, so there
+	/// is no destination confirmation; it goes straight to the pre-scan.
+	///
+	/// Waiting a frame is what makes a multi-file drop one batch: the OS reports each path as its
+	/// own event and never says which is the last, so deciding on the first would send one file and
+	/// then decline its own siblings as "a transfer is already running".
+	fn on_drop_settled(&mut self) -> iced::Task<Message> {
+		let dropped = std::mem::take(&mut self.dropped);
+		if dropped.is_empty() {
+			return iced::Task::none();
+		}
+		// A folder needs the tree flow and a file the batch flow (§17), so the drop is sorted into
+		// its two kinds here — both are sent, one after the other, through the single transfer slot.
+		let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
+			dropped.into_iter().partition(|path| path.is_dir());
 		// A batch already set up or running would fight over the one progress bar. `upload_files`
-		// being non-empty catches a second file of a multi-file drop — each file arrives as its
-		// own event — and a menu upload mid-setup alike: one flow at a time (§17).
+		// being non-empty catches a menu upload waiting on its confirmation, too: one flow at a time.
 		let busy =
 			self.transfer.is_some() || !self.uploads.is_empty() || !self.upload_files.is_empty();
 		match drop_outcome(
 			self.terminal.is_some(),
 			busy,
-			local.is_dir(),
+			folders.len() + files.len(),
 			self.files.path(),
 		) {
 			// No session (or not the terminal screen): nowhere to send, so say nothing.
@@ -6032,21 +6090,26 @@ impl Tab {
 				self.transfer_notice = Some("A transfer is already running.".to_owned());
 				iced::Task::none()
 			}
-			DropOutcome::Folder => {
-				self.transfer_notice =
-					Some("Drop a single file — folder drops aren't supported yet.".to_owned());
-				iced::Task::none()
-			}
 			DropOutcome::NoDir => {
 				self.transfer_notice = Some("Open a folder in the files pane first.".to_owned());
 				iced::Task::none()
 			}
-			// Seed the one-file batch and run the ordinary confirmed-upload path: it pre-scans the
-			// destination, then either sends or opens the collision dialog (§17).
 			DropOutcome::Upload(dir) => {
-				self.upload_files = vec![local];
 				self.upload_dir = dir;
 				self.transfer_notice = None;
+				// Every folder queues, each to go tree-and-all exactly as the menu's "Upload
+				// folder…" does (§17) — the same command, the same per-file collision questions,
+				// the same resume. `pump_uploads` starts them once the files are through.
+				self.upload_trees = folders.into();
+				if files.is_empty() {
+					// Folders only: there is no batch to pre-scan, so the first tree starts here.
+					self.pump_uploads();
+					return iced::Task::none();
+				}
+				// Seed the batch and run the ordinary confirmed-upload path: it pre-scans the
+				// destination, then either sends or opens the collision dialog (§17). One file or
+				// twenty, this is the same flow the picker's own selection takes.
+				self.upload_files = files;
 				self.on_upload_confirmed()
 			}
 		}
@@ -7366,41 +7429,83 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 	}
 }
 
-/// What a file dropped onto the window should do (§29). Split out of `on_file_dropped` so the
-/// decision — is there a session, is a transfer busy, is it a folder, is there a directory to
-/// land in — is pure and testable, the way `plan_uploads` and `band_hits` are.
+/// What a drop onto the window should do (§29). Split out of `on_drop_settled` so the decision —
+/// is there a session, is a transfer busy, is there anything to send, is there a directory to land
+/// in — is pure and testable, the way `plan_uploads` and `band_hits` are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DropOutcome {
-	/// No live session (or not on the terminal): ignore the drop silently — with nowhere to send,
-	/// there is nothing to tell the user.
+	/// No live session (or not on the terminal), or nothing droppable at all: ignore the drop
+	/// silently — with nowhere to send, there is nothing to tell the user.
 	Ignore,
 	/// A transfer is already running or a batch is being set up: decline, one flow at a time.
 	Busy,
-	/// A folder was dropped; this iteration takes single files only.
-	Folder,
 	/// The files pane has no directory yet, so there is nowhere to drop into.
 	NoDir,
-	/// Upload the dropped file into this remote directory — the pane's own.
+	/// Upload everything dropped into this remote directory — the pane's own. What is a file and
+	/// what is a folder no longer changes the answer: files go as one batch and each folder goes
+	/// tree-and-all, all of them queued behind the single transfer slot (§29).
 	Upload(String),
 }
 
-/// Decide a dropped file's fate from the state it depends on (§29), free of `self` so it is
-/// tested on its own. The order is deliberate: no session outranks everything (a folder dropped
-/// with nowhere to go still reads `Ignore`), then a busy transfer, then the single-file rule, and
-/// only a plain file with a real destination becomes an `Upload`.
-fn drop_outcome(connected: bool, busy: bool, is_dir: bool, pane_dir: Option<&str>) -> DropOutcome {
+/// Decide a drop's fate from the state it depends on (§29), free of `self` so it is tested on its
+/// own. `items` is a count rather than the paths themselves, because whether there is anything at
+/// all is the whole of what this decides — sorting files from folders is the caller's business.
+///
+/// The order is deliberate. No session outranks everything, so a drop onto a home tab is silent
+/// whatever it held. Then a busy transfer, since nothing could start whatever the drop was. Then an
+/// empty drop, which is silent for the same reason a drop with no session is. Only then does the
+/// destination decide between `NoDir` and a real upload.
+fn drop_outcome(connected: bool, busy: bool, items: usize, pane_dir: Option<&str>) -> DropOutcome {
 	if !connected {
 		return DropOutcome::Ignore;
 	}
 	if busy {
 		return DropOutcome::Busy;
 	}
-	if is_dir {
-		return DropOutcome::Folder;
+	// Nothing to do, and nothing worth saying: a drop of nothing at all is not a mistake the user
+	// made. (Reachable only if every dropped path vanished between the drop and this frame.)
+	if items == 0 {
+		return DropOutcome::Ignore;
 	}
 	match pane_dir {
 		Some(dir) => DropOutcome::Upload(dir.to_owned()),
 		None => DropOutcome::NoDir,
+	}
+}
+
+/// The closing notice for an upload that has fully drained (§17, §29), from what actually landed.
+/// Pure so the wording is testable — it is the one line a user reads to know a drop of several
+/// things did all of them.
+///
+/// `last` is the path of the item that finished last, named only when it is the ONLY thing that
+/// went: with one file, "Uploaded to /srv/notes.txt" says more than "Uploaded 1 file". Past that
+/// the counts carry it, and a mixed drop names both kinds rather than adding them up into a total
+/// of nothing in particular.
+fn upload_summary(files: usize, folders: usize, last: &str) -> String {
+	let files_part = |count: usize| {
+		if count == 1 {
+			"1 file".to_owned()
+		} else {
+			format!("{count} files")
+		}
+	};
+	let folders_part = |count: usize| {
+		if count == 1 {
+			"1 folder".to_owned()
+		} else {
+			format!("{count} folders")
+		}
+	};
+	match (files, folders) {
+		// One thing on its own — the path is the most useful thing to show.
+		(1, 0) | (0, 1) => format!("Uploaded to {last}"),
+		(0, folders) => format!("Uploaded {}", folders_part(folders)),
+		(files, 0) => format!("Uploaded {}", files_part(files)),
+		(files, folders) => format!(
+			"Uploaded {} and {}",
+			files_part(files),
+			folders_part(folders)
+		),
 	}
 }
 
@@ -8961,43 +9066,70 @@ mod tests {
 	}
 
 	#[test]
+	fn the_paths_of_one_drop_gather_until_the_frame_reads_them() {
+		// The OS reports a multi-file drop as one event per path and never says which is the last
+		// (§29), so each event only gathers. The frame that follows takes the lot and leaves nothing
+		// behind — otherwise the next drop would inherit these paths and upload them again.
+		let mut tab = Tab::default();
+		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/a.txt")));
+		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/b.txt")));
+		assert_eq!(tab.dropped.len(), 2, "both paths waited for the frame");
+		// No session here, so the decision itself is `Ignore` — what this pins is that the settle
+		// consumes the set either way.
+		let _ = tab.update(Message::FileDropSettled);
+		assert!(tab.dropped.is_empty());
+	}
+
+	#[test]
+	fn a_drop_puts_the_target_highlight_out() {
+		// The drag is over the moment a path lands, whatever is then decided about it (§29).
+		let mut tab = Tab::default();
+		let _ = tab.update(Message::FileHovered);
+		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/a.txt")));
+		assert!(!tab.drop_hover);
+	}
+
+	#[test]
 	fn a_dropped_file_uploads_into_the_pane_directory() {
-		// A live session, nothing transferring, a plain file, and the pane showing a folder: the
+		// A live session, nothing transferring, one plain file, and the pane showing a folder: the
 		// drop uploads into that folder.
-		let outcome = drop_outcome(true, false, false, Some("/home/user"));
+		let outcome = drop_outcome(true, false, 1, Some("/home/user"));
 		assert_eq!(outcome, DropOutcome::Upload("/home/user".to_owned()));
 	}
 
 	#[test]
-	fn a_drop_with_no_session_is_ignored_even_when_it_is_a_folder() {
-		// No session outranks every other rule: with nowhere to send, a folder drop is silent, not
-		// a "folders aren't supported" notice about something that could never have happened.
+	fn a_drop_of_many_things_of_either_kind_is_accepted_whole() {
+		// Files, folders, or both together: the pane's directory takes the lot (§29). What each
+		// path IS decides which queue it joins, not whether the drop is allowed at all.
+		for items in [1, 7, 40] {
+			assert_eq!(
+				drop_outcome(true, false, items, Some("/home/user")),
+				DropOutcome::Upload("/home/user".to_owned())
+			);
+		}
+	}
+
+	#[test]
+	fn a_drop_with_no_session_is_ignored() {
+		// No session outranks every other rule: with nowhere to send, the drop is silent rather
+		// than a notice about something that could never have uploaded.
 		assert_eq!(
-			drop_outcome(false, false, true, Some("/home/user")),
+			drop_outcome(false, false, 1, Some("/home/user")),
 			DropOutcome::Ignore
 		);
 	}
 
 	#[test]
-	fn a_drop_while_busy_is_declined_before_the_single_file_rule() {
-		// A transfer in flight (or a batch being set up) declines the drop whatever it is — the one
-		// progress bar cannot serve two, so the busy check comes before the folder check.
+	fn a_drop_while_busy_is_declined() {
+		// A transfer in flight (or a batch being set up) declines the drop whatever it held — the
+		// one progress bar cannot serve two flows at once (§17).
 		assert_eq!(
-			drop_outcome(true, true, false, Some("/home/user")),
+			drop_outcome(true, true, 1, Some("/home/user")),
 			DropOutcome::Busy
 		);
 		assert_eq!(
-			drop_outcome(true, true, true, Some("/home/user")),
+			drop_outcome(true, true, 6, Some("/home/user")),
 			DropOutcome::Busy
-		);
-	}
-
-	#[test]
-	fn a_dropped_folder_is_declined_this_iteration() {
-		// A live session, not busy, but the drop is a directory: single files only for now.
-		assert_eq!(
-			drop_outcome(true, false, true, Some("/home/user")),
-			DropOutcome::Folder
 		);
 	}
 
@@ -9005,7 +9137,100 @@ mod tests {
 	fn a_drop_with_no_pane_directory_has_nowhere_to_land() {
 		// Connected and idle, a plain file, but the pane has listed nothing yet: there is no folder
 		// to drop into, so the user is told to open one rather than the file landing on a guess.
-		assert_eq!(drop_outcome(true, false, false, None), DropOutcome::NoDir);
+		assert_eq!(drop_outcome(true, false, 1, None), DropOutcome::NoDir);
+	}
+
+	#[test]
+	fn a_drop_that_held_nothing_says_nothing() {
+		// Not a mistake the user made — every dropped path would have had to vanish between the drop
+		// and the frame that reads it — so it is silent rather than a notice about an empty drop.
+		assert_eq!(
+			drop_outcome(true, false, 0, Some("/home/user")),
+			DropOutcome::Ignore
+		);
+	}
+
+	#[test]
+	fn the_files_of_a_drop_go_before_its_folders() {
+		// One queue each, one transfer slot between them (§29). The batch drains first, because its
+		// collision question was answered up front (§17) while a tree asks its own as it walks —
+		// so the folder is still waiting when the file starts.
+		let mut tab = Tab {
+			upload_dir: "/srv".to_owned(),
+			..Tab::default()
+		};
+		tab.uploads
+			.push_back((PathBuf::from("/local/a.txt"), "/srv/a.txt".to_owned()));
+		tab.upload_trees.push_back(PathBuf::from("/local/photos"));
+		tab.pump_uploads();
+		assert!(tab.uploads.is_empty(), "the file was taken first");
+		assert_eq!(tab.upload_trees.len(), 1, "the folder is still queued");
+	}
+
+	#[test]
+	fn the_folders_of_a_drop_are_started_one_after_another() {
+		// With the files through, the pump reaches the folder queue — and takes one at a time, so
+		// the second waits for the first to report back rather than racing it (§29). There is no
+		// session here, so each send fails and frees the slot immediately; what is pinned is that
+		// the queue is walked at all, and one item per pump.
+		let mut tab = Tab {
+			upload_dir: "/srv".to_owned(),
+			..Tab::default()
+		};
+		tab.upload_trees.push_back(PathBuf::from("/local/one"));
+		tab.upload_trees.push_back(PathBuf::from("/local/two"));
+		tab.pump_uploads();
+		assert_eq!(tab.upload_trees.len(), 1);
+		tab.pump_uploads();
+		assert!(tab.upload_trees.is_empty());
+	}
+
+	#[test]
+	fn a_batch_does_not_close_while_folders_are_still_queued() {
+		// `finish_batch` clears the destination every queued folder is going to, so closing early
+		// would strand them (§29).
+		let mut tab = Tab {
+			upload_dir: "/srv".to_owned(),
+			..Tab::default()
+		};
+		tab.upload_trees.push_back(PathBuf::from("/local/photos"));
+		tab.finish_batch_if_drained();
+		assert_eq!(tab.upload_dir, "/srv");
+		assert_eq!(tab.upload_trees.len(), 1);
+	}
+
+	#[test]
+	fn one_thing_uploaded_is_named_by_its_path() {
+		// With a single item the path says more than a count does — "Uploaded 1 file" tells the user
+		// nothing they did not just watch happen (§29).
+		assert_eq!(
+			upload_summary(1, 0, "/srv/notes.txt"),
+			"Uploaded to /srv/notes.txt"
+		);
+		assert_eq!(
+			upload_summary(0, 1, "/srv/photos"),
+			"Uploaded to /srv/photos"
+		);
+	}
+
+	#[test]
+	fn a_mixed_upload_names_both_kinds_rather_than_adding_them_up() {
+		// Three files and two folders is not "five files": a drop that carried both kinds has to
+		// read back as both, or the notice quietly misreports what landed (§29).
+		assert_eq!(
+			upload_summary(3, 2, "/srv/last"),
+			"Uploaded 3 files and 2 folders"
+		);
+		assert_eq!(
+			upload_summary(1, 1, "/srv/last"),
+			"Uploaded 1 file and 1 folder"
+		);
+	}
+
+	#[test]
+	fn several_of_one_kind_are_counted() {
+		assert_eq!(upload_summary(4, 0, "/srv/last"), "Uploaded 4 files");
+		assert_eq!(upload_summary(0, 3, "/srv/last"), "Uploaded 3 folders");
 	}
 
 	// A bare app with one undivided region holding one home tab, and empty shared state, so the
