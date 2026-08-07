@@ -6,10 +6,12 @@
 # checksums them, and attaches the lot to a DRAFT GitHub Release for a human to review
 # and publish.
 #
-# The artifacts are NOT yet code-signed or notarized — Authenticode on Windows and
-# `codesign` + notarize on macOS stay deferred (PLAN §16). So a fresh download still
-# trips SmartScreen / Gatekeeper until that lands; the `SHA256SUMS` file is the
-# integrity check in the meantime.
+# The artifacts are NOT code-signed or notarized, and will not be — Authenticode on
+# Windows and `codesign` + notarize on macOS are refused rather than deferred (PLAN §16:
+# an ordinary certificate does not silence SmartScreen, which warns on reputation, and a
+# signing key in CI is a secret worth more than it saves). So `SHA256SUMS` is THE integrity
+# check, not a stand-in for one, and a fresh download trips SmartScreen / Gatekeeper for
+# good rather than "until that lands".
 name: Release
 
 on:
