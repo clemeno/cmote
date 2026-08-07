@@ -455,14 +455,25 @@ impl Terminal {
 		true
 	}
 
-	/// Reveal and locate the most recently finished command's output for a text selection (§34) —
-	/// the Ctrl+Shift+O keybind. Returns the document lines the output occupies (after scrolling its
-	/// start into view if it was above the live screen), or `None` when no command has finished or
-	/// the last one printed nothing. The caller turns the span into a selection the ordinary Copy
-	/// then grabs — all of it, however tall it is (§40).
-	pub fn select_output_latest(&mut self) -> Option<OutputSpan> {
-		let (start, end) = self.prompts.latest_output()?;
+	/// Reveal and locate a finished command's output for a text selection (§34) — the Ctrl+Shift+O
+	/// keybind. The first press takes the most recent command; each press after it steps one command
+	/// further back through the session, which is what makes the key a way of reading BACK through
+	/// what has been run rather than a way of grabbing the last thing only.
+	///
+	/// Returns the document lines the output occupies (after scrolling its start into view if it was
+	/// above the live screen), or `None` when no command has finished, or once the walk has reached
+	/// the oldest one held — the selection then stays on it. The caller turns the span into a
+	/// selection the ordinary Copy then grabs — all of it, however tall it is (§40).
+	pub fn select_output_back(&mut self) -> Option<OutputSpan> {
+		let (start, end) = self.prompts.walk_output()?;
 		Some(self.locate_output(start, end))
+	}
+
+	/// Start the walk over, so the next Ctrl+Shift+O takes the most recent command again (§34). The
+	/// app calls this when the user does anything else with the grid: the walk is one gesture, and
+	/// pressing on the grid — a selection, a click, a drag — is the start of another.
+	pub fn restart_output_walk(&mut self) {
+		self.prompts.restart_walk();
 	}
 
 	/// The same for the command whose prompt tick sits on viewport `row` (§34) — the gutter-click
@@ -1201,7 +1212,7 @@ mod tests {
 			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07one\r\ntwo\r\n\x1b]133;D;0\x07",
 		);
 		let span = terminal
-			.select_output_latest()
+			.select_output_back()
 			.expect("a finished command with output");
 		assert_eq!((span.start_line, span.end_line), (1, 2));
 		assert_eq!(span.last_col, 39);
@@ -1226,7 +1237,7 @@ mod tests {
 		terminal.process(b"\x1b]133;D;0\x07");
 
 		let span = terminal
-			.select_output_latest()
+			.select_output_back()
 			.expect("a finished command with output");
 		assert_eq!(
 			span.end_line - span.start_line + 1,
@@ -1236,12 +1247,44 @@ mod tests {
 	}
 
 	#[test]
+	fn a_second_press_walks_back_to_the_command_before_it() {
+		// Two commands run one after the other (§34). Ctrl+Shift+O takes the newer, pressing again
+		// takes the older, and a press on the grid — `restart_output_walk` — puts the key back at
+		// the newest, which is what stops the walk quietly carrying on into a later session's work.
+		let mut terminal = Terminal::new(20, 40);
+		terminal.process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07one\r\n\x1b]133;C\x07first\r\n\x1b]133;D;0\x07",
+		);
+		terminal.process(
+			b"\x1b]133;A\x07$ \x1b]133;B\x07two\r\n\x1b]133;C\x07second\r\n\x1b]133;D;0\x07",
+		);
+		let newest = terminal
+			.select_output_back()
+			.expect("the command just finished");
+		let older = terminal
+			.select_output_back()
+			.expect("the command before it");
+		assert!(
+			older.start_line < newest.start_line,
+			"the second press steps BACK: line {} then {}",
+			newest.start_line,
+			older.start_line
+		);
+		terminal.restart_output_walk();
+		let again = terminal.select_output_back().expect("the newest again");
+		assert_eq!(
+			(again.start_line, again.end_line),
+			(newest.start_line, newest.end_line)
+		);
+	}
+
+	#[test]
 	fn a_command_that_printed_nothing_locates_no_output() {
 		// A bare Enter at the prompt: A, B, then D with no output in between (§34). There is no
 		// output line-span, so nothing is offered to select.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"\x1b]133;A\x07$ \x1b]133;B\x07\r\n\x1b]133;D;0\x07");
-		assert!(terminal.select_output_latest().is_none());
+		assert!(terminal.select_output_back().is_none());
 	}
 
 	#[test]
@@ -1262,7 +1305,7 @@ mod tests {
 			"starts at the live bottom"
 		);
 		let span = terminal
-			.select_output_latest()
+			.select_output_back()
 			.expect("the earlier command's output");
 		assert!(
 			terminal.screen().display_offset() > 0,

@@ -3191,7 +3191,8 @@ OSC and ignores it, so cmote scans the same bytes itself.
 - **Select-command-output has two triggers, one selection (`osc133.rs` + `term/mod.rs` + `app.rs`).**
   Alongside the prompt lines, `Prompts` now files each finished command's output as an absolute
   half-open line range `[output, end)` — the C mark's line to the D mark's — keyed by its prompt line
-  (the A mark). **Ctrl+Shift+O** selects the latest finished command's output; **clicking a prompt
+  (the A mark). **Ctrl+Shift+O** selects a finished command's output — the latest, then one further
+  back on each repeat (below); **clicking a prompt
   tick** in the gutter (a press with the pointer inside `GRID_PADDING`) selects that command's. Both
   resolve to a range, `Terminal::select_output_*` reveals it (scrolling it into view only if it had
   left the live screen) and returns the lines it fills as a plain `OutputSpan` — so `term/` never
@@ -3206,14 +3207,46 @@ OSC and ignores it, so cmote scans the same bytes itself.
   only the prompt ticks are relearned from the next prompt on. (`ponytail:` cleared on any resize,
   including a height-only one that would not actually reflow the columns.)
 
+### Pressing again reads further back
+
+Ctrl+Shift+O took the latest command's output and only ever that, so a session's history was reachable
+only by clicking the right tick — which means finding it on screen first. Now **each press steps one
+command further back**: newest, the one before it, the one before that. The key becomes a way of
+reading *back* through what has been run rather than a way of grabbing the last thing.
+
+The walk is a cursor into the filed commands (`Prompts::walk`), and everything interesting about it is
+in when it goes back to the start:
+
+- **A command finishing restarts it.** Running something new is the clearest statement there is that
+  the user has stopped reading old output, so the next press takes what was just run — even if the
+  command finished on its own while the user was several steps back.
+- **A press on the grid restarts it.** The walk is one gesture; a click, a drag or a selection is the
+  start of another. Anything else would leave a stale place kept across unrelated work.
+- **A click on a prompt tick PARKS it there.** The two ways of reaching a command's output are then
+  one gesture: point at a command, then keep stepping back from it. Jumping to the newest after a
+  click would read as the key having lost its place.
+- **The oldest is the end of the road, not a wrap.** Past it the answer is nothing at all and the
+  selection stays on the oldest, because wrapping round to the newest looks like the key did something
+  else entirely.
+- **Commands that printed nothing are stepped over.** A `cd`, a bare Enter or a failed `cd` files a
+  span with nothing in it; stopping on those would make the key look broken exactly in a session that
+  has a run of them.
+
+The cursor is an INDEX into the command ring rather than a count back from its end, and that is safe
+for one reason worth writing down: the only thing that drops a command from the front is filing a new
+one, and filing a new one restarts the walk on the same call. An index is therefore never held across
+a shift. (The first cut of this carried an index-fixup for the drop, which was unreachable code for
+exactly that reason.)
+
 ### What is deliberately NOT here
 
 - ~~**Full-scrollback capture of an over-long output.**~~ **Shipped in §40.** As built here
   select-command-output was viewport-bound — a command whose output was taller than the screen selected
   and copied only the first screenful — because the selection itself addressed viewport rows. §40 moved
   the selection to absolute document lines and gave the copy path a history read, so the whole range
-  comes back whatever the scroll position. Still deferred: **walking older commands on a repeated
-  Ctrl+Shift+O** (it always takes the latest; clicking a specific tick already reaches any command).
+  comes back whatever the scroll position.
+- ~~**Walking older commands on a repeated Ctrl+Shift+O.**~~ **Shipped** — see below. As built here the
+  key always took the latest; now each press steps one command further back.
 - **No injection of the marks.** cmote reads whatever the shell offers and adds nothing: a shell
   without integration configured shows no dots, no ticks, and jump-to-prompt finds nothing. cmote
   never rewrites the remote's shell init to turn it on — that is the user's to configure, exactly as

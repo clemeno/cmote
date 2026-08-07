@@ -261,6 +261,15 @@ pub struct Prompts {
 	/// The command currently being assembled from its marks, if a prompt has started but not yet
 	/// finished (§34). `None` at rest and between commands.
 	pending: Option<Pending>,
+	/// How far back through `commands` the output selection has walked (§34): `None` before the
+	/// first press, then an index INTO `commands` of the one selected last. Repeated Ctrl+Shift+O
+	/// steps it further back through the session's history; a new command, a click on a prompt tick
+	/// and any fresh grid press all put it back where it belongs.
+	///
+	/// An index into a ring that drops from the front is normally a hazard, and here it is safe for
+	/// one reason worth stating: the only thing that drops a command is filing a new one, and filing
+	/// a new one restarts the walk on the same call. So an index is never held across a shift.
+	walk: Option<usize>,
 }
 
 impl Prompts {
@@ -336,26 +345,65 @@ impl Prompts {
 		if self.commands.len() > MAX_COMMANDS {
 			self.commands.remove(0);
 		}
+		// A command that has just finished is what the next Ctrl+Shift+O should reach for, whatever
+		// the walk had wandered back to: running something new is the clearest possible statement
+		// that the user is done reading old output (§34). It is also what makes the walk safe to hold
+		// as an INDEX despite the ring above dropping from the front — every drop happens here, on
+		// the same call that forgets the index, so a stored one can never be left pointing a place
+		// along from where it was put.
+		self.restart_walk();
 	}
 
-	/// The output line-span of the most recently finished command (§34), as absolute half-open
-	/// `(start, end)` lines, or `None` when no command has finished or the last one printed nothing.
-	/// Drives the "select the last command's output" keybind.
-	pub fn latest_output(&self) -> Option<(u64, u64)> {
-		self.commands.last().copied().and_then(Command::range)
+	/// The next output line-span going BACK through the session (§34), as absolute half-open
+	/// `(start, end)` lines: the most recent finished command's on the first call, the one before it
+	/// on the next, and so on. `None` when nothing has finished yet, or once the walk has reached
+	/// the oldest command still held — at which point the walk stays there, so leaning on the key
+	/// leaves the oldest output selected rather than wrapping round to the newest.
+	///
+	/// Commands that printed NOTHING are stepped over rather than stopping the walk. A `cd`, a bare
+	/// Enter or a failed `cd` files a span with nothing in it (§34), and stopping on those would
+	/// make the key look broken exactly when a session has a run of them.
+	pub fn walk_output(&mut self) -> Option<(u64, u64)> {
+		// Where to look from: one before the last one given, or the newest if the walk is fresh.
+		let mut at = match self.walk {
+			Some(at) => at.checked_sub(1)?,
+			None => self.commands.len().checked_sub(1)?,
+		};
+		loop {
+			if let Some(range) = self.commands[at].range() {
+				self.walk = Some(at);
+				return Some(range);
+			}
+			// Nothing printed here — keep going back. Running out means the walk stays where it was,
+			// so the selection on screen is left alone rather than cleared.
+			at = at.checked_sub(1)?;
+		}
+	}
+
+	/// Start the walk over, so the next Ctrl+Shift+O takes the most recent command again (§34).
+	/// Called when a command finishes and whenever the user does something else with the grid — the
+	/// walk is a gesture, and any other gesture ends it.
+	pub fn restart_walk(&mut self) {
+		self.walk = None;
 	}
 
 	/// The output line-span of the finished command whose prompt sat on absolute line `prompt`
 	/// (§34), or `None` when no finished command started there — the resolver behind clicking a
 	/// prompt's gutter tick. Searched newest-first so a reused line resolves to its most recent
 	/// command.
-	pub fn output_at_prompt(&self, prompt: u64) -> Option<(u64, u64)> {
-		self.commands
+	///
+	/// The click also PARKS THE WALK on that command, which is why this takes `&mut self`: a click
+	/// picks a place in the history, so the Ctrl+Shift+O after it carries on back from there rather
+	/// than jumping to the newest. The two ways of reaching a command's output are then one gesture
+	/// — point at one, then keep stepping.
+	pub fn output_at_prompt(&mut self, prompt: u64) -> Option<(u64, u64)> {
+		let at = self
+			.commands
 			.iter()
-			.rev()
-			.find(|command| command.prompt == prompt)
-			.copied()
-			.and_then(Command::range)
+			.rposition(|command| command.prompt == prompt)?;
+		let range = self.commands[at].range()?;
+		self.walk = Some(at);
+		Some(range)
 	}
 
 	/// Forget every prompt (a full reset — `ESC c` — or the screen cleared them out from under us).
@@ -365,6 +413,8 @@ impl Prompts {
 		self.marks.clear();
 		self.commands.clear();
 		self.pending = None;
+		// The walk indexed into the list that was just emptied.
+		self.restart_walk();
 	}
 
 	/// Where the command cycle stands (§34), for the status glyph.
@@ -642,7 +692,7 @@ mod tests {
 		prompts.apply(Mark::PromptStart, 0, 0);
 		prompts.apply(Mark::OutputStart, 0, 1);
 		prompts.apply(Mark::CommandEnd(Some(0)), 0, 3);
-		assert_eq!(prompts.latest_output(), Some((1, 3)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
 	}
 
 	#[test]
@@ -657,9 +707,11 @@ mod tests {
 		prompts.apply(Mark::PromptStart, 5, 0);
 		prompts.apply(Mark::OutputStart, 5, 1);
 		prompts.apply(Mark::CommandEnd(Some(0)), 5, 3);
+		// The keybind with no walk under way takes the latest of the two …
+		assert_eq!(prompts.walk_output(), Some((6, 8)));
+		// … and a click reaches either, whichever the walk had got to.
 		assert_eq!(prompts.output_at_prompt(0), Some((1, 2)));
 		assert_eq!(prompts.output_at_prompt(5), Some((6, 8)));
-		assert_eq!(prompts.latest_output(), Some((6, 8)));
 		// A prompt line no command started at resolves to nothing.
 		assert_eq!(prompts.output_at_prompt(99), None);
 	}
@@ -672,7 +724,7 @@ mod tests {
 		let mut prompts = Prompts::default();
 		prompts.apply(Mark::PromptStart, 0, 0);
 		prompts.apply(Mark::CommandEnd(Some(0)), 0, 0);
-		assert_eq!(prompts.latest_output(), None);
+		assert_eq!(prompts.walk_output(), None);
 		assert_eq!(prompts.output_at_prompt(0), None);
 	}
 
@@ -683,9 +735,103 @@ mod tests {
 		let mut prompts = Prompts::default();
 		prompts.apply(Mark::PromptStart, 0, 0);
 		prompts.apply(Mark::OutputStart, 0, 1);
-		assert_eq!(prompts.latest_output(), None);
+		assert_eq!(prompts.walk_output(), None);
 		prompts.apply(Mark::CommandEnd(None), 0, 2);
-		assert_eq!(prompts.latest_output(), Some((1, 2)));
+		assert_eq!(prompts.walk_output(), Some((1, 2)));
+	}
+
+	/// Run one whole command cycle: a prompt on absolute line `at`, output from `at + 1`, finishing
+	/// on `end`. Written out here because the walk tests need several commands each and the marks
+	/// themselves are not what those tests are about.
+	fn run_command(prompts: &mut Prompts, at: u64, end: u64) {
+		prompts.apply(Mark::PromptStart, at as usize, 0);
+		prompts.apply(Mark::OutputStart, at as usize + 1, 0);
+		prompts.apply(Mark::CommandEnd(Some(0)), end as usize, 0);
+	}
+
+	#[test]
+	fn repeated_presses_walk_back_through_the_commands() {
+		// Three commands, newest last. Ctrl+Shift+O takes the newest, then the one before it, then
+		// the one before that — which is what makes the key a way of reading back through a session
+		// rather than a way of grabbing the last thing only (§34).
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		run_command(&mut prompts, 10, 13);
+		run_command(&mut prompts, 20, 23);
+		assert_eq!(prompts.walk_output(), Some((21, 23)));
+		assert_eq!(prompts.walk_output(), Some((11, 13)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
+	}
+
+	#[test]
+	fn the_walk_stays_on_the_oldest_command_it_still_holds() {
+		// Past the oldest there is nothing to select, and the answer is `None` rather than the newest
+		// again: leaning on the key leaves the oldest output selected instead of silently starting
+		// the session over from the top, which would look like the key had done something else.
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		run_command(&mut prompts, 10, 13);
+		assert_eq!(prompts.walk_output(), Some((11, 13)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
+		assert_eq!(prompts.walk_output(), None);
+		assert_eq!(prompts.walk_output(), None);
+	}
+
+	#[test]
+	fn the_walk_steps_over_commands_that_printed_nothing() {
+		// A `cd`, a bare Enter and a failed `cd` all file a span with nothing in it. Stopping on one
+		// would make the key look broken exactly when a session has a run of them, so the walk keeps
+		// going back until it finds output (§34).
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		// Two commands that printed nothing: prompt and end on the same line, no output start.
+		prompts.apply(Mark::PromptStart, 10, 0);
+		prompts.apply(Mark::CommandEnd(Some(0)), 10, 0);
+		prompts.apply(Mark::PromptStart, 11, 0);
+		prompts.apply(Mark::CommandEnd(Some(1)), 11, 0);
+		run_command(&mut prompts, 20, 23);
+		assert_eq!(prompts.walk_output(), Some((21, 23)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
+	}
+
+	#[test]
+	fn a_command_that_finishes_puts_the_walk_back_at_the_newest() {
+		// Reading back through history, then running something new: the next press must take what
+		// was just run. Running a command is the clearest statement there is that the user has
+		// stopped reading old output (§34).
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		run_command(&mut prompts, 10, 13);
+		assert_eq!(prompts.walk_output(), Some((11, 13)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
+		run_command(&mut prompts, 20, 23);
+		assert_eq!(prompts.walk_output(), Some((21, 23)));
+	}
+
+	#[test]
+	fn restarting_the_walk_takes_the_newest_again() {
+		// What a press on the grid does (§34): the walk is one gesture, and anything else the user
+		// does with the grid ends it.
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		run_command(&mut prompts, 10, 13);
+		assert_eq!(prompts.walk_output(), Some((11, 13)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
+		prompts.restart_walk();
+		assert_eq!(prompts.walk_output(), Some((11, 13)));
+	}
+
+	#[test]
+	fn clicking_a_prompt_parks_the_walk_there_so_the_next_press_carries_on_back() {
+		// The two ways to reach a command's output are one gesture (§34): point at a prompt tick,
+		// then keep stepping back from it. Without the parking, the press after a click would jump
+		// to the newest, which reads as the key having lost its place.
+		let mut prompts = Prompts::default();
+		run_command(&mut prompts, 0, 3);
+		run_command(&mut prompts, 10, 13);
+		run_command(&mut prompts, 20, 23);
+		assert_eq!(prompts.output_at_prompt(10), Some((11, 13)));
+		assert_eq!(prompts.walk_output(), Some((1, 3)));
 	}
 
 	#[test]
@@ -696,8 +842,8 @@ mod tests {
 		prompts.apply(Mark::PromptStart, 0, 0);
 		prompts.apply(Mark::OutputStart, 0, 1);
 		prompts.apply(Mark::CommandEnd(Some(0)), 0, 2);
-		assert_eq!(prompts.latest_output(), Some((1, 2)));
+		assert_eq!(prompts.walk_output(), Some((1, 2)));
 		prompts.clear();
-		assert_eq!(prompts.latest_output(), None);
+		assert_eq!(prompts.walk_output(), None);
 	}
 }

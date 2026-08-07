@@ -394,6 +394,8 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Ctrl+Shift+C** | Copy the selection as plain text only |
 | **Ctrl+V** / **Ctrl+Shift+V** | Paste (bracketed-paste aware); both paste plain text |
 | **Ctrl+Shift+F** | Open the scrollback find bar (pressed again, it refocuses the field). **↑** / **↓** step to the older / newer hit, wrapping; **Esc** or its ✕ closes it and leaves the last hit selected. Hits on screen are washed; the bar follows live output |
+| **Ctrl+Shift+Up** / **Ctrl+Shift+Down** | Jump the view to the previous / next prompt (needs a shell with OSC 133 integration configured) |
+| **Ctrl+Shift+O** | Select the last finished command's whole output; **press again** to step back a command at a time. A click on a prompt's gutter tick selects that command's output and the next press carries on back from there |
 | **Copy / Paste** via the status-bar buttons or right-click menu | Same copy (rich) and paste |
 | Click / drag / scroll **in a program that asked for the mouse** | Goes to that program (btop, vim, tmux, mc) instead of selecting |
 | **Shift** + click or drag | Takes the pointer back: select text, or right-click for cmote's own menu |

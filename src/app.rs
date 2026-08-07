@@ -5182,6 +5182,12 @@ impl Tab {
 		self.search = None;
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
 		self.set_focus(Focus::Terminal);
+		// Any press on the grid ends a walk back through the commands (§34): the next Ctrl+Shift+O
+		// starts from the newest again. The gutter branch below re-parks it on the tick that was
+		// clicked, so a click on a prompt still says "carry on back from HERE".
+		if let Some(terminal) = self.terminal.as_mut() {
+			terminal.restart_output_walk();
+		}
 		let Some(terminal) = self.terminal.as_ref() else {
 			return;
 		};
@@ -5294,14 +5300,16 @@ impl Tab {
 		}
 	}
 
-	/// Select the most recently finished command's output as a text selection (§34) — the
-	/// Ctrl+Shift+O keybind. The terminal reveals the output (scrolling up to it when it has left the
-	/// live screen) and hands back the viewport rows it fills; those become a stream selection the
-	/// existing Copy path then copies. A no-op when no command has finished or the last printed
-	/// nothing.
+	/// Select a finished command's output as a text selection (§34) — the Ctrl+Shift+O keybind. The
+	/// first press takes the latest command; each press after it steps one command further back, so
+	/// the key reads BACK through the session rather than only grabbing the last thing run. The
+	/// terminal reveals the output (scrolling up to it when it has left the live screen) and hands
+	/// back the document lines it fills; those become a stream selection the existing Copy path then
+	/// copies. A no-op when no command has finished, and at the oldest one held — the selection stays
+	/// where it is rather than wrapping round to the newest.
 	fn select_command_output(&mut self) {
 		if let Some(terminal) = self.terminal.as_mut()
-			&& let Some(span) = terminal.select_output_latest()
+			&& let Some(span) = terminal.select_output_back()
 		{
 			self.set_output_selection(span);
 		}
