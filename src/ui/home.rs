@@ -2,6 +2,9 @@
 //
 // This is the landing screen (§10 state machine). It lists the saved targets
 // (`profiles::Target`) sorted alphabetically by name, and lets the user:
+//   * narrow the list — the filter box above it keeps only the rows matching what is typed
+//     (§49): a fragment while there is no wildcard in it, a whole-row glob once `*` or `?`
+//     appears. Everything below the filter works off the rows it left, not off the whole list;
 //   * pick one — pre-fills the connect form with its host / port / user / auth so a
 //     return visit is one click (the secret is still entered on the form, §12);
 //   * rename one — F2 on the selected row, or right-click → Rename; the row becomes
@@ -31,6 +34,10 @@ use crate::ui::{dialog, menu};
 /// prompt, §7).
 pub const RENAME_INPUT_ID: &str = "home-rename";
 
+/// The widget id of the filter box (§49), so Ctrl+F can put the cursor in it without the user
+/// reaching for the mouse — the same trick the rename field and the find bar use.
+pub const FILTER_INPUT_ID: &str = "home-filter";
+
 /// The body copy for the delete confirmation (§14). `app` appends the target being
 /// deleted (its name and endpoint) and seeds the whole thing into the dialog buffer, so
 /// the user confirms against the row they actually picked.
@@ -46,10 +53,12 @@ pub const DELETE_DIALOG_BODY: &str = "Removes this target from the saved list. N
 // The list geometry. Each row is a FIXED height so the right-click menu can be placed
 // from the selected row's index without measuring the laid-out widgets (iced does not
 // expose that). `LIST_TOP` is the approximate y where the first row starts, below the
-// header. `ponytail:` these are eyeballed to the current layout; the menu can sit a few
-// pixels off if the header wraps, and assumes the list is scrolled to the top.
+// header, the hint and the filter box. `ponytail:` these are eyeballed to the current layout;
+// the menu can sit a few pixels off if the header wraps, and assumes the list is scrolled to
+// the top. The filter box (§49) is what pushed `LIST_TOP` down from 108: it is one text input
+// (its own padding plus a line of text) and the column's spacing above it.
 const ROW_HEIGHT: f32 = 34.0;
-const LIST_TOP: f32 = 108.0;
+const LIST_TOP: f32 = 151.0;
 const MENU_LEFT: f32 = 40.0;
 
 /// The current inline-rename edit: which target (by endpoint key) is being renamed and
@@ -60,23 +69,32 @@ pub struct RenameState {
 	pub text: String,
 }
 
+/// Everything the home screen shows besides the targets themselves, in one struct rather than
+/// a row of positional arguments: `filter` is what is typed in the filter box (§49), `selected`
+/// the endpoint key of the highlighted row, `rename` the in-progress inline edit, `menu_open`
+/// the right-click menu anchored at the selected row, and `confirm_delete` the delete
+/// confirmation over everything, with `dialog_body` as its selectable message and `drag` its
+/// position. Named fields also mean the call site says which flag is which — with seven of them
+/// in a row, two `bool`s next to each other are a silent bug waiting for the day their order is
+/// mistyped.
+pub struct View<'a> {
+	pub filter: &'a str,
+	pub selected: Option<&'a str>,
+	pub rename: Option<&'a RenameState>,
+	pub menu_open: bool,
+	pub confirm_delete: bool,
+	pub dialog_body: &'a text_editor::Content,
+	pub drag: dialog::Drag,
+}
+
 /// Render the home screen. `targets` are already in display order (`profiles` keeps
-/// them sorted); `selected` is the endpoint key of the highlighted row, if any;
-/// `rename` is the in-progress inline edit, if any; `menu_open` shows the right-click
-/// menu anchored at the selected row; `confirm_delete` overlays the delete confirmation
-/// on top of everything, with `dialog_body` as its selectable message and `drag` its
-/// position.
+/// them sorted); `state` is everything else on the screen (see `View`).
 pub fn view<'a>(
 	// `targets` has its OWN lifetime, not `'a`: every row clones the names it shows (see
 	// `target_row`), so nothing in the returned element borrows the list. That lets `app` pass a
 	// short-lived borrow of the shared, `RefCell`-guarded target list (§26).
 	targets: &[Target],
-	selected: Option<&str>,
-	rename: Option<&'a RenameState>,
-	menu_open: bool,
-	confirm_delete: bool,
-	dialog_body: &'a text_editor::Content,
-	drag: dialog::Drag,
+	state: View<'a>,
 ) -> Element<'a, Message> {
 	let header = row![
 		text("cmote — targets").size(24).width(Length::Fill),
@@ -86,19 +104,41 @@ pub fn view<'a>(
 	.align_y(Vertical::Center);
 
 	// A one-line hint so the (deliberately terse) interactions are discoverable.
-	let hint = text("Click to select · click again or Enter to open · F2 or right-click to rename")
-		.size(12)
-		.style(text::secondary);
+	let hint = text(
+		"Click to select · click again or Enter to open · F2 or right-click to rename · Ctrl+F to filter",
+	)
+	.size(12)
+	.style(text::secondary);
 
-	let base: Element<'a, Message> = column![header, hint, target_list(targets, selected, rename)]
-		.spacing(12)
-		.padding(20)
-		.into();
+	// The rows the filter leaves on screen (§49). Everything below this line works off `shown`
+	// and not off `targets` — the list, the count, and the row index the context menu is placed
+	// by — so the menu lands beside the row the user is actually looking at rather than beside
+	// wherever that target sits in the unfiltered list.
+	let shown: Vec<&Target> = targets
+		.iter()
+		.filter(|target| target.matches(state.filter))
+		.collect();
+
+	let base: Element<'a, Message> = column![
+		header,
+		hint,
+		filter_bar(state.filter, shown.len(), targets.len()),
+		target_list(
+			&shown,
+			!state.filter.is_empty(),
+			state.selected,
+			state.rename
+		),
+	]
+	.spacing(12)
+	.padding(20)
+	.into();
 
 	// The menu only shows for a real selection; find that row's index to place it. If
 	// the selection has somehow gone stale, fall back to just the base view.
-	let menu_index = menu_open
-		.then(|| selected.and_then(|key| index_of(targets, key)))
+	let menu_index = state
+		.menu_open
+		.then(|| state.selected.and_then(|key| index_of(&shown, key)))
 		.flatten();
 
 	let mut layers: Vec<Element<'a, Message>> = vec![base];
@@ -109,9 +149,9 @@ pub fn view<'a>(
 	// Deleting a target cannot be undone, so it goes through the same confirmation
 	// chrome as Disconnect (§10) rather than acting on the menu click. The list stays
 	// visible (dimmed) behind the card, so the row being removed is still in view.
-	if confirm_delete {
+	if state.confirm_delete {
 		layers.push(dialog::backdrop(Message::HomeDeleteCancelled));
-		layers.push(confirm_delete_panel(dialog_body, drag));
+		layers.push(confirm_delete_panel(state.dialog_body, state.drag));
 	}
 
 	// One stack, always — even with nothing over the list. iced keys a widget's internal
@@ -151,18 +191,55 @@ fn confirm_delete_panel(
 	)
 }
 
-/// The scrollable list of target rows, or an empty-state hint when there are none.
+/// The filter box above the list (§49), with a `shown of total` tally beside it once something
+/// is typed — the tally is how the user knows the list is short because it was filtered and not
+/// because the targets are gone.
+///
+/// The field deliberately has **no `on_submit`**. iced's text input only captures Enter when it
+/// has a submit message, and the home screen's key handler only ever sees the keys no widget
+/// captured — so leaving it off is what lets Enter fall through to the list and open the
+/// selected target while the cursor is still in the box. Type, arrow nothing, press Enter,
+/// connect. Backspace and Delete go the other way: the focused field captures those, so the
+/// Delete key cannot reach the list and raise a delete prompt while a pattern is being edited.
+fn filter_bar<'a>(filter: &'a str, shown: usize, total: usize) -> Element<'a, Message> {
+	let field = text_input(
+		"Filter targets — a fragment, or a glob with * and ?",
+		filter,
+	)
+	.id(FILTER_INPUT_ID)
+	.on_input(Message::HomeFilterEdited)
+	.width(Length::Fill);
+
+	let mut bar = row![field].spacing(10).align_y(Vertical::Center);
+	if !filter.is_empty() {
+		bar = bar.push(
+			text(format!("{shown} of {total}"))
+				.size(12)
+				.style(text::secondary),
+		);
+	}
+	bar.into()
+}
+
+/// The scrollable list of target rows, or an empty-state hint when there are none. `filtering`
+/// says whether the box above holds a pattern, which is the difference between the two ways the
+/// list can be empty: nothing saved yet, or nothing matching — the first is answered by
+/// connecting somewhere, the second by editing the pattern, so they must not read alike.
 fn target_list<'a>(
 	// Fresh lifetime, like `view` — the rows clone what they show, so the list is not borrowed
 	// into the returned element (§26).
-	targets: &[Target],
+	targets: &[&Target],
+	filtering: bool,
 	selected: Option<&str>,
 	rename: Option<&'a RenameState>,
 ) -> Element<'a, Message> {
 	if targets.is_empty() {
-		return text("No saved targets yet — “New connection” to add one.")
-			.style(text::secondary)
-			.into();
+		let empty = if filtering {
+			"No target matches this filter."
+		} else {
+			"No saved targets yet — “New connection” to add one."
+		};
+		return text(empty).style(text::secondary).into();
 	}
 
 	let rows = targets.iter().map(|target| {
@@ -276,8 +353,9 @@ fn context_menu(index: usize) -> Element<'static, Message> {
 		.into()
 }
 
-/// The index of the target with this endpoint key in display order, used to place the
-/// context menu against the right row.
-fn index_of(targets: &[Target], key: &str) -> Option<usize> {
+/// The index of the target with this endpoint key among the rows ON SCREEN, used to place the
+/// context menu against the right row. A filtered-out selection is simply not found, and the
+/// menu is not drawn — which is the right answer, since there is no row for it to point at.
+fn index_of(targets: &[&Target], key: &str) -> Option<usize> {
 	targets.iter().position(|target| target.endpoint() == key)
 }

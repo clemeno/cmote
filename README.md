@@ -69,6 +69,13 @@ references below (§n) point into it.
   the form; **rename** it in place with **F2** or right-click → **Rename** (the list
   re-sorts); right-click also offers **Open** and **Delete** (deleting asks to confirm —
   cancelling keeps the target); **New connection** opens a blank form.
+- **Filter the target list** — the box above the list narrows it as you type (**Ctrl+F** puts
+  the cursor there). Plain text is a **fragment**, matching anywhere, so `prod` finds
+  `web-production-01` from the first keystroke; type a `*` or a `?` and it becomes a **glob** over
+  the whole row instead — `prod*` starts with, `*.db` ends with, `web-0?` is one character wide.
+  Both the name and the `user@host:port` are matched, case-insensitively, and a `shown of total`
+  tally says how much is hidden. **Enter** opens the selected target without leaving the box;
+  **Esc** empties it (§49).
 - Connection form: host, port, user, and an auth method.
 - **Password** auth, or **private-key** auth with a native file picker (`rfd`).
 - Key formats: OpenSSH / PEM (via `russh::keys`) and PuTTY **`.ppk`** (via
@@ -456,6 +463,10 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 |---|---|
 | Click a target | Select it; click again (or **Enter**) to open it |
 | Right-click a target | Open / Rename / Delete (deleting asks first) |
+| Type in the filter box | Keep only the matching rows — a fragment, or a glob once you type `*` or `?`; name and endpoint both count |
+| **Ctrl+F** | Put the cursor in the filter box |
+| **Enter** (from the filter box) | Open the selected target without leaving the box |
+| **Esc** | Empty the filter box (from inside it, press it twice: the first press leaves the field) |
 | **F2** | Rename the selected target (**Enter** commits, **Esc** abandons) |
 | **Delete** | Delete the selected target, after the confirmation (**Esc** cancels it) |
 | **Tab** / **Shift+Tab** on the connect form | Move focus across the fields, the auth radios and Connect; **Enter** / **Space** activates the focused radio or button |

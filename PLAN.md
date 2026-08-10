@@ -44,7 +44,7 @@ for disambiguate, press / repeat / release events, report-all and associated tex
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
 3.0.0; and everything since *that* lands the same way in the one **v4.0.0** major release —
-§32 through §48, with no point increments in between (the 3.1.0 the manifest carried for a
+§32 through §49, with no point increments in between (the 3.1.0 the manifest carried for a
 while was work in progress, never tagged, and is folded in here). What earns the major number
 is that two of them change what a cmote window *is*: it can be **split** in two, each half with
 its own tab strip and its own session on screen at once (§48), and one connection can hold
@@ -58,7 +58,9 @@ prompt marks** driving a per-tab command-status dot, jump-to-prompt and select-c
 (§34); a **selection that speaks document lines**, so text stays selected as it scrolls (§40),
 with **double- and triple-click** to take a word or a line (§42); the **identity and input queries**
 the engine drops, answered beside it (§33, §36); a **tab strip the user orders**, with files beside
-their session and drag to rearrange (§38), and a close that **returns you where you were** (§37).
+their session and drag to rearrange (§38), and a close that **returns you where you were** (§37);
+and a **filter box over the saved-target list** — a fragment while you type, a whole-row glob the
+moment a `*` or `?` appears (§49).
 Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -231,6 +233,7 @@ cmote/
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
+    ├── glob.rs           the home filter's text rule: a fragment until `*` or `?` is typed, then a whole-text glob; case-insensitive (§49)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── mru.rs            the tabs' activation order (ids, most recent last): a close falls back to the previous visit (§37)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
@@ -245,7 +248,7 @@ cmote/
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
-    │   ├── home.rs        the home screen: the saved-target list, select / open / rename / delete, theme-following colours (§14)
+    │   ├── home.rs        the home screen: the filter box, the saved-target list, select / open / rename / delete, theme-following colours (§14, §49)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
@@ -1064,7 +1067,8 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   (host / port / user / auth / key; the secret fields start empty); **New connection**
   opens a blank form; **rename** in place via **F2** or the right-click menu (Enter
   commits and re-sorts, Esc cancels); the right-click menu also offers **Open** and
-  **Delete**. `Esc` on the form returns to the list.
+  **Delete**; **filter** the list from the box above it (§49). `Esc` on the form returns to
+  the list.
 - **Delete asks first.** Removing a target is not undoable, so the menu item and the
   **Delete** key only open a confirmation in the shared dialog chrome (§10) — the same
   treatment Disconnect gets. Its body names the target being removed, since the list is
@@ -4748,3 +4752,108 @@ while positions moved underneath them.
 - **The regions do not label themselves.** The focused region's strip is lit and the others are dimmed, and
   the title bar names the focused region's session (§17) — a window has one title bar however many regions
   are in it. A per-region caption would be a third thing saying the same as the tint and the chip.
+
+---
+
+## §49 — Filtering the target list (v4.0.0)
+
+The home screen (§14) lists every target you have ever connected to, alphabetically, and it grows the way
+those lists always grow — one row per machine, forever, because a machine you stopped using is exactly the
+one you will want again in six months. At a dozen rows the list is a menu; at sixty it is a haystack you
+scroll, and the click that opens the wrong row is a connection to the wrong server. This section puts a
+**filter box above the list**: type, and only the rows matching what you typed stay on screen.
+
+### One pattern, two rules — and the wildcard is the switch between them
+
+`glob.rs` holds the whole rule, and it is two rules chosen by what was typed:
+
+- **No `*` and no `?` — a fragment.** The pattern matches anywhere in the text, so `prod` finds
+  `web-production-01`. This is what makes the box usable one keystroke at a time. Whole-string matching from
+  the first letter would blank the list until the pattern was finished, which is the opposite of a quick
+  filter — the point is to narrow *while* typing, not to type a name in full and be told whether it exists.
+- **A `*` or a `?` — a glob over the whole text**, the way a shell glob matches a whole filename. `prod*` is
+  the rows that *begin* with prod, `*.db` the ones that end with `.db`, `web-0?` a row with exactly one
+  character where the `?` is. This is where **anchoring** comes from, and a fragment cannot express it: a
+  fragment is free to match in the middle, so there is no way to say "at the start" without a second syntax.
+
+Making the wildcard the switch means the mode is visible in what was typed rather than hidden in a toggle
+somewhere. The alternative — matching a fragment always, wildcards included — was rejected because it makes
+a trailing `*` mean **nothing** (a fragment already matches with anything after it), so a user typing the
+shell habit `prod*` would get an answer that quietly ignored half of what they wrote.
+
+Matching is **case-insensitive** under both rules: a host list is typed in whatever case its naming scheme
+happened to use, and nobody filtering it is trying to make that distinction.
+
+The glob itself is the classic **two-pointer walk with one backtrack point**, not a recursion and not a
+regex build. Only a `*` can be wrong recoverably — everything else either matches the character in front of
+it or fails outright — so the walk remembers the last `*` it passed and how much text that star had
+swallowed, and on a mismatch it feeds the star one more character and carries on. That is what lets `*b`
+find its `b` at the *end* of `abab` instead of stopping at the first one. Only the **last** star needs
+remembering: an earlier star that has to give more ground is reached again by the same rule. Comparison is
+by `char`, not by byte, because `?` means one character the user can see — a byte-wise `?` would match a
+third of an emoji.
+
+### The pattern is tried against both halves of the row
+
+`Target::matches` asks the rule about the **name** and about the **`user@host:port` endpoint**, and either
+hit keeps the row. Both are on screen, so filtering by only one of them would hide rows whose match the user
+can *see* — and the two are searched for different reasons: the name for what the machine is for (`build`,
+`staging`), the endpoint for where it actually is (a subnet, a login, a port). It matters too that every
+target *starts out* named after its endpoint (§14), so a list nobody has renamed is all endpoint.
+
+That method lives on `Target` rather than in the view, which is what lets `app` ask the **same** question of
+the selected row that the list asked of every row.
+
+### A filter that hides the selection lets go of it
+
+Every shortcut on this screen acts on the **selection**, not on what the pointer is over: F2 renames it,
+Enter opens it, Delete asks to remove it. So a selection left behind a filter is one keystroke away from
+renaming or deleting a row that is not on screen, and a confirmation naming a target the user cannot see
+reads as a bug rather than as the warning it is. `on_home_filter` therefore drops the selection — and the
+context menu anchored to it — the moment the pattern stops matching it. Nothing is lost: re-selecting is the
+same click that selected it in the first place.
+
+The context menu is placed by the selected row's **index among the rows on screen**, not its index in the
+saved list (§14's fixed `ROW_HEIGHT` arithmetic, since iced does not expose a laid-out position). A
+filtered-out selection is simply not found there and the menu is not drawn, which is the right answer: there
+is no row for it to point at.
+
+### The box takes the keys it needs and leaves the rest
+
+iced's keyboard subscription delivers only the events **no widget captured**, and a focused text input
+captures what it uses. That single fact does the whole keyboard split for free, in both directions:
+
+- **Backspace and Delete are captured** by the field, so editing a pattern cannot reach the list — the
+  Delete key raises no delete prompt while the cursor is in the box. This is why the box needed no mode of
+  its own.
+- **Enter is NOT captured**, because the field is given **no `on_submit`** — iced's text input only captures
+  Enter when it has a submit message to publish. So Enter falls through to the screen's key handler and
+  **opens the selected target** while the cursor is still in the box: type, press Enter, connect.
+- **Ctrl+F** puts the cursor in the box — the browser's shortcut for the same thing. The terminal's find bar
+  answers to Ctrl+Shift+F (§35) because a live shell has a claim on plain Ctrl+F; the home screen does not.
+- **Esc empties the box** and puts the whole list back. From *inside* the box it takes two presses: iced's
+  text input unfocuses on Esc and captures the event, so the first press hands the keyboard back and the
+  second one arrives at the screen. That is the widget's behaviour, disclosed rather than fought.
+
+A `shown of total` tally appears beside the box once something is typed, so a short list reads as *filtered*
+rather than as *targets missing*, and the empty state says which of the two kinds of empty it is — nothing
+saved yet (answered by connecting somewhere) or nothing matching (answered by editing the pattern).
+
+The pattern is **per tab**, like the selection: two regions of a split window (§48) are two places to be
+looking for two different machines, and one filter shared between them would move under a user who never
+touched it. It is not persisted — a filter is a way of getting somewhere, not a setting.
+
+### What is deliberately NOT here
+
+- **No regular expressions.** A glob is what this list needs: names are `role-environment-number`, and `?`
+  and `*` cover every question anyone asks of them. A regex engine would be a dependency, a syntax to
+  explain, and a way to type something that matches nothing for reasons that need reading.
+- **No fuzzy matching.** It would rank rather than filter, and ranking fights the alphabetical order the
+  list is read by (§14) — the row you are looking for would move as you type.
+- **No `{a,b}` braces and no `[a-z]` classes.** Both are shell-glob features; neither earns its explanation
+  here, and `*`/`?` plus a fragment already reach every row.
+- **The filter does not survive leaving the screen** in any way but staying in the field — it is per tab and
+  in memory, not in `targets.json`. Nothing about a machine changed, so nothing belongs in the store.
+- **No filtering by what is not on the row.** Auth kind, key path and the remembered-secret flag are not
+  matched, only the two strings the user can see. A filter that matched invisible fields would hide rows for
+  reasons the screen never shows.

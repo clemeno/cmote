@@ -1899,6 +1899,11 @@ pub struct Tab {
 	/// rename or delete in one tab's home screen is seen by every other, and there is a single
 	/// file on disk. Profiles only — never any secret material (§12).
 	targets: Rc<RefCell<crate::profiles::Targets>>,
+	/// What is typed in the home screen's filter box (§49); empty means the whole list is on
+	/// show. Per tab, like the selection below it: two regions of a split window are two places
+	/// to be looking for two different machines, and one filter shared between them would move
+	/// under a user who never touched it.
+	home_filter: String,
 	/// The endpoint key (`user@host:port`) of the highlighted target on the home
 	/// screen, if any. Drives the row highlight and is what the right-click menu and
 	/// the F2/Enter/Delete shortcuts act on.
@@ -2298,6 +2303,8 @@ pub enum Message {
 	HomeDeleteConfirmed,
 	/// The user backed out of the delete prompt (Cancel / ✕ / backdrop / Esc) — keep it.
 	HomeDeleteCancelled,
+	/// The home screen's filter box changed (§49) — narrow the list to the rows it matches.
+	HomeFilterEdited(String),
 	/// The inline rename field changed.
 	HomeRenameEdited(String),
 	/// The inline rename was submitted (Enter) — commit it and re-sort.
@@ -2986,6 +2993,7 @@ impl Tab {
 			Message::HomeMenuDelete => self.ask_delete_selected_target(),
 			Message::HomeDeleteConfirmed => self.delete_selected_target(),
 			Message::HomeDeleteCancelled => self.confirm_delete = false,
+			Message::HomeFilterEdited(pattern) => self.on_home_filter(pattern),
 			Message::HomeRenameEdited(value) => {
 				if let Some(rename) = self.home_rename.as_mut() {
 					rename.text = value;
@@ -4391,6 +4399,30 @@ impl Tab {
 		self.go_to_form()
 	}
 
+	/// A new pattern in the home screen's filter box (§49): keep it, and let go of the selection
+	/// if the row it names is no longer on screen.
+	///
+	/// Dropping it is the whole point. Every shortcut this screen has acts on the selection and
+	/// not on what the pointer is over — F2 renames it, Enter opens it, Delete asks to remove it
+	/// — so a selection hidden behind a filter is one keystroke away from renaming or deleting a
+	/// row the user cannot see, and the confirmation naming a target that is not in the list
+	/// reads as a bug rather than as the warning it is. Re-selecting is a click, the same click
+	/// that selected it in the first place, so nothing is lost by letting go.
+	fn on_home_filter(&mut self, pattern: String) {
+		self.home_filter = pattern;
+		let still_shown = self.home_selected.as_deref().is_some_and(|key| {
+			self.targets
+				.borrow()
+				.find(key)
+				.is_some_and(|target| target.matches(&self.home_filter))
+		});
+		if !still_shown {
+			self.home_selected = None;
+			// The context menu is anchored to the selected row, so it cannot outlive it.
+			self.home_menu_open = false;
+		}
+	}
+
 	/// Begin an inline rename of the selected target (§14): seed the edit with its
 	/// current name and focus the field so the user types straight away. No selection
 	/// (or a stale one) is a no-op.
@@ -4508,11 +4540,32 @@ impl Tab {
 			return iced::Task::done(Message::TabCloseRequested(self.id));
 		}
 
+		// Ctrl+F puts the cursor in the filter box (§49) — the browser's shortcut for the same
+		// thing, and the one the terminal's find bar answers to a screen away (Ctrl+Shift+F,
+		// §35; the shell has a claim on plain Ctrl+F, this screen does not). Pressing it while
+		// already typing there simply focuses it again, which is a no-op rather than a surprise.
+		if modifiers.control()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "f")
+		{
+			return iced::widget::operation::focus(ui::home::FILTER_INPUT_ID);
+		}
+
 		match key {
 			iced::keyboard::Key::Named(Named::F2) => self.start_rename(),
 			iced::keyboard::Key::Named(Named::Enter) => self.open_selected_target(),
 			iced::keyboard::Key::Named(Named::Delete) => {
 				self.ask_delete_selected_target();
+				iced::Task::none()
+			}
+			// Esc empties the filter box and puts the whole list back (§49) — the way out of a
+			// pattern that matches nothing, without going back to the box to erase it. From
+			// INSIDE the box it takes two presses: iced's text input unfocuses on Esc and
+			// captures the event, so the first press only hands the keyboard back and the second
+			// one arrives here. That is the widget's behaviour, not a rule of this screen.
+			iced::keyboard::Key::Named(Named::Escape) => {
+				self.on_home_filter(String::new());
 				iced::Task::none()
 			}
 			_ => iced::Task::none(),
@@ -6981,12 +7034,15 @@ impl Tab {
 			// every name it needs, so nothing in the returned element outlives the borrow (§26).
 			Screen::Home => ui::home::view(
 				self.targets.borrow().items(),
-				self.home_selected.as_deref(),
-				self.home_rename.as_ref(),
-				self.home_menu_open,
-				self.confirm_delete,
-				&self.dialog_body,
-				drag,
+				ui::home::View {
+					filter: &self.home_filter,
+					selected: self.home_selected.as_deref(),
+					rename: self.home_rename.as_ref(),
+					menu_open: self.home_menu_open,
+					confirm_delete: self.confirm_delete,
+					dialog_body: &self.dialog_body,
+					drag,
+				},
 			),
 			Screen::Connect => ui::connect::view(&self.form, self.form_focus),
 			Screen::Connecting { status } => text(status).into(),
@@ -7892,6 +7948,81 @@ mod tests {
 		// A stale event for a forward that no longer exists changes nothing.
 		let _ = app.on_ssh_event(SshEvent::ForwardConnectionOpened { id: 999 });
 		assert_eq!(app.forwards[0].activity_gauge(), "1 open · 2 total");
+	}
+
+	/// Two saved targets, `root@web-01:22` and `root@db-01:22`, on a tab sitting at the home
+	/// list — enough to have one row the filter keeps and one it hides (§49).
+	fn tab_with_targets() -> Tab {
+		let tab = Tab::default();
+		{
+			let mut targets = tab.targets.borrow_mut();
+			targets.upsert_on_connect("web-01", 22, "root", AuthKind::Password, None, None);
+			targets.upsert_on_connect("db-01", 22, "root", AuthKind::Password, None, None);
+		}
+		tab
+	}
+
+	/// Typing a pattern the selected row still matches leaves the selection alone — a list that
+	/// narrows under the pointer must not also move what the keyboard is aimed at (§49).
+	#[test]
+	fn a_filter_the_selection_survives_keeps_it_selected() {
+		let mut tab = tab_with_targets();
+		tab.home_selected = Some("root@web-01:22".to_owned());
+
+		tab.on_home_filter("web".to_owned());
+
+		assert_eq!(tab.home_selected.as_deref(), Some("root@web-01:22"));
+	}
+
+	/// A pattern that hides the selected row lets go of it, and of the menu anchored to it (§49).
+	/// Every shortcut on this screen acts on the selection — F2 renames it, Enter opens it,
+	/// Delete asks to remove it — so a selection behind the filter is one keystroke away from
+	/// acting on a row that is not on screen.
+	#[test]
+	fn a_filter_that_hides_the_selection_drops_it() {
+		let mut tab = tab_with_targets();
+		tab.home_selected = Some("root@web-01:22".to_owned());
+		tab.home_menu_open = true;
+
+		tab.on_home_filter("db".to_owned());
+
+		assert_eq!(
+			tab.home_selected, None,
+			"the hidden row is no longer selected"
+		);
+		assert!(!tab.home_menu_open, "and its context menu went with it");
+	}
+
+	/// The pattern is matched against the endpoint as well as the name, so a target still called
+	/// after its endpoint — which is how every target starts out — is findable by its host, its
+	/// login or its port (§49).
+	#[test]
+	fn a_filter_matches_the_endpoint_as_well_as_the_name() {
+		let tab = tab_with_targets();
+		tab.targets.borrow_mut().rename("root@db-01:22", "ledger");
+		let targets = tab.targets.borrow();
+
+		let ledger = targets.find("root@db-01:22").expect("the renamed target");
+		assert!(ledger.matches("ledger"), "by the name the user gave it");
+		assert!(ledger.matches("db-01"), "and by where it actually is");
+		assert!(ledger.matches("root@*"), "globs read the endpoint too");
+		assert!(!ledger.matches("web"), "the other row is not this one");
+	}
+
+	/// Esc empties the filter box and puts the whole list back (§49) — the way out of a pattern
+	/// that matches nothing without going back to the box to erase it.
+	#[test]
+	fn escape_empties_the_home_filter() {
+		let mut tab = tab_with_targets();
+		tab.home_filter = "prod".to_owned();
+
+		let _ = tab.on_home_key(key_press(
+			iced::keyboard::key::Named::Escape,
+			iced::keyboard::key::Code::Escape,
+			iced::keyboard::Modifiers::empty(),
+		));
+
+		assert!(tab.home_filter.is_empty());
 	}
 
 	// A key-press event for the terminal handler. `text: None` is fine for the named keys these

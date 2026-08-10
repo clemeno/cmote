@@ -150,6 +150,20 @@ impl Target {
 		endpoint_of(&self.user, &self.host, self.port)
 	}
 
+	/// Does this target survive the home screen's filter box (§49)? The pattern is tried against
+	/// BOTH halves of the row — the name the user gave it and the `user@host:port` it stands for
+	/// — and either hit keeps the row. Both are on screen, so filtering by only one of them
+	/// would hide rows whose match the user can see; and the two are searched for different
+	/// reasons: the name for the machine's role ("build", "staging"), the endpoint for where it
+	/// actually is (a subnet, a login, a port).
+	///
+	/// The rule itself is `glob::matches` — a fragment until a `*` or `?` is typed, then a
+	/// whole-text glob. Living here rather than in the view is what lets `app` ask the same
+	/// question of the selected row that the list asked of every row.
+	pub fn matches(&self, pattern: &str) -> bool {
+		crate::glob::matches(pattern, &self.name) || crate::glob::matches(pattern, &self.endpoint())
+	}
+
 	/// This target's remembered session state (§22), read out for the next connection to
 	/// restore. `show_hidden` is always known (it is a plain flag), so it comes back as
 	/// `Some`; the rest are as absent or present as they were stored.
