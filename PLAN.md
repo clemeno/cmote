@@ -286,6 +286,7 @@ cmote/
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, the viewport↔document line mapping and whether a line wraps into the next (§9, §16, §23, §24, §25, §40, §42)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
+    ├── transfer.rs       the ONE transfer slot and everything queued behind it: the batch being set up, the file / folder / download queues, the collision questions, resume, and an OS drop settling into all of it (§16, §17, §19, §21, §29)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -1407,10 +1408,29 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   (§21): a late failure would already have destroyed the old contents.
 - **A queue, one transfer at a time.** The confirmed batch becomes a `VecDeque` (`plan_uploads`
   builds it — pure, so the collision-answer logic is unit-tested without a server), and each
-  `UploadDone` pumps the next, exactly as the download queue does (§21). The status bar's
+  landing pumps the next, exactly as the download queue does (§21). The status bar's
   centre zone is a progress bar per file; the closing notice is `Uploaded N files` for a
   batch, `Uploaded to <path>` for a lone one. A race — a file that appears on the server
   after the pre-scan — is skipped rather than reopening the question mid-batch.
+- **All of it is one module (v4.0.0): `transfer::Queue`.** Uploads, downloads, whole folders and
+  drops are ONE feature with many entrances, and the rule they share — a single transfer at a time,
+  because there is one progress bar — used to be spelled out at each entrance, slightly differently
+  every time. `Queue` states it once, as `busy()`, and owns everything behind it: the batch being
+  set up, the three queues (files, folders, downloads), the slot, whichever question is open, the
+  resume point and the last notice. Every field is private, so a caller says what the USER DID and
+  never has to know that a folder queue drains after a file queue, or that a resume point goes stale
+  the moment a fresh transfer starts.
+  - It reaches for nothing — no SSH channel, no dialog buffer, no panels. Each call returns
+    `transfer::Effects` (commands to send, a dialog body to seed, a folder to re-list, whether the
+    destination field takes the keyboard) and `Tab::apply` carries it out. That is what makes every
+    rule in here testable with no session, no window and no server.
+  - The six SSH events that can end a transfer collapse into one `ended(Ended)` — `Done`, `Failed`,
+    `Interrupted`, `Skipped` — because which DIRECTION the thing in the slot was going is already
+    remembered (`in_flight`), so it need not be asked. Same for the two collision dialogs: only one
+    can be open, so one `answer_clash` serves both.
+  - A session ending is `reset()`, one call. The dozen hand-written clears it replaced missed six
+    fields — including the resume point, which meant a Resume button could survive a disconnect and
+    relaunch a transfer against whatever server the tab connected to next (§16).
 - **Progress.** The copy loop streams 32 KiB chunks and emits `TransferProgress` every
   256 KiB — enough for a smooth bar, far below the flood that per-chunk events would be.
 - **Failures stay in the bar.** A failure shows its reason in the status bar, never the error
@@ -1492,8 +1512,10 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
   through the usual `*Failed` event with a "cancelled" message, so the bar stays calm and offers no
   resume: the partial is gone.
 - **Resume continues a failure.** A copy that *errors* mid-flight (not a cancel) keeps its partial
-  and reports `SshEvent::TransferInterrupted`; the GUI remembers what it launched (`in_flight` →
-  `resumable`) and shows Resume. Resume re-issues the exact command with `resume` set. The task then
+  and reports `SshEvent::TransferInterrupted`; the queue remembers what it launched (`in_flight` →
+  `resumable`, both private to `transfer::Queue`) and shows Resume. It is also the only thing that
+  survives a stop, which is why a session ending has to clear it — see `reset()` under §17.
+  Resume re-issues the exact command with `resume` set. The task then
   **sizes the destination and sends only the bytes still missing**: `resume_start` (pure, unit-tested
   in `ssh/transfer.rs`) compares the destination's current size to the source's — equal or larger is
   *skip* (already there), smaller is *append from there*, absent is a fresh send. A single file opens
@@ -2740,28 +2762,28 @@ the window-event stream down to the three drag events. It is global (like focus 
   from the blue focus ring), but only with a live session — a hover over a home tab lights nothing.
 - `FilesHoveredLeft` → `Message::FileDropLeft` → put the ring out.
 - `FileDropped(path)` → `Message::FileDropped` → the path is **gathered**, not acted on.
-- the next frame → `Message::FileDropSettled` → `Tab::on_drop_settled` reads the whole set.
+- the next frame → `Message::FileDropSettled` → `transfer::Queue::settle` reads the whole set.
 
 The drop events carry **no pointer position** (iced does not report one), so a drop cannot be aimed
 at a widget — but it does not need to be: every drop targets the pane's own directory by definition,
 which is the whole contract. So position is irrelevant and a drop anywhere on the window uploads
 into the pane's folder.
 
-`on_drop_settled` reuses the entire §17 upload pipeline. It seeds the batch (`upload_files` /
-`upload_dir` = the pane's directory) and calls `on_upload_confirmed` — the same entry point the
+`settle` reuses the entire §17 upload pipeline. It seeds the batch (the picked files, and the
+destination = the pane's directory) and calls `send_batch` — the same entry point the
 destination-confirm dialog calls — so the destination is **pre-scanned** and, on a name already
 taken, the **same Overwrite / Keep both / Skip / Cancel dialog** opens (reused, not a new one).
 There is no destination-confirm step: the drop already said where. A dropped **folder** goes the
-other way, into `start_upload_tree` — again the same call the menu's "Upload folder…" makes.
+other way, into the tree queue — travelling by the same command the menu's "Upload folder…" makes.
 
 **Every upload now re-lists its destination.** When a batch (or a folder-tree upload) lands, the
-completion calls `refresh_remote_dir(upload_dir)` — the same helper a create or delete uses — so if
-the files pane (or the tree) is showing the folder the file went into, it re-lists in place and the
-new file appears without a manual Refresh. It is a no-op when the pane is elsewhere, so an upload to
-the shell's cwd while the pane is pointed at another folder costs no round trip. This fixes the
-drag-drop's most confusing gap: a file you drop onto the pane you are looking at now shows up in it.
-The tree-upload flow keeps no queue, so it stashes its destination in `upload_dir` on start for the
-same completion to read.
+queue asks for the destination to be re-listed (`Effects::refresh` → `refresh_remote_dir`, the same
+helper a create or delete uses) — so if the files pane (or the tree) is showing the folder the file
+went into, it re-lists in place and the new file appears without a manual Refresh. It is a no-op
+when the pane is elsewhere, so an upload to the shell's cwd while the pane is pointed at another
+folder costs no round trip. This fixes the drag-drop's most confusing gap: a file you drop onto the
+pane you are looking at now shows up in it. The tree-upload flow keeps no queue, so it stashes its
+destination in the batch's `dest` on start for the same completion to read.
 
 ### A drop is a set, not a file
 
@@ -2770,30 +2792,30 @@ is the last. Acting on each as it arrives is what made the first cut single-file
 would start a batch, and every sibling behind it would then be declined as "a transfer is already
 running" — a drop of five files uploading exactly one, with a misleading notice for the rest.
 
-So a `FileDropped` now only **gathers** its path, and a **frame clock** settles the drop: while
-`dropped` is non-empty the tab asks for `window::frames()`, and the tick reads the whole set at
+So a `FileDropped` now only **gathers** its path, and a **frame clock** settles the drop: while the
+queue is `settling()` the tab asks for `window::frames()`, and the tick reads the whole set at
 once. It is the same shape as the toast's dwell and the find bar's re-scan (§10, §44) — a clock
 that exists only while there is work for it — and it costs one frame, which is invisible against a
 gesture that ends with a mouse button coming up. What it buys is that the *set* is what gets
 decided about, which is the only way "these five files" can be one batch.
 
 With the whole set in hand, each path joins the queue for its own kind: **files** seed the ordinary
-batch (pre-scan, one collision question, queue), and **folders** go into `upload_trees`, each to
-travel tree-and-all through `start_upload_tree`. Both pipelines were already there; the drop reaches
-them both, and **a drop may carry any mixture of the two**.
+batch (pre-scan, one collision question, queue), and **folders** go into the tree queue, each to
+travel tree-and-all as its own recursive transfer. Both pipelines were already there; the drop
+reaches them both, and **a drop may carry any mixture of the two**.
 
 **Two queues, one slot.** A file and a folder are different transfers — a queued `(local, remote)`
 pair against a whole recursive walk that asks its own collision questions as it goes — and there is
-one progress bar, one cancel and one resume between them (§16, §17). So `pump_uploads` became the
+one progress bar, one cancel and one resume between them (§16, §17). So `Queue::pump` is the
 one place that decides what runs next: it drains the file batch first, then starts the folders one
-at a time, each on the `UploadDone` of the last. Files first because the batch's collision question
-is answered **up front**, before a byte moves, so putting it first gets the whole of the user's
-input out of the way; a tree asks as it walks and can be left to run.
+at a time, each on the landing of the last, and the downloads behind those. Files first because the
+batch's collision question is answered **up front**, before a byte moves, so putting it first gets
+the whole of the user's input out of the way; a tree asks as it walks and can be left to run.
 
-Nothing else had to learn about the second queue, because a tree reports the same `UploadDone` a
-file does — so the existing completion path already walks the queue. The three things that did
+Nothing else had to learn about the second queue, because a tree reports the same landing a file
+does — so the existing completion path already walks the queue. The three things that did
 change are the ones that count or clear: the closing notice (`upload_summary`, which names both
-kinds rather than adding them into a meaningless total), `finish_batch*` (which must not close while
+kinds rather than adding them into a meaningless total), the batch close (which must not run while
 folders are still waiting, since it clears the destination they are going to), and the two cancels
 (a deliberate cancel takes the whole drop, not just the item on the wire).
 
@@ -2806,8 +2828,9 @@ folders is the caller's business. The order is deliberate:
 
 - **no session** outranks everything — a drop onto a home tab is a silent `Ignore`, not a notice
   about something that could never have uploaded;
-- a **busy** transfer (or a batch mid-setup — `upload_files` still non-empty catches a menu upload
-  waiting on its confirmation) is declined, one flow at a time behind the single progress bar;
+- a **busy** transfer (or a batch mid-setup — `Queue::busy` counts a picked-but-unconfirmed batch,
+  which catches a menu upload waiting on its confirmation) is declined, one flow at a time behind
+  the single progress bar;
 - an **empty** set is silent: every dropped path would have had to vanish between the drop and the
   frame that reads it, which is not a mistake the user made;
 - with a **real pane directory** it is an `Upload`; without one (nothing listed yet) it is `NoDir`,

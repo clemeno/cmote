@@ -29,6 +29,7 @@ mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases 
 mod settings; // app-wide layout remembered between runs: the window size (§31)
 mod ssh; // SSH client, auth, host-key verification, key loading (§6-§8)
 mod term; // VT/ANSI terminal emulator wrapping the engine, behind a small surface (§9, §23)
+mod transfer; // the one transfer slot and everything queued behind it (§16, §17, §19, §21, §29)
 mod ui; // view helpers: the home list, the connect form and the terminal grid (§10)
 mod vault; // opt-in, portable, master-passphrase-encrypted store for remembered secrets (§16)
 

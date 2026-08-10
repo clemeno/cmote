@@ -29,7 +29,7 @@
 // arrive as two messages, and the click comes first.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use iced::Element;
@@ -42,6 +42,7 @@ use crate::files::{self, FilesMessage};
 use crate::link;
 use crate::secret::Secret;
 use crate::term;
+use crate::transfer;
 use crate::ui;
 use crate::ui::connect::AuthKind;
 
@@ -2052,7 +2053,7 @@ impl App {
 		// whole set is read together. Same shape as the two clocks above — the clock exists only
 		// while there is work for it, and the tick goes to every region since the tab that caught
 		// the drop is the one with paths waiting.
-		if on_screen().any(|tab| !tab.dropped.is_empty()) {
+		if on_screen().any(|tab| tab.transfers.settling()) {
 			subs.push(iced::window::frames().map(|_instant| Message::FileDropSettled));
 		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
@@ -2347,56 +2348,16 @@ pub struct Tab {
 	/// whole, this tab's REGION once it is split. Tracked from resize events so a dialog can be
 	/// centred and clamped within the space the tab actually occupies.
 	window_size: iced::Size,
-	/// The local files picked for the current upload batch (§17), empty when none is
-	/// pending — which is also what disables the status bar's Upload button. Cleared once
-	/// the batch drains, so the same files are never re-sent by a stray click. One file or
-	/// many: the flow is the same, and the confirmation lists them.
-	upload_files: Vec<PathBuf>,
-	/// Where the file transfer in progress has got to (§17, §19): confirming the path or
-	/// moving bytes. `None` when nothing is being transferred. One state for both directions
-	/// — only one transfer runs at a time, and an upload's progress bar and a download's read
-	/// the same.
-	transfer: Option<TransferState>,
-	/// The destination FOLDER the batch goes into (§17), editable in the confirmation.
-	/// Seeded from wherever the upload was started — the shell's cwd, the files pane's
-	/// directory, or a folder right-clicked in the tree — and normalised to `.` (the login
-	/// directory) when left empty. Each file keeps its own name inside it.
-	upload_dir: String,
-	/// The batch waiting to send, a (local file, remote path) pair each (§17). One transfer
-	/// runs at a time, so the files queue here and every `UploadDone` starts the next — the
-	/// mirror of the download queue (§21).
-	uploads: std::collections::VecDeque<(PathBuf, String)>,
-	/// The FOLDERS waiting to go, tree-and-all, into `upload_dir` (§29). A drop can carry both kinds
-	/// at once, and the two travel by different routes — a file joins the `uploads` queue above, a
-	/// folder is a whole recursive transfer of its own — so they queue separately and run one after
-	/// another through the single transfer slot. Empty except while a drop's folders are draining.
-	upload_trees: std::collections::VecDeque<PathBuf>,
-	/// How many of the batch have landed, for its closing notice (§17).
-	uploaded: usize,
-	/// How many whole FOLDERS have landed, counted apart from the files so the closing notice can
-	/// say what actually went (§29) — "3 files and 2 folders" rather than five of something.
-	uploaded_trees: usize,
-	/// Whether the batch sends with overwrite set — true only when the user answered the
-	/// collision question with "replace" (§17). Decided once, applied to every file; a
-	/// free or "keep both" destination is written with it off and its own name.
-	upload_overwrite: bool,
-	/// A batch held at the "some are already there" question (§17): the clashing names the
-	/// server found, each paired with a free `name-1` path for the "keep both" answer.
-	/// `Some` while the question is open, which is what draws the dialog; `None` otherwise.
-	upload_clash: Option<Vec<(String, String)>>,
-	/// The last transfer outcome, shown in the status bar until the next one starts
-	/// (§17, §19). `ponytail:` no timed fade — that would need a timer subscription for a
-	/// line of text.
-	transfer_notice: Option<String>,
-	/// Whether a file from the OS is being dragged over the window right now (§29). Lights the
-	/// files pane as the drop target while true; set by `FileHovered`, cleared when the drag leaves
-	/// or drops. Purely a visual cue — the drop itself reads the pane's directory, not this flag.
-	drop_hover: bool,
-	/// The paths of a drop that has just landed, gathering (§29). The OS reports a multi-file drop
-	/// as one event PER PATH, with nothing to say the last has arrived — so they are collected here
-	/// and read once on the next frame, when the whole drop is known. Empty at rest, which is also
-	/// what tells `subscription` there is no settling to wait for.
-	dropped: Vec<PathBuf>,
+	/// Moving bytes between here and the remote (§16, §17, §19, §21, §29): the batch being set
+	/// up, the files, folders and downloads waiting their turn, the ONE transfer slot they all
+	/// share, whichever question the flow is holding, and the last outcome the status bar shows.
+	///
+	/// Eighteen fields and twenty methods on this struct before it was a module of its own —
+	/// which meant the one-transfer-at-a-time rule was spelled out at each of its six entrances,
+	/// slightly differently every time, and a session teardown had to remember to clear twelve of
+	/// them by hand (it missed six). `Tab` now says what the user did and asks `busy()`; the queue
+	/// answers with `transfer::Effects`, which `apply` carries out.
+	transfers: transfer::Queue,
 	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
 	/// width, expansion state and selection; `app` only relays its events and turns the
 	/// paths it asks for into `SshCommand::ListDir`.
@@ -2420,14 +2381,6 @@ pub struct Tab {
 	/// subscription because a mouse press reports none of its own, and Ctrl+click,
 	/// Shift+click and Ctrl+drag all need to know.
 	modifiers: iced::keyboard::Modifiers,
-	/// Downloads waiting their turn (§21) — remote path and where it is being saved. One
-	/// transfer runs at a time, so a multi-file download queues here and each completion
-	/// starts the next.
-	downloads: std::collections::VecDeque<(String, PathBuf)>,
-	/// How many of the current batch have landed, for its closing notice.
-	downloaded: usize,
-	/// A multi-file download held at the "some of these are already there" question (§21).
-	clash: Option<Clash>,
 	/// The "new folder" dialog's target and typed name (§18), `Some` while it is open. The
 	/// parent is where the folder will be made — a tree folder or the pane's directory — and
 	/// `name` is what the user is typing; `None` the rest of the time, which hides the dialog.
@@ -2436,20 +2389,6 @@ pub struct Tab {
 	/// once the user confirms. `Some` while the confirmation is up, `None` otherwise — deleting is
 	/// not undoable, so nothing is sent until this is confirmed.
 	pending_delete: Option<Vec<String>>,
-	/// The file a recursive transfer is currently asking about (§17, §19): its name, shown in the
-	/// six-way conflict dialog. `Some` parks the transfer behind the prompt; answering clears it
-	/// and sends the choice back down the wire.
-	transfer_conflict: Option<String>,
-	/// The transfer running right now, remembered so a mid-flight failure can be resumed (§16). Set
-	/// at every start — a queued file, a folder tree, or a resume itself — and cleared when it
-	/// lands; it carries the direction and endpoints `resume_transfer` needs to relaunch it. `None`
-	/// when nothing is transferring.
-	in_flight: Option<Resumable>,
-	/// A transfer that stopped on a failure and can be picked up where it left off (§16). Set from
-	/// `in_flight` when a `TransferInterrupted` arrives — the partial was kept, unlike a cancel —
-	/// and cleared by a resume, a cancel, a fresh transfer, or a clean finish. `Some` is what draws
-	/// the status bar's Resume button.
-	resumable: Option<Resumable>,
 	/// The copy-confirmation toast currently showing, if any (§10). Set on every clipboard
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
@@ -2532,15 +2471,6 @@ struct Snackbar {
 	shown_at: std::time::Instant,
 }
 
-/// A queued batch of downloads waiting on the name-collision answer (§21). The names that
-/// collide are not kept: the answer is applied by looking again, so a folder that changed
-/// while the dialog was open is still handled correctly.
-#[derive(Debug, Clone)]
-struct Clash {
-	remotes: Vec<String>,
-	dir: PathBuf,
-}
-
 /// The in-progress "new folder" dialog (§18): where the folder will be made, and the name typed
 /// so far. A small owned struct, like the home screen's rename, because it is the same shape of
 /// interaction — a name being entered against a fixed target.
@@ -2548,48 +2478,6 @@ struct Clash {
 struct NewFolder {
 	parent: String,
 	name: String,
-}
-
-/// What to do about local files a multi-file download would land on top of (§21).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ClashChoice {
-	/// Leave the local copies alone and download only the rest.
-	Skip,
-	/// Overwrite them.
-	Replace,
-	/// Save alongside, as `name-1.ext`.
-	KeepBoth,
-	/// Download nothing at all.
-	Cancel,
-}
-
-/// Where a file transfer has got to (§17, §19). Only one runs at a time, so this is a
-/// plain state, not a queue. `ConfirmPath` is upload-only: a download's destination comes
-/// from the native save dialog, which asks its own overwrite question, and an upload's
-/// overwrite question is settled up front by the batch pre-scan (§17), not by a per-file state.
-#[derive(Debug, Clone, Copy)]
-pub enum TransferState {
-	/// Showing the destination folder for confirmation, before anything is sent.
-	ConfirmPath,
-	/// Transferring, with the bytes written so far out of the file's size.
-	Running { sent: u64, total: u64 },
-}
-
-/// A transfer kept so it can be relaunched (§16) — as `in_flight` while it runs, or as `resumable`
-/// after a failure parked it. It carries just enough to re-issue the exact command: the direction
-/// (which decides upload vs download, single file vs whole tree) and its two endpoints. A resume
-/// re-sends with `resume` set, so the task appends only the bytes still missing rather than
-/// starting the file over.
-#[derive(Debug, Clone)]
-enum Resumable {
-	/// A single file going up: local source, remote destination.
-	Upload { local: PathBuf, remote: String },
-	/// A single file coming down: remote source, local destination.
-	Download { remote: String, local: PathBuf },
-	/// A whole folder going up (§17): local root, remote parent directory.
-	UploadTree { local: PathBuf, remote: String },
-	/// A whole folder coming down (§19): remote root, local parent directory.
-	DownloadTree { remote: String, local: PathBuf },
 }
 
 /// What the fresh region of a split opens with (§48, §52).
@@ -2849,7 +2737,7 @@ pub enum Message {
 	/// The destination folder was confirmed — pre-scan the server for collisions (§17).
 	UploadConfirmed,
 	/// The answer to "some of these are already there" for an upload batch (§17).
-	UploadClashResolved(ClashChoice),
+	UploadClashResolved(transfer::ClashChoice),
 	/// The user backed out of an upload confirmation or its collision question (Cancel / ✕ /
 	/// backdrop / Esc) — nothing is sent.
 	UploadCancelled,
@@ -2875,7 +2763,7 @@ pub enum Message {
 		dir: Option<PathBuf>,
 	},
 	/// The answer to "some of these files are already there" (§21).
-	DownloadClash(ClashChoice),
+	DownloadClash(transfer::ClashChoice),
 	// --- create / delete / recursive transfer (§18, §17, §19) ---
 	/// The "new folder" dialog's name field changed.
 	NewFolderNameChanged(String),
@@ -3467,15 +3355,18 @@ impl Tab {
 			// OS file drops (§29): a drag over the window lights the pane as the drop target, and a
 			// drop uploads the file into it. Only a live session can be a target, so a hover with no
 			// shell open lights nothing.
-			Message::FileHovered => self.drop_hover = self.terminal.is_some(),
-			Message::FileDropLeft => self.drop_hover = false,
+			Message::FileHovered => self.transfers.hover(self.terminal.is_some()),
+			Message::FileDropLeft => self.transfers.hover(false),
 			// One event per PATH, so nothing is decided here: the paths gather and the next frame
 			// reads the whole drop at once (§29).
-			Message::FileDropped(path) => {
-				self.drop_hover = false;
-				self.dropped.push(path);
+			Message::FileDropped(path) => self.transfers.caught(path),
+			Message::FileDropSettled => {
+				// The pane's directory is where a drop lands (§29); taken as an owned string so the
+				// queue can be borrowed mutably to settle into it.
+				let dir = self.files.path().map(str::to_owned);
+				let effects = self.transfers.settle(self.terminal.is_some(), dir.as_deref());
+				return self.apply(effects);
 			}
-			Message::FileDropSettled => return self.on_drop_settled(),
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
 			Message::DisconnectCancelled => self.confirm_disconnect = false,
@@ -3528,30 +3419,25 @@ impl Tab {
 			Message::UploadPickPressed => return browse_upload(),
 			// A cancelled picker yields no files, which keeps whatever was already chosen —
 			// the same rule the key-file picker on the form uses.
-			Message::UploadFilesPicked(files) => {
-				if !files.is_empty() {
-					self.upload_files = files;
-					self.transfer_notice = None;
-				}
-			}
+			Message::UploadFilesPicked(files) => self.transfers.pick(files),
 			// Started from a right-click surface: the folder is already known, so pick the
 			// files and go straight to the confirmation.
 			Message::UploadFilesPickedInto { files, dir } => {
-				if !files.is_empty() {
-					self.upload_files = files;
-					self.upload_dir = dir;
-					self.transfer_notice = None;
-					return self.open_upload_confirm();
-				}
+				let effects = self.transfers.pick_into(files, dir);
+				return self.apply(effects);
 			}
 			Message::UploadPressed => {
-				self.upload_dir = self
+				// Started from the status bar, which names no folder: the shell's own cwd is the
+				// destination, and the confirmation lets it be corrected before anything is sent.
+				let dir = self
 					.terminal
 					.as_ref()
 					.and_then(term::Terminal::cwd)
 					.unwrap_or_default()
 					.to_owned();
-				return self.open_upload_confirm();
+				self.menu = None;
+				let effects = self.transfers.open_confirm(dir);
+				return self.apply(effects);
 			}
 			Message::TerminalUploadPressed => {
 				// The grid's right-click "Upload…": pick files for the shell's own directory.
@@ -3564,27 +3450,39 @@ impl Tab {
 					.to_owned();
 				return browse_upload_into(dir);
 			}
-			Message::UploadDestChanged(value) => self.upload_dir = value,
-			Message::UploadConfirmed => return self.on_upload_confirmed(),
-			Message::UploadClashResolved(choice) => self.on_upload_clash(choice),
-			Message::UploadCancelled => self.cancel_upload(),
-			Message::TransferCancelPressed => self.cancel_transfer(),
-			Message::TransferResumePressed => return self.resume_transfer(),
+			Message::UploadDestChanged(value) => self.transfers.set_dest(value),
+			Message::UploadConfirmed => {
+				let effects = self.transfers.send_batch();
+				return self.apply(effects);
+			}
+			// One answer, two questions (§17, §21): only one of the two collision dialogs can ever
+			// be open, so the queue reads off which it is holding rather than the message saying.
+			Message::UploadClashResolved(choice) | Message::DownloadClash(choice) => {
+				let effects = self.transfers.answer_clash(choice);
+				return self.apply(effects);
+			}
+			Message::UploadCancelled => self.transfers.cancel_batch(),
+			Message::TransferCancelPressed => {
+				let effects = self.transfers.cancel();
+				return self.apply(effects);
+			}
+			Message::TransferResumePressed => {
+				let effects = self.transfers.resume();
+				return self.apply(effects);
+			}
 			Message::Explorer(message) => return self.on_explorer(message),
 			Message::Files(message) => return self.on_files(message),
 			// The editor buffer's own interactions (§32): typing, Save / Save As, the prompt field.
 			// The App has already peeled off the ones needing cross-tab reach (open / flush / close).
 			Message::Editor(message) => return self.on_editor(message),
 			Message::EditorKey(event) => return self.on_editor_key(event),
-			Message::DownloadTargetPicked { remote, local } => self.start_download(remote, local),
-			Message::DownloadFolderPicked { remotes, dir } => self.on_download_folder(remotes, dir),
-			Message::DownloadClash(choice) => {
-				// Taking it closes the dialog whichever way the question was answered.
-				if let Some(clash) = self.clash.take()
-					&& choice != ClashChoice::Cancel
-				{
-					self.queue_downloads(&clash.remotes, &clash.dir, choice);
-				}
+			Message::DownloadTargetPicked { remote, local } => {
+				let effects = self.transfers.download(remote, local);
+				return self.apply(effects);
+			}
+			Message::DownloadFolderPicked { remotes, dir } => {
+				let effects = self.transfers.download_into(remotes, dir);
+				return self.apply(effects);
 			}
 			// Create / delete / recursive transfer (§18, §17, §19).
 			Message::NewFolderNameChanged(value) => {
@@ -3596,10 +3494,23 @@ impl Tab {
 			Message::NewFolderCancelled => self.new_folder = None,
 			Message::DeleteConfirmed => self.confirm_remote_delete(),
 			Message::DeleteCancelled => self.pending_delete = None,
-			Message::TransferConflictResolved(choice) => self.on_conflict_resolved(choice),
-			Message::UploadFolderPicked { local, dir } => self.start_upload_tree(local, dir),
+			Message::TransferConflictResolved(choice) => {
+				let effects = self.transfers.answer_conflict(choice);
+				return self.apply(effects);
+			}
+			Message::UploadFolderPicked { local, dir } => {
+				let effects = self.transfers.upload_tree(local, dir);
+				return self.apply(effects);
+			}
 			Message::DownloadFolderTargetPicked { remote, local } => {
-				self.start_download_tree(remote, local);
+				// The refusal for this one is shown in the files pane it was started from, so the
+				// guard sits here rather than inside the queue (§19).
+				if self.transfers.busy() {
+					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
+					return iced::Task::none();
+				}
+				let effects = self.transfers.download_tree(remote, local);
+				return self.apply(effects);
 			}
 			// A click swallowed by a dialog card: nothing to do — capturing it is the
 			// whole point (it stops the click reaching the backdrop, §10).
@@ -3974,6 +3885,34 @@ impl Tab {
 		}
 	}
 
+	/// Carry out what a nudge to the transfer queue asked for (§17): send its commands, seed the
+	/// shared dialog buffer for a question it opened, focus the destination field, re-list a folder
+	/// something just landed in.
+	///
+	/// ONE place turns transfer effects into the rest of the app, which is what lets the queue
+	/// itself reach for nothing — no SSH channel, no dialog buffer, no panels — and therefore be
+	/// tested with none of them. A dead channel is already an error screen (`send_command` says
+	/// so), and with no session there is nowhere left to send what was queued, so the queue drops
+	/// it rather than firing at whatever this tab connects to next.
+	fn apply(&mut self, effects: transfer::Effects) -> iced::Task<Message> {
+		if let Some(body) = &effects.body {
+			self.set_dialog_body(body);
+		}
+		for command in effects.commands {
+			if !self.send_command(command) {
+				self.transfers.reset();
+				return iced::Task::none();
+			}
+		}
+		if let Some(dir) = &effects.refresh {
+			self.refresh_remote_dir(dir);
+		}
+		if effects.focus_dest {
+			return iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID);
+		}
+		iced::Task::none()
+	}
+
 	/// Load `text` into the dialog body buffer so the dialog about to open shows it as
 	/// selectable, copyable content (§10). Called at each dialog-open transition; a
 	/// fresh `Content` also resets any selection left from a previous dialog.
@@ -4300,35 +4239,24 @@ impl Tab {
 			// popup beside the selection (§20).
 			SshEvent::Zone(zone) => self.files.set_zone(zone),
 			SshEvent::LinkTarget { path, target } => self.files.set_link_target(path, target),
-			SshEvent::DownloadDone(path) => {
-				self.transfer = None;
-				// This file landed, so there is nothing to resume; the next one, if any, is
-				// remembered afresh by `pump_downloads`.
-				self.in_flight = None;
-				self.resumable = None;
-				self.downloaded += 1;
-				self.transfer_notice = Some(format!("Saved to {path}"));
-				// A batch keeps going, and says how it went once the last file lands (§21).
-				self.pump_downloads();
-				if self.transfer.is_none() && self.downloaded > 1 {
-					self.transfer_notice = Some(format!("Saved {} files", self.downloaded));
-				}
+			// The four ways the one transfer slot can empty (§16, §17, §21). Which DIRECTION the
+			// thing in it was going is not said here: the queue remembers, which is why an upload's
+			// ending and a download's are one arm apiece rather than one pair apiece.
+			SshEvent::DownloadDone(path) | SshEvent::UploadDone(path) => {
+				let effects = self.transfers.ended(transfer::Ended::Done(path));
+				return self.apply(effects);
 			}
-			SshEvent::DownloadFailed(message) => {
-				self.transfer = None;
-				self.transfer_notice = Some(message);
-				// One file failing does not abandon the rest of the batch — the notice says
-				// which one it was, and the queue moves on.
-				self.pump_downloads();
+			SshEvent::DownloadFailed(message) | SshEvent::UploadFailed(message) => {
+				let effects = self.transfers.ended(transfer::Ended::Failed(message));
+				return self.apply(effects);
 			}
-			// A transfer stopped mid-flight but kept its partial (§16), so it can be resumed rather
-			// than lost: park it, show the reason, and offer Resume. The queue behind it is left in
-			// place, so resuming the failed file drains the rest afterwards. Direction-agnostic —
-			// `in_flight` already knows which command to relaunch.
 			SshEvent::TransferInterrupted { message } => {
-				self.transfer = None;
-				self.transfer_notice = Some(message);
-				self.resumable = self.in_flight.take();
+				let effects = self.transfers.ended(transfer::Ended::Interrupted(message));
+				return self.apply(effects);
+			}
+			SshEvent::UploadExists(path) => {
+				let effects = self.transfers.ended(transfer::Ended::Skipped(path));
+				return self.apply(effects);
 			}
 			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
 			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
@@ -4363,68 +4291,14 @@ impl Tab {
 				self.files.set_notice(reason);
 			}
 			SshEvent::TransferConflict { name } => {
-				// Park the transfer behind the six-way question, naming the file it is about (§17,
-				// §19). The shared dialog body carries a fixed intro plus that name.
-				self.set_dialog_body(&format!("{}\n\n{name}", ui::terminal::CONFLICT_DIALOG_BODY));
-				self.transfer_conflict = Some(name);
+				let effects = self.transfers.conflicted(&name);
+				return self.apply(effects);
 			}
-			SshEvent::UploadExists(path) => {
-				// The batch pre-scan already settled every collision it knew about (§17), so
-				// reaching here means this file appeared on the server AFTER the scan. Skip it
-				// rather than reopening the question mid-batch, and move the queue on.
-				self.transfer = None;
-				self.transfer_notice = Some(format!(
-					"Skipped {} — it appeared on the server",
-					explorer::name(&path)
-				));
-				self.pump_uploads();
-				self.finish_batch_if_drained();
+			SshEvent::UploadPrescan { collisions } => {
+				let effects = self.transfers.prescan(collisions);
+				return self.apply(effects);
 			}
-			SshEvent::UploadPrescan { collisions } => self.on_upload_prescan(collisions),
-			// Progress only means something while a transfer is running; a late event
-			// after a failure must not revive the bar.
-			SshEvent::TransferProgress { sent, total } => {
-				if matches!(self.transfer, Some(TransferState::Running { .. })) {
-					self.transfer = Some(TransferState::Running { sent, total });
-				}
-			}
-			SshEvent::UploadDone(path) => {
-				// One file — or one whole folder — landed; count it and start the next. The closing
-				// notice, and clearing the picked files, wait until everything has drained (§17).
-				// Which of the two it was is read off `in_flight` before that is cleared: a tree
-				// reports the same `UploadDone` its files do, and the closing notice says what went.
-				let was_tree = matches!(self.in_flight, Some(Resumable::UploadTree { .. }));
-				self.transfer = None;
-				// Landed, so nothing to resume; `pump_uploads` remembers the next file itself.
-				self.in_flight = None;
-				self.resumable = None;
-				if was_tree {
-					self.uploaded_trees += 1;
-				} else {
-					self.uploaded += 1;
-				}
-				self.pump_uploads();
-				if self.transfer.is_none() && self.uploads.is_empty() {
-					self.transfer_notice =
-						Some(upload_summary(self.uploaded, self.uploaded_trees, &path));
-					// Show what just landed: if the pane (or the tree) is on the folder we uploaded
-					// into, re-list it so the new file — or folder — appears without a manual Refresh
-					// (§29). Captured before `finish_batch`, which clears `upload_dir`.
-					let dir = self.upload_dir.clone();
-					self.finish_batch();
-					self.refresh_remote_dir(&dir);
-				}
-			}
-			SshEvent::UploadFailed(message) => {
-				// One file failing does not abandon the rest of the batch — the notice says
-				// what went wrong, and the queue moves on (§17). The failure shows in the
-				// status bar rather than the error screen, which would tear the shell down for
-				// a file that never left.
-				self.transfer = None;
-				self.transfer_notice = Some(message);
-				self.pump_uploads();
-				self.finish_batch_if_drained();
-			}
+			SshEvent::TransferProgress { sent, total } => self.transfers.progressed(sent, total),
 			// A forward came up or failed (§27): mark its row. A failure never tears the shell
 			// down — the tunnel simply shows as failed in the dialog. A late event for a forward
 			// already removed finds no entry and is dropped.
@@ -5176,30 +5050,13 @@ impl Tab {
 			return iced::Task::none();
 		}
 
-		// The collision questions (§17, §21) are modal: Esc backs out of the whole batch,
-		// everything else waits for a button. The download's and the upload's read the same.
-		if self.clash.is_some() {
+		// The transfer flow's modals (§17, §21) are exactly that: while one is open the keyboard
+		// belongs to it — the destination field types through the widget tree — so nothing here
+		// reaches the shell. Esc backs out of whichever it is; everything else waits for a button.
+		// One question asked of the queue, which is the only thing that knows what it is holding.
+		if self.transfers.holds_keyboard() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.clash = None;
-			}
-			return iced::Task::none();
-		}
-		if self.upload_clash.is_some() {
-			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.cancel_upload();
-			}
-			return iced::Task::none();
-		}
-
-		// Same rule for the upload confirmation (§17): while it is open the keyboard belongs
-		// to it — the destination field types through the widget tree — so nothing here
-		// reaches the shell. Esc backs out; a running transfer has nothing to back out of, so
-		// it just swallows the key.
-		if let Some(state) = self.transfer {
-			if matches!(state, TransferState::ConfirmPath)
-				&& matches!(key, iced::keyboard::Key::Named(Named::Escape))
-			{
-				self.cancel_upload();
+				self.transfers.escape();
 			}
 			return iced::Task::none();
 		}
@@ -5406,9 +5263,7 @@ impl Tab {
 	/// by the fuller guard chain in `on_key`, which this mirrors.
 	fn shell_owns_keyboard(&self) -> bool {
 		!self.confirm_disconnect
-			&& self.clash.is_none()
-			&& self.upload_clash.is_none()
-			&& self.transfer.is_none()
+			&& !self.transfers.holds_keyboard()
 			&& self.explorer.editing().is_none()
 			&& self.files.editing().is_none()
 			&& matches!(self.focus, Focus::Terminal)
@@ -6314,20 +6169,11 @@ impl Tab {
 		// longer exists, and would go on swallowing the keyboard (§35) — so it closes with the rest.
 		self.search = None;
 		self.confirm_disconnect = false;
-		self.transfer = None;
-		self.upload_files.clear();
-		self.upload_dir.clear();
-		self.uploads.clear();
-		self.uploaded = 0;
-		self.upload_overwrite = false;
-		self.upload_clash = None;
-		self.transfer_notice = None;
-		// A drag that was mid-hover when the session went is over with it (§29).
-		self.drop_hover = false;
-		// A queued batch belongs to the session that asked for it (§17, §21).
-		self.downloads.clear();
-		self.downloaded = 0;
-		self.clash = None;
+		// Everything about moving bytes belongs to the session that asked for it (§17, §21, §29):
+		// the picked batch, the queues behind it, a drag mid-hover, and — the one the twelve
+		// hand-written clears here used to forget — a Resume offer, which would otherwise relaunch
+		// a transfer against whatever server this tab connected to next (§16).
+		self.transfers.reset();
 		// Every session starts with the keyboard at the shell (§20), and none is mid-resume:
 		// a torn-down session has nothing to settle, and a fresh one sets this itself once it
 		// knows whether it has a shell directory to replay (§22). Set straight rather than
@@ -6351,330 +6197,6 @@ impl Tab {
 		self.forwards.clear();
 		self.forward_dialog = false;
 		self.forward_error = None;
-	}
-
-	/// Open the upload confirmation for the picked batch (§17): list the files in the body,
-	/// show the destination folder in the editable field, and focus it so the folder can be
-	/// corrected — or the batch confirmed with Enter — without reaching for the mouse. No-op
-	/// with nothing picked, and refused while another transfer is running, since the status
-	/// bar has one progress bar and two transfers would fight over it.
-	fn open_upload_confirm(&mut self) -> iced::Task<Message> {
-		self.menu = None;
-		if self.upload_files.is_empty() {
-			return iced::Task::none();
-		}
-		if self.transfer.is_some() || !self.uploads.is_empty() {
-			self.transfer_notice = Some("A transfer is already running.".to_owned());
-			return iced::Task::none();
-		}
-		let names: Vec<String> = self
-			.upload_files
-			.iter()
-			.map(|local| file_name_of(local).to_owned())
-			.collect();
-		let body = format!(
-			"{}\n\n{}",
-			ui::terminal::UPLOAD_DIALOG_BODY,
-			names.join("\n")
-		);
-		self.set_dialog_body(&body);
-		self.transfer = Some(TransferState::ConfirmPath);
-		iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID)
-	}
-
-	/// The destination folder was confirmed (§17): pre-scan the server for names already in
-	/// it, so the "some are already there" question is asked once for the whole batch before
-	/// a single byte is sent. An empty folder normalises to `.` — the login directory — so a
-	/// shell that never announced its cwd still has somewhere to send to. The confirmation
-	/// closes while the scan runs; `UploadPrescan` reopens as either the collision question
-	/// or the transfer itself.
-	fn on_upload_confirmed(&mut self) -> iced::Task<Message> {
-		if self.upload_files.is_empty() {
-			self.cancel_upload();
-			return iced::Task::none();
-		}
-		let dir = self.upload_dir.trim();
-		// A relative `.` resolves against the login directory server-side, and `join` keeps
-		// it in front rather than turning a bare name into an absolute `/name`.
-		self.upload_dir = if dir.is_empty() {
-			".".to_owned()
-		} else {
-			dir.to_owned()
-		};
-		let names: Vec<String> = self
-			.upload_files
-			.iter()
-			.map(|local| file_name_of(local).to_owned())
-			.collect();
-		self.transfer = None;
-		self.transfer_notice = Some("Checking the destination…".to_owned());
-		if !self.send_command(SshCommand::CheckUploads {
-			dir: self.upload_dir.clone(),
-			names,
-		}) {
-			self.cancel_upload();
-		}
-		iced::Task::none()
-	}
-
-	/// The batch pre-scan came back (§17). Nothing clashing → queue every file and start
-	/// sending. Some clashing → hold the batch on the collision question, the names it found
-	/// listed in the (shared) dialog body. A batch cancelled while the scan was in flight
-	/// leaves nothing to do.
-	fn on_upload_prescan(&mut self, collisions: Vec<(String, String)>) {
-		self.transfer_notice = None;
-		if self.upload_files.is_empty() {
-			return;
-		}
-		if collisions.is_empty() {
-			// The choice is irrelevant when nothing collides — every file writes to its own
-			// free name — so `Skip` (which touches only clashing names) does for all of them.
-			self.queue_uploads(&[], ClashChoice::Skip);
-			return;
-		}
-		let names: Vec<String> = collisions.iter().map(|(name, _)| name.clone()).collect();
-		self.set_dialog_body(&format!(
-			"{}\n\n{}",
-			ui::terminal::UPLOAD_CLASH_BODY,
-			names.join("\n")
-		));
-		self.upload_clash = Some(collisions);
-	}
-
-	/// The collision question was answered (§17): build the queue under that choice and start
-	/// it, or drop the whole batch on Cancel. `Replace` sends every file with overwrite set;
-	/// `Skip` drops the clashing ones; `KeepBoth` sends them to the server-checked `name-1`
-	/// path the pre-scan proposed. The non-clashing files always go, whatever the answer.
-	fn on_upload_clash(&mut self, choice: ClashChoice) {
-		let Some(collisions) = self.upload_clash.take() else {
-			return;
-		};
-		if choice == ClashChoice::Cancel {
-			self.cancel_upload();
-			return;
-		}
-		self.queue_uploads(&collisions, choice);
-	}
-
-	/// Turn the picked files, the destination folder and the collision answer into the upload
-	/// queue (§17), then start it. The mapping is `plan_uploads` (pure, so it is tested on its
-	/// own); this only records the batch-wide overwrite flag and pumps the queue, one file at a
-	/// time, the way the download side does (§21).
-	fn queue_uploads(&mut self, collisions: &[(String, String)], choice: ClashChoice) {
-		self.uploads =
-			plan_uploads(&self.upload_files, &self.upload_dir, collisions, choice).into();
-		self.uploaded = 0;
-		self.upload_overwrite = choice == ClashChoice::Replace;
-		self.pump_uploads();
-		// Every file may have been skipped — a Skip answer to an all-clashing batch — so there
-		// is nothing to send and nothing to wait for. Close it out rather than leaving the
-		// picked files hanging.
-		self.finish_batch_if_drained();
-	}
-
-	/// Start the next queued upload if the one transfer slot is free (§17). Called when a
-	/// batch begins and again as each file finishes, which is what walks the queue — the
-	/// mirror of `pump_downloads` (§21).
-	fn pump_uploads(&mut self) {
-		if self.transfer.is_some() {
-			return;
-		}
-		// Files first, then the folders behind them (§29). Both queues share the one transfer slot,
-		// so this is the only place that decides what runs next — and it drains the batch before
-		// starting a tree, because the batch's collision question was answered up front (§17) while
-		// a tree asks its own as it walks.
-		if self.uploads.is_empty()
-			&& let Some(local) = self.upload_trees.pop_front()
-		{
-			let dir = self.upload_dir.clone();
-			self.start_upload_tree(Some(local), dir);
-			return;
-		}
-		if let Some((local, remote)) = self.uploads.pop_front() {
-			let total = std::fs::metadata(&local)
-				.map(|meta| meta.len())
-				.unwrap_or(0);
-			// A fresh file starting means the previous transfer's resume offer, if any, is stale
-			// (§16); remember this file so its own failure can be resumed.
-			self.resumable = None;
-			self.in_flight = Some(Resumable::Upload {
-				local: local.clone(),
-				remote: remote.clone(),
-			});
-			if self.send_command(SshCommand::Upload {
-				local,
-				remote,
-				overwrite: self.upload_overwrite,
-				resume: false,
-			}) {
-				self.transfer = Some(TransferState::Running { sent: 0, total });
-			} else {
-				self.transfer = None;
-				self.in_flight = None;
-			}
-		}
-	}
-
-	/// Close a batch once it has fully drained (§17): no transfer running and nothing left in
-	/// the queue. Clears the picked files (which disables the Upload button) and the folder,
-	/// so a stray click cannot re-send what just landed. The closing notice is set by the
-	/// caller that noticed the last file land.
-	fn finish_batch_if_drained(&mut self) {
-		if self.transfer.is_none() && self.uploads.is_empty() && self.upload_trees.is_empty() {
-			self.finish_batch();
-		}
-	}
-
-	/// Drop the finished batch's leftovers (§17), keeping whatever notice is showing.
-	fn finish_batch(&mut self) {
-		self.upload_files.clear();
-		self.upload_dir.clear();
-		self.uploads.clear();
-		self.upload_trees.clear();
-		self.uploaded = 0;
-		self.uploaded_trees = 0;
-		self.upload_overwrite = false;
-	}
-
-	/// Back out of the upload flow before or during a batch (§17): a cancelled confirmation
-	/// or collision question, or Esc. Drops everything pending so nothing is sent; a transfer
-	/// already in flight is left to finish, since its bytes are already on the wire.
-	fn cancel_upload(&mut self) {
-		self.upload_clash = None;
-		self.uploads.clear();
-		self.upload_trees.clear();
-		self.uploaded = 0;
-		self.uploaded_trees = 0;
-		self.upload_overwrite = false;
-		self.upload_files.clear();
-		self.upload_dir.clear();
-		if matches!(self.transfer, Some(TransferState::ConfirmPath)) {
-			self.transfer = None;
-		}
-	}
-
-	/// Stop the transfer running right now (§16) — the status bar's ✕. Empties both queues and
-	/// forgets any resume point, since a deliberate cancel is final and takes the whole batch with
-	/// it, then tells the worker to stop: its copy loop deletes the partial it was writing and
-	/// reports the neutral "cancelled" outcome, which clears the bar and, the queues now empty,
-	/// closes the batch out. `transfer` is left running until that outcome lands, so the bar does
-	/// not flicker between the click and the worker winding down.
-	fn cancel_transfer(&mut self) {
-		self.uploads.clear();
-		// The folders queued behind this transfer go with it: a deliberate cancel takes the whole
-		// drop, not just the item on the wire (§16, §29).
-		self.upload_trees.clear();
-		self.downloads.clear();
-		self.uploaded = 0;
-		self.uploaded_trees = 0;
-		self.downloaded = 0;
-		self.resumable = None;
-		self.in_flight = None;
-		self.send_command(SshCommand::CancelTransfer);
-	}
-
-	/// Pick up a transfer that a failure interrupted (§16) — the status bar's Resume. Relaunches
-	/// the exact command `resumable` remembers with `resume` set, so the task sizes the destination
-	/// and sends only the bytes still missing; a single file left in a batch drains the rest once
-	/// it lands. Does nothing if there is nothing to resume, or if the session has since gone.
-	fn resume_transfer(&mut self) -> iced::Task<Message> {
-		let Some(resumable) = self.resumable.take() else {
-			return iced::Task::none();
-		};
-		// Mirror what a fresh start records, so this resumed transfer is itself resumable if it too
-		// is interrupted (a flaky link may need more than one nudge).
-		self.in_flight = Some(resumable.clone());
-		let command = match resumable {
-			Resumable::Upload { local, remote } => SshCommand::Upload {
-				local,
-				remote,
-				// The partial is our own earlier work, not a clash, so skip the exists check and
-				// go straight to the appending copy.
-				overwrite: true,
-				resume: true,
-			},
-			Resumable::Download { remote, local } => SshCommand::Download {
-				remote,
-				local,
-				resume: true,
-			},
-			Resumable::UploadTree { local, remote } => SshCommand::UploadTree {
-				local,
-				remote,
-				resume: true,
-			},
-			Resumable::DownloadTree { remote, local } => SshCommand::DownloadTree {
-				remote,
-				local,
-				resume: true,
-			},
-		};
-		if self.send_command(command) {
-			self.transfer_notice = None;
-			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
-		} else {
-			self.in_flight = None;
-		}
-		iced::Task::none()
-	}
-
-	/// A drop landed and the frame after it has come round, so the whole set of paths is in hand
-	/// (§29). Send it into the files pane's current directory, reusing the upload pipeline whole —
-	/// the destination pre-scan and, on a name already taken, the same Overwrite / Keep both / Skip
-	/// / Cancel dialog a menu upload opens (§17). The drop already said where the bytes go, so there
-	/// is no destination confirmation; it goes straight to the pre-scan.
-	///
-	/// Waiting a frame is what makes a multi-file drop one batch: the OS reports each path as its
-	/// own event and never says which is the last, so deciding on the first would send one file and
-	/// then decline its own siblings as "a transfer is already running".
-	fn on_drop_settled(&mut self) -> iced::Task<Message> {
-		let dropped = std::mem::take(&mut self.dropped);
-		if dropped.is_empty() {
-			return iced::Task::none();
-		}
-		// A folder needs the tree flow and a file the batch flow (§17), so the drop is sorted into
-		// its two kinds here — both are sent, one after the other, through the single transfer slot.
-		let (folders, files): (Vec<PathBuf>, Vec<PathBuf>) =
-			dropped.into_iter().partition(|path| path.is_dir());
-		// A batch already set up or running would fight over the one progress bar. `upload_files`
-		// being non-empty catches a menu upload waiting on its confirmation, too: one flow at a time.
-		let busy =
-			self.transfer.is_some() || !self.uploads.is_empty() || !self.upload_files.is_empty();
-		match drop_outcome(
-			self.terminal.is_some(),
-			busy,
-			folders.len() + files.len(),
-			self.files.path(),
-		) {
-			// No session (or not the terminal screen): nowhere to send, so say nothing.
-			DropOutcome::Ignore => iced::Task::none(),
-			DropOutcome::Busy => {
-				self.transfer_notice = Some("A transfer is already running.".to_owned());
-				iced::Task::none()
-			}
-			DropOutcome::NoDir => {
-				self.transfer_notice = Some("Open a folder in the files pane first.".to_owned());
-				iced::Task::none()
-			}
-			DropOutcome::Upload(dir) => {
-				self.upload_dir = dir;
-				self.transfer_notice = None;
-				// Every folder queues, each to go tree-and-all exactly as the menu's "Upload
-				// folder…" does (§17) — the same command, the same per-file collision questions,
-				// the same resume. `pump_uploads` starts them once the files are through.
-				self.upload_trees = folders.into();
-				if files.is_empty() {
-					// Folders only: there is no batch to pre-scan, so the first tree starts here.
-					self.pump_uploads();
-					return iced::Task::none();
-				}
-				// Seed the batch and run the ordinary confirmed-upload path: it pre-scans the
-				// destination, then either sends or opens the collision dialog (§17). One file or
-				// twenty, this is the same flow the picker's own selection takes.
-				self.upload_files = files;
-				self.on_upload_confirmed()
-			}
-		}
 	}
 
 	/// A snapshot of this session's per-target UI state (§22): where the shell and files pane
@@ -7073,9 +6595,8 @@ impl Tab {
 				// "Download folder…": recreate this remote directory's tree locally (§19). One
 				// transfer at a time, like every other, so a running one blocks it.
 				self.files.close_menu();
-				if self.transfer.is_some() {
-					self.files
-						.set_notice("A transfer is already running.".to_owned());
+				if self.transfers.busy() {
+					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
 					return iced::Task::none();
 				}
 				return pick_download_tree_target(path);
@@ -7235,9 +6756,8 @@ impl Tab {
 				// One transfer at a time — the status bar has one progress bar, and two
 				// concurrent transfers would fight over it (§17). A batch respects that by
 				// queueing; a batch started while something else runs still has to wait.
-				if self.transfer.is_some() {
-					self.files
-						.set_notice("A transfer is already running.".to_owned());
+				if self.transfers.busy() {
+					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
 					return iced::Task::none();
 				}
 				// Folders are dropped rather than refused: a band that swept up a directory
@@ -7269,87 +6789,6 @@ impl Tab {
 			FilesMessage::SplitterExited => self.files.set_splitter_hovered(false),
 		}
 		iced::Task::none()
-	}
-
-	/// Start the download the save dialog just picked a destination for (§19). A
-	/// cancelled dialog (`None`) sends nothing. The progress bar starts at zero of an
-	/// unknown total; the first progress event from the task fills the real size in.
-	fn start_download(&mut self, remote: String, local: Option<PathBuf>) {
-		let Some(local) = local else {
-			return;
-		};
-		self.resumable = None;
-		self.in_flight = Some(Resumable::Download {
-			remote: remote.clone(),
-			local: local.clone(),
-		});
-		if self.send_command(SshCommand::Download {
-			remote,
-			local,
-			resume: false,
-		}) {
-			self.transfer_notice = None;
-			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
-		} else {
-			self.in_flight = None;
-		}
-	}
-
-	/// The folder picker for a multi-file download closed (§21). Nothing is written yet:
-	/// the local names that are already taken are looked up first, and if there are any the
-	/// batch waits on the dialog that asks what to do about them.
-	fn on_download_folder(&mut self, remotes: Vec<String>, dir: Option<PathBuf>) {
-		let Some(dir) = dir else {
-			return;
-		};
-		let taken: Vec<String> = remotes
-			.iter()
-			.map(|remote| explorer::name(remote).to_owned())
-			.filter(|name| dir.join(name).exists())
-			.collect();
-		if taken.is_empty() {
-			// Nothing to lose: the choice cannot apply to anything, so any of them will do.
-			self.queue_downloads(&remotes, &dir, ClashChoice::Skip);
-			return;
-		}
-		self.set_dialog_body(&format!(
-			"{}\n\n{}",
-			ui::terminal::DOWNLOAD_EXISTS_BODY,
-			taken.join("\n")
-		));
-		self.clash = Some(Clash { remotes, dir });
-	}
-
-	/// Turn a picked folder and a batch of remote files into the download queue (§21),
-	/// applying the answer to the "already there" question. Only the queue is built here;
-	/// `pump_downloads` is what starts them, one at a time.
-	fn queue_downloads(&mut self, remotes: &[String], dir: &Path, choice: ClashChoice) {
-		self.downloads.clear();
-		self.downloaded = 0;
-		for remote in remotes {
-			let name = explorer::name(remote);
-			let local = dir.join(name);
-			let local = match choice {
-				_ if !local.exists() => local,
-				ClashChoice::Replace => local,
-				ClashChoice::KeepBoth => free_name(dir, name),
-				// Cancel never gets this far — `DownloadClash` drops the batch instead.
-				ClashChoice::Skip | ClashChoice::Cancel => continue,
-			};
-			self.downloads.push_back((remote.clone(), local));
-		}
-		self.pump_downloads();
-	}
-
-	/// Start the next queued download, if the one transfer slot is free (§21). Called when
-	/// a batch begins and again as each file finishes, which is what walks the queue.
-	fn pump_downloads(&mut self) {
-		if self.transfer.is_some() {
-			return;
-		}
-		if let Some((remote, local)) = self.downloads.pop_front() {
-			self.start_download(remote, Some(local));
-		}
 	}
 
 	/// Open the "new folder" dialog for a folder to be created inside `parent` (§18): the tree
@@ -7406,75 +6845,6 @@ impl Tab {
 	fn confirm_remote_delete(&mut self) {
 		if let Some(paths) = self.pending_delete.take() {
 			self.send_command(SshCommand::Delete(paths));
-		}
-	}
-
-	/// A recursive transfer's collision prompt was answered (§17, §19): clear the dialog and send
-	/// the choice to the transfer parked on it, which resumes — or, on Cancel, winds down and
-	/// reports back through the usual terminal event.
-	fn on_conflict_resolved(&mut self, choice: bridge::ConflictChoice) {
-		self.transfer_conflict = None;
-		self.send_command(SshCommand::ResolveConflict(choice));
-	}
-
-	/// Start a recursive folder upload the picker chose a source for (§17). A cancelled picker
-	/// (`None`) sends nothing; a transfer already running, or a batch still queued, blocks it —
-	/// the one progress bar serves them all. The bar starts at an unknown total the first progress
-	/// event fills in.
-	fn start_upload_tree(&mut self, local: Option<PathBuf>, dir: String) {
-		let Some(local) = local else {
-			return;
-		};
-		if self.transfer.is_some() || !self.uploads.is_empty() {
-			self.transfer_notice = Some("A transfer is already running.".to_owned());
-			return;
-		}
-		self.resumable = None;
-		self.in_flight = Some(Resumable::UploadTree {
-			local: local.clone(),
-			remote: dir.clone(),
-		});
-		if self.send_command(SshCommand::UploadTree {
-			local,
-			remote: dir.clone(),
-			resume: false,
-		}) {
-			self.transfer_notice = None;
-			// Remembered so completion re-lists this folder if the pane is on it (§29) — the same
-			// refresh a single-file upload gets. The tree flow keeps no queue, so this is the only
-			// reader of `upload_dir` for it, and `finish_batch` clears it at the end.
-			self.upload_dir = dir;
-			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
-		} else {
-			self.in_flight = None;
-		}
-	}
-
-	/// Start a recursive folder download the picker chose a destination for (§19). The mirror of
-	/// `start_upload_tree`: a cancelled picker sends nothing, a running transfer blocks it.
-	fn start_download_tree(&mut self, remote: String, local: Option<PathBuf>) {
-		let Some(local) = local else {
-			return;
-		};
-		if self.transfer.is_some() {
-			self.files
-				.set_notice("A transfer is already running.".to_owned());
-			return;
-		}
-		self.resumable = None;
-		self.in_flight = Some(Resumable::DownloadTree {
-			remote: remote.clone(),
-			local: local.clone(),
-		});
-		if self.send_command(SshCommand::DownloadTree {
-			remote,
-			local,
-			resume: false,
-		}) {
-			self.transfer_notice = None;
-			self.transfer = Some(TransferState::Running { sent: 0, total: 0 });
-		} else {
-			self.in_flight = None;
 		}
 	}
 
@@ -7646,14 +7016,11 @@ impl Tab {
 						self.menu,
 						ui::terminal::Modals {
 							confirm_disconnect: self.confirm_disconnect,
-							clash: self.clash.is_some(),
-							upload_clash: self.upload_clash.is_some(),
 							new_folder: self
 								.new_folder
 								.as_ref()
 								.map(|new_folder| new_folder.name.as_str()),
 							pending_delete: self.pending_delete.is_some(),
-							transfer_conflict: self.transfer_conflict.is_some(),
 							forwards: ui::forward::ForwardsView {
 								open: self.forward_dialog,
 								entries: &self.forwards,
@@ -7666,14 +7033,11 @@ impl Tab {
 							body: &self.dialog_body,
 							card,
 						},
-						ui::terminal::UploadView {
-							file_count: self.upload_files.len(),
-							first_file: self.upload_files.first().map(|local| file_name_of(local)),
-							dest: &self.upload_dir,
-							state: self.transfer,
-							notice: self.transfer_notice.as_deref(),
-							resumable: self.resumable.is_some(),
-						},
+						// The transfer flow itself (§17), borrowed rather than copied into a view
+						// struct: the status bar, the two collision dialogs, the confirmation and
+						// the pane's drop highlight all read it, and it is the only thing that
+						// knows what it is holding.
+						&self.transfers,
 						ui::terminal::Panels {
 							explorer: &self.explorer,
 							files: &self.files,
@@ -7682,7 +7046,6 @@ impl Tab {
 							// what its grid wraps at and its overlays are placed against (§18, §19).
 							width: self.files_width(),
 							height: self.window_size.height,
-							drop_hover: self.drop_hover,
 						},
 					);
 					// The copy toast floats over the whole terminal screen as the top layer
@@ -8042,35 +7405,6 @@ fn is_within(path: &str, ancestor: &str) -> bool {
 	path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
-/// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§21) —
-/// the "save alongside" answer to the collision question. Bounded: after a hundred tries
-/// the folder is telling us something, and the last candidate is returned rather than
-/// spinning. Writing it is the download's problem, not this function's.
-fn free_name(dir: &Path, name: &str) -> PathBuf {
-	let (stem, extension) = match name.rsplit_once('.') {
-		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
-		_ => (name, String::new()),
-	};
-	let mut candidate = dir.join(format!("{stem}-1{extension}"));
-	for attempt in 2..=100 {
-		if !candidate.exists() {
-			break;
-		}
-		candidate = dir.join(format!("{stem}-{attempt}{extension}"));
-	}
-	candidate
-}
-
-/// A path's own file name, which is what the status bar shows and what the remote
-/// destination is built from (§17). A path with no final component (a bare root) falls
-/// back to a placeholder rather than an empty label.
-fn file_name_of(path: &std::path::Path) -> &str {
-	path.file_name()
-		.and_then(std::ffi::OsStr::to_str)
-		.unwrap_or("file")
-}
-
 /// The secret a "Remember" tick should persist for this auth method (§16): the password, or a
 /// non-empty pre-seeded key passphrase. An empty secret is nothing worth storing, so it maps to
 /// `None` — the target flag then stays off and the vault keeps no empty entry. A key relying on
@@ -8095,115 +7429,6 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 	} else {
 		Some(secret.clone())
 	}
-}
-
-/// What a drop onto the window should do (§29). Split out of `on_drop_settled` so the decision —
-/// is there a session, is a transfer busy, is there anything to send, is there a directory to land
-/// in — is pure and testable, the way `plan_uploads` and `band_hits` are.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DropOutcome {
-	/// No live session (or not on the terminal), or nothing droppable at all: ignore the drop
-	/// silently — with nowhere to send, there is nothing to tell the user.
-	Ignore,
-	/// A transfer is already running or a batch is being set up: decline, one flow at a time.
-	Busy,
-	/// The files pane has no directory yet, so there is nowhere to drop into.
-	NoDir,
-	/// Upload everything dropped into this remote directory — the pane's own. What is a file and
-	/// what is a folder no longer changes the answer: files go as one batch and each folder goes
-	/// tree-and-all, all of them queued behind the single transfer slot (§29).
-	Upload(String),
-}
-
-/// Decide a drop's fate from the state it depends on (§29), free of `self` so it is tested on its
-/// own. `items` is a count rather than the paths themselves, because whether there is anything at
-/// all is the whole of what this decides — sorting files from folders is the caller's business.
-///
-/// The order is deliberate. No session outranks everything, so a drop onto a home tab is silent
-/// whatever it held. Then a busy transfer, since nothing could start whatever the drop was. Then an
-/// empty drop, which is silent for the same reason a drop with no session is. Only then does the
-/// destination decide between `NoDir` and a real upload.
-fn drop_outcome(connected: bool, busy: bool, items: usize, pane_dir: Option<&str>) -> DropOutcome {
-	if !connected {
-		return DropOutcome::Ignore;
-	}
-	if busy {
-		return DropOutcome::Busy;
-	}
-	// Nothing to do, and nothing worth saying: a drop of nothing at all is not a mistake the user
-	// made. (Reachable only if every dropped path vanished between the drop and this frame.)
-	if items == 0 {
-		return DropOutcome::Ignore;
-	}
-	match pane_dir {
-		Some(dir) => DropOutcome::Upload(dir.to_owned()),
-		None => DropOutcome::NoDir,
-	}
-}
-
-/// The closing notice for an upload that has fully drained (§17, §29), from what actually landed.
-/// Pure so the wording is testable — it is the one line a user reads to know a drop of several
-/// things did all of them.
-///
-/// `last` is the path of the item that finished last, named only when it is the ONLY thing that
-/// went: with one file, "Uploaded to /srv/notes.txt" says more than "Uploaded 1 file". Past that
-/// the counts carry it, and a mixed drop names both kinds rather than adding them up into a total
-/// of nothing in particular.
-fn upload_summary(files: usize, folders: usize, last: &str) -> String {
-	let files_part = |count: usize| {
-		if count == 1 {
-			"1 file".to_owned()
-		} else {
-			format!("{count} files")
-		}
-	};
-	let folders_part = |count: usize| {
-		if count == 1 {
-			"1 folder".to_owned()
-		} else {
-			format!("{count} folders")
-		}
-	};
-	match (files, folders) {
-		// One thing on its own — the path is the most useful thing to show.
-		(1, 0) | (0, 1) => format!("Uploaded to {last}"),
-		(0, folders) => format!("Uploaded {}", folders_part(folders)),
-		(files, 0) => format!("Uploaded {}", files_part(files)),
-		(files, folders) => format!(
-			"Uploaded {} and {}",
-			files_part(files),
-			folders_part(folders)
-		),
-	}
-}
-
-/// Build an upload batch's queue from the picked files, the destination folder and the
-/// answer to the collision question (§17). `collisions` maps a name already in the folder to
-/// the free `name-1` path the server pre-scan proposed; a file not in it is free and takes its
-/// own name. `Replace` overwrites in place, `KeepBoth` writes to the free path, `Skip` drops
-/// the clashing file (`Cancel` never reaches here — the batch is dropped before this). Pure, so
-/// the collision logic is tested without an `App` or a server.
-fn plan_uploads(
-	files: &[PathBuf],
-	dir: &str,
-	collisions: &[(String, String)],
-	choice: ClashChoice,
-) -> Vec<(PathBuf, String)> {
-	let mut queue = Vec::new();
-	for local in files {
-		let name = file_name_of(local).to_owned();
-		let remote = match collisions.iter().find(|(clash, _)| *clash == name) {
-			// Free: its own name in the folder.
-			None => explorer::join(dir, &name),
-			Some((_, free)) => match choice {
-				ClashChoice::Replace => explorer::join(dir, &name),
-				ClashChoice::KeepBoth => free.clone(),
-				ClashChoice::Skip | ClashChoice::Cancel => continue,
-			},
-		};
-		queue.push((local.clone(), remote));
-	}
-	queue
 }
 
 /// The scroll offset that brings the band `top..top + height` into a `view`-tall window
@@ -9900,263 +9125,6 @@ mod tests {
 		let _ = app.on_key(Event::ModifiersChanged(Modifiers::empty()));
 		let _ = app.on_files(FilesMessage::EntryClicked("/home/b".to_owned()));
 		assert_eq!(chosen(&app), ["/home/b"]);
-	}
-
-	#[test]
-	fn an_upload_batch_with_no_collisions_queues_every_file_by_name() {
-		// Arrange: two files, an empty collision list — nothing is already there.
-		let files = vec![PathBuf::from("/local/a.txt"), PathBuf::from("/local/b.txt")];
-
-		// Act: the choice is irrelevant with no collisions, so any of them plans the same.
-		let queue = plan_uploads(&files, "/remote/dir", &[], ClashChoice::Skip);
-
-		// Assert: each file goes to the folder under its own name.
-		assert_eq!(
-			queue,
-			vec![
-				(
-					PathBuf::from("/local/a.txt"),
-					"/remote/dir/a.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/b.txt"),
-					"/remote/dir/b.txt".to_owned()
-				),
-			]
-		);
-	}
-
-	#[test]
-	fn the_collision_answer_decides_each_clashing_file() {
-		// Arrange: three files; `b.txt` already exists, and the server proposed `b-1.txt` for
-		// "keep both". `a.txt` is free, so it is unaffected by the answer.
-		let files = vec![
-			PathBuf::from("/local/a.txt"),
-			PathBuf::from("/local/b.txt"),
-			PathBuf::from("/local/c.txt"),
-		];
-		let clashing = [("b.txt".to_owned(), "/remote/dir/b-1.txt".to_owned())];
-
-		// Replace: the clashing file keeps its name (it is overwritten in place).
-		assert_eq!(
-			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::Replace),
-			vec![
-				(
-					PathBuf::from("/local/a.txt"),
-					"/remote/dir/a.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/b.txt"),
-					"/remote/dir/b.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/c.txt"),
-					"/remote/dir/c.txt".to_owned()
-				),
-			]
-		);
-
-		// Keep both: the clashing file takes the free `-1` path; the others are untouched.
-		assert_eq!(
-			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::KeepBoth),
-			vec![
-				(
-					PathBuf::from("/local/a.txt"),
-					"/remote/dir/a.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/b.txt"),
-					"/remote/dir/b-1.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/c.txt"),
-					"/remote/dir/c.txt".to_owned()
-				),
-			]
-		);
-
-		// Skip: the clashing file is dropped from the queue; the free ones still go.
-		assert_eq!(
-			plan_uploads(&files, "/remote/dir", &clashing, ClashChoice::Skip),
-			vec![
-				(
-					PathBuf::from("/local/a.txt"),
-					"/remote/dir/a.txt".to_owned()
-				),
-				(
-					PathBuf::from("/local/c.txt"),
-					"/remote/dir/c.txt".to_owned()
-				),
-			]
-		);
-	}
-
-	#[test]
-	fn the_paths_of_one_drop_gather_until_the_frame_reads_them() {
-		// The OS reports a multi-file drop as one event per path and never says which is the last
-		// (§29), so each event only gathers. The frame that follows takes the lot and leaves nothing
-		// behind — otherwise the next drop would inherit these paths and upload them again.
-		let mut tab = Tab::default();
-		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/a.txt")));
-		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/b.txt")));
-		assert_eq!(tab.dropped.len(), 2, "both paths waited for the frame");
-		// No session here, so the decision itself is `Ignore` — what this pins is that the settle
-		// consumes the set either way.
-		let _ = tab.update(Message::FileDropSettled);
-		assert!(tab.dropped.is_empty());
-	}
-
-	#[test]
-	fn a_drop_puts_the_target_highlight_out() {
-		// The drag is over the moment a path lands, whatever is then decided about it (§29).
-		let mut tab = Tab::default();
-		let _ = tab.update(Message::FileHovered);
-		let _ = tab.update(Message::FileDropped(PathBuf::from("/local/a.txt")));
-		assert!(!tab.drop_hover);
-	}
-
-	#[test]
-	fn a_dropped_file_uploads_into_the_pane_directory() {
-		// A live session, nothing transferring, one plain file, and the pane showing a folder: the
-		// drop uploads into that folder.
-		let outcome = drop_outcome(true, false, 1, Some("/home/user"));
-		assert_eq!(outcome, DropOutcome::Upload("/home/user".to_owned()));
-	}
-
-	#[test]
-	fn a_drop_of_many_things_of_either_kind_is_accepted_whole() {
-		// Files, folders, or both together: the pane's directory takes the lot (§29). What each
-		// path IS decides which queue it joins, not whether the drop is allowed at all.
-		for items in [1, 7, 40] {
-			assert_eq!(
-				drop_outcome(true, false, items, Some("/home/user")),
-				DropOutcome::Upload("/home/user".to_owned())
-			);
-		}
-	}
-
-	#[test]
-	fn a_drop_with_no_session_is_ignored() {
-		// No session outranks every other rule: with nowhere to send, the drop is silent rather
-		// than a notice about something that could never have uploaded.
-		assert_eq!(
-			drop_outcome(false, false, 1, Some("/home/user")),
-			DropOutcome::Ignore
-		);
-	}
-
-	#[test]
-	fn a_drop_while_busy_is_declined() {
-		// A transfer in flight (or a batch being set up) declines the drop whatever it held — the
-		// one progress bar cannot serve two flows at once (§17).
-		assert_eq!(
-			drop_outcome(true, true, 1, Some("/home/user")),
-			DropOutcome::Busy
-		);
-		assert_eq!(
-			drop_outcome(true, true, 6, Some("/home/user")),
-			DropOutcome::Busy
-		);
-	}
-
-	#[test]
-	fn a_drop_with_no_pane_directory_has_nowhere_to_land() {
-		// Connected and idle, a plain file, but the pane has listed nothing yet: there is no folder
-		// to drop into, so the user is told to open one rather than the file landing on a guess.
-		assert_eq!(drop_outcome(true, false, 1, None), DropOutcome::NoDir);
-	}
-
-	#[test]
-	fn a_drop_that_held_nothing_says_nothing() {
-		// Not a mistake the user made — every dropped path would have had to vanish between the drop
-		// and the frame that reads it — so it is silent rather than a notice about an empty drop.
-		assert_eq!(
-			drop_outcome(true, false, 0, Some("/home/user")),
-			DropOutcome::Ignore
-		);
-	}
-
-	#[test]
-	fn the_files_of_a_drop_go_before_its_folders() {
-		// One queue each, one transfer slot between them (§29). The batch drains first, because its
-		// collision question was answered up front (§17) while a tree asks its own as it walks —
-		// so the folder is still waiting when the file starts.
-		let mut tab = Tab {
-			upload_dir: "/srv".to_owned(),
-			..Tab::default()
-		};
-		tab.uploads
-			.push_back((PathBuf::from("/local/a.txt"), "/srv/a.txt".to_owned()));
-		tab.upload_trees.push_back(PathBuf::from("/local/photos"));
-		tab.pump_uploads();
-		assert!(tab.uploads.is_empty(), "the file was taken first");
-		assert_eq!(tab.upload_trees.len(), 1, "the folder is still queued");
-	}
-
-	#[test]
-	fn the_folders_of_a_drop_are_started_one_after_another() {
-		// With the files through, the pump reaches the folder queue — and takes one at a time, so
-		// the second waits for the first to report back rather than racing it (§29). There is no
-		// session here, so each send fails and frees the slot immediately; what is pinned is that
-		// the queue is walked at all, and one item per pump.
-		let mut tab = Tab {
-			upload_dir: "/srv".to_owned(),
-			..Tab::default()
-		};
-		tab.upload_trees.push_back(PathBuf::from("/local/one"));
-		tab.upload_trees.push_back(PathBuf::from("/local/two"));
-		tab.pump_uploads();
-		assert_eq!(tab.upload_trees.len(), 1);
-		tab.pump_uploads();
-		assert!(tab.upload_trees.is_empty());
-	}
-
-	#[test]
-	fn a_batch_does_not_close_while_folders_are_still_queued() {
-		// `finish_batch` clears the destination every queued folder is going to, so closing early
-		// would strand them (§29).
-		let mut tab = Tab {
-			upload_dir: "/srv".to_owned(),
-			..Tab::default()
-		};
-		tab.upload_trees.push_back(PathBuf::from("/local/photos"));
-		tab.finish_batch_if_drained();
-		assert_eq!(tab.upload_dir, "/srv");
-		assert_eq!(tab.upload_trees.len(), 1);
-	}
-
-	#[test]
-	fn one_thing_uploaded_is_named_by_its_path() {
-		// With a single item the path says more than a count does — "Uploaded 1 file" tells the user
-		// nothing they did not just watch happen (§29).
-		assert_eq!(
-			upload_summary(1, 0, "/srv/notes.txt"),
-			"Uploaded to /srv/notes.txt"
-		);
-		assert_eq!(
-			upload_summary(0, 1, "/srv/photos"),
-			"Uploaded to /srv/photos"
-		);
-	}
-
-	#[test]
-	fn a_mixed_upload_names_both_kinds_rather_than_adding_them_up() {
-		// Three files and two folders is not "five files": a drop that carried both kinds has to
-		// read back as both, or the notice quietly misreports what landed (§29).
-		assert_eq!(
-			upload_summary(3, 2, "/srv/last"),
-			"Uploaded 3 files and 2 folders"
-		);
-		assert_eq!(
-			upload_summary(1, 1, "/srv/last"),
-			"Uploaded 1 file and 1 folder"
-		);
-	}
-
-	#[test]
-	fn several_of_one_kind_are_counted() {
-		assert_eq!(upload_summary(4, 0, "/srv/last"), "Uploaded 4 files");
-		assert_eq!(upload_summary(0, 3, "/srv/last"), "Uploaded 3 folders");
 	}
 
 	// A bare app with one undivided region holding one home tab, and empty shared state, so the

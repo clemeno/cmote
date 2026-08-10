@@ -10,10 +10,11 @@ use iced::widget::{
 };
 use iced::{Color, Element, Length, Point, Size};
 
-use crate::app::{Message, TransferState};
+use crate::app::Message;
 use crate::explorer::Explorer;
 use crate::files::Files;
 use crate::term::Terminal;
+use crate::transfer::{ClashChoice, Progress, Question, Queue};
 use crate::ui::selection::{Cell, Selection};
 
 /// Glyph size and line spacing. A fixed monospace metric — the whole grid shares
@@ -61,26 +62,14 @@ const SEARCH_BAR_INSET: f32 = 8.0;
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
 
-/// The body copy for the upload confirmation (§17). `app` appends the names of the files
-/// being sent. The destination below is a FOLDER — each file keeps its own name inside it —
-/// so one file or many read the same, and the batch is confirmed once for the whole lot.
-pub const UPLOAD_DIALOG_BODY: &str = "These files are sent over SFTP into the remote folder below. Edit the folder to send them somewhere else; leave it empty to use your login directory. Each file keeps its own name.";
-
 /// The widget id of the upload dialog's destination field, so `app` can focus it as the
 /// dialog opens (§17) — the folder is the one thing the user may want to change, and Enter
 /// in the field sends. Same trick as the passphrase prompt (§7).
+///
+/// The dialog's WORDS are not here: each question the transfer flow asks is worded by the module
+/// that raises it (`transfer`), since only that module knows when it is asked. What stays here is
+/// the widget id, which is the view's own business.
 pub const UPLOAD_INPUT_ID: &str = "upload-dest";
-
-/// The body of the upload batch's collision question (§17), followed by the names already in
-/// the folder. Asked once for the whole batch after the server pre-scan, never per file — the
-/// mirror of the download side (§21). Nothing has been sent when it appears, so every answer,
-/// cancelling included, is safe to give.
-pub const UPLOAD_CLASH_BODY: &str = "Some of these files are already in the destination folder. Skipping leaves those on the server as they are, keeping both adds a -1 to the name, and replacing overwrites them — replaced files are not recoverable. Nothing has been sent yet.";
-
-/// The body of the multi-file download's collision question (§21), followed by the names
-/// that clash. Nothing has been downloaded when it is asked, so every answer is safe to
-/// give — including cancelling the batch outright.
-pub const DOWNLOAD_EXISTS_BODY: &str = "These files are already in the folder you picked. Skipping leaves the local copies alone, saving alongside adds a -1 to the name, and replacing overwrites them — replaced files are not recoverable. Nothing has been downloaded yet.";
 
 /// The body of the "new folder" dialog (§18). `app` appends the folder it will be made in. The
 /// name goes in the field below; Enter there, or the Create button, sends it.
@@ -95,12 +84,6 @@ pub const NEW_FOLDER_INPUT_ID: &str = "new-folder-name";
 /// the list — the same caution the home list's own delete carries (§14).
 pub const DELETE_DIALOG_BODY: &str = "Delete these from the server? This cannot be undone — a folder is removed with everything inside it.";
 
-/// The body of a recursive transfer's file-collision prompt (§17, §19), followed by the name of
-/// the file already there. Asked one file at a time as the tree is walked: overwrite or skip just
-/// this one, keep both (a -1 copy beside it), settle every later collision the same way at once,
-/// or cancel the whole transfer — files already copied stay.
-pub const CONFLICT_DIALOG_BODY: &str = "A file with this name is already at the destination. Choose what to do — replaced files are not recoverable. This applies as you go; \"all\" settles every remaining collision the same way.";
-
 /// Which way the shell and the panes can still be brought together (§19), for the two buttons that
 /// do it. One struct because they are one idea read in two directions — and because `status_bar`
 /// is at its argument limit, so the pair would otherwise cost it its eighth.
@@ -114,26 +97,8 @@ struct Follow {
 	reveal: bool,
 }
 
-/// Everything the status bar and the modals need to know about the upload feature
-/// (§17), grouped so `view` keeps a readable signature. `file_count` is how many local
-/// files are picked (zero disables Upload) and `first_file` the first one's name, so the
-/// bar can label a lone pick by name and a batch by count; `dest` is the destination folder
-/// being confirmed, `state` the flow's current step, and `notice` the last outcome.
-#[derive(Debug, Clone, Copy)]
-pub struct UploadView<'a> {
-	pub file_count: usize,
-	pub first_file: Option<&'a str>,
-	pub dest: &'a str,
-	pub state: Option<TransferState>,
-	pub notice: Option<&'a str>,
-	/// Whether a transfer was interrupted and can be resumed (§16). Draws the Resume button beside
-	/// the notice while nothing is running; the ✕ that stops a running transfer needs no flag, only
-	/// `state` being `Running`.
-	pub resumable: bool,
-}
-
 /// The two browser panels in the strip under the grid (§18, §19), grouped so `view` keeps
-/// a readable signature — the same reason `Modals` and `UploadView` exist. They travel
+/// a readable signature — the same reason `Modals` exists. They travel
 /// together: the files pane takes the strip's height off the grid and the tree sits in it
 /// on the pane's right, both draw overlays, and the tree owns the dot-entry toggle that
 /// filters the pane.
@@ -153,9 +118,6 @@ pub struct Panels<'a> {
 	/// this to convert the pane's own top edge — the pane sits at the window's bottom, so its top
 	/// is `window height − pane height` — into the window space its placement is measured in.
 	pub height: f32,
-	/// Whether a file from the OS is being dragged over the window (§29): lights the files pane
-	/// as the drop target, so the user sees where a release will send it.
-	pub drop_hover: bool,
 }
 
 /// What every overlay on this screen needs (§10): whether the Disconnect confirmation is
@@ -167,18 +129,11 @@ pub struct Panels<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct Modals<'a> {
 	pub confirm_disconnect: bool,
-	/// Whether a download's "some of these files are already there" question is open (§21).
-	pub clash: bool,
-	/// The same, for an upload batch (§17). Separate flag because the two dialogs word the
-	/// question and wire their answers differently, even though the chrome is shared.
-	pub upload_clash: bool,
 	/// The "new folder" dialog's typed name when it is open, `None` when closed (§18). Carries the
 	/// name rather than a bare bool because the dialog's field draws from it.
 	pub new_folder: Option<&'a str>,
 	/// Whether the delete confirmation is open (§18).
 	pub pending_delete: bool,
-	/// Whether a recursive transfer's file-collision prompt is open (§17, §19).
-	pub transfer_conflict: bool,
 	/// The port-forwards manager and its list/add-form state (§27). Grouped in with the other
 	/// modals because it is one — an overlay with the shared chrome — and it keeps `view` under
 	/// the argument limit.
@@ -194,7 +149,8 @@ pub struct Modals<'a> {
 /// filling the rest. `endpoint` is the `user@host:port` shown in the bar,
 /// `selection` the active text selection to highlight (if any), `menu` the
 /// right-click context menu's anchor when it is open, `modals` whichever dialog is over
-/// the shell, and `upload` the file-transfer state the bar and its dialogs show (§17).
+/// the shell, and `transfers` the transfer queue the bar, the drop highlight and three of the
+/// dialogs read (§17).
 /// The grid widget borrows the emulator's screen for the frame, so the terminal, the
 /// selection and the dialog body all share the returned element's lifetime.
 pub fn view<'a>(
@@ -203,7 +159,7 @@ pub fn view<'a>(
 	selection: Option<&'a Selection>,
 	menu: Option<Point>,
 	modals: Modals<'a>,
-	upload: UploadView<'a>,
+	transfers: &'a Queue,
 	panels: Panels<'a>,
 ) -> Element<'a, Message> {
 	let Panels {
@@ -212,15 +168,11 @@ pub fn view<'a>(
 		focus,
 		width,
 		height,
-		drop_hover,
 	} = panels;
 	let Modals {
 		confirm_disconnect,
-		clash,
-		upload_clash,
 		new_folder,
 		pending_delete,
-		transfer_conflict,
 		forwards,
 		search,
 		body: dialog_body,
@@ -314,7 +266,7 @@ pub fn view<'a>(
 				sync: can_sync,
 				reveal: can_reveal,
 			},
-			upload,
+			transfers,
 			explorer.visible(),
 			files.visible(),
 			forwards.entries.len(),
@@ -328,7 +280,7 @@ pub fn view<'a>(
 			explorer.show_hidden(),
 			width,
 			focus == crate::app::Focus::Files,
-			drop_hover,
+			transfers.hovering(),
 		);
 		// The pane fills the strip's width; the tree, when shown, takes a fixed column on its
 		// right — the very width `width` was already reduced by (§18), so the pane's grid math
@@ -414,25 +366,39 @@ pub fn view<'a>(
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
 		layers.push(confirm_disconnect_panel(dialog_body, card));
 	}
-	// The upload confirmation (§17) uses the same chrome. A running transfer shows no
-	// modal — its progress lives in the status bar, so the shell stays usable.
-	if let Some(TransferState::ConfirmPath) = upload.state {
-		layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
-		layers.push(confirm_upload_panel(dialog_body, upload.dest, card));
-	}
-	// The batch collision questions, same chrome again — a download's (§21) and an upload's
-	// (§17). Nothing has been written when either opens: the whole batch waits on the answer.
-	if clash {
-		layers.push(crate::ui::dialog::backdrop(Message::DownloadClash(
-			crate::app::ClashChoice::Cancel,
-		)));
-		layers.push(download_clash_panel(dialog_body, card));
-	}
-	if upload_clash {
-		layers.push(crate::ui::dialog::backdrop(Message::UploadClashResolved(
-			crate::app::ClashChoice::Cancel,
-		)));
-		layers.push(upload_clash_panel(dialog_body, card));
+	// Whichever question the transfer flow is holding, all in the same chrome (§17, §19, §21).
+	// Only one is ever open — the queue raises them all off its single slot — so this is one
+	// match rather than three flags that could in principle disagree. A running transfer shows no
+	// modal at all: its progress lives in the status bar, so the shell stays usable.
+	match transfers.asking() {
+		Some(Question::Dest) => {
+			layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
+			layers.push(confirm_upload_panel(dialog_body, transfers.dest(), card));
+		}
+		// Nothing has been written when either batch question opens: the whole batch waits on
+		// the answer, so every dismissal route is safe.
+		Some(Question::DownloadClash) => {
+			layers.push(crate::ui::dialog::backdrop(Message::DownloadClash(
+				ClashChoice::Cancel,
+			)));
+			layers.push(download_clash_panel(dialog_body, card));
+		}
+		Some(Question::UploadClash) => {
+			layers.push(crate::ui::dialog::backdrop(Message::UploadClashResolved(
+				ClashChoice::Cancel,
+			)));
+			layers.push(upload_clash_panel(dialog_body, card));
+		}
+		// A recursive transfer's file-collision prompt (§17, §19): six answers, the whole
+		// transfer parked behind it. The ✕ and backdrop both cancel the transfer — the safe
+		// choice, since resuming would need an explicit decision about the file.
+		Some(Question::Conflict) => {
+			layers.push(crate::ui::dialog::backdrop(
+				Message::TransferConflictResolved(crate::bridge::ConflictChoice::Cancel),
+			));
+			layers.push(transfer_conflict_panel(dialog_body, card));
+		}
+		None => {}
 	}
 	// The "new folder" dialog (§18): the body plus a name field. Every dismissal route cancels,
 	// so backing out creates nothing.
@@ -445,15 +411,6 @@ pub fn view<'a>(
 	if pending_delete {
 		layers.push(crate::ui::dialog::backdrop(Message::DeleteCancelled));
 		layers.push(delete_panel(dialog_body, card));
-	}
-	// A recursive transfer's file-collision prompt (§17, §19): six answers, the whole transfer
-	// parked behind it. The ✕ and backdrop both cancel the transfer — the safe choice, since
-	// resuming would need an explicit decision about the file.
-	if transfer_conflict {
-		layers.push(crate::ui::dialog::backdrop(
-			Message::TransferConflictResolved(crate::bridge::ConflictChoice::Cancel),
-		));
-		layers.push(transfer_conflict_panel(dialog_body, card));
 	}
 	// The port-forwards manager (§27): its own list + add form in the shared chrome. The ✕ and
 	// the backdrop both just close it — nothing here is destructive, forwards are removed by
@@ -494,7 +451,7 @@ fn status_bar<'a>(
 	endpoint: &'a str,
 	has_selection: bool,
 	follow: Follow,
-	upload: UploadView<'a>,
+	transfers: &'a Queue,
 	explorer_visible: bool,
 	files_visible: bool,
 	forward_count: usize,
@@ -517,9 +474,8 @@ fn status_bar<'a>(
 	// Picking a file is always available (it also replaces an earlier pick); sending it
 	// needs both a file and no transfer already in flight (§17).
 	let pick = button(text("Files…").size(STATUS_BAR_TEXT)).on_press(Message::UploadPickPressed);
-	let idle = upload.state.is_none();
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
-		.on_press_maybe((idle && upload.file_count > 0).then_some(Message::UploadPressed));
+		.on_press_maybe(transfers.can_send().then_some(Message::UploadPressed));
 	// The explorer toggle (§18): its label says what the panel currently is, so the
 	// button reads as a state rather than a command.
 	let tree = button(
@@ -568,9 +524,9 @@ fn status_bar<'a>(
 		.align_y(iced::alignment::Vertical::Center);
 	// Say what is picked right after Upload — the button it belongs to — so Upload never
 	// sends a mystery: a lone file by name, a batch by count, and nothing when none is picked.
-	let picked = match upload.file_count {
+	let picked = match transfers.picked_count() {
 		0 => None,
-		1 => upload.first_file.map(str::to_owned),
+		1 => transfers.first_picked().map(str::to_owned),
 		count => Some(format!("{count} files")),
 	};
 	if let Some(picked) = picked {
@@ -580,7 +536,7 @@ fn status_bar<'a>(
 	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
-	let center = container(center_zone(endpoint, upload))
+	let center = container(center_zone(endpoint, transfers))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
 	// `align_y` on each group, not only on the row of groups: a row aligns its own children to each
@@ -615,8 +571,8 @@ fn status_bar<'a>(
 /// What the middle of the status bar shows (§17). A running transfer takes priority — a
 /// progress bar with the byte count — then the last upload's outcome, and otherwise the
 /// session's `user@host:port`, which is what the bar shows all the rest of the time.
-fn center_zone<'a>(endpoint: &str, upload: UploadView<'a>) -> Element<'a, Message> {
-	if let Some(TransferState::Running { sent, total }) = upload.state {
+fn center_zone<'a>(endpoint: &str, transfers: &'a Queue) -> Element<'a, Message> {
+	if let Some(Progress { sent, total }) = transfers.progress() {
 		// A total of zero has nothing to divide by. That is a download that has not yet
 		// heard the file's size (§19) — or a zero-byte file — so the bar stays empty and
 		// the label shows only what has actually moved.
@@ -647,9 +603,9 @@ fn center_zone<'a>(endpoint: &str, upload: UploadView<'a>) -> Element<'a, Messag
 
 	// Nothing running: the last outcome (or the endpoint), and — when a failure left something to
 	// pick up — a Resume beside it that re-sends only the bytes still missing (§16).
-	let label = upload.notice.unwrap_or(endpoint).to_owned();
+	let label = transfers.notice().unwrap_or(endpoint).to_owned();
 	let notice = text(label).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG);
-	if upload.resumable {
+	if transfers.can_resume() {
 		return row![
 			notice,
 			button(text("Resume").size(STATUS_BAR_TEXT)).on_press(Message::TransferResumePressed),
@@ -893,8 +849,6 @@ fn upload_clash_panel<'a>(
 	dialog_body: &'a text_editor::Content,
 	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
-	use crate::app::ClashChoice;
-
 	crate::ui::dialog::dialog(
 		"Some of these files are already there".to_owned(),
 		Message::UploadClashResolved(ClashChoice::Cancel),
@@ -925,8 +879,6 @@ fn download_clash_panel<'a>(
 	dialog_body: &'a text_editor::Content,
 	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
-	use crate::app::ClashChoice;
-
 	crate::ui::dialog::dialog(
 		"Some of these files are already there".to_owned(),
 		Message::DownloadClash(ClashChoice::Cancel),
