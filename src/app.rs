@@ -3085,7 +3085,10 @@ impl Tab {
 			Message::GridRightPressed => self.menu = Some(self.pointer),
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
-			Message::CopyPressed => return self.on_copy_rich(),
+			Message::CopyPressed => {
+				self.on_terminal_command();
+				return self.on_copy_rich();
+			}
 			Message::TermFindOpen => return self.open_term_find(),
 			Message::TermFindClose => self.search = None,
 			Message::TermFindQuery(query) => self.term_find_query(query),
@@ -3095,14 +3098,17 @@ impl Tab {
 			// output does, like the toast's.
 			Message::TermFindRescan => self.rescan_find(),
 			Message::LinkOpen(uri) => {
-				self.menu = None;
+				self.on_terminal_command();
 				self.follow_link(&uri);
 			}
 			Message::LinkCopy(uri) => {
-				self.menu = None;
+				self.on_terminal_command();
 				return self.copy_to_clipboard(uri);
 			}
-			Message::PastePressed => return self.on_paste(),
+			Message::PastePressed => {
+				self.on_terminal_command();
+				return self.on_paste();
+			}
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::SyncPressed => self.on_sync(),
 			Message::MenuDismissed => self.menu = None,
@@ -3148,7 +3154,7 @@ impl Tab {
 			}
 			Message::TerminalUploadPressed => {
 				// The grid's right-click "Upload…": pick files for the shell's own directory.
-				self.menu = None;
+				self.on_terminal_command();
 				let dir = self
 					.terminal
 					.as_ref()
@@ -4779,6 +4785,34 @@ impl Tab {
 			return iced::Task::none();
 		}
 
+		// Typing takes the keyboard back to the shell (§50). A panel answers to the arrows, the
+		// Page keys, Tab, Enter, F2, F5 and Esc — never to a plain character — so a letter
+		// arriving while a panel holds the ring is someone starting a command at the prompt they
+		// are looking at, with the focus left on a pane they navigated a while ago. The old
+		// behaviour dropped that keystroke: the panel swallowed it, nothing happened, and the
+		// first letter of the command was silently eaten (or, worse, the first several, until the
+		// missing echo was noticed). Handing the focus over is what the user was asking for by
+		// typing at all. Taken before the panel dispatch below, so the key itself goes on to the
+		// shell rather than being spent on the switch.
+		if !matches!(self.focus, Focus::Terminal) && is_typing(&key, modifiers) {
+			self.set_focus(Focus::Terminal);
+		}
+
+		// Ctrl+V is typing by another route, so it is answered from wherever the keyboard is (§50)
+		// — the same reading that makes the menu's own Paste take the focus back. It sits ABOVE the
+		// panel dispatch rather than in the copy/paste block below for exactly that reason: down
+		// there it is only reached with the shell already focused, and a paste aimed at the shell
+		// while a panel held the ring would be dropped on the floor with no echo to say so. Neither
+		// panel claims Ctrl+V, so nothing is being taken from them.
+		//
+		// Ctrl+C is NOT treated this way. It reads the terminal's own selection or, with none, is
+		// the interrupt for the remote — neither is text going in, and the panels have the better
+		// claim on a future "copy what is selected here".
+		if is_paste(physical_key, modifiers) {
+			self.on_terminal_command();
+			return self.on_paste();
+		}
+
 		// A focused panel keeps the key; only the shell's own focus reaches the channel.
 		match self.focus {
 			Focus::Tree => return self.on_tree_key(&key),
@@ -4786,11 +4820,12 @@ impl Tab {
 			Focus::Terminal => {}
 		}
 
-		// Copy / paste keyboard shortcuts, with the shell focused (§10). Taken before the key is
-		// encoded for the remote, so a terminal binding wins over the program — the way xterm and
-		// kitty keep these for the terminal itself. Matched on the PHYSICAL key, so the shortcut
-		// holds on any layout (AZERTY, Dvorak, …), not only where C / V sit on QWERTY. Alt / Logo
-		// held means it is some other combination, so leave those for the shell.
+		// The copy keyboard shortcuts, with the shell focused (§10) — paste is answered above,
+		// before the focus dispatch. Taken before the key is encoded for the remote, so a terminal
+		// binding wins over the program — the way xterm and kitty keep these for the terminal
+		// itself. Matched on the PHYSICAL key, so the shortcut holds on any layout (AZERTY,
+		// Dvorak, …), not only where C sits on QWERTY. Alt / Logo held means it is some other
+		// combination, so leave those for the shell.
 		if modifiers.control() && !modifiers.alt() && !modifiers.logo() {
 			match physical_key {
 				// Ctrl+C copies the selection as rich HTML (colour + attributes), but ONLY when
@@ -4812,10 +4847,6 @@ impl Tab {
 					}
 					// no selection: fall through so Ctrl+C reaches the shell as the interrupt
 				}
-				// Ctrl+V and Ctrl+Shift+V both paste plain text: a terminal takes bytes for the
-				// remote shell, so there is no styled paste to distinguish (pasting escape codes
-				// would be a paste-injection hazard, the one the bracketed-paste strip guards).
-				Physical::Code(Code::KeyV) => return self.on_paste(),
 				// Ctrl+Shift+O selects the last finished command's output (§34), so the existing
 				// Copy then grabs it. Plain Ctrl+O has a readline meaning (the shell's), so only
 				// the Shift form is ours — the bare key falls through to the channel below.
@@ -4931,6 +4962,24 @@ impl Tab {
 		// Backwards is a forward step of len-1, which keeps the wrap-around in one place.
 		let step = if backwards { ring.len() - 1 } else { 1 };
 		self.set_focus(ring[(at + step) % ring.len()]);
+	}
+
+	/// A command from the terminal's own surface ran — an item of the grid's right-click menu, the
+	/// status-bar button that duplicates it, or the Ctrl+V that is the same command off the
+	/// keyboard (§50). Whatever held cmote's keyboard until now, the user just reached into the
+	/// terminal and acted on it, so the ring goes back there.
+	///
+	/// It matters most for **Paste**, which is typing at the prompt by another route: pasting a
+	/// command while the files pane held the focus used to leave the next keystroke — the Enter
+	/// that runs it — going to the pane. But the same reading covers the rest of the menu: a copy,
+	/// an upload into the shell's directory, a link followed out of its scrollback are all work on
+	/// the terminal, and none of them is a reason to keep the keyboard parked on a panel.
+	///
+	/// Only an ITEM does this, not the right-press that opens the menu: opening it is a question
+	/// about what is under the pointer, and dismissing it (Esc, or a click on the dismiss layer)
+	/// leaves everything as it was — including where the keyboard is.
+	fn on_terminal_command(&mut self) {
+		self.focus_pane(Focus::Terminal);
 	}
 
 	/// Give the keyboard to a panel because it was clicked (§20). Also closes the OTHER
@@ -7290,6 +7339,44 @@ fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Direc
 	}
 }
 
+/// Whether this key press is plain TYPING — a character meant to appear at a prompt — rather
+/// than a shortcut or a navigation key (§50). This is what decides that a keystroke aimed at a
+/// focused panel was really meant for the shell.
+///
+/// Two conditions, and both are needed:
+///   * a `Character` key, never a `Named` one. Enter, Tab, the arrows, F2, Esc, Backspace and
+///     Delete are all `Named`, and every one of them is a panel's own key (§20) — a rule written
+///     on the produced `text` instead would catch Enter (which carries `"\r"`) and take the
+///     folder tree's "send the shell there" away from it;
+///   * no Ctrl, Alt or Logo. Those make a combination, not a character: the files pane's Ctrl+A
+///     takes the whole listing (§21), and Ctrl+Tab is the way out of a panel at all.
+///
+/// Shift is allowed through, since a capital letter is as much typing as a small one.
+///
+/// `ponytail:` on Windows AltGr arrives as Ctrl+Alt, so an AltGr character — `@` on an AZERTY
+/// layout — reads as a combination here and does not, on its own, hand the keyboard over. The
+/// letters typed around it do, which is the case that matters: a command starts with a word.
+fn is_typing(key: &iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) -> bool {
+	matches!(key, iced::keyboard::Key::Character(_))
+		&& !modifiers.control()
+		&& !modifiers.alt()
+		&& !modifiers.logo()
+}
+
+/// Whether this press is the paste shortcut — Ctrl+V, or Ctrl+Shift+V (§10). Both paste the same
+/// plain text: a terminal takes bytes for the remote shell, so there is no styled paste to
+/// distinguish (pasting escape codes would be a paste-injection hazard, the one the
+/// bracketed-paste strip guards). Matched on the PHYSICAL key so it holds on any layout — AZERTY,
+/// Dvorak — and not only where V sits on QWERTY. Alt or Logo held makes it some other
+/// combination, which belongs to the shell.
+fn is_paste(physical: iced::keyboard::key::Physical, modifiers: iced::keyboard::Modifiers) -> bool {
+	use iced::keyboard::key::{Code, Physical};
+	modifiers.control()
+		&& !modifiers.alt()
+		&& !modifiers.logo()
+		&& matches!(physical, Physical::Code(Code::KeyV))
+}
+
 /// Open the native file picker for a private-key file (§7). The dialog is modal
 /// and would block the GUI thread, so it runs as an async `Task` instead; its
 /// result arrives back through the Elm loop as `Message::KeyFilePicked`. We keep
@@ -8023,6 +8110,139 @@ mod tests {
 		));
 
 		assert!(tab.home_filter.is_empty());
+	}
+
+	// A press of a printable character key, the way a real typed letter arrives: the logical key
+	// AND the text the OS produced for it, since the encoder reads both.
+	fn character_press(
+		character: &str,
+		code: iced::keyboard::key::Code,
+		modifiers: iced::keyboard::Modifiers,
+	) -> iced::keyboard::Event {
+		let key = iced::keyboard::Key::Character(character.into());
+		iced::keyboard::Event::KeyPressed {
+			key: key.clone(),
+			modified_key: key,
+			physical_key: iced::keyboard::key::Physical::Code(code),
+			location: iced::keyboard::Location::Standard,
+			modifiers,
+			text: Some(character.into()),
+			repeat: false,
+		}
+	}
+
+	/// Typing while a side panel holds the keyboard hands it back to the shell, and the letter
+	/// that did it goes down the channel rather than being spent on the switch (§50). Without
+	/// this the panel swallowed it and the first character of a command vanished.
+	#[test]
+	fn typing_while_a_panel_has_the_keyboard_gives_it_to_the_shell() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(character_press(
+			"l",
+			iced::keyboard::key::Code::KeyL,
+			iced::keyboard::Modifiers::empty(),
+		));
+
+		assert_eq!(app.focus, Focus::Terminal, "typing means the shell");
+		assert_eq!(
+			next_input(&mut rx),
+			Some(b"l".to_vec()),
+			"and the letter goes with it"
+		);
+	}
+
+	/// A navigation key is the panel's own, so it keeps both the key and the keyboard (§20, §50).
+	/// This is the half of the rule that makes the other half safe: walking a tree with the arrows
+	/// must not read as typing at the prompt.
+	#[test]
+	fn an_arrow_while_a_panel_has_the_keyboard_stays_with_the_panel() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Tree;
+
+		let _ = app.on_key(key_press(
+			iced::keyboard::key::Named::ArrowDown,
+			iced::keyboard::key::Code::ArrowDown,
+			iced::keyboard::Modifiers::empty(),
+		));
+
+		assert_eq!(app.focus, Focus::Tree, "the tree is still being walked");
+		assert_eq!(next_input(&mut rx), None, "and nothing reached the shell");
+	}
+
+	/// A character under Ctrl is a combination, not typing (§50): the files pane's Ctrl+A still
+	/// takes the whole listing (§21) instead of handing the keyboard over and sending an `a`.
+	#[test]
+	fn a_control_combination_is_not_typing() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(character_press(
+			"a",
+			iced::keyboard::key::Code::KeyA,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert_eq!(app.focus, Focus::Files, "the pane keeps its own shortcut");
+		assert_eq!(next_input(&mut rx), None, "and nothing reached the shell");
+	}
+
+	/// Ctrl+V is the menu's Paste off the keyboard, so it is answered from wherever the ring is
+	/// and takes it back with it (§50). It used to be dropped: the panel swallowed it and the
+	/// paste never happened, with nothing on screen to say why.
+	#[test]
+	fn ctrl_v_pastes_from_a_panel_and_takes_the_keyboard_back() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(character_press(
+			"v",
+			iced::keyboard::key::Code::KeyV,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert_eq!(app.focus, Focus::Terminal, "the paste goes to the shell");
+	}
+
+	/// Ctrl+C is not treated that way (§50): it reads the terminal's own selection, or is the
+	/// interrupt for the remote — neither is text going in — so a panel holding the ring keeps it.
+	#[test]
+	fn ctrl_c_does_not_take_the_keyboard_from_a_panel() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+
+		let _ = app.on_key(character_press(
+			"c",
+			iced::keyboard::key::Code::KeyC,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert_eq!(app.focus, Focus::Files, "the pane keeps the keyboard");
+		assert_eq!(
+			next_input(&mut rx),
+			None,
+			"and the shell hears no interrupt"
+		);
+	}
+
+	/// A command from the terminal's own surface — here Paste, off the grid's right-click menu —
+	/// puts the keyboard back on the shell (§50). Pasting a command while a panel held the focus
+	/// used to leave the Enter that runs it going to the panel.
+	#[test]
+	fn a_terminal_menu_command_takes_the_keyboard_back() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.focus = Focus::Files;
+		app.menu = Some(iced::Point::new(10.0, 10.0));
+
+		let _ = app.update(Message::PastePressed);
+
+		assert_eq!(
+			app.focus,
+			Focus::Terminal,
+			"the paste lands where the keyboard now is"
+		);
+		assert!(app.menu.is_none(), "and the menu it was chosen from closed");
 	}
 
 	// A key-press event for the terminal handler. `text: None` is fine for the named keys these

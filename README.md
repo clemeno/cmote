@@ -263,6 +263,16 @@ references below (§n) point into it.
   hands the keyboard back to the shell. **Shift** held on an arrow, a Page key or Home/End
   extends the selection instead of moving it. A keyboard-moved selection scrolls itself into
   view, only at the edges (§20).
+- **The keyboard follows what you act on** — no panel answers to a plain character, so **typing
+  while a panel holds the keyboard hands it back to the shell**, and the letter you typed goes to
+  the prompt instead of vanishing. Anything under **Ctrl / Alt** stays a shortcut (the files pane
+  keeps Ctrl+A), and the arrows, Tab, Enter, F2 and Esc stay the panel's. The same goes for the
+  terminal's own commands: choosing **Copy selection / Paste / Upload… / Open link / Copy link**
+  from its right-click menu (or the Copy / Paste buttons in the status bar) puts the keyboard back
+  on the shell — so the Enter that runs a pasted command reaches it. **Ctrl+V** is that same Paste
+  off the keyboard and behaves the same, from whichever panel has the ring. Merely opening the
+  menu, or dismissing it, changes nothing; **Ctrl+C** stays where it is, since copying is not text
+  going into the shell (§50).
 - **A details popup beside the selection** — the entry's **full name** (the grid's label is
   narrow and may clip it), where a **symlink points**, the file's **MIME type**, its
   **modification time in the server's own timezone** (`2026-03-20 11:46:40 CEST (+02:00)` —
@@ -385,6 +395,9 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 |---|---|
 | **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous panel — shell, folder tree, files pane (hidden panels are skipped) |
 | Click a panel | Focus it |
+| Type a letter while a panel has the keyboard | Hand it back to the shell and send that letter to the prompt — no panel answers to plain characters (Ctrl / Alt combinations stay the panel's) |
+| Pick an item off the terminal's right-click menu | Do it, and put the keyboard back on the shell (opening or dismissing the menu does not) |
+| **Ctrl+V** from anywhere | Paste into the shell and put the keyboard back on it — the menu's Paste off the keyboard |
 | **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way. Shown only while the window is whole: one split is the limit |
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
@@ -925,6 +938,13 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
   the remote — they should agree, including the timezone. Select a symlink
   (`ln -s /etc /tmp/link-to-etc`) → the popup adds `→ /etc` a moment later.
 - **Enter** on a folder enters it; **F2** renames in place.
+- **Type while the pane (or the tree) has the ring**: `whoami` → the ring jumps to the shell on
+  the `w` and the whole word lands at the prompt, `w` included. Then **Ctrl+A** with the pane
+  focused again → it still selects the whole listing rather than typing an `a` (§50).
+- With a panel focused, right-click the terminal and pick **Paste** (put something on the
+  clipboard first) → the text lands at the prompt and the ring is back on the shell, so **Enter**
+  runs it. **Ctrl+V** with the panel focused should do exactly the same. Right-click and press
+  **Esc** instead → the menu closes and the panel keeps the keyboard.
 
 **11. Selecting many entries.** In a directory with a dozen or so entries:
 

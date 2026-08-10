@@ -44,7 +44,7 @@ for disambiguate, press / repeat / release events, report-all and associated tex
 modifyOtherKeys when an editor turns it on, §25). Everything since v2.3.0 lands in the one
 **v3.0.0** major release — §23, §24 and §25 are all part of it, with no point increments above
 3.0.0; and everything since *that* lands the same way in the one **v4.0.0** major release —
-§32 through §49, with no point increments in between (the 3.1.0 the manifest carried for a
+§32 through §50, with no point increments in between (the 3.1.0 the manifest carried for a
 while was work in progress, never tagged, and is folded in here). What earns the major number
 is that two of them change what a cmote window *is*: it can be **split** in two, each half with
 its own tab strip and its own session on screen at once (§48), and one connection can hold
@@ -60,7 +60,8 @@ with **double- and triple-click** to take a word or a line (§42); the **identit
 the engine drops, answered beside it (§33, §36); a **tab strip the user orders**, with files beside
 their session and drag to rearrange (§38), and a close that **returns you where you were** (§37);
 and a **filter box over the saved-target list** — a fragment while you type, a whole-row glob the
-moment a `*` or `?` appears (§49).
+moment a `*` or `?` appears (§49); and a keyboard that **follows what you act on**, so typing while
+a side panel holds it, or choosing an item off the grid's menu, hands it back to the shell (§50).
 Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -1913,9 +1914,10 @@ keyboard just landed on.
 - **Ctrl+Tab cycles**, Ctrl+Shift+Tab the other way, skipping panels that are hidden — a
   stop you cannot see is a dead press. It is read *before* anything else on the terminal
   screen, because it is the way out of a panel that is swallowing keys.
-- **A focused panel keeps every key**, not just the ones it uses. A panel that swallowed
-  only the arrows would leave Tab completing paths at a prompt the user is not looking at.
-  **Esc** hands the keyboard back to the shell from either panel.
+- **A focused panel keeps every key it could mean**, not just the ones it uses. A panel that
+  swallowed only the arrows would leave Tab completing paths at a prompt the user is not
+  looking at. **Esc** hands the keyboard back to the shell from either panel — and so does
+  **plain typing**, which no panel answers to and the shell always does (§50).
 - The focused panel wears a one-pixel ring (`ui::explorer::focus_border`, shared by both),
   which is the only thing that tells the two panels apart at a glance.
 
@@ -4857,3 +4859,91 @@ touched it. It is not persisted — a filter is a way of getting somewhere, not 
 - **No filtering by what is not on the row.** Auth kind, key path and the remembered-secret flag are not
   matched, only the two strings the user can see. A filter that matched invisible fields would hide rows for
   reasons the screen never shows.
+
+---
+
+## §50 — The keyboard follows what you act on (v4.0.0)
+
+§20 gave the window one keyboard and three stops for it — the shell, the folder tree, the files pane — and
+made every move between them explicit: a click, Ctrl+Tab, or Esc. Explicit is right for a ring, and it is
+wrong for the two moments where the user has *already said* where they are working and only the ring has not
+caught up. This section handles those two.
+
+### Typing at a prompt means the prompt
+
+The panels answer to the arrows, the Page keys, Home/End, Tab, Enter, F2, F5 and Esc. Not one of them
+answers to a plain character — there is no type-ahead in either panel — so a letter arriving while a panel
+holds the keyboard could only ever have been meant for the shell. It was dropped: the panel swallowed
+everything (§20's "a focused panel keeps every key"), nothing happened on screen, and the first character of
+a command disappeared. Usually several, because nothing about a swallowed keystroke says it was swallowed —
+the user finds out when the echo they expected is missing and has to work out how much of what they typed
+survived.
+
+Now typing **hands the keyboard to the shell and goes with it**. The focus moves before the key is
+dispatched, so the letter that asked for the move is the letter that reaches the prompt rather than being
+spent on the switch.
+
+What counts as typing is `is_typing`, and it is deliberately narrow — two conditions, both required:
+
+- **A `Character` key, never a `Named` one.** Enter, Tab, the arrows, F2, Esc, Backspace and Delete are all
+  `Named`, and every one is a panel's own key. Writing the rule on the *produced text* instead — the obvious
+  alternative, since winit hands one to most keys — would catch Enter, which carries `"\r"`, and take the
+  tree's "send the shell there" away from it.
+- **No Ctrl, Alt or Logo.** Those make a combination, not a character: the files pane's Ctrl+A takes the
+  whole listing (§21), and Ctrl+Tab is the way out of a panel at all. Shift is let through, since a capital
+  is as much typing as a small letter.
+
+`ponytail:` on Windows AltGr arrives as Ctrl+Alt, so an AltGr character — `@` on an AZERTY layout — reads as
+a combination and does not on its own hand the keyboard over. The letters around it do, which is the case
+that matters: a command starts with a word.
+
+The rule is one-way. Typing in the shell never moves the focus *to* a panel, because a panel has nothing to
+type into (its rename fields are modal and take the keyboard whole, §18, §19).
+
+### A command from the terminal's surface means the terminal
+
+The grid's right-click menu — Copy selection, Paste, Upload…, and Open / Copy link on a link cell (§10, §17,
+§24) — and the status-bar buttons that duplicate the first two used to leave the keyboard wherever it was.
+The case that shows why that is wrong is **Paste**: pasting a command while the files pane held the focus put
+the text at the prompt and left the *next* keystroke — the Enter that runs it — going to the pane.
+
+`on_terminal_command` now puts the ring back on the shell for every item of that menu. Paste is the sharp
+case, but the reading covers the rest: a copy of the scrollback, an upload into the shell's own directory, a
+link followed out of its output are all work on the terminal, and none is a reason to keep the keyboard
+parked on a panel.
+
+**Ctrl+V is that same command off the keyboard**, so it is answered the same way — from wherever the ring
+is, and it brings the ring with it. That means it moved *above* the focus dispatch in `on_key`: left in the
+copy/paste block below it, it was only ever reached with the shell already focused, so a paste asked for
+while a panel held the keyboard was dropped on the floor with no echo to say why. Neither panel claims
+Ctrl+V, so nothing is taken from them. Ctrl+Shift+V is the same shortcut and pastes the same plain text
+(`is_paste` covers both, matched on the physical key so it holds on AZERTY and Dvorak).
+
+**Ctrl+C is deliberately not treated that way.** It reads the terminal's own selection, or — with nothing
+selected — is the interrupt for the remote. Neither is text going *in*, which is what this whole section is
+about; and of every unclaimed shortcut, "copy what is selected here" is the one a panel has the best claim
+on the day it wants it.
+
+**An item does this; the right-press that opens the menu does not.** Opening the menu is a question about
+what is under the pointer, and every way of leaving it unanswered — Esc, a click on the dismiss layer —
+leaves the window as it was, keyboard included. Only choosing an item is an act on the terminal. (A LEFT
+click on the grid has always focused it, §20; that is unchanged.)
+
+Both moves go through `set_focus`, so **focus reporting** sees them like any other (§23): a program that
+asked for `?1004` hears `CSI I` when typing or a menu command brings the keyboard back, exactly as it would
+for a click on the grid. Reporting the ring rather than the OS window is what makes that consistent.
+
+### What is deliberately NOT here
+
+- **No other shortcut reaches across the focus.** Ctrl+V does, because it is text going into the shell;
+  every other unclaimed combination still lands wherever the ring is and does nothing there. Widening that
+  would be deciding, in advance, that the panels will never want those keys.
+- **No focus move for the panels' own context menus.** A menu item on the tree or the files pane acts on
+  that panel, and the panel already had the keyboard when it was right-clicked; there is nothing to take
+  back.
+- **The right-press does not focus the grid**, per above.
+- **Typing does not move the focus away from the shell**, since there is nowhere it would go.
+- **No type-ahead in the panels.** Letters could plausibly jump to the entry that starts with them — the
+  file-manager habit — but that is exactly the key this section gives to the shell, and the shell has the
+  better claim: a terminal is a thing you type at. If type-ahead is ever wanted it needs its own way in (a
+  panel-local search field), not a quiet reversal of this rule.
