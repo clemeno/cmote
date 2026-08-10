@@ -54,19 +54,116 @@ pub const DIALOG_DRAG_MIN_VISIBLE: f32 = 44.0;
 /// top corners) so the header does not square off over the card's rounded border.
 const CORNER_RADIUS: f32 = 6.0;
 
-/// Where the dialog card sits and whether it is mid-drag (§10). `pos` is the card's
-/// top-left in window coordinates (seeded to centre and clamped by `app`); `dragging`
-/// switches on the pointer-capture layer that follows the drag.
-#[derive(Debug, Clone, Copy)]
-pub struct Drag {
-	pub pos: Point,
-	pub dragging: bool,
+/// A floating dialog card: where it sits, and whether it is being dragged by its header (§10).
+///
+/// It owns the whole gesture — centring on open, the anchor-then-delta arithmetic of a drag, and
+/// the clamp that keeps the header reachable — because that arithmetic used to exist TWICE, once
+/// for a tab's own dialogs and once for the App-level overlay cards (§26, §30), differing only in
+/// which box they were measured against. The two copies were line for line the same, and each
+/// correction had to be made in both; here it is made once, and the box is a parameter.
+///
+/// The fields are private on purpose. A caller holds a `Card`, hands it the pointer, and passes it
+/// to `dialog` — it never has to know that a drag needs an anchor to avoid jumping on its first
+/// move, which is precisely the detail both copies had to get right.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Card {
+	/// The card's top-left, in the coordinates of whatever box it floats over — the OS window for
+	/// an App-level overlay, a region for a tab's own dialog (§48).
+	pos: Point,
+	/// Whether the header is being held right now. Switches on the pointer-capture layer that
+	/// follows the drag past the card's own edges, and closes the hand cursor (§51).
+	dragging: bool,
+	/// The pointer position at the previous move of this drag, so successive positions become
+	/// movement deltas. `None` between drags and before a drag's FIRST move: a press reports where
+	/// the pointer is, not where inside the header it landed, so the first move can only record an
+	/// anchor — applying it as a delta would snap the card's corner to the pointer.
+	last: Option<Point>,
+}
+
+impl Card {
+	/// A card freshly opened in `box_size`: centred, at rest, with no leftover anchor — so a spot
+	/// dragged into during a previous dialog never carries across to the next (§10, §26).
+	///
+	/// Centring uses the card's fixed width and its ESTIMATED height (iced does not expose the
+	/// laid-out size), and floors at zero so a box too small to centre in keeps the card at the
+	/// origin rather than off-screen.
+	pub fn opened(box_size: iced::Size) -> Self {
+		Self {
+			pos: Point::new(
+				((box_size.width - DIALOG_WIDTH) / 2.0).max(0.0),
+				((box_size.height - DIALOG_HEIGHT_ESTIMATE) / 2.0).max(0.0),
+			),
+			dragging: false,
+			last: None,
+		}
+	}
+
+	/// The header was pressed: the drag begins (§10). The anchor is cleared rather than set,
+	/// because a press carries no useful offset — see `last`.
+	pub fn grab(&mut self) {
+		self.dragging = true;
+		self.last = None;
+	}
+
+	/// The pointer moved during a drag: shift the card by the delta since the previous move and
+	/// clamp it back into `box_size` (§10). The first move of a drag only records the anchor, so
+	/// the card does not jump; a move while nothing is held is ignored, which is what makes the
+	/// full-window capture layer harmless at rest.
+	pub fn drag_to(&mut self, pointer: Point, box_size: iced::Size) {
+		if !self.dragging {
+			return;
+		}
+		if let Some(last) = self.last {
+			self.pos = clamped(self.pos + (pointer - last), box_size);
+		}
+		self.last = Some(pointer);
+	}
+
+	/// The drag ended (§10). The anchor goes with it, so the next drag starts by re-anchoring
+	/// instead of measuring against wherever this one happened to stop.
+	pub fn release(&mut self) {
+		self.dragging = false;
+		self.last = None;
+	}
+
+	/// The box the card floats over changed size (§26): pull the card back into it, so one dragged
+	/// to a far corner before the window shrank is not left stranded off-screen. Harmless — and
+	/// cheap — when the card is nowhere near an edge.
+	pub fn reflow(&mut self, box_size: iced::Size) {
+		self.pos = clamped(self.pos, box_size);
+	}
+
+	/// Test-only: the card's top-left. Production code never needs it — `dialog` is handed the
+	/// whole card and reads the field directly — so this is not part of the interface a caller
+	/// learns; it exists so an assertion can say where the card ended up.
+	#[cfg(test)]
+	pub(crate) fn pos(self) -> Point {
+		self.pos
+	}
+
+	/// Test-only, for the same reason as `pos`: whether the header is being held right now.
+	#[cfg(test)]
+	pub(crate) fn is_dragging(self) -> bool {
+		self.dragging
+	}
+}
+
+/// Keep a proposed top-left inside `box_size` so the card stays reachable (§10).
+///
+/// Horizontal is exact — the fixed width keeps the whole card between the side edges. Vertical
+/// only keeps `DIALOG_DRAG_MIN_VISIBLE` on screen rather than the whole card, because iced does
+/// not expose the card's real height; that lets the dialog be dragged right down to the bottom
+/// edge instead of being blocked short of it, while the header and its ✕ stay in reach.
+fn clamped(pos: Point, box_size: iced::Size) -> Point {
+	let max_x = (box_size.width - DIALOG_WIDTH).max(0.0);
+	let max_y = (box_size.height - DIALOG_DRAG_MIN_VISIBLE).max(0.0);
+	Point::new(pos.x.clamp(0.0, max_x), pos.y.clamp(0.0, max_y))
 }
 
 /// Assemble a dialog card. `title` is the question shown in the header; `on_close`
 /// is emitted by the ✕ button (wire it to the safe/cancel action); `body` explains
 /// what the action does; `footer` holds the action buttons, laid out evenly across
-/// the width. `drag` places the card (its top-left) and, while dragging, adds a
+/// the width. `card` places it (its top-left) and, while dragging, adds a
 /// pointer-capture layer. The result fills the window, so a caller overlaying a live
 /// view stacks it over a dimming backdrop, while a standalone screen renders it on the
 /// plain window background.
@@ -75,13 +172,13 @@ pub fn dialog<'a>(
 	on_close: Message,
 	body: Element<'a, Message>,
 	footer: Vec<Element<'a, Message>>,
-	drag: Drag,
+	card: Card,
 ) -> Element<'a, Message> {
 	// Header / body / footer stacked with no gaps: each band paints its own region,
 	// so the seams line up flush and the header colour meets the body cleanly. The
-	// width is fixed so `app` can clamp horizontal dragging exactly.
-	let card = container(column![
-		header_bar(title, on_close, drag.dragging),
+	// width is fixed so the drag can be clamped horizontally to the exact edge.
+	let chrome = container(column![
+		header_bar(title, on_close, card.dragging),
 		body_band(body),
 		footer_bar(footer)
 	])
@@ -103,26 +200,26 @@ pub fn dialog<'a>(
 	// backdrop, so clicking away can still cancel. A selectable widget inside the card
 	// receives its own press first (children handle events before this wrapper), so
 	// this does not block selecting the body text.
-	let card = mouse_area(card)
+	let chrome = mouse_area(chrome)
 		.on_press(Message::Ignored)
 		.on_right_press(Message::Ignored);
 
-	// Place the card's top-left at `drag.pos`. The window-filling container is
+	// Place the card's top-left at `card.pos`. The window-filling container is
 	// top-left aligned by default, so its padding acts as an absolute offset.
-	let positioned = container(card)
+	let positioned = container(chrome)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.padding(Padding {
-			top: drag.pos.y,
+			top: card.pos.y,
 			right: 0.0,
 			bottom: 0.0,
-			left: drag.pos.x,
+			left: card.pos.x,
 		});
 
 	// While dragging, a transparent full-window layer on top captures every pointer
 	// move and the release, so tracking continues even when the pointer leaves the card
 	// (its coordinates are window-local because the layer fills the window from origin).
-	if drag.dragging {
+	if card.dragging {
 		stack![positioned, drag_capture_layer()]
 			.width(Length::Fill)
 			.height(Length::Fill)
@@ -304,4 +401,110 @@ fn footer_bar<'a>(buttons: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 			left: 12.0,
 		})
 		.into()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A comfortable box to float a card in, big enough that centring is not clamped.
+	const ROOMY: iced::Size = iced::Size {
+		width: 1000.0,
+		height: 800.0,
+	};
+
+	#[test]
+	fn a_card_opens_centred_and_at_rest() {
+		let card = Card::opened(ROOMY);
+		assert_eq!(card.pos().x, (1000.0 - DIALOG_WIDTH) / 2.0);
+		assert_eq!(card.pos().y, (800.0 - DIALOG_HEIGHT_ESTIMATE) / 2.0);
+		assert!(!card.is_dragging(), "a card opens ready to read, not held");
+	}
+
+	/// A box smaller than the card cannot centre it — the arithmetic would put the top-left
+	/// negative, which is off-screen in the one direction nothing can drag it back from.
+	#[test]
+	fn a_box_too_small_to_centre_in_keeps_the_card_at_the_origin() {
+		let card = Card::opened(iced::Size::new(100.0, 100.0));
+		assert_eq!(card.pos(), Point::ORIGIN);
+	}
+
+	/// A press reports where the POINTER is, not where inside the header it landed, so the first
+	/// move of a drag can only record an anchor. Applying it as a delta would snap the card's
+	/// corner to the pointer — a visible jump at the start of every drag.
+	#[test]
+	fn the_first_move_of_a_drag_only_anchors_it() {
+		let mut card = Card::opened(ROOMY);
+		let start = card.pos();
+		card.grab();
+		card.drag_to(Point::new(500.0, 500.0), ROOMY);
+		assert_eq!(card.pos(), start);
+		card.drag_to(Point::new(520.0, 540.0), ROOMY);
+		assert_eq!(card.pos(), Point::new(start.x + 20.0, start.y + 40.0));
+	}
+
+	/// The capture layer that follows a drag past the card's edges fills the whole box, so it
+	/// reports moves that are none of the card's business. One that arrives with nothing held
+	/// moves nothing.
+	#[test]
+	fn a_card_that_is_not_held_ignores_a_move() {
+		let mut card = Card::opened(ROOMY);
+		let start = card.pos();
+		card.drag_to(Point::new(10.0, 10.0), ROOMY);
+		card.drag_to(Point::new(400.0, 400.0), ROOMY);
+		assert_eq!(card.pos(), start);
+	}
+
+	/// A release forgets the anchor as well as ending the drag, so the NEXT drag re-anchors
+	/// instead of measuring its first move against wherever this one stopped — which would fling
+	/// the card by the whole distance between the two gestures.
+	#[test]
+	fn a_release_forgets_the_anchor_so_the_next_drag_does_not_fling() {
+		let mut card = Card::opened(ROOMY);
+		card.grab();
+		card.drag_to(Point::new(100.0, 100.0), ROOMY);
+		card.drag_to(Point::new(140.0, 130.0), ROOMY);
+		let settled = card.pos();
+		card.release();
+		assert!(!card.is_dragging());
+
+		card.grab();
+		card.drag_to(Point::new(900.0, 700.0), ROOMY);
+		assert_eq!(
+			card.pos(),
+			settled,
+			"the new drag anchors, it does not jump"
+		);
+	}
+
+	/// Dragged at the edges, the card stays reachable: fully inside horizontally (its width is
+	/// fixed, so that clamp is exact), and vertically only far enough to keep the header — and
+	/// with it the ✕ and the drag handle — on screen.
+	#[test]
+	fn a_card_cannot_be_dragged_out_of_reach() {
+		let mut card = Card::opened(ROOMY);
+		card.grab();
+		card.drag_to(Point::new(0.0, 0.0), ROOMY);
+		card.drag_to(Point::new(5000.0, 5000.0), ROOMY);
+		assert_eq!(card.pos().x, 1000.0 - DIALOG_WIDTH);
+		assert_eq!(card.pos().y, 800.0 - DIALOG_DRAG_MIN_VISIBLE);
+
+		card.drag_to(Point::new(-5000.0, -5000.0), ROOMY);
+		assert_eq!(card.pos(), Point::ORIGIN);
+	}
+
+	/// The box can shrink under a card that was dragged to a far corner — a window resize, or a
+	/// region losing width to a split (§48). The card is pulled back rather than stranded.
+	#[test]
+	fn a_shrunken_box_pulls_a_dragged_card_back_into_reach() {
+		let mut card = Card::opened(ROOMY);
+		card.grab();
+		card.drag_to(Point::new(0.0, 0.0), ROOMY);
+		card.drag_to(Point::new(5000.0, 5000.0), ROOMY);
+
+		let small = iced::Size::new(500.0, 400.0);
+		card.reflow(small);
+		assert_eq!(card.pos().x, (500.0 - DIALOG_WIDTH).max(0.0));
+		assert_eq!(card.pos().y, 400.0 - DIALOG_DRAG_MIN_VISIBLE);
+	}
 }

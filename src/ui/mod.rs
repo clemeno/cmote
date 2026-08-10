@@ -123,13 +123,13 @@ pub(crate) fn elide_middle(text: &str, max_chars: usize) -> String {
 /// sensitive leaks to the UI (§12). The message is a selectable body so it can be
 /// copied; the close (✕) does the same as Back. `body` is `App::dialog_body`, seeded
 /// with the error text when the screen opens.
-pub fn error_view(body: &text_editor::Content, drag: dialog::Drag) -> Element<'_, Message> {
+pub fn error_view(body: &text_editor::Content, card: dialog::Card) -> Element<'_, Message> {
 	dialog::dialog(
 		"Connection failed".to_owned(),
 		Message::BackPressed,
 		dialog::selectable_body(body),
 		vec![button("Back").on_press(Message::BackPressed).into()],
-		drag,
+		card,
 	)
 }
 
@@ -140,7 +140,7 @@ pub fn error_view(body: &text_editor::Content, drag: dialog::Drag) -> Element<'_
 /// trusted just because the dialog was dismissed. `body` (`App::dialog_body`) holds the
 /// explanation plus the fingerprint as one selectable block, so the fingerprint can be
 /// copied for out-of-band comparison.
-pub fn host_key_view(body: &text_editor::Content, drag: dialog::Drag) -> Element<'_, Message> {
+pub fn host_key_view(body: &text_editor::Content, card: dialog::Card) -> Element<'_, Message> {
 	dialog::dialog(
 		"Trust this host key?".to_owned(),
 		Message::RejectHostKey,
@@ -149,7 +149,7 @@ pub fn host_key_view(body: &text_editor::Content, drag: dialog::Drag) -> Element
 			button("Reject").on_press(Message::RejectHostKey).into(),
 			button("Accept").on_press(Message::AcceptHostKey).into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -166,7 +166,7 @@ pub fn host_key_view(body: &text_editor::Content, drag: dialog::Drag) -> Element
 /// the reject-by-default dismissal are the friction (§8).
 pub fn host_key_changed_view(
 	body: &text_editor::Content,
-	drag: dialog::Drag,
+	card: dialog::Card,
 ) -> Element<'_, Message> {
 	// The warning line sits above the selectable body — the same shape as the passphrase prompt's
 	// hint — so the "possible attack" message is loud without needing a colour on the shared chrome.
@@ -191,7 +191,7 @@ pub fn host_key_changed_view(
 				.on_press(Message::ReplaceHostKey)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -204,7 +204,7 @@ pub fn passphrase_view<'a>(
 	value: &'a str,
 	failed: bool,
 	body: &'a text_editor::Content,
-	drag: dialog::Drag,
+	card: dialog::Card,
 ) -> Element<'a, Message> {
 	// Only the message (`body`) is selectable; the field and the "incorrect" hint are
 	// their own widgets. The hint is added only on a re-ask (`failed`), so the first
@@ -240,7 +240,7 @@ pub fn passphrase_view<'a>(
 				.on_press(Message::PassphraseCancelled)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -259,7 +259,7 @@ pub fn vault_view<'a>(
 	creating: bool,
 	failed: bool,
 	body: &'a text_editor::Content,
-	drag: dialog::Drag,
+	card: dialog::Card,
 ) -> Element<'a, Message> {
 	let mut content = column![dialog::selectable_body(body)].spacing(12);
 
@@ -307,7 +307,7 @@ pub fn vault_view<'a>(
 			button(action).on_press(Message::VaultSubmitted).into(),
 			button("Cancel").on_press(Message::VaultCancelled).into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -321,7 +321,7 @@ pub fn interactive_view<'a>(
 	prompts: &'a [crate::bridge::InteractivePrompt],
 	answers: &'a [String],
 	body: &'a text_editor::Content,
-	drag: dialog::Drag,
+	card: dialog::Card,
 ) -> Element<'a, Message> {
 	let mut content = column![dialog::selectable_body(body)].spacing(12);
 
@@ -351,7 +351,7 @@ pub fn interactive_view<'a>(
 				.on_press(Message::InteractiveCancelled)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 

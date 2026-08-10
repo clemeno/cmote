@@ -249,7 +249,7 @@ cmote/
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
-    │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕, the drag handle and its hand cursor) / body / footer (§10, §51)
+    │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕, the drag handle and its hand cursor) / body / footer, and `Card` — where a floating dialog sits and how a header drag moves it, once for every dialog in the app (§10, §26, §51)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
@@ -733,12 +733,30 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
   - **Draggable by the header** (§10): pressing the header background starts a drag
     (`DialogGrabbed`), and while dragging a transparent full-window capture layer reports
     every pointer move (`DialogDragged`) and the release (`DialogReleased`) — so tracking
-    survives the pointer leaving the card. `App` moves the card by the pointer delta and
-    clamps it (`dialog_pos`, `window_size`): horizontally exact via the fixed width, and
-    vertically only far enough to keep the header on screen (`DIALOG_DRAG_MIN_VISIBLE`) —
-    iced does not expose the card's real height, so this keeps the dialog draggable to the
-    window's bottom (and grabbable back) rather than stopping short of it. The ✕ button
-    captures its own press, so closing never starts a drag.
+    survives the pointer leaving the card.
+
+    **The card is a module, not a field triple** (`ui::dialog::Card`). It owns the whole
+    gesture — centred on open (`Card::opened`), `grab` / `drag_to` / `release` for the drag
+    itself, `reflow` to pull it back when the box under it shrinks — and the box it is
+    measured against is an ARGUMENT. That last point is why it exists: the arithmetic was
+    written twice, once for a tab's own dialogs (`dialog_pos` / `dialog_dragging` /
+    `dialog_drag_last`) and once for the App-level overlay cards (§26, §30), differing in
+    nothing but whether the box was the OS window or a region. The copies were line for
+    line the same, down to the comments, and each correction had to be made in both.
+
+    The arithmetic itself is unchanged, and now stated once: the first move of a drag only
+    records an anchor (a press reports where the *pointer* is, not where inside the header
+    it landed — applying it as a delta would snap the card's corner to the pointer), later
+    moves apply the delta, and the result is clamped — horizontally exact via the fixed
+    width, vertically only far enough to keep the header on screen
+    (`DIALOG_DRAG_MIN_VISIBLE`), since iced does not expose the card's real height. That
+    keeps the dialog draggable to the bottom edge (and grabbable back) rather than stopping
+    short of it. A release forgets the anchor too, so the next drag re-anchors instead of
+    flinging the card by the distance between two gestures.
+
+    The fields are private, so a caller holds a `Card`, hands it the pointer, and passes it
+    to `dialog` — it never learns that a drag needs an anchor. The ✕ button captures its own
+    press, so closing never starts a drag.
 - **The copy toast** (`ui::snackbar`, v2.2): `iced::clipboard::write` is silent, and by v2.2
   a dozen surfaces write to the clipboard — both panel headers, the details card, four
   context menus. A copy that quietly did nothing looked exactly like a copy that worked, so
@@ -2837,11 +2855,13 @@ underneath — Esc and Enter drive the dialog, everything else is swallowed.
 
 Like every other dialog (§10), both overlay cards — this quit card and the per-tab close confirmation
 (§26) — are **draggable by their header**. But because they float over the *whole* window rather than
-one tab, their drag cannot live on any single `Tab`; it lives on `App` (`overlay_pos` /
-`overlay_dragging` / `overlay_drag_last`, seeded centred on open by `seed_overlay`). While an overlay is
-up (`overlay_open`), `App::update` steers the shared `DialogGrabbed` / `DialogDragged` / `DialogReleased`
-to itself (`on_overlay_dragged`, clamped by `clamp_overlay_pos` against the full window height, strip
-included) instead of delegating them to the active tab, which otherwise drives its own dialogs' drag.
+one tab, their position cannot live on any single `Tab`; it lives on `App` as one `ui::dialog::Card`
+(`overlay`), seeded by `Card::opened(self.window)` each time an overlay goes up. While an overlay is up
+(`overlay_open`), `App::update` steers the shared `DialogGrabbed` / `DialogDragged` / `DialogReleased`
+to itself instead of delegating them to the active tab, which otherwise drives its own dialogs' card.
+The only difference between the two paths is the box handed to `drag_to` — the full window here, strip
+included; the tab's own region there (§48) — which is exactly the difference that used to justify two
+copies of the arithmetic, and now does not (§10).
 Until this, the two overlay cards were the only dialogs pinned centred every frame — a stray exception
 to §10 that a drag now closes.
 

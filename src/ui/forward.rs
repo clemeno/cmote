@@ -13,7 +13,7 @@ use iced::{Border, Color, Element, Length};
 
 use crate::app::Message;
 use crate::forward::{ForwardEntry, ForwardKind, ForwardStatus};
-use crate::ui::dialog::{self, Drag};
+use crate::ui::dialog::{self, Card};
 
 /// The widget id of the add form's listen field, so `app` can focus it as the dialog opens —
 /// the first thing to type when adding a forward.
@@ -51,7 +51,7 @@ pub struct ForwardsView<'a> {
 /// Build the tunnels dialog card (§27). The body is the live-forwards list (or a "none yet"
 /// line) above the add form; the footer is a single Close. Reuses the shared chrome, so it
 /// drags, centres and dismisses like every other modal.
-pub fn panel<'a>(view: ForwardsView<'a>, drag: Drag) -> Element<'a, Message> {
+pub fn panel<'a>(view: ForwardsView<'a>, card: Card) -> Element<'a, Message> {
 	let mut body = column![].spacing(12);
 
 	if view.entries.is_empty() {
@@ -78,7 +78,7 @@ pub fn panel<'a>(view: ForwardsView<'a>, drag: Drag) -> Element<'a, Message> {
 		Message::ForwardsClosed,
 		body.into(),
 		vec![button("Close").on_press(Message::ForwardsClosed).into()],
-		drag,
+		card,
 	)
 }
 

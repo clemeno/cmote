@@ -73,8 +73,8 @@ pub struct RenameState {
 /// a row of positional arguments: `filter` is what is typed in the filter box (§49), `selected`
 /// the endpoint key of the highlighted row, `rename` the in-progress inline edit, `menu_open`
 /// the right-click menu anchored at the selected row, and `confirm_delete` the delete
-/// confirmation over everything, with `dialog_body` as its selectable message and `drag` its
-/// position. Named fields also mean the call site says which flag is which — with seven of them
+/// confirmation over everything, with `dialog_body` as its selectable message and `card` its
+/// floating position. Named fields also mean the call site says which flag is which — with seven of them
 /// in a row, two `bool`s next to each other are a silent bug waiting for the day their order is
 /// mistyped.
 pub struct View<'a> {
@@ -84,7 +84,7 @@ pub struct View<'a> {
 	pub menu_open: bool,
 	pub confirm_delete: bool,
 	pub dialog_body: &'a text_editor::Content,
-	pub drag: dialog::Drag,
+	pub card: dialog::Card,
 }
 
 /// Render the home screen. `targets` are already in display order (`profiles` keeps
@@ -151,7 +151,7 @@ pub fn view<'a>(
 	// visible (dimmed) behind the card, so the row being removed is still in view.
 	if state.confirm_delete {
 		layers.push(dialog::backdrop(Message::HomeDeleteCancelled));
-		layers.push(confirm_delete_panel(state.dialog_body, state.drag));
+		layers.push(confirm_delete_panel(state.dialog_body, state.card));
 	}
 
 	// One stack, always — even with nothing over the list. iced keys a widget's internal
@@ -173,7 +173,7 @@ pub fn view<'a>(
 /// only the Delete button removes it.
 fn confirm_delete_panel(
 	dialog_body: &text_editor::Content,
-	drag: dialog::Drag,
+	card: dialog::Card,
 ) -> Element<'_, Message> {
 	dialog::dialog(
 		"Delete this target?".to_owned(),
@@ -187,7 +187,7 @@ fn confirm_delete_panel(
 				.on_press(Message::HomeDeleteConfirmed)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 

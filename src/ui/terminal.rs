@@ -187,7 +187,7 @@ pub struct Modals<'a> {
 	/// grid rather than pushing it down, so opening it never reflows the remote pty.
 	pub search: Option<&'a crate::term::search::Search>,
 	pub body: &'a text_editor::Content,
-	pub drag: crate::ui::dialog::Drag,
+	pub card: crate::ui::dialog::Card,
 }
 
 /// Render the whole terminal screen (§10): a status bar on top, the vt100 grid
@@ -224,7 +224,7 @@ pub fn view<'a>(
 		forwards,
 		search,
 		body: dialog_body,
-		drag,
+		card,
 	} = modals;
 	// The grid itself: one widget filling the space left under the status bar (§9). It is handed
 	// the rows a shell prompt sits on (§34) so it can tick them in the left gutter, and the find
@@ -412,13 +412,13 @@ pub fn view<'a>(
 	}
 	if confirm_disconnect {
 		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
-		layers.push(confirm_disconnect_panel(dialog_body, drag));
+		layers.push(confirm_disconnect_panel(dialog_body, card));
 	}
 	// The upload confirmation (§17) uses the same chrome. A running transfer shows no
 	// modal — its progress lives in the status bar, so the shell stays usable.
 	if let Some(TransferState::ConfirmPath) = upload.state {
 		layers.push(crate::ui::dialog::backdrop(Message::UploadCancelled));
-		layers.push(confirm_upload_panel(dialog_body, upload.dest, drag));
+		layers.push(confirm_upload_panel(dialog_body, upload.dest, card));
 	}
 	// The batch collision questions, same chrome again — a download's (§21) and an upload's
 	// (§17). Nothing has been written when either opens: the whole batch waits on the answer.
@@ -426,25 +426,25 @@ pub fn view<'a>(
 		layers.push(crate::ui::dialog::backdrop(Message::DownloadClash(
 			crate::app::ClashChoice::Cancel,
 		)));
-		layers.push(download_clash_panel(dialog_body, drag));
+		layers.push(download_clash_panel(dialog_body, card));
 	}
 	if upload_clash {
 		layers.push(crate::ui::dialog::backdrop(Message::UploadClashResolved(
 			crate::app::ClashChoice::Cancel,
 		)));
-		layers.push(upload_clash_panel(dialog_body, drag));
+		layers.push(upload_clash_panel(dialog_body, card));
 	}
 	// The "new folder" dialog (§18): the body plus a name field. Every dismissal route cancels,
 	// so backing out creates nothing.
 	if let Some(name) = new_folder {
 		layers.push(crate::ui::dialog::backdrop(Message::NewFolderCancelled));
-		layers.push(new_folder_panel(dialog_body, name, drag));
+		layers.push(new_folder_panel(dialog_body, name, card));
 	}
 	// The delete confirmation (§18): the ✕ and the backdrop keep the entries, so dismissing never
 	// deletes — the destructive action is only ever the explicit button.
 	if pending_delete {
 		layers.push(crate::ui::dialog::backdrop(Message::DeleteCancelled));
-		layers.push(delete_panel(dialog_body, drag));
+		layers.push(delete_panel(dialog_body, card));
 	}
 	// A recursive transfer's file-collision prompt (§17, §19): six answers, the whole transfer
 	// parked behind it. The ✕ and backdrop both cancel the transfer — the safe choice, since
@@ -453,14 +453,14 @@ pub fn view<'a>(
 		layers.push(crate::ui::dialog::backdrop(
 			Message::TransferConflictResolved(crate::bridge::ConflictChoice::Cancel),
 		));
-		layers.push(transfer_conflict_panel(dialog_body, drag));
+		layers.push(transfer_conflict_panel(dialog_body, card));
 	}
 	// The port-forwards manager (§27): its own list + add form in the shared chrome. The ✕ and
 	// the backdrop both just close it — nothing here is destructive, forwards are removed by
 	// their own ✕ — so dismissing leaves every tunnel exactly as it was.
 	if forwards.open {
 		layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
-		layers.push(crate::ui::forward::panel(forwards, drag));
+		layers.push(crate::ui::forward::panel(forwards, card));
 	}
 	// Becoming another account (§45). Last of the overlays, so it sits above anything else that
 	// happened to be open when it was asked for: it holds a secret field, and a field the user is
@@ -835,7 +835,7 @@ fn context_menu(
 /// the backdrop both emit `DisconnectCancelled`, so dismissing never disconnects.
 fn confirm_disconnect_panel(
 	dialog_body: &text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Disconnect from this session?".to_owned(),
@@ -849,7 +849,7 @@ fn confirm_disconnect_panel(
 				.on_press(Message::DisconnectConfirmed)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -861,7 +861,7 @@ fn confirm_disconnect_panel(
 fn confirm_upload_panel<'a>(
 	dialog_body: &'a text_editor::Content,
 	dest: &'a str,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	let content = column![
 		crate::ui::dialog::selectable_body(dialog_body),
@@ -880,7 +880,7 @@ fn confirm_upload_panel<'a>(
 			button("Cancel").on_press(Message::UploadCancelled).into(),
 			button("Upload").on_press(Message::UploadConfirmed).into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -891,7 +891,7 @@ fn confirm_upload_panel<'a>(
 /// out sends nothing.
 fn upload_clash_panel<'a>(
 	dialog_body: &'a text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	use crate::app::ClashChoice;
 
@@ -913,7 +913,7 @@ fn upload_clash_panel<'a>(
 				.on_press(Message::UploadClashResolved(ClashChoice::Replace))
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -923,7 +923,7 @@ fn upload_clash_panel<'a>(
 /// dismissal route cancels, so backing out downloads nothing.
 fn download_clash_panel<'a>(
 	dialog_body: &'a text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	use crate::app::ClashChoice;
 
@@ -945,7 +945,7 @@ fn download_clash_panel<'a>(
 				.on_press(Message::DownloadClash(ClashChoice::Replace))
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -955,7 +955,7 @@ fn download_clash_panel<'a>(
 fn new_folder_panel<'a>(
 	dialog_body: &'a text_editor::Content,
 	name: &'a str,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	let content = column![
 		crate::ui::dialog::selectable_body(dialog_body),
@@ -978,7 +978,7 @@ fn new_folder_panel<'a>(
 				.on_press(Message::NewFolderConfirmed)
 				.into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -987,7 +987,7 @@ fn new_folder_panel<'a>(
 /// dismissing never deletes — the destructive action is only ever the explicit button.
 fn delete_panel<'a>(
 	dialog_body: &'a text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	crate::ui::dialog::dialog(
 		"Delete from the server?".to_owned(),
@@ -997,7 +997,7 @@ fn delete_panel<'a>(
 			button("Cancel").on_press(Message::DeleteCancelled).into(),
 			button("Delete").on_press(Message::DeleteConfirmed).into(),
 		],
-		drag,
+		card,
 	)
 }
 
@@ -1008,7 +1008,7 @@ fn delete_panel<'a>(
 /// still undecided.
 fn transfer_conflict_panel<'a>(
 	dialog_body: &'a text_editor::Content,
-	drag: crate::ui::dialog::Drag,
+	card: crate::ui::dialog::Card,
 ) -> Element<'a, Message> {
 	use crate::bridge::ConflictChoice;
 
@@ -1042,7 +1042,7 @@ fn transfer_conflict_panel<'a>(
 		content.into(),
 		// The answers live in the body, so the footer carries none of its own.
 		Vec::new(),
-		drag,
+		card,
 	)
 }
 
