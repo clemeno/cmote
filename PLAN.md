@@ -60,8 +60,10 @@ with **double- and triple-click** to take a word or a line (§42); the **identit
 the engine drops, answered beside it (§33, §36); a **tab strip the user orders**, with files beside
 their session and drag to rearrange (§38), and a close that **returns you where you were** (§37);
 and a **filter box over the saved-target list** — a fragment while you type, a whole-row glob the
-moment a `*` or `?` appears (§49); and a keyboard that **follows what you act on**, so typing while
-a side panel holds it, or choosing an item off the grid's menu, hands it back to the shell (§50).
+moment a `*` or `?` appears (§49); a keyboard that **follows what you act on**, so typing while
+a side panel holds it, or choosing an item off the grid's menu, hands it back to the shell (§50);
+and the **open and closed hand** over everything you can pick up — a tab chip, a dialog header —
+drawn by cmote because Windows has neither cursor (§51).
 Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -231,6 +233,7 @@ cmote/
 └── src/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: a strip of independent `Tab`s + the shared target list / vault; `Tab` = one session's State/Message/update/view; App delegates + routes SSH events per tab + draws the strip (§26)
+    ├── cursor.rs         the open / closed hand over every grab handle (tab chip, dialog header): the art, the `HCURSOR`s built from it, and the `WM_SETCURSOR` subclass that paints them — Windows has neither cursor (§51)
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
@@ -244,7 +247,7 @@ cmote/
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
-    │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕) / body / footer (§10)
+    │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕, the drag handle and its hand cursor) / body / footer (§10, §51)
     │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
@@ -253,7 +256,7 @@ cmote/
     │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
-    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38)
+    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38), the hand cursor over one (§51)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
@@ -1829,6 +1832,30 @@ for a window resize.
   to do — no directory on show, or the pane and the shell's announced cwd already agree
   (an exact string compare, so an un-announced cwd leaves it live and the `cd` is a harmless
   no-op). Dimmed, it doubles as a tell that the two are already in step.
+- **The "Reveal" button brings the panes to the console** — Sync read backwards, and the half
+  that was missing. The drift goes both ways, but only one way could be closed from the bar: a
+  browse three folders deep left the panes somewhere the shell was not, and the shell's own
+  announcements could not undo it, because `Files::follow` acts on a *move* and a shell standing
+  at the same prompt re-announces the same directory. The choices were to `cd` the console —
+  moving the side that was already right — or to walk the tree back by hand. Reveal opens the
+  chain down to the announced cwd, selects it and points the pane there in one press.
+  - **It sends nothing.** No `cd` is typed and no bytes reach the remote: this is the local view
+    catching up with a shell that stays where it is, which is why it is safe with a full-screen
+    program running and `move_shell_to` (Sync, "Open in terminal") is not.
+  - **It uses the UNguarded reveal** (`Explorer::reveal`, split out of `reveal_if_new`). The
+    guard's job is to keep the per-chunk call cheap and to stop a re-announcement undoing a
+    browse; both are wrong here, since the whole reason to press it is that the tree was walked
+    away from a cwd that never changed — the guarded call would decline exactly when asked.
+  - **It seeds the follow-guard** (`Files::set_followed`) with the same path, so the next prompt
+    reads as "still there" rather than as a move, and a real `cd` after it still carries the pane.
+  - **Disabled when there is nothing to do:** no announced cwd (§17 — it takes OSC 7), the strip
+    hidden (the tree goes with the pane, so a press would change nothing anyone can see), or both
+    panels already there. "Both" is three terms rather than Sync's one: the pane can be on the cwd
+    while the tree is not, which is what a collapsed branch under an unmoved selection leaves —
+    `selected_index` is `None` for a row inside a collapsed branch, and that is what says the
+    folder is on screen rather than merely remembered.
+  - It sits **beside Sync at the head of the left group**, the pair reading as one question in two
+    directions: whichever way the two have drifted, the lit button says which way it will move.
 
 ### Icons
 
@@ -3608,10 +3635,11 @@ another chip and release, and the grabbed tab takes that chip's slot. No separat
   the grabbed chip clears the target, so changing your mind mid-drag also leaves the order alone.
 - **A press that never travels is just a click.** The drag arms with no target, so press-and-release
   on one chip selects and reorders nothing — the gesture costs the old behaviour nothing.
-- **The hover report is only wired up while a drag is in flight.** `App` would ignore it at rest
-  anyway, but not asking means moving the pointer across the strip publishes no messages at all when
-  there is nothing to move. The cursor still advertises the affordance: an open hand over a chip, a
-  closed one while a tab is in flight.
+- **The hover report says a different thing at rest.** Mid-drag it names the slot under the pointer,
+  which is what the drop needs. At rest it says only "a chip has the pointer", which is what the
+  cursor needs (§51) — the affordance the strip advertises with an open hand over a chip and a
+  closed one while a tab is in flight. On Windows that took a good deal more than asking; §51 is
+  the whole of it.
 - **The activation order (§37) is untouched by a reorder**, because it is keyed by tab id. Where a tab
   *sits* and where the user has *been* stay independent — which is exactly why §37 used ids.
 
@@ -4195,9 +4223,9 @@ What it deliberately does not do is pretend the file panes came along. They did 
 > attempt honest. `elevate::valid_user` carries an `#[allow(dead_code)]` and a note saying why it was
 > kept rather than deleted.
 >
-> One thing survived above the line: the status bar's **read-only account label**. It says who the grid
-> belongs to, which is worth its width on its own — several people on one shared account, or an agent
-> key you are not certain which identity it offered.
+> Nothing survives above the line. The status bar's read-only account label was the last piece and has
+> since gone too: it repeated, on the same row, the `user@` the centred endpoint already carries. With
+> it went the two fields that existed only to feed it — `Identity::user` and `Tab::login_user`.
 
 ### One shell was one channel; now it is a set (`ssh/shell.rs`)
 
@@ -4270,14 +4298,23 @@ The consequence worth having: `cme`'s scrollback, cwd, prompt marks and find bar
 when the user comes back to it, and a long build keeps printing into them while root's shell is on
 screen.
 
-### The status bar's account label (`ui/terminal.rs`)
+### The status bar's account label (`ui/terminal.rs`) — gone
 
-All that is left of this section above the UI line: `account_label` draws the account whose shell is on
-screen, as plain text, from `Tab::current_user` — the identity list's entry for the identity on screen,
-falling back to the account the session authenticated as for the moment before the first shell is
-listed.
+Nothing of this section is left above the UI line. The label outlived the switcher it belonged to for a
+while: plain text at the head of the right group, the account whose shell was on screen, read from the
+identity list. What it did NOT do is tell the user anything the bar was not already saying. The centre
+zone is the session's `user@host:port`, on the same row, a few centimetres away — so the account was
+printed twice, and two labels for one fact read as though they could disagree. They could not: with the
+switcher withdrawn a session has exactly one shell, so `current_user` could only ever return the account
+the endpoint already names.
 
-What stood here, and is now withdrawn: a "Log in as…" button beside that label and the same item in the
+Removing it took `Identity::user` and `Tab::login_user` with it, since the label was the only reader of
+either. That is deliberate rather than tidy-up: a name nothing displays is a name nothing keeps honest,
+and the elevation that brings a second account back is what should add it, beside whatever shows it.
+What stays is the machinery that cannot be re-derived — the identity NUMBERS, the parked workspaces and
+the routing that keeps a background shell's output out of the foreground grid.
+
+What stood here before that, and is withdrawn: a "Log in as…" button beside that label and the same item in the
 terminal's context menu, both raising `ElevateOpen`; a select in place of the label once a session held
 two accounts; and the elevate dialog itself — one conversation in two faces, a FORM (which account,
 `sudo` or `su`) until something was asked and then the remote's QUESTION with a masked field under it,
@@ -4947,3 +4984,141 @@ for a click on the grid. Reporting the ring rather than the OS window is what ma
   file-manager habit — but that is exactly the key this section gives to the shell, and the shell has the
   better claim: a terminal is a thing you type at. If type-ahead is ever wanted it needs its own way in (a
   panel-local search field), not a quiet reversal of this rule.
+
+---
+
+## 51. The hand over everything you can pick up (v4.0.0)
+
+§38 made every chip in the strip a drag handle and asked iced for the two cursors the web has
+taught everyone to read: `Interaction::Grab`, an open hand, over a chip at rest, and
+`Interaction::Grabbing`, a closed one, while a tab is in flight. On Windows that asked for
+something the operating system does not have, and the strip has been showing the four-arrow *move*
+cursor for both states ever since — a control whose cursor said "this can be moved" but never said
+whether you had hold of it.
+
+**Two surfaces wear the hand**, and the second is the reason this is a section rather than a fix:
+
+- a **tab chip**, which drags along the strip to a new slot (§38); and
+- a **dialog header**, which drags the card around the window (§10) — and which said nothing at all
+  before, arrow at rest and arrow while dragging. A header LOOKS like a title bar, and title bars
+  are not reliably draggable, so the affordance was invisible: the way to find out was to try.
+
+They share one implementation and one pair of messages, so whatever becomes grabbable next says it
+the same way by calling the same module. That is the point of an affordance — the user learns it
+once, on the chips, and it holds everywhere.
+
+Three facts stack up, and none of them is visible from the Rust side:
+
+- **Windows ships no hand cursors.** `IDC_*` has an arrow, an I-beam, a four-arrow move, resize
+  arrows, a wait ring, a help arrow — and `IDC_HAND`, which is the POINTING finger used for links,
+  not a hand that can hold something. There is no open palm and no fist anywhere in the set.
+- **winit therefore collapses the two into one:** `CursorIcon::Grab | Grabbing | Move | AllScroll
+  => IDC_SIZEALL`. Asking for two different hands got one four-arrow, so press and release changed
+  nothing on screen.
+- **iced exposes no custom cursor.** winit 0.30 can build one from pixels (`CustomCursor`), but
+  `iced_winit` only ever calls `window.set_cursor(CursorIcon)` and iced hands out no winit `Window`.
+  There is no seam to pass an image through.
+
+Which is exactly the situation every browser is in — and they solve it by shipping their own
+bitmaps (Firefox's `widget/windows/res/grab.cur`, Chromium's own resources). cmote does the same,
+with the hands **drawn in the source as text** rather than bundled as binary assets.
+
+### The two hands are `const` art (`cursor.rs`)
+
+Each cursor is 32 rows of 32 characters — `#` outline, `.` fill, anything else transparent — turned
+into BGRA pixels at start-up. Written this way for three reasons: the shapes are reviewable in a
+diff (a cursor committed as a `.cur` is a blob nobody reads again), the repository stays free of a
+third-party asset and its licence (cmote is MIT; Firefox's cursors are MPL-2.0, which would have
+put a second licence and its notice into the tree for two small pictures), and the whole thing
+costs about a hundred bytes of `const` per hand.
+
+Two details that are not decoration:
+
+- **Alpha is 0 or 255 and never in between**, so there is no premultiplication to get wrong. The
+  shapes carry their own black outline instead of relying on antialiasing to separate them from
+  whatever is behind, which is also what keeps them legible on the strip's dark bar and on a light
+  desktop when the pointer leaves it mid-drag.
+- **One hotspot for both shapes** (`HOTSPOT`), inside the part they share. Press and the hand
+  closes without the pointer appearing to jump — a hand cursor is aimed with its middle, since it
+  has no tip to aim with, which is how the browsers place theirs too. A test pins the hotspot
+  inside both drawings for the same reason it pins the row widths: the art is edited by hand.
+
+Building the `HCURSOR` is `CreateIconIndirect` with `fIcon = FALSE` (an icon with a hotspot IS a
+cursor), a 32-bit top-down DIB for the colour — negative height, or every hand is drawn upside
+down — and an all-zero 1-bit mask, which is how a 32-bit cursor says "use my own alpha" rather
+than the monochrome and/or/invert scheme.
+
+### Painting it takes one Win32 seam, and only one
+
+winit answers `WM_SETCURSOR` itself: whenever the pointer is over the client area it calls
+`SetCursor` with whatever icon iced last asked for. So a cursor set from anywhere else is undone on
+the next mouse move. The window is **subclassed** (`SetWindowSubclass`) and that one message is
+answered first — while a hand is wanted, this module sets it and returns TRUE, so winit's handler
+never runs for it. Every other message, and every moment no hand is wanted, is passed straight
+through with `DefSubclassProc`; nothing else about the window's behaviour changes.
+
+Two consequences worth stating:
+
+- **A handle asks iced for NO interaction on Windows** (`grab_interaction` answers `None`). This
+  looks backwards and is the crux: iced tells winit to change the cursor whenever the requested
+  interaction CHANGES, which is precisely at the hover and at the press — the two moments the hand
+  is supposed to change. Asking for `Grab` would therefore stomp the hand with `IDC_SIZEALL` at
+  exactly the wrong instants. Asking for nothing means winit never touches the cursor over the
+  handle and the subclass owns it outright. Off Windows the same function answers `Grab`/`Grabbing`,
+  because those platforms have the real thing — which is also why every handle goes through this one
+  function rather than naming an `Interaction` itself.
+- **A press that never moves still closes the hand.** `WM_SETCURSOR` arrives with pointer movement,
+  so between the button going down and the first move there is no message to answer; the state
+  setters call `SetCursor` directly as well. That call is safe from `update` because iced's update
+  runs on the thread that owns the window.
+
+Failure is silent by construction. If the cursors cannot be built or the subclass cannot be
+installed, the handles keep the cursor they had before and nothing else in cmote depends on it.
+
+### What the module is told, and why a COUNT
+
+`cursor` is told three things and works the rest out itself: a handle took the pointer, a handle
+lost it, and something is or is not being dragged. Dragging outranks hovering, so the hand stays
+closed wherever the pointer has got to — that is what says the gesture is still live, and it is why
+a dialog dragged clean out from under the pointer does not open its hand halfway through the move.
+
+It is told none of this in terms of WHICH handle, and that is the design rather than a shortcut.
+Two messages — `GrabEntered` and `GrabExited` — carry no payload, and `set_dragging` is a bare
+bool, so a chip press (§38) and a header press (§10) are indistinguishable here. The cursor
+question is "is the pointer on something that can be picked up, and is something held"; identity
+would be state to keep in step for nothing, and it is what would have made a second handle a second
+implementation. `App` answers all three, not `Tab`: there is one pointer and one window, so a card
+dragged across a split must not change hands on the way.
+
+The hover state is a **count, not a flag**, and that is a real bug avoided rather than a
+preference. Two handles report the same mouse move — one being left, one being entered — and iced
+dispatches those in the widgets' layout order, not in the order the pointer crossed them. Moving
+right to left along the strip, the chip being ENTERED is asked first, so a flag would be set and
+then immediately cleared by the chip being left, and the hand would vanish exactly when the pointer
+arrived. A count cannot be put out of order by that, and it is also what lets two DIFFERENT kinds
+of handle overlap — a dialog header over a strip — without either knowing the other exists. It is
+clamped at zero (an unmatched exit must not dig a hole the next real hover has to climb out of) and
+**reset outright when the pointer leaves a whole region of handles**, which is the boundary that
+heals a count left standing by a handle that was closed or re-laid out under the pointer.
+
+### What is deliberately NOT here
+
+- **The splitters keep their resize arrows** — the tree's and the pane's handles, and the split
+  divider (§48). They are named `SplitterGrabbed` and they are grabbed, but what they do is
+  RESIZE, and `↔` / `↕` say which axis while a hand would not. Swapping them for the hand would
+  trade information for consistency. The web draws the same distinction: `col-resize` for a
+  splitter, `grab` for something you carry.
+- **Nothing else gets a custom cursor.** The grid keeps its I-beam, the buttons their arrow. This
+  section exists because a specific pair of cursors is missing from Windows, not to start dressing
+  the app's pointer.
+- **The rubber band and the text selection are not grabs.** Pressing empty space in the files pane
+  (§21) or dragging across the grid (§40) starts a SELECTION — nothing is picked up and nothing
+  moves — so neither wears a hand.
+- **No `.cur` or `.ani` files, and no `SetSystemCursor`.** The first is the licence and
+  reviewability argument above; the second changes the cursor for *every application on the
+  machine* and is not something a terminal client gets to do.
+- **No DPI variants.** One 32×32 pair, which is `SM_CXCURSOR` at every normal scaling; Windows
+  scales it like any other cursor. A 48×48 set for 200% displays is a straight addition to the art
+  if it is ever wanted.
+- **No drag-and-drop invented to have somewhere else to put the hand.** The two surfaces that wear
+  it are the two that already dragged. Nothing was made draggable for the sake of the cursor.

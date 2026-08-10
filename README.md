@@ -29,8 +29,11 @@ references below (§n) point into it.
   on the home list while another runs a shell, and every tab keeps its own terminal, folder tree,
   files pane, selection and dialogs. A background tab's shell keeps running and its listings keep
   arriving while you work in another. Mouse-only strip across the top: **click** a tab to switch,
-  **"+"** to open a new one, **"×"** to close (a live session asks to confirm first). The saved
-  targets and the unlocked vault are shared across every tab.
+  **"+"** to open a new one, **"×"** to close (a live session asks to confirm first), and **drag**
+  a tab along the strip to reorder it. The pointer says so: an **open hand** over a tab, a **closed**
+  one from the moment you press until you let go — the same pair over every grabbable thing in
+  cmote, a **dialog header** included. Windows has no hand cursor of either kind, so cmote draws
+  both and paints them itself. The saved targets and the unlocked vault are shared across every tab.
 - **Split the window — two sessions side by side.** The two buttons at the right of the strip cut
   the window **beside** or **below**, and the new half is a whole small cmote: its own tab
   strip, its own tab, opened on the saved target list ready to connect somewhere. **One split, no
@@ -169,10 +172,6 @@ references below (§n) point into it.
   than only where you are in it (§35, §39). The bar keeps up with a **live** shell: a hit printed while
   it is open joins the count and the washes on the next frame, without dragging the view off whatever
   you are reading (§44).
-- **The status bar says which account you are** — the name the session authenticated as, beside the
-  panel toggles. Read-only: it is what is left of a "log in as another account" feature that has been
-  withdrawn while the approach is reconsidered, and it stayed because knowing who you are on a shared
-  machine — or which identity an agent key offered — is worth its width on its own.
 - **Mouse text selection** (drag to select, highlighted in place) with **Copy** and
   **Paste** — from the status-bar buttons, a right-click menu, or the keyboard. **Double-click
   selects a word** and **triple-click the whole line**: a word is generous about what belongs to
@@ -253,6 +252,13 @@ references below (§n) point into it.
   **Open in terminal**, or the status bar's **Sync**, which brings the shell (and with it the
   tree and the title) to the folder the pane is showing. Sync is disabled when the two already
   agree (§19).
+- **Reveal brings the panes back to the shell** — the same button read the other way.
+  After browsing away, the pane and the tree jump to the directory the shell is in: the tree opens
+  the chain down to it and selects it, the pane lists it. It types nothing at the shell, so it is
+  safe while a full-screen program is running, and it is the only way back when the shell has not
+  moved — a shell sitting at the same prompt announces the same directory, which is not a move for
+  the pane to follow. Disabled when the shell has never said where it is, when the bottom strip is
+  hidden, or when both panels are already there (§19).
 - **Keyboard focus across the three panels** — the shell, the folder tree and the files
   pane each take the keyboard. A session starts at the shell; a click focuses whatever was
   clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
@@ -367,7 +373,8 @@ references below (§n) point into it.
   connect form, the disconnect modal over the shell) behind a dim backdrop; clicking the
   card never dismisses it (only a click outside does); the body message is **selectable and
   copyable** — drag to select, `Ctrl+C` to copy (handy for the host-key fingerprint or an
-  error message); and the dialog is **draggable** by its header, clamped to the window (§10).
+  error message); and the dialog is **draggable** by its header, clamped to the window (§10) — the
+  header wears the **open hand** and closes it while you drag, the same cursor a tab does (§51).
 - **Every copy says so** — any **Copy** (a menu item, a header's copy button, the details
   card's) raises a short toast at the bottom of the window that fades itself after three
   seconds, so a copy is never a silent no-op you have to test by pasting (§10).
@@ -398,6 +405,8 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Type a letter while a panel has the keyboard | Hand it back to the shell and send that letter to the prompt — no panel answers to plain characters (Ctrl / Alt combinations stay the panel's) |
 | Pick an item off the terminal's right-click menu | Do it, and put the keyboard back on the shell (opening or dismissing the menu does not) |
 | **Ctrl+V** from anywhere | Paste into the shell and put the keyboard back on it — the menu's Paste off the keyboard |
+| Hover anything grabbable — a **tab**, a **dialog header** | The pointer becomes an **open hand**; press and it **closes** until you let go, so the thing says it can be picked up and says when you have it. cmote draws both hands itself — Windows has neither. Splitters keep their **↔ / ↕** arrows: they resize rather than move, and the arrow says which way |
+| Drag a tab along the strip | Move it to another slot; the chip that would receive it is outlined, and the order commits on the drop |
 | **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way. Shown only while the window is whole: one split is the limit |
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
@@ -426,6 +435,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Any other key | Goes to the remote shell — arrows (SS3 form in application-cursor mode), **F1-F12**, **modified named keys** (Ctrl/Shift/Alt + arrows / Home / End / F-keys, F13-F24 included), **modifyOtherKeys** Ctrl/Alt combos (`CSI 27;…~`), and the **kitty keyboard protocol** (`CSI u`, incl. key-release events) when an editor turns either mode on |
 | Drag either splitter | Resize the folder tree or the files pane; the pty is reflowed to match. The handle shows a resize cursor and lights up while hovered or dragged |
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
+| **Reveal** in the status bar | Jump the files pane and the folder tree to the folder the shell is in — nothing is typed at the shell (disabled when they already agree, when the strip is hidden, or when the shell has never announced its directory) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
 
 **Folder tree** (right of the files pane, in the bottom strip — the status bar's **Folders** button hides it; shown only alongside the files pane)
@@ -910,6 +920,12 @@ then follow the shell. Then:
   it is, and it must NOT snap back on the next prompt. Click **Sync** in the status bar →
   now the shell `cd`s there, the tree reveals it and the title follows; Sync greys out once
   the two agree.
+- The other direction: `cd /var/log` in the shell, then click a different folder in the tree
+  and collapse the branch the shell is in → **Reveal** lights up. Press it → the pane lists
+  `/var/log`, the tree opens the chain down to it and selects it, **no `cd` is typed** (the
+  prompt does not move and the shell prints nothing), and Reveal greys out. Press **Enter** at
+  the prompt → the pane must stay on `/var/log` rather than jump, since the shell has not moved.
+  Hide the pane with the **Files** button → Reveal greys out with it.
 - Toggle the `.*` checkbox → dot-files disappear from the grid and the tree together.
 - Right-click a file → **Download…** opens the save dialog; pick a path and the status bar
   runs a progress bar, then reports where it landed. Downloading onto an existing local
@@ -1050,6 +1066,15 @@ fit the window (no missing bottom row). Click a tab's **"×"**: an idle Home/Con
 once, a **live** shell asks to confirm first. A rename or delete on one tab's home list
 should be visible on another tab's home list (the target store is shared).
 
+With two or more tabs open, check the **hand cursor**: move onto a chip → an open hand (not the
+four-arrow move cursor, and not the pointing finger); press and HOLD without moving → it closes
+immediately; drag onto another chip → still closed, and the target chip is outlined; release → it
+opens again while the pointer is still on a chip. Slide off the strip onto the terminal → the hand
+goes and the usual cursor is back. Move quickly back and forth across two chips (right to left as
+well as left to right): the hand must not flicker off while the pointer is still on a chip. Close a
+tab while the pointer sits on it, then move off the strip and back: the hand should be correct
+again.
+
 **16. Quitting cleanly.** With one tab left, click its **"×"** (or, from the home screen, press
 **Ctrl+D**): instead of reopening a blank tab, cmote asks **Quit cmote?** — **Cancel** keeps the
 window, **Quit** exits. With a **live** session, the dialog says how many will disconnect; on Quit
@@ -1057,7 +1082,10 @@ the shell should be torn down cleanly (`who` / the server's log shows a normal l
 before the window closes. Now the title-bar **×**: it too asks **Quit cmote?** — even with no live
 session — and on confirm disconnects everything before exiting. While the **Quit cmote?** card is up,
 **drag it by its header** — like every other dialog it moves and stays where you drop it (clamped so
-the header never leaves the window); the same works on the per-tab **live-shell close** card. On a
+the header never leaves the window); the same works on the per-tab **live-shell close** card. The
+header should wear the **open hand** on hover and the **closed** one from the press to the release,
+exactly as a tab chip does — including when the card slides out from under the pointer mid-drag,
+which must not open the hand early. The body text keeps its I-beam and the ✕ its arrow. On a
 **live** shell, **Ctrl+D** should reach the remote as EOF (it logs you out, landing back on the home
 screen), *not* close the tab; a second **Ctrl+D** there then closes it.
 

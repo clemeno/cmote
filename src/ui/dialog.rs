@@ -81,7 +81,7 @@ pub fn dialog<'a>(
 	// so the seams line up flush and the header colour meets the body cleanly. The
 	// width is fixed so `app` can clamp horizontal dragging exactly.
 	let card = container(column![
-		header_bar(title, on_close),
+		header_bar(title, on_close, drag.dragging),
 		body_band(body),
 		footer_bar(footer)
 	])
@@ -192,7 +192,12 @@ pub fn selectable_body(content: &text_editor::Content) -> Element<'_, Message> {
 /// The header bar: the title filling the width on the left, a square close (✕) button
 /// pinned to the right. The ✕ emits `on_close`, so closing the dialog is always the
 /// safe choice (never the destructive one).
-fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
+///
+/// `dragging` is the card's own drag state, and reaches this far only for the cursor (§51): the
+/// hand is closed for as long as the card is held, which is a property of the gesture rather than
+/// of where the pointer happens to be — a card dragged out from under the pointer must not open the
+/// hand halfway through the drag.
+fn header_bar<'a>(title: String, on_close: Message, dragging: bool) -> Element<'a, Message> {
 	let label = container(text(title).size(TITLE_SIZE).color(FG))
 		.width(Length::Fill)
 		.align_x(Horizontal::Left);
@@ -218,10 +223,21 @@ fn header_bar<'a>(title: String, on_close: Message) -> Element<'a, Message> {
 	// ends one (§10). The ✕ button inside captures its own press, so closing still
 	// works and does not begin a drag. The release is normally caught by the capture
 	// layer, but handling it here too ends a click that never moved.
-	mouse_area(bar)
+	//
+	// It wears the hand (§51), the same one a tab chip does: an open hand says the card can be
+	// picked up — which nothing else on a dialog says, since the header looks like a title bar and
+	// title bars are not always draggable — and a closed one from the press to the release. The
+	// enter/exit pair is what tells `cursor` the pointer is on a handle; who draws the hand depends
+	// on the platform, which is `grab_interaction`'s business and not this file's.
+	let area = mouse_area(bar)
 		.on_press(Message::DialogGrabbed)
 		.on_release(Message::DialogReleased)
-		.into()
+		.on_enter(Message::GrabEntered)
+		.on_exit(Message::GrabExited);
+	match crate::cursor::grab_interaction(dragging) {
+		Some(interaction) => area.interaction(interaction).into(),
+		None => area.into(),
+	}
 }
 
 /// The shared close (✕) button (§10, §32): a transparent square with the glyph centred, no

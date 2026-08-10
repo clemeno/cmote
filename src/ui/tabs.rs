@@ -289,21 +289,28 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 
 	// The whole chip is the drag handle (§38). `on_press` selects and grabs; `on_release` drops. The
 	// cursor advertises the gesture: an open hand at rest, a closed one while a tab is in flight.
+	//
+	// WHO draws that hand depends on the platform (§51). Windows has no hand cursor at all, so
+	// `chip_interaction` answers `None` there — iced is asked for nothing, precisely so it never
+	// sets a cursor over the strip, and `cursor` paints the two hands itself from the enter/exit
+	// events below. Everywhere else the toolkit has them and is simply asked.
 	let area = mouse_area(cell)
 		.on_press(Message::TabSelected(index))
-		.on_release(Message::TabDropped)
-		.interaction(if dragging {
-			iced::mouse::Interaction::Grabbing
-		} else {
-			iced::mouse::Interaction::Grab
-		});
+		.on_release(Message::TabDropped);
+	let area = match crate::cursor::grab_interaction(dragging) {
+		Some(interaction) => area.interaction(interaction),
+		None => area,
+	};
 
-	// The hover report — which slot the pointer is over — is wired up ONLY while a tab is actually
-	// being dragged. `App` would ignore it at rest anyway, but not asking for it means moving the
-	// pointer across the strip publishes no messages at all when there is nothing to move.
+	// While a tab is in flight the pointer entering a chip means "this slot", which is the message
+	// the drop needs. At rest it means "a hand goes here" (§51) — and the pair of them is why the
+	// exit is only wired at rest: mid-drag the hand is closed wherever the pointer has got to, so
+	// leaving a chip changes nothing.
 	if dragging {
 		area.on_enter(Message::TabDraggedOver(index)).into()
 	} else {
-		area.into()
+		area.on_enter(Message::GrabEntered)
+			.on_exit(Message::GrabExited)
+			.into()
 	}
 }

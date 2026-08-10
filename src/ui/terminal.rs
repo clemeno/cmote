@@ -101,16 +101,17 @@ pub const DELETE_DIALOG_BODY: &str = "Delete these from the server? This cannot 
 /// or cancel the whole transfer — files already copied stay.
 pub const CONFLICT_DIALOG_BODY: &str = "A file with this name is already at the destination. Choose what to do — replaced files are not recoverable. This applies as you go; \"all\" settles every remaining collision the same way.";
 
-/// Who the session is, for the status bar (§10). One struct rather than two parameters because
-/// `view` is at its argument limit — and because they are one idea: the connection, and the account
-/// whose shell is on screen.
-pub struct SessionView<'a> {
-	/// The `user@host:port` of the connection itself — the account it authenticated as.
-	pub endpoint: &'a str,
-	/// The account the grid belongs to, shown in the bar as plain text. Read-only: the way to BECOME
-	/// another account was withdrawn with the rest of §45's UX, and the label stayed because knowing
-	/// who you are on a server is worth a line of the bar on its own.
-	pub user: &'a str,
+/// Which way the shell and the panes can still be brought together (§19), for the two buttons that
+/// do it. One struct because they are one idea read in two directions — and because `status_bar`
+/// is at its argument limit, so the pair would otherwise cost it its eighth.
+///
+/// `sync` types a `cd` and moves the SHELL to the pane; `reveal` moves the PANES to the shell and
+/// sends nothing. Both are false when the two already agree, which is how a dimmed pair says "in
+/// step" without a label for it.
+#[derive(Debug, Clone, Copy)]
+struct Follow {
+	sync: bool,
+	reveal: bool,
 }
 
 /// Everything the status bar and the modals need to know about the upload feature
@@ -198,7 +199,7 @@ pub struct Modals<'a> {
 /// selection and the dialog body all share the returned element's lifetime.
 pub fn view<'a>(
 	terminal: &'a Terminal,
-	session: SessionView<'a>,
+	endpoint: &'a str,
 	selection: Option<&'a Selection>,
 	menu: Option<Point>,
 	modals: Modals<'a>,
@@ -268,6 +269,28 @@ pub fn view<'a>(
 	// `cd` is a harmless no-op — far better than dimming a button that would in fact move.
 	let can_sync = files.path().is_some() && files.path() != terminal.cwd();
 
+	// Reveal (§19) is the same question the other way round: it has something to do when the shell
+	// names a directory the panes are not both already showing. "Both" is why this is three terms
+	// and not the mirror image of one — the pane can be there while the tree is not, which is
+	// exactly what happens when a branch is collapsed under a selection that never moved.
+	// `selected_index` is `None` for a selection inside a collapsed branch, so it is what says the
+	// cwd's row is on screen rather than merely remembered.
+	//
+	// The strip has to be on screen at all: with the pane hidden the tree goes with it, so there
+	// is nothing for a press to move in front of the user. The Files toggle is one button away,
+	// and a control that answers with a change nobody can see reads as a broken one.
+	let can_reveal = files.visible()
+		&& match terminal.cwd() {
+			Some(cwd) => {
+				files.path() != Some(cwd)
+					|| explorer.selected() != Some(cwd)
+					|| explorer.selected_index().is_none()
+			}
+			// Never announced (§17): there is no directory to go to, and unlike Sync's harmless
+			// duplicate `cd` there is nothing to guess at either.
+			None => false,
+		};
+
 	// The terminal now has the whole area under the bar to itself — full width, alone in its
 	// section (§18). The folder tree used to share this row; it moved down beside the files
 	// pane, so the grid is always `Fill` here and reserves width for nothing.
@@ -285,9 +308,12 @@ pub fn view<'a>(
 	// view's `'a` lifetime.
 	let mut stacked = column![
 		status_bar(
-			session,
+			endpoint,
 			has_selection,
-			can_sync,
+			Follow {
+				sync: can_sync,
+				reveal: can_reveal,
+			},
 			upload,
 			explorer.visible(),
 			files.visible(),
@@ -452,22 +478,38 @@ pub fn view<'a>(
 		.into()
 }
 
-/// The status bar (§10, §17, §19): three zones — Copy / Paste / File… / Upload / Sync on
-/// the left, the live session's `user@host:port` centered, and Disconnect on the right. Its
+/// The status bar (§10, §17, §19): three zones — Sync / Reveal / Copy / Paste / Files… / Upload
+/// on the left, the live session's `user@host:port` centered, and Disconnect on the right. Its
 /// height is fixed to `STATUS_BAR_HEIGHT` so `grid_size` can subtract it exactly.
-/// `has_selection` enables Copy, a picked file enables Upload, and `can_sync` enables Sync —
-/// a button with no `on_press` is rendered disabled by iced. While a transfer runs the centre
-/// zone shows its progress instead of the endpoint, and afterwards the outcome notice until
+/// `has_selection` enables Copy, a picked file enables Upload, and `follow` enables Sync and
+/// Reveal — a button with no `on_press` is rendered disabled by iced. While a transfer runs the
+/// centre zone shows its progress instead of the endpoint, and afterwards the outcome notice until
 /// the next upload.
+///
+/// The account is said ONCE, by the centred endpoint. A separate account label used to sit at the
+/// head of the right group — what was left of §45's withdrawn switcher — repeating on the same line
+/// the `user@` the centre already carries; a bar that says the same thing twice reads as though the
+/// two could differ.
 fn status_bar<'a>(
-	session: SessionView<'a>,
+	endpoint: &'a str,
 	has_selection: bool,
-	can_sync: bool,
+	follow: Follow,
 	upload: UploadView<'a>,
 	explorer_visible: bool,
 	files_visible: bool,
 	forward_count: usize,
 ) -> Element<'a, Message> {
+	// Sync (§19): type a `cd` into the shell so it follows the pane. Disabled until the pane
+	// names a directory the shell is not already in — dimmed, it doubles as a tell that the
+	// two are in step. It carries no path; `app` reads `Files::path` live when the press
+	// arrives, so the button can never move the shell somewhere the pane has since left.
+	let sync = button(text("Sync").size(STATUS_BAR_TEXT))
+		.on_press_maybe(follow.sync.then_some(Message::SyncPressed));
+	// Reveal (§19): the same closing of the gap, read the other way — the panes come to the shell.
+	// It types nothing and sends nothing; `app` reads the announced cwd when the press arrives, so
+	// like Sync it can only ever mean where the other side is NOW.
+	let reveal = button(text("Reveal").size(STATUS_BAR_TEXT))
+		.on_press_maybe(follow.reveal.then_some(Message::RevealPressed));
 	// `on_press_maybe(None)` disables Copy until there is a selection to copy.
 	let copy = button(text("Copy").size(STATUS_BAR_TEXT))
 		.on_press_maybe(has_selection.then_some(Message::CopyPressed));
@@ -478,12 +520,6 @@ fn status_bar<'a>(
 	let idle = upload.state.is_none();
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
 		.on_press_maybe((idle && upload.file_count > 0).then_some(Message::UploadPressed));
-	// Sync (§19): type a `cd` into the shell so it follows the pane. Disabled until the pane
-	// names a directory the shell is not already in — dimmed, it doubles as a tell that the
-	// two are in step. It carries no path; `app` reads `Files::path` live when the press
-	// arrives, so the button can never move the shell somewhere the pane has since left.
-	let sync = button(text("Sync").size(STATUS_BAR_TEXT))
-		.on_press_maybe(can_sync.then_some(Message::SyncPressed));
 	// The explorer toggle (§18): its label says what the panel currently is, so the
 	// button reads as a state rather than a command.
 	let tree = button(
@@ -517,14 +553,17 @@ fn status_bar<'a>(
 		button(text(tunnels_label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed);
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
-	// Who the grid belongs to, built before the zones so the endpoint label can be read off the same
-	// struct.
-	let account = account_label(&session);
 
 	// Three equal-width zones. Because each takes the same `Fill` share, the middle
 	// zone's centered label is centered in the *window*, not merely between the side
 	// groups — so the host info stays put no matter how wide the buttons are.
-	let mut buttons = row![copy, paste, pick, send]
+	// Sync and Reveal open the group, ahead of the clipboard and upload buttons. They are the two
+	// controls here that answer "where am I", one in each direction, and the eye goes to them first
+	// while working the panes below — so they sit at the edge, where a group's first items are
+	// easiest to hit, rather than trailing an upload run they have nothing to do with. Adjacent
+	// because they are a pair: whichever way the two sides have drifted, the answer is one of these
+	// two buttons, and the one that is lit says which way it will move.
+	let mut buttons = row![sync, reveal, copy, paste, pick, send]
 		.spacing(10)
 		.align_y(iced::alignment::Vertical::Center);
 	// Say what is picked right after Upload — the button it belongs to — so Upload never
@@ -535,25 +574,20 @@ fn status_bar<'a>(
 		count => Some(format!("{count} files")),
 	};
 	if let Some(picked) = picked {
-		// Its own height, like the account label beside it: the row centres it against the buttons.
+		// Plain text, its own height: the row's `align_y` centres it against the buttons.
 		buttons = buttons.push(text(picked).size(STATUS_BAR_TEXT).color(STATUS_BAR_FG));
 	}
-	// Sync closes the left group, after the upload controls it is unrelated to.
-	buttons = buttons.push(sync);
 	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
-	let center = container(center_zone(session.endpoint, upload))
+	let center = container(center_zone(endpoint, upload))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
-	// The account sits at the head of the right group, before the panel toggles: it says WHO the
-	// grid above belongs to, which is closer to the terminal's own identity than to the buttons that
-	// act on it.
 	// `align_y` on each group, not only on the row of groups: a row aligns its own children to each
 	// other, so without it these settle at the top of whichever child is tallest. That is invisible
 	// while a group is all buttons of one height, and shows the moment a label or a select joins them.
 	let right = container(
-		row![account, tree, pane, tunnels, disconnect]
+		row![tree, pane, tunnels, disconnect]
 			.spacing(10)
 			.align_y(iced::alignment::Vertical::Center),
 	)
@@ -576,20 +610,6 @@ fn status_bar<'a>(
 	.align_y(iced::alignment::Vertical::Center)
 	.padding(STATUS_BAR_PADDING)
 	.into()
-}
-
-/// The account label in the status bar: who the grid above belongs to.
-///
-/// Read-only, and deliberately so. It arrived with §45's account switcher, which also put a "Log in
-/// as…" button beside it and turned the label into a select once a session held two accounts; that
-/// whole path was withdrawn pending a different approach to elevation. The label is what was worth
-/// keeping on its own — on a machine where several people share an account, or where you are not
-/// sure which one an agent key authenticated you as, the bar answering it is worth its width.
-fn account_label<'a>(session: &SessionView<'a>) -> Element<'a, Message> {
-	text(session.user.to_owned())
-		.size(STATUS_BAR_TEXT)
-		.color(STATUS_BAR_FG)
-		.into()
 }
 
 /// What the middle of the status bar shows (§17). A running transfer takes priority — a

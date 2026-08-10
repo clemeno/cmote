@@ -13,6 +13,7 @@
 // under `src/`. See PLAN.md §5 for the responsibility of each module.
 mod app; // iced application: State, Message, update, view, subscription
 mod bridge; // channel message types that cross the GUI <-> tokio boundary (§4)
+mod cursor; // the open/closed hand over a draggable tab, drawn here because Windows has none (§51)
 mod editor; // the in-tab text editor's model: encoding, changed-line diff, buffer state (§32)
 mod elevate; // becoming another account on the machine we are already logged in to (§45)
 mod explorer; // the remote folder tree's model: nodes, expansion, path arithmetic (§18)

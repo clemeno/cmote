@@ -422,7 +422,7 @@ impl App {
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
-		(app, size)
+		(app, iced::Task::batch([size, install_hand_cursors()]))
 	}
 
 	/// The region holding the keyboard (§48). `focus` is kept valid by every path that changes the
@@ -554,6 +554,9 @@ impl App {
 			Message::DialogGrabbed if self.overlay_open() => {
 				self.overlay_dragging = true;
 				self.overlay_drag_last = None;
+				// The card is held: the hand closes and stays closed until the release, wherever
+				// the pointer goes meanwhile (§51).
+				crate::cursor::set_dragging(true);
 				iced::Task::none()
 			}
 			Message::DialogDragged(pointer) if self.overlay_open() => {
@@ -563,6 +566,7 @@ impl App {
 			Message::DialogReleased if self.overlay_open() => {
 				self.overlay_dragging = false;
 				self.overlay_drag_last = None;
+				crate::cursor::set_dragging(false);
 				iced::Task::none()
 			}
 			// Everything else has no region of its own — the keyboard, above all — so it is for the
@@ -595,10 +599,24 @@ impl App {
 				}
 				iced::Task::none()
 			}
+			// Something grabbable has the pointer with nothing in flight (§51): a tab chip, a dialog
+			// header. Caught here rather than in the tab because the cursor is the WINDOW's, not any
+			// one region's — the answer is the same whichever region raised it, and a card dragged
+			// across a split does not change hands halfway.
+			Message::GrabEntered => {
+				crate::cursor::hover_entered();
+				iced::Task::none()
+			}
+			Message::GrabExited => {
+				crate::cursor::hover_exited();
+				iced::Task::none()
+			}
 			Message::TabDropped => {
 				if let Some(region) = self.regions.get_mut(pane) {
 					region.drop_tab();
 				}
+				// Released: the hand opens again if the pointer is still on a chip (§51).
+				crate::cursor::set_dragging(false);
 				iced::Task::none()
 			}
 			// The pointer left the strip: the gesture is over and nothing moves. Also fires when the
@@ -607,6 +625,11 @@ impl App {
 				if let Some(region) = self.regions.get_mut(pane) {
 					region.tab_drag = None;
 				}
+				// Off the strip, so no chip can still hold the pointer whatever the enter/exit
+				// events added up to — the boundary that heals a count a closed chip left standing
+				// (§51).
+				crate::cursor::set_dragging(false);
+				crate::cursor::hover_reset();
 				iced::Task::none()
 			}
 			Message::TabCloseRequested(id) => self.request_close(id),
@@ -1022,6 +1045,10 @@ impl App {
 				grabbed: tab.id,
 				over: None,
 			});
+			// The hand closes on the press and stays closed until the release (§51), which is why
+			// this is set here rather than when the pointer first MOVES with the button down: a
+			// press that never moves still holds the chip.
+			crate::cursor::set_dragging(true);
 		}
 		self.select_tab(pane, index)
 	}
@@ -1843,13 +1870,16 @@ pub enum Focus {
 /// that same connection (`sudo -u root -i`), which gets a channel and a shell of its own. So this is
 /// not a second connection and not a second tab — it is one more shell on the one session, with its
 /// own view of the machine parked beside it.
+///
+/// It holds no account NAME. It used to, for the status bar's label and the switcher's entries, and
+/// both are gone (§45's UX was withdrawn, and the label with it — the bar's centred endpoint already
+/// says who the session is). A name nothing reads is a name nothing keeps true, so the elevation
+/// this list is waiting for will add it back beside whatever displays it.
 #[derive(Debug, Default)]
 struct Identity {
 	/// The number the SSH task knows this shell by. `bridge::LOGIN_IDENTITY` for the account the
 	/// session authenticated as; counted up from 1 for each elevation.
 	id: u64,
-	/// The account name, which is what the switcher shows.
-	user: String,
 	/// Whether its shell is through its credential conversation and live. A shell still elevating
 	/// is in the list (so a failure has something to report against) but cannot be switched to.
 	ready: bool,
@@ -2002,9 +2032,6 @@ pub struct Tab {
 	/// keeps filling `cme`'s scrollback while root's shell is on screen, and switching back finds it
 	/// where it was.
 	identities: Vec<Identity>,
-	/// The account this session authenticated as (§45), captured when the connect is dialed so the
-	/// first identity can be named the moment the shell opens. Holds no secret.
-	login_user: String,
 	/// Which of `identities` is on screen. Its workspace is the LIVE one — the `terminal`,
 	/// `selection`, `search` fields above — which is why those fields stay where they are and only
 	/// the ones off screen are parked; nothing in the thousands of lines that touch `self.terminal`
@@ -2453,6 +2480,11 @@ pub enum Message {
 	/// reading it when the press arrives keeps it from being a directory the pane has since
 	/// left (same discipline as `Files(CopyCurrentPath)` and `Files(ParentOpened)`).
 	SyncPressed,
+	/// The status bar's "Reveal" button (§19): the other direction — bring the files pane and the
+	/// folder tree to the directory the SHELL is in. Carries no path for the same reason
+	/// `SyncPressed` does not: the announced cwd is read when the press arrives, so it can never
+	/// be a directory the shell has since left.
+	RevealPressed,
 	/// Dismiss the open context menu without choosing an item.
 	MenuDismissed,
 	/// A window-frame tick while a copy-confirmation toast is showing (§10). Carries no
@@ -2568,6 +2600,15 @@ pub enum Message {
 	/// The pointer entered the chip at this strip position (§38). While a drag is armed, that chip
 	/// is the slot the grabbed tab will drop into; with no drag in flight it is ignored.
 	TabDraggedOver(usize),
+	/// The pointer entered something grabbable while nothing is being dragged (§51): a tab chip, a
+	/// dialog header, or whatever wears the hand next. The window shows the open hand.
+	///
+	/// Carries nothing — not which handle, not even which kind. The cursor question is "is the
+	/// pointer on something that can be picked up", and a count of entries and exits answers it for
+	/// every surface at once; anything more would be state to keep in step for no gain.
+	GrabEntered,
+	/// The pointer left something grabbable (§51).
+	GrabExited,
 	/// The button was released over the strip (§38) — move the grabbed tab into the hovered slot, or
 	/// do nothing when the press never travelled to another chip.
 	TabDropped,
@@ -3111,6 +3152,7 @@ impl Tab {
 			}
 			Message::Pasted(text) => self.on_pasted(text),
 			Message::SyncPressed => self.on_sync(),
+			Message::RevealPressed => self.on_reveal(),
 			Message::MenuDismissed => self.menu = None,
 			// A frame tick while the toast is up (§10): drop it once it has outlived its
 			// dwell. Clearing it removes the `frames()` subscription next diff, so the
@@ -3213,18 +3255,27 @@ impl Tab {
 			Message::DialogGrabbed => {
 				self.dialog_dragging = true;
 				self.dialog_drag_last = None;
+				// Held: the hand closes until the release (§51), exactly as the overlay cards'
+				// copy of this arm does — the two paths differ in WHICH card moves, not in what
+				// the pointer is doing.
+				crate::cursor::set_dragging(true);
 			}
 			Message::DialogDragged(pointer) => self.on_dialog_dragged(pointer),
 			Message::DialogReleased => {
 				self.dialog_dragging = false;
 				self.dialog_drag_last = None;
+				crate::cursor::set_dragging(false);
 			}
 			// `App` routes an SSH event to the tab that owns the session before delegating, so it
 			// already picked the right `self`; the id is not needed again here (§26).
 			Message::Ssh(_id, event) => return self.on_ssh_event(event),
+			// The hand cursor is the WINDOW's, so `App` answers these too (§51) — a tab's own dialog
+			// header raises them just as a chip does, and both mean the same thing to the pointer.
+			Message::GrabEntered
+			| Message::GrabExited
 			// Tab-strip management is `App`'s job — it intercepts these before delegating, so a
 			// tab never sees them. The arms exist only to keep the match total (§26).
-			Message::TabNew
+			| Message::TabNew
 			| Message::TabSelected(_)
 			| Message::TabDraggedOver(_)
 			| Message::TabDropped
@@ -3356,12 +3407,8 @@ impl Tab {
 		// The label the terminal status bar will show once the shell is open (§10);
 		// capture it now, before `params` moves into the command.
 		let endpoint = format!("{}@{}:{}", params.user, params.host, params.port);
-		// The account this session authenticates as, which becomes its first identity once the shell
-		// opens (§45). Captured here for the same reason as the endpoint: `params` is about to move.
-		let login_user = params.user.clone();
 		if self.send_command(SshCommand::Connect(params)) {
 			self.connection = Some(endpoint);
-			self.login_user = login_user;
 			self.screen = Screen::Connecting { status };
 		} else {
 			// The command never left: do not leave a pending target — or a secret to save — behind.
@@ -3759,7 +3806,6 @@ impl Tab {
 				// identity falls back to.
 				self.identities = vec![Identity {
 					id: bridge::LOGIN_IDENTITY,
-					user: self.login_user.clone(),
 					ready: true,
 					work: Workspace::default(),
 				}];
@@ -5556,20 +5602,6 @@ impl Tab {
 
 	// --- more than one account on one connection (§45) ---
 
-	/// The account whose shell is on screen, for the status bar's label.
-	///
-	/// Read off the identity list rather than from `login_user` alone, because the list is what knows
-	/// which shell the grid belongs to (§45) — it holds one entry while there is no way to open a
-	/// second. `login_user` is the fallback for the moment before the first shell is listed, when the
-	/// bar is already up and the answer is nonetheless known: it is who the session authenticated as.
-	fn current_user(&self) -> &str {
-		self.identities
-			.iter()
-			.find(|entry| entry.id == self.identity)
-			.map(|entry| entry.user.as_str())
-			.unwrap_or(&self.login_user)
-	}
-
 	/// Put another identity's terminal on screen (§45).
 	///
 	/// The swap is the whole mechanism: the live view moves into the identity being left, and the
@@ -6491,6 +6523,48 @@ impl Tab {
 		self.move_shell_to(&path);
 	}
 
+	/// The status bar's "Reveal" button (§19): Sync read backwards — bring the PANES to the shell.
+	///
+	/// The two drift apart in both directions, and until now only one of them could be closed from
+	/// the bar. Browsing moves the pane and leaves the console alone (§19), and the shell's own
+	/// re-announcement cannot bring the pane back: `Files::follow` acts on a *move*, and a shell
+	/// standing still at the same prompt announces the same directory every time. So a browse three
+	/// folders away was undone only by `cd`-ing the shell somewhere — moving the thing that was
+	/// already where you wanted it — or by walking the tree back by hand.
+	///
+	/// It moves nothing on the remote. No `cd` is typed, no bytes reach the shell: this is the
+	/// local view catching up with a shell that stays exactly where it is, which is why it is safe
+	/// while a full-screen program is running and `move_shell_to` is not.
+	///
+	/// Three things happen, and all three are the point:
+	///
+	/// * the tree opens the chain down to the cwd and selects it — through `Explorer::reveal`, the
+	///   UNguarded one, since the whole reason to press this is that the tree has been walked away
+	///   from a cwd that never changed;
+	/// * the pane shows that directory (`Files::show`, the deliberate move, not `follow`); and
+	/// * the follow-guard is seeded with the same path, so the next prompt's announcement is
+	///   correctly read as "still there, nothing to do" rather than as a move — and a real `cd`
+	///   after it still carries the pane along.
+	///
+	/// A no-op when the shell has never announced a cwd (§17: it needs OSC 7, or a shell configured
+	/// to send it) — the button dims then, and whenever the panes are already there.
+	fn on_reveal(&mut self) {
+		let Some(cwd) = self
+			.terminal
+			.as_ref()
+			.and_then(term::Terminal::cwd)
+			.map(str::to_owned)
+		else {
+			return;
+		};
+		let needed = self.explorer.reveal(&cwd);
+		self.list_dirs(needed);
+		self.files.set_followed(&cwd);
+		if let Some(request) = self.files.show(&cwd) {
+			self.list_files(request);
+		}
+	}
+
 	/// Browse the files pane into a directory (§19): a double-clicked folder, the toolbar's
 	/// "up" button, or Enter on the keyboard. This points the PANE only — the console stays
 	/// put, so you can look inside a folder you are not in without disturbing the shell. The
@@ -7141,10 +7215,7 @@ impl Tab {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
-						ui::terminal::SessionView {
-							endpoint: self.connection.as_deref().unwrap_or(""),
-							user: self.current_user(),
-						},
+						self.connection.as_deref().unwrap_or(""),
 						self.selection.as_ref(),
 						self.menu,
 						ui::terminal::Modals {
@@ -7253,6 +7324,34 @@ fn new_emulator() -> term::Terminal {
 
 fn fit_terminal() -> iced::Task<Message> {
 	iced::window::latest().and_then(|id| iced::window::size(id).map(Message::WindowResized))
+}
+
+/// Hand the window itself to `cursor`, once, at start-up (§51).
+///
+/// The hands are painted through a Win32 window subclass, so the one thing that layer needs is the
+/// window's own handle — and `iced::window::run` is the only way iced offers to reach it: the
+/// closure is handed the live window on the UI thread, which is also the thread that pumps its
+/// messages, so the subclass is installed from the right place.
+///
+/// `discard` because the installation raises no message: everything after it is driven by the tab
+/// strip's own pointer events. Off Windows this resolves to a no-op that costs one boot task.
+fn install_hand_cursors() -> iced::Task<Message> {
+	iced::window::latest()
+		.and_then(|id| {
+			iced::window::run(id, |window| {
+				use iced::window::raw_window_handle::RawWindowHandle;
+
+				// A handle iced could not give us, or one that is not a Win32 window, means there is
+				// nothing to subclass — the strip then keeps whatever cursor the toolkit gives it.
+				let Ok(handle) = window.window_handle() else {
+					return;
+				};
+				if let RawWindowHandle::Win32(win32) = handle.as_raw() {
+					crate::cursor::install(win32.hwnd.get());
+				}
+			})
+		})
+		.discard()
 }
 
 /// Window focus changes, as `Message::WindowFocus(bool)` for focus reporting (§23). iced
@@ -8832,10 +8931,8 @@ mod tests {
 	fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut app, rx) = app_with_terminal(32);
 		app.screen = Screen::Terminal;
-		app.login_user = "cme".to_owned();
 		app.identities = vec![Identity {
 			id: bridge::LOGIN_IDENTITY,
-			user: "cme".to_owned(),
 			ready: true,
 			work: Workspace::default(),
 		}];
@@ -8848,12 +8945,11 @@ mod tests {
 	// through a dialog — that UX was withdrawn — so the identity is listed here as `elevate_submit`
 	// used to list it, and then announced live. Returns the new identity's number, which is also on
 	// screen when this returns.
-	fn elevate_to(app: &mut Tab, user: &str) -> u64 {
+	fn elevate_to(app: &mut Tab) -> u64 {
 		let id = app.next_identity;
 		app.next_identity += 1;
 		app.identities.push(Identity {
 			id,
-			user: user.to_owned(),
 			ready: false,
 			work: Workspace::default(),
 		});
@@ -8878,7 +8974,7 @@ mod tests {
 			app.list_files(request);
 		}
 		// Becoming root puts root's shell on screen, and that same switch moves the panes.
-		let root = elevate_to(&mut app, "root");
+		let root = elevate_to(&mut app);
 		assert_eq!(app.identity, root);
 
 		let sent = drain(&mut rx);
@@ -8930,7 +9026,7 @@ mod tests {
 	#[test]
 	fn a_file_opened_as_root_is_still_saved_as_root_after_switching_back() {
 		let (mut session, rx) = app_with_login_identity();
-		let root = elevate_to(&mut session, "root");
+		let root = elevate_to(&mut session);
 		let mut app = tab_app();
 		let id = session.id;
 		let region = strip_mut(&mut app);
@@ -8988,7 +9084,7 @@ mod tests {
 		app.term_find_query("cme".to_owned());
 		assert_eq!(app.search.as_ref().unwrap().count(), 1);
 
-		let root = elevate_to(&mut app, "root");
+		let root = elevate_to(&mut app);
 		assert_eq!(app.identity, root, "the new account comes forward");
 		assert!(
 			app.search.is_none(),
@@ -9018,7 +9114,7 @@ mod tests {
 	#[test]
 	fn output_for_a_parked_account_goes_to_its_own_scrollback() {
 		let (mut app, mut rx) = app_with_login_identity();
-		let root = elevate_to(&mut app, "root");
+		let root = elevate_to(&mut app);
 		let _ = drain(&mut rx);
 
 		// cme's shell keeps talking while root's is on screen.
@@ -9050,7 +9146,7 @@ mod tests {
 	#[test]
 	fn a_parked_accounts_query_is_answered_on_its_own_channel() {
 		let (mut app, mut rx) = app_with_login_identity();
-		let _root = elevate_to(&mut app, "root");
+		let _root = elevate_to(&mut app);
 		let _ = drain(&mut rx);
 
 		// A cursor-position report request from the shell the user is NOT looking at.
@@ -9087,7 +9183,6 @@ mod tests {
 		app.next_identity += 1;
 		app.identities.push(Identity {
 			id: root,
-			user: "root".to_owned(),
 			ready: false,
 			work: Workspace::default(),
 		});
@@ -9115,7 +9210,7 @@ mod tests {
 	fn an_elevated_shell_exiting_falls_back_to_the_login_account() {
 		let (mut app, _rx) = app_with_login_identity();
 		let _ = app.on_ssh_event(shell_output(b"i am cme\r\n"));
-		let root = elevate_to(&mut app, "root");
+		let root = elevate_to(&mut app);
 
 		let _task = app.on_ssh_event(SshEvent::IdentityEnded {
 			identity: root,
@@ -9137,7 +9232,7 @@ mod tests {
 	#[test]
 	fn disconnecting_forgets_every_account() {
 		let (mut app, _rx) = app_with_login_identity();
-		let _root = elevate_to(&mut app, "root");
+		let _root = elevate_to(&mut app);
 
 		let _task = app.on_ssh_event(SshEvent::Disconnected);
 		assert!(app.identities.is_empty());
@@ -9265,6 +9360,60 @@ mod tests {
 			Some("/var/log/nginx"),
 			"following resumed"
 		);
+	}
+
+	/// The status bar's Reveal button (§19): the panes come to the shell, and nothing is typed at
+	/// it. The case that matters is the one the shell cannot fix by itself — a browse away from a
+	/// shell that has not moved since. Its next prompt announces the same directory, which is not a
+	/// move, so the pane rightly stays put and only an explicit ask brings it back.
+	#[test]
+	fn reveal_brings_the_panes_to_the_shell_without_typing_anything() {
+		let (mut app, mut rx) = app_with_terminal(32);
+		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
+
+		// The shell says where it is, and both panels follow it there as usual.
+		let _ = app.on_ssh_event(announce("/var/log"));
+		assert_eq!(app.files.path(), Some("/var/log"));
+		assert_eq!(app.explorer.selected(), Some("/var/log"));
+
+		// A look somewhere else, with the tree walked off the shell's folder too.
+		app.browse_to("/etc");
+		app.explorer.select("/etc");
+		let _ = app.on_ssh_event(announce("/var/log"));
+		assert_eq!(
+			app.files.path(),
+			Some("/etc"),
+			"a re-announcement is not a move, so the browse stands (§19)"
+		);
+
+		let _ = drain(&mut rx);
+		let _task = app.update(Message::RevealPressed);
+		assert_eq!(app.files.path(), Some("/var/log"), "the pane came back");
+		assert_eq!(
+			app.explorer.selected(),
+			Some("/var/log"),
+			"and the tree with it"
+		);
+		assert!(
+			!drain(&mut rx)
+				.iter()
+				.any(|command| matches!(command, SshCommand::Input(_))),
+			"the shell was never typed at — this moves the local view alone"
+		);
+	}
+
+	/// With no cwd announcement (§17: it takes OSC 7, which not every shell sends) Reveal has
+	/// nowhere to go, so it leaves both panels where they are rather than guessing at the root.
+	/// The button dims in that case; this is what sits behind the dimming.
+	#[test]
+	fn reveal_does_nothing_when_the_shell_never_said_where_it_is() {
+		let (mut app, mut rx) = app_with_terminal(32);
+		app.browse_to("/etc");
+		let _ = drain(&mut rx);
+
+		let _task = app.update(Message::RevealPressed);
+		assert_eq!(app.files.path(), Some("/etc"), "left where it was");
+		assert!(drain(&mut rx).is_empty(), "and nothing asked of the server");
 	}
 
 	/// Shift+click and Shift+arrow through the app's own handlers (§21) — the model's rules
@@ -9830,6 +9979,45 @@ mod tests {
 		let _ = app.update(Message::DialogReleased);
 		assert!(!app.overlay_dragging, "releasing ends the drag");
 		assert!(app.overlay_drag_last.is_none());
+	}
+
+	/// Every grabbable surface drives the ONE hand (§51). A dialog header is not a tab chip and
+	/// knows nothing about one, but the pointer does the same thing on both — so both report the
+	/// same two events and the cursor state is told what the POINTER is doing, never which widget
+	/// did it. The chip half of this is the same sequence with `TabSelected` / `TabDropped`.
+	#[test]
+	fn a_dialog_header_and_a_chip_drive_the_same_hand() {
+		let _held = crate::cursor::TEST_LOCK
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner());
+		crate::cursor::forget();
+		let mut app = tab_app();
+
+		// The header, with no overlay up, so the tab's own dialog drives it.
+		let _ = app.update(Message::GrabEntered);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+		let _ = app.update(Message::DialogGrabbed);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed, "held");
+		let _ = app.update(Message::DialogReleased);
+		assert_eq!(
+			crate::cursor::hand(),
+			crate::cursor::Hand::Open,
+			"let go, and the pointer is still on the header"
+		);
+		let _ = app.update(Message::GrabExited);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
+
+		// A chip, through its own messages, arriving at the same three states.
+		let _ = app.update(Message::GrabEntered);
+		let _ = app.update(Message::TabSelected(0));
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed);
+		let _ = app.update(Message::TabDropped);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+		// Off the strip: the count is asserted rather than adjusted, so a chip that closed under
+		// the pointer cannot leave a hand behind.
+		let _ = app.update(Message::TabDragCancelled);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
+		crate::cursor::forget();
 	}
 
 	#[test]

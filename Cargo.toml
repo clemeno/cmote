@@ -80,6 +80,21 @@ tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "io-util", "
 two-face = { version = "0.5", default-features = false, features = ["syntect-default-fancy"] }
 zeroize = "1.9.0"
 
+[target.'cfg(windows)'.dependencies]
+# The two Win32 calls behind the tab strip's hand cursors (PLAN §51): a window subclass to answer
+# `WM_SETCURSOR` before winit does, and `CreateIconIndirect` to build a cursor from pixels cmote
+# draws itself. Needed because Windows ships no hand cursor and iced exposes no custom-cursor seam.
+# Bindings only — windows-sys is pure Rust with pre-built import libraries, no C compiler and no
+# build script of ours, so the no-C-toolchain portable build holds (§11). The version matches the
+# one winit already pulls in, so it is a feature selection on a crate in the tree rather than a new
+# dependency to compile.
+windows-sys = { version = "0.61", features = [
+	"Win32_Foundation",
+	"Win32_Graphics_Gdi",
+	"Win32_UI_Shell",
+	"Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 # Temporary directories for tests that write known_hosts fixtures (§13).
 tempfile = "3"

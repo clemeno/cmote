@@ -472,7 +472,23 @@ impl Explorer {
 	/// is left alone rather than revealed at a made-up place. Upgrade path: root the tree
 	/// at the drive when the announced path carries one.
 	pub fn reveal_if_new(&mut self, cwd: &str) -> Vec<String> {
-		if self.revealed.as_deref() == Some(cwd) || !cwd.starts_with('/') {
+		if self.revealed.as_deref() == Some(cwd) {
+			return Vec::new();
+		}
+		self.reveal(cwd)
+	}
+
+	/// The same, asked for out loud (§19): open the chain down to `cwd` and select it whether or
+	/// not the shell has announced that directory before.
+	///
+	/// Without the "has it changed" guard, which is why it is a separate entry point rather than an
+	/// argument. The guard exists to keep the automatic call cheap and to stop a re-announcement
+	/// undoing a browse — neither applies to a press of the **Reveal** button, whose whole purpose
+	/// is to put the tree back where the shell is *after* it has been walked away from: collapse
+	/// the branch, click elsewhere, and the cwd has not changed, so the guarded call would decline
+	/// exactly when the user is asking for it.
+	pub fn reveal(&mut self, cwd: &str) -> Vec<String> {
+		if !cwd.starts_with('/') {
 			return Vec::new();
 		}
 		self.revealed = Some(cwd.to_owned());
