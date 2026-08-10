@@ -137,6 +137,10 @@ pub fn dialog<'a>(
 /// clicked so a click outside the card cancels. Shared by the disconnect modal (over the
 /// shell) and the connect-flow dialogs (over the form).
 pub fn backdrop(on_dismiss: Message) -> Element<'static, Message> {
+	// Everything under this cannot be picked up while it is there (§52): a chip behind a modal is
+	// still a live widget and still reports the pointer entering it, so without this the strip would
+	// wear the open hand over chips a click cannot even reach.
+	crate::cursor::covered();
 	mouse_area(
 		container(text(""))
 			.width(Length::Fill)
@@ -202,7 +206,12 @@ fn header_bar<'a>(title: String, on_close: Message, dragging: bool) -> Element<'
 		.width(Length::Fill)
 		.align_x(Horizontal::Left);
 
-	let close = close_button(on_close);
+	// The ✕ wins the cursor while it has the pointer (§52), exactly as a chip's "×" does: the header
+	// is the card's drag handle and reports the pointer anywhere inside itself, and a hand over the
+	// button that DISMISSES the dialog says the wrong thing about what a press there would do.
+	let close = mouse_area(close_button(on_close))
+		.on_enter(Message::GrabControlEntered(crate::cursor::HEADER))
+		.on_exit(Message::GrabControlExited(crate::cursor::HEADER));
 
 	let bar = container(row![label, close].spacing(10).align_y(Vertical::Center))
 		.width(Length::Fill)
@@ -229,11 +238,17 @@ fn header_bar<'a>(title: String, on_close: Message, dragging: bool) -> Element<'
 	// title bars are not always draggable — and a closed one from the press to the release. The
 	// enter/exit pair is what tells `cursor` the pointer is on a handle; who draws the hand depends
 	// on the platform, which is `grab_interaction`'s business and not this file's.
+	//
+	// It names itself `cursor::HEADER` (§52): a card is drawn while its dialog is open and gone the
+	// instant it closes — including when the ✕ inside this very bar is what closed it — and iced
+	// publishes no exit for a widget that has left the tree. So the header says it is still there
+	// with every frame it is drawn into, and the hand lets go on the first frame it is not.
+	crate::cursor::drawn(crate::cursor::HEADER);
 	let area = mouse_area(bar)
 		.on_press(Message::DialogGrabbed)
 		.on_release(Message::DialogReleased)
-		.on_enter(Message::GrabEntered)
-		.on_exit(Message::GrabExited);
+		.on_enter(Message::GrabEntered(crate::cursor::HEADER))
+		.on_exit(Message::GrabExited(crate::cursor::HEADER));
 	match crate::cursor::grab_interaction(dragging) {
 		Some(interaction) => area.interaction(interaction).into(),
 		None => area.into(),

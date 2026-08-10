@@ -14,6 +14,11 @@
 // holds the whole gesture's state (which tab is grabbed, which slot it is over) and hands back the
 // one piece the strip has to draw: a mark on the chip that would receive the drop.
 //
+// A chip also carries a right-click menu (§52), which sends the tab to another AREA of the window —
+// moving it there, or opening a second copy of it there. It is the keyboard-free counterpart to the
+// drag above: a drag reorders a tab within one strip and cannot cross a seam (the other strip's
+// chips report nothing to a gesture that began here), so crossing one is what the menu is for.
+//
 // The strip has a fixed height (`STRIP_HEIGHT`), which the terminal below it must account for: it
 // sits in a sub-region of the window that is exactly that much shorter. `App` hands each tab a
 // window size already reduced by `STRIP_HEIGHT`, so every layout and pointer coordinate inside a
@@ -28,7 +33,7 @@
 
 use iced::alignment::Vertical;
 use iced::widget::{button, container, mouse_area, row, space, text};
-use iced::{Border, Color, Element, Font, Length};
+use iced::{Border, Color, Element, Font, Length, Point, Size};
 
 use crate::app::Message;
 use crate::ui::split;
@@ -259,6 +264,15 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 			..button::Style::default()
 		});
 
+	// The "×" is a button sitting on a drag handle, and it wins the cursor while it has the pointer
+	// (§52): the chip's own `mouse_area` reports the pointer anywhere inside its bounds, this one
+	// included, so without saying so the hand would offer to pick up the control that CLOSES the
+	// tab. The wrapper sets no press handler, so it captures nothing and the button's own click is
+	// untouched.
+	let close = mouse_area(close)
+		.on_enter(Message::GrabControlEntered(chip.id))
+		.on_exit(Message::GrabControlExited(chip.id));
+
 	contents = contents.push(close);
 	let active = chip.active;
 	let drop_target = chip.drop_target;
@@ -302,6 +316,17 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 		None => area,
 	};
 
+	// A right press opens the chip's own menu (§52), which sends this tab to another area of the
+	// window. It names the chip by INDEX, exactly as the left press does, and — unlike the left one
+	// — does not select it: acting on a background tab is the point of having the menu on the chip
+	// rather than on the tab already showing, so opening the menu must not change what is on screen.
+	let area = area.on_right_press(Message::TabMenuOpened(index));
+
+	// This chip is still on screen, which is what keeps a hand it is holding (§52). A chip that
+	// closes, or is sent to another region, simply stops saying so — and iced publishes no `on_exit`
+	// for a widget that has left the tree, so this is the only way the hand hears about it.
+	crate::cursor::drawn(chip.id);
+
 	// While a tab is in flight the pointer entering a chip means "this slot", which is the message
 	// the drop needs. At rest it means "a hand goes here" (§51) — and the pair of them is why the
 	// exit is only wired at rest: mid-drag the hand is closed wherever the pointer has got to, so
@@ -309,8 +334,83 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 	if dragging {
 		area.on_enter(Message::TabDraggedOver(index)).into()
 	} else {
-		area.on_enter(Message::GrabEntered)
-			.on_exit(Message::GrabExited)
+		area.on_enter(Message::GrabEntered(chip.id))
+			.on_exit(Message::GrabExited(chip.id))
 			.into()
 	}
+}
+
+/// One area the chip's menu offers to send a tab to (§52), and whether each of the two actions can
+/// actually act on it. `App` works both flags out — they depend on the tree of regions, on how many
+/// tabs the strip holds and on what the tab IS — and this file only draws the answer.
+///
+/// A destination that cannot be acted on is still LISTED, dimmed, rather than dropped: with at most
+/// four rows per group, a menu whose items move about between openings is harder to use than one
+/// with a greyed row in it, and the grey is itself the explanation.
+#[derive(Debug, Clone, Copy)]
+pub struct Destination {
+	pub area: split::Area,
+	/// Whether "Move to …" would do something. False for the area the tab is already in, and for a
+	/// move that would empty this region into a brand-new one — a cut and a collapse in one press.
+	pub can_move: bool,
+	/// Whether "Duplicate to …" would do something. False unless the tab holds a session there is
+	/// something to open a second copy of.
+	pub can_duplicate: bool,
+}
+
+/// The name an area goes by in the menu. Deliberately not the word "region": the menu is read by
+/// someone looking at the window, and what they see is a place — the main one, the one on the right,
+/// the one at the bottom — rather than a node in a tree (§52).
+fn area_label(area: split::Area) -> &'static str {
+	match area {
+		split::Area::Main => "main",
+		split::Area::Right => "right",
+		split::Area::Bottom => "bottom",
+	}
+}
+
+/// The chip's right-click menu (§52): move this tab to an area of the window, or open a second copy
+/// of it there. `at` is where the click landed, in WINDOW coordinates — the menu is drawn over the
+/// whole window rather than inside the region, because a menu clipped to a region would be cut off
+/// by the very seam it is offering to send the tab across.
+///
+/// `window` is only used to keep the panel inside the right edge: a chip near the end of a wide
+/// strip would otherwise open a menu half of which is off screen. The bottom edge needs no such care
+/// — a strip sits at the top of its region, so there is always room below it.
+pub fn context_menu(
+	at: Point,
+	window: Size,
+	destinations: &[Destination],
+) -> Element<'static, Message> {
+	let mut items: Vec<Element<'static, Message>> = Vec::with_capacity(destinations.len() * 2 + 1);
+	for destination in destinations {
+		items.push(crate::ui::menu::item(
+			format!("Move to {} area", area_label(destination.area)),
+			destination
+				.can_move
+				.then_some(Message::TabMoveTo(destination.area)),
+		));
+	}
+	items.push(crate::ui::menu::separator());
+	for destination in destinations {
+		items.push(crate::ui::menu::item(
+			format!("Duplicate to {} area", area_label(destination.area)),
+			destination
+				.can_duplicate
+				.then_some(Message::TabDuplicateTo(destination.area)),
+		));
+	}
+
+	// A full-window transparent container whose padding places the panel at the click, exactly as
+	// the grid's own menu is placed (§10).
+	container(crate::ui::menu::panel(items))
+		.width(Length::Fill)
+		.height(Length::Fill)
+		.padding(iced::Padding {
+			top: at.y,
+			right: 0.0,
+			bottom: 0.0,
+			left: at.x.min((window.width - crate::ui::menu::WIDTH).max(0.0)),
+		})
+		.into()
 }

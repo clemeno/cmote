@@ -232,6 +232,9 @@ struct App {
 	/// The multi-click tally over the window's dividers (§48), the twin of a tab's `clicks` over the
 	/// grid (§42) — same counter, and the seam is the target instead of the cell.
 	seam_clicks: ui::selection::Clicks<pane_grid::Split>,
+	/// The chip menu that is open, `None` when none is (§52). App-wide rather than per region: only
+	/// one can be open at a time, and it is drawn over the whole window.
+	strip_menu: Option<StripMenu>,
 }
 
 /// A tab being dragged along the strip (§38). Both halves are **ids, not strip positions**: the
@@ -419,6 +422,7 @@ impl App {
 			// No seam to hit until the window is cut, so nothing reads these until then (§48).
 			pointer: iced::Point::ORIGIN,
 			seam_clicks: ui::selection::Clicks::default(),
+			strip_menu: None,
 		};
 		let size = iced::window::latest()
 			.and_then(|id| iced::window::size(id).map(Message::WindowResized));
@@ -531,7 +535,17 @@ impl App {
 				way,
 				window,
 				size,
-			} => self.apply_split(pane, way, window, size),
+				seed,
+			} => self.apply_split(pane, way, window, size, seed),
+			// The chip menu's own items (§52). Raised by an overlay drawn over the whole window, so
+			// they arrive unwrapped — the region they act on is the one the menu remembers, not the
+			// one holding the keyboard.
+			Message::TabMenuDismissed => {
+				self.strip_menu = None;
+				iced::Task::none()
+			}
+			Message::TabMoveTo(area) => self.move_tab_to(area),
+			Message::TabDuplicateTo(area) => self.duplicate_tab_to(area),
 			Message::SplitFocused(pane) => {
 				self.focus = pane;
 				iced::Task::none()
@@ -590,7 +604,7 @@ impl App {
 			Message::In(_, inner) => self.update_in(pane, *inner),
 			Message::Ssh(id, event) => self.route_ssh(id, event),
 			// The strip's split buttons (§48): cut THIS region, whichever one the button was on.
-			Message::Split(way) => self.request_split(pane, way),
+			Message::Split(way) => self.request_split(pane, way, SplitSeed::Home),
 			Message::TabNew => self.open_tab(pane),
 			Message::TabSelected(index) => self.grab_tab(pane, index),
 			Message::TabDraggedOver(index) => {
@@ -603,12 +617,22 @@ impl App {
 			// header. Caught here rather than in the tab because the cursor is the WINDOW's, not any
 			// one region's — the answer is the same whichever region raised it, and a card dragged
 			// across a split does not change hands halfway.
-			Message::GrabEntered => {
-				crate::cursor::hover_entered();
+			Message::GrabEntered(handle) => {
+				crate::cursor::hover_entered(handle);
 				iced::Task::none()
 			}
-			Message::GrabExited => {
-				crate::cursor::hover_exited();
+			Message::GrabExited(handle) => {
+				crate::cursor::hover_exited(handle);
+				iced::Task::none()
+			}
+			// A button ON a handle taking or giving back the pointer (§52). Same reasoning as
+			// above — the cursor is the window's — and the same place to answer it.
+			Message::GrabControlEntered(handle) => {
+				crate::cursor::control_entered(handle);
+				iced::Task::none()
+			}
+			Message::GrabControlExited(handle) => {
+				crate::cursor::control_exited(handle);
 				iced::Task::none()
 			}
 			Message::TabDropped => {
@@ -630,6 +654,13 @@ impl App {
 				// (§51).
 				crate::cursor::set_dragging(false);
 				crate::cursor::hover_reset();
+				iced::Task::none()
+			}
+			// A chip was right-clicked (§52). The strip names the chip, the wrapper names the strip,
+			// and between them that is the whole target — nothing is selected, so the menu can act on
+			// a tab the user is not looking at without first putting it on screen.
+			Message::TabMenuOpened(index) => {
+				self.strip_menu = Some(StripMenu { pane, index });
 				iced::Task::none()
 			}
 			Message::TabCloseRequested(id) => self.request_close(id),
@@ -782,7 +813,14 @@ impl App {
 	///
 	/// A screen that cannot be measured is not a reason to refuse the split; it is a reason not to
 	/// clamp against a number we do not have.
-	fn request_split(&mut self, pane: pane_grid::Pane, way: ui::split::Way) -> iced::Task<Message> {
+	/// `seed` rides along to say what the fresh region opens with: the target list for the strip's
+	/// own buttons, or — since §52 — the tab the chip menu is sending across.
+	fn request_split(
+		&mut self,
+		pane: pane_grid::Pane,
+		way: ui::split::Way,
+		seed: SplitSeed,
+	) -> iced::Task<Message> {
 		let wanted = way.grown(self.window);
 		iced::window::latest().and_then(move |window| {
 			iced::window::monitor_size(window).then(move |screen| {
@@ -798,6 +836,7 @@ impl App {
 					way,
 					window,
 					size,
+					seed,
 				})
 			})
 		})
@@ -807,7 +846,9 @@ impl App {
 	///
 	/// The fresh region opens on the target list, which is what makes a split useful straight away:
 	/// the point of asking for one is almost always to connect somewhere else, and the list is where
-	/// that starts. It also takes the keyboard, for the same reason.
+	/// that starts. It also takes the keyboard, for the same reason. Since §52 the chip menu can ask
+	/// for the same cut with a different `seed`, and then the new region opens holding the tab that
+	/// was sent to it — or a fresh copy of it — instead.
 	///
 	/// The window is asked to grow in the same turn, and the regions are measured against the size it
 	/// was ASKED for rather than the size it has. If the OS grants less — the screen was already
@@ -820,6 +861,7 @@ impl App {
 		way: ui::split::Way,
 		window: iced::window::Id,
 		size: iced::Size,
+		seed: SplitSeed,
 	) -> iced::Task<Message> {
 		// The region may have gone while the monitor was being asked — its last tab closed, which
 		// closes the region (§48). Nothing to cut, and the window must not grow for a split that is
@@ -835,19 +877,57 @@ impl App {
 		if !self.splittable() {
 			return iced::Task::none();
 		}
-		let id = self.next_id;
-		self.next_id += 1;
 		// The new tab inherits the window focus and modifier state from the region being split, so
 		// its first paint agrees with the rest of the window. Its SIZE is left at the default on
 		// purpose: the region it will live in does not exist yet, and the relayout below is what
 		// hands it the box it actually fills.
 		let (_, focused, modifiers) = self.region_at(pane).carried();
-		let mut tab = Tab::home(
-			self.targets.clone(),
-			self.vault.clone(),
-			id,
-			iced::Size::default(),
-		);
+		// What goes in the fresh region (§52). A move takes the tab out of the region being cut, so
+		// it is checked against the same rule the menu greys the entry by: a region cannot be
+		// emptied into a split, because the cut and the collapse would cancel out and leave nothing
+		// but a resized window. The check is repeated HERE rather than trusted from the menu for the
+		// reason the `splittable` one above is — the monitor was measured in between, and a tab can
+		// close in that time.
+		let mut opening = None;
+		let mut tab = match seed {
+			SplitSeed::Home => {
+				let id = self.next_id;
+				self.next_id += 1;
+				Tab::home(
+					self.targets.clone(),
+					self.vault.clone(),
+					id,
+					iced::Size::default(),
+				)
+			}
+			SplitSeed::Move(index) => {
+				if self.region_at(pane).tabs.len() < 2 {
+					return iced::Task::none();
+				}
+				let Some(tab) = self.take_tab(pane, index) else {
+					return iced::Task::none();
+				};
+				tab
+			}
+			SplitSeed::Duplicate(index) => {
+				let Some((key, cwd)) = self.copy_source(pane, index) else {
+					return iced::Task::none();
+				};
+				let id = self.next_id;
+				self.next_id += 1;
+				let mut tab = Tab::home(
+					self.targets.clone(),
+					self.vault.clone(),
+					id,
+					iced::Size::default(),
+				);
+				// Held until the tab is in the tree: the connect it starts can put a dialog on
+				// screen, and a dialog belonging to a tab that is not yet anywhere would be drawn
+				// nowhere.
+				opening = Some(tab.open_copy_of(key, cwd));
+				tab
+			}
+		};
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
 		// `split` only fails on a pane that is not in the tree, which was just ruled out. If it ever
@@ -861,7 +941,8 @@ impl App {
 		// Both halves are new shapes, so both terminals have to be re-measured — including the one
 		// that was already there, which now has a divider beside it (§48).
 		let relayout = self.relayout();
-		iced::Task::batch([relayout, iced::window::resize(window, size)])
+		let opening = opening.unwrap_or_else(iced::Task::none);
+		iced::Task::batch([relayout, opening, iced::window::resize(window, size)])
 	}
 
 	/// A divider was dragged (§48): the two regions either side of it re-share their room.
@@ -1235,26 +1316,58 @@ impl App {
 		}
 		// Save a live tab's session before it goes (§22) — the same snapshot a disconnect writes.
 		region.tabs[index].persist_session();
-		// The tab currently on screen holds the freshest window geometry / focus, and the tab coming
-		// forward is given them. Read them BEFORE the removal: when the tab being dropped IS the one
-		// on screen, this is the last moment they exist (§26).
-		let carried = region.carried();
-		let closed = region.tabs[index].id;
-		region.tabs.remove(index);
-		// Take the tab out of the activation order, which names the one that should come forward:
-		// the most recently activated of those left (§37).
-		let forward = region.recent.forget(closed);
+		// Everything else about taking a tab out of a strip is shared with a MOVE (§52), which does
+		// the same bookkeeping and then puts the tab somewhere rather than dropping it. The `Tab`
+		// falls out of scope here, which is what ends its session: its command channel goes with it.
+		if self.take_tab(pane, index).is_none() {
+			return iced::Task::none();
+		}
 		// The strip is empty, so the region has nothing to show. With a split open the region closes
 		// and gives its room back to the one beside it (§48); with no split this is unreachable,
 		// because the last tab of the only region raises a quit instead (§30).
-		if region.tabs.is_empty() {
+		if self
+			.regions
+			.get(pane)
+			.is_some_and(|region| region.tabs.is_empty())
+		{
 			return self.close_region(pane);
 		}
+		// Re-measure rather than trust the carried size: the tab coming forward may have been in the
+		// background across a window resize or a divider drag (§48).
+		self.relayout()
+	}
+
+	/// Lift the tab at `index` out of `pane` and hand it back, WITHOUT ending it (§52).
+	///
+	/// The strip bookkeeping a departure needs is the same whether the tab is being closed or moved
+	/// to another region, so both go through here and the caller decides the tab's fate. What it does
+	/// NOT do is deal with a strip left empty — a close turns that into a closed region, a move can
+	/// only reach it when there is somewhere for the room to go — so the caller checks for that too.
+	///
+	/// `None` means there was nothing at that position: a stale index, or a region that has closed
+	/// since the message naming it was raised.
+	fn take_tab(&mut self, pane: pane_grid::Pane, index: usize) -> Option<Tab> {
+		let region = self.regions.get_mut(pane)?;
+		if index >= region.tabs.len() {
+			return None;
+		}
+		// The tab currently on screen holds the freshest window geometry / focus, and the tab coming
+		// forward is given them. Read them BEFORE the removal: when the tab leaving IS the one on
+		// screen, this is the last moment they exist (§26).
+		let carried = region.carried();
+		let gone = region.tabs.remove(index);
+		// Take the tab out of the activation order, which names the one that should come forward:
+		// the most recently activated of those left (§37).
+		let forward = region.recent.forget(gone.id);
+		if region.tabs.is_empty() {
+			return Some(gone);
+		}
 		match forward.and_then(|id| region.tabs.iter().position(|tab| tab.id == id)) {
-			// One rule covers both cases. Closing the tab ON SCREEN pops the order's top, so this is
+			// One rule covers both cases. Losing the tab ON SCREEN pops the order's top, so this is
 			// the tab the user was last on — not whichever chip happens to sit next door in the strip.
-			// Closing a BACKGROUND tab leaves the top alone, so this resolves to the on-screen tab
-			// itself, which is exactly right: closing a tab off-screen must not change what is shown.
+			// Losing a BACKGROUND tab leaves the top alone, so this resolves to the on-screen tab
+			// itself, which is exactly right: a tab leaving from off screen must not change what is
+			// shown.
 			Some(position) => region.active = position,
 			// Only reachable if a tab were opened without ever being activated, which no path does.
 			// Fall back to the old strip arithmetic rather than leave `active` pointing anywhere.
@@ -1271,9 +1384,181 @@ impl App {
 		tab.window_size = size;
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
-		// Re-measure rather than trust the carried size: the tab coming forward may have been in the
-		// background across a window resize or a divider drag (§48).
+		Some(gone)
+	}
+
+	/// The region an area of the window currently is, or `None` for one that would have to be cut
+	/// first (§52).
+	fn pane_of(&self, area: ui::split::Area) -> Option<pane_grid::Pane> {
+		ui::split::areas(&self.regions, self.window)
+			.into_iter()
+			.find(|(named, _)| *named == area)
+			.map(|(_, pane)| pane)
+	}
+
+	/// What a duplicate of the tab at `index` of `pane` would be opened from (§52): the endpoint to
+	/// dial again, and the directory its shell is standing in, if it has announced one.
+	///
+	/// `None` when there is nothing to copy — a home tab, a connect form, an editor. A copy is a
+	/// second connection to the same machine, so it needs a session to have been made in the first
+	/// place; everything else the menu greys out on the strength of this answer.
+	fn copy_source(&self, pane: pane_grid::Pane, index: usize) -> Option<(String, Option<String>)> {
+		let tab = self.regions.get(pane)?.tabs.get(index)?;
+		if !tab.is_live() {
+			return None;
+		}
+		let endpoint = tab.connection.clone()?;
+		let cwd = tab
+			.terminal
+			.as_ref()
+			.and_then(term::Terminal::cwd)
+			.map(str::to_owned);
+		Some((endpoint, cwd))
+	}
+
+	/// The menu's own rows for the tab it is open on (§52): which areas it offers, and which of the
+	/// two actions can act on each.
+	///
+	/// An undivided window offers all three, because two of them are a cut away and the menu is what
+	/// makes the cut. A split one offers only the two that exist: the third would need the window
+	/// made whole and cut the other way, which is more than a menu item should be asked to mean.
+	fn destinations(&self, menu: StripMenu) -> Vec<ui::tabs::Destination> {
+		let areas = ui::split::areas(&self.regions, self.window);
+		let offered: Vec<ui::split::Area> = if areas.len() == 1 {
+			vec![
+				ui::split::Area::Main,
+				ui::split::Area::Right,
+				ui::split::Area::Bottom,
+			]
+		} else {
+			areas.iter().map(|(area, _)| *area).collect()
+		};
+		// Read once: both flags are about the tab and its strip, not about any one destination.
+		let alone = self.region_at(menu.pane).tabs.len() < 2;
+		let can_duplicate = self.copy_source(menu.pane, menu.index).is_some();
+		offered
+			.into_iter()
+			.map(|area| {
+				let pane = areas
+					.iter()
+					.find(|(named, _)| *named == area)
+					.map(|(_, pane)| *pane);
+				let can_move = match pane {
+					// An area that is already there: a move means something unless the tab is
+					// already in it.
+					Some(pane) => pane != menu.pane,
+					// An area that would have to be cut: the tab's own region cannot be the one
+					// emptied to make it, or the cut and the collapse that follows would cancel out
+					// and leave nothing behind but a window that grew and shrank again.
+					None => !alone,
+				};
+				ui::tabs::Destination {
+					area,
+					can_move,
+					can_duplicate,
+				}
+			})
+			.collect()
+	}
+
+	/// Menu "Move to … area" (§52): take the tab the menu is open on out of its strip and put it in
+	/// `area`, cutting the window first if that area does not exist yet.
+	///
+	/// The moved tab arrives ON SCREEN in its new region and takes the keyboard with it (§50): the
+	/// user has just said where they want this tab, and a move that left it hidden behind whatever
+	/// was showing there would have to be followed by a hunt through the strip to find it.
+	///
+	/// A move that empties its old region closes it, and the window is whole again (§48) — which
+	/// makes this the way back from a split without closing anything: send the last tab across and
+	/// the seam goes with it.
+	fn move_tab_to(&mut self, area: ui::split::Area) -> iced::Task<Message> {
+		let Some(menu) = self.strip_menu.take() else {
+			return iced::Task::none();
+		};
+		let Some(dest) = self.pane_of(area) else {
+			// The area is not on screen, so the move is a split whose fresh region opens holding
+			// this tab. `Main` always exists, so `way` is never `None` here.
+			let Some(way) = area.way() else {
+				return iced::Task::none();
+			};
+			return self.request_split(menu.pane, way, SplitSeed::Move(menu.index));
+		};
+		if dest == menu.pane {
+			return iced::Task::none();
+		}
+		let Some(mut tab) = self.take_tab(menu.pane, menu.index) else {
+			return iced::Task::none();
+		};
+		let emptied = self
+			.regions
+			.get(menu.pane)
+			.is_some_and(|region| region.tabs.is_empty());
+		// The arriving tab is stamped with its new region's focus and modifier state — the relayout
+		// below hands it the box, but neither of those travels with a resize (§48).
+		let (_, focused, modifiers) = self.region_at(dest).carried();
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		let id = tab.id;
+		let Some(region) = self.regions.get_mut(dest) else {
+			return iced::Task::none();
+		};
+		region.tabs.push(tab);
+		region.active = region.tabs.len() - 1;
+		// Arriving on screen counts as a visit, so closing it later comes back to whatever this
+		// region was showing before (§37).
+		region.recent.touch(id);
+		self.focus = dest;
+		if emptied {
+			// `close_region` re-measures everything itself, and leaves the focus alone because it
+			// now names the region that is staying.
+			return self.close_region(menu.pane);
+		}
 		self.relayout()
+	}
+
+	/// Menu "Duplicate to … area" (§52): open a second tab on the same endpoint in `area` and dial
+	/// it, carrying the source shell's directory over so the copy opens where the original stands.
+	///
+	/// The copy is a fresh connection, not a clone: a session is a socket and a remote process, and
+	/// neither can be forked from this end. It re-runs the connect the source tab made — which is why
+	/// the menu offers it only on a tab that has a session (`copy_source`) — and dials straight away
+	/// unless something still has to be typed, in which case the pre-filled form is what opens.
+	fn duplicate_tab_to(&mut self, area: ui::split::Area) -> iced::Task<Message> {
+		let Some(menu) = self.strip_menu.take() else {
+			return iced::Task::none();
+		};
+		let Some((endpoint, cwd)) = self.copy_source(menu.pane, menu.index) else {
+			return iced::Task::none();
+		};
+		let Some(dest) = self.pane_of(area) else {
+			let Some(way) = area.way() else {
+				return iced::Task::none();
+			};
+			return self.request_split(menu.pane, way, SplitSeed::Duplicate(menu.index));
+		};
+		let id = self.next_id;
+		self.next_id += 1;
+		let (size, focused, modifiers) = self.region_at(dest).carried();
+		let mut tab = Tab::home(self.targets.clone(), self.vault.clone(), id, size);
+		tab.window_focused = focused;
+		tab.modifiers = modifiers;
+		let opening = tab.open_copy_of(endpoint, cwd);
+		let Some(region) = self.regions.get_mut(dest) else {
+			return iced::Task::none();
+		};
+		// A copy made into its own strip lands NEXT TO the tab it came from, the way a duplicated
+		// row lands beside its original; sent to the other region there is no "beside", so it goes
+		// on the end. Either way it opens on screen, since dialing is something to watch.
+		let at = if dest == menu.pane {
+			menu.index + 1
+		} else {
+			region.tabs.len()
+		};
+		region.tabs.insert(at, tab);
+		region.active = at;
+		region.recent.touch(id);
+		self.focus = dest;
+		iced::Task::batch([self.relayout(), opening])
 	}
 
 	/// Open a remote file in a new editor tab (§32), parented to the session it was opened from, and
@@ -1525,9 +1810,27 @@ impl App {
 		self.active().title()
 	}
 
+	/// Draw the window, and let the hand cursor watch it being drawn (§52).
+	///
+	/// Every grab handle says it is still on screen as it builds itself, so a hand held by one that
+	/// has GONE — a dialog closed by the ✕ under the pointer, a chip closed or sent to another
+	/// region — is let go the moment the frame that no longer contains it is finished. iced offers
+	/// nothing better to hang this on: a widget publishes its own `on_exit`, so a widget that has
+	/// left the tree publishes nothing at all, and the frame is the only place that knows what is
+	/// still there.
+	///
+	/// Bracketing here rather than inside `screen` is what makes it one pair of calls instead of one
+	/// per early return.
+	fn view(&self) -> Element<'_, Message> {
+		crate::cursor::frame_begin();
+		let frame = self.screen();
+		crate::cursor::frame_end();
+		frame
+	}
+
 	/// Draw the split frame — every region's strip and the tab beneath it — then, if a quit or a
 	/// live tab's close is pending, the confirmation over everything (§26, §30, §48).
-	fn view(&self) -> Element<'_, Message> {
+	fn screen(&self) -> Element<'_, Message> {
 		// Copied out rather than read through `self` inside the closure, so nothing borrows the App
 		// for longer than the regions themselves do.
 		let focus = self.focused_pane();
@@ -1537,6 +1840,34 @@ impl App {
 		let body = ui::split::frame(&self.regions, move |pane, region| {
 			Self::region_view(pane, region, pane == focus, splittable)
 		});
+
+		// A chip's menu (§52), over the whole window rather than inside its region: it offers to send
+		// the tab across a seam, and a menu the seam could clip would be a poor advertisement for
+		// that. It hangs from the strip it was raised on — the region's own top-left corner, just
+		// below the bar — so it needs no stored pointer position and follows a divider dragged while
+		// it is open. Ranked below every modal: the dialogs return before this point.
+		let body = match self.strip_menu {
+			Some(menu) => {
+				let regions = ui::split::regions(&self.regions, self.window);
+				match regions.get(&menu.pane) {
+					Some(region) => {
+						let at = iced::Point::new(region.x, region.y + ui::tabs::STRIP_HEIGHT);
+						iced::widget::stack![
+							body,
+							ui::menu::dismiss_layer(Message::TabMenuDismissed),
+							ui::tabs::context_menu(at, self.window, &self.destinations(menu)),
+						]
+						.width(iced::Length::Fill)
+						.height(iced::Length::Fill)
+						.into()
+					}
+					// The region has closed since the menu opened — nothing to hang it from, and
+					// nothing it could still act on.
+					None => body,
+				}
+			}
+			None => body,
+		};
 
 		// The app-wide quit dialog outranks a single tab's close: it floats over the whole window,
 		// every split and strip included (§30, §48). While confirming it offers Cancel / Quit; while
@@ -1961,6 +2292,15 @@ pub struct Tab {
 	/// Channel to the SSH task. `None` until the worker starts and delivers it
 	/// via `SshEvent::Ready`; `update` sends `SshCommand`s through it.
 	command_tx: Option<mpsc::Sender<SshCommand>>,
+	/// Dial as soon as this tab HAS a worker (§52) — set by a duplicate that has everything it needs
+	/// and nothing to ask the user, cleared by the `Ready` that fires it.
+	///
+	/// A tab is born without a worker: one is started by the subscription list, which iced rebuilds
+	/// only after the update that created the tab has returned, and it announces itself a moment
+	/// later with `SshEvent::Ready`. So a copy cannot dial in the same breath as it is made — it
+	/// tried, and got "SSH worker is not ready yet" for its trouble. The pre-filled form is what
+	/// shows in the meantime, which is also the honest fallback if a worker never arrives.
+	pending_connect: bool,
 	/// The terminal emulator, alive only while a shell is open. `Some` from
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
@@ -2175,6 +2515,13 @@ pub struct Tab {
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
 	snackbar: Option<Snackbar>,
+	/// Where a duplicate opens (§52), or `None` for a tab that is nobody's copy.
+	///
+	/// Set once, when the chip menu makes the tab, and spent when the shell opens — where it is
+	/// replayed as a `cd`, exactly as a remembered session's directory is (§22), and outranks it:
+	/// the user asked for a copy of THIS shell, standing where it is standing now, not for another
+	/// visit to wherever this target was left last time.
+	carry_cwd: Option<Carry>,
 	/// The shell cwd a reconnect is waiting to settle at (§22), or `None` when not resuming.
 	/// Set on connect when a remembered terminal path is replayed as a `cd`: until the shell
 	/// announces this exact directory, the files pane is pinned to its own remembered path so
@@ -2304,6 +2651,56 @@ enum Resumable {
 	UploadTree { local: PathBuf, remote: String },
 	/// A whole folder coming down (§19): remote root, local parent directory.
 	DownloadTree { remote: String, local: PathBuf },
+}
+
+/// What the fresh region of a split opens with (§48, §52).
+///
+/// A split is two steps with an OS question between them — how big is the monitor — so what the new
+/// region is FOR has to survive the round trip. It rides in the message rather than in a field on
+/// `App` for the same reason `pane` does: two of them could be in flight at once, and a field would
+/// let the second overwrite the first's intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitSeed {
+	/// The target list, which is what the strip's own split buttons ask for (§48): the point of
+	/// asking for a split is almost always to connect somewhere else, and the list is where that
+	/// starts.
+	Home,
+	/// The tab at this position in the strip being cut, moved across (§52).
+	Move(usize),
+	/// A second copy of the tab at this position in the strip being cut (§52).
+	Duplicate(usize),
+}
+
+/// Where a duplicate opens, and the connection that answer belongs to (§52).
+///
+/// The endpoint travels with the directory because a path only means anything on one machine. A copy
+/// that is dialed straight away spends this on its first `Connected` and the two always agree — but a
+/// copy that stopped at the form is a form, and a form can be edited: change the host, press Connect,
+/// and a directory carried from somewhere else would `cd` a shell into a stranger's filesystem. So the
+/// carry names its own endpoint and is used only when the session that opened is that one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Carry {
+	endpoint: String,
+	cwd: String,
+}
+
+/// The chip menu that is open, if any (§52): which strip it was raised on, and the tab it acts on.
+///
+/// It lives on `App` rather than on a `Region` because it is drawn over the WHOLE window — a menu
+/// clipped to its region would be cut off by the very seam it is offering to send the tab across.
+///
+/// It carries no anchor. Every other menu in cmote hangs from the pointer, but a right press
+/// publishes no position (iced's `mouse_area` reports the button, not where it was) and the raw
+/// stream that would supply one is asked for only while the window is split (§48) — it is the one
+/// subscription that costs a message per pointer move, and switching it on for every window would
+/// make an undivided one pay for a menu it opens once in a session. So this menu hangs from the
+/// STRIP instead: the region's own top-left, just under the bar the chip sits in. The tree's menu
+/// is anchored to its panel for the same reason (§18), it is always on screen, and it follows a
+/// divider dragged while the menu is open, which a stored point would not.
+#[derive(Debug, Clone, Copy)]
+struct StripMenu {
+	pane: pane_grid::Pane,
+	index: usize,
 }
 
 /// Every event the app can react to. UI events come from widgets; `Ssh` events
@@ -2603,12 +3000,21 @@ pub enum Message {
 	/// The pointer entered something grabbable while nothing is being dragged (§51): a tab chip, a
 	/// dialog header, or whatever wears the hand next. The window shows the open hand.
 	///
-	/// Carries nothing — not which handle, not even which kind. The cursor question is "is the
-	/// pointer on something that can be picked up", and a count of entries and exits answers it for
-	/// every surface at once; anything more would be state to keep in step for no gain.
-	GrabEntered,
-	/// The pointer left something grabbable (§51).
-	GrabExited,
+	/// It carries the handle's NAME (§52) — a tab's id, or `cursor::HEADER` for a dialog header —
+	/// because the hand has to be able to notice a handle that vanished under the pointer, and a
+	/// handle that is gone raises no exit of its own. Naming the claimant is what lets the frame
+	/// itself say who is still there.
+	GrabEntered(u64),
+	/// The pointer left something grabbable (§51), naming which so it can only let go of its own
+	/// claim — the chip being left must not cancel the chip being entered on the same move.
+	GrabExited(u64),
+	/// The pointer entered a CONTROL sitting on a grab handle (§52): a chip's "×", a dialog header's
+	/// ✕. It carries the handle it sits on, and it wins — the hand gives way to whatever cursor that
+	/// control asks for, because the pointer is over something to click rather than something to
+	/// pick up.
+	GrabControlEntered(u64),
+	/// The pointer left that control — back onto the handle around it, or off both (§52).
+	GrabControlExited(u64),
 	/// The button was released over the strip (§38) — move the grabbed tab into the hovered slot, or
 	/// do nothing when the press never travelled to another chip.
 	TabDropped,
@@ -2621,6 +3027,19 @@ pub enum Message {
 	TabCloseConfirmed,
 	/// The close confirmation was dismissed — keep the tab.
 	TabCloseCancelled,
+	// --- a chip's own menu: send this tab to another area of the window (§52) ---
+	/// A chip was right-clicked — open its menu on the tab at this strip position. Arrives wrapped
+	/// in `In`, which is what names the strip it was raised on; the pointer's window position is
+	/// read from `App`, since a right press carries none of its own.
+	TabMenuOpened(usize),
+	/// Dismiss the chip menu without choosing an item.
+	TabMenuDismissed,
+	/// Menu "Move to … area" — take the tab the menu is open on out of its strip and put it in the
+	/// named area, cutting the window first if that area does not exist yet.
+	TabMoveTo(ui::split::Area),
+	/// Menu "Duplicate to … area" — open a second tab on the same endpoint there, dialing it and
+	/// carrying the source shell's directory over so the copy opens where the original is standing.
+	TabDuplicateTo(ui::split::Area),
 	// --- the window's split regions (§48). Mouse-only, like the strip the buttons live on. ---
 	/// A message raised by ONE region's widgets, carrying the region it came from.
 	///
@@ -2639,12 +3058,13 @@ pub enum Message {
 	/// The second half of a split, once the monitor has been measured: `size` is the grown window
 	/// clamped to the screen, `window` is the window to ask for it, and `pane` is the region to cut —
 	/// carried rather than re-read from the focus, which could have moved while the OS was being
-	/// asked.
+	/// asked. `seed` says what the fresh region opens with (§52).
 	SplitSized {
 		pane: pane_grid::Pane,
 		way: ui::split::Way,
 		window: iced::window::Id,
 		size: iced::Size,
+		seed: SplitSeed,
 	},
 	/// A left press landed in this region — it takes the keyboard. Raised by `pane_grid` itself, so
 	/// it arrives unwrapped and already naming its region.
@@ -3271,8 +3691,10 @@ impl Tab {
 			Message::Ssh(_id, event) => return self.on_ssh_event(event),
 			// The hand cursor is the WINDOW's, so `App` answers these too (§51) — a tab's own dialog
 			// header raises them just as a chip does, and both mean the same thing to the pointer.
-			Message::GrabEntered
-			| Message::GrabExited
+			Message::GrabEntered(_)
+			| Message::GrabExited(_)
+			| Message::GrabControlEntered(_)
+			| Message::GrabControlExited(_)
 			// Tab-strip management is `App`'s job — it intercepts these before delegating, so a
 			// tab never sees them. The arms exist only to keep the match total (§26).
 			| Message::TabNew
@@ -3283,6 +3705,12 @@ impl Tab {
 			| Message::TabCloseRequested(_)
 			| Message::TabCloseConfirmed
 			| Message::TabCloseCancelled
+			// A chip's menu moves tabs between REGIONS (§52), which is a fact about the window that
+			// no single tab can see, let alone act on.
+			| Message::TabMenuOpened(_)
+			| Message::TabMenuDismissed
+			| Message::TabMoveTo(_)
+			| Message::TabDuplicateTo(_)
 			// The quit flow is `App`'s job too (§30) — a tab never sees these.
 			| Message::QuitRequested
 			| Message::QuitConfirmed
@@ -3666,7 +4094,15 @@ impl Tab {
 	/// size to fit its grid right away (§9).
 	fn on_ssh_event(&mut self, event: SshEvent) -> iced::Task<Message> {
 		match event {
-			SshEvent::Ready(sender) => self.command_tx = Some(sender),
+			SshEvent::Ready(sender) => {
+				self.command_tx = Some(sender);
+				// A duplicate that was waiting for exactly this (§52): it had everything it needed
+				// the moment it was made, but nothing to send it down. Now there is.
+				if self.pending_connect {
+					self.pending_connect = false;
+					return self.on_connect_pressed();
+				}
+			}
 			SshEvent::Connecting => {
 				self.screen = Screen::Connecting {
 					status: "connecting…".to_string(),
@@ -3811,6 +4247,20 @@ impl Tab {
 				}];
 				self.identity = bridge::LOGIN_IDENTITY;
 				self.next_identity = 1;
+
+				// A duplicate opens where the tab it was copied from is standing (§52), which
+				// outranks whatever this target remembers: the user pointed at a shell, not at a
+				// machine. The files pane is left on its own remembered directory either way — the
+				// pin below holds it there until the shell settles, exactly as on a reconnect.
+				//
+				// Taken whether or not it is used, so a carry is spent by the first session either
+				// way; kept only when THIS is the connection it was made for, since the form it
+				// rode in on could have been pointed at another machine in between.
+				if let Some(carried) = self.carry_cwd.take()
+					&& self.connection.as_deref() == Some(carried.endpoint.as_str())
+				{
+					resume_terminal = Some(carried.cwd);
+				}
 
 				// Resume where the last session left off (§22), falling back to the root for a
 				// first connection or a shell that never announced a cwd — the previous
@@ -4375,6 +4825,11 @@ impl Tab {
 		self.pending_target = None;
 		self.form.password.clear();
 		self.form.passphrase.clear();
+		// Going back to the list abandons the connect a copy was opened for, so its carried
+		// directory goes too (§52) — whatever is dialed from here is not that copy. The armed dial
+		// goes with it, or a worker arriving a moment later would dial from the home screen.
+		self.carry_cwd = None;
+		self.pending_connect = false;
 		iced::Task::none()
 	}
 
@@ -4396,10 +4851,28 @@ impl Tab {
 		let Some(key) = self.home_selected.clone() else {
 			return iced::Task::none();
 		};
+		// A deferred task means the secret is behind the master passphrase and the form is not
+		// finished being filled; otherwise it is ready as it stands and all that is left is to show
+		// it (§16).
+		self.seed_form(&key).unwrap_or_else(|| self.go_to_form())
+	}
+
+	/// Fill the connect form from the stored target `key`, secret and all (§14, §16). Shared by the
+	/// home list's Open and by a chip menu's Duplicate (§52), which needs the same form filled the
+	/// same way before it can dial.
+	///
+	/// Returns `Some(task)` when the fill could NOT be finished on the spot: the target remembers a
+	/// secret and the vault holding it is locked, so the task is the master-passphrase prompt and
+	/// the fill resumes on unlock. `None` means the form is ready as it stands — which includes a
+	/// target that remembers nothing, and one whose secret was already to hand.
+	///
+	/// A key naming no stored target answers `None` with the form untouched, since there is nothing
+	/// to fill it from.
+	fn seed_form(&mut self, key: &str) -> Option<iced::Task<Message>> {
 		// Copy out the fields before touching `self.form`, so the borrow of `self.targets` ends
 		// first (assigning the form mutably borrows `self`).
-		let Some((host, port, user, auth_kind, key_path, cert_path, remember)) =
-			self.targets.borrow().find(&key).map(|target| {
+		let (host, port, user, auth_kind, key_path, cert_path, remember) =
+			self.targets.borrow().find(key).map(|target| {
 				(
 					target.host.clone(),
 					target.port,
@@ -4409,10 +4882,7 @@ impl Tab {
 					target.cert_path.clone(),
 					target.remember_secret,
 				)
-			})
-		else {
-			return iced::Task::none();
-		};
+			})?;
 		self.form = ui::connect::ConnectForm {
 			host,
 			port: port.to_string(),
@@ -4437,7 +4907,7 @@ impl Tab {
 					.vault
 					.borrow()
 					.as_ref()
-					.and_then(|vault| vault.get(&key).cloned());
+					.and_then(|vault| vault.get(key).cloned());
 				if let Some(secret) = secret {
 					self.fill_secret_field(&secret);
 				}
@@ -4445,10 +4915,63 @@ impl Tab {
 				// Vault locked: show the (now populated) form as the backdrop and prompt to
 				// unlock; the pre-fill resumes on success.
 				self.screen = Screen::Connect;
-				return self.open_vault_modal(VaultPending::Prefill(key));
+				return Some(self.open_vault_modal(VaultPending::Prefill(key.to_owned())));
 			}
 		}
+		None
+	}
+
+	/// Open this fresh tab as a copy of a session on `endpoint`, standing in `cwd` (§52).
+	///
+	/// The tab is brand new and on the home screen; this fills its form from the same stored target
+	/// the endpoint was connected through and dials it, so a duplicate is one menu click rather than
+	/// a form to fill in again. The carried directory is set first and spent when the shell opens.
+	///
+	/// It does NOT reach into the source tab for the secret. The credential comes from the vault, by
+	/// exactly the route the home list's Open takes (§16), so a duplicate can do no more than the
+	/// user could do by hand — and a password that was typed once and never stored still has to be
+	/// typed again, which is the promise "remember" is the opt-in to (§12).
+	///
+	/// Three ways this can end, and the form is filled in all of them:
+	///   * the vault is locked — the master-passphrase prompt opens over the form, and the user
+	///     presses Connect once it is filled;
+	///   * something is still needed from the user (a password that was never remembered) — the
+	///     form opens with the rest already in it;
+	///   * nothing is — it dials at once, which is the common case and the point of the feature.
+	fn open_copy_of(&mut self, endpoint: String, cwd: Option<String>) -> iced::Task<Message> {
+		self.carry_cwd = cwd.map(|cwd| Carry {
+			endpoint: endpoint.clone(),
+			cwd,
+		});
+		if let Some(deferred) = self.seed_form(&endpoint) {
+			return deferred;
+		}
+		if self.ready_to_dial() {
+			// The worker is normally not there yet — this tab was made a moment ago — so the dial is
+			// armed and fired by the `Ready` that follows. A tab that somehow already has one is
+			// dialed on the spot rather than made to wait for an event that has been and gone.
+			if self.command_tx.is_some() {
+				return self.on_connect_pressed();
+			}
+			self.pending_connect = true;
+		}
 		self.go_to_form()
+	}
+
+	/// Whether a connect could be sent with the form exactly as it stands (§52) — nothing left for
+	/// the user to type.
+	///
+	/// Validation on its own is not the test: it accepts an EMPTY password, deliberately, because
+	/// some servers do (§7). Dialing on an empty password field would spend an authentication
+	/// attempt to arrive back at the same form with a failure notice on it, so a password that is
+	/// not there is treated as something still to type. Every other method needs no field — a key's
+	/// passphrase, a keyboard-interactive challenge and an agent's confirmation are all asked for
+	/// during the connect, exactly as they would be from the form's own button.
+	fn ready_to_dial(&self) -> bool {
+		if self.form.auth_kind == ui::connect::AuthKind::Password && self.form.password.is_empty() {
+			return false;
+		}
+		self.form.validate().is_ok()
 	}
 
 	/// A new pattern in the home screen's filter box (§49): keep it, and let go of the selection
@@ -5913,6 +6436,10 @@ impl Tab {
 		self.focus = Focus::Terminal;
 		self.shell_focus_reported = true;
 		self.resume_cwd = None;
+		// The carried directory is deliberately NOT cleared here (§52): this runs on the way INTO a
+		// session as well as out of one, and a copy's whole point is to be spent by the connect that
+		// is opening. It is taken by that connect, and what it is not spent on it is matched
+		// against, so nothing stale can be replayed into a later session.
 		// The panels' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
 		self.explorer.reset();
@@ -9764,6 +10291,7 @@ mod tests {
 			// double-click starts from (§48).
 			pointer: iced::Point::ORIGIN,
 			seam_clicks: ui::selection::Clicks::default(),
+			strip_menu: None,
 		}
 	}
 
@@ -9994,7 +10522,7 @@ mod tests {
 		let mut app = tab_app();
 
 		// The header, with no overlay up, so the tab's own dialog drives it.
-		let _ = app.update(Message::GrabEntered);
+		let _ = app.update(Message::GrabEntered(crate::cursor::HEADER));
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
 		let _ = app.update(Message::DialogGrabbed);
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed, "held");
@@ -10004,19 +10532,56 @@ mod tests {
 			crate::cursor::Hand::Open,
 			"let go, and the pointer is still on the header"
 		);
-		let _ = app.update(Message::GrabExited);
+		let _ = app.update(Message::GrabExited(crate::cursor::HEADER));
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
 
-		// A chip, through its own messages, arriving at the same three states.
-		let _ = app.update(Message::GrabEntered);
+		// A chip, through its own messages, arriving at the same three states. It names itself by
+		// its tab's id (§52), which is what lets a vanished chip be told from a live one.
+		let chip = strip(&app)[0].id;
+		let _ = app.update(Message::GrabEntered(chip));
 		let _ = app.update(Message::TabSelected(0));
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed);
 		let _ = app.update(Message::TabDropped);
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
-		// Off the strip: the count is asserted rather than adjusted, so a chip that closed under
-		// the pointer cannot leave a hand behind.
+		// Off the strip: the claim is dropped whoever holds it, so a chip that closed under the
+		// pointer cannot leave a hand behind.
 		let _ = app.update(Message::TabDragCancelled);
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
+		crate::cursor::forget();
+	}
+
+	/// A handle that goes away under the pointer lets go of the hand (§52). iced publishes a
+	/// widget's `on_exit` from the widget itself, so a chip that closed — or was sent to another
+	/// region — never says it lost the pointer, and before this the window went on wearing an open
+	/// hand over everything.
+	#[test]
+	fn a_chip_that_vanishes_under_the_pointer_lets_go_of_the_hand() {
+		let _held = crate::cursor::TEST_LOCK
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner());
+		crate::cursor::forget();
+		let mut app = tab_app();
+		let pane = app.focus;
+		let _ = app.update(Message::In(pane, Box::new(Message::TabNew)));
+		let chip = strip(&app)[0].id;
+
+		let _ = app.update(Message::GrabEntered(chip));
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+		// A frame with the chip still in it: it redraws, so it keeps the hand.
+		let _ = app.view();
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+
+		// Closed under the pointer — an idle home tab goes at once, with no confirmation (§26).
+		let _ = app.update(Message::In(
+			pane,
+			Box::new(Message::TabCloseRequested(chip)),
+		));
+		let _ = app.view();
+		assert_eq!(
+			crate::cursor::hand(),
+			crate::cursor::Hand::None,
+			"the chip is not on screen any more, so it cannot still be under the pointer"
+		);
 		crate::cursor::forget();
 	}
 
@@ -10339,7 +10904,13 @@ mod tests {
 	fn split(app: &mut App, way: ui::split::Way) -> iced::Size {
 		let pane = app.focus;
 		let grown = way.grown(app.window);
-		let _ = app.apply_split(pane, way, iced::window::Id::unique(), grown);
+		let _ = app.apply_split(
+			pane,
+			way,
+			iced::window::Id::unique(),
+			grown,
+			SplitSeed::Home,
+		);
 		grown
 	}
 
@@ -10614,6 +11185,7 @@ mod tests {
 			ui::split::Way::Horizontal,
 			iced::window::Id::unique(),
 			iced::Size::new(9999.0, 9999.0),
+			SplitSeed::Home,
 		);
 		assert_eq!((region_count(&app), app.window, app.next_id), before);
 	}
@@ -10841,5 +11413,389 @@ mod tests {
 			Some(QuitPhase::Draining { pending, .. }) => assert_eq!(pending.len(), 2),
 			_ => panic!("the quit must wait for both sessions to report down"),
 		}
+	}
+
+	// --- a chip's menu: sending a tab to another area of the window (§52) ---
+
+	/// Right-click the chip at `index` on the focused region's strip, and hand back what its menu
+	/// offers. Driven through `update` so the wrapping that names the strip is exercised too.
+	fn chip_menu(app: &mut App, index: usize) -> Vec<ui::tabs::Destination> {
+		let pane = app.focus;
+		let _ = app.update(Message::In(pane, Box::new(Message::TabMenuOpened(index))));
+		let menu = app.strip_menu.expect("a right press opens the menu");
+		app.destinations(menu)
+	}
+
+	/// The areas a menu lists, in the order it lists them.
+	fn offered(destinations: &[ui::tabs::Destination]) -> Vec<ui::split::Area> {
+		destinations
+			.iter()
+			.map(|destination| destination.area)
+			.collect()
+	}
+
+	/// A tab with a live session on `endpoint`, its shell standing in `cwd` — the only kind of tab
+	/// there is anything to duplicate. The receiver is handed back to keep the channel open.
+	fn live_tab(id: u64, endpoint: &str, cwd: &str) -> (Tab, mpsc::Receiver<SshCommand>) {
+		let (mut tab, rx) = app_with_terminal(32);
+		tab.id = id;
+		tab.screen = Screen::Terminal;
+		tab.connection = Some(endpoint.to_owned());
+		// One OSC 7 announcement, which is how a shell says where it is (§17).
+		let _ = tab.on_ssh_event(shell_output(
+			format!("\x1b]7;file://host{cwd}\x07").as_bytes(),
+		));
+		(tab, rx)
+	}
+
+	#[test]
+	fn a_whole_window_offers_every_area_and_a_split_one_only_the_two_it_has() {
+		let mut app = tab_app();
+		// Nothing is cut yet, so all three are on the menu: two of them are a cut away, and taking
+		// one is what makes the cut (§52).
+		assert_eq!(
+			offered(&chip_menu(&mut app, 0)),
+			vec![
+				ui::split::Area::Main,
+				ui::split::Area::Right,
+				ui::split::Area::Bottom
+			]
+		);
+		let _ = app.update(Message::TabMenuDismissed);
+
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		// One cut is all there is (§48), so the area the window does NOT have is not offered: it
+		// would mean closing a region and cutting the other way, which is more than a menu row can
+		// honestly say.
+		assert_eq!(
+			offered(&chip_menu(&mut app, 0)),
+			vec![ui::split::Area::Main, ui::split::Area::Right]
+		);
+	}
+
+	#[test]
+	fn the_menu_greys_a_move_that_would_do_nothing_or_undo_itself() {
+		let mut app = tab_app();
+		let menu = chip_menu(&mut app, 0);
+		assert!(!menu[0].can_move, "it is already in the main area");
+		assert!(
+			!menu[1].can_move && !menu[2].can_move,
+			"the only tab of a region cannot be the one cut away into a new one — the cut and the \
+			 collapse behind it would cancel out"
+		);
+		let _ = app.update(Message::TabMenuDismissed);
+
+		let pane = app.focus;
+		let _ = app.update(Message::In(pane, Box::new(Message::TabNew)));
+		let menu = chip_menu(&mut app, 0);
+		assert!(!menu[0].can_move, "still its own area");
+		assert!(
+			menu[1].can_move && menu[2].can_move,
+			"now the strip has a tab to spare"
+		);
+	}
+
+	#[test]
+	fn a_copy_is_offered_only_where_there_is_a_session_to_copy() {
+		let mut app = tab_app();
+		assert!(
+			chip_menu(&mut app, 0)
+				.iter()
+				.all(|destination| !destination.can_duplicate),
+			"a home tab is nobody's original — there is no connection to make a second time"
+		);
+		let _ = app.update(Message::TabMenuDismissed);
+
+		let pane = app.focus;
+		let (source, _rx) = live_tab(0, "u@h:22", "/srv");
+		app.regions.get_mut(pane).expect("the one region").tabs[0] = source;
+		assert!(
+			chip_menu(&mut app, 0)
+				.iter()
+				.all(|destination| destination.can_duplicate)
+		);
+	}
+
+	#[test]
+	fn a_move_takes_the_tab_out_of_one_strip_and_puts_it_on_screen_in_the_other() {
+		let mut app = tab_app();
+		let main = app.focus;
+		let _ = app.update(Message::In(main, Box::new(Message::TabNew)));
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let moved = app.regions.get(main).expect("the main region").tabs[0].id;
+
+		app.strip_menu = Some(StripMenu {
+			pane: main,
+			index: 0,
+		});
+		let _ = app.move_tab_to(ui::split::Area::Right);
+
+		let fresh = app.pane_of(ui::split::Area::Right).expect("still cut");
+		assert_eq!(
+			app.regions.get(main).expect("the main region").tabs.len(),
+			1
+		);
+		let right = app.regions.get(fresh).expect("the right region");
+		assert_eq!(right.tabs.len(), 2);
+		assert_eq!(
+			right.tabs[right.active].id, moved,
+			"a tab sent somewhere arrives on screen, not hidden behind what was already there"
+		);
+		assert_eq!(app.focus, fresh, "and the keyboard goes with it (§50)");
+		assert!(app.strip_menu.is_none(), "the menu closed behind the item");
+	}
+
+	#[test]
+	fn moving_the_last_tab_out_of_a_region_makes_the_window_whole_again() {
+		let mut app = tab_app();
+		let main = app.focus;
+		let _ = split(&mut app, ui::split::Way::Horizontal);
+		let fresh = app.focus;
+		let moved = app.regions.get(fresh).expect("the fresh region").tabs[0].id;
+
+		// The merge gesture: the region a tab leaves empty closes and gives its room back (§48), so
+		// this is the way back from a split without closing anything.
+		app.strip_menu = Some(StripMenu {
+			pane: fresh,
+			index: 0,
+		});
+		let _ = app.move_tab_to(ui::split::Area::Main);
+
+		assert_eq!(region_count(&app), 1);
+		let region = app.regions.get(main).expect("main took the room back");
+		assert_eq!(region.tabs.len(), 2);
+		assert_eq!(region.tabs[region.active].id, moved);
+		assert_eq!(app.focus, main);
+	}
+
+	#[test]
+	fn a_move_to_an_area_that_is_not_there_yet_cuts_the_window_and_lands_in_the_new_half() {
+		let mut app = tab_app();
+		let main = app.focus;
+		let _ = app.update(Message::In(main, Box::new(Message::TabNew)));
+		let moved = app.regions.get(main).expect("the one region").tabs[1].id;
+		let ids = app.next_id;
+
+		// The monitor step already answered, exactly as the `split` helper does (§48).
+		let grown = ui::split::Way::Vertical.grown(app.window);
+		let _ = app.apply_split(
+			main,
+			ui::split::Way::Vertical,
+			iced::window::Id::unique(),
+			grown,
+			SplitSeed::Move(1),
+		);
+
+		assert_eq!(region_count(&app), 2);
+		assert_eq!(app.regions.get(main).expect("the region cut").tabs.len(), 1);
+		let fresh = app.pane_of(ui::split::Area::Bottom).expect("cut downwards");
+		assert_eq!(
+			app.regions.get(fresh).expect("the fresh region").tabs[0].id,
+			moved,
+			"the tab that was sent is the tab that is there"
+		);
+		assert_eq!(
+			app.next_id, ids,
+			"no id was handed out: the tab was carried across, not built again"
+		);
+	}
+
+	#[test]
+	fn a_region_is_never_emptied_into_a_split_of_itself() {
+		let mut app = tab_app();
+		let main = app.focus;
+		let before = (region_count(&app), app.window);
+		// The menu greys this, but the monitor is measured in between and a tab can close in that
+		// time — so the rule is enforced again where the cut is actually made (§52).
+		let grown = ui::split::Way::Horizontal.grown(app.window);
+		let _ = app.apply_split(
+			main,
+			ui::split::Way::Horizontal,
+			iced::window::Id::unique(),
+			grown,
+			SplitSeed::Move(0),
+		);
+		assert_eq!(
+			(region_count(&app), app.window),
+			before,
+			"nothing cut, and above all the window did not grow for a split that cannot happen"
+		);
+		assert_eq!(app.regions.get(main).expect("the one region").tabs.len(), 1);
+	}
+
+	#[test]
+	fn a_copy_opens_beside_its_original_and_carries_the_shell_directory() {
+		use crate::ui::connect::AuthKind;
+
+		let mut app = tab_app();
+		let main = app.focus;
+		let (source, _rx) = live_tab(0, "u@h:22", "/srv/www");
+		app.regions.get_mut(main).expect("the one region").tabs[0] = source;
+		app.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+
+		app.strip_menu = Some(StripMenu {
+			pane: main,
+			index: 0,
+		});
+		let _ = app.duplicate_tab_to(ui::split::Area::Main);
+
+		let region = app.regions.get(main).expect("the one region");
+		assert_eq!(region.tabs.len(), 2);
+		assert_eq!(
+			region.active, 1,
+			"a copy made into its own strip lands next to the tab it came from, and on screen"
+		);
+		let copy = &region.tabs[1];
+		assert_eq!(
+			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),
+			Some("/srv/www")
+		);
+		assert_eq!(
+			(copy.form.host.as_str(), copy.form.user.as_str()),
+			("h", "u")
+		);
+		assert!(
+			matches!(copy.screen, Screen::Connect),
+			"the password was never remembered, so the copy stops at the form with everything else \
+			 already filled in rather than spending an attempt on an empty field"
+		);
+	}
+
+	#[test]
+	fn a_copy_dials_the_same_target_and_lands_the_shell_where_the_original_stood() {
+		use crate::ui::connect::AuthKind;
+
+		let (tx, mut rx) = mpsc::channel(64);
+		let mut copy = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+		// Agent auth reads no field (§7), so the copy has everything it needs the moment the form
+		// is filled — the common case the menu item exists for.
+		copy.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Agent, None, None);
+
+		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+		assert!(
+			matches!(copy.screen, Screen::Connecting { .. }),
+			"dialed without asking anything"
+		);
+		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
+
+		// The shell opens: the carried directory is replayed as a `cd` and pins the pane against the
+		// announcements that follow, exactly as a remembered one is (§22).
+		let _ = copy.on_ssh_event(SshEvent::Connected);
+		assert_eq!(copy.resume_cwd.as_deref(), Some("/srv/www"));
+		assert_eq!(
+			copy.carry_cwd, None,
+			"spent, so the next session inherits nothing"
+		);
+		let mut sent = Vec::new();
+		while let Ok(command) = rx.try_recv() {
+			sent.push(command);
+		}
+		assert!(
+			sent.iter().any(|command| matches!(
+				command,
+				SshCommand::Input(bytes) if bytes.as_slice() == b"cd '/srv/www'\r"
+			)),
+			"the copy walks itself to where the original was standing"
+		);
+	}
+
+	#[test]
+	fn a_copy_of_a_password_session_stops_at_the_form_rather_than_dialing_blind() {
+		use crate::ui::connect::AuthKind;
+
+		let (tx, mut rx) = mpsc::channel(8);
+		let mut copy = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+		copy.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+
+		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv".to_owned()));
+		assert!(matches!(copy.screen, Screen::Connect));
+		assert_eq!(copy.form.host, "h");
+		assert!(rx.try_recv().is_err(), "nothing was dialed");
+		assert_eq!(
+			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),
+			Some("/srv"),
+			"still carried: the user types the password and presses Connect, and the copy still \
+			 opens where the original stands"
+		);
+	}
+
+	/// A copy is made and dialed in the same breath, but a tab is born with **no worker**: iced
+	/// rebuilds the subscription list only after the update that created the tab returns, and the
+	/// worker announces itself with `Ready` a moment later. So the dial is armed and fired then —
+	/// dialing on the spot is what produced "SSH worker is not ready yet" (§52).
+	#[test]
+	fn a_copy_waits_for_its_own_worker_before_dialing() {
+		use crate::ui::connect::AuthKind;
+
+		let mut copy = Tab::default();
+		copy.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Agent, None, None);
+
+		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+		assert!(copy.pending_connect, "armed, waiting for a channel to use");
+		assert!(
+			matches!(copy.screen, Screen::Connect),
+			"the pre-filled form is what shows in the meantime, and what is left behind if no \
+			 worker ever arrives"
+		);
+		assert!(
+			!matches!(copy.screen, Screen::Error),
+			"and above all not an error about a worker that was never late"
+		);
+
+		// The worker checks in. The dial goes now, down the channel it just handed over.
+		let (tx, mut rx) = mpsc::channel(64);
+		let _ = copy.on_ssh_event(SshEvent::Ready(tx));
+		assert!(!copy.pending_connect, "spent");
+		assert!(matches!(copy.screen, Screen::Connecting { .. }));
+		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
+		assert_eq!(
+			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),
+			Some("/srv/www"),
+			"still carried across the wait"
+		);
+	}
+
+	#[test]
+	fn a_carried_directory_is_dropped_when_the_form_was_pointed_somewhere_else() {
+		use crate::ui::connect::AuthKind;
+
+		let (tx, _rx) = mpsc::channel(64);
+		let mut copy = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+		copy.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+
+		// The copy stopped at the form, and the user typed a different machine into it. A path only
+		// means something on the host it came from, so this one goes unspent (§52).
+		copy.form.host = "elsewhere".to_owned();
+		copy.form.password = "pw".to_owned();
+		let _ = copy.on_connect_pressed();
+		let _ = copy.on_ssh_event(SshEvent::Connected);
+		assert_eq!(
+			copy.resume_cwd, None,
+			"no `cd` into a directory from another filesystem"
+		);
+		assert_eq!(
+			copy.carry_cwd, None,
+			"and spent either way, so it cannot resurface"
+		);
 	}
 }

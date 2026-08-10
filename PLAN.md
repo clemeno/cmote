@@ -63,7 +63,9 @@ and a **filter box over the saved-target list** — a fragment while you type, a
 moment a `*` or `?` appears (§49); a keyboard that **follows what you act on**, so typing while
 a side panel holds it, or choosing an item off the grid's menu, hands it back to the shell (§50);
 and the **open and closed hand** over everything you can pick up — a tab chip, a dialog header —
-drawn by cmote because Windows has neither cursor (§51).
+drawn by cmote because Windows has neither cursor (§51); and a **chip's own right-click menu** that
+sends a tab to another area of the window — moving it there, or opening a second copy of the session
+where the first one is standing (§52).
 Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -253,10 +255,10 @@ cmote/
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the filter box, the saved-target list, select / open / rename / delete, theme-following colours (§14, §49)
-    │   ├── menu.rs        shared right-click menu chrome: panel / items / dismiss layer (§10)
+    │   ├── menu.rs        shared right-click menu chrome: panel / items / separator / dismiss layer (§10, §19, §52)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
-    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38), the hand cursor over one (§51)
+    │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38), the hand cursor over one (§51), the right-click menu that sends it to another area (§52)
     │   └── terminal.rs    the terminal screen's layout and chrome; the cell metrics; pixel→cell resize math (§9)
     ├── ssh/
     │   ├── mod.rs         module tree + `open_sftp`, shared by upload, download and browse (§17-§19)
@@ -4777,7 +4779,9 @@ while positions moved underneath them.
 - **A tab cannot be dragged from one region's strip to another's.** The drag is reported by the chips' own
   pointer events (§38) and a chip belongs to one strip, so a pointer that wanders into another region's strip
   reports nothing there and the release drops the tab where it was. Correct, but a real limitation: moving
-  work between regions means opening it again.
+  work between regions meant opening it again. **Lifted in §52** — not by teaching the drag to cross the
+  seam, which would need the pixel arithmetic §38 exists to avoid, but by a right-click menu on the chip
+  that sends the tab to an area by name.
 - **A dropped file goes to the region holding the keyboard**, not the region it was dropped on. iced's
   `FileDropped` window event carries no position, so there is nothing to route on.
 - **A file picker's answer goes to the region holding the keyboard.** In practice that is the right region,
@@ -5021,32 +5025,82 @@ Three facts stack up, and none of them is visible from the Rust side:
 
 Which is exactly the situation every browser is in — and they solve it by shipping their own
 bitmaps (Firefox's `widget/windows/res/grab.cur`, Chromium's own resources). cmote does the same,
-with the hands **drawn in the source as text** rather than bundled as binary assets.
+with **its own two drawings** bundled in `assets/` and decoded into `HCURSOR`s at start-up.
 
-### The two hands are `const` art (`cursor.rs`)
+### The two hands are drawings (`assets/`)
 
-Each cursor is 32 rows of 32 characters — `#` outline, `.` fill, anything else transparent — turned
-into BGRA pixels at start-up. Written this way for three reasons: the shapes are reviewable in a
-diff (a cursor committed as a `.cur` is a blob nobody reads again), the repository stays free of a
-third-party asset and its licence (cmote is MIT; Firefox's cursors are MPL-2.0, which would have
-put a second licence and its notice into the tree for two small pictures), and the whole thing
-costs about a hundred bytes of `const` per hand.
+`assets/cursor-grab.png` and `assets/cursor-grabbing.png`, **drawn at 64×64** on a transparent
+background, bundled into the binary with `include_bytes!`, decoded at start-up and resampled to
+whatever size Windows asks for.
 
-Two details that are not decoration:
+They began as `const` **ASCII art** — one character per pixel, `#` outline, `.` fill, space for a
+hole — for three good reasons: the shapes are reviewable in a diff (a cursor committed as a `.cur`
+is a blob nobody reads again), the repository stays free of a third-party asset and its licence
+(cmote is MIT; Firefox's cursors are MPL-2.0), and the whole thing cost about a hundred bytes of
+`const` per hand. Two rounds of drawing them that way settled the argument the other way:
 
-- **Alpha is 0 or 255 and never in between**, so there is no premultiplication to get wrong. The
-  shapes carry their own black outline instead of relying on antialiasing to separate them from
-  whatever is behind, which is also what keeps them legible on the strip's dark bar and on a light
-  desktop when the pointer leaves it mid-drag.
-- **One hotspot for both shapes** (`HOTSPOT`), inside the part they share. Press and the hand
-  closes without the pointer appearing to jump — a hand cursor is aimed with its middle, since it
-  has no tip to aim with, which is how the browsers place theirs too. A test pins the hotspot
-  inside both drawings for the same reason it pins the row widths: the art is edited by hand.
+- **A cursor is a drawing, and a drawing wants a drawing tool.** Nudging a fingertip by moving `#`
+  characters in a grid is slow, and it does not let you *see* what you are doing until the app is
+  launched. Both attempts were geometrically fine and looked, in the author's word, alien.
+- **The licence argument does not survive contact with our own art.** It was an argument against
+  bundling *someone else's* cursor. A PNG drawn for cmote is cmote's, under cmote's licence, and
+  brings nothing into the tree with it.
+- **What is lost is reviewability**, and that is the real cost of the change. The shapes can no
+  longer be read in a diff, so the tests now stand in for that: whatever is bundled decodes, is
+  square, the same size as its twin, covers the hotspot, and draws something without drawing
+  everything — plus that halving one keeps its shape and its colour at the edges. They skip a hand
+  that is not there rather than demand one, so "not drawn yet" is a state the build allows.
 
-Building the `HCURSOR` is `CreateIconIndirect` with `fIcon = FALSE` (an icon with a hotspot IS a
-cursor), a 32-bit top-down DIB for the colour — negative height, or every hand is drawn upside
-down — and an all-zero 1-bit mask, which is how a 32-bit cursor says "use my own alpha" rather
-than the monochrome and/or/invert scheme.
+They are bundled rather than read from beside the executable, like the fonts (§9, §19): §11 promises
+one portable binary. Redrawing a hand is therefore *overwrite the file, rebuild* — no code change,
+and `cursor_from` takes the size from the image so even a different one needs none.
+
+**An empty file means that hand has not been drawn yet**, and the window says so honestly: nothing
+is painted, the subclass is never fitted, and `grab_interaction` flips from "ask iced for nothing"
+to asking for `Grab` / `Grabbing` — which winit collapses to the four-arrow **move** cursor. That is
+strictly the behaviour the strip had before §51: it cannot tell hovering from holding, but it does
+say the thing can be moved. The same fallback covers an unreadable PNG and the moment between the
+window opening and the boot task installing the cursors. The files have to EXIST for
+`include_bytes!` to compile, which is why an empty one is the placeholder rather than no file.
+
+Decoding is the `png` crate: pure Rust, its inflate backend already in the tree, so §11's
+no-C-toolchain build holds. `image` is present but iced pulls it in deliberately **without codecs**
+(§41), so it cannot read a PNG, and enabling its `png` feature would only add the same crate behind
+another layer. The decoder is asked to normalise to 8-bit RGBA, so a hand exported as a palette, as
+greyscale, or with a `tRNS` chunk all arrive the same way, and the alpha is passed through as drawn.
+
+Three details that are not decoration:
+
+- **Drawn at 64, shown at whatever Windows wants.** `SetCursor` does not scale, so handing over the
+  64×64 artwork would show a double-size cursor on an ordinary display. `SM_CXCURSOR` is the one
+  number to ask: it already accounts for the display's scaling *and* for the user's own cursor-size
+  setting in Accessibility. On a 100% display it is 32, which halves the artwork exactly; at 200% it
+  is 64 and the drawing is used as drawn, which is the point of drawing it large. It is asked
+  **for the window's own DPI** (`GetSystemMetricsForDpi` + `GetDpiForWindow`), because iced runs
+  per-monitor-DPI-aware and plain `GetSystemMetrics` answers for the DPI the session logged in at —
+  on a 200% panel beside a 100% primary that would make the hands half the size of every other
+  cursor on the screen. The resampler averages **weighted by alpha**: a transparent pixel still
+  carries a colour, usually black, and averaging it in unweighted rings every soft edge with a dark
+  halo. Read once at start-up (`ponytail:` moving the window to a differently-scaled monitor keeps
+  the size it booted with, until `WM_DPICHANGED` is handled — the subclass already sees it).
+- **Fitted to a FRACTION of that box, not to the box** (`COVERAGE`). `SM_CXCURSOR` is the size of
+  the box a cursor is drawn in, not of the drawing in it, and the standard arrow uses barely two
+  thirds of its own — a 32×32 arrow bitmap carries a glyph about twenty pixels tall with empty space
+  around it. Artwork that fills its box edge to edge therefore reads as visibly bigger than every
+  other cursor on screen, which is what the first fitted build looked like on a real desktop. The
+  hands are scaled to about the arrow's own footprint instead: 21 pixels where the box is 32. The
+  cursor bitmap is simply made that size — nothing requires it to BE `SM_CXCURSOR`, and padding the
+  drawing out to one would move the hotspot for nothing. One constant to turn if it still reads
+  large.
+- **One hotspot for both shapes** (`HOTSPOT`), given in the DRAWING's own pixels and scaled with the
+  image. It is the middle of the drawn hand — between the two shapes' centres of area, on the palm of
+  each — so press and the hand closes without the pointer appearing to jump; a hand cursor is aimed
+  with its middle, since it has no tip to aim with. A test pins it on an opaque pixel of both
+  drawings, so a redrawn hand that no longer covers it fails the build rather than quietly clicking
+  somewhere the user is not pointing.
+- **Straight alpha, not premultiplied.** That is what 32-bit icons and cursors are documented to
+  use, and the `ponytail:` note in `decode` says what to change if a soft-edged hand ever comes out
+  haloed.
 
 ### Painting it takes one Win32 seam, and only one
 
@@ -5067,39 +5121,56 @@ Two consequences worth stating:
   handle and the subclass owns it outright. Off Windows the same function answers `Grab`/`Grabbing`,
   because those platforms have the real thing — which is also why every handle goes through this one
   function rather than naming an `Interaction` itself.
-- **A press that never moves still closes the hand.** `WM_SETCURSOR` arrives with pointer movement,
-  so between the button going down and the first move there is no message to answer; the state
-  setters call `SetCursor` directly as well. That call is safe from `update` because iced's update
-  runs on the thread that owns the window.
+- **A press that never moves still closes the hand, and a pointer that comes to rest gives it back.**
+  `WM_SETCURSOR` arrives with pointer MOVEMENT, so between one message and the next there is nothing
+  to answer, and both directions matter. Pressing without moving has to close the hand, so the state
+  setters call `SetCursor` directly. The mirror image turned up with §52's close buttons: the move
+  that lands the pointer on a chip's "×" carries its own `WM_SETCURSOR`, which is answered BEFORE the
+  enter event reaches iced, so the hand would otherwise stay until the user moved again. When no hand
+  is wanted, `apply` therefore asks the window the same question Windows would (`SendMessageW(hwnd,
+  WM_SETCURSOR, …)`): the message re-enters the subclass, which now passes it to winit's handler,
+  and the button's pointing finger goes on at once. Both calls are safe from `update`, which runs on
+  the thread that owns the window.
 
 Failure is silent by construction. If the cursors cannot be built or the subclass cannot be
 installed, the handles keep the cursor they had before and nothing else in cmote depends on it.
 
-### What the module is told, and why a COUNT
+### What the module is told, and why the claim is NAMED
 
 `cursor` is told three things and works the rest out itself: a handle took the pointer, a handle
 lost it, and something is or is not being dragged. Dragging outranks hovering, so the hand stays
 closed wherever the pointer has got to — that is what says the gesture is still live, and it is why
 a dialog dragged clean out from under the pointer does not open its hand halfway through the move.
 
-It is told none of this in terms of WHICH handle, and that is the design rather than a shortcut.
-Two messages — `GrabEntered` and `GrabExited` — carry no payload, and `set_dragging` is a bare
-bool, so a chip press (§38) and a header press (§10) are indistinguishable here. The cursor
-question is "is the pointer on something that can be picked up, and is something held"; identity
-would be state to keep in step for nothing, and it is what would have made a second handle a second
-implementation. `App` answers all three, not `Tab`: there is one pointer and one window, so a card
-dragged across a split must not change hands on the way.
+`set_dragging` is a bare bool, so a chip press (§38) and a header press (§10) are indistinguishable
+there — a drag is a drag. `App` answers all of it, not `Tab`: there is one pointer and one window,
+so a card dragged across a split must not change hands on the way.
 
-The hover state is a **count, not a flag**, and that is a real bug avoided rather than a
-preference. Two handles report the same mouse move — one being left, one being entered — and iced
-dispatches those in the widgets' layout order, not in the order the pointer crossed them. Moving
-right to left along the strip, the chip being ENTERED is asked first, so a flag would be set and
-then immediately cleared by the chip being left, and the hand would vanish exactly when the pointer
-arrived. A count cannot be put out of order by that, and it is also what lets two DIFFERENT kinds
-of handle overlap — a dialog header over a strip — without either knowing the other exists. It is
-clamped at zero (an unmatched exit must not dig a hole the next real hover has to climb out of) and
-**reset outright when the pointer leaves a whole region of handles**, which is the boundary that
-heals a count left standing by a handle that was closed or re-laid out under the pointer.
+The HOVER, though, is a **claim held by one named handle** — a tab's id, or `cursor::HEADER` for a
+dialog header. It began as an anonymous count, on the reasoning that the cursor question is only
+"is the pointer on something that can be picked up"; §52 corrected that, and the correction is worth
+keeping written down because the reasoning was sound and the conclusion was still wrong:
+
+- **A count survives the ordering trap, which was the original point.** Two handles report the same
+  mouse move — one left, one entered — and iced dispatches them in the widgets' layout order, not
+  in the order the pointer crossed them. Moving right to left along the strip, the chip being
+  ENTERED is asked first, so a bare flag would be set and then immediately cleared by the chip being
+  left. A named claim survives it just as well and more directly: the exit names the handle being
+  left, that handle no longer holds the claim, and so it takes nothing away.
+- **A count cannot survive a handle that VANISHES.** iced publishes a widget's `on_exit` from the
+  widget itself (`mouse_area`), so a widget that has left the tree publishes nothing at all: press a
+  dialog's ✕ while the pointer is on its header, close a chip under the pointer, or send a tab to
+  another region (§52), and the exit that would have let go is never raised. The count stayed at one
+  and the window went on wearing an open hand over the terminal, the buttons, everything. Leaving a
+  whole region of handles (`hover_reset`, wired to the strip's own exit) healed the chip case only,
+  and nothing healed the dialog case at all.
+
+So the claim is **re-asserted every frame by the handle drawing itself**: `view` brackets the build
+with `frame_begin` / `frame_end`, each handle calls `drawn(id)` as it lays itself out, and a claim
+that was not redrawn is dropped. The frame is the only place that knows what still exists, which is
+why the hand is the one piece of state in cmote that a view path writes to. A modal's backdrop says
+`covered()` on the same pass, because a chip under a scrim is a live widget still reporting the
+pointer and still cannot be picked up.
 
 ### What is deliberately NOT here
 
@@ -5114,11 +5185,226 @@ heals a count left standing by a handle that was closed or re-laid out under the
 - **The rubber band and the text selection are not grabs.** Pressing empty space in the files pane
   (§21) or dragging across the grid (§40) starts a SELECTION — nothing is picked up and nothing
   moves — so neither wears a hand.
-- **No `.cur` or `.ani` files, and no `SetSystemCursor`.** The first is the licence and
-  reviewability argument above; the second changes the cursor for *every application on the
-  machine* and is not something a terminal client gets to do.
+- **No `.cur` or `.ani` files, and no `SetSystemCursor`.** A `.cur` would carry a hotspot and save
+  the `CreateIconIndirect` dance, but it is a format no drawing tool exports and no reviewer can
+  open; a PNG is both. `SetSystemCursor` changes the cursor for *every application on the machine*
+  and is not something a terminal client gets to do.
 - **No DPI variants.** One 32×32 pair, which is `SM_CXCURSOR` at every normal scaling; Windows
   scales it like any other cursor. A 48×48 set for 200% displays is a straight addition to the art
   if it is ever wanted.
 - **No drag-and-drop invented to have somewhere else to put the hand.** The two surfaces that wear
   it are the two that already dragged. Nothing was made draggable for the sake of the cursor.
+
+---
+
+## 52. Sending a tab to another area of the window (v4.0.0)
+
+§48 cut the window in two and gave each half its own strip. §38 let a chip be dragged along its
+strip. Neither let a tab **cross the seam**: the drag is reported by the chips themselves — the
+pointer entering one names the slot — so a gesture that starts in the left strip hears nothing from
+the right one and the release drops the tab where it was. A tab opened in the wrong half had to be
+closed and opened again, which for a live session means dropping it.
+
+**A right press on a chip opens a menu**, and every row in it is one sentence: send *this* tab to
+*that* area. Two groups of up to three rows each:
+
+```
+Move to main area            greyed — it is already there
+Move to right area
+Move to bottom area
+─────────────────────────────
+Duplicate to main area
+Duplicate to right area
+Duplicate to bottom area
+```
+
+The right press does **not** select the chip. Acting on a tab the user is *not* looking at is the
+reason the menu is on the chip rather than on the tab already showing, so opening it must not change
+what is on screen — the opposite of the strip's left press, which selects because a press *is* a
+selection there (§26).
+
+### Areas, not regions
+
+The menu names **places on screen** — main, right, bottom — and never `Pane`, `Region` or "split".
+A `pane_grid::Pane` is an opaque index that survives a window being cut and made whole again while
+meaning something different each time; what the user can point at is a corner of the window.
+
+With one cut allowed (§48) the vocabulary is closed, which is what makes this honest rather than a
+simplification: there is the region at the top left, and there is the one the cut made, which is
+either to its right or below it. `ui::split::areas` reads that off the **laid-out rectangles** — the
+same `Node` `regions` measures with — so it cannot drift from what is drawn, and "main" keeps
+meaning the top-left one even after the *original* region is the one that closed.
+
+### What is offered, and what is greyed
+
+**An undivided window offers all three**, because two of them are one cut away and choosing one is
+what makes the cut — the same cut the strip's own split buttons make, monitor measurement and window
+growth included. **A split window offers only the two it has**: the third would mean closing a
+region and cutting the other way round, which is more than a menu row can promise.
+
+Rows that are there but cannot act are **dimmed, not dropped**. With at most four rows in a group, a
+menu whose items move about between openings is harder to use than one with a grey row in it — and
+the grey is itself the explanation. Three rules dim a row:
+
+- **Move to the area it is already in.** Nothing to do.
+- **Move the only tab of a region into an area that would have to be cut.** The cut and the collapse
+  behind it cancel out: the window would grow, the tab would land in the new half, the old half
+  would empty, close, and hand the room back. All that for a window that flickered. Re-checked when
+  the cut is actually made, not only in the menu, because the monitor is measured asynchronously and
+  a tab can close in between — the same reason §48 re-checks `splittable` on arrival.
+- **Duplicate anything that is not a session.** A copy is a second connection; a home tab has none
+  to make again, and a second editor on one remote file is two dirty buffers racing to save it.
+
+### A move is a lift, not a close and a reopen
+
+`take_tab` is `remove_tab` with the ending taken out: the same strip bookkeeping (the activation
+order, which tab comes forward, the window geometry handed to it) with the `Tab` handed back instead
+of dropped. A close is now that plus the drop; a move is that plus a push. **The session never
+notices** — its channel, emulator, scrollback, panels and forwards travel with the struct, because a
+tab has always owned all of it (§26) and nothing about a session was ever indexed by region.
+
+The moved tab arrives **on screen** in its new strip and takes the keyboard with it (§50). The user
+has just said where they want this tab; a move that left it hidden behind whatever was showing there
+would have to be followed by a hunt through the strip to find it.
+
+**A move that empties its old region closes it** (§48), and the window is whole again — which makes
+this the way back from a split without closing anything. Send the last tab across, and the seam goes
+with it. That is why the "would empty a region" rule dims only the *cut* case: emptying a region
+into one that already exists is not a mistake, it is the merge.
+
+### A duplicate is a fresh connection
+
+A session is a socket and a remote process. Neither can be forked from this end, so **Duplicate
+dials again** — it is "open this connection a second time", not "clone this tab".
+
+- **The credential comes from the vault**, by exactly the route the home list's Open takes (§16):
+  the stored target is read, the form is filled, and a remembered secret is pulled in — unlocking the
+  vault behind the master-passphrase prompt if it is locked. It deliberately does **not** reach into
+  the source tab's own form field, though the plaintext is sitting right there while the session is
+  up. A duplicate can do no more than the user could do by hand, and a password typed once and never
+  stored still has to be typed again — which is the promise "Remember" is the opt-in to (§12).
+- **It dials when nothing is left to type**, and stops at the pre-filled form when something is.
+  Validation alone is not that test: it accepts an *empty* password on purpose, because some servers
+  do (§7). Dialing on an empty field would spend an authentication attempt to arrive back at the same
+  form with a failure on it. Every other method needs no field — a key's passphrase, a
+  keyboard-interactive challenge and an agent's confirmation are all asked for *during* the connect,
+  exactly as they would be from the form's own button.
+- **It waits for its own worker first.** A tab is born with no channel to the SSH task: the worker is
+  started by the subscription list, which iced rebuilds only *after* the update that created the tab
+  has returned, and it checks in with `SshEvent::Ready` a moment later. Dialing in the same breath as
+  making the tab therefore failed with "SSH worker is not ready yet". So the dial is **armed**
+  (`pending_connect`) and fired by that `Ready`. The pre-filled form is what shows in between — and
+  what is left behind, usably, if a worker never arrives at all.
+- **It opens where the original is standing.** The source shell's cwd (§17's OSC 7 announcement) is
+  carried to the copy and replayed as a `cd` when its shell opens — the same mechanism a reconnect
+  resumes with (§22), pin included — and it **outranks** the target's remembered directory: the user
+  pointed at a shell, not at a machine.
+- **The carry names its own endpoint.** A copy that stopped at the form is a form, and a form can be
+  edited; change the host, press Connect, and a path from another filesystem would otherwise be typed
+  at a stranger's shell. It is taken by the first `Connected` either way, and used only if that
+  session is the one it was made for.
+- **The files pane is not carried.** It opens at its own remembered directory and is pinned there
+  until the shell settles, exactly as on a reconnect (§22) — the two panels drift apart on purpose,
+  and Sync and Reveal (§19) are the deliberate ways to bring them back together.
+- **A copy made into its own strip lands beside its original**; sent to the other region there is no
+  "beside", so it goes on the end. Either way it opens on screen, since a connection dialing is
+  something to watch.
+
+### The menu hangs from the strip, not from the pointer
+
+Every other context menu in cmote opens at the click. This one cannot: a right press publishes no
+position (iced's `mouse_area` reports the button, not where it was), and the raw event stream that
+would supply one is asked for **only while the window is split** (§48) — it is the single
+subscription in cmote that costs a message per pointer move, and switching it on for every window
+would make an undivided one pay for a menu it opens once in a session.
+
+So it hangs from the **region's own top-left corner, just under the bar**; the tree's menu is
+anchored to its panel for the same reason (§18). It is always on screen, it needs no stored point,
+and it follows a divider dragged while it is open, which a remembered pointer position would not. It
+is drawn over the **whole window** rather than inside its region: a menu offering to send a tab
+across a seam should not be clipped by that seam.
+
+
+### The hand had to learn what is still on screen
+
+Moving a tab out of a strip is the case §51's hand cursor could not survive, and fixing it fixed two
+older ones with it.
+
+iced publishes a widget's `on_exit` **from the widget**, and only when it is still in the tree
+(`mouse_area::update` compares the cursor against its own bounds). A handle that DISAPPEARS under
+the pointer therefore says nothing: send a tab to another region and its chip is gone, close a tab
+under the pointer, or — the oldest of the three — press a dialog's ✕, which destroys the very header
+the pointer is resting on. §51 held the hover as an anonymous count, so an exit that never came left
+the count at one and the window wore an **open hand over everything**: the terminal, the buttons,
+the whole frame. The strip's own exit healed the chip cases if you happened to move off the bar;
+nothing healed the dialog case.
+
+The fix is to make the hand a **claim held by a named handle** — a tab's id (app-wide and never
+reused, §26) or `cursor::HEADER` — and to have it **re-asserted every frame**:
+
+- `App::view` brackets the whole build with `cursor::frame_begin` / `frame_end`;
+- every handle calls `cursor::drawn(id)` as it lays itself out — one line in `chip_view`, one in
+  `dialog::header_bar`;
+- a claim that was not redrawn is dropped, because a handle that is not on screen cannot be under
+  the pointer.
+
+Naming the claimant also replaces the count's original job outright: the exit that arrives out of
+order (iced dispatches enter and exit in layout order, not in the order the pointer crossed the two
+handles) names the handle being LEFT, which no longer holds the claim, so it takes nothing away.
+
+A handle is also not uniform. A chip carries its own **"×"**, a header its **✕**, and those are
+buttons: the pointer is over something to CLICK, and an open hand there offers to drag the control
+that closes the tab or dismisses the dialog. The handle's own `mouse_area` cannot see the difference
+— it reports the pointer anywhere inside its bounds, children included — so each control says so
+itself (`control_entered` / `control_exited`) and wins while it has the pointer. It is a **second
+named claim** rather than a flag on the first, because iced updates a child BEFORE its parent:
+arriving on a chip directly over its "×" raises the control's enter first, and one shared flag would
+let the chip's enter, arriving second, clear a block that is still true. A drag still outranks both —
+the pointer crossing a close button mid-gesture must not drop the closed hand.
+
+`ui::dialog::backdrop` says `cursor::covered()` on the same pass, which drops any claim that is not
+the header's: a chip behind a modal is a live widget still reporting the pointer, and a hand over
+something the click cannot even reach is the same lie in the other direction. That under-claims
+rather than over-claims — close the dialog with the pointer resting on a chip and the hand comes
+back only once the pointer leaves and returns, because the chip never stopped believing it was
+hovered — and a missing hand over something draggable is the smaller of the two lies.
+
+This is the one piece of state in cmote a **view** path writes to. It is justified by there being
+nowhere else to put it: the frame is the only thing that knows which handles exist, and iced offers
+no hook for a widget leaving the tree.
+
+### Structure
+
+- `ui/split.rs` — `Area` (`Main` / `Right` / `Bottom`), `Area::way` (the cut that would make it,
+  `None` for main), and `areas` (which region each one currently is, read off the rectangles).
+- `ui/tabs.rs` — `on_right_press` on the chip, and `context_menu`: the rows, their labels, and the
+  clamp that keeps the panel inside the window's right edge. It draws `Destination`s and works
+  nothing out — availability depends on the region tree, which a strip cannot see.
+- `cursor.rs` — the hover became a named claim with `drawn` / `frame_begin` / `frame_end` /
+  `covered`; `ui/tabs.rs` and `ui/dialog.rs` each gained the one line that says "still here", and
+  `Message::GrabEntered` / `GrabExited` gained the name of the handle raising them.
+- `app.rs` — `StripMenu` (which strip, which chip), `destinations` (the rules above), `move_tab_to`,
+  `duplicate_tab_to`, `take_tab` (lifted out of `remove_tab`), `seed_form` (lifted out of
+  `open_selected_target`, so Duplicate fills the form by the same route the home list does),
+  `open_copy_of`, `ready_to_dial`, `Carry`, and `SplitSeed` — which is what lets one split flow serve
+  three openings: a home tab, a tab moved in, or a copy made there.
+
+### Deliberately not
+
+- **No dragging a chip across the seam.** The drag is built out of per-chip pointer events with no
+  pixel arithmetic anywhere (§38); making it cross a strip means one strip knowing where the other's
+  chips laid out, which is exactly the measurement iced does not expose and §38 was designed to avoid.
+  The menu says the same thing in one click.
+- **No third area.** One cut remains one cut (§48). A menu that could produce a second cut would be
+  making a window-layout decision behind a row of text.
+- **No keyboard shortcut.** The strip is mouse-only by design (§26), and this is a strip gesture.
+- **No "move all tabs" and no "move to a new window".** The first is a bulk edit nobody asked for;
+  the second is a second OS window, which is a far larger decision than a menu row (cmote is one
+  window, §1).
+- **The copy authenticates as the login account.** An elevated shell (§45) lives on the connection it
+  was raised on; a fresh connection starts where every connection starts, and the copy can be
+  elevated again by the same route the original was.
+- **The copy does not inherit the original's forwards, find bar, selection or panel sizes.** Those
+  belong to a session or to the target's remembered state (§22, §27), and the copy gets the target's
+  the same way any other connect to it would. Only the directory is carried, because only the
+  directory is the thing the user was looking at.

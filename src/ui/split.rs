@@ -66,6 +66,71 @@ pub enum Way {
 	Vertical,
 }
 
+/// Where a region sits in the window (§52).
+///
+/// The strip's context menu sends a tab to an AREA rather than to a region, because an area is what
+/// a user can point at: "the one at the bottom" names a place on screen, while the `pane_grid::Pane`
+/// that place resolves to is an opaque index that changes every time the window is cut or made whole
+/// again. One cut is all there is (§48), so the vocabulary is closed — the region that was there
+/// first, and whichever of right or bottom the cut made — and can simply be spelled out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Area {
+	/// The region at the top left: the whole window when there is no split, and the half that stays
+	/// where it was when there is one.
+	Main,
+	/// The half a horizontal cut put to the right of `Main`.
+	Right,
+	/// The half a vertical cut put below `Main`.
+	Bottom,
+}
+
+impl Area {
+	/// The cut that would BRING this area into being, or `None` for `Main`, which always exists.
+	/// A menu entry naming an area the window does not have yet is what makes the cut (§52).
+	pub fn way(self) -> Option<Way> {
+		match self {
+			Area::Main => None,
+			Area::Right => Some(Way::Horizontal),
+			Area::Bottom => Some(Way::Vertical),
+		}
+	}
+}
+
+/// Which region each area of the window currently is (§52), top-left first.
+///
+/// Read off the LAID-OUT rectangles rather than off a remembered `Way`, for the same reason
+/// `regions` measures instead of recomputing: a cut can be made, undone by closing a region, and
+/// made again the other way round, so any stored answer would have to be kept in step with all
+/// three. The rectangles cannot drift from the layout — they are the layout.
+///
+/// An undivided window answers with `Main` alone. A split one answers with `Main` and exactly one
+/// of `Right` / `Bottom`, told apart by whether the second region starts at a different x (side by
+/// side) or the same one (stacked).
+pub fn areas<T>(state: &pane_grid::State<T>, window: Size) -> Vec<(Area, pane_grid::Pane)> {
+	let mut boxes: Vec<(pane_grid::Pane, Rectangle)> = regions(state, window).into_iter().collect();
+	// Nearest the window's origin first. That region is `Main`, whichever `Pane` index it carries —
+	// the fresh half of a split can perfectly well hold the lower index, since `pane_grid` hands
+	// them out in creation order and a closed region's is not reused.
+	boxes.sort_by(|left, right| (left.1.x + left.1.y).total_cmp(&(right.1.x + right.1.y)));
+	let mut named = Vec::with_capacity(boxes.len());
+	let mut rest = boxes.into_iter();
+	let Some((main, main_rect)) = rest.next() else {
+		// Unreachable: `pane_grid` refuses to close the last region, so the tree is never empty.
+		return named;
+	};
+	named.push((Area::Main, main));
+	// Only the second region is named, and with one cut allowed there is never a third.
+	if let Some((other, other_rect)) = rest.next() {
+		let area = if (other_rect.x - main_rect.x).abs() > 0.5 {
+			Area::Right
+		} else {
+			Area::Bottom
+		};
+		named.push((area, other));
+	}
+	named
+}
+
 impl Way {
 	/// This cut as `pane_grid` names it — the axis the DIVIDER lies along, which is the opposite of
 	/// the one the regions are laid out on. Two regions side by side are parted by a vertical seam.
@@ -380,6 +445,66 @@ mod tests {
 		state.resize(split, EVEN);
 		let evened = regions(&state, window);
 		assert!((evened[&first].width - evened[&second].width).abs() < 0.5);
+	}
+
+	#[test]
+	fn an_undivided_window_is_all_main() {
+		let (state, first) = pane_grid::State::new(());
+		// The one region is `Main`, and the other two areas are simply absent — which is what the
+		// menu reads as "that area would have to be cut first" (§52).
+		assert_eq!(
+			areas(&state, Size::new(1000.0, 600.0)),
+			vec![(Area::Main, first)]
+		);
+	}
+
+	#[test]
+	fn a_side_by_side_split_names_the_second_region_right() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (second, _split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		assert_eq!(
+			areas(&state, Size::new(1000.0, 600.0)),
+			vec![(Area::Main, first), (Area::Right, second)]
+		);
+	}
+
+	#[test]
+	fn a_stacked_split_names_the_second_region_bottom() {
+		let (mut state, first) = pane_grid::State::new(());
+		let (second, _split) = state
+			.split(Way::Vertical.axis(), first, ())
+			.expect("the first region can always be split");
+		assert_eq!(
+			areas(&state, Size::new(1000.0, 600.0)),
+			vec![(Area::Main, first), (Area::Bottom, second)]
+		);
+	}
+
+	#[test]
+	fn main_is_the_region_at_the_top_left_and_not_the_older_one() {
+		// Close the ORIGINAL region and the survivor inherits the whole window — it is `Main` from
+		// then on, though it was the fresh half a moment earlier. Naming areas by where they are
+		// rather than by which came first is what keeps the menu honest after that (§52).
+		let (mut state, first) = pane_grid::State::new(());
+		let (second, _split) = state
+			.split(Way::Horizontal.axis(), first, ())
+			.expect("the first region can always be split");
+		state.close(first);
+		assert_eq!(
+			areas(&state, Size::new(1000.0, 600.0)),
+			vec![(Area::Main, second)]
+		);
+	}
+
+	#[test]
+	fn an_area_names_the_cut_that_would_make_it() {
+		// `Main` is always there, so it asks for no cut; the other two are exactly the two the
+		// strip's split buttons offer (§48, §52).
+		assert_eq!(Area::Main.way(), None);
+		assert_eq!(Area::Right.way(), Some(Way::Horizontal));
+		assert_eq!(Area::Bottom.way(), Some(Way::Vertical));
 	}
 
 	#[test]

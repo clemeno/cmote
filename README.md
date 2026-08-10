@@ -46,6 +46,16 @@ references below (§n) point into it.
   keyboard and lights its strip, and that same click still lands where you aimed it. Closing a
   region's last tab closes the region and **shrinks the window back**, so the region you kept stays
   exactly the size it was — however you had dragged the divider or resized the window meanwhile.
+- **Send a tab to another area — or a copy of it.** **Right-click a tab** and the menu offers the
+  window's areas by name: **main**, **right**, **bottom**. *Move* carries the tab over, session and
+  scrollback and all — nothing reconnects — and it arrives on screen with the keyboard. On a whole
+  window the right and bottom rows make the split themselves. *Duplicate* opens a **second
+  connection to the same machine** in the area you pick, and it opens **where the first one is
+  standing**: the copy `cd`s to the source shell's directory as soon as its own shell is up. It
+  dials straight away when nothing is left to type — a remembered password, a key, an agent — and
+  otherwise opens the connect form with everything but the secret already filled in. Moving a
+  region's **last** tab to the other area closes that region: the way back from a split without
+  closing anything.
   Closing the last tab of the last region still asks to quit.
 - **Confirmed, clean quit.** Closing the **last** tab, or clicking the window's title-bar **×**,
   asks **Quit cmote?** first — telling you how many live sessions it will disconnect — so a stray
@@ -405,8 +415,9 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Type a letter while a panel has the keyboard | Hand it back to the shell and send that letter to the prompt — no panel answers to plain characters (Ctrl / Alt combinations stay the panel's) |
 | Pick an item off the terminal's right-click menu | Do it, and put the keyboard back on the shell (opening or dismissing the menu does not) |
 | **Ctrl+V** from anywhere | Paste into the shell and put the keyboard back on it — the menu's Paste off the keyboard |
-| Hover anything grabbable — a **tab**, a **dialog header** | The pointer becomes an **open hand**; press and it **closes** until you let go, so the thing says it can be picked up and says when you have it. cmote draws both hands itself — Windows has neither. Splitters keep their **↔ / ↕** arrows: they resize rather than move, and the arrow says which way |
+| Hover anything grabbable — a **tab**, a **dialog header** | The pointer becomes an **open hand** (or the system **move** cursor, where no hand has been drawn — see the license note); press and it **closes** until you let go, so the thing says it can be picked up and says when you have it. It lets go the moment the thing does — a tab sent to another area, a dialog closed with its ✕ — it never appears over a chip behind a modal, and the buttons **on** a handle keep their own cursor: over a tab's **×** or a dialog's **✕** you get the usual click pointer, since a press there closes rather than picks up. cmote draws both hands itself; Windows has neither. Splitters keep their **↔ / ↕** arrows: they resize rather than move, and the arrow says which way |
 | Drag a tab along the strip | Move it to another slot; the chip that would receive it is outlined, and the order commits on the drop |
+| **Right-click a tab** | Send it to an area of the window — **Move to** / **Duplicate to** *main* / *right* / *bottom*. On a whole window the right and bottom rows make the split first. A row it cannot act on is greyed: the area the tab is already in, a move that would empty its region into a brand-new one, and Duplicate on anything that is not a session. It does not select the tab, so the menu can act on one you are not looking at |
 | **◨** / **⬓** at the right of the strip | Split the window beside / below — a fresh region on the target list, and the window doubles that way. Shown only while the window is whole: one split is the limit |
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
@@ -1073,7 +1084,32 @@ opens again while the pointer is still on a chip. Slide off the strip onto the t
 goes and the usual cursor is back. Move quickly back and forth across two chips (right to left as
 well as left to right): the hand must not flicker off while the pointer is still on a chip. Close a
 tab while the pointer sits on it, then move off the strip and back: the hand should be correct
-again.
+again — and it should be gone **immediately**, without moving the pointer at all, since the chip it
+was holding is no longer there. Same check on a dialog: open any confirmation, rest the pointer on
+its header (open hand), and click the **✕** — the hand must go with the card, not follow you around
+the window. With a dialog open, move over the tab strip behind its dim backdrop: no hand there
+either, because nothing behind a modal can be picked up. Finally, slide from a chip onto its **×**
+and STOP moving: the hand must give way to the click pointer immediately, not on the next twitch of
+the mouse — and back onto the chip brings it straight back. Same on a dialog header and its ✕. Press
+a chip and drag across another chip's **×**: the hand stays closed throughout, because the gesture
+is what it is reporting.
+
+Then the chip's **right-click menu**. With one region and two tabs, right-click the *background*
+tab: the menu opens under the strip, the tab on screen does **not** change, and it lists **main**
+(greyed — that tab is already there), **right** and **bottom**. Pick **Move to right area**: the
+window doubles rightwards, the tab lands in the new half **on screen** with the keyboard (its strip
+is the lit one), and its shell is still exactly where it was — scrollback intact, a `sleep 5; date`
+started before the move still delivers. Right-click that tab again: only **main** and **right** are
+now offered. Pick **Move to main area**: the tab crosses back, the emptied region closes, and the
+window shrinks to the half you kept. Now right-click the *only* tab of a one-region window: every
+**Move** row is greyed (there is nowhere for it to go that would not collapse behind it), and on a
+**home** tab every **Duplicate** row is greyed too. In a live session, `cd /var/log`, right-click
+its chip and pick **Duplicate to bottom area**: the window splits downwards and a second connection
+to the same machine opens there — with a remembered password (or key / agent auth) it dials on its
+own, otherwise the connect form opens with everything but the secret filled in. Once its shell is
+up, `pwd` in the copy should print `/var/log`, and the two shells should be independent (type in
+one, the other does not echo). Finally, right-click a chip and click **away** from the menu: it
+closes and nothing moves.
 
 **16. Quitting cleanly.** With one tab left, click its **"×"** (or, from the home screen, press
 **Ctrl+D**): instead of reopening a blank tab, cmote asks **Quit cmote?** — **Cancel** keeps the
@@ -1121,3 +1157,15 @@ MIT — see [LICENSE](LICENSE).
 Bundled fonts keep their own licenses (redistributed under them): **Fira Mono** and
 **IBM Plex Mono** under the SIL Open Font License 1.1, and **Material Icons** under
 Apache-2.0 — each with its license text in [assets/](assets/).
+
+The two hand cursors in [assets/](assets/) — `cursor-grab.png` and `cursor-grabbing.png`, drawn at
+64×64 on a transparent background and bundled into the binary — are cmote's own artwork under the
+same MIT license. Windows ships no hand cursor of either kind, so cmote carries its own (§51). They
+are resampled at startup to fit the cursor size Windows asks for, which follows the display's scaling
+and the Accessibility cursor-size setting, so drawing them large is what keeps them sharp on a hi-DPI
+screen. They are fitted to about two-thirds of that size on purpose: the system arrow leaves most of
+its own box empty, so artwork that filled the box would tower over every other cursor on screen.
+To change one: redraw the file at the same size as its twin, keep something opaque at the hotspot
+(30, 34), and rebuild. An **empty** file means that hand has not been drawn, and grabbable things
+fall back to the system's four-arrow **move** cursor — the same one they showed before the hands
+existed.
