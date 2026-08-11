@@ -383,7 +383,7 @@ impl Region {
 		while self
 			.tabs
 			.get(slot)
-			.and_then(|tab| tab.editor.as_ref())
+			.and_then(Tab::editor)
 			.is_some_and(|editor| editor.session == session)
 		{
 			slot += 1;
@@ -1651,16 +1651,10 @@ impl App {
 			}
 			_ => false,
 		};
-		if !sent {
-			let reason = "The session this file was opened from is no longer available.".to_owned();
-			if let Some(editor) = self.editor_mut(id) {
-				editor.mark_parent_gone();
-				editor.load_failed(reason);
-			} else if let Some(preview) = self.preview_mut(id) {
-				// No `mark_parent_gone` twin: that flag exists to disable Save, and there is no
-				// Save here — the sentence in place of the picture is the whole story (§53).
-				preview.load_failed(reason);
-			}
+		if !sent && let Some(viewer) = self.viewer_mut(id) {
+			viewer.parent_gone(
+				"The session this file was opened from is no longer available.".to_owned(),
+			);
 		}
 		// The strip gained a chip, which changes nothing about the region's box — but the tab that
 		// just came on screen has never been measured, so it is given one (§48).
@@ -1677,7 +1671,7 @@ impl App {
 		let Some((session, identity, path, bytes)) = self
 			.tabs()
 			.find(|tab| tab.id == viewer_id)
-			.and_then(|tab| tab.editor.as_ref())
+			.and_then(Tab::editor)
 			.map(|editor| {
 				(
 					editor.session,
@@ -1718,19 +1712,10 @@ impl App {
 	/// the image is decoded and in memory, and it stays as good as it was a moment ago.
 	fn orphan_viewers(&mut self, id: u64) {
 		for tab in self.tabs_mut() {
-			if let Some(editor) = tab.editor.as_mut()
-				&& editor.session == id
+			if let Some(viewer) = tab.viewer.as_mut()
+				&& viewer.session() == id
 			{
-				editor.mark_parent_gone();
-			}
-			if let Some(preview) = tab.preview.as_mut()
-				&& preview.session == id
-				&& matches!(preview.status, crate::preview::Status::Loading)
-			{
-				preview.load_failed(
-					"The session this file was opened from closed before it finished loading."
-						.to_owned(),
-				);
+				viewer.orphan();
 			}
 		}
 	}
@@ -1780,11 +1765,7 @@ impl App {
 		let Some(region) = self.regions.get_mut(pane) else {
 			return iced::Task::none();
 		};
-		if let Some(editor) = region
-			.tabs
-			.get_mut(region.active)
-			.and_then(|tab| tab.editor.as_mut())
-		{
+		if let Some(editor) = region.tabs.get_mut(region.active).and_then(Tab::editor_mut) {
 			editor.set_theme(theme);
 			let ext = crate::editor::extension_key(&editor.path);
 			// Remembered app-wide and written on the way out (§31), so this file type keeps the
@@ -1794,14 +1775,18 @@ impl App {
 		iced::Task::none()
 	}
 
-	/// The editor on the tab with this id, mutably (§32), wherever in the window that tab sits.
-	fn editor_mut(&mut self, id: u64) -> Option<&mut crate::editor::Editor> {
-		self.tab_mut(id).and_then(|tab| tab.editor.as_mut())
+	/// The viewer on the tab with this id, mutably (§32, §53), wherever in the window that tab sits
+	/// — whichever of the two kinds it is. Callers that need one kind in particular go on to ask
+	/// for it; callers that only need what the two share (the parent session, the path, "your
+	/// parent is gone") stop here, and that is most of them.
+	fn viewer_mut(&mut self, id: u64) -> Option<&mut Viewer> {
+		self.tab_mut(id).and_then(|tab| tab.viewer.as_mut())
 	}
 
-	/// The preview on the tab with this id, mutably (§53) — the picture twin of `editor_mut`.
-	fn preview_mut(&mut self, id: u64) -> Option<&mut crate::preview::Preview> {
-		self.tab_mut(id).and_then(|tab| tab.preview.as_mut())
+	/// The editor on the tab with this id, mutably (§32) — `None` when that tab is showing a
+	/// picture, which has no buffer to give.
+	fn editor_mut(&mut self, id: u64) -> Option<&mut crate::editor::Editor> {
+		self.viewer_mut(id).and_then(Viewer::editor_mut)
 	}
 
 	/// True while an App-level overlay card is on screen (§26, §30): a live tab's close
@@ -1890,7 +1875,7 @@ impl App {
 			let name = self
 				.tabs()
 				.find(|tab| tab.id == id)
-				.and_then(|tab| tab.editor.as_ref())
+				.and_then(Tab::editor)
 				.map_or_else(
 					|| "This file".to_owned(),
 					|editor| crate::explorer::name(&editor.path).to_owned(),
@@ -2124,12 +2109,20 @@ impl App {
 				subs.push(iced::keyboard::listen().map(Message::FormKey));
 			}
 			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
-			// The editor's shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W); typing goes to the widget.
-			Screen::Editor => subs.push(iced::keyboard::listen().map(Message::EditorKey)),
-			// A preview has nothing to type into, so it listens for one thing: the key that closes
-			// it (§53). Without this the tab would be the only one in the app a keyboard cannot
-			// dismiss, which reads as a bug rather than as a design.
-			Screen::Preview => subs.push(iced::keyboard::listen().map(Message::PreviewKey)),
+			// What a viewer listens for depends on what it is holding, so it is asked (§32, §53).
+			// The editor wants its shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W) while typing goes
+			// to the widget. A picture has nothing to type into, so it listens for one thing: the
+			// key that closes it — without which it would be the only tab in the app a keyboard
+			// cannot dismiss, which reads as a bug rather than as a design.
+			Screen::Viewer => match &active.viewer {
+				Some(Viewer::Editor(_)) => {
+					subs.push(iced::keyboard::listen().map(Message::EditorKey));
+				}
+				Some(Viewer::Picture(_)) => {
+					subs.push(iced::keyboard::listen().map(Message::PreviewKey));
+				}
+				None => {}
+			},
 			Screen::Connect | Screen::Connecting { .. } => {}
 		}
 
@@ -2153,16 +2146,18 @@ pub enum Screen {
 	Connecting { status: String },
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
-	/// A text editor open on a remote file (§32). This tab is NOT a session — it has no connection
-	/// of its own; its loads and saves ride the parent session's channel. The buffer and its state
-	/// live in `Tab::editor`, which is `Some` exactly while this screen shows.
-	Editor,
-	/// A picture open on a remote file (§53). The editor's read-only twin: not a session either,
-	/// its one read rides the parent session's channel, and the decoded image lives in
-	/// `Tab::preview`, `Some` exactly while this screen shows. It exists because a `.png` opened in
-	/// a text editor can only ever be refused, and "here is the picture" is the answer the user
-	/// wanted from the double-click.
-	Preview,
+	/// A remote file open for viewing — a text editor (§32) or a picture (§53). This tab is NOT a
+	/// session: it has no connection of its own, and its load (and its saves, if it has any) ride
+	/// the parent session's channel. WHICH of the two it is lives in `Tab::viewer`, which is `Some`
+	/// exactly while this screen shows.
+	///
+	/// One variant and not two, because the kind is not a property of the screen: every place that
+	/// branched on `Screen::Editor` vs `Screen::Preview` immediately went on to unwrap the matching
+	/// field, so the screen's job was only ever to say WHETHER a viewer is open. Saying it twice
+	/// meant a `Tab` could be built claiming one kind while holding the other, and nothing rejected
+	/// it. The picture screen exists at all because a `.png` opened in a text editor can only ever
+	/// be refused, and "here is the picture" is the answer the double-click wanted.
+	Viewer,
 }
 
 /// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
@@ -2282,6 +2277,120 @@ struct Workspace {
 	search_stale: bool,
 }
 
+/// What a VIEWER tab is showing (§32, §53): a text buffer, or a picture.
+///
+/// The two are siblings, not a base and a special case — an editor has an encoding to preserve, a
+/// dirty flag, changed-line marks, a theme and a save path, and a preview has none of those,
+/// because it cannot write. Folding the read-only one INTO the read-write one would have meant a
+/// dozen fields that are always empty on one of the two, which is the shape §16's queue was pulled
+/// out of `Tab` to escape. An enum keeps both whole and adds no empty field to either.
+///
+/// It replaces a PAIR of `Option` fields that modelled one thing. The pair could represent states
+/// that cannot exist — both `Some`, or neither `Some` on a viewer tab — so "exactly one of these is
+/// open" was a convention maintained by hand at every site that touched them, and the fork between
+/// the two kinds was written out five times. Here the invariant is the type's, and the fork is a
+/// `match` the compiler completes.
+///
+/// What the two DO share is stated once, below: a viewer is parented to a session, and a viewer is
+/// open on a path. Those two facts drive most of the call sites, and neither needs to know which
+/// kind it is holding to ask for them.
+#[derive(Debug)]
+enum Viewer {
+	Editor(crate::editor::Editor),
+	Picture(crate::preview::Preview),
+}
+
+impl Viewer {
+	/// The session this viewer was opened from (§32, §53) — the tab whose channel carries its
+	/// loads, and its saves if it has any. Both kinds have one, so asking costs no fork.
+	fn session(&self) -> u64 {
+		match self {
+			Self::Editor(editor) => editor.session,
+			Self::Picture(picture) => picture.session,
+		}
+	}
+
+	/// The remote path it is open on. Both kinds have one; only the editor's can change, when a
+	/// Save As lands (§32).
+	fn path(&self) -> &str {
+		match self {
+			Self::Editor(editor) => &editor.path,
+			Self::Picture(picture) => &picture.path,
+		}
+	}
+
+	/// The buffer, when this is an editor. `None` for a picture, which is the honest answer to
+	/// "give me the text of this" rather than something to guard against at the call site.
+	fn editor(&self) -> Option<&crate::editor::Editor> {
+		match self {
+			Self::Editor(editor) => Some(editor),
+			Self::Picture(_) => None,
+		}
+	}
+
+	/// The buffer, mutably.
+	fn editor_mut(&mut self) -> Option<&mut crate::editor::Editor> {
+		match self {
+			Self::Editor(editor) => Some(editor),
+			Self::Picture(_) => None,
+		}
+	}
+
+	/// The picture, mutably — the twin of `editor_mut`.
+	fn picture_mut(&mut self) -> Option<&mut crate::preview::Preview> {
+		match self {
+			Self::Picture(picture) => Some(picture),
+			Self::Editor(_) => None,
+		}
+	}
+
+	/// What the tab strip's chip says (§32, §53): the file's name, with a dot in front of it when
+	/// there are unsaved edits. A picture never wears the dot — it has nothing to save.
+	fn label(&self) -> String {
+		let name = crate::explorer::name(self.path());
+		match self {
+			Self::Editor(editor) if editor.is_dirty() => format!("• {name}"),
+			_ => name.to_owned(),
+		}
+	}
+
+	/// Tell it the session it was opened from has gone (§32, §53). The two kinds lose different
+	/// things with it, so they are told different things — which is exactly the sort of per-kind
+	/// difference that belongs in here rather than at the caller.
+	///
+	/// An EDITOR loses its way to save: the buffer stays open to read and copy, and the toolbar
+	/// disables Save with a note. A PICTURE still LOADING loses the read it is waiting on, so it is
+	/// failed rather than left showing "Loading…" for the rest of the tab's life; one that already
+	/// has its picture is untouched, because the image is decoded and in memory and is as good as it
+	/// was a moment ago.
+	fn orphan(&mut self) {
+		match self {
+			Self::Editor(editor) => editor.mark_parent_gone(),
+			Self::Picture(picture) => {
+				if matches!(picture.status, crate::preview::Status::Loading) {
+					picture.load_failed(
+						"The session this file was opened from closed before it finished loading."
+							.to_owned(),
+					);
+				}
+			}
+		}
+	}
+
+	/// Say that the load could not happen at all, because the parent went away before it was asked
+	/// (§32, §53). The editor also loses Save — there is no channel to save through — while the
+	/// picture has no Save to lose, so the sentence in place of the image is its whole story.
+	fn parent_gone(&mut self, reason: String) {
+		match self {
+			Self::Editor(editor) => {
+				editor.mark_parent_gone();
+				editor.load_failed(reason);
+			}
+			Self::Picture(picture) => picture.load_failed(reason),
+		}
+	}
+}
+
 /// One session's whole state — its screen, its connection, its terminal and panels, its
 /// dialogs (§6). This used to BE the app; with tabs (§26) the app owns a `Vec<Tab>` and each
 /// tab is one of these, fully independent: a tab can sit at the home list while another runs a
@@ -2344,20 +2453,12 @@ pub struct Tab {
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
 	terminal: Option<term::Terminal>,
-	/// The open text editor, when this tab is editing a remote file rather than running a session
-	/// (§32). `Some` exactly while `screen` is `Screen::Editor`; it holds the buffer, the encoding,
-	/// the changed-line marks and the id of the parent session its saves ride through.
-	editor: Option<crate::editor::Editor>,
-	/// The open picture, when this tab is showing a remote image rather than running a session
-	/// (§53). `Some` exactly while `screen` is `Screen::Preview`; it holds the decoded image and the
-	/// id of the parent session whose channel carried the read.
-	///
-	/// A sibling of `editor` rather than a state inside it: the two share only the tab shape and the
-	/// read that fills them. An editor has an encoding to preserve, a dirty flag, changed-line marks,
-	/// a theme and a save path; a preview has none of those, because it cannot write. Folding a
-	/// read-only thing into a read-write one would have meant a dozen fields that are always empty
-	/// on one of the two — the shape §16's queue was pulled out of `Tab` to escape.
-	preview: Option<crate::preview::Preview>,
+	/// What this tab is VIEWING, when it is showing a remote file rather than running a session
+	/// (§32, §53) — a text buffer or a picture, see [`Viewer`]. `Some` exactly while `screen` is
+	/// `Screen::Viewer`, and that is now one invariant rather than the two it used to be: this was a
+	/// pair of `Option` fields, `editor` and `preview`, each paired with a `Screen` variant of its
+	/// own, so four values had to agree about a thing that is one thing.
+	viewer: Option<Viewer>,
 	/// The question the connect flow is holding over the form, `None` when it is holding none
 	/// (§7, §8, §16). Each variant carries what answering it needs — the passphrase being typed,
 	/// the interactive challenge and its answers, the vault's two fields and what its unlock
@@ -3156,10 +3257,10 @@ impl Tab {
 	) -> Self {
 		Self {
 			id,
-			screen: Screen::Editor,
-			editor: Some(crate::editor::Editor::loading(
+			screen: Screen::Viewer,
+			viewer: Some(Viewer::Editor(crate::editor::Editor::loading(
 				session, identity, path, theme,
-			)),
+			))),
 			window_size,
 			window_focused: true,
 			shell_focus_reported: true,
@@ -3174,8 +3275,10 @@ impl Tab {
 	fn new_preview(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
 		Self {
 			id,
-			screen: Screen::Preview,
-			preview: Some(crate::preview::Preview::loading(session, path)),
+			screen: Screen::Viewer,
+			viewer: Some(Viewer::Picture(crate::preview::Preview::loading(
+				session, path,
+			))),
 			window_size,
 			window_focused: true,
 			shell_focus_reported: true,
@@ -3187,7 +3290,17 @@ impl Tab {
 	/// session. The property that matters is the one they share: no connection of its own, so no SSH
 	/// worker is started for it.
 	fn is_viewer(&self) -> bool {
-		self.editor.is_some() || self.preview.is_some()
+		self.viewer.is_some()
+	}
+
+	/// The buffer this tab is editing, if it is editing one (§32).
+	fn editor(&self) -> Option<&crate::editor::Editor> {
+		self.viewer.as_ref().and_then(Viewer::editor)
+	}
+
+	/// The buffer this tab is editing, mutably.
+	fn editor_mut(&mut self) -> Option<&mut crate::editor::Editor> {
+		self.viewer.as_mut().and_then(Viewer::editor_mut)
 	}
 
 	/// Ask `App` to open `path` in a new viewer tab parented to THIS session (§32, §53). Raised by
@@ -3213,20 +3326,11 @@ impl Tab {
 				.clone()
 				.unwrap_or_else(|| "session".to_owned()),
 			Screen::Home => "Home".to_owned(),
-			// An editor tab is named by its file, with a dot when it has unsaved edits (§32).
-			Screen::Editor => match &self.editor {
-				Some(editor) => {
-					let name = crate::explorer::name(&editor.path);
-					let dot = if editor.is_dirty() { "• " } else { "" };
-					format!("{dot}{name}")
-				}
-				None => "editor".to_owned(),
-			},
-			// A preview is named by its file too, and never wears the dot: it has nothing to save
-			// (§53).
-			Screen::Preview => match &self.preview {
-				Some(preview) => crate::explorer::name(&preview.path).to_owned(),
-				None => "preview".to_owned(),
+			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
+			// only an editor can have (§32, §53). Both halves of that are the viewer's own.
+			Screen::Viewer => match &self.viewer {
+				Some(viewer) => viewer.label(),
+				None => "file".to_owned(),
 			},
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
@@ -3264,9 +3368,7 @@ impl Tab {
 	/// Whether this tab is an editor with unsaved edits (§32). Its "×" is confirmed like a live
 	/// session's, so a stray click cannot lose the work.
 	fn is_dirty_editor(&self) -> bool {
-		self.editor
-			.as_ref()
-			.is_some_and(crate::editor::Editor::is_dirty)
+		self.editor().is_some_and(crate::editor::Editor::is_dirty)
 	}
 
 	/// Apply an editor-buffer message (§32): typing and the Save As prompt's own field are handled
@@ -3274,7 +3376,7 @@ impl Tab {
 	/// alone can reach the parent session's channel.
 	fn on_editor(&mut self, message: crate::editor::EditorMessage) -> iced::Task<Message> {
 		use crate::editor::EditorMessage;
-		let Some(editor) = self.editor.as_mut() else {
+		let Some(editor) = self.editor_mut() else {
 			return iced::Task::none();
 		};
 		match message {
@@ -3370,7 +3472,7 @@ impl Tab {
 		// Escape closes the find bar if it is open (§32), whatever holds focus — the field has no close
 		// of its own. When the bar is closed, Escape does nothing here and falls through.
 		if matches!(key, Key::Named(Named::Escape)) {
-			let find_open = self.editor.as_ref().is_some_and(|e| e.find.is_some());
+			let find_open = self.editor().is_some_and(|e| e.find.is_some());
 			return if find_open {
 				iced::Task::done(Message::Editor(EditorMessage::FindClose))
 			} else {
@@ -3442,7 +3544,7 @@ impl Tab {
 	/// unbounded hang. Moving it off-thread is an async task plus a message and a route home; worth
 	/// doing if a real picture is ever felt to stutter, and not before.
 	fn on_preview_event(&mut self, event: SshEvent) -> iced::Task<Message> {
-		let Some(preview) = self.preview.as_mut() else {
+		let Some(picture) = self.viewer.as_mut().and_then(Viewer::picture_mut) else {
 			return iced::Task::none();
 		};
 		match event {
@@ -3452,11 +3554,11 @@ impl Tab {
 				// which would be a bigger number the user has no way to recognise.
 				let size = bytes.len() as u64;
 				match crate::preview::decode(&bytes) {
-					Ok(decoded) => preview.set_loaded(decoded, size),
-					Err(reason) => preview.load_failed(reason),
+					Ok(decoded) => picture.set_loaded(decoded, size),
+					Err(reason) => picture.load_failed(reason),
 				}
 			}
-			SshEvent::FileLoadFailed { reason, .. } => preview.load_failed(reason),
+			SshEvent::FileLoadFailed { reason, .. } => picture.load_failed(reason),
 			// A preview never asked for a save, so a save reply cannot be for it.
 			_ => {}
 		}
@@ -3470,11 +3572,11 @@ impl Tab {
 	/// A preview tab takes the same two load replies and none of the save ones, so it is answered
 	/// first and separately rather than by threading an `Option` through the editor's arms.
 	fn on_viewer_event(&mut self, event: SshEvent) -> iced::Task<Message> {
-		if self.preview.is_some() {
+		if matches!(self.viewer, Some(Viewer::Picture(_))) {
 			return self.on_preview_event(event);
 		}
 		let id = self.id;
-		let Some(editor) = self.editor.as_mut() else {
+		let Some(editor) = self.editor_mut() else {
 			return iced::Task::none();
 		};
 		match event {
@@ -7648,17 +7750,14 @@ impl Tab {
 				}
 				None => text("terminal starting…").into(),
 			},
-			// The in-tab editor (§32): its whole screen — toolbar, gutter, buffer — comes from
-			// `ui::editor`, which borrows the buffer in place, so nothing outlives this frame.
-			Screen::Editor => match &self.editor {
-				Some(editor) => ui::editor::view(editor, self.id),
-				None => text("editor starting…").into(),
-			},
-			// The picture tab (§53): one toolbar naming the file and one zoomable image, both from
-			// `ui::preview`, which borrows the decoded handle rather than copying pixels per frame.
-			Screen::Preview => match &self.preview {
-				Some(preview) => ui::preview::view(preview, self.id),
-				None => text("preview starting…").into(),
+			// A viewer tab (§32, §53). The in-tab editor's whole screen — toolbar, gutter, buffer —
+			// comes from `ui::editor`; the picture's toolbar and zoomable image come from
+			// `ui::preview`. Both borrow what they draw in place, so neither the buffer nor the
+			// decoded pixels are copied per frame.
+			Screen::Viewer => match &self.viewer {
+				Some(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
+				Some(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
+				None => text("opening…").into(),
 			},
 		}
 	}
@@ -9661,14 +9760,14 @@ mod tests {
 		let _task = app.open_viewer(app.focus, id, "/root/.ssh/authorized_keys".to_owned());
 		let editor = app
 			.tabs()
-			.find_map(|tab| tab.editor.as_ref())
+			.find_map(Tab::editor)
 			.expect("the editor tab is open");
 		assert_eq!(editor.identity, root, "opened as the account on screen");
 
 		// The session goes back to `cme` while the file is still open, and the save still names root.
 		let viewer_id = app
 			.tabs()
-			.find(|tab| tab.editor.is_some())
+			.find(|tab| tab.editor().is_some())
 			.map(|tab| tab.id)
 			.expect("the editor tab has an id");
 		if let Some(tab) = app.tab_mut(id) {
@@ -10743,8 +10842,7 @@ mod tests {
 	// The path of an editor tab's file, for asserting where in the strip it landed (§38).
 	fn editor_path(app: &App, index: usize) -> String {
 		strip(app)[index]
-			.editor
-			.as_ref()
+			.editor()
 			.expect("an editor tab")
 			.path
 			.clone()
@@ -10850,10 +10948,10 @@ mod tests {
 
 	/// The picture tab with this id (§53).
 	fn preview_of(app: &App, id: u64) -> &crate::preview::Preview {
-		app.tabs()
-			.find(|tab| tab.id == id)
-			.and_then(|tab| tab.preview.as_ref())
-			.expect("a preview tab")
+		match app.tabs().find(|tab| tab.id == id).map(|tab| &tab.viewer) {
+			Some(Some(Viewer::Picture(picture))) => picture,
+			_ => panic!("a preview tab"),
+		}
 	}
 
 	/// The double-click that used to hand a `.png` to a text editor now opens a picture instead
@@ -10864,14 +10962,66 @@ mod tests {
 
 		let picture = open_file(&mut app, session, "/srv/shot.png");
 		let tab = app.tabs().find(|tab| tab.id == picture).expect("the tab");
-		assert!(tab.preview.is_some(), "a picture opens a preview");
-		assert!(tab.editor.is_none(), "and never a buffer as well");
-		assert!(matches!(tab.screen, Screen::Preview));
+		// "And never a buffer as well" used to need its own assertion, because the two kinds were
+		// two `Option` fields and nothing stopped both being `Some`. One enum makes that
+		// unrepresentable, so matching the variant IS the whole claim.
+		assert!(
+			matches!(tab.viewer, Some(Viewer::Picture(_))),
+			"a picture opens a picture"
+		);
+		assert!(matches!(tab.screen, Screen::Viewer));
 
 		let notes = open_file(&mut app, session, "/srv/notes.txt");
 		let tab = app.tabs().find(|tab| tab.id == notes).expect("the tab");
-		assert!(tab.editor.is_some(), "text still opens the editor");
-		assert!(tab.preview.is_none());
+		assert!(
+			matches!(tab.viewer, Some(Viewer::Editor(_))),
+			"text still opens the editor"
+		);
+	}
+
+	/// What the two viewer kinds SHARE, asked of the enum rather than forked on at the call site
+	/// (§32, §53). No window and no session: these are the accessors most of the old fork sites
+	/// actually wanted, and they are the reason the fork disappeared rather than moved.
+	#[test]
+	fn both_viewer_kinds_answer_for_their_parent_and_their_path() {
+		let editor = Viewer::Editor(crate::editor::Editor::loading(
+			7,
+			bridge::LOGIN_IDENTITY,
+			"/srv/notes.txt".to_owned(),
+			crate::editor::EditorTheme::default(),
+		));
+		let picture = Viewer::Picture(crate::preview::Preview::loading(
+			7,
+			"/srv/shot.png".to_owned(),
+		));
+
+		assert_eq!(editor.session(), 7);
+		assert_eq!(picture.session(), 7, "a picture is parented the same way");
+		assert_eq!(editor.path(), "/srv/notes.txt");
+		assert_eq!(picture.path(), "/srv/shot.png");
+	}
+
+	/// The chip's label, which used to be two `Screen` arms each unwrapping its own field (§32,
+	/// §53).
+	#[test]
+	fn only_an_editor_can_wear_the_unsaved_dot() {
+		let clean = Viewer::Editor(crate::editor::Editor::loading(
+			7,
+			bridge::LOGIN_IDENTITY,
+			"/srv/notes.txt".to_owned(),
+			crate::editor::EditorTheme::default(),
+		));
+		let picture = Viewer::Picture(crate::preview::Preview::loading(
+			7,
+			"/srv/shot.png".to_owned(),
+		));
+
+		// Both are named by the file's own name, not by its path.
+		assert_eq!(clean.label(), "notes.txt");
+		// A picture has nothing to save, so it can never be dirty and never wears the dot. That
+		// used to be enforced by writing the picture's arm without one; now it is enforced by
+		// there being no `is_dirty` to reach on this variant.
+		assert_eq!(picture.label(), "shot.png");
 	}
 
 	/// An SVG is a picture by icon and text by nature, and the editor can genuinely edit it (§53).
@@ -10882,7 +11032,7 @@ mod tests {
 		assert!(
 			app.tabs()
 				.find(|tab| tab.id == id)
-				.is_some_and(|tab| tab.editor.is_some())
+				.is_some_and(|tab| tab.editor().is_some())
 		);
 	}
 

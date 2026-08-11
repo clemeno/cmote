@@ -5872,6 +5872,20 @@ account the pane happened to be showing.
 
 ### Small decisions worth stating
 
+- **One `Screen::Viewer` and one `Tab::viewer`, not two of each.** A viewer tab was modelled as
+  `Screen::Editor`/`Screen::Preview` beside `editor: Option<…>`/`preview: Option<…>` — four values
+  agreeing about one thing, with "exactly one of these is open" maintained by hand. The kind is now
+  `enum Viewer { Editor, Picture }` and the screen says only WHETHER a viewer is open, which is all
+  it ever meant: every arm that branched on the screen went straight on to unwrap the matching
+  field. What that buys is not brevity. It is that `Tab { screen: Screen::Editor, preview: Some(…) }`
+  used to be constructible and nothing rejected it, and the fork between the two kinds was written
+  out five times (open, orphan, route an event, label the chip, draw the tab). The enum is still two
+  whole structs — an editor has an encoding, a dirty flag, changed-line marks, a theme and a save
+  path, and a picture has none of those because it cannot write — so this is NOT the "fold the
+  read-only one into the read-write one" that was refused when §53 landed; that would have meant a
+  dozen always-empty fields. What the two share (`session`, `path`, "your parent is gone", the chip
+  label) is stated once on the enum, and that is what most of the old fork sites were actually
+  reaching for.
 - **Zoom and pan are iced's**, not cmote's: `image::viewer` already scroll-zooms about the pointer
   and drag-pans, and it keeps the scale in the widget's own state. So the model carries no zoom
   level and nothing has to be reset — there is exactly one picture per tab for the life of the tab,
