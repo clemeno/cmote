@@ -552,6 +552,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | G / H (+ f) | Absolute position | ✅ | HVP `f` too |
 | I / Z | Forward / backward tab | ✅ | |
 | d / \` | Vertical / horizontal PA | ✅ | |
+| a / e | Horizontal / vertical PR | ✅ | the parser aliases HPR to CUF and VPR to CUD (`ansi.rs`), so they move but do not have their own arm |
 | s / u | Save / restore cursor | ✅ | ANSI.SYS form |
 | @ / P / X | Insert / delete / erase char | ✅ | |
 | L / M | Insert / delete line | ✅ | |
@@ -562,8 +563,10 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
-| s (DECSLRM) | Left / right margins | ❌ | engine scroll region is vertical only (§5) |
+| s (DECSLRM) | Left / right margins | ❌ | engine scroll region is vertical only (§5). The spelling also **collides**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` saves the cursor rather than doing nothing. Unreachable in practice — a program only spells `s` as DECSLRM once DECLRMM (mode 69) is set, and that mode is refused, so a conformant emitter never sends it |
 | g | Tab clear | ✅ | |
+| ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
+| Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
 | $ z / $ x / $ v | Rectangular erase / fill / copy | ❌ | not represented (§5) |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
 | 5n / 6n | Device status report | ✅ | |
@@ -571,7 +574,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
 | ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
 | ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers |
-| # p / # q | Colour palette stack | ❌ | |
+| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | ❌ | *(policy)* — downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy |
 
 ### ESC — single sequences
 
