@@ -727,10 +727,28 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
     to `App::dialog_body`, seeded when the dialog opens (the host-key body includes the
     fingerprint on its own line). The user can drag to select and copy the selection
     (Ctrl+C); `update` applies every `text_editor::Action` except an edit (`!is_edit()`), so
-    the text is selectable yet never mutable. While the disconnect modal is open, `on_key`
+    the text is selectable yet never mutable. While a modal is open, `on_key`
     stops forwarding keys to the shell so Ctrl+C copies rather than sending ETX to the
     remote. The `Screen::ConfirmHostKey` / `Screen::Error` variants carry no text anymore —
     the message lives in `dialog_body`, so they are bare markers.
+  - **One dialog, one field** (`Tab::modal`, v4.0.0). The terminal screen can put four
+    questions to the user — Disconnect, New folder, Delete, the tunnels manager — and only
+    ONE at a time: they share the body buffer above and the card below, so two were never
+    drawable. That was four independent fields (two bools, two `Option`s) and a convention;
+    it is now `Option<Modal>`, and the convention's three holes closed with it:
+    - opening one now closes whatever was up (they each used to write only their own field,
+      so both cards drew, one over the other);
+    - all four now take the keyboard. Three of them did not, so typing a folder name, or a
+      forward's port, ALSO typed at the remote prompt — the very thing the inline rename
+      fields (§18, §19) already guard against. Esc closes whichever is open, which is safe
+      because none of them acts on being dismissed;
+    - all four now close with the session. `pending_delete` and `new_folder` did not, so a
+      delete confirmation could outlive the server whose paths it was holding and, on the
+      next connect, delete them on a different machine.
+
+    Each variant carries what answering it needs — the folder's parent and typed name, the
+    paths to delete, the tunnels dialog's add form — so the answer is read off the thing
+    that asked rather than off a field that might have been left over from something else.
   - **Draggable by the header** (§10): pressing the header background starts a drag
     (`DialogGrabbed`), and while dragging a transparent full-window capture layer reports
     every pointer move (`DialogDragged`) and the release (`DialogReleased`) — so tracking
@@ -2673,8 +2691,11 @@ Two commands (`AddForward { id, spec }` / `RemoveForward(id)`) and four events (
 { id, assigned_port }` / `ForwardFailed { id, reason }` and the gauge's `ForwardConnectionOpened
 { id }` / `ForwardConnectionClosed { id }`) extend the protocol (§4); the id is app-assigned, keying a
 forward to its outcome, its removal, and its activity. Each tab keeps a `Vec<ForwardEntry>` (id +
-spec + status: Starting → Active / Failed, plus the assigned port and the live/total counts) and a
-small add-form. The **Tunnels** button (status bar, with the live
+spec + status: Starting → Active / Failed, plus the assigned port and the live/total counts). The
+add form (`ui::forward::ForwardForm`) is NOT beside it: it lives inside the open modal (§10), because
+it exists only while the dialog does — closing the dialog throws a half-typed forward away, which is
+what dismissing a form means, and the entry list is the thing that has to outlive it. The
+**Tunnels** button (status bar, with the live
 count) opens the manager — the shared dialog chrome (§10) with a row per forward (label, status dot,
 remove ✕) above the add form (a kind selector, a listen field, a target field hidden for Dynamic).
 Adding parses, refuses a duplicate bind before it is sent, queues the entry and asks the worker;

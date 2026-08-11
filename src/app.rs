@@ -2328,16 +2328,18 @@ pub struct Tab {
 	pointer: iced::Point,
 	/// The context menu's anchor when it is open, `None` when closed (§10).
 	menu: Option<iced::Point>,
-	/// Whether the Disconnect confirmation modal is open (§10). Set by the Disconnect
-	/// button and cleared on confirm or cancel — it guards a live session against an
-	/// accidental click.
-	confirm_disconnect: bool,
+	/// The dialog open over the terminal screen, `None` when none is (§10).
+	///
+	/// One field, because one dialog: they share the body buffer below, and every one of them
+	/// takes the keyboard while it is up. As four independent fields nothing but care kept two
+	/// from being set at once, nothing closed one when the next opened, and three of them were
+	/// missing from both the keyboard guard and the session teardown.
+	modal: Option<Modal>,
 	/// The body message of whatever dialog is currently open, held as `text_editor`
 	/// content so the user can *select* it and copy the selection (§10). It is
 	/// read-only in practice — `update` performs every action except an edit — and is
-	/// reseeded each time a dialog opens. Only one dialog is ever visible, so a single
-	/// buffer serves all seven (delete-target, disconnect, upload, overwrite, host-key,
-	/// passphrase, error).
+	/// reseeded each time a dialog opens. Only one dialog is ever visible — `modal` above is
+	/// how that is now stated — so a single buffer serves them all.
 	dialog_body: text_editor::Content,
 	/// Where this tab's open dialog floats and whether it is being dragged (§10). Centred each
 	/// time a dialog opens, then it follows the header. The same `ui::dialog::Card` the App-level
@@ -2381,14 +2383,6 @@ pub struct Tab {
 	/// subscription because a mouse press reports none of its own, and Ctrl+click,
 	/// Shift+click and Ctrl+drag all need to know.
 	modifiers: iced::keyboard::Modifiers,
-	/// The "new folder" dialog's target and typed name (§18), `Some` while it is open. The
-	/// parent is where the folder will be made — a tree folder or the pane's directory — and
-	/// `name` is what the user is typing; `None` the rest of the time, which hides the dialog.
-	new_folder: Option<NewFolder>,
-	/// The remote entries a delete confirmation is holding (§18): the paths that will be removed
-	/// once the user confirms. `Some` while the confirmation is up, `None` otherwise — deleting is
-	/// not undoable, so nothing is sent until this is confirmed.
-	pending_delete: Option<Vec<String>>,
 	/// The copy-confirmation toast currently showing, if any (§10). Set on every clipboard
 	/// write and cleared once its dwell elapses; `None` the rest of the time. The timestamp
 	/// inside it is the dwell clock — see `Snackbar`.
@@ -2438,15 +2432,31 @@ pub struct Tab {
 	/// The next forward id to hand out (§27). Monotonic per tab, never reused, so a removed
 	/// forward's late event can never land on a new one.
 	next_forward_id: u64,
-	/// Whether the port-forwards management dialog is open (§27).
-	forward_dialog: bool,
-	/// The add form's selected kind (§27).
-	forward_kind: crate::forward::ForwardKind,
-	/// The add form's listen and target fields, and the last parse error to show under them
-	/// (§27). Cleared as forwards are added; the error is cleared on the next edit or a clean add.
-	forward_listen: String,
-	forward_to: String,
-	forward_error: Option<String>,
+}
+
+/// The dialog open over the terminal screen (§10), and whatever answering it needs.
+///
+/// This screen can put four questions to the user, and it can put only ONE at a time: they share
+/// the tab's single body buffer and its single card, and each of them owns the keyboard while it
+/// is up. As four separate fields — two bools and two `Option`s — that was a convention rather
+/// than a fact, and the convention had holes: opening one left the others alone, three of the four
+/// were absent from the keyboard guard (so naming a new folder also typed at the remote prompt),
+/// and two were absent from the session teardown (so a delete confirmation could outlive the
+/// server whose paths it was holding). One `Option` is all four rules at once.
+#[derive(Debug)]
+pub enum Modal {
+	/// Ending this shell (§10). The Disconnect button only ever raises this; the teardown happens
+	/// on the explicit confirm, so an accidental click cannot end a live session.
+	Disconnect,
+	/// A folder to be made inside `parent` — a tree folder that was right-clicked, or the files
+	/// pane's own directory — with the name typed so far (§18).
+	NewFolder { parent: String, name: String },
+	/// The remote entries a delete confirmation is holding (§18): the paths that will be removed
+	/// once the user confirms. Deleting is not undoable, so nothing is sent until then.
+	Delete(Vec<String>),
+	/// The port-forwards manager (§27) and its add form. The session's forwards themselves are
+	/// NOT here — they outlive any number of opens and closes of this dialog.
+	Forwards(ui::forward::ForwardForm),
 }
 
 /// What a successful vault unlock should resume (§16). The master-passphrase prompt can
@@ -2469,15 +2479,6 @@ enum VaultPending {
 struct Snackbar {
 	message: String,
 	shown_at: std::time::Instant,
-}
-
-/// The in-progress "new folder" dialog (§18): where the folder will be made, and the name typed
-/// so far. A small owned struct, like the home screen's rename, because it is the same shape of
-/// interaction — a name being entered against a fixed target.
-#[derive(Debug, Clone)]
-struct NewFolder {
-	parent: String,
-	name: String,
 }
 
 /// What the fresh region of a split opens with (§48, §52).
@@ -3369,7 +3370,6 @@ impl Tab {
 			}
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
 			Message::DisconnectConfirmed => return self.on_disconnect_confirmed(),
-			Message::DisconnectCancelled => self.confirm_disconnect = false,
 			Message::GridMoved(point) => self.on_grid_moved(point),
 			Message::GridPressed => self.on_grid_pressed(),
 			Message::GridReleased => self.on_grid_released(),
@@ -3486,14 +3486,18 @@ impl Tab {
 			}
 			// Create / delete / recursive transfer (§18, §17, §19).
 			Message::NewFolderNameChanged(value) => {
-				if let Some(new_folder) = self.new_folder.as_mut() {
-					new_folder.name = value;
+				if let Some(Modal::NewFolder { name, .. }) = &mut self.modal {
+					*name = value;
 				}
 			}
 			Message::NewFolderConfirmed => self.confirm_new_folder(),
-			Message::NewFolderCancelled => self.new_folder = None,
+			// Every dialog over this screen dismisses the same way: the modal closes and nothing
+			// it was holding is acted on. That is what makes the ✕, the backdrop and Esc all safe.
+			Message::NewFolderCancelled
+			| Message::DeleteCancelled
+			| Message::DisconnectCancelled
+			| Message::ForwardsClosed => self.modal = None,
 			Message::DeleteConfirmed => self.confirm_remote_delete(),
-			Message::DeleteCancelled => self.pending_delete = None,
 			Message::TransferConflictResolved(choice) => {
 				let effects = self.transfers.answer_conflict(choice);
 				return self.apply(effects);
@@ -3589,18 +3593,25 @@ impl Tab {
 			| Message::PointerPressed => {}
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
-			Message::ForwardsClosed => self.forward_dialog = false,
+			// Any edit to the add form clears the last parse error under it, so a stale complaint
+			// never sits under a field the user has since fixed.
 			Message::ForwardKindSelected(kind) => {
-				self.forward_kind = kind;
-				self.forward_error = None;
+				if let Some(form) = self.forward_form_mut() {
+					form.kind = kind;
+					form.error = None;
+				}
 			}
 			Message::ForwardListenChanged(value) => {
-				self.forward_listen = value;
-				self.forward_error = None;
+				if let Some(form) = self.forward_form_mut() {
+					form.listen = value;
+					form.error = None;
+				}
 			}
 			Message::ForwardToChanged(value) => {
-				self.forward_to = value;
-				self.forward_error = None;
+				if let Some(form) = self.forward_form_mut() {
+					form.to = value;
+					form.error = None;
+				}
 			}
 			Message::ForwardAddPressed => self.add_forward(),
 			Message::ForwardRemove(id) => self.remove_forward(id),
@@ -3911,6 +3922,16 @@ impl Tab {
 			return iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID);
 		}
 		iced::Task::none()
+	}
+
+	/// Open a dialog over the terminal screen (§10). ONE way in, so every one of them gets the
+	/// same four things: whatever was open closes (they share a body buffer and a card, and only
+	/// one can be on screen), any context menu goes with it, the body is seeded, and the card is
+	/// centred fresh rather than inheriting the last dialog's position.
+	fn open_modal(&mut self, modal: Modal, body: &str) {
+		self.menu = None;
+		self.set_dialog_body(body);
+		self.modal = Some(modal);
 	}
 
 	/// Load `text` into the dialog body buffer so the dialog about to open shows it as
@@ -4410,9 +4431,7 @@ impl Tab {
 	/// closes any open context menu so only the modal is shown. The teardown happens
 	/// in `on_disconnect_confirmed` once the user confirms.
 	fn on_disconnect_pressed(&mut self) {
-		self.menu = None;
-		self.set_dialog_body(ui::terminal::DISCONNECT_DIALOG_BODY);
-		self.confirm_disconnect = true;
+		self.open_modal(Modal::Disconnect, ui::terminal::DISCONNECT_DIALOG_BODY);
 	}
 
 	/// Confirmed Disconnect (§10): tell the SSH task to tear down, then drop the local
@@ -4429,14 +4448,22 @@ impl Tab {
 		self.go_home()
 	}
 
-	/// Open the port-forwards manager (§27): close any context menu, show the dialog centred, and
-	/// focus the listen field so a forward can be typed straight away.
+	/// Open the port-forwards manager (§27): the dialog opens centred with a blank add form, and
+	/// the listen field takes the keyboard so a forward can be typed straight away. The form goes
+	/// with the dialog, so reopening it never shows what a previous visit left half typed.
 	fn open_forwards_dialog(&mut self) -> iced::Task<Message> {
-		self.menu = None;
-		self.forward_error = None;
-		self.card = ui::dialog::Card::opened(self.window_size);
-		self.forward_dialog = true;
+		// The manager draws its own list; the shared body buffer has nothing to say for it, and is
+		// seeded empty so no previous dialog's message lingers behind it.
+		self.open_modal(Modal::Forwards(ui::forward::ForwardForm::default()), "");
 		iced::widget::operation::focus(ui::forward::LISTEN_INPUT_ID)
+	}
+
+	/// The add form of the open tunnels dialog, or `None` when that is not what is open (§27).
+	fn forward_form_mut(&mut self) -> Option<&mut ui::forward::ForwardForm> {
+		match &mut self.modal {
+			Some(Modal::Forwards(form)) => Some(form),
+			_ => None,
+		}
 	}
 
 	/// Add the forward described by the add form (§27): parse the two fields, reject a duplicate
@@ -4445,16 +4472,13 @@ impl Tab {
 	/// sent. The listen/target fields are cleared on success so the next forward starts blank;
 	/// the kind is kept, since adding several of one kind is common.
 	fn add_forward(&mut self) {
-		let spec = match crate::forward::ForwardSpec::parse(
-			self.forward_kind,
-			&self.forward_listen,
-			&self.forward_to,
-		) {
+		let Some(Modal::Forwards(form)) = &self.modal else {
+			return;
+		};
+		let parsed = crate::forward::ForwardSpec::parse(form.kind, &form.listen, &form.to);
+		let spec = match parsed {
 			Ok(spec) => spec,
-			Err(reason) => {
-				self.forward_error = Some(reason);
-				return;
-			}
+			Err(reason) => return self.refuse_forward(reason),
 		};
 		// Two forwards cannot bind the same local (or server) endpoint; refuse the duplicate
 		// before it is sent, so the second one's inevitable bind failure never happens.
@@ -4463,8 +4487,7 @@ impl Tab {
 			.iter()
 			.any(|entry| entry.spec.same_endpoint(&spec))
 		{
-			self.forward_error = Some("A forward already binds that address.".to_owned());
-			return;
+			return self.refuse_forward("A forward already binds that address.".to_owned());
 		}
 
 		let id = self.next_forward_id;
@@ -4483,10 +4506,20 @@ impl Tab {
 				open_count: 0,
 				total_count: 0,
 			});
-			self.forward_listen.clear();
-			self.forward_to.clear();
-			self.forward_error = None;
+			if let Some(form) = self.forward_form_mut() {
+				form.listen.clear();
+				form.to.clear();
+				form.error = None;
+			}
 			self.persist_forwards();
+		}
+	}
+
+	/// Show why an add was refused, under the form that asked for it (§27). Nothing is sent, and
+	/// what was typed stays, so the reason names a field the user can still see.
+	fn refuse_forward(&mut self, reason: String) {
+		if let Some(form) = self.forward_form_mut() {
+			form.error = Some(reason);
 		}
 	}
 
@@ -4987,15 +5020,6 @@ impl Tab {
 	fn on_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::{Code, Named, Physical};
 
-		// While the Disconnect confirmation modal is open, keystrokes belong to the
-		// dialog (notably Ctrl+C to copy the selected message text), not the remote
-		// shell — the `keyboard::listen` subscription fires independently of widget
-		// focus, so without this guard Ctrl+C would also send ETX to the session. The
-		// dialog's own widgets still receive the keys through the widget tree (§10).
-		if self.confirm_disconnect {
-			return iced::Task::none();
-		}
-
 		// The one place the modifier state is kept (§21): a mouse press carries none of its
 		// own, so Ctrl+click, Shift+click and Ctrl+drag all read it from here.
 		if let iced::keyboard::Event::ModifiersChanged(modifiers) = event {
@@ -5050,10 +5074,23 @@ impl Tab {
 			return iced::Task::none();
 		}
 
-		// The transfer flow's modals (§17, §21) are exactly that: while one is open the keyboard
-		// belongs to it — the destination field types through the widget tree — so nothing here
-		// reaches the shell. Esc backs out of whichever it is; everything else waits for a button.
-		// One question asked of the queue, which is the only thing that knows what it is holding.
+		// A dialog over this screen owns the keyboard while it is up (§10, §18, §27). Two reasons,
+		// and each of the four needs one of them: the ones with a FIELD (the new folder's name, a
+		// forward's listen/target) type through the widget tree, so a key reaching the shell as
+		// well would be typing at the remote prompt at the same time; the ones without take it so
+		// that Ctrl+C copies the selected message rather than sending ETX down the channel — the
+		// `keyboard::listen` subscription fires independently of widget focus. Esc closes whichever
+		// it is, which is safe because none of them acts on being dismissed.
+		if self.modal.is_some() {
+			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
+				self.modal = None;
+			}
+			return iced::Task::none();
+		}
+
+		// The transfer flow's own questions, by the same rule (§17, §21) — asked of the queue,
+		// which is the only thing that knows what it is holding. Esc backs out of whichever it is;
+		// everything else waits for a button.
 		if self.transfers.holds_keyboard() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.transfers.escape();
@@ -5262,7 +5299,7 @@ impl Tab {
 	/// the session. Used to decide whether a key *release* should reach the shell; a press is routed
 	/// by the fuller guard chain in `on_key`, which this mirrors.
 	fn shell_owns_keyboard(&self) -> bool {
-		!self.confirm_disconnect
+		self.modal.is_none()
 			&& !self.transfers.holds_keyboard()
 			&& self.explorer.editing().is_none()
 			&& self.files.editing().is_none()
@@ -6168,7 +6205,12 @@ impl Tab {
 		// A find bar left open across a session change would be searching a scrollback that no
 		// longer exists, and would go on swallowing the keyboard (§35) — so it closes with the rest.
 		self.search = None;
-		self.confirm_disconnect = false;
+		// Whichever dialog was open belongs to the session it was asked about (§10, §18, §27). One
+		// line, and it covers the two the three hand-written clears here used to forget: a delete
+		// confirmation left holding one server's paths, and a "new folder" dialog left naming one
+		// server's parent — either of which, on the next connect, would have acted on the NEW
+		// server with the old one's arguments.
+		self.modal = None;
 		// Everything about moving bytes belongs to the session that asked for it (§17, §21, §29):
 		// the picked batch, the queues behind it, a drag mid-hover, and — the one the twelve
 		// hand-written clears here used to forget — a Resume offer, which would otherwise relaunch
@@ -6192,11 +6234,10 @@ impl Tab {
 		self.explorer.reset();
 		self.files.reset();
 		// A session's forwards die with it (§27): the worker drops its listeners when the session
-		// ends, so the list — and the open dialog — belong to this session and are cleared. A fresh
-		// session re-establishes the target's saved set itself, after this runs.
+		// ends, so the list belongs to this session and is cleared — the manager dialog over it
+		// went with `modal` above. A fresh session re-establishes the target's saved set itself,
+		// after this runs.
 		self.forwards.clear();
-		self.forward_dialog = false;
-		self.forward_error = None;
 	}
 
 	/// A snapshot of this session's per-target UI state (§22): where the shell and files pane
@@ -6799,14 +6840,14 @@ impl Tab {
 		if parent.is_empty() {
 			return iced::Task::none();
 		}
-		self.set_dialog_body(&format!(
-			"{}\n\n{parent}",
-			ui::terminal::NEW_FOLDER_DIALOG_BODY
-		));
-		self.new_folder = Some(NewFolder {
-			parent,
-			name: String::new(),
-		});
+		let body = format!("{}\n\n{parent}", ui::terminal::NEW_FOLDER_DIALOG_BODY);
+		self.open_modal(
+			Modal::NewFolder {
+				parent,
+				name: String::new(),
+			},
+			&body,
+		);
 		iced::widget::operation::focus(ui::terminal::NEW_FOLDER_INPUT_ID)
 	}
 
@@ -6815,14 +6856,14 @@ impl Tab {
 	/// submittable — the dialog stays open rather than closing on nothing, the same rule the
 	/// inline rename follows. A good name closes the dialog and sends the request.
 	fn confirm_new_folder(&mut self) {
-		let Some(new_folder) = self.new_folder.as_ref() else {
+		let Some(Modal::NewFolder { parent, name }) = &self.modal else {
 			return;
 		};
-		if !explorer::is_plain_name(&new_folder.name) {
+		if !explorer::is_plain_name(name) {
 			return;
 		}
-		let path = explorer::join(&new_folder.parent, new_folder.name.trim());
-		self.new_folder = None;
+		let path = explorer::join(parent, name.trim());
+		self.modal = None;
 		self.send_command(SshCommand::MakeDir(path));
 	}
 
@@ -6835,17 +6876,24 @@ impl Tab {
 			return;
 		}
 		let names = join_lines(paths.iter().map(|path| explorer::name(path).to_owned()));
-		self.set_dialog_body(&format!("{}\n\n{names}", ui::terminal::DELETE_DIALOG_BODY));
-		self.pending_delete = Some(paths);
+		let body = format!("{}\n\n{names}", ui::terminal::DELETE_DIALOG_BODY);
+		self.open_modal(Modal::Delete(paths), &body);
 	}
 
 	/// Delete the held entries (§18) — only reached from a confirmed prompt. The panels re-list
 	/// when the server reports it done (`on_deleted`), so nothing is dropped from the view on a
 	/// hopeful guess.
 	fn confirm_remote_delete(&mut self) {
-		if let Some(paths) = self.pending_delete.take() {
-			self.send_command(SshCommand::Delete(paths));
-		}
+		let paths = match self.modal.take() {
+			Some(Modal::Delete(paths)) => paths,
+			// Some other dialog, or none: put back what was open and send nothing. Taking the
+			// paths is what closes the confirmation, so nothing can be deleted twice.
+			other => {
+				self.modal = other;
+				return;
+			}
+		};
+		self.send_command(SshCommand::Delete(paths));
 	}
 
 	/// Re-list a remote directory in whichever panel is showing it (§18): the tree, if it knows
@@ -7015,20 +7063,8 @@ impl Tab {
 						self.selection.as_ref(),
 						self.menu,
 						ui::terminal::Modals {
-							confirm_disconnect: self.confirm_disconnect,
-							new_folder: self
-								.new_folder
-								.as_ref()
-								.map(|new_folder| new_folder.name.as_str()),
-							pending_delete: self.pending_delete.is_some(),
-							forwards: ui::forward::ForwardsView {
-								open: self.forward_dialog,
-								entries: &self.forwards,
-								kind: self.forward_kind,
-								listen: &self.forward_listen,
-								to: &self.forward_to,
-								error: self.forward_error.as_deref(),
-							},
+							open: self.modal.as_ref(),
+							forwards: &self.forwards,
 							search: self.search.as_ref(),
 							body: &self.dialog_body,
 							card,
@@ -7597,14 +7633,85 @@ mod tests {
 		rx.try_recv().ok()
 	}
 
+	// Open the tunnels dialog if it is not already up and type a forward into its add form (§27) —
+	// the way the user does, since the form lives INSIDE the open modal and there is no field on
+	// the tab to set. Driving it through `update` is also what pins the wiring: an edit reaching a
+	// closed dialog would silently do nothing, and these tests would catch it.
+	fn type_forward(app: &mut Tab, kind: crate::forward::ForwardKind, listen: &str, to: &str) {
+		if !matches!(app.modal, Some(Modal::Forwards(_))) {
+			let _ = app.open_forwards_dialog();
+		}
+		let _ = app.update(Message::ForwardKindSelected(kind));
+		let _ = app.update(Message::ForwardListenChanged(listen.to_owned()));
+		let _ = app.update(Message::ForwardToChanged(to.to_owned()));
+	}
+
+	// The open tunnels dialog's add form, for assertions about what it is left holding.
+	fn forward_form(app: &Tab) -> &ui::forward::ForwardForm {
+		match &app.modal {
+			Some(Modal::Forwards(form)) => form,
+			other => panic!("the tunnels dialog is not open: {other:?}"),
+		}
+	}
+
+	/// Only ONE dialog can be over this screen (§10): they share the body buffer and the card, so
+	/// opening one has to close whatever was up. As four separate fields it did not — both stayed
+	/// set, and both cards drew, one on top of the other.
+	#[test]
+	fn opening_a_dialog_closes_the_one_before_it() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.begin_delete(vec!["/srv/a".to_owned()]);
+		assert!(matches!(app.modal, Some(Modal::Delete(_))));
+		app.on_disconnect_pressed();
+		assert!(matches!(app.modal, Some(Modal::Disconnect)));
+	}
+
+	/// A dialog owns the keyboard while it is up (§10, §18). Its own field types through the widget
+	/// tree, so a key reaching the shell as well would be typing at the remote prompt at the same
+	/// time — exactly what the inline rename fields already guard against.
+	#[test]
+	fn a_dialog_takes_the_keyboard_from_the_shell() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		let _ = app.begin_new_folder("/srv".to_owned());
+		let _ = app.on_key(character_press("x", Code::KeyX, Modifiers::empty()));
+		assert_eq!(next_input(&mut rx), None, "the shell heard nothing");
+		assert!(!app.shell_owns_keyboard());
+
+		// Esc closes it, and creates nothing — the same as the ✕ and the backdrop.
+		let _ = app.on_key(key_press(Named::Escape, Code::Escape, Modifiers::empty()));
+		assert!(app.modal.is_none());
+		assert!(next_command(&mut rx).is_none());
+		assert!(app.shell_owns_keyboard());
+	}
+
+	/// A dialog belongs to the session it asked about (§10, §18). A delete confirmation holding one
+	/// server's paths must not survive into the next connection — confirming it there would delete
+	/// those paths on a DIFFERENT machine.
+	#[test]
+	fn a_dialog_does_not_outlive_the_session_it_asked_about() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.begin_delete(vec!["/srv/a".to_owned()]);
+		app.clear_grid_interaction();
+		assert!(app.modal.is_none());
+		// Nothing is left to confirm, so a stray confirm sends nothing at all.
+		app.confirm_remote_delete();
+		assert!(next_command(&mut rx).is_none());
+	}
+
 	/// Adding a forward from the dialog parses the two fields, queues the entry as `Starting`,
 	/// sends the worker an `AddForward`, and clears the fields for the next one (§27).
 	#[test]
 	fn adding_a_forward_parses_queues_and_sends_it() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Local;
-		app.forward_listen = "8080".to_owned();
-		app.forward_to = "db:5432".to_owned();
+		type_forward(
+			&mut app,
+			crate::forward::ForwardKind::Local,
+			"8080",
+			"db:5432",
+		);
 
 		app.add_forward();
 
@@ -7614,9 +7721,9 @@ mod tests {
 			app.forwards[0].status,
 			crate::forward::ForwardStatus::Starting
 		);
-		assert!(app.forward_listen.is_empty());
-		assert!(app.forward_to.is_empty());
-		assert!(app.forward_error.is_none());
+		assert!(forward_form(&app).listen.is_empty());
+		assert!(forward_form(&app).to.is_empty());
+		assert!(forward_form(&app).error.is_none());
 
 		// The worker was asked to start exactly that spec.
 		match next_command(&mut rx) {
@@ -7634,13 +7741,17 @@ mod tests {
 	#[test]
 	fn a_bad_forward_shows_an_error_and_sends_nothing() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.forward_listen = "not-a-port".to_owned();
-		app.forward_to = "db:5432".to_owned();
+		type_forward(
+			&mut app,
+			crate::forward::ForwardKind::Local,
+			"not-a-port",
+			"db:5432",
+		);
 
 		app.add_forward();
 
 		assert!(app.forwards.is_empty());
-		assert!(app.forward_error.is_some());
+		assert!(forward_form(&app).error.is_some());
 		assert!(next_command(&mut rx).is_none());
 	}
 
@@ -7649,9 +7760,7 @@ mod tests {
 	#[test]
 	fn a_duplicate_bind_is_refused() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Local;
-		app.forward_listen = "8080".to_owned();
-		app.forward_to = "a:1".to_owned();
+		type_forward(&mut app, crate::forward::ForwardKind::Local, "8080", "a:1");
 		app.add_forward();
 		assert!(matches!(
 			next_command(&mut rx),
@@ -7659,11 +7768,10 @@ mod tests {
 		));
 
 		// Same bind, different target: rejected, nothing added, nothing sent.
-		app.forward_listen = "8080".to_owned();
-		app.forward_to = "b:2".to_owned();
+		type_forward(&mut app, crate::forward::ForwardKind::Local, "8080", "b:2");
 		app.add_forward();
 		assert_eq!(app.forwards.len(), 1);
-		assert!(app.forward_error.is_some());
+		assert!(forward_form(&app).error.is_some());
 		assert!(next_command(&mut rx).is_none());
 	}
 
@@ -7671,8 +7779,7 @@ mod tests {
 	#[test]
 	fn removing_a_forward_drops_it_and_sends_remove() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Dynamic;
-		app.forward_listen = "1080".to_owned();
+		type_forward(&mut app, crate::forward::ForwardKind::Dynamic, "1080", "");
 		app.add_forward();
 		let id = app.forwards[0].id;
 		assert!(matches!(
@@ -7697,9 +7804,12 @@ mod tests {
 	#[test]
 	fn a_forward_event_marks_its_row() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Local;
-		app.forward_listen = "8080".to_owned();
-		app.forward_to = "db:5432".to_owned();
+		type_forward(
+			&mut app,
+			crate::forward::ForwardKind::Local,
+			"8080",
+			"db:5432",
+		);
 		app.add_forward();
 		let id = app.forwards[0].id;
 
@@ -7734,9 +7844,12 @@ mod tests {
 	#[test]
 	fn a_server_assigned_remote_port_is_recorded_on_the_row() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Remote;
-		app.forward_listen = "0".to_owned();
-		app.forward_to = "localhost:3000".to_owned();
+		type_forward(
+			&mut app,
+			crate::forward::ForwardKind::Remote,
+			"0",
+			"localhost:3000",
+		);
 		app.add_forward();
 		let id = app.forwards[0].id;
 		// Authored as 0, no assigned port yet.
@@ -7766,9 +7879,12 @@ mod tests {
 	#[test]
 	fn a_forward_connection_event_moves_the_gauge() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.forward_kind = crate::forward::ForwardKind::Local;
-		app.forward_listen = "8080".to_owned();
-		app.forward_to = "db:5432".to_owned();
+		type_forward(
+			&mut app,
+			crate::forward::ForwardKind::Local,
+			"8080",
+			"db:5432",
+		);
 		app.add_forward();
 		let id = app.forwards[0].id;
 		// A fresh forward has carried nothing.

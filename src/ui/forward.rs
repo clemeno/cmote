@@ -29,32 +29,38 @@ const SELECTED_BG: Color = Color::from_rgb8(0x3d, 0x55, 0x77);
 
 const BODY_SIZE: f32 = 14.0;
 
-/// Everything the tunnels dialog needs to draw (§27), grouped so `ui::terminal::view` keeps a
-/// readable signature — the same pattern as `UploadView` / `Panels`. All fields are shared refs
-/// or `Copy`, so the struct is `Copy` and cheap to thread through.
-#[derive(Debug, Clone, Copy)]
-pub struct ForwardsView<'a> {
-	/// Whether the dialog is open — the one flag `view` checks before overlaying it.
-	pub open: bool,
-	/// The session's forwards, in add order.
-	pub entries: &'a [ForwardEntry],
-	/// The add form's currently-selected kind.
+/// The tunnels dialog's add form (§27): the kind selected, the two fields being typed, and the
+/// last parse error to show under them.
+///
+/// It is OWNED STATE, not a view of some — the app holds one, exactly as it holds a
+/// `ui::connect::ConnectForm`. It lives INSIDE the open modal rather than beside it, because it
+/// exists only while the dialog does: dismissing a form is what throws a half-typed forward away.
+/// The session's forwards themselves are not here; they outlive any number of opens and closes of
+/// this dialog, so they stay on the tab.
+#[derive(Debug, Default)]
+pub struct ForwardForm {
+	/// The currently-selected kind. Kept across a successful add — putting up several forwards of
+	/// one kind is the common case — while the two fields below are cleared.
 	pub kind: ForwardKind,
-	/// The add form's listen field (`port` or `host:port`).
-	pub listen: &'a str,
-	/// The add form's target field (`host:port`), unused for a Dynamic forward.
-	pub to: &'a str,
-	/// The last add attempt's parse error, shown under the form; `None` when the form is clean.
-	pub error: Option<&'a str>,
+	/// The listen field (`port` or `host:port`).
+	pub listen: String,
+	/// The target field (`host:port`), unused for a Dynamic forward.
+	pub to: String,
+	/// The last add attempt's parse error; `None` when the form is clean.
+	pub error: Option<String>,
 }
 
 /// Build the tunnels dialog card (§27). The body is the live-forwards list (or a "none yet"
 /// line) above the add form; the footer is a single Close. Reuses the shared chrome, so it
 /// drags, centres and dismisses like every other modal.
-pub fn panel<'a>(view: ForwardsView<'a>, card: Card) -> Element<'a, Message> {
+pub fn panel<'a>(
+	entries: &'a [ForwardEntry],
+	form: &'a ForwardForm,
+	card: Card,
+) -> Element<'a, Message> {
 	let mut body = column![].spacing(12);
 
-	if view.entries.is_empty() {
+	if entries.is_empty() {
 		body = body.push(
 			text("No forwards yet. Add one below.")
 				.size(BODY_SIZE)
@@ -62,14 +68,14 @@ pub fn panel<'a>(view: ForwardsView<'a>, card: Card) -> Element<'a, Message> {
 		);
 	} else {
 		let mut list = column![].spacing(6);
-		for entry in view.entries {
+		for entry in entries {
 			list = list.push(forward_row(entry));
 		}
 		body = body.push(list);
 	}
 
-	body = body.push(add_form(view));
-	if let Some(error) = view.error {
+	body = body.push(add_form(form));
+	if let Some(error) = &form.error {
 		body = body.push(text(error).size(BODY_SIZE).color(FAILED_FG));
 	}
 
@@ -125,15 +131,15 @@ fn forward_row(entry: &ForwardEntry) -> Element<'_, Message> {
 
 /// The add form (§27): a kind selector, a listen field, a target field (hidden for Dynamic, which
 /// has no fixed target), and an Add button. Enter in either field also adds.
-fn add_form(view: ForwardsView<'_>) -> Element<'_, Message> {
+fn add_form(form: &ForwardForm) -> Element<'_, Message> {
 	let selector = row![
-		kind_button("Local", ForwardKind::Local, view.kind),
-		kind_button("Remote", ForwardKind::Remote, view.kind),
-		kind_button("Dynamic", ForwardKind::Dynamic, view.kind),
+		kind_button("Local", ForwardKind::Local, form.kind),
+		kind_button("Remote", ForwardKind::Remote, form.kind),
+		kind_button("Dynamic", ForwardKind::Dynamic, form.kind),
 	]
 	.spacing(6);
 
-	let listen = text_input("listen (port or host:port)", view.listen)
+	let listen = text_input("listen (port or host:port)", &form.listen)
 		.id(LISTEN_INPUT_ID)
 		.on_input(Message::ForwardListenChanged)
 		.on_submit(Message::ForwardAddPressed)
@@ -142,9 +148,9 @@ fn add_form(view: ForwardsView<'_>) -> Element<'_, Message> {
 	let mut fields = column![selector, listen].spacing(8);
 	// A Local/Remote forward names where the traffic goes; a Dynamic one lets each connection
 	// choose, so its target field is replaced by a short note.
-	if view.kind.has_target() {
+	if form.kind.has_target() {
 		fields = fields.push(
-			text_input("to (host:port)", view.to)
+			text_input("to (host:port)", &form.to)
 				.on_input(Message::ForwardToChanged)
 				.on_submit(Message::ForwardAddPressed)
 				.size(BODY_SIZE),

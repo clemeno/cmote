@@ -128,16 +128,13 @@ pub struct Panels<'a> {
 /// over the grid, and it would otherwise be `view`'s eighth argument.
 #[derive(Debug, Clone, Copy)]
 pub struct Modals<'a> {
-	pub confirm_disconnect: bool,
-	/// The "new folder" dialog's typed name when it is open, `None` when closed (§18). Carries the
-	/// name rather than a bare bool because the dialog's field draws from it.
-	pub new_folder: Option<&'a str>,
-	/// Whether the delete confirmation is open (§18).
-	pub pending_delete: bool,
-	/// The port-forwards manager and its list/add-form state (§27). Grouped in with the other
-	/// modals because it is one — an overlay with the shared chrome — and it keeps `view` under
-	/// the argument limit.
-	pub forwards: crate::ui::forward::ForwardsView<'a>,
+	/// Which dialog is open over this screen, `None` when none is (§10). ONE field, because one
+	/// dialog: they share the body buffer below and the card beside it, which only works because
+	/// only one of them can be on screen.
+	pub open: Option<&'a crate::app::Modal>,
+	/// The session's port forwards (§27) — the rows the manager lists when it is the open modal.
+	/// Session state rather than the dialog's, so it outlives any number of opens and closes.
+	pub forwards: &'a [crate::forward::ForwardEntry],
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Floats over the
 	/// grid rather than pushing it down, so opening it never reflows the remote pty.
 	pub search: Option<&'a crate::term::search::Search>,
@@ -170,9 +167,7 @@ pub fn view<'a>(
 		height,
 	} = panels;
 	let Modals {
-		confirm_disconnect,
-		new_folder,
-		pending_delete,
+		open: modal,
 		forwards,
 		search,
 		body: dialog_body,
@@ -269,7 +264,7 @@ pub fn view<'a>(
 			transfers,
 			explorer.visible(),
 			files.visible(),
-			forwards.entries.len(),
+			forwards.len(),
 		),
 		body
 	]
@@ -362,9 +357,34 @@ pub fn view<'a>(
 	if files.band().is_some() {
 		layers.push(crate::ui::files::band_drag_layer());
 	}
-	if confirm_disconnect {
-		layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
-		layers.push(confirm_disconnect_panel(dialog_body, card));
+	// The one dialog this screen has open, in the shared chrome (§10, §18, §27). One match, because
+	// one dialog: they share the body buffer and the card, so two at once was never drawable — the
+	// type says so now, where four independent fields only ever implied it. Every arm's backdrop
+	// carries the same message its ✕ does, and none of them acts on being dismissed.
+	match modal {
+		Some(crate::app::Modal::Disconnect) => {
+			layers.push(crate::ui::dialog::backdrop(Message::DisconnectCancelled));
+			layers.push(confirm_disconnect_panel(dialog_body, card));
+		}
+		// The "new folder" dialog (§18): the body plus a name field, so backing out creates nothing.
+		Some(crate::app::Modal::NewFolder { name, .. }) => {
+			layers.push(crate::ui::dialog::backdrop(Message::NewFolderCancelled));
+			layers.push(new_folder_panel(dialog_body, name, card));
+		}
+		// The delete confirmation (§18): the ✕ and the backdrop keep the entries, so dismissing
+		// never deletes — the destructive action is only ever the explicit button.
+		Some(crate::app::Modal::Delete(_)) => {
+			layers.push(crate::ui::dialog::backdrop(Message::DeleteCancelled));
+			layers.push(delete_panel(dialog_body, card));
+		}
+		// The port-forwards manager (§27): its own list + add form in the shared chrome. Nothing
+		// here is destructive — forwards are removed by their own ✕ — so dismissing leaves every
+		// tunnel exactly as it was.
+		Some(crate::app::Modal::Forwards(form)) => {
+			layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
+			layers.push(crate::ui::forward::panel(forwards, form, card));
+		}
+		None => {}
 	}
 	// Whichever question the transfer flow is holding, all in the same chrome (§17, §19, §21).
 	// Only one is ever open — the queue raises them all off its single slot — so this is one
@@ -399,25 +419,6 @@ pub fn view<'a>(
 			layers.push(transfer_conflict_panel(dialog_body, card));
 		}
 		None => {}
-	}
-	// The "new folder" dialog (§18): the body plus a name field. Every dismissal route cancels,
-	// so backing out creates nothing.
-	if let Some(name) = new_folder {
-		layers.push(crate::ui::dialog::backdrop(Message::NewFolderCancelled));
-		layers.push(new_folder_panel(dialog_body, name, card));
-	}
-	// The delete confirmation (§18): the ✕ and the backdrop keep the entries, so dismissing never
-	// deletes — the destructive action is only ever the explicit button.
-	if pending_delete {
-		layers.push(crate::ui::dialog::backdrop(Message::DeleteCancelled));
-		layers.push(delete_panel(dialog_body, card));
-	}
-	// The port-forwards manager (§27): its own list + add form in the shared chrome. The ✕ and
-	// the backdrop both just close it — nothing here is destructive, forwards are removed by
-	// their own ✕ — so dismissing leaves every tunnel exactly as it was.
-	if forwards.open {
-		layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
-		layers.push(crate::ui::forward::panel(forwards, card));
 	}
 	// Becoming another account (§45). Last of the overlays, so it sits above anything else that
 	// happened to be open when it was asked for: it holds a secret field, and a field the user is
