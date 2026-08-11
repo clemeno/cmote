@@ -51,6 +51,7 @@ pub mod osc133; // reads the shell-integration prompt marks the engine ignores (
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
+mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
@@ -61,8 +62,8 @@ use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::Config;
 use alacritty_terminal::term::cell::{Cell, Flags};
+use alacritty_terminal::term::{Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use crate::palette;
@@ -186,6 +187,7 @@ impl Terminal {
 			progress: progress::Reports::default(),
 			protect: protect::Protect::default(),
 			cancels: cancel::Cancel::default(),
+			rectangles: rect::Rectangles::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -235,6 +237,10 @@ impl Terminal {
 		// one is not reporting something to apply — it is reporting a byte the engine must not be let
 		// near, so its offset is the final byte itself and the split loop steps OVER it.
 		let cancels = self.cancels.feed(bytes);
+		// The VT420 rectangular operations the engine drops (§58). Split-fed like the selective erase
+		// and with the same one-past offsets: these name their own coordinates and never touch the
+		// cursor, so the split is only about the order they land in against the text around them.
+		let rectangles = self.rectangles.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
@@ -243,11 +249,14 @@ impl Terminal {
 			&& bookmarks.is_empty()
 			&& protections.is_empty()
 			&& cancels.is_empty()
+			&& rectangles.is_empty()
 		{
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(marks, images, bookmarks, protections, cancels) {
+			for (offset, split) in
+				splits(marks, images, bookmarks, protections, cancels, rectangles)
+			{
 				// `start` can already be past this offset, because a cancelled final byte was stepped
 				// over just now (see `Split::Cancel`). No scanner can report an event INSIDE a CSI
 				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
@@ -278,6 +287,7 @@ impl Terminal {
 						self.parser.advance(&mut self.term, &[cancel::CANCEL]);
 						start += 1;
 					}
+					Split::Rect(request) => self.apply_rectangle(request),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -532,6 +542,124 @@ impl Terminal {
 				}
 				*cell = background.into();
 			}
+		}
+	}
+
+	/// Perform one rectangular area operation (§58) — erase, fill or copy a box of cells.
+	///
+	/// Written straight into the grid, for the reason `selective_erase` above spells out: the engine
+	/// has no arm for any of these, and every one of them is defined never to move the cursor, so
+	/// there is nothing to delegate and no mode interaction to inherit.
+	///
+	/// `ponytail:` **origin mode is refused rather than approximated.** With DECOM set, these corners
+	/// are counted from the top of the scrolling region instead of the top of the page — and the
+	/// engine keeps its `scroll_region` private, with no accessor to read it back through. Placing the
+	/// rectangle at the page's rows anyway would put it on the wrong lines, so the operation is
+	/// dropped instead: doing nothing is a correct refusal where acting on a guess is a wrong action
+	/// (§57). Lifting this means cmote tracking DECSTBM itself, including the engine's own clamping
+	/// rules and every reset that widens the region back out — a second copy of state the engine
+	/// already owns, which is the shape §56 turned down.
+	fn apply_rectangle(&mut self, request: rect::Request) {
+		if self.term.mode().contains(TermMode::ORIGIN) {
+			return;
+		}
+		let (rows, cols) = {
+			let grid = self.term.grid();
+			(grid.screen_lines(), grid.columns())
+		};
+		match request {
+			rect::Request::Erase(corners) => {
+				if let Some(area) = rect::area(corners, rows, cols) {
+					self.erase_area(area, false);
+				}
+			}
+			rect::Request::SelectiveErase(corners) => {
+				if let Some(area) = rect::area(corners, rows, cols) {
+					self.erase_area(area, true);
+				}
+			}
+			rect::Request::Fill(glyph, corners) => {
+				if let Some(area) = rect::area(corners, rows, cols) {
+					self.fill_area(glyph, area);
+				}
+			}
+			rect::Request::Copy { source, top, left } => {
+				let Some(source) = rect::area(source, rows, cols) else {
+					return;
+				};
+				if let Some((source, to_row, to_col)) =
+					rect::copy_extent(source, top, left, rows, cols)
+				{
+					self.copy_area(source, to_row, to_col);
+				}
+			}
+		}
+	}
+
+	/// Blank every cell of a rectangle (DECERA, §58), or every unprotected one (DECSERA).
+	///
+	/// What lands in each cell is what the engine's own erase writes: the pen's background colour and
+	/// no glyph, so an erased cell is blank rather than merely overwritten — flags included, which is
+	/// what lets a cell erased here be protected again later (§56).
+	fn erase_area(&mut self, area: rect::Area, selective: bool) {
+		let background = self.term.grid().cursor.template.bg;
+		let grid = self.term.grid_mut();
+		for row in area.rows() {
+			for column in area.columns() {
+				let cell = &mut grid[Line(row as i32)][Column(column)];
+				if selective && protect::is_protected(cell.flags.bits()) {
+					continue;
+				}
+				*cell = background.into();
+			}
+		}
+	}
+
+	/// Fill every cell of a rectangle with one character (DECFRA, §58).
+	///
+	/// Stamped from the PEN, so the fill carries the colours and attributes a printed character would
+	/// have had at that moment — which is what DECFRA is defined to do, and what makes it worth
+	/// having over a rectangle of spaces. Protection rides along with the rest of the pen, so a fill
+	/// inside a DECSCA run is protected exactly as typed text would be.
+	fn fill_area(&mut self, glyph: char, area: rect::Area) {
+		let mut template = self.term.grid().cursor.template.clone();
+		template.c = glyph;
+		let grid = self.term.grid_mut();
+		for row in area.rows() {
+			for column in area.columns() {
+				grid[Line(row as i32)][Column(column)] = template.clone();
+			}
+		}
+	}
+
+	/// Copy a rectangle of cells to a new top-left corner (DECCRA, §58).
+	///
+	/// The source is read out WHOLE before anything is written, because the two rectangles may
+	/// overlap — scrolling a sub-window by one row is the point of the sequence, and it is also the
+	/// maximally overlapping case. DECCRA is defined as if the copy went through a buffer, so cmote
+	/// uses a buffer rather than working out which direction to walk in.
+	///
+	/// Whole cells move, so the glyph's colours, its attributes, its OSC 8 link and its DECSCA
+	/// protection all travel with it. That is right on its own terms: protection makes a cell
+	/// unerasable, not immovable (§56).
+	fn copy_area(&mut self, source: rect::Area, to_row: usize, to_col: usize) {
+		let cells: Vec<Cell> = {
+			let grid = self.term.grid();
+			source
+				.rows()
+				.flat_map(|row| {
+					source
+						.columns()
+						.map(move |column| grid[Line(row as i32)][Column(column)].clone())
+				})
+				.collect()
+		};
+		let width = source.width();
+		let grid = self.term.grid_mut();
+		for (index, cell) in cells.into_iter().enumerate() {
+			let row = to_row + index / width;
+			let column = to_col + index % width;
+			grid[Line(row as i32)][Column(column)] = cell;
 		}
 	}
 
@@ -914,6 +1042,11 @@ pub struct Terminal {
 	/// here because the engine ignores something, this one because it does not. Fed by the split
 	/// advance so the offending final byte can be swapped for a CAN on its way past.
 	cancels: cancel::Cancel,
+	/// Reads the VT420 rectangular area operations the engine drops (§58) — DECERA, DECSERA, DECFRA
+	/// and DECCRA. Fed by the split advance for the same reason as the selective erase: each one is
+	/// applied with the engine advanced PAST the sequence it ignored. Nothing is stored here; the
+	/// module is the grammar and the geometry, and the cells are written below.
+	rectangles: rect::Rectangles,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
@@ -946,6 +1079,9 @@ enum Split {
 	/// A final byte the engine must not dispatch (§57). The only split that is not something to
 	/// apply: it marks the byte itself, and the loop replaces it with a CAN rather than feeding it.
 	Cancel,
+	/// A rectangular area operation (§58) — erase, fill or copy a box of cells. Applied on the far
+	/// side of its sequence, as a selective erase is, and for the same reason.
+	Rect(rect::Request),
 }
 
 /// Merge one chunk's prompt marks, image events, bookmarks, selective-erase requests and cancelled
@@ -958,9 +1094,15 @@ fn splits(
 	bookmarks: Vec<(usize, iterm::Report)>,
 	protections: Vec<(usize, protect::Request)>,
 	cancels: Vec<usize>,
+	rectangles: Vec<(usize, rect::Request)>,
 ) -> Vec<(usize, Split)> {
 	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
-		marks.len() + images.len() + bookmarks.len() + protections.len() + cancels.len(),
+		marks.len()
+			+ images.len()
+			+ bookmarks.len()
+			+ protections.len()
+			+ cancels.len()
+			+ rectangles.len(),
 	);
 	merged.extend(
 		marks
@@ -984,6 +1126,11 @@ fn splits(
 			.map(|(offset, request)| (offset, Split::Protect(request))),
 	);
 	merged.extend(cancels.into_iter().map(|offset| (offset, Split::Cancel)));
+	merged.extend(
+		rectangles
+			.into_iter()
+			.map(|(offset, request)| (offset, Split::Rect(request))),
+	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
 }
@@ -2202,6 +2349,149 @@ mod tests {
 		let mut terminal = Terminal::new(4, 20);
 		terminal.process(b"\x1b[2;5H\x1b[s\x1b[4;1Helsewhere\x1b[uX");
 		assert_eq!(read(&terminal, 1, 4, 1), "X");
+	}
+
+	/// DECERA blanks a box and leaves everything around it standing — the one thing that separates it
+	/// from every erase the engine already has, all of which work in lines (§58).
+	#[test]
+	fn a_rectangular_erase_takes_a_box_out_of_the_middle() {
+		let mut terminal = Terminal::new(4, 10);
+		terminal.process(b"aaaaaaaaaa\r\nbbbbbbbbbb\r\ncccccccccc\r\ndddddddddd");
+		// Rows 2-3, columns 3-5.
+		terminal.process(b"\x1b[2;3;3;5$z");
+		assert_eq!(
+			read(&terminal, 0, 0, 10),
+			"aaaaaaaaaa",
+			"row above untouched"
+		);
+		assert_eq!(
+			read(&terminal, 1, 0, 10),
+			"bbbbbbb",
+			"three cells gone from the middle"
+		);
+		assert_eq!(read(&terminal, 2, 0, 10), "ccccccc");
+		assert_eq!(
+			read(&terminal, 3, 0, 10),
+			"dddddddddd",
+			"row below untouched"
+		);
+		// The gap is where it was asked for, not at the end of the row.
+		let screen = terminal.screen();
+		assert_eq!(screen.cell(1, 1).unwrap().contents(), "b");
+		assert!(screen.cell(1, 2).unwrap().contents().is_empty());
+		assert!(screen.cell(1, 4).unwrap().contents().is_empty());
+		assert_eq!(screen.cell(1, 5).unwrap().contents(), "b");
+	}
+
+	/// DECERA is the plain verb and DECSERA the selective one, exactly as `CSI J` and `CSI ? J` are
+	/// (§56). Having both is the point: the plain one is the stronger.
+	#[test]
+	fn a_rectangular_erase_and_its_selective_twin_differ_over_protection() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"\x1b[1\"qKEEP\x1b[0\"qgone");
+		// The selective one leaves the protected label standing.
+		terminal.process(b"\x1b[1;1;1;10${");
+		assert_eq!(read(&terminal, 0, 0, 10), "KEEP");
+		// The plain one takes it.
+		terminal.process(b"\x1b[1;1;1;10$z");
+		assert_eq!(read(&terminal, 0, 0, 10).trim(), "");
+	}
+
+	/// DECFRA rules a box with one character, in the attributes the pen holds — which is what makes it
+	/// worth having over a rectangle of spaces (§58).
+	#[test]
+	fn a_rectangular_fill_paints_the_box_in_the_pen() {
+		let mut terminal = Terminal::new(3, 8);
+		// 45 is `-`. Fill row 2, columns 2 to 4, in bold.
+		terminal.process(b"\x1b[1m\x1b[45;2;2;2;4$x");
+		assert_eq!(read(&terminal, 1, 0, 8), "---");
+		let screen = terminal.screen();
+		assert!(screen.cell(1, 0).unwrap().contents().is_empty());
+		assert_eq!(screen.cell(1, 1).unwrap().contents(), "-");
+		assert!(
+			screen.cell(1, 1).unwrap().bold(),
+			"filled in the pen's attributes"
+		);
+		assert!(screen.cell(1, 4).unwrap().contents().is_empty());
+		assert_eq!(
+			read(&terminal, 0, 0, 8).trim(),
+			"",
+			"and only the row it named"
+		);
+	}
+
+	/// DECCRA's overlapping case, which is the one it exists for: scroll a sub-window up a row by
+	/// copying it over itself. Reading the source out whole first is what makes this come out right.
+	#[test]
+	fn a_rectangular_copy_over_itself_scrolls_the_box() {
+		let mut terminal = Terminal::new(4, 6);
+		terminal.process(b"one\r\ntwo\r\nsix\r\nten");
+		// Copy rows 2-4 up to row 1: the source and the destination overlap by two rows.
+		terminal.process(b"\x1b[2;1;4;3;1;1;1;1$v");
+		assert_eq!(read(&terminal, 0, 0, 6), "two");
+		assert_eq!(read(&terminal, 1, 0, 6), "six");
+		assert_eq!(read(&terminal, 2, 0, 6), "ten");
+		assert_eq!(
+			read(&terminal, 3, 0, 6),
+			"ten",
+			"the last row is the source, left as it was"
+		);
+	}
+
+	/// A copy carries the whole cell, attributes and all — which is what DECCRA is for, and comes free
+	/// from copying cells rather than characters.
+	#[test]
+	fn a_rectangular_copy_brings_the_attributes_with_it() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"\x1b[1;1H\x1b[1;31mRED\x1b[0m");
+		terminal.process(b"\x1b[1;1;1;3;1;3;1;1$v");
+		let screen = terminal.screen();
+		assert_eq!(read(&terminal, 2, 0, 3), "RED");
+		let cell = screen.cell(2, 0).expect("the copy landed on the last row");
+		assert!(cell.bold(), "bold travelled with the glyph");
+	}
+
+	/// A copy that runs off the page is trimmed to what fits rather than refused, which is what makes
+	/// a scroll-by-copy work against the bottom edge.
+	#[test]
+	fn a_rectangular_copy_off_the_page_keeps_what_fits() {
+		let mut terminal = Terminal::new(3, 4);
+		terminal.process(b"ab\r\ncd\r\nef");
+		// Three rows of source, one row of room: only the first row lands.
+		terminal.process(b"\x1b[1;1;3;2;1;3;1;1$v");
+		assert_eq!(read(&terminal, 2, 0, 4), "ab");
+		assert_eq!(
+			read(&terminal, 0, 0, 4),
+			"ab",
+			"and the source is untouched"
+		);
+		assert_eq!(read(&terminal, 1, 0, 4), "cd");
+	}
+
+	/// Origin mode counts these corners from the top of the scrolling region, and the engine keeps
+	/// that region private — so the operation is refused rather than placed on the wrong rows (§58).
+	#[test]
+	fn a_rectangle_is_refused_while_origin_mode_is_set() {
+		let mut terminal = Terminal::new(3, 6);
+		terminal.process(b"aaaaaa\r\nbbbbbb\r\ncccccc");
+		terminal.process(b"\x1b[?6h\x1b[1;1;3;6$z");
+		assert_eq!(read(&terminal, 0, 0, 6), "aaaaaa", "nothing was erased");
+		// Reset origin mode and the same request goes through.
+		terminal.process(b"\x1b[?6l\x1b[1;1;3;6$z");
+		assert_eq!(read(&terminal, 0, 0, 6).trim(), "");
+	}
+
+	/// A rectangle a program described backwards, or one that starts off the page, is a no-op — never
+	/// a rectangle cmote invented by swapping or clamping the corners.
+	#[test]
+	fn a_rectangle_nobody_could_draw_does_nothing() {
+		let mut terminal = Terminal::new(3, 6);
+		terminal.process(b"aaaaaa\r\nbbbbbb\r\ncccccc");
+		// Bottom above top, right left of left, and a top-left past the last row.
+		terminal.process(b"\x1b[3;1;1;6$z\x1b[1;6;3;2$z\x1b[9;1;9;6$z");
+		assert_eq!(read(&terminal, 0, 0, 6), "aaaaaa");
+		assert_eq!(read(&terminal, 1, 0, 6), "bbbbbb");
+		assert_eq!(read(&terminal, 2, 0, 6), "cccccc");
 	}
 
 	/// A margin request in the middle of a chunk that also carries a split of another kind — the two

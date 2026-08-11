@@ -288,6 +288,7 @@ cmote/
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── protect.rs     scan DECSCA / DECSED / DECSEL out of the stream: the cells a program asked us not to wipe (§56)
     │   ├── cancel.rs      find the sequence the engine would read as something ELSE — DECSLRM's `s`, which its save-cursor arm takes — so `process` can cancel it in flight (§57)
+    │   ├── rect.rs        scan the VT420 rectangular ops out of the stream — DECERA / DECSERA / DECFRA / DECCRA — plus the corner arithmetic they all resolve through (§58)
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6432,3 +6433,90 @@ next to "scan it out", "borrow a bit", and "accept the engine's limit" — is **
   handlers, which is a *third* failure shape — the arm exists and does nothing — and harmless.
 - **cmote does not tell the program it refused.** There is no reply for DECSLRM to fail with, and a
   program that wants to know can ask DECRQM about mode 69 and be told `0`.
+
+---
+
+## 58. Acting on a box instead of a line (v4.0.0)
+
+Everything a terminal erases, it erases in lines. `CSI K` takes part of one, `CSI J` takes the rest of
+the screen, and the selective pair §56 added take the same shapes. A VT420 could also act on a **box**:
+
+```
+CSI Pt;Pl;Pb;Pr $ z                          DECERA  — erase the rectangle
+CSI Pt;Pl;Pb;Pr $ {                          DECSERA — erase it, leaving protected cells (§56)
+CSI Pch;Pt;Pl;Pb;Pr $ x                      DECFRA  — fill it with one character
+CSI Pts;Pls;Pbs;Prs;Pps;Ptd;Pld;Ppd $ v      DECCRA  — copy it somewhere else
+```
+
+Top, left, bottom, right — 1-based, inclusive, and 0 or omitted meaning the edge of the page. These
+were the block operations of a forms terminal: clear a field, rule a line of `-` across a box, scroll a
+sub-window by copying it up one row.
+
+`vte` has no arm for any of them. Its CSI dispatch matches the `$` intermediate in exactly two places,
+both of them DECRQM, so all four fall through unhandled and are dropped whole.
+
+### Why this was cheap, and why it was not before
+
+It sat in §5 as an engine limit for the whole life of the audit, and by the time it came round it was
+not one — §56 had already built the hard half. Writing cells straight into the engine's grid, and
+knowing which of them a program had protected, were the two problems worth solving, and both were
+solved for the selective erase. What was left is a grammar and some arithmetic: one more chunk-safe CSI
+scanner, two pure functions over row and column numbers, and four small methods that walk a box.
+
+The geometry is deliberately pure, as `protect::spans` is. `area` resolves corners against a page size;
+`copy_extent` works out how much of a source fits at its destination. Neither touches a terminal, so
+every case of defaulting, clamping and trimming is tested directly instead of inferred from a screen.
+
+### Three rules decided where they are decided
+
+**A rectangle nobody could draw is a no-op.** An *end* past the edge of the page clamps to it — a
+program sized for a bigger screen gets the part of its rectangle that exists. A *start* past the edge
+does not clamp, and neither do crossed corners (bottom above top, right left of left) get swapped: both
+yield nothing. Clamping a start back onto the last row would erase a row the program never named, and a
+rectangle cmote invented is worse than one it declined.
+
+**DECFRA's character is an allow-list**, 32–126 and 160–255 — printable ASCII and printable Latin-1,
+the ranges xterm allows. Anything else drops the whole sequence. "Fill four hundred cells with U+0000"
+is not a request worth honouring on the way to finding out what the renderer does with it (§12).
+
+**DECCRA reads its source out whole before writing anything.** The two rectangles may overlap, and the
+maximally overlapping case — copy a box over itself, one row up — is exactly what the sequence exists
+for. DEC defines the copy as if it went through a buffer, so cmote uses a buffer rather than working out
+which direction to walk in. Whole cells move, so colour, attributes, the OSC 8 link and DECSCA
+protection all travel with the glyph. That last one is right on its own terms: protection makes a cell
+unerasable, not immovable.
+
+Protection otherwise divides the family the way §56 divided the erases: only DECSERA respects it.
+DECERA, DECFRA and DECCRA go straight through a protected cell, exactly as the plain `CSI J` does — two
+verbs, and the plain one is the stronger.
+
+### The one limit left in, and disclosed
+
+**Origin mode is refused, not approximated.** With DECOM set, these corners are counted from the top of
+the scrolling region rather than the top of the page — and the engine keeps `scroll_region` as a private
+field with no accessor. Placing the rectangle at the page's rows anyway would put it on the wrong lines,
+so `apply_rectangle` drops every one of these while origin mode is on. That is §57's rule applied a
+second time: doing nothing is a correct refusal where acting on a guess is a wrong action, and one line
+of check beats a shadow copy of the region — which would mean tracking DECSTBM, the engine's own
+clamping rules, and every reset that widens the region back out. It is marked `ponytail:` in the code
+rather than left to be discovered.
+
+### What it cost
+
+One module (`term/rect.rs`, 30 tests), one `Split` arm, four methods and eight engine-level tests. The
+overlapping copy, the protection split, the pen-attributed fill, the trimmed copy, the origin-mode
+refusal and the undrawable rectangle each have one.
+
+### Not done
+
+- **DECCARA / DECRARA** (`$ r` / `$ t`) — the attribute half of the family, and a different job: they
+  fold an SGR list into cells that already have attributes, rather than writing a cell whole. **DECSACE**
+  (`CSI Ps * x`) selects whether those two work on a rectangle or on the wrapped stream between two
+  points, so it would have to arrive with them.
+- **DECRQCRA** (`CSI Pid;Pp;Pt;Pl;Pb;Pr * y`) — the rectangle checksum a conformance suite blocks on. A
+  *query*, so it belongs with §33's answerers, and worth nothing unless it matches DEC's byte-exact
+  definition. §58 supplies the geometry it would read.
+- **No page parameters.** DECCRA's `Pps` and `Ppd` are ignored: cmote has one page, which is what
+  clamping a page number to the number of pages a terminal has comes to.
+- **No damage plumbing**, as in §56 — cmote repaints from the grid each frame, so a direct write needs
+  none.

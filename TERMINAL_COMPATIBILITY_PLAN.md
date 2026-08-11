@@ -332,11 +332,18 @@ short, and since §41 nothing left in it is high value:
   with save-cursor, and `vte`'s arm for that byte ignores its parameters, so the refusal was not free:
   `CSI 5;70 s` *saved the cursor*, overwriting a value the program meant to restore from later. cmote
   now cancels that byte in flight, so the request does nothing — see PLAN §57 and `term/cancel.rs`.
-- **DRCS soft fonts, VT320 status line, VT420 rectangular ops** (DECCRA / DECFRA / DECERA, and
-  the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`. One of
-  that family has since come within reach: **DECSERA** (`CSI Pt;Pl;Pb;Pr $ {`) is the selective erase
-  of a rectangle, and §56 supplied the per-cell protection it needed — so it is now a fourth shape for
-  `protect::spans` rather than an engine limit. Unbuilt because nothing asked for it.
+- **~~VT420 rectangular ops~~ — SHIPPED in §58.** DECERA (`$ z`), DECSERA (`$ {`), DECFRA (`$ x`) and
+  DECCRA (`$ v`) all read as engine limits until §56 built the hard half of them: writing cells
+  straight into the grid, and knowing which of them a program protected. `vte` matches `$` only in the
+  two DECRQM spellings, so all four fall through unhandled and are cmote's — a grammar, some clamping
+  arithmetic and four small methods (`term/rect.rs`). One limit is disclosed rather than solved:
+  **origin mode is refused**, because with DECOM set the corners count from the top of the scrolling
+  region and the engine keeps that region private. See PLAN §58.
+- **DRCS soft fonts, VT320 status line, and the rest of the rectangular family** — DECCARA / DECRARA
+  (`$ r` / `$ t`, the attribute half), DECSACE (`* x`) which selects their extent, and the DECRQCRA
+  checksum query (`* y`) some conformance suites block on. `[DEC]`. The checksum is a *query* and so
+  §33's kind of work rather than §58's, and it has to match DEC's byte-exact definition to be worth
+  answering at all.
 - **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
   `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
   (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
@@ -588,8 +595,13 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | g | Tab clear | ✅ | |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
-| $ z / $ x / $ v | Rectangular erase / fill / copy | ❌ | not represented (§5) |
-| $ { | Selective erase rectangular area (DECSERA) | ❌ | the missing piece was per-cell protection, and §56 supplies it — so this is now only a rectangle instead of the region shapes `protect::spans` already builds. Left unbuilt because nothing asked for it, not because it is blocked |
+| $ z (DECERA) | Erase rectangular area | ✅ | cmote's own scanner and cell writer (`term/rect.rs`, §58) — the engine matches `$` only in DECRQM, so all four of this family fall through unhandled. Corners default to the page edges, an end past the edge clamps, and a rectangle described backwards or starting off the page is a **no-op** rather than one cmote invents by swapping corners |
+| $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb (§58): protected cells stand, and the plain `$ z` still takes them. This was the piece §56 unblocked and left unbuilt — the per-cell protection it needed already existed |
+| $ x (DECFRA) | Fill rectangular area | ✅ | one character across a box, stamped from the **pen**, so the fill carries the colours and attributes a printed glyph would have (§58). `Pch` is an **allow-list** — 32–126 and 160–255, as xterm allows — so a remote cannot paint the page with C0, C1, DEL or unassigned code points |
+| $ v (DECCRA) | Copy rectangular area | ✅ | whole cells move, so colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph (§58). The source is read out **whole first**, because the overlapping case — scroll a sub-window by copying it over itself — is what the sequence is for. A copy running off the page is trimmed to what fits; the two page parameters are ignored, cmote having one page |
+| Ps * x (DECSACE) | Attribute change extent | ❌ | selects whether the pair below work on a rectangle or on the wrapped stream between two points. Nothing to select while neither is implemented |
+| $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ❌ | the attribute half of the family §58 shipped the content half of. Deliberately not claimed: these need an SGR list parsed and folded into cells that already have attributes, which is a different job from writing a cell whole — and DECSACE would have to come with them |
+| Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ❌ | a *query*, so it belongs with §33's answerers rather than here — and answering it means matching DEC's exact checksum definition, which conformance suites compare against byte for byte. §58 supplies the geometry it would read |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
 | 5n / 6n | Device status report | ✅ | |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
@@ -701,13 +713,15 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
 query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
-protected-cell erase it dropped as well. Most of the ❌ column is **deliberate**: no images, no remote
+protected-cell erase it dropped as well, and — since §58 — the four VT420 rectangular operations.
+Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048), rectangular editing, and left-right margins — the last of
-which, since §57, is at least a gap that costs nothing rather than one that quietly took the program's
-saved cursor with it. All catalogued with their cost in §5, which is now the *only* section with
-anything open in it.
+the newer private modes (2027 / 2031 / 2048), the attribute half of the rectangular family
+(DECCARA / DECRARA / DECSACE, its content half having shipped in §58), and left-right margins — the
+last of which, since §57, is at least a gap that costs nothing rather than one that quietly took the
+program's saved cursor with it. All catalogued with their cost in §5, which is now the *only* section
+with anything open in it.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -760,6 +774,15 @@ Audited file:line anchors behind the claims above, for later re-checking.
   handler at `term/mod.rs:1874`. cmote surfaces this through the seam (below).
 - **Scroll region is vertical only**: `set_scrolling_region(top, bottom)` (`term/mod.rs:2155`) —
   no horizontal (left/right) margins.
+- **No arm for any rectangular operation** (what §58 walked into). `vte-0.15.0/src/ansi.rs`'s CSI
+  dispatch matches the `$` intermediate in exactly two places — `('p', [b'$'])` at `:1703` and
+  `('p', [b'?', b'$'])` at `:1707`, the two DECRQM spellings — so `$ z`, `$ {`, `$ x`, `$ v`, `$ r` and
+  `$ t` all reach the unhandled arm and are dropped whole. `Cell` fields are public (`term/cell.rs:134`)
+  and `Cell::default` gives `c: ' '`, so a fill is the pen cloned with one field changed and an erase is
+  `From<Color> for Cell` (`:257`) — the same value `Cell::reset` (`:252`) writes, which is why an erased
+  cell comes back protectable. **Origin mode is readable, the region is not**: `TermMode::ORIGIN`
+  (`term/mod.rs:66`) comes back through `Term::mode()`, but `scroll_region` (`:301`) is a private field
+  with no accessor — hence §58's refusal rather than an approximation.
 - **DECSLRM lands on save-cursor** (the §57 misparse). `vte-0.15.0/src/ansi.rs:1737` is
   `('s', []) => handler.save_cursor_position()` — no parameters read, so `CSI 5;70 s` reaches
   `save_cursor_position` (`term/mod.rs:1619`), which assigns `self.grid.saved_cursor`, the single slot
@@ -960,6 +983,21 @@ Audited file:line anchors behind the claims above, for later re-checking.
   viewport into history* rather than blanking it, and the CUP+ECH alternative would move a cursor the
   erase is defined never to move. `spans` is pure row/column arithmetic, so all six region shapes are
   tested without a terminal.
+- **`term/rect.rs`** — the rectangular-operations scanner and geometry (§58). One chunk-safe CSI
+  machine reading the four `$` sequences the engine drops — **DECERA** (`$ z`), **DECSERA** (`$ {`),
+  **DECFRA** (`$ x`), **DECCRA** (`$ v`) — and two pure functions doing all the arithmetic: `area`
+  resolves 1-based inclusive corners against the page (0 or omitted means the edge; an end past the
+  edge clamps; a crossed pair or a start off the page yields `None`, so cmote never invents a rectangle
+  by swapping corners), and `copy_extent` trims a copy to the room at its destination. Offsets are
+  **one past** the final byte as §56's are; these name their own coordinates and never touch the
+  cursor, so the split is only about ordering against the text in the chunk. `numbers()` refuses the
+  whole sequence on any unparseable parameter (§54's rule) — a misread corner erases the wrong cells —
+  and `fill_char` is an allow-list of 32–126 / 160–255. `term/mod.rs` writes the cells in four methods:
+  `erase_area` (the pen's background, protection honoured only for DECSERA), `fill_area` (the pen
+  cloned with a new glyph), `copy_area` (source read out whole first, because the overlapping case is
+  the point of DECCRA) and `apply_rectangle`, which **refuses every one of them while `TermMode::ORIGIN`
+  is set** — a `ponytail:` limit, since DECOM makes the corners region-relative and the engine's
+  `scroll_region` has no accessor.
 - **`term/cancel.rs`** — the misparse scanner (§57), and the only one here that exists because the
   engine does **not** ignore something. `Cancel::feed` is a chunk-safe CSI state machine looking for
   one shape: a final `s` with at least one parameter byte, no private marker and no intermediate —
