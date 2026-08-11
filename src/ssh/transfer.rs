@@ -288,6 +288,66 @@ pub(crate) async fn resolve(
 	}
 }
 
+/// How many bytes must move before the status bar is told again (§16, §17, §19). A quarter of a
+/// megabyte: often enough that a big file's bar looks continuous, rare enough that a fast local
+/// copy does not spend its time sending progress events instead of bytes.
+pub(crate) const PROGRESS_STEP: u64 = 256 * 1024;
+
+/// The running byte count behind a transfer's progress bar (§16, §17, §19) — how much has moved,
+/// and how much had moved the last time anyone was told.
+///
+/// It exists because those two numbers were previously threaded through the copy loops as a pair
+/// of `&mut u64` parameters and compared by hand at six sites, in five-line blocks that were
+/// character-for-character the same. Holding them together makes the pair one argument instead of
+/// two, and makes "is a report due" a question with one answer rather than six copies of it.
+///
+/// The gate is `>=` against the LAST REPORTED figure, not against a chunk size, so a single huge
+/// write past several steps reports once rather than several times, and a dribble of tiny writes
+/// still reports as soon as they add up. Nothing here sends anything: the caller owns the channel
+/// and the event, this only says when.
+#[derive(Debug, Default)]
+pub(crate) struct Ticker {
+	moved: u64,
+	reported: u64,
+}
+
+impl Ticker {
+	/// How much has moved altogether — what a report carries, and what the final event sends.
+	pub(crate) fn moved(&self) -> u64 {
+		self.moved
+	}
+
+	/// Count bytes and say whether that is worth telling anyone: `Some(moved)` once a whole
+	/// [`PROGRESS_STEP`] has passed since the last report, `None` otherwise. The returned figure is
+	/// the running total, which is what the event wants — so the caller reads
+	/// `if let Some(sent) = ticker.advance(n)` and never touches either counter itself.
+	pub(crate) fn advance(&mut self, bytes: u64) -> Option<u64> {
+		self.moved += bytes;
+		if self.moved - self.reported >= PROGRESS_STEP {
+			self.reported = self.moved;
+			return Some(self.moved);
+		}
+		None
+	}
+
+	/// Count bytes that are accounted for and already on the bar, spending the step rather than
+	/// building towards it. Returns the running total, for the caller that wants to send it.
+	///
+	/// Two call shapes, one meaning. A file SKIPPED whole — by a "skip" answer, or by a resume
+	/// finding it already fully there — moves no bytes at all, so the step would never pass on its
+	/// own and the bar would stall for that file's whole size and then jump; the caller settles it
+	/// and sends the total straight away. A resume's CARRY-IN is the same thing arriving from the
+	/// other direction: the bytes that survived the interruption belong in the total immediately,
+	/// or the bar restarts from zero and lies about how much is left — and the initial event the
+	/// caller sends next is what puts them on screen. Either way they are counted and announced, so
+	/// neither leaves a report owing.
+	pub(crate) fn settle(&mut self, bytes: u64) -> u64 {
+		self.moved += bytes;
+		self.reported = self.moved;
+		self.moved
+	}
+}
+
 /// Build a remote path from the tree's destination root and a relative component list (§17,
 /// §19), joining POSIX-style the way every remote path does. Shared so the two directions build
 /// the same string from the same parts.
@@ -457,6 +517,58 @@ mod tests {
 			error.to_string(),
 			"could not create /srv/data/notes.txt on the server: permission denied"
 		);
+	}
+
+	#[test]
+	fn a_ticker_stays_quiet_until_a_whole_step_has_moved() {
+		use super::{PROGRESS_STEP, Ticker};
+		let mut ticker = Ticker::default();
+		// A dribble of chunks, none of them a step on its own.
+		assert_eq!(ticker.advance(PROGRESS_STEP / 4), None);
+		assert_eq!(ticker.advance(PROGRESS_STEP / 4), None);
+		assert_eq!(ticker.advance(PROGRESS_STEP / 4), None);
+		// The fourth quarter completes the step, so this is the one that is news — and it reports
+		// the RUNNING TOTAL, not the chunk.
+		assert_eq!(ticker.advance(PROGRESS_STEP / 4), Some(PROGRESS_STEP));
+		assert_eq!(ticker.moved(), PROGRESS_STEP);
+	}
+
+	#[test]
+	fn a_ticker_reports_once_for_a_chunk_that_crosses_several_steps() {
+		use super::{PROGRESS_STEP, Ticker};
+		// The gate is against the last REPORTED figure, so a huge single write is one piece of
+		// news rather than one per step it flew past. A gate written against the chunk size
+		// instead would either miss this or fire repeatedly for one write.
+		let mut ticker = Ticker::default();
+		assert_eq!(ticker.advance(PROGRESS_STEP * 10), Some(PROGRESS_STEP * 10));
+		assert_eq!(ticker.advance(1), None);
+	}
+
+	#[test]
+	fn a_resume_starts_its_bar_where_the_interruption_left_it() {
+		use super::{PROGRESS_STEP, Ticker};
+		// The bytes that survived the interruption belong in the total at once — otherwise a
+		// resumed transfer's bar starts at zero and lies about how much is left.
+		let mut ticker = Ticker::default();
+		assert_eq!(ticker.settle(PROGRESS_STEP * 3), PROGRESS_STEP * 3);
+		assert_eq!(ticker.moved(), PROGRESS_STEP * 3);
+		// And they are ANNOUNCED as they are counted — the caller sends the initial event right
+		// after — so they must not also count towards the next step. Getting this wrong makes the
+		// very first chunk of a resumed file report, which is what the pair of counters this
+		// replaced avoided by starting BOTH of them at the resume offset.
+		assert_eq!(ticker.advance(1), None);
+	}
+
+	#[test]
+	fn a_skipped_file_lands_on_the_bar_whole_and_at_once() {
+		use super::{PROGRESS_STEP, Ticker};
+		// A file skipped by a resume or a "skip" answer moves no bytes, so the step would never
+		// pass on its own: the bar would stall for that file's whole size and then jump.
+		let mut ticker = Ticker::default();
+		assert_eq!(ticker.settle(10), 10);
+		// Having been announced, it has spent the step: the next byte is not news again.
+		assert_eq!(ticker.advance(1), None);
+		assert_eq!(ticker.advance(PROGRESS_STEP), Some(PROGRESS_STEP + 11));
 	}
 
 	#[test]

@@ -31,13 +31,12 @@ use crate::explorer;
 use crate::ssh::asuser::{Files, Runner};
 use crate::ssh::shellfs;
 use crate::ssh::transfer::{
-	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, TreePlan, resume_start,
+	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, Ticker, TreePlan, resume_start,
 };
 
-/// How much of the file to move per read, and how many bytes between progress events.
-/// The same figures the upload uses, for the same reasons (§17).
+/// How much of the file to move per read. The same figure the upload uses, for the same reasons
+/// (§17); how many bytes go by between progress events is the shared `transfer::PROGRESS_STEP`.
 const CHUNK: usize = 32 * 1024;
-const PROGRESS_STEP: u64 = 256 * 1024;
 
 /// Hand the transfer to a background task (§19), over whichever backend the account it runs as
 /// could offer (§46). Opening a channel borrows the session handle, so that already happened in the
@@ -189,11 +188,13 @@ async fn copy(
 	let mut destination = open_local_at(local, offset).await?;
 
 	let mut buffer = vec![0u8; CHUNK];
-	let mut received = offset;
-	let mut reported = offset;
+	// Whatever survived the interruption is already on the bar, so a resume picks up its position
+	// rather than starting again from nothing.
+	let mut ticker = Ticker::default();
+	ticker.settle(offset);
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: received,
+			sent: ticker.moved(),
 			total,
 		})
 		.await;
@@ -211,14 +212,9 @@ async fn copy(
 			.write_all(&buffer[..read])
 			.await
 			.context("write failed")?;
-		received += read as u64;
-		if received - reported >= PROGRESS_STEP {
-			reported = received;
+		if let Some(sent) = ticker.advance(read as u64) {
 			let _ = events
-				.send(SshEvent::TransferProgress {
-					sent: received,
-					total,
-				})
+				.send(SshEvent::TransferProgress { sent, total })
 				.await;
 		}
 	}
@@ -232,7 +228,7 @@ async fn copy(
 	stamp_local(local, mtime, mode).await;
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: received,
+			sent: ticker.moved(),
 			total,
 		})
 		.await;
@@ -337,11 +333,6 @@ fn apply_mode(_local: &Path, _mode: Option<u32>) {}
 fn remote_mode(meta: &FileAttributes) -> Option<u32> {
 	meta.permissions.map(|bits| bits & 0o7777)
 }
-
-/// How far to probe for a free `name-1`, `name-2`… beside a local name already taken (§19), the
-/// "keep both" answer to a tree download's collision. Bounded like every other free-name search
-/// here: after a hundred the folder is telling us something.
-const FREE_NAME_TRIES: u32 = 100;
 
 /// Open the SFTP channel and hand a whole-folder download to a background task (§19). The mirror
 /// of `start_tree` on the upload side: the transfer may pause to ask the user about a local file
@@ -530,12 +521,11 @@ async fn receive_tree(
 			.map_err(transfer::refused)?;
 	}
 
-	let mut received = 0u64;
-	let mut reported = 0u64;
+	let mut ticker = Ticker::default();
 	let mut sticky: Option<Sticky> = None;
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: received,
+			sent: ticker.moved(),
 			total,
 		})
 		.await;
@@ -555,12 +545,10 @@ async fn receive_tree(
 					free_local(&dir, leaf)
 				}
 				FileAction::Skip => {
-					received += file.size;
+					// Counted as handled so the bar still reaches the end (§19).
+					let sent = ticker.settle(file.size);
 					let _ = events
-						.send(SshEvent::TransferProgress {
-							sent: received,
-							total,
-						})
+						.send(SshEvent::TransferProgress { sent, total })
 						.await;
 					continue;
 				}
@@ -579,8 +567,7 @@ async fn receive_tree(
 			resume,
 			file.size,
 			events,
-			&mut received,
-			&mut reported,
+			&mut ticker,
 			total,
 			cancel,
 		)
@@ -595,7 +582,7 @@ async fn receive_tree(
 
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: received,
+			sent: ticker.moved(),
 			total,
 		})
 		.await;
@@ -608,10 +595,11 @@ async fn receive_tree(
 	Ok(Some(local_target.display().to_string()))
 }
 
-/// Fetch one remote file into a local one, folding its bytes into the tree-wide `received`
-/// counter and emitting a progress event every `PROGRESS_STEP` (§19). The twin of the upload's
-/// `send_file`, in the other direction — including the resume size-compare and the cancel poll
-/// with its delete of the partial (§16).
+/// Fetch one remote file into a local one, folding its bytes into the tree-wide [`Ticker`] and
+/// emitting a progress event every `PROGRESS_STEP` (§19). The twin of the upload's `send_file`, in
+/// the other direction — including the resume size-compare and the cancel poll with its delete of
+/// the partial (§16), and including the ticker that carries the running total from one file to the
+/// next in place of the pair of `&mut u64` counters this used to take.
 #[allow(clippy::too_many_arguments)]
 async fn receive_file(
 	sftp: &SftpSession,
@@ -620,8 +608,7 @@ async fn receive_file(
 	resume: bool,
 	size: u64,
 	events: &mpsc::Sender<SshEvent>,
-	received: &mut u64,
-	reported: &mut u64,
+	ticker: &mut Ticker,
 	total: u64,
 	cancel: &Arc<AtomicBool>,
 ) -> Result<CopyOutcome> {
@@ -633,12 +620,9 @@ async fn receive_file(
 	let offset = match resume_start(resume, dest_size, size) {
 		// Already fully here from before the interruption: count its bytes and move on.
 		Start::Skip => {
-			*received += size;
+			let sent = ticker.settle(size);
 			let _ = events
-				.send(SshEvent::TransferProgress {
-					sent: *received,
-					total,
-				})
+				.send(SshEvent::TransferProgress { sent, total })
 				.await;
 			return Ok(CopyOutcome::Done);
 		}
@@ -656,7 +640,7 @@ async fn receive_file(
 			.with_context(|| format!("could not seek {remote} to the resume point"))?;
 		// The bytes already on disk count towards the running total straight away, so the bar
 		// reflects the resumed progress rather than dropping back.
-		*received += offset;
+		ticker.settle(offset);
 	}
 	let mut destination = open_local_at(local, offset).await?;
 
@@ -675,14 +659,9 @@ async fn receive_file(
 			.write_all(&buffer[..read])
 			.await
 			.context("write failed")?;
-		*received += read as u64;
-		if *received - *reported >= PROGRESS_STEP {
-			*reported = *received;
+		if let Some(sent) = ticker.advance(read as u64) {
 			let _ = events
-				.send(SshEvent::TransferProgress {
-					sent: *received,
-					total,
-				})
+				.send(SshEvent::TransferProgress { sent, total })
 				.await;
 		}
 	}
@@ -797,20 +776,16 @@ fn planned_remote(rel: Vec<String>, meta: &FileAttributes) -> PlannedFile {
 }
 
 /// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§19) — the
-/// "keep both" destination for a tree download. The twin of the upload's `free_remote`, but a
-/// local `exists()` is cheap, so it needs no round-trip bound beyond the shared sanity cap.
+/// "keep both" destination for a tree download. The twin of the upload's `free_remote`, sharing
+/// the candidate's shape with it through `explorer::free_candidate`; a local `exists()` is cheap,
+/// so the cap is a sanity bound here rather than a round-trip one, but it is the SAME bound, so
+/// one file does not get a hundred tries on one side and a thousand on the other.
 fn free_local(dir: &Path, name: &str) -> PathBuf {
-	let (stem, extension) = match name.rsplit_once('.') {
-		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
-		_ => (name, String::new()),
-	};
-	let mut candidate = dir.join(format!("{stem}-1{extension}"));
-	for attempt in 2..=FREE_NAME_TRIES {
+	for attempt in 1..=explorer::FREE_NAME_TRIES {
+		let candidate = dir.join(explorer::free_candidate(name, attempt));
 		if !candidate.exists() {
-			break;
+			return candidate;
 		}
-		candidate = dir.join(format!("{stem}-{attempt}{extension}"));
 	}
-	candidate
+	dir.join(explorer::free_candidate(name, explorer::FREE_NAME_TRIES))
 }

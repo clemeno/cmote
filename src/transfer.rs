@@ -1140,23 +1140,22 @@ fn plan_uploads(
 }
 
 /// The first free `name-1.ext`, `name-2.ext`… beside a local name already taken (§21) — the "save
-/// alongside" answer to the collision question. Bounded: after a hundred tries the folder is
-/// telling us something, and the last candidate is returned rather than spinning. Writing it is
-/// the download's problem, not this function's.
+/// alongside" answer to the collision question. Bounded by `explorer::FREE_NAME_TRIES`: after a
+/// hundred tries the folder is telling us something, and the last candidate is returned rather
+/// than spinning. Writing it is the download's problem, not this function's.
+///
+/// The queue asks the same shared rule the ssh layer asks, which is why the rule sits in
+/// `explorer` beside `join` and `name` rather than in either of the two transfer modules: this one
+/// deliberately knows nothing about `ssh::`, and the ssh one is a background-task spine the GUI
+/// never links against.
 fn free_name(dir: &Path, name: &str) -> PathBuf {
-	let (stem, extension) = match name.rsplit_once('.') {
-		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
-		_ => (name, String::new()),
-	};
-	let mut candidate = dir.join(format!("{stem}-1{extension}"));
-	for attempt in 2..=100 {
+	for attempt in 1..=explorer::FREE_NAME_TRIES {
+		let candidate = dir.join(explorer::free_candidate(name, attempt));
 		if !candidate.exists() {
-			break;
+			return candidate;
 		}
-		candidate = dir.join(format!("{stem}-{attempt}{extension}"));
 	}
-	candidate
+	dir.join(explorer::free_candidate(name, explorer::FREE_NAME_TRIES))
 }
 
 /// A path's own file name, which is what the status bar shows and what the remote destination is

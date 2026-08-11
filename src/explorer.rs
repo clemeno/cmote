@@ -779,6 +779,38 @@ pub fn shell_quote(path: &str) -> String {
 	format!("'{}'", path.replace('\'', r"'\''"))
 }
 
+/// How many `name-1`, `name-2`… candidates a "keep both" answer tries before it gives up (§17,
+/// §19, §21). A hundred, because past that the folder is telling us something — and because on the
+/// remote side every probe is a ROUND TRIP, so an unbounded search would hang a slow link on one
+/// colliding file. The shell backend probes with `[ -e ]`, which is dearer than SFTP's own check
+/// rather than cheaper, so it gets the same ceiling and not a looser one.
+pub const FREE_NAME_TRIES: u32 = 100;
+
+/// The `attempt`-th "keep both" candidate for a name already taken (§17, §19, §21): `notes.txt` at
+/// attempt 1 is `notes-1.txt`.
+///
+/// Only the NAME — joining it onto a folder stays the caller's, because the callers join it four
+/// ways (POSIX `/` for the remote, `PathBuf::push` locally) and only the SHAPE is shared. It was
+/// written out five times before this, in three spellings, under two different caps, with three
+/// different answers when the tries ran out. Sitting here it is one rule, next to the other
+/// name-shaping ones, reachable from both the queue and the ssh layer without either depending on
+/// the other.
+///
+/// The number goes BEFORE the extension so the copy still opens in the same program as the
+/// original — `notes-1.txt` and not `notes.txt-1`. The split is `rsplit_once('.')` guarded on a
+/// non-empty stem, and the guard is what makes a DOT-FILE keep its whole name: `.bashrc` has no
+/// extension to preserve, it is all name, so it becomes `.bashrc-1` rather than `-1.bashrc`. A
+/// name with several dots keeps every dot but the last in its stem — `archive.tar.gz` becomes
+/// `archive.tar-1.gz` — because the last dot is the only one anything treats as the extension.
+pub fn free_candidate(name: &str, attempt: u32) -> String {
+	let (stem, extension) = match name.rsplit_once('.') {
+		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
+		// A dot-file (`.bashrc`) or a name with no dot at all: the whole thing is the stem.
+		_ => (name, String::new()),
+	};
+	format!("{stem}-{attempt}{extension}")
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1129,6 +1161,38 @@ mod tests {
 		let menu = explorer.menu().expect("the menu is open");
 		assert_eq!(menu.path, "/home");
 		assert_eq!(menu.at, iced::Point::new(30.0, 60.0));
+	}
+
+	#[test]
+	fn a_keep_both_candidate_numbers_the_stem_and_keeps_the_extension() {
+		// The number goes before the extension, so the copy still opens in the same program as
+		// the original. This is the ordinary case, and the only one of the five old copies that
+		// every one of them agreed on.
+		assert_eq!(free_candidate("notes.txt", 1), "notes-1.txt");
+		assert_eq!(free_candidate("notes.txt", 42), "notes-42.txt");
+	}
+
+	#[test]
+	fn a_dot_file_is_all_name_and_has_no_extension_to_keep() {
+		// `.bashrc` is not a file called nothing with an extension of `bashrc`. The guard on a
+		// non-empty stem is what tells those two apart, and dropping it would produce `-1.bashrc`
+		// — a different dot-file, in the same folder, that no longer sorts beside its original.
+		assert_eq!(free_candidate(".bashrc", 1), ".bashrc-1");
+		assert_eq!(free_candidate(".gitignore", 3), ".gitignore-3");
+	}
+
+	#[test]
+	fn a_name_with_no_dot_is_numbered_on_the_end() {
+		assert_eq!(free_candidate("README", 1), "README-1");
+		assert_eq!(free_candidate("Makefile", 2), "Makefile-2");
+	}
+
+	#[test]
+	fn only_the_last_dot_counts_as_the_extension() {
+		// `archive.tar.gz` keeps `.tar` in its stem: the last dot is the only one anything reads
+		// as an extension, so numbering before the `.tar` would rename the archive's type.
+		assert_eq!(free_candidate("archive.tar.gz", 1), "archive.tar-1.gz");
+		assert_eq!(free_candidate("v1.2.3.json", 1), "v1.2.3-1.json");
 	}
 
 	#[test]

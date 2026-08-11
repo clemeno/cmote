@@ -36,12 +36,8 @@ use tokio::sync::mpsc;
 use super::asuser::Runner;
 use super::transfer::{self, CopyOutcome, FileAction, PlannedFile, Start, TreePlan};
 use crate::bridge::{ConflictChoice, SshEvent};
-use crate::explorer::{join, shell_quote};
+use crate::explorer::{self, join, shell_quote};
 use crate::files::{self, Entry, Kind, Meta};
-
-/// How often the copy loops report progress, in bytes moved. The same interval the SFTP loops use,
-/// so the status bar behaves identically whichever backend is under it.
-const PROGRESS_STEP: u64 = 256 * 1024;
 
 // A file read through a shell is bounded by the ceiling its CALLER passes, exactly as the SFTP path
 // is (§53) — there is no constant here on purpose. There was one, `MAX_READ = edit::MAX_SIZE`, and
@@ -184,19 +180,22 @@ pub async fn remove(runner: &Runner, paths: &[String]) -> Result<()> {
 }
 
 /// A free `name-1`-style path beside an occupied one (§17), for a "keep both" answer. Asks the
-/// remote about each candidate in turn, exactly as the SFTP path does.
+/// remote about each candidate in turn, exactly as the SFTP path does — and now with exactly the
+/// same shape and the same ceiling, through `explorer::free_candidate` and
+/// `explorer::FREE_NAME_TRIES`. Each probe here is a `[ -e ]` round trip, which is dearer than
+/// SFTP's own existence check rather than cheaper, so the bound matters more on this backend than
+/// on that one; it used to be a bare `1000` written twice in this file.
 pub async fn free_name(runner: &Runner, dir: &str, name: &str) -> String {
-	let (stem, extension) = match name.rsplit_once('.') {
-		Some((stem, extension)) if !stem.is_empty() => (stem, format!(".{extension}")),
-		_ => (name, String::new()),
-	};
-	for index in 1..1000 {
-		let candidate = join(dir, &format!("{stem}-{index}{extension}"));
+	for attempt in 1..=explorer::FREE_NAME_TRIES {
+		let candidate = join(dir, &explorer::free_candidate(name, attempt));
 		if !exists(runner, &candidate).await {
 			return candidate;
 		}
 	}
-	join(dir, &format!("{stem}-{extension}"))
+	join(
+		dir,
+		&explorer::free_candidate(name, explorer::FREE_NAME_TRIES),
+	)
 }
 
 /// Read a whole remote file into memory, for a viewer tab (§32, §53). Refuses one over `limit`
@@ -350,8 +349,8 @@ pub async fn fetch(
 
 	let mut file = open_local(local, offset).await?;
 	let mut channel = open_read(runner, remote, offset).await?;
-	let mut moved = offset;
-	let mut reported = offset;
+	let mut ticker = transfer::Ticker::default();
+	ticker.settle(offset);
 	let mut stderr = String::new();
 	let mut status = None;
 	while let Some(message) = channel.wait().await {
@@ -365,11 +364,9 @@ pub async fn fetch(
 				file.write_all(&data)
 					.await
 					.context("could not write to the local file")?;
-				moved += data.len() as u64;
-				if moved - reported >= PROGRESS_STEP {
-					reported = moved;
+				if let Some(sent) = ticker.advance(data.len() as u64) {
 					let _ = events
-						.send(SshEvent::TransferProgress { sent: moved, total })
+						.send(SshEvent::TransferProgress { sent, total })
 						.await;
 				}
 			}
@@ -388,7 +385,10 @@ pub async fn fetch(
 		bail!("{}", reason_of(&stderr));
 	}
 	let _ = events
-		.send(SshEvent::TransferProgress { sent: moved, total })
+		.send(SshEvent::TransferProgress {
+			sent: ticker.moved(),
+			total,
+		})
 		.await;
 	Ok(CopyOutcome::Done)
 }
@@ -427,8 +427,8 @@ pub async fn send(
 	}
 	let mut channel = open_write(runner, remote, offset > 0).await?;
 	let mut buffer = vec![0u8; 32 * 1024];
-	let mut moved = offset;
-	let mut reported = offset;
+	let mut ticker = transfer::Ticker::default();
+	ticker.settle(offset);
 	loop {
 		if cancel.load(Ordering::Relaxed) {
 			// A cancelled upload leaves no half file behind, matching the SFTP path.
@@ -447,17 +447,18 @@ pub async fn send(
 			.data(&buffer[..read])
 			.await
 			.context("could not send the file's bytes")?;
-		moved += read as u64;
-		if moved - reported >= PROGRESS_STEP {
-			reported = moved;
+		if let Some(sent) = ticker.advance(read as u64) {
 			let _ = events
-				.send(SshEvent::TransferProgress { sent: moved, total })
+				.send(SshEvent::TransferProgress { sent, total })
 				.await;
 		}
 	}
 	finish_write(&mut channel).await?;
 	let _ = events
-		.send(SshEvent::TransferProgress { sent: moved, total })
+		.send(SshEvent::TransferProgress {
+			sent: ticker.moved(),
+			total,
+		})
 		.await;
 	Ok(CopyOutcome::Done)
 }
@@ -702,25 +703,24 @@ fn split_remote(path: &str) -> (String, String) {
 }
 
 /// A free `name-1` beside an occupied LOCAL path, for a "keep both" answer on a download.
+///
+/// This one took a whole path where its three twins took a folder and a name, and split it with
+/// `file_stem`/`extension` where they used `rsplit_once`, so it was the only one that could ever
+/// have disagreed with the rest about what a name's extension is. It now asks the same shared rule
+/// as everything else. A path with no parent and no name has nothing to make a candidate out of,
+/// so it comes back unchanged — the caller's `exists` check has already told it that much.
 fn free_local(path: &Path) -> std::path::PathBuf {
-	let Some(parent) = path.parent() else {
+	let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
 		return path.to_path_buf();
 	};
-	let stem = path
-		.file_stem()
-		.map(|stem| stem.to_string_lossy().into_owned())
-		.unwrap_or_default();
-	let extension = path
-		.extension()
-		.map(|extension| format!(".{}", extension.to_string_lossy()))
-		.unwrap_or_default();
-	for index in 1..1000 {
-		let candidate = parent.join(format!("{stem}-{index}{extension}"));
+	let name = name.to_string_lossy();
+	for attempt in 1..=explorer::FREE_NAME_TRIES {
+		let candidate = parent.join(explorer::free_candidate(&name, attempt));
 		if !candidate.exists() {
 			return candidate;
 		}
 	}
-	path.to_path_buf()
+	parent.join(explorer::free_candidate(&name, explorer::FREE_NAME_TRIES))
 }
 
 #[cfg(test)]

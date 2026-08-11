@@ -1627,6 +1627,27 @@ on the server, or the remote one recreated on this machine. Both directions shar
   sticky policy that settles every later collision without asking again, and *Cancel* stops the
   whole transfer — files already copied stay. This is the per-file mirror of the flat batch's
   up-front question above; the flat paths are untouched.
+- **One "keep both" rule, in one place** (`explorer::free_candidate` + `explorer::FREE_NAME_TRIES`).
+  `notes.txt` becomes `notes-1.txt` — the number before the extension, so the copy still opens in
+  the same program; `.bashrc` becomes `.bashrc-1`, because a dot-file is all name and has no
+  extension to keep; `archive.tar.gz` becomes `archive.tar-1.gz`, because only the last dot is an
+  extension. A hundred tries, then the last candidate is returned unprobed — the create that follows
+  re-checks, so the worst a hundred-deep collision costs is one skipped file, never an overwrite.
+  Worth stating because it was written **five** times before it was written once: the SFTP upload,
+  the SFTP download, both shell-backend halves, and the queue's own local "save alongside". Three
+  spellings, two caps (one of them a bare `1000` on the backend whose probes are the DEAREST), and
+  three different answers when the tries ran out — one of which handed back the path it had just
+  been told was occupied. It lives in `explorer` beside `join` and `name` rather than in either
+  transfer module because both of those callers must reach it and neither may depend on the other:
+  the queue deliberately knows nothing of `ssh::`.
+- **The progress bar's arithmetic is one type** (`ssh::transfer::Ticker`), not six copies of a
+  five-line gate and a pair of `&mut u64` counters threaded through every copy loop. It answers one
+  question — has a whole `PROGRESS_STEP` gone by since anyone was last told — and it makes the two
+  cases that move no bytes explicit rather than incidental: a file **skipped** whole and a resume's
+  **carry-in** are both counted AND announced at once, so neither stalls the bar nor leaves a report
+  owing. That last part is the bug the tests now pin: the counters it replaced started *both* at the
+  resume offset, and a ticker that carried the bytes without also marking them reported would make
+  the first chunk of every resumed file fire an event.
 
 ### Cancel and resume (v4.0.0)
 
