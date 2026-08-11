@@ -3366,7 +3366,11 @@ impl Tab {
 				}
 			}
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
-			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
+			// Two dialogs, one meaning: the credential asked for cannot be given, so the handshake
+			// waiting on it is over (§7).
+			Message::PassphraseCancelled | Message::InteractiveCancelled => {
+				return self.on_credential_cancelled();
+			}
 			Message::InteractiveAnswerChanged(index, value) => {
 				if let Some(Prompt::Interactive { answers, .. }) = &mut self.prompt
 					&& let Some(slot) = answers.get_mut(index)
@@ -3375,7 +3379,6 @@ impl Tab {
 				}
 			}
 			Message::InteractiveSubmitted => return self.on_interactive_submitted(),
-			Message::InteractiveCancelled => return self.on_interactive_cancelled(),
 			Message::RememberToggled => self.form.remember = !self.form.remember,
 			Message::VaultInputChanged(value) => {
 				if let Some(Prompt::Vault { input, .. }) = &mut self.prompt {
@@ -3673,16 +3676,24 @@ impl Tab {
 
 		// Decide, before `params` moves into the dial, whether this connect should remember its
 		// secret — and capture it now. Only a non-empty secret is worth storing (§16).
-		if self.form.remember
-			&& let Some(secret) = extract_secret(&params.auth)
-		{
-			let endpoint = crate::profiles::endpoint_of(&params.user, &params.host, params.port);
-			self.pending_remember = Some((endpoint, secret));
-			// A secret is in play, so the vault must be unlocked to store it. If it is not yet,
-			// defer the connect behind the master-passphrase prompt and resume it on unlock.
-			if self.vault.borrow().is_none() {
-				return self.open_vault_modal(VaultPending::Connect(params));
-			}
+		//
+		// Written UNCONDITIONALLY, `None` included. An earlier attempt may have captured a secret
+		// and then failed, and skipping this line when Remember is off would leave that capture in
+		// place: the next successful connect would store the OLD host's password under the OLD
+		// endpoint, with nothing ticked and no connection to it (§12, §16).
+		self.pending_remember = if self.form.remember {
+			extract_secret(&params.auth).map(|secret| {
+				let endpoint =
+					crate::profiles::endpoint_of(&params.user, &params.host, params.port);
+				(endpoint, secret)
+			})
+		} else {
+			None
+		};
+		// A secret is in play, so the vault must be unlocked to store it. If it is not yet, defer
+		// the connect behind the master-passphrase prompt and resume it on unlock.
+		if self.pending_remember.is_some() && self.vault.borrow().is_none() {
+			return self.open_vault_modal(VaultPending::Connect(params));
 		}
 
 		self.dial(params)
@@ -3739,11 +3750,23 @@ impl Tab {
 			self.connection = Some(endpoint);
 			self.screen = Screen::Connecting { status };
 		} else {
-			// The command never left: do not leave a pending target — or a secret to save — behind.
-			self.pending_target = None;
-			self.pending_remember = None;
+			// The command never left, so there is no attempt for either capture to belong to.
+			self.abandon_attempt();
 		}
 		iced::Task::none()
+	}
+
+	/// This connection attempt is over without opening a session (§14, §16): drop the two things
+	/// it was carrying on the promise that it would.
+	///
+	/// The profile is only a profile, but the SECRET matters. It is captured when Connect is
+	/// pressed with Remember ticked and stored only when the session opens, so anything that ends
+	/// the attempt in between has to drop it — otherwise a later successful connect finds it still
+	/// there and stores it, under the endpoint it was captured for rather than the one that just
+	/// succeeded (§12). One method, so a new way for an attempt to die cannot forget half of it.
+	fn abandon_attempt(&mut self) {
+		self.pending_target = None;
+		self.pending_remember = None;
 	}
 
 	/// Open the master-passphrase prompt for the secret vault (§16), recording what to resume
@@ -3856,7 +3879,9 @@ impl Tab {
 	/// abandoned; the user can still type the secret by hand.
 	fn on_vault_cancelled(&mut self) -> iced::Task<Message> {
 		self.prompt = None;
-		self.pending_remember = None;
+		// The connect this prompt was blocking is abandoned with it, and the secret it captured
+		// goes too (§12, §16).
+		self.abandon_attempt();
 		self.screen = Screen::Connect;
 		iced::Task::none()
 	}
@@ -3875,16 +3900,24 @@ impl Tab {
 		}
 	}
 
+	/// An answer went back and the handshake carries on (§7, §8): the question is closed and the
+	/// status line says what is happening now. Said in one place because it is one fact — three
+	/// prompts reach it, and a copy that forgot to close the prompt would leave the dialog on screen
+	/// over a connection that had already moved on.
+	fn authenticating(&mut self) {
+		self.prompt = None;
+		self.screen = Screen::Connecting {
+			status: "authenticating…".to_owned(),
+		};
+	}
+
 	/// Relay the user's host-key choice to the SSH task (§8): reject, trust once, or pin. Any
 	/// choice but reject means the handshake proceeds, so we go back to a connecting status; on
 	/// reject the refused handshake surfaces its own error and moves the screen.
 	fn on_host_key_decision(&mut self, choice: HostKeyChoice) {
 		let proceeding = choice != HostKeyChoice::Reject;
 		if self.send_command(SshCommand::HostKeyResponse(choice)) && proceeding {
-			self.prompt = None;
-			self.screen = Screen::Connecting {
-				status: "authenticating…".to_string(),
-			};
+			self.authenticating();
 		}
 	}
 
@@ -3901,17 +3934,22 @@ impl Tab {
 			// An attempt is now in flight. If the key does not unlock, the SSH task
 			// re-asks and this flag makes the next prompt show its "incorrect" hint (§7).
 			self.passphrase_failed = true;
-			self.screen = Screen::Connecting {
-				status: "authenticating…".to_string(),
-			};
+			self.authenticating();
 		}
 	}
 
-	/// Dismiss the passphrase prompt: tell the task to tear down and go back to
-	/// the form. The prompt goes first, so the discarded text does not linger.
-	fn on_passphrase_cancelled(&mut self) -> iced::Task<Message> {
+	/// Dismiss a credential prompt mid-handshake — the key passphrase (§7) or the server's
+	/// keyboard-interactive challenge (§7). Both mean the same thing and did the same three lines
+	/// twice: the prompt goes first, so the discarded text does not linger (§12); the half-done
+	/// handshake is torn down, because there is no way to answer it later; and what the attempt
+	/// captured is abandoned rather than left for a future connect to store (§16).
+	///
+	/// The vault prompt is NOT one of these: it is asked BEFORE anything is dialed, so there is no
+	/// handshake to tear down — see `on_vault_cancelled`.
+	fn on_credential_cancelled(&mut self) -> iced::Task<Message> {
 		self.prompt = None;
 		self.send_command(SshCommand::Disconnect);
+		self.abandon_attempt();
 		self.go_to_form()
 	}
 
@@ -3927,19 +3965,9 @@ impl Tab {
 		};
 		let answers: Vec<Secret> = answers.into_iter().map(Secret::new).collect();
 		if self.send_command(SshCommand::Interactive(answers)) {
-			self.screen = Screen::Connecting {
-				status: "authenticating…".to_string(),
-			};
+			self.authenticating();
 		}
 		iced::Task::none()
-	}
-
-	/// Dismiss the keyboard-interactive prompt: tear the connection down and go back to the form
-	/// (§7). The prompt goes first, so the discarded answers do not linger (§12).
-	fn on_interactive_cancelled(&mut self) -> iced::Task<Message> {
-		self.prompt = None;
-		self.send_command(SshCommand::Disconnect);
-		self.go_to_form()
 	}
 
 	/// Send one command to the SSH task. Returns whether it was sent; a
@@ -4420,6 +4448,7 @@ impl Tab {
 			SshEvent::Disconnected => {
 				// A remote hangup ends a live session too: remember where it was (§22).
 				self.persist_session();
+				self.abandon_attempt();
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
@@ -4430,6 +4459,9 @@ impl Tab {
 				// Only saves when a shell had actually opened — an auth/handshake failure
 				// reaches here with no terminal, and `persist_session` then does nothing (§22).
 				self.persist_session();
+				// A refused handshake is the commonest way an attempt dies: whatever it captured on
+				// the promise of succeeding goes now, secret first (§12, §16).
+				self.abandon_attempt();
 				self.terminal = None;
 				self.connection = None;
 				self.clear_grid_interaction();
@@ -4720,7 +4752,9 @@ impl Tab {
 		self.home_menu_open = false;
 		self.home_rename = None;
 		self.confirm_delete = false;
-		self.pending_target = None;
+		// Leaving for the list abandons any connect in flight, so what it was carrying goes with
+		// it — the unsaved profile and, above all, the secret it captured (§12, §14, §16).
+		self.abandon_attempt();
 		self.form.password.clear();
 		self.form.passphrase.clear();
 		// Going back to the list abandons the connect a copy was opened for, so its carried
@@ -7776,6 +7810,55 @@ mod tests {
 		assert!(app.modal.is_none());
 		assert!(next_command(&mut rx).is_none());
 		assert!(app.shell_owns_keyboard());
+	}
+
+	/// SECURITY (§16, §12): a secret captured for ONE attempt must never be stored on the back of a
+	/// later one. The capture happens when Connect is pressed with Remember ticked; the store happens
+	/// only on a successful connect. A failed attempt in between has to drop it, or the two ends stop
+	/// describing the same connection.
+	#[test]
+	fn a_failed_attempt_leaves_no_secret_for_a_later_connect_to_store() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.pending_remember = Some(("u@a:22".to_owned(), Secret::new("hunter2".to_owned())));
+		// A dial's own capture: the profile it would save if the session opened (§14).
+		app.form.host = "a".to_owned();
+		app.form.port = "22".to_owned();
+		app.form.user = "u".to_owned();
+		app.form.auth_kind = AuthKind::Password;
+		app.form.password = "hunter2".to_owned();
+		let _ = app.dial(app.form.validate().expect("a valid form"));
+		assert!(app.pending_target.is_some(), "the dial captured a profile");
+
+		let _ = app.on_ssh_event(SshEvent::Error("authentication failed".to_owned()));
+
+		assert!(
+			app.pending_remember.is_none(),
+			"the secret belonged to the attempt that just failed"
+		);
+		assert!(app.pending_target.is_none());
+	}
+
+	/// SECURITY (§16): pressing Connect with Remember OFF captures nothing — and clears anything a
+	/// previous press captured. Otherwise a secret from an earlier attempt would still be sitting
+	/// there when this connection succeeds, and would be stored under the EARLIER endpoint: a
+	/// password persisted for a host the user is not even connecting to, without ticking anything.
+	#[test]
+	fn a_connect_with_remember_off_captures_nothing_and_clears_what_came_before() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.pending_remember = Some(("u@a:22".to_owned(), Secret::new("hunter2".to_owned())));
+
+		app.form.host = "b".to_owned();
+		app.form.port = "22".to_owned();
+		app.form.user = "u".to_owned();
+		app.form.auth_kind = AuthKind::Password;
+		app.form.password = "different".to_owned();
+		app.form.remember = false;
+		let _ = app.on_connect_pressed();
+
+		assert!(
+			app.pending_remember.is_none(),
+			"nothing was ticked, so there is nothing to store — for this host or any other"
+		);
 	}
 
 	/// SECURITY (§8): an unknown host key is trusted ONLY by an explicit choice. The prompt itself

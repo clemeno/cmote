@@ -1212,6 +1212,16 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   so a forgotten master passphrase means the secrets are gone, by design. Still deferred: the
   other `age` unlock paths (encrypt to the user's own SSH key, or a dedicated generated identity
   file), which drop into the same code path when wanted.
+  - **The capture and the store are two ends of ONE attempt (v4.0.0).** The secret is captured
+    when Connect is pressed with Remember ticked, and written only when `Connected` arrives — so
+    everything that ends the attempt in between has to drop it. It did not. A failed
+    authentication left the capture in place, and because the capture site only *wrote* the field
+    when Remember was ticked, a later connect with Remember OFF inherited it: that connect then
+    stored the EARLIER host's password, under the EARLIER endpoint, with nothing ticked and no
+    connection to it. Fixed at both ends and locked by tests — the capture site now writes the
+    field unconditionally (`None` included), and one `abandon_attempt` is called by every path
+    that ends an attempt without opening a session: a dial that never left, `SshEvent::Error`,
+    `Disconnected`, a cancelled credential prompt, a cancelled vault prompt, and going Home.
 - **Multiple sessions / tabs** — *done (v3.0)*. Fully independent tabs (§26): each tab is a whole
   session state machine — its own screen (home / connect / a live shell), terminal, panels and
   dialogs — so one can browse the home list while another runs a shell. `App` owns a `Vec<Tab>`
@@ -2782,6 +2792,36 @@ locked by tests (two hosts, so the line is not trivially 1).
   `host keytype base64` shape); an exotic hand-written `known_hosts` line surfaces "(could not read
   the stored key)" rather than a wrong fingerprint, and the dialog still opens with the presented
   key so the decision is never blocked on it.
+
+### No `auth::Handshake` module — and why (v4.0.0)
+
+An architecture review proposed lifting the whole connect flow into an `auth::Handshake` module
+(`begin` / `answer` / `on_event`, returning a `Step`), on the reading that §7's prompts, §8's
+host-key gate, §12's secrets and §16's vault were one feature scattered across `Tab`. It was
+explored and **rejected**; recorded here so it is not re-suggested.
+
+Most of the state it would have owned had already been collapsed by the change that landed just
+before it: the six prompt-backing field groups became one `Option<Prompt>` (§10), which was the
+bulk of it. What remained was four scalars — `pending_target`, `pending_remember`,
+`pending_connect`, `passphrase_failed` — and a set of three-line message handlers. Against that,
+the interface would have had to be nearly as wide as the body, which is what a shallow module is:
+
+- **`Connected` is not an auth event.** Of its ~130 lines, about 25 are the handshake's (upsert the
+  target, settle the remembered secret); the rest is §22's session restore, §27's saved forwards,
+  §45's first identity, the emulator, the cwd replay. A `Step::Open(…)` would have to hand every
+  auth-side capture back for the caller to finish the job, so the seam leaks at exactly the point
+  it exists to close.
+- **The vault prompt serves two flows, and only one of them is a handshake.**
+  `VaultPending::Connect` resumes a deferred dial; `VaultPending::Prefill` fills a form field for a
+  target the user merely *opened* (§14, §16). A `Handshake` owning that prompt would have to reach
+  into the connect form for a case with no handshake in it at all.
+- **Everything it would act on is owned elsewhere.** The vault (`Rc<RefCell<…>>`, app-wide), the
+  target list (likewise), the form, the screen — each call would take three or four of them as
+  arguments.
+
+What the exploration DID find is in §16 above: the remembered-secret capture outliving the attempt
+it belonged to. That is fixed. The friction was never the shape of the flow — it was one rule
+stated at two ends with nothing joining them, which is now `abandon_attempt`.
 
 ## 29. Drag-and-drop upload (v3.0.0)
 
