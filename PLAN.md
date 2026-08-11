@@ -65,7 +65,8 @@ a side panel holds it, or choosing an item off the grid's menu, hands it back to
 and the **open and closed hand** over everything you can pick up — a tab chip, a dialog header —
 drawn by cmote because Windows has neither cursor (§51); and a **chip's own right-click menu** that
 sends a tab to another area of the window — moving it there, or opening a second copy of the session
-where the first one is standing (§52).
+where the first one is standing (§52); and a **picture that opens as a picture**, so double-clicking
+a `.png` gives its own zoomable tab instead of a text editor that can only refuse it (§53).
 Both targets are supported first-class, and each has a verified toolchain on its host:
 
 - **macOS Sequoia (Intel)** — this machine (15.7.7): `rustc`/`cargo` 1.97.1 stable,
@@ -245,6 +246,7 @@ cmote/
     ├── mru.rs            the tabs' activation order (ids, most recent last): a close falls back to the previous visit (§37)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
     ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
+    ├── preview.rs        the picture tab's model: which files open as a picture, and the fenced decode — sniff by magic bytes, cap the dimensions and the allocation, name the format in every refusal (§53)
     ├── profiles.rs       load/save `targets.json`: saved connection profiles + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
     ├── secret.rs         the session-secret wrapper (`Secret` over `zeroize`): passwords / passphrases held in memory, wiped on drop, never logged (§12)
     ├── ui/
@@ -257,6 +259,7 @@ cmote/
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
     │   ├── home.rs        the home screen: the filter box, the saved-target list, select / open / rename / delete, theme-following colours (§14, §49)
     │   ├── menu.rs        shared right-click menu chrome: panel / items / separator / dismiss layer (§10, §19, §52)
+    │   ├── preview.rs     the picture tab: a toolbar naming what the bytes turned out to be, the image on its ground (iced's own zoom/pan viewer), the refusal card (§53)
     │   ├── selection.rs   stream text selection over the grid, in absolute document lines; word / line expansion for a double or triple click; text extraction, unwrapping across a wrap (§10, §40, §42)
     │   ├── snackbar.rs    the copy-confirmation toast, bottom-centre, self-dismissing (§10)
     │   ├── tabs.rs        the tab strip across the top: one chip per session + "+"; mouse-only select / open / close (§26), drag a chip to move it (§38), the hand cursor over one (§51), the right-click menu that sends it to another area (§52)
@@ -4309,6 +4312,11 @@ of their boxes.
   it is what the sixel-capable tools already speak. The placement, reservation, compositing, eviction
   and capability-advertising machinery here is protocol-agnostic: adding kitty later is a decoder plus a
   scanner arm, not a rethink.
+  **This still holds after §53 brought those decoders into the tree.** The refusal was never "cmote
+  owns no PNG parser" — it is that a REMOTE must not get one run on bytes it pushed into the terminal
+  stream unasked. §53 decodes only a file the user pointed at and asked to open, one at a time, under
+  caps, with the format chosen by magic bytes; nothing about that reaches the escape-sequence path,
+  and the two are not the same decision wearing different clothes.
 - **A picture is not reflowed, it is dropped.** `ponytail:` a terminal with native graphics re-lays its
   images on resize; cmote drops them rather than leave one floating over whatever text landed on its old
   line.
@@ -5755,3 +5763,132 @@ no hook for a widget leaving the tree.
   belong to a session or to the target's remembered state (§22, §27), and the copy gets the target's
   the same way any other connect to it would. Only the directory is carried, because only the
   directory is the thing the user was looking at.
+
+---
+
+## 53. A picture opens as a picture (v4.0.0)
+
+§32 gave a file two ways into a tab: a **double-click** in the files pane, and the menu's **Edit…**.
+Both went to the text editor, because the text editor was the only viewer there was. Double-click a
+`.png` and cmote pulled the whole file off the server, tried to read it as UTF-8, failed, and put up
+*"This file is not text in a supported encoding (UTF-8 or UTF-16)."* — true, useless, and a wasted
+transfer. The pane already knew that file was a picture: it had drawn it a picture icon (§19).
+
+**A picture now opens in a picture tab.** Same double-click, same menu row (relabelled **Preview**
+when the file is one), a new kind of tab: the file's name and dimensions along the top, the image on
+a grey ground below it, scroll to zoom and drag to pan.
+
+### The editor's read-only twin
+
+- **A `Tab` now carries a `preview: Option<Preview>`** beside its `editor`, and a `Screen::Preview`
+  beside `Screen::Editor`. Everything §32 established about a tab that is not a session holds
+  unchanged: no connection and no SSH worker of its own, parented to the session it was opened from,
+  its read sent on **that** session's channel and routed back by the viewer tab's id.
+- **A sibling of the editor, not a state inside it.** The two share the tab shape and the read that
+  fills it, and nothing else: an editor has an encoding to preserve, a dirty flag, changed-line
+  marks, a theme, a find bar and a save path, and a preview has none of them, because it cannot
+  write. Folding a read-only thing into a read-write one buys a dozen fields that are always empty
+  on one of the two — the shape §16's queue was pulled out of `Tab` to escape.
+- **Read-only is most of what makes it small.** No Save, so no dirty dot, no unsaved-close prompt,
+  no encoding to persist, no account to pin for a later write, and no `parent_gone` flag — that flag
+  exists to disable Save. The tab's whole keyboard is Ctrl+W and Escape, and both of them close it.
+- **The load is one command for both viewers.** `EditLoad` became **`FileLoad`**, `editor_id` became
+  `viewer_id`: what the two want off the network is identical — this file, whole, read as this
+  account (§46) — and what they do with the bytes is entirely a GUI-side matter. `EditSave` kept its
+  name, because only one of them saves.
+
+### Which tab opens, and which decoder runs, are two different questions
+
+This is the load-bearing distinction, and the two answers come from different places on purpose.
+
+- **The tab is chosen by the EXTENSION**, in one place (`App::open_viewer`), because it has to be
+  chosen before a single byte has been read. Both entry points send the same message and arrive at
+  that one function, so the rule cannot end up half-applied — the double-click and the menu row can
+  never disagree about what a `.png` is.
+- **The decoder is chosen by the file's MAGIC BYTES** (`preview::decode`), never by its name. The
+  name is the remote's to pick, and letting it steer which parser runs would hand an attacker the
+  only decision that matters here. The pleasant side effect is that a mislabelled file simply opens:
+  a `.jpg` carrying PNG bytes previews fine, and the toolbar says PNG — the one place a user would
+  ever find that out.
+- **The picture set is `files`' image table minus SVG.** SVG is a picture by icon and text by
+  nature: it is XML, the editor can genuinely edit it, and a preview could only refuse it (drawing
+  one is a layout engine, not a decoder). Everything else in that table opens here **even where
+  cmote has no decoder** — a TIFF gets *"cmote does not preview TIFF — it previews PNG, JPEG, GIF,
+  BMP and WebP"*, which is a better answer than the editor's truthful *"not text in a supported
+  encoding"*. The table is `pub(crate)` and derived from, not copied, so the icon and the dispatch
+  cannot drift apart as extensions are added.
+
+### The fence around the decoder
+
+`image` was already in the tree — iced pulls it in **without codecs** for §41's sixel compositing.
+This takes it as a direct dependency purely to turn five decoders on: **PNG, JPEG, GIF, BMP, WebP**.
+Nothing new enters the dependency graph, and the no-C-toolchain portable build (§11) holds.
+
+That narrows §41's refusal rather than reversing it, and the difference is the whole point: §41 is
+about bytes a remote **pushed** into the terminal stream unasked, and kitty graphics and OSC 1337 are
+still not implemented. This is a file the user pointed at and asked for. It is fenced three ways:
+
+- **The format comes from the leading bytes**, and the reader is pinned to it (`with_format`, not
+  `with_guessed_format`), so the payload cannot talk it into a second opinion.
+- **`image::Limits` caps the decode** at 8192 per side and 128 MiB of allocation, checked before a
+  buffer is reserved — so a header declaring 30000×30000 is refused rather than allocated for. 8192
+  is doing two jobs: it bounds the bomb, and it is the smallest maximum texture size still found on
+  hardware cmote runs on, so a picture that decodes is a picture that can be drawn.
+- **The fetch is capped at `preview::MAX_SIZE`, 32 MiB**, off the server-reported size before a byte
+  moves, and again as the bytes arrive in case that size was a lie.
+- **Every decoder not listed is one that cannot be reached** — TIFF, AVIF, EXR, DDS, HDR, TGA, PNM,
+  farbfeld and QOI are all left off, and each is a parser that is not compiled in.
+
+### The ceiling belongs to the caller now
+
+`edit::MAX_SIZE` is 8 MiB — generous for a config file, mean for a photograph. So **`limit` rides
+the `FileLoad` command** rather than sitting as one constant in the network layer, and both readers
+take it as a parameter. The `shellfs` path took the same change, which closed a real hole rather
+than a theoretical one: it had its own `MAX_READ = edit::MAX_SIZE`, so a preview opened while the
+files pane was elevated (§46) — reading through `cat` rather than sftp — would have silently kept
+the editor's ceiling, and the same photograph would have opened or been refused depending on which
+account the pane happened to be showing.
+
+### Small decisions worth stating
+
+- **Zoom and pan are iced's**, not cmote's: `image::viewer` already scroll-zooms about the pointer
+  and drag-pans, and it keeps the scale in the widget's own state. So the model carries no zoom
+  level and nothing has to be reset — there is exactly one picture per tab for the life of the tab,
+  which is what makes that free. Limits: out to a third (a big scan fits a small region), in to 10×
+  (far enough to read a screenshot's smallest text, which is why anyone zooms one).
+- **`ContentFit::Contain`, never `Fill`.** The whole picture, scaled down if it is too big and left
+  at its own size if it is not — a 32×32 favicon blown across the window would be a wall of soft
+  squares, and the user asked to see the file, not an enlargement of it.
+- **Decoded once, on arrival**, into an iced image handle held on the model — the same trade
+  `term::graphics` makes for the sixel images (§41). The alternative is keeping the pixels and
+  rebuilding a handle every frame, which re-uploads the texture on every paint. `ponytail:` that
+  decode runs on the GUI thread, so a big picture holds the window for the length of it — bounded on
+  both ends (32 MiB in, 8192 per side out), so the worst case is a fraction of a second on a file
+  the user asked for and is already waiting on. Moving it off-thread is an async task plus a message
+  and a route home; worth doing if a real picture is ever felt to stutter, and not before.
+- **The toolbar reports what the file IS**: format, pixel dimensions, and the size of the FILE — not
+  of the decoded pixels, which would be a bigger number the user has no way to recognise.
+- **A preview still loading when its session ends is failed, not left spinning.** The read it is
+  waiting on can never arrive, so `orphan_viewers` says so. One that already has its picture is
+  untouched: the image is decoded and in memory, and it is as good as it was a moment ago.
+- **The menu row is relabelled, not duplicated.** "Edit…" promises a buffer and on a picture that
+  promise cannot be kept, so a picture's row reads "Preview". It sends the identical message — the
+  decision stays `App`'s alone — and only the wording follows the file, so the menu never says one
+  thing and does another.
+
+### Deliberately not
+
+- **No SVG, and no TIFF, HEIC, AVIF or ICO.** SVG is text and belongs to the editor. The rest are
+  formats whose decoders are deliberately not compiled in; each is refused **by name**, which is the
+  useful half of supporting it.
+- **No editing, no rotate, no save-as, no copy-to-clipboard.** A preview answers "what is in this
+  file". Everything past that is an image editor, and cmote is an SSH client.
+- **No thumbnails in the files pane.** That is a listing that fetches every picture in a directory
+  to draw it, which is a different feature with a different cost — the icon says "picture" and the
+  double-click shows it.
+- **`ponytail:` transparency shows a flat mid-grey, not a checkerboard.** The convention is
+  unambiguous and needs a tiled custom widget; one tone that loses to neither light nor dark artwork
+  buys most of the clarity for none of the work. Deliberately not the panels' near-black, which
+  would swallow exactly the dark artwork transparency is most often used for.
+- **No animation.** An animated GIF shows its first frame. Playing one means a frame clock, a decode
+  loop and a pause control — a media player, not a preview.

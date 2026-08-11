@@ -231,25 +231,27 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
-			SshCommand::EditLoad {
+			SshCommand::FileLoad {
 				identity,
-				editor_id,
+				viewer_id,
 				path,
+				limit,
 			} => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
 						.to_session
-						.send(SessionMsg::EditLoad {
+						.send(SessionMsg::FileLoad {
 							identity,
-							editor_id,
+							viewer_id,
 							path,
+							limit,
 						})
 						.await;
 				}
 			}
 			SshCommand::EditSave {
 				identity,
-				editor_id,
+				viewer_id,
 				path,
 				bytes,
 			} => {
@@ -258,7 +260,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.to_session
 						.send(SessionMsg::EditSave {
 							identity,
-							editor_id,
+							viewer_id,
 							path,
 							bytes,
 						})
@@ -401,17 +403,19 @@ pub(crate) enum SessionMsg {
 		local: PathBuf,
 		resume: bool,
 	},
-	/// Read a whole remote file into the in-tab text editor (§32), as the account named by
-	/// `identity` (§46). `editor_id` routes the reply.
-	EditLoad {
+	/// Read a whole remote file into a viewer tab — the editor or the picture preview (§32, §53) —
+	/// as the account named by `identity` (§46). `viewer_id` routes the reply and `limit` is that
+	/// viewer's size ceiling, which is the caller's to choose.
+	FileLoad {
 		identity: u64,
-		editor_id: u64,
+		viewer_id: u64,
 		path: String,
+		limit: u64,
 	},
 	/// Write the editor's buffer back to the remote, atomically (§32), as the account that opened it.
 	EditSave {
 		identity: u64,
-		editor_id: u64,
+		viewer_id: u64,
 		path: String,
 		bytes: Vec<u8>,
 	},
@@ -767,13 +771,13 @@ async fn stream(
 					// It names its own account rather than using the selected one (§46): a file opened
 					// as root must be read and saved as root, whichever account the panes have moved on
 					// to while it was being edited.
-					Some(SessionMsg::EditLoad { identity, editor_id, path }) => {
+					Some(SessionMsg::FileLoad { identity, viewer_id, path, limit }) => {
 						let backend = accounts.files_as(session, identity).await;
-						edit::load(backend, events, editor_id, path).await;
+						edit::load(backend, events, viewer_id, path, limit).await;
 					}
-					Some(SessionMsg::EditSave { identity, editor_id, path, bytes }) => {
+					Some(SessionMsg::EditSave { identity, viewer_id, path, bytes }) => {
 						let backend = accounts.files_as(session, identity).await;
-						edit::save(backend, events, editor_id, path, bytes).await;
+						edit::save(backend, events, viewer_id, path, bytes).await;
 					}
 					// The shell-integration errand (§17), on its own channel like the editor's.
 					//

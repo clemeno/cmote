@@ -119,7 +119,9 @@ pub enum Category {
 
 /// The extension tables behind `category`. Lower-case, no dot. Anything unlisted is a
 /// `Plain` file — an unknown type gets the neutral icon rather than a wrong one.
-const IMAGE: &[&str] = &[
+/// `pub(crate)` alone among these: `preview` derives the set of files that open as a PICTURE from
+/// it (§53), so the icon and the open dispatch cannot drift apart as extensions are added here.
+pub(crate) const IMAGE: &[&str] = &[
 	"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tif", "tiff", "heic",
 ];
 const CODE: &[&str] = &[
@@ -260,9 +262,10 @@ pub enum FilesMessage {
 	RenameCommitted,
 	/// Menu "Download": pick a local destination, then pull the file.
 	Download(String),
-	/// Menu "Edit…" or a double-click on a file: open it in a new editor tab (§32). A directory
-	/// has nothing to edit, so the menu item is disabled there and the double-click browses instead.
-	EditStarted(String),
+	/// The menu's open item, or a double-click on a file: open it in a new viewer tab — the text
+	/// editor, or a picture preview if it is an image (§32, §53). A directory has nothing to open
+	/// this way, so the menu item is disabled there and the double-click browses instead.
+	OpenStarted(String),
 	/// The splitter was pressed — begin resizing the pane.
 	SplitterGrabbed,
 	/// The pointer moved while resizing; the payload is its window position.

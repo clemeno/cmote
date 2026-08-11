@@ -43,9 +43,12 @@ use crate::files::{self, Entry, Kind, Meta};
 /// so the status bar behaves identically whichever backend is under it.
 const PROGRESS_STEP: u64 = 256 * 1024;
 
-/// How much of a file the editor will read through a shell (§32). The same ceiling the SFTP path
-/// applies, checked the same way — before a byte is read, from the size the remote reports.
-const MAX_READ: u64 = super::edit::MAX_SIZE;
+// A file read through a shell is bounded by the ceiling its CALLER passes, exactly as the SFTP path
+// is (§53) — there is no constant here on purpose. There was one, `MAX_READ = edit::MAX_SIZE`, and
+// it was right until a second viewer arrived with a different number: the picture preview would
+// have quietly kept the editor's 8 MiB whenever the files pane was elevated (§46) and reading
+// through `cat` instead of sftp, so the same photograph opened or was refused depending on which
+// account the pane happened to be showing.
 
 /// The folders inside `path`, for the explorer tree (§18).
 ///
@@ -196,14 +199,15 @@ pub async fn free_name(runner: &Runner, dir: &str, name: &str) -> String {
 	join(dir, &format!("{stem}-{extension}"))
 }
 
-/// Read a whole remote file into memory, for the editor (§32). Refuses one over the ceiling before
-/// reading a byte, from the size the remote itself reports.
-pub async fn read_all(runner: &Runner, path: &str) -> Result<Vec<u8>> {
+/// Read a whole remote file into memory, for a viewer tab (§32, §53). Refuses one over `limit`
+/// before reading a byte, from the size the remote itself reports, and again as the bytes arrive
+/// in case that size was a lie.
+pub async fn read_all(runner: &Runner, path: &str, limit: u64) -> Result<Vec<u8>> {
 	match size(runner, path).await {
-		Some(bytes) if bytes > MAX_READ => bail!(
+		Some(bytes) if bytes > limit => bail!(
 			"the file is {} — larger than the {} cmote will open",
 			super::edit::human_size(bytes),
-			super::edit::human_size(MAX_READ)
+			super::edit::human_size(limit)
 		),
 		Some(_) => {}
 		None => bail!("could not read the file"),
@@ -216,7 +220,7 @@ pub async fn read_all(runner: &Runner, path: &str) -> Result<Vec<u8>> {
 		match message {
 			ChannelMsg::Data { data } => {
 				bytes.extend_from_slice(&data);
-				if bytes.len() as u64 > MAX_READ {
+				if bytes.len() as u64 > limit {
 					bail!("the file grew past the size cmote will open");
 				}
 			}

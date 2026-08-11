@@ -673,7 +673,7 @@ impl App {
 			// editor saves through the session it was opened from — so they are handled here, at the
 			// App, not delegated to the tab. In-buffer editing (`Message::Editor`) and the editor
 			// shortcuts (`Message::EditorKey`) fall through to the active tab below.
-			Message::EditorOpen { session, path } => self.open_editor(pane, session, path),
+			Message::ViewerOpen { session, path } => self.open_viewer(pane, session, path),
 			Message::EditorFlush(id) => self.flush_editor_save(id),
 			Message::EditorCloseSave => self.editor_close_save(),
 			Message::EditorCloseDiscard => self.editor_close_discard(),
@@ -706,11 +706,12 @@ impl App {
 	/// Route one session's event to the tab that owns it, wherever in the window that tab now sits
 	/// (§26, §48). Lifted out of `update` so both the wrapped and unwrapped paths share it.
 	fn route_ssh(&mut self, id: u64, event: SshEvent) -> iced::Task<Message> {
-		// An editor's load/save reply rides the SESSION's stream (it has no channel of its own) but
-		// belongs to the EDITOR tab that asked — route it there by editor id (§32).
-		if let Some(editor_id) = event.editor_target() {
-			return match self.tab_mut(editor_id) {
-				Some(tab) => tab.on_edit_event(event),
+		// A viewer's load/save reply rides the SESSION's stream (a viewer has no channel of its own)
+		// but belongs to the VIEWER tab that asked — an editor or a picture preview — so it is routed
+		// there by viewer id (§32, §53).
+		if let Some(viewer_id) = event.viewer_target() {
+			return match self.tab_mut(viewer_id) {
+				Some(tab) => tab.on_viewer_event(event),
 				None => iced::Task::none(),
 			};
 		}
@@ -722,8 +723,9 @@ impl App {
 			None => iced::Task::none(),
 		};
 		if ended {
-			// Any editors opened from this session can no longer save — mark them so (§32).
-			self.orphan_editors(id);
+			// Any viewers opened from this session lost the channel they read and write through —
+			// tell them so (§32, §53).
+			self.orphan_viewers(id);
 			// One fewer session to wait on; once the last is down the process exits (§30).
 			if let Some(exit) = self.note_drained(id) {
 				return exit;
@@ -1561,15 +1563,23 @@ impl App {
 		iced::Task::batch([self.relayout(), opening])
 	}
 
-	/// Open a remote file in a new editor tab (§32), parented to the session it was opened from, and
-	/// send the load on THAT session's channel. The editor tab has no worker of its own; its reply
-	/// (`EditLoaded` / `EditLoadFailed`) rides the parent's stream and routes back here by editor id.
+	/// Open a remote file in a new VIEWER tab (§32, §53), parented to the session it was opened from,
+	/// and send the read on THAT session's channel. The viewer tab has no worker of its own; its
+	/// reply (`FileLoaded` / `FileLoadFailed`) rides the parent's stream and routes back here by
+	/// viewer id.
 	///
-	/// The editor opens in `pane`, the region the file was clicked in (§48) — beside its own session's
+	/// WHICH KIND OF VIEWER IS DECIDED HERE, ONCE — the text editor, or the picture preview if the
+	/// file is an image (§53). Both entry points (a double-click and the pane's open item) arrive at
+	/// this one function precisely so the answer cannot differ between them. The decision is by
+	/// EXTENSION rather than by content, because it chooses which tab to open and that has to happen
+	/// before a byte has been read; the DECODER, in contrast, is chosen by the bytes themselves
+	/// (`preview::decode`), so a mislabelled file still opens correctly once it arrives.
+	///
+	/// The tab opens in `pane`, the region the file was clicked in (§48) — beside its own session's
 	/// chip, in the same strip. It could be argued the other way, that a file wants a region of its
-	/// own, but the tab it is grouped with is the one it saves through: keeping the two in one strip
+	/// own, but the tab it is grouped with is the one it reads through: keeping the two in one strip
 	/// keeps that relationship visible instead of scattering a session's files across the window.
-	fn open_editor(
+	fn open_viewer(
 		&mut self,
 		pane: pane_grid::Pane,
 		session: u64,
@@ -1580,20 +1590,26 @@ impl App {
 		// Inherit the window geometry / focus from the region's on-screen tab so the first paint is
 		// sized right, exactly as `open_tab` does for a home tab (§26).
 		let (size, focused, modifiers) = self.region_at(pane).carried();
-		// Open in the scheme this file type was last edited in (§32); an unseen extension starts on
-		// the default. The choice is recorded back in `settings` when the toolbar's select changes
-		// it, and now rides `settings.json`, so the type keeps its scheme across a restart (§31).
-		let theme = self
-			.settings
-			.editor_theme(&crate::editor::extension_key(&path));
 		// The account the file is being opened as (§46) — the one the parent session is SHOWING right
-		// now. Fixed into the editor here rather than read again at save time: the file belongs to
+		// now. Fixed into the viewer here rather than read again at save time: the file belongs to
 		// that account, and the panes may well have switched to another by the time it is saved.
 		let identity = self
 			.tabs()
 			.find(|tab| tab.id == session)
 			.map_or(bridge::LOGIN_IDENTITY, |tab| tab.identity);
-		let mut tab = Tab::new_editor(id, session, identity, path.clone(), size, theme);
+		let picture = crate::preview::opens_preview(&path);
+		let mut tab = if picture {
+			Tab::new_preview(id, session, path.clone(), size)
+		} else {
+			// Open in the scheme this file type was last edited in (§32); an unseen extension starts
+			// on the default. The choice is recorded back in `settings` when the toolbar's select
+			// changes it, and rides `settings.json`, so the type keeps its scheme across a restart
+			// (§31).
+			let theme = self
+				.settings
+				.editor_theme(&crate::editor::extension_key(&path));
+			Tab::new_editor(id, session, identity, path.clone(), size, theme)
+		};
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
 		let Some(region) = self.regions.get_mut(pane) else {
@@ -1612,25 +1628,39 @@ impl App {
 		// rather than whatever another region had on screen (§48).
 		self.focus = pane;
 
-		// Ask the parent session to read the file. If the parent is gone the editor opens straight
+		// Ask the parent session to read the file. If the parent is gone the viewer opens straight
 		// into its "session closed" state rather than hanging on a load that can never arrive. The
 		// match resolves to a plain `bool` so the parent borrow is released before the fallback,
-		// which borrows the tabs again to reach the just-opened editor.
+		// which borrows the tabs again to reach the just-opened viewer.
+		//
+		// The ceiling rides the command because the two viewers disagree about it (§53): 8 MiB is
+		// generous for a config file and mean for a photograph.
+		let limit = if picture {
+			crate::preview::MAX_SIZE
+		} else {
+			crate::ssh::edit::MAX_SIZE
+		};
 		let sent = match self.tab_mut(session) {
 			Some(parent) if parent.command_tx.is_some() => {
-				parent.send_command(SshCommand::EditLoad {
+				parent.send_command(SshCommand::FileLoad {
 					identity,
-					editor_id: id,
+					viewer_id: id,
 					path,
+					limit,
 				})
 			}
 			_ => false,
 		};
-		if !sent && let Some(editor) = self.editor_mut(id) {
-			editor.mark_parent_gone();
-			editor.load_failed(
-				"The session this file was opened from is no longer available.".to_owned(),
-			);
+		if !sent {
+			let reason = "The session this file was opened from is no longer available.".to_owned();
+			if let Some(editor) = self.editor_mut(id) {
+				editor.mark_parent_gone();
+				editor.load_failed(reason);
+			} else if let Some(preview) = self.preview_mut(id) {
+				// No `mark_parent_gone` twin: that flag exists to disable Save, and there is no
+				// Save here — the sentence in place of the picture is the whole story (§53).
+				preview.load_failed(reason);
+			}
 		}
 		// The strip gained a chip, which changes nothing about the region's box — but the tab that
 		// just came on screen has never been measured, so it is given one (§48).
@@ -1641,12 +1671,12 @@ impl App {
 	/// Save / Save As; only the App can reach across to the parent's channel — across regions too
 	/// since §48, since an editor and its session can be dragged apart. A parent that has gone away
 	/// leaves the editor's save marked failed rather than hanging on a reply that never comes.
-	fn flush_editor_save(&mut self, editor_id: u64) -> iced::Task<Message> {
+	fn flush_editor_save(&mut self, viewer_id: u64) -> iced::Task<Message> {
 		// The identity comes from the EDITOR, not from what the session is showing now (§46): the file
 		// was read as that account and has to be written back as the same one.
 		let Some((session, identity, path, bytes)) = self
 			.tabs()
-			.find(|tab| tab.id == editor_id)
+			.find(|tab| tab.id == viewer_id)
 			.and_then(|tab| tab.editor.as_ref())
 			.map(|editor| {
 				(
@@ -1662,27 +1692,45 @@ impl App {
 		let sent = match self.tab_mut(session) {
 			Some(parent) => parent.send_command(SshCommand::EditSave {
 				identity,
-				editor_id,
+				viewer_id,
 				path,
 				bytes,
 			}),
 			None => false,
 		};
-		if !sent && let Some(editor) = self.editor_mut(editor_id) {
+		if !sent && let Some(editor) = self.editor_mut(viewer_id) {
 			editor.mark_parent_gone();
 			editor.save_failed("The session this file came from is closed.".to_owned());
 		}
 		iced::Task::none()
 	}
 
-	/// Mark every editor opened from session `id` as orphaned (§32): its parent is gone, so it can no
-	/// longer save. The buffer stays open to read and copy; the toolbar disables Save with a note.
-	fn orphan_editors(&mut self, id: u64) {
+	/// Tell every viewer opened from session `id` that its parent is gone (§32, §53). The two kinds
+	/// need different things said, because they lost different things with it.
+	///
+	/// An EDITOR loses its way to save: the buffer stays open to read and copy, and the toolbar
+	/// disables Save with a note. An editor that never finished loading keeps that state too — its
+	/// buffer is empty and there is nothing to lose.
+	///
+	/// A PREVIEW that is still LOADING loses everything, because a picture half-read is no picture:
+	/// the read it is waiting on can never arrive now, so it is failed here rather than left showing
+	/// "Loading…" for the rest of the tab's life. One that already has its picture is untouched —
+	/// the image is decoded and in memory, and it stays as good as it was a moment ago.
+	fn orphan_viewers(&mut self, id: u64) {
 		for tab in self.tabs_mut() {
 			if let Some(editor) = tab.editor.as_mut()
 				&& editor.session == id
 			{
 				editor.mark_parent_gone();
+			}
+			if let Some(preview) = tab.preview.as_mut()
+				&& preview.session == id
+				&& matches!(preview.status, crate::preview::Status::Loading)
+			{
+				preview.load_failed(
+					"The session this file was opened from closed before it finished loading."
+						.to_owned(),
+				);
 			}
 		}
 	}
@@ -1749,6 +1797,11 @@ impl App {
 	/// The editor on the tab with this id, mutably (§32), wherever in the window that tab sits.
 	fn editor_mut(&mut self, id: u64) -> Option<&mut crate::editor::Editor> {
 		self.tab_mut(id).and_then(|tab| tab.editor.as_mut())
+	}
+
+	/// The preview on the tab with this id, mutably (§53) — the picture twin of `editor_mut`.
+	fn preview_mut(&mut self, id: u64) -> Option<&mut crate::preview::Preview> {
+		self.tab_mut(id).and_then(|tab| tab.preview.as_mut())
 	}
 
 	/// True while an App-level overlay card is on screen (§26, §30): a live tab's close
@@ -1999,9 +2052,10 @@ impl App {
 	fn subscription(&self) -> iced::Subscription<Message> {
 		let mut subs: Vec<iced::Subscription<Message>> = self
 			.tabs()
-			// An editor tab has no session of its own (§32): it saves through the tab it was opened
-			// from, so it starts NO worker — opening editors costs no network threads.
-			.filter(|tab| tab.editor.is_none())
+			// A viewer tab — an editor or a picture preview — has no session of its own (§32, §53):
+			// it reads and saves through the tab it was opened from, so it starts NO worker. Opening
+			// ten files costs no network threads.
+			.filter(|tab| !tab.is_viewer())
 			.map(|tab| {
 				// `map` demands a NON-capturing closure, so the tab id cannot be closed over. `with`
 				// threads it into each event as `(id, event)`, which the plain closure then unpacks
@@ -2072,6 +2126,10 @@ impl App {
 			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
 			// The editor's shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W); typing goes to the widget.
 			Screen::Editor => subs.push(iced::keyboard::listen().map(Message::EditorKey)),
+			// A preview has nothing to type into, so it listens for one thing: the key that closes
+			// it (§53). Without this the tab would be the only one in the app a keyboard cannot
+			// dismiss, which reads as a bug rather than as a design.
+			Screen::Preview => subs.push(iced::keyboard::listen().map(Message::PreviewKey)),
 			Screen::Connect | Screen::Connecting { .. } => {}
 		}
 
@@ -2099,6 +2157,12 @@ pub enum Screen {
 	/// of its own; its loads and saves ride the parent session's channel. The buffer and its state
 	/// live in `Tab::editor`, which is `Some` exactly while this screen shows.
 	Editor,
+	/// A picture open on a remote file (§53). The editor's read-only twin: not a session either,
+	/// its one read rides the parent session's channel, and the decoded image lives in
+	/// `Tab::preview`, `Some` exactly while this screen shows. It exists because a `.png` opened in
+	/// a text editor can only ever be refused, and "here is the picture" is the answer the user
+	/// wanted from the double-click.
+	Preview,
 }
 
 /// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
@@ -2284,6 +2348,16 @@ pub struct Tab {
 	/// (§32). `Some` exactly while `screen` is `Screen::Editor`; it holds the buffer, the encoding,
 	/// the changed-line marks and the id of the parent session its saves ride through.
 	editor: Option<crate::editor::Editor>,
+	/// The open picture, when this tab is showing a remote image rather than running a session
+	/// (§53). `Some` exactly while `screen` is `Screen::Preview`; it holds the decoded image and the
+	/// id of the parent session whose channel carried the read.
+	///
+	/// A sibling of `editor` rather than a state inside it: the two share only the tab shape and the
+	/// read that fills them. An editor has an encoding to preserve, a dirty flag, changed-line marks,
+	/// a theme and a save path; a preview has none of those, because it cannot write. Folding a
+	/// read-only thing into a read-write one would have meant a dozen fields that are always empty
+	/// on one of the two — the shape §16's queue was pulled out of `Tab` to escape.
+	preview: Option<crate::preview::Preview>,
 	/// The question the connect flow is holding over the form, `None` when it is holding none
 	/// (§7, §8, §16). Each variant carries what answering it needs — the passphrase being typed,
 	/// the interactive challenge and its answers, the vault's two fields and what its unlock
@@ -3008,11 +3082,12 @@ pub enum Message {
 	ForwardAddPressed,
 	/// A forward's row ✕ — tear that forward down (payload: its runtime id).
 	ForwardRemove(u64),
-	// --- the in-tab text editor (§32): a tab can edit a remote file, not only run a session ---
-	/// Open a remote file in a new editor tab (payload: the parent session's id and the path).
-	/// Raised by the files pane's "Edit…" or a file double-click; `App` creates the tab, then
-	/// sends the load on the parent session's channel and routes the reply back by editor id.
-	EditorOpen {
+	// --- the in-tab viewers (§32, §53): a tab can show a remote file, not only run a session ---
+	/// Open a remote file in a new VIEWER tab (payload: the parent session's id and the path).
+	/// Raised by the files pane's open item or a file double-click; `App` creates the tab — a text
+	/// editor, or a picture preview if the file is an image (§53) — then sends the read on the
+	/// parent session's channel and routes the reply back by viewer id.
+	ViewerOpen {
 		session: u64,
 		path: String,
 	},
@@ -3022,6 +3097,9 @@ pub enum Message {
 	/// A keystroke while an editor tab is active (§32): the shortcuts (Ctrl+S save, Ctrl+Shift+S
 	/// save as, Ctrl+W close). Typing itself reaches the text widget directly, not here.
 	EditorKey(iced::keyboard::Event),
+	/// A keystroke while a PREVIEW tab is active (§53). It claims two: Ctrl+W and Escape, both of
+	/// which close the tab. There is nothing else to press on a picture.
+	PreviewKey(iced::keyboard::Event),
 	/// The editor tab `id` asked to flush its buffer to the network (§32). Raised by the tab
 	/// after a Save / Save As; handled by `App`, which alone can reach the parent's channel.
 	EditorFlush(u64),
@@ -3089,10 +3167,37 @@ impl Tab {
 		}
 	}
 
-	/// Ask `App` to open `path` in a new editor tab parented to THIS session (§32). Raised by the
-	/// files pane's "Edit…" and a file double-click; `App` creates the tab and drives the load.
-	fn request_edit(&self, path: String) -> iced::Task<Message> {
-		iced::Task::done(Message::EditorOpen {
+	/// Build a fresh PREVIEW tab (§53): no session of its own, `Loading` until the parent session's
+	/// channel delivers the picture. `session` is the tab it was opened from, whose channel its one
+	/// read rides. It takes no identity and no theme — it never writes, and a photograph has no
+	/// syntax to colour.
+	fn new_preview(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
+		Self {
+			id,
+			screen: Screen::Preview,
+			preview: Some(crate::preview::Preview::loading(session, path)),
+			window_size,
+			window_focused: true,
+			shell_focus_reported: true,
+			..Self::default()
+		}
+	}
+
+	/// Whether this tab is a VIEWER — an editor or a picture preview (§32, §53) — rather than a
+	/// session. The property that matters is the one they share: no connection of its own, so no SSH
+	/// worker is started for it.
+	fn is_viewer(&self) -> bool {
+		self.editor.is_some() || self.preview.is_some()
+	}
+
+	/// Ask `App` to open `path` in a new viewer tab parented to THIS session (§32, §53). Raised by
+	/// the files pane's open item and a file double-click; `App` creates the tab — an editor or a
+	/// picture preview, by what the file is — and drives the load.
+	///
+	/// The kind is decided in ONE place, `App::open_viewer`, rather than here: both entry points
+	/// send the same message, so a rule about which files are pictures cannot end up half-applied.
+	fn request_open(&self, path: String) -> iced::Task<Message> {
+		iced::Task::done(Message::ViewerOpen {
 			session: self.id,
 			path,
 		})
@@ -3116,6 +3221,12 @@ impl Tab {
 					format!("{dot}{name}")
 				}
 				None => "editor".to_owned(),
+			},
+			// A preview is named by its file too, and never wears the dot: it has nothing to save
+			// (§53).
+			Screen::Preview => match &self.preview {
+				Some(preview) => crate::explorer::name(&preview.path).to_owned(),
+				None => "preview".to_owned(),
 			},
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
@@ -3298,22 +3409,82 @@ impl Tab {
 		}
 	}
 
-	/// Apply an editor load/save reply routed here by id (§32). A successful load fills the buffer
-	/// (or, if the bytes are not text in a supported encoding, shows the reason in its place); a
-	/// successful save clears the marks and — after a "Save & close" — drops the tab.
-	fn on_edit_event(&mut self, event: SshEvent) -> iced::Task<Message> {
+	/// The preview's keyboard (§53): Ctrl/Cmd+W and Escape both close the tab, and nothing else is
+	/// claimed. A picture has no text to type into and no state to change, so its whole keyboard is
+	/// "I am done with this" — Escape as well as the editor's Ctrl+W, because a read-only thing
+	/// opened with a double-click is one a user expects Escape to dismiss.
+	fn on_preview_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
+		use iced::keyboard::key::Named;
+		use iced::keyboard::{Event, Key};
+		let Event::KeyPressed { key, modifiers, .. } = event else {
+			return iced::Task::none();
+		};
+		let close = match key {
+			Key::Named(Named::Escape) => true,
+			Key::Character(ref c) => modifiers.command() && c.as_str().eq_ignore_ascii_case("w"),
+			_ => false,
+		};
+		if close {
+			// Through the ordinary close path, not `force_close`: a preview is never dirty, so it
+			// takes the plain branch, but routing it here keeps one way for a tab to leave (§26).
+			return iced::Task::done(Message::TabCloseRequested(self.id));
+		}
+		iced::Task::none()
+	}
+
+	/// Apply a picture load reply routed here by id (§53). The bytes are decoded on ARRIVAL rather
+	/// than at draw time — once, into a renderer handle — so a repaint never re-runs a decoder, and
+	/// a file that turns out not to be a picture it can draw says so in place of the image.
+	///
+	/// `ponytail:` that decode runs on the GUI thread, so a big picture holds the window for the
+	/// length of it. It is bounded on both ends — 32 MiB in, 8192 per side out (§53) — so the worst
+	/// case is a fraction of a second on a file the user asked for and is waiting on anyway, not an
+	/// unbounded hang. Moving it off-thread is an async task plus a message and a route home; worth
+	/// doing if a real picture is ever felt to stutter, and not before.
+	fn on_preview_event(&mut self, event: SshEvent) -> iced::Task<Message> {
+		let Some(preview) = self.preview.as_mut() else {
+			return iced::Task::none();
+		};
+		match event {
+			SshEvent::FileLoaded { bytes, .. } => {
+				// The FILE's size, kept before the bytes are consumed: it is the number the files
+				// pane showed, so it is the one the toolbar repeats back — not the decoded pixels',
+				// which would be a bigger number the user has no way to recognise.
+				let size = bytes.len() as u64;
+				match crate::preview::decode(&bytes) {
+					Ok(decoded) => preview.set_loaded(decoded, size),
+					Err(reason) => preview.load_failed(reason),
+				}
+			}
+			SshEvent::FileLoadFailed { reason, .. } => preview.load_failed(reason),
+			// A preview never asked for a save, so a save reply cannot be for it.
+			_ => {}
+		}
+		iced::Task::none()
+	}
+
+	/// Apply a viewer load/save reply routed here by id (§32, §53). A successful load fills the
+	/// buffer (or, if the bytes are not text in a supported encoding, shows the reason in its
+	/// place); a successful save clears the marks and — after a "Save & close" — drops the tab.
+	///
+	/// A preview tab takes the same two load replies and none of the save ones, so it is answered
+	/// first and separately rather than by threading an `Option` through the editor's arms.
+	fn on_viewer_event(&mut self, event: SshEvent) -> iced::Task<Message> {
+		if self.preview.is_some() {
+			return self.on_preview_event(event);
+		}
 		let id = self.id;
 		let Some(editor) = self.editor.as_mut() else {
 			return iced::Task::none();
 		};
 		match event {
-			SshEvent::EditLoaded { bytes, .. } => match crate::editor::decode(&bytes) {
+			SshEvent::FileLoaded { bytes, .. } => match crate::editor::decode(&bytes) {
 				Some((text, encoding)) => editor.set_loaded(text, encoding),
 				None => editor.load_failed(
 					"This file is not text in a supported encoding (UTF-8 or UTF-16).".to_owned(),
 				),
 			},
-			SshEvent::EditLoadFailed { reason, .. } => editor.load_failed(reason),
+			SshEvent::FileLoadFailed { reason, .. } => editor.load_failed(reason),
 			SshEvent::EditSaved { path, .. } => {
 				editor.path = path;
 				editor.mark_saved();
@@ -3573,6 +3744,8 @@ impl Tab {
 			// The App has already peeled off the ones needing cross-tab reach (open / flush / close).
 			Message::Editor(message) => return self.on_editor(message),
 			Message::EditorKey(event) => return self.on_editor_key(event),
+			// The picture tab's two keys (§53) — both of them "close this".
+			Message::PreviewKey(event) => return self.on_preview_key(event),
 			Message::DownloadTargetPicked { remote, local } => {
 				let effects = self.transfers.download(remote, local);
 				return self.apply(effects);
@@ -3668,9 +3841,9 @@ impl Tab {
 			| Message::QuitConfirmed
 			| Message::QuitCancelled
 			| Message::QuitTick
-			// The editor's cross-tab work is `App`'s job (§32): opening a tab, flushing a save
+			// The viewers' cross-tab work is `App`'s job (§32, §53): opening a tab, flushing a save
 			// through the parent's channel, and the unsaved-close prompt all need reach a tab lacks.
-			| Message::EditorOpen { .. }
+			| Message::ViewerOpen { .. }
 			| Message::EditorFlush(_)
 			| Message::EditorCloseSave
 			| Message::EditorCloseDiscard
@@ -4600,9 +4773,9 @@ impl Tab {
 				self.show_error(&message);
 			}
 			// An editor's load/save replies are routed by `App` straight to the editor tab that asked
-			// (`on_edit_event`, §32), so a session's own event stream never delivers them here.
-			SshEvent::EditLoaded { .. }
-			| SshEvent::EditLoadFailed { .. }
+			// (`on_viewer_event`, §32), so a session's own event stream never delivers them here.
+			SshEvent::FileLoaded { .. }
+			| SshEvent::FileLoadFailed { .. }
 			| SshEvent::EditSaved { .. }
 			| SshEvent::EditSaveFailed { .. } => {}
 		}
@@ -7059,14 +7232,14 @@ impl Tab {
 				// Sync or "Open in terminal", never as a side effect of either.
 				match self.files.kind_of(&path) {
 					Some(files::Kind::Dir) => self.browse_to(&path),
-					Some(_) => return self.request_edit(path),
+					Some(_) => return self.request_open(path),
 					None => {}
 				}
 			}
-			FilesMessage::EditStarted(path) => {
+			FilesMessage::OpenStarted(path) => {
 				// The menu's "Edit…" — the deliberate twin of a file double-click (§32).
 				self.files.close_menu();
-				return self.request_edit(path);
+				return self.request_open(path);
 			}
 			FilesMessage::OpenInTerminal(path) => {
 				// The pane's own "Open in terminal": the deliberate console move that a
@@ -7480,6 +7653,12 @@ impl Tab {
 			Screen::Editor => match &self.editor {
 				Some(editor) => ui::editor::view(editor, self.id),
 				None => text("editor starting…").into(),
+			},
+			// The picture tab (§53): one toolbar naming the file and one zoomable image, both from
+			// `ui::preview`, which borrows the decoded handle rather than copying pixels per frame.
+			Screen::Preview => match &self.preview {
+				Some(preview) => ui::preview::view(preview, self.id),
+				None => text("preview starting…").into(),
 			},
 		}
 	}
@@ -9479,7 +9658,7 @@ mod tests {
 		region.active = 0;
 		app.next_id = id + 1;
 
-		let _task = app.open_editor(app.focus, id, "/root/.ssh/authorized_keys".to_owned());
+		let _task = app.open_viewer(app.focus, id, "/root/.ssh/authorized_keys".to_owned());
 		let editor = app
 			.tabs()
 			.find_map(|tab| tab.editor.as_ref())
@@ -9487,7 +9666,7 @@ mod tests {
 		assert_eq!(editor.identity, root, "opened as the account on screen");
 
 		// The session goes back to `cme` while the file is still open, and the save still names root.
-		let editor_id = app
+		let viewer_id = app
 			.tabs()
 			.find(|tab| tab.editor.is_some())
 			.map(|tab| tab.id)
@@ -9497,7 +9676,7 @@ mod tests {
 		}
 		let mut rx = rx;
 		let _drained = drain(&mut rx);
-		let _task = app.flush_editor_save(editor_id);
+		let _task = app.flush_editor_save(viewer_id);
 
 		let saved = drain(&mut rx)
 			.into_iter()
@@ -10577,7 +10756,7 @@ mod tests {
 		let _ = app.open_tab(app.focus);
 		let _ = app.open_tab(app.focus); // 3 tabs; the file is opened from the LEFTMOST one
 		let session = strip(&app)[0].id;
-		let _ = app.open_editor(app.focus, session, "/home/user/notes.txt".to_owned());
+		let _ = app.open_viewer(app.focus, session, "/home/user/notes.txt".to_owned());
 		assert_eq!(strip(&app).len(), 4);
 		assert_eq!(
 			on_screen(&app),
@@ -10592,8 +10771,8 @@ mod tests {
 		let mut app = tab_app();
 		let _ = app.open_tab(app.focus);
 		let session = strip(&app)[0].id;
-		let _ = app.open_editor(app.focus, session, "first.txt".to_owned());
-		let _ = app.open_editor(app.focus, session, "second.txt".to_owned());
+		let _ = app.open_viewer(app.focus, session, "first.txt".to_owned());
+		let _ = app.open_viewer(app.focus, session, "second.txt".to_owned());
 		// The second file goes after the first, not between it and its session — so the group reads
 		// left to right in the order the files were opened (§38).
 		assert_eq!(editor_path(&app, 1), "first.txt");
@@ -10607,10 +10786,10 @@ mod tests {
 		let _ = app.open_tab(app.focus);
 		let first_session = strip(&app)[0].id;
 		let second_session = strip(&app)[1].id;
-		let _ = app.open_editor(app.focus, first_session, "one.txt".to_owned());
+		let _ = app.open_viewer(app.focus, first_session, "one.txt".to_owned());
 		// The second session's file goes beside IT, so the run of editors after the first session
 		// ends at the first chip that is not one of its own (§38).
-		let _ = app.open_editor(app.focus, second_session, "two.txt".to_owned());
+		let _ = app.open_viewer(app.focus, second_session, "two.txt".to_owned());
 		assert_eq!(editor_path(&app, 1), "one.txt");
 		assert_eq!(strip(&app)[2].id, second_session);
 		assert_eq!(editor_path(&app, 3), "two.txt");
@@ -10622,9 +10801,214 @@ mod tests {
 		let _ = app.open_tab(app.focus);
 		// The session tab closed while the load was in flight: there is nothing to sit beside, so the
 		// editor takes the end of the strip rather than a guessed slot (§38).
-		let _ = app.open_editor(app.focus, 9_999, "orphan.txt".to_owned());
+		let _ = app.open_viewer(app.focus, 9_999, "orphan.txt".to_owned());
 		assert_eq!(on_screen(&app), strip(&app).len() - 1);
 		assert_eq!(editor_path(&app, on_screen(&app)), "orphan.txt");
+	}
+
+	/// A real PNG of the given size, so the preview tests run over bytes a decoder actually produced
+	/// rather than a hand-forged header (§53).
+	fn png(width: u32, height: u32) -> Vec<u8> {
+		let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([9, 9, 9, 255]));
+		let mut bytes = Vec::new();
+		image::DynamicImage::ImageRgba8(picture)
+			.write_to(
+				&mut std::io::Cursor::new(&mut bytes),
+				image::ImageFormat::Png,
+			)
+			.expect("the test's own encoder writes");
+		bytes
+	}
+
+	/// Open `path` from `session` and hand back the id of the viewer tab it made (§53). The id is
+	/// taken BEFORE the call — it is the one `open_viewer` is about to hand out — because the new
+	/// tab is slotted beside its session (§38) rather than appended, so neither end of the strip is
+	/// reliably the one just opened.
+	fn open_file(app: &mut App, session: u64, path: &str) -> u64 {
+		let id = app.next_id;
+		let _task = app.open_viewer(app.focus, session, path.to_owned());
+		id
+	}
+
+	/// An app whose one tab is a LIVE session with a command channel, and that channel's receiving
+	/// end (§53). The preview tests need it: a tab with no channel fails every load the instant it
+	/// is opened, so a preview would never be seen in the `Loading` state that half of these are
+	/// about.
+	fn app_with_session() -> (App, u64, mpsc::Receiver<SshCommand>) {
+		let (session, mut rx) = app_with_login_identity();
+		let mut app = tab_app();
+		let id = session.id;
+		let region = strip_mut(&mut app);
+		region.tabs.clear();
+		region.tabs.push(session);
+		region.active = 0;
+		app.next_id = id + 1;
+		// Whatever the session sent on its way up is not this test's business.
+		let _drained = drain(&mut rx);
+		(app, id, rx)
+	}
+
+	/// The picture tab with this id (§53).
+	fn preview_of(app: &App, id: u64) -> &crate::preview::Preview {
+		app.tabs()
+			.find(|tab| tab.id == id)
+			.and_then(|tab| tab.preview.as_ref())
+			.expect("a preview tab")
+	}
+
+	/// The double-click that used to hand a `.png` to a text editor now opens a picture instead
+	/// (§53) — and the file that always belonged in the editor still gets there.
+	#[test]
+	fn a_picture_opens_a_preview_and_everything_else_opens_the_editor() {
+		let (mut app, session, _rx) = app_with_session();
+
+		let picture = open_file(&mut app, session, "/srv/shot.png");
+		let tab = app.tabs().find(|tab| tab.id == picture).expect("the tab");
+		assert!(tab.preview.is_some(), "a picture opens a preview");
+		assert!(tab.editor.is_none(), "and never a buffer as well");
+		assert!(matches!(tab.screen, Screen::Preview));
+
+		let notes = open_file(&mut app, session, "/srv/notes.txt");
+		let tab = app.tabs().find(|tab| tab.id == notes).expect("the tab");
+		assert!(tab.editor.is_some(), "text still opens the editor");
+		assert!(tab.preview.is_none());
+	}
+
+	/// An SVG is a picture by icon and text by nature, and the editor can genuinely edit it (§53).
+	#[test]
+	fn an_svg_still_opens_in_the_editor() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/logo.svg");
+		assert!(
+			app.tabs()
+				.find(|tab| tab.id == id)
+				.is_some_and(|tab| tab.editor.is_some())
+		);
+	}
+
+	/// A preview costs no network thread, exactly as an editor does not (§32, §53).
+	#[test]
+	fn a_preview_tab_starts_no_worker_of_its_own() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the tab");
+		assert!(tab.is_viewer(), "so the subscription list skips it");
+		assert!(tab.command_tx.is_none(), "and it holds no channel");
+	}
+
+	/// The bytes arrive and become a picture, described by what they turned out to BE (§53).
+	#[test]
+	fn a_picture_that_arrives_is_shown_with_what_it_turned_out_to_be() {
+		let (mut app, session, _rx) = app_with_session();
+		// Named `.jpg` and carrying PNG bytes: the tab is chosen by the name, the decoder by the
+		// bytes, so it opens anyway and reports the truth (§53).
+		let id = open_file(&mut app, session, "/srv/mislabelled.jpg");
+		let bytes = png(5, 3);
+		let size = bytes.len() as u64;
+		if let Some(tab) = app.tab_mut(id) {
+			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/mislabelled.jpg".to_owned(),
+				bytes,
+			});
+		}
+
+		let preview = preview_of(&app, id);
+		assert_eq!(preview.status, crate::preview::Status::Ready);
+		let picture = preview.picture.as_ref().expect("a decoded picture");
+		assert_eq!((picture.width, picture.height), (5, 3));
+		assert_eq!(picture.format, "PNG", "the bytes, not the extension");
+		assert_eq!(picture.bytes, size, "the FILE's size, not the pixels'");
+	}
+
+	/// A file that is not a picture cmote can draw says so where the picture would have been (§53).
+	#[test]
+	fn a_file_that_is_not_a_picture_shows_the_reason_in_place_of_the_image() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/broken.png");
+		if let Some(tab) = app.tab_mut(id) {
+			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/broken.png".to_owned(),
+				bytes: b"this is not a picture".to_vec(),
+			});
+		}
+		let preview = preview_of(&app, id);
+		assert!(matches!(preview.status, crate::preview::Status::Failed(_)));
+		assert!(preview.picture.is_none());
+	}
+
+	/// A read that failed on the far side reports the SERVER's reason, not a generic one (§53).
+	#[test]
+	fn a_read_that_failed_shows_the_servers_own_reason() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/secret.png");
+		if let Some(tab) = app.tab_mut(id) {
+			let _task = tab.on_viewer_event(SshEvent::FileLoadFailed {
+				viewer_id: id,
+				reason: "permission denied".to_owned(),
+			});
+		}
+		assert_eq!(
+			preview_of(&app, id).status,
+			crate::preview::Status::Failed("permission denied".to_owned())
+		);
+	}
+
+	/// A picture half-read is no picture: when the session carrying the read ends, a preview still
+	/// waiting on it is failed rather than left on "Loading…" for the life of the tab (§53).
+	#[test]
+	fn a_preview_still_loading_when_its_session_ends_is_told_so() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		assert_eq!(preview_of(&app, id).status, crate::preview::Status::Loading);
+
+		app.orphan_viewers(session);
+		let crate::preview::Status::Failed(reason) = &preview_of(&app, id).status else {
+			panic!("the load can never arrive now, so it is failed");
+		};
+		assert!(reason.contains("closed"), "and it says why: {reason}");
+	}
+
+	/// One that already HAS its picture keeps it: the image is decoded and in memory, and the
+	/// session it came from has nothing more to give it (§53).
+	#[test]
+	fn a_preview_that_already_has_its_picture_outlives_its_session() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		if let Some(tab) = app.tab_mut(id) {
+			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/shot.png".to_owned(),
+				bytes: png(2, 2),
+			});
+		}
+
+		app.orphan_viewers(session);
+		assert_eq!(preview_of(&app, id).status, crate::preview::Status::Ready);
+		assert!(preview_of(&app, id).picture.is_some(), "still on screen");
+	}
+
+	/// The size ceiling rides the read, and it is the one belonging to the viewer that asked (§53) —
+	/// so a photograph is not refused by a limit chosen for config files.
+	#[test]
+	fn the_read_carries_the_ceiling_of_the_viewer_that_asked() {
+		let (mut app, id, mut rx) = app_with_session();
+
+		let _picture = open_file(&mut app, id, "/srv/holiday.jpg");
+		let _text = open_file(&mut app, id, "/srv/notes.txt");
+		let limits: Vec<u64> = drain(&mut rx)
+			.into_iter()
+			.filter_map(|command| match command {
+				SshCommand::FileLoad { limit, .. } => Some(limit),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			limits,
+			vec![crate::preview::MAX_SIZE, crate::ssh::edit::MAX_SIZE],
+			"the picture's ceiling, then the editor's"
+		);
 	}
 
 	#[test]

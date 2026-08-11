@@ -236,7 +236,14 @@ references below (§n) point into it.
   long for its cell is **middle-ellipsised**, so the start *and* the extension survive. A big
   directory streams in batches of 1000 and the header counts as they land. Icons come from a
   bundled icon font, by category (folder, image, code, archive, document, audio, video, link,
-  plain). Right-click an entry for **Open in terminal**, **Download…**, **Download folder…**
+  plain). **Double-click a file** to open it in a tab of its own: a text file lands in the in-tab
+  editor, and a **picture opens as a picture** — its own tab with the image on a grey ground,
+  **scroll to zoom** and **drag to pan**, the name, the format and the pixel size along the top.
+  The menu's row says which one you will get (**Edit…** or **Preview**). The format is read from
+  the file's own leading bytes, not its name, so a `.jpg` that is really a PNG opens anyway and says
+  so; PNG, JPEG, GIF, BMP and WebP are drawn, and anything else is refused **by name** rather than
+  mangled. An SVG opens in the editor, because it is text. Right-click an entry for **Open in
+  terminal**, **Download…**, **Download folder…**
   (a lone directory, tree and all), **Rename…**, **Delete…**, **Copy name / relative path /
   full path** and **Refresh**; right-click **empty space** for **New folder…**, **Upload…
   here**, **Upload folder… here** and **Refresh**. The header carries an **up** button, the
@@ -483,6 +490,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 |---|---|
 | Click an entry | Select it (and show its details popup) |
 | Double-click a folder | Show it in the pane; the shell stays where it is |
+| Double-click a file | Open it in its own tab — the editor for text, a zoomable **preview** for a picture |
 | Click empty space | Clear the selection |
 | **Drag** from empty space | Rubber-band selection; **Ctrl+drag** adds to what is selected |
 | **Ctrl+click** | Add or remove one entry |
@@ -502,6 +510,15 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Esc** | Give the keyboard back to the shell |
 | ↑ button in the header | Show the parent directory |
 | Copy button in the header | Copy the path of the directory on show |
+
+**Picture preview** (the tab a double-clicked image opens)
+
+| Gesture | What it does |
+|---|---|
+| **Scroll** over the picture | Zoom about the pointer — out to a third, in to 10× |
+| **Drag** the picture | Pan it |
+| **Esc** or **Ctrl+W** | Close the tab |
+| **Close** button in the toolbar | The same |
 
 **Home screen**
 
@@ -723,6 +740,16 @@ on the wire, or an offer the user had not taken up yet) and what it must not (a 
 transfer, an idle session), that the offer is matched to the endpoint it was made on, and —
 through `on_ssh_event` end to end — a hangup under a running transfer followed by a reconnect
 that offers it, resumes the very same two paths, and refuses to when the tab lands elsewhere.
+The **picture preview** is covered on both halves of its split: the decode over bytes a real
+encoder produced (each enabled format naming itself, the size and the four-bytes-a-pixel buffer,
+a format recognised but not compiled in refused **by name**, a script and an empty file refused,
+and the dimension cap turned into the user's sentence — driven with tight limits rather than by
+forging a bomb), the extension rule that picks the tab (pictures yes, SVG no because it is text,
+a dot-file named `.png` no); and — through the app's own handlers — that an image opens a preview
+while text still opens the editor, that a `.png` served under a `.jpg` name opens anyway and
+reports PNG, that a failed read shows the server's own reason, that the size ceiling riding each
+read is the one belonging to the viewer that asked, and that a session ending fails a preview
+still loading while leaving one that already has its picture alone.
 
 ### Manual smoke test (live SSH)
 
@@ -976,6 +1003,19 @@ then follow the shell. Then:
   runs a progress bar, then reports where it landed. Downloading onto an existing local
   file goes through the OS dialog's own replace prompt. **Open in terminal** is greyed out
   on a file, **Download…** on a folder.
+- **Double-click a picture** (`.png`, `.jpg`, `.gif`, `.bmp`, `.webp`) → a **preview tab** opens
+  beside its session with the image on a grey ground, and the toolbar reads the path, the format,
+  the pixel size and the file size. Check them against `identify` or `file` on the remote. **Scroll**
+  over it to zoom about the pointer and **drag** to pan; **Esc** or **Ctrl+W** closes it. The three
+  that must also hold:
+  - `cp shot.png shot.jpg` on the remote and open `shot.jpg` → it opens anyway and the toolbar says
+    **PNG**. The format comes from the bytes, never from the name.
+  - Open a `.tif` (or any picture cmote has no decoder for) → the tab says *"cmote does not preview
+    TIFF"* and names what it can do. Open a `.svg` → it opens in the **editor**, because it is text.
+  - `head -c 2000000 /dev/urandom > junk.png` and open it → *"This file is not a picture in a format
+    cmote recognises."*, no crash and no hang. A file over **32 MiB** is refused off its size before
+    a byte moves; try one under an **elevated** files pane too (§46), where the read goes through
+    `cat` rather than sftp and must use the same ceiling.
 - **Rename…** edits the label in place; Enter commits and the grid re-lists so the entry
   lands in its new sort position. **Refresh** (the menu item, the header **↻** button, or
   **F5** with the pane focused) picks up a file created from the shell.

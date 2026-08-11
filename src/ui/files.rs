@@ -1015,11 +1015,19 @@ pub fn context_menu<'a>(
 			(is_dir && !many).then(|| Message::Files(FilesMessage::OpenInTerminal(path.clone()))),
 		),
 		menu::item(
-			"Edit…".to_owned(),
-			// A single file opens in a new editor tab (§32); a directory or a multiple selection has
-			// nothing to edit, so the item is disabled there — kept, not hidden, so the menu keeps one
-			// shape (§19).
-			(!is_dir && !many).then(|| Message::Files(FilesMessage::EditStarted(path.clone()))),
+			// The label says which tab this will open (§53): "Edit…" promises a buffer, and on a
+			// picture that promise cannot be kept, so a picture's item reads "Preview" instead. It
+			// is the same message either way — the decision is `App`'s alone (§53) — and only the
+			// wording follows the file, so the menu never says one thing and does another.
+			if crate::preview::opens_preview(&path) {
+				"Preview".to_owned()
+			} else {
+				"Edit…".to_owned()
+			},
+			// A single file opens in a new viewer tab (§32, §53); a directory or a multiple selection
+			// has nothing to open, so the item is disabled there — kept, not hidden, so the menu keeps
+			// one shape (§19).
+			(!is_dir && !many).then(|| Message::Files(FilesMessage::OpenStarted(path.clone()))),
 		),
 		menu::item(
 			suffix("Download…"),

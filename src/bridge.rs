@@ -269,20 +269,30 @@ pub enum SshCommand {
 		local: PathBuf,
 		resume: bool,
 	},
-	/// Read a whole remote file into the in-tab text editor (§32). `editor_id` is the EDITOR tab's
-	/// id, echoed back on `EditLoaded` / `EditLoadFailed` so the reply routes to the tab that asked
-	/// — not the session tab whose channel carried it (an editor has no channel of its own). The
-	/// whole file is one in-memory buffer, so the read is bounded by `edit::MAX_SIZE`.
+	/// Read a whole remote file into a VIEWER tab (§32, §53) — the text editor, or the picture
+	/// preview. One command for both, because the two want exactly the same thing off the network:
+	/// this file's bytes, whole, read as this account. What they do with them differs entirely, and
+	/// that happens on the GUI side, which is why nothing here says which kind asked.
+	///
+	/// `viewer_id` is the VIEWER tab's id, echoed back on `FileLoaded` / `FileLoadFailed` so the
+	/// reply routes to the tab that asked — not the session tab whose channel carried it (a viewer
+	/// has no channel of its own).
+	///
+	/// `limit` is that viewer's ceiling in bytes, refused off the metadata before a byte is pulled.
+	/// It rides the command rather than sitting as one constant in the network layer because the two
+	/// viewers honestly disagree: 8 MiB is generous for a config file and mean for a photograph
+	/// (`edit::MAX_SIZE` vs `preview::MAX_SIZE`). The caller owns the number; the reader enforces it.
 	///
 	/// `identity` names the ACCOUNT to read as (§46), rather than letting the read follow whichever
 	/// account the panes are showing: a file opened as root belongs to that account for as long as
-	/// the editor tab lives, and the save has to reach the same file it came from.
-	EditLoad {
+	/// the viewer tab lives, and an editor's save has to reach the same file it came from.
+	FileLoad {
 		identity: u64,
-		editor_id: u64,
+		viewer_id: u64,
 		path: String,
+		limit: u64,
 	},
-	/// Write the editor's buffer back to the remote (§32). `editor_id` routes the reply; `path` is
+	/// Write the editor's buffer back to the remote (§32). `viewer_id` routes the reply; `path` is
 	/// the destination (a Save As names a new one); `bytes` are already encoded as the file was
 	/// opened (BOM and all — the GUI side owns the encoding). Written atomically: a temp sibling
 	/// then a rename over the target, so a drop mid-write cannot truncate the user's file.
@@ -292,7 +302,7 @@ pub enum SshCommand {
 	/// that only happens to be on screen now.
 	EditSave {
 		identity: u64,
-		editor_id: u64,
+		viewer_id: u64,
 		path: String,
 		bytes: Vec<u8>,
 	},
@@ -442,23 +452,25 @@ pub enum SshEvent {
 	DownloadDone(String),
 	/// The download failed; carries a short reason for the status bar (§19).
 	DownloadFailed(String),
-	/// A file was read for the editor (§32). `editor_id` is the tab that asked, `path` the file,
-	/// and `bytes` its raw contents — the GUI side decodes them (BOM / UTF detection lives there,
-	/// so the network layer stays encoding-agnostic).
-	EditLoaded {
-		editor_id: u64,
+	/// A file was read for a viewer tab (§32, §53). `viewer_id` is the tab that asked, `path` the
+	/// file, and `bytes` its raw contents — undecoded, because what they decode INTO is the viewer's
+	/// business: the editor runs BOM / UTF detection over them and the preview sniffs an image
+	/// format. Both live on the GUI side, so the network layer stays ignorant of either.
+	FileLoaded {
+		viewer_id: u64,
 		path: String,
 		bytes: Vec<u8>,
 	},
-	/// The editor load failed (§32): the file is over `edit::MAX_SIZE`, could not be read, or the
-	/// sftp channel would not open. The editor tab shows the reason in place of a buffer.
-	EditLoadFailed { editor_id: u64, reason: String },
+	/// The load failed (§32, §53): the file is over the ceiling the command carried, could not be
+	/// read, or the sftp channel would not open. The viewer tab shows the reason in place of its
+	/// content.
+	FileLoadFailed { viewer_id: u64, reason: String },
 	/// The editor's buffer was saved to `path` (§32); the tab clears its dirty marks and, on a
 	/// Save As, is now editing the new file.
-	EditSaved { editor_id: u64, path: String },
+	EditSaved { viewer_id: u64, path: String },
 	/// The editor save failed (§32): the buffer stays dirty and the reason is shown, so the edits
 	/// that failed to persist are never thrown away.
-	EditSaveFailed { editor_id: u64, reason: String },
+	EditSaveFailed { viewer_id: u64, reason: String },
 	/// What the login account's shell config looks like (§17), in answer to `ProbeIntegration`.
 	/// `shell` is the family read out of `/etc/passwd` — `None` when the account is not a local one
 	/// or names a shell cmote has no block for, in which case the dialog says so and offers
@@ -553,12 +565,12 @@ impl SshEvent {
 	/// worker tags its whole stream with the SESSION tab's id (§26), but a file loaded or saved for
 	/// the editor belongs to the EDITOR tab that asked — so `App` routes these four by this id
 	/// instead, whichever session's channel carried them.
-	pub fn editor_target(&self) -> Option<u64> {
+	pub fn viewer_target(&self) -> Option<u64> {
 		match self {
-			Self::EditLoaded { editor_id, .. }
-			| Self::EditLoadFailed { editor_id, .. }
-			| Self::EditSaved { editor_id, .. }
-			| Self::EditSaveFailed { editor_id, .. } => Some(*editor_id),
+			Self::FileLoaded { viewer_id, .. }
+			| Self::FileLoadFailed { viewer_id, .. }
+			| Self::EditSaved { viewer_id, .. }
+			| Self::EditSaveFailed { viewer_id, .. } => Some(*viewer_id),
 			_ => None,
 		}
 	}

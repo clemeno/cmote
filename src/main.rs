@@ -25,6 +25,7 @@ mod link; // opening an OSC 8 hyperlink safely: scheme policy + the OS browser l
 mod mru; // the tabs' activation order, so closing one falls back to the previous visit (§37)
 mod palette; // the terminal colour scheme, shared by the renderer and the query answerer (§9, §23)
 mod paths; // where on-disk data lives: known_hosts + saved targets (§11, §14)
+mod preview; // the picture tab's model: which files are pictures, and the fenced decode (§53)
 mod profiles; // saved connection targets, persisted as profiles only — no secrets (§14)
 mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases (§12)
 mod settings; // app-wide layout remembered between runs: the window size (§31)

@@ -13,6 +13,7 @@ pub mod forward; // the port-forwards management dialog (§27)
 pub mod grid; // the terminal screen itself, drawn cell-exact as one widget (§9)
 pub mod home; // the home screen: saved connection targets (§14)
 pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss layer (§10)
+pub mod preview; // the in-tab picture viewer: toolbar, the image on its ground, the refusal (§53)
 pub mod richcopy; // serialise a selection to styled HTML for a rich Ctrl+C (§10)
 pub mod selection; // mouse text selection over the grid
 pub mod snackbar; // the copy-confirmation toast (§10)

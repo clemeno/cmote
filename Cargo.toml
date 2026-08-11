@@ -49,6 +49,30 @@ arboard = { version = "3", default-features = false }
 # build weight for a format we never hand the renderer. Pure Rust either way, so the
 # no-C-toolchain portable build holds (§11).
 iced = { version = "0.14.0", features = ["advanced", "image-without-codecs"] }
+# Decodes a remote picture for the preview tab (PLAN §53). It is the SAME crate iced already pulls
+# in above — taken directly here only to turn five formats on, so nothing new enters the dependency
+# graph but the codecs themselves, all pure Rust (§11 holds). `ponytail:` these features are not
+# split encoder/decoder upstream, so the matching ENCODERS come along and are dead weight in the
+# binary: cmote never writes an image file, and the only code that calls them is this module's own
+# tests, which build their fixtures rather than carrying binary blobs in the repo.
+#
+# This deliberately narrows §41's refusal rather than reversing it. That refusal stands where it
+# was made: a remote must not get a PNG/JPEG parser run on bytes it PUSHED into the terminal
+# stream unasked, so kitty graphics and OSC 1337 are still not implemented. A preview is the other
+# case — the user named one file and asked for it — and the decode is fenced accordingly: the
+# format is chosen by MAGIC BYTES, never by the remote-controlled file name; `image::Limits` caps
+# the dimensions and the allocation, so a declared-30000×30000 decompression bomb is refused
+# before a buffer is reserved for it; and the fetch itself is capped in `preview::MAX_SIZE`.
+# `default-features = false` keeps that surface to exactly the five formats listed and drops the
+# rest (TIFF, AVIF, EXR, DDS, HDR, TGA, PNM, farbfeld, QOI) — every decoder we do not enable is a
+# parser that cannot be reached. `rayon` stays off for the same reason it is off everywhere else.
+image = { version = "0.25", default-features = false, features = [
+	"png",
+	"jpeg",
+	"gif",
+	"bmp",
+	"webp",
+] }
 # Opens an OSC 8 hyperlink in the OS's default browser (PLAN §24). Pure Rust, no C
 # toolchain, so the portable build holds (§11). Its default launcher hands the URI to
 # PowerShell `Start-Process` as an ENVIRONMENT VARIABLE (data, never shell code), falling
