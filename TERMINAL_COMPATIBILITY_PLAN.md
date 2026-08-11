@@ -138,6 +138,11 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   (Ctrl+Shift+Up/Down) and select-command-output (Ctrl+Shift+O, or clicking a prompt tick), scanned
   out of the stream by `term::osc133` — the same tactic as `cwd`, but with each mark's grid line
   captured by splitting the engine advance at it.
+- **Can install the shell hook that emits both** (§17, `integration.rs`), on request, into the
+  remote's own rc file. Nothing here changes: the emulator still only ever READS what the stream
+  carries, and a shell that was already announcing is unaffected. What changes is how many remotes
+  say anything at all — a plain bash emits neither sequence until someone puts the hook there, and
+  before this the only someone was the user, by hand.
 
 ---
 

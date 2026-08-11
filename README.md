@@ -370,11 +370,19 @@ references below (§n) point into it.
 - **The remote working directory in the window title** — cmote reads the `OSC 7` /
   `OSC 9;9` sequences shells emit on each prompt, so the title follows `cd` on POSIX *and*
   Windows remotes. fish and Windows Terminal-style prompts announce it themselves and are
-  followed for free; a plain bash/zsh stays silent unless you add the prompt hook to your own
-  shell config, in which case cmote picks it up too — cmote types nothing into the shell itself,
-  so your command history stays clean (§17). When a program sets its own title (`OSC 0` /
+  followed for free; a plain bash/zsh says nothing, and cmote types nothing into the shell to make
+  it, so your command history stays clean (§17). When a program sets its own title (`OSC 0` /
   `OSC 2` — `vim` naming the file it is editing, say), that shows in the title bar instead; the
   host is always kept alongside so the window stays identifiable (§23).
+- **Shell integration, installed once per server** — right-click the terminal → **Shell
+  integration…**. cmote works out which shell the account logs into and which config file it
+  reads, shows you the exact block it would append, and appends it over SFTP when you say so —
+  nothing is ever typed at the prompt, so nothing lands in the remote's command history. From the
+  next login that shell announces its directory (`OSC 7`) and its prompt marks (`OSC 133`), which
+  is what lights up the directory in the title, **Sync**, **Reveal**, the prompt ticks and the
+  reconnect resume. The block is bounded by its own `# >>> cmote shell integration >>>` markers, so
+  the same dialog removes exactly what it added. fish is recognised and left alone — it already
+  announces its directory (§17).
 - **Consistent dialogs** — the delete-target, disconnect, upload and overwrite
   confirmations, the host-key prompt, the passphrase prompt, and the error notice share
   one chrome: a header bar (question on the left, close ✕
@@ -816,10 +824,16 @@ it). Right-click anywhere to confirm the context menu opens at the cursor and di
 on a click away. Copy is disabled with nothing selected; pasting keeps the highlight.
 
 **7. Remote directory + upload.** On a shell that announces its directory (fish, a Windows
-OSC 9;9 prompt, or a bash/zsh with the OSC 7 prompt hook in its own config) the window title
+OSC 9;9 prompt, or a bash/zsh with the OSC 7 prompt hook in its config) the window title
 should read `cmote — tester@localhost:2222 — /config` (or wherever the shell starts), and `cd /tmp`
 should update it within a prompt — cmote types **nothing** into the shell, so a plain bash/zsh with
-no such hook shows no directory in the title and leaves the command history untouched (§17). Set a title from a program
+no such hook shows no directory in the title and leaves the command history untouched (§17). To put
+the hook there, right-click the terminal → **Shell integration…**: the dialog should name the login
+shell and its config file (`bash`, `/home/tester/.bashrc`), show the block it would append, and on
+**Install** report the file it wrote. Nothing changes in the open session; **reconnect**, and the
+title should now carry the directory, **Sync**/**Reveal** should come out of their dimmed state, and
+`history | tail` on the remote should show no trace of it. Reopen the dialog and it should offer
+**Remove**, which puts `.bashrc` back exactly as it was. Set a title from a program
 (`printf '\033]2;my title\033\\'`) and the bar should switch to `cmote — tester@localhost:2222
 — my title`; clearing it (`printf '\033]2;\033\\'`) brings the directory back (§23). Then:
 

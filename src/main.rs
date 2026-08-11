@@ -20,6 +20,7 @@ mod explorer; // the remote folder tree's model: nodes, expansion, path arithmet
 mod files; // the remote file browser's model: one directory, batched listings (§19)
 mod forward; // the pure port-forward spec: kind + bind/target, parse/validate/label (§27)
 mod glob; // the home filter's text rule: a fragment, or a whole-text glob once * or ? is typed (§49)
+mod integration; // the shell-integration block a remote's rc file can be given, so it announces its cwd (§17)
 mod link; // opening an OSC 8 hyperlink safely: scheme policy + the OS browser launch (§24)
 mod mru; // the tabs' activation order, so closing one falls back to the previous visit (§37)
 mod palette; // the terminal colour scheme, shared by the renderer and the query answerer (§9, §23)

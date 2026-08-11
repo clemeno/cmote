@@ -35,6 +35,7 @@ use crate::ssh::download;
 use crate::ssh::edit;
 use crate::ssh::forward;
 use crate::ssh::hostkey::{self, HostKeyVerdict};
+use crate::ssh::integration;
 use crate::ssh::shell;
 use crate::ssh::upload;
 use crate::term;
@@ -264,6 +265,30 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 						.await;
 				}
 			}
+			SshCommand::ProbeIntegration { user } => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::ProbeIntegration { user })
+						.await;
+				}
+			}
+			SshCommand::WriteIntegration {
+				path,
+				shell,
+				install,
+			} => {
+				if let Some(link) = session.as_ref() {
+					let _ = link
+						.to_session
+						.send(SessionMsg::WriteIntegration {
+							path,
+							shell,
+							install,
+						})
+						.await;
+				}
+			}
 			SshCommand::ResolveConflict(choice) => {
 				if let Some(link) = session.as_ref() {
 					let _ = link
@@ -389,6 +414,14 @@ pub(crate) enum SessionMsg {
 		editor_id: u64,
 		path: String,
 		bytes: Vec<u8>,
+	},
+	/// Look at the login account's shell config and report what could be done to it (§17).
+	ProbeIntegration { user: String },
+	/// Put the cwd announcer into that config file, or cut it back out (§17).
+	WriteIntegration {
+		path: String,
+		shell: crate::integration::Shell,
+		install: bool,
 	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19), forwarded
 	/// to the transfer waiting on it.
@@ -741,6 +774,20 @@ async fn stream(
 					Some(SessionMsg::EditSave { identity, editor_id, path, bytes }) => {
 						let backend = accounts.files_as(session, identity).await;
 						edit::save(backend, events, editor_id, path, bytes).await;
+					}
+					// The shell-integration errand (§17), on its own channel like the editor's.
+					//
+					// Always as the LOGIN account, never the selected one: the config being written
+					// is the one the shell a reconnect opens will read, and that shell is always
+					// this account's. Elevating to root and installing would put the announcer in
+					// root's `.bashrc`, where it would do nothing for the session that asked.
+					Some(SessionMsg::ProbeIntegration { user }) => {
+						let backend = accounts.files_as(session, crate::bridge::LOGIN_IDENTITY).await;
+						integration::probe(backend, events, user).await;
+					}
+					Some(SessionMsg::WriteIntegration { path, shell, install }) => {
+						let backend = accounts.files_as(session, crate::bridge::LOGIN_IDENTITY).await;
+						integration::write(backend, events, path, shell, install).await;
 					}
 					// Forward a collision answer to the transfer parked on it. A send that fails —
 					// the transfer already finished, or there was never a recursive one — is

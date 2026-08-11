@@ -2454,7 +2454,7 @@ pub struct Tab {
 
 /// The dialog open over the terminal screen (§10), and whatever answering it needs.
 ///
-/// This screen can put four questions to the user, and it can put only ONE at a time: they share
+/// This screen can put five questions to the user, and it can put only ONE at a time: they share
 /// the tab's single body buffer and its single card, and each of them owns the keyboard while it
 /// is up. As four separate fields — two bools and two `Option`s — that was a convention rather
 /// than a fact, and the convention had holes: opening one left the others alone, three of the four
@@ -2475,6 +2475,35 @@ pub enum Modal {
 	/// The port-forwards manager (§27) and its add form. The session's forwards themselves are
 	/// NOT here — they outlive any number of opens and closes of this dialog.
 	Forwards(ui::forward::ForwardForm),
+	/// Setting the remote's shell up to announce its working directory (§17), and how far that has
+	/// got. Everything the dialog SAYS is in the shared body buffer, as every other dialog's text
+	/// is; this carries only what the buttons need to act on.
+	Integration(Integration),
+}
+
+/// How far the shell-integration errand has got (§17) — the state of the one dialog that is not a
+/// question but a small conversation with the server: ask, look, write, report.
+///
+/// Each state decides which buttons the dialog offers, and only `Found` can act: an install needs
+/// the file to write and the shell whose block goes in it, and neither is known until the server
+/// has answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Integration {
+	/// The probe is out; the dialog is waiting for the server to answer.
+	Asking,
+	/// The server answered. `shell` is `None` when it could not be established, or names fish,
+	/// which announces its own directory — in both cases there is nothing to offer, and the body
+	/// says why. `installed` decides whether the one action is Install or Remove.
+	Found {
+		shell: Option<crate::integration::Shell>,
+		path: String,
+		installed: bool,
+	},
+	/// A write is out; the dialog is waiting for it to land.
+	Writing,
+	/// The errand finished, one way or the other. The body holds what happened — the file that was
+	/// written, or the server's own reason for refusing — so the only thing left to do is close.
+	Done,
 }
 
 /// What a successful vault unlock should resume (§16). The master-passphrase prompt can
@@ -2938,6 +2967,20 @@ pub enum Message {
 	/// A frame tick while draining (§30): re-checks the drain timeout so a wedged session cannot
 	/// hold the process open. Carries no payload — `update` reads the drain's own age.
 	QuitTick,
+	// --- shell integration (§17): teaching a silent remote shell to announce its directory ---
+	/// The terminal's context-menu "Shell integration…" — open the dialog and ask the server what
+	/// its login shell's config looks like.
+	IntegrationPressed,
+	/// Write the block into the file the probe found. The path and shell are read from the open
+	/// dialog when the press arrives rather than carried here, so the button can never write to a
+	/// file the probe has since been re-run against.
+	IntegrationInstall,
+	/// Cut the block back out of that same file.
+	IntegrationRemove,
+	/// The dialog was dismissed (Close / ✕ / backdrop / Esc). Nothing in flight is cancelled — a
+	/// write already sent lands whether or not the dialog is watching — but nothing is written
+	/// either, since only the two buttons above send anything.
+	IntegrationClosed,
 	// --- port forwarding (§27): the tunnels dialog opened from the status bar ---
 	/// The status bar's "Tunnels" button — open the port-forwards manager.
 	ForwardsPressed,
@@ -3538,6 +3581,7 @@ impl Tab {
 			Message::NewFolderCancelled
 			| Message::DeleteCancelled
 			| Message::DisconnectCancelled
+			| Message::IntegrationClosed
 			| Message::ForwardsClosed => self.modal = None,
 			Message::DeleteConfirmed => self.confirm_remote_delete(),
 			Message::TransferConflictResolved(choice) => {
@@ -3633,6 +3677,10 @@ impl Tab {
 			// exists to catch the press on a divider, which sits BETWEEN two regions (§48).
 			| Message::PointerMoved(_)
 			| Message::PointerPressed => {}
+			// Shell integration (§17).
+			Message::IntegrationPressed => self.open_integration_dialog(),
+			Message::IntegrationInstall => self.write_integration(true),
+			Message::IntegrationRemove => self.write_integration(false),
 			// Port forwarding (§27).
 			Message::ForwardsPressed => return self.open_forwards_dialog(),
 			// Any edit to the add form clears the last parse error under it, so a stale complaint
@@ -4445,6 +4493,18 @@ impl Tab {
 			// A forward came up or failed (§27): mark its row. A failure never tears the shell
 			// down — the tunnel simply shows as failed in the dialog. A late event for a forward
 			// already removed finds no entry and is dropped.
+			// The shell-integration errand (§17). None of the three touches the session: the dialog
+			// is the only thing that changes, and a reply for a dialog the user has closed is
+			// dropped where it is handled.
+			SshEvent::IntegrationProbed {
+				shell,
+				path,
+				installed,
+			} => self.on_integration_probed(shell, path, installed),
+			SshEvent::IntegrationWritten { path, installed } => {
+				self.on_integration_written(path, installed);
+			}
+			SshEvent::IntegrationFailed(reason) => self.on_integration_failed(&reason),
 			SshEvent::ForwardReady { id, assigned_port } => {
 				self.mark_forward_ready(id, assigned_port)
 			}
@@ -4572,6 +4632,104 @@ impl Tab {
 		self.connection = None;
 		self.clear_grid_interaction();
 		self.go_home()
+	}
+
+	/// Open the shell-integration dialog and ask the server what it is looking at (§17).
+	///
+	/// The dialog opens on the WAIT rather than after it: the probe is two or three round trips and
+	/// opening only once it lands would leave the menu item feeling dead on a slow link. Nothing is
+	/// written by this — the whole point of the dialog is that the block and the file it goes in are
+	/// shown before anything happens.
+	fn open_integration_dialog(&mut self) {
+		self.open_modal(
+			Modal::Integration(Integration::Asking),
+			ui::terminal::INTEGRATION_ASKING_BODY,
+		);
+		// The account to look up in the remote's `/etc/passwd`. `connection` is the endpoint key
+		// `user@host:port`, which is the only place the GUI still holds the login name once the
+		// form has been left — and a username cannot contain an `@`, so the first one splits it.
+		let user = self
+			.connection
+			.as_deref()
+			.and_then(|endpoint| endpoint.split_once('@'))
+			.map(|(user, _)| user.to_owned())
+			.unwrap_or_default();
+		self.send_command(SshCommand::ProbeIntegration { user });
+	}
+
+	/// Install or remove the block, on the file the probe found (§17).
+	///
+	/// The path and the shell are read out of the OPEN dialog rather than carried on the message:
+	/// the only thing that can put them there is a probe that answered, so a button press can never
+	/// name a file the server did not offer. A press in any other state does nothing, which is what
+	/// makes a stray Enter harmless — including a shell cmote has no block for, where the dialog
+	/// offers no button at all and this refuses to invent one.
+	fn write_integration(&mut self, install: bool) {
+		let Some(Modal::Integration(Integration::Found {
+			shell: Some(shell),
+			path,
+			..
+		})) = &self.modal
+		else {
+			return;
+		};
+		if !shell.installable() {
+			return;
+		}
+		let path = path.clone();
+		let shell = *shell;
+		self.open_modal(
+			Modal::Integration(Integration::Writing),
+			ui::terminal::INTEGRATION_WRITING_BODY,
+		);
+		self.send_command(SshCommand::WriteIntegration {
+			path,
+			shell,
+			install,
+		});
+	}
+
+	/// The server answered the probe (§17): show what it found, and what can be done about it. A
+	/// reply that arrives after the dialog was closed is dropped — the user asked and then left, so
+	/// re-opening the dialog on their behalf would be the app talking over them.
+	fn on_integration_probed(
+		&mut self,
+		shell: Option<crate::integration::Shell>,
+		path: String,
+		installed: bool,
+	) {
+		if !matches!(self.modal, Some(Modal::Integration(_))) {
+			return;
+		}
+		self.set_dialog_body(&ui::terminal::integration_found_body(
+			shell, &path, installed,
+		));
+		self.modal = Some(Modal::Integration(Integration::Found {
+			shell,
+			path,
+			installed,
+		}));
+	}
+
+	/// The write landed (§17). The file now says what it says; the session in front of the user is
+	/// unaffected, because a shell reads its config at login and this one has already started.
+	fn on_integration_written(&mut self, path: String, installed: bool) {
+		if !matches!(self.modal, Some(Modal::Integration(_))) {
+			return;
+		}
+		self.set_dialog_body(&ui::terminal::integration_done_body(&path, installed));
+		self.modal = Some(Modal::Integration(Integration::Done));
+	}
+
+	/// The probe or the write did not happen (§17). Shown in the dialog rather than as a session
+	/// error: this is a side errand, and a remote that refuses it is still a perfectly good remote
+	/// to be typing at.
+	fn on_integration_failed(&mut self, reason: &str) {
+		if !matches!(self.modal, Some(Modal::Integration(_))) {
+			return;
+		}
+		self.set_dialog_body(&ui::terminal::integration_failed_body(reason));
+		self.modal = Some(Modal::Integration(Integration::Done));
 	}
 
 	/// Open the port-forwards manager (§27): the dialog opens centred with a blank add form, and
@@ -5217,13 +5375,14 @@ impl Tab {
 			return iced::Task::none();
 		}
 
-		// A dialog over this screen owns the keyboard while it is up (§10, §18, §27). Two reasons,
-		// and each of the four needs one of them: the ones with a FIELD (the new folder's name, a
-		// forward's listen/target) type through the widget tree, so a key reaching the shell as
-		// well would be typing at the remote prompt at the same time; the ones without take it so
-		// that Ctrl+C copies the selected message rather than sending ETX down the channel — the
-		// `keyboard::listen` subscription fires independently of widget focus. Esc closes whichever
-		// it is, which is safe because none of them acts on being dismissed.
+		// A dialog over this screen owns the keyboard while it is up (§10, §17, §18, §27). Two
+		// reasons, and each of the five needs one of them: the ones with a FIELD (the new folder's
+		// name, a forward's listen/target) type through the widget tree, so a key reaching the
+		// shell as well would be typing at the remote prompt at the same time; the ones without
+		// take it so that Ctrl+C copies the selected message rather than sending ETX down the
+		// channel — the `keyboard::listen` subscription fires independently of widget focus, and
+		// the shell-integration dialog's whole body is a block meant to be read and copied. Esc
+		// closes whichever it is, which is safe because none of them acts on being dismissed.
 		if self.modal.is_some() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.modal = None;
@@ -7807,6 +7966,148 @@ mod tests {
 		assert!(matches!(app.modal, Some(Modal::Delete(_))));
 		app.on_disconnect_pressed();
 		assert!(matches!(app.modal, Some(Modal::Disconnect)));
+	}
+
+	// The shell-integration dialog, driven to the point where it has an answer to act on (§17) —
+	// the probe out, the server's reply in. Every test below starts here, because nothing about
+	// the dialog can be exercised until the server has said what it found.
+	fn probed(
+		shell: Option<crate::integration::Shell>,
+		path: &str,
+		installed: bool,
+	) -> (Tab, mpsc::Receiver<SshCommand>) {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.connection = Some("root@sybille-rec:22".to_owned());
+		let _ = app.update(Message::IntegrationPressed);
+		let _ = next_command(&mut rx); // the probe itself, asserted on in its own test
+		let _ = app.on_ssh_event(SshEvent::IntegrationProbed {
+			shell,
+			path: path.to_owned(),
+			installed,
+		});
+		(app, rx)
+	}
+
+	/// The dialog asks about the LOGIN account (§17) — the one whose shell a reconnect opens, not
+	/// whichever account the panes have been elevated to. The name comes off the endpoint, the only
+	/// place the tab still holds it once the connect form has been left.
+	#[test]
+	fn the_shell_integration_dialog_asks_about_the_login_account() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.connection = Some("rocky@gw-test:22".to_owned());
+		let _ = app.update(Message::IntegrationPressed);
+		assert!(matches!(
+			app.modal,
+			Some(Modal::Integration(Integration::Asking))
+		));
+		assert!(
+			matches!(next_command(&mut rx), Some(SshCommand::ProbeIntegration { user }) if user == "rocky")
+		);
+	}
+
+	/// Reading is not writing (§17). The probe answers, the dialog fills with the block, and NOTHING
+	/// has been sent to the server — the whole promise of this dialog is that the user sees the text
+	/// before their config file is touched.
+	#[test]
+	fn a_silent_bash_is_shown_the_block_before_anything_is_written() {
+		use crate::integration::Shell;
+
+		let (mut app, mut rx) = probed(Some(Shell::Bash), "/root/.bashrc", false);
+		assert!(matches!(
+			app.modal,
+			Some(Modal::Integration(Integration::Found { .. }))
+		));
+		assert!(next_command(&mut rx).is_none(), "the probe wrote nothing");
+
+		// Now the explicit act, and only now.
+		let _ = app.update(Message::IntegrationInstall);
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::WriteIntegration { path, shell, install })
+				if path == "/root/.bashrc" && shell == Shell::Bash && install
+		));
+		assert!(matches!(
+			app.modal,
+			Some(Modal::Integration(Integration::Writing))
+		));
+	}
+
+	/// A file that already carries the block is offered removal instead, and removal is the same
+	/// command with the flag turned over (§17) — one round trip, one code path, so an install and a
+	/// removal cannot drift apart.
+	#[test]
+	fn a_file_that_already_has_the_block_is_offered_its_removal() {
+		use crate::integration::Shell;
+
+		let (mut app, mut rx) = probed(Some(Shell::Zsh), "/home/cme/.zshrc", true);
+		let _ = app.update(Message::IntegrationRemove);
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::WriteIntegration { path, install, .. })
+				if path == "/home/cme/.zshrc" && !install
+		));
+	}
+
+	/// A shell cmote has no block for is never written to (§17). fish announces its own directory,
+	/// and an unrecognised login shell is one cmote must not guess at — writing bash syntax into a
+	/// ksh rc file is how an account loses its login. The dialog offers no button in either case;
+	/// this pins that a message arriving anyway still sends nothing.
+	#[test]
+	fn a_shell_cmote_has_no_block_for_is_never_written_to() {
+		use crate::integration::Shell;
+
+		for shell in [None, Some(Shell::Fish)] {
+			let (mut app, mut rx) = probed(shell, "/home/cme/.config/fish/config.fish", false);
+			let _ = app.update(Message::IntegrationInstall);
+			assert!(
+				next_command(&mut rx).is_none(),
+				"nothing is written for {shell:?}"
+			);
+		}
+	}
+
+	/// An answer for a dialog the user has closed is dropped (§17). Re-opening it on their behalf
+	/// would be the app talking over them — and would put an Install button under a cursor that has
+	/// moved on to the shell.
+	#[test]
+	fn an_answer_for_a_closed_dialog_is_dropped() {
+		use crate::integration::Shell;
+
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.connection = Some("root@sybille-rec:22".to_owned());
+		let _ = app.update(Message::IntegrationPressed);
+		let _ = next_command(&mut rx);
+		let _ = app.update(Message::IntegrationClosed);
+
+		let _ = app.on_ssh_event(SshEvent::IntegrationProbed {
+			shell: Some(Shell::Bash),
+			path: "/root/.bashrc".to_owned(),
+			installed: false,
+		});
+		assert!(app.modal.is_none(), "the dialog stays closed");
+	}
+
+	/// A refused errand is a dialog message, not a session failure (§17). The remote said no to a
+	/// side errand on its own channel; the shell in front of the user is untouched, and so is the
+	/// screen it is drawn on.
+	#[test]
+	fn a_refused_errand_leaves_the_session_alone() {
+		use crate::integration::Shell;
+
+		let (mut app, _rx) = probed(Some(Shell::Bash), "/root/.bashrc", false);
+		app.screen = Screen::Terminal;
+		let _ = app.on_ssh_event(SshEvent::IntegrationFailed(
+			"could not open /root/.bashrc: permission denied".to_owned(),
+		));
+		assert!(matches!(
+			app.modal,
+			Some(Modal::Integration(Integration::Done))
+		));
+		assert!(app.terminal.is_some(), "the shell is still there");
+		assert!(
+			matches!(app.screen, Screen::Terminal),
+			"and still on screen"
+		);
 	}
 
 	/// A dialog owns the keyboard while it is up (§10, §18). Its own field types through the widget

@@ -296,6 +296,27 @@ pub enum SshCommand {
 		path: String,
 		bytes: Vec<u8>,
 	},
+	/// Find out whether the LOGIN account's shell announces its working directory, and where its
+	/// config file is (§17). `user` is the account name, which the task matches against
+	/// `/etc/passwd` to learn the login shell — the GUI already knows it from the endpoint, so
+	/// sending it saves the session layer from having to remember the connect parameters.
+	///
+	/// Reads only; nothing is written until the user has seen the block and pressed Install. The
+	/// answer is `IntegrationProbed`, or `IntegrationFailed` if the account's home could not even
+	/// be resolved.
+	ProbeIntegration { user: String },
+	/// Write the shell-integration block into `path`, or cut it back out (§17). `install` says
+	/// which — one command for both directions, because they are the same read-modify-write with a
+	/// different edit in the middle, and the dialog offers exactly one of them at a time.
+	///
+	/// `shell` decides which block goes in; it is ignored when removing, since the markers bound
+	/// the block whichever shell wrote it. Answered with `IntegrationWritten` or
+	/// `IntegrationFailed`.
+	WriteIntegration {
+		path: String,
+		shell: crate::integration::Shell,
+		install: bool,
+	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Routed to
 	/// the transfer waiting on it; a `*All` answer makes the task stop asking for the rest.
 	ResolveConflict(ConflictChoice),
@@ -438,6 +459,24 @@ pub enum SshEvent {
 	/// The editor save failed (§32): the buffer stays dirty and the reason is shown, so the edits
 	/// that failed to persist are never thrown away.
 	EditSaveFailed { editor_id: u64, reason: String },
+	/// What the login account's shell config looks like (§17), in answer to `ProbeIntegration`.
+	/// `shell` is the family read out of `/etc/passwd` — `None` when the account is not a local one
+	/// or names a shell cmote has no block for, in which case the dialog says so and offers
+	/// nothing. `path` is the config file that would be written, and `installed` whether cmote's
+	/// block is already in it, which is what makes the dialog offer Remove instead of Install.
+	IntegrationProbed {
+		shell: Option<crate::integration::Shell>,
+		path: String,
+		installed: bool,
+	},
+	/// The config file was written (§17). `installed` is its state AFTER the write — true for an
+	/// install, false for a removal — so the dialog reports what is now true rather than what was
+	/// asked for.
+	IntegrationWritten { path: String, installed: bool },
+	/// The probe or the write did not happen (§17), with the server's own reason. Never tears the
+	/// session down: this is a side errand on its own channel, and a remote that refuses it is
+	/// simply a remote where the cwd stays unknown.
+	IntegrationFailed(String),
 	/// A transfer stopped mid-flight on a failure, but its partial was KEPT so it can be resumed
 	/// (§16). Distinct from `*Failed` (final, nothing to continue) and from a cancel (which
 	/// deletes its partial): the GUI shows `message` and offers a Resume, which re-runs the same

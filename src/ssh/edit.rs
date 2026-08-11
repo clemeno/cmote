@@ -90,7 +90,9 @@ async fn report_load(
 /// Read the file into a bounded buffer (§32). The size gate runs first off the metadata, so a huge
 /// file is refused before a byte is pulled; a server that will not report a size is caught by a
 /// second check as the buffer grows, so the cap holds either way.
-async fn read_file(sftp: &SftpSession, path: &str) -> Result<Vec<u8>> {
+/// Shared with `ssh::integration` (§17), which reads a config file the same bounded way — one
+/// reader, so the two can never disagree about how big a file cmote will pull into memory.
+pub(crate) async fn read_file(sftp: &SftpSession, path: &str) -> Result<Vec<u8>> {
 	if let Ok(meta) = sftp.metadata(path.to_owned()).await
 		&& let Some(size) = meta.size
 		&& size > MAX_SIZE
@@ -189,7 +191,10 @@ async fn report_save(
 /// behind — EXCEPT the one case where doing so would lose data: if the target was already removed and
 /// the second rename then fails, the temp is the file's only remaining copy, so it is kept and named
 /// in the error for a manual rescue rather than deleted.
-async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<()> {
+///
+/// Shared with `ssh::integration` (§17): a shell config is the one file on a server where a
+/// half-written copy costs the user their way back in, so it commits through exactly this rename.
+pub(crate) async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -> Result<()> {
 	let temp = format!("{path}{TEMP_SUFFIX}");
 
 	// Write the whole buffer to the temp. `shutdown` flushes and closes the remote handle, so the

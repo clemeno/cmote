@@ -240,6 +240,7 @@ cmote/
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
     ├── glob.rs           the home filter's text rule: a fragment until `*` or `?` is typed, then a whole-text glob; case-insensitive (§49)
+    ├── integration.rs    the OSC 7 / OSC 133 block a remote's rc file can be given, its markers, and the install / remove edits (§17, §34)
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── mru.rs            the tabs' activation order (ids, most recent last): a close falls back to the previous visit (§37)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
@@ -269,6 +270,7 @@ cmote/
     │   ├── download.rs    file + recursive-folder download over an sftp channel: stream, progress, per-file collisions (§19)
     │   ├── forward.rs     run port forwards: local/dynamic listeners → direct-tcpip, remote via tcpip_forward + Handler, SOCKS5 (§27)
     │   ├── hostkey.rs     TOFU: check_known_hosts_path, fingerprint, accept/learn; a changed key's stored fingerprint + replace, for the override dialog (§8, §28)
+    │   ├── integration.rs find the login shell + its rc file and write the cwd announcer into it, atomically (§17)
     │   ├── keyfile.rs     load PEM/OpenSSH + PuTTY .ppk (via ssh-key from_ppk); passphrases; zeroize (§7)
     │   ├── transfer.rs    the recursive transfer's shared spine: the tree plan + the per-file collision protocol (§17, §19)
     │   ├── upload.rs      file + recursive-folder upload over an sftp channel: batch pre-scan, stream, progress, per-file collisions (§17)
@@ -1425,14 +1427,81 @@ escape sequence on each prompt, and the terminal reads it out of the output stre
   remote's command history (readline/zle log every submitted line; hiding its on-screen echo does
   not stop the record), and it is bash syntax a shell like fish would choke on. Rather than
   pollute the user's shell, cmote leaves it untouched and accepts an unknown cwd on a silent
-  bash/zsh. Upgrade path for a user who wants cwd-follow there: add the OSC 7
-  `PROMPT_COMMAND`/`precmd` hook to their own shell config, which cmote then reads passively.
+  bash/zsh. The way OUT of that on a bash/zsh remote is the dialog below, which writes the hook
+  into the shell's own config file instead of typing it at a prompt (v4.0.0).
 - **Shown in the window title.** `App::title` is a function of the state:
   `cmote — user@host:port — /current/dir` while connected, dropping the third part when the
   shell never announces one. When a program sets its own window title (OSC 0/2, §23) that takes
   the third slot instead of the cwd — the endpoint always stays, so the window is still
   identifiable by host even while a program owns the title. The title costs no grid space,
   which the status bar would.
+
+### Shell integration, written to the config rather than typed (`integration.rs`, v4.0.0)
+
+Passive reading is the right rule and it has one consequence nobody enjoys: on a plain bash — a
+Rocky/CentOS/Amazon box, which is most fleets — the cwd is never known, so the title has no
+directory, Sync and Reveal are permanently dimmed, the upload dialog asks for a path, and §22's
+reconnect resume has no `terminal_path` to remember. Nothing announces that this is a *missing
+shell hook* rather than a broken feature. That is what turned up in use: `targets.json` had
+`files_path`, the panel sizes and the sort for every saved target, and `terminal_path` for exactly
+one — an old entry from before the typed hook was removed.
+
+The fix does not reverse the rule. cmote still types nothing. It offers to write the announcer into
+the **shell's own config file**, over SFTP, once, from a dialog — the same thing every terminal with
+"shell integration" offers, and the same thing the user would otherwise do by hand.
+
+- **Terminal right-click → "Shell integration…".** A once-per-server act belongs in a menu, not on
+  the status bar beside the per-moment buttons. The dimmed Sync/Reveal pair is the tell that sends
+  people looking.
+- **It reads before it writes, and shows what it would write.** The probe resolves the login
+  account's home directory over SFTP, reads `/etc/passwd` for its login shell (the authoritative
+  answer, and one obtainable without typing at a prompt), falls back to whichever of `.zshrc` /
+  `.bashrc` exists for an LDAP/SSSD account that is not in the file, and reports whether cmote's
+  block is already there. The dialog then shows **the exact block** in its selectable body. This is
+  a change to a file every future login of theirs reads, on a machine cmote does not own; the honest
+  way to ask for that is to put the text in front of them — and it doubles as the answer for anyone
+  who would rather paste it in themselves.
+- **The LOGIN account, never the elevated one.** The config being written is the one the shell a
+  reconnect opens will read. Installing into root's `.bashrc` because the panes happen to be
+  elevated would do nothing for the session that asked.
+- **Marker-bounded, so it can be removed.** `# >>> cmote shell integration >>>` … `# <<<`. The
+  marker is the whole bookkeeping: its presence is "already installed" (installing twice would
+  announce the directory twice per prompt), and removal cuts exactly what installation added,
+  blank line included, leaving anything written after it alone. A block whose closing marker
+  someone deleted by hand is left ALONE rather than truncated to the end of the file — the user's
+  own lines may be under it.
+- **`.bashrc`, not `.bash_profile`.** cmote's shell is a login shell, which reads only the profile
+  — but every mainstream distribution's default profile sources `.bashrc`, and `.bashrc` is also
+  what a non-login interactive shell reads, so it is the file that covers both. On an account whose
+  profile does not source it, nothing happens; the dialog names the file it wrote, so that reads as
+  "installed, still silent" rather than as a mystery.
+- **Written atomically** through `edit::write_atomic` — temp sibling, then rename. A config file is
+  the one file on a server where a half-written copy costs the user their way back in.
+- **What goes in.** OSC 7 on every prompt, plus OSC 133;D (with `$?`) and 133;A, which light up
+  §34's prompt ticks, jump-to-prompt and the per-tab exit-code glyph for free. zsh also gets 133;C
+  from `preexec`. bash does **not**: 133;C needs a global `DEBUG` trap, a single slot every preexec
+  framework wants, and cmote will not take it silently. The cost is bounded and known — no
+  "running" dot, and Ctrl+Shift+O finds no output span, because a command with no output start is
+  filed as an empty range.
+- **fish is recognised and left alone.** It announces its own directory; offering to fix a shell
+  that is not broken would be a lie the user pays for with a change to their config. An
+  unrecognised login shell (`ksh`, a bare `sh`) is reported as "could not tell" and offered
+  nothing — writing bash syntax into a ksh rc file is how an account loses its login.
+- **BEL, not ST.** The sequences end `\007`. Not taste: writing ST means `\\` in the `printf`
+  format, and `\\` immediately followed by `\033` does not come back out of bash's `printf` as
+  backslash-then-escape — the backslashes are eaten together and the next sequence is emitted as
+  the literal text `033]7;…`. Found by *running* the block, not by reading it. A test asserts no ST
+  survives in either block.
+- **Nothing changes in the session that asked.** A shell reads its config when it starts, and this
+  one already has. The dialog says so rather than leaving the user to wonder why the title is still
+  bare.
+- **`ponytail:`** the path in the OSC 7 URI is not percent-encoded — encoding it in portable shell
+  is a per-character loop on every prompt. cmote's own reader takes a raw path fine; the case it
+  gets wrong is a directory name containing a literal `%` followed by two hex digits.
+- **`ponytail:`** bash's `PROMPT_COMMAND` is prepended as a STRING. On bash 5.1+ it can be an
+  array, and an account that has deliberately made it one loses the other entries. The guard
+  (`case`) makes re-sourcing safe, which is the common hazard; the array case is rare enough to
+  disclose rather than branch on.
 
 ### Uploading (`ssh/upload.rs`)
 
@@ -2274,6 +2343,13 @@ header so both panels name the same place.
   (the OSC scanner, §17), but the pane path and panel sizes are GUI state the app owns — they
   never appear in the byte stream, so the scanner stays a scanner and the snapshot lives with
   the target.
+- **So the shell resume only exists on a shell that announces.** Everything else here works on
+  any remote — the pane path, the panel sizes, the `.*` filter and the sort are the GUI's own
+  state — but `terminal_path` can only ever be what the shell said. On a plain bash it is
+  therefore always `None`, forever, and the rule above quietly keeps whatever was there. That
+  reads as a broken feature rather than a missing shell hook, which is what §17's shell-integration
+  dialog exists to close: install it once per server and the resume starts working from the next
+  connection.
 
 ### Putting you back
 

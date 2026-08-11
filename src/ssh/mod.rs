@@ -9,6 +9,7 @@
 //   upload  — send a local file (or a whole folder tree) to the remote over sftp (§17)
 //   download— pull a remote file (or a whole folder tree) down over sftp (§19)
 //   edit    — read a whole remote file into the editor and save its buffer back atomically (§32)
+//   integration — put the cwd announcer into the remote's own shell config, once, on request (§17)
 //   forward — run local / remote / dynamic port forwards over the live connection (§27)
 //   browse  — read, rename, create and delete remote folders for the explorer tree (§18)
 //   shell   — the shells running on one connection, and elevating into another account (§45)
@@ -26,6 +27,7 @@ pub mod download;
 pub mod edit;
 pub mod forward;
 pub mod hostkey;
+pub mod integration;
 pub mod keyfile;
 pub mod shell;
 pub mod shellfs;

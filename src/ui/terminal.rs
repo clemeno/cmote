@@ -62,6 +62,96 @@ const SEARCH_BAR_INSET: f32 = 8.0;
 /// seed it into the selectable dialog buffer when the modal opens.
 pub const DISCONNECT_DIALOG_BODY: &str = "Ends this shell and returns to the connect form. The remote program is signalled to close; what happens to any unsaved work there is up to that program.";
 
+/// The body copy for the shell-integration dialog while the server is being asked, and while it is
+/// being written to (§17). Two waits, said differently, because the second one is a WRITE to the
+/// user's own config file and a dialog that goes quiet mid-write is the one moment they will wonder
+/// what is happening to it.
+pub const INTEGRATION_ASKING_BODY: &str =
+	"Looking at the login shell's configuration on the server…";
+pub const INTEGRATION_WRITING_BODY: &str = "Writing…";
+
+/// What the dialog says once the probe has answered (§17): what cmote found, what it would write,
+/// and the block itself so it is read before it is installed and not after.
+///
+/// The block goes in the body rather than behind a "show me" toggle on purpose. This is a change to
+/// a file the user's every future login reads, on a machine cmote does not own; the honest way to
+/// ask for that is to put the exact text in front of them. The body is selectable and copyable
+/// (§10), so it doubles as the answer for anyone who would rather paste it in by hand.
+pub fn integration_found_body(
+	shell: Option<crate::integration::Shell>,
+	path: &str,
+	installed: bool,
+) -> String {
+	let Some(shell) = shell else {
+		return format!(
+			"cmote could not tell which shell this account logs into, so there is nothing it can \
+			 safely add. It looked in /etc/passwd and for a .zshrc or .bashrc under {path}.\n\n\
+			 A shell that announces its directory does it with an OSC 7 escape sequence from its \
+			 prompt; adding that by hand to whichever file this account reads at login has the \
+			 same effect as this dialog would."
+		);
+	};
+	if !shell.installable() {
+		return format!(
+			"This account logs into {}, which announces its working directory by itself — there \
+			 is nothing for cmote to add.\n\n\
+			 If the directory still is not showing, the shell is older than the version that \
+			 started sending it (fish 3.1).",
+			shell.label()
+		);
+	}
+	if installed {
+		return format!(
+			"{} is already set up: cmote's block is in {path}.\n\n\
+			 Removing it takes out exactly what was added — the block is bounded by its own \
+			 markers — and leaves the rest of the file alone. The shell stops announcing its \
+			 directory at the next login, and this session is unaffected either way.",
+			shell.label()
+		);
+	}
+	let block = crate::integration::block(shell).unwrap_or_default();
+	format!(
+		"This account logs into {}, which says nothing about where it is — so cmote cannot show \
+		 the directory, follow a cd, or resume a reconnect where the last session left off.\n\n\
+		 Installing appends this to {path}. It is typed nowhere, so it never reaches the shell's \
+		 command history, and it takes effect at the NEXT login — this session is unchanged. The \
+		 sequences are the ones every modern terminal reads, so other terminals benefit too, and \
+		 any that do not read them ignore them.\n\n\
+		 {block}",
+		shell.label()
+	)
+}
+
+/// What the dialog says once the file has been written (§17). It names the file, and says plainly
+/// that nothing has changed in the session in front of the user — a shell reads its configuration
+/// at login, and this one started before the file did.
+pub fn integration_done_body(path: &str, installed: bool) -> String {
+	if installed {
+		format!(
+			"Installed in {path}.\n\n\
+			 This session is unchanged — a shell reads its configuration when it starts. The next \
+			 connection to this server will announce its directory, and from then on the title, \
+			 Sync, Reveal and the reconnect resume all follow the shell."
+		)
+	} else {
+		format!(
+			"Removed from {path}.\n\n\
+			 This session is unchanged; the shell stops announcing its directory at the next login."
+		)
+	}
+}
+
+/// What the dialog says when the server refused (§17): its own words, and what that means. The
+/// reason is the remote's, not a translation of it — a permissions error on a config file is
+/// exactly the kind of thing the user can act on once they can read it.
+pub fn integration_failed_body(reason: &str) -> String {
+	format!(
+		"{reason}\n\n\
+		 Nothing was changed on the server. The shell's directory stays unknown, which costs the \
+		 title, Sync, Reveal and the reconnect resume — everything else works as it did."
+	)
+}
+
 /// The widget id of the upload dialog's destination field, so `app` can focus it as the
 /// dialog opens (§17) — the folder is the one thing the user may want to change, and Enter
 /// in the field sends. Same trick as the passphrase prompt (§7).
@@ -383,6 +473,13 @@ pub fn view<'a>(
 		Some(crate::app::Modal::Forwards(form)) => {
 			layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
 			layers.push(crate::ui::forward::panel(forwards, form, card));
+		}
+		// Setting the remote's shell up to announce its directory (§17). Dismissing writes
+		// nothing — only the explicit Install / Remove button sends anything — so the ✕ and the
+		// backdrop are safe at every stage, including while a probe is still out.
+		Some(crate::app::Modal::Integration(state)) => {
+			layers.push(crate::ui::dialog::backdrop(Message::IntegrationClosed));
+			layers.push(integration_panel(dialog_body, state, card));
 		}
 		None => {}
 	}
@@ -755,6 +852,14 @@ fn context_menu(
 		// Send local files into the shell's own working directory (§17): the picker opens,
 		// then the confirmation with that folder already filled in.
 		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
+		// Teach this remote's shell to announce its directory (§17). It lives in the menu rather
+		// than on the status bar because it is a once-per-server act, not a per-moment one — and
+		// the bar's Sync and Reveal, dimmed for want of exactly this, are the tell that sends
+		// people looking for it.
+		crate::ui::menu::item(
+			"Shell integration…".to_owned(),
+			Some(Message::IntegrationPressed),
+		),
 	];
 	// On a link cell, follow or copy the link too (§24). Both carry the URI, so the menu is
 	// the one place the whole address is offered — handy when a link's visible text hides it.
@@ -931,6 +1036,49 @@ fn new_folder_panel<'a>(
 				.on_press(Message::NewFolderConfirmed)
 				.into(),
 		],
+		card,
+	)
+}
+
+/// The shell-integration dialog (§17), in the shared dialog chrome. One panel for the whole
+/// errand — asking, deciding, writing, done — because it is one conversation, and a dialog that
+/// closed and reopened between its steps would lose the card's position and the user's place in the
+/// text they were reading.
+///
+/// The state decides only the FOOTER. Only `Found` with a shell cmote has a block for offers an
+/// action, and it offers exactly one: Install when the block is absent, Remove when it is there.
+/// Every other state offers Close alone, which is honest — there is nothing to decide while the
+/// server is being asked, and nothing left to do once it has answered.
+fn integration_panel<'a>(
+	dialog_body: &'a text_editor::Content,
+	state: &'a crate::app::Integration,
+	card: crate::ui::dialog::Card,
+) -> Element<'a, Message> {
+	use crate::app::Integration;
+
+	let mut buttons: Vec<Element<'a, Message>> =
+		vec![button("Close").on_press(Message::IntegrationClosed).into()];
+	if let Integration::Found {
+		shell: Some(shell),
+		installed,
+		..
+	} = state
+		&& shell.installable()
+	{
+		buttons.push(if *installed {
+			button("Remove").on_press(Message::IntegrationRemove).into()
+		} else {
+			button("Install")
+				.on_press(Message::IntegrationInstall)
+				.into()
+		});
+	}
+
+	crate::ui::dialog::dialog(
+		"Shell integration".to_owned(),
+		Message::IntegrationClosed,
+		crate::ui::dialog::selectable_body(dialog_body),
+		buttons,
 		card,
 	)
 }
