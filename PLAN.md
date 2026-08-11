@@ -1920,6 +1920,37 @@ for a window resize.
   `Files::follow` therefore acts only when the announced directory differs from the last one
   followed — a repeat is not a move — while `Files::show` (a browse) is unconditional. Last
   one wins: browse and the pane moves; move the console and the pane follows the `cd`.
+- **The tree carries the same guard, and the two must agree** (`Explorer::reveal_if_new`
+  against its own `revealed`, `Files::follow` against `followed`). Two panels, one question —
+  "has the shell actually moved?" — answered in two places, which is two chances to disagree.
+  They did, on the reconnect path: see §22's pin, which held the pane and not the tree.
+
+### No `remote::Location` module — and why (v4.0.0)
+
+An architecture review proposed lifting the shell/tree/pane coordination — `on_sync`,
+`on_reveal`, `browse_to`, `refresh_remote_dir`, the resume pin and the shell-follow — into one
+`remote::Location` owning "where the panels point relative to the shell". It was explored and
+rejected. Recorded so a later review does not re-suggest it.
+
+- **It would have to own `Explorer` and `Files`, which are used everywhere for reasons that
+  have nothing to do with location.** Scroll offset, panel width and reserved space, visibility,
+  hidden-file mode, the context menus, the inline rename, the selection and the rubber band —
+  around a hundred call sites in `app.rs`, against the eight that are about *where the panels
+  point*. Owning them means an `explorer()` / `explorer_mut()` pair carrying ninety per cent of
+  the traffic straight through: a module whose interface is as wide as what it hides, which is
+  the definition of shallow.
+- **Not owning them is worse.** The alternative is free functions taking `&mut Explorer`,
+  `&mut Files` and a path — three or four arguments to move two lines of state, with the
+  invariants still living in the caller.
+- **The peers are already the deep modules.** `explorer.rs` and `files.rs` each own a panel and
+  hand back listing requests; `transfer.rs` works because the state it owns is *only* used by
+  transfers. A third layer mediating two widely-used peers is not a deepening, it is a wrapper.
+- **What is genuinely shared is one field**, `App::resume_cwd`, and merging the two panels'
+  follow-guards behind it would move state *out* of the panel modules and *into* `app.rs` — the
+  wrong direction, since `app.rs` is the file the review flagged for being 11k lines.
+
+The exploration was not wasted: it found the pin covering only half of what it was for, and
+Reveal stranding the panels when pressed against it. Both are fixed below.
 - **The "Sync" button brings the console to the pane.** Since browsing no longer moves the
   shell, the pane and the console drift apart on purpose; Sync is the manual way to close
   that gap, typing a quoted `cd` (via `move_shell_to`) so the shell — and with it the tree
@@ -1943,8 +1974,16 @@ for a window resize.
     guard's job is to keep the per-chunk call cheap and to stop a re-announcement undoing a
     browse; both are wrong here, since the whole reason to press it is that the tree was walked
     away from a cwd that never changed — the guarded call would decline exactly when asked.
-  - **It seeds the follow-guard** (`Files::set_followed`) with the same path, so the next prompt
-    reads as "still there" rather than as a move, and a real `cd` after it still carries the pane.
+  - **It seeds both follow-guards** with the same path — the pane's through `Files::set_followed`,
+    the tree's inside `Explorer::reveal` itself — so the next prompt reads as "still there" rather
+    than as a move, and a real `cd` after it still carries both panels.
+  - **It ends a reconnect resume still settling** (`resume_cwd = None`, §22), the rule
+    `move_shell_to` already follows and for the same reason: the pin holds the panels against the
+    shell's login announcements, and the user saying out loud where the panels go outranks that.
+    Left armed, the pin swallowed the settle as "already there" and stranded the panels at the
+    login directory with no further announcement coming to put it right — the exact drift this
+    button exists to close, caused by pressing it. Nothing is spent when there is no announced cwd,
+    since there is then no ask to outrank.
   - **Disabled when there is nothing to do:** no announced cwd (§17 — it takes OSC 7), the strip
     hidden (the tree goes with the pane, so a press would change nothing anyone can see), or both
     panels already there. "Both" is three terms rather than Sync's one: the pane can be on the cwd
@@ -2247,12 +2286,20 @@ header so both panels name the same place.
 - **The shell is resumed with a `cd`** typed in exactly as the tree's "Open in terminal"
   does (§18) — quoted, POSIX-assumed, visible in the scrollback. Nothing to replay leaves
   the shell at its login directory, the previous behaviour.
-- **The pane is pinned while the shell settles.** The shell announces its login directory
-  *before* the replayed `cd` runs, so without a guard that announcement would drag the pane
-  off a divergent `files_path`. `App::resume_cwd` holds the cwd we are waiting for: until the
-  shell reaches it, `SshEvent::Output` does not let the pane follow; once it does, the
-  follow-guard is seeded (so the pane stays put now but follows the next real `cd`) and the
-  pin lifts. An explicit move by the user lifts it early.
+- **Both panels are pinned while the shell settles.** The shell announces its login directory
+  *before* the replayed `cd` runs, so without a guard that announcement would drag them off a
+  divergent `files_path`. `App::resume_cwd` holds the cwd we are waiting for: until the shell
+  reaches it, `SshEvent::Output` moves neither panel; once it does, both follow-guards are seeded
+  (so they stay put now but follow the next real `cd`) and the pin lifts. An explicit move by the
+  user — Sync, "Open in terminal", Reveal — lifts it early.
+- **The tree used to sit outside the pin, and that was the bug.** It followed every announcement
+  while the pane was held, so a resume walked it to the login directory and then on to the
+  replayed one, opening each chain in turn and asking the server for a listing of every folder
+  along both — to land somewhere the pane had deliberately not gone. The two panels are meant to
+  open a session agreeing on the resume point, and one of them was leaving before the user saw it
+  there. `Explorer::set_revealed` is the tree's half of the seed, the exact mirror of
+  `Files::set_followed`, and the reveal now happens *inside* the not-pinned arm rather than in
+  front of the whole match.
 
 ### The folder tree shows the path too
 

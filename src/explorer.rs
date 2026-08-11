@@ -505,6 +505,17 @@ impl Explorer {
 		needed
 	}
 
+	/// Seed the "has the shell moved" guard without opening or selecting anything (§22). The
+	/// tree's half of the reconnect pin, and the exact mirror of `Files::set_followed`: while a
+	/// resume is settling, the shell's login-then-`cd` announcements must not drag either panel
+	/// off the directory the restore put it on — and the tree is the more expensive of the two to
+	/// drag, since revealing a directory opens its whole chain and asks the server for a listing
+	/// of every folder along it. Once the shell has settled, this marks its cwd as already seen,
+	/// so the arrival moves nothing while a later, real `cd` still counts as a move.
+	pub fn set_revealed(&mut self, cwd: &str) {
+		self.revealed = Some(cwd.to_owned());
+	}
+
 	/// Begin renaming a folder. The root has no parent to rename it within, so it is
 	/// left alone.
 	pub fn start_rename(&mut self, path: String) {

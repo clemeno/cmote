@@ -4331,21 +4331,31 @@ impl Tab {
 				// panel holds the keyboard is not left believing the shell is focused.
 				self.report_focus();
 				if let Some(cwd) = cwd {
-					let needed = self.explorer.reveal_if_new(&cwd);
-					self.list_dirs(needed);
-					// While a reconnect is resuming (§22) the pane is pinned to its own
-					// remembered directory: the shell's login-then-`cd` announcements must not
-					// drag it off until the shell has settled at the cwd we replayed. Once it
-					// has, seed the follow-guard — so the pane does not jump now but *does*
-					// follow the next real `cd` — and stop pinning. Off the resume path the
-					// pane follows the shell as usual (§19): only a real move re-lists.
+					// While a reconnect is resuming (§22) BOTH panels are pinned to the
+					// directories the restore put them on: the shell's login-then-`cd`
+					// announcements must not drag either off until it has settled at the cwd we
+					// replayed. Once it has, seed both follow-guards — so neither panel jumps
+					// now but both *do* follow the next real `cd` — and stop pinning. Off the
+					// resume path they follow the shell as usual (§18, §19): only a real move
+					// re-lists.
+					//
+					// The tree sits INSIDE the pin rather than in front of it, which is the half
+					// this used to miss. It followed every announcement while the pane was held,
+					// so a resume walked it to the login directory and then on to the replayed
+					// one — opening each chain in turn and asking the server for a listing of
+					// every folder along both — to end up somewhere the pane had deliberately not
+					// gone. A session is meant to open with the two panels agreeing, and one of
+					// them was leaving before the user ever saw it there.
 					match self.resume_cwd.as_deref() {
 						Some(target) if target == cwd.as_str() => {
+							self.explorer.set_revealed(&cwd);
 							self.files.set_followed(&cwd);
 							self.resume_cwd = None;
 						}
 						Some(_) => {}
 						None => {
+							let needed = self.explorer.reveal_if_new(&cwd);
+							self.list_dirs(needed);
 							if let Some(request) = self.files.follow(&cwd) {
 								self.list_files(request);
 							}
@@ -6660,18 +6670,25 @@ impl Tab {
 	/// local view catching up with a shell that stays exactly where it is, which is why it is safe
 	/// while a full-screen program is running and `move_shell_to` is not.
 	///
-	/// Three things happen, and all three are the point:
+	/// Four things happen, and all four are the point:
 	///
 	/// * the tree opens the chain down to the cwd and selects it — through `Explorer::reveal`, the
 	///   UNguarded one, since the whole reason to press this is that the tree has been walked away
 	///   from a cwd that never changed;
 	/// * the pane shows that directory (`Files::show`, the deliberate move, not `follow`); and
-	/// * the follow-guard is seeded with the same path, so the next prompt's announcement is
+	/// * both follow-guards are seeded with the same path, so the next prompt's announcement is
 	///   correctly read as "still there, nothing to do" rather than as a move — and a real `cd`
-	///   after it still carries the pane along.
+	///   after it still carries both panels along; and
+	/// * any reconnect resume still settling is ended, the same rule an explicit `move_shell_to`
+	///   follows and for the same reason (§22). The pin exists to hold the panels against the
+	///   shell's login-then-`cd` announcements until it settles; the user saying out loud where
+	///   the panels go outranks that, and leaving it armed would let it swallow the settle as
+	///   "already there" and strand them at the login directory — the exact drift this button is
+	///   for, caused by pressing it.
 	///
 	/// A no-op when the shell has never announced a cwd (§17: it needs OSC 7, or a shell configured
-	/// to send it) — the button dims then, and whenever the panes are already there.
+	/// to send it) — the button dims then, and whenever the panes are already there. Nothing is
+	/// spent in that case either, the pin included: there is no ask to outrank.
 	fn on_reveal(&mut self) {
 		let Some(cwd) = self
 			.terminal
@@ -6681,6 +6698,7 @@ impl Tab {
 		else {
 			return;
 		};
+		self.resume_cwd = None;
 		let needed = self.explorer.reveal(&cwd);
 		self.list_dirs(needed);
 		self.files.set_followed(&cwd);
@@ -9413,6 +9431,125 @@ mod tests {
 			app.files.path(),
 			Some("/var/log/nginx"),
 			"following resumed"
+		);
+	}
+
+	/// The pin is for BOTH panels (§18, §22). The tree follows the shell on every announcement
+	/// exactly as the pane does, so the same login-then-`cd` sequence that would drag the pane off
+	/// the restored view drags the tree off it too — and more expensively, since revealing a
+	/// directory opens its whole chain and asks the server for a listing of every folder along it.
+	/// A resume must leave both panels on the resume point, and both free to follow the next real
+	/// move.
+	#[test]
+	fn a_reconnect_pins_the_tree_as_well_as_the_pane() {
+		use crate::ui::connect::AuthKind;
+
+		let (tx, _rx) = mpsc::channel(64);
+		let mut app = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+
+		app.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+		app.targets.borrow_mut().set_session(
+			"u@h:22",
+			crate::profiles::SessionState {
+				terminal_path: Some("/var/log".to_owned()),
+				files_path: Some("/etc".to_owned()),
+				..crate::profiles::SessionState::default()
+			},
+		);
+		app.connection = Some("u@h:22".to_owned());
+		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
+
+		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
+
+		// Both panels open on the resume point: the pane at its remembered directory, the tree
+		// with the chain down to it open and that folder selected.
+		let _ = app.on_ssh_event(SshEvent::Connected);
+		assert_eq!(app.explorer.selected(), Some("/etc"));
+
+		// The login prompt announces a directory the shell is about to leave. Neither panel may
+		// be dragged onto it — the pane was always safe here, the tree was not.
+		let _ = app.on_ssh_event(announce("/home/u"));
+		assert_eq!(
+			app.explorer.selected(),
+			Some("/etc"),
+			"the tree is pinned too"
+		);
+
+		// The replayed `cd` lands: the shell has settled and the pin lifts, but the restored
+		// view stands in both panels rather than being clobbered by the arrival.
+		let _ = app.on_ssh_event(announce("/var/log"));
+		assert_eq!(app.explorer.selected(), Some("/etc"), "kept, not clobbered");
+
+		// A real move afterwards carries both panels, exactly as it always did.
+		let _ = app.on_ssh_event(announce("/var/log/nginx"));
+		assert_eq!(
+			app.explorer.selected(),
+			Some("/var/log/nginx"),
+			"following resumed"
+		);
+	}
+
+	/// Reveal is an explicit ask, so it ends the resume pin (§19, §22) — the same rule
+	/// `move_shell_to` already follows, for the same reason: once the user has said where the
+	/// panels go, the pin protecting the restored view has nothing left to protect.
+	///
+	/// Without that, pressing Reveal in the window between the login prompt and the replayed `cd`
+	/// landing left the panels stranded. They went to the login directory, the still-armed pin
+	/// swallowed the settle as "already there", and the shell then sat at a directory the panels
+	/// had been explicitly asked to come to and had not — with no further announcement coming to
+	/// put it right, since a shell standing still announces no move.
+	#[test]
+	fn reveal_during_a_resume_ends_the_pin_rather_than_stranding_the_panels() {
+		use crate::ui::connect::AuthKind;
+
+		let (tx, _rx) = mpsc::channel(64);
+		let mut app = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+
+		app.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+		app.targets.borrow_mut().set_session(
+			"u@h:22",
+			crate::profiles::SessionState {
+				terminal_path: Some("/var/log".to_owned()),
+				files_path: Some("/etc".to_owned()),
+				..crate::profiles::SessionState::default()
+			},
+		);
+		app.connection = Some("u@h:22".to_owned());
+		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
+
+		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
+
+		let _ = app.on_ssh_event(SshEvent::Connected);
+		let _ = app.on_ssh_event(announce("/home/u"));
+		assert_eq!(
+			app.resume_cwd.as_deref(),
+			Some("/var/log"),
+			"still settling"
+		);
+
+		// The user asks for the panels to come to the shell, mid-resume.
+		let _task = app.update(Message::RevealPressed);
+		assert_eq!(app.files.path(), Some("/home/u"), "the panels came");
+		assert_eq!(app.resume_cwd, None, "and the pin is spent");
+
+		// The replayed `cd` lands. It is a real move now, so both panels follow it — where
+		// before, the leftover pin read it as "already there" and left them behind.
+		let _ = app.on_ssh_event(announce("/var/log"));
+		assert_eq!(app.files.path(), Some("/var/log"), "the pane kept up");
+		assert_eq!(
+			app.explorer.selected(),
+			Some("/var/log"),
+			"and the tree with it"
 		);
 	}
 
