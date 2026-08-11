@@ -2385,6 +2385,27 @@ impl Viewer {
 	}
 }
 
+/// Everything a target remembers, read out of the shared list in ONE borrow (§14, §22, §27).
+///
+/// A connection arriving is the most consequential moment in the app: it is where a saved profile,
+/// a remembered layout, a saved set of forwards and a possibly-stored secret all meet a live shell.
+/// All four used to be read inline in the `Connected` arm, in three separate borrow scopes of the
+/// shared target cell, arranged in a fixed order — with two comments whose entire subject was that
+/// ordering. The ordering existed only because the reads were interleaved with `&mut self` calls
+/// that want the same cell.
+///
+/// Reading everything first and acting afterwards makes the borrow discipline a property of one
+/// function rather than a rule the caller has to keep in its head.
+#[derive(Debug, Default)]
+struct Arrival {
+	/// The target's key in the saved list — what pre-selects its row for a return to the home list.
+	key: String,
+	/// The session this endpoint was last left in (§22), if it has been connected to before.
+	session: Option<crate::profiles::SessionState>,
+	/// The port forwards saved against it (§27), to be re-established once the shell is up.
+	forwards: Vec<crate::forward::ForwardSpec>,
+}
+
 /// Who has the keyboard right now (§10, §14, §17, §18, §27, §35).
 ///
 /// Something on screen is often holding the keyboard: a dialog, a field being typed into, a
@@ -4540,73 +4561,21 @@ impl Tab {
 				return iced::widget::operation::focus(ui::interactive_field_id(0));
 			}
 			SshEvent::Connected => {
-				// The session is real: persist the target now (§14) — profiles only, no
-				// secret. `upsert_on_connect` adds it (or refreshes an existing endpoint,
-				// keeping its custom name) and returns its key so we pre-select the row
-				// for when the user returns to the home list.
 				let mut resume_terminal = None;
 				let mut resume_files = None;
-				// The forwards this target saved (§27), read here and re-established once the shell
-				// is up. Captured in the same short borrow discipline as the session snapshot.
 				let mut saved_forwards = Vec::new();
 				if let Some(target) = self.pending_target.take() {
-					let key = self.targets.borrow_mut().upsert_on_connect(
-						&target.host,
-						target.port,
-						&target.user,
-						target.auth_kind,
-						target.key_path,
-						target.cert_path,
-					);
-					// Restore this target's remembered session before the panels list anything
-					// (§22): the `.*` filter and panel sizes go on now, and the resume paths
-					// come back to drive the cd / pane / tree restore below. `upsert_on_connect`
-					// leaves a known endpoint's saved state untouched, so it is still here to
-					// read; taking an owned snapshot ends the borrow before the panels change.
-					// Snapshot the saved session in a short borrow that ends before the `&mut self`
-					// call: a held `Ref` on the shared target cell would clash with
-					// `restore_session` (§26).
-					let session = self
-						.targets
-						.borrow()
-						.find(&key)
-						.map(crate::profiles::Target::session);
-					if let Some(session) = session {
+					// Everything this target remembers, in one read (§14, §22, §27) — see `Arrival`.
+					let arrival = self.adopt_target(target);
+					saved_forwards = arrival.forwards;
+					// Restore the remembered session before the panels list anything (§22): the
+					// `.*` filter and both panel sizes go on now, and the resume paths come back to
+					// drive the cd / pane / tree restore below.
+					if let Some(session) = arrival.session {
 						(resume_terminal, resume_files) = self.restore_session(session);
 					}
-					// The saved forwards, taken by a short borrow that ends before any `&mut self`
-					// call below (§27), to be started once the terminal is shown.
-					saved_forwards = self
-						.targets
-						.borrow()
-						.find(&key)
-						.map(|target| target.forwards.clone())
-						.unwrap_or_default();
-					// Remembered-secret bookkeeping (§16). A successful connect is the ONLY place
-					// a secret is persisted — the credentials are now known good, so a wrong
-					// password was never stored. With "Remember" on, store what dial captured;
-					// with it off, forget any secret the vault held for this endpoint. The
-					// target's flag is then synced to what the vault actually holds, so the home
-					// list never promises a pre-fill that is not there. All of this needs the
-					// vault unlocked, which the dial / open flow already ensured whenever a secret
-					// was in play; if it is locked (the user never engaged it) the flag is left
-					// as stored.
-					if let Some(vault) = self.vault.borrow_mut().as_mut() {
-						if let Some((endpoint, secret)) = self.pending_remember.take() {
-							if let Err(error) = vault.store(&endpoint, secret) {
-								eprintln!("could not save the vault: {error:#}");
-							}
-						} else if !self.form.remember
-							&& let Err(error) = vault.forget(&key)
-						{
-							eprintln!("could not update the vault: {error:#}");
-						}
-						self.targets
-							.borrow_mut()
-							.set_remembered(&key, vault.get(&key).is_some());
-					}
-					self.pending_remember = None;
-					self.home_selected = Some(key);
+					self.settle_remembered_secret(&arrival.key);
+					self.home_selected = Some(arrival.key);
 					if let Err(error) = self.targets.borrow().save() {
 						eprintln!("could not save targets: {error:#}");
 					}
@@ -6681,6 +6650,64 @@ impl Tab {
 	fn reread_panes(&mut self) {
 		let fetches = self.panes.reread();
 		self.send_fetches(fetches);
+	}
+
+	/// The session is real: persist the target it was made for and read back everything it
+	/// remembers (§14, §22, §27). Profiles only — no secret goes in here.
+	///
+	/// `upsert_on_connect` adds the endpoint, or refreshes a known one while keeping its custom
+	/// name, and hands back its key. It leaves a known endpoint's saved state alone, so the session
+	/// snapshot and the forwards are still there to read straight afterwards — which they are, in
+	/// ONE borrow, as owned values. That is the whole point of the function: the caller then acts on
+	/// what it was given with nothing borrowed, instead of interleaving three short borrows with the
+	/// `&mut self` calls that want the same cell (§26).
+	fn adopt_target(&mut self, target: crate::profiles::Target) -> Arrival {
+		let key = self.targets.borrow_mut().upsert_on_connect(
+			&target.host,
+			target.port,
+			&target.user,
+			target.auth_kind,
+			target.key_path,
+			target.cert_path,
+		);
+		let targets = self.targets.borrow();
+		let saved = targets.find(&key);
+		Arrival {
+			session: saved.map(crate::profiles::Target::session),
+			forwards: saved
+				.map(|target| target.forwards.clone())
+				.unwrap_or_default(),
+			key,
+		}
+	}
+
+	/// Remembered-secret bookkeeping for a connect that has just succeeded (§16).
+	///
+	/// A successful connect is the ONLY place a secret is persisted, and that is the rule this
+	/// function exists to keep in one piece: the credentials are now known good, so a wrong password
+	/// was never stored. With "Remember" on, store what dial captured; with it off, forget whatever
+	/// the vault held for this endpoint. The target's flag is then synced to what the vault ACTUALLY
+	/// holds, so the home list never promises a pre-fill that is not there.
+	///
+	/// All of it needs the vault unlocked, which the dial / open flow already ensured whenever a
+	/// secret was in play. If it is locked — the user never engaged it — the flag is left as stored
+	/// rather than being cleared on the strength of a vault nobody has opened.
+	fn settle_remembered_secret(&mut self, key: &str) {
+		if let Some(vault) = self.vault.borrow_mut().as_mut() {
+			if let Some((endpoint, secret)) = self.pending_remember.take() {
+				if let Err(error) = vault.store(&endpoint, secret) {
+					eprintln!("could not save the vault: {error:#}");
+				}
+			} else if !self.form.remember
+				&& let Err(error) = vault.forget(key)
+			{
+				eprintln!("could not update the vault: {error:#}");
+			}
+			self.targets
+				.borrow_mut()
+				.set_remembered(key, vault.get(key).is_some());
+		}
+		self.pending_remember = None;
 	}
 
 	/// Turn what the panels asked for into commands (§18, §19).
@@ -8915,6 +8942,91 @@ mod tests {
 			targets.upsert_on_connect("db-01", 22, "root", AuthKind::Password, None, None);
 		}
 		tab
+	}
+
+	/// A pending target as `dial` builds one (§14): auth and endpoint only. Everything else is a
+	/// placeholder there too — the STORED target's remembered session, forwards and flag are what
+	/// `adopt_target` reads back, and `upsert_on_connect` leaves those alone.
+	fn pending_target(host: &str, user: &str) -> crate::profiles::Target {
+		crate::profiles::Target {
+			name: crate::profiles::endpoint_of(user, host, 22),
+			host: host.to_owned(),
+			port: 22,
+			user: user.to_owned(),
+			auth_kind: AuthKind::Password,
+			key_path: None,
+			cert_path: None,
+			show_hidden: true,
+			terminal_path: None,
+			files_path: None,
+			explorer_width: None,
+			files_height: None,
+			sort: None,
+			sort_dir: None,
+			remember_secret: false,
+			forwards: Vec::new(),
+		}
+	}
+
+	/// A connection arriving reads everything the target remembers in ONE go (§14, §22, §27).
+	///
+	/// The read used to be three separate borrows of the shared target list, interleaved with the
+	/// `&mut self` calls that act on what they found — so the order was load-bearing and two
+	/// comments existed to say so. Asked as one question, it can be asserted as one answer.
+	#[test]
+	fn a_connect_reads_the_targets_layout_and_forwards_in_one_go() {
+		let mut tab = tab_with_targets();
+		let endpoint = "root@web-01:22";
+
+		// The endpoint has been connected to before, so it carries a layout and a forward.
+		{
+			let mut targets = tab.targets.borrow_mut();
+			targets.set_session(
+				endpoint,
+				crate::profiles::SessionState {
+					files_path: Some("/srv/data".to_owned()),
+					show_hidden: Some(true),
+					..crate::profiles::SessionState::default()
+				},
+			);
+			targets.set_forwards(
+				endpoint,
+				vec![crate::forward::ForwardSpec {
+					kind: crate::forward::ForwardKind::Local,
+					listen_host: "127.0.0.1".to_owned(),
+					listen_port: 8080,
+					target_host: "localhost".to_owned(),
+					target_port: 80,
+				}],
+			);
+		}
+
+		let arrival = tab.adopt_target(pending_target("web-01", "root"));
+
+		assert_eq!(arrival.key, endpoint, "and it re-uses the saved row");
+		let session = arrival.session.expect("the remembered layout came back");
+		assert_eq!(session.files_path.as_deref(), Some("/srv/data"));
+		assert_eq!(session.show_hidden, Some(true));
+		assert_eq!(arrival.forwards.len(), 1, "and so did the saved forward");
+		assert_eq!(arrival.forwards[0].listen_port, 8080);
+	}
+
+	/// A target never connected to before remembers nothing, and says so rather than being absent
+	/// (§14) — the first-connection path, which then falls back to the root and a login directory.
+	#[test]
+	fn a_first_connection_brings_back_nothing_to_restore() {
+		let mut tab = Tab::default();
+		let arrival = tab.adopt_target(pending_target("new-host", "cme"));
+
+		assert_eq!(arrival.key, "cme@new-host:22");
+		// It IS saved now — a real connect persists the profile (§14) — it just has no history.
+		assert!(arrival.forwards.is_empty());
+		assert!(
+			arrival
+				.session
+				.is_none_or(|session| session.files_path.is_none()),
+			"nothing to resume to"
+		);
 	}
 
 	/// Typing a pattern the selected row still matches leaves the selection alone — a list that
