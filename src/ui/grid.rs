@@ -151,6 +151,13 @@ const PROMPT_TICK_INSET: f32 = 1.0;
 const PROMPT_TICK_VPAD: f32 = 2.0;
 const PROMPT_TICK_COLOR: Color = Color::from_rgba(0.42, 0.72, 0.85, 0.85);
 
+/// The bookmark tick (§55): the same mark in the same gutter, for a line a SCRIPT chose with
+/// `OSC 1337 ; SetMark` rather than a line the shell had a prompt on. Amber against the prompts'
+/// cyan, because the two answer different questions — "where did I run something" and "where did the
+/// build say to look" — and a session using both wants to tell them apart at a glance. Same geometry,
+/// so a bookmark on a prompt's own line simply draws over it.
+const USER_TICK_COLOR: Color = Color::from_rgba(0.84, 0.66, 0.23, 0.85);
+
 /// The stroke of a box-drawing line we draw ourselves (the rounded corners). One logical
 /// pixel — what Fira Mono's own ─ and │ come out at over the font sizes the grid uses, so
 /// a drawn corner joins a shaped line without a step.
@@ -188,6 +195,10 @@ pub struct Grid<'a> {
 	/// (a short list, at most one per visible row) rather than borrowed, since it is computed fresh
 	/// each frame from the terminal's scroll position.
 	prompts: Vec<u16>,
+	/// Viewport rows holding an explicit bookmark right now (§55), for the same gutter in a different
+	/// colour. Owned and recomputed each frame for the same reason as `prompts`, and normally empty —
+	/// only a session whose scripts drop marks has any.
+	user_marks: Vec<u16>,
 	/// The find bar's matches that fall on the visible screen right now (§39), each washed so every
 	/// hit shows and not only the current one. Owned and computed fresh each frame for the same
 	/// reason as `prompts`: it is a resolution of absolute document lines against wherever the
@@ -200,12 +211,13 @@ pub struct Grid<'a> {
 }
 
 /// Draw the emulator's current screen, highlighting `selection` if there is one, washing the find
-/// bar's on-screen `matches` (§39), ticking the `prompts` rows in the left gutter (§34) and
-/// compositing the inline `images` over the cells they reserved (§41).
+/// bar's on-screen `matches` (§39), ticking the `prompts` and `user_marks` rows in the left gutter
+/// (§34, §55) and compositing the inline `images` over the cells they reserved (§41).
 pub fn grid<'a>(
 	screen: Screen<'a>,
 	selection: Option<&'a Selection>,
 	prompts: Vec<u16>,
+	user_marks: Vec<u16>,
 	matches: Vec<Highlight>,
 	images: &'a [Placement],
 ) -> Grid<'a> {
@@ -213,6 +225,7 @@ pub fn grid<'a>(
 		screen,
 		selection,
 		prompts,
+		user_marks,
 		matches,
 		images,
 	}
@@ -430,17 +443,26 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// screen. Like the scroll indicator, they are drawn last and in the padding, so they sit
 		// over no cell and never disturb the text. A row outside the visible grid is skipped — the
 		// terminal only hands over on-screen rows, but the guard keeps the geometry honest.
-		for &row in &self.prompts {
-			if row < rows {
-				renderer.fill_quad(
-					Quad {
-						bounds: prompt_tick_rect(bounds, row),
-						border: Border::default().rounded(PROMPT_TICK_WIDTH / 2.0),
-						shadow: iced::Shadow::default(),
-						snap: false,
-					},
-					Background::Color(PROMPT_TICK_COLOR),
-				);
+		// The bookmark ticks are drawn AFTER the prompt ticks (§55) so that a bookmark landing on a
+		// prompt's own line — a shell hook that emits both — shows as the bookmark. That is the right
+		// way round: the prompt is derivable from the shell's own marks, whereas a bookmark is
+		// something a script went out of its way to say.
+		for (marks, color) in [
+			(&self.prompts, PROMPT_TICK_COLOR),
+			(&self.user_marks, USER_TICK_COLOR),
+		] {
+			for &row in marks {
+				if row < rows {
+					renderer.fill_quad(
+						Quad {
+							bounds: prompt_tick_rect(bounds, row),
+							border: Border::default().rounded(PROMPT_TICK_WIDTH / 2.0),
+							shadow: iced::Shadow::default(),
+							snap: false,
+						},
+						Background::Color(color),
+					);
+				}
 			}
 		}
 	}

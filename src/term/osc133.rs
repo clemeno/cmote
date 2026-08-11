@@ -195,6 +195,16 @@ struct Pending {
 pub struct Prompts {
 	scanner: Scanner,
 	marks: Vec<u64>,
+	/// The lines a script bookmarked explicitly with iTerm2's `OSC 1337 ; SetMark` (§55), absolute
+	/// like `marks` and bounded the same way.
+	///
+	/// Kept SEPARATE from `marks` rather than merged into it, because a bookmark is not a prompt.
+	/// Nothing about it has a command state, an exit code or an output span, and `output_at_prompt`
+	/// must not resolve one — a click on a bookmark's tick has no command to select. What the two do
+	/// share is where they are shown and how they are reached, so `visible_rows` and `jump` treat
+	/// them alike; only the tick's colour tells them apart, since a bookmark is somewhere the SCRIPT
+	/// chose and a prompt is somewhere the shell was.
+	user_marks: Vec<u64>,
 	state: CommandState,
 	last_exit: Option<i32>,
 	/// The finished commands' output spans (§34), a bounded ring like `marks`. Built from the C and
@@ -257,6 +267,24 @@ impl Prompts {
 					self.file_command(pending, absolute);
 				}
 			}
+		}
+	}
+
+	/// Record an explicit bookmark at absolute line `history_size + row` (§55) — iTerm2's
+	/// `OSC 1337 ; SetMark`, applied once the engine has been advanced to it so the cursor names the
+	/// line the script meant.
+	///
+	/// Deduped against the last bookmark exactly as prompts are, because a shell hook can emit one on
+	/// every prompt redraw. Unlike `record`, this touches neither the command state nor the pending
+	/// span: a bookmark says "here", and nothing about a command.
+	pub fn record_user_mark(&mut self, history_size: usize, row: u16) {
+		let absolute = history_size as u64 + row as u64;
+		if self.user_marks.last() == Some(&absolute) {
+			return;
+		}
+		self.user_marks.push(absolute);
+		if self.user_marks.len() > MAX_MARKS {
+			self.user_marks.remove(0);
 		}
 	}
 
@@ -354,6 +382,8 @@ impl Prompts {
 	/// anything once the grid is reflowed or reset.
 	pub fn clear(&mut self) {
 		self.marks.clear();
+		// The bookmarks are absolute lines too (§55), so a reflow invalidates them the same way.
+		self.user_marks.clear();
 		self.commands.clear();
 		self.pending = None;
 		// The walk indexed into the list that was just emptied.
@@ -380,21 +410,30 @@ impl Prompts {
 		display_offset: usize,
 		screen_lines: usize,
 	) -> Vec<u16> {
-		self.marks
-			.iter()
-			.filter_map(|&absolute| {
-				let row = absolute as i64 - history_size as i64 + display_offset as i64;
-				(0..screen_lines as i64)
-					.contains(&row)
-					.then_some(row as u16)
-			})
-			.collect()
+		project(&self.marks, history_size, display_offset, screen_lines)
 	}
 
-	/// The display offset that scrolls the nearest prompt above or below the current viewport top
-	/// into view (§34), or `None` when there is no prompt in that direction. The viewport's top
-	/// row shows absolute line `history_size - display_offset`; a jump lands the target prompt on
+	/// The same, for the explicit bookmarks a script dropped (§55). Kept a separate answer rather
+	/// than folded into `visible_rows` because the two are drawn in different colours: a prompt is
+	/// where the shell WAS, a bookmark is where the script said to look.
+	pub fn visible_user_rows(
+		&self,
+		history_size: usize,
+		display_offset: usize,
+		screen_lines: usize,
+	) -> Vec<u16> {
+		project(&self.user_marks, history_size, display_offset, screen_lines)
+	}
+
+	/// The display offset that scrolls the nearest mark above or below the current viewport top
+	/// into view (§34), or `None` when there is no mark in that direction. The viewport's top
+	/// row shows absolute line `history_size - display_offset`; a jump lands the target mark on
 	/// that top row, clamped to the retained history so it never asks to scroll past either end.
+	///
+	/// Prompts and the explicit bookmarks (§55) are considered TOGETHER here, unlike in the two
+	/// `visible_*` answers. Being reachable is the whole point of a bookmark — a script that marks
+	/// each stage of a build wants Ctrl+Shift+Up to visit those stages — and a user pressing the key
+	/// is asking for "the last interesting line", not for a particular kind of interesting.
 	pub fn jump(
 		&self,
 		direction: Direction,
@@ -402,24 +441,43 @@ impl Prompts {
 		display_offset: usize,
 	) -> Option<usize> {
 		let top = history_size as i64 - display_offset as i64;
+		let anywhere = self
+			.marks
+			.iter()
+			.chain(self.user_marks.iter())
+			.map(|&mark| mark as i64);
 		let target = match direction {
 			// Strictly above the top so a repeated press keeps climbing rather than sticking.
-			Direction::Previous => self
-				.marks
-				.iter()
-				.map(|&mark| mark as i64)
-				.filter(|&mark| mark < top)
-				.max()?,
-			Direction::Next => self
-				.marks
-				.iter()
-				.map(|&mark| mark as i64)
-				.filter(|&mark| mark > top)
-				.min()?,
+			Direction::Previous => anywhere.filter(|&mark| mark < top).max()?,
+			Direction::Next => anywhere.filter(|&mark| mark > top).min()?,
 		};
 		let offset = (history_size as i64 - target).clamp(0, history_size as i64);
 		Some(offset as usize)
 	}
+}
+
+/// Absolute mark lines projected onto the viewport rows that are actually on screen (§34, §55). A
+/// viewport row for an absolute line is `absolute - history_size + display_offset`; a mark scrolled
+/// off the top or below the bottom falls outside `0..screen_lines` and is dropped.
+///
+/// Shared by the prompt ticks and the bookmark ticks: the two lists differ in what they mean and in
+/// how they are drawn, but this arithmetic is the same for both and must stay so — a projection that
+/// drifted between them would put one kind of tick a row off the line it marks.
+fn project(
+	marks: &[u64],
+	history_size: usize,
+	display_offset: usize,
+	screen_lines: usize,
+) -> Vec<u16> {
+	marks
+		.iter()
+		.filter_map(|&absolute| {
+			let row = absolute as i64 - history_size as i64 + display_offset as i64;
+			(0..screen_lines as i64)
+				.contains(&row)
+				.then_some(row as u16)
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -624,6 +682,65 @@ mod tests {
 		// Viewing with the prompt already on the top row (offset = history - 5): nothing above it.
 		assert_eq!(prompts.jump(Direction::Previous, 5, 0), None);
 		assert_eq!(prompts.jump(Direction::Next, 5, 0), None);
+	}
+
+	#[test]
+	fn a_bookmark_ticks_its_own_line_in_its_own_list() {
+		// §55. A script marked absolute line 12 (row 2 with 10 lines scrolled off). It shows in the
+		// bookmark list and NOT among the prompts, because the two are drawn in different colours.
+		let mut prompts = Prompts::default();
+		prompts.record_user_mark(10, 2);
+		assert_eq!(prompts.visible_user_rows(10, 0, 24), vec![2]);
+		assert!(prompts.visible_rows(10, 0, 24).is_empty());
+	}
+
+	#[test]
+	fn a_bookmark_repeated_on_one_line_is_not_stacked() {
+		// A shell hook that emits SetMark on every prompt redraw fires it repeatedly at the same
+		// line, exactly as `A` does.
+		let mut prompts = Prompts::default();
+		prompts.record_user_mark(5, 2);
+		prompts.record_user_mark(5, 2);
+		assert_eq!(prompts.visible_user_rows(5, 0, 24), vec![2]);
+	}
+
+	#[test]
+	fn a_jump_visits_bookmarks_and_prompts_alike() {
+		// §55. A prompt at absolute 2 and a bookmark at absolute 14, with 20 lines of history. From
+		// the live bottom the nearest thing above is the BOOKMARK (14 -> offset 6) — being reachable
+		// is the whole point of dropping one, so the jump must not see only prompts.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 2, 0);
+		prompts.record_user_mark(14, 0);
+		assert_eq!(prompts.jump(Direction::Previous, 20, 0), Some(6));
+		// Carrying on up from there reaches the prompt at 2 -> offset 18.
+		assert_eq!(prompts.jump(Direction::Previous, 20, 6), Some(18));
+		// And back down from above the prompt, the bookmark is the next one below.
+		assert_eq!(prompts.jump(Direction::Next, 20, 18), Some(6));
+	}
+
+	#[test]
+	fn a_bookmark_is_not_a_command_and_resolves_to_no_output() {
+		// The reason bookmarks are stored apart from prompts: nothing about one has an output span,
+		// so a click on its tick must find nothing rather than a stray selection from another
+		// command that happened to sit on that line.
+		let mut prompts = Prompts::default();
+		prompts.record_user_mark(0, 4);
+		assert_eq!(prompts.output_at_prompt(4), None);
+		// And it moves neither the command state nor the exit code.
+		assert_eq!(prompts.state(), CommandState::Idle);
+		assert_eq!(prompts.last_exit(), None);
+	}
+
+	#[test]
+	fn a_reflow_forgets_bookmarks_with_the_prompts() {
+		// Both are absolute line indices, so a resize invalidates them together (§34, §55).
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 1);
+		prompts.record_user_mark(0, 2);
+		prompts.clear();
+		assert!(prompts.visible_rows(0, 0, 24).is_empty());
+		assert!(prompts.visible_user_rows(0, 0, 24).is_empty());
 	}
 
 	#[test]

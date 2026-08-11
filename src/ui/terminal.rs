@@ -282,6 +282,7 @@ pub fn view<'a>(
 		screen,
 		selection,
 		terminal.prompt_rows(),
+		terminal.user_mark_rows(),
 		matches,
 		terminal.images(),
 	);

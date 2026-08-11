@@ -361,6 +361,22 @@ belongs to, so the worst a lying remote achieves is a wrong number on its own ta
 clamped and a malformed report changes nothing. The line here is not "which OSC number" but **whether
 the effect escapes the tab**.
 
+**iTerm2's OSC 1337 namespace, key by key** — this one is not a single decision, and treating it as one
+would have been a mistake with teeth. OSC 1337 is a `key=value` grab-bag about twenty keys deep sharing
+one OSC number, and **two of those keys are refusals above, in a different costume**: `Copy=<base64>` is
+an OSC 52 clipboard write, and `SetProfile=` / `SetColors=` are a theme repaint.
+`SetBackgroundImageFile=` is both, plus a remote naming a file for cmote to decode (§41). A generic
+"support OSC 1337" would have reopened all three silently.
+
+So `term/iterm.rs` is an **allow-list**: a key not named in it produces nothing, which means a key
+iTerm2 adds tomorrow is refused by default rather than by anyone remembering to refuse it. Each
+dangerous key is additionally pinned by a test **by name**, so the refusal is checked rather than
+intended. `StealFocus` and `RequestAttention=` are refused on §54's line — the effect escapes the tab;
+note that `RequestAttention` flashing the taskbar button is an *interrupt demand*, which is why it is
+refused while §54's progress on the same button is not. `ClearScrollback` destroys the user's own record
+of the session. Honoured: `SetMark` (a bookmark, additive over §34) and `CurrentDir=` (a third cwd
+spelling). Details in PLAN §55.
+
 **Remote-set mouse pointer shape** — `OSC 22` is **refused**, and the reason is not the one that first
 suggests itself. "The pointer is ours like the theme is ours" is the weaker half: a colour scheme is
 persistent identity the user chose, whereas a pointer shape is transient feedback about what sits under
@@ -515,7 +531,15 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Kitty 21 | Colour by semantic name | ❌ | *(policy)* — same fixed scheme as 4 / 10 / 11 / 12: the theme is cmote's, not the remote's |
 | Kitty 99 | Rich notifications | ❌ | *(policy)* — a notification, in a third spelling (§6, §54) |
 | iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
-| iTerm 1337 | Marks / vars / profiles | ❌ | |
+| iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
+| iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
+| iTerm 1337 `Copy` | Clipboard write | ❌ | *(policy)* — **OSC 52 write by another name** (§6, §55); pinned by a test so the refusal cannot regress |
+| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | ❌ | *(policy)* — the fixed-scheme refusal in a new costume (§6, §55) |
+| iTerm 1337 `SetBackgroundImageFile` | Background image | ❌ | *(policy)* — a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
+| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | ❌ | *(policy)* — the effect escapes the tab (§6, §54, §55) |
+| iTerm 1337 `ClearScrollback` | Drop the scrollback | ❌ | *(policy)* — destroys the user's own record (§55); `CSI 3J` is the sanctioned spelling |
+| iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant: DECSCUSR and `CSI 14t`/`16t` already work |
+| iTerm 1337 (every other key) | — | ❌ | *(policy)* — `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
 | 777 | urxvt notification | ❌ | *(policy)* — a notification, in a fourth spelling (§6, §54) |
 
 ### CSI — cursor movement & editing
@@ -814,7 +838,20 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
   `Terminal::modify_other_keys` and threaded into `keymap::encode`.
-- **`term/osc.rs`** — the shared OSC framer (§17, §34, §54). One chunk-safe byte machine
+- **`term/iterm.rs`** — the OSC 1337 **allow-list** (§55). `Iterm::feed` runs on the shared framer and
+  returns `(offset, Report)` for the honoured keys only; `parse` strips the `1337;` prefix and matches
+  `SetMark` **whole**, so `SetMarkAnything` is not it. One honoured key today, and everything else —
+  including keys nobody here has heard of — yields nothing, which is what makes the namespace safe
+  without an enumerated deny-list. `MAX_PAYLOAD` is deliberately far below an `iTerm2 File=` payload:
+  refusing to buffer megabytes of base64 is the cheapest way to mean §41's refusal. The dangerous keys
+  (`Copy`, `SetProfile`, `SetColors`, `SetBackgroundImageFile`, `StealFocus`, `RequestAttention`,
+  `ClearScrollback`, `File`) each have a test asserting they produce nothing. `SetMark` is applied
+  through `Terminal::process`'s split advance into `osc133::Prompts::record_user_mark`, kept in a ring
+  separate from the prompt marks — a bookmark has no command state, exit code or output span, so
+  `output_at_prompt` must never resolve one — surfaced by `Terminal::user_mark_rows` and drawn as an
+  amber gutter tick (`ui/grid.rs`), while `jump` chains both rings so Ctrl+Shift+Up/Down visits either.
+  `CurrentDir=` is handled in `term/cwd.rs` instead, beside the two cwd spellings it duplicates.
+- **`term/osc.rs`** — the shared OSC framer (§17, §34, §54, §55). One chunk-safe byte machine
   (`Text`/`Escape`/`Payload`/`PayloadEscape`) recognising `ESC ] payload (BEL | ESC \)`, calling back
   once per completed payload with the byte offset **just past its terminator** — the coordinate §34
   needs to line a mark up with the grid, and which §17 and §54 ignore. `Framer<CAP>` takes its payload

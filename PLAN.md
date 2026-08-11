@@ -282,7 +282,8 @@ cmote/
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries, reserve the cells an inline image covers (§9, §16, §23, §41)
-    │   ├── osc.rs         frame OSC strings out of the stream — one chunk-safe machine, shared by every scanner below that reads one (§17, §34, §54)
+    │   ├── osc.rs         frame OSC strings out of the stream — one chunk-safe machine, shared by every scanner below that reads one (§17, §34, §54, §55)
+    │   ├── iterm.rs       read the parts of iTerm2's OSC 1337 namespace cmote honours — an ALLOW-LIST, so a key nobody vetted does nothing (§55)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
@@ -6098,3 +6099,87 @@ make every chip resize the moment a command started, and the whole strip would t
   bar** until the next report or the tab closes. `st = 0` and §34's `D` both cover the honest cases;
   a shell with no integration configured gives nothing to hook, and inventing a timeout would put a
   bar's lifetime in cmote's hands rather than the reporter's.
+
+---
+
+## 55. A script says "look here" (v4.0.0)
+
+iTerm2's OSC 1337 is not one sequence. It is a private namespace — a `key=value` grab-bag sharing one
+OSC number, about twenty keys deep:
+
+```
+ESC ] 1337 ; SetMark                        BEL | ST
+ESC ] 1337 ; CurrentDir=/home/user          BEL | ST
+ESC ] 1337 ; SetUserVar=gitBranch=<base64>  BEL | ST
+ESC ] 1337 ; SetProfile=Production          BEL | ST
+```
+
+So "support OSC 1337" is not a decision anyone can take in one go, and taking it in one go would have
+been actively dangerous. **Two of those keys are decisions cmote had already made, wearing a different
+costume**, and a generic implementation would have quietly reopened both:
+
+| key | what it actually is |
+|---|---|
+| `Copy=<base64>` | a system-clipboard write — **OSC 52 write**, refused (TERMINAL_COMPATIBILITY_PLAN §6) |
+| `SetProfile=` / `SetColors=` | a theme repaint — the **fixed-scheme** refusal (§6) |
+| `SetBackgroundImageFile=` | both of the above, plus a remote naming a file for cmote to **decode** (§41) |
+
+That is the finding that shaped this section, and it is why `term/iterm.rs` is an **allow-list rather
+than a parser with a policy bolted on**. A key not named there produces nothing, so a key iTerm2 adds
+tomorrow is refused by default rather than by anyone remembering to refuse it.
+
+### What is honoured
+
+**`SetMark` — a navigable bookmark on the current line.** This is the one item in the namespace that
+is genuinely additive rather than a second spelling of something cmote has. §34's marks are
+*prompt-derived*: OSC 133's A/B/C/D bracket a command, so nothing in that vocabulary can mark a point
+**mid-output**. `SetMark` can — before each test suite, each stage of a build, each retry — and a
+script that drops them turns a wall of output into something navigable.
+
+It lands on machinery that already existed: absolute line indices that ride the scrollback, the
+left-gutter tick, and Ctrl+Shift+Up/Down.
+
+**`CurrentDir=` — a third spelling of the working directory.** Read in `term/cwd.rs` beside OSC 7 and
+OSC 9;9, *not* in `term/iterm.rs`, because the only thing that differs between the three is the prefix
+and the path arithmetic should not exist twice. A dotfile written for iTerm2 now gets cwd tracking
+(§17) with nothing else configured.
+
+### Decisions worth stating
+
+- **A bookmark is not a prompt, so it is stored apart.** The tempting shortcut was to push `SetMark`
+  lines into `Prompts::marks` and get the ticks and jumps for free. It is wrong: nothing about a
+  bookmark has a command state, an exit code or an output span, so `output_at_prompt` must not resolve
+  one — a click on a bookmark's tick has no command to select, and a merged list would eventually
+  hand it somebody else's. `user_marks` is its own ring.
+- **…but a JUMP treats them alike.** Being reachable is the entire point of dropping a bookmark, and a
+  user pressing Ctrl+Shift+Up is asking for "the last interesting line", not for a particular *kind*
+  of interesting. So `visible_rows` and `visible_user_rows` are two answers (they are drawn in
+  different colours) while `jump` chains both lists into one.
+- **Amber for a bookmark, cyan for a prompt, and the bookmark draws last.** A shell hook that emits
+  both on the same line should show as the bookmark: a prompt is derivable from the shell's own marks,
+  whereas a bookmark is something a script went out of its way to say. Same geometry, so one simply
+  draws over the other.
+- **The tick projection is one function.** `project` is shared by both lists deliberately — an
+  arithmetic that drifted between them would put one kind of tick a row off the line it marks.
+- **A bookmark is grid-anchored, so it joins the split advance.** Its whole content is the line it
+  arrived on, so `process` merges it into the same offset-ordered list as the prompt marks and the
+  inline images (§34, §41) and applies it at its own point in the stream. A chunk carrying a prompt
+  mark *and* a bookmark puts each on its own line, which is the case that list exists for.
+- **The payload cap is part of the refusal.** `MAX_PAYLOAD` here is far below what an `iTerm2 File=`
+  inline image needs. That key is refused, and refusing to *buffer* it is the cheapest possible way of
+  meaning it — a megabyte of base64 overruns the cap, the framer abandons it, and cmote holds none.
+
+### Deliberately not
+
+- **`Copy=`, `SetProfile=`, `SetColors=`, `SetBackgroundImageFile=`** — see the table above. Refused
+  because they are closed decisions in a new costume, and each is pinned by a test **by name**, so the
+  refusal is checked rather than merely intended.
+- **`StealFocus`, `RequestAttention=`, `ClearScrollback`** — refused on the line §54 drew: a remote may
+  change what its own tab looks like and nothing more. `StealFocus` raises the window;
+  `RequestAttention` flashes the taskbar button, which is an *interrupt demand* rather than §54's
+  reading about work the user started; `ClearScrollback` destroys the user's own record of the session.
+- **The keys that are simply redundant** — `CursorShape=` (DECSCUSR already), `ClearScrollback`
+  (`CSI 3J` already), `ReportCellSize` (`CSI 14t`/`16t` already), `ShellIntegrationVersion` (OSC 133).
+  Nothing is gained by a second spelling of a sequence that already works.
+- **`AddAnnotation=`, `SetBadgeFormat=`** — real features with no consumer in cmote. A note attached to
+  a line range, and a watermark over the grid, are each their own section if ever wanted.

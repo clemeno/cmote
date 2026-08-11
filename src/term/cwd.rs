@@ -6,10 +6,16 @@
 // same way — the shell announces its cwd in an OSC escape sequence on each prompt, and
 // the terminal picks it out of the output stream. cmote does exactly that:
 //
-//   OSC 7   ESC ] 7 ; file://host/path        BEL | ST   — the POSIX convention
-//   OSC 9;9 ESC ] 9 ; 9 ; C:\path             BEL | ST   — the Windows convention
+//   OSC 7    ESC ] 7 ; file://host/path         BEL | ST   — the POSIX convention
+//   OSC 9;9  ESC ] 9 ; 9 ; C:\path              BEL | ST   — the Windows convention
+//   OSC 1337 ESC ] 1337 ; CurrentDir=/path      BEL | ST   — iTerm2's spelling (§55)
 //
-// Both are scanned here, so a remote of either family works. The sequences are
+// All three are scanned here, so a remote of any family works. The third is the reason this
+// module owns the question rather than `term::iterm`: what varies between them is only the
+// spelling, and the thing that knows how to turn an announcement into a path should be one
+// place. A dotfile written for iTerm2 then gets cwd tracking with nothing else configured.
+//
+// The sequences are
 // invisible to the user (vt100 ignores OSC codes it does not know). cmote reads whatever
 // the shell offers and injects nothing: a shell that announces its cwd (fish, a Windows
 // OSC 9;9 shell) is followed; a silent bash/zsh — which emits neither unless the user has
@@ -57,20 +63,33 @@ impl Cwd {
 }
 
 /// Pull the directory out of an OSC payload, or `None` if this OSC is not a cwd
-/// announcement. OSC 7 carries a `file://` URI (percent-encoded); OSC 9;9 carries a
-/// bare path, sometimes quoted.
+/// announcement. OSC 7 carries a `file://` URI (percent-encoded); OSC 9;9 and iTerm2's
+/// OSC 1337 `CurrentDir=` carry a bare path, sometimes quoted.
+///
+/// A payload that matches none of the three is somebody else's business — a title, a
+/// clipboard write, a prompt mark — and reports `None`, which leaves the last known path
+/// alone rather than forgetting it.
 fn parse(payload: &[u8]) -> Option<String> {
 	let text = if let Some(rest) = payload.strip_prefix(b"7;") {
 		String::from_utf8(percent_decode(rest)).ok()?
 	} else {
-		// Not OSC 7, so the only other announcement we read is OSC 9;9 — anything else
-		// (a title, a clipboard write) is none of our business.
-		let rest = payload.strip_prefix(b"9;9;")?;
+		// The two bare-path spellings. `CurrentDir=` is iTerm2's; it is read here rather than
+		// in `term::iterm` because the only thing that differs is the prefix, and the path
+		// arithmetic below should not exist twice.
+		let rest = bare_path(payload)?;
 		std::str::from_utf8(rest).ok()?.trim_matches('"').to_owned()
 	};
 
 	let path = strip_file_url(text.trim());
 	(!path.is_empty()).then(|| path.to_owned())
+}
+
+/// The payload's path bytes, for the two announcements that carry one plainly. `None` when the
+/// payload is neither.
+fn bare_path(payload: &[u8]) -> Option<&[u8]> {
+	payload
+		.strip_prefix(b"9;9;")
+		.or_else(|| payload.strip_prefix(b"1337;CurrentDir="))
 }
 
 /// Reduce a `file://host/path` URI to its path. The authority (the host) is dropped:
@@ -172,6 +191,22 @@ mod tests {
 		// of the native path.
 		let path = track(b"\x1b]7;file:///C:/Users/CLEm\x07");
 		assert_eq!(path.as_deref(), Some("C:/Users/CLEm"));
+	}
+
+	#[test]
+	fn iterm2s_current_dir_is_read_as_a_third_spelling() {
+		// A dotfile written for iTerm2 announces the cwd this way and nothing else; cmote follows it
+		// with no extra configuration (§55).
+		let path = track(b"\x1b]1337;CurrentDir=/home/user/work\x07");
+		assert_eq!(path.as_deref(), Some("/home/user/work"));
+	}
+
+	#[test]
+	fn a_current_dir_that_is_not_the_whole_prefix_is_not_a_path() {
+		// Matched by its full prefix, so a different 1337 key cannot be mistaken for a directory —
+		// most of that namespace is refused outright (`term::iterm`), and none of it lands here.
+		assert_eq!(track(b"\x1b]1337;SetProfile=Production\x07"), None);
+		assert_eq!(track(b"\x1b]1337;CurrentDirIsh=/tmp\x07"), None);
 	}
 
 	#[test]

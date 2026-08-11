@@ -34,11 +34,12 @@
 
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
+pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
-mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34, §54)
+mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34, §54, §55)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
@@ -160,6 +161,7 @@ impl Terminal {
 			modkeys: modkeys::ModKeys::default(),
 			queries: query::Queries::default(),
 			prompts: osc133::Prompts::default(),
+			iterm: iterm::Iterm::default(),
 			progress: progress::Reports::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
@@ -198,14 +200,17 @@ impl Terminal {
 		// that actually carries one pays for the split.
 		let marks = self.prompts.feed(bytes);
 		let images = self.graphics.feed(bytes);
+		// The explicit bookmarks a script dropped (§55). Grid-anchored like a prompt mark, and for the
+		// same reason: the event's whole content is the line it arrived on.
+		let bookmarks = self.iterm.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
-		if marks.is_empty() && images.is_empty() {
+		if marks.is_empty() && images.is_empty() && bookmarks.is_empty() {
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(marks, images) {
+			for (offset, split) in splits(marks, images, bookmarks) {
 				self.parser.advance(&mut self.term, &bytes[start..offset]);
 				start = offset;
 				match split {
@@ -215,6 +220,13 @@ impl Terminal {
 						self.prompts.apply(mark, history, row);
 					}
 					Split::Graphics(event) => placed_on_alternate |= self.apply_graphics(event),
+					// A bookmark is read the same way a prompt mark is — the cursor, now that the
+					// engine has been advanced to the sequence, names the line the script meant.
+					Split::UserMark => {
+						let history = self.term.grid().history_size();
+						let (row, _) = self.screen().cursor_position();
+						self.prompts.record_user_mark(history, row);
+					}
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -539,6 +551,18 @@ impl Terminal {
 		)
 	}
 
+	/// The viewport rows holding an explicit bookmark a script dropped (§55), so the grid can tick
+	/// those too — in their own colour, since a bookmark is a place the SCRIPT chose and a prompt is a
+	/// place the shell was. Empty unless something actually sent `OSC 1337 ; SetMark`.
+	pub fn user_mark_rows(&self) -> Vec<u16> {
+		let grid = self.term.grid();
+		self.prompts.visible_user_rows(
+			grid.history_size(),
+			grid.display_offset(),
+			self.term.screen_lines(),
+		)
+	}
+
 	/// Scroll the nearest prompt above or below the viewport into view (§34), returning whether
 	/// there was one to move to (so the caller can leave the view be when there is not). The target
 	/// offset is `osc133`'s to choose; here it is turned into the signed delta the engine scrolls
@@ -742,6 +766,11 @@ pub struct Terminal {
 	/// this one by splitting the advance at each mark, so a prompt is recorded at the grid line the
 	/// cursor is on when the mark arrives.
 	prompts: osc133::Prompts,
+	/// Reads the honoured parts of iTerm2's OSC 1337 namespace (§55) — today, the explicit bookmarks
+	/// `SetMark` drops. Fed by the same split advance as the prompt marks and for the same reason: a
+	/// bookmark's whole meaning is the line it arrived on. Its own module is an ALLOW-LIST, which is
+	/// what keeps the dangerous keys of that namespace (a clipboard write, a theme repaint) out.
+	iterm: iterm::Iterm,
 	/// Reads the progress a remote command reports (OSC 9;4, §54) — another OSC the engine ignores.
 	/// Like the cwd, it is a latest-value reading with no place on the grid, so `process` feeds it
 	/// the whole chunk and never splits the advance for it.
@@ -758,23 +787,29 @@ pub struct Terminal {
 	on_alternate: bool,
 }
 
-/// One thing `process` has to do part-way through a chunk (§34, §41). Both scanners report the byte
-/// offset their event sits at, and the engine can only be advanced forwards, so the two lists are
+/// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
+/// byte offset its event sits at, and the engine can only be advanced forwards, so the lists are
 /// merged into this single ordered one — otherwise applying all the marks and then all the images
-/// would place the second kind at the wrong point in the stream.
+/// would place the later kinds at the wrong point in the stream.
 enum Split {
 	Prompt(osc133::Mark),
 	Graphics(graphics::Event),
+	/// An explicit bookmark a script dropped with `OSC 1337 ; SetMark` (§55). Carries nothing: the
+	/// whole content of the event is the line it arrived on, which is why it has to be applied here
+	/// rather than after the chunk.
+	UserMark,
 }
 
-/// Merge the prompt marks and the image events of one chunk into offset order. Both lists arrive
+/// Merge one chunk's prompt marks, image events and bookmarks into offset order. Every list arrives
 /// ascending, and the sort is stable, so two events at the very same offset keep the order they were
-/// scanned in — which is the only sensible tie-break, since neither scanner can see the other's.
+/// scanned in — which is the only sensible tie-break, since no scanner can see another's.
 fn splits(
 	marks: Vec<(usize, osc133::Mark)>,
 	images: Vec<(usize, graphics::Event)>,
+	bookmarks: Vec<(usize, iterm::Report)>,
 ) -> Vec<(usize, Split)> {
-	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(marks.len() + images.len());
+	let mut merged: Vec<(usize, Split)> =
+		Vec::with_capacity(marks.len() + images.len() + bookmarks.len());
 	merged.extend(
 		marks
 			.into_iter()
@@ -785,6 +820,12 @@ fn splits(
 			.into_iter()
 			.map(|(offset, event)| (offset, Split::Graphics(event))),
 	);
+	merged.extend(bookmarks.into_iter().map(|(offset, report)| {
+		let split = match report {
+			iterm::Report::Mark => Split::UserMark,
+		};
+		(offset, split)
+	}));
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
 }
@@ -1335,6 +1376,38 @@ mod tests {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"line one\r\nline two\r\n\x1b]133;A\x07$ ");
 		assert_eq!(terminal.prompt_rows(), vec![2]);
+	}
+
+	#[test]
+	fn a_bookmark_is_anchored_to_the_line_the_cursor_is_on() {
+		// §55, and the same split-advance point as the prompt test above: `OSC 1337 ; SetMark` has to
+		// land on the line the cursor is on when it ARRIVES. Two lines of build output, then a mark
+		// before the third stage — its tick sits at viewport row 2, in its own list.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"stage one\r\nstage two\r\n\x1b]1337;SetMark\x07stage three");
+		assert_eq!(terminal.user_mark_rows(), vec![2]);
+		// And it is not mistaken for a prompt, which would tick it in the wrong colour and give it a
+		// command's output span it does not have.
+		assert!(terminal.prompt_rows().is_empty());
+	}
+
+	#[test]
+	fn a_bookmark_and_a_prompt_in_one_chunk_each_land_on_their_own_line() {
+		// The ordering the merged split list exists for: both scanners report offsets into the same
+		// chunk, and the engine only advances forwards, so applying all of one kind and then the
+		// other would put the second kind on the wrong line.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]133;A\x07$ make\r\nbuilding\r\n\x1b]1337;SetMark\x07linking");
+		assert_eq!(terminal.prompt_rows(), vec![0]);
+		assert_eq!(terminal.user_mark_rows(), vec![2]);
+	}
+
+	#[test]
+	fn iterm2s_current_dir_is_followed_like_the_other_two_spellings() {
+		// §55: a dotfile written for iTerm2 announces the cwd with OSC 1337 and nothing else.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]1337;CurrentDir=/srv/app\x07$ ");
+		assert_eq!(terminal.cwd(), Some("/srv/app"));
 	}
 
 	#[test]
