@@ -286,6 +286,7 @@ cmote/
     │   ├── iterm.rs       read the parts of iTerm2's OSC 1337 namespace cmote honours — an ALLOW-LIST, so a key nobody vetted does nothing (§55)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
+    │   ├── protect.rs     scan DECSCA / DECSED / DECSEL out of the stream: the cells a program asked us not to wipe (§56)
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6218,3 +6219,124 @@ the chip, after the endpoint label.
 - **The pill does not go in the window title.** The title is what the OS shows in the taskbar preview
   and the Alt-Tab list, i.e. outside the tab — so remote-chosen text there escapes further than the
   strip, and §54's line applies.
+
+---
+
+## 56. The labels a program asked us not to wipe (v4.0.0)
+
+A VT220 had **two** erases. The plain one wipes everything; the *selective* one leaves alone whatever
+the program marked as protected first:
+
+```
+CSI 1 " q     DECSCA — protect what is written from here on
+CSI 0 " q     DECSCA — stop protecting (Ps 2 means the same)
+CSI ? Ps J    DECSED — selective erase in the display
+CSI ? Ps K    DECSEL — selective erase in the line
+```
+
+It exists for data-entry forms on a serial line. The program draws the labels once inside a protected
+run — `Name:`, `Address:` — the user types into the blanks unprotected, and the next record costs a
+single `CSI ? 2 J`: the typed fields clear and the labels stay put. At 9600 baud, not redrawing the
+form was the whole point.
+
+Nothing much emits it today, because full-screen programs repaint every frame instead. It sat in the
+matrix as a ❌ that had never been looked at properly, and looking at it turned out to be worth more
+than the feature: it is the first thing cmote could not add the way it added everything else.
+
+### Why the usual tactic does not work here
+
+Every compatibility addition since §17 has the same shape. The engine drops a sequence, so cmote scans
+the same bytes for it and keeps the answer **beside** the grid: a working directory (§17), a reply to an
+identity query (§33), a prompt mark's line number (§34), a picture's anchor (§41), a progress reading
+(§54), a branch name (§55).
+
+Protection cannot be kept beside the grid, because it is not one answer — it is **per-cell state**. A
+bitmap of protected cells would have to be re-aligned every time the grid moved underneath it: every
+scroll, every `IL`/`DL`, every reflow on resize, every swap to the alternate page and back. Keeping a
+second grid in step with the engine's grid *is* re-implementing the grid, and it would drift the first
+time a program did something the re-implementation had not thought of.
+
+The other obvious route is to fork the engine — add a `PROTECTED` flag and two `vte` arms, maybe eighty
+lines. Rejected: it buys one dead VT220 feature and costs a vendored fork of two crates forever, and the
+whole point of the seam in `term/mod.rs` is that the engine stays swappable and unpatched.
+
+### What worked: borrow a bit the engine is not using
+
+`alacritty_terminal` stores each cell's attributes in a `Flags: u16` and **names fifteen of the sixteen
+bits**. Bit 15 is free.
+
+So cmote sets bit 15 on `grid.cursor.template` — the pen — while DECSCA is armed. Every cell the engine
+prints is stamped from that template, so from then on the engine carries protection *itself*, as if it
+were bold: through scrolling, through insert/delete, through reflow, through the alternate-screen swap.
+There is no map to keep aligned, because protection lives in the same place as the glyph it belongs to.
+
+It is invisible in both directions, which is what makes it safe rather than a trick:
+
+- **The engine never reads it.** `Cell::is_empty` tests named flags with `intersects`, so an unknown bit
+  cannot make a blank cell look occupied — which would otherwise have quietly changed line-wrap
+  trimming and what a copy yields.
+- **The renderer never draws it.** `ui/grid.rs` and `screen.rs` match named flags too.
+- **`Cell::reset` clears it**, so protection dies with the cell's content. A plain erase leaves the cell
+  reusable and unprotected, and a form cannot accumulate ground nothing can clear.
+
+The one hazard is a future `alacritty_terminal` naming a sixteenth flag. That is caught at **build
+time**, not at runtime:
+
+```rust
+const _: () = assert!(
+	Flags::all().bits() & protect::PROTECTED_BIT == 0,
+	"the engine has claimed the flag bit cmote borrows for DECSCA protection — pick another"
+);
+```
+
+A collision would otherwise surface as text that cannot be erased and one attribute coming out wrong — a
+symptom nobody would trace back to a bit mask.
+
+### The one thing the engine does do to the flag word
+
+`SGR 0` assigns it whole: `Attr::Reset` sets `Flags::empty()`. On a real terminal DECSCA is independent
+of SGR, so `CSI 0 m` inside a protected run must not unprotect the rest of it.
+
+So the scanner reports **every SGR seen while the pen is armed**, and `mod.rs` puts the bit back on the
+far side of it. Deliberately over-reported: re-asserting a bit that is still set is a no-op, whereas
+working out which SGR lists contain a reset means parsing colour specs, where a `0` can be a colour
+index (`38;5;0`) rather than a reset. Over-report and stay correct. An unarmed stream — every ordinary
+session — reports nothing at all, so the common case costs `process` no splits.
+
+### Two smaller decisions
+
+**The offsets point the other way.** Every other split-fed scanner reports the offset the sequence
+*starts* at, because the engine is advanced up to it and the cursor then names the line the event
+belongs on. `protect` reports **one past** the final byte: a pen change has to land after the SGR that
+wiped it, and an erase after the engine has ignored the sequence. Same loop, opposite side of the
+boundary.
+
+**The erase writes cells directly**, which breaks the rule §41 set in `reserve_cells` — inject VT
+sequences, because erasing and scrolling are the engine's business. Two reasons it cannot hold here. The
+engine's plain `CSI 2 J` on the primary screen does not blank the viewport at all, it **scrolls it into
+history** (`Grid::clear_viewport`), which would carry the protected cells off with everything else. And
+the per-run alternative — position with CUP, blank with ECH — would move the cursor across a screen this
+erase is defined never to move it on, dragging in origin mode and clearing the pending-wrap flag. The
+honest version of "blank these cells and nothing else" is to blank these cells. What gets written is
+what the engine's own erase writes: the pen's background colour and no glyph.
+
+### What it cost, and what it unblocked
+
+One new module (`term/protect.rs`), two methods in `term/mod.rs`, one arm on `Split`. The region
+arithmetic is a pure function over row and column numbers, so all six shapes of DECSED/DECSEL are
+tested without building a terminal.
+
+It also moved a wall. **DECSERA** (`CSI Pt;Pl;Pb;Pr $ {`) — selective erase of a rectangle — was listed
+under §5's VT420 rectangular ops as an engine limit. The missing piece was per-cell protection, and that
+now exists, so DECSERA is a fourth shape for `protect::spans`. Left unbuilt because nothing asked for
+it, which is a different sentence from the one that was there before.
+
+### Not done
+
+- **DECSCA is not reported by DECRQSS.** A program can set protection and cannot ask what it is. §33
+  answers `DCS $ q m` from the pen's SGR, and protection is not an SGR attribute, so this would be a new
+  selector rather than a field on an existing reply.
+- **No protected-cell awareness anywhere else.** `IL` / `DL` / `ICH` / `DCH` move cells around and take
+  protection with them, which is right: DECSCA makes a cell unerasable, not immovable.
+- **`CSI ? 3 J` does not exist.** Plain `CSI 3 J` drops the scrollback, and protection is a property of
+  cells on the screen — history is not erased a cell at a time.

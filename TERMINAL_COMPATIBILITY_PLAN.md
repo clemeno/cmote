@@ -300,6 +300,17 @@ short, and since §41 nothing left in it is high value:
   image-format dependency), anchors the picture to an absolute document line (§40), reserves the cells
   it covers by feeding the engine ECH + LF, and composites it in `ui/grid.rs` — on the alternate screen
   too, which needed no new coordinate, only its own store. See PLAN §41.
+- **~~Selective erase / protected regions~~ — SHIPPED in §56, and not by the usual tactic.** DECSCA
+  (`CSI Ps " q`) and the `?` erases (DECSED / DECSEL) have no arm anywhere in `vte`, and protection is
+  **per-cell** state, so the scan-it-out-and-keep-it-beside-the-grid move that carried §17 / §33 / §34 /
+  §41 / §54 / §55 does not work here: a bitmap beside the grid would have to be re-aligned on every
+  scroll, insert, delete and reflow, which is re-implementing the grid. What worked instead was to
+  borrow the **one unused bit** in the engine's own per-cell flag word (`Flags` names 15 of 16) and set
+  it on `grid.cursor.template`, after which the engine carries protection as if it were bold — for free,
+  through scrolling and reflow and the alternate screen. Nothing in the engine reads it, nothing in the
+  renderer draws it, and a build-time assertion fails the compile if a future engine version claims the
+  bit. cmote then performs the erase itself, cell by cell, because the engine's own `CSI 2 J` scrolls
+  the viewport into history rather than blanking it. See PLAN §56 and `term/protect.rs`.
 - **ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — still ❌, but the reason has moved out
   of this section's premise. Nothing about the engine blocks them either; kitty and iTerm2 carry
   **PNG/JPEG** payloads, so each needs an image-format decoder — a parser fed bytes straight off the
@@ -317,7 +328,10 @@ short, and since §41 nothing left in it is high value:
 - **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
   (`set_scrolling_region(top, bottom)`). `[DEC]`.
 - **DRCS soft fonts, VT320 status line, VT420 rectangular ops** (DECCRA / DECFRA / DECERA, and
-  the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`.
+  the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`. One of
+  that family has since come within reach: **DECSERA** (`CSI Pt;Pl;Pb;Pr $ {`) is the selective erase
+  of a rectangle, and §56 supplied the per-cell protection it needed — so it is now a fourth shape for
+  `protect::spans` rather than an engine limit. Unbuilt because nothing asked for it.
 - **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
   `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
   (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
@@ -559,7 +573,9 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | J | Erase in display | ✅ | |
 | 3 J | Erase scrollback | ✅ | |
 | K | Erase in line | ✅ | |
-| ? J / ? K | Selective erase (protected) | ❌ | no protected-region support |
+| Ps " q | Character protection (DECSCA) | ✅ | cmote's own scanner (`term/protect.rs`, §56); the engine has no arm for it, so protection rides a bit cmote borrows in the engine's per-cell flag word — invisible to both the engine and the renderer, and guarded at build time |
+| ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | all three extents, applied by cmote in place (§56). Protected cells survive; a **plain** `CSI J` / `CSI K` still takes them, which is the point of two verbs |
+| ! p | Soft reset (DECSTR) | ⚠️ | no arm in `vte`, so the reset itself does nothing — cmote reads it only to drop DECSCA protection with the pen (§56), which is the one piece of soft-reset state it owns |
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
@@ -568,6 +584,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
 | $ z / $ x / $ v | Rectangular erase / fill / copy | ❌ | not represented (§5) |
+| $ { | Selective erase rectangular area (DECSERA) | ❌ | the missing piece was per-cell protection, and §56 supplies it — so this is now only a rectangle instead of the region shapes `protect::spans` already builds. Left unbuilt because nothing asked for it, not because it is blocked |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
 | 5n / 6n | Device status report | ✅ | |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
@@ -678,12 +695,20 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
-query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3). Most of the ❌ column is
-**deliberate**: no images, no remote clipboard (OSC 52), no answerback, no remote window control
-(CSI t), no blink (the engine drops it), and a fixed colour scheme so dynamic-palette writes are
-query-only. The genuine plain gaps left are the newer private modes (2027 / 2031 / 2048),
-selective / rectangular editing, and left-right margins — all catalogued with their cost in §5, which
-is now the *only* section with anything open in it.
+query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
+protected-cell erase it dropped as well. Most of the ❌ column is **deliberate**: no images, no remote
+clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
+and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
+the newer private modes (2027 / 2031 / 2048), rectangular editing, and left-right margins — all
+catalogued with their cost in §5, which is now the *only* section with anything open in it.
+
+§56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
+sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
+anchor. Protection could not be kept beside the grid, because it is per-cell state that has to survive
+scrolling and reflow, and a map of it would have meant re-implementing the grid to keep the two
+aligned. So instead cmote borrowed the one unused bit in the engine's per-cell flag word and let the
+engine carry protection as if it were bold. That is a third way in, next to "scan it out" and "accept
+the engine's limit", and the reason DECSERA above is now a rectangle rather than a wall.
 
 ---
 
@@ -886,6 +911,26 @@ Audited file:line anchors behind the claims above, for later re-checking.
   chunk by `process` with no split, like the cwd. Surfaced by `Terminal::progress`; drawn as a 3 px bar
   along the bottom of the tab chip (`ui/tabs.rs`) and mirrored onto the Windows taskbar button for the
   **active** tab only (`taskbar.rs`). Parse-only, no engine, no widgets — fully unit-tested.
+- **`term/protect.rs`** — the selective-erase scanner (§56), and the one place cmote writes *inside* the
+  engine's cells. A chunk-safe CSI state machine (`Protect::feed`) reading **DECSCA** (`CSI Ps " q`),
+  **DECSED** (`CSI ? Ps J`), **DECSEL** (`CSI ? Ps K`), plus **RIS** and **DECSTR** as protection
+  clears, and — only while the pen is armed — every **SGR**, since `Attr::Reset` assigns the whole flag
+  word and would otherwise unprotect a run mid-way. All three of final byte, private marker and
+  intermediates are matched together, which is what keeps the near-misses out: `CSI 2 J` is a plain
+  erase, `CSI > 4 ; 2 m` is XTMODKEYS not an SGR, `CSI 1 SP q` is DECSCUSR not a DECSCA. Offsets are
+  **one past** the final byte — the opposite of a prompt mark — because a pen change must land after
+  the SGR that wiped it and an erase after the engine has ignored it. Protection itself is stored
+  nowhere here: `PROTECTED_BIT` is bit 15 of the engine's per-cell flag word, unnamed by the engine, so
+  `term/mod.rs`'s `set_pen_protection` stamps it on `grid.cursor.template` and the engine then carries
+  it through scroll, insert/delete, reflow and the alternate-screen swap as if it were bold. Invisible
+  both ways (`Cell::is_empty` tests named flags with `intersects`; `screen.rs` exposes only named
+  attributes) and guarded by a `const _: () = assert!(…)` beside `DEFAULT_ROWS`, so an engine version
+  that claims bit 15 fails the **build** instead of shipping unerasable text. `selective_erase` writes
+  the pen's background straight into the grid via `grid_mut` — a deliberate break with
+  `reserve_cells`'s inject-VT-sequences rule, because the engine's plain `CSI 2 J` *scrolls the
+  viewport into history* rather than blanking it, and the CUP+ECH alternative would move a cursor the
+  erase is defined never to move. `spans` is pure row/column arithmetic, so all six region shapes are
+  tested without a terminal.
 - **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` runs on the shared
   framer and returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
   code parsed from its next field. `Prompts` holds the command state (`Idle`/`Prompt`/`Running`), the

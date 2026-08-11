@@ -42,6 +42,7 @@ pub mod mouse; // maps pointer events to the reports a mouse-aware program expec
 mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34, §54, §55)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
+mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
@@ -66,6 +67,19 @@ use crate::palette;
 /// size via `resize` + `SshCommand::Resize`.
 pub const DEFAULT_COLS: u16 = 80;
 pub const DEFAULT_ROWS: u16 = 24;
+
+/// A build-time guard on the one bit cmote borrows inside the engine's per-cell flag word to mean
+/// "the program protected this cell from a selective erase" (§56, `protect::PROTECTED_BIT`).
+///
+/// The engine names fifteen flags in a `u16` and leaves bit 15 free, which is what lets protection
+/// ride the grid as an ordinary attribute (see `term/protect.rs`). Nothing stops a future
+/// `alacritty_terminal` from adding a sixteenth, so the collision is caught here instead: a version
+/// bump that claims the bit fails the BUILD, rather than shipping as text that cannot be erased and
+/// a colour that comes out wrong — a symptom nobody would trace back to this line.
+const _: () = assert!(
+	Flags::all().bits() & protect::PROTECTED_BIT == 0,
+	"the engine has claimed the flag bit cmote borrows for DECSCA protection — pick another in term/protect.rs"
+);
 
 /// cmote's terminal identity, reported to a program that sends XTVERSION (§33). The `name(version)`
 /// form is what xterm and kitty use and what a fingerprinting program pattern-matches on; the
@@ -163,6 +177,7 @@ impl Terminal {
 			prompts: osc133::Prompts::default(),
 			iterm: iterm::Iterm::default(),
 			progress: progress::Reports::default(),
+			protect: protect::Protect::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -203,14 +218,19 @@ impl Terminal {
 		// The explicit bookmarks a script dropped (§55). Grid-anchored like a prompt mark, and for the
 		// same reason: the event's whole content is the line it arrived on.
 		let bookmarks = self.iterm.feed(bytes);
+		// The selective-erase sequences the engine drops (§56). Split-fed like the marks, but its
+		// offsets sit one PAST each sequence, because a pen change has to be applied after the SGR
+		// that wiped it and an erase after the engine has ignored it. An unarmed stream that sends no
+		// `?`-erase reports nothing, so the common case still pays for no split.
+		let protections = self.protect.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
-		if marks.is_empty() && images.is_empty() && bookmarks.is_empty() {
+		if marks.is_empty() && images.is_empty() && bookmarks.is_empty() && protections.is_empty() {
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(marks, images, bookmarks) {
+			for (offset, split) in splits(marks, images, bookmarks, protections) {
 				self.parser.advance(&mut self.term, &bytes[start..offset]);
 				start = offset;
 				match split {
@@ -227,6 +247,7 @@ impl Terminal {
 						let (row, _) = self.screen().cursor_position();
 						self.prompts.record_user_mark(history, row);
 					}
+					Split::Protect(request) => self.apply_protection(request),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -412,6 +433,76 @@ impl Terminal {
 		}
 		feed.push(b'\r');
 		self.parser.advance(&mut self.term, &feed);
+	}
+
+	/// Carry out one selective-erase request (§56), with the engine already advanced past the
+	/// sequence that carried it.
+	fn apply_protection(&mut self, request: protect::Request) {
+		match request {
+			protect::Request::Protect(on) => self.set_pen_protection(on),
+			// The SGR just applied may have assigned the pen's whole flag word, so put the bit back.
+			// Idempotent, which is why the scanner is free to over-report (see `term/protect.rs`).
+			protect::Request::Reassert => self.set_pen_protection(true),
+			protect::Request::Erase(erase) => self.selective_erase(erase),
+		}
+	}
+
+	/// Arm or disarm DECSCA by setting cmote's borrowed flag bit on the engine's PEN (§56).
+	///
+	/// This one line is the whole trick. Every cell the engine prints is stamped from
+	/// `grid.cursor.template`, so from here on each printed cell carries the bit — and then rides
+	/// scrolling, insert/delete, reflow and the alternate-screen swap on the engine's back, with no
+	/// map on cmote's side to keep aligned with the grid. `from_bits_retain` is what allows a bit the
+	/// engine has no name for; the build-time assertion beside `DEFAULT_ROWS` is what keeps that from
+	/// becoming a silent collision if the engine ever claims it.
+	fn set_pen_protection(&mut self, on: bool) {
+		let flags = &mut self.term.grid_mut().cursor.template.flags;
+		let bits = if on {
+			protect::mark(flags.bits())
+		} else {
+			protect::unmark(flags.bits())
+		};
+		*flags = Flags::from_bits_retain(bits);
+	}
+
+	/// Erase the cells the request covers, leaving the protected ones standing (§56).
+	///
+	/// Written straight into the grid, which is a deliberate break with `reserve_cells` above — that
+	/// one injects VT sequences precisely BECAUSE erasing and scrolling are the engine's business.
+	/// Here the engine cannot be asked, for two separate reasons. Its plain `CSI 2 J` on the primary
+	/// screen does not blank the viewport at all, it scrolls it into history (`Grid::clear_viewport`),
+	/// which would carry the protected cells away with everything else. And the per-run alternative —
+	/// position with CUP, blank with ECH — would have to move the cursor across a screen the erase is
+	/// defined never to move it on, which drags in origin mode and clears the pending-wrap flag. So
+	/// the honest version of "blank these cells and nothing else" is to blank these cells.
+	///
+	/// What is written is what the engine's own erase writes: the PEN's background colour and no
+	/// glyph (`Cell: From<Color>` is the same conversion `clear_screen` uses), so a program that
+	/// erases with a colour set gets that colour, exactly as a plain erase would give it.
+	fn selective_erase(&mut self, erase: protect::Erase) {
+		let grid = self.term.grid();
+		let point = grid.cursor.point;
+		// The cursor's line is counted from the top of the screen, and history sits at negative
+		// lines — but a cursor is never in history, so the clamp is only for the type.
+		let row = point.line.0.max(0) as usize;
+		let spans = protect::spans(
+			erase,
+			row,
+			point.column.0,
+			grid.screen_lines(),
+			grid.columns(),
+		);
+		let background = grid.cursor.template.bg;
+		let grid = self.term.grid_mut();
+		for (row, columns) in spans {
+			for column in columns {
+				let cell = &mut grid[Line(row as i32)][Column(column)];
+				if protect::is_protected(cell.flags.bits()) {
+					continue;
+				}
+				*cell = background.into();
+			}
+		}
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -782,6 +873,12 @@ pub struct Terminal {
 	/// Like the cwd, it is a latest-value reading with no place on the grid, so `process` feeds it
 	/// the whole chunk and never splits the advance for it.
 	progress: progress::Reports,
+	/// Reads the selective-erase sequences the engine drops — DECSCA, DECSED and DECSEL (§56). Fed by
+	/// the split advance, but for the opposite reason to the marks above: each of its requests has to
+	/// be applied with the engine advanced PAST the sequence, not up to it. Protection itself is not
+	/// held here at all — it rides the engine's pen and then each printed cell, so there is no map to
+	/// keep aligned with the grid.
+	protect: protect::Protect,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
@@ -805,18 +902,26 @@ enum Split {
 	/// whole content of the event is the line it arrived on, which is why it has to be applied here
 	/// rather than after the chunk.
 	UserMark,
+	/// A selective-erase request (§56). The odd one out in this list: every other kind is applied
+	/// with the engine advanced UP TO its offset, because the cursor then names the line the event
+	/// belongs on, while `protect` reports offsets one past the sequence so its requests land on the
+	/// far side of it. Both work through the same loop because a split is a split — the difference is
+	/// only which side of the boundary the scanner asked for.
+	Protect(protect::Request),
 }
 
-/// Merge one chunk's prompt marks, image events and bookmarks into offset order. Every list arrives
-/// ascending, and the sort is stable, so two events at the very same offset keep the order they were
-/// scanned in — which is the only sensible tie-break, since no scanner can see another's.
+/// Merge one chunk's prompt marks, image events, bookmarks and selective-erase requests into offset
+/// order. Every list arrives ascending, and the sort is stable, so two events at the very same offset
+/// keep the order they were scanned in — which is the only sensible tie-break, since no scanner can
+/// see another's.
 fn splits(
 	marks: Vec<(usize, osc133::Mark)>,
 	images: Vec<(usize, graphics::Event)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
+	protections: Vec<(usize, protect::Request)>,
 ) -> Vec<(usize, Split)> {
 	let mut merged: Vec<(usize, Split)> =
-		Vec::with_capacity(marks.len() + images.len() + bookmarks.len());
+		Vec::with_capacity(marks.len() + images.len() + bookmarks.len() + protections.len());
 	merged.extend(
 		marks
 			.into_iter()
@@ -833,6 +938,11 @@ fn splits(
 		};
 		(offset, split)
 	}));
+	merged.extend(
+		protections
+			.into_iter()
+			.map(|(offset, request)| (offset, Split::Protect(request))),
+	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
 }
@@ -1895,5 +2005,110 @@ mod tests {
 			offset,
 			"a visible match is revealed in place"
 		);
+	}
+
+	/// The form a VT220 program draws: labels inside a DECSCA run, the user's data outside it, then
+	/// one selective erase to start the next record (§56).
+	#[test]
+	fn a_selective_erase_leaves_the_protected_labels_standing() {
+		let mut terminal = Terminal::new(4, 20);
+		// No space between the two runs: a blank cell reads as an empty string through the view, so a
+		// gap would be invisible here and the test would be asserting less than it looks like.
+		terminal.process(b"\x1b[1\"qName:\x1b[0\"qBob");
+		assert_eq!(read(&terminal, 0, 0, 9), "Name:Bob");
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(
+			read(&terminal, 0, 0, 9),
+			"Name:",
+			"the label survives and the typed value does not"
+		);
+	}
+
+	/// The two erases are different verbs, and the plain one is the stronger: protection only holds
+	/// against the `?` spelling. A program that means to wipe everything still can.
+	#[test]
+	fn a_plain_erase_takes_the_protected_labels_too() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1\"qName:\x1b[0\"q Bob");
+		terminal.process(b"\x1b[2J");
+		assert_eq!(read(&terminal, 0, 0, 9).trim(), "");
+	}
+
+	/// DECSCA is independent of SGR on a real terminal, so a colour reset inside a protected run must
+	/// not quietly unprotect the rest of it. This is the case the pen trick has to be told about: the
+	/// engine's SGR 0 assigns the whole flag word, borrowed bit included (§56).
+	#[test]
+	fn a_colour_reset_inside_a_protected_run_does_not_unprotect_it() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1\"q\x1b[31mRed\x1b[0mPlain\x1b[0\"q gone");
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(
+			read(&terminal, 0, 0, 13).trim_end(),
+			"RedPlain",
+			"both halves of the run are protected, across the reset"
+		);
+	}
+
+	/// The payoff of carrying protection on the pen rather than in a map beside the grid (§56): the
+	/// cells move and their protection moves with them, because to the engine it is just another
+	/// attribute. A map would have had to be re-aligned here, and this is where it would have drifted.
+	#[test]
+	fn protection_rides_a_scroll() {
+		let mut terminal = Terminal::new(3, 20);
+		// Draw the row at the very bottom, then step off the end so the screen scrolls under it.
+		terminal.process(b"\x1b[3;1H\x1b[1\"qName:\x1b[0\"qvalue\n");
+		assert_eq!(
+			read(&terminal, 1, 0, 10),
+			"Name:value",
+			"one row up after the scroll"
+		);
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(read(&terminal, 1, 0, 10).trim_end(), "Name:");
+	}
+
+	/// A selective erase in the LINE is confined to the cursor's row, exactly as the plain EL is.
+	#[test]
+	fn a_selective_erase_in_the_line_leaves_the_other_rows_alone() {
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"first\r\nsecond\x1b[1;1H\x1b[?2K");
+		assert_eq!(read(&terminal, 0, 0, 5).trim(), "");
+		assert_eq!(read(&terminal, 1, 0, 6), "second");
+	}
+
+	/// A full reset rebuilds the pen, so protection cannot outlive it — otherwise a program that
+	/// resets and moves on would leave cmote holding text nothing could erase.
+	#[test]
+	fn a_full_reset_stops_the_pen_protecting() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1\"q\x1bcAfter");
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(read(&terminal, 0, 0, 5).trim(), "");
+	}
+
+	/// Protection dies with the cell it was on. A plain erase writes the cell fresh — flags and all —
+	/// so a cell reused after one is erasable again, and a form cannot accumulate unerasable ground.
+	#[test]
+	fn a_cell_erased_the_plain_way_comes_back_unprotected() {
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"\x1b[1\"qName:\x1b[0\"q");
+		// Plain EL blanks the row in place, which resets each cell's flags with its glyph.
+		terminal.process(b"\x1b[2K\x1b[1;1Hnew");
+		terminal.process(b"\x1b[?2K");
+		assert_eq!(read(&terminal, 0, 0, 5).trim(), "");
+	}
+
+	/// The borrowed flag bit must be invisible in the other direction too: the view reports the
+	/// attributes the program actually set, and nothing extra (§56).
+	#[test]
+	fn protection_is_invisible_to_the_screen_view() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"\x1b[1\"q\x1b[1mBold");
+		let screen = terminal.screen();
+		let cell = screen.cell(0, 0).expect("the first cell is on screen");
+		assert_eq!(cell.contents(), "B");
+		assert!(cell.bold(), "the attribute the program set");
+		assert!(!cell.italic());
+		assert!(!cell.inverse());
+		assert_eq!(cell.underline(), screen::UnderlineStyle::None);
 	}
 }
