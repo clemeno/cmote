@@ -79,12 +79,6 @@ const ICON_FONT: &[u8] = include_bytes!("../assets/MaterialIcons-Regular.ttf");
 const INITIAL_COLS: u16 = 180;
 const INITIAL_ROWS: u16 = 40;
 
-/// The most of the window the explorer panel — and, on the other axis, the files pane —
-/// may be dragged to (§18, §19). A splitter with no ceiling can push the terminal grid
-/// down to a single cell, which is a state the user then has to drag their way back out
-/// of.
-const MAX_PANEL_FRACTION: f32 = 0.6;
-
 /// How long a copy-confirmation toast stays before it clears itself (§10). Long enough to
 /// register, short enough not to linger over the shell.
 const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
@@ -2615,14 +2609,15 @@ pub struct Tab {
 	/// about this machine's disk and that server's, right now, and an offer to append to one after
 	/// a restart hours later trusts far more than the size comparison behind it can carry.
 	unfinished: Option<transfer::Unfinished>,
-	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
-	/// width, expansion state and selection; `app` only relays its events and turns the
-	/// paths it asks for into `SshCommand::ListDir`.
-	explorer: explorer::Explorer,
-	/// The remote file grid shown under the grid and the tree (§19). Same division of
-	/// labour: it owns what it shows, `app` turns its requests into `SshCommand::ListFiles`
-	/// / `Download` and follows the shell's directory into it.
-	files: files::Files,
+	/// The two file panels — the folder tree beside the grid (§18) and the file pane under it
+	/// (§19) — as one thing, because a good deal about them is true of the PAIR (§22).
+	///
+	/// Each panel still owns what only concerns it: its visibility, its size, its expansion state,
+	/// its selection, its menu. `panes` owns what neither can answer alone — where the session is,
+	/// what a deletion means, the remembered layout, and the `.*` toggle that filters both — and
+	/// hands back the listings to ask for rather than reaching for a channel it does not have.
+	/// Those rules used to sit in eighteen `app` methods that sequenced both models by hand.
+	panes: crate::panes::Panes,
 	/// Which of the three — shell, tree, files pane — the keyboard belongs to (§20).
 	focus: Focus,
 	/// Whether the OS window currently has focus (§23). Half of what "the shell is focused"
@@ -3770,7 +3765,7 @@ impl Tab {
 			Message::FileDropSettled => {
 				// The pane's directory is where a drop lands (§29); taken as an owned string so the
 				// queue can be borrowed mutably to settle into it.
-				let dir = self.files.path().map(str::to_owned);
+				let dir = self.panes.pane.path().map(str::to_owned);
 				let effects = self.transfers.settle(self.terminal.is_some(), dir.as_deref());
 				return self.apply(effects);
 			}
@@ -3919,7 +3914,7 @@ impl Tab {
 				// The refusal for this one is shown in the files pane it was started from, so the
 				// guard sits here rather than inside the queue (§19).
 				if self.transfers.busy() {
-					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
+					self.panes.pane.set_notice(transfer::BUSY_NOTICE.to_owned());
 					return iced::Task::none();
 				}
 				let effects = self.transfers.download_tree(remote, local);
@@ -4097,7 +4092,7 @@ impl Tab {
 			cert_path,
 			// Placeholder like `name`: the stored preference wins on connect, and a
 			// brand-new target takes the default `upsert_on_connect` gives it (§14).
-			show_hidden: self.explorer.show_hidden(),
+			show_hidden: self.panes.show_hidden(),
 			// The pending target only carries auth into `upsert_on_connect`; the remembered
 			// session (§22), the remember flag (§16) and the saved forwards (§27) live with the
 			// *stored* target, which the upsert leaves untouched, so these placeholders are never read.
@@ -4655,9 +4650,9 @@ impl Tab {
 				// behaviour. The pane opens at its own remembered directory; the tree opens the
 				// chain down to it and selects it, so both panels start on the resume point.
 				let files_start = resume_files.unwrap_or_else(|| explorer::ROOT.to_owned());
-				let needed = self.explorer.reveal_if_new(&files_start);
+				let needed = self.panes.tree.reveal_if_new(&files_start);
 				self.list_dirs(needed);
-				if let Some(request) = self.files.show(&files_start) {
+				if let Some(request) = self.panes.pane.show(&files_start) {
 					self.list_files(request);
 				}
 
@@ -4761,17 +4756,14 @@ impl Tab {
 					// them was leaving before the user ever saw it there.
 					match self.resume_cwd.as_deref() {
 						Some(target) if target == cwd.as_str() => {
-							self.explorer.set_revealed(&cwd);
-							self.files.set_followed(&cwd);
+							self.panes.tree.set_revealed(&cwd);
+							self.panes.pane.set_followed(&cwd);
 							self.resume_cwd = None;
 						}
 						Some(_) => {}
 						None => {
-							let needed = self.explorer.reveal_if_new(&cwd);
-							self.list_dirs(needed);
-							if let Some(request) = self.files.follow(&cwd) {
-								self.list_files(request);
-							}
+							let fetches = self.panes.follow(&cwd);
+							self.send_fetches(fetches);
 						}
 					}
 				}
@@ -4789,12 +4781,12 @@ impl Tab {
 				request,
 				entries,
 				done,
-			} => self.files.chunk(request, entries, done),
-			SshEvent::FilesFailed { request, reason } => self.files.failed(request, reason),
+			} => self.panes.pane.chunk(request, entries, done),
+			SshEvent::FilesFailed { request, reason } => self.panes.pane.failed(request, reason),
 			// The server's own timezone and one resolved symlink, both for the details
 			// popup beside the selection (§20).
-			SshEvent::Zone(zone) => self.files.set_zone(zone),
-			SshEvent::LinkTarget { path, target } => self.files.set_link_target(path, target),
+			SshEvent::Zone(zone) => self.panes.pane.set_zone(zone),
+			SshEvent::LinkTarget { path, target } => self.panes.pane.set_link_target(path, target),
 			// The four ways the one transfer slot can empty (§16, §17, §21). Which DIRECTION the
 			// thing in it was going is not said here: the queue remembers, which is why an upload's
 			// ending and a download's are one arm apiece rather than one pair apiece.
@@ -4814,21 +4806,20 @@ impl Tab {
 				let effects = self.transfers.ended(transfer::Ended::Skipped(path));
 				return self.apply(effects);
 			}
-			SshEvent::DirListed { path, dirs } => self.explorer.listed(&path, dirs),
-			SshEvent::DirFailed { path, reason } => self.explorer.failed(&path, reason),
+			SshEvent::DirListed { path, dirs } => self.panes.tree.listed(&path, dirs),
+			SshEvent::DirFailed { path, reason } => self.panes.tree.failed(&path, reason),
 			SshEvent::RenameDone { from, to } => {
 				// The entry moved: re-list its parent so the row reappears under the new
 				// name, in the right sort position. Both panels may be showing it (§19).
-				if let Some(parent) = self.explorer.renamed(&from, &to) {
+				if let Some(parent) = self.panes.tree.renamed(&from, &to) {
 					self.send_command(SshCommand::ListDir(parent));
 				}
-				if let Some(request) = self.files.renamed(&from) {
+				if let Some(request) = self.panes.pane.renamed(&from) {
 					self.list_files(request);
 				}
 			}
 			SshEvent::RenameFailed(reason) => {
-				self.explorer.set_notice(reason.clone());
-				self.files.set_notice(reason);
+				self.panes.set_notice(reason);
 			}
 			SshEvent::MakeDirDone(path) => {
 				// The new folder appeared inside its parent: re-list the parent in both panels so
@@ -4838,13 +4829,11 @@ impl Tab {
 				}
 			}
 			SshEvent::MakeDirFailed(reason) => {
-				self.explorer.set_notice(reason.clone());
-				self.files.set_notice(reason);
+				self.panes.set_notice(reason);
 			}
 			SshEvent::DeleteDone(paths) => self.on_deleted(paths),
 			SshEvent::DeleteFailed(reason) => {
-				self.explorer.set_notice(reason.clone());
-				self.files.set_notice(reason);
+				self.panes.set_notice(reason);
 			}
 			SshEvent::TransferConflict { name } => {
 				let effects = self.transfers.conflicted(&name);
@@ -4931,7 +4920,7 @@ impl Tab {
 		// The files pane takes its height out of the grid — the terminal is full width now, the
 		// tree sits under it (§18) — so the same call serves a window resize and the pane's own
 		// resize (§19).
-		let (rows, cols) = ui::terminal::grid_size(size, self.files.reserved());
+		let (rows, cols) = ui::terminal::grid_size(size, self.panes.pane.reserved());
 		let changed = match self.terminal.as_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
 				terminal.resize(rows, cols);
@@ -5577,10 +5566,10 @@ impl Tab {
 				if self.transfers.holds_keyboard() {
 					return Some(Claim::Transfers);
 				}
-				if self.explorer.editing().is_some() {
+				if self.panes.tree.editing().is_some() {
 					return Some(Claim::TreeRename);
 				}
-				if self.files.editing().is_some() {
+				if self.panes.pane.editing().is_some() {
 					return Some(Claim::PaneRename);
 				}
 				if self.search.is_some() {
@@ -5603,8 +5592,8 @@ impl Tab {
 			Claim::TargetRename => self.home_rename = None,
 			Claim::Modal => self.modal = None,
 			Claim::Transfers => self.transfers.escape(),
-			Claim::TreeRename => self.explorer.cancel_rename(),
-			Claim::PaneRename => self.files.cancel_rename(),
+			Claim::TreeRename => self.panes.tree.cancel_rename(),
+			Claim::PaneRename => self.panes.pane.cancel_rename(),
 			// The current match stays selected when the bar closes, so it can still be copied.
 			Claim::Find => self.search = None,
 		}
@@ -6000,8 +5989,8 @@ impl Tab {
 	fn shell_owns_keyboard(&self) -> bool {
 		self.modal.is_none()
 			&& !self.transfers.holds_keyboard()
-			&& self.explorer.editing().is_none()
-			&& self.files.editing().is_none()
+			&& self.panes.tree.editing().is_none()
+			&& self.panes.pane.editing().is_none()
 			&& matches!(self.focus, Focus::Terminal)
 	}
 
@@ -6010,10 +5999,10 @@ impl Tab {
 	/// shell is always in the ring; it is the one thing always on this screen.
 	fn cycle_focus(&mut self, backwards: bool) {
 		let mut ring = vec![Focus::Terminal];
-		if self.explorer.visible() {
+		if self.panes.tree.visible() {
 			ring.push(Focus::Tree);
 		}
-		if self.files.visible() {
+		if self.panes.pane.visible() {
 			ring.push(Focus::Files);
 		}
 		let at = ring
@@ -6112,27 +6101,27 @@ impl Tab {
 				// Open the folder — the same call the row click makes: a folder never listed is
 				// fetched here too, and re-opening a closed one re-lists it (`expand`), so the
 				// keyboard catches a shell-side change just as the mouse does.
-				if let Some(path) = self.explorer.selected().map(str::to_owned)
-					&& let Some(fetch) = self.explorer.expand(&path, false)
+				if let Some(path) = self.panes.tree.selected().map(str::to_owned)
+					&& let Some(fetch) = self.panes.tree.expand(&path, false)
 				{
 					self.send_command(SshCommand::ListDir(fetch));
 				}
 				return iced::Task::none();
 			}
 			Named::ArrowLeft => {
-				if let Some(path) = self.explorer.selected().map(str::to_owned) {
-					self.explorer.collapse(&path);
+				if let Some(path) = self.panes.tree.selected().map(str::to_owned) {
+					self.panes.tree.collapse(&path);
 				}
 				return iced::Task::none();
 			}
 			Named::Enter => {
-				let Some(path) = self.explorer.selected().map(str::to_owned) else {
+				let Some(path) = self.panes.tree.selected().map(str::to_owned) else {
 					return iced::Task::none();
 				};
 				return self.on_explorer(ExplorerMessage::Cd(path));
 			}
 			Named::F2 => {
-				let Some(path) = self.explorer.selected().map(str::to_owned) else {
+				let Some(path) = self.panes.tree.selected().map(str::to_owned) else {
 					return iced::Task::none();
 				};
 				return self.on_explorer(ExplorerMessage::RenameStarted(path));
@@ -6147,7 +6136,7 @@ impl Tab {
 			_ => return iced::Task::none(),
 		};
 
-		self.explorer.step(step);
+		self.panes.tree.step(step);
 		self.scroll_tree_into_view()
 	}
 
@@ -6168,7 +6157,7 @@ impl Tab {
 			&& matches!(key, iced::keyboard::Key::Character(character)
 				if character.as_str().eq_ignore_ascii_case("a"))
 		{
-			self.files.select_all(self.explorer.show_hidden());
+			self.panes.pane.select_all(self.panes.show_hidden());
 			return iced::Task::none();
 		}
 
@@ -6179,7 +6168,7 @@ impl Tab {
 		let columns = ui::files::columns(self.files_width()) as isize;
 		// A page is a screenful of rows (less one, for context), turned into a model-space delta
 		// by the column count — the same units `step` moves the arrows in.
-		let page = ui::files::page_rows(&self.files) as isize * columns;
+		let page = ui::files::page_rows(&self.panes.pane) as isize * columns;
 		// Shift held on a movement key extends the selection instead of moving it (§21). Not on
 		// Tab: there, Shift already means "the other way".
 		let extend = modifiers.shift();
@@ -6206,7 +6195,7 @@ impl Tab {
 			Named::Tab if modifiers.shift() => (Nav::Step(-1), false),
 			Named::Tab => (Nav::Step(1), false),
 			Named::Enter => {
-				let Some(path) = self.files.cursor().map(str::to_owned) else {
+				let Some(path) = self.panes.pane.cursor().map(str::to_owned) else {
 					return iced::Task::none();
 				};
 				// Straight through the double-click's own handler, which is where "only a
@@ -6214,7 +6203,7 @@ impl Tab {
 				return self.on_files(FilesMessage::EntryOpened(path));
 			}
 			Named::F2 => {
-				let Some(path) = self.files.cursor().map(str::to_owned) else {
+				let Some(path) = self.panes.pane.cursor().map(str::to_owned) else {
 					return iced::Task::none();
 				};
 				return self.on_files(FilesMessage::RenameStarted(path));
@@ -6229,10 +6218,10 @@ impl Tab {
 			_ => return iced::Task::none(),
 		};
 
-		let show_hidden = self.explorer.show_hidden();
+		let show_hidden = self.panes.show_hidden();
 		match nav {
-			Nav::Step(delta) => self.files.step(show_hidden, delta, extend),
-			Nav::Edge(to_last) => self.files.jump_to_edge(show_hidden, to_last, extend),
+			Nav::Step(delta) => self.panes.pane.step(show_hidden, delta, extend),
+			Nav::Edge(to_last) => self.panes.pane.jump_to_edge(show_hidden, to_last, extend),
 		}
 		self.resolve_selected_link();
 		// Only the keyboard scrolls: a click is already on a cell the user can see, and
@@ -6244,32 +6233,33 @@ impl Tab {
 	/// view, so the band is turned into cell indices there and back into paths here — the
 	/// same split the arrow keys already use.
 	fn apply_band(&mut self) {
-		let Some(rect) = self.files.band().map(files::Band::rect) else {
+		let Some(rect) = self.panes.pane.band().map(files::Band::rect) else {
 			return;
 		};
-		let Some(directory) = self.files.path().map(str::to_owned) else {
+		let Some(directory) = self.panes.pane.path().map(str::to_owned) else {
 			return;
 		};
-		let rows = self.files.rows(self.explorer.show_hidden());
+		let rows = self.panes.rows();
 		let paths: Vec<String> = ui::files::band_hits(
 			rect,
 			ui::files::columns(self.files_width()),
 			rows.len(),
-			self.files.scroll(),
+			self.panes.pane.scroll(),
 		)
 		.into_iter()
 		.filter_map(|index| Some(explorer::join(&directory, &rows.get(index)?.name)))
 		.collect();
-		self.files.set_band_selection(paths);
+		self.panes.pane.set_band_selection(paths);
 	}
 
 	/// Which entries a context-menu item acts on (§21): the whole selection when the menu
 	/// was opened on part of it, that one entry otherwise. In grid order, since that is the
 	/// order a list of copied names should come out in.
 	fn action_targets(&self, path: &str) -> Vec<String> {
-		if self.files.selected_count() > 1 && self.files.is_selected(path) {
-			self.files
-				.selected_rows(self.explorer.show_hidden())
+		if self.panes.pane.selected_count() > 1 && self.panes.pane.is_selected(path) {
+			self.panes
+				.pane
+				.selected_rows(self.panes.show_hidden())
 				.into_iter()
 				.map(|(path, _)| path)
 				.collect()
@@ -6284,9 +6274,9 @@ impl Tab {
 	/// One `readlink` per *selected* link, not one per link in the listing: resolving them
 	/// all is the round-trip-per-entry cost the pane is built to avoid (§19).
 	fn resolve_selected_link(&mut self) {
-		if let Some(path) = self.files.cursor().map(str::to_owned)
-			&& self.files.kind_of(&path) == Some(files::Kind::Link)
-			&& self.files.link_target().is_none()
+		if let Some(path) = self.panes.pane.cursor().map(str::to_owned)
+			&& self.panes.pane.kind_of(&path) == Some(files::Kind::Link)
+			&& self.panes.pane.link_target().is_none()
 		{
 			self.send_command(SshCommand::ReadLink(path));
 		}
@@ -6298,7 +6288,7 @@ impl Tab {
 	/// rubber band, the menus — reads this rather than the raw window width. `Explorer::reserved`
 	/// is zero when the tree is hidden, so the pane is the full window then.
 	fn files_width(&self) -> f32 {
-		self.window_size.width - self.explorer.reserved()
+		self.window_size.width - self.panes.tree.reserved()
 	}
 
 	/// Scroll the files pane so the selected cell is on screen (§20). The grid's geometry
@@ -6306,17 +6296,17 @@ impl Tab {
 	/// works out where the selected one sits. The model is told the new offset as well as
 	/// the widget, because the details popup is placed against it on this very frame.
 	fn scroll_files_into_view(&mut self) -> iced::Task<Message> {
-		let Some(index) = self.files.selected_index(self.explorer.show_hidden()) else {
+		let Some(index) = self.panes.pane.selected_index(self.panes.show_hidden()) else {
 			return iced::Task::none();
 		};
 		let row = index / ui::files::columns(self.files_width());
 		let offset = keep_visible(
-			self.files.scroll(),
-			ui::files::grid_height(&self.files),
+			self.panes.pane.scroll(),
+			ui::files::grid_height(&self.panes.pane),
 			ui::files::row_top(row),
 			ui::files::CELL_HEIGHT,
 		);
-		self.files.set_scroll(offset);
+		self.panes.pane.set_scroll(offset);
 		iced::widget::operation::scroll_to(
 			ui::files::GRID_ID,
 			iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
@@ -6325,20 +6315,20 @@ impl Tab {
 
 	/// The same, for the folder tree — one fixed-height row rather than a wrapping grid.
 	fn scroll_tree_into_view(&mut self) -> iced::Task<Message> {
-		let Some(index) = self.explorer.selected_index() else {
+		let Some(index) = self.panes.tree.selected_index() else {
 			return iced::Task::none();
 		};
 		let offset = keep_visible(
-			self.explorer.scroll(),
+			self.panes.tree.scroll(),
 			ui::explorer::tree_height(
-				self.files.height(),
-				self.files.path(),
-				self.explorer.width(),
+				self.panes.pane.height(),
+				self.panes.pane.path(),
+				self.panes.tree.width(),
 			),
 			index as f32 * ui::explorer::ROW_HEIGHT,
 			ui::explorer::ROW_HEIGHT,
 		);
-		self.explorer.set_scroll(offset);
+		self.panes.tree.set_scroll(offset);
 		iced::widget::operation::scroll_to(
 			ui::explorer::TREE_ID,
 			iced::widget::scrollable::AbsoluteOffset { x: 0.0, y: offset },
@@ -6689,9 +6679,19 @@ impl Tab {
 	/// belongs to the account just left — and if the new one cannot list at all, they stay empty
 	/// beside the remote's own reason rather than quietly showing another account's files.
 	fn reread_panes(&mut self) {
-		let needed = self.explorer.reread();
-		self.list_dirs(needed);
-		if let Some(request) = self.files.refresh() {
+		let fetches = self.panes.reread();
+		self.send_fetches(fetches);
+	}
+
+	/// Turn what the panels asked for into commands (§18, §19).
+	///
+	/// The one place the pair's [`panes::Fetches`](crate::panes::Fetches) becomes network traffic.
+	/// `panes` decides WHAT is needed and can be tested doing it; this decides how to ask, which
+	/// needs the channel and cannot be. Before there was a `Fetches` this pattern —
+	/// "ask the model, then relay the listing" — was open-coded at fifteen call sites.
+	fn send_fetches(&mut self, fetches: crate::panes::Fetches) {
+		self.list_dirs(fetches.dirs);
+		if let Some(request) = fetches.files {
 			self.list_files(request);
 		}
 	}
@@ -6937,8 +6937,7 @@ impl Tab {
 		// against, so nothing stale can be replayed into a later session.
 		// The panels' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
-		self.explorer.reset();
-		self.files.reset();
+		self.panes.reset();
 		// A session's forwards die with it (§27): the worker drops its listeners when the session
 		// ends, so the list belongs to this session and is cleared — the manager dialog over it
 		// went with `modal` above. A fresh session re-establishes the target's saved set itself,
@@ -6954,19 +6953,13 @@ impl Tab {
 	/// silent session never erases what an earlier one recorded.
 	fn capture_session(&self) -> crate::profiles::SessionState {
 		crate::profiles::SessionState {
+			// The panels' whole half of the snapshot, from the pair that owns it.
 			terminal_path: self
 				.terminal
 				.as_ref()
 				.and_then(term::Terminal::cwd)
 				.map(str::to_owned),
-			files_path: self.files.path().map(str::to_owned),
-			show_hidden: Some(self.explorer.show_hidden()),
-			explorer_width: Some(self.explorer.width()),
-			files_height: Some(self.files.height()),
-			// The pane always knows its sort (both halves may be unset), so it is always `Some`
-			// here — `set_session` then writes the tri-state through as-is (§19, §22).
-			sort: Some(self.files.sort_key()),
-			sort_dir: Some(self.files.sort_dir()),
+			..self.panes.capture()
 		}
 	}
 
@@ -7002,28 +6995,8 @@ impl Tab {
 		&mut self,
 		session: crate::profiles::SessionState,
 	) -> (Option<String>, Option<String>) {
-		if let Some(show_hidden) = session.show_hidden {
-			self.explorer.set_hidden(show_hidden);
-		}
-		// The remembered sort goes straight onto the pane model, so the grid reopens in the order
-		// this target was left in (§22). Both halves travel together from `capture_session`, so
-		// they are applied together; `set_sort` writes the tri-state outright rather than toggling.
-		if let (Some(sort), Some(sort_dir)) = (session.sort, session.sort_dir) {
-			self.files.set_sort(sort, sort_dir);
-		}
-		if let Some(width) = session.explorer_width
-			&& self.window_size.width > 1.0
-		{
-			self.explorer
-				.set_width(width, self.window_size.width * MAX_PANEL_FRACTION);
-		}
-		if let Some(height) = session.files_height
-			&& self.window_size.height > 1.0
-		{
-			self.files
-				.set_height(height, self.window_size.height * MAX_PANEL_FRACTION);
-		}
-		(session.terminal_path, session.files_path)
+		let resume = self.panes.restore(session, self.window_size);
+		(resume.terminal, resume.pane)
 	}
 
 	/// Handle one event from the remote folder tree (§18). The model decides what the
@@ -7033,9 +7006,9 @@ impl Tab {
 	fn on_explorer(&mut self, message: ExplorerMessage) -> iced::Task<Message> {
 		match message {
 			ExplorerMessage::Toggled => {
-				self.explorer.toggle();
+				self.panes.tree.toggle();
 				// A hidden panel cannot hold the keyboard: hand it back to the shell (§20).
-				if !self.explorer.visible() && self.focus == Focus::Tree {
+				if !self.panes.tree.visible() && self.focus == Focus::Tree {
 					self.set_focus(Focus::Terminal);
 				}
 				// The panel's width just moved between it and the grid: reflow both the
@@ -7043,45 +7016,45 @@ impl Tab {
 				self.refit_grid();
 			}
 			ExplorerMessage::HiddenToggled => {
-				self.explorer.toggle_hidden();
+				self.panes.tree.toggle_hidden();
 				// Persist the flip now (§14, §22): the toggle folds into the same per-target
 				// snapshot as the paths and panel sizes, so it survives even a later hard exit.
 				self.persist_session();
 			}
 			ExplorerMessage::PanelPressed => self.focus_pane(Focus::Tree),
-			ExplorerMessage::Scrolled(offset) => self.explorer.set_scroll(offset),
+			ExplorerMessage::Scrolled(offset) => self.panes.tree.set_scroll(offset),
 			ExplorerMessage::RowClicked(path) => {
 				self.focus_pane(Focus::Tree);
-				if let Some(fetch) = self.explorer.toggle_node(&path) {
+				if let Some(fetch) = self.panes.tree.toggle_node(&path) {
 					self.send_command(SshCommand::ListDir(fetch));
 				}
 				// Clicking a folder in the tree also points the files pane at it, WITHOUT
 				// moving the shell — that is what makes the pane usable to look inside a
 				// folder you are not in (§19).
-				if let Some(request) = self.files.show(&path) {
+				if let Some(request) = self.panes.pane.show(&path) {
 					self.list_files(request);
 				}
 			}
 			ExplorerMessage::RowRightClicked(path) => {
 				self.focus_pane(Focus::Tree);
-				self.explorer.select(&path);
-				self.explorer.open_menu(path);
+				self.panes.tree.select(&path);
+				self.panes.tree.open_menu(path);
 			}
-			ExplorerMessage::PointerMoved(point) => self.explorer.set_pointer(point),
-			ExplorerMessage::MenuDismissed => self.explorer.close_menu(),
+			ExplorerMessage::PointerMoved(point) => self.panes.tree.set_pointer(point),
+			ExplorerMessage::MenuDismissed => self.panes.tree.close_menu(),
 			ExplorerMessage::RefreshDir(path) => {
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				// The menu's "Refresh" answers "is this folder still here, under this name, holding
 				// these children?" Its CONTENTS come from re-listing the folder itself (forced open,
 				// so the result shows at once); its own NAME and EXISTENCE come from re-listing its
 				// PARENT — a rename or deletion made from the shell surfaces in the parent's listing,
 				// never the folder's. The root has no parent, so only its contents refresh.
 				if let Some(parent) = explorer::parent(&path).map(str::to_owned)
-					&& let Some(fetch) = self.explorer.refresh_dir(&parent)
+					&& let Some(fetch) = self.panes.tree.refresh_dir(&parent)
 				{
 					self.send_command(SshCommand::ListDir(fetch));
 				}
-				if let Some(fetch) = self.explorer.expand(&path, true) {
+				if let Some(fetch) = self.panes.tree.expand(&path, true) {
 					self.send_command(SshCommand::ListDir(fetch));
 				}
 			}
@@ -7089,66 +7062,66 @@ impl Tab {
 				// The header ↻ button and F5: re-list every open folder, so all the expanded
 				// content is current in one action — the user never has to work out which folders
 				// a move touched. Each becomes its own listing request.
-				self.explorer.close_menu();
-				for fetch in self.explorer.refresh_open() {
+				self.panes.tree.close_menu();
+				for fetch in self.panes.tree.refresh_open() {
 					self.send_command(SshCommand::ListDir(fetch));
 				}
 			}
 			ExplorerMessage::CollapseAll => {
 				// The header's collapse-all button: close every branch back to the root's own
 				// children. Local state only — nothing is re-fetched — so this needs no command.
-				self.explorer.close_menu();
-				self.explorer.collapse_all();
+				self.panes.tree.close_menu();
+				self.panes.tree.collapse_all();
 			}
 			ExplorerMessage::Cd(path) => {
 				// The tree's "Open in terminal" and its Enter key: a deliberate console move,
 				// quoted so a folder name carrying a quote stays one argument (§18). The pane
 				// then follows the `cd` it can see, the same as any other console move.
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				self.move_shell_to(&path);
 			}
 			ExplorerMessage::UploadHere(path) => {
 				// The tree's "Upload…": pick local files to send into this folder (§17),
 				// whichever directory the shell itself is in.
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				return browse_upload_into(path);
 			}
 			ExplorerMessage::UploadFolderHere(path) => {
 				// The tree's "Upload folder…": pick a local folder to send whole into this one (§17).
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				return browse_upload_folder_into(path);
 			}
 			ExplorerMessage::NewFolderHere(path) => {
 				// The tree's "New folder…": create a subfolder inside the right-clicked one (§18).
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				return self.begin_new_folder(path);
 			}
 			ExplorerMessage::DeleteStarted(path) => {
 				// The tree's "Delete…": remove this folder and its whole subtree, once confirmed (§18).
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				self.begin_delete(vec![path]);
 			}
 			ExplorerMessage::RenameStarted(path) => {
-				self.explorer.start_rename(path);
+				self.panes.tree.start_rename(path);
 				// The root has no parent, so it declines to be renamed; only focus the
 				// field when an edit actually opened.
-				if self.explorer.editing().is_some() {
+				if self.panes.tree.editing().is_some() {
 					return iced::widget::operation::focus(ui::explorer::RENAME_INPUT_ID);
 				}
 			}
-			ExplorerMessage::RenameEdited(text) => self.explorer.edit_rename(text),
+			ExplorerMessage::RenameEdited(text) => self.panes.tree.edit_rename(text),
 			ExplorerMessage::RenameCommitted => {
-				if let Some((from, to)) = self.explorer.commit_rename() {
+				if let Some((from, to)) = self.panes.tree.commit_rename() {
 					self.send_command(SshCommand::RenameDir { from, to });
 				}
 			}
 			ExplorerMessage::CopyName(path) => {
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				let text = explorer::name(&path).to_owned();
 				return self.copy_to_clipboard(text);
 			}
 			ExplorerMessage::CopyRelative(path) => {
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				// The menu disables this item without a cwd, so this is belt and braces.
 				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
@@ -7157,33 +7130,33 @@ impl Tab {
 				return self.copy_to_clipboard(text);
 			}
 			ExplorerMessage::CopyPath(path) => {
-				self.explorer.close_menu();
+				self.panes.tree.close_menu();
 				return self.copy_to_clipboard(path);
 			}
 			ExplorerMessage::CopyCurrentPath => {
 				// The header path, not a tree selection: copy the one directory the header
 				// names — the files view's — verbatim, the twin of the pane's own button.
-				if let Some(path) = self.files.path() {
+				if let Some(path) = self.panes.pane.path() {
 					let text = path.to_owned();
 					return self.copy_to_clipboard(text);
 				}
 			}
-			ExplorerMessage::SplitterGrabbed => self.explorer.set_dragging(true),
+			ExplorerMessage::SplitterGrabbed => self.panes.tree.set_dragging(true),
 			ExplorerMessage::SplitterDragged(pointer) => {
-				if self.explorer.dragging() {
+				if self.panes.tree.dragging() {
 					// The splitter sits at the panel's left edge and the panel runs to the
 					// window's right edge, so the pointer's distance from that edge IS the
-					// width — no drag anchor to track.
-					let max = self.window_size.width * MAX_PANEL_FRACTION;
-					self.explorer
-						.set_width(self.window_size.width - pointer.x, max);
+					// width — no drag anchor to track. The clamp and the arithmetic are the
+					// pair's, so this arm and the pane's twin below no longer restate them
+					// with `width`/`x` swapped for `height`/`y`.
+					self.panes.drag_tree_splitter(pointer.x, self.window_size);
 					self.refit_grid();
 				}
 			}
-			ExplorerMessage::SplitterReleased => self.explorer.set_dragging(false),
+			ExplorerMessage::SplitterReleased => self.panes.tree.set_dragging(false),
 			// Hover only lights the bar (§18); no relayout, so no grid refit.
-			ExplorerMessage::SplitterEntered => self.explorer.set_splitter_hovered(true),
-			ExplorerMessage::SplitterExited => self.explorer.set_splitter_hovered(false),
+			ExplorerMessage::SplitterEntered => self.panes.tree.set_splitter_hovered(true),
+			ExplorerMessage::SplitterExited => self.panes.tree.set_splitter_hovered(false),
 		}
 		iced::Task::none()
 	}
@@ -7214,7 +7187,7 @@ impl Tab {
 	/// with no shell or no directory on show; the button dims in those cases and when the two
 	/// already agree, so pressing it always has something to do.
 	fn on_sync(&mut self) {
-		let Some(path) = self.files.path().map(str::to_owned) else {
+		let Some(path) = self.panes.pane.path().map(str::to_owned) else {
 			return;
 		};
 		self.move_shell_to(&path);
@@ -7262,12 +7235,8 @@ impl Tab {
 			return;
 		};
 		self.resume_cwd = None;
-		let needed = self.explorer.reveal(&cwd);
-		self.list_dirs(needed);
-		self.files.set_followed(&cwd);
-		if let Some(request) = self.files.show(&cwd) {
-			self.list_files(request);
-		}
+		let fetches = self.panes.reveal(&cwd);
+		self.send_fetches(fetches);
 	}
 
 	/// Browse the files pane into a directory (§19): a double-clicked folder, the toolbar's
@@ -7277,9 +7246,8 @@ impl Tab {
 	/// (`move_shell_to`); a real `cd` there is what brings the pane back into step, via the
 	/// shell-follow (§19 "last one wins").
 	fn browse_to(&mut self, path: &str) {
-		if let Some(request) = self.files.show(path) {
-			self.list_files(request);
-		}
+		let fetches = self.panes.browse(path);
+		self.send_fetches(fetches);
 	}
 
 	/// Handle one event from the files pane (§19). Same division of labour as the tree's
@@ -7289,9 +7257,9 @@ impl Tab {
 	fn on_files(&mut self, message: FilesMessage) -> iced::Task<Message> {
 		match message {
 			FilesMessage::Toggled => {
-				self.files.toggle();
+				self.panes.pane.toggle();
 				// A hidden pane cannot hold the keyboard: hand it back to the shell (§20).
-				if !self.files.visible() && self.focus == Focus::Files {
+				if !self.panes.pane.visible() && self.focus == Focus::Files {
 					self.set_focus(Focus::Terminal);
 				}
 				// The pane's height just moved between it and the grid: reflow both the
@@ -7304,54 +7272,57 @@ impl Tab {
 				// reaches the pane missed them all. On the grid that starts a rubber band
 				// (§21) — which also clears the selection, as every file manager's empty
 				// space does; on the header or the notice line it only clears it.
-				let pointer = self.files.pointer();
+				let pointer = self.panes.pane.pointer();
 				let grid = pointer.y >= ui::files::HEADER_HEIGHT
-					&& pointer.y <= ui::files::HEADER_HEIGHT + ui::files::grid_height(&self.files);
+					&& pointer.y
+						<= ui::files::HEADER_HEIGHT + ui::files::grid_height(&self.panes.pane);
 				if grid {
-					self.files.begin_band(pointer, self.modifiers.control());
+					self.panes
+						.pane
+						.begin_band(pointer, self.modifiers.control());
 				} else if !self.modifiers.control() {
-					self.files.deselect();
+					self.panes.pane.deselect();
 				}
 			}
-			FilesMessage::PanelReleased => self.files.end_band(),
+			FilesMessage::PanelReleased => self.panes.pane.end_band(),
 			FilesMessage::PanelRightPressed => {
 				// A right-press that reached the pane missed every cell, so it landed on the
 				// empty grid: open the pane's own menu there (§17). The keyboard follows too,
 				// as a left-press would.
 				self.focus_pane(Focus::Files);
-				self.files.open_pane_menu();
+				self.panes.pane.open_pane_menu();
 			}
 			FilesMessage::PaneUploadHere => {
 				// "Upload… here": send local files into the directory the pane is showing.
-				self.files.close_menu();
-				let dir = self.files.path().unwrap_or("").to_owned();
+				self.panes.pane.close_menu();
+				let dir = self.panes.pane.path().unwrap_or("").to_owned();
 				return browse_upload_into(dir);
 			}
 			FilesMessage::PaneUploadFolderHere => {
 				// "Upload folder… here": send a whole local folder into the directory on show (§17).
-				self.files.close_menu();
-				let dir = self.files.path().unwrap_or("").to_owned();
+				self.panes.pane.close_menu();
+				let dir = self.panes.pane.path().unwrap_or("").to_owned();
 				return browse_upload_folder_into(dir);
 			}
 			FilesMessage::NewFolderHere => {
 				// "New folder…": create a folder in the directory the pane is showing (§18).
-				self.files.close_menu();
-				let dir = self.files.path().unwrap_or("").to_owned();
+				self.panes.pane.close_menu();
+				let dir = self.panes.pane.path().unwrap_or("").to_owned();
 				return self.begin_new_folder(dir);
 			}
 			FilesMessage::DeleteStarted(path) => {
 				// "Delete…": remove the whole selection once confirmed (§18). A right-click inside
 				// the selection kept it; one outside has already collapsed onto the clicked entry.
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				let targets = self.action_targets(&path);
 				self.begin_delete(targets);
 			}
 			FilesMessage::DownloadFolder(path) => {
 				// "Download folder…": recreate this remote directory's tree locally (§19). One
 				// transfer at a time, like every other, so a running one blocks it.
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				if self.transfers.busy() {
-					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
+					self.panes.pane.set_notice(transfer::BUSY_NOTICE.to_owned());
 					return iced::Task::none();
 				}
 				return pick_download_tree_target(path);
@@ -7361,36 +7332,36 @@ impl Tab {
 				// and it runs to the bottom, so only the vertical origin — the strip's top — comes off.
 				let local = iced::Point::new(
 					point.x,
-					point.y - (self.window_size.height - self.files.height()),
+					point.y - (self.window_size.height - self.panes.pane.height()),
 				);
-				self.files.set_pointer(local);
-				if self.files.drag_band(local) {
+				self.panes.pane.set_pointer(local);
+				if self.panes.pane.drag_band(local) {
 					self.apply_band();
 				}
 			}
-			FilesMessage::Scrolled(offset) => self.files.set_scroll(offset),
+			FilesMessage::Scrolled(offset) => self.panes.pane.set_scroll(offset),
 			FilesMessage::EntryClicked(path) => {
 				self.focus_pane(Focus::Files);
-				self.files.close_menu();
-				let show_hidden = self.explorer.show_hidden();
+				self.panes.pane.close_menu();
+				let show_hidden = self.panes.show_hidden();
 				// Shift runs a range from the anchor, Ctrl adds or removes this one, a plain
 				// click takes it alone (§21).
 				if self.modifiers.shift() {
-					self.files.extend_selection(show_hidden, &path);
+					self.panes.pane.extend_selection(show_hidden, &path);
 				} else if self.modifiers.control() {
-					self.files.toggle_selection(&path);
+					self.panes.pane.toggle_selection(&path);
 				} else {
-					self.files.select(&path);
+					self.panes.pane.select(&path);
 				}
 				// A clicked link is resolved the same way a walked-to one is (§20).
 				self.resolve_selected_link();
 			}
 			FilesMessage::EntryOpened(path) => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				// A directory is entered — browsing the PANE there, the console left where it is
 				// (§19). A FILE opens in a new editor tab (§32). The console is moved on purpose, by
 				// Sync or "Open in terminal", never as a side effect of either.
-				match self.files.kind_of(&path) {
+				match self.panes.pane.kind_of(&path) {
 					Some(files::Kind::Dir) => self.browse_to(&path),
 					Some(_) => return self.request_open(path),
 					None => {}
@@ -7398,22 +7369,22 @@ impl Tab {
 			}
 			FilesMessage::OpenStarted(path) => {
 				// The menu's "Edit…" — the deliberate twin of a file double-click (§32).
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				return self.request_open(path);
 			}
 			FilesMessage::OpenInTerminal(path) => {
 				// The pane's own "Open in terminal": the deliberate console move that a
 				// double-click no longer is (§19). Same landing as the tree's item.
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				self.move_shell_to(&path);
 			}
 			FilesMessage::ParentOpened => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				// The toolbar disables the button at the root and before the first listing,
 				// so this is belt and braces — and the parent is read HERE, from the
 				// directory actually on show, rather than carried in the message. Browses the
 				// PANE up; the console is left where it is (§19).
-				let Some(parent) = self.files.path().and_then(explorer::parent) else {
+				let Some(parent) = self.panes.pane.path().and_then(explorer::parent) else {
 					return iced::Task::none();
 				};
 				let parent = parent.to_owned();
@@ -7424,51 +7395,51 @@ impl Tab {
 				// A right-click INSIDE the selection keeps it — that is how a menu comes to
 				// act on all of it (§21); one outside collapses onto the entry clicked, so
 				// the menu never acts on entries the user has looked away from.
-				if !self.files.is_selected(&path) {
-					self.files.select(&path);
+				if !self.panes.pane.is_selected(&path) {
+					self.panes.pane.select(&path);
 				}
-				self.files.open_menu(path);
+				self.panes.pane.open_menu(path);
 				self.resolve_selected_link();
 			}
 			FilesMessage::PointerMoved(point) => {
-				self.files.set_pointer(point);
+				self.panes.pane.set_pointer(point);
 				// A move with the button down is a band being stretched (§21).
-				if self.files.drag_band(point) {
+				if self.panes.pane.drag_band(point) {
 					self.apply_band();
 				}
 			}
-			FilesMessage::MenuDismissed => self.files.close_menu(),
+			FilesMessage::MenuDismissed => self.panes.pane.close_menu(),
 			// The sort menu is a plain view preference: none of these re-list or re-fetch, they
 			// only re-order what `rows` already holds, so each just mutates and falls through to
 			// the shared `Task::none()` below (§19).
-			FilesMessage::SortMenuOpened => self.files.toggle_sort_menu(),
-			FilesMessage::SortMenuDismissed => self.files.close_sort_menu(),
+			FilesMessage::SortMenuOpened => self.panes.pane.toggle_sort_menu(),
+			FilesMessage::SortMenuDismissed => self.panes.pane.close_sort_menu(),
 			// Picking a key or a direction leaves the menu open, so both halves of a sort can be
 			// set in one visit; a click-away (or the button) closes it. Each pick persists the sort
 			// into the connected target (§22), the same way the `.*` toggle folds into the snapshot,
 			// so the chosen order survives a disconnect and even a later hard exit.
 			FilesMessage::SortKeyPicked(key) => {
-				self.files.pick_sort_key(key);
+				self.panes.pane.pick_sort_key(key);
 				self.persist_session();
 			}
 			FilesMessage::SortDirPicked(dir) => {
-				self.files.pick_sort_dir(dir);
+				self.panes.pane.pick_sort_dir(dir);
 				self.persist_session();
 			}
 			FilesMessage::Refresh => {
-				self.files.close_menu();
-				if let Some(request) = self.files.refresh() {
+				self.panes.pane.close_menu();
+				if let Some(request) = self.panes.pane.refresh() {
 					self.list_files(request);
 				}
 			}
 			FilesMessage::CopyName(path) => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				let names = self.action_targets(&path);
 				let text = join_lines(names.iter().map(|path| explorer::name(path).to_owned()));
 				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyRelative(path) => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				// The menu disables this item without a cwd, so this is belt and braces.
 				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
@@ -7479,14 +7450,14 @@ impl Tab {
 				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyPath(path) => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				let text = join_lines(self.action_targets(&path));
 				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::CopyCurrentPath => {
 				// The header path, not a selection: copy the one directory verbatim, with no
 				// `action_targets` detour and no line-joining — there is only ever the one.
-				if let Some(path) = self.files.path() {
+				if let Some(path) = self.panes.pane.path() {
 					let text = path.to_owned();
 					return self.copy_to_clipboard(text);
 				}
@@ -7497,28 +7468,28 @@ impl Tab {
 				return self.copy_to_clipboard(text);
 			}
 			FilesMessage::RenameStarted(path) => {
-				self.files.start_rename(path);
+				self.panes.pane.start_rename(path);
 				return iced::widget::operation::focus(ui::files::RENAME_INPUT_ID);
 			}
-			FilesMessage::RenameEdited(text) => self.files.edit_rename(text),
+			FilesMessage::RenameEdited(text) => self.panes.pane.edit_rename(text),
 			FilesMessage::RenameCommitted => {
-				if let Some((from, to)) = self.files.commit_rename() {
+				if let Some((from, to)) = self.panes.pane.commit_rename() {
 					self.send_command(SshCommand::RenameDir { from, to });
 				}
 			}
 			FilesMessage::Download(path) => {
-				self.files.close_menu();
+				self.panes.pane.close_menu();
 				// One transfer at a time — the status bar has one progress bar, and two
 				// concurrent transfers would fight over it (§17). A batch respects that by
 				// queueing; a batch started while something else runs still has to wait.
 				if self.transfers.busy() {
-					self.files.set_notice(transfer::BUSY_NOTICE.to_owned());
+					self.panes.pane.set_notice(transfer::BUSY_NOTICE.to_owned());
 					return iced::Task::none();
 				}
 				// Folders are dropped rather than refused: a band that swept up a directory
 				// alongside nine files should still fetch the nine (§21).
 				let mut targets = self.action_targets(&path);
-				targets.retain(|path| self.files.kind_of(path) != Some(files::Kind::Dir));
+				targets.retain(|path| self.panes.pane.kind_of(path) != Some(files::Kind::Dir));
 				return match targets.len() {
 					0 => iced::Task::none(),
 					// One file keeps the save dialog, which asks its own overwrite question.
@@ -7526,22 +7497,20 @@ impl Tab {
 					_ => pick_download_folder(targets),
 				};
 			}
-			FilesMessage::SplitterGrabbed => self.files.set_dragging(true),
+			FilesMessage::SplitterGrabbed => self.panes.pane.set_dragging(true),
 			FilesMessage::SplitterDragged(pointer) => {
-				if self.files.dragging() {
+				if self.panes.pane.dragging() {
 					// The splitter sits at the pane's top edge and the pane runs to the
 					// window's bottom edge, so the pointer's distance from that edge IS the
-					// height — no drag anchor to track.
-					let max = self.window_size.height * MAX_PANEL_FRACTION;
-					self.files
-						.set_height(self.window_size.height - pointer.y, max);
+					// height — no drag anchor to track. The tree's twin, on the other axis.
+					self.panes.drag_pane_splitter(pointer.y, self.window_size);
 					self.refit_grid();
 				}
 			}
-			FilesMessage::SplitterReleased => self.files.set_dragging(false),
+			FilesMessage::SplitterReleased => self.panes.pane.set_dragging(false),
 			// Hover only lights the bar (§19); no relayout, so no grid refit.
-			FilesMessage::SplitterEntered => self.files.set_splitter_hovered(true),
-			FilesMessage::SplitterExited => self.files.set_splitter_hovered(false),
+			FilesMessage::SplitterEntered => self.panes.pane.set_splitter_hovered(true),
+			FilesMessage::SplitterExited => self.panes.pane.set_splitter_hovered(false),
 		}
 		iced::Task::none()
 	}
@@ -7614,14 +7583,8 @@ impl Tab {
 	/// the folder, and the files pane, if that is the directory on show. The refresh a create or a
 	/// delete triggers, so a new row appears — or a gone one vanishes — in place.
 	fn refresh_remote_dir(&mut self, dir: &str) {
-		if let Some(fetch) = self.explorer.refresh_dir(dir) {
-			self.send_command(SshCommand::ListDir(fetch));
-		}
-		if self.files.path() == Some(dir)
-			&& let Some(request) = self.files.refresh()
-		{
-			self.list_files(request);
-		}
+		let fetches = self.panes.refresh_dir(dir);
+		self.send_fetches(fetches);
 	}
 
 	/// Entries were deleted (§18): step the files pane out of any folder that is now gone, drop
@@ -7629,31 +7592,8 @@ impl Tab {
 	/// update in place. Done here rather than in a model because it spans both panels and the
 	/// pane's own idea of where it is.
 	fn on_deleted(&mut self, paths: Vec<String>) {
-		// If the pane sits inside a deleted subtree, move it up to a folder that still exists
-		// before anything re-lists — otherwise it would try to list a directory that is gone.
-		if let Some(pane) = self.files.path().map(str::to_owned) {
-			for deleted in &paths {
-				if is_within(&pane, deleted) {
-					let up = explorer::parent(deleted)
-						.unwrap_or(explorer::ROOT)
-						.to_owned();
-					self.browse_to(&up);
-					break;
-				}
-			}
-		}
-		let mut parents: Vec<String> = Vec::new();
-		for path in &paths {
-			self.explorer.forget(path);
-			if let Some(parent) = explorer::parent(path).map(str::to_owned)
-				&& !parents.contains(&parent)
-			{
-				parents.push(parent);
-			}
-		}
-		for parent in parents {
-			self.refresh_remote_dir(&parent);
-		}
+		let fetches = self.panes.deleted(&paths);
+		self.send_fetches(fetches);
 	}
 
 	/// Reflow the terminal to the current window *and* panel footprint (§18). The panel
@@ -7676,7 +7616,7 @@ impl Tab {
 	/// Ask the SSH task for the directory the files pane wants (§19). One command per
 	/// listing; the batches come back tagged with this same request number.
 	fn list_files(&mut self, request: u64) {
-		let Some(path) = self.files.path().map(str::to_owned) else {
+		let Some(path) = self.panes.pane.path().map(str::to_owned) else {
 			return;
 		};
 		self.send_command(SshCommand::ListFiles { path, request });
@@ -7785,8 +7725,8 @@ impl Tab {
 						// knows what it is holding.
 						&self.transfers,
 						ui::terminal::Panels {
-							explorer: &self.explorer,
-							files: &self.files,
+							explorer: &self.panes.tree,
+							files: &self.panes.pane,
 							focus: self.focus,
 							// The pane's width (the window less the tree's column beside it), which is
 							// what its grid wraps at and its overlays are placed against (§18, §19).
@@ -8140,14 +8080,6 @@ fn pick_download_tree_target(remote: String) -> iced::Task<Message> {
 			local: handle.map(|handle| handle.path().to_path_buf()),
 		},
 	)
-}
-
-/// Whether `path` is `ancestor` itself or sits somewhere beneath it (§18) — the test for a files
-/// pane showing a directory that a delete just removed. The trailing slash is normalised so `/a`
-/// matches `/a/b` but not the unrelated `/ab`.
-fn is_within(path: &str, ancestor: &str) -> bool {
-	let ancestor = ancestor.trim_end_matches('/');
-	path == ancestor || path.starts_with(&format!("{ancestor}/"))
 }
 
 /// The secret a "Remember" tick should persist for this auth method (§16): the password, or a
@@ -8534,7 +8466,7 @@ mod tests {
 		let _ = app.open_term_find();
 		assert_eq!(app.keyboard_claim(), Some(Claim::Find));
 
-		app.explorer.start_rename("/srv".to_owned());
+		app.panes.tree.start_rename("/srv".to_owned());
 		assert_eq!(
 			app.keyboard_claim(),
 			Some(Claim::TreeRename),
@@ -9439,7 +9371,7 @@ mod tests {
 		let (mut app, _rx) = app_with_terminal(16);
 		// The files pane starts open (§19) and takes its height out of the grid, so the window sizes
 		// here have to allow for it or the reflow lands on a one-row grid.
-		let reserved = app.files.reserved();
+		let reserved = app.panes.pane.reserved();
 		app.window_size = ui::terminal::window_size(80, 24, reserved);
 		app.terminal.as_mut().unwrap().process(b"hello world");
 
@@ -9480,7 +9412,7 @@ mod tests {
 	#[test]
 	fn a_resize_starts_the_multi_click_tally_over() {
 		let (mut app, _rx) = app_with_terminal(16);
-		let reserved = app.files.reserved();
+		let reserved = app.panes.pane.reserved();
 		app.window_size = ui::terminal::window_size(80, 24, reserved);
 		app.terminal.as_mut().unwrap().process(b"cat /etc/hosts");
 
@@ -9805,9 +9737,9 @@ mod tests {
 	fn switching_accounts_reads_the_file_panes_again_as_the_new_account() {
 		let (mut app, mut rx) = app_with_login_identity();
 		// A tree with a listed, open folder and a pane showing it — `cme`'s view of /etc.
-		let _fetch = app.explorer.expand("/etc", false);
-		app.explorer.listed("/etc", vec!["ssl".to_owned()]);
-		if let Some(request) = app.files.show("/etc") {
+		let _fetch = app.panes.tree.expand("/etc", false);
+		app.panes.tree.listed("/etc", vec!["ssl".to_owned()]);
+		if let Some(request) = app.panes.pane.show("/etc") {
 			app.list_files(request);
 		}
 		// Becoming root puts root's shell on screen, and that same switch moves the panes.
@@ -9835,13 +9767,17 @@ mod tests {
 		// Nothing `cme` listed is on screen in the meantime: the rows stand empty under the spinner
 		// until root's own listing lands.
 		assert!(
-			app.explorer.rows().iter().all(|row| row.path != "/etc/ssl"),
+			app.panes
+				.tree
+				.rows()
+				.iter()
+				.all(|row| row.path != "/etc/ssl"),
 			"another account's children must not survive the switch"
 		);
-		assert_eq!(app.files.count(), 0, "nor its files");
+		assert_eq!(app.panes.pane.count(), 0, "nor its files");
 
 		// And it happens in both directions: going back to `cme` re-reads what root had listed.
-		app.explorer.listed("/etc", vec!["shadow.d".to_owned()]);
+		app.panes.tree.listed("/etc", vec!["shadow.d".to_owned()]);
 		let _task = app.switch_identity(bridge::LOGIN_IDENTITY);
 		let back = drain(&mut rx);
 		assert!(
@@ -9850,7 +9786,8 @@ mod tests {
 			"the folder is read again as the login account too"
 		);
 		assert!(
-			app.explorer
+			app.panes
+				.tree
 				.rows()
 				.iter()
 				.all(|row| row.path != "/etc/shadow.d"),
@@ -10167,14 +10104,14 @@ mod tests {
 		// at its own — so the pane is pinned to `/etc` until the shell reaches `/var/log`.
 		let _ = app.on_ssh_event(SshEvent::Connected);
 		assert!(matches!(app.screen, Screen::Terminal));
-		assert_eq!(app.files.path(), Some("/etc"));
+		assert_eq!(app.panes.pane.path(), Some("/etc"));
 		assert_eq!(app.resume_cwd.as_deref(), Some("/var/log"));
 
 		// The login prompt announces the login directory first. The pane must NOT follow it
 		// off `/etc` while the resume is still pending.
 		let _ = app.on_ssh_event(announce("/home/u"));
 		assert_eq!(
-			app.files.path(),
+			app.panes.pane.path(),
 			Some("/etc"),
 			"pinned through the login prompt"
 		);
@@ -10187,13 +10124,13 @@ mod tests {
 		// The replayed `cd` lands: the shell has settled, so the pin lifts — but the pane is
 		// left where the restore put it rather than dragged onto the shell's cwd.
 		let _ = app.on_ssh_event(announce("/var/log"));
-		assert_eq!(app.files.path(), Some("/etc"), "kept, not clobbered");
+		assert_eq!(app.panes.pane.path(), Some("/etc"), "kept, not clobbered");
 		assert_eq!(app.resume_cwd, None, "no longer pinned");
 
 		// A real move afterwards follows normally: the pane tracks the shell again.
 		let _ = app.on_ssh_event(announce("/var/log/nginx"));
 		assert_eq!(
-			app.files.path(),
+			app.panes.pane.path(),
 			Some("/var/log/nginx"),
 			"following resumed"
 		);
@@ -10234,13 +10171,13 @@ mod tests {
 		// Both panels open on the resume point: the pane at its remembered directory, the tree
 		// with the chain down to it open and that folder selected.
 		let _ = app.on_ssh_event(SshEvent::Connected);
-		assert_eq!(app.explorer.selected(), Some("/etc"));
+		assert_eq!(app.panes.tree.selected(), Some("/etc"));
 
 		// The login prompt announces a directory the shell is about to leave. Neither panel may
 		// be dragged onto it — the pane was always safe here, the tree was not.
 		let _ = app.on_ssh_event(announce("/home/u"));
 		assert_eq!(
-			app.explorer.selected(),
+			app.panes.tree.selected(),
 			Some("/etc"),
 			"the tree is pinned too"
 		);
@@ -10248,12 +10185,16 @@ mod tests {
 		// The replayed `cd` lands: the shell has settled and the pin lifts, but the restored
 		// view stands in both panels rather than being clobbered by the arrival.
 		let _ = app.on_ssh_event(announce("/var/log"));
-		assert_eq!(app.explorer.selected(), Some("/etc"), "kept, not clobbered");
+		assert_eq!(
+			app.panes.tree.selected(),
+			Some("/etc"),
+			"kept, not clobbered"
+		);
 
 		// A real move afterwards carries both panels, exactly as it always did.
 		let _ = app.on_ssh_event(announce("/var/log/nginx"));
 		assert_eq!(
-			app.explorer.selected(),
+			app.panes.tree.selected(),
 			Some("/var/log/nginx"),
 			"following resumed"
 		);
@@ -10377,15 +10318,15 @@ mod tests {
 
 		// The user asks for the panels to come to the shell, mid-resume.
 		let _task = app.update(Message::RevealPressed);
-		assert_eq!(app.files.path(), Some("/home/u"), "the panels came");
+		assert_eq!(app.panes.pane.path(), Some("/home/u"), "the panels came");
 		assert_eq!(app.resume_cwd, None, "and the pin is spent");
 
 		// The replayed `cd` lands. It is a real move now, so both panels follow it — where
 		// before, the leftover pin read it as "already there" and left them behind.
 		let _ = app.on_ssh_event(announce("/var/log"));
-		assert_eq!(app.files.path(), Some("/var/log"), "the pane kept up");
+		assert_eq!(app.panes.pane.path(), Some("/var/log"), "the pane kept up");
 		assert_eq!(
-			app.explorer.selected(),
+			app.panes.tree.selected(),
 			Some("/var/log"),
 			"and the tree with it"
 		);
@@ -10402,24 +10343,28 @@ mod tests {
 
 		// The shell says where it is, and both panels follow it there as usual.
 		let _ = app.on_ssh_event(announce("/var/log"));
-		assert_eq!(app.files.path(), Some("/var/log"));
-		assert_eq!(app.explorer.selected(), Some("/var/log"));
+		assert_eq!(app.panes.pane.path(), Some("/var/log"));
+		assert_eq!(app.panes.tree.selected(), Some("/var/log"));
 
 		// A look somewhere else, with the tree walked off the shell's folder too.
 		app.browse_to("/etc");
-		app.explorer.select("/etc");
+		app.panes.tree.select("/etc");
 		let _ = app.on_ssh_event(announce("/var/log"));
 		assert_eq!(
-			app.files.path(),
+			app.panes.pane.path(),
 			Some("/etc"),
 			"a re-announcement is not a move, so the browse stands (§19)"
 		);
 
 		let _ = drain(&mut rx);
 		let _task = app.update(Message::RevealPressed);
-		assert_eq!(app.files.path(), Some("/var/log"), "the pane came back");
 		assert_eq!(
-			app.explorer.selected(),
+			app.panes.pane.path(),
+			Some("/var/log"),
+			"the pane came back"
+		);
+		assert_eq!(
+			app.panes.tree.selected(),
 			Some("/var/log"),
 			"and the tree with it"
 		);
@@ -10441,7 +10386,7 @@ mod tests {
 		let _ = drain(&mut rx);
 
 		let _task = app.update(Message::RevealPressed);
-		assert_eq!(app.files.path(), Some("/etc"), "left where it was");
+		assert_eq!(app.panes.pane.path(), Some("/etc"), "left where it was");
 		assert!(drain(&mut rx).is_empty(), "and nothing asked of the server");
 	}
 
@@ -10454,10 +10399,11 @@ mod tests {
 
 		let mut app = Tab::default();
 		let request = app
-			.files
+			.panes
+			.pane
 			.show("/home")
 			.expect("a new directory needs listing");
-		app.files.chunk(
+		app.panes.pane.chunk(
 			request,
 			["a", "b", "c", "d"]
 				.into_iter()
@@ -10470,8 +10416,9 @@ mod tests {
 			true,
 		);
 		let chosen = |app: &Tab| {
-			app.files
-				.selected_rows(app.explorer.show_hidden())
+			app.panes
+				.pane
+				.selected_rows(app.panes.show_hidden())
 				.into_iter()
 				.map(|(path, _)| path)
 				.collect::<Vec<_>>()

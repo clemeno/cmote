@@ -245,6 +245,7 @@ cmote/
     ├── link.rs           opening an OSC 8 hyperlink safely: the scheme allow-list + the OS browser launch (§24)
     ├── mru.rs            the tabs' activation order (ids, most recent last): a close falls back to the previous visit (§37)
     ├── palette.rs        the terminal colour scheme (default fg/bg + xterm-256), shared by the renderer and the colour-query answerer (§9, §23)
+    ├── panes.rs          the tree and the file pane as one pair, and only what spans them: reveal/follow, re-read, what a deletion means, the remembered layout, the shared `.*` toggle — returning the listings to ask for rather than sending them (§18, §19, §22)
     ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
     ├── preview.rs        the picture tab's model: which files open as a picture, and the fenced decode — sniff by magic bytes, cap the dimensions and the allocation, name the format in every refusal (§53)
     ├── profiles.rs       load/save `targets.json`: saved connection profiles + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
@@ -1943,7 +1944,34 @@ answers "what is actually in here". Same three-way split — a pure model
 (`files.rs`), a pure view (`ui/files.rs`), and the network calls (`ssh/browse.rs`,
 `ssh/download.rs`) — so the rules that matter are unit-testable with no server.
 
-The layout is now two rows under the status bar: `terminal | tree` on top, the files pane
+### The pair has an owner (`panes.rs`)
+
+The tree and the pane are two models, but a good deal is true of **both at once**, and that half
+had no home: it lived in `app`, in eighteen methods that reached into the two models and sequenced
+them by hand — one of which said so in its own comment, *"Done here rather than in a model because
+it spans both panels."* `panes::Panes` holds the pair and owns exactly the operations that are about
+the pair: revealing a directory (tree opened down to it AND pane pointed at it — one without the
+other is a bug, not a halfway state), following the shell, re-reading for another account (§46), the
+remembered layout (§22), and what a deletion means.
+
+Deletion is the one that shows why order is a rule and not a detail: the pane must step out of a
+folder that is gone **before** anything re-lists, or the first refresh asks the server to list a
+directory that has just been removed. That sequence is now one method with a test, instead of a
+comment.
+
+Two things it deliberately does **not** do. It does not forward the panels' own methods — both
+models stay public, and a caller that wants to scroll the tree scrolls the tree; re-typing a hundred
+single-panel methods would make it wide and shallow and would earn nothing. And it does not touch a
+channel: operations that need the network return `Fetches` — the listings to ask for — and the
+caller turns those into commands. That is `transfer::Queue`'s shape (§16), for the same reason, and
+it is what lets every rule above be answered in a test with no window and no server.
+
+The `.*` toggle is the clearest case of a coupling that had nowhere to live. It is **one setting for
+both panels**, and it is held by the tree — so `files::rows` cannot answer "what should I show"
+without it, and nine call sites used to fetch the flag off the other model and hand it over.
+`panes.rows()` states that once. There are now zero expressions in `app` that touch both models.
+
+The layout is two rows under the status bar: `terminal | tree` on top, the files pane
 across the bottom, with a draggable splitter on each seam. `grid_size` subtracts the
 tree's width AND the pane's height, so the pty reflows for either drag exactly as it does
 for a window resize.

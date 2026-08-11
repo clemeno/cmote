@@ -24,6 +24,7 @@ mod integration; // the shell-integration block a remote's rc file can be given,
 mod link; // opening an OSC 8 hyperlink safely: scheme policy + the OS browser launch (§24)
 mod mru; // the tabs' activation order, so closing one falls back to the previous visit (§37)
 mod palette; // the terminal colour scheme, shared by the renderer and the query answerer (§9, §23)
+mod panes; // the tree and the pane as one pair, and the rules that span them (§18, §19, §22)
 mod paths; // where on-disk data lives: known_hosts + saved targets (§11, §14)
 mod preview; // the picture tab's model: which files are pictures, and the fenced decode (§53)
 mod profiles; // saved connection targets, persisted as profiles only — no secrets (§14)
