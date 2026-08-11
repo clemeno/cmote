@@ -5856,9 +5856,21 @@ account the pane happened to be showing.
   level and nothing has to be reset — there is exactly one picture per tab for the life of the tab,
   which is what makes that free. Limits: out to a third (a big scan fits a small region), in to 10×
   (far enough to read a screenshot's smallest text, which is why anyone zooms one).
-- **`ContentFit::Contain`, never `Fill`.** The whole picture, scaled down if it is too big and left
-  at its own size if it is not — a 32×32 favicon blown across the window would be a wall of soft
-  squares, and the user asked to see the file, not an enlargement of it.
+- **A picture opens at 1:1 if it fits and contained if it does not, and centred either way**
+  (`ContentFit::ScaleDown`). Two rules, and the second one is the one that is easy to get wrong.
+  Bigger than the body: shrunk until the whole of it is on screen at once, so there is nothing to
+  scroll to before you have seen the picture — never `Cover` (crops) and never `Fill` (a 2:1
+  photograph squeezed into a 4:3 body is a photograph of something that does not look like that).
+  Smaller than the body: left alone, because upscaling invents detail the file does not contain and
+  the request was to see the file. This shipped as `ContentFit::Contain` first, which is the same
+  thing for large pictures and silently WRONG for small ones — `Contain` fits upward too, so a 32×32
+  favicon opened as a 600-pixel wall of soft squares. Worth stating because the mistake is invisible
+  in the case anyone tests by eye: every fit that scales at all handles a photograph identically, and
+  it is the icon that tells them apart. Four tests in `ui/preview.rs` ask the constant itself what
+  size a given picture comes out in a given body, so the variant cannot drift back.
+- **Centring is the widget's**, not a container alignment: `image::viewer` splits the leftover room
+  evenly on both sides of the image. Panning is therefore inert at the opening fit — with nothing
+  hidden, there is nowhere to drag to — and wakes up only once someone has zoomed past the body.
 - **Decoded once, on arrival**, into an iced image handle held on the model — the same trade
   `term::graphics` makes for the sixel images (§41). The alternative is keeping the pixels and
   rebuilding a handle every frame, which re-uploads the texture on every paint. `ponytail:` that

@@ -238,7 +238,10 @@ references below (§n) point into it.
   bundled icon font, by category (folder, image, code, archive, document, audio, video, link,
   plain). **Double-click a file** to open it in a tab of its own: a text file lands in the in-tab
   editor, and a **picture opens as a picture** — its own tab with the image on a grey ground,
-  **scroll to zoom** and **drag to pan**, the name, the format and the pixel size along the top.
+  **scroll to zoom** and **drag to pan**, the name, the format and the pixel size along the top. It
+  opens **centred**, at its own size if it fits and shrunk to fit whole if it does not: an icon stays
+  icon-sized rather than being blown up into soft squares, and a photograph is all there at once
+  rather than something you have to drag around to see.
   The menu's row says which one you will get (**Edit…** or **Preview**). The format is read from
   the file's own leading bytes, not its name, so a `.jpg` that is really a PNG opens anyway and says
   so; PNG, JPEG, GIF, BMP and WebP are drawn, and anything else is refused **by name** rather than
@@ -515,8 +518,9 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 
 | Gesture | What it does |
 |---|---|
+| Opening a picture | Centred, 1:1 if it fits the tab, shrunk to fit whole if it does not |
 | **Scroll** over the picture | Zoom about the pointer — out to a third, in to 10× |
-| **Drag** the picture | Pan it |
+| **Drag** the picture | Pan it — only once it has been zoomed past the tab, since until then all of it is already on screen |
 | **Esc** or **Ctrl+W** | Close the tab |
 | **Close** button in the toolbar | The same |
 
@@ -1006,8 +1010,11 @@ then follow the shell. Then:
 - **Double-click a picture** (`.png`, `.jpg`, `.gif`, `.bmp`, `.webp`) → a **preview tab** opens
   beside its session with the image on a grey ground, and the toolbar reads the path, the format,
   the pixel size and the file size. Check them against `identify` or `file` on the remote. **Scroll**
-  over it to zoom about the pointer and **drag** to pan; **Esc** or **Ctrl+W** closes it. The three
-  that must also hold:
+  over it to zoom about the pointer and **drag** to pan; **Esc** or **Ctrl+W** closes it. The opening
+  fit is worth checking with two files rather than one, because the wrong one looks right on a
+  photograph: a **16×16 or 32×32 icon** must open icon-sized and centred, not blown across the tab,
+  and a **photograph larger than the window** must open with all of it visible and nothing to drag to
+  until you have zoomed in. The three that must also hold:
   - `cp shot.png shot.jpg` on the remote and open `shot.jpg` → it opens anyway and the toolbar says
     **PNG**. The format comes from the bytes, never from the name.
   - Open a `.tif` (or any picture cmote has no decoder for) → the tab says *"cmote does not preview
