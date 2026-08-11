@@ -2057,13 +2057,22 @@ impl App {
 			subs.push(iced::window::frames().map(|_instant| Message::FileDropSettled));
 		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
-		match self.active().screen {
+		let active = self.active();
+		match active.screen {
 			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
-			Screen::Connect => subs.push(iced::keyboard::listen().map(Message::FormKey)),
+			// The form's own focus ring (Tab / Shift+Tab / Enter / Space, §10) — but ONLY while
+			// nothing is being asked over it (§7, §8, §16). A prompt's fields type through the
+			// widget tree, so leaving the ring live would move the highlight around behind the
+			// dialog and let Enter press the Connect button under it. This is the one place that
+			// rule is stated; it used to be implicit in the six `Screen` variants that each had no
+			// keyboard subscription of their own.
+			Screen::Connect if active.prompt.is_none() => {
+				subs.push(iced::keyboard::listen().map(Message::FormKey));
+			}
 			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
 			// The editor's shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W); typing goes to the widget.
 			Screen::Editor => subs.push(iced::keyboard::listen().map(Message::EditorKey)),
-			_ => {}
+			Screen::Connect | Screen::Connecting { .. } => {}
 		}
 
 		iced::Subscription::batch(subs)
@@ -2084,39 +2093,62 @@ pub enum Screen {
 	/// Handshake and authentication in progress; `status` is a human-readable
 	/// step for the UI ("connecting", "verifying host key", "authenticating").
 	Connecting { status: String },
-	/// First contact with an unknown host: the server's key fingerprint is shown
-	/// and the user must accept or reject before the handshake continues (§8). The
-	/// fingerprint text itself lives in `App::dialog_body` (the selectable message),
-	/// seeded when this state is entered — the variant is just the marker.
-	ConfirmHostKey,
-	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
-	/// man-in-the-middle. The loud override dialog shows both fingerprints (stored vs presented,
-	/// carried in `App::dialog_body`) and offers reject / trust once / replace. Like
-	/// `ConfirmHostKey` this variant is just the marker; the message lives in the dialog body.
-	HostKeyChanged,
-	/// The chosen private key is encrypted: prompt for its passphrase (§7). The
-	/// text the user types lives in `App::passphrase_input`.
-	NeedPassphrase,
-	/// The server posed a keyboard-interactive challenge (§7): 2FA / OTP or any
-	/// challenge-response scheme. The request's fields live in `App::interactive_prompts` and
-	/// the user's in-progress answers in `App::interactive_answers`; submitting sends them back
-	/// and the server drives what comes next — another prompt, success, or a generic failure.
-	Interactive,
-	/// The master-passphrase prompt for the portable secret vault (§16), shown over the
-	/// connect form: CREATE it (first time, typed twice) or UNLOCK it. The typed values live
-	/// in `App::vault_input` / `vault_confirm`; on success the pending action (`vault_pending`)
-	/// — a deferred connect, or a form pre-fill — resumes.
-	VaultUnlock,
 	/// A live shell: the vt100 grid fills the window.
 	Terminal,
 	/// A text editor open on a remote file (§32). This tab is NOT a session — it has no connection
 	/// of its own; its loads and saves ride the parent session's channel. The buffer and its state
 	/// live in `Tab::editor`, which is `Some` exactly while this screen shows.
 	Editor,
-	/// A terminal failure. The generic, non-leaking message (§12) lives in
-	/// `App::dialog_body` so it can be selected and copied; this variant just marks
-	/// that the error screen is showing.
-	Error,
+}
+
+/// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
+///
+/// These were six `Screen` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
+/// `NeedPassphrase`, `Interactive`, `VaultUnlock`, `Error` — but they were never separate screens:
+/// every one of them renders `form_with_dialog(…)`, the connect form with a dialog over it. Calling
+/// them screens cost a real thing, which is that `Screen::Connect`'s keyboard subscription was the
+/// only place the form's own Tab / Enter ring was live. Six variants that each had to remember to
+/// switch it off; one `Option` that says it once.
+///
+/// Each variant carries what answering it needs, so the answer is read off the thing that asked.
+/// The two host-key variants carry nothing: their message is already in the selectable dialog body,
+/// and the CHOICE goes back down the wire, so there is nothing to hold on this side (§8).
+#[derive(Debug)]
+enum Prompt {
+	/// First contact with an unknown host: the server's fingerprint is shown and the user must
+	/// accept or reject before the handshake continues (§8).
+	HostKey,
+	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
+	/// man-in-the-middle. The loud override dialog shows both fingerprints and offers reject /
+	/// trust once / replace. Dismissing REJECTS, whichever way it is dismissed.
+	HostKeyChanged,
+	/// The chosen private key is encrypted (§7): the passphrase being typed. Moved into a `Secret`
+	/// on submit and this buffer dropped with the prompt, so no plain copy is kept (§12).
+	Passphrase(String),
+	/// The server posed a keyboard-interactive challenge (§7): 2FA / OTP or any
+	/// challenge-response scheme. `fields` is the request, one per prompt with its echo hint, and
+	/// `answers` the user's in-progress replies in the same order — moved into `Secret`s on submit.
+	Interactive {
+		fields: Vec<bridge::InteractivePrompt>,
+		answers: Vec<String>,
+	},
+	/// The master-passphrase prompt for the portable secret vault (§16): CREATE it (first time,
+	/// typed twice) or UNLOCK it. `pending` is what a successful unlock resumes, held here rather
+	/// than beside the prompt so a dismissed prompt cannot leave a deferred connect behind.
+	Vault {
+		input: String,
+		confirm: String,
+		/// Whether this is a create (no vault file yet, two fields) rather than an unlock (one).
+		/// Fixed when the prompt opens, so the view need not re-check the disk.
+		creating: bool,
+		/// Whether to show the "wrong / do not match" hint — set on a failed unlock or a
+		/// mismatched create, and false again each time the prompt is opened afresh.
+		failed: bool,
+		pending: VaultPending,
+	},
+	/// A failure. The generic, non-leaking message (§12) is in the selectable dialog body so it can
+	/// be copied; this variant just says the failure dialog is what is showing.
+	Failed,
 }
 
 /// Which part of the terminal screen the keyboard is talking to (§20).
@@ -2252,24 +2284,24 @@ pub struct Tab {
 	/// (§32). `Some` exactly while `screen` is `Screen::Editor`; it holds the buffer, the encoding,
 	/// the changed-line marks and the id of the parent session its saves ride through.
 	editor: Option<crate::editor::Editor>,
-	/// The passphrase being typed on the `NeedPassphrase` screen. Kept here rather
-	/// than in the form so it never lingers there; it is moved into a `Secret` on
-	/// submit and the field is cleared (§12).
-	passphrase_input: String,
+	/// The question the connect flow is holding over the form, `None` when it is holding none
+	/// (§7, §8, §16). Each variant carries what answering it needs — the passphrase being typed,
+	/// the interactive challenge and its answers, the vault's two fields and what its unlock
+	/// resumes — so nothing is read from a field that might be left over from an earlier prompt.
+	///
+	/// While it is `Some` the form's own keyboard ring is off (see `subscription`): the prompt's
+	/// fields type through the widget tree, and Tab / Enter belong to them. As six `Screen`
+	/// variants that was six places that each had to remember.
+	prompt: Option<Prompt>,
 	/// Whether a passphrase has already been submitted this connection. The SSH task
 	/// re-emits `NeedPassphrase` for both the first ask and a wrong-passphrase re-ask,
-	/// so this flag is how the passphrase screen knows to show its "incorrect" hint:
+	/// so this flag is how the passphrase prompt knows to show its "incorrect" hint:
 	/// if it is set when the prompt appears, the previous attempt was rejected (§7).
 	/// Reset at the start of each connection attempt.
+	///
+	/// It is HERE rather than in `Prompt::Passphrase` because it outlives the prompt: the flag is
+	/// set as the answer goes down the wire, and read when the re-ask builds the next prompt.
 	passphrase_failed: bool,
-	/// The current keyboard-interactive request's fields (§7), one per prompt with its echo
-	/// hint. Empty unless the Interactive screen is showing; set from `SshEvent::Interactive`
-	/// and cleared once the prompt is answered or cancelled.
-	interactive_prompts: Vec<bridge::InteractivePrompt>,
-	/// The user's in-progress answers to `interactive_prompts` (§7), one `String` per prompt in
-	/// the same order. Moved into `Secret`s on submit and then cleared, so no plain copy of an
-	/// OTP or password lingers in app state (§12).
-	interactive_answers: Vec<String>,
 	/// The `user@host:port` of the current session, shown in the terminal's status
 	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
 	/// secret, so it is safe in `Debug`.
@@ -2406,20 +2438,6 @@ pub struct Tab {
 	/// when the app exits, wiping the decrypted secrets it carries. Lazy: a user who never opts in
 	/// never has one.
 	vault: Rc<RefCell<Option<crate::vault::Vault>>>,
-	/// The master passphrase being typed in the vault prompt, and its confirm field (create
-	/// mode). Kept out of the vault itself so a cancelled prompt leaves nothing behind; cleared
-	/// on submit or cancel (§16, §12).
-	vault_input: String,
-	vault_confirm: String,
-	/// Whether the vault prompt is CREATING a passphrase (no vault file yet, two fields) rather
-	/// than unlocking an existing one (a single field). Fixed when the prompt opens.
-	vault_creating: bool,
-	/// Whether the vault prompt should show its "wrong / do not match" hint — set on a failed
-	/// unlock or a mismatched create, cleared when the prompt reopens (§16).
-	vault_failed: bool,
-	/// What a successful vault unlock should resume (§16): a deferred connect, or a form
-	/// pre-fill. `None` when no vault prompt is pending.
-	vault_pending: Option<VaultPending>,
 	/// The secret captured at dial time to store once the connect succeeds (§16), with its
 	/// endpoint. Set only when "Remember" is on and the secret is non-empty; taken and written
 	/// on `Connected`, cleared if the connect never leaves. Persisting only on success means a
@@ -3035,7 +3053,6 @@ impl Tab {
 				.clone()
 				.unwrap_or_else(|| "session".to_owned()),
 			Screen::Home => "Home".to_owned(),
-			Screen::Error => "Error".to_owned(),
 			// An editor tab is named by its file, with a dot when it has unsaved edits (§32).
 			Screen::Editor => match &self.editor {
 				Some(editor) => {
@@ -3045,8 +3062,13 @@ impl Tab {
 				}
 				None => "editor".to_owned(),
 			},
-			// The connect form and every dialog over it are all one "new connection" in progress.
-			_ => "New connection".to_owned(),
+			// The connect form and every prompt over it are one "new connection" in progress —
+			// except a failure, which is worth naming on the chip so a tab that fell over says so
+			// without being opened.
+			Screen::Connect => match self.prompt {
+				Some(Prompt::Failed) => "Error".to_owned(),
+				_ => "New connection".to_owned(),
+			},
 		}
 	}
 
@@ -3335,19 +3357,36 @@ impl Tab {
 			Message::RejectHostKey => self.on_host_key_decision(HostKeyChoice::Reject),
 			Message::TrustHostKeyOnce => self.on_host_key_decision(HostKeyChoice::TrustOnce),
 			Message::ReplaceHostKey => self.on_host_key_decision(HostKeyChoice::Pin),
-			Message::PassphraseChanged(value) => self.passphrase_input = value,
+			// The prompts' own field edits (§7, §16). Each one goes to the open prompt or nowhere:
+			// with the prompt closed there is no buffer to type into, which is the point of the
+			// buffers living inside it.
+			Message::PassphraseChanged(value) => {
+				if let Some(Prompt::Passphrase(input)) = &mut self.prompt {
+					*input = value;
+				}
+			}
 			Message::PassphraseSubmitted => self.on_passphrase_submitted(),
 			Message::PassphraseCancelled => return self.on_passphrase_cancelled(),
 			Message::InteractiveAnswerChanged(index, value) => {
-				if let Some(slot) = self.interactive_answers.get_mut(index) {
+				if let Some(Prompt::Interactive { answers, .. }) = &mut self.prompt
+					&& let Some(slot) = answers.get_mut(index)
+				{
 					*slot = value;
 				}
 			}
 			Message::InteractiveSubmitted => return self.on_interactive_submitted(),
 			Message::InteractiveCancelled => return self.on_interactive_cancelled(),
 			Message::RememberToggled => self.form.remember = !self.form.remember,
-			Message::VaultInputChanged(value) => self.vault_input = value,
-			Message::VaultConfirmChanged(value) => self.vault_confirm = value,
+			Message::VaultInputChanged(value) => {
+				if let Some(Prompt::Vault { input, .. }) = &mut self.prompt {
+					*input = value;
+				}
+			}
+			Message::VaultConfirmChanged(value) => {
+				if let Some(Prompt::Vault { confirm, .. }) = &mut self.prompt {
+					*confirm = value;
+				}
+			}
 			Message::VaultSubmitted => return self.on_vault_submitted(),
 			Message::VaultCancelled => return self.on_vault_cancelled(),
 			Message::Key(event) => return self.on_key(event),
@@ -3712,17 +3751,22 @@ impl Tab {
 	/// UNLOCK mode (one field) when it does — fixed here so the view need not re-check the disk.
 	/// It shows over the connect form, so the caller has already put the form on screen.
 	fn open_vault_modal(&mut self, pending: VaultPending) -> iced::Task<Message> {
-		self.vault_creating = !crate::vault::Vault::exists();
-		self.vault_input.clear();
-		self.vault_confirm.clear();
-		self.vault_failed = false;
-		self.vault_pending = Some(pending);
-		self.set_dialog_body(if self.vault_creating {
+		let creating = !crate::vault::Vault::exists();
+		let body = if creating {
 			ui::VAULT_CREATE_BODY
 		} else {
 			ui::VAULT_UNLOCK_BODY
-		});
-		self.screen = Screen::VaultUnlock;
+		};
+		self.open_prompt(
+			Prompt::Vault {
+				input: String::new(),
+				confirm: String::new(),
+				creating,
+				failed: false,
+				pending,
+			},
+			body,
+		);
 		iced::widget::operation::focus(ui::VAULT_INPUT_ID)
 	}
 
@@ -3732,45 +3776,65 @@ impl Tab {
 	/// (§12). On success the unlocked vault is kept for the session and the pending action
 	/// resumes. The typed values are taken (not copied) out of the fields so nothing lingers.
 	fn on_vault_submitted(&mut self) -> iced::Task<Message> {
-		let entered = std::mem::take(&mut self.vault_input);
+		// Taking the prompt takes the typed values with it: whatever happens next, the passphrase
+		// is not left sitting in app state (§12). A re-ask below builds a fresh prompt.
+		let Some(Prompt::Vault {
+			input,
+			confirm,
+			creating,
+			pending,
+			..
+		}) = self.prompt.take()
+		else {
+			return iced::Task::none();
+		};
 
-		let opened = if self.vault_creating {
-			let confirm = std::mem::take(&mut self.vault_confirm);
+		let opened = if creating {
 			// A new master passphrase must be non-empty and typed identically twice, so the one
 			// value that protects everything can never be a typo the user cannot reproduce.
-			if entered.is_empty() || entered != confirm {
-				self.vault_failed = true;
-				return iced::widget::operation::focus(ui::VAULT_INPUT_ID);
+			if input.is_empty() || input != confirm {
+				return self.reask_vault(creating, pending);
 			}
-			crate::vault::Vault::create(entered)
+			crate::vault::Vault::create(input)
 		} else {
-			crate::vault::Vault::unlock(entered)
+			crate::vault::Vault::unlock(input)
 		};
 
 		match opened {
 			Ok(vault) => {
 				*self.vault.borrow_mut() = Some(vault);
-				self.vault_confirm.clear();
-				self.vault_failed = false;
-				self.resume_vault_pending()
+				self.resume_vault_pending(pending)
 			}
 			Err(error) => {
 				// Wrong passphrase, or a damaged / unresolvable file: re-ask. The detail is
 				// logged, never shown (§12).
 				eprintln!("could not open the vault: {error:#}");
-				self.vault_failed = true;
-				iced::widget::operation::focus(ui::VAULT_INPUT_ID)
+				self.reask_vault(creating, pending)
 			}
 		}
+	}
+
+	/// Ask again, with the "wrong / do not match" hint and empty fields (§16). The prompt is
+	/// rebuilt rather than edited in place, so the rejected passphrase is dropped rather than
+	/// left in the buffer the next attempt types over.
+	fn reask_vault(&mut self, creating: bool, pending: VaultPending) -> iced::Task<Message> {
+		self.prompt = Some(Prompt::Vault {
+			input: String::new(),
+			confirm: String::new(),
+			creating,
+			failed: true,
+			pending,
+		});
+		iced::widget::operation::focus(ui::VAULT_INPUT_ID)
 	}
 
 	/// Resume whatever the vault unlock was blocking (§16): continue the deferred connect, or
 	/// pre-fill the form's masked field from the now-readable secret. A `Prefill` whose entry is
 	/// missing (the flag out of step with the vault) simply leaves the field blank.
-	fn resume_vault_pending(&mut self) -> iced::Task<Message> {
-		match self.vault_pending.take() {
-			Some(VaultPending::Connect(params)) => self.dial(params),
-			Some(VaultPending::Prefill(endpoint)) => {
+	fn resume_vault_pending(&mut self, pending: VaultPending) -> iced::Task<Message> {
+		match pending {
+			VaultPending::Connect(params) => self.dial(params),
+			VaultPending::Prefill(endpoint) => {
 				// Read the secret in a short borrow that ends before the `&mut self` call: a held
 				// `Ref` on the shared vault cell would clash with `fill_secret_field` (§26).
 				let secret = self
@@ -3783,19 +3847,15 @@ impl Tab {
 				}
 				self.go_to_form()
 			}
-			None => iced::Task::none(),
 		}
 	}
 
-	/// Dismiss the vault prompt (§16): clear the typed values and the pending secret, and drop
-	/// back to the connect form (populated behind the prompt in both flows). Cancelling never
-	/// stores anything — the deferred connect and the pre-fill are simply abandoned; the user
-	/// can still type the secret by hand.
+	/// Dismiss the vault prompt (§16): the prompt goes, and the typed values and the deferred
+	/// action go with it, leaving the connect form (populated behind the prompt in both flows).
+	/// Cancelling never stores anything — the deferred connect and the pre-fill are simply
+	/// abandoned; the user can still type the secret by hand.
 	fn on_vault_cancelled(&mut self) -> iced::Task<Message> {
-		self.vault_input.clear();
-		self.vault_confirm.clear();
-		self.vault_failed = false;
-		self.vault_pending = None;
+		self.prompt = None;
 		self.pending_remember = None;
 		self.screen = Screen::Connect;
 		iced::Task::none()
@@ -3821,6 +3881,7 @@ impl Tab {
 	fn on_host_key_decision(&mut self, choice: HostKeyChoice) {
 		let proceeding = choice != HostKeyChoice::Reject;
 		if self.send_command(SshCommand::HostKeyResponse(choice)) && proceeding {
+			self.prompt = None;
 			self.screen = Screen::Connecting {
 				status: "authenticating…".to_string(),
 			};
@@ -3831,8 +3892,12 @@ impl Tab {
 	/// status. The text is moved straight into a `Secret` and the input field
 	/// cleared, so no plain copy of the passphrase lingers in app state (§12).
 	fn on_passphrase_submitted(&mut self) {
-		let secret = Secret::new(std::mem::take(&mut self.passphrase_input));
-		if self.send_command(SshCommand::Passphrase(secret)) {
+		// Taking the prompt takes the typed text with it and moves it straight into a `Secret`, so
+		// no plain copy is left behind whether the send succeeds or not (§12).
+		let Some(Prompt::Passphrase(input)) = self.prompt.take() else {
+			return;
+		};
+		if self.send_command(SshCommand::Passphrase(Secret::new(input))) {
 			// An attempt is now in flight. If the key does not unlock, the SSH task
 			// re-asks and this flag makes the next prompt show its "incorrect" hint (§7).
 			self.passphrase_failed = true;
@@ -3843,9 +3908,9 @@ impl Tab {
 	}
 
 	/// Dismiss the passphrase prompt: tell the task to tear down and go back to
-	/// the form. Clearing the field first means the discarded text does not linger.
+	/// the form. The prompt goes first, so the discarded text does not linger.
 	fn on_passphrase_cancelled(&mut self) -> iced::Task<Message> {
-		self.passphrase_input.clear();
+		self.prompt = None;
 		self.send_command(SshCommand::Disconnect);
 		self.go_to_form()
 	}
@@ -3855,11 +3920,12 @@ impl Tab {
 	/// so no plain copy of an OTP or password lingers in app state (§12). The server drives what
 	/// happens next: another prompt (the dialog reappears), success, or a generic failure.
 	fn on_interactive_submitted(&mut self) -> iced::Task<Message> {
-		let answers: Vec<Secret> = std::mem::take(&mut self.interactive_answers)
-			.into_iter()
-			.map(Secret::new)
-			.collect();
-		self.interactive_prompts.clear();
+		// Taking the prompt takes the answers with it and moves each straight into a `Secret`, so
+		// no plain copy of an OTP or password is left behind (§12).
+		let Some(Prompt::Interactive { answers, .. }) = self.prompt.take() else {
+			return iced::Task::none();
+		};
+		let answers: Vec<Secret> = answers.into_iter().map(Secret::new).collect();
 		if self.send_command(SshCommand::Interactive(answers)) {
 			self.screen = Screen::Connecting {
 				status: "authenticating…".to_string(),
@@ -3869,10 +3935,9 @@ impl Tab {
 	}
 
 	/// Dismiss the keyboard-interactive prompt: tear the connection down and go back to the form
-	/// (§7). Clearing the buffers first means the discarded answers do not linger (§12).
+	/// (§7). The prompt goes first, so the discarded answers do not linger (§12).
 	fn on_interactive_cancelled(&mut self) -> iced::Task<Message> {
-		self.interactive_answers.clear();
-		self.interactive_prompts.clear();
+		self.prompt = None;
 		self.send_command(SshCommand::Disconnect);
 		self.go_to_form()
 	}
@@ -3948,8 +4013,19 @@ impl Tab {
 	/// body so the user can copy the failure text (§10, §12). Central so every error
 	/// path (validation, a dead worker channel, a session failure) stays consistent.
 	fn show_error(&mut self, message: &str) {
-		self.set_dialog_body(message);
-		self.screen = Screen::Error;
+		self.open_prompt(Prompt::Failed, message);
+		// A failure is shown over the connect FORM, wherever it came from — a validation slip on
+		// the form, a dead worker channel, a session that dropped — so Back leaves the user
+		// somewhere they can retry from rather than on a dead terminal screen (§10).
+		self.screen = Screen::Connect;
+	}
+
+	/// Open a prompt over the connect form (§7, §8, §16), the mirror of `open_modal` on the
+	/// terminal screen: whatever was being asked is replaced, the selectable body is seeded, and
+	/// the card is centred fresh rather than inheriting the last prompt's position.
+	fn open_prompt(&mut self, prompt: Prompt, body: &str) {
+		self.set_dialog_body(body);
+		self.prompt = Some(prompt);
 	}
 
 	/// React to an event from the SSH task. Returns a `Task` for any follow-up
@@ -3975,25 +4051,29 @@ impl Tab {
 				// Seed the selectable body with the explanation plus the fingerprint on
 				// its own line, so the whole message — the fingerprint included — can be
 				// selected and copied for out-of-band comparison (§8, §10).
-				self.set_dialog_body(&format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY));
-				self.screen = Screen::ConfirmHostKey;
+				let body = format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY);
+				self.open_prompt(Prompt::HostKey, &body);
+				self.screen = Screen::Connect;
 			}
 			SshEvent::HostKeyChanged { stored, presented } => {
 				// Seed the selectable body with the warning plus BOTH fingerprints, each labelled
 				// and on its own line, so the whole block — what was trusted vs what was sent — can
 				// be selected and copied for out-of-band comparison (§8, §10).
-				self.set_dialog_body(&format!(
+				let body = format!(
 					"{}\n\nStored (trusted before):\n{stored}\n\nPresented (sent now):\n{presented}",
 					ui::HOST_KEY_CHANGED_DIALOG_BODY
-				));
-				self.screen = Screen::HostKeyChanged;
+				);
+				self.open_prompt(Prompt::HostKeyChanged, &body);
+				self.screen = Screen::Connect;
 			}
 			SshEvent::NeedPassphrase => {
-				// Start from an empty field each time we ask (including a re-ask
-				// after a wrong passphrase), so a stale attempt is never resent.
-				self.passphrase_input.clear();
-				self.set_dialog_body(ui::PASSPHRASE_DIALOG_BODY);
-				self.screen = Screen::NeedPassphrase;
+				// A fresh, empty buffer each time we ask — including a re-ask after a wrong
+				// passphrase — so a stale attempt is never resent (§7, §12).
+				self.open_prompt(
+					Prompt::Passphrase(String::new()),
+					ui::PASSPHRASE_DIALOG_BODY,
+				);
+				self.screen = Screen::Connect;
 				// Focus the field so the user can type at once — the re-ask path
 				// lands here too, refocusing on every prompt (§7).
 				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
@@ -4013,13 +4093,17 @@ impl Tab {
 						body.push_str(extra);
 					}
 				}
-				self.set_dialog_body(&body);
 				// Start every field blank, one per prompt, and show the dialog. The server only
 				// sends a request with at least one prompt here (an empty, message-only request
 				// is answered by the SSH task itself), so focusing the first field is always apt.
-				self.interactive_answers = vec![String::new(); prompts.len()];
-				self.interactive_prompts = prompts;
-				self.screen = Screen::Interactive;
+				self.open_prompt(
+					Prompt::Interactive {
+						answers: vec![String::new(); prompts.len()],
+						fields: prompts,
+					},
+					&body,
+				);
+				self.screen = Screen::Connect;
 				return iced::widget::operation::focus(ui::interactive_field_id(0));
 			}
 			SshEvent::Connected => {
@@ -4617,6 +4701,9 @@ impl Tab {
 	/// (error Back, passphrase cancel) — a full return to the list uses `go_home`.
 	fn go_to_form(&mut self) -> iced::Task<Message> {
 		self.screen = Screen::Connect;
+		// Nothing is being asked any more, which is what puts the form's own keyboard ring back on
+		// (§7): the ring and the prompt are never both live.
+		self.prompt = None;
 		self.form_focus = ui::connect::FormStop::Host;
 		self.apply_form_focus()
 	}
@@ -4627,6 +4714,9 @@ impl Tab {
 	/// re-opens on the last-used row.
 	fn go_home(&mut self) -> iced::Task<Message> {
 		self.screen = Screen::Home;
+		// Whatever the connect flow was asking is abandoned with the connect itself, and the
+		// buffers it was holding go with it (§12).
+		self.prompt = None;
 		self.home_menu_open = false;
 		self.home_rename = None;
 		self.confirm_delete = false;
@@ -4975,6 +5065,15 @@ impl Tab {
 	/// is ignored here; the focused input still receives it through the widget tree.
 	fn on_form_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
+
+		// Not while something is being asked over the form (§7, §8, §16). `subscription` already
+		// switches this listener off, but iced rebuilds the subscription list only AFTER the update
+		// that opened the prompt has returned — so a key pressed in the same frame the dialog
+		// appeared still arrives here. Without this, Enter could press the Connect button under a
+		// host-key dialog.
+		if self.prompt.is_some() {
+			return iced::Task::none();
+		}
 
 		let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
 			return iced::Task::none();
@@ -7011,50 +7110,46 @@ impl Tab {
 					card,
 				},
 			),
-			Screen::Connect => ui::connect::view(&self.form, self.form_focus),
+			// The connect form, and — when the flow is holding a question — the dialog that asks
+			// it, floating over the (dimmed) form rather than replacing it, so the page stays in
+			// view behind it (§10). The second argument to `form_with_dialog` is what a click on
+			// the BACKDROP does, and every one of them is the safe answer: reject, cancel, back.
+			Screen::Connect => match &self.prompt {
+				None => ui::connect::view(&self.form, self.form_focus),
+				Some(Prompt::HostKey) => self.form_with_dialog(
+					ui::host_key_view(&self.dialog_body, card),
+					Message::RejectHostKey,
+				),
+				// Dismissing the mismatch override REJECTS — the safe default — so a backdrop
+				// click, the ✕ and Esc all refuse a changed key rather than trusting it (§8).
+				Some(Prompt::HostKeyChanged) => self.form_with_dialog(
+					ui::host_key_changed_view(&self.dialog_body, card),
+					Message::RejectHostKey,
+				),
+				Some(Prompt::Passphrase(input)) => self.form_with_dialog(
+					ui::passphrase_view(input, self.passphrase_failed, &self.dialog_body, card),
+					Message::PassphraseCancelled,
+				),
+				Some(Prompt::Interactive { fields, answers }) => self.form_with_dialog(
+					ui::interactive_view(fields, answers, &self.dialog_body, card),
+					Message::InteractiveCancelled,
+				),
+				Some(Prompt::Vault {
+					input,
+					confirm,
+					creating,
+					failed,
+					..
+				}) => self.form_with_dialog(
+					ui::vault_view(input, confirm, *creating, *failed, &self.dialog_body, card),
+					Message::VaultCancelled,
+				),
+				Some(Prompt::Failed) => self.form_with_dialog(
+					ui::error_view(&self.dialog_body, card),
+					Message::BackPressed,
+				),
+			},
 			Screen::Connecting { status } => text(status).into(),
-			// The connect-flow dialogs float over the (dimmed) form rather than replacing
-			// it, so the page stays in view behind them (§10). A click on the backdrop
-			// dismisses with the dialog's own safe action (reject / cancel / back).
-			Screen::ConfirmHostKey => self.form_with_dialog(
-				ui::host_key_view(&self.dialog_body, card),
-				Message::RejectHostKey,
-			),
-			// The mismatch override dialog, over the same dimmed form. Dismissing rejects — the
-			// safe default — so a backdrop click never trusts a changed key (§8).
-			Screen::HostKeyChanged => self.form_with_dialog(
-				ui::host_key_changed_view(&self.dialog_body, card),
-				Message::RejectHostKey,
-			),
-			Screen::NeedPassphrase => self.form_with_dialog(
-				ui::passphrase_view(
-					&self.passphrase_input,
-					self.passphrase_failed,
-					&self.dialog_body,
-					card,
-				),
-				Message::PassphraseCancelled,
-			),
-			Screen::Interactive => self.form_with_dialog(
-				ui::interactive_view(
-					&self.interactive_prompts,
-					&self.interactive_answers,
-					&self.dialog_body,
-					card,
-				),
-				Message::InteractiveCancelled,
-			),
-			Screen::VaultUnlock => self.form_with_dialog(
-				ui::vault_view(
-					&self.vault_input,
-					&self.vault_confirm,
-					self.vault_creating,
-					self.vault_failed,
-					&self.dialog_body,
-					card,
-				),
-				Message::VaultCancelled,
-			),
 			Screen::Terminal => match &self.terminal {
 				Some(terminal) => {
 					let base = ui::terminal::view(
@@ -7104,10 +7199,6 @@ impl Tab {
 				Some(editor) => ui::editor::view(editor, self.id),
 				None => text("editor starting…").into(),
 			},
-			Screen::Error => self.form_with_dialog(
-				ui::error_view(&self.dialog_body, card),
-				Message::BackPressed,
-			),
 		}
 	}
 
@@ -7685,6 +7776,119 @@ mod tests {
 		assert!(app.modal.is_none());
 		assert!(next_command(&mut rx).is_none());
 		assert!(app.shell_owns_keyboard());
+	}
+
+	/// SECURITY (§8): an unknown host key is trusted ONLY by an explicit choice. The prompt itself
+	/// sends nothing — the handshake is parked on the far side — and Reject sends a refusal without
+	/// moving on to "authenticating", so a rejected server never looks like a connecting one.
+	#[test]
+	fn an_unknown_host_key_is_trusted_only_by_an_explicit_choice() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		let _ = app.on_ssh_event(SshEvent::HostKey("SHA256:aaaa".to_owned()));
+		assert!(matches!(app.prompt, Some(Prompt::HostKey)));
+		assert!(matches!(app.screen, Screen::Connect));
+		assert!(
+			next_command(&mut rx).is_none(),
+			"asking is not answering: nothing goes back until the user chooses"
+		);
+
+		let _ = app.update(Message::RejectHostKey);
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::HostKeyResponse(HostKeyChoice::Reject))
+		));
+		assert!(
+			!matches!(app.screen, Screen::Connecting { .. }),
+			"a refusal does not read as a connection in progress"
+		);
+	}
+
+	/// SECURITY (§8): a CHANGED host key is the man-in-the-middle case, so rejecting is the default
+	/// and trusting is the deliberate act. Every dismissal route on that dialog carries
+	/// `RejectHostKey` — the ✕, the backdrop, and now Esc — and only the two explicit buttons pin.
+	#[test]
+	fn a_changed_host_key_rejects_unless_the_user_says_otherwise() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		let _ = app.on_ssh_event(SshEvent::HostKeyChanged {
+			stored: "SHA256:old".to_owned(),
+			presented: "SHA256:new".to_owned(),
+		});
+		assert!(matches!(app.prompt, Some(Prompt::HostKeyChanged)));
+		assert!(next_command(&mut rx).is_none());
+
+		// Both fingerprints are in the copyable body, so the user can compare them out of band.
+		let body = app.dialog_body.text();
+		assert!(body.contains("SHA256:old") && body.contains("SHA256:new"));
+
+		// A key pressed in the frame the dialog appeared must not reach the form's ring underneath —
+		// Enter there would press Connect (§10).
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+		let _ = app.on_form_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
+		assert!(next_command(&mut rx).is_none());
+		assert!(matches!(app.prompt, Some(Prompt::HostKeyChanged)));
+
+		// Replacing the pinned key is the deliberate act, and only then does the handshake go on.
+		let _ = app.update(Message::ReplaceHostKey);
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::HostKeyResponse(HostKeyChoice::Pin))
+		));
+		assert!(matches!(app.screen, Screen::Connecting { .. }));
+		assert!(app.prompt.is_none(), "the question is answered and gone");
+	}
+
+	/// A prompt holds the secret being typed, so dismissing it drops that secret (§7, §12) — there
+	/// is no buffer left on the tab for a later prompt to inherit, or for a Debug dump to find.
+	#[test]
+	fn dismissing_a_prompt_drops_what_was_typed_into_it() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
+		let _ = app.update(Message::PassphraseChanged("hunter2".to_owned()));
+		assert!(matches!(&app.prompt, Some(Prompt::Passphrase(input)) if input == "hunter2"));
+
+		let _ = app.update(Message::PassphraseCancelled);
+		assert!(app.prompt.is_none());
+		assert!(matches!(
+			next_command(&mut rx),
+			Some(SshCommand::Disconnect)
+		));
+		// And the next prompt starts empty rather than showing the abandoned attempt.
+		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
+		assert!(matches!(&app.prompt, Some(Prompt::Passphrase(input)) if input.is_empty()));
+	}
+
+	/// A wrong master passphrase re-asks with the hint and EMPTY fields (§16, §12): the rejected
+	/// value is dropped rather than left in the buffer the next attempt types over. The deferred
+	/// action it was blocking survives the re-ask, or the retry would unlock into nothing.
+	#[test]
+	fn a_refused_vault_passphrase_re_asks_empty_and_keeps_what_it_was_blocking() {
+		// Create mode with a mismatched confirmation — no vault file is touched, so this needs no disk.
+		let mut app = Tab {
+			prompt: Some(Prompt::Vault {
+				input: "one".to_owned(),
+				confirm: "two".to_owned(),
+				creating: true,
+				failed: false,
+				pending: VaultPending::Prefill("u@h:22".to_owned()),
+			}),
+			..Tab::default()
+		};
+		let _ = app.on_vault_submitted();
+		match &app.prompt {
+			Some(Prompt::Vault {
+				input,
+				confirm,
+				failed,
+				pending,
+				..
+			}) => {
+				assert!(input.is_empty() && confirm.is_empty());
+				assert!(*failed, "the hint says the two did not match");
+				assert!(matches!(pending, VaultPending::Prefill(_)));
+			}
+			other => panic!("expected the prompt to re-ask, got {other:?}"),
+		}
 	}
 
 	/// A dialog belongs to the session it asked about (§10, §18). A delete confirmation holding one
@@ -10735,8 +10939,8 @@ mod tests {
 			 worker ever arrives"
 		);
 		assert!(
-			!matches!(copy.screen, Screen::Error),
-			"and above all not an error about a worker that was never late"
+			copy.prompt.is_none(),
+			"and above all not an error dialog about a worker that was never late"
 		);
 
 		// The worker checks in. The dial goes now, down the channel it just handed over.

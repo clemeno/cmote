@@ -624,8 +624,32 @@ Turning a raw byte stream into a screen.
 A small state machine drives the single window.
 
 ```
-enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPassphrase, Interactive, VaultUnlock, Terminal, Error }
+enum Screen  { Home, Connect, Connecting { status }, Terminal, Editor }
+enum Prompt  { HostKey, HostKeyChanged, Passphrase, Interactive, Vault, Failed }   // over Connect
+enum Modal   { Disconnect, NewFolder, Delete, Forwards }                           // over Terminal
 ```
+
+**Five screens, not eleven (v4.0.0).** `ConfirmHostKey`, `HostKeyChanged`, `NeedPassphrase`,
+`Interactive`, `VaultUnlock` and `Error` were `Screen` variants, but none of them was a screen: every
+one renders `form_with_dialog(…)` — the connect FORM with a dialog over it. Calling them screens cost
+a real thing. `Screen::Connect` is where the form's own keyboard ring lives (Tab / Shift+Tab / Enter,
+below), and the ring was off during those six only because each of them happened to have no keyboard
+subscription of its own: six places that had to remember, and no one line saying why. As
+`Option<Prompt>` it is said once — `Screen::Connect if prompt.is_none()` — and `on_form_key` refuses
+the same way, because iced rebuilds the subscription list only AFTER the update that opened the
+prompt returns, so a key pressed in that frame still arrives (Enter would have pressed the Connect
+button under a host-key dialog).
+
+Each `Prompt` variant carries what answering it needs — the passphrase being typed, the interactive
+challenge and its answers, the vault's two fields and what its unlock resumes — so the answer is read
+off the thing that asked. That is also where §12 lands: the secret buffers live in the prompt, so
+dismissing it drops them, and there is no buffer on the tab for a later prompt to inherit. The two
+host-key variants carry nothing, because their message is already in the selectable dialog body and
+their answer goes straight back down the wire (§8).
+
+`Screen::Terminal` has the same shape one layer down — see `Modal` under "One dialog, one field"
+below. Two owners, because a terminal dialog and a connect prompt can never be up together: the
+screen is one or the other.
 
 - **Connect form** (`Screen::Connect`): text inputs for host, port, user; a radio for
   the auth method (Password, Key, Interactive **or** Agent — a sum type, never more than one,
@@ -650,17 +674,17 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
   it is a character, and a host or user name can contain one.
 - **Connecting** (`Screen::Connecting`): a status line reflecting the flow steps —
   *connecting → verifying host key → authenticating*.
-- **Confirm host key** (`Screen::ConfirmHostKey`): first-contact fingerprint with
+- **Confirm host key** (`Prompt::HostKey`): first-contact fingerprint with
   Accept / Reject (§8), in the shared dialog chrome floating over the dimmed connect form
   (below). Closing (✕) or a backdrop click rejects — the safe default, so dismissing never
   trusts an unverified host.
-- **Host key changed** (`Screen::HostKeyChanged`, §8, §28): the mismatch override dialog, over
+- **Host key changed** (`Prompt::HostKeyChanged`, §8, §28): the mismatch override dialog, over
   the same dimmed form. Loud by design — a red "possible man-in-the-middle" line and **both**
   SHA-256 fingerprints (stored vs presented, selectable for out-of-band comparison, seeded into
   `App::dialog_body`) — with a three-button footer: **Reject** / **Trust once** / **Replace key**.
-  Closing (✕) or a backdrop click rejects, so dismissing never trusts a changed key. A changed
-  key is never auto-trusted; each override is one explicit click (§8).
-- **Need passphrase** (`Screen::NeedPassphrase`): shown only when the chosen private
+  Closing (✕), a backdrop click or Esc all reject, so dismissing never trusts a changed key. A
+  changed key is never auto-trusted; each override is one explicit click (§8).
+- **Need passphrase** (`Prompt::Passphrase`): shown only when the chosen private
   key is encrypted (§7). A masked field with Unlock / Cancel; the field is auto-focused
   when the screen opens (a `text_input::focus` task keyed to a shared id, refocused on
   every re-ask) so the user can type at once. A wrong passphrase re-shows the prompt
@@ -670,7 +694,7 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
   and cleared on submit. This is a local key-file passphrase, not remote auth, so the
   hint is not a credential oracle (§12). The prompt uses the shared dialog chrome (below),
   floating over the dimmed connect form.
-- **Interactive prompt** (`Screen::Interactive`, §7): the server's keyboard-interactive
+- **Interactive prompt** (`Prompt::Interactive`, §7): the server's keyboard-interactive
   challenge — 2FA / OTP and challenge-response. One field per prompt in the server's request,
   each masked when its `echo` flag is false (a password / OTP) and plain when true (a
   username), captioned with the server's own prompt text. The dialog's selectable body carries
@@ -729,7 +753,7 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
     (Ctrl+C); `update` applies every `text_editor::Action` except an edit (`!is_edit()`), so
     the text is selectable yet never mutable. While a modal is open, `on_key`
     stops forwarding keys to the shell so Ctrl+C copies rather than sending ETX to the
-    remote. The `Screen::ConfirmHostKey` / `Screen::Error` variants carry no text anymore —
+    remote. `Prompt::HostKey` / `Prompt::Failed` carry no text of their own —
     the message lives in `dialog_body`, so they are bare markers.
   - **One dialog, one field** (`Tab::modal`, v4.0.0). The terminal screen can put four
     questions to the user — Disconnect, New folder, Delete, the tunnels manager — and only
@@ -845,9 +869,12 @@ enum Screen { Home, Connect, Connecting, ConfirmHostKey, HostKeyChanged, NeedPas
     it and the files pane and a status-bar button that hides it. Its width comes out of the
     *pane's* now, not the grid's — the terminal keeps the full width above the strip — so a
     tree resize only reshapes the pane, and only the strip's height reflows the pty (§18, §19).
-- **Error** (`Screen::Error`): a generic, non-leaking message (selectable/copyable) plus
+- **Error** (`Prompt::Failed`): a generic, non-leaking message (selectable/copyable) plus
   a "Back" button, in the shared dialog chrome floating over the dimmed connect form.
-  Closing (✕) or a backdrop click goes Back. Detail is logged, not shown (§12).
+  Closing (✕) or a backdrop click goes Back. Detail is logged, not shown (§12). It is a prompt
+  over the form rather than a screen of its own because that is what it always rendered as — and
+  because a failure raised from the TERMINAL screen (a dead worker channel, a session that
+  dropped) has to leave the user somewhere they can retry from, which is the form.
 
 All state is owned in the iced `State` struct; every transition is a `Message` handled
 in `update`. No mutable global state, no `unsafe`.
@@ -2722,12 +2749,13 @@ it reads the fingerprint currently pinned (`hostkey::stored_fingerprint`, parsin
 `known_hosts` line back to a key so the fingerprint is computed exactly as the presented key's is),
 emits `SshEvent::HostKeyChanged { stored, presented }`, and **blocks the handshake** on the user's
 choice — the same one-shot the first-contact gate uses. The GUI shows a loud dialog
-(`Screen::HostKeyChanged`, `ui::host_key_changed_view`): a red "possible man-in-the-middle" line
+(`Prompt::HostKeyChanged`, `ui::host_key_changed_view`): a red "possible man-in-the-middle" line
 above **both** SHA-256 fingerprints — what was trusted vs what the server now sends, seeded into the
 selectable `dialog_body` so either can be copied for out-of-band comparison. Three buttons:
 
-- **Reject** — refuse. The safe default: the ✕, a backdrop click, and a GUI that went away all pick
-  it.
+- **Reject** — refuse. The safe default: the ✕, a backdrop click, Esc, and a GUI that went away all
+  pick it. Locked by a test (§8), which is what stops a later refactor of the dialog wiring from
+  quietly making some dismissal route trust the key instead.
 - **Trust once** — connect this session only, leaving `known_hosts` untouched (it warns again next
   time). The safer override when the change is unverified or might be transient.
 - **Replace key** — drop the stale line and pin the presented key, so future connections verify
