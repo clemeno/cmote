@@ -77,6 +77,15 @@ impl Scanner {
 	}
 }
 
+/// Whether an OSC payload is the mark that ends a command (`133;D`). Exposed for §54, which has to
+/// drop a command's progress bar the moment that command finishes — and has to do it in stream
+/// order, because one chunk can carry a `D` and then the FIRST report of the next command. Reading
+/// the payload itself is what makes that ordering possible; the grammar stays here, owned by the
+/// module that defines it, rather than being copied into the one that needs the answer.
+pub fn ends_command(payload: &[u8]) -> bool {
+	matches!(parse(payload), Some(Mark::CommandEnd(_)))
+}
+
 /// Pull an OSC 133 mark out of a payload, or `None` when the payload is some other OSC. The
 /// payload is the bytes between `]` and the terminator, so an OSC 133 one reads `133;<letter>`
 /// with optional trailing `;`-separated fields. Only the letter matters, plus the exit code that

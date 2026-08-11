@@ -237,6 +237,7 @@ cmote/
     ├── main.rs           entry; #![windows_subsystem = "windows"] (inert on macOS); spawns runtime + iced::run
     ├── app.rs            iced App: a strip of independent `Tab`s + the shared target list / vault; `Tab` = one session's State/Message/update/view; App delegates + routes SSH events per tab + draws the strip (§26)
     ├── cursor.rs         the open / closed hand over every grab handle (tab chip, dialog header): the art, the `HCURSOR`s built from it, and the `WM_SETCURSOR` subclass that paints them — Windows has neither cursor (§51)
+    ├── taskbar.rs        mirror the active tab's command progress onto the Windows taskbar button — `ITaskbarList3` declared by hand, since `windows-sys` ships no COM interfaces (§54)
     ├── explorer.rs       the remote folder tree's model: nodes, expansion, path arithmetic (§18)
     ├── files.rs          the files pane's model: one directory, batched listings, icon categories (§19)
     ├── forward.rs        the pure port-forward spec: kind (L/R/D) + bind/target, parse / validate / label / serialise (§27)
@@ -281,7 +282,9 @@ cmote/
     │   └── fixtures/      real .ppk test vectors (Ed25519, plain + encrypted)
     ├── term/
     │   ├── mod.rs         terminal emulator wrapper: drive the engine, expose the screen view, resize, answer the host's colour/size queries, reserve the cells an inline image covers (§9, §16, §23, §41)
+    │   ├── osc.rs         frame OSC strings out of the stream — one chunk-safe machine, shared by every scanner below that reads one (§17, §34, §54)
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
+    │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6014,3 +6017,84 @@ account the pane happened to be showing.
   would swallow exactly the dark artwork transparency is most often used for.
 - **No animation.** An animated GIF shows its first frame. Playing one means a frame clock, a decode
   loop and a pause control — a media player, not a preview.
+
+---
+
+## 54. A remote command says how far along it is (v4.0.0)
+
+A build, a `dd`, an `apt upgrade` and a `rsync` all know their own progress, and until now cmote had
+no way to hear it. The convention ConEmu introduced and Windows Terminal adopted is one OSC:
+
+```
+ESC ] 9 ; 4 ; st ; pr   BEL | ST
+
+  st = 0   remove progress            pr ignored
+  st = 1   this share is done         pr = 0..100
+  st = 2   the work failed            pr optional — stays where it was
+  st = 3   working, share unknown     pr ignored
+  st = 4   paused / wants attention   pr optional — stays where it was
+```
+
+`alacritty_terminal` treats it as an unknown OSC and drops it, so this is the beside-the-engine
+tactic once more (§17, §33, §34, §41): scan the same bytes, keep a reading, draw it.
+
+### Where it shows
+
+**Two surfaces, and the split is deliberate.** The chip carries a 3 px bar along its bottom edge, for
+**every** tab — a background tab's build is exactly the thing worth seeing without switching to it.
+The Windows taskbar button carries the **active** tab's reading only, because there is one button and
+there can be many tabs, and "the one you are looking at" is the only rule that needs no explanation.
+Neither surface appears at all until a command reports, so a session whose commands never send this
+looks precisely as it did before.
+
+The bar is laid **over** the chip in a `stack`, not added to its row: a bar that took up layout would
+make every chip resize the moment a command started, and the whole strip would twitch.
+
+### Decisions worth stating
+
+- **Implementing `9;4` did not reopen `OSC 9`.** OSC 9 is multiplexed — `9;9` is the Windows cwd
+  announcement cmote has read since §17, `9;4` is this, and a bare `9;<text>` is a desktop
+  notification which stays **refused**. The line is not the OSC number, it is whether the effect
+  escapes the tab: progress cannot leave the chip it belongs to, a notification lands on the user's
+  desktop and outlives the session. Recorded in TERMINAL_COMPATIBILITY_PLAN §6, along with the two
+  other spellings of the same refusal (`OSC 777`, `kitty 99`).
+- **A malformed report is a no-op, never a reset.** Every byte here is chosen by the remote, so an
+  unknown `st`, a non-numeric field, an `st=1` carrying no share, and a number too big for a `u32`
+  all leave the previous reading untouched. The alternative — falling back to a default — would hand
+  a remote a way to *blank* a real reading by sending rubbish, which is a worse primitive to offer
+  than an ignored sequence.
+- **A share is clamped, not believed.** The number is drawn, so a claimed 4 000 000 000 is 100.
+- **The command ending is judged in stream order, inside the scanner.** One read off the wire can
+  carry the end of one command, a fresh prompt, and the first report of the next. Clearing the bar
+  after the chunk — the obvious place — would wipe the *new* report and leave a working tab looking
+  idle. So `progress` asks `osc133::ends_command` payload by payload as the framer hands them over.
+  That predicate is a five-line seam on `osc133` rather than a copy of its grammar: the module that
+  defines the marks keeps owning what one means.
+- **There is no `clear` on the interface.** Both endings that matter arrive in the stream (the
+  remote's own `st = 0`, and §34's `D`). The one place a caller might reach for it is `resize`, and
+  `resize` must **not**: it drops the prompt marks and the inline images because both are anchored to
+  grid positions a reflow invalidates, whereas a progress reading has no place on the grid at all.
+  Wiping a running command's bar because the window got wider would be a bug, so the method that
+  would let that happen does not exist.
+- **`st = 3` (indeterminate) is a full-width dimmed bar, not an animated pulse.** Animating it means
+  waking the whole window on a timer to move a few pixels on a strip. The dimming is what
+  distinguishes it from a genuine 100%.
+- **The taskbar is hand-rolled COM, because `windows-sys` ships no COM vtables.** It has the
+  `TaskbarList` CLSID and nothing to call on it, so `ITaskbarList3` is declared in `taskbar.rs`:
+  the IID, the vtable laid out in its true order (IUnknown's 3, then ITaskbarList's 5, then
+  ITaskbarList2's 1, so `SetProgressValue` is slot 9 and `SetProgressState` slot 10). The
+  alternative was the full `windows` crate for two calls. The HWND is the one `cursor.rs` already
+  stashes for §51, so no new window plumbing was needed.
+
+### Deliberately not
+
+- **No desktop notifications, in any of their four spellings** — see above and
+  TERMINAL_COMPATIBILITY_PLAN §6. This is a decision, not a deferral.
+- **No progress in the status bar.** That bar already shows the file transfer queue's progress
+  (§16, §17), and two unrelated progress bars in one strip is how a user learns to read neither.
+- **No history of readings, and no rate or ETA.** The remote reports a share; inventing a
+  time-remaining from it would be cmote guessing about work it cannot see.
+- **`ponytail:` a tab whose remote sets progress and then dies WITHOUT shell integration keeps its
+  bar** until the next report or the tab closes. `st = 0` and §34's `D` both cover the honest cases;
+  a shell with no integration configured gives nothing to hook, and inventing a timeout would put a
+  bar's lifetime in cmote's hands rather than the reporter's.

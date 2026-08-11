@@ -498,6 +498,20 @@ impl App {
 	///  * Everything else unwrapped — the keyboard, chiefly, which comes from a subscription and
 	///    therefore has no region of its own. It goes to the region holding the keyboard.
 	fn update(&mut self, message: Message) -> iced::Task<Message> {
+		let task = self.dispatch(message);
+		// Mirror the active tab's command progress onto the taskbar button (§54). Done HERE, once,
+		// rather than at each of the places that could change it — shell output arriving, a tab
+		// switch, a split's focus moving, a tab closing — because that list is long, it would grow
+		// with every future feature, and a missed one leaves a stale bar on the taskbar. `show` drops
+		// a reading equal to the one already up, so paying for this on every message costs a mutex
+		// and a comparison.
+		crate::taskbar::show(self.active().command_progress());
+		task
+	}
+
+	/// Apply one message. `update` wraps this to mirror the taskbar afterwards; everything that
+	/// actually decides what a message DOES is here.
+	fn dispatch(&mut self, message: Message) -> iced::Task<Message> {
 		// The quit confirmation is modal app-wide (§30): while it is up, Esc cancels and Enter
 		// confirms, and every other keystroke is swallowed so none reaches the shell beneath it.
 		// Non-key messages (button presses, SSH events, ticks, resizes) pass straight through.
@@ -1961,6 +1975,7 @@ impl App {
 				label: tab.strip_label(),
 				active: index == region.active,
 				status: tab.prompt_status(),
+				progress: tab.command_progress(),
 				drop_target: drop_target == Some(tab.id),
 			})
 			.collect();
@@ -3408,6 +3423,16 @@ impl Tab {
 				0 => Some(ui::tabs::Status::Ok),
 				_ => Some(ui::tabs::Status::Failed),
 			},
+		}
+	}
+
+	/// What this tab's remote command reports about its progress (§54), for the bar along the bottom
+	/// of its chip. A tab with no terminal — the home list, the connect form, a viewer — reports
+	/// nothing, and so does a live shell whose commands never send OSC 9;4, which is most of them.
+	fn command_progress(&self) -> term::progress::Progress {
+		match self.terminal.as_ref() {
+			Some(terminal) => terminal.progress(),
+			None => term::progress::Progress::None,
 		}
 	}
 
@@ -7827,15 +7852,19 @@ fn fit_terminal() -> iced::Task<Message> {
 	iced::window::latest().and_then(|id| iced::window::size(id).map(Message::WindowResized))
 }
 
-/// Hand the window itself to `cursor`, once, at start-up (§51).
+/// Hand the window itself to `cursor` and `taskbar`, once, at start-up (§51, §54).
 ///
 /// The hands are painted through a Win32 window subclass, so the one thing that layer needs is the
 /// window's own handle — and `iced::window::run` is the only way iced offers to reach it: the
 /// closure is handed the live window on the UI thread, which is also the thread that pumps its
 /// messages, so the subclass is installed from the right place.
 ///
+/// §54's taskbar progress needs the same handle for a different reason (`ITaskbarList3` addresses the
+/// button by window), so it is taken here too rather than through a second boot task that would reach
+/// for the identical thing.
+///
 /// `discard` because the installation raises no message: everything after it is driven by the tab
-/// strip's own pointer events. Off Windows this resolves to a no-op that costs one boot task.
+/// strip's own pointer events. Off Windows both calls resolve to no-ops that cost one boot task.
 fn install_hand_cursors() -> iced::Task<Message> {
 	iced::window::latest()
 		.and_then(|id| {
@@ -7849,6 +7878,7 @@ fn install_hand_cursors() -> iced::Task<Message> {
 				};
 				if let RawWindowHandle::Win32(win32) = handle.as_raw() {
 					crate::cursor::install(win32.hwnd.get());
+					crate::taskbar::install(win32.hwnd.get());
 				}
 			})
 		})

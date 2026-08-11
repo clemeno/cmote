@@ -119,9 +119,17 @@ zeroize = "1.9.0"
 # build script of ours, so the no-C-toolchain portable build holds (§11). The version matches the
 # one winit already pulls in, so it is a feature selection on a crate in the tree rather than a new
 # dependency to compile.
+#
+# `Win32_System_Com` was added for the taskbar progress bar (PLAN §54). The taskbar's progress lives on
+# `ITaskbarList3`, a COM object, so it needs `CoInitializeEx` + `CoCreateInstance` — and note that this
+# crate ships NO COM interfaces at all (it has the `TaskbarList` CLSID and not one method to call on
+# it), so `taskbar.rs` declares the interface's IID and vtable itself. That is the trade: ~40 lines of
+# hand-written declaration instead of pulling in the full `windows` crate, a second and much larger
+# Windows-bindings crate, for two calls.
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Gdi",
+	"Win32_System_Com",
 	"Win32_UI_HiDpi",
 	"Win32_UI_Shell",
 	"Win32_UI_WindowsAndMessaging",

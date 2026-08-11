@@ -38,8 +38,9 @@ pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
-mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34)
+mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34, §54)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
+pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
@@ -159,6 +160,7 @@ impl Terminal {
 			modkeys: modkeys::ModKeys::default(),
 			queries: query::Queries::default(),
 			prompts: osc133::Prompts::default(),
+			progress: progress::Reports::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -180,6 +182,10 @@ impl Terminal {
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
 		self.modkeys.feed(bytes);
+		// The progress a remote command reports (§54). Like the cwd, it is a latest-value reading
+		// with no position on the grid, so it needs no split in the advance below — only the order
+		// the reports arrive in, which its own scanner keeps.
+		self.progress.feed(bytes);
 		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
 		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
 		// for the usual flow where a program sets attributes and then queries in the same write.
@@ -514,6 +520,13 @@ impl Terminal {
 		self.prompts.last_exit()
 	}
 
+	/// What the remote command last reported about its progress (OSC 9;4, §54). `Progress::None` on
+	/// a shell whose commands never report — which is most of them, most of the time, so the GUI
+	/// draws nothing at all unless something asked it to.
+	pub fn progress(&self) -> progress::Progress {
+		self.progress.current()
+	}
+
 	/// The viewport rows (0-based from the top of the visible screen) a prompt mark sits on right
 	/// now (§34), so the grid can draw a tick beside each. Empty on a shell without integration and
 	/// on the alternate screen, which keeps no history and shows no shell prompts.
@@ -729,6 +742,10 @@ pub struct Terminal {
 	/// this one by splitting the advance at each mark, so a prompt is recorded at the grid line the
 	/// cursor is on when the mark arrives.
 	prompts: osc133::Prompts,
+	/// Reads the progress a remote command reports (OSC 9;4, §54) — another OSC the engine ignores.
+	/// Like the cwd, it is a latest-value reading with no place on the grid, so `process` feeds it
+	/// the whole chunk and never splits the advance for it.
+	progress: progress::Reports,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.

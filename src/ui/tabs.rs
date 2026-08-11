@@ -32,7 +32,7 @@
 // several strips on screen "which one am I typing into" is no longer answerable from the layout.
 
 use iced::alignment::Vertical;
-use iced::widget::{button, container, mouse_area, row, space, text};
+use iced::widget::{button, container, mouse_area, progress_bar, row, space, stack, text};
 use iced::{Border, Color, Element, Font, Length, Point, Size};
 
 use crate::app::Message;
@@ -104,6 +104,16 @@ impl Status {
 	}
 }
 
+/// The progress bar's thickness and its unfilled track (§54). Three pixels along the bottom edge of
+/// the chip: enough to read across the strip at a glance, thin enough that a chip with no progress
+/// to report looks exactly as it did before — and one is drawn only when a command actually reports.
+const PROGRESS_GIRTH: f32 = 3.0;
+const PROGRESS_TRACK: Color = Color::from_rgb8(0x2e, 0x2e, 0x2e);
+
+/// The paused/attention colour (§54). A muted blue rather than the amber of work in flight or the
+/// red of failure: `st = 4` means the command is waiting for something, which is neither.
+const PROGRESS_PAUSED: Color = Color::from_rgb8(0x5c, 0x8a, 0xc8);
+
 /// The drop mark's colour (§38): the border drawn round the chip a dragged tab would land on. A
 /// muted blue, the same family as the selection fills elsewhere, so it reads as "here" rather than
 /// as a warning.
@@ -114,14 +124,62 @@ const DROP_BORDER: Color = Color::from_rgb8(0x5c, 0x8a, 0xc8);
 const MAX_LABEL_CHARS: usize = 48;
 
 /// One chip's data: the owning tab's id (for the close message), the label to show, whether it is
-/// the active tab (which tints its fill and brightens its text), its command-status dot (§34), and
-/// whether a drag in flight would drop onto this chip's slot (§38), which outlines it.
+/// the active tab (which tints its fill and brightens its text), its command-status dot (§34), what
+/// the remote command reports about its progress (§54), and whether a drag in flight would drop onto
+/// this chip's slot (§38), which outlines it.
 pub struct Chip {
 	pub id: u64,
 	pub label: String,
 	pub active: bool,
 	pub status: Option<Status>,
+	pub progress: crate::term::progress::Progress,
 	pub drop_target: bool,
+}
+
+/// The bar along a chip's bottom edge when the tab's remote command reports progress (§54), or
+/// `None` when it reports nothing — which is most tabs, most of the time, so most chips are built
+/// exactly as they were before this existed.
+///
+/// `Indeterminate` is drawn as a FULL-width bar in a dimmed amber rather than as an animated pulse.
+/// Animating it would mean waking the whole window on a timer to move a few pixels on a strip, which
+/// is a poor trade for a state that already reads correctly as "something is happening and nobody
+/// will say how much". The dimming is what distinguishes it from a genuine 100%.
+fn progress_bar_for(
+	progress: crate::term::progress::Progress,
+) -> Option<Element<'static, Message>> {
+	use crate::term::progress::Progress;
+
+	let (fraction, fill) = match progress {
+		Progress::None => return None,
+		// Full width, dimmed: working, extent unknown.
+		Progress::Indeterminate => (
+			1.0,
+			Color {
+				a: 0.45,
+				..STATUS_RUNNING
+			},
+		),
+		Progress::Working(share) => (f32::from(share) / 100.0, STATUS_RUNNING),
+		Progress::Failed(share) => (f32::from(share) / 100.0, STATUS_FAILED),
+		Progress::Paused(share) => (f32::from(share) / 100.0, PROGRESS_PAUSED),
+	};
+
+	let bar = progress_bar(0.0..=1.0, fraction)
+		.length(Length::Fill)
+		.girth(Length::Fixed(PROGRESS_GIRTH))
+		.style(move |_theme| progress_bar::Style {
+			background: PROGRESS_TRACK.into(),
+			bar: fill.into(),
+			border: Border::default(),
+		});
+	// Pinned to the chip's bottom edge: the bar fills the stack layer's height and pushes itself
+	// down, so it rides the edge whatever the chip's own padding does above it.
+	Some(
+		container(bar)
+			.height(Length::Fill)
+			.align_y(Vertical::Bottom)
+			.into(),
+	)
 }
 
 /// Build the tab strip from the chips, in strip order. Returns an owned (`'static`) element —
@@ -300,6 +358,15 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 			}
 			style
 		});
+
+	// The progress a remote command reports (§54), laid over the chip's bottom edge rather than inside
+	// its row: the bar must not shift the label or change how wide the chip is, because a bar that
+	// appears and vanishes with a command would otherwise make the whole strip twitch. Nothing is
+	// stacked when there is no progress, so the common chip is the bare cell it always was.
+	let cell: Element<'static, Message> = match progress_bar_for(chip.progress) {
+		Some(bar) => stack![cell, bar].into(),
+		None => cell.into(),
+	};
 
 	// The whole chip is the drag handle (§38). `on_press` selects and grabs; `on_release` drops. The
 	// cursor advertises the gesture: an open hand at rest, a closed one while a tab is in flight.

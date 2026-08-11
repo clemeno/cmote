@@ -333,6 +333,20 @@ poison the local clipboard, and cmote touches the clipboard only on an explicit 
 The **bell** and any remote colour *set* request are dropped for the same "no remote-driven side
 effects" reason. Answering an OSC 52 read query would be an injection vector and stays out.
 
+**Remote-triggered desktop notifications** — `OSC 9;<text>`, `OSC 777` (urxvt) and `kitty 99` (rich
+notifications) are all the same feature in three spellings, and all three are **refused on purpose**
+(§54). A notification *leaves the window*: it lands on the user's desktop, outlives the tab, and on
+Windows sits in the Action Center after the session is gone. That hands a remote a channel to the
+machine itself, and a compromised or merely chatty host would spam it. cmote's rule throughout is that
+a remote may change what its own tab looks like and nothing more.
+
+**This is what makes `OSC 9;4` progress a different question, not an inconsistency** — §54 implements
+it. OSC 9 is *multiplexed*: `9;9` is the Windows working-directory announcement cmote has read since
+§17, `9;4` is progress, and a bare `9;<text>` is the notification. Progress cannot leave the chip it
+belongs to, so the worst a lying remote achieves is a wrong number on its own tab; the number is
+clamped and a malformed report changes nothing. The line here is not "which OSC number" but **whether
+the effect escapes the tab**.
+
 **Answerback (ENQ `0x05`)** — refused for the same reason, and this is why xterm ships it empty too
 (§36). The trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05`
 — a `cat` of a binary, a corrupt download, a stray progress stream — would type the answerback string
@@ -408,6 +422,18 @@ legacy, invisible in practice, or a PNG/JPEG decoder dependency. For "support *a
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
 refused with its reason written down.
 
+**§54 then closed the OSC column's last item of real value, and turned four ❌ rows into decisions.**
+`OSC 9;4` progress reporting shipped (`term/progress.rs`) — a per-tab bar on the chip and the taskbar
+button mirroring the active tab. The same pass wrote down the stance the notification rows had been
+missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spellings and are **refused**
+(§6), because a notification escapes the tab and lands on the desktop; `kitty 21` is refused for the
+reason 4 / 10 / 11 / 12 already were, a fixed scheme. Those rows now read as choices rather than as
+work not yet done, which is the difference between a gap and a policy.
+
+**One genuine OSC gap is left, and it is small: `OSC 22`, the mouse-pointer shape.** A remote asking for
+`text` / `wait` / `pointer` is entirely tab-local, so it raises none of the questions above, and cmote
+already owns a cursor-shape mechanism it could hang off (`cursor.rs`, §51). Unclaimed, not refused.
+
 ---
 
 ## 8. Feature support matrix (vs `vtdn.dev`)
@@ -430,8 +456,8 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** ignored (fixed palette) |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
-| 9 | Desktop notification | ❌ | |
-| 9;4 | Progress reporting | ❌ | |
+| 9 | Desktop notification | ❌ | *(policy)* — a notification leaves the window and lands on the desktop (§6, §54) |
+| 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
 | 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate); **set** ignored |
 | 22 | Mouse pointer shape | ❌ | |
 | 52 (write) | Clipboard write | ❌ | *(policy)* — remote must not poison local clipboard (§6) |
@@ -439,11 +465,11 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 104 | Reset palette entry | ❌ | no effect (fixed palette) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | ❌ | no effect (fixed scheme) |
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
-| Kitty 21 | Colour by semantic name | ❌ | |
-| Kitty 99 | Rich notifications | ❌ | |
+| Kitty 21 | Colour by semantic name | ❌ | *(policy)* — same fixed scheme as 4 / 10 / 11 / 12: the theme is cmote's, not the remote's |
+| Kitty 99 | Rich notifications | ❌ | *(policy)* — a notification, in a third spelling (§6, §54) |
 | iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
 | iTerm 1337 | Marks / vars / profiles | ❌ | |
-| 777 | urxvt notification | ❌ | |
+| 777 | urxvt notification | ❌ | *(policy)* — a notification, in a fourth spelling (§6, §54) |
 
 ### CSI — cursor movement & editing
 
@@ -741,8 +767,31 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
   `Terminal::modify_other_keys` and threaded into `keymap::encode`.
-- **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` is the same chunk-safe
-  byte machine as `cwd.rs` but returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
+- **`term/osc.rs`** — the shared OSC framer (§17, §34, §54). One chunk-safe byte machine
+  (`Text`/`Escape`/`Payload`/`PayloadEscape`) recognising `ESC ] payload (BEL | ESC \)`, calling back
+  once per completed payload with the byte offset **just past its terminator** — the coordinate §34
+  needs to line a mark up with the grid, and which §17 and §54 ignore. `Framer<CAP>` takes its payload
+  cap as a const parameter, so each scanner keeps deriving `Default` and keeps its own limit named in
+  its own module (`cwd` 4096, `osc133` 512, `progress` 128); past the cap the payload is abandoned and
+  framing resumes (§12). This replaced three copies of the same machine that had already drifted.
+  **`graphics.rs` deliberately keeps its own**: a 16 MB binary payload whose overflow must keep
+  scanning to the real terminator while flagging the payload spoiled, which is a different policy, not
+  a different number.
+- **`term/progress.rs`** — the command-progress scanner (OSC 9;4, §54). `Reports::feed` runs on the
+  shared framer and keeps a latest-value `Progress` — `None` / `Indeterminate` / `Working(share)` /
+  `Failed(share)` / `Paused(share)` for `st` 0 / 3 / 1 / 2 / 4, the share clamped to 100. Untrusted
+  input throughout, so **a malformed report is a no-op**: an unknown `st`, a non-numeric field, an
+  `st=1` with no share and an out-of-range number all leave the previous reading alone rather than
+  blanking it, and `st=2`/`st=4` with no share stay at the share already reached. A command ending is
+  judged **inside** `feed`, payload by payload, via `osc133::ends_command` — because one chunk can
+  carry a `D` and then the first report of the *next* command, so clearing after the chunk would wipe
+  the new report. There is deliberately **no `clear` on the interface**: unlike prompt marks and
+  images, a progress reading has no place on the grid, so `resize` must not drop it. Fed the whole
+  chunk by `process` with no split, like the cwd. Surfaced by `Terminal::progress`; drawn as a 3 px bar
+  along the bottom of the tab chip (`ui/tabs.rs`) and mirrored onto the Windows taskbar button for the
+  **active** tab only (`taskbar.rs`). Parse-only, no engine, no widgets — fully unit-tested.
+- **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` runs on the shared
+  framer and returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
   code parsed from its next field. `Prompts` holds the command state (`Idle`/`Prompt`/`Running`), the
   last exit, the prompt lines as **absolute indices** (`history_size + row`), and each finished
   command's output as an absolute half-open range `[output, end)` keyed by its prompt line;
