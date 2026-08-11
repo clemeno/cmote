@@ -15,103 +15,44 @@
 // OSC 9;9 shell) is followed; a silent bash/zsh — which emits neither unless the user has
 // configured it to — leaves the cwd unknown, and the upload dialog then asks for the path.
 //
-// The scanner is a small state machine rather than a regex over a buffer, because
-// output arrives in arbitrary chunks: a sequence can be split anywhere, including
-// between the ESC and the `]`.
-
-/// The escape and bell bytes that frame an OSC sequence.
-const ESC: u8 = 0x1b;
-const BEL: u8 = 0x07;
+// Finding where a sequence starts and ends is `term::osc`'s job, shared with the other
+// scanners that read an OSC the engine ignores; a cwd announcement can be split anywhere
+// in the stream and the framer carries that state between calls. What is left here is the
+// part that is actually about directories: deciding which OSC codes announce one, and
+// turning the payload into a path.
 
 /// The longest OSC payload we will buffer. A cwd is a path; anything longer is either
 /// not for us (a long window title, a base64 OSC 52 clipboard write) or malformed, and
 /// buffering it would let a hostile stream grow our memory without bound (§12).
 const MAX_PAYLOAD: usize = 4096;
 
-/// Where the scanner is in the byte stream.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC; an OSC starts if the next byte is `]`.
-	Escape,
-	/// Inside an OSC payload, collecting it until the terminator.
-	Payload,
-	/// Saw ESC inside a payload; the string ends if the next byte is `\` (ST).
-	PayloadEscape,
-}
-
 /// The remote working directory as last announced by the shell (§17). Feed it every
 /// byte of shell output; it keeps the most recent path and ignores everything else.
 #[derive(Debug, Default)]
 pub struct Cwd {
-	state: Scan,
-	payload: Vec<u8>,
+	framer: super::osc::Framer<MAX_PAYLOAD>,
 	path: Option<String>,
 }
 
 impl Cwd {
 	/// Scan a chunk of shell output for a cwd announcement. Safe at any chunk
-	/// boundary — the state machine carries over between calls.
+	/// boundary — the framer's state carries over between calls.
 	pub fn feed(&mut self, bytes: &[u8]) {
-		for &byte in bytes {
-			match self.state {
-				Scan::Text => {
-					if byte == ESC {
-						self.state = Scan::Escape;
-					}
-				}
-				Scan::Escape => {
-					self.payload.clear();
-					self.state = match byte {
-						b']' => Scan::Payload,
-						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => Scan::Escape,
-						_ => Scan::Text,
-					};
-				}
-				Scan::Payload => match byte {
-					BEL => self.finish(),
-					ESC => self.state = Scan::PayloadEscape,
-					_ => {
-						self.payload.push(byte);
-						if self.payload.len() > MAX_PAYLOAD {
-							self.abandon();
-						}
-					}
-				},
-				// ESC `\` is the string terminator; an ESC followed by anything else is
-				// a malformed sequence, so drop what we collected rather than guess.
-				Scan::PayloadEscape => {
-					if byte == b'\\' {
-						self.finish();
-					} else {
-						self.abandon();
-					}
-				}
+		// Every finished OSC arrives here — titles, clipboard writes, prompt marks and all — and
+		// `parse` keeps only the two that announce a directory. A payload that is not one leaves the
+		// last known path alone: shells set the title on every prompt, and forgetting the cwd each
+		// time they did would make the feature useless.
+		let path = &mut self.path;
+		self.framer.feed(bytes, |_offset, payload| {
+			if let Some(found) = parse(payload) {
+				*path = Some(found);
 			}
-		}
+		});
 	}
 
 	/// The last announced remote directory, or `None` if the shell never said.
 	pub fn path(&self) -> Option<&str> {
 		self.path.as_deref()
-	}
-
-	/// A complete OSC payload: keep it if it is a cwd announcement, drop it otherwise
-	/// (window titles, clipboard writes and the rest all arrive here too).
-	fn finish(&mut self) {
-		if let Some(path) = parse(&self.payload) {
-			self.path = Some(path);
-		}
-		self.abandon();
-	}
-
-	/// Reset the scanner without touching the last known path.
-	fn abandon(&mut self) {
-		self.state = Scan::Text;
-		self.payload.clear();
 	}
 }
 

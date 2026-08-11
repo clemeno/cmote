@@ -21,13 +21,10 @@
 // the advance at each offset to read the cursor there). Keeping the scanner a pure bytes -> marks
 // function is what lets it be unit-tested without an engine at all.
 //
-// The scanner is a small state machine rather than a search over a buffer, because output arrives
-// in arbitrary chunks: a sequence can be split anywhere, including between the ESC and the `]` or
-// in the middle of the payload. The state carries over between `feed` calls so any split is safe.
-
-/// The escape and bell bytes that frame an OSC sequence.
-const ESC: u8 = 0x1b;
-const BEL: u8 = 0x07;
+// Finding where a sequence starts and ends — and how far into the chunk its terminator sat — is
+// `term::osc`'s job, shared with the other scanners that read an OSC the engine ignores. What is
+// left here is the part that is actually about shell integration: which payloads are marks, and how
+// the four of them add up to a command's state.
 
 /// The longest OSC 133 payload we will buffer. The marks themselves are tiny (`133;A`), but a
 /// shell may append `key=value` fields (`133;A;aid=7`, `133;D;0;user`); this is generous for
@@ -52,28 +49,12 @@ pub enum Mark {
 	CommandEnd(Option<i32>),
 }
 
-/// Where the scanner is in the byte stream. The same four-state shape as the cwd scanner (§17):
-/// an OSC is `ESC ] payload (BEL | ESC \)`.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC; an OSC starts if the next byte is `]`.
-	Escape,
-	/// Inside an OSC payload, collecting it until the terminator.
-	Payload,
-	/// Saw ESC inside a payload; the string ends if the next byte is `\` (ST).
-	PayloadEscape,
-}
-
 /// Reads OSC 133 marks out of the shell's output. Feed it every byte; it returns the marks that
 /// completed in that chunk, each with the offset just past its terminator so the caller can line
 /// the mark up with the grid (§34). It holds only the in-flight sequence between calls.
 #[derive(Debug, Default)]
 pub struct Scanner {
-	state: Scan,
-	payload: Vec<u8>,
+	framer: super::osc::Framer<MAX_PAYLOAD>,
 }
 
 impl Scanner {
@@ -84,62 +65,15 @@ impl Scanner {
 	/// boundary: a sequence split across calls completes on the call that carries its terminator,
 	/// and the offset is measured in that final chunk.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Mark)> {
+		// Every finished OSC arrives here; `parse` keeps only the marks, so a cwd announcement, a
+		// title or a clipboard write passes through without producing anything.
 		let mut marks = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				Scan::Text => {
-					if byte == ESC {
-						self.state = Scan::Escape;
-					}
-				}
-				Scan::Escape => {
-					self.payload.clear();
-					self.state = match byte {
-						b']' => Scan::Payload,
-						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => Scan::Escape,
-						_ => Scan::Text,
-					};
-				}
-				Scan::Payload => match byte {
-					// BEL ends the string; the offset is just past it.
-					BEL => self.finish(index + 1, &mut marks),
-					ESC => self.state = Scan::PayloadEscape,
-					_ => {
-						self.payload.push(byte);
-						if self.payload.len() > MAX_PAYLOAD {
-							self.abandon();
-						}
-					}
-				},
-				// ESC `\` is the string terminator (ST); an ESC followed by anything else is a
-				// malformed sequence, so drop what we collected rather than guess.
-				Scan::PayloadEscape => {
-					if byte == b'\\' {
-						self.finish(index + 1, &mut marks);
-					} else {
-						self.abandon();
-					}
-				}
+		self.framer.feed(bytes, |offset, payload| {
+			if let Some(mark) = parse(payload) {
+				marks.push((offset, mark));
 			}
-		}
+		});
 		marks
-	}
-
-	/// A complete OSC payload: if it is an OSC 133 mark, push it with its end offset; otherwise
-	/// drop it (a cwd announcement, a title, a clipboard write all arrive here too and are none
-	/// of this scanner's business). Either way the scanner returns to hunting text.
-	fn finish(&mut self, offset: usize, marks: &mut Vec<(usize, Mark)>) {
-		if let Some(mark) = parse(&self.payload) {
-			marks.push((offset, mark));
-		}
-		self.abandon();
-	}
-
-	/// Reset the scanner to hunt for the next sequence, discarding the current payload.
-	fn abandon(&mut self) {
-		self.state = Scan::Text;
-		self.payload.clear();
 	}
 }
 

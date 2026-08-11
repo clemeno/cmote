@@ -38,6 +38,7 @@ pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
+mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
