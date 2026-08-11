@@ -2392,6 +2392,18 @@ pub struct Tab {
 	/// them by hand (it missed six). `Tab` now says what the user did and asks `busy()`; the queue
 	/// answers with `transfer::Effects`, which `apply` carries out.
 	transfers: transfer::Queue,
+	/// What the LAST session on this tab was still transferring when it ended (§16), or `None` —
+	/// which is the ordinary case, since most sessions end with nothing moving.
+	///
+	/// It sits outside `transfers` on purpose: everything in the queue belongs to one session and
+	/// is cleared with it, and this is the single thing that must outlive one. It names the
+	/// endpoint it was made on, so the session that adopts it can refuse a resume point belonging
+	/// to another machine. Spent by the first session to open afterwards, used or not.
+	///
+	/// It is deliberately NOT persisted with the target (§22): a partial and its source are facts
+	/// about this machine's disk and that server's, right now, and an offer to append to one after
+	/// a restart hours later trusts far more than the size comparison behind it can carry.
+	unfinished: Option<transfer::Unfinished>,
 	/// The remote folder tree shown beside the grid (§18). It owns its own visibility,
 	/// width, expansion state and selection; `app` only relays its events and turns the
 	/// paths it asks for into `SshCommand::ListDir`.
@@ -4052,7 +4064,9 @@ impl Tab {
 		}
 		for command in effects.commands {
 			if !self.send_command(command) {
-				self.transfers.reset();
+				// A dead channel is a dead session, so this is a teardown like any other: what was
+				// moving is kept for the next connection, and the rest of the queue goes (§16).
+				self.abandon_transfers();
 				return iced::Task::none();
 			}
 		}
@@ -4063,6 +4077,43 @@ impl Tab {
 			return iced::widget::operation::focus(ui::terminal::UPLOAD_INPUT_ID);
 		}
 		iced::Task::none()
+	}
+
+	/// The session is ending: keep whatever a later one could still finish, and let the queue
+	/// forget the rest (§16).
+	///
+	/// Called from every teardown — a remote hangup, a session failure, a confirmed Disconnect, a
+	/// worker channel that has died — because none of them says anything about the bytes already
+	/// on the far side, which survive all four. A deliberate Disconnect is included on purpose: the
+	/// ✕ beside the progress bar is how a transfer is *cancelled*, and the partial it leaves is
+	/// deleted; leaving the server instead leaves the partial there, so offering to finish it beats
+	/// leaving a half file behind with nothing said about it.
+	///
+	/// It reads `connection` and so must run BEFORE the teardown clears it — the endpoint is what
+	/// stops the offer being made to the next machine this tab visits.
+	fn abandon_transfers(&mut self) {
+		let Some(endpoint) = self.connection.clone() else {
+			return;
+		};
+		// Only ever overwritten by a real one: a session that ended with nothing moving must not
+		// wipe the offer an earlier one left (a tab that reconnects, sits idle and drops again).
+		if let Some(unfinished) = self.transfers.abandon(&endpoint) {
+			self.unfinished = Some(unfinished);
+		}
+	}
+
+	/// A shell has opened: offer to finish what the last session on this tab did not (§16). The
+	/// queue itself decides whether this is the same server, and says nothing if it is not.
+	///
+	/// Taken whether or not it is used, exactly as a duplicate's carried directory is (§52), so
+	/// the offer is spent by the FIRST session that opens afterwards. An endpoint of `None` cannot
+	/// match a real one, so a session with no connection key simply drops it.
+	fn adopt_unfinished(&mut self) {
+		let Some(unfinished) = self.unfinished.take() else {
+			return;
+		};
+		let endpoint = self.connection.clone().unwrap_or_default();
+		self.transfers.adopt(unfinished, &endpoint);
 	}
 
 	/// Open a dialog over the terminal screen (§10). ONE way in, so every one of them gets the
@@ -4259,6 +4310,9 @@ impl Tab {
 				// rather than waiting for the first resize event.
 				self.terminal = Some(new_emulator());
 				self.clear_grid_interaction();
+				// After the clear, never before: `clear_grid_interaction` empties the queue this
+				// puts the resume offer back into (§16).
+				self.adopt_unfinished();
 				self.screen = Screen::Terminal;
 				// This shell is the session's first identity (§45): the account it authenticated as.
 				// It is the one that can never be elevated away or closed, and the one every other
@@ -4518,6 +4572,10 @@ impl Tab {
 			SshEvent::Disconnected => {
 				// A remote hangup ends a live session too: remember where it was (§22).
 				self.persist_session();
+				// And what it was still transferring, so the next connection to this same server
+				// can offer to finish it (§16). Before `connection` is cleared — that endpoint is
+				// what the offer is matched against.
+				self.abandon_transfers();
 				self.abandon_attempt();
 				self.terminal = None;
 				self.connection = None;
@@ -4529,6 +4587,9 @@ impl Tab {
 				// Only saves when a shell had actually opened — an auth/handshake failure
 				// reaches here with no terminal, and `persist_session` then does nothing (§22).
 				self.persist_session();
+				// A session that failed under a running transfer is the very case Resume is for
+				// (§16): the bytes that reached the far side are still there.
+				self.abandon_transfers();
 				// A refused handshake is the commonest way an attempt dies: whatever it captured on
 				// the promise of succeeding goes now, secret first (§12, §16).
 				self.abandon_attempt();
@@ -4625,8 +4686,11 @@ impl Tab {
 	/// follows just confirms what we have already done. Mirrors the passphrase-cancel
 	/// path, which also acts immediately rather than waiting.
 	fn on_disconnect_confirmed(&mut self) -> iced::Task<Message> {
-		// Save where the shell and pane were before any of it is torn down (§22).
+		// Save where the shell and pane were before any of it is torn down (§22), and keep what
+		// was still moving for the next connection to this server (§16) — leaving mid-transfer
+		// leaves the partial on the far side either way.
 		self.persist_session();
+		self.abandon_transfers();
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
 		self.connection = None;
@@ -6517,6 +6581,13 @@ impl Tab {
 		// the picked batch, the queues behind it, a drag mid-hover, and — the one the twelve
 		// hand-written clears here used to forget — a Resume offer, which would otherwise relaunch
 		// a transfer against whatever server this tab connected to next (§16).
+		//
+		// `unfinished` is deliberately NOT cleared here (§16), for the same reason the carried
+		// directory below is not: this runs on the way INTO a session as well as out of one, and
+		// an offer that a dropped session left is meant to be adopted by the connect that is
+		// opening. The teardown paths set it through `abandon_transfers` before calling this, and
+		// the connect spends it straight after — matched against its own endpoint, so an offer
+		// made on another server can never be replayed here.
 		self.transfers.reset();
 		// Every session starts with the keyboard at the shell (§20), and none is mid-resume:
 		// a torn-down session has nothing to settle, and a fresh one sets this itself once it
@@ -9793,6 +9864,79 @@ mod tests {
 			Some("/var/log/nginx"),
 			"following resumed"
 		);
+	}
+
+	/// A transfer that a DROPPED CONNECTION stopped is offered again by the next session to that
+	/// same server (§16) — the whole lifecycle, through the two paths that wire it: the teardown
+	/// that keeps the resume point and the connect that puts it back. Cancel and resume used to
+	/// live inside one session, which left the commonest way a big transfer stops as the one way
+	/// it could not be picked up from.
+	#[test]
+	fn a_transfer_the_lost_connection_stopped_is_offered_by_the_next_session() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.connection = Some("u@h:22".to_owned());
+
+		// A folder coming down when the link dies. Started through the queue's own entrance, so
+		// the slot and the in-flight memory are set exactly as a real download sets them.
+		let effects = app
+			.transfers
+			.download_tree("/srv/logs".to_owned(), Some(PathBuf::from("/local")));
+		let _ = app.apply(effects);
+		assert!(app.transfers.progress().is_some(), "bytes are moving");
+
+		// The remote hangs up. The queue is emptied with the rest of the session, and what it was
+		// moving is the one thing kept — the partial on disk did not go anywhere.
+		let _task = app.on_ssh_event(SshEvent::Disconnected);
+		assert!(!app.transfers.can_resume(), "the queue kept nothing itself");
+		assert!(app.unfinished.is_some(), "the tab did");
+
+		// Reconnecting to the same endpoint offers to finish it, and says why it is asking.
+		app.connection = Some("u@h:22".to_owned());
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		assert!(app.transfers.can_resume());
+		assert_eq!(
+			app.transfers.notice(),
+			Some("logs stopped when the connection dropped")
+		);
+		assert!(app.unfinished.is_none(), "the offer is spent either way");
+
+		// And Resume re-issues the very same transfer, this time in resume mode: the task sizes
+		// the destination and sends only what is missing.
+		while next_command(&mut rx).is_some() {}
+		let _task = app.update(Message::TransferResumePressed);
+		match next_command(&mut rx) {
+			Some(SshCommand::DownloadTree {
+				remote,
+				local,
+				resume,
+			}) => {
+				assert_eq!(remote, "/srv/logs");
+				assert_eq!(local, PathBuf::from("/local"));
+				assert!(resume);
+			}
+			other => panic!("expected the same folder, resumed: {other:?}"),
+		}
+	}
+
+	/// The offer belongs to the machine it was made on (§16): both its paths are that server's,
+	/// and the partial it would append to is over there. A tab that goes somewhere else next is
+	/// offered nothing — and is not left holding the offer either, since a resume point that
+	/// waited through a session on another machine is one nobody remembers making.
+	#[test]
+	fn an_unfinished_transfer_is_not_offered_to_a_different_server() {
+		let (mut app, _rx) = app_with_terminal(16);
+		app.connection = Some("u@h:22".to_owned());
+		let effects = app
+			.transfers
+			.download_tree("/srv/logs".to_owned(), Some(PathBuf::from("/local")));
+		let _ = app.apply(effects);
+		let _task = app.on_ssh_event(SshEvent::Disconnected);
+
+		app.connection = Some("u@elsewhere:22".to_owned());
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		assert!(!app.transfers.can_resume());
+		assert_eq!(app.transfers.notice(), None);
+		assert!(app.unfinished.is_none(), "spent, not left waiting");
 	}
 
 	/// Reveal is an explicit ask, so it ends the resume pin (§19, §22) — the same rule

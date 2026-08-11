@@ -348,10 +348,14 @@ references below (§n) point into it.
   a cancel) its partial is kept and a **Resume** appears beside the notice; Resume picks up from
   exactly where it stopped — a byte-offset append for a single file, and for a folder a re-walk that
   size-compares every file so only the missing ones and the interrupted file's tail cross again.
-  Resume works within one live session; a dropped *connection* tears down the session, so that is
-  not resumable (§16, §17). A transfer the destination **refused** — no write permission on the
-  folder — gets no Resume either: nothing was created, so there is nothing to pick up, and the
-  notice simply says what the server said.
+  **A dropped connection is resumable too** — the usual reason a big transfer stops. The session
+  goes, the partial does not, so the next time you connect **to that same server** the bar says
+  *"backups stopped when the connection dropped"* with a Resume beside it, and it picks up where the
+  link left off. It is offered only to the same endpoint, only once, and only for the run of the app
+  — a partial you come back to days later is not something cmote will quietly append to. A transfer
+  the destination **refused** — no write permission on the folder — gets no Resume either: nothing
+  was created, so there is nothing to pick up, and the notice simply says what the server said
+  (§16, §17).
 - **Timestamps are kept** — a transferred file keeps its **modification time** instead of being
   re-dated to "now", both when you upload and when you download, so a folder still sorts by date and
   a build still sees the right ages. Between two Unix machines the **permission bits** ride along too
@@ -713,7 +717,12 @@ grid cell's two-line version of it, the short mtime that keeps the server's wall
 but drops the seconds and the zone tag, the session snapshot's round trip through
 `targets.json` (including a pre-v2.2 file
 with no session fields at all), and — again through the app's own handlers — a reconnect
-that resumes both paths and pins the pane until the shell has caught up.
+that resumes both paths and pins the pane until the shell has caught up. Resume across a
+**dropped connection** adds its own set: what a dying session hands on (the transfer that was
+on the wire, or an offer the user had not taken up yet) and what it must not (a cancelled
+transfer, an idle session), that the offer is matched to the endpoint it was made on, and —
+through `on_ssh_event` end to end — a hangup under a running transfer followed by a reconnect
+that offers it, resumes the very same two paths, and refuses to when the tab lands elsewhere.
 
 ### Manual smoke test (live SSH)
 
@@ -863,6 +872,17 @@ title should now carry the directory, **Sync**/**Reveal** should come out of the
   the files go first, then the folders; the closing notice says how many of each landed. Drop while
   a transfer is running → declined with the busy note. (Dragging a file *out* of the pane onto the
   desktop is not offered — use **Download…**.)
+- **Resume across a dropped connection.** Make something big enough to watch
+  (`head -c 300000000 /dev/urandom > /tmp/big.bin`), start a **Download…** of it, and kill the link
+  mid-bar the hard way — `docker stop cmote-sshd`, or `pkill sshd` on the remote. The tab drops to
+  the error screen, as it always did; the half-written local file is still on disk (check its size).
+  Reconnect to the **same** target: the bar should read *"big.bin stopped when the connection
+  dropped"* with a **Resume** beside it. Press it → the bar restarts at the size already on disk,
+  not at zero, and when it lands `sha256sum` both ends must match. Repeat the other way with an
+  **upload** (the partial is then on the server: `ls -l` it before resuming). Then check what must
+  **not** happen: reconnect to a *different* target instead → no Resume, no notice; cancel a
+  transfer with the **✕** and drop the link → no Resume, since a cancel deletes its partial; and
+  restart cmote before reconnecting → no Resume, the offer only lives for the run of the app.
 - Edit the destination in the dialog to a directory you cannot write (`/etc/x`) → the
   status bar shows the failure and the shell stays open.
 - Start a shell that does **not** announce its directory (a plain `bash --norc`, or

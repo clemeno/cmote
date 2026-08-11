@@ -288,7 +288,7 @@ cmote/
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, the viewport↔document line mapping and whether a line wraps into the next (§9, §16, §23, §24, §25, §40, §42)
     │   └── search.rs      find text anywhere in the scrollback: a row flattened for searching, the match list, which is current, which are on screen (§35, §39)
-    ├── transfer.rs       the ONE transfer slot and everything queued behind it: the batch being set up, the file / folder / download queues, the collision questions, resume, and an OS drop settling into all of it (§16, §17, §19, §21, §29)
+    ├── transfer.rs       the ONE transfer slot and everything queued behind it: the batch being set up, the file / folder / download queues, the collision questions, resume — including the one a dropped session hands to the next — and an OS drop settling into all of it (§16, §17, §19, §21, §29)
     └── bridge.rs          SshCommand / SshEvent enums + channel wiring (§4)
 ```
 
@@ -1280,9 +1280,12 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   — the one attribute meaningful in the everyday Windows case, where the client neither has a Unix
   mode to send nor can apply one — and, when both ends are Unix, its **permission bits** too (so a
   script keeps its `+x`). It never fails a transfer: a server that refuses `setstat` or a filesystem
-  that will not take the timestamp is logged and the bytes stand. Still deferred: resuming across a
-  *dropped connection* (cancel/resume live inside one live session — a lost session tears down to
-  the error screen, so its transfer state is gone), aiming a drop at a PARTICULAR folder — the
+  that will not take the timestamp is logged and the bytes stand. v4.0.0 then carried resume **across
+  a dropped connection** (§16 below): a session that dies under a transfer hands the resume point to
+  the tab rather than losing it with the queue, and the next session **to that same endpoint** offers
+  to finish it — which matters because the link itself is the commonest reason a big transfer stops,
+  and it was the one reason cmote could not offer to pick up from. Still deferred: aiming a drop at a
+  PARTICULAR folder — the
   gesture itself now takes any number of files or a whole folder (§29, v4.0.0), but iced's drop
   events carry no pointer position, so every drop lands in the pane's own directory — two transfers
   at once (a batch queues instead, §17, §21), and preserving the *access* time as its own attribute
@@ -1659,8 +1662,54 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
   so it cannot be lost between the refusal and the report. Everything past the line that opened the
   destination stays resumable, because past that line there is somewhere for bytes to survive.
 
-Both live inside one connection: a transfer whose *session* drops tears down to the error screen, so
-its state is gone — resuming across a reconnect is the deferred upgrade path (§16).
+### Resuming across a dropped connection (v4.0.0)
+
+Cancel and resume above both lived inside ONE session: a connection that died took the tab down to
+the error screen, and `reset()` cleared the resume point along with everything else. Which left the
+commonest reason a big transfer stops — the link — as the one reason cmote could not offer to
+continue from. The bytes were still on the far side; only the memory of them was gone.
+
+- **The mechanism never cared which connection carried it.** A resume re-issues an absolute command
+  with `resume` set, and the task sizes the destination before it sends a byte (`resume_start`,
+  above). Nothing in it refers to the session that started it. So this is a memory feature, not a
+  transfer one: `transfer::Unfinished` is what a dying session hands over, and the two calls that
+  move it — `Queue::abandon` on the way out, `Queue::adopt` on the way in — are the whole of it.
+- **A dropped connection is not a cancel, and that is the whole justification.** A cancel deletes
+  the partial it was writing, deliberately, so there is nothing to continue; a connection dying
+  deletes nothing at either end (the copy loops only `remove_file` on the cancel flag), so the
+  partial is exactly as good as the one a mid-flight failure leaves. A cancelled transfer therefore
+  hands over nothing, because `cancel` has already cleared both slots — unit-tested, since "the
+  cancel I asked for came back on the next connection" would be the worst version of this feature.
+- **What was on the wire outranks an older parked offer.** Either can be what a session dies
+  holding: a transfer still running, or one that failed and was waiting on a Resume the user had
+  not pressed yet. The running one wins — its partial was growing a moment ago.
+- **The endpoint travels with it, and is matched on adoption.** Both paths belong to one machine and
+  one account, and the partial to append to is on it. `Unfinished` therefore names the endpoint it
+  was made on, and a session that opens somewhere else is offered nothing, silently. The offer is
+  **spent by the first session either way** — taken and then matched, exactly as a duplicate's
+  carried directory is (§52) — because a resume point that waited through a session on another
+  machine is one nobody remembers making.
+- **It lives on the `Tab`, outside the queue**, and is the ONE thing `clear_grid_interaction` does
+  not clear — that function runs on the way INTO a session as well as out of one, and this is meant
+  to survive exactly that crossing. Every teardown sets it through `Tab::abandon_transfers` (remote
+  hangup, session failure, confirmed Disconnect, dead worker channel), which must run *before*
+  `connection` is cleared, since that endpoint is the whole guard.
+- **A deliberate Disconnect keeps the offer too.** The ✕ beside the progress bar is how a transfer
+  is *cancelled*; leaving the server is not that, and it leaves the partial there either way. An
+  offer to finish it beats a half file on a server with nothing said about it.
+- **The notice comes with the offer.** A Resume button appearing on a freshly opened session would
+  otherwise offer to finish something without saying what — so the bar reads
+  `<name> stopped when the connection dropped`, the source's own name in both directions (a
+  destination may have been renamed to a `-1` copy on the way, §17, §21).
+- **It is deliberately NOT persisted with the target** (§22). A partial, and the source beside it,
+  are facts about this machine's disk and that server's *now*; an offer to append to one after a
+  restart hours later would trust far more than the size comparison behind it (`ponytail:` no
+  checksum, above) can carry. In-memory, per tab, for the reconnect that follows the drop — which
+  is the case the user is actually in.
+- `ponytail:` **the account is not carried.** A transfer runs as the identity selected at the time
+  (§46), and an elevated one does not exist after a reconnect — so a resume issued after one runs as
+  the login account. If that account cannot write the destination, the resume fails with the
+  server's own reason in the status bar and nothing is lost; it just cannot be finished from there.
 
 ### Preserving file metadata (v4.0.0)
 

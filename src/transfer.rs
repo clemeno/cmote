@@ -132,6 +132,42 @@ enum Resumable {
 	DownloadTree { remote: String, local: PathBuf },
 }
 
+impl Resumable {
+	/// What is being moved, by name, for the notice a LATER session shows about it (§16). The
+	/// SOURCE's name in both directions: it is the name the user picked, while a destination may
+	/// have been renamed to a `-1` copy on the way (§17, §21) and would read as something they
+	/// never asked for.
+	fn name(&self) -> &str {
+		match self {
+			Self::Upload { local, .. } | Self::UploadTree { local, .. } => file_name_of(local),
+			Self::Download { remote, .. } | Self::DownloadTree { remote, .. } => {
+				explorer::name(remote)
+			}
+		}
+	}
+}
+
+/// A transfer a lost session took down with it (§16), kept for the NEXT session to offer to
+/// finish.
+///
+/// Cancel and resume used to live entirely inside one connection: a session that dropped tore the
+/// tab down to the error screen, and the resume point went with it — so the commonest reason a big
+/// transfer stops, the link itself, was the one reason cmote could not offer to pick it up from.
+/// The partial is still there, though: neither end deletes anything when a connection dies, so the
+/// bytes that arrived are exactly as good as the ones a mid-flight failure leaves.
+///
+/// The endpoint rides along because a resume point means nothing away from the machine — and the
+/// account — it was made on. Both its paths are that server's, and the partial a resume appends to
+/// is on it. So this names where it belongs and the queue adopting it says where it now is; a tab
+/// holding one can never hand it to another server by accident.
+#[derive(Debug, Clone)]
+pub struct Unfinished {
+	/// The endpoint key (`user@host:port`) of the session it was running on.
+	endpoint: String,
+	/// What was moving, and between which two paths.
+	what: Resumable,
+}
+
 /// How the transfer in the slot stopped (§16, §17, §21). Four ways, one call: which DIRECTION it
 /// was going is not asked, because the queue already remembers it — so the six SSH events that
 /// used to end a transfer are six one-line arms into here.
@@ -792,6 +828,52 @@ impl Queue {
 		*self = Self::default();
 	}
 
+	/// The session has gone while something was still unfinished (§16): hand back the one thing a
+	/// LATER session to the same server could pick up, then forget everything else exactly as
+	/// `reset` does.
+	///
+	/// A dropped connection is not a cancel. A cancel deletes the partial it was writing, on
+	/// purpose, and is final; a connection dying deletes nothing — the bytes that reached the far
+	/// side are still there, still exactly as long as they got — so the one thing worth carrying
+	/// out of a dead session is how far it got. Everything else belongs to the session that raised
+	/// it: the queue behind the slot, the batch being set up, the question that was open.
+	///
+	/// What was ON THE WIRE outranks an older parked offer, because it is the one whose partial was
+	/// growing a moment ago. A cancel has already cleared both, which is what keeps a deliberately
+	/// cancelled transfer from reappearing on the next connection.
+	pub fn abandon(&mut self, endpoint: &str) -> Option<Unfinished> {
+		let what = self.in_flight.take().or_else(|| self.resumable.take());
+		self.reset();
+		what.map(|what| Unfinished {
+			endpoint: endpoint.to_owned(),
+			what,
+		})
+	}
+
+	/// A fresh session opened: put back what the last one left unfinished (§16), if this is the
+	/// same server it was left on. That is the whole of "resume across a dropped connection" —
+	/// the resume itself already re-issues an absolute command and sizes the destination before it
+	/// sends a byte, so it never cared WHICH connection carries it; only the memory of it was
+	/// missing.
+	///
+	/// The notice comes with it, because a Resume button appearing on a freshly opened session
+	/// would otherwise offer to finish something without saying what: the file is named, and so is
+	/// the reason it stopped.
+	///
+	/// A different endpoint drops it silently, and the offer is spent either way — the caller
+	/// `take`s it before calling, the same rule a carried directory follows (§52). A resume point
+	/// that waited through a session on another machine is one nobody remembers making.
+	pub fn adopt(&mut self, unfinished: Unfinished, endpoint: &str) {
+		if unfinished.endpoint != endpoint {
+			return;
+		}
+		self.notice = Some(format!(
+			"{} stopped when the connection dropped",
+			unfinished.what.name()
+		));
+		self.resumable = Some(unfinished.what);
+	}
+
 	// ---- the rules themselves ----------------------------------------------------------
 
 	/// Turn the picked files, the destination and the collision answer into the upload queue
@@ -1281,6 +1363,101 @@ mod tests {
 		assert!(!queue.can_resume());
 		assert!(!queue.settling());
 		assert!(queue.asking().is_none());
+	}
+
+	#[test]
+	fn a_transfer_a_dropped_session_took_with_it_is_offered_again_on_the_next_one() {
+		// The commonest reason a big transfer stops is the link itself, and that used to be the
+		// one reason cmote could not offer to pick it up from (§16): the teardown cleared the slot
+		// along with everything else. The partial is still on the far side, so what the dead
+		// session hands over is how far it got — and nothing else.
+		let mut queue = drop_of_both_kinds();
+		let _ = queue.pump();
+		let unfinished = queue
+			.abandon("u@h:22")
+			.expect("the file on the wire is the offer");
+		assert!(!queue.busy(), "everything else went with the session");
+		assert!(
+			queue.trees.is_empty(),
+			"including the folders queued behind"
+		);
+
+		// The next session to the SAME server picks it up, says so, and resumes the very same two
+		// endpoints — a resume that named different ones would append to the wrong file.
+		let mut fresh = Queue::default();
+		fresh.adopt(unfinished, "u@h:22");
+		assert!(fresh.can_resume());
+		assert_eq!(
+			fresh.notice(),
+			Some("a.txt stopped when the connection dropped")
+		);
+		match fresh.resume().commands.first() {
+			Some(SshCommand::Upload {
+				local,
+				remote,
+				resume,
+				..
+			}) => {
+				assert_eq!(local, &PathBuf::from("/local/a.txt"));
+				assert_eq!(remote, "/srv/a.txt");
+				assert!(*resume);
+			}
+			other => panic!("expected the same upload, resumed: {other:?}"),
+		}
+	}
+
+	#[test]
+	fn an_offer_made_on_one_server_is_never_shown_on_another() {
+		// Both its paths belong to the machine it was made on, and the partial it would append to
+		// is over there (§16). A tab that reconnects somewhere else must therefore be offered
+		// nothing at all — silently, since it is not a failure the user needs telling about.
+		let mut queue = drop_of_both_kinds();
+		let _ = queue.pump();
+		let unfinished = queue.abandon("u@h:22").expect("something was moving");
+		let mut elsewhere = Queue::default();
+		elsewhere.adopt(unfinished, "u@other:22");
+		assert!(!elsewhere.can_resume());
+		assert_eq!(elsewhere.notice(), None);
+	}
+
+	#[test]
+	fn an_offer_the_user_had_not_taken_up_yet_outlives_the_session_too() {
+		// A transfer that failed mid-flight, then a connection that dropped before the user
+		// reached the Resume button: the offer was already parked rather than in flight, and it is
+		// just as good (§16).
+		let mut queue = Queue {
+			resumable: Some(Resumable::Download {
+				remote: "/srv/big.iso".to_owned(),
+				local: PathBuf::from("/local/big.iso"),
+			}),
+			..Queue::default()
+		};
+		let unfinished = queue.abandon("u@h:22").expect("the parked offer travels");
+		let mut fresh = Queue::default();
+		fresh.adopt(unfinished, "u@h:22");
+		assert_eq!(
+			fresh.notice(),
+			Some("big.iso stopped when the connection dropped")
+		);
+	}
+
+	#[test]
+	fn a_cancelled_transfer_is_not_offered_after_a_reconnect() {
+		// A cancel is final and its partial is deleted (§16), so there is nothing over there to
+		// append to. Carrying one across a reconnect would offer to finish a file the user
+		// deliberately stopped — and would restart it whole, since nothing is left of it.
+		let mut queue = drop_of_both_kinds();
+		let _ = queue.pump();
+		let _ = queue.cancel();
+		assert!(queue.abandon("u@h:22").is_none());
+	}
+
+	#[test]
+	fn a_session_that_ended_with_nothing_moving_hands_nothing_on() {
+		// Which is every ordinary disconnect. The next session gets a clean bar rather than a
+		// Resume button for a transfer that finished perfectly well.
+		let mut queue = Queue::default();
+		assert!(queue.abandon("u@h:22").is_none());
 	}
 
 	#[test]
