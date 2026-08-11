@@ -2391,6 +2391,42 @@ impl Viewer {
 	}
 }
 
+/// Who has the keyboard right now (§10, §14, §17, §18, §27, §35).
+///
+/// Something on screen is often holding the keyboard: a dialog, a field being typed into, a
+/// question waiting for a button. While one of them holds it, a key press must reach IT and nothing
+/// else — most of all not the remote, because a rename field and the shell prompt would otherwise
+/// receive the same keystroke, and renaming a folder would be typing at the remote at the same time.
+///
+/// That rule was already obeyed, by a run of seven `if` blocks — all the same shape, "if this thing
+/// is up, handle Escape and return" — spread across two key handlers. It worked, but the PRIORITY
+/// was nowhere written down: it was the source order of the blocks, so swapping two of them silently
+/// changed which one wins, and no test could name a pair because there was nothing to name. This
+/// enum is that priority made into a value, so [`Tab::keyboard_claim`] can be asked and answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Claim {
+	/// Home: the "remove this target?" confirmation (§14). Outranks the rename below it so a stray
+	/// Enter cannot open a connection behind the modal.
+	DeleteTarget,
+	/// Home: the inline rename of a saved target (§14).
+	TargetRename,
+	/// Terminal: a dialog over the screen (§10, §17, §18, §27). The ones with a FIELD take the
+	/// keyboard so their typing does not also reach the remote; the ones without take it so Ctrl+C
+	/// copies the message rather than sending ETX down the channel.
+	Modal,
+	/// Terminal: one of the transfer flow's questions (§17, §21) — asked of the queue, which is the
+	/// only thing that knows what it is holding.
+	Transfers,
+	/// Terminal: the folder tree's inline rename (§18).
+	TreeRename,
+	/// Terminal: the files pane's inline rename (§19).
+	PaneRename,
+	/// Terminal: the scrollback find bar (§35). Ranked LAST on purpose, and it is the only claimant
+	/// with an exception above it — see `on_key`, where Ctrl+Shift+F is allowed through so pressing
+	/// it again refocuses the field rather than being swallowed by the bar it opened.
+	Find,
+}
+
 /// One session's whole state — its screen, its connection, its terminal and panels, its
 /// dialogs (§6). This used to BE the app; with tabs (§26) the app owns a `Vec<Tab>` and each
 /// tab is one of these, fully independent: a tab can sit at the home list while another runs a
@@ -5514,12 +5550,71 @@ impl Tab {
 		}
 	}
 
-	/// Handle a key on the home screen (§14). While the delete prompt is up the list
-	/// shortcuts are inert and only Esc is handled (it cancels, keeping the target) — a
-	/// stray Enter must not open a connection behind the modal. While renaming, only Esc
-	/// (cancel) is handled here — the field's own `on_submit` commits on Enter. Otherwise
-	/// F2 renames the selection, Enter opens it, Delete asks to remove it; all are no-ops
-	/// without a selection. Other keys fall through.
+	/// Who is holding the keyboard on this tab, if anyone (§10, §14, §17, §18, §27, §35) — see
+	/// [`Claim`], which is where the reasoning lives.
+	///
+	/// THE ORDER OF THESE TESTS IS THE PRIORITY, and that is the whole point of the function: it
+	/// used to be the order of seven `if` blocks in two different handlers, which is a rule nothing
+	/// could read back. Here it is one list, in one place, and the tests below can assert a pair.
+	///
+	/// Pure, and it reads only what is already on the tab, so "who has the keyboard" can be asked
+	/// without a window and without pressing anything.
+	fn keyboard_claim(&self) -> Option<Claim> {
+		match self.screen {
+			Screen::Home => {
+				if self.confirm_delete {
+					return Some(Claim::DeleteTarget);
+				}
+				if self.home_rename.is_some() {
+					return Some(Claim::TargetRename);
+				}
+				None
+			}
+			Screen::Terminal => {
+				if self.modal.is_some() {
+					return Some(Claim::Modal);
+				}
+				if self.transfers.holds_keyboard() {
+					return Some(Claim::Transfers);
+				}
+				if self.explorer.editing().is_some() {
+					return Some(Claim::TreeRename);
+				}
+				if self.files.editing().is_some() {
+					return Some(Claim::PaneRename);
+				}
+				if self.search.is_some() {
+					return Some(Claim::Find);
+				}
+				None
+			}
+			// The connect form, the viewers and the connecting screen have keyboard handlers of
+			// their own, and nothing on them holds the keyboard against the others.
+			_ => None,
+		}
+	}
+
+	/// Escape, given to whoever is holding the keyboard (§10, §14, §17, §18, §27, §35). Every
+	/// claimant can be backed out of, and none of them acts on being dismissed — which is what makes
+	/// one key safe for all seven.
+	fn dismiss(&mut self, claim: Claim) {
+		match claim {
+			Claim::DeleteTarget => self.confirm_delete = false,
+			Claim::TargetRename => self.home_rename = None,
+			Claim::Modal => self.modal = None,
+			Claim::Transfers => self.transfers.escape(),
+			Claim::TreeRename => self.explorer.cancel_rename(),
+			Claim::PaneRename => self.files.cancel_rename(),
+			// The current match stays selected when the bar closes, so it can still be copied.
+			Claim::Find => self.search = None,
+		}
+	}
+
+	/// Handle a key on the home screen (§14). While something is holding the keyboard — the delete
+	/// prompt, an inline rename — the list shortcuts are inert and only Esc is handled; a stray
+	/// Enter must not open a connection behind the modal, and a rename's Enter belongs to the
+	/// field's own `on_submit`. Otherwise F2 renames the selection, Enter opens it, Delete asks to
+	/// remove it; all are no-ops without a selection. Other keys fall through.
 	fn on_home_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
@@ -5527,16 +5622,9 @@ impl Tab {
 			return iced::Task::none();
 		};
 
-		if self.confirm_delete {
+		if let Some(claim) = self.keyboard_claim() {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.confirm_delete = false;
-			}
-			return iced::Task::none();
-		}
-
-		if self.home_rename.is_some() {
-			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.home_rename = None;
+				self.dismiss(claim);
 			}
 			return iced::Task::none();
 		}
@@ -5714,54 +5802,27 @@ impl Tab {
 			return iced::Task::none();
 		}
 
-		// A dialog over this screen owns the keyboard while it is up (§10, §17, §18, §27). Two
-		// reasons, and each of the five needs one of them: the ones with a FIELD (the new folder's
-		// name, a forward's listen/target) type through the widget tree, so a key reaching the
-		// shell as well would be typing at the remote prompt at the same time; the ones without
-		// take it so that Ctrl+C copies the selected message rather than sending ETX down the
-		// channel — the `keyboard::listen` subscription fires independently of widget focus, and
-		// the shell-integration dialog's whole body is a block meant to be read and copied. Esc
-		// closes whichever it is, which is safe because none of them acts on being dismissed.
-		if self.modal.is_some() {
+		// Whoever is holding the keyboard gets it, and gets it before anything on this screen may
+		// see the key (§10, §17, §18, §27, §35) — see `Claim`. Esc backs out of whichever it is;
+		// everything else waits for the field or the button that is holding it.
+		let claim = self.keyboard_claim();
+		if let Some(claim) = claim
+			&& claim != Claim::Find
+		{
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.modal = None;
+				self.dismiss(claim);
 			}
 			return iced::Task::none();
 		}
 
-		// The transfer flow's own questions, by the same rule (§17, §21) — asked of the queue,
-		// which is the only thing that knows what it is holding. Esc backs out of whichever it is;
-		// everything else waits for a button.
-		if self.transfers.holds_keyboard() {
-			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.transfers.escape();
-			}
-			return iced::Task::none();
-		}
-
-		// And the same for the folder tree's inline rename (§18): the field types through
-		// the widget tree, Esc abandons the edit, and nothing reaches the shell meanwhile
-		// — otherwise renaming a folder would also be typing at the remote prompt.
-		if self.explorer.editing().is_some() {
-			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.explorer.cancel_rename();
-			}
-			return iced::Task::none();
-		}
-
-		// And the files pane's inline rename (§19), for the same reason.
-		if self.files.editing().is_some() {
-			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.files.cancel_rename();
-			}
-			return iced::Task::none();
-		}
-
-		// Ctrl+Shift+F opens the scrollback find bar and focuses its field (§35). Taken BEFORE the
-		// bar's own keyboard guard below, so pressing it again while the bar is up refocuses the
-		// field rather than being swallowed. Matched on the PHYSICAL key like the copy/paste
-		// bindings, so it holds on any layout; plain Ctrl+F belongs to the shell (readline's
-		// forward-char), which is why only the Shift form is cmote's.
+		// Ctrl+Shift+F opens the scrollback find bar and focuses its field (§35). THE ONE EXCEPTION
+		// to the rule above, and the reason `Claim::Find` is ranked last and singled out here:
+		// pressing it while the bar is already up refocuses the field rather than being swallowed by
+		// the bar it opened. Every other claimant still outranks it — with a modal or a rename up,
+		// this key does nothing, which is the behaviour the old block order gave by sitting exactly
+		// here. Matched on the PHYSICAL key like the copy/paste bindings, so it holds on any layout;
+		// plain Ctrl+F belongs to the shell (readline's forward-char), which is why only the Shift
+		// form is cmote's.
 		if modifiers.control()
 			&& modifiers.shift()
 			&& !modifiers.alt()
@@ -5771,13 +5832,10 @@ impl Tab {
 			return self.open_term_find();
 		}
 
-		// While the find bar is open it owns the keyboard (§35): its field types through the widget
-		// tree, so nothing here may ALSO reach the remote — otherwise searching the scrollback would
-		// be typing at the shell's prompt. Exactly the rule the inline rename fields above follow.
-		// Esc closes the bar; the current match stays selected, so it can still be copied.
-		if self.search.is_some() {
+		// And now the find bar itself, having let its own shortcut past.
+		if let Some(claim) = claim {
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
-				self.search = None;
+				self.dismiss(claim);
 			}
 			return iced::Task::none();
 		}
@@ -8211,6 +8269,11 @@ mod tests {
 		let app = Tab {
 			command_tx: Some(tx),
 			terminal: Some(term::Terminal::new(24, 80)),
+			// A tab with a live terminal is ON the terminal screen — the fixture left this at its
+			// `Home` default for a long time and nothing minded, because `on_key` only ever ran on
+			// this screen in production and so never had to ask. `keyboard_claim` does ask, since
+			// which claimants exist at all is a property of the screen.
+			screen: Screen::Terminal,
 			window_focused: true,
 			shell_focus_reported: true,
 			focus: Focus::Terminal,
@@ -8457,6 +8520,58 @@ mod tests {
 			matches!(app.screen, Screen::Terminal),
 			"and still on screen"
 		);
+	}
+
+	/// Who holds the keyboard when several things could (§10, §17, §18, §35). This is the assertion
+	/// that could not be written before: the priority was the source order of seven `if` blocks, so
+	/// there was no value to compare against and no way to name a pair.
+	#[test]
+	fn the_keyboard_goes_to_one_claimant_in_a_stated_order() {
+		let (mut app, _rx) = app_with_terminal(16);
+		assert_eq!(app.keyboard_claim(), None, "nothing is holding it");
+
+		// The find bar is ranked last, so anything else opened over it takes precedence.
+		let _ = app.open_term_find();
+		assert_eq!(app.keyboard_claim(), Some(Claim::Find));
+
+		app.explorer.start_rename("/srv".to_owned());
+		assert_eq!(
+			app.keyboard_claim(),
+			Some(Claim::TreeRename),
+			"a rename field outranks the find bar"
+		);
+
+		// A dialog outranks the rename, which is what stops a key reaching two fields at once.
+		let _ = app.begin_new_folder("/srv".to_owned());
+		assert_eq!(app.keyboard_claim(), Some(Claim::Modal));
+
+		// And dismissing them gives the keyboard back in the reverse order, one at a time.
+		app.dismiss(Claim::Modal);
+		assert_eq!(app.keyboard_claim(), Some(Claim::TreeRename));
+		app.dismiss(Claim::TreeRename);
+		assert_eq!(app.keyboard_claim(), Some(Claim::Find));
+		app.dismiss(Claim::Find);
+		assert_eq!(app.keyboard_claim(), None);
+	}
+
+	/// The home screen's claimants are the home screen's (§14). A terminal-screen holder is not
+	/// consulted there and vice versa, which is what the screen match in `keyboard_claim` says.
+	#[test]
+	fn the_home_screen_has_claimants_of_its_own() {
+		let mut app = Tab::default();
+		assert!(matches!(app.screen, Screen::Home));
+		assert_eq!(app.keyboard_claim(), None);
+
+		app.home_rename = Some(ui::home::RenameState {
+			key: "one".to_owned(),
+			text: "one".to_owned(),
+		});
+		assert_eq!(app.keyboard_claim(), Some(Claim::TargetRename));
+
+		// The delete confirmation outranks the rename: a stray Enter must not open a connection
+		// from behind the modal.
+		app.confirm_delete = true;
+		assert_eq!(app.keyboard_claim(), Some(Claim::DeleteTarget));
 	}
 
 	/// A dialog owns the keyboard while it is up (§10, §18). Its own field types through the widget
