@@ -40,11 +40,6 @@ use crate::term;
 /// to wait for the loop to keep up rather than grow memory without limit (§4).
 const CHANNEL_BOUND_SHELL: usize = 256;
 
-/// How many questions cmote will answer for one elevation before giving up (§45). sudo itself
-/// stops after three wrong passwords; this only guards against a program that would ask for ever,
-/// so it is generously above any real conversation (a password plus a second factor, retried).
-const MAX_PROMPTS: u32 = 8;
-
 /// One message read off one shell's channel, tagged with the shell it came from. The reader tasks
 /// all send these down the same channel, so the session loop awaits one receiver however many
 /// shells are open.
@@ -55,31 +50,11 @@ pub struct ShellMsg {
 
 /// Where a shell is in its life (§45).
 enum State {
-	/// The elevation program is still talking: its output is a conversation to answer, not
-	/// terminal output to draw. `buffer` is what it has said since the last question was answered
-	/// — cleared at each question, so a stale prompt is never mistaken for a fresh one — `asked`
-	/// counts the questions put to the user, and `pending` is set while one is unanswered so the
-	/// same prompt cannot raise two dialogs.
-	///
-	/// `password` records whether the outstanding question is the one cmote NAMED itself (`-p
-	/// MARKER`), which is the only question whose answer may be kept: it is the caller's own
-	/// password, and the file layer needs the same one to authenticate sudo on a file channel
-	/// (§46). Anything else — a second factor, `su`'s prompt for another account's password — is
-	/// answered and forgotten.
-	///
-	/// `factors` counts the DISTINCT things asked for, which is not the same as `asked`: a question
-	/// the program re-put after refusing the answer is the same factor over again, so only a question
-	/// that follows no refusal increments it. That distinction carries two decisions. A corrected
-	/// password is still a password and is worth keeping (`factors` is still 1), and an account that
-	/// took more than one factor to log in as cannot have its FILES read as it (§46) — a file channel
-	/// can replay a password to sudo but can neither ask for a second factor nor reuse a spent one.
-	Elevating {
-		buffer: String,
-		asked: u32,
-		factors: u32,
-		pending: bool,
-		password: bool,
-	},
+	/// The elevation program is still talking: its output is a conversation to answer, not terminal
+	/// output to draw. The conversation itself — what has been said, what has been asked, and which
+	/// answer may be kept — is `elevate::Handshake`, which holds no channel and is therefore
+	/// testable on its own. This file's job is only to carry its answers to and from the socket.
+	Elevating(elevate::Handshake),
 	/// A live terminal: bytes are output, keystrokes may be routed here.
 	Live,
 }
@@ -229,13 +204,7 @@ impl Shells {
 		self.adopt(
 			identity,
 			channel,
-			State::Elevating {
-				buffer: String::new(),
-				asked: 0,
-				factors: 0,
-				pending: false,
-				password: false,
-			},
+			State::Elevating(elevate::Handshake::default()),
 		);
 		Ok(())
 	}
@@ -263,10 +232,7 @@ impl Shells {
 					let reason = match shell.state {
 						// It died mid-conversation: the last thing it said is why, and those are
 						// the remote's own words about its own policy.
-						State::Elevating { buffer, .. } => Some(
-							elevate::reason(&buffer)
-								.unwrap_or_else(|| "The elevation was refused.".to_owned()),
-						),
+						State::Elevating(handshake) => Some(handshake.death_reason()),
 						// It had become a shell and that shell exited — an ordinary `exit`.
 						State::Live => None,
 					};
@@ -299,24 +265,21 @@ impl Shells {
 				let _ = events.send(SshEvent::Output { identity, bytes }).await;
 				After::Nothing
 			}
-			State::Elevating {
-				buffer,
-				asked,
-				factors,
-				pending,
-				password,
-			} => {
-				// Lossy on purpose: a chunk can end mid-UTF-8, and this text is only ever compared
-				// against prompt shapes — the terminal, which does care, never sees it.
-				buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-				// A shell prompt means the program is gone and the account's own shell has the
-				// channel: the conversation is over, whatever else is in the buffer. Everything
-				// buffered since the last answer is flushed as output, so the shell's greeting and
-				// its first prompt appear in the grid rather than being swallowed.
-				if elevate::looks_like_shell(buffer) {
-					let flush = std::mem::take(buffer).into_bytes();
-					let factors = *factors;
+			// An elevating shell's bytes are a conversation. What they MEAN is `Handshake`'s to
+			// decide; what is left here is carrying the answer to the channel and to the GUI.
+			State::Elevating(handshake) => match handshake.on_bytes(&bytes) {
+				elevate::Step::Nothing => After::Nothing,
+				elevate::Step::Ask { label, refusal } => {
+					let _ = events
+						.send(SshEvent::ElevatePrompt {
+							identity,
+							label,
+							refusal,
+						})
+						.await;
+					After::Nothing
+				}
+				elevate::Step::Live { flush, factors } => {
 					shell.state = State::Live;
 					// READY FIRST, then the bytes. The GUI builds this identity's emulator when it
 					// hears `IdentityReady` (§45), and output for an identity that has none yet is
@@ -327,52 +290,12 @@ impl Shells {
 					let _ = events
 						.send(SshEvent::Output {
 							identity,
-							bytes: flush,
+							bytes: flush.into_bytes(),
 						})
 						.await;
-					return After::Live { identity, factors };
+					After::Live { identity, factors }
 				}
-
-				// Otherwise: is it asking something? Only while no question is already outstanding
-				// — the same buffer arriving in two chunks must not raise two dialogs — and only up
-				// to a bound, so a program that asks for ever cannot pin the user in a dialog loop.
-				if *pending || *asked >= MAX_PROMPTS {
-					return After::Nothing;
-				}
-				if let Some(label) = elevate::prompt(buffer) {
-					// Whether the program rejected the PREVIOUS answer, in its own words. Read here
-					// for the same reason as `password` below — the buffer is about to be cleared, and
-					// what it holds between one answer and the next question is the only evidence
-					// there is. The alternative the GUI used to rely on, "the same wording twice means
-					// refused", is wrong on a two-factor machine (§45).
-					let refusal = elevate::refusal(buffer);
-					// Whether this is cmote's OWN password question, decided before the buffer is
-					// cleared: the answer to that one is the caller password the file layer will need
-					// (§46), and to any other question it is a secret to use once and forget.
-					*password = buffer.contains(elevate::MARKER);
-					*pending = true;
-					*asked += 1;
-					// A question the program put again after refusing the answer is the same factor
-					// over again, so only one that follows no refusal counts as a new one. This is the
-					// number both credential rules turn on — see `State::Elevating` — and it is why a
-					// corrected password is still cacheable while a second factor never is.
-					if refusal.is_none() {
-						*factors += 1;
-					}
-					// Cleared now: the question has been put, so these bytes are spent. What
-					// arrives next is either the answer's outcome or the next question, and
-					// neither should be read against text that has already been dealt with.
-					buffer.clear();
-					let _ = events
-						.send(SshEvent::ElevatePrompt {
-							identity,
-							label,
-							refusal,
-						})
-						.await;
-				}
-				After::Nothing
-			}
+			},
 		}
 	}
 
@@ -385,34 +308,18 @@ impl Shells {
 	///
 	/// Answers `true` when what was just answered is the password cmote itself asked for by name —
 	/// the caller's own, which the file layer needs to authenticate sudo on a file channel (§46). Any
-	/// other question answers `false`, so a one-time code is used once and never kept.
-	///
-	/// Being cmote's own prompt is necessary but NOT sufficient, which is why `factors` is in the
-	/// test: sudo substitutes its `-p` text for every standard prompt in its PAM stack, so on a
-	/// two-factor machine the code is asked for under the marker too. Answering `true` there handed
-	/// the one-time code to the file layer as the connection's sudo password, from where it could only
-	/// ever be refused. The FIRST factor's answer is the password — including when it took two goes,
-	/// since a refused question is the same factor asked again.
+	/// other question answers `false`, so a one-time code is used once and never kept. That judgement
+	/// is `Handshake::answered`'s, where it can be tested; the write is this function's.
 	pub async fn answer(&mut self, identity: u64, secret: Secret) -> bool {
 		let Some(shell) = self.shells.get_mut(&identity) else {
 			return false;
 		};
-		let State::Elevating {
-			buffer,
-			factors,
-			pending,
-			password,
-			..
-		} = &mut shell.state
-		else {
+		let State::Elevating(handshake) = &mut shell.state else {
 			return false;
 		};
-		if !*pending {
+		let Some(was_password) = handshake.answered() else {
 			return false;
-		}
-		*pending = false;
-		let was_password = *password && *factors == 1;
-		buffer.clear();
+		};
 		let mut line = secret.expose().as_bytes().to_vec();
 		line.push(b'\n');
 		let _ = shell.write.data_bytes(line).await;

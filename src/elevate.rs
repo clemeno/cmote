@@ -411,6 +411,313 @@ fn sanitize(line: &str) -> String {
 	out
 }
 
+/// How many questions cmote will answer for one elevation before giving up (§45). sudo itself
+/// stops after three wrong passwords; this only guards against a program that would ask for ever,
+/// so it is generously above any real conversation (a password plus a second factor, retried).
+const MAX_PROMPTS: u32 = 8;
+
+/// What the bytes that just arrived on an elevating channel MEAN (§45) — the answer
+/// [`Handshake::on_bytes`] gives, and the whole of what the caller has to act on.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Step {
+	/// Nothing to do: output that is neither a question nor the end of the conversation, or a
+	/// question that must not be put (one is already outstanding, or too many have been asked).
+	Nothing,
+	/// Put this question to the user. `refusal` is the program's own words about the PREVIOUS
+	/// answer, when it rejected one — shown beside the new question so "asked again" and "you got
+	/// it wrong" do not look alike.
+	Ask {
+		label: String,
+		refusal: Option<String>,
+	},
+	/// The program is gone and the account's own shell has the channel. `flush` is everything
+	/// buffered since the last answer — the shell's greeting and its first prompt — which the caller
+	/// must put on screen or the freshly elevated terminal comes up empty. `factors` is how many
+	/// DISTINCT things were asked for on the way, which decides whether the file layer may follow
+	/// this account (§46).
+	Live { flush: String, factors: u32 },
+}
+
+/// The conversation cmote holds with `sudo` or `su` while becoming another account (§45): what has
+/// been said, what has been asked, and what the next chunk of bytes means.
+///
+/// This is a state machine over a `String` and three counters, and it used to live inside a match
+/// arm in `ssh::shell` — where it could not be reached by a test, because building the type that
+/// held it needs a `russh::Channel` and therefore a real server. The rules it carries are the ones
+/// that most want testing: which questions may be asked at all, and which single answer out of the
+/// conversation may be KEPT as the caller's password. It holds no channel and no session, so the
+/// whole conversation can now be played out against it in memory.
+///
+/// The subtle field is `factors`, and it is not `asked`. A question the program puts AGAIN after
+/// refusing the answer is the same factor over again, so only a question that follows no refusal
+/// increments it. Two decisions turn on that distinction: a corrected password is still a password
+/// and is worth keeping, and an account that took more than one factor to log in as cannot have its
+/// files read as it (§46) — a file channel can replay a password to sudo, but it can neither ask
+/// for a second factor nor reuse a spent one.
+#[derive(Debug, Default)]
+pub struct Handshake {
+	/// What the program has said since the last question was answered. Cleared at each question, so
+	/// a stale prompt is never mistaken for a fresh one.
+	buffer: String,
+	/// How many questions have been put to the user, bounded by [`MAX_PROMPTS`].
+	asked: u32,
+	/// How many DISTINCT things have been asked for — see the type's own note.
+	factors: u32,
+	/// Set while a question is unanswered, so the same buffer arriving in two chunks cannot raise
+	/// two dialogs.
+	pending: bool,
+	/// Whether the outstanding question is the one cmote NAMED itself (`-p MARKER`).
+	password: bool,
+}
+
+impl Handshake {
+	/// Read the next chunk the program sent, and say what it means.
+	///
+	/// Lossy UTF-8 on purpose: a chunk can end mid-character, and this text is only ever compared
+	/// against prompt shapes — the terminal, which does care, never sees it.
+	pub fn on_bytes(&mut self, bytes: &[u8]) -> Step {
+		self.buffer.push_str(&String::from_utf8_lossy(bytes));
+
+		// A shell prompt means the program is gone and the account's own shell has the channel: the
+		// conversation is over, whatever else is in the buffer.
+		if looks_like_shell(&self.buffer) {
+			return Step::Live {
+				flush: std::mem::take(&mut self.buffer),
+				factors: self.factors,
+			};
+		}
+
+		// Otherwise: is it asking something? Only while no question is already outstanding, and
+		// only up to a bound, so a program that asks for ever cannot pin the user in a dialog loop.
+		if self.pending || self.asked >= MAX_PROMPTS {
+			return Step::Nothing;
+		}
+		let Some(label) = prompt(&self.buffer) else {
+			return Step::Nothing;
+		};
+		// Whether the program rejected the PREVIOUS answer, in its own words. Read before the
+		// buffer is cleared: what it holds between one answer and the next question is the only
+		// evidence there is. The alternative the GUI once relied on — "the same wording twice means
+		// refused" — is wrong on a two-factor machine.
+		let refusal = refusal(&self.buffer);
+		// Whether this is cmote's OWN password question, also decided before the clear: the answer
+		// to that one is the caller password the file layer will need (§46), and the answer to any
+		// other question is a secret to use once and forget.
+		self.password = self.buffer.contains(MARKER);
+		self.pending = true;
+		self.asked += 1;
+		if refusal.is_none() {
+			self.factors += 1;
+		}
+		// Cleared now: the question has been put, so these bytes are spent. What arrives next is
+		// either the answer's outcome or the next question, and neither should be read against text
+		// that has already been dealt with.
+		self.buffer.clear();
+		Step::Ask { label, refusal }
+	}
+
+	/// Record that the outstanding question has just been answered, and say whether that answer was
+	/// the caller's own password — the one the file layer may keep and replay to sudo on a file
+	/// channel (§46). `None` when there was no question outstanding, which is the caller's signal
+	/// to write nothing at all.
+	///
+	/// Being cmote's own prompt is necessary but NOT sufficient, which is why `factors` is in the
+	/// test. sudo substitutes its `-p` text for every standard prompt in its PAM stack, so on a
+	/// two-factor machine the one-time code is asked for under the marker too; answering "yes"
+	/// there handed the code to the file layer as the connection's sudo password, from where it
+	/// could only ever be refused. The FIRST factor's answer is the password — including when it
+	/// took two goes, since a refused question is the same factor asked again.
+	pub fn answered(&mut self) -> Option<bool> {
+		if !self.pending {
+			return None;
+		}
+		self.pending = false;
+		let was_password = self.password && self.factors == 1;
+		self.buffer.clear();
+		Some(was_password)
+	}
+
+	/// Why the channel died mid-conversation (§45) — the last thing the program said, which is the
+	/// remote's own words about its own policy, falling back to a plain sentence when it said
+	/// nothing at all.
+	pub fn death_reason(&self) -> String {
+		reason(&self.buffer).unwrap_or_else(|| "The elevation was refused.".to_owned())
+	}
+}
+
+#[cfg(test)]
+mod handshake_tests {
+	use super::{Handshake, MARKER, MAX_PROMPTS, Step};
+
+	/// The ordinary elevation, start to finish: sudo asks under cmote's own marker, the password is
+	/// given, the root shell greets and prompts.
+	///
+	/// This whole test was unreachable before the conversation was lifted out of `ssh::shell`,
+	/// because the type that held it took a `russh::Channel` and so needed a real server.
+	#[test]
+	fn one_password_and_the_shell_arrives() {
+		let mut handshake = Handshake::default();
+
+		// sudo's prompt, worded by us so it is an exact match rather than a guess.
+		let Step::Ask { label, refusal } = handshake.on_bytes(MARKER.as_bytes()) else {
+			panic!("the marker is a question");
+		};
+		// Shown as a plain question: the marker is an internal token and would mean nothing.
+		assert_eq!(label, "Password:");
+		assert_eq!(refusal, None, "nothing was refused; this is the first ask");
+
+		// It IS the caller's own password, so the file layer may keep it (§46).
+		assert_eq!(handshake.answered(), Some(true));
+
+		// The greeting and the first prompt arrive together and must reach the grid — losing them
+		// is what left a freshly elevated terminal empty but for a caret.
+		let step = handshake.on_bytes(b"Welcome to Debian\nroot@host:~# ");
+		assert_eq!(
+			step,
+			Step::Live {
+				flush: "Welcome to Debian\nroot@host:~# ".to_owned(),
+				factors: 1,
+			}
+		);
+	}
+
+	/// A mistyped password is the SAME factor asked again, so the corrected one is still the
+	/// caller's password and is still cacheable (§45, §46).
+	#[test]
+	fn a_corrected_password_is_still_a_password() {
+		let mut handshake = Handshake::default();
+		assert!(matches!(
+			handshake.on_bytes(MARKER.as_bytes()),
+			Step::Ask { .. }
+		));
+		assert_eq!(handshake.answered(), Some(true));
+
+		// sudo says no, in its own words, and asks the same thing again.
+		let Step::Ask { refusal, .. } = handshake.on_bytes(b"Sorry, try again.\ncmote-password:")
+		else {
+			panic!("it asked again");
+		};
+		// The refusal is carried through so the dialog can say WHY, rather than looking like a
+		// question that simply repeated itself.
+		assert_eq!(refusal.as_deref(), Some("Sorry, try again."));
+		// Still one factor — so still the password, and still keepable.
+		assert_eq!(handshake.answered(), Some(true));
+		assert_eq!(
+			handshake.on_bytes(b"root@host:~# "),
+			Step::Live {
+				flush: "root@host:~# ".to_owned(),
+				factors: 1,
+			}
+		);
+	}
+
+	/// THE SECURITY RULE, and the reason this extraction was worth doing: a one-time code asked for
+	/// under cmote's own marker must NOT be kept as the connection's sudo password.
+	///
+	/// sudo substitutes its `-p` text for every standard prompt in its PAM stack, so on a
+	/// two-factor machine the marker appears twice — once for the password, once for the code.
+	/// Answering "this was the password" the second time handed the code to the file layer, from
+	/// where it could only ever be refused. Being cmote's own prompt is necessary but not
+	/// sufficient; the factor count is what tells the two apart, and until now nothing tested it.
+	#[test]
+	fn a_second_factor_under_our_own_marker_is_never_kept() {
+		let mut handshake = Handshake::default();
+
+		assert!(matches!(
+			handshake.on_bytes(MARKER.as_bytes()),
+			Step::Ask { .. }
+		));
+		assert_eq!(
+			handshake.answered(),
+			Some(true),
+			"the first factor is the password"
+		);
+
+		// No refusal in between — so this is a NEW thing being asked for, not the same one again.
+		let Step::Ask { refusal, .. } = handshake.on_bytes(b"\ncmote-password:") else {
+			panic!("the second factor is a question too");
+		};
+		assert_eq!(refusal, None, "nothing was refused; it moved on");
+		assert_eq!(
+			handshake.answered(),
+			Some(false),
+			"a second factor is answered and forgotten, whatever prompt it wore"
+		);
+
+		// And the file layer is told two factors, which is what stops it following this account.
+		assert_eq!(
+			handshake.on_bytes(b"root@host:~# "),
+			Step::Live {
+				flush: "root@host:~# ".to_owned(),
+				factors: 2,
+			}
+		);
+	}
+
+	/// One question raises one dialog, however the bytes are chopped up.
+	#[test]
+	fn a_prompt_split_across_chunks_is_asked_once() {
+		let mut handshake = Handshake::default();
+		// A chunk that ends mid-prompt is not yet a question.
+		assert_eq!(handshake.on_bytes(b"cmote-pass"), Step::Nothing);
+		assert!(matches!(handshake.on_bytes(b"word:"), Step::Ask { .. }));
+		// More bytes while the question is outstanding cannot raise a second dialog — the same
+		// buffer arriving twice is exactly how that used to happen.
+		assert_eq!(handshake.on_bytes(b"cmote-password:"), Step::Nothing);
+	}
+
+	/// A program that would ask for ever cannot pin the user in a dialog loop.
+	#[test]
+	fn the_questions_run_out() {
+		let mut handshake = Handshake::default();
+		for _ in 0..MAX_PROMPTS {
+			assert!(matches!(
+				handshake.on_bytes(MARKER.as_bytes()),
+				Step::Ask { .. }
+			));
+			handshake.answered();
+		}
+		assert_eq!(handshake.on_bytes(MARKER.as_bytes()), Step::Nothing);
+	}
+
+	/// Answering when nothing was asked writes nothing at all — the guard that keeps a secret off a
+	/// channel that is not waiting for one.
+	#[test]
+	fn there_is_nothing_to_answer_until_something_is_asked() {
+		let mut handshake = Handshake::default();
+		assert_eq!(handshake.answered(), None);
+		// And not twice for one question either.
+		assert!(matches!(
+			handshake.on_bytes(MARKER.as_bytes()),
+			Step::Ask { .. }
+		));
+		assert_eq!(handshake.answered(), Some(true));
+		assert_eq!(handshake.answered(), None);
+	}
+
+	/// When the channel dies mid-conversation, the notice is the remote's own last words.
+	#[test]
+	fn a_refused_elevation_reports_what_the_remote_said() {
+		let mut handshake = Handshake::default();
+		assert_eq!(
+			handshake
+				.on_bytes(b"cme is not in the sudoers file.  This incident will be reported.\n"),
+			Step::Nothing,
+			"a terminated line is output, not a question"
+		);
+		assert_eq!(
+			handshake.death_reason(),
+			"cme is not in the sudoers file.  This incident will be reported."
+		);
+
+		// And a program that died silently still gets a sentence rather than an empty dialog.
+		assert_eq!(
+			Handshake::default().death_reason(),
+			"The elevation was refused."
+		);
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

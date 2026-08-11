@@ -4605,6 +4605,31 @@ What it deliberately does not do is pretend the file panes came along. They did 
 > since gone too: it repeated, on the same row, the `user@` the centred endpoint already carries. With
 > it went the two fields that existed only to feed it — `Identity::user` and `Tab::login_user`.
 
+### The conversation is a value, not a match arm (`elevate::Handshake`)
+
+The state machine that reads sudo's replies — what has been said, what has been asked, how many
+DISTINCT things were asked for, and which single answer may be kept — lives in `elevate`, as a plain
+struct with `on_bytes(&[u8]) -> Step`. `ssh::shell` holds the channel and does nothing with the bytes
+but hand them over and act on the `Step` that comes back.
+
+It was written the other way first: seventy-odd lines inside a match arm in `ssh::shell`, operating on
+a `&mut String` and three counters and touching no socket at all — yet unreachable by any test,
+because `Shells::new` takes a `russh::Channel` and so needs a real server to exist. The predicates it
+calls (`prompt`, `refusal`, `looks_like_shell`, `reason`) were all tested; the thing that SEQUENCES
+them was not, and sequencing is where the rule lives.
+
+The rule in question is the one worth the move. **A one-time code asked for under cmote's own `-p`
+marker must never be kept as the connection's sudo password.** sudo substitutes its `-p` text for
+every standard prompt in its PAM stack, so on a two-factor machine the marker appears twice — and
+answering "that was the password" the second time handed the code to the file layer, where it could
+only ever be refused. Being cmote's own prompt is necessary but not sufficient; `factors == 1` is what
+tells the two apart, and `factors` is not `asked`, because a question re-put after a refusal is the
+same factor over again (which is also why a *corrected* password is still cacheable). Thirty lines of
+comment explained all that and nothing checked it. There are now seven tests that play whole
+conversations in memory: the ordinary one, the corrected password, the second factor under the marker,
+a prompt split across chunks, the question bound, answering when nothing was asked, and the refusal
+notice.
+
 ### One shell was one channel; now it is a set (`ssh/shell.rs`)
 
 `stream()` used to hold the shell channel, await it and write to it. `shell::Shells` now holds them all,
