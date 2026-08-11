@@ -191,6 +191,50 @@ async fn exec_inline(
 /// the spawned task that does the work.
 ///
 /// The login account's runner is the plain one: it wraps nothing, so every command is exactly what
+/// Running one shell snippet on the remote and hearing what it said (§46).
+///
+/// Three questions, which is all the shell backend's directory listings, metadata reads and
+/// mutations ever ask: what did it print, did it print it successfully, and did it work at all.
+/// [`Runner`] is the real implementation — the one that opens a channel and wraps the snippet in an
+/// elevation — and `shellfs` is written against the trait instead, so a test can drive `ls -1Ap`
+/// and `wc -c` with canned output and assert both the command that was composed AND the parse of
+/// the reply. Neither was reachable before: every one of those functions named `Runner`, and a
+/// `Runner` that will answer needs a live session.
+///
+/// **`stream` is deliberately NOT on here**, and that is the whole boundary. The operations that
+/// stream bytes — a file read through `cat`, a file written through `cat >`, and the two copy loops
+/// behind them — keep taking a concrete `Runner`, because a stream hands back a `russh::Channel`
+/// and putting a foreign, non-constructible type on the trait would make the trait unimplementable
+/// by anything but the real thing, which is the opposite of the point. It is also the line
+/// `shellfs`'s own `ponytail:` note draws: making the COPY LOOPS generic over a filesystem would
+/// mean rewriting working transfer, resume and conflict code with no way to test it against a real
+/// server. That refusal still stands, unchanged. This trait sits entirely on the other side of it —
+/// the commands whose whole content is a string and a reply.
+///
+/// `async fn` in a trait, so it is not `dyn`-compatible; every caller is generic (`&impl Exec`) and
+/// dispatches statically, which is what the callers wanted anyway.
+#[allow(async_fn_in_trait)]
+pub trait Exec {
+	/// A snippet's output, or an error carrying the remote's own reason. The shape most callers
+	/// want: a listing either arrives or explains itself.
+	async fn stdout(&self, snippet: &str) -> Result<String>;
+
+	/// Whether the snippet ran cleanly — for a question only ever asked as a yes or no. A failure
+	/// to even run it is `false`, not an error: the question was about the remote's state, and
+	/// "could not ask" is not "yes".
+	async fn succeeds(&self, snippet: &str) -> bool;
+}
+
+impl Exec for Runner {
+	async fn stdout(&self, snippet: &str) -> Result<String> {
+		Runner::stdout(self, snippet).await
+	}
+
+	async fn succeeds(&self, snippet: &str) -> bool {
+		Runner::succeeds(self, snippet).await
+	}
+}
+
 /// cmote has always sent. An elevated runner carries the account, the kind of elevation, and the
 /// password to authenticate it with when sudo asks for one.
 #[derive(Clone)]
@@ -249,7 +293,9 @@ impl Runner {
 		}
 	}
 
-	/// Run a shell snippet as this account and collect what it printed.
+	/// Run a shell snippet as this account and collect what it printed. The inherent form of
+	/// [`Exec::output`]; the trait exists so the callers that only ever ask these three questions
+	/// can be driven by something other than a live connection.
 	///
 	/// The retry is the password rule in code: the first attempt is always non-interactive, and
 	/// only a refusal that names the missing password earns a second attempt with it. A `-S`

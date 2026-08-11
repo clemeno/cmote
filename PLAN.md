@@ -4900,6 +4900,28 @@ question cmote NAMED itself (`-p cmote-password:`), and only that one is kept. A
    words and the panes list nothing. They never quietly fall back to the login account's files while the
    terminal says root: a pane that lies about whose eyes it is using is worse than an empty one.
 
+#### The shell backend is written against a trait, and where that stops
+
+`asuser::Exec` is two methods — `stdout` and `succeeds` — implemented by `Runner`. Every function in
+`shellfs` whose whole content is "compose a command, read the reply" takes `&impl Exec` rather than
+`&Runner`: the listings, the metadata reads, the mutations, the free-name probe.
+
+The reason is testability, and it is not a small one. A `Runner` that will answer anything needs a
+live session, so **none of that code could be reached by a test at all** — including the quoting,
+which is a security boundary, and the `ls` parsing, which is a compatibility one. Those two want
+testing *together*, because the pair of them is the entire backend: a `Script` double records what
+it was asked to run and answers out of a canned reply, so one test asserts both the command that
+went out and the parse of what came back. A folder called `'; rm -rf ~` is now checked as a composed
+command rather than by reading `shell_quote` in isolation and trusting the call sites.
+
+**`Exec` deliberately has no `stream`.** That returns a `russh::Channel` — a foreign type nothing
+but the real runner can produce — so putting it on the trait would make the trait implementable only
+by the thing it exists to stand in for. The four functions that move bytes (`read_all`, `write_all`,
+`fetch`, `send`) therefore still take a concrete `&Runner`, which is the same line `shellfs`'s own
+`ponytail:` note draws: **the copy loops stay two, not one generic pair.** Making *those* generic
+would mean rewriting working transfer, resume and conflict code (§16, §17, §19) with no way to test
+it against a real server, and that refusal is unchanged.
+
 ### What moves when you switch account
 
 The panes are NOT parked per account the way the terminal is, and that is a deliberate difference. A

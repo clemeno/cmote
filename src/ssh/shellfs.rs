@@ -18,11 +18,26 @@
 //     against comes from `wc -c`, which is exact, but mtimes and permission bits are NOT carried:
 //     a copy made this way lands with the time and mode the remote's own umask gives it. The SFTP
 //     path keeps all of it, and it is what runs unless the remote has no `sftp-server`.
-//   * **`ponytail:`** the two backends therefore have two copy loops, not one generic one. Making
+//   * **`ponytail:`** the two backends therefore have two COPY LOOPS, not one generic one. Making
 //     the SFTP loops generic over a filesystem trait would have meant rewriting the working
 //     transfer, resume and conflict code (§16, §17, §19) with no way to test it against a real
 //     server — so the risk was put here, in the path that runs on almost no server, instead of
 //     there, in the path that runs on all of them.
+//
+// That refusal is about the copy loops and stays exactly where it was. The functions in this file
+// whose whole content is "compose a command, read the reply" are on the other side of it, and they
+// are generic — `&impl Exec` (`asuser::Exec`) rather than `&Runner`. The reason is testability and
+// nothing else: a `Runner` that will answer anything needs a live session, so every listing, every
+// metadata read and every mutation here was unreachable by any test, including the QUOTING, which
+// is a security boundary. `Script` at the foot of this file answers out of a canned reply and
+// records what it was asked to run, which makes both halves assertable at once — the command that
+// went out and the parse of what came back.
+//
+// `Exec` deliberately carries no `stream`: that returns a `russh::Channel`, a foreign type nothing
+// but the real runner can produce, and putting it on the trait would make the trait implementable
+// only by the thing it exists to stand in for. So `read_all`, `write_all`, `fetch` and `send` — the
+// four that move bytes — still take a concrete `&Runner`, which is the same line the note above
+// draws.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -33,7 +48,7 @@ use russh::{Channel, ChannelMsg, client};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use super::asuser::Runner;
+use super::asuser::{Exec, Runner};
 use super::transfer::{self, CopyOutcome, FileAction, PlannedFile, Start, TreePlan};
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer::{self, join, shell_quote};
@@ -50,7 +65,7 @@ use crate::files::{self, Entry, Kind, Meta};
 ///
 /// `ls -1Ap` marks a real directory with a trailing `/`, includes dotfiles and leaves `.`/`..` out.
 /// `--` stops a path that begins with a dash being read as an option.
-pub async fn dirs(runner: &Runner, path: &str) -> Result<Vec<String>> {
+pub async fn dirs(runner: &impl Exec, path: &str) -> Result<Vec<String>> {
 	let output = runner
 		.stdout(&format!("ls -1Ap -- {}", shell_quote(path)))
 		.await?;
@@ -66,7 +81,7 @@ pub async fn dirs(runner: &Runner, path: &str) -> Result<Vec<String>> {
 /// `ls -1AF` marks the type: `/` a directory, `@` a symlink, and `*`/`|`/`=` an executable, fifo or
 /// socket — all of which are files as far as the pane is concerned. No size, time or owner comes
 /// with it, so the pane shows the name and the type and leaves the rest blank (§20).
-pub async fn entries(runner: &Runner, path: &str) -> Result<Vec<Entry>> {
+pub async fn entries(runner: &impl Exec, path: &str) -> Result<Vec<Entry>> {
 	let output = runner
 		.stdout(&format!("ls -1AF -- {}", shell_quote(path)))
 		.await?;
@@ -99,7 +114,7 @@ pub async fn entries(runner: &Runner, path: &str) -> Result<Vec<Entry>> {
 
 /// Where a symlink points (§20), for the details popup. `readlink` prints the link's own target;
 /// nothing is reported when it will not resolve, which leaves the popup without that line.
-pub async fn read_link(runner: &Runner, path: &str) -> Option<String> {
+pub async fn read_link(runner: &impl Exec, path: &str) -> Option<String> {
 	let target = runner
 		.stdout(&format!("readlink -- {}", shell_quote(path)))
 		.await
@@ -113,7 +128,7 @@ pub async fn read_link(runner: &Runner, path: &str) -> Option<String> {
 /// `wc -c <` rather than `stat`: the redirect means the count is of the file's contents whatever the
 /// path looks like, and `wc` is in every environment while `stat`'s flags differ between GNU, BSD
 /// and BusyBox.
-pub async fn size(runner: &Runner, path: &str) -> Option<u64> {
+pub async fn size(runner: &impl Exec, path: &str) -> Option<u64> {
 	let output = runner
 		.stdout(&format!("wc -c < {}", shell_quote(path)))
 		.await
@@ -122,7 +137,7 @@ pub async fn size(runner: &Runner, path: &str) -> Option<u64> {
 }
 
 /// Whether anything at all sits at `path` — a file, a folder, or a dangling symlink.
-pub async fn exists(runner: &Runner, path: &str) -> bool {
+pub async fn exists(runner: &impl Exec, path: &str) -> bool {
 	runner
 		.succeeds(&format!("[ -e {} ]", shell_quote(path)))
 		.await
@@ -130,7 +145,7 @@ pub async fn exists(runner: &Runner, path: &str) -> bool {
 
 /// Create one folder, refusing to replace whatever is already there (§18). The test and the create
 /// are one command so nothing can slip into the path between them.
-pub async fn make_dir(runner: &Runner, path: &str) -> Result<()> {
+pub async fn make_dir(runner: &impl Exec, path: &str) -> Result<()> {
 	let quoted = shell_quote(path);
 	runner
 		.stdout(&format!(
@@ -142,7 +157,7 @@ pub async fn make_dir(runner: &Runner, path: &str) -> Result<()> {
 
 /// Create a folder and every missing parent, for a tree transfer's destination. Unlike `make_dir`
 /// this is happy to find it already there — merging into an existing tree is the point (§17).
-pub async fn make_dirs(runner: &Runner, path: &str) -> Result<()> {
+pub async fn make_dirs(runner: &impl Exec, path: &str) -> Result<()> {
 	runner
 		.stdout(&format!("mkdir -p -- {}", shell_quote(path)))
 		.await
@@ -154,7 +169,7 @@ pub async fn make_dirs(runner: &Runner, path: &str) -> Result<()> {
 }
 
 /// Rename, refusing an occupied destination (§18) — again as one command, for the same reason.
-pub async fn rename(runner: &Runner, from: &str, to: &str) -> Result<()> {
+pub async fn rename(runner: &impl Exec, from: &str, to: &str) -> Result<()> {
 	let from = shell_quote(from);
 	let to = shell_quote(to);
 	runner
@@ -167,7 +182,7 @@ pub async fn rename(runner: &Runner, from: &str, to: &str) -> Result<()> {
 
 /// Delete entries, folders and their contents included (§18). `--` matters more here than anywhere:
 /// a blunt instrument must only ever see paths, never options.
-pub async fn remove(runner: &Runner, paths: &[String]) -> Result<()> {
+pub async fn remove(runner: &impl Exec, paths: &[String]) -> Result<()> {
 	let quoted = paths
 		.iter()
 		.map(|path| shell_quote(path))
@@ -185,7 +200,7 @@ pub async fn remove(runner: &Runner, paths: &[String]) -> Result<()> {
 /// `explorer::FREE_NAME_TRIES`. Each probe here is a `[ -e ]` round trip, which is dearer than
 /// SFTP's own existence check rather than cheaper, so the bound matters more on this backend than
 /// on that one; it used to be a bare `1000` written twice in this file.
-pub async fn free_name(runner: &Runner, dir: &str, name: &str) -> String {
+pub async fn free_name(runner: &impl Exec, dir: &str, name: &str) -> String {
 	for attempt in 1..=explorer::FREE_NAME_TRIES {
 		let candidate = join(dir, &explorer::free_candidate(name, attempt));
 		if !exists(runner, &candidate).await {
@@ -508,7 +523,7 @@ async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 /// an error about the command. A `find` without that check would spin instead. The SFTP path,
 /// which is what runs unless the server has no sftp subsystem, decides this itself with `realpath`
 /// and `transfer::loops_back`. Upgrade path: `find -L ... -printf` the inode and cut cycles here.
-pub async fn walk(runner: &Runner, root: &str) -> Result<TreePlan> {
+pub async fn walk(runner: &impl Exec, root: &str) -> Result<TreePlan> {
 	let quoted = shell_quote(root);
 	let mut plan = TreePlan::default();
 
@@ -721,6 +736,191 @@ fn free_local(path: &Path) -> std::path::PathBuf {
 		}
 	}
 	parent.join(explorer::free_candidate(&name, explorer::FREE_NAME_TRIES))
+}
+
+/// A remote that answers out of a script instead of over a socket (§46), for the tests below.
+///
+/// Every function above that only composes a command and reads the reply now takes `&impl Exec`
+/// rather than `&Runner`, and this is why: a `Runner` that will answer anything needs a live
+/// session, so none of them could be tested at all. This one records the snippet it was asked to
+/// run and hands back whatever was queued for it — which makes BOTH halves assertable at once, the
+/// command that went out and the parse of what came back. They are worth testing together: the
+/// quoting is a security boundary and the parsing is a compatibility one, and the pair of them is
+/// the entire shell backend.
+#[cfg(test)]
+#[derive(Default)]
+struct Script {
+	/// What the caller asked to run, in order.
+	ran: std::cell::RefCell<Vec<String>>,
+	/// What to answer with. `None` means the command failed.
+	reply: Option<String>,
+}
+
+#[cfg(test)]
+impl Script {
+	/// A remote that answers every command with `reply`.
+	fn saying(reply: &str) -> Self {
+		Self {
+			ran: std::cell::RefCell::new(Vec::new()),
+			reply: Some(reply.to_owned()),
+		}
+	}
+
+	/// A remote that refuses every command.
+	fn refusing() -> Self {
+		Self::default()
+	}
+
+	/// The one command that was run. Panics if there was not exactly one, which is itself part of
+	/// what these tests check: a listing is one round trip, not several.
+	fn only_command(&self) -> String {
+		let ran = self.ran.borrow();
+		assert_eq!(ran.len(), 1, "expected exactly one command: {ran:?}");
+		ran[0].clone()
+	}
+}
+
+#[cfg(test)]
+impl Exec for Script {
+	async fn stdout(&self, snippet: &str) -> Result<String> {
+		self.ran.borrow_mut().push(snippet.to_owned());
+		match &self.reply {
+			Some(reply) => Ok(reply.clone()),
+			None => bail!("the remote refused"),
+		}
+	}
+
+	async fn succeeds(&self, snippet: &str) -> bool {
+		self.ran.borrow_mut().push(snippet.to_owned());
+		self.reply.is_some()
+	}
+}
+
+#[cfg(test)]
+mod backend_tests {
+	use super::*;
+
+	/// The tree's listing: one `ls`, and only the entries marked as directories (§18).
+	#[tokio::test]
+	async fn the_tree_asks_ls_once_and_keeps_only_the_folders() {
+		let remote = Script::saying("bin/\nhosts\nnginx/\nresolv.conf\n");
+		let dirs = dirs(&remote, "/etc").await.expect("the listing arrived");
+
+		// `-1Ap`: one per line, dotfiles included, a `/` on real directories. `--` stops a path
+		// beginning with a dash being read as an option.
+		assert_eq!(remote.only_command(), "ls -1Ap -- '/etc'");
+		assert_eq!(dirs, vec!["bin".to_owned(), "nginx".to_owned()]);
+	}
+
+	/// The pane's listing reads the TYPE off the suffix `ls -F` puts there (§19).
+	#[tokio::test]
+	async fn the_pane_reads_the_type_marker_off_each_name() {
+		let remote = Script::saying("bin/\nlink@\nrun*\nplain\n");
+		let entries = entries(&remote, "/srv").await.expect("the listing arrived");
+
+		assert_eq!(remote.only_command(), "ls -1AF -- '/srv'");
+		let seen: Vec<(&str, Kind)> = entries
+			.iter()
+			.map(|entry| (entry.name.as_str(), entry.kind))
+			.collect();
+		// The executable's `*` is stripped and it is a plain file: the pane cares about folder,
+		// link or file, and nothing else `-F` marks is a fourth kind.
+		assert!(seen.contains(&("bin", Kind::Dir)));
+		assert!(seen.contains(&("link", Kind::Link)));
+		assert!(seen.contains(&("run", Kind::File)));
+		assert!(seen.contains(&("plain", Kind::File)));
+	}
+
+	/// A NAME CARRYING A QUOTE reaches the remote as a name, not as commands (§18).
+	///
+	/// This is the security-bearing one, and until now it could only be checked by reading
+	/// `shell_quote` in isolation and trusting every call site to have used it. Here the composed
+	/// command itself is the assertion.
+	#[tokio::test]
+	async fn a_name_that_looks_like_a_command_is_still_a_name() {
+		let remote = Script::saying("");
+		let _ = dirs(&remote, "/tmp/'; rm -rf ~").await;
+		assert_eq!(
+			remote.only_command(),
+			r"ls -1Ap -- '/tmp/'\''; rm -rf ~'",
+			"the quote is closed, escaped and reopened — never left to the shell"
+		);
+	}
+
+	/// A size comes from `wc -c` through a REDIRECT, so it counts the file's contents whatever the
+	/// path looks like.
+	#[tokio::test]
+	async fn a_size_is_counted_through_a_redirect() {
+		let remote = Script::saying("  4096\n");
+		assert_eq!(size(&remote, "/etc/hosts").await, Some(4096));
+		assert_eq!(remote.only_command(), "wc -c < '/etc/hosts'");
+	}
+
+	/// A remote that will not answer is not a size of zero.
+	#[tokio::test]
+	async fn a_size_that_cannot_be_read_is_absent_rather_than_zero() {
+		let remote = Script::refusing();
+		assert_eq!(size(&remote, "/etc/shadow").await, None);
+	}
+
+	/// The test and the create are ONE command, so nothing can slip into the path between them
+	/// (§18).
+	#[tokio::test]
+	async fn making_a_folder_tests_and_creates_in_one_breath() {
+		let remote = Script::saying("");
+		let _ = make_dir(&remote, "/srv/new").await;
+
+		let command = remote.only_command();
+		assert!(
+			command.contains("if [ -e '/srv/new' ]") && command.contains("mkdir -- '/srv/new'"),
+			"one command, both halves: {command}"
+		);
+		// And it is a refusal, not a merge: an existing entry must not be replaced.
+		assert!(command.contains("exit 1"), "{command}");
+	}
+
+	/// A rename refuses an occupied destination, by the same one-command rule (§18).
+	#[tokio::test]
+	async fn a_rename_refuses_to_replace_what_is_already_there() {
+		let remote = Script::saying("");
+		let _ = rename(&remote, "/srv/a", "/srv/b").await;
+
+		let command = remote.only_command();
+		assert!(command.contains("if [ -e '/srv/b' ]"), "{command}");
+		assert!(command.contains("mv -- '/srv/a' '/srv/b'"), "{command}");
+	}
+
+	/// A delete takes every path in one command, each quoted separately (§18). `--` matters more
+	/// here than anywhere: a blunt instrument must only ever see paths, never options.
+	#[tokio::test]
+	async fn a_delete_quotes_every_path_and_stops_option_parsing() {
+		let remote = Script::saying("");
+		let _ = remove(&remote, &["/srv/a".to_owned(), "-rf".to_owned()]).await;
+		assert_eq!(remote.only_command(), "rm -rf -- '/srv/a' '-rf'");
+	}
+
+	/// "Keep both" probes candidate names in order and stops at the first free one (§17), sharing
+	/// its shape with every other backend through `explorer::free_candidate`.
+	#[tokio::test]
+	async fn keep_both_takes_the_first_name_the_remote_does_not_have() {
+		// A remote that says every candidate is free: the first one wins.
+		let remote = Script::refusing();
+		let free = free_name(&remote, "/srv", "notes.txt").await;
+		assert_eq!(free, "/srv/notes-1.txt");
+		assert_eq!(remote.only_command(), "[ -e '/srv/notes-1.txt' ]");
+	}
+
+	/// An existence check that the remote will not answer reads as "not there" (§18) — the caller
+	/// asked about the remote's state, and "could not ask" is not "yes".
+	#[tokio::test]
+	async fn a_question_the_remote_will_not_answer_is_not_a_yes() {
+		let refused = Script::refusing();
+		assert!(!exists(&refused, "/etc/hosts").await);
+
+		let answered = Script::saying("");
+		assert!(exists(&answered, "/etc/hosts").await);
+		assert_eq!(answered.only_command(), "[ -e '/etc/hosts' ]");
+	}
 }
 
 #[cfg(test)]
