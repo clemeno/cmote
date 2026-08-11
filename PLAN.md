@@ -287,6 +287,7 @@ cmote/
     │   ├── cwd.rs         scan OSC 7 / OSC 9;9 out of the output stream: the remote cwd (§17)
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── protect.rs     scan DECSCA / DECSED / DECSEL out of the stream: the cells a program asked us not to wipe (§56)
+    │   ├── cancel.rs      find the sequence the engine would read as something ELSE — DECSLRM's `s`, which its save-cursor arm takes — so `process` can cancel it in flight (§57)
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6340,3 +6341,94 @@ it, which is a different sentence from the one that was there before.
   protection with them, which is right: DECSCA makes a cell unerasable, not immovable.
 - **`CSI ? 3 J` does not exist.** Plain `CSI 3 J` drops the scrollback, and protection is a property of
   cells on the screen — history is not erased a cell at a time.
+
+---
+
+## 57. Refusing a sequence without paying for it (v4.0.0)
+
+The next ❌ down the matrix was left/right margins, and it is a different animal from everything above
+it. Two sequences, one final byte:
+
+```
+CSI s           SCOSC   — save the cursor position (the ANSI.SYS spelling, universal)
+CSI Pl ; Pr s   DECSLRM — set the left and right margins (VT420)
+```
+
+A real VT420 tells them apart with a mode: `s` means margins only once **DECLRMM** (`CSI ? 69 h`) is
+set, and save-cursor otherwise. cmote does not have margins to give. The engine's scroll region is
+vertical only — `set_scrolling_region(top, bottom)` — and horizontal margins are not one more arm to
+add: they change what printing does at the right edge, what wrapping does at the left, and what `IL`,
+`DL`, `ICH`, `DCH`, `SU`, `SD` and every line feed at the bottom of the region operate on. That is the
+grid's whole job, so DECSLRM stays out, and the engine agrees: mode 69 is not in its list, and DECRQM
+answers `0`, "not recognised". A program that asks is told the truth.
+
+### The gap that was not a gap
+
+The problem is the program that does not ask, because refusing DECSLRM was not free. `vte`'s dispatch is
+
+```rust
+('s', []) => handler.save_cursor_position()     // vte-0.15.0/src/ansi.rs:1737
+```
+
+which never looks at its parameters. So `CSI 5;70 s` **saved the cursor** — and the engine keeps one
+saved-cursor slot, shared by `CSI s` and `ESC 7`, so it overwrote whatever the program had put there. A
+program that saves the cursor, updates a status line, and restores would land wherever the margin
+request happened to sit. The bug surfaces as a cursor that jumps, nowhere near the sequence that caused
+it, and the matrix's old note — "unreachable in practice, a conformant emitter never sends it" — is a
+guarantee about other people's software.
+
+This is a shape none of the earlier compatibility work had: **the engine does not ignore the sequence,
+it acts on it wrongly.** Scanning it out and keeping the answer beside the grid, the move that carried
+§17 / §33 / §34 / §41 / §54 / §55 / §56, has nothing to offer here — the problem is not what cmote
+fails to do with the bytes, it is what the engine does with them. So the bytes have to be stopped.
+
+### Cancelling a sequence in flight
+
+`term/cancel.rs` is a chunk-safe CSI state machine looking for one shape, and `process` splits its
+advance at the offending **final byte**: advance the engine up to it, feed it `CAN` (0x18) in place of
+it, resume after it. One small state machine, and four lines in the loop.
+
+Two details carry the design.
+
+**Feeding nothing in place of the byte would be the bug, not the fix.** The parameters have already
+reached the engine's parser, which is sitting in its CSI-parameter state waiting for a final byte — so
+the *next* one in the stream would be taken as this sequence's. `CSI 5;70 s` followed by `hello` would
+dispatch `('h', [])` with parameters 5 and 70: set mode 5, set mode 70, print `ello`. The sequence has
+to be **ended**, and CAN is how the ANSI state machine ends one: 0x18 in the CSI-parameter state routes
+to `anywhere()`, which runs `execute` and returns to Ground with no dispatch, and `execute` has no arm
+for CAN. Not SUB (0x1a), which takes the same transition but is *defined* to be displayable — this
+engine ignoring it today is not a promise. Not a final byte that merely has no arm, like `('p', [])`,
+because that rests on the absence of an arm, which is the kind of thing a version bump adds. CAN is a
+cancel in the machine itself, and there is a test for each half: one that fails if the byte is not
+withheld, one that fails if the CAN is not fed.
+
+**A parameter is what makes it DECSLRM.** The mode that would settle it is one the engine never
+accepts, so the parameter count is the only evidence in the bytes. It costs the reading of `CSI 0 s` as
+a save-cursor, which nothing writes — every save-cursor in the wild is the bare `CSI s`, and that one
+is untouched and still works. A private marker or an intermediate rules the sequence out too:
+`CSI ? Pm s` is XTSAVE, which the engine drops harmlessly on its own.
+
+The offsets are a third convention, and worth naming as such: a prompt mark reports where its sequence
+**starts** (§34), a selective erase reports the byte **one past** the end (§56), and a cancel reports
+**the final byte itself** — because that byte is the one being replaced. The split loop clamps
+`offset.max(start)` now, since a cancel is the first split that leaves `start` past its own offset.
+
+### What it cost
+
+One module (`term/cancel.rs`, 15 tests), one `Split` arm, five engine-level tests. No new state, no
+buffering, no rewriting of the stream — the chunk is still fed to the engine as slices of the caller's
+bytes, with one byte swapped on the way past.
+
+A ❌ that costs nothing is worth more than most ✅s, and the fourth way into a compatibility gap —
+next to "scan it out", "borrow a bit", and "accept the engine's limit" — is **refuse it properly**.
+
+### Not done
+
+- **The margins themselves.** Unchanged and not planned: they are a grid rewrite, not an arm.
+- **No other misparse is known.** This module has one member because the audit found one. The near
+  neighbours were checked and are clean: `CSI ? Pm r` (XTRESTORE) and `CSI ? Pm s` (XTSAVE) both carry
+  a marker the engine has no arm for, and DECSTBM's `r` is the vertical region the engine really
+  implements. `CSI ? 5 W` (DECST8C) and `CSI Ps SP k` (SCP) are parsed and dropped into empty default
+  handlers, which is a *third* failure shape — the arm exists and does nothing — and harmless.
+- **cmote does not tell the program it refused.** There is no reply for DECSLRM to fail with, and a
+  program that wants to know can ask DECRQM about mode 69 and be told `0`.

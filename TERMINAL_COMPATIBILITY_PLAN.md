@@ -326,7 +326,12 @@ short, and since §41 nothing left in it is high value:
 - **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
   (single wide glyphs are; whole-line doubling is not). `[DEC]`.
 - **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
-  (`set_scrolling_region(top, bottom)`). `[DEC]`.
+  (`set_scrolling_region(top, bottom)`), and horizontal ones are not an arm to add: they change what
+  printing, wrapping, `IL`/`DL`, `ICH`/`DCH` and every scroll do, which is the grid's whole job. This
+  one stays. `[DEC]`. What **§57** changed is the cost of refusing it. DECSLRM shares its final byte
+  with save-cursor, and `vte`'s arm for that byte ignores its parameters, so the refusal was not free:
+  `CSI 5;70 s` *saved the cursor*, overwriting a value the program meant to restore from later. cmote
+  now cancels that byte in flight, so the request does nothing — see PLAN §57 and `term/cancel.rs`.
 - **DRCS soft fonts, VT320 status line, VT420 rectangular ops** (DECCRA / DECFRA / DECERA, and
   the DECRQCRA checksum query some conformance suites block on) — not represented. `[DEC]`. One of
   that family has since come within reach: **DECSERA** (`CSI Pt;Pl;Pb;Pr $ {`) is the selective erase
@@ -567,7 +572,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | I / Z | Forward / backward tab | ✅ | |
 | d / \` | Vertical / horizontal PA | ✅ | |
 | a / e | Horizontal / vertical PR | ✅ | the parser aliases HPR to CUF and VPR to CUD (`ansi.rs`), so they move but do not have their own arm |
-| s / u | Save / restore cursor | ✅ | ANSI.SYS form |
+| s / u | Save / restore cursor | ✅ | ANSI.SYS form. The **bare** `CSI s` only — a parametrised one is DECSLRM and is cancelled before the engine can mistake it for this (§57, below) |
 | @ / P / X | Insert / delete / erase char | ✅ | |
 | L / M | Insert / delete line | ✅ | |
 | J | Erase in display | ✅ | |
@@ -579,7 +584,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
-| s (DECSLRM) | Left / right margins | ❌ | engine scroll region is vertical only (§5). The spelling also **collides**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` saves the cursor rather than doing nothing. Unreachable in practice — a program only spells `s` as DECSLRM once DECLRMM (mode 69) is set, and that mode is refused, so a conformant emitter never sends it |
+| s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out — the engine's scroll region is vertical only (§5), and giving it horizontal ones means re-implementing print, wrap, insert, delete and scroll. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
 | g | Tab clear | ✅ | |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
@@ -654,7 +659,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 12 | Blinking cursor | ⚠️ | tracked, drawn steady |
 | 25 | Show / hide cursor | ✅ | |
 | 45 | Reverse wrap | ❌ | |
-| 69 | Left / right margin | ❌ | |
+| 69 (DECLRMM) | Left / right margin | ❌ | not in the engine's mode list, so setting it is ignored and DECRQM answers `0`, "not recognised" — the honest reply, and the one that tells a conformant program not to spell `CSI s` as DECSLRM. §57 covers the program that sends it anyway |
 | 80 | Sixel scrolling (DECSDM) | ⚠️ | the mode is not tracked; cmote always scrolls — the modern default, and what emitters assume (§41) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | `term/mouse.rs` |
 | 1004 | Focus events | ✅ | cmote sends CSI I / CSI O |
@@ -699,8 +704,10 @@ query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since
 protected-cell erase it dropped as well. Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048), rectangular editing, and left-right margins — all
-catalogued with their cost in §5, which is now the *only* section with anything open in it.
+the newer private modes (2027 / 2031 / 2048), rectangular editing, and left-right margins — the last of
+which, since §57, is at least a gap that costs nothing rather than one that quietly took the program's
+saved cursor with it. All catalogued with their cost in §5, which is now the *only* section with
+anything open in it.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -709,6 +716,15 @@ scrolling and reflow, and a map of it would have meant re-implementing the grid 
 aligned. So instead cmote borrowed the one unused bit in the engine's per-cell flag word and let the
 engine carry protection as if it were bold. That is a third way in, next to "scan it out" and "accept
 the engine's limit", and the reason DECSERA above is now a rectangle rather than a wall.
+
+§57 found a fourth, and a different kind of gap to go with it. Every row in these tables until now was
+some flavour of "the engine ignores this"; DECSLRM is the one where the engine ignores nothing and gets
+it *wrong* — `vte` dispatches its final `s` to save-cursor without reading the parameters, so a margin
+request cmote cannot honour was still costing the program its saved cursor. A sequence like that cannot
+be scanned out and applied beside the grid, because the problem is not what cmote fails to do with it,
+it is what the engine does. So `process` now cancels the offending byte in flight — advance up to it,
+feed the state machine's own CAN in its place, resume after it. "Refuse it properly" is the fourth way
+in, and the cheapest: a ❌ that costs nothing is worth more than most ✅s.
 
 ---
 
@@ -744,6 +760,19 @@ Audited file:line anchors behind the claims above, for later re-checking.
   handler at `term/mod.rs:1874`. cmote surfaces this through the seam (below).
 - **Scroll region is vertical only**: `set_scrolling_region(top, bottom)` (`term/mod.rs:2155`) —
   no horizontal (left/right) margins.
+- **DECSLRM lands on save-cursor** (the §57 misparse). `vte-0.15.0/src/ansi.rs:1737` is
+  `('s', []) => handler.save_cursor_position()` — no parameters read, so `CSI 5;70 s` reaches
+  `save_cursor_position` (`term/mod.rs:1619`), which assigns `self.grid.saved_cursor`, the single slot
+  `ESC 7` and `CSI s` share and `restore_cursor_position` (`:1626`) reads back. Mode 69 is absent from
+  `NamedPrivateMode` (`ansi.rs:938-968`), so DECSET 69 is ignored (`set_mode`'s `Unknown` arm,
+  `term/mod.rs:2100`) and DECRQM answers `ModeState::NotSupported` = 0 (`report_private_mode`,
+  `:2087`). The cancel byte cmote feeds instead: 0x18 in `State::CsiParam` falls to the catch-all
+  `_ => self.anywhere(...)` (`vte-0.15.0/src/lib.rs:252`), and `anywhere` runs `execute(byte)` and sets
+  `State::Ground` — no `csi_dispatch` — while `execute` (`ansi.rs:1296`) has no CAN arm, only the
+  `debug!` fallback. `advance_ground` calls `reset_params()` on the next ESC (`lib.rs:605`), so the
+  abandoned parameters cannot leak into the following sequence. SUB (0x1a) takes the same transition but
+  calls `substitute()` (`term/mod.rs:1443`), which is a `trace!` today and displayable by definition —
+  hence CAN.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
   crate source.
@@ -931,6 +960,22 @@ Audited file:line anchors behind the claims above, for later re-checking.
   viewport into history* rather than blanking it, and the CUP+ECH alternative would move a cursor the
   erase is defined never to move. `spans` is pure row/column arithmetic, so all six region shapes are
   tested without a terminal.
+- **`term/cancel.rs`** — the misparse scanner (§57), and the only one here that exists because the
+  engine does **not** ignore something. `Cancel::feed` is a chunk-safe CSI state machine looking for
+  one shape: a final `s` with at least one parameter byte, no private marker and no intermediate —
+  **DECSLRM**, the VT420 left/right margins, whose final byte `vte` dispatches to save-cursor
+  (`('s', []) => handler.save_cursor_position()`, parameters unread). Left alone, a margin request
+  overwrites the engine's one saved-cursor slot, and the program's own `CSI u` then lands wherever the
+  request happened to sit. The parameter count is the only evidence available, since DECLRMM (mode 69)
+  — the mode that disambiguates the byte on a real VT420 — is one the engine never accepts; the bare
+  `CSI s` therefore still saves the cursor, and every save-cursor in the wild is that spelling. Offsets
+  name **the final byte itself**, a third convention next to a prompt mark's start-of-sequence and a
+  selective erase's one-past-the-end, because that byte is the one being replaced: `process` advances
+  the engine up to it, feeds **CAN** (0x18) in its place and resumes after it. Feeding nothing would
+  leave the engine's parser mid-CSI, taking the next final byte in the stream as this sequence's —
+  `CSI 5;70 s` then `hello` would dispatch `('h', [])` with parameters 5 and 70. CAN because the ANSI
+  state machine defines it as the cancel (`anywhere()` → `execute`, state Ground, no dispatch), rather
+  than SUB, which is *defined* to be displayable, or a final byte that merely has no arm today.
 - **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` runs on the shared
   framer and returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
   code parsed from its next field. `Prompts` holds the command state (`Idle`/`Prompt`/`Running`), the

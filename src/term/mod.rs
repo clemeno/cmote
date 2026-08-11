@@ -31,7 +31,14 @@
 // DCS its parser ignores, so `graphics` scans it out of the same bytes, `sixel` decodes it, and
 // `process` reserves the cells it covers in the engine so the picture rides the grid as text does
 // (§41).
+//
+// One sequence goes the other way — the engine does NOT drop it, and should. `CSI Pl;Pr s` sets the
+// left and right margins on a VT420, and the engine's arm for the final `s` is save-cursor, which
+// ignores its parameters; the margins cmote cannot give would come at the cost of a saved cursor the
+// program never asked it to overwrite. So `cancel` finds that final byte and `process` feeds the
+// engine a CAN in place of it (§57).
 
+mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
@@ -178,6 +185,7 @@ impl Terminal {
 			iterm: iterm::Iterm::default(),
 			progress: progress::Reports::default(),
 			protect: protect::Protect::default(),
+			cancels: cancel::Cancel::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -223,14 +231,28 @@ impl Terminal {
 		// that wiped it and an erase after the engine has ignored it. An unarmed stream that sends no
 		// `?`-erase reports nothing, so the common case still pays for no split.
 		let protections = self.protect.feed(bytes);
+		// The one sequence the engine reads as something else (§57). Unlike every scanner above, this
+		// one is not reporting something to apply — it is reporting a byte the engine must not be let
+		// near, so its offset is the final byte itself and the split loop steps OVER it.
+		let cancels = self.cancels.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
-		if marks.is_empty() && images.is_empty() && bookmarks.is_empty() && protections.is_empty() {
+		if marks.is_empty()
+			&& images.is_empty()
+			&& bookmarks.is_empty()
+			&& protections.is_empty()
+			&& cancels.is_empty()
+		{
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(marks, images, bookmarks, protections) {
+			for (offset, split) in splits(marks, images, bookmarks, protections, cancels) {
+				// `start` can already be past this offset, because a cancelled final byte was stepped
+				// over just now (see `Split::Cancel`). No scanner can report an event INSIDE a CSI
+				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
+				// from being built backwards.
+				let offset = offset.max(start);
 				self.parser.advance(&mut self.term, &bytes[start..offset]);
 				start = offset;
 				match split {
@@ -248,6 +270,14 @@ impl Terminal {
 						self.prompts.record_user_mark(history, row);
 					}
 					Split::Protect(request) => self.apply_protection(request),
+					// End the sequence instead of letting the engine dispatch it, and step over the
+					// final byte so it is neither dispatched nor printed. Feeding nothing here would
+					// leave the engine's parser mid-CSI, waiting to take the next final byte in the
+					// stream as this sequence's — see `term/cancel.rs` for what that costs.
+					Split::Cancel => {
+						self.parser.advance(&mut self.term, &[cancel::CANCEL]);
+						start += 1;
+					}
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -879,6 +909,11 @@ pub struct Terminal {
 	/// held here at all — it rides the engine's pen and then each printed cell, so there is no map to
 	/// keep aligned with the grid.
 	protect: protect::Protect,
+	/// Finds the sequences the engine would read as something ELSE — today only DECSLRM, whose `s`
+	/// the engine takes for a save-cursor (§57). The odd one out among these scanners: the others are
+	/// here because the engine ignores something, this one because it does not. Fed by the split
+	/// advance so the offending final byte can be swapped for a CAN on its way past.
+	cancels: cancel::Cancel,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
@@ -908,20 +943,25 @@ enum Split {
 	/// far side of it. Both work through the same loop because a split is a split — the difference is
 	/// only which side of the boundary the scanner asked for.
 	Protect(protect::Request),
+	/// A final byte the engine must not dispatch (§57). The only split that is not something to
+	/// apply: it marks the byte itself, and the loop replaces it with a CAN rather than feeding it.
+	Cancel,
 }
 
-/// Merge one chunk's prompt marks, image events, bookmarks and selective-erase requests into offset
-/// order. Every list arrives ascending, and the sort is stable, so two events at the very same offset
-/// keep the order they were scanned in — which is the only sensible tie-break, since no scanner can
-/// see another's.
+/// Merge one chunk's prompt marks, image events, bookmarks, selective-erase requests and cancelled
+/// final bytes into offset order. Every list arrives ascending, and the sort is stable, so two events
+/// at the very same offset keep the order they were scanned in — which is the only sensible
+/// tie-break, since no scanner can see another's.
 fn splits(
 	marks: Vec<(usize, osc133::Mark)>,
 	images: Vec<(usize, graphics::Event)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
 	protections: Vec<(usize, protect::Request)>,
+	cancels: Vec<usize>,
 ) -> Vec<(usize, Split)> {
-	let mut merged: Vec<(usize, Split)> =
-		Vec::with_capacity(marks.len() + images.len() + bookmarks.len() + protections.len());
+	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
+		marks.len() + images.len() + bookmarks.len() + protections.len() + cancels.len(),
+	);
 	merged.extend(
 		marks
 			.into_iter()
@@ -943,6 +983,7 @@ fn splits(
 			.into_iter()
 			.map(|(offset, request)| (offset, Split::Protect(request))),
 	);
+	merged.extend(cancels.into_iter().map(|offset| (offset, Split::Cancel)));
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
 }
@@ -2110,5 +2151,66 @@ mod tests {
 		assert!(!cell.italic());
 		assert!(!cell.inverse());
 		assert_eq!(cell.underline(), screen::UnderlineStyle::None);
+	}
+
+	/// The collision §57 is about: `CSI Pl;Pr s` is a margin request, and the engine's arm for the
+	/// final `s` is save-cursor with its parameters ignored. Unhandled, it silently overwrites the one
+	/// saved-cursor slot, and the program's own restore then lands wherever the margin request sat.
+	#[test]
+	fn a_margin_request_does_not_move_the_saved_cursor() {
+		let mut terminal = Terminal::new(4, 20);
+		// The status-line shape: save, go somewhere, write, come back.
+		terminal.process(b"\x1b[1;1Hhome\x1b[s");
+		terminal.process(b"\x1b[3;1Hstatus\x1b[5;70s");
+		terminal.process(b"\x1b[uBACK");
+		assert_eq!(
+			read(&terminal, 0, 0, 8),
+			"homeBACK",
+			"the restore went where the program saved, not where the margin request sat"
+		);
+		assert_eq!(
+			read(&terminal, 2, 0, 10),
+			"status",
+			"and nothing was written over the status line it had moved away from"
+		);
+	}
+
+	/// The cancel has to END the sequence, not merely withhold its final byte: the parameters have
+	/// already reached the engine's parser, so without one the next final byte in the stream would be
+	/// taken as this sequence's. Here that is the `h` of `hello`, which would dispatch as set-mode
+	/// with parameters 5 and 70 and swallow four characters of output.
+	#[test]
+	fn the_text_after_a_margin_request_is_printed_and_not_eaten() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[5;70shello");
+		assert_eq!(read(&terminal, 0, 0, 5), "hello");
+	}
+
+	/// And the CAN itself must leave nothing behind. A substitute glyph, or the `s` printed as a
+	/// letter, would both show up here.
+	#[test]
+	fn a_cancelled_margin_request_prints_nothing_at_all() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"a\x1b[5;70sb");
+		assert_eq!(read(&terminal, 0, 0, 4), "ab");
+	}
+
+	/// The other meaning of the same final byte, which cmote keeps: a bare `CSI s` is the universal
+	/// save-cursor spelling and still works.
+	#[test]
+	fn a_bare_save_and_restore_still_works() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2;5H\x1b[s\x1b[4;1Helsewhere\x1b[uX");
+		assert_eq!(read(&terminal, 1, 4, 1), "X");
+	}
+
+	/// A margin request in the middle of a chunk that also carries a split of another kind — the two
+	/// conventions meet here, since a selective erase reports the byte one PAST its sequence and a
+	/// cancel reports the final byte itself.
+	#[test]
+	fn a_margin_request_beside_a_selective_erase_keeps_both() {
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"\x1b[1\"qName:\x1b[0\"qBob\x1b[5;70s\x1b[?2J");
+		assert_eq!(read(&terminal, 0, 0, 9), "Name:");
 	}
 }
