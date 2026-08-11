@@ -330,8 +330,22 @@ short, and since §41 nothing left in it is high value:
 **OSC 52 clipboard read/write** — the engine surfaces it as `Event::ClipboardLoad` /
 `ClipboardStore`; cmote **drops both on purpose** (§9 / §12 / §23): a remote could read or
 poison the local clipboard, and cmote touches the clipboard only on an explicit *local* action.
-The **bell** and any remote colour *set* request are dropped for the same "no remote-driven side
-effects" reason. Answering an OSC 52 read query would be an injection vector and stays out.
+The **bell** is dropped for the same "no remote-driven side effects" reason. Answering an OSC 52 read
+query would be an injection vector and stays out.
+
+**Remote colour *set* requests** — `OSC 4;n;<spec>`, `OSC 10 / 11 / 12` with a value, and the resets
+`OSC 104 / 110 / 111 / 112`. The theme is chrome the **user** chose and cmote owns, so a remote does not
+repaint it. Worth stating precisely what happens, because "ignored" is not quite it: the engine's
+`set_color` **records** the value in its own colour table and marks the terminal fully damaged, and
+cmote's renderer never reads that table — `ui/grid.rs` paints from `palette` alone. So a set costs a
+full-screen repaint and changes nothing. Harmless, and invisible.
+
+That leaves one **asymmetry worth knowing about**, since it is a consequence rather than an oversight:
+a *query* is answered from cmote's scheme (`report_color`), so set-then-query does not round-trip. A
+program that sets the background to pink and then asks is told the background is cmote's — which is the
+honest answer, and the useful one for anything probing whether the set took. A program that sets and
+merely *assumes* success will draw text for a background it has not got. Honouring sets is the only fix,
+and that is exactly what this policy refuses.
 
 **Remote-triggered desktop notifications** — `OSC 9;<text>`, `OSC 777` (urxvt) and `kitty 99` (rich
 notifications) are all the same feature in three spellings, and all three are **refused on purpose**
@@ -346,6 +360,33 @@ it. OSC 9 is *multiplexed*: `9;9` is the Windows working-directory announcement 
 belongs to, so the worst a lying remote achieves is a wrong number on its own tab; the number is
 clamped and a malformed report changes nothing. The line here is not "which OSC number" but **whether
 the effect escapes the tab**.
+
+**Remote-set mouse pointer shape** — `OSC 22` is **refused**, and the reason is not the one that first
+suggests itself. "The pointer is ours like the theme is ours" is the weaker half: a colour scheme is
+persistent identity the user chose, whereas a pointer shape is transient feedback about what sits under
+it, and there the remote program genuinely knows more than cmote does. Refusing it does cost something
+real — no I-beam over text in a full-screen editor, no wait cursor through a long operation.
+
+The load-bearing reasons are these three:
+
+- **The pointer is already contested, and the arbitration is hand-rolled unsafe code.** cmote sets four
+  shapes of its own — `ResizingHorizontally` / `ResizingVertically` on the panel splitters, `Grab` /
+  `Grabbing` on every drag handle — and on Windows it *paints its own hands* through a `WM_SETCURSOR`
+  subclass that answers **before** winit, because Windows ships no hand cursor at all (§51). Both §51
+  and §52 went into getting that contest right. OSC 22 adds a remote as a fifth voice, and every pair
+  then needs a winner: the remote asks for `wait` while the pointer rests on a chip that wants the open
+  hand — which one? That question would be answered inside the subclass, the last place in cmote worth
+  adding a case to.
+- **A pointer shape is window-wide, so it fails the same test §54 applies to progress.** The cursor
+  travels over the tab strip, the file panes and the dialogs, none of which belong to the remote. Its
+  shape would either leak outside the grid — the effect escaping the tab — or the subclass would have
+  to learn the grid's bounds to fence it in, which is more contest in that same unsafe path.
+- **`none` is in the vocabulary.** OSC 22 carries cursor *names*, and hiding the pointer is one. A
+  remote that makes the local mouse pointer vanish over cmote's window is a real nuisance with no
+  obvious undo.
+
+Note this refuses nothing that works today: cmote sets **no** cursor over the terminal grid, so this is
+an unrealised nicety being declined, not a behaviour being removed.
 
 **Answerback (ENQ `0x05`)** — refused for the same reason, and this is why xterm ships it empty too
 (§36). The trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05`
@@ -430,9 +471,15 @@ missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spell
 reason 4 / 10 / 11 / 12 already were, a fixed scheme. Those rows now read as choices rather than as
 work not yet done, which is the difference between a gap and a policy.
 
-**One genuine OSC gap is left, and it is small: `OSC 22`, the mouse-pointer shape.** A remote asking for
-`text` / `wait` / `pointer` is entirely tab-local, so it raises none of the questions above, and cmote
-already owns a cursor-shape mechanism it could hang off (`cursor.rs`, §51). Unclaimed, not refused.
+**`OSC 22` was then decided too, which empties the OSC column: every row is now shipped or refused with
+its reason written down, and none is merely outstanding.** The mouse-pointer shape looked at first like
+the one cheap gap left — tab-local, and cmote already owns a cursor mechanism to hang it off (`cursor.rs`,
+§51). Looking properly reversed that. The pointer is *window-wide* chrome that travels over the strip,
+the panes and the dialogs, so a remote's shape either escapes the tab or needs fencing; `none` is one of
+the names it can carry, so a remote could hide the local pointer; and cmote's cursor is already contested
+by four shapes of its own, arbitrated inside a hand-rolled `WM_SETCURSOR` subclass that took §51 and §52
+to get right — the last place worth adding a fifth voice. Refused, with the cost admitted: no I-beam over
+text, no wait cursor through a long operation. See §6.
 
 ---
 
@@ -453,13 +500,13 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 |---|---|---|---|
 | 0 | Icon name + window title | ✅ | title shown; icon name dropped (`term/mod.rs`) |
 | 2 | Window title | ✅ | control chars stripped (anti-spoof) |
-| 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** ignored (fixed palette) |
+| 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** recorded by the engine and never read by the renderer (fixed palette) |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
 | 9 | Desktop notification | ❌ | *(policy)* — a notification leaves the window and lands on the desktop (§6, §54) |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
-| 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate); **set** ignored |
-| 22 | Mouse pointer shape | ❌ | |
+| 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell); **set** recorded by the engine and never read — a full repaint for no change |
+| 22 | Mouse pointer shape | ❌ | *(policy)* — the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) |
 | 52 (write) | Clipboard write | ❌ | *(policy)* — remote must not poison local clipboard (§6) |
 | 52 (read) | Clipboard read | ❌ | *(policy)* — remote must not read local clipboard (§6) |
 | 104 | Reset palette entry | ❌ | no effect (fixed palette) |
