@@ -6144,6 +6144,14 @@ OSC 9;9, *not* in `term/iterm.rs`, because the only thing that differs between t
 and the path arithmetic should not exist twice. A dotfile written for iTerm2 now gets cwd tracking
 (§17) with nothing else configured.
 
+**`SetUserVar=gitBranch=<base64>` — the branch, on the chip.** iTerm2 lets a shell set any named
+variable and reference it from a title template; cmote has no template, so the allow-list is applied a
+**second time, to the names**. Only `gitBranch` is kept — the name iTerm2's own git integration uses.
+
+That narrowness is the security property, not a shortcut: a remote cannot make cmote hold a map whose
+keys it chose, so there is no unbounded store needing a bound. The value is drawn as a small pill on
+the chip, after the endpoint label.
+
 ### Decisions worth stating
 
 - **A bookmark is not a prompt, so it is stored apart.** The tempting shortcut was to push `SetMark`
@@ -6168,6 +6176,25 @@ and the path arithmetic should not exist twice. A dotfile written for iTerm2 now
 - **The payload cap is part of the refusal.** `MAX_PAYLOAD` here is far below what an `iTerm2 File=`
   inline image needs. That key is refused, and refusing to *buffer* it is the cheapest possible way of
   meaning it — a megabyte of base64 overruns the cap, the framer abandons it, and cmote holds none.
+- **The branch pill sits BESIDE the endpoint label, never in place of it.** This is the load-bearing
+  decision of the variable half, and it is a spoofing one. The value is chosen by the remote and drawn
+  in the tab strip — chrome cmote owns, which the user reads to know *which machine they are typing
+  into*. Given the label outright, a remote could name itself `prod-db-01` and be believed. In its own
+  dimmer pill, after the label, it reads as an annotation on the tab: the remote gets to say what
+  branch it is on, and does not get to say what host it is.
+- **A value that will not decode leaves the branch alone; an EMPTY value clears it.** Those must be
+  different answers, which is why `parse_user_var` is three-valued (`None` / `Some(None)` /
+  `Some(Some)`). An empty value is the shell reporting it *left the repository*, and a stale branch
+  under a directory that has none would be a lie. Rubbish, though, must not be a way to wipe a real
+  reading — the same rule §54 applies to progress.
+- **Sanitised on the way IN, not on the way out.** Control characters stripped (the window title's rule
+  since §23, and for the same reason) and the length capped, both before the value is stored, so the
+  bound holds however it is later drawn. The cap counts `chars`, not bytes, so a name of multi-byte
+  glyphs is cut at a character boundary rather than panicking a slice.
+- **`base64` is taken as a dependency rather than hand-rolled.** It is the same crate at the same
+  version `alacritty_terminal` already pulls in, so it adds nothing to the graph and nothing to
+  compile. The input is remote-controlled, and a decoder is exactly the small, boundary-condition-heavy
+  code that should not be written a second time in the world.
 
 ### Deliberately not
 
@@ -6183,3 +6210,11 @@ and the path arithmetic should not exist twice. A dotfile written for iTerm2 now
   Nothing is gained by a second spelling of a sequence that already works.
 - **`AddAnnotation=`, `SetBadgeFormat=`** — real features with no consumer in cmote. A note attached to
   a line range, and a watermark over the grid, are each their own section if ever wanted.
+- **No user variable other than `gitBranch`, and no title template.** iTerm2's variables are useful
+  because a configurable template interpolates them; building that here means a settings surface, a
+  parser for the template, and a decision about how much remote-chosen text may appear in the strip.
+  The one variable with an obvious reader is honoured, and the rest wait for a real want. Adding a
+  second name later is one entry on the list.
+- **The pill does not go in the window title.** The title is what the OS shows in the taskbar preview
+  and the Alt-Tab list, i.e. outside the tab — so remote-chosen text there escapes further than the
+  strip, and §54's line applies.

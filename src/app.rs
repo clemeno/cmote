@@ -1976,6 +1976,7 @@ impl App {
 				active: index == region.active,
 				status: tab.prompt_status(),
 				progress: tab.command_progress(),
+				branch: tab.branch(),
 				drop_target: drop_target == Some(tab.id),
 			})
 			.collect();
@@ -3434,6 +3435,13 @@ impl Tab {
 			Some(terminal) => terminal.progress(),
 			None => term::progress::Progress::None,
 		}
+	}
+
+	/// The branch this tab's remote shell announced (§55), for the pill on its chip. `None` on a tab
+	/// with no terminal, and on every shell that does not set iTerm2's `gitBranch` user variable —
+	/// which is most of them, so most chips carry no pill.
+	fn branch(&self) -> Option<String> {
+		self.terminal.as_ref()?.branch().map(str::to_owned)
 	}
 
 	/// Whether this tab holds a live shell (§26). Closing one is confirmed like a Disconnect;

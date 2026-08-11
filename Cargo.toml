@@ -30,6 +30,14 @@ age = { version = "0.11", default-features = false }
 # dead weight, not a C dependency.
 alacritty_terminal = "0.26"
 anyhow = "1.0.104"
+# Decodes the value of iTerm2's `OSC 1337 ; SetUserVar=name=<base64>` (PLAN §55), which is the only
+# base64 cmote reads that a crate does not already handle for it (a known_hosts key blob goes through
+# `russh::keys`). It is the SAME crate, at the same version, that `alacritty_terminal` already pulls
+# in, so naming it here adds nothing to the dependency graph and nothing to compile — the `image`
+# precedent below. Pure Rust, so the no-C-toolchain portable build holds (§11). Taken rather than
+# hand-rolled because the input is remote-controlled: a decoder is exactly the kind of small,
+# fiddly, boundary-condition-heavy code that should not be written twice in the world.
+base64 = "0.22"
 # Writes styled HTML to the system clipboard for a rich Ctrl+C (PLAN §10): the terminal grid
 # carries per-cell colour and attributes, so a copy can preserve the look when pasted into a
 # rich editor, with a plain-text fallback riding alongside for editors (and the shell) that read

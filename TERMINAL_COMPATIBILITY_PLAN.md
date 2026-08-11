@@ -533,6 +533,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
+| iTerm 1337 `SetUserVar` | Per-session variable | ⚠️ | **`gitBranch` only** — shown as a pill on the chip (§55). The allow-list applied to NAMES too: with no title template there is no reader for the others, so a remote cannot key a store. Value base64-decoded, UTF-8 checked, control chars stripped, capped at 32 chars, drawn BESIDE the endpoint label so it cannot pass for the host |
 | iTerm 1337 `Copy` | Clipboard write | ❌ | *(policy)* — **OSC 52 write by another name** (§6, §55); pinned by a test so the refusal cannot regress |
 | iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | ❌ | *(policy)* — the fixed-scheme refusal in a new costume (§6, §55) |
 | iTerm 1337 `SetBackgroundImageFile` | Background image | ❌ | *(policy)* — a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
@@ -851,6 +852,14 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `output_at_prompt` must never resolve one — surfaced by `Terminal::user_mark_rows` and drawn as an
   amber gutter tick (`ui/grid.rs`), while `jump` chains both rings so Ctrl+Shift+Up/Down visits either.
   `CurrentDir=` is handled in `term/cwd.rs` instead, beside the two cwd spellings it duplicates.
+  `SetUserVar=` honours the single name `gitBranch` — the allow-list applied to names as well as keys,
+  which is what means there is no remote-keyed map to bound. `parse_user_var` is three-valued so the
+  three cases stay distinct: not an assignment (keep what we hold), an EMPTY value (the shell left the
+  repository — clear it), a value fit to draw. A bad base64 or non-UTF-8 payload lands in the first
+  case, so rubbish cannot wipe a real reading. `sanitize` strips control characters and caps the value
+  at `MAX_VALUE_CHARS` counted in `chars`, on the way IN. Surfaced by `Terminal::branch` and drawn by
+  `ui/tabs.rs` as a dim pill AFTER the endpoint label — remote-chosen text in cmote's own chrome must
+  not be able to pass for the label that says which machine the user is typing into.
 - **`term/osc.rs`** — the shared OSC framer (§17, §34, §54, §55). One chunk-safe byte machine
   (`Text`/`Escape`/`Payload`/`PayloadEscape`) recognising `ESC ] payload (BEL | ESC \)`, calling back
   once per completed payload with the byte offset **just past its terminator** — the coordinate §34

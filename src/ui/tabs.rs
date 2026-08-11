@@ -114,6 +114,16 @@ const PROGRESS_TRACK: Color = Color::from_rgb8(0x2e, 0x2e, 0x2e);
 /// red of failure: `st = 4` means the command is waiting for something, which is neither.
 const PROGRESS_PAUSED: Color = Color::from_rgb8(0x5c, 0x8a, 0xc8);
 
+/// The branch pill (§55): the value a remote shell announced as its git branch, drawn on the chip.
+///
+/// Its own fill and its own dimmer ink, deliberately. This value is chosen by the REMOTE and drawn in
+/// chrome cmote owns, so it must not be able to pass for the endpoint label beside it — the label is
+/// how the user knows which machine they are typing into. A pill is the cheapest honest way to say
+/// "the remote said this": it reads as an annotation on the tab rather than as part of its name.
+const BRANCH_BG: Color = Color::from_rgb8(0x2f, 0x3a, 0x2f);
+const BRANCH_FG: Color = Color::from_rgb8(0x9d, 0xc0, 0x9d);
+const BRANCH_TEXT_SIZE: f32 = 11.0;
+
 /// The drop mark's colour (§38): the border drawn round the chip a dragged tab would land on. A
 /// muted blue, the same family as the selection fills elsewhere, so it reads as "here" rather than
 /// as a warning.
@@ -133,6 +143,10 @@ pub struct Chip {
 	pub active: bool,
 	pub status: Option<Status>,
 	pub progress: crate::term::progress::Progress,
+	/// The branch the remote announced (§55), if it announced one. Already sanitised and capped by
+	/// `term::iterm` — this file draws it and does not police it, but note that it IS remote-chosen
+	/// text, which is why it gets its own pill rather than joining the label.
+	pub branch: Option<String>,
 	pub drop_target: bool,
 }
 
@@ -313,6 +327,26 @@ fn chip_view(index: usize, chip: &Chip, dragging: bool) -> Element<'static, Mess
 		contents = contents.push(text("●").size(10).color(status.color()));
 	}
 	contents = contents.push(name);
+	// The branch pill (§55), after the endpoint label and before the ✕. AFTER matters: the label is
+	// what says which machine this is, so the remote-chosen text can never be read as the start of it.
+	if let Some(branch) = chip.branch.as_deref() {
+		contents = contents.push(
+			container(
+				text(branch.to_owned())
+					.size(BRANCH_TEXT_SIZE)
+					.color(BRANCH_FG),
+			)
+			.padding([0.0, 5.0])
+			.style(|_theme| container::Style {
+				background: Some(BRANCH_BG.into()),
+				border: Border {
+					radius: 7.0.into(),
+					..Border::default()
+				},
+				..container::Style::default()
+			}),
+		);
+	}
 	let close = button(text("×").size(14).color(fg))
 		.padding([0.0, 4.0])
 		.on_press(Message::TabCloseRequested(chip.id))

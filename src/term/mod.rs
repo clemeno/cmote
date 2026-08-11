@@ -563,6 +563,13 @@ impl Terminal {
 		)
 	}
 
+	/// The branch the remote shell last announced (§55), or `None` when it announced none — which is
+	/// every shell that does not set iTerm2's `gitBranch` user variable, so most of them. Already safe
+	/// to draw: decoded, UTF-8, control characters stripped, length capped.
+	pub fn branch(&self) -> Option<&str> {
+		self.iterm.branch()
+	}
+
 	/// Scroll the nearest prompt above or below the viewport into view (§34), returning whether
 	/// there was one to move to (so the caller can leave the view be when there is not). The target
 	/// offset is `osc133`'s to choose; here it is turned into the signed delta the engine scrolls

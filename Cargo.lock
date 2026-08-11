@@ -839,6 +839,7 @@ dependencies = [
  "alacritty_terminal",
  "anyhow",
  "arboard",
+ "base64 0.22.1",
  "iced",
  "image",
  "open",
