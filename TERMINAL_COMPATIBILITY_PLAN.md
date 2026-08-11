@@ -545,111 +545,111 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 
 ### CSI — cursor movement & editing
 
-| Feature | Code | Status | Note |
+| Code | Feature | Status | Note |
 |---|---|---|---|
-| Cursor up / down / fwd / back | A / B / C / D | ✅ | |
-| Cursor next / prev line | E / F | ✅ | |
-| Absolute position | G / H (+ f) | ✅ | HVP `f` too |
-| Forward / backward tab | I / Z | ✅ | |
-| Vertical / horizontal PA | d / \` | ✅ | |
-| Save / restore cursor | s / u | ✅ | ANSI.SYS form |
-| Insert / delete / erase char | @ / P / X | ✅ | |
-| Insert / delete line | L / M | ✅ | |
-| Erase in display | J | ✅ | |
-| Erase scrollback | 3 J | ✅ | |
-| Erase in line | K | ✅ | |
-| Selective erase (protected) | ? J / ? K | ❌ | no protected-region support |
-| Repeat character | b (REP) | ✅ | handled in the vte parser (`ansi.rs`) |
-| Scroll up / down | S / T | ✅ | |
-| Scrolling region (top / bottom) | r (DECSTBM) | ✅ | vertical only |
-| Left / right margins | s (DECSLRM) | ❌ | engine scroll region is vertical only (§5) |
-| Tab clear | g | ✅ | |
-| Rectangular erase / fill / copy | $ z / $ x / $ v | ❌ | not represented (§5) |
-| Cursor style | Ps SP q (DECSCUSR) | ✅ | block / underline / bar; blink dropped |
-| Device status report | 5n / 6n | ✅ | |
-| Primary / secondary DA | c / > c | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
-| Tertiary DA | = c | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
-| Graphics attributes (XTSMGRAPHICS) | ? Pi;Pa;Pv S | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
-| Request mode (DECRQM) | ? Ps $ p | ✅ | engine answers |
-| Colour palette stack | # p / # q | ❌ | |
+| A / B / C / D | Cursor up / down / fwd / back | ✅ | |
+| E / F | Cursor next / prev line | ✅ | |
+| G / H (+ f) | Absolute position | ✅ | HVP `f` too |
+| I / Z | Forward / backward tab | ✅ | |
+| d / \` | Vertical / horizontal PA | ✅ | |
+| s / u | Save / restore cursor | ✅ | ANSI.SYS form |
+| @ / P / X | Insert / delete / erase char | ✅ | |
+| L / M | Insert / delete line | ✅ | |
+| J | Erase in display | ✅ | |
+| 3 J | Erase scrollback | ✅ | |
+| K | Erase in line | ✅ | |
+| ? J / ? K | Selective erase (protected) | ❌ | no protected-region support |
+| b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
+| S / T | Scroll up / down | ✅ | |
+| r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
+| s (DECSLRM) | Left / right margins | ❌ | engine scroll region is vertical only (§5) |
+| g | Tab clear | ✅ | |
+| $ z / $ x / $ v | Rectangular erase / fill / copy | ❌ | not represented (§5) |
+| Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
+| 5n / 6n | Device status report | ✅ | |
+| c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
+| = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
+| ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
+| ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers |
+| # p / # q | Colour palette stack | ❌ | |
 
 ### ESC — single sequences
 
-| Feature | Code | Status | Note |
+| Code | Feature | Status | Note |
 |---|---|---|---|
-| Index / Reverse index | ESC D / ESC M | ✅ | |
-| Next line | ESC E | ✅ | |
-| Set tab stop | ESC H | ✅ | |
-| Save / restore cursor | ESC 7 / ESC 8 | ✅ | |
-| Full reset | ESC c (RIS) | ✅ | |
-| Keypad app / numeric | ESC = / ESC > | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
-| Screen alignment test | ESC #8 (DECALN) | ✅ | |
-| Designate charset G0 / G1 | ESC ( / ESC ) | ✅ | DEC line-drawing works |
-| Single shift G2 / G3 | ESC N / ESC O | ❌ | |
-| Locking shifts | LS2 / LS3 / LS1R… | ⚠️ | SO / SI + designation only |
-| Double-height / width lines | ESC #3–6 | ❌ | not represented (§5) |
-| 7 / 8-bit control output | ESC SP F / G | ❌ | |
-| UTF-8 charset | ESC % G | ✅ | engine is always UTF-8 |
+| ESC D / ESC M | Index / Reverse index | ✅ | |
+| ESC E | Next line | ✅ | |
+| ESC H | Set tab stop | ✅ | |
+| ESC 7 / ESC 8 | Save / restore cursor | ✅ | |
+| ESC c (RIS) | Full reset | ✅ | |
+| ESC = / ESC > | Keypad app / numeric | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
+| ESC #8 (DECALN) | Screen alignment test | ✅ | |
+| ESC ( / ESC ) | Designate charset G0 / G1 | ✅ | DEC line-drawing works |
+| ESC N / ESC O | Single shift G2 / G3 | ❌ | |
+| LS2 / LS3 / LS1R… | Locking shifts | ⚠️ | SO / SI + designation only |
+| ESC #3–6 | Double-height / width lines | ❌ | not represented (§5) |
+| ESC SP F / G | 7 / 8-bit control output | ❌ | |
+| ESC % G | UTF-8 charset | ✅ | engine is always UTF-8 |
 
 ### DCS — Device Control String
 
-| Feature | Code | Status | Note |
+| Code | Feature | Status | Note |
 |---|---|---|---|
-| Request status string | DCS $ q (DECRQSS) | ⚠️ | SGR reported from the live pen; other settings honest `ps=0` (`term/query.rs`, §33) |
-| Termcap query | DCS + q (XTGETTCAP) | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
-| Terminal version | CSI > q (XTVERSION) | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
-| Tertiary device attributes | CSI = c (DA3 → DECRPTUI) | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
-| Sixel graphics | DCS … q | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). The alternate screen has its own page of them, on the same coordinate with the history at zero — so `ranger` previews and `mpv --vo=sixel` draw |
-| tmux passthrough | DCS tmux; … | ❌ | |
+| DCS $ q (DECRQSS) | Request status string | ⚠️ | SGR reported from the live pen; other settings honest `ps=0` (`term/query.rs`, §33) |
+| DCS + q (XTGETTCAP) | Termcap query | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
+| CSI > q (XTVERSION) | Terminal version | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
+| CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
+| DCS … q | Sixel graphics | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). The alternate screen has its own page of them, on the same coordinate with the history at zero — so `ranger` previews and `mpv --vo=sixel` draw |
+| DCS tmux; … | tmux passthrough | ❌ | |
 
 ### SGR — text styling
 
-| Attribute | Code | Status | Note |
+| Code | Attribute | Status | Note |
 |---|---|---|---|
-| Bold | 1 | ✅ | |
-| Dim / faint | 2 | ✅ | faded toward bg |
-| Italic | 3 | ✅ | bundled IBM Plex Mono face |
-| Underline | 4 | ✅ | |
-| Slow / rapid blink | 5 / 6 | ❌ | **dropped by the engine** — `vte` parses it, `alacritty_terminal` has no arm and no cell flag, so it never reaches cmote (§5, §36) |
-| Reverse video | 7 | ✅ | |
-| Hidden / conceal | 8 | ✅ | copy still yields the text |
-| Strikethrough | 9 | ✅ | |
-| Double underline | 21 / 4:2 | ✅ | |
-| Curly / dotted / dashed underline | 4:3 / 4:4 / 4:5 | ✅ | drawn as our own quads |
-| Overline | 53 | ❌ | not carried |
-| 16 ANSI colours | 30–37 / 40–47 / 90–97 / 100–107 | ✅ | |
-| 256-colour indexed | 38;5 / 48;5 | ✅ | |
-| Truecolor (`;` and `:`) | 38;2 / 38:2 | ✅ | both spellings |
-| Underline colour | 58;5 / 58;2 | ✅ | |
+| 1 | Bold | ✅ | |
+| 2 | Dim / faint | ✅ | faded toward bg |
+| 3 | Italic | ✅ | bundled IBM Plex Mono face |
+| 4 | Underline | ✅ | |
+| 5 / 6 | Slow / rapid blink | ❌ | **dropped by the engine** — `vte` parses it, `alacritty_terminal` has no arm and no cell flag, so it never reaches cmote (§5, §36) |
+| 7 | Reverse video | ✅ | |
+| 8 | Hidden / conceal | ✅ | copy still yields the text |
+| 9 | Strikethrough | ✅ | |
+| 21 / 4:2 | Double underline | ✅ | |
+| 4:3 / 4:4 / 4:5 | Curly / dotted / dashed underline | ✅ | drawn as our own quads |
+| 53 | Overline | ❌ | not carried |
+| 30–37 / 40–47 / 90–97 / 100–107 | 16 ANSI colours | ✅ | |
+| 38;5 / 48;5 | 256-colour indexed | ✅ | |
+| 38;2 / 38:2 | Truecolor (`;` and `:`) | ✅ | both spellings |
+| 58;5 / 58;2 | Underline colour | ✅ | |
 
 ### DECSET / DECRST private modes
 
-| Mode | # | Status | Note |
+| Code | Mode | Status | Note |
 |---|---|---|---|
-| Application cursor keys | 1 | ✅ | arrows send SS3 |
-| 132 / 80 column | 3 | ⚠️ | DECCOLM clears screen, no resize (DECRQM: NotSupported) |
-| Global reverse video | 5 (DECSCNM) | ❌ | |
-| Origin mode | 6 | ✅ | |
-| Auto-wrap | 7 | ✅ | |
-| Blinking cursor | 12 | ⚠️ | tracked, drawn steady |
-| Show / hide cursor | 25 | ✅ | |
-| Reverse wrap | 45 | ❌ | |
-| Left / right margin | 69 | ❌ | |
-| Sixel scrolling (DECSDM) | 80 | ⚠️ | the mode is not tracked; cmote always scrolls — the modern default, and what emitters assume (§41) |
-| Alternate screen | 1049 | ✅ | no scrollback there, by design |
-| Mouse: normal / btn / any | 1000 / 1002 / 1003 | ✅ | `term/mouse.rs` |
-| Focus events | 1004 | ✅ | cmote sends CSI I / CSI O |
-| SGR mouse | 1006 | ✅ | |
-| Alt-scroll | 1007 | ✅ | |
-| SGR-pixel mouse | 1016 | ❌ | |
-| Bracketed paste | 2004 | ✅ | with an injection scrub |
-| Synchronized output | 2026 | ⚠️ | parser batches; engine mode is a no-op; cmote already atomic |
-| Grapheme clustering | 2027 | ❌ | |
-| Colour-scheme reporting | 2031 | ❌ | |
-| In-band resize | 2048 | ❌ | |
-| Insert / replace (IRM) | 4 | ✅ | |
-| Newline mode (LNM) | 20 | ✅ | |
-| X10 mouse (press-only) | 9 | ❌ | engine never implemented it |
+| 1 | Application cursor keys | ✅ | arrows send SS3 |
+| 3 | 132 / 80 column | ⚠️ | DECCOLM clears screen, no resize (DECRQM: NotSupported) |
+| 5 (DECSCNM) | Global reverse video | ❌ | |
+| 6 | Origin mode | ✅ | |
+| 7 | Auto-wrap | ✅ | |
+| 12 | Blinking cursor | ⚠️ | tracked, drawn steady |
+| 25 | Show / hide cursor | ✅ | |
+| 45 | Reverse wrap | ❌ | |
+| 69 | Left / right margin | ❌ | |
+| 80 | Sixel scrolling (DECSDM) | ⚠️ | the mode is not tracked; cmote always scrolls — the modern default, and what emitters assume (§41) |
+| 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | `term/mouse.rs` |
+| 1004 | Focus events | ✅ | cmote sends CSI I / CSI O |
+| 1006 | SGR mouse | ✅ | |
+| 1007 | Alt-scroll | ✅ | |
+| 1016 | SGR-pixel mouse | ❌ | |
+| 1049 | Alternate screen | ✅ | no scrollback there, by design |
+| 2004 | Bracketed paste | ✅ | with an injection scrub |
+| 2026 | Synchronized output | ⚠️ | parser batches; engine mode is a no-op; cmote already atomic |
+| 2027 | Grapheme clustering | ❌ | |
+| 2031 | Colour-scheme reporting | ❌ | |
+| 2048 | In-band resize | ❌ | |
+| 4 | Insert / replace (IRM) | ✅ | ANSI mode, not a `?` private one — hence out of the run above |
+| 9 | X10 mouse (press-only) | ❌ | engine never implemented it |
+| 20 | Newline mode (LNM) | ✅ | ANSI mode, not a `?` private one |
 
 ### Graphics, window ops, keyboard, C0
 
