@@ -95,8 +95,8 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   carries them. Cursor is drawn in the **shape a program picks with DECSCUSR** (block /
   underline / bar / hollow), steady — cmote runs no animation timer, so blink is dropped. Since §41 it
   also **composites inline sixel images** over the cells they reserve — decoded in-house, anchored to a
-  document line so a picture rides the scrollback, and advertised to programs through DA1's attribute 4
-  and XTSMGRAPHICS.
+  document line so a picture rides the scrollback, drawn on the alternate screen too (its own page, with
+  its own lifetime), and advertised to programs through DA1's attribute 4 and XTSMGRAPHICS.
 - **Keeps 10 000 lines of scrollback** with a thin, read-only scroll indicator (§23 Stage 8):
   the wheel and Shift+PageUp/PageDown/Home/End scroll the history, and typing snaps back to the
   live bottom. The alternate screen keeps no history, so scrolling is inert there by design. That
@@ -256,9 +256,14 @@ the layer rather than sit beside it:
   a program that writes over the image's rows erases them the way it erases anything.
 - **It is drawn where its own text is**, from an absolute document line (§40) resolved back onto a row
   per frame — the reverse of §39's projection, in the same coordinate.
-- **It is not drawn on the alternate screen**, which keeps no history and so has no such line. That is
-  the one real gap left (`ranger`, `mpv --vo=sixel`), and it is written down in PLAN §41 rather than
-  papered over.
+- **The alternate screen has its own page of pictures** (`ranger`, `mpv --vo=sixel`), which §41 first
+  shipped without and this document called the one real gap left. It closed on a coordinate insight
+  rather than new machinery: that page keeps no history, so `history_size` is 0 and the absolute
+  document line of row `r` is exactly `r` — the same space, not a second one. The renderer takes
+  whichever page is up and branches on nothing. What differs is the *lifetime*: a second store, emptied
+  by either screen swap and by `CSI 2 J`, replacing a picture whose box a new one overlaps, and retiring
+  one the program has drawn a glyph over. The reservation steps its rows with **CUD** there rather than
+  LF, since a page with no history must never be scrolled by cmote's own bookkeeping (PLAN §41).
 
 **§42 reads one more engine flag and answers no sequence.** Word (double-click) and line (triple-click)
 selection is local UX in the §39/§40 family — nothing a remote can ask for — but it appears here because
@@ -288,7 +293,8 @@ short, and since §41 nothing left in it is high value:
   the engine (`term/graphics.rs`) exactly as the cwd, modifyOtherKeys, the identity queries and the OSC
   133 marks are. cmote decodes the payload itself (`term/sixel.rs` — sixel is printable ASCII, so no
   image-format dependency), anchors the picture to an absolute document line (§40), reserves the cells
-  it covers by feeding the engine ECH + LF, and composites it in `ui/grid.rs`. See PLAN §41.
+  it covers by feeding the engine ECH + LF, and composites it in `ui/grid.rs` — on the alternate screen
+  too, which needed no new coordinate, only its own store. See PLAN §41.
 - **ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — still ❌, but the reason has moved out
   of this section's premise. Nothing about the engine blocks them either; kitty and iTerm2 carry
   **PNG/JPEG** payloads, so each needs an image-format decoder — a parser fed bytes straight off the
@@ -490,7 +496,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Termcap query | DCS + q (XTGETTCAP) | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
 | Terminal version | CSI > q (XTVERSION) | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
 | Tertiary device attributes | CSI = c (DA3 → DECRPTUI) | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
-| Sixel graphics | DCS … q | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). Not on the alternate screen — no history there to anchor to |
+| Sixel graphics | DCS … q | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). The alternate screen has its own page of them, on the same coordinate with the history at zero — so `ranger` previews and `mpv --vo=sixel` draw |
 | tmux passthrough | DCS tmux; … | ❌ | |
 
 ### SGR — text styling
@@ -633,11 +639,15 @@ Audited file:line anchors behind the claims above, for later re-checking.
   advance so a set-then-query in one write is seen. **§41 added the inline-image half**: `process` merges
   the prompt marks and the image events of a chunk into one offset-ordered list (`splits`, since the
   engine only advances forwards), `apply_graphics` anchors a picture at `history_size + cursor row` and
-  column — skipping the alternate screen, which has no such line — and `reserve_cells` feeds the engine
-  `CSI <cols> X` + LF per row and a closing CR, so the picture's box is erased, its cells become ordinary
-  scrollback and the cursor lands at the left margin below it. `set_cell_pixels` now also feeds the image
-  store (pixels → cells), `resize` clears the placements with the prompt marks, and the drained reply
-  buffer goes out through `query::with_sixel_attribute`. `Terminal::images` surfaces the placements.
+  column, and `reserve_cells` feeds the engine `CSI <cols> X` + LF per row and a closing CR, so the
+  picture's box is erased, its cells become ordinary scrollback and the cursor lands at the left margin
+  below it. `set_cell_pixels` now also feeds the image store (pixels → cells), `resize` clears the
+  placements with the prompt marks, and the drained reply buffer goes out through
+  `query::with_sixel_attribute`. `Terminal::images` surfaces the placements. **The alternate screen has
+  its own page of them**: `history_size` is 0 there, so the anchor is simply the cursor's row;
+  `sync_alternate` empties that page on either screen swap, `retire_covered_images` drops a picture the
+  program has since written a glyph into, and `reserve_cells` steps its rows with **CUD** instead of LF,
+  because a page with no history must never be scrolled by cmote's own bookkeeping.
 - **`term/query.rs`** — the identity-query scanner (§33, §36), the same out-of-band tactic as `cwd` /
   `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`),
   **DA3** (`CSI = c`), **DECRQSS** (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector
@@ -687,8 +697,8 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `history_size`, `hide_cursor`, `cursor_shape`, `application_cursor`, `application_keypad`
   (DECKPAM, §36), `bracketed_paste`, `focus_reporting`, `mouse_mode`, `mouse_encoding`, `cell`,
   `kitty_flags` (the five active kitty protocol flags, read off `Term::mode()`, §25) and, since §41,
-  `is_alternate` (`TermMode::ALT_SCREEN` — the guard both the image placement and the image drawing take,
-  since the alternate screen keeps no history and so has no document line to anchor to). Nothing the
+  `is_alternate` (`TermMode::ALT_SCREEN` — which page the images are placed on and read back from, since
+  that screen keeps no history and so carries its own store on its own lifetime). Nothing the
   engine tracks is left unsurfaced now; blink it does not track at all (see above). **§40 added the
   document readers**: `line_at(row)` is the single written-down form of `history_size + row -
   display_offset` (the viewport → document mapping §34's ticks and §39's washes are placed by), and

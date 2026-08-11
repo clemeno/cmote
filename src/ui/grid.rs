@@ -366,28 +366,28 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			// so a picture is never hidden by the row it sits on, and inside the same clip, so one
 			// scrolled half off the top is cut at the grid's edge instead of drawn over the chrome.
 			//
-			// Nothing is drawn while the alternate screen is up: a placement's line is a PRIMARY-screen
-			// document line, and the alternate screen keeps no history, so every line index there means
-			// something else entirely (`Screen::is_alternate`). Sitting the pictures out is what keeps
-			// them from raining over vim.
-			if !self.screen.is_alternate() {
-				for placement in self.images {
-					let (pixels, reserved) = image_bounds(placement, origin, top_line);
-					// Clipped to the cells the picture reserved, so its own pixels can never bleed past
-					// the box the engine is holding for it — an image drawn a shade larger than its
-					// rounded-up box would otherwise creep onto the row below. A box entirely off the
-					// visible grid is skipped before any texture work is asked of the renderer.
-					let Some(clip) = reserved.intersection(&visible) else {
-						continue;
-					};
-					renderer.draw_image(
-						// Snapped to the pixel grid: a picture drawn at its native size on a
-						// half-pixel boundary would be resampled into a blur for no reason.
-						RasterImage::new(placement.handle.clone()).snap(true),
-						pixels,
-						clip,
-					);
-				}
+			// Whichever page is up, these are ITS pictures: the emulator keeps a store per screen and
+			// hands over only the one being drawn (`Terminal::images`), so a full-screen program's
+			// preview shows while it is up and the scrollback's plots come back untouched when it
+			// quits. No check is needed here, and none is possible either — the placements are the same
+			// shape on both pages, because the alternate screen keeps no history and so the absolute
+			// line of row `r` there is simply `r` (§40).
+			for placement in self.images {
+				let (pixels, reserved) = image_bounds(placement, origin, top_line);
+				// Clipped to the cells the picture reserved, so its own pixels can never bleed past
+				// the box the engine is holding for it — an image drawn a shade larger than its
+				// rounded-up box would otherwise creep onto the row below. A box entirely off the
+				// visible grid is skipped before any texture work is asked of the renderer.
+				let Some(clip) = reserved.intersection(&visible) else {
+					continue;
+				};
+				renderer.draw_image(
+					// Snapped to the pixel grid: a picture drawn at its native size on a
+					// half-pixel boundary would be resampled into a blur for no reason.
+					RasterImage::new(placement.handle.clone()).snap(true),
+					pixels,
+					clip,
+				);
 			}
 
 			// A shaped (non-block) cursor sits on top of its cell's glyph, once, after the grid.

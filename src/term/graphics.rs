@@ -17,10 +17,18 @@
 //   3. BOUND it. Decoded pixels are the only unbounded memory a remote can hand cmote, so the store
 //      is capped in both count and bytes and evicts oldest-first (§12).
 //
+// There are TWO stores, because there are two pages. The alternate screen (`ranger`, `mpv --vo=sixel`,
+// a preview pane in `fzf`) keeps no history at all, so its pictures cannot ride a document line that
+// grows: they are anchored to a ROW on the page and thrown away whole when the program swaps back.
+// That reads as a second coordinate space, which §40 spent its whole length collapsing to one — but
+// it is the SAME space with the history at zero, since on the alternate screen `history_size` is 0
+// and the document line of row `r` is exactly `r`. So the renderer needs no second path and the
+// arithmetic is unchanged; what differs is the lifetime, which is what `Store` separates.
+//
 // The cells the picture covers are RESERVED in the engine by `term::mod`, which erases that box and
-// feeds it the line feeds the image's height needs. So the grid underneath an image is ordinary
-// blank cells: it scrolls, it reflows and it evicts exactly as text does, and the renderer's only
-// job is to paint the pixels over the box the placement names (`ui::grid`).
+// steps the cursor down the rows the image's height needs. So the grid underneath an image is
+// ordinary blank cells: it scrolls, it reflows and it evicts exactly as text does, and the renderer's
+// only job is to paint the pixels over the box the placement names (`ui::grid`).
 //
 // The store holds an iced image HANDLE rather than raw pixels, which is the one place this module
 // looks up at the GUI. A handle carries the pixels plus an identity, and the renderer caches its
@@ -98,7 +106,9 @@ pub enum Event {
 ///
 /// `line` is absolute (§40): line 0 is the oldest line the session still retains, so the picture
 /// keeps pointing at its own text as output pushes it up the screen and into the scrollback, without
-/// anything having to move it.
+/// anything having to move it. On the ALTERNATE screen the session retains nothing, so line 0 is the
+/// top of the page and `line` is simply the row — the same number, read against a document that
+/// happens to be one screen tall (§41).
 #[derive(Debug, Clone)]
 pub struct Placement {
 	pub line: u64,
@@ -117,6 +127,67 @@ impl Placement {
 	/// size rather than stored, because RGBA is four bytes per pixel by construction.
 	fn bytes(&self) -> usize {
 		usize::from(self.width) * usize::from(self.height) * 4
+	}
+
+	/// Whether this placement's cell box overlaps `other`'s — the ordinary rectangle test, on the
+	/// CELLS rather than the pixels, since the cells are what the engine reserved and what a later
+	/// picture would be reserving over.
+	///
+	/// Only the alternate page asks (§41): a full-screen program redraws the same pane over and over,
+	/// so the picture arriving is the replacement for the one already there rather than a second one
+	/// beside it. On the primary screen the question never comes up — output only ever moves forward,
+	/// so a new picture lands on lines no older one can be on.
+	fn overlaps(&self, other: &Self) -> bool {
+		let rows = self.line < other.line + u64::from(other.rows)
+			&& other.line < self.line + u64::from(self.rows);
+		let cols = u32::from(self.col) < u32::from(other.col) + u32::from(other.cols)
+			&& u32::from(other.col) < u32::from(self.col) + u32::from(self.cols);
+		rows && cols
+	}
+}
+
+/// One page's pictures, and the pixel bytes they hold between them. There are two — the primary
+/// screen's and the alternate screen's (§41) — so every rule about how a list grows and is trimmed is
+/// written once here instead of twice in `Images`, and the caps are enforced on each page separately:
+/// a program covering the alternate screen in pictures cannot evict the scrollback's.
+#[derive(Debug, Default)]
+struct Store {
+	placements: Vec<Placement>,
+	/// Total decoded pixel bytes held, maintained alongside `placements` so the byte cap costs no
+	/// walk of the list.
+	bytes: usize,
+}
+
+impl Store {
+	/// Add a picture, then bring the page back inside its caps.
+	fn push(&mut self, placement: Placement) {
+		self.bytes += placement.bytes();
+		self.placements.push(placement);
+		self.evict();
+	}
+
+	/// Keep the placements `keep` accepts, and re-total the bytes held.
+	fn retain(&mut self, keep: impl Fn(&Placement) -> bool) {
+		self.placements.retain(&keep);
+		self.bytes = self.placements.iter().map(Placement::bytes).sum();
+	}
+
+	/// Drop every picture on this page.
+	fn clear(&mut self) {
+		self.placements.clear();
+		self.bytes = 0;
+	}
+
+	/// Enforce the caps by dropping the oldest pictures. A `Vec::remove(0)` is a shift of at most
+	/// `MAX_IMAGES` entries — a handful of pointers — which is far cheaper than the ring buffer it
+	/// would take to avoid it.
+	fn evict(&mut self) {
+		while self.placements.len() > MAX_IMAGES
+			|| (self.bytes > MAX_TOTAL_BYTES && self.placements.len() > 1)
+		{
+			let dropped = self.placements.remove(0);
+			self.bytes = self.bytes.saturating_sub(dropped.bytes());
+		}
 	}
 }
 
@@ -160,10 +231,14 @@ pub struct Images {
 	/// on before their own bytes reach the engine (see `Event`). `None` once a sequence has run over a
 	/// chunk boundary: its bytes then start at the very beginning of this chunk, which is offset 0.
 	sequence_start: Option<usize>,
-	placements: Vec<Placement>,
-	/// Total decoded pixel bytes held, maintained alongside `placements` so the byte cap costs no
-	/// walk of the list.
-	bytes: usize,
+	/// The PRIMARY screen's pictures, anchored to absolute document lines (§40) and living as long as
+	/// the text they sit beside — which is to say until the scrollback evicts them or the session is
+	/// reset.
+	primary: Store,
+	/// The ALTERNATE screen's, anchored to a row on the page and living only as long as the program
+	/// that drew them (§41). Kept apart rather than mixed in with a flag, because the two differ in
+	/// every way that matters: what the anchor means, what erases them, and when they all go.
+	alternate: Store,
 	/// One cell in pixels, as the GUI measured it — what turns a picture's pixel size into the
 	/// number of rows and columns it has to reserve.
 	cell_width: u16,
@@ -178,8 +253,8 @@ impl Default for Images {
 			payload: Vec::new(),
 			overflowed: false,
 			sequence_start: None,
-			placements: Vec::new(),
-			bytes: 0,
+			primary: Store::default(),
+			alternate: Store::default(),
 			cell_width: FALLBACK_CELL_WIDTH,
 			cell_height: FALLBACK_CELL_HEIGHT,
 		}
@@ -341,69 +416,99 @@ impl Images {
 	/// Place a decoded image with its top-left corner at absolute `line`, column `col`, and return
 	/// the `(rows, cols)` box it needs reserved from that corner.
 	///
-	/// Both counts round UP: a picture 30 pixels tall in a 14-pixel cell reserves three rows, so the
-	/// cell box always covers every pixel and text can never be laid over the bottom of an image. The
-	/// caller reserves exactly that box in the engine, which is what keeps the two in step.
+	/// The caller reserves exactly that box in the engine, which is what keeps the two in step.
 	pub fn place(&mut self, image: sixel::Image, line: u64, col: u16) -> (u16, u16) {
-		let rows = cells(image.height, self.cell_height);
-		let cols = cells(image.width, self.cell_width);
-		let placement = Placement {
+		let placement = self.build(image, line, col);
+		let reserved = (placement.rows, placement.cols);
+		self.primary.push(placement);
+		reserved
+	}
+
+	/// The same for the ALTERNATE page (§41), where the anchor is the `row` the cursor is on rather
+	/// than a document line — the page keeps no history, so the two are the same number.
+	///
+	/// One rule differs, and it is the one that makes a preview pane work: a picture whose box the new
+	/// one OVERLAPS is replaced rather than stacked under it. A full-screen program redraws the same
+	/// pane every time the selection moves, so the picture arriving is the successor of the one
+	/// already there — and without this the store would fill with the frames of a video, each hidden
+	/// behind the next.
+	pub fn place_alternate(&mut self, image: sixel::Image, row: u16, col: u16) -> (u16, u16) {
+		let placement = self.build(image, u64::from(row), col);
+		let reserved = (placement.rows, placement.cols);
+		self.alternate
+			.retain(|existing| !existing.overlaps(&placement));
+		self.alternate.push(placement);
+		reserved
+	}
+
+	/// Turn a decoded image into a placement at `line`/`col`, sizing its cell box from the measured
+	/// cell. Both counts round UP: a picture 30 pixels tall in a 14-pixel cell reserves three rows, so
+	/// the cell box always covers every pixel and text can never be laid over the bottom of an image.
+	fn build(&self, image: sixel::Image, line: u64, col: u16) -> Placement {
+		Placement {
 			line,
 			col,
-			rows,
-			cols,
+			rows: cells(image.height, self.cell_height),
+			cols: cells(image.width, self.cell_width),
 			width: image.width,
 			height: image.height,
 			handle: Handle::from_rgba(u32::from(image.width), u32::from(image.height), image.rgba),
-		};
-		self.bytes += placement.bytes();
-		self.placements.push(placement);
-		self.evict();
-		(rows, cols)
+		}
 	}
 
-	/// Every image the session is holding, oldest first — what the renderer walks each frame.
+	/// Every image the PRIMARY screen is holding, oldest first — what the renderer walks each frame
+	/// while that page is up.
 	pub fn placements(&self) -> &[Placement] {
-		&self.placements
+		&self.primary.placements
+	}
+
+	/// The same for the alternate page (§41). Empty until a full-screen program draws one, and empty
+	/// again the moment it swaps back.
+	pub fn alternate(&self) -> &[Placement] {
+		&self.alternate.placements
 	}
 
 	/// Drop the pictures on the visible screen, for `CSI 2 J`. `first_visible` is the absolute line
 	/// the live screen starts at (the engine's `history_size`), so a picture anchored above it is in
 	/// the scrollback and survives — the same split the erase itself makes in the text.
 	pub fn clear_screen(&mut self, first_visible: u64) {
-		self.retain(|placement| placement.line < first_visible);
+		self.primary
+			.retain(|placement| placement.line < first_visible);
 	}
 
 	/// Drop the pictures in the scrollback, for `CSI 3 J` — the mirror of `clear_screen`.
 	pub fn clear_scrollback(&mut self, first_visible: u64) {
-		self.retain(|placement| placement.line >= first_visible);
+		self.primary
+			.retain(|placement| placement.line >= first_visible);
 	}
 
-	/// Drop every picture. Used for RIS, and for a resize — a reflow changes how many lines the
-	/// history holds, so every absolute anchor stops meaning what it did (`ponytail:` the same
-	/// trade-off the prompt marks make, §34: a picture that would land on the wrong line is better
-	/// gone than wrong, and it is cleared even on a height-only resize that reflows nothing).
+	/// Drop the alternate page's pictures and nothing else (§41) — for the swap on or off that page,
+	/// and for a `CSI 2 J` while it is up. They belong to the program that drew them: it owns the
+	/// whole page, it repaints all of it, and it leaves nothing behind when it goes.
+	pub fn clear_alternate(&mut self) {
+		self.alternate.clear();
+	}
+
+	/// Retire the alternate page's pictures the program has since drawn text over (§41), `covered`
+	/// answering whether a placement's cell box now holds any glyph.
+	///
+	/// This is the closest cmote gets to what a terminal with native graphics has for free: there the
+	/// picture lives IN the cells, so writing a character erases the pixels under it. Here the picture
+	/// is an object beside the grid, and the box it reserved was left blank — so a glyph appearing in
+	/// it means the program has repainted over the picture and the picture is stale. The whole picture
+	/// goes rather than the covered part of it: cmote does not cut pixels out of an image, and a
+	/// half-erased plot would be a worse lie than no plot (§41's "not reflowed, dropped" trade).
+	pub fn retire_covered_alternate(&mut self, covered: impl Fn(&Placement) -> bool) {
+		self.alternate.retain(|placement| !covered(placement));
+	}
+
+	/// Drop every picture on both pages. Used for RIS, and for a resize — a reflow changes how many
+	/// lines the history holds, so every absolute anchor stops meaning what it did (`ponytail:` the
+	/// same trade-off the prompt marks make, §34: a picture that would land on the wrong line is
+	/// better gone than wrong, and it is cleared even on a height-only resize that reflows nothing).
 	pub fn clear(&mut self) {
-		self.placements.clear();
-		self.bytes = 0;
-	}
-
-	/// Keep the placements `keep` accepts, and re-total the bytes held.
-	fn retain(&mut self, keep: impl Fn(&Placement) -> bool) {
-		self.placements.retain(&keep);
-		self.bytes = self.placements.iter().map(Placement::bytes).sum();
-	}
-
-	/// Enforce the store's caps by dropping the oldest pictures. A `Vec::remove(0)` is a shift of at
-	/// most `MAX_IMAGES` entries — a handful of pointers — which is far cheaper than the ring buffer
-	/// it would take to avoid it.
-	fn evict(&mut self) {
-		while self.placements.len() > MAX_IMAGES
-			|| (self.bytes > MAX_TOTAL_BYTES && self.placements.len() > 1)
-		{
-			let dropped = self.placements.remove(0);
-			self.bytes = self.bytes.saturating_sub(dropped.bytes());
-		}
+		self.primary.clear();
+		self.alternate.clear();
 	}
 }
 
@@ -597,17 +702,92 @@ mod tests {
 		assert!(images.placements().is_empty());
 	}
 
-	#[test]
-	fn a_reset_or_a_resize_drops_everything() {
-		let mut images = Images::default();
-		let image = sixel::Image {
+	/// A one-pixel picture, for the tests that only care where a placement lands.
+	fn dot() -> sixel::Image {
+		sixel::Image {
 			width: 1,
 			height: 1,
 			rgba: vec![0; 4],
+		}
+	}
+
+	/// The two pages are separate stores (§41): a full-screen program's pictures never appear among
+	/// the scrollback's, and the erases that split the primary screen's by line leave the alternate
+	/// page's alone — it has no history for them to split against.
+	#[test]
+	fn the_two_pages_hold_their_pictures_apart() {
+		let mut images = Images::default();
+		images.place(dot(), 40, 0);
+		images.place_alternate(dot(), 3, 0);
+		assert_eq!(images.placements().len(), 1);
+		assert_eq!(images.alternate().len(), 1);
+		assert_eq!(
+			images.alternate()[0].line,
+			3,
+			"the row, not a document line"
+		);
+
+		images.clear_screen(0);
+		assert!(images.placements().is_empty());
+		assert_eq!(images.alternate().len(), 1, "a different page, untouched");
+
+		images.clear_alternate();
+		assert!(images.alternate().is_empty());
+	}
+
+	/// A picture whose box the new one overlaps is REPLACED on the alternate page, because a
+	/// full-screen program redraws the same pane over and over: each frame of a video is the successor
+	/// of the last, not a second picture beside it. One that overlaps nothing is a second pane, and
+	/// stays.
+	#[test]
+	fn a_new_alternate_picture_replaces_the_one_it_covers() {
+		let mut images = Images::default();
+		images.set_cell_pixels(7, 14);
+		let wide = || sixel::Image {
+			width: 21,
+			height: 30,
+			rgba: vec![0; 21 * 30 * 4],
 		};
-		images.place(image, 0, 0);
+		// Three rows by three columns from row 2, column 0 — then the same box again.
+		images.place_alternate(wide(), 2, 0);
+		images.place_alternate(wide(), 2, 0);
+		assert_eq!(images.alternate().len(), 1, "the redraw took the old frame");
+
+		// Touching its bottom-right corner: rows 4-6 and columns 2-4 still overlap.
+		images.place_alternate(wide(), 4, 2);
+		assert_eq!(images.alternate().len(), 1);
+
+		// Clear of it in both axes: another pane, so both are kept.
+		images.place_alternate(wide(), 8, 6);
+		assert_eq!(images.alternate().len(), 2);
+	}
+
+	/// The sweep retires the alternate page's pictures a program has drawn over, and only those — the
+	/// primary screen's are not its business (§41).
+	#[test]
+	fn retiring_covered_pictures_touches_only_the_alternate_page() {
+		let mut images = Images::default();
+		images.place(dot(), 5, 0);
+		images.place_alternate(dot(), 5, 0);
+		images.place_alternate(dot(), 6, 0);
+
+		images.retire_covered_alternate(|placement| placement.line == 5);
+		assert_eq!(images.alternate().len(), 1);
+		assert_eq!(images.alternate()[0].line, 6);
+		assert_eq!(images.placements().len(), 1, "the other page is untouched");
+	}
+
+	#[test]
+	fn a_reset_or_a_resize_drops_everything() {
+		let mut images = Images::default();
+		images.place(dot(), 0, 0);
+		images.place_alternate(dot(), 0, 0);
 		images.clear();
 		assert!(images.placements().is_empty());
+		assert!(
+			images.alternate().is_empty(),
+			"both pages, not just the one"
+		);
 	}
 
 	#[test]

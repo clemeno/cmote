@@ -159,6 +159,7 @@ impl Terminal {
 			queries: query::Queries::default(),
 			prompts: osc133::Prompts::default(),
 			graphics: graphics::Images::default(),
+			on_alternate: false,
 		}
 	}
 
@@ -190,6 +191,9 @@ impl Terminal {
 		// that actually carries one pays for the split.
 		let marks = self.prompts.feed(bytes);
 		let images = self.graphics.feed(bytes);
+		// Whether this chunk put a picture on the alternate page — the one thing that makes the
+		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
+		let mut placed_on_alternate = false;
 		if marks.is_empty() && images.is_empty() {
 			self.parser.advance(&mut self.term, bytes);
 		} else {
@@ -203,10 +207,16 @@ impl Terminal {
 						let (row, _) = self.screen().cursor_position();
 						self.prompts.apply(mark, history, row);
 					}
-					Split::Graphics(event) => self.apply_graphics(event),
+					Split::Graphics(event) => placed_on_alternate |= self.apply_graphics(event),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
+		}
+		// The chunk is applied, so this is where a swap on or off the alternate screen is noticed —
+		// including one that carried no picture with it, which the split loop above never sees (§41).
+		self.sync_alternate();
+		if !placed_on_alternate {
+			self.retire_covered_images();
 		}
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		let mut out = std::mem::take(&mut buffer.bytes);
@@ -256,36 +266,51 @@ impl Terminal {
 	/// then feed the line feeds — which leaves the cursor below the image exactly as a terminal that
 	/// implements sixel natively does, so a prompt lands under the picture and not on it.
 	///
-	/// Nothing is placed while the ALTERNATE screen is up: it keeps no scrollback, so the absolute
-	/// line an anchor needs does not exist there (`Screen::is_alternate`). A full-screen program's
-	/// picture is therefore dropped rather than pinned to a line that means something else — see
-	/// PLAN §41 for why that is written down as a limit rather than papered over.
-	fn apply_graphics(&mut self, event: graphics::Event) {
+	/// The ALTERNATE screen has its own page of pictures (§41), which is what lets `ranger` show a
+	/// preview and `mpv --vo=sixel` play. Everything above holds there too — the anchor is still the
+	/// cursor's row, the cells are still reserved — with one substitution: that page keeps no history,
+	/// so `history_size` is 0 and the absolute line of row `r` is just `r`. Nothing new is needed to
+	/// say where the picture goes; what the page needs is its own LIFETIME, which is what the second
+	/// store gives it.
+	///
+	/// Returns whether a picture was placed on the alternate page, which `process` uses to leave that
+	/// page's covered-cell sweep alone for the chunk.
+	fn apply_graphics(&mut self, event: graphics::Event) -> bool {
+		// A swap earlier in this same chunk has already been applied to the engine by the split
+		// advance, so ask before doing anything: the picture arriving belongs to the page that is up
+		// NOW, and the page it swapped away from should already have been emptied.
+		self.sync_alternate();
 		match event {
 			graphics::Event::Image(image) => {
-				if self.screen().is_alternate() {
-					return;
-				}
-				// Absolute line = history + the cursor's row on the live screen (§40). Read before the
-				// reservation scrolls anything: scrolling grows the history by exactly as much as it
-				// moves the content up, so this line goes on naming the same text either way.
-				let history = self.term.grid().history_size() as u64;
+				// Read the cursor before the reservation moves it. On the primary screen the absolute
+				// line is history + the row (§40) — safe to read first, because scrolling grows the
+				// history by exactly as much as it moves the content up, so the line goes on naming the
+				// same text either way.
 				let (row, col) = self.screen().cursor_position();
-				let (rows, cols) = self.graphics.place(image, history + u64::from(row), col);
+				let (rows, cols) = if self.on_alternate {
+					self.graphics.place_alternate(image, row, col)
+				} else {
+					let history = self.term.grid().history_size() as u64;
+					self.graphics.place(image, history + u64::from(row), col)
+				};
 				self.reserve_cells(rows, cols);
+				return self.on_alternate;
 			}
-			// The two erases only take the pictures whose lines they erase, so a `CSI 2 J` at a prompt
-			// leaves the plots further up the scrollback alone. On the alternate screen neither says
-			// anything about the primary screen's pictures — and a full-screen program erases
-			// constantly — so both are ignored there.
+			// On the primary screen the two erases take only the pictures whose lines they erase, so a
+			// `CSI 2 J` at a prompt leaves the plots further up the scrollback alone. On the alternate
+			// page there is no such split — it is one screen with no history behind it — so `CSI 2 J`
+			// takes all of its pictures and `CSI 3 J` says nothing about a scrollback that is not
+			// there.
 			graphics::Event::ClearScreen => {
-				if !self.screen().is_alternate() {
+				if self.on_alternate {
+					self.graphics.clear_alternate();
+				} else {
 					self.graphics
 						.clear_screen(self.term.grid().history_size() as u64);
 				}
 			}
 			graphics::Event::ClearScrollback => {
-				if !self.screen().is_alternate() {
+				if !self.on_alternate {
 					self.graphics
 						.clear_scrollback(self.term.grid().history_size() as u64);
 				}
@@ -293,6 +318,48 @@ impl Terminal {
 			// RIS resets the terminal itself, so it takes everything wherever the session is.
 			graphics::Event::Reset => self.graphics.clear(),
 		}
+		false
+	}
+
+	/// Notice a swap between the primary and the alternate screen, and empty the alternate page's
+	/// pictures whenever one happens (§41).
+	///
+	/// Either direction clears, which is the whole rule and is why it is not written as two. Swapping
+	/// OFF the page ends the program that drew the pictures, so nothing it left survives to be painted
+	/// over the shell — and that alone leaves the page empty, so the clear on the way back ON is the
+	/// belt to its braces: a program is shown its own blank screen and never the last one's, whatever
+	/// route got it there. The primary screen's pictures are untouched either way — a `vim` session in
+	/// the middle of a scrollback of plots leaves every one of them where it was, which is exactly what
+	/// a user expects on quitting it.
+	fn sync_alternate(&mut self) {
+		let alternate = self.screen().is_alternate();
+		if alternate != self.on_alternate {
+			self.on_alternate = alternate;
+			self.graphics.clear_alternate();
+		}
+	}
+
+	/// Drop the alternate page's pictures the program has drawn text over since the last chunk (§41).
+	///
+	/// A terminal with native graphics gets this free: the picture lives in the cells, so writing a
+	/// character erases the pixels under it. cmote's pictures sit BESIDE the grid, so the cells they
+	/// reserved were blanked when they were placed — and a glyph appearing in that box since means the
+	/// program has repainted over the picture. `ranger` moving from an image preview to a text one is
+	/// exactly this, and it is the only signal there is: it repaints the pane in place, with no erase
+	/// and no swap to say so.
+	///
+	/// A chunk that placed a picture sits the sweep out, so a program that draws its image and then
+	/// the rest of its frame in one write does not blank its own picture the instant it arrives. It
+	/// costs a chunk's delay on noticing, which is a frame nobody sees.
+	fn retire_covered_images(&mut self) {
+		if !self.on_alternate || self.graphics.alternate().is_empty() {
+			return;
+		}
+		// The screen borrows the engine and the store is borrowed mutably, so they are taken as
+		// separate fields rather than through `self.screen()`, which would borrow all of `self`.
+		let screen = screen::Screen::new(&self.term);
+		self.graphics
+			.retire_covered_alternate(|placement| covered(&screen, placement));
 	}
 
 	/// Claim a `rows`×`cols` box of cells for an image just placed at the cursor (§41), leaving the
@@ -307,11 +374,22 @@ impl Terminal {
 	/// Injecting VT sequences rather than reaching into the grid is deliberate: erasing and scrolling
 	/// are the engine's business, and doing it this way means the reservation obeys the scroll region,
 	/// the autowrap mode and the character-set state exactly as the program's own output would.
+	///
+	/// On the ALTERNATE page the rows are stepped with CUD (`CSI B`) instead of LF, and that is the
+	/// one difference between the two (§41). LF at the bottom of the screen SCROLLS, which on the
+	/// primary screen is right — that is how a picture's cells become scrollback — and on the
+	/// alternate page is ruin: the page keeps no history, so a scroll throws a row away for good, it
+	/// shifts every other picture's anchor row out from under it, and a full-screen image (`mpv
+	/// --vo=sixel` draws one every frame) reaches the bottom by definition. CUD stops at the margin
+	/// instead, so the reservation can never move the page. The cost is that the cursor is left on the
+	/// last row rather than below the picture, which no full-screen program notices: they all position
+	/// absolutely.
 	fn reserve_cells(&mut self, rows: u16, cols: u16) {
+		let down: &[u8] = if self.on_alternate { b"\x1b[B" } else { b"\n" };
 		let mut feed = Vec::new();
 		for _ in 0..rows {
 			feed.extend_from_slice(format!("\x1b[{cols}X").as_bytes());
-			feed.push(b'\n');
+			feed.extend_from_slice(down);
 		}
 		feed.push(b'\r');
 		self.parser.advance(&mut self.term, &feed);
@@ -404,12 +482,22 @@ impl Terminal {
 		screen::Screen::new(&self.term)
 	}
 
-	/// The inline images the session is holding, oldest first (§41). Each names the absolute document
-	/// line and column its top-left corner sits on, so the renderer resolves them against wherever
-	/// the viewport is parked — exactly as it does the selection (§40). Empty until a program sends a
-	/// picture, and on a session that never does, forever.
+	/// The inline images the page ON SHOW is holding, oldest first (§41). Each names the absolute
+	/// document line and column its top-left corner sits on, so the renderer resolves them against
+	/// wherever the viewport is parked — exactly as it does the selection (§40). Empty until a program
+	/// sends a picture, and on a session that never does, forever.
+	///
+	/// The two pages have separate stores and only the one being drawn is handed over, so the
+	/// renderer never has to ask which screen it is on: while a full-screen program is up it gets that
+	/// program's pictures, and the moment it quits it gets the scrollback's again, untouched. On the
+	/// alternate page there is no history and no scrollback offset, so a placement's absolute line is
+	/// its row and the renderer's own arithmetic resolves it without a special case (§40).
 	pub fn images(&self) -> &[graphics::Placement] {
-		self.graphics.placements()
+		if self.screen().is_alternate() {
+			self.graphics.alternate()
+		} else {
+			self.graphics.placements()
+		}
 	}
 
 	/// Where the remote command cycle stands (§34), from the OSC 133 marks the shell emits. `Idle`
@@ -644,6 +732,12 @@ pub struct Terminal {
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
 	graphics: graphics::Images,
+	/// Whether the ALTERNATE screen was the one up last time this was looked at (§41). The engine
+	/// tracks the swap itself and `Screen::is_alternate` reads it back at any moment; what this adds
+	/// is the EDGE. A full-screen program's pictures belong to that program, so both swaps — on and
+	/// off the page — throw them away, and noticing that needs the previous answer as well as the
+	/// current one.
+	on_alternate: bool,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41). Both scanners report the byte
@@ -675,6 +769,29 @@ fn splits(
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
+}
+
+/// Whether any cell of an alternate-page picture's reserved box now holds a glyph (§41) — the test
+/// `retire_covered_images` retires a stale picture on.
+///
+/// The box was blanked when the picture was placed, so anything in it was put there afterwards by the
+/// program. The FULL reserved box counts, fringe included: the last row and column are only partly
+/// covered by pixels, but they are cells the picture was given, and a terminal drawing the picture
+/// into its cells would have erased whatever a program then wrote across them.
+///
+/// A row off the bottom of the page reads as no cell at all, which is right — a picture reserved
+/// against a page that has since been resized smaller has nothing to be covered by.
+fn covered(screen: &screen::Screen<'_>, placement: &graphics::Placement) -> bool {
+	// The alternate page keeps no history and cannot be scrolled back, so the placement's absolute
+	// line IS its viewport row and the cast cannot lose anything: it was built from a `u16` row.
+	let top = placement.line as u16;
+	(top..top.saturating_add(placement.rows)).any(|row| {
+		(placement.col..placement.col.saturating_add(placement.cols)).any(|col| {
+			screen
+				.cell(row, col)
+				.is_some_and(|cell| cell.has_contents())
+		})
+	})
 }
 
 /// The shared buffer the engine's replies collect in. Besides the bytes it holds the few
@@ -1419,16 +1536,140 @@ mod tests {
 		);
 	}
 
-	/// The alternate screen keeps no history, so a document line means nothing there: a picture sent
-	/// by a full-screen program is dropped rather than anchored to a line that means something else
-	/// (§41 — written down as a limit, not papered over).
+	/// The alternate screen has its own page of pictures (§41). It keeps no history, so a placement's
+	/// absolute line there is simply the row the cursor was on — the same coordinate, read against a
+	/// document one screen tall.
+	///
+	/// The session is given a deep scrollback FIRST, because that is the claim the whole design rests
+	/// on: the renderer resolves a picture against `line_at(0)`, so if the alternate page reported the
+	/// primary screen's history rather than none of its own, every picture on it would be drawn
+	/// hundreds of rows adrift.
 	#[test]
-	fn a_sixel_on_the_alternate_screen_is_not_placed() {
+	fn a_sixel_on_the_alternate_screen_is_placed_on_its_row() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		let filler: Vec<u8> = (0..40).flat_map(|_| b"line\r\n".to_vec()).collect();
+		terminal.process(&filler);
+		assert!(terminal.screen().history_size() > 0, "a real scrollback");
+
+		terminal.process(b"\x1b[?1049h");
+		assert_eq!(
+			terminal.screen().line_at(0),
+			0,
+			"the page's top row IS document line 0 — no history behind it"
+		);
+		// Row 3, column 5 in the program's own 1-based coordinates, so row 2, column 4 in ours.
+		terminal.process(b"\x1b[3;5H");
+		terminal.process(&sixel_image(21, 5));
+
+		let placement = &terminal.images()[0];
+		assert_eq!((placement.line, placement.col), (2, 4));
+		assert_eq!((placement.rows, placement.cols), (3, 3));
+	}
+
+	/// Reserving cells on the alternate page must never SCROLL it (§41). A page with no history throws
+	/// a scrolled-off row away for good and drags every other picture's anchor row out from under it,
+	/// and a picture reaching the bottom is the normal case, not the corner one — `mpv --vo=sixel`
+	/// draws a full-screen image every frame. So the rows are stepped with CUD, which stops at the
+	/// margin, rather than with LF, which scrolls at it.
+	#[test]
+	fn reserving_on_the_alternate_page_never_scrolls_it() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"\x1b[?1049h");
+		terminal.process(b"\x1b[1;1Htop");
+		// A three-row picture anchored on row 8 of ten: its box runs off the bottom of the page.
+		terminal.process(b"\x1b[9;1H");
+		terminal.process(&sixel_image(21, 5));
+
+		assert_eq!(read(&terminal, 0, 0, 3), "top", "the page did not move");
+		assert_eq!(terminal.images()[0].line, 8);
+	}
+
+	/// A full-screen program's pictures belong to that program (§41): both swaps take them, and
+	/// neither touches the scrollback's. Quitting `ranger` leaves every plot in the session's history
+	/// exactly where it was — and starting it again shows it an empty page, not the last program's.
+	#[test]
+	fn a_screen_swap_takes_the_alternate_pictures_and_leaves_the_others() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(&sixel_image(21, 5));
+		assert_eq!(terminal.images().len(), 1, "one on the primary screen");
+
+		terminal.process(b"\x1b[?1049h");
+		assert!(terminal.images().is_empty(), "the page starts blank");
+		terminal.process(&sixel_image(21, 5));
+		assert_eq!(terminal.images().len(), 1, "the program's own picture");
+
+		terminal.process(b"\x1b[?1049l");
+		assert_eq!(
+			terminal.images().len(),
+			1,
+			"the primary screen's, still there"
+		);
+		assert_eq!(terminal.images()[0].line, 0);
+
+		terminal.process(b"\x1b[?1049h");
+		assert!(
+			terminal.images().is_empty(),
+			"and the next program is shown nobody else's screen"
+		);
+	}
+
+	/// `CSI 2 J` on the alternate page takes ALL of its pictures — there is no history there for the
+	/// erase to spare, which is the one place the two pages' rules differ (§41). `CSI 3 J` says nothing
+	/// about a scrollback that does not exist, so the page is left alone.
+	#[test]
+	fn erasing_the_alternate_screen_takes_every_picture_on_it() {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.set_cell_pixels(7, 14);
 		terminal.process(b"\x1b[?1049h");
 		terminal.process(&sixel_image(21, 5));
+		terminal.process(b"\x1b[3J");
+		assert_eq!(terminal.images().len(), 1, "no scrollback to clear");
+		terminal.process(b"\x1b[2J");
 		assert!(terminal.images().is_empty());
+	}
+
+	/// Text drawn over an alternate-page picture retires it (§41) — the closest cmote gets to what a
+	/// terminal with native graphics has for free, where the pixels live in the cells and writing a
+	/// character erases them. `ranger` moving from an image preview to a text one is exactly this: it
+	/// repaints the pane in place, with no erase and no swap to announce it.
+	#[test]
+	fn text_drawn_over_an_alternate_picture_retires_it() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"\x1b[?1049h");
+		terminal.process(b"\x1b[1;1H");
+		terminal.process(&sixel_image(21, 5));
+		// Just outside the three-by-three box the picture reserved: not its business.
+		terminal.process(b"\x1b[4;1Hbelow");
+		terminal.process(b"\x1b[1;4Hright");
+		assert_eq!(terminal.images().len(), 1, "neither one covers it");
+
+		terminal.process(b"\x1b[2;2Hx");
+		assert!(terminal.images().is_empty());
+	}
+
+	/// A chunk that PLACED a picture sits the sweep out, so a program writing its image and the rest of
+	/// its frame in one go does not blank its own picture the instant it arrives (§41). The cost is a
+	/// chunk's delay in noticing — a frame nobody sees.
+	#[test]
+	fn a_picture_is_not_retired_by_the_chunk_that_placed_it() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(7, 14);
+		terminal.process(b"\x1b[?1049h");
+		let mut frame = b"\x1b[1;1H".to_vec();
+		frame.extend_from_slice(&sixel_image(21, 5));
+		frame.extend_from_slice(b"\x1b[2;2Hx");
+		terminal.process(&frame);
+		assert_eq!(terminal.images().len(), 1, "drawn, then written over");
+
+		terminal.process(b"");
+		assert!(
+			terminal.images().is_empty(),
+			"and retired on the next chunk"
+		);
 	}
 
 	/// An erase takes only the pictures whose lines it erases (§41): `CSI 2 J` clears the screen, so a

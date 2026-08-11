@@ -4057,8 +4057,8 @@ own text, because nothing ever has to move it. It is the same coordinate the pro
 search hits (§35) live in.
 
 The cells underneath are then genuinely reserved, by feeding the engine sequences **as if the remote had
-sent them** — `CSI <cols> X` (ECH) to erase exactly the box the picture covers, then LF per row, then
-CR:
+sent them** — `CSI <cols> X` (ECH) to erase exactly the box the picture covers, then LF per row (CUD on
+the alternate screen, for the reason below), then CR:
 
 - The engine knows nothing about images, so unless the cells are claimed the shell's next line of output
   is written straight over the picture. With them claimed, the grid under an image is ordinary blank
@@ -4126,8 +4126,55 @@ screen exactly as it was.
 - **RIS (`ESC c`)** takes everything: the session starts over.
 - **A resize** takes everything, because a reflow moves the document out from under every anchor — the
   trade §34's prompt marks already make.
-- **The alternate screen** is sat out entirely: nothing is placed while it is up and nothing is drawn
-  over it. It keeps no history, so `history_size` is 0 and every line index there means something else.
+- **The alternate screen has its own page of pictures**, with its own lifecycle — see below.
+
+### The alternate screen draws too, on a page of its own (v4.0.0)
+
+`ranger`'s previews and `mpv --vo=sixel` draw on the **alternate screen**, and until this they were the
+one thing sixel support did not reach. It was written down as a limit rather than papered over, on the
+grounds that the alternate page needs a coordinate space of its own and §40 spent its whole length
+collapsing two spaces into one. That premise turned out to be **wrong, and pleasantly so**: the
+alternate screen keeps no history, so `history_size` there is 0 and the absolute document line of row
+`r` is exactly `r`. It is not a second space — it is the **same** space with the history at zero. The
+anchor arithmetic, `image_bounds`, the clipping and the compositing are all unchanged, and the
+renderer needs no branch: `Terminal::images` hands it whichever page is up.
+
+What the page really needed was a **lifetime**, which is a second store (`graphics::Store`), and four
+rules that differ from the primary screen's:
+
+- **A screen swap empties it, in either direction.** The pictures belong to the program that drew them:
+  quitting `ranger` must not leave its preview painted over the shell, and starting the next program
+  must not show it the last one's screen. The primary screen's pictures are untouched by either swap —
+  a `vim` session in the middle of a scrollback of plots leaves every one of them exactly where it was.
+- **`CSI 2 J` takes all of them**, because there is no history there for the erase to spare. `CSI 3 J`
+  says nothing about a scrollback that does not exist, so it is ignored.
+- **A new picture replaces the one whose box it overlaps.** A full-screen program redraws the same pane
+  every time the selection moves, so the picture arriving is the *successor* of the one there, not a
+  second one beside it — without this the store would fill with the frames of a video, each hidden
+  behind the next.
+- **A glyph appearing in a picture's reserved box retires it.** This is the closest cmote gets to what a
+  terminal with native graphics has for free, where the pixels live in the cells and writing a character
+  erases them. cmote's pictures sit *beside* the grid, and the box was blanked when the picture was
+  placed — so a glyph in it means the program has repainted over the picture. `ranger` moving from an
+  image preview to a text one is exactly that, and it announces itself no other way: it repaints the
+  pane in place, with no erase and no swap. A chunk that *placed* a picture sits the sweep out, so a
+  program writing its image and the rest of its frame in one write does not blank its own picture the
+  instant it arrives.
+
+And one rule that differs in the reservation itself: **the rows are stepped with CUD (`CSI B`), not
+LF**. LF at the bottom of the screen scrolls, which on the primary screen is the point — that is how a
+picture's cells become scrollback — and on the alternate page is ruin: a page with no history throws
+the scrolled-off row away for good and drags every other picture's anchor row out from under it, and a
+picture reaching the bottom is the *normal* case there, since a full-screen video is exactly one. CUD
+stops at the margin instead. The cost is that the cursor is left on the last row rather than below the
+picture, which no full-screen program notices — they all position absolutely.
+
+**What is still not right there**, and is cheap to say out loud: a pane cleared to blanks with nothing
+then drawn in it leaves the picture up until the next repaint or swap (nothing distinguishes that from
+an untouched box); a picture is retired *whole* rather than having the covered part cut out of it,
+which is the same trade as "not reflowed, dropped"; and a program that scrolls the alternate page
+itself moves the text out from under its pictures, which is only noticed when the new text lands in one
+of their boxes.
 
 ### What is deliberately NOT here
 
@@ -4137,10 +4184,6 @@ screen exactly as it was.
   it is what the sixel-capable tools already speak. The placement, reservation, compositing, eviction
   and capability-advertising machinery here is protocol-agnostic: adding kitty later is a decoder plus a
   scanner arm, not a rethink.
-- **No images on the alternate screen.** This is the real gap, and the one that costs: `ranger` previews
-  and `mpv --vo=sixel` draw there. Fixing it means placements anchored to the alternate page rather than
-  to a document line, and a second store discarded on the swap back — a second coordinate space, which
-  §40 spent its whole length collapsing to one. Deferred deliberately.
 - **A picture is not reflowed, it is dropped.** `ponytail:` a terminal with native graphics re-lays its
   images on resize; cmote drops them rather than leave one floating over whatever text landed on its old
   line.
