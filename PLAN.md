@@ -288,7 +288,7 @@ cmote/
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── protect.rs     scan DECSCA / DECSED / DECSEL out of the stream: the cells a program asked us not to wipe (§56)
     │   ├── cancel.rs      find the sequence the engine would read as something ELSE — DECSLRM's `s`, which its save-cursor arm takes — so `process` can cancel it in flight (§57)
-    │   ├── rect.rs        scan the VT420 rectangular ops out of the stream — DECERA / DECSERA / DECFRA / DECCRA — plus the corner arithmetic they all resolve through (§58)
+    │   ├── rect.rs        scan the VT420 rectangular ops out of the stream — DECERA / DECSERA / DECFRA / DECCRA (§58), DECCARA / DECRARA / DECSACE (§59) — plus the corner arithmetic they all resolve through
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6518,10 +6518,8 @@ refusal and the undrawable rectangle each have one.
 
 ### Not done
 
-- **DECCARA / DECRARA** (`$ r` / `$ t`) — the attribute half of the family, and a different job: they
-  fold an SGR list into cells that already have attributes, rather than writing a cell whole. **DECSACE**
-  (`CSI Ps * x`) selects whether those two work on a rectangle or on the wrapped stream between two
-  points, so it would have to arrive with them.
+- ~~**DECCARA / DECRARA** (`$ r` / `$ t`), and the **DECSACE** (`CSI Ps * x`) that picks their
+  extent~~ — **done in §59**, below.
 - **DECRQCRA** (`CSI Pid;Pp;Pt;Pl;Pb;Pr * y`) — the rectangle checksum a conformance suite blocks on. A
   *query*, so it belongs with §33's answerers, and worth nothing unless it matches DEC's byte-exact
   definition. §58 supplies the geometry it would read.
@@ -6529,3 +6527,95 @@ refusal and the undrawable rectangle each have one.
   clamping a page number to the number of pages a terminal has comes to.
 - **No damage plumbing**, as in §56 — cmote repaints from the grid each frame, so a direct write needs
   none.
+
+---
+
+## 59. Changing how a box looks without moving what is in it (v4.0.0)
+
+§58 built the half of the VT420 rectangular family that changes what the cells **hold**. This is the
+half that changes what they **look like**, leaving every character exactly where it stands:
+
+```
+CSI Pt;Pl;Pb;Pr;Ps… $ r      DECCARA — turn attributes on and off across an area
+CSI Pt;Pl;Pb;Pr;Ps… $ t      DECRARA — flip them
+CSI Ps * x                   DECSACE — pick which SHAPE those two act on
+```
+
+It is what a forms terminal used to highlight a field: underline a column of entry blanks in one
+write, reverse the row under the cursor as it moved down a menu, then flip it back. Doing the same
+with SGR means repainting the text, and repainting the text was the expensive thing.
+
+`vte` has no arm for any of the three. It matches the `*` intermediate in **no CSI at all**, and `$`
+only in the two DECRQM spellings, so all three fall through unhandled — like the four before them.
+
+### DECSACE is a mode, and modes belong to whoever sees the order
+
+DECSACE picks between two readings of the same four corners. Under `2` they are a **rectangle**, the
+box §58 already draws. Under `0` or `1` — the default, and what a terminal powers up in — they are a
+**stream**: the wrapped run from the top-left corner out to the end of its row, every whole row
+between, then in from the start of the last. The shape a mouse selection has.
+
+That makes it the first thing in this family that is state rather than work, and it is kept in the
+**scanner**, not in `Terminal`. The scanner is the one place that reads a DECSACE and the DECCARA
+after it in stream order, so the ordering is free there and would have to be reconstructed anywhere
+else. Each attribute request therefore leaves `term/rect.rs` already carrying the extent that was in
+force when it arrived, and `term/mod.rs` never has to hold a mode or reason about when it changed.
+
+Two smaller calls, both made the same way as §58's: a value DEC never defined (`CSI 9 * x`) leaves the
+extent where it was rather than guessing at a shape, and **RIS resets it while DECSTR does not** —
+because DEC's published DECSTR list does not name DECSACE, and inventing a reset is the same kind of
+guess as inventing a rectangle.
+
+### The extent changes a rule, not a walk
+
+The easy assumption is that the extent only decides which cells get visited. It also decides whether
+there are any. A rectangle whose right corner is left of its left one is undrawable and yields
+nothing (§58's rule). The **same numbers** as a stream are ordinary: `CSI 1;70;5;10;4$r` underlines
+from row 1 column 70, round the wrap, to row 5 column 10. So left and right are only compared when
+the run is confined to a single row, and the extent is a parameter of `area` rather than a mode it
+reads — the call site is what says which family the corners belong to, and the four operations of
+§58 pass `Rectangle` because DECSACE does not govern them.
+
+### Only the bits it names
+
+`Ps` here is a small DEC-defined subset of SGR: `0` for all of them, then bold, underline, blink and
+reverse — never a colour, never a glyph. The selectors fold into a `Change { on, off, flip }` at
+parse time, later winning over earlier as in an SGR, so the walk over the cells costs the same
+however long the list was. An unknown selector (`3`, italic, which DEC never gave DECCARA) is
+**ignored while the rest of the list still applies** — the opposite of the rule for a malformed
+*number*, and deliberately: a number that will not parse leaves cmote unable to say which cells were
+meant, while `3` is a perfectly clear request for an attribute this sequence cannot name.
+
+DECRARA gets the shorter table — `0 1 4 5 7` and no off-forms — because "off" has no meaning for a
+verb that flips, and reading `24` as an underline toggle would flip an attribute on a request that
+plainly said "off".
+
+The rule that matters most is at the other end. `attribute_area` sets **named bits one at a time**
+and never assigns the flag word. Assigning it would be the obvious way to write "all attributes off",
+and it would silently unprotect a form the moment a program underlined it — cmote's DECSCA protection
+rides bit 15 of that same word (§56). A test pins it: underline a protected label, then selectively
+erase the row, and the label has to still be there.
+
+### Blink is read and dropped
+
+`alacritty_terminal`'s flag word has no bit for blink. The fifteen it names cover inverse, bold,
+italic, dim, hidden, strikeout, five underline styles and the wide-character marks, and nothing
+blinks. So DECCARA's `5` / `25` and DECRARA's `5` are parsed, accepted and dropped in the one place
+that translates cmote's mask to engine names — the same call already made for DECSCUSR's blinking
+cursor shapes (§2), and the honest one while there is nothing to store it in. A program asking for
+blink and underline together still gets its underline.
+
+### What it cost
+
+Three arms in an existing scanner, one mode field, two selector tables, one method, and 24 tests. The
+extent's two shapes, the undrawable-rectangle-that-is-a-valid-stream, the protection bit, the
+"all off" that spares italics, the dropped blink and the reversal-with-no-off-forms each have one.
+Both load-bearing halves were checked by breaking them: forcing `columns_on` to ignore the extent
+fails the stream tests, and assigning the flag word fails the protection test.
+
+### Not done
+
+- **DECRQCRA** (`* y`) is still the only piece of the family left, and still §33's kind of work.
+- **Origin mode** is refused here as it is for the rest of §58's family, and for the same reason.
+- **`term/mod.rs` grew again** (~2700 lines). `splits()` now takes six positional lists and could use
+  a struct; the six scanners could plausibly become one. Neither is urgent, both are noted.

@@ -371,11 +371,14 @@ short, and since §41 nothing left in it is high value:
   arithmetic and four small methods (`term/rect.rs`). One limit is disclosed rather than solved:
   **origin mode is refused**, because with DECOM set the corners count from the top of the scrolling
   region and the engine keeps that region private. See PLAN §58.
-- **DRCS soft fonts, VT320 status line, and the rest of the rectangular family** — DECCARA / DECRARA
-  (`$ r` / `$ t`, the attribute half), DECSACE (`* x`) which selects their extent, and the DECRQCRA
-  checksum query (`* y`) some conformance suites block on. `[DEC]`. The checksum is a *query* and so
-  §33's kind of work rather than §58's, and it has to match DEC's byte-exact definition to be worth
-  answering at all.
+- **DRCS soft fonts, VT320 status line, and the DECRQCRA checksum query** (`* y`) some conformance
+  suites block on. `[DEC]`. The checksum is a *query* and so §33's kind of work rather than §58's,
+  and it has to match DEC's byte-exact definition to be worth answering at all. ~~The attribute half
+  of the rectangular family — DECCARA / DECRARA (`$ r` / `$ t`) and the DECSACE (`* x`) that picks
+  their extent~~ **SHIPPED in §59**, on the geometry §58 had already built: a selector list folded to
+  three masks at parse time, then applied a named bit at a time so a cell keeps its italics, its
+  underline style and cmote's DECSCA protection bit. **Blink is read and dropped** — the engine's
+  flag word has no bit for it.
 - **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
   `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
   (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
@@ -631,8 +634,8 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb (§58): protected cells stand, and the plain `$ z` still takes them. This was the piece §56 unblocked and left unbuilt — the per-cell protection it needed already existed |
 | $ x (DECFRA) | Fill rectangular area | ✅ | one character across a box, stamped from the **pen**, so the fill carries the colours and attributes a printed glyph would have (§58). `Pch` is an **allow-list** — 32–126 and 160–255, as xterm allows — so a remote cannot paint the page with C0, C1, DEL or unassigned code points |
 | $ v (DECCRA) | Copy rectangular area | ✅ | whole cells move, so colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph (§58). The source is read out **whole first**, because the overlapping case — scroll a sub-window by copying it over itself — is what the sequence is for. A copy running off the page is trimmed to what fits; the two page parameters are ignored, cmote having one page |
-| Ps * x (DECSACE) | Attribute change extent | ❌ | selects whether the pair below work on a rectangle or on the wrapped stream between two points. Nothing to select while neither is implemented |
-| $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ❌ | the attribute half of the family §58 shipped the content half of. Deliberately not claimed: these need an SGR list parsed and folded into cells that already have attributes, which is a different job from writing a cell whole — and DECSACE would have to come with them |
+| Ps * x (DECSACE) | Attribute change extent | ✅ | picks which shape the pair below act on: `0` / `1` the wrapped **stream** between two points (the default, and what a terminal powers up in), `2` the **rectangle** (§59). Absorbed by cmote's scanner rather than reported — it is a mode, and only the scanner sees a mode and the requests it governs in stream order, so each one leaves carrying the extent that was in force. A value DEC never defined leaves the mode where it was. RIS resets it; DECSTR does not, DEC's published list for that not naming it. Note the intermediate: `* x` is this, `$ x` is DECFRA |
+| $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | the attribute half of the family §58 shipped the content half of (§59) — corners first, then a small DEC-defined selector list, folded to three masks at parse time so the walk costs the same however long the list. `$ r` sets and clears (`0 1 4 5 7 22 24 25 27`, later wins); `$ t` flips (`0 1 4 5 7` only — "off" has no meaning for a verb that flips). Attributes only: never a colour, never a glyph, and **never the flag word wholesale**, which would take cmote's DECSCA protection bit with it (§56). An unknown selector is ignored and the rest of the list still applies, as an SGR does; a malformed *number* still drops the sequence. Blink is parsed and dropped — the engine has no bit for it |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ❌ | a *query*, so it belongs with §33's answerers rather than here — and answering it means matching DEC's exact checksum definition, which conformance suites compare against byte for byte. §58 supplies the geometry it would read |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
 | 5n / 6n | Device status report | ✅ | |
@@ -745,12 +748,12 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
 query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
-protected-cell erase it dropped as well, and — since §58 — the four VT420 rectangular operations.
-Most of the ❌ column is **deliberate**: no images, no remote
+protected-cell erase it dropped as well, and — since §58 and §59 — the whole VT420 rectangular family
+bar its checksum query. Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048), the attribute half of the rectangular family
-(DECCARA / DECRARA / DECSACE, its content half having shipped in §58), and left-right margins. That
+the newer private modes (2027 / 2031 / 2048), the DECRQCRA rectangle checksum (`* y`, a query and so
+§33's kind of work), and left-right margins. That
 last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
 do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
 exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
@@ -1043,6 +1046,22 @@ Audited file:line anchors behind the claims above, for later re-checking.
   the point of DECCRA) and `apply_rectangle`, which **refuses every one of them while `TermMode::ORIGIN`
   is set** — a `ponytail:` limit, since DECOM makes the corners region-relative and the engine's
   `scroll_region` has no accessor.
+- **`term/rect.rs`, the attribute half** (§59) — the same module grew three more sequences the engine
+  drops: **DECCARA** (`$ r`), **DECRARA** (`$ t`) and **DECSACE** (`* x`). `vte` matches `*` in no CSI
+  arm at all and `$` only in the two DECRQM spellings, so all three fall through unhandled. DECSACE is
+  a mode and is **absorbed by the scanner**, which is the one place that sees it and the requests it
+  governs in stream order; each attribute request therefore leaves carrying its own `Extent`, and
+  `term/mod.rs` never holds the mode. The extent is a parameter of `area` rather than something it
+  reads, because it changes a *rule*, not a walk: a rectangle whose right corner is left of its left
+  one is undrawable, while the same numbers as a stream are an ordinary run round the wrap. Selector
+  lists fold to a `Change { on, off, flip }` at parse time — later wins, as in an SGR — and
+  `Change::apply` is pure, so the whole table is tested without a terminal. `term/mod.rs` holds the
+  one translation to engine names (`RECT_ATTRIBUTES`) and `attribute_area` sets **named bits one at a
+  time**; assigning `Flags` wholesale would silently drop cmote's DECSCA protection bit (§56), which a
+  test pins by underlining a protected form and then selectively erasing it. **Blink has no engine
+  flag** — `Flags` names inverse, bold, italic, dim, hidden, strikeout, five underline styles and the
+  wide-character marks, and nothing blinks — so DECCARA's `5` / `25` and DECRARA's `5` are read and
+  dropped there, the rest of the list unaffected.
 - **`term/cancel.rs`** — the misparse scanner (§57), and the only one here that exists because the
   engine does **not** ignore something. `Cancel::feed` is a chunk-safe CSI state machine looking for
   one shape: a final `s` with at least one parameter byte, no private marker and no intermediate —

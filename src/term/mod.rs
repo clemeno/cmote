@@ -51,7 +51,7 @@ pub mod osc133; // reads the shell-integration prompt marks the engine ignores (
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
-mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58)
+mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
@@ -88,6 +88,24 @@ const _: () = assert!(
 	Flags::all().bits() & protect::PROTECTED_BIT == 0,
 	"the engine has claimed the flag bit cmote borrows for DECSCA protection — pick another in term/protect.rs"
 );
+
+/// The engine flag behind each attribute DECCARA and DECRARA can name (§59).
+///
+/// `term/rect.rs` folds a selector list into a mask of its own four bits, and this is the one place
+/// those bits meet the engine's names — which keeps the grammar testable without a terminal and puts
+/// the translation where the engine types already live.
+///
+/// **Blink is missing on purpose.** `alacritty_terminal`'s flag word has no bit for it: the fifteen
+/// it names cover inverse, bold, italic, dim, hidden, strikeout, five underline styles and the
+/// wide-character marks, and nothing blinks. So DECCARA's `5` / `25` and DECRARA's `5` are parsed,
+/// accepted and then quietly dropped here — the same call cmote already makes for DECSCUSR's
+/// blinking cursor shapes (§2), and the honest one while there is nothing to store it in. A program
+/// that asks for blink and underline together still gets its underline.
+const RECT_ATTRIBUTES: [(u8, Flags); 3] = [
+	(rect::BOLD, Flags::BOLD),
+	(rect::UNDERLINE, Flags::UNDERLINE),
+	(rect::REVERSE, Flags::INVERSE),
+];
 
 /// cmote's terminal identity, reported to a program that sends XTVERSION (§33). The `name(version)`
 /// form is what xterm and kitty use and what a fingerprinting program pattern-matches on; the
@@ -237,9 +255,9 @@ impl Terminal {
 		// one is not reporting something to apply — it is reporting a byte the engine must not be let
 		// near, so its offset is the final byte itself and the split loop steps OVER it.
 		let cancels = self.cancels.feed(bytes);
-		// The VT420 rectangular operations the engine drops (§58). Split-fed like the selective erase
-		// and with the same one-past offsets: these name their own coordinates and never touch the
-		// cursor, so the split is only about the order they land in against the text around them.
+		// The VT420 rectangular operations the engine drops (§58, §59). Split-fed like the selective
+		// erase and with the same one-past offsets: these name their own coordinates and never touch
+		// the cursor, so the split is only about the order they land in against the text around them.
 		let rectangles = self.rectangles.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
@@ -545,7 +563,8 @@ impl Terminal {
 		}
 	}
 
-	/// Perform one rectangular area operation (§58) — erase, fill or copy a box of cells.
+	/// Perform one rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of
+	/// cells.
 	///
 	/// Written straight into the grid, for the reason `selective_erase` above spells out: the engine
 	/// has no arm for any of these, and every one of them is defined never to move the cursor, so
@@ -567,24 +586,39 @@ impl Terminal {
 			let grid = self.term.grid();
 			(grid.screen_lines(), grid.columns())
 		};
+		// The four content operations are always the box. DECSACE picks between the box and the
+		// wrapped run for the attribute pair alone (§59), which is why the extent is a parameter of
+		// `area` rather than a mode it reads: the call site is what says which family it belongs to.
 		match request {
 			rect::Request::Erase(corners) => {
-				if let Some(area) = rect::area(corners, rows, cols) {
+				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
 					self.erase_area(area, false);
 				}
 			}
 			rect::Request::SelectiveErase(corners) => {
-				if let Some(area) = rect::area(corners, rows, cols) {
+				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
 					self.erase_area(area, true);
 				}
 			}
 			rect::Request::Fill(glyph, corners) => {
-				if let Some(area) = rect::area(corners, rows, cols) {
+				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
 					self.fill_area(glyph, area);
 				}
 			}
+			rect::Request::Attributes {
+				corners,
+				extent,
+				change,
+			} => {
+				if change.is_empty() {
+					return;
+				}
+				if let Some(area) = rect::area(corners, extent, rows, cols) {
+					self.attribute_area(area, extent, change, cols);
+				}
+			}
 			rect::Request::Copy { source, top, left } => {
-				let Some(source) = rect::area(source, rows, cols) else {
+				let Some(source) = rect::area(source, rect::Extent::Rectangle, rows, cols) else {
 					return;
 				};
 				if let Some((source, to_row, to_col)) =
@@ -628,6 +662,48 @@ impl Terminal {
 		for row in area.rows() {
 			for column in area.columns() {
 				grid[Line(row as i32)][Column(column)] = template.clone();
+			}
+		}
+	}
+
+	/// Change or flip attributes across an area, leaving every character where it stands (DECCARA
+	/// and DECRARA, §59).
+	///
+	/// The one thing this must not do is assign the flag word. Only the three bits `RECT_ATTRIBUTES`
+	/// names are touched, one at a time, so a cell keeps its italics, its wide-character marking, its
+	/// underline STYLE — and, the reason this is a rule rather than a nicety, cmote's DECSCA
+	/// protection bit (§56). A form drawn in a protected run stays protected after a program
+	/// underlines it, which is what a VT420 does and what the flag word being shared makes easy to
+	/// get wrong.
+	///
+	/// Protection is otherwise ignored here, unlike in the erases: DECSCA marks a cell unerasable,
+	/// and changing how it looks does not erase it.
+	fn attribute_area(
+		&mut self,
+		area: rect::Area,
+		extent: rect::Extent,
+		change: rect::Change,
+		cols: usize,
+	) {
+		let grid = self.term.grid_mut();
+		for row in area.rows() {
+			for column in area.columns_on(row, extent, cols) {
+				let flags = &mut grid[Line(row as i32)][Column(column)].flags;
+				let mut before = 0u8;
+				for (attribute, flag) in RECT_ATTRIBUTES {
+					if flags.contains(flag) {
+						before |= attribute;
+					}
+				}
+				let after = change.apply(before);
+				// Nothing to write when the fold changed nothing, which is the common case for a
+				// selector the cell already satisfies.
+				if after == before {
+					continue;
+				}
+				for (attribute, flag) in RECT_ATTRIBUTES {
+					flags.set(flag, after & attribute != 0);
+				}
 			}
 		}
 	}
@@ -1042,10 +1118,12 @@ pub struct Terminal {
 	/// here because the engine ignores something, this one because it does not. Fed by the split
 	/// advance so the offending final byte can be swapped for a CAN on its way past.
 	cancels: cancel::Cancel,
-	/// Reads the VT420 rectangular area operations the engine drops (§58) — DECERA, DECSERA, DECFRA
-	/// and DECCRA. Fed by the split advance for the same reason as the selective erase: each one is
-	/// applied with the engine advanced PAST the sequence it ignored. Nothing is stored here; the
-	/// module is the grammar and the geometry, and the cells are written below.
+	/// Reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA and
+	/// DECCRA (§58), then DECCARA, DECRARA and DECSACE (§59). Fed by the split advance for the same
+	/// reason as the selective erase: each one is applied with the engine advanced PAST the sequence
+	/// it ignored. The module is the grammar and the geometry, and the cells are written below; the
+	/// one thing it does hold is DECSACE's extent, because only the scanner sees a mode and the
+	/// requests it governs in stream order.
 	rectangles: rect::Rectangles,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
@@ -1079,8 +1157,8 @@ enum Split {
 	/// A final byte the engine must not dispatch (§57). The only split that is not something to
 	/// apply: it marks the byte itself, and the loop replaces it with a CAN rather than feeding it.
 	Cancel,
-	/// A rectangular area operation (§58) — erase, fill or copy a box of cells. Applied on the far
-	/// side of its sequence, as a selective erase is, and for the same reason.
+	/// A rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of cells. Applied
+	/// on the far side of its sequence, as a selective erase is, and for the same reason.
 	Rect(rect::Request),
 }
 
@@ -2502,5 +2580,128 @@ mod tests {
 		let mut terminal = Terminal::new(3, 20);
 		terminal.process(b"\x1b[1\"qName:\x1b[0\"qBob\x1b[5;70s\x1b[?2J");
 		assert_eq!(read(&terminal, 0, 0, 9), "Name:");
+	}
+
+	/// DECCARA changes how an area LOOKS and leaves every character where it stands — the one thing
+	/// that separates it from the fill and the erase of §58 (§59).
+	#[test]
+	fn an_attribute_change_repaints_without_moving_a_character() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"abcdefgh\r\nijklmnop\r\nqrstuvwx");
+		// Rectangle extent, so the box alone: row 2, columns 3 to 5, bold and underlined.
+		terminal.process(b"\x1b[2*x\x1b[2;3;2;5;1;4$r");
+		assert_eq!(
+			read(&terminal, 1, 0, 8),
+			"ijklmnop",
+			"the text is untouched"
+		);
+		let screen = terminal.screen();
+		assert!(!screen.cell(1, 1).unwrap().bold(), "left of the box");
+		assert!(screen.cell(1, 2).unwrap().bold());
+		assert_eq!(
+			screen.cell(1, 2).unwrap().underline(),
+			screen::UnderlineStyle::Single
+		);
+		assert!(screen.cell(1, 4).unwrap().bold());
+		assert!(!screen.cell(1, 5).unwrap().bold(), "right of the box");
+		assert!(!screen.cell(0, 2).unwrap().bold(), "the row above");
+	}
+
+	/// DECRARA is the same shape by the flipping verb: a cell that was bold comes out plain and a
+	/// plain one comes out bold, in a single pass.
+	#[test]
+	fn an_attribute_reversal_flips_each_cell_on_its_own() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"\x1b[1mAB\x1b[0mCD");
+		terminal.process(b"\x1b[2*x\x1b[1;1;1;4;1$t");
+		let screen = terminal.screen();
+		assert!(!screen.cell(0, 0).unwrap().bold(), "bold became plain");
+		assert!(screen.cell(0, 2).unwrap().bold(), "plain became bold");
+		assert_eq!(read(&terminal, 0, 0, 4), "ABCD");
+	}
+
+	/// DECSACE is the whole difference between a box and a wrapped run, and cmote defaults to the
+	/// run because a terminal powers up that way (§59).
+	#[test]
+	fn the_extent_decides_whether_the_change_wraps() {
+		let mut terminal = Terminal::new(3, 6);
+		terminal.process(b"aaaaaa\r\nbbbbbb\r\ncccccc");
+		// The default extent: row 1 column 5 through row 2 column 2, round the wrap.
+		terminal.process(b"\x1b[1;5;2;2;1$r");
+		let screen = terminal.screen();
+		assert!(!screen.cell(0, 3).unwrap().bold(), "before the run starts");
+		assert!(screen.cell(0, 4).unwrap().bold());
+		assert!(screen.cell(0, 5).unwrap().bold(), "out to the page edge");
+		assert!(screen.cell(1, 0).unwrap().bold(), "in from the page edge");
+		assert!(screen.cell(1, 1).unwrap().bold());
+		assert!(!screen.cell(1, 2).unwrap().bold(), "after the run ends");
+	}
+
+	/// The same corners as a RECTANGLE are drawn backwards — right corner 2 is left of left corner
+	/// 5 — so they name no box at all and nothing happens. The extent is not a detail of how the
+	/// same area is walked; it decides whether there is an area.
+	#[test]
+	fn the_same_corners_as_a_box_can_be_undrawable() {
+		let mut terminal = Terminal::new(3, 6);
+		terminal.process(b"aaaaaa\r\nbbbbbb\r\ncccccc");
+		terminal.process(b"\x1b[2*x\x1b[1;5;2;2;1$r");
+		let screen = terminal.screen();
+		assert!(!screen.cell(0, 4).unwrap().bold());
+		assert!(!screen.cell(1, 0).unwrap().bold());
+	}
+
+	/// A protected form stays protected after a program underlines it. The DECSCA bit rides the
+	/// engine's flag word (§56), so an attribute change that ASSIGNED the word instead of setting
+	/// named bits would silently unprotect the labels.
+	#[test]
+	fn an_attribute_change_leaves_protection_alone() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"\x1b[1\"qKEEP\x1b[0\"qgone");
+		// Underline everything, then selectively erase the row.
+		terminal.process(b"\x1b[2*x\x1b[1;1;1;10;4$r\x1b[1;1;1;10${");
+		assert_eq!(read(&terminal, 0, 0, 10), "KEEP", "still protected");
+		assert_eq!(
+			terminal.screen().cell(0, 0).unwrap().underline(),
+			screen::UnderlineStyle::Single,
+			"and underlined"
+		);
+	}
+
+	/// Selector `0` names the four attributes DEC gave these sequences, and nothing else. Italics
+	/// are not among them, so they survive an "all off".
+	#[test]
+	fn all_attributes_off_means_the_four_it_can_name() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"\x1b[1;3mXY");
+		terminal.process(b"\x1b[2*x\x1b[1;1;1;2;0$r");
+		let screen = terminal.screen();
+		let cell = screen.cell(0, 0).expect("the first cell");
+		assert!(!cell.bold(), "bold is one of the four");
+		assert!(cell.italic(), "italic is not");
+	}
+
+	/// Blink has no bit in the engine's flag word, so it is parsed and dropped — and dropping it
+	/// must not cost the rest of the list.
+	#[test]
+	fn a_blink_request_still_delivers_the_rest_of_the_list() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"XY");
+		terminal.process(b"\x1b[2*x\x1b[1;1;1;2;5;4$r");
+		assert_eq!(
+			terminal.screen().cell(0, 0).unwrap().underline(),
+			screen::UnderlineStyle::Single
+		);
+	}
+
+	/// The attribute pair inherits §58's origin-mode refusal, for the same reason: with DECOM set
+	/// the corners are counted from a scrolling region the engine keeps private.
+	#[test]
+	fn an_attribute_change_is_refused_while_origin_mode_is_set() {
+		let mut terminal = Terminal::new(3, 6);
+		terminal.process(b"aaaaaa\r\nbbbbbb\r\ncccccc");
+		terminal.process(b"\x1b[?6h\x1b[2*x\x1b[1;1;3;6;1$r");
+		assert!(!terminal.screen().cell(0, 0).unwrap().bold());
+		terminal.process(b"\x1b[?6l\x1b[1;1;3;6;1$r");
+		assert!(terminal.screen().cell(0, 0).unwrap().bold());
 	}
 }
