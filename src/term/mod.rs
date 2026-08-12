@@ -63,7 +63,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags};
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{Config, Osc52, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 
 use crate::palette;
@@ -183,6 +183,44 @@ pub struct OutputSpan {
 	pub last_col: u16,
 }
 
+/// The settings cmote runs the engine with. A named function rather than a literal buried inside
+/// `Terminal::new`, so that a test can read it back: every field here overrides an
+/// `alacritty_terminal` default on purpose, and two of them are decisions this project argued at
+/// length. A decision nothing checks is a decision that leaves quietly on the next crate bump —
+/// which is exactly the failure §62 of TERMINAL_COMPATIBILITY_PLAN went looking for.
+fn engine_config() -> Config {
+	Config {
+		scrolling_history: SCROLLBACK,
+		// Let the engine accept, track and answer the kitty keyboard protocol (§25). Unlike
+		// modifyOtherKeys — which the engine ignores, so `modkeys` scans it out of the stream —
+		// the engine fully implements kitty: it keeps the pushed-flags stack (`CSI > flags u` /
+		// `CSI < n u` / `CSI = flags ; mode u`), swaps it across the alternate screen, and
+		// answers the `CSI ? u` query itself. All of that is gated behind this flag, off in
+		// `Config::default()`. With it on, cmote's only job is the *encoding*: it reads the
+		// active flags off the seam (`Screen::kitty_flags`) and `keymap`/`kitty` turn a key press
+		// into the matching CSI u report. The query reply comes back as an `Event::PtyWrite`,
+		// which the `Replies` listener already drains — so no extra reply path is needed.
+		kitty_keyboard: true,
+		// Refuse the remote clipboard AT THE BOUNDARY, in both directions (§6, §12, §63).
+		//
+		// `Config::default()` leaves this at `Osc52::OnlyCopy`, which upstream chose as "a
+		// compromise between entirely disabling it (the most secure) and allowing paste". A
+		// compromise is not a refusal. Under that default a remote's `OSC 52` *write* was parsed,
+		// base64 and all, and raised as an `Event::ClipboardStore`; the only thing that kept it
+		// off the user's clipboard was the catch-all arm of `Replies::send_event` discarding an
+		// event it does not recognise. That drop is still there and still correct, but a
+		// fall-through cannot be read as a decision — nothing in it says "this is refused", so
+		// nothing fails if a future edit starts handling the event.
+		//
+		// `Disabled` makes the engine return before an event exists: a remote may not poison the
+		// local clipboard, and may not read what the user's other applications put there. cmote
+		// touches the clipboard only on an explicit LOCAL action. The refusal is now stated in one
+		// place, in the same file as the listener that used to carry it alone, and pinned by a test.
+		osc52: Osc52::Disabled,
+		..Config::default()
+	}
+}
+
 impl Terminal {
 	/// Create an emulator with a `rows`×`cols` grid, matching the remote pty.
 	pub fn new(rows: u16, cols: u16) -> Self {
@@ -191,22 +229,8 @@ impl Terminal {
 			cols,
 			..ReplyBuffer::default()
 		}));
-		let config = Config {
-			scrolling_history: SCROLLBACK,
-			// Let the engine accept, track and answer the kitty keyboard protocol (§25). Unlike
-			// modifyOtherKeys — which the engine ignores, so `modkeys` scans it out of the stream —
-			// the engine fully implements kitty: it keeps the pushed-flags stack (`CSI > flags u` /
-			// `CSI < n u` / `CSI = flags ; mode u`), swaps it across the alternate screen, and
-			// answers the `CSI ? u` query itself. All of that is gated behind this flag, off in
-			// `Config::default()`. With it on, cmote's only job is the *encoding*: it reads the
-			// active flags off the seam (`Screen::kitty_flags`) and `keymap`/`kitty` turn a key press
-			// into the matching CSI u report. The query reply comes back as an `Event::PtyWrite`,
-			// which the `Replies` listener already drains — so no extra reply path is needed.
-			kitty_keyboard: true,
-			..Config::default()
-		};
 		let term = Term::new(
-			config,
+			engine_config(),
 			&GridSize {
 				rows: rows as usize,
 				cols: cols as usize,
@@ -1344,6 +1368,11 @@ struct ReplyBuffer {
 /// particular the OSC 52 clipboard events (`ClipboardLoad`/`ClipboardStore`) are deliberately
 /// ignored: a remote must not read or poison the local clipboard, and cmote only touches it on
 /// an explicit local action (§12).
+///
+/// Since §63 that pair no longer arrives at all — `engine_config` sets `osc52: Osc52::Disabled`,
+/// so the engine returns before an event exists. The catch-all below is kept as the second line
+/// rather than the only one: if an engine bump changed the meaning of that field, or a `Config`
+/// edit dropped it, the events would start arriving again and would still be discarded here.
 #[derive(Clone)]
 pub(crate) struct Replies(Arc<Mutex<ReplyBuffer>>);
 
@@ -1525,6 +1554,39 @@ mod tests {
 			.filter_map(|col| screen.cell(row, col))
 			.map(|cell| cell.contents().to_owned())
 			.collect()
+	}
+
+	#[test]
+	fn the_engine_is_told_to_refuse_the_remote_clipboard() {
+		// The refusal that has to be STATED rather than fallen into (§63). Left at its default
+		// this field would be `OnlyCopy`, which is enough for a remote's OSC 52 write to become an
+		// `Event::ClipboardStore` that only the listener's catch-all discards. This test exists to
+		// fail if the field is ever dropped from `engine_config` — a fall-through cannot say
+		// "refused", so the field has to, and something has to check the field.
+		assert_eq!(engine_config().osc52, Osc52::Disabled);
+	}
+
+	#[test]
+	fn a_remote_clipboard_request_draws_no_reply() {
+		// Both directions on the wire: a write carrying base64, and a read (`?`), which is the
+		// reply-bearing one — answering it would hand the remote the local clipboard's contents.
+		// Neither draws a byte back. The text after them still lands, which is what says the
+		// sequences were consumed whole rather than half-parsed with their tail spilling onto the
+		// screen.
+		let mut terminal = Terminal::new(4, 20);
+		assert!(terminal.process(b"\x1b]52;c;aGVsbG8=\x07").is_empty());
+		assert!(terminal.process(b"\x1b]52;c;?\x07").is_empty());
+		terminal.process(b"after");
+		assert_eq!(read(&terminal, 0, 0, 5), "after");
+	}
+
+	#[test]
+	fn the_engine_is_told_to_speak_the_kitty_keyboard_protocol() {
+		// The other decision in `engine_config`, pinned for the same reason: §25 leaves the whole
+		// control plane to the engine and only encodes key presses, so turning this off would
+		// strand `keymap`/`kitty` reading flags nothing maintains — and it would fail silently,
+		// with programs simply never being told the protocol is available.
+		assert!(engine_config().kitty_keyboard);
 	}
 
 	#[test]

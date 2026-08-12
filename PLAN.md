@@ -6893,9 +6893,99 @@ item and the §8 closing prose.
 
 ### Not done
 
-- **`osc52: Osc52::Disabled`** is not set. One line, and the only security item the pass turned up; it
-  waits on a word rather than on a design.
+- **`osc52: Osc52::Disabled`** was not set when this section was written — the one security item the
+  pass turned up, waiting on a word rather than on a design. **§63 set it**, and the word came in the
+  same breath as reading this list.
 - **Images and DECSLRM keep plain ❌.** Both are refusals, but each is also a real cost — a PNG/JPEG
   decoder dependency (§41), a 71-method delegating wrapper that degrades silently on an engine bump
   (§5). A 🛑 would claim the price is not part of the reason, and it is.
 - **The other six XTMODKEYS resources** (§61) are a refusal with no mark at all, having no row.
+
+
+## 63. Saying the refusal out loud (v4.0.0)
+
+§62 split the matrix's refusals into **🛑** (cmote refuses it) and **🤷** (nothing does), and the one
+row that would not sit still under that question was **OSC 52**, the remote clipboard — the oldest
+refusal in the project and, it turned out, the least stated.
+
+### What was actually there
+
+`alacritty_terminal`'s `Config` carries an `osc52` field. cmote never set it, so it sat at the crate's
+default:
+
+```rust
+/// This option is the default as a compromise between entirely
+/// disabling it (the most secure) and allowing `paste` (the less secure).
+#[default]
+OnlyCopy,
+```
+
+Under `OnlyCopy` the *write* direction is **allowed at the engine**. A remote's `OSC 52 ; c ; <base64>`
+was parsed whole and raised as an `Event::ClipboardStore`, and the single thing standing between that
+and the user's clipboard was the last arm of `Replies::send_event`:
+
+```rust
+// Everything else — the clipboard pair, the bell, a colour *set* — needs no reply
+// and carries nothing we surface, so it is dropped.
+_ => {}
+```
+
+Which works. It has always worked, cmote has never touched the clipboard on a remote's word, and no
+behaviour changed in this section. What was wrong is subtler and worth naming: **a fall-through cannot
+say "refused".** The arm drops the event because it drops everything it does not recognise, so nothing
+in the code asserts a decision, nothing fails if a later edit starts handling `ClipboardStore` for some
+well-meant reason, and the comment is the only place the reasoning lives. Next to it in the same
+document sit the iTerm 1337 keys, each with a named arm and a `refuses_*` test — the contrast is what
+made this row look thin.
+
+The read direction was thinner still. `OnlyCopy` refuses `clipboard_load`, so the read *was* stopped at
+the boundary — but as a **side effect of allowing the write**. cmote's strongest refusal, the one §6
+argues hardest (a remote must not learn what the user's other applications put on the clipboard, which
+it has never seen), was being performed by an upstream compromise's spare half.
+
+### One field, and a function to put it in
+
+```rust
+osc52: Osc52::Disabled,
+```
+
+`Disabled` makes both handlers return inside the engine, before an event exists. The catch-all stays,
+now as the second line rather than the only one: if an engine bump changed that field's meaning, or a
+`Config` edit dropped it, the events would arrive again and would still be discarded.
+
+The `Config` itself moved out of `Terminal::new` into a named `engine_config()`, and that move is the
+point rather than tidying. A literal inside a constructor cannot be asserted; a function can:
+
+```rust
+assert_eq!(engine_config().osc52, Osc52::Disabled);
+```
+
+That is the test the section exists for, and **deleting the field is how it was checked** — with the
+field gone the assertion fails, which is the intended tripwire. The same run proved the limit of the
+other test: `a_remote_clipboard_request_draws_no_reply` feeds both directions on the wire and still
+passed with the field removed, because at cmote's own boundary `Disabled` and `OnlyCopy`-plus-catch-all
+are indistinguishable — the event is dropped either way, and no reply appears either way. That is
+exactly why the guarantee had to be pinned on the *field* and not on the behaviour. A behaviour test
+here can only confirm the outcome; it cannot see which of two mechanisms produced it.
+
+The kitty-keyboard flag beside it got the same treatment for free (`kitty_keyboard: true`, §25). It is
+the other place where cmote overrides a crate default on purpose, and turning it off would fail
+silently — `keymap`/`kitty` would go on encoding `CSI u` reports from a flag stack the engine no longer
+maintains, and programs would simply never be told the protocol is available.
+
+### What it cost
+
+One field, one extracted function, a doc comment on `Replies` saying the pair no longer arrives, and 3
+tests. `term/mod.rs` is ~3020 lines. No behaviour changed, which is the honest summary: this section
+moved a decision from a comment into code that can fail.
+
+### Not done
+
+- **The bell and the colour sets still ride the catch-all.** Both are refusals §6 argues for, and
+  neither has a field to state them in — the engine has no `bell` switch, and a colour *set* is refused
+  by `ui/grid.rs` painting from `palette` alone rather than by anything declining it. Structural rather
+  than stated, and the structure is load-bearing enough that a test would have to assert a rendering
+  fact instead of a config one.
+- **`Osc52::Disabled` is asserted, not proven end to end.** The proof that a remote cannot reach the
+  clipboard is the engine's early return plus cmote never calling a clipboard API on a remote's behalf;
+  no test can watch the Windows clipboard from inside the suite.

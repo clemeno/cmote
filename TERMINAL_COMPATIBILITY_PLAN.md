@@ -20,7 +20,10 @@ corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing ans
 more rows in §8 that had drifted from the crates; **§61 then closed that row**, so §3 stands again.
 **§62 corrected two more in the same direction** — `CSI 1–10 t` and ENQ answerback were credited to
 cmote as refusals nothing in cmote performs — while splitting §8's refusals into **🛑** (cmote's code
-refuses it) and **🤷** (nothing does; it dies upstream).
+refuses it) and **🤷** (nothing does; it dies upstream). **§63 then took the one item that split turned
+up as work**: OSC 52's refusal moved from an inherited crate default plus a catch-all to a stated
+`osc52: Osc52::Disabled`, with a test on the field. No row changed status; the mechanism behind two of
+them did.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -416,9 +419,20 @@ short, and since §41 nothing left in it is high value:
 
 ## 6. Deliberately excluded (🛑 / 🤷 in §8 — policy, not gap)
 
-**OSC 52 clipboard read/write** — the engine surfaces it as `Event::ClipboardLoad` /
-`ClipboardStore`; cmote **drops both on purpose** (§9 / §12 / §23): a remote could read or
-poison the local clipboard, and cmote touches the clipboard only on an explicit *local* action.
+**OSC 52 clipboard read/write** — **refused at the engine boundary** since §63: `engine_config` sets
+`osc52: Osc52::Disabled`, so `clipboard_store` and `clipboard_load` return before an event exists. A
+remote could read or poison the local clipboard, and cmote touches the clipboard only on an explicit
+*local* action (§9 / §12 / §23).
+
+Worth recording what this replaced, because the outcome never changed and the *statement* did. Until
+§63 the field sat at its `Config::default()` value, `Osc52::OnlyCopy` — which upstream documents as "a
+compromise between entirely disabling it (the most secure) and allowing paste", and a compromise is not
+a refusal. A remote's write was therefore parsed, base64 and all, and raised as
+`Event::ClipboardStore`, and what kept it off the clipboard was the **catch-all arm** of
+`Replies::send_event` discarding an event it does not recognise. Correct, and correct for as long as
+cmote has existed — but a fall-through says nothing, so nothing failed if a later edit started handling
+that event. The catch-all is still there as the second line; the decision is now in the field, and a
+test (`the_engine_is_told_to_refuse_the_remote_clipboard`) fails if the field goes.
 The **bell** is dropped for the same "no remote-driven side effects" reason. Answering an OSC 52 read
 query would be an injection vector and stays out.
 
@@ -533,17 +547,18 @@ What is left in §5 (blink, double-height lines, left/right margins, rectangular
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
 decoder dependency — **no item of real UX value remains anywhere in this document.**
 
-**One line of hardening is worth taking, and §62 is how it surfaced.** Re-deriving every refusal from
-the crates showed that cmote leaves `alacritty_terminal`'s `config.osc52` at its default,
+**One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
+crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
 `Osc52::OnlyCopy` — chosen upstream as *"a compromise between entirely disabling it (the most secure)
-and allowing paste"*, which is not the same thing as a refusal. So an OSC 52 **write** is parsed,
-decoded and raised as `Event::ClipboardStore`, and the thing that stops a remote poisoning the local
-clipboard is the catch-all arm of `Replies::send_event`. The outcome is correct today and has always
-been; what is missing is that the refusal is *inherited* rather than stated — a future upstream default,
-or a `Config` touched for an unrelated reason, changes it with nothing failing. Setting `osc52:
-Osc52::Disabled` where the `Config` is built moves the refusal to the engine boundary, makes the **read**
+and allowing paste"*, which is not the same thing as a refusal. So an OSC 52 **write** was parsed,
+decoded and raised as `Event::ClipboardStore`, and the thing that stopped a remote poisoning the local
+clipboard was the catch-all arm of `Replies::send_event`. The outcome was correct and always had been;
+what was missing is that the refusal was *inherited* rather than stated — a future upstream default, or
+a `Config` touched for an unrelated reason, would change it with nothing failing. `engine_config` now
+sets `osc52: Osc52::Disabled`, which moves the refusal to the engine boundary, makes the **read**
 refusal explicit instead of a side effect of `OnlyCopy`, and gives the `refuses_*` family in
-`term/iterm.rs` a sibling to sit beside. Not urgent, and the cheapest security line left here.
+`term/iterm.rs` a sibling to sit beside. The `Config` moved out of `Terminal::new` into a named
+function to make that assertable at all, so the kitty-keyboard flag beside it is now pinned too.
 
 The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
 in `keymap::encode` — the numpad keys with no NumLock meaning to lose, and explicitly *not* the digits
@@ -655,8 +670,8 @@ footnote:
 | 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell); **set** recorded by the engine and never read — a full repaint for no change |
 | 22 | Mouse pointer shape | 🤷 | the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) — but **no cmote code performs this refusal**: `vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body, which `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. A decision cmote would make and a cost it does not pay; nothing enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it, the listener's catch-all would drop it — the outcome is robust, the *reason* is unpinned |
 | 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working |
-| 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6) — and the one refusal on this page the engine actively hands over: `alacritty_terminal`'s `config.osc52` defaults to `OnlyCopy`, which cmote leaves alone, so `clipboard_store` fires `Event::ClipboardStore` and **cmote's listener drops it** (`term/mod.rs`, `Replies::send_event`, catch-all) |
-| 52 (read) | Clipboard read | 🛑 | remote must not read local clipboard (§6). Refused **twice**: the engine's default `Osc52::OnlyCopy` returns early from `clipboard_load` so no event is ever raised, and cmote's listener would drop `Event::ClipboardLoad` if a config change or an engine bump handed it one |
+| 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6). Refused **at the boundary and again behind it** since §63: `engine_config` sets `osc52: Osc52::Disabled`, so `clipboard_store` returns before an event exists, and the catch-all arm of `Replies::send_event` would still drop the event if it ever arrived. Until §63 only the second of those was true, the field sitting at the crate's `OnlyCopy` default — the weakest 🛑 in this table, now the most explicit |
+| 52 (read) | Clipboard read | 🛑 | remote must not read local clipboard (§6) — the same two lines, and the direction where being explicit matters most: `OnlyCopy` refused the read as a *side effect* of allowing the write, so the read's refusal was never stated anywhere. `Disabled` states both |
 | 104 | Reset palette entry | 🛑 | no effect — the reset side of the fixed scheme (§6): the engine restores its own table and `ui/grid.rs` never reads it |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | no effect — same fixed scheme (§6), named there beside the sets it undoes |
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
@@ -885,13 +900,15 @@ manipulation exists to leave at a default. **ENQ answerback** read as a refusal 
 `vte`'s `execute` has no `0x05` arm, so what refuses it is that nobody ever wrote the reply.
 
 The mark also earned its keep in the other direction, by making one row *harder* than its old tag. **OSC
-52 write** is the single refusal on this page the engine actively hands over: `alacritty_terminal`'s
-`config.osc52` defaults to `Osc52::OnlyCopy`, cmote does not set it, so `clipboard_store` fires a real
-`Event::ClipboardStore` and the only thing that stops a remote poisoning the local clipboard is the
-catch-all arm in `Replies::send_event`. That is a genuine 🛑 and it works — but it is the *weakest* 🛑
-here, being a default cmote inherits plus a fall-through rather than a named refusal with a test on it.
-Setting `osc52: Osc52::Disabled` explicitly would move the refusal to the boundary and cost one line;
-see §7.
+52 write** was the single refusal on this page the engine actively handed over: `alacritty_terminal`'s
+`config.osc52` defaults to `Osc52::OnlyCopy`, cmote did not set it, so `clipboard_store` fired a real
+`Event::ClipboardStore` and the only thing that stopped a remote poisoning the local clipboard was the
+catch-all arm in `Replies::send_event`. A genuine 🛑, and it worked — but the *weakest* 🛑 here, being a
+default cmote inherited plus a fall-through rather than a named refusal with a test on it. **§63 set
+`osc52: Osc52::Disabled`** and pinned it, so it is now the most explicit refusal in the table instead of
+the least. That is the whole of what a change of marks turned into work, and a fair argument for making a
+column state its mechanism: nothing about the *behaviour* was wrong, and looking anyway found the one
+place where the reasoning lived outside the code.
 
 ---
 
@@ -978,7 +995,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   accumulated whole), `ColorRequest` (OSC 10 / 11 / 12 / 4, resolved against cmote's scheme via
   `report_color`), `TextAreaSizeRequest` (`CSI 14t`, from the grid + cell pixel size),
   `Title` / `ResetTitle` (OSC 0 / 2, sanitized). **Dropped**: `ClipboardLoad` / `ClipboardStore`
-  (OSC 52), the bell, and colour *set* requests. `SCROLLBACK = 10_000`. The seam hides the
+  (OSC 52), the bell, and colour *set* requests. `SCROLLBACK = 10_000`. **Since §63 the clipboard pair
+  no longer arrives at all**: the engine settings moved out of `Terminal::new` into `engine_config()`,
+  which sets `osc52: Osc52::Disabled` beside `kitty_keyboard: true` — so `clipboard_store` /
+  `clipboard_load` return inside the engine, before an event exists, and the catch-all is the second
+  line rather than the only one. Both fields are pinned by tests
+  (`the_engine_is_told_to_refuse_the_remote_clipboard`, `the_engine_is_told_to_speak_the_kitty_keyboard_protocol`),
+  which is the reason the `Config` is a named function at all. The seam hides the
   engine types behind `Terminal` + `ScrollMotion`. Since §33 `process` also drains the `term::query`
   scanner: the chunk is scanned for identity queries *before* the engine advances, then each completed
   query becomes a reply — XTVERSION / XTGETTCAP / DA3 from static facts (`VERSION`, `UNIT_ID`),
