@@ -6825,3 +6825,77 @@ every resource fails the two that exist to stop it.
   cmote's replies are appended after whatever the engine wrote for the chunk. A write that queries the
   cursor position and then the modifier level gets both, in engine-then-cmote order rather than stream
   order. No program has been seen to care, and fixing it means the split machinery §58 built.
+
+
+## 62. A refusal that nothing performs (v4.0.0)
+
+The compatibility matrix had one column doing two jobs. A **❌** meant "a program cannot use this", and
+a parenthetical *(policy)* in the note said whether that was a gap or a decision. Worse, the two rows
+§60 had corrected carried *(policy, and free)* — a second footnote, on the footnote, marking the case
+where cmote agrees with a refusal it does not carry out. Everything a reader needed in order to trust
+the row was in the prose, and the column said only "no".
+
+So the refusals took marks of their own: **🛑** where cmote's own code refuses, **🤷** where nothing
+does. The second one is the interesting half. It reads as a shrug because that is the honest posture:
+the sequence dies upstream — no `vte` dispatch arm, or a `Handler` method `alacritty_terminal` leaves at
+its empty default body — so cmote is never offered it, pays nothing to refuse it, and has no test
+pinning the refusal because there is no code to pin. It is a stance, not a guarantee.
+
+### The split had to be re-derived, and that is what found things
+
+A mark in a status column reads as *verified*, which meant every refusal had to be checked against the
+crates rather than inherited from the note beside it. Eighteen rows, the same method §60 used, and two
+of them turned out wrong in exactly the §60 way — a refusal the document credited to cmote that cmote
+does not perform:
+
+- **`CSI 1–10 t`** — iconify, move, resize, raise, maximize, fullscreen — read as cmote holding its own
+  window against a remote. In fact `vte`'s `('t', [])` arm handles **14 / 18 / 22 / 23** and sends every
+  other parameter to `unhandled!()`. There is no `Handler` method for window manipulation to leave at a
+  default; the sequence has nowhere to go at all.
+- **ENQ answerback** read the same way, and it *is* a decision (§36 argued it at length: a lone `0x05`
+  in binary output would type a string into the shell). But `vte`'s `execute` matches HT / BS / CR / LF
+  / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`. What refuses answerback is that nobody
+  ever wrote the reply.
+
+Both were true as stances and wrong about who was doing the work — the failure shape §57 exists to name,
+turning up twice more the moment the column was made to state it.
+
+### One row got harder, not easier
+
+The split also cut the other way, and this is the part worth keeping. **OSC 52 write** is the single
+refusal in the matrix that the engine actively hands over. `alacritty_terminal`'s `config.osc52`
+defaults to `Osc52::OnlyCopy` — documented upstream as *"a compromise between entirely disabling it (the
+most secure) and allowing paste"*, which is not a refusal — and cmote never sets it. So a remote's
+clipboard write is parsed, base64 and all, raised as `Event::ClipboardStore`, and stopped by the
+**catch-all arm** of `Replies::send_event`.
+
+That works, and has always worked. But it is the weakest 🛑 on the page: an inherited default plus a
+fall-through, where the iTerm keys next to it have a named arm and a `refuses_*` test each. The read
+direction is refused by the same inherited default, one line above cmote's code rather than in it.
+Setting `osc52: Osc52::Disabled` explicitly would move both refusals to the engine boundary and cost one
+line — recorded in §7 of the compatibility document rather than done here, because this section changed
+no code.
+
+### Why a mark and not a better sentence
+
+The counter-argument was real: the ❌/🛑 split is about *support*, the 🛑/🤷 split is about *mechanism*,
+and mixing axes in one column is how the six wrong rows of §60 happened. What settles it is who reads
+which. A note is read by someone already suspicious of the row; a column is read by everyone, in one
+pass, without deciding to. The mechanism is the thing this document keeps getting wrong, so it belongs
+where it cannot be skipped — and the notes now spell out, on every one of the eighteen rows, either the
+code that performs the refusal or the exact place the sequence dies.
+
+### What it cost
+
+No code, no tests: a documentation section. Eighteen rows re-derived from `vte-0.15.0` and
+`alacritty_terminal-0.26.0`, eleven 🛑 and seven 🤷, plus the legend, §6's heading, §7's new hardening
+item and the §8 closing prose.
+
+### Not done
+
+- **`osc52: Osc52::Disabled`** is not set. One line, and the only security item the pass turned up; it
+  waits on a word rather than on a design.
+- **Images and DECSLRM keep plain ❌.** Both are refusals, but each is also a real cost — a PNG/JPEG
+  decoder dependency (§41), a 71-method delegating wrapper that degrades silently on an engine bump
+  (§5). A 🛑 would claim the price is not part of the reason, and it is.
+- **The other six XTMODKEYS resources** (§61) are a refusal with no mark at all, having no row.

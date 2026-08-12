@@ -18,6 +18,9 @@ or refused with its reason recorded: input (§2), query→reply (§3) and the re
 listed as cmote's policy choice when in fact the engine drops the attribute entirely — and **§60's audit
 corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing answered) and fixing five
 more rows in §8 that had drifted from the crates; **§61 then closed that row**, so §3 stands again.
+**§62 corrected two more in the same direction** — `CSI 1–10 t` and ENQ answerback were credited to
+cmote as refusals nothing in cmote performs — while splitting §8's refusals into **🛑** (cmote's code
+refuses it) and **🤷** (nothing does; it dies upstream).
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -411,7 +414,7 @@ short, and since §41 nothing left in it is high value:
 
 ---
 
-## 6. Deliberately excluded (policy, not gap)
+## 6. Deliberately excluded (🛑 / 🤷 in §8 — policy, not gap)
 
 **OSC 52 clipboard read/write** — the engine surfaces it as `Event::ClipboardLoad` /
 `ClipboardStore`; cmote **drops both on purpose** (§9 / §12 / §23): a remote could read or
@@ -488,7 +491,10 @@ The load-bearing reasons are these three:
   obvious undo.
 
 Note this refuses nothing that works today: cmote sets **no** cursor over the terminal grid, so this is
-an unrealised nicety being declined, not a behaviour being removed.
+an unrealised nicety being declined, not a behaviour being removed. And note who does the declining:
+`vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method `alacritty_terminal` leaves at
+its empty default, so the sequence never reaches cmote at all. The reasoning above is why cmote would
+refuse it; nothing in cmote currently has to. That is the **🤷** in §8.
 
 **Answerback (ENQ `0x05`)** — refused for the same reason, and this is why xterm ships it empty too
 (§36). The trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05`
@@ -496,6 +502,11 @@ an unrealised nicety being declined, not a behaviour being removed.
 into the shell's input as if the user had. That is a remote-driven side effect on the user's keyboard
 in exchange for legacy identification nobody asks for; the DA / DECRQM / XTVERSION / DA3 answers cover
 every probe a modern program makes.
+
+The refusal is a **🤷** rather than a **🛑** in §8, and precisely because it is: `vte`'s `execute`
+matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's
+own scanner has no arm for it either. Answerback is refused by never having been written, which is a
+decision this section stands behind and no code enforces.
 
 ---
 
@@ -521,6 +532,18 @@ added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows ar
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
 decoder dependency — **no item of real UX value remains anywhere in this document.**
+
+**One line of hardening is worth taking, and §62 is how it surfaced.** Re-deriving every refusal from
+the crates showed that cmote leaves `alacritty_terminal`'s `config.osc52` at its default,
+`Osc52::OnlyCopy` — chosen upstream as *"a compromise between entirely disabling it (the most secure)
+and allowing paste"*, which is not the same thing as a refusal. So an OSC 52 **write** is parsed,
+decoded and raised as `Event::ClipboardStore`, and the thing that stops a remote poisoning the local
+clipboard is the catch-all arm of `Replies::send_event`. The outcome is correct today and has always
+been; what is missing is that the refusal is *inherited* rather than stated — a future upstream default,
+or a `Config` touched for an unrelated reason, changes it with nothing failing. Setting `osc52:
+Osc52::Disabled` where the `Config` is built moves the refusal to the engine boundary, makes the **read**
+refusal explicit instead of a side effect of `OnlyCopy`, and gives the `refuses_*` family in
+`term/iterm.rs` a sibling to sit beside. Not urgent, and the cheapest security line left here.
 
 The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
 in `keymap::encode` — the numpad keys with no NumLock meaning to lose, and explicitly *not* the digits
@@ -567,7 +590,10 @@ legacy, invisible in practice, or a PNG/JPEG decoder dependency. For "support *a
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
 refused with its reason written down.
 
-**§54 then closed the OSC column's last item of real value, and turned four ❌ rows into decisions.**
+**§54 then closed the OSC column's last item of real value, and turned four ❌ rows into decisions** —
+🛑 and 🤷 rows since the legend grew marks of their own — and the split was instructive: OSC 9 is
+refused by cmote's own scanner and pinned by a test, while `OSC 777` and `kitty 99` are refused by
+nobody at all, since `vte` has no arm for either.
 `OSC 9;4` progress reporting shipped (`term/progress.rs`) — a per-tab bar on the chip and the taskbar
 button mirroring the active tab. The same pass wrote down the stance the notification rows had been
 missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spellings and are **refused**
@@ -591,12 +617,27 @@ text, no wait cursor through a long operation. See §6.
 
 A per-sequence audit against the escape-sequence catalogue published at
 [vtdn.dev](https://vtdn.dev), so support is legible one line at a time rather than only as the
-"still-missing" lens of §2–§6. Every ✅/⚠️/❌ below was verified against the real sources — the
+"still-missing" lens of §2–§6. Every ✅/⚠️/❌/🛑/🤷 below was verified against the real sources — the
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
 (`term/`, `ui/grid.rs`) — not from memory.
 
-Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not supported. A ❌ marked
-*(policy)* is excluded on purpose (§6), not a gap.
+Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not supported · **🛑** refused, by
+cmote's own code · **🤷** refused in principle, by nothing in particular.
+
+The last three are different in kind, which is why each carries its own mark rather than one mark and a
+footnote:
+
+- **❌** is a *gap* — a sequence that could still land, and several since have.
+- **🛑** is a *decision* recorded in §6 that **cmote enforces**: a scanner allow-list, an event dropped
+  in the listener, a renderer that never reads the value. It never becomes work, and the row names the
+  code that performs it — usually with a test pinning it by name, so the refusal cannot regress
+  unnoticed.
+- **🤷** is the same decision with **nothing behind it**: the sequence dies upstream — no `vte` dispatch
+  arm, or a `Handler` method `alacritty_terminal` leaves at its empty default body — so cmote is never
+  offered it and pays nothing to refuse it. The row names *where* it dies. These are stances, not
+  guarantees: an engine bump could start handing the sequence over, and then the listener's catch-all is
+  the only thing standing there. The distance between agreeing with a refusal and performing one is what
+  §57 is about, and it is worth seeing in the column rather than reading for.
 
 ### OSC — Operating System Command
 
@@ -608,31 +649,31 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** recorded by the engine and never read by the renderer (fixed palette) |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
-| 9 | Desktop notification | ❌ | *(policy)* — a notification leaves the window and lands on the desktop (§6, §54) |
+| 9 | Desktop notification | 🛑 | a notification leaves the window and lands on the desktop (§6, §54). cmote's own scanners perform this one: `term/progress.rs` matches `9;4;` and `term/cwd.rs` matches `9;9;`, so a bare `9;<text>` is *seen* and declined — pinned by `the_other_osc_nine_sequences_are_left_alone`. `vte` has no OSC 9 arm, so the engine would never have offered it either |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
 | 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
 | 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell); **set** recorded by the engine and never read — a full repaint for no change |
-| 22 | Mouse pointer shape | ❌ | *(policy, and free)* — the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6). §60's audit made the **mechanism** exact, because the row read as a refusal cmote performs: `set_mouse_cursor_icon` is an empty default body in `vte`'s `Handler` that `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. The decision in §6 is one cmote would make and a cost it does not pay — but no code enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it the listener's catch-all would still drop it, so the ❌ is robust either way |
+| 22 | Mouse pointer shape | 🤷 | the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) — but **no cmote code performs this refusal**: `vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body, which `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. A decision cmote would make and a cost it does not pay; nothing enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it, the listener's catch-all would drop it — the outcome is robust, the *reason* is unpinned |
 | 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working |
-| 52 (write) | Clipboard write | ❌ | *(policy)* — remote must not poison local clipboard (§6) |
-| 52 (read) | Clipboard read | ❌ | *(policy)* — remote must not read local clipboard (§6) |
-| 104 | Reset palette entry | ❌ | no effect (fixed palette) |
-| 110 / 111 / 112 | Reset fg / bg / cursor colour | ❌ | no effect (fixed scheme) |
+| 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6) — and the one refusal on this page the engine actively hands over: `alacritty_terminal`'s `config.osc52` defaults to `OnlyCopy`, which cmote leaves alone, so `clipboard_store` fires `Event::ClipboardStore` and **cmote's listener drops it** (`term/mod.rs`, `Replies::send_event`, catch-all) |
+| 52 (read) | Clipboard read | 🛑 | remote must not read local clipboard (§6). Refused **twice**: the engine's default `Osc52::OnlyCopy` returns early from `clipboard_load` so no event is ever raised, and cmote's listener would drop `Event::ClipboardLoad` if a config change or an engine bump handed it one |
+| 104 | Reset palette entry | 🛑 | no effect — the reset side of the fixed scheme (§6): the engine restores its own table and `ui/grid.rs` never reads it |
+| 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | no effect — same fixed scheme (§6), named there beside the sets it undoes |
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
-| Kitty 21 | Colour by semantic name | ❌ | *(policy)* — same fixed scheme as 4 / 10 / 11 / 12: the theme is cmote's, not the remote's |
-| Kitty 99 | Rich notifications | ❌ | *(policy)* — a notification, in a third spelling (§6, §54) |
+| Kitty 21 | Colour by semantic name | 🤷 | same fixed scheme as 4 / 10 / 11 / 12 — the theme is cmote's, not the remote's (§6) — but nothing performs the refusal: `vte`'s OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so OSC 21 reaches no handler, and cmote has no scanner for it |
+| Kitty 99 | Rich notifications | 🤷 | a notification, in a third spelling (§6, §54) — and, unlike OSC 9, one nothing here declines: no `vte` arm, no cmote scanner |
 | iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
 | iTerm 1337 `SetUserVar` | Per-session variable | ⚠️ | **`gitBranch` only** — shown as a pill on the chip (§55). The allow-list applied to NAMES too: with no title template there is no reader for the others, so a remote cannot key a store. Value base64-decoded, UTF-8 checked, control chars stripped, capped at 32 chars, drawn BESIDE the endpoint label so it cannot pass for the host |
-| iTerm 1337 `Copy` | Clipboard write | ❌ | *(policy)* — **OSC 52 write by another name** (§6, §55); pinned by a test so the refusal cannot regress |
-| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | ❌ | *(policy)* — the fixed-scheme refusal in a new costume (§6, §55) |
-| iTerm 1337 `SetBackgroundImageFile` | Background image | ❌ | *(policy)* — a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
-| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | ❌ | *(policy)* — the effect escapes the tab (§6, §54, §55) |
-| iTerm 1337 `ClearScrollback` | Drop the scrollback | ❌ | *(policy)* — destroys the user's own record (§55); `CSI 3J` is the sanctioned spelling |
+| iTerm 1337 `Copy` | Clipboard write | 🛑 | **OSC 52 write by another name** (§6, §55); pinned by a test so the refusal cannot regress |
+| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | the fixed-scheme refusal in a new costume (§6, §55) |
+| iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
+| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | the effect escapes the tab (§6, §54, §55) |
+| iTerm 1337 `ClearScrollback` | Drop the scrollback | 🛑 | destroys the user's own record (§55); `CSI 3J` is the sanctioned spelling |
 | iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant — but not by the route this row claimed until §60's audit. `CursorShape` is DECSCUSR **and** OSC 50 over again. `ReportCellSize` follows from `CSI 14t` ÷ `CSI 18t`, pixels over cells; **`CSI 16t` is not the alternative** — it has no arm in `vte` and cmote does not answer it, as the window-ops table says |
-| iTerm 1337 (every other key) | — | ❌ | *(policy)* — `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
-| 777 | urxvt notification | ❌ | *(policy)* — a notification, in a fourth spelling (§6, §54) |
+| iTerm 1337 (every other key) | — | 🛑 | `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
+| 777 | urxvt notification | 🤷 | a notification, in a fourth spelling (§6, §54); no `vte` arm, no cmote scanner |
 
 ### CSI — cursor movement & editing
 
@@ -673,7 +714,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
 | ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers **both** spellings — the ANSI one (`CSI 4 $ p` → `CSI 4;2$y`, insert mode reset) as well as the private one. This row named the private form alone until §60's audit |
-| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | ❌ | *(policy, and free)* — downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy. As with OSC 22, `vte` has no arm for either final byte, so this is a decision cmote agrees with rather than one it carries out |
+| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy. `vte` has no CSI arm for either final byte, so — as with OSC 22 — this is a decision cmote agrees with rather than one it carries out |
 
 ### ESC — single sequences
 
@@ -762,7 +803,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | ReGIS | ❌ | a vector language; no users worth an interpreter (§5) |
 | iTerm2 inline images (OSC 1337) | ❌ | same reason as kitty: a PNG/JPEG payload (§5, §41) |
 | Graphics capability report | ✅ | XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) answered from the decoder's real limits — 256 registers, 4096×4096 / 4 Mpx; a *set* honestly refused (`term/query.rs`, §41) |
-| Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | ❌ | *(policy)* — cmote owns its tabbed window; remote can't drive it |
+| Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | cmote owns its tabbed window; a remote can't drive it (§6) — and the mark moved here in the same pass that added it: `vte`'s `('t', [])` arm handles **14 / 18 / 22 / 23 only** and sends every other parameter to `unhandled!()`, so there is no `Handler` method for window manipulation at all. Nothing to refuse, nothing to pin |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
 | Cell size (CSI 16 t) | ❌ | |
@@ -770,7 +811,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
 | **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply back to restore the state. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it. **Resource 4 only**: XTMODKEYS carries seven, cmote holds one, and the reply being an XTMODKEYS control leaves no way to say "not mine" — so the other six draw silence rather than an invented level. Answered where the question sits in the stream, not where the chunk ends |
-| ENQ answerback | ❌ | **refused on purpose** — a lone `0x05` in binary output would type a string into the shell (§6, §36) |
+| ENQ answerback | 🤷 | a lone `0x05` in binary output would type a string into the shell (§6, §36) — a decision cmote holds and nothing carries out: `vte`'s `execute` matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's scanner has no arm for it. Answerback is refused by never having been written, which is the cheapest refusal in the document and the least pinned |
 | BEL | ⚠️ | accepted, **silent** — bell event dropped |
 | BS / HT / LF / CR | ✅ | |
 | SO / SI | ✅ | charset shift |
@@ -780,12 +821,18 @@ colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQ
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
 query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
 protected-cell erase it dropped as well, and — since §58, §59 and §60 — the whole VT420 rectangular
-family, checksum query included. Most of the ❌ column is **deliberate**: no images, no remote
-clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
-and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048) and left-right margins. That
-last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
-do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
+family, checksum query included. The **deliberate** part of what is missing used to be most of the ❌
+column and now carries two marks of its own. **🛑** is what cmote's code refuses and its tests pin:
+the remote clipboard (OSC 52 both ways), desktop notifications in the OSC 9 spelling, the dangerous
+half of iTerm's OSC 1337 namespace, and a fixed colour scheme that makes every palette set and reset a
+no-op. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
+control (`CSI 1–10 t`), the remote pointer shape (OSC 22), the palette stack (`CSI # p / # q`), and
+notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
+cmote sees a byte. That leaves the plain ❌ column short, and worth reading as the real list: the
+PNG/JPEG image protocols (a decoder dependency and a security decision, §41), blink (the engine drops
+it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the
+delegating-`Handler` build that would do it, and the reason it stays ❌ is that such a wrapper degrades
+silently on an engine bump, in
 exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
 costs nothing to have, rather than one that quietly took the program's saved cursor with it. All
 catalogued with their cost in §5 — which read as the *only* section with anything open in it until
@@ -826,6 +873,25 @@ reading `vte`'s dispatch arms and `alacritty_terminal`'s `Handler` impl and aski
 methods are left at their empty default* — not from reading this document and asking whether it looked
 right. A row is only as good as the last time somebody checked it against a crate, and the two rows
 that were wrong about *why* had been right about *what* for long enough to stop being read.
+
+**§62 then made that distinction a mark instead of a sentence.** The refusals had been ❌ rows with an
+italic *(policy)* tag, and the two the audit had corrected carried *(policy, and free)* — a footnote
+doing the work of a column. Splitting them into **🛑** (cmote refuses it) and **🤷** (nobody does)
+forced every refusal to be re-derived from the crates rather than inherited, and that turned up two
+more rows wrong in exactly the §60 way. **`CSI 1–10 t`** — iconify, move, resize, raise, maximize,
+fullscreen — read as cmote holding its window against a remote; in fact `vte`'s `('t', [])` arm handles
+14 / 18 / 22 / 23 and drops every other parameter to `unhandled!()`, so no `Handler` method for window
+manipulation exists to leave at a default. **ENQ answerback** read as a refusal too, and it is one — but
+`vte`'s `execute` has no `0x05` arm, so what refuses it is that nobody ever wrote the reply.
+
+The mark also earned its keep in the other direction, by making one row *harder* than its old tag. **OSC
+52 write** is the single refusal on this page the engine actively hands over: `alacritty_terminal`'s
+`config.osc52` defaults to `Osc52::OnlyCopy`, cmote does not set it, so `clipboard_store` fires a real
+`Event::ClipboardStore` and the only thing that stops a remote poisoning the local clipboard is the
+catch-all arm in `Replies::send_event`. That is a genuine 🛑 and it works — but it is the *weakest* 🛑
+here, being a default cmote inherits plus a fall-through rather than a named refusal with a test on it.
+Setting `osc52: Osc52::Disabled` explicitly would move the refusal to the boundary and cost one line;
+see §7.
 
 ---
 
