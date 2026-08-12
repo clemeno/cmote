@@ -34,8 +34,8 @@
 //
 // One sequence goes the other way — the engine does NOT drop it, and should. `CSI Pl;Pr s` sets the
 // left and right margins on a VT420, and the engine's arm for the final `s` is save-cursor, which
-// ignores its parameters; the margins cmote cannot give would come at the cost of a saved cursor the
-// program never asked it to overwrite. So `cancel` finds that final byte and `process` feeds the
+// ignores its parameters; the margins cmote does not offer would come at the cost of a saved cursor
+// the program never asked it to overwrite. So `cancel` finds that final byte and `process` feeds the
 // engine a CAN in place of it (§57).
 
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)

@@ -6425,7 +6425,16 @@ next to "scan it out", "borrow a bit", and "accept the engine's limit" — is **
 
 ### Not done
 
-- **The margins themselves.** Unchanged and not planned: they are a grid rewrite, not an arm.
+- **The margins themselves.** Unchanged and not planned — but the reason has since been corrected, and
+  it is a price rather than a wall. This section first said margins would mean re-implementing the
+  grid. They would not: `Processor::advance` is generic over `Handler` and `Term` merely implements it,
+  so a wrapper can sit between the parser and the engine; `Cursor::input_needs_wrap` is public, so even
+  the pending-wrap decision is reachable; and §58 supplied the band scroll (a rectangular copy plus an
+  erase). It is about twelve of `Handler`'s 71 methods overridden and the rest forwarded — 400–600
+  lines. What it is *not* is safe to keep: every method of that trait has a default empty body, so a
+  forwarding gap, today's or a future version's, compiles cleanly and silently drops a sequence — the
+  §57 hazard again, minus the `const` assertion that made §57's catchable. Nothing outside a
+  conformance suite emits DECSLRM. Costed in TERMINAL_COMPATIBILITY_PLAN §5.
 - **No other misparse is known.** This module has one member because the audit found one. The near
   neighbours were checked and are clean: `CSI ? Pm r` (XTRESTORE) and `CSI ? Pm s` (XTSAVE) both carry
   a marker the engine has no arm for, and DECSTBM's `r` is the vertical region the engine really

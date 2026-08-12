@@ -326,12 +326,44 @@ short, and since §41 nothing left in it is high value:
 - **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
   (single wide glyphs are; whole-line doubling is not). `[DEC]`.
 - **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
-  (`set_scrolling_region(top, bottom)`), and horizontal ones are not an arm to add: they change what
-  printing, wrapping, `IL`/`DL`, `ICH`/`DCH` and every scroll do, which is the grid's whole job. This
-  one stays. `[DEC]`. What **§57** changed is the cost of refusing it. DECSLRM shares its final byte
-  with save-cursor, and `vte`'s arm for that byte ignores its parameters, so the refusal was not free:
-  `CSI 5;70 s` *saved the cursor*, overwriting a value the program meant to restore from later. cmote
-  now cancels that byte in flight, so the request does nothing — see PLAN §57 and `term/cancel.rs`.
+  (`set_scrolling_region(top, bottom)`), and horizontal ones reach into what printing, wrapping,
+  `IL`/`DL`, `ICH`/`DCH` and every scroll do. `[DEC]`, and **still ❌ — but as a cost, not a
+  capability.** An earlier reading of this row called it impossible without re-implementing the grid.
+  That was wrong, and the correction is worth writing down because it is the only row in this document
+  whose verdict rests on price rather than on a wall:
+
+  - **There is a seam.** `Processor::advance<H: Handler>` is generic and `Term<T>` merely *implements*
+    `Handler`, so cmote can pass a wrapper that holds the margin state, overrides the margin-sensitive
+    methods and forwards the rest. No fork, no patch.
+  - **The state that decides where a line breaks is public.** `Cursor::input_needs_wrap` is a `pub`
+    field, so the pending-wrap flag can be read and set from outside — the piece assumed to be sealed
+    inside `Term::input`.
+  - **§58 already built the hard primitive.** Scrolling a column band by a row IS a rectangular copy
+    plus an erase, and `copy_area` / `erase_area` exist.
+
+  What it would take: about twelve of `Handler`'s 71 methods overridden (`input`, `carriage_return`,
+  `linefeed`, `insert_blank_lines`, `delete_lines`, `insert_blank`, `delete_chars`, `goto`, `goto_col`,
+  `move_forward`, `scroll_up`/`scroll_down`, `set_scrolling_region` plus the resets), the rest
+  forwarded, `DECIC`/`DECDC` scanned out as `vte` has no arm for those either, and a `unicode_width`
+  dependency so a two-cell glyph wraps at the right column. `Term::input` itself would be *pre-empted*
+  rather than reimplemented — wrap at the margin first, then delegate, so the engine's own autowrap
+  never reaches the screen edge. Call it 400–600 lines plus tests.
+
+  What blocks it is what it would cost to keep. **Every `Handler` method has a default empty body**, so
+  a method left unforwarded — or one a future `alacritty_terminal` adds — compiles cleanly and silently
+  drops a sequence. That is the same class of hazard as §57's borrowed flag bit, except §57's could be
+  caught at **build time** with a `const` assertion and this one cannot: a trait growing a defaulted
+  method breaks nothing. Add the smaller ones — a margin wrap has to set `WRAPLINE` itself or copy,
+  search and reflow read the line as two; margins are per-screen and have to ride the alternate-screen
+  swap; resize reflows assuming full width, so margins would reset on resize as xterm's do. Against
+  that: essentially nothing emits DECSLRM outside a conformance suite. So the answer is still no, on
+  price.
+
+  What **§57** changed is the cost of *refusing* it. DECSLRM shares its final byte with save-cursor,
+  and `vte`'s arm for that byte ignores its parameters, so the refusal was not free: `CSI 5;70 s`
+  *saved the cursor*, overwriting a value the program meant to restore from later. cmote now cancels
+  that byte in flight, so the request does nothing at all — the `s` row in §8, PLAN §57, and
+  `term/cancel.rs`.
 - **~~VT420 rectangular ops~~ — SHIPPED in §58.** DECERA (`$ z`), DECSERA (`$ {`), DECFRA (`$ x`) and
   DECCRA (`$ v`) all read as engine limits until §56 built the hard half of them: writing cells
   straight into the grid, and knowing which of them a program protected. `vte` matches `$` only in the
@@ -591,7 +623,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
-| s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out — the engine's scroll region is vertical only (§5), and giving it horizontal ones means re-implementing print, wrap, insert, delete and scroll. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
+| s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out, on **price rather than capability** — there is a seam (`Processor::advance` is generic over `Handler`, which `Term` merely implements), but a delegating wrapper over a 71-method trait whose every method has a default empty body degrades **silently** on an engine bump, and nothing emits DECSLRM outside a conformance suite. Costed in §5. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
 | g | Tab clear | ✅ | |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
@@ -718,10 +750,12 @@ Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
 the newer private modes (2027 / 2031 / 2048), the attribute half of the rectangular family
-(DECCARA / DECRARA / DECSACE, its content half having shipped in §58), and left-right margins — the
-last of which, since §57, is at least a gap that costs nothing rather than one that quietly took the
-program's saved cursor with it. All catalogued with their cost in §5, which is now the *only* section
-with anything open in it.
+(DECCARA / DECRARA / DECSACE, its content half having shipped in §58), and left-right margins. That
+last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
+do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
+exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
+costs nothing to have, rather than one that quietly took the program's saved cursor with it. All
+catalogued with their cost in §5, which is now the *only* section with anything open in it.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -774,6 +808,17 @@ Audited file:line anchors behind the claims above, for later re-checking.
   handler at `term/mod.rs:1874`. cmote surfaces this through the seam (below).
 - **Scroll region is vertical only**: `set_scrolling_region(top, bottom)` (`term/mod.rs:2155`) —
   no horizontal (left/right) margins.
+- **The engine is interceptable, which is why the margins row is a price and not a wall.**
+  `Processor::advance<H>(&mut self, handler: &mut H, bytes)` is generic over `H: Handler`
+  (`vte-0.15.0/src/ansi.rs:298`), and `Term` only *implements* that trait
+  (`impl<T: EventListener> Handler for Term<T>`, `term/mod.rs:1059`) — so a wrapper can sit between
+  the parser and the engine, override what it needs and forward the rest, without a fork.
+  `Cursor::input_needs_wrap` is a **`pub` field** (`grid/mod.rs:52`), so even the pending-wrap flag —
+  the state that decides where a line breaks — is reachable from outside `Term::input` (77 lines,
+  `term/mod.rs:1060`). The catch is in the same place: `Handler` declares **71 methods and every one
+  has a default empty body** (`ansi.rs:495`), so a forwarding gap — today's or a future version's — is
+  a silent no-op rather than a compile error. That is the hazard §5 prices the feature against, and
+  unlike §57's borrowed flag bit it cannot be turned into a build failure.
 - **No arm for any rectangular operation** (what §58 walked into). `vte-0.15.0/src/ansi.rs`'s CSI
   dispatch matches the `$` intermediate in exactly two places — `('p', [b'$'])` at `:1703` and
   `('p', [b'?', b'$'])` at `:1707`, the two DECRQM spellings — so `$ z`, `$ {`, `$ x`, `$ v`, `$ r` and

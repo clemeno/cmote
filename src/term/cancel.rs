@@ -11,12 +11,19 @@
 //   CSI Pl ; Pr s   DECSLRM — set the LEFT and RIGHT margins (VT420)
 //
 // Two unrelated meanings on one final byte. A real VT420 tells them apart by a mode: DECSLRM only
-// means margins once DECLRMM (`CSI ? 69 h`) has been set, and means save-cursor otherwise. cmote
-// does not have margins to give — the engine's scroll region is vertical only
-// (`set_scrolling_region(top, bottom)`), so left/right margins would mean re-implementing print,
-// wrap, insert, delete and scroll — and the engine refuses mode 69 outright, answering a DECRQM for
-// it with `0`, "not recognised". A program that asks is therefore told the truth and will not spell
-// `s` as DECSLRM.
+// means margins once DECLRMM (`CSI ? 69 h`) has been set, and means save-cursor otherwise. cmote has
+// no margins to give — the engine's scroll region is vertical only
+// (`set_scrolling_region(top, bottom)`) — and the engine refuses mode 69 outright, answering a DECRQM
+// for it with `0`, "not recognised". A program that asks is therefore told the truth and will not
+// spell `s` as DECSLRM.
+//
+// Not having them is a decision about price, not a limit of the engine: `Processor::advance` is
+// generic over `Handler` and `Term` merely implements it, so a wrapper could sit in between and give
+// cmote the dozen methods margins reach into. It stays unbuilt because every method of that 71-method
+// trait has a default empty body, so a forwarding gap — one missed today, or one a future version
+// adds — silently drops a sequence instead of failing the build. TERMINAL_COMPATIBILITY_PLAN §5 costs
+// it out. None of that changes anything below: whether the margins arrive one day or never, the byte
+// that asks for them must not be allowed to mean save-cursor.
 //
 // The problem is the program that does not ask. `vte`'s dispatch is
 //
