@@ -246,7 +246,10 @@ impl Terminal {
 	/// when it arrives and each picture is placed where the stream put it.
 	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
 		self.cwd.feed(bytes);
-		self.modkeys.feed(bytes);
+		// The modifyOtherKeys level, and any question about it (§9, §61). The question is answered
+		// by the tracker itself, at the point in the stream it sits, because the tracker is the one
+		// thing that holds the answer — so the bytes come back here already formatted.
+		let modkeys_reply = self.modkeys.feed(bytes);
 		// The progress a remote command reports (§54). Like the cwd, it is a latest-value reading
 		// with no position on the grid, so it needs no split in the advance below — only the order
 		// the reports arrive in, which its own scanner keeps.
@@ -371,6 +374,10 @@ impl Terminal {
 				}
 			}
 		}
+		// The XTQMODKEYS answer, already built by the tracker that owns the level (§61). It joins
+		// the other cmote-originated replies rather than the engine's, which is where it belongs:
+		// the engine parsed the question and dropped it.
+		out.extend_from_slice(&modkeys_reply);
 		// Last, amend the engine's own DA1 answer if this chunk asked for one: cmote draws sixels, so
 		// its device attributes have to say so (§41). Nothing else in `out` is touched.
 		query::with_sixel_attribute(out)
@@ -2903,6 +2910,33 @@ mod tests {
 		assert_eq!(
 			terminal.process(b"\x1b[5;1;1;3;1;1*y"),
 			b"\x1bP5!~0000\x1b\\".to_vec()
+		);
+	}
+
+	/// XTQMODKEYS (`CSI ? 4 m`) is answered with the level cmote holds, in the set form (§61). The
+	/// engine parses the question and drops it, so before §61 the program asking waited out its
+	/// timeout — the exact failure §33 exists to prevent.
+	#[test]
+	fn a_modify_other_keys_question_is_answered() {
+		let mut terminal = Terminal::new(2, 8);
+		assert_eq!(terminal.process(b"\x1b[?4m"), b"\x1b[>4;0m".to_vec());
+		assert_eq!(terminal.process(b"\x1b[>4;2m"), b"".to_vec());
+		assert_eq!(terminal.process(b"\x1b[?4m"), b"\x1b[>4;2m".to_vec());
+		assert_eq!(
+			terminal.modify_other_keys(),
+			modkeys::ModifyOtherKeys::Level2,
+			"asking must not disturb the level"
+		);
+	}
+
+	/// The private-mode sequences share the question's `?` marker and its parameter shape, and are
+	/// orders of magnitude more common. None of them may draw a reply.
+	#[test]
+	fn a_private_mode_earns_no_modify_other_keys_reply() {
+		let mut terminal = Terminal::new(2, 8);
+		assert_eq!(
+			terminal.process(b"\x1b[?1049h\x1b[?25l\x1b[?2004h"),
+			b"".to_vec()
 		);
 	}
 

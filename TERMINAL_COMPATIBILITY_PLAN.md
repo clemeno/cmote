@@ -16,8 +16,9 @@ remains is a much smaller, concrete set of genuine gaps, grouped below by where 
 or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
 (§4) are closed. §6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
 listed as cmote's policy choice when in fact the engine drops the attribute entirely — and **§60's audit
-corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing answers) and fixing five
-more rows in §8 that had drifted from the crates. **§39 touched this
+corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing answered) and fixing five
+more rows in §8 that had drifted from the crates; **§61 then closed that row**, so §3 stands again.
+**§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
 selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
@@ -171,15 +172,16 @@ DECKPAM, so the `ESC O B`-style bytes a program expects are what DECCKM alone al
 
 ---
 
-## 3. Query → reply — one left open (`[reply]`)
+## 3. Query → reply — closed again (`[reply]`)
 
-This section read **closed** until §60's audit, and the sequence that reopened it is worth the
-correction on its own: `CSI ? 4 m` (XTQMODKEYS, "what modifyOtherKeys level are you at?") is dispatched
-by `vte` to `report_modify_other_keys`, left at the trait's empty default by `alacritty_terminal`, and
-covered by neither `term/query.rs` nor `term/modkeys.rs` — which reads the *set* form and nothing else.
-So a program that asks waits out its timeout. Nobody hit it; it was found by reading the crate's trait
-impl for methods still at their default. Cheap to close, cmote already holding the level: a scanner arm
-and a two-parameter reply. Everything below is answered.
+This section read **closed** from §36 until §60's audit found it was not: `CSI ? 4 m` (XTQMODKEYS,
+"what modifyOtherKeys level are you at?") is dispatched by `vte` to `report_modify_other_keys`, left at
+the trait's empty default by `alacritty_terminal`, and was covered by neither `term/query.rs` nor
+`term/modkeys.rs` — which read the *set* form and nothing else. So a program that asked waited out its
+timeout. Nobody ever hit it; it was found by reading the crate's trait impl for methods still sitting at
+their default. **§61 closed it**, and closed it in `term/modkeys.rs` rather than beside the other
+answerers, because that module holds the level and so is the one place that sees the sets and the
+questions in stream order — the answer is the level as it stood where the question sat.
 
 DA1 / DA2 / DSR / DECRQM are answered by the engine; the colour
 and pixel-size queries by cmote's listener; and **since §33** (DA3 added in §36, XTSMGRAPHICS in §41)
@@ -202,6 +204,15 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   identifies the program, not the person. The "is this the default parameter form?" test is now shared
   with XTVERSION (`default_params`), so the two arms cannot drift.
 
+- **XTQMODKEYS** (`CSI ? 4 m`) → `CSI > 4 ; Pv m`, the level `term/modkeys.rs` is holding (§61). The
+  answer is deliberately spelled as the SET form, which is xterm's own choice and a good one: what
+  comes back is exactly the sequence that would restore the state, so a program can pocket the reply
+  and write it back on the way out without parsing a byte of it. **Only resource 4 is answered.**
+  XTMODKEYS carries seven, cmote holds one, and the reply format being an XTMODKEYS control means
+  there is no spelling of "I do not have that resource" — so an answer for `modifyCursorKeys` would
+  be a level asserted for a knob cmote's key encoder does not have. Silence for the other six is the
+  honest reading, and the same call §60 made three times.
+
 - **XTSMGRAPHICS** (`CSI ? Pi ; Pa ; Pv S`) → cmote's graphics limits (§41). The engine's only `S` is
   SU with no intermediate, so the `?` form falls to the scanner. Answered from what the sixel decoder
   actually enforces — 256 colour registers, 4096×4096 and 4 Mpx — so a program sizing a picture is told
@@ -214,8 +225,8 @@ ranger's previewer read at startup. Since §41 cmote rewrites that reply on its 
 (`query::with_sixel_attribute`) rather than sending a second DA1 (the program would parse one of them as
 input) or suppressing the engine's (that would mean cutting bytes out of an inbound stream mid-sequence).
 
-The other reply-class sequence still outstanding, **answerback (ENQ `0x05`)**, is refused as policy
-rather than carried as a gap — see §6. XTQMODKEYS above is the opposite: not refused, just missed.
+The one remaining reply-class sequence, **answerback (ENQ `0x05`)**, is refused as policy rather than
+carried as a gap — see §6. XTQMODKEYS was the opposite while it lasted: not refused, just missed.
 
 ---
 
@@ -490,10 +501,11 @@ every probe a modern program makes.
 
 ## 7. Recommendation
 
-**There is no A-sized item left.** Input (§2) and the rendering/attribute layer (§4) are closed, and
-query→reply (§3) is one small row from it — §60's audit found `CSI ? 4 m` unanswered, which is a
-scanner arm's worth of work, not a design question. What else remains is the engine's own ceiling (§5)
-and the two sequences cmote refuses on purpose (§6). §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
+**There is no A-sized item left.** Input (§2), query→reply (§3) and the rendering/attribute layer
+(§4) are all closed; what remains is the engine's own ceiling (§5) and the two sequences cmote refuses
+on purpose (§6). §60's audit briefly reopened §3 — `CSI ? 4 m` went unanswered — and §61 closed it in a
+scanner arm and a two-parameter reply, which is what a gap found by reading a trait impl rather than by
+hitting it tends to cost. §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
 blink by deciding them (and, for blink, by correcting a wrong claim in this document: the engine drops
 the attribute, so it was never cmote's choice to make).
 
@@ -757,7 +769,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Title stack (CSI 22 / 23 t) | ✅ | `push_title` / `pop_title` |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
-| **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ❌ | **an unanswered query**, and after §60 the only one left. `vte` dispatches it to `report_modify_other_keys`, `alacritty_terminal` leaves the trait's empty default, and cmote's own answerers (`term/query.rs`, §33) do not cover it — `modkeys.rs` reads the set form and nothing else. A program that asks waits out its timeout, which is the exact failure §33 exists to prevent. Cheap to close: cmote already holds the level, so this is a scanner arm and a two-parameter reply |
+| **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply back to restore the state. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it. **Resource 4 only**: XTMODKEYS carries seven, cmote holds one, and the reply being an XTMODKEYS control leaves no way to say "not mine" — so the other six draw silence rather than an invented level. Answered where the question sits in the stream, not where the chunk ends |
 | ENQ answerback | ❌ | **refused on purpose** — a lone `0x05` in binary output would type a string into the shell (§6, §36) |
 | BEL | ⚠️ | accepted, **silent** — bell event dropped |
 | BS / HT / LF / CR | ✅ | |
@@ -771,9 +783,7 @@ protected-cell erase it dropped as well, and — since §58, §59 and §60 — t
 family, checksum query included. Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048), the **modifyOtherKeys query** (`CSI ? 4 m` — the only
-sequence left that a program can sit and wait on, found by §60's audit rather than by anyone hitting
-it), and left-right margins. That
+the newer private modes (2027 / 2031 / 2048) and left-right margins. That
 last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
 do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
 exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
@@ -808,7 +818,8 @@ already recorded as unanswered, three tables further down. Two rows called a ref
 the engine had in fact dropped the sequence first — true in spirit, wrong about who was doing it, and
 worth the correction precisely because §57 is a whole section about the difference between a gap that
 costs nothing and one that costs something. The single real find is the **modifyOtherKeys query**: a
-sequence a program sends and then waits on, which nothing here answers.
+sequence a program sends and then waits on, which nothing here answered. **§61 closed it** — the row
+above, and the only line of code the audit turned into work.
 
 The lesson is about the shape of the audit rather than its findings. Every one of the six came from
 reading `vte`'s dispatch arms and `alacritty_terminal`'s `Handler` impl and asking *which trait
@@ -1005,7 +1016,14 @@ Audited file:line anchors behind the claims above, for later re-checking.
   their flags. No engine dependency — pure input → bytes, unit-tested per flag.
 - **`term/modkeys.rs`** — the `modifyOtherKeys` stream scanner (`CSI > 4 ; p m` → `Off` /
   `Level1` / `Level2`), a small state machine mirroring `cwd.rs`. Read by
-  `Terminal::modify_other_keys` and threaded into `keymap::encode`.
+  `Terminal::modify_other_keys` and threaded into `keymap::encode`. **Since §61 it also answers**
+  the question (`CSI ? 4 m` → `CSI > 4 ; Pv m`): `feed` returns the bytes owed, built the moment the
+  question's final byte is read, so the reply carries the level as it stood *there* rather than as
+  the chunk left it — a test asserts both orders in one write. The `?` marker now opens the same
+  parameter run `>` did, which every DECSET and DECRST in the stream enters and then abandons on its
+  own final byte; a test pins that they draw no reply and do not disturb the level. Resource 4 only,
+  and a second parameter drops the sequence (§54's rule) — the reply format is an XTMODKEYS control,
+  so there is no way to answer "not mine" except by not answering.
 - **`term/iterm.rs`** — the OSC 1337 **allow-list** (§55). `Iterm::feed` runs on the shared framer and
   returns `(offset, Report)` for the honoured keys only; `parse` strips the `1337;` prefix and matches
   `SetMark` **whole**, so `SetMarkAnything` is not it. One honoured key today, and everything else —

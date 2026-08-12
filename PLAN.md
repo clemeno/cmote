@@ -294,7 +294,7 @@ cmote/
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
     │   ├── kitty.rs       encode a key event in the kitty keyboard protocol's CSI u form (§25)
     │   ├── mouse.rs       pointer events → the xterm mouse reports a program that asked for them expects (§9)
-    │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9)
+    │   ├── modkeys.rs     scan `CSI > 4 ; p m` out of the stream: the remote's modifyOtherKeys level (§9) — and answer `CSI ? 4 m` with it (§61)
     │   ├── osc133.rs      scan the OSC 133 shell-integration marks out of the stream: prompt lines, command state, output ranges (§34)
     │   ├── query.rs       answer the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS — and amend its DA1 to advertise sixel (§33, §36, §41)
     │   ├── screen.rs      the engine-agnostic Screen/Cell/Color view the app reads through — incl. a cell's OSC 8 link, the kitty flags, the viewport↔document line mapping and whether a line wraps into the next (§9, §16, §23, §24, §25, §40, §42)
@@ -6757,5 +6757,71 @@ records each with the row that was wrong:
 The one real gap: **`CSI ? 4 m`** (XTQMODKEYS) is a query nothing answers. `vte` dispatches it to
 `report_modify_other_keys`, the engine leaves the default empty, `term/query.rs` does not cover it and
 `term/modkeys.rs` reads only the set form — so a program that asks waits out its timeout, the exact
-failure §33 exists to prevent. Cheap to close, cmote already holding the level; not done here because
-this section was about a checksum.
+failure §33 exists to prevent. Closed in **§61**, below.
+
+---
+
+## 61. Answering the one question the audit found (v4.0.0)
+
+§60's audit turned up exactly one thing that was work rather than wording:
+
+```
+CSI ? 4 m          XTQMODKEYS — "what modifyOtherKeys level are you at?"
+CSI > 4 ; Pv m     the answer
+```
+
+`vte` dispatches it to `report_modify_other_keys`; the body of that method in the `Handler` trait is
+empty and `alacritty_terminal` never overrides it. So the question was parsed, dropped, and the
+program that asked sat waiting for a reply that was never coming — §33's founding complaint, hiding in
+a sequence §33 never listed.
+
+### The module that holds the state is the module that answers
+
+The obvious home was `term/query.rs`, beside XTVERSION and DECRQSS and the rest of §33's answerers.
+It went in `term/modkeys.rs` instead, for the reason DECSACE went in `term/rect.rs` (§59) and the
+checksum went with it (§60): **the level lives there**, and that scanner is the one thing in cmote
+that sees the sets and the questions in the order the stream put them. Answer from `query.rs` and the
+reply would have to read the level after the whole chunk was scanned; answer from `modkeys.rs` and it
+is read where the question sat. A chunk carrying `CSI > 4 ; 2 m` then the question reports 2; one
+carrying the question then the set reports 0. Both are what a terminal reading in order would say, and
+a test asserts both in one write — the load-bearing half, proved by deferring the answer to the end of
+`feed` and watching that test fail.
+
+### The answer is the order, said back
+
+xterm replies to XTQMODKEYS with an XTMODKEYS control — the *set* form, not a bespoke report. That is
+worth copying and worth understanding: what comes back is exactly the sequence that would put the
+terminal into the state it is in, so a program can save the reply and write it back verbatim on the way
+out, without knowing what any of it means.
+
+It is also what settles the scope question. XTMODKEYS carries **seven** resources —
+`modifyKeyboard`, `modifyCursorKeys`, `modifyFunctionKeys`, `modifyKeypadKeys`, `modifyOtherKeys`,
+`modifyModifierKeys`, `modifySpecialKeys` — and cmote holds state for one. Because the reply *is* a set
+control, there is no spelling of "I do not have that resource": an answer for resource 1 would be cmote
+asserting a level for a knob `keymap.rs` does not have, which a program could then act on. So the other
+six draw **silence**, which is the third time in three sections that an invented number lost to a
+missing one. In practice they are not asked; resource 4 is the one editors probe.
+
+### The cost of the `?` marker
+
+The scanner used to open its parameter run on `>` alone. It now opens on `?` too — which means every
+DECSET and DECRST in the stream, by far the most common private CSI there is, enters the run, buffers a
+few digits and is abandoned on its `h` or `l`. That is the same toll `>` already paid, and a test pins
+that a page of `\x1b[?1049h\x1b[?25l\x1b[?2004h` draws no reply and does not disturb the level. A
+second parameter drops the sequence outright (§54's rule): XTQMODKEYS takes one, so `CSI ? 4 ; 1 m` is
+not the sequence it looks like.
+
+### What it cost
+
+One enum, one field, one method, one line in `process`, and 9 tests. Both rules were checked by
+breaking them: deferring the answer to the end of the chunk fails the stream-order test, and answering
+every resource fails the two that exist to stop it.
+
+### Not done
+
+- **The other six XTMODKEYS resources** stay unanswered, and that is a decision rather than a deferral
+  — it reverses only if cmote grows a real resource to report.
+- **Ordering against the engine's own replies** is still approximate, as it is for every §33 answer:
+  cmote's replies are appended after whatever the engine wrote for the chunk. A write that queries the
+  cursor position and then the modifier level gets both, in engine-then-cmote order rather than stream
+  order. No program has been seen to care, and fixing it means the split machinery §58 built.
