@@ -6735,3 +6735,27 @@ the query fails the one that exists to catch it.
   sixteenth flag bit, and bit 15 is already cmote's (§56) — so it would mean shadow state beside the
   grid, which is the shape §56 turned down.
 - **`term/mod.rs` is ~2930 lines.** The note from §59 stands unchanged, and is now a little louder.
+
+### The audit that followed
+
+With the last CSI row closed, the OSC and CSI tables of `TERMINAL_COMPATIBILITY_PLAN.md` §8 were swept
+against `vte-0.15.0`'s dispatch arms and `alacritty_terminal-0.26.0`'s `Handler` impl — the question
+being *which trait methods are left at their empty default*, which is the only reading that catches a
+sequence the engine parses and then silently drops. Six rows disagreed with the code, and the doc now
+records each with the row that was wrong:
+
+- **Three worked and were not written down.** OSC 50 (`CursorShape=`, a third spelling landing in the
+  same `cursor_style.shape` DECSCUSR uses), OSC 9;9 (the Windows cwd spelling — missing from a Windows
+  client's own table) and the ANSI form of DECRQM (`CSI Ps $ p`, not only the `?` one).
+- **One row contradicted another.** iTerm's `ReportCellSize` was refused as redundant to `CSI 16t`,
+  which this same document records as unanswered three tables further down. The honest argument is
+  `14t` ÷ `18t`.
+- **Two called a refusal *policy*** when the engine dropped the sequence first — OSC 22 and
+  XTPUSHCOLORS / XTPOPCOLORS. True as a stance, wrong about who performs it, and worth correcting
+  precisely because §57 is a section about that difference.
+
+The one real gap: **`CSI ? 4 m`** (XTQMODKEYS) is a query nothing answers. `vte` dispatches it to
+`report_modify_other_keys`, the engine leaves the default empty, `term/query.rs` does not cover it and
+`term/modkeys.rs` reads only the set form — so a program that asks waits out its timeout, the exact
+failure §33 exists to prevent. Cheap to close, cmote already holding the level; not done here because
+this section was about a checksum.

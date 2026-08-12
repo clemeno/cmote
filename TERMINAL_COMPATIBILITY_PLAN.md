@@ -15,7 +15,9 @@ remains is a much smaller, concrete set of genuine gaps, grouped below by where 
 **State as of §42.** Every *engine-independent* item this document ever listed is now either shipped
 or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
 (§4) are closed. §6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
-listed as cmote's policy choice when in fact the engine drops the attribute entirely. **§39 touched this
+listed as cmote's policy choice when in fact the engine drops the attribute entirely — and **§60's audit
+corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing answers) and fixing five
+more rows in §8 that had drifted from the crates. **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
 selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
@@ -169,9 +171,17 @@ DECKPAM, so the `ESC O B`-style bytes a program expects are what DECCKM alone al
 
 ---
 
-## 3. Query → reply — closed (`[reply]`)
+## 3. Query → reply — one left open (`[reply]`)
 
-The whole query class is closed. DA1 / DA2 / DSR / DECRQM are answered by the engine; the colour
+This section read **closed** until §60's audit, and the sequence that reopened it is worth the
+correction on its own: `CSI ? 4 m` (XTQMODKEYS, "what modifyOtherKeys level are you at?") is dispatched
+by `vte` to `report_modify_other_keys`, left at the trait's empty default by `alacritty_terminal`, and
+covered by neither `term/query.rs` nor `term/modkeys.rs` — which reads the *set* form and nothing else.
+So a program that asks waits out its timeout. Nobody hit it; it was found by reading the crate's trait
+impl for methods still at their default. Cheap to close, cmote already holding the level: a scanner arm
+and a two-parameter reply. Everything below is answered.
+
+DA1 / DA2 / DSR / DECRQM are answered by the engine; the colour
 and pixel-size queries by cmote's listener; and **since §33** (DA3 added in §36, XTSMGRAPHICS in §41)
 the identity queries the engine drops are answered by cmote's own stream scanner (`term::query`), the
 same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
@@ -204,8 +214,8 @@ ranger's previewer read at startup. Since §41 cmote rewrites that reply on its 
 (`query::with_sixel_attribute`) rather than sending a second DA1 (the program would parse one of them as
 input) or suppressing the engine's (that would mean cutting bytes out of an inbound stream mid-sequence).
 
-The one remaining reply-class sequence, **answerback (ENQ `0x05`)**, is refused as policy rather than
-carried as a gap — see §6.
+The other reply-class sequence still outstanding, **answerback (ENQ `0x05`)**, is refused as policy
+rather than carried as a gap — see §6. XTQMODKEYS above is the opposite: not refused, just missed.
 
 ---
 
@@ -480,9 +490,10 @@ every probe a modern program makes.
 
 ## 7. Recommendation
 
-**There is no A-sized item left.** Input (§2), query→reply (§3) and the rendering/attribute layer
-(§4) are all closed; what remains is the engine's own ceiling (§5) and the two sequences cmote refuses
-on purpose (§6). §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
+**There is no A-sized item left.** Input (§2) and the rendering/attribute layer (§4) are closed, and
+query→reply (§3) is one small row from it — §60's audit found `CSI ? 4 m` unanswered, which is a
+scanner arm's worth of work, not a design question. What else remains is the engine's own ceiling (§5)
+and the two sequences cmote refuses on purpose (§6). §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
 blink by deciding them (and, for blink, by correcting a wrong claim in this document: the engine drops
 the attribute, so it was never cmote's choice to make).
 
@@ -580,14 +591,17 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Code | Feature | Status | Note |
 |---|---|---|---|
 | 0 | Icon name + window title | ✅ | title shown; icon name dropped (`term/mod.rs`) |
+| 1 | Icon name alone | ❌ | no arm in `vte` — `0` and `2` both map to the title handler and `1` matches nothing at all, so it does nothing. Nothing is lost: cmote shows no icon name anywhere, so there would be nowhere to put it |
 | 2 | Window title | ✅ | control chars stripped (anti-spoof) |
 | 4 | Palette entry set / query | ⚠️ | query answered from cmote's scheme; **set** recorded by the engine and never read by the renderer (fixed palette) |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
 | 9 | Desktop notification | ❌ | *(policy)* — a notification leaves the window and lands on the desktop (§6, §54) |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
+| 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
 | 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | query answered (scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell); **set** recorded by the engine and never read — a full repaint for no change |
-| 22 | Mouse pointer shape | ❌ | *(policy)* — the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) |
+| 22 | Mouse pointer shape | ❌ | *(policy, and free)* — the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6). §60's audit made the **mechanism** exact, because the row read as a refusal cmote performs: `set_mouse_cursor_icon` is an empty default body in `vte`'s `Handler` that `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. The decision in §6 is one cmote would make and a cost it does not pay — but no code enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it the listener's catch-all would still drop it, so the ❌ is robust either way |
+| 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working |
 | 52 (write) | Clipboard write | ❌ | *(policy)* — remote must not poison local clipboard (§6) |
 | 52 (read) | Clipboard read | ❌ | *(policy)* — remote must not read local clipboard (§6) |
 | 104 | Reset palette entry | ❌ | no effect (fixed palette) |
@@ -604,7 +618,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | iTerm 1337 `SetBackgroundImageFile` | Background image | ❌ | *(policy)* — a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
 | iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | ❌ | *(policy)* — the effect escapes the tab (§6, §54, §55) |
 | iTerm 1337 `ClearScrollback` | Drop the scrollback | ❌ | *(policy)* — destroys the user's own record (§55); `CSI 3J` is the sanctioned spelling |
-| iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant: DECSCUSR and `CSI 14t`/`16t` already work |
+| iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant — but not by the route this row claimed until §60's audit. `CursorShape` is DECSCUSR **and** OSC 50 over again. `ReportCellSize` follows from `CSI 14t` ÷ `CSI 18t`, pixels over cells; **`CSI 16t` is not the alternative** — it has no arm in `vte` and cmote does not answer it, as the window-ops table says |
 | iTerm 1337 (every other key) | — | ❌ | *(policy)* — `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
 | 777 | urxvt notification | ❌ | *(policy)* — a notification, in a fourth spelling (§6, §54) |
 
@@ -646,8 +660,8 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
 | ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
-| ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers |
-| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | ❌ | *(policy)* — downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy |
+| Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers **both** spellings — the ANSI one (`CSI 4 $ p` → `CSI 4;2$y`, insert mode reset) as well as the private one. This row named the private form alone until §60's audit |
+| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | ❌ | *(policy, and free)* — downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy. As with OSC 22, `vte` has no arm for either final byte, so this is a decision cmote agrees with rather than one it carries out |
 
 ### ESC — single sequences
 
@@ -742,7 +756,8 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | Cell size (CSI 16 t) | ❌ | |
 | Title stack (CSI 22 / 23 t) | ✅ | `push_title` / `pop_title` |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
-| **xterm modifyOtherKeys** | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9) |
+| **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
+| **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ❌ | **an unanswered query**, and after §60 the only one left. `vte` dispatches it to `report_modify_other_keys`, `alacritty_terminal` leaves the trait's empty default, and cmote's own answerers (`term/query.rs`, §33) do not cover it — `modkeys.rs` reads the set form and nothing else. A program that asks waits out its timeout, which is the exact failure §33 exists to prevent. Cheap to close: cmote already holds the level, so this is a scanner arm and a two-parameter reply |
 | ENQ answerback | ❌ | **refused on purpose** — a lone `0x05` in binary output would type a string into the shell (§6, §36) |
 | BEL | ⚠️ | accepted, **silent** — bell event dropped |
 | BS / HT / LF / CR | ✅ | |
@@ -756,12 +771,15 @@ protected-cell erase it dropped as well, and — since §58, §59 and §60 — t
 family, checksum query included. Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048) and left-right margins. That
+the newer private modes (2027 / 2031 / 2048), the **modifyOtherKeys query** (`CSI ? 4 m` — the only
+sequence left that a program can sit and wait on, found by §60's audit rather than by anyone hitting
+it), and left-right margins. That
 last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
 do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
 exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
 costs nothing to have, rather than one that quietly took the program's saved cursor with it. All
-catalogued with their cost in §5, which is now the *only* section with anything open in it.
+catalogued with their cost in §5 — which read as the *only* section with anything open in it until
+§60's audit put one row back into §3.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -779,6 +797,24 @@ be scanned out and applied beside the grid, because the problem is not what cmot
 it is what the engine does. So `process` now cancels the offending byte in flight — advance up to it,
 feed the state machine's own CAN in its place, resume after it. "Refuse it properly" is the fourth way
 in, and the cheapest: a ❌ that costs nothing is worth more than most ✅s.
+
+§60 closed the last row of §8's CSI table and then swept the two tables above it against the crate
+sources, which turned up six rows the code and the doc disagreed about — and only one of them a gap.
+Three sequences **worked and were not written down**: OSC 50 (a third spelling of the cursor shape,
+arriving free through the same engine field DECSCUSR writes), OSC 9;9 (the Windows cwd spelling, of
+all things to be missing from a Windows client's table) and the ANSI form of DECRQM. One row
+**contradicted another**: `ReportCellSize` was refused as redundant to a `CSI 16t` that this document
+already recorded as unanswered, three tables further down. Two rows called a refusal **policy** when
+the engine had in fact dropped the sequence first — true in spirit, wrong about who was doing it, and
+worth the correction precisely because §57 is a whole section about the difference between a gap that
+costs nothing and one that costs something. The single real find is the **modifyOtherKeys query**: a
+sequence a program sends and then waits on, which nothing here answers.
+
+The lesson is about the shape of the audit rather than its findings. Every one of the six came from
+reading `vte`'s dispatch arms and `alacritty_terminal`'s `Handler` impl and asking *which trait
+methods are left at their empty default* — not from reading this document and asking whether it looked
+right. A row is only as good as the last time somebody checked it against a crate, and the two rows
+that were wrong about *why* had been right about *what* for long enough to stop being read.
 
 ---
 
