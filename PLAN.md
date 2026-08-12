@@ -288,7 +288,7 @@ cmote/
     │   ├── progress.rs    scan OSC 9;4 out of the stream: how far along the remote command says it is (§54)
     │   ├── protect.rs     scan DECSCA / DECSED / DECSEL out of the stream: the cells a program asked us not to wipe (§56)
     │   ├── cancel.rs      find the sequence the engine would read as something ELSE — DECSLRM's `s`, which its save-cursor arm takes — so `process` can cancel it in flight (§57)
-    │   ├── rect.rs        scan the VT420 rectangular ops out of the stream — DECERA / DECSERA / DECFRA / DECCRA (§58), DECCARA / DECRARA / DECSACE (§59) — plus the corner arithmetic they all resolve through
+    │   ├── rect.rs        scan the VT420 rectangular ops out of the stream — DECERA / DECSERA / DECFRA / DECCRA (§58), DECCARA / DECRARA / DECSACE (§59), DECRQCRA (§60) — plus the corner arithmetic they all resolve through and the checksum one of them reports
     │   ├── graphics.rs    scan the sixel images out of the stream and anchor each to a document line, capped and evicted oldest-first (§41)
     │   ├── sixel.rs       decode a sixel payload into RGBA pixels — in-house, no image-format dependency (§41)
     │   ├── keymap.rs      GUI key events → the bytes a terminal sends; legacy or kitty per the active mode (§9, §25)
@@ -6520,9 +6520,8 @@ refusal and the undrawable rectangle each have one.
 
 - ~~**DECCARA / DECRARA** (`$ r` / `$ t`), and the **DECSACE** (`CSI Ps * x`) that picks their
   extent~~ — **done in §59**, below.
-- **DECRQCRA** (`CSI Pid;Pp;Pt;Pl;Pb;Pr * y`) — the rectangle checksum a conformance suite blocks on. A
-  *query*, so it belongs with §33's answerers, and worth nothing unless it matches DEC's byte-exact
-  definition. §58 supplies the geometry it would read.
+- ~~**DECRQCRA** (`CSI Pid;Pp;Pt;Pl;Pb;Pr * y`) — the rectangle checksum a conformance suite blocks
+  on~~ — **done in §60**, below, on the geometry this section built.
 - **No page parameters.** DECCRA's `Pps` and `Ppd` are ignored: cmote has one page, which is what
   clamping a page number to the number of pages a terminal has comes to.
 - **No damage plumbing**, as in §56 — cmote repaints from the grid each frame, so a direct write needs
@@ -6615,7 +6614,124 @@ fails the stream tests, and assigning the flag word fails the protection test.
 
 ### Not done
 
-- **DECRQCRA** (`* y`) is still the only piece of the family left, and still §33's kind of work.
+- ~~**DECRQCRA** (`* y`) is still the only piece of the family left~~ — **done in §60**, below.
 - **Origin mode** is refused here as it is for the rest of §58's family, and for the same reason.
 - **`term/mod.rs` grew again** (~2700 lines). `splits()` now takes six positional lists and could use
   a struct; the six scanners could plausibly become one. Neither is urgent, both are noted.
+
+---
+
+## 60. Answering a question about a box (v4.0.0)
+
+The last row of the rectangular family, and the only one that writes bytes back down the pty:
+
+```
+CSI Pid ; Pp ; Pt ; Pl ; Pb ; Pr * y      DECRQCRA — report a checksum of the rectangle
+DCS Pid ! ~ XXXX ST                       DECCKSR  — the answer
+```
+
+§58 built the geometry and §59 the mode beside it; this needed neither. What it needed was a number
+that is right to the digit, which is a different kind of work from everything above it.
+
+### A checksum you derive is worth less than no checksum at all
+
+Every other sequence in this family could be reasoned out from its definition: a rectangle is a
+rectangle, an erase blanks cells. A checksum has no such property. Its only use is being compared —
+a conformance suite prints the four digits it got beside the four a real VT420 gave — so an
+implementation that is *plausible* fails exactly as loudly as one that is absent, and costs the work
+as well. Two implementations that both "sum the characters" disagree on whether the sum is negated,
+whether attributes count, what a blank weighs, and what happens at sixteen bits. There are four
+places to be wrong and no way to notice from the inside.
+
+So it was not derived. It was **copied**, from xterm's `xtermCheckRect` with no extension bits set —
+the mode xterm arrived at by comparing against screenshots from a real VT520, which makes it DEC's
+answer by way of the one implementation everybody tests against. The primary source was read, not
+remembered:
+
+- a cell weighs its character code, plus 0x04 if DECSCA protected, 0x08 hidden, 0x10 underlined,
+  0x20 reverse, 0x40 blinking, 0x80 bold;
+- a cell finishing at exactly 0x20 — a plain space, nothing added — is dropped, **except the first
+  cell of the rectangle**, which always counts, so an empty area reports one space rather than zero;
+- the total is taken mod 2^16 and **negated**, which is why a page of ordinary text reports a number
+  just under 0x10000, and is the single detail most likely to come out backwards.
+
+The trim compares the *finished* value, attributes included. An underlined blank weighs 0x30 and
+survives — a cell you can see is a cell that counts. That falls out of doing it in the right order,
+and would not have from doing it in the obvious one.
+
+### Three places it cannot match, named rather than hidden
+
+**Blink** has no bit in `alacritty_terminal`'s flag word (§59 found this the hard way), so 0x40 never
+lands. **A DEC charset cell** — `ESC ( 0` then `q` for a box-drawing rule — reaches the grid already
+translated, so cmote weighs U+2500 where xterm weighs the `q` it remembers seeing; reversing the
+translation would be a guess, since a program that wrote U+2500 directly would then be weighed wrong
+in the other direction. And **a never-written cell** reads exactly like a written blank, because the
+engine's grid starts full of blanks and has no "drawn" bit; xterm has one and skips those cells, so a
+rectangle whose first cell is virgin reports 0xFFE0 where xterm reports 0x0000.
+
+That last one is the interesting divergence, because it is bounded to a single term: **every
+rectangle that begins on a written cell agrees to the digit**, which is every rectangle a suite
+checksums after painting one. Naming the bound is worth more than the 0x20.
+
+### It reads the page, which is the whole objection
+
+Ask about a one-cell rectangle and the reply is `-(character + attributes)`. That inverts in one
+subtraction. A program can walk the page a cell at a time and recover every character on it, so a
+hostile file `cat`ed into the terminal can read back what the commands before it left on screen.
+This is a screen readback, and cmote has refused readbacks before.
+
+It is answered anyway, and the reason is a boundary rather than a preference. **Every byte on that
+page arrived from the pty the reply goes back down** — the remote wrote it, or the remote's own echo
+did. Nothing is learned that the far end did not already have. Contrast OSC 52's read form, refused
+outright since §9: the *local* clipboard holds what the user's other applications put there, which
+the remote has never seen. One crosses a boundary cmote is standing on; the other does not.
+
+Two properties keep it that way, and both are enforced rather than trusted:
+
+- **the visible page only.** Corners resolve through `area`, which clamps to `screen_lines()`, and no
+  spelling of a corner reaches a retired line. A test scrolls text into history and checks the answer
+  is the page's, and that a bottom corner of 99 clamps rather than reaches.
+- **grid cells and nothing else.** No size, no title, no working directory, no clock — nothing about
+  cmote or the machine it runs on enters the number. It repeats what the remote already said.
+
+### A query in a scanner full of commands
+
+DECRQCRA shares its `*` intermediate with DECSACE and differs by one final byte, so it belongs in
+`term/rect.rs` rather than with §33's answerers, whatever the plan said for two sections. Three
+things followed from putting it there, and all three were the point:
+
+- **The split gives it correct timing for free.** Its offset is one past the final byte like the
+  rest, but for a second reason: it *reads*, so it must answer from the page as it stood where the
+  question sat. A chunk carrying `AB`, the query, and then `ZZ` over the top reports the checksum of
+  `AB`. A test pins that with the value the wrong answer would have had.
+- **The reply goes into the engine's own buffer**, pushed at the split point, so a DSR and a checksum
+  asked for in one write come back in the order they were asked — no second reply path to keep in
+  step with the first.
+- **Origin mode costs it the rectangle and not the reply.** The rest of the family is refused
+  outright under DECOM, because the corners would be region-relative and the engine keeps its
+  scrolling region private. A query cannot take that exit: a program that gets no answer waits on a
+  terminal that has already moved on (§33). It answers `0000` — the checksum of no cells, which is
+  what it could actually reach.
+
+The grammar has one trap worth naming: **the corners start at parameter 2**, since `Pid` and `Pp`
+come first. `Pp` is then ignored, as DECCRA's two are and for the same reason — which also settles
+DEC's "`Pp` = 0 means all of page memory", because with one page the page is all of them.
+
+### What it cost
+
+One scanner arm, a nine-line accumulator, one reply formatter, one method reading the grid, and 19
+tests. The negation, the trim, the exempt first cell, the sixteen-bit wrap, the four hex digits, the
+attribute weights, the protection weight, the split timing, the scrollback clamp, the ignored extent
+and the origin-mode reply each have one. Three load-bearing parts were checked by breaking them:
+dropping the negation fails ten tests, removing the trim fails three, and letting origin mode swallow
+the query fails the one that exists to catch it.
+
+### Not done
+
+- **`CSI Ps # y` (XTCHECKSUM)**, the sequence that selects xterm's extension bits, is not implemented.
+  cmote computes the DEC-compatible default and only that; a program that asks for a different
+  variant gets the default anyway, which is better than a mode nothing honours.
+- **The never-written cell** stays indistinguishable from a written blank. Fixing it means a
+  sixteenth flag bit, and bit 15 is already cmote's (§56) — so it would mean shadow state beside the
+  grid, which is the shape §56 turned down.
+- **`term/mod.rs` is ~2930 lines.** The note from §59 stands unchanged, and is now a little louder.

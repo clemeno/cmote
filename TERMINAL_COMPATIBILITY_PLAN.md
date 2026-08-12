@@ -371,9 +371,13 @@ short, and since §41 nothing left in it is high value:
   arithmetic and four small methods (`term/rect.rs`). One limit is disclosed rather than solved:
   **origin mode is refused**, because with DECOM set the corners count from the top of the scrolling
   region and the engine keeps that region private. See PLAN §58.
-- **DRCS soft fonts, VT320 status line, and the DECRQCRA checksum query** (`* y`) some conformance
-  suites block on. `[DEC]`. The checksum is a *query* and so §33's kind of work rather than §58's,
-  and it has to match DEC's byte-exact definition to be worth answering at all. ~~The attribute half
+- **DRCS soft fonts and the VT320 status line** some conformance suites block on. `[DEC]`.
+  ~~The DECRQCRA checksum query (`* y`)~~ **SHIPPED in §60**: it was §33's kind of work rather than
+  §58's, and it is worth nothing unless the four digits match, so the algorithm was **copied** from
+  xterm's `xtermCheckRect` at its DEC-compatible default rather than derived from the shape of the
+  sequence. Three divergences are named rather than papered over — blink has no engine flag, a cell
+  written through a DEC charset designation reaches the grid already translated, and the engine cannot
+  tell a never-written cell from a written blank. ~~The attribute half
   of the rectangular family — DECCARA / DECRARA (`$ r` / `$ t`) and the DECSACE (`* x`) that picks
   their extent~~ **SHIPPED in §59**, on the geometry §58 had already built: a selector list folded to
   three masks at parse time, then applied a named bit at a time so a cell keeps its italics, its
@@ -636,7 +640,7 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 | $ v (DECCRA) | Copy rectangular area | ✅ | whole cells move, so colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph (§58). The source is read out **whole first**, because the overlapping case — scroll a sub-window by copying it over itself — is what the sequence is for. A copy running off the page is trimmed to what fits; the two page parameters are ignored, cmote having one page |
 | Ps * x (DECSACE) | Attribute change extent | ✅ | picks which shape the pair below act on: `0` / `1` the wrapped **stream** between two points (the default, and what a terminal powers up in), `2` the **rectangle** (§59). Absorbed by cmote's scanner rather than reported — it is a mode, and only the scanner sees a mode and the requests it governs in stream order, so each one leaves carrying the extent that was in force. A value DEC never defined leaves the mode where it was. RIS resets it; DECSTR does not, DEC's published list for that not naming it. Note the intermediate: `* x` is this, `$ x` is DECFRA |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | the attribute half of the family §58 shipped the content half of (§59) — corners first, then a small DEC-defined selector list, folded to three masks at parse time so the walk costs the same however long the list. `$ r` sets and clears (`0 1 4 5 7 22 24 25 27`, later wins); `$ t` flips (`0 1 4 5 7` only — "off" has no meaning for a verb that flips). Attributes only: never a colour, never a glyph, and **never the flag word wholesale**, which would take cmote's DECSCA protection bit with it (§56). An unknown selector is ignored and the rest of the list still applies, as an SGR does; a malformed *number* still drops the sequence. Blink is parsed and dropped — the engine has no bit for it |
-| Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ❌ | a *query*, so it belongs with §33's answerers rather than here — and answering it means matching DEC's exact checksum definition, which conformance suites compare against byte for byte. §58 supplies the geometry it would read |
+| Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | the one sequence in the family that answers rather than acts (`term/rect.rs`, §60). The algorithm is **xterm's `xtermCheckRect` at its DEC-compatible default**, copied rather than derived: each cell weighs its character code plus 0x04 protected / 0x08 hidden / 0x10 underline / 0x20 reverse / 0x80 bold, a plain space is trimmed unless it is the rectangle's first cell, and the total is negated and reported as `DCS Pid ! ~ XXXX ST`. The corners start at parameter **2**; the page number is ignored, cmote having one. Answered from the page as it stood **where the question sat**, and clamped to the visible page, so the scrollback cannot be read through it. Refused a rectangle under origin mode like the rest of the family — but still answered, with the checksum of no cells, because a query dropped on the floor stalls the program that asked. **Blink never lands** (no engine flag), a DEC-charset cell weighs its Unicode point, and a never-written cell reads as a written blank |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
 | 5n / 6n | Device status report | ✅ | |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
@@ -748,12 +752,11 @@ Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not 
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
 query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
-protected-cell erase it dropped as well, and — since §58 and §59 — the whole VT420 rectangular family
-bar its checksum query. Most of the ❌ column is **deliberate**: no images, no remote
+protected-cell erase it dropped as well, and — since §58, §59 and §60 — the whole VT420 rectangular
+family, checksum query included. Most of the ❌ column is **deliberate**: no images, no remote
 clipboard (OSC 52), no answerback, no remote window control (CSI t), no blink (the engine drops it),
 and a fixed colour scheme so dynamic-palette writes are query-only. The genuine plain gaps left are
-the newer private modes (2027 / 2031 / 2048), the DECRQCRA rectangle checksum (`* y`, a query and so
-§33's kind of work), and left-right margins. That
+the newer private modes (2027 / 2031 / 2048) and left-right margins. That
 last one is no longer a *capability* gap at all: §5 costs out the delegating-`Handler` build that would
 do it, and the reason it stays ❌ is that such a wrapper degrades silently on an engine bump, in
 exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
@@ -1062,6 +1065,29 @@ Audited file:line anchors behind the claims above, for later re-checking.
   flag** — `Flags` names inverse, bold, italic, dim, hidden, strikeout, five underline styles and the
   wide-character marks, and nothing blinks — so DECCARA's `5` / `25` and DECRARA's `5` are read and
   dropped there, the rest of the list unaffected.
+- **`term/rect.rs`, the checksum** (§60) — **DECRQCRA** (`* y`), the eighth sequence in the module and
+  the only one that answers rather than acts. Its corners start at parameter **2** (`Pid` and `Pp`
+  come first), which is the one thing about its grammar that is easy to get wrong; `Pp` is ignored as
+  DECCRA's two are, which also settles DEC's "`Pp` = 0 means all of page memory" — with one page, the
+  page is all of them. The arithmetic is **copied, not derived**: `Checksum::cell` / `finish` are
+  xterm's `xtermCheckRect` with no extension bits, which is the mode xterm tuned against a real VT520,
+  so it is DEC's answer by way of the implementation every suite compares against. Each cell weighs its
+  code point plus 0x04 protected (read through `protect::is_protected`, since it is not in `Flags`),
+  0x08 hidden, 0x10 underline, 0x20 reverse, 0x80 bold; a cell that finishes at exactly 0x20 is trimmed
+  unless it is the rectangle's first; the total is taken mod 2^16 and **negated**, which is why real
+  text reports a number just under 0x10000 and is the detail most easily got backwards. The reply
+  (`DCS Pid ! ~ XXXX ST`) goes into the **same buffer the engine's own replies use**, pushed at the
+  split point — so it answers from the page as it stood where the question sat, and orders correctly
+  against a DSR in the same write with no second reply path. Origin mode costs it the rectangle and not
+  the reply: it answers `0000`, because a query dropped on the floor stalls the program (§33). Three
+  divergences are stated rather than hidden: **blink** never lands (§59's hole), a **DEC-charset** cell
+  weighs its translated Unicode point where xterm weighs the byte it remembers, and a **never-written**
+  cell is indistinguishable from a written blank, so a rectangle starting on virgin grid reports 0xFFE0
+  where xterm reports 0x0000. Answering at all is a **security judgment, made explicitly**: a one-cell
+  checksum inverts in a subtraction, so this is a screen readback — but every byte on that page came
+  from the pty the reply goes back down, which is exactly what OSC 52's refused read form is not. Two
+  properties are enforced, not assumed: the rectangle clamps to the **visible page** (no scrollback),
+  and the answer is a function of grid cells and nothing about cmote or the machine.
 - **`term/cancel.rs`** — the misparse scanner (§57), and the only one here that exists because the
   engine does **not** ignore something. `Cancel::feed` is a chunk-safe CSI state machine looking for
   one shape: a final `s` with at least one parameter byte, no private marker and no intermediate —

@@ -107,6 +107,26 @@ const RECT_ATTRIBUTES: [(u8, Flags); 3] = [
 	(rect::REVERSE, Flags::INVERSE),
 ];
 
+/// What each attribute adds to a cell's weight in a DECRQCRA checksum (§60), in xterm's numbers.
+///
+/// A different table from `RECT_ATTRIBUTES` above and deliberately so: that one is the four
+/// attributes DECCARA can NAME, this one is the six that CHANGE THE NUMBER, and the two sets only
+/// look alike. Folding them together would tie a report to a request, and the next time either moved
+/// the other would follow it silently.
+///
+/// These weights are not cmote's to choose. They are `xtermCheckRect`'s, which is where every
+/// conformance suite's expected digits come from — so they are copied, and the reason they are
+/// copied is written down in `term/rect.rs` rather than repeated here. DECSCA protection is the one
+/// missing from this list, because it does not live in `Flags`: it rides bit 15 and is read through
+/// `protect::is_protected`, weighing 0x04. Blink is missing because the engine has no bit for it at
+/// all (§59), so 0x40 can never land — the honest hole, in the same place as the last one.
+const CHECKSUM_ATTRIBUTES: [(Flags, u32); 4] = [
+	(Flags::HIDDEN, 0x08),
+	(Flags::UNDERLINE, 0x10),
+	(Flags::INVERSE, 0x20),
+	(Flags::BOLD, 0x80),
+];
+
 /// cmote's terminal identity, reported to a program that sends XTVERSION (§33). The `name(version)`
 /// form is what xterm and kitty use and what a fingerprinting program pattern-matches on; the
 /// version is the crate's, stamped in at build time so the reply never drifts from the binary.
@@ -579,16 +599,23 @@ impl Terminal {
 	/// rules and every reset that widens the region back out — a second copy of state the engine
 	/// already owns, which is the shape §56 turned down.
 	fn apply_rectangle(&mut self, request: rect::Request) {
-		if self.term.mode().contains(TermMode::ORIGIN) {
+		// Origin mode refuses every operation that ACTS, for the reason above. The one that ASKS is
+		// not let off it — it cannot place its rectangle either — but it is still let through, because
+		// a question dropped on the floor leaves the program that asked waiting on a terminal that has
+		// already moved on (§33). It answers for the cells it could reach, which under origin mode is
+		// none of them.
+		let origin = self.term.mode().contains(TermMode::ORIGIN);
+		if origin && !matches!(request, rect::Request::Checksum { .. }) {
 			return;
 		}
 		let (rows, cols) = {
 			let grid = self.term.grid();
 			(grid.screen_lines(), grid.columns())
 		};
-		// The four content operations are always the box. DECSACE picks between the box and the
-		// wrapped run for the attribute pair alone (§59), which is why the extent is a parameter of
-		// `area` rather than a mode it reads: the call site is what says which family it belongs to.
+		// The four content operations are always the box, and so is the checksum. DECSACE picks
+		// between the box and the wrapped run for the attribute pair alone (§59), which is why the
+		// extent is a parameter of `area` rather than a mode it reads: the call site is what says
+		// which family it belongs to.
 		match request {
 			rect::Request::Erase(corners) => {
 				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
@@ -627,7 +654,61 @@ impl Terminal {
 					self.copy_area(source, to_row, to_col);
 				}
 			}
+			rect::Request::Checksum { id, corners } => {
+				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
+				// origin-mode refusal above — is answered with the checksum of nothing, which is
+				// what a real terminal reports for an empty area and is not a special case here:
+				// `Checksum::default().finish()` is 0 because no cell was ever weighed.
+				let area = if origin {
+					None
+				} else {
+					rect::area(corners, rect::Extent::Rectangle, rows, cols)
+				};
+				let checksum = area.map_or(0, |area| self.checksum_area(area));
+				// Into the same buffer the engine's own replies land in, at the point in the stream
+				// the question sat — so a DSR and a checksum asked for in one write come back in the
+				// order they were asked, without a second reply path to keep in step.
+				let reply = rect::checksum_reply(id, checksum);
+				self.replies
+					.lock()
+					.expect("reply buffer mutex poisoned")
+					.bytes
+					.extend_from_slice(&reply);
+			}
 		}
+	}
+
+	/// Weigh a rectangle for DECRQCRA (§60) — the one rectangular operation that reads the grid
+	/// instead of writing it.
+	///
+	/// Every cell's character code plus its attribute weights, trimmed and negated by
+	/// `rect::Checksum`. The weights are xterm's and the reason they are is in `term/rect.rs`; this
+	/// is only the half that needs the engine's types, which is why it lives here beside the writers
+	/// rather than beside the arithmetic.
+	///
+	/// The rectangle, not the extent: DECSACE selects a shape for the attribute pair alone, and
+	/// xterm's own checksum walks `left..=right` on every row regardless of it.
+	fn checksum_area(&self, area: rect::Area) -> u16 {
+		let grid = self.term.grid();
+		let mut checksum = rect::Checksum::default();
+		for row in area.rows() {
+			for column in area.columns() {
+				let cell = &grid[Line(row as i32)][Column(column)];
+				let mut value = u32::from(cell.c);
+				// Protection is not in `Flags` — it rides bit 15 (§56) — so it is read through the
+				// same helper the selective erase uses rather than by naming the bit twice.
+				if protect::is_protected(cell.flags.bits()) {
+					value += 0x04;
+				}
+				for (flag, weight) in CHECKSUM_ATTRIBUTES {
+					if cell.flags.contains(flag) {
+						value += weight;
+					}
+				}
+				checksum.cell(value);
+			}
+		}
+		checksum.finish()
 	}
 
 	/// Blank every cell of a rectangle (DECERA, §58), or every unprotected one (DECSERA).
@@ -2703,5 +2784,145 @@ mod tests {
 		assert!(!terminal.screen().cell(0, 0).unwrap().bold());
 		terminal.process(b"\x1b[?6l\x1b[1;1;3;6;1$r");
 		assert!(terminal.screen().cell(0, 0).unwrap().bold());
+	}
+
+	/// DECRQCRA reports the negated sum of what is on the cells, as four hex digits, with the
+	/// request's own id echoed back (§60). `A` + `B` is 0x83, and 0x10000 − 0x83 is 0xFF7D.
+	#[test]
+	fn a_checksum_reports_the_negated_sum_of_the_rectangle() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"AB");
+		assert_eq!(
+			terminal.process(b"\x1b[1;1;1;1;1;2*y"),
+			b"\x1bP1!~FF7D\x1b\\".to_vec()
+		);
+	}
+
+	/// The answer is the page as it stood WHERE THE QUESTION SAT, not as the rest of the chunk left
+	/// it. That is what the split-fed offset buys, and the only rectangular operation that needs it
+	/// for anything but ordering (§60).
+	#[test]
+	fn a_checksum_answers_from_the_page_the_question_arrived_on() {
+		let mut terminal = Terminal::new(2, 4);
+		// One write: print `AB`, ask about it, then overwrite it with `ZZ`. Answering at the end of
+		// the chunk would report 0xFF4C, the checksum of `ZZ`.
+		assert_eq!(
+			terminal.process(b"AB\x1b[1;1;1;1;1;2*y\x1b[1;1HZZ"),
+			b"\x1bP1!~FF7D\x1b\\".to_vec()
+		);
+		assert_eq!(read(&terminal, 0, 0, 4), "ZZ");
+	}
+
+	/// Attributes weigh into the number, in xterm's amounts: bold 0x80, underline 0x10, reverse 0x20.
+	/// A checksum of the characters alone would be a different number for every styled screen.
+	#[test]
+	fn attributes_weigh_into_the_checksum() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"\x1b[1mA");
+		// 0x41 + 0x80 = 0xC1, negated 0xFF3F.
+		assert_eq!(
+			terminal.process(b"\x1b[1;1;1;1;1;1*y"),
+			b"\x1bP1!~FF3F\x1b\\".to_vec()
+		);
+		let mut styled = Terminal::new(2, 4);
+		styled.process(b"\x1b[4;7mA");
+		// 0x41 + 0x10 + 0x20 = 0x71, negated 0xFF8F.
+		assert_eq!(
+			styled.process(b"\x1b[1;1;1;1;1;1*y"),
+			b"\x1bP1!~FF8F\x1b\\".to_vec()
+		);
+	}
+
+	/// DECSCA protection is one of the weights (0x04), and it does not live in the engine's `Flags` —
+	/// it rides bit 15 (§56), so a checksum that read `Flags` alone would miss it.
+	#[test]
+	fn a_protected_cell_weighs_four_more() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"\x1b[1\"qA\x1b[0\"q");
+		// 0x41 + 0x04 = 0x45, negated 0xFFBB.
+		assert_eq!(
+			terminal.process(b"\x1b[9;1;1;1;1;1*y"),
+			b"\x1bP9!~FFBB\x1b\\".to_vec()
+		);
+	}
+
+	/// A plain space is trimmed out of the sum, except the very first cell of the rectangle — which
+	/// is why an empty page reports one space rather than nothing.
+	///
+	/// This is also cmote's one disclosed divergence from xterm: xterm knows which cells a program
+	/// actually wrote and skips the rest, where the engine's grid starts out full of blanks that
+	/// read the same either way, so xterm answers 0x0000 for a page it has never painted (§60).
+	#[test]
+	fn a_blank_page_reports_a_single_trimmed_space() {
+		let mut terminal = Terminal::new(2, 4);
+		assert_eq!(
+			terminal.process(b"\x1b[3*y"),
+			b"\x1bP3!~FFE0\x1b\\".to_vec()
+		);
+	}
+
+	/// The rectangle resolves against the VISIBLE PAGE, so the scrollback cannot be read through it —
+	/// the security property that lets cmote answer this at all (§60). A bottom corner far past the
+	/// page clamps to it and reports the same number as the page itself.
+	#[test]
+	fn a_checksum_never_reaches_the_scrollback() {
+		let mut terminal = Terminal::new(2, 4);
+		// `AB` scrolls into the history; `CD` and `EF` are what is left on screen.
+		terminal.process(b"AB\r\nCD\r\nEF");
+		// 0x43 + 0x44 + 0x45 + 0x46 = 0x112, negated 0xFEEE. `AB` would have added 0x83 more.
+		let page = terminal.process(b"\x1b[1*y");
+		assert_eq!(page, b"\x1bP1!~FEEE\x1b\\".to_vec());
+		assert_eq!(
+			terminal.process(b"\x1b[1;1;1;1;99;99*y"),
+			page,
+			"a corner past the page clamps to it and reaches no further"
+		);
+	}
+
+	/// DECSACE picks a shape for the attribute pair alone. The checksum is always the box, as
+	/// xterm's own walk is — so the same question gets the same answer under either extent.
+	#[test]
+	fn a_checksum_ignores_the_attribute_extent() {
+		let mut terminal = Terminal::new(2, 6);
+		terminal.process(b"abcdef\r\nghijkl");
+		// Rows 1–2, columns 2–4: `bcd` and `hij`, summing to 0x264 and reported as 0xFD9C. Read as a
+		// wrapped run the same corners would take `bcdef` and `ghij` instead.
+		let stream = terminal.process(b"\x1b[0*x\x1b[1;1;1;2;2;4*y");
+		let boxed = terminal.process(b"\x1b[2*x\x1b[1;1;1;2;2;4*y");
+		assert_eq!(stream, b"\x1bP1!~FD9C\x1b\\".to_vec());
+		assert_eq!(boxed, stream);
+	}
+
+	/// A rectangle that holds no cells is still a question, and gets the checksum of nothing rather
+	/// than silence — a program waiting on an answer that never comes stalls (§33).
+	#[test]
+	fn a_rectangle_that_holds_nothing_is_still_answered() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"AB");
+		// Right corner 1 is left of left corner 3: undrawable, so no cells were weighed.
+		assert_eq!(
+			terminal.process(b"\x1b[5;1;1;3;1;1*y"),
+			b"\x1bP5!~0000\x1b\\".to_vec()
+		);
+	}
+
+	/// Origin mode refuses every operation in this family that ACTS, because the corners would be
+	/// counted from a scrolling region the engine keeps private (§58). The one that ASKS is refused
+	/// the same rectangle and answered anyway, because the alternative is a program that waits.
+	#[test]
+	fn origin_mode_costs_the_rectangle_and_not_the_reply() {
+		let mut terminal = Terminal::new(3, 4);
+		terminal.process(b"AB");
+		assert_eq!(
+			terminal.process(b"\x1b[?6h\x1b[7;1;1;1;1;2*y"),
+			b"\x1bP7!~0000\x1b\\".to_vec(),
+			"answered, for no cells"
+		);
+		terminal.process(b"\x1b[?6l");
+		assert_eq!(
+			terminal.process(b"\x1b[7;1;1;1;1;2*y"),
+			b"\x1bP7!~FF7D\x1b\\".to_vec(),
+			"and for the real ones once the mode is off"
+		);
 	}
 }

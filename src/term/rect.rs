@@ -1,4 +1,4 @@
-// term/rect.rs — the VT420 rectangular area operations (PLAN §58, §59).
+// term/rect.rs — the VT420 rectangular area operations (PLAN §58, §59, §60).
 //
 // A VT420 could act on a BOX of the screen rather than a run of it. Four sequences change what the
 // cells HOLD, all sharing the `$` intermediate and all giving their corners as `Pt;Pl;Pb;Pr` — top,
@@ -15,24 +15,29 @@
 //   CSI Pt;Pl;Pb;Pr;Ps… $ t                      DECRARA — flip them
 //   CSI Ps * x                                   DECSACE — pick which SHAPE those two act on
 //
+// And one ASKS about a box instead of changing it — the only sequence in the family that writes
+// bytes back down the pty (§60):
+//
+//   CSI Pid;Pp;Pt;Pl;Pb;Pr * y                   DECRQCRA — report a checksum of the rectangle
+//
 // They were the block operations of a forms terminal: clear a field, rule a line of `-` across a box,
 // scroll a sub-window by copying it up a row, underline a whole column of entry fields in one write.
 // A modern full-screen program repaints instead, so almost nothing emits these — but they are cheap
 // here, because everything they need already exists. §56 had to solve the hard half: writing cells
 // directly into the engine's grid, and knowing which of them a program marked as protected.
 //
-// `vte` has no arm for any of the seven. Its CSI dispatch matches `$` only in `('p', [b'$'])` and
+// `vte` has no arm for any of the eight. Its CSI dispatch matches `$` only in `('p', [b'$'])` and
 // `('p', [b'?', b'$'])` — the two DECRQM spellings — and matches `*` in no CSI at all, so every one
 // of them falls through to the unhandled arm and is dropped whole. That makes them cmote's, the same
 // way DECSCA and the `?` erases were.
 //
-// This module is the grammar and the geometry, and nothing else: it deals in plain row and column
-// numbers and in a four-bit attribute mask of its own, so every corner case of clamping, defaulting,
-// overlap and folding is tested without building a terminal. `term/mod.rs` does the cell writing, as
-// it does for the selective erase, and owns the one translation from this module's mask to the
-// engine's flag names.
+// This module is the grammar and the arithmetic, and nothing else: it deals in plain row and column
+// numbers, in a four-bit attribute mask of its own, and in the running total of a checksum, so every
+// corner case of clamping, defaulting, overlap, folding and trimming is tested without building a
+// terminal. `term/mod.rs` does the cell reading and writing, as it does for the selective erase, and
+// owns the two translations from this module's numbers to the engine's flag names.
 //
-// Five rules are worth stating where they are decided rather than where they are executed.
+// Seven rules are worth stating where they are decided rather than where they are executed.
 //
 // PROTECTION. Only DECSERA respects it. DECERA, DECFRA and DECCRA go straight through a protected
 // cell, exactly as the plain `CSI J` does and the `?` one does not (§56) — two verbs, the plain one
@@ -64,6 +69,48 @@
 // flag word wholesale. That last one is not pedantry: cmote's DECSCA protection rides bit 15 of the
 // engine's flag word (§56), so assigning the word would silently unprotect a form the moment a
 // program underlined it. Only the named bits move, one at a time.
+//
+// THE CHECKSUM IS COPIED, NOT INVENTED (§60). A number nobody else computes the same way is worth
+// less than no number at all: a conformance suite compares the four digits it got against the four a
+// real terminal gave, so a checksum that is merely plausible fails exactly as loudly as a missing one
+// and costs the work as well. cmote's is xterm's `xtermCheckRect` with no extension bits set — the
+// `CSI 0 # y` default, which is the mode xterm tuned against screenshots from a real VT520, so it is
+// DEC's answer arrived at by way of the one implementation everybody tests against:
+//
+//   * a cell contributes its character code, plus 0x04 if it is DECSCA protected, 0x08 if hidden,
+//     0x10 underlined, 0x20 reverse, 0x40 blinking, 0x80 bold;
+//   * a cell whose total comes out as exactly 0x20 — a plain space with nothing added on top — is
+//     dropped, EXCEPT the first cell of the rectangle, which always counts;
+//   * the running total is taken modulo 2^16, negated, and reported as four upper-case hex digits,
+//     which is why a page of ordinary text reports a number just under 0x10000.
+//
+// Three parts of that cmote cannot match, and names rather than papers over. BLINK has no bit in the
+// engine's flag word (§59), so 0x40 never lands — the same hole, in the same place, for the same
+// reason. A cell written through a DEC character-set designation (`ESC ( 0`, then `q` for a
+// box-drawing rule) reaches the grid already translated to Unicode, so cmote weighs U+2500 where
+// xterm weighs the `q` it remembers seeing. And xterm knows which cells a program has actually
+// WRITTEN, where the engine's grid starts out full of blanks that read identically — so a rectangle
+// whose first cell has never been written reports 0xFFE0, one trimmed space, where xterm reports
+// 0x0000. Every rectangle that begins on a written cell agrees to the digit, which is every
+// rectangle a suite checksums after painting one.
+//
+// THE CHECKSUM IS A READ, AND THAT IS THE WHOLE OBJECTION TO IT. Ask about a one-cell rectangle and
+// the reply is `-(character + attributes)`, which inverts in a single subtraction: a program can walk
+// the page a cell at a time and recover every character on it. A hostile file `cat`ed into the
+// terminal can read back what the commands before it left on screen. That is real, and it is why this
+// gets weighed against the same line every other read-back has been (§12) — and comes down on the
+// other side of it, for one reason. Every byte on that page arrived from the pty this reply goes back
+// down: the remote wrote it, or the remote's own echo did. Contrast OSC 52's read form, refused
+// outright, because the LOCAL clipboard holds what the user's other applications put there and the
+// remote has never seen any of it. A screen readback crosses no boundary cmote is standing on; a
+// clipboard readback crosses the only one that matters.
+//
+// Two properties keep it on that side, and both are enforced rather than assumed. The rectangle
+// resolves against the VISIBLE PAGE, so the scrollback is out of reach — `area` clamps to the page,
+// and there is no spelling of a corner that reaches a retired line. And the answer is a function of
+// grid cells and nothing else: not the window size, not the title, not the working directory, not the
+// clock, nothing about cmote or the machine it runs on. It repeats what the remote already said, and
+// only that.
 
 use std::ops::RangeInclusive;
 
@@ -237,6 +284,13 @@ pub enum Request {
 		extent: Extent,
 		change: Change,
 	},
+	/// DECRQCRA — report a checksum of the rectangle, and change nothing (§60). `id` is the label
+	/// the program attached so it can match the answer to the question, echoed back untouched.
+	///
+	/// The only request here that OWES a reply. The others may resolve to nothing and simply not
+	/// happen; a query that resolves to nothing still has to say so, or the program that asked waits
+	/// on a terminal that has already moved on (§33).
+	Checksum { id: u16, corners: Corners },
 }
 
 /// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then intermediate
@@ -252,9 +306,9 @@ enum Scan {
 	Csi,
 }
 
-/// The rectangular-operations scanner (§58, §59). Feed it every byte of shell output; it reports the
-/// six sequences the engine drops, in the order the stream put them, and holds the one mode among
-/// them (DECSACE) itself.
+/// The rectangular-operations scanner (§58, §59, §60). Feed it every byte of shell output; it
+/// reports the seven sequences the engine drops, in the order the stream put them, and holds the one
+/// mode among them (DECSACE) itself.
 #[derive(Debug, Default)]
 pub struct Rectangles {
 	state: Scan,
@@ -276,7 +330,9 @@ impl Rectangles {
 	/// prompt mark's. These operations name their own coordinates and never read or move the cursor,
 	/// so the offset is not about where the cursor will be — it is only about ordering against the
 	/// text in the same chunk, and applying them on the far side of the sequence the engine is about
-	/// to ignore keeps both halves in a defined state.
+	/// to ignore keeps both halves in a defined state. The checksum needs that ordering for a second
+	/// reason (§60): it READS the page, so it has to be answered from the page as it stood where the
+	/// question sat, not as the rest of the chunk went on to leave it.
 	///
 	/// DECSACE comes out of here as nothing at all: it selects a mode, and the mode is stamped onto
 	/// the attribute requests that follow it (§59). A chunk carrying only a DECSACE therefore still
@@ -381,6 +437,15 @@ impl Rectangles {
 				corners: corners(&numbers, 0),
 				extent: self.extent,
 				change: reversals(selectors(&numbers)),
+			}),
+			// DECRQCRA — the id and the page come FIRST, so the corners start at parameter 2 (§60).
+			// The page is ignored, as DECCRA's two are and for the same reason: cmote has one page,
+			// which is what clamping a page number to the number of pages there are amounts to. That
+			// also settles the `Pp = 0` case DEC defines as "all of page memory" — with one page, the
+			// whole page is all of them, and omitted corners already mean the whole page.
+			(b'y', None, [b'*']) => Some(Request::Checksum {
+				id: number(&numbers, 0),
+				corners: corners(&numbers, 2),
 			}),
 			// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
 			// mean anything; a fourth leaves the extent where it was, rather than guessing at a
@@ -595,6 +660,65 @@ pub fn copy_extent(
 		right: source.left + width - 1,
 	};
 	Some((trimmed, to_row, to_col))
+}
+
+/// What a cell has to weigh before the checksum will trim it away: a plain space, and nothing added
+/// on top of it (§60).
+///
+/// The comparison is against the cell's FINISHED value, attributes included, which is what makes it
+/// right rather than merely cheap: an underlined blank weighs 0x20 + 0x10 and so is kept. A cell you
+/// can see is a cell that counts.
+const BLANK: u32 = 0x20;
+
+/// The running total behind a DECRQCRA report (§60) — xterm's `xtermCheckRect` with no extension
+/// bits, which is the DEC-compatible default and the only version worth computing.
+///
+/// Kept here, away from the engine's types, so the two rules with any subtlety in them — the trimmed
+/// blank and the exempt first cell — are tested against numbers rather than against a grid.
+/// `term/mod.rs` weighs each cell and feeds it in; this decides what survives and what the four
+/// digits come out as.
+#[derive(Debug, Default)]
+pub struct Checksum {
+	total: u32,
+	/// Whether a cell has been counted yet. xterm's `first`, inverted: its exemption is for the
+	/// first cell of the WHOLE rectangle, not of each row, so it survives the row boundary.
+	counted: bool,
+}
+
+impl Checksum {
+	/// Weigh in one cell, given as its character code plus whatever its attributes added.
+	///
+	/// A plain space is dropped — that is the trim, and it is why a mostly-empty page checksums as
+	/// though it held only its text. The very first cell is never dropped, so an all-blank rectangle
+	/// still reports one space rather than nothing, which is xterm's behaviour and reads like a
+	/// deliberate guard against a rectangle and an empty rectangle being indistinguishable.
+	pub fn cell(&mut self, value: u32) {
+		if self.counted && value == BLANK {
+			return;
+		}
+		self.counted = true;
+		self.total = self.total.wrapping_add(value);
+	}
+
+	/// The number to report: the total modulo 2^16, negated.
+	///
+	/// Negated because DEC's terminals did, which is why a real checksum of real text is a large hex
+	/// number rather than a small one — the single detail most likely to be got wrong by an
+	/// implementation working from the shape of the sequence rather than from a terminal.
+	pub fn finish(self) -> u16 {
+		let low = (self.total & 0xffff) as u16;
+		low.wrapping_neg()
+	}
+}
+
+/// The DECCKSR report a DECRQCRA earns: `DCS Pid ! ~ XXXX ST` (§60).
+///
+/// The id is echoed back exactly as the program spelled it, which is its whole purpose — a program
+/// with several questions outstanding matches answers to questions by it. The checksum is four
+/// upper-case hex digits, always four: a short one would be read as a short reply rather than a
+/// small number.
+pub fn checksum_reply(id: u16, checksum: u16) -> Vec<u8> {
+	format!("\x1bP{id}!~{checksum:04X}\x1b\\").into_bytes()
 }
 
 #[cfg(test)]
@@ -1124,6 +1248,116 @@ mod tests {
 		// An omitted destination reads as 0, and both 0 and 1 mean the first row or column.
 		let source = boxed(box_of(3, 3, 4, 4), 24, 80).expect("inside the page");
 		assert_eq!(copy_extent(source, 0, 0, 24, 80), Some((source, 0, 0)));
+	}
+
+	#[test]
+	fn a_checksum_request_reads_its_id_then_its_corners() {
+		// `Pid;Pp;Pt;Pl;Pb;Pr` — the rectangle starts at parameter 2, two later than everywhere else
+		// in this family, which is the one thing about DECRQCRA's grammar that is easy to get wrong.
+		assert_eq!(
+			scan(b"\x1b[42;1;2;3;4;5*y"),
+			vec![(
+				16,
+				Request::Checksum {
+					id: 42,
+					corners: box_of(2, 3, 4, 5),
+				}
+			)]
+		);
+	}
+
+	#[test]
+	fn a_checksum_may_name_no_rectangle_at_all() {
+		// DEC defines an omitted rectangle as the whole page, and `Pp = 0` as all of page memory —
+		// which on a one-page terminal is the same answer, reached by the same defaulting.
+		assert_eq!(
+			scan(b"\x1b[1*y"),
+			vec![(
+				5,
+				Request::Checksum {
+					id: 1,
+					corners: box_of(0, 0, 0, 0),
+				}
+			)]
+		);
+	}
+
+	#[test]
+	fn a_checksum_and_an_extent_are_one_final_byte_apart() {
+		// `* x` selects the attribute extent and reports nothing; `* y` asks a question. Sharing an
+		// intermediate, they are told apart by the final byte alone.
+		assert!(scan(b"\x1b[2*x").is_empty());
+		assert_eq!(scan(b"\x1b[2*y").len(), 1);
+	}
+
+	#[test]
+	fn a_self_test_is_not_mistaken_for_a_checksum() {
+		// `CSI 2;1 y` with no intermediate is DECTST, which orders a terminal to run its power-up
+		// self-test. Claiming it here would answer a question nobody asked with a number.
+		assert!(scan(b"\x1b[2;1y").is_empty());
+		assert!(scan(b"\x1b[1;1;1;1;1;1$y").is_empty());
+	}
+
+	#[test]
+	fn the_checksum_is_the_negated_sum() {
+		// `AB` is 0x41 + 0x42 = 0x83, and DEC reports the negative of it. Getting this backwards is
+		// the single most likely way to ship a checksum that is wrong in every case at once.
+		let mut checksum = Checksum::default();
+		checksum.cell(0x41);
+		checksum.cell(0x42);
+		assert_eq!(checksum.finish(), 0xff7d);
+	}
+
+	#[test]
+	fn a_plain_space_is_trimmed_and_the_first_cell_is_not() {
+		// ` ` ` ` `A`: the leading space counts because it is first, the second is dropped, and `A`
+		// counts because it is not a space. 0x20 + 0x41 = 0x61.
+		let mut checksum = Checksum::default();
+		checksum.cell(0x20);
+		checksum.cell(0x20);
+		checksum.cell(0x41);
+		assert_eq!(checksum.finish(), 0xff9f);
+		// The exemption is for the rectangle, not for each row — feeding a whole row of blanks
+		// leaves the total at one space however many there were.
+		let mut row = Checksum::default();
+		for _ in 0..80 {
+			row.cell(0x20);
+		}
+		assert_eq!(row.finish(), 0xffe0);
+	}
+
+	#[test]
+	fn a_blank_that_can_be_seen_is_not_trimmed() {
+		// An underlined space weighs 0x20 + 0x10, which is not 0x20, so it survives the trim. That
+		// is the whole reason the comparison is against the finished value rather than the glyph.
+		let mut checksum = Checksum::default();
+		checksum.cell(0x41);
+		checksum.cell(0x30);
+		assert_eq!(checksum.finish(), 0xff8f);
+	}
+
+	#[test]
+	fn a_rectangle_with_no_cells_checksums_as_zero() {
+		assert_eq!(Checksum::default().finish(), 0);
+	}
+
+	#[test]
+	fn the_total_wraps_at_sixteen_bits() {
+		// A big enough rectangle overflows, and the report is the low sixteen bits of the sum,
+		// negated. 0xff00 twice is 0x1fe00, so the sum is 0xfe00 and the report 0x0200.
+		let mut checksum = Checksum::default();
+		checksum.cell(0xff00);
+		checksum.cell(0xff00);
+		assert_eq!(checksum.finish(), 0x0200);
+	}
+
+	#[test]
+	fn the_report_echoes_the_id_and_four_hex_digits() {
+		// `DCS Pid ! ~ XXXX ST`. Four digits always, upper case always: a program reading a fixed
+		// width would take a short number as a short reply.
+		assert_eq!(checksum_reply(42, 0xff7d), b"\x1bP42!~FF7D\x1b\\".to_vec());
+		assert_eq!(checksum_reply(0, 0), b"\x1bP0!~0000\x1b\\".to_vec());
+		assert_eq!(checksum_reply(7, 0x000a), b"\x1bP7!~000A\x1b\\".to_vec());
 	}
 
 	#[test]
