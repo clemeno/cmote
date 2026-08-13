@@ -40,7 +40,9 @@ gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecol
 much — an empty note being the explicit claim that nothing is withheld. Sweeping for rows that had been
 leaning on the reader found one supported sequence with no row at all (`1005`, UTF-8 mouse), one
 unsupported spelling with none (`CSI ? 6 n`), one row carrying two different reports (DSR, now `5n` and
-`6n`), and seven rows whose extent had been left to the reader.
+`6n`), and seven rows whose extent had been left to the reader. **§68 then split the last rows that stated
+two answers in one** — `OSC 0`, `OSC 8`, DECSCUSR, XTSMGRAPHICS, DECKPAM, charset designation and the
+XTMODKEYS query — so §8 now holds one answer and one mechanism per row, with no exceptions left over.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -621,12 +623,16 @@ encoding, live on the seam since the mouse shipped), DSR was one row for two dif
 was right for a reason it never gave (`ESC % G`), and one more ❌ came to light (`CSI ? 6 n`). None of
 that is work — it is the table saying what it already does.
 
-The same rule has one more consequence, stated so it is not discovered as a surprise: **a few ✅ rows still
-carry a "but only…" clause** — `OSC 0` (title yes, icon name no), `OSC 8` (http/https/mailto only, the
-rest refused by `link.rs`), `ESC ( ) * +` (ASCII and line drawing only), `r` (DECSTBM, vertical only),
-`SP q` (DECSCUSR, shape yes and blink dropped) and `CSI ? 4 m` (resource 4 of XTMODKEYS' seven). By the
-one-answer-per-row rule each of those is two rows, in ✅/❌ or ✅/🛑 pairs. §66 did not split them: they
-are honest as written and their second halves are named in their own notes, whereas a partial named nothing.
+**§68 closed that consequence rather than leaving it as a note.** The ✅ rows carrying a "but only…"
+clause are now split in ✅/❌ or ✅/🛑 pairs: `OSC 0` (title) against `OSC 1` (the icon name, wherever it
+is spelled), `OSC 8`'s three openable schemes against every other one (drawn, never launched — `link.rs`),
+`ESC ( ) * +`'s `B` and `0` against the 94-charsets `vte` drops, DECSCUSR's shape against its blink (a
+refusal cmote performs, the engine having stored the flag), XTSMGRAPHICS' read against its set (answered
+`status 3`), DECKPAM's encoded keys against the numpad digits NumLock owns, and the XTMODKEYS query's
+resource 4 against the six cmote does not track. One case needed no split: DECSTBM's horizontal twin is
+DECSLRM, which has had a row of its own since §57, so the note points at it. Deciding each pair's second
+mark is what the split is worth — three turned out to be refusals cmote performs, four gaps nobody had
+named.
 
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
@@ -768,20 +774,25 @@ and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. That is why 
 here: a row saying two things at once cannot be checked, and every finding this document has recorded came
 from checking one. Sections below that speak of a row having been "partial" are describing what it used to
 carry, not a mark still in use — the symbol itself is gone from this document, so it cannot be copied into
-a new row by someone skimming for an example. The cost is admitted in §7 — a handful of ✅ rows still carry
-a "but only…" clause, and by this rule each of those is two rows too.
+a new row by someone skimming for an example. **§68 paid the last of the cost**: the ✅ rows that had been
+carrying a "but only…" clause are split too, so every row in this table is now one answer — `OSC 0`'s title
+against `OSC 1`'s icon name, `OSC 8`'s three schemes against every other one, DECSCUSR's shape against its
+blink, XTSMGRAPHICS' read against its set, DECKPAM's keys against its digits, and the two charset finals
+that work against the rest. Where a row's second half already had a row of its own — DECSTBM's horizontal
+twin is DECSLRM — the note points at it instead of repeating it.
 
 ### OSC — Operating System Command
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| 0 | Icon name + window title | ✅ | title shown; icon name dropped (`term/mod.rs`) |
-| 1 | Icon name alone | ❌ | no arm in `vte` — `0` and `2` both map to the title handler and `1` matches nothing at all, so it does nothing. Nothing is lost: cmote shows no icon name anywhere, so there would be nowhere to put it |
+| 0 (title half) | Window title | ✅ | the same handler `OSC 2` uses, control characters stripped (`term/mod.rs`) |
+| 1, and the icon half of 0 | Icon name | ❌ | `vte` maps `0` and `2` alike to the title handler and has no arm for `1` at all, so the icon name is dropped wherever it is spelled. Nothing is lost: cmote shows no icon name anywhere, so there would be nowhere to put it |
 | 2 | Window title | ✅ | control chars stripped (anti-spoof) |
 | 4 (query) | Palette entry query | ✅ | answered from cmote's scheme: `report_color` resolves the slot through the shared const table `ui/grid.rs` paints from, so the answer never disagrees with the screen. Pinned by `a_palette_colour_query_reports_that_slot` |
 | 4 (set) | Palette entry set | 🛑 | the theme is chrome the **user** chose (§6) — the same refusal row 104 carries for the reset side. The engine records the value in `Term::colors` and nothing in `src/` reads that table; `ui/grid.rs` paints through a style resolver that is never handed a terminal, so the renderer's half of the refusal is structural. Since §64 the reply's half is pinned by `a_palette_colour_set_does_not_move_the_query_answer`, which proves the engine stored the set before asserting the answer ignores it |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
-| 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
+| 8 (http / https / mailto) | Hyperlinks | ✅ | rendered, underlined under a Ctrl-hover, and followed on Ctrl-click or through the right-click menu (`link.rs`, §24) |
+| 8 (any other scheme) | Hyperlinks | 🛑 | still drawn as a link, never opened. A scheme decides which local program the OS launches and the URI comes from the remote, so `link.rs` holds a three-entry `ALLOWED_SCHEMES` allow-list and turns anything else — `file:`, an app scheme, a URI with no `:` at all — into a note to the user rather than a launch (§24) |
 | 9 | Desktop notification | 🛑 | a notification leaves the window and lands on the desktop (§6, §54). cmote's own scanners perform this one: `term/progress.rs` matches `9;4;` and `term/cwd.rs` matches `9;9;`, so a bare `9;<text>` is *seen* and declined — pinned by `the_other_osc_nine_sequences_are_left_alone`. `vte` has no OSC 9 arm, so the engine would never have offered it either |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
 | 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
@@ -832,7 +843,7 @@ a "but only…" clause, and by this rule each of those is two rows too.
 | ! p (everything else) | Soft reset — the rest | ❌ | `vte`'s `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for DECRQM and **no arm for `('p', [b'!'])`**, so origin mode, autowrap, the keypad mode, cursor visibility, the scrolling region, the pen and the charset designations all survive a soft reset untouched. A **gap**, not a policy — nothing here refuses it, and `ESC c` (RIS) does have an arm, so a program that wants state cleared has a spelling that works (§65) |
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
-| r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
+| r (DECSTBM) | Scrolling region (top / bottom) | ✅ | the vertical region in full, top and bottom, honoured by every operation that scrolls. The horizontal one is a different sequence with its own row below (`s`, DECSLRM) |
 | s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out, on **price rather than capability** — there is a seam (`Processor::advance` is generic over `Handler`, which `Term` merely implements), but a delegating wrapper over a 71-method trait whose every method has a default empty body degrades **silently** on an engine bump, and nothing emits DECSLRM outside a conformance suite. Costed in §5. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
 | g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
@@ -844,13 +855,15 @@ a "but only…" clause, and by this rule each of those is two rows too.
 | Ps * x (DECSACE) | Attribute change extent | ✅ | picks which shape the pair below act on: `0` / `1` the wrapped **stream** between two points (the default, and what a terminal powers up in), `2` the **rectangle** (§59). Absorbed by cmote's scanner rather than reported — it is a mode, and only the scanner sees a mode and the requests it governs in stream order, so each one leaves carrying the extent that was in force. A value DEC never defined leaves the mode where it was. RIS resets it; DECSTR does not, DEC's published list for that not naming it. Note the intermediate: `* x` is this, `$ x` is DECFRA |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | the attribute half of the family §58 shipped the content half of (§59) — corners first, then a small DEC-defined selector list, folded to three masks at parse time so the walk costs the same however long the list. `$ r` sets and clears (`0 1 4 5 7 22 24 25 27`, later wins); `$ t` flips (`0 1 4 5 7` only — "off" has no meaning for a verb that flips). Attributes only: never a colour, never a glyph, and **never the flag word wholesale**, which would take cmote's DECSCA protection bit with it (§56). An unknown selector is ignored and the rest of the list still applies, as an SGR does; a malformed *number* still drops the sequence. Blink is parsed and dropped — the engine has no bit for it |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | the one sequence in the family that answers rather than acts (`term/rect.rs`, §60). The algorithm is **xterm's `xtermCheckRect` at its DEC-compatible default**, copied rather than derived: each cell weighs its character code plus 0x04 protected / 0x08 hidden / 0x10 underline / 0x20 reverse / 0x80 bold, a plain space is trimmed unless it is the rectangle's first cell, and the total is negated and reported as `DCS Pid ! ~ XXXX ST`. The corners start at parameter **2**; the page number is ignored, cmote having one. Answered from the page as it stood **where the question sat**, and clamped to the visible page, so the scrollback cannot be read through it. Refused a rectangle under origin mode like the rest of the family — but still answered, with the checksum of no cells, because a query dropped on the floor stalls the program that asked. **Blink never lands** (no engine flag), a DEC-charset cell weighs its Unicode point, and a never-written cell reads as a written blank |
-| Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
+| Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | block, underline and bar, read off `cursor_style.shape` by `term/screen.rs`; `0` restores the default, `7`+ falls to `unhandled!()` in `vte` |
+| Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | cmote's refusal, not an absence: `vte` does carry the blink (`blinking: id % 2 == 1`) and the engine stores it, and cmote's own seam declines to — `CursorShape` has no blink variant and cmote runs no animation timer. The same refusal as mode `12 (the blink)`, one sequence over |
 | 5n | Device status report | ✅ | `CSI 0 n`, "terminal ok" — the whole of what DSR 5 is |
 | 6n | Cursor position report | ✅ | `CSI <row> ; <col> R`, one-based, from the live cursor |
 | ? 6 n | Extended cursor position (DECXCPR) | ❌ | `vte` has `('n', [])` and no `('n', [b'?'])`, so the private spelling reaches nothing — a program that wants the page number back gets silence. `CSI 6 n` is the spelling that works (§67) |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
-| ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
+| ? Pi;Pa;1 S / ? Pi;Pa;4 S | Graphics attributes — read (XTSMGRAPHICS) | ✅ | colour registers and maximum image size, answered `status 0` from the decoder's real limits (§41) |
+| ? Pi;Pa;3 S | Graphics attributes — set | 🛑 | answered `status 3`, failure, by cmote's own `graphics_reply` — the limits are the decoder's and are not a remote's to move (`term/query.rs`, §41) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | engine answers **both** spellings — the ANSI one (`CSI 4 $ p` → `CSI 4;2$y`, insert mode reset) as well as the private one. This row named the private form alone until §60's audit |
 | # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | downstream of the fixed scheme (§6): a stack over a palette that is never read has nothing to save or restore, so ignoring push, set and pop alike is consistent rather than lossy. `vte` has no CSI arm for either final byte, so — as with OSC 22 — this is a decision cmote agrees with rather than one it carries out |
 
@@ -863,9 +876,11 @@ a "but only…" clause, and by this rule each of those is two rows too.
 | ESC H | Set tab stop | ✅ | at the cursor's column (HTS) |
 | ESC 7 / ESC 8 | Save / restore cursor | ✅ | |
 | ESC c (RIS) | Full reset | ✅ | |
-| ESC = / ESC > | Keypad app / numeric | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
+| ESC = / ESC > | Keypad application / numeric | ✅ | tracked on the seam (`Screen::application_keypad`) and encoded for the numpad keys that have no NumLock meaning to lose — Enter and `* + , - / =` (DECKPAM, §2, §36) |
+| ESC = — the numpad digits | Keypad application mode | 🛑 | the digits keep their NumLock behaviour rather than sending `SS3 p`–`SS3 y`: `keymap::encode` has one guarded branch and the digits sit outside it on purpose, NumLock being the user's own switch and not a remote's (§2, §36) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | |
-| ESC ( / ) / * / + | Designate charset G0 / G1 / G2 / G3 | ✅ | all four slots — `configure_charset` maps the four intermediates — but only ASCII (`B`) and DEC line drawing (`0`); any other final falls to `unhandled!()`. Designating G2 / G3 works and is inert in practice, since nothing can invoke them (below) |
+| ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | all four slots, `configure_charset` mapping the four intermediates. Designating G2 or G3 works and is inert in practice, nothing being able to invoke them (below) |
+| ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ | UK, Dutch, Finnish and the rest fall to `unhandled!()` in `vte`, so nothing designates them — and nothing would draw them if it did |
 | ESC N / ESC O | Single shift G2 / G3 | ❌ | |
 | SI / SO (LS0 / LS1) | Locking shift G0 / G1 | ✅ | `vte`'s `execute` maps SI to `set_active_charset(G0)` and SO to G1 — the two spellings anything in practice uses |
 | LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ | no `esc_dispatch` arm for `n`, `o`, `~`, `}` or `\|`, so each reaches no handler. With SS2 / SS3 missing too (above), G2 and G3 can be designated and never invoked — a gap nobody here declines (§65) |
@@ -948,7 +963,7 @@ a "but only…" clause, and by this rule each of those is two rows too.
 | Kitty graphics protocol / unicode placeholders / animation | ❌ | its payloads are PNG/RGBA chunks, so it needs an image-format decoder — a dependency and a security decision, not a rendering gap (§5, §41) |
 | ReGIS | ❌ | a vector language; no users worth an interpreter (§5) |
 | iTerm2 inline images (OSC 1337) | ❌ | same reason as kitty: a PNG/JPEG payload (§5, §41) |
-| Graphics capability report | ✅ | XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) answered from the decoder's real limits — 256 registers, 4096×4096 / 4 Mpx; a *set* honestly refused (`term/query.rs`, §41) |
+| Graphics capability report | ✅ | XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) **read**, answered from the decoder's real limits — 256 registers, 4096×4096 / 4 Mpx (`term/query.rs`, §41). The *set* action is refused and has its own row in the CSI table |
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | cmote owns its tabbed window; a remote can't drive it (§6) — and the mark moved here in the same pass that added it: `vte`'s `('t', [])` arm handles **14 / 18 / 22 / 23 only** and sends every other parameter to `unhandled!()`, so there is no `Handler` method for window manipulation at all. Nothing to refuse, nothing to pin |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
@@ -956,7 +971,8 @@ a "but only…" clause, and by this rule each of those is two rows too.
 | Title stack (CSI 22 / 23 t) | ✅ | the **window title** only, and only the first parameter: `vte` reads `22` / `23` and ignores the `; 0` / `; 1` / `; 2` that would name icon-title-only or window-title-only, so all three spellings push and pop the one title cmote has. The engine caps the stack at 4096 and drops the oldest entry rather than failing (§67) |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
-| **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply back to restore the state. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it. **Resource 4 only**: XTMODKEYS carries seven, cmote holds one, and the reply being an XTMODKEYS control leaves no way to say "not mine" — so the other six draw silence rather than an invented level. Answered where the question sits in the stream, not where the chunk ends |
+| **xterm modifyOtherKeys** — query (`CSI ? 4 m`), resource 4 | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply straight back to restore the state. Answered where the question sits in the stream, not where the chunk ends. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it |
+| **xterm modifyOtherKeys** — query, the other six resources | ❌ | XTMODKEYS carries seven resources and cmote holds one. A query for any of the rest draws silence: the reply is itself an XTMODKEYS control, which has no way to say "not mine", so the alternative would be inventing a level. Honest, and still a gap — nothing tracks those six (§61, §68) |
 | ENQ answerback | 🤷 | a lone `0x05` in binary output would type a string into the shell (§6, §36) — a decision cmote holds and nothing carries out: `vte`'s `execute` matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's scanner has no arm for it. Answerback is refused by never having been written, which is the cheapest refusal in the document and the least pinned |
 | BEL | 🛑 | accepted and **silent** by decision, not by absence: `vte` dispatches it and `alacritty_terminal` implements it as `Event::Bell`, so the event really arrives and the catch-all arm of `Replies::send_event` drops it (§6 — a remote may change what its own tab looks like and nothing more). The last refusal in this document riding a fall-through alone: unlike OSC 52 there is no config field to state it in, and unlike the colour sets there is no renderer that structurally cannot read it (§63, §65) |
 | BS / HT / LF / CR | ✅ | |
@@ -1086,6 +1102,16 @@ is also why there is no way back out to ISO-8859-1. Seven rows gained the extent
 the reader: tabs and HTS, `CSI g`'s two parameters, the mouse's buttons, the title stack's one title and
 4096-deep cap, and DSR's two halves. One new ❌: `CSI ? 6 n`, the private cursor-position spelling, which
 reaches nothing.
+
+**§68 spent the rule's last instalment.** §66 had named six ✅ rows that carried a "but only…" clause and
+left them, on the grounds that they at least *said* their second half — which was true, and was also the
+argument every partial row had made before it. Splitting them cost seven pairs and forced seven decisions
+the notes had been dodging: `OSC 8`'s refused schemes, DECSCUSR's blink and XTSMGRAPHICS' set turn out to
+be refusals **cmote performs** (an allow-list, a seam that drops a flag the engine stored, a `status 3`
+written by cmote's own code), while charset designation, the XTMODKEYS query's other six resources and
+`OSC 0`'s icon-name half are gaps nobody had ever marked as such. That is the whole value of the rule
+stated in one line: a second half left inside a note is a decision nobody has had to make, and this
+document's entire audit history is what happens when those pile up.
 
 ---
 

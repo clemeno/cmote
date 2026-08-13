@@ -7360,3 +7360,58 @@ note is precisely what stops a row from being findable by what it does.
   means) without making them *ideal*.
 - **`CSI ? 6 n` is a real ❌ nobody will miss.** Answering it would mean inventing a page number cmote
   does not have, and the standard spelling already works.
+
+## 68. Paying the rest of the rule (v4.0.0)
+
+§66 set the rule — one row, one answer, one mechanism — and named six ✅ rows that broke it, then left
+them alone. The reason given was that they *said* their second half in the note, unlike a partial, which
+said nothing. That was true, and it was also exactly the defence every partial row had been making for
+five sections.
+
+### The seven pairs
+
+| Row | Split into | The decision it forced |
+|---|---|---|
+| `OSC 0` | title ✅ + the icon half ❌ | the icon name is dropped by `vte` wherever it is spelled, so `OSC 1`'s row now covers both |
+| `OSC 8` | http/https/mailto ✅ + any other scheme 🛑 | `link.rs`'s `ALLOWED_SCHEMES` is an allow-list; the link is still **drawn**, never launched, because the scheme picks which local program the OS starts |
+| `ESC ( ) * +` | `B` / `0` ✅ + any other final ❌ | UK, Dutch, Finnish and the rest hit `unhandled!()`; nothing designates them and nothing would draw them |
+| `Ps SP q` (DECSCUSR) | shape ✅ + blink 🛑 | `vte` carries the blink (`blinking: id % 2 == 1`) and the engine stores it — cmote's seam drops it, so this is a refusal cmote performs |
+| XTSMGRAPHICS | read ✅ + set 🛑 | `graphics_reply` answers a set with `status 3`: the decoder's limits are not a remote's to move |
+| `ESC =` (DECKPAM) | the encoded keys ✅ + the numpad digits 🛑 | NumLock is the user's switch; `keymap::encode` leaves the digits outside its guarded branch on purpose |
+| `CSI ? 4 m` | resource 4 ✅ + the other six ❌ | the reply is itself an XTMODKEYS control with no way to say "not mine", so silence beats an invented level — honest, and still nothing tracks them |
+
+One row needed no split. **DECSTBM**'s "vertical only" is not a second answer: the horizontal margins are
+a different sequence, DECSLRM, with a row of its own since §57. The note points at it now instead of
+carrying it.
+
+### Why it was worth the edit
+
+Three of the seven second halves are refusals **cmote performs** — an allow-list, a seam that drops a flag
+the engine had already stored, a failure status cmote writes itself. Four are gaps nobody had marked.
+Before the split, all seven read as the same thing: a clause after a semicolon.
+
+That is the argument for the rule in one line. **A second half left inside a note is a decision nobody has
+had to make.** The mark forces someone to choose between ❌, 🛑 and 🤷, and choosing is what turns up the
+`ESC % G` sort of finding — a row that was right for a reason it had never given. This document's whole
+audit history (§60's six wrong rows, §62's two, §64's two, §65's seven, §66's two, §67's four) is what
+happens when a note is allowed to hold what a column should.
+
+### What it cost
+
+Markdown only. Seven rows became fourteen, one row gained a cross-reference, and the legend's closing
+paragraph now says the cost is *paid* rather than admitted. **No code changed and no answer changed** —
+every one of these fourteen rows describes behaviour that predates the split.
+
+### Not done
+
+- **`OSC 8`'s refused schemes are unpinned.** `link.rs` has tests for the allow-list itself, but nothing
+  asserts that the grid still *draws* a refused link rather than hiding it — the visible half of the
+  decision. Small, and worth it the next time §24 is touched.
+- **The XTMODKEYS six are still a gap, not a plan.** Tracking them means holding six more resources for
+  programs that essentially never ask; the ❌ is honest and the work is not obviously worth doing.
+- **Rows whose "extent" is about output fidelity were left alone on purpose** — the mouse's three buttons
+  and vertical wheel, the kitty protocol's best-effort alternate keys. Nothing a program *sends* gets a
+  different answer there; the limit is in what cmote's own encoder produces, which is an extent under
+  §67's definition of ✅ rather than a second answer under §66's rule. That line is worth keeping in mind
+  the next time someone is tempted to split a row: the test is whether a program can send something and
+  get a different answer.
