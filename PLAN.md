@@ -7119,3 +7119,98 @@ being described as an expensive one.
 - **The other ⚠️ rows outside the OSC table have not had this treatment** — DECSTR, locking shifts,
   DECRQSS, XTGETTCAP, DECCOLM, blinking cursor, DECSDM, synchronized output, BEL. Each is a partial for
   its own reason and each would need the same read-the-crate pass to say whether its note still holds.
+
+## 65. Asking the partials which part (v4.0.0)
+
+§64 split the two ⚠️ colour rows and left the obvious question hanging: there were eight more ⚠️ rows in
+the matrix, and none of them had ever been audited the way §60 audited the ❌ and 🛑 ones. This section
+audits all ten, and the result is lopsided enough to be worth stating first: **seven were two answers
+hiding under one mark, one was a refusal wearing a partial's clothes, and two were honestly partial.**
+
+### Why the partials were the least examined rows
+
+A ❌ invites someone to close it. A 🛑 invites someone to check whether the refusal is real — which is
+exactly what §62 and §63 did. A ⚠️ invites nothing. It has already admitted that something is missing, so
+nobody asks *which part*, and a note of five words ("SO / SI + designation only") is never felt as thin.
+That is how the one real finding below sat in plain sight for this long.
+
+### The seven splits
+
+Each is now two rows, following the `(query)` / `(set)` shape §64 settled on:
+
+| Was | Now | What the audit found |
+|---|---|---|
+| `SetUserVar` ⚠️ | `=gitBranch` ✅ + any other name 🛑 | the name is matched whole **before** anything is decoded, so there is no map for a remote to fill — pinned by `only_the_one_honoured_variable_name_is_kept` |
+| `CSI ! p` ⚠️ | DECSCA part ✅ + the rest ❌ | `vte` has `('p', [b'$'])` and `('p', [b'?', b'$'])` and **no `('p', [b'!'])`**, so a soft reset leaves origin mode, autowrap, the keypad, the scrolling region and the pen untouched. A gap, not a policy |
+| locking shifts ⚠️ | `SI`/`SO` ✅ + `LS2`/`LS3`/`LS1R`… ❌ | `execute` maps only SI and SO; `esc_dispatch` has no arm for `n`, `o`, `~`, `}`, `\|`. G2/G3 can be designated (`ESC * B`) and never invoked |
+| mode 3 ⚠️ | side effects ✅ + column resize 🤷 | the engine's `deccolm` clears the grid and region on purpose and declines the resize itself — cmote is never asked, so it is a 🤷, the same shape as `CSI 1–10 t` |
+| mode 12 ⚠️ | the mode ✅ + the blink 🛑 | engine tracks and DECRQM reports; `CursorShape` carries no blink and cmote runs no animation timer, and `Event::CursorBlinkingChange` hits the catch-all. Both halves of the refusal are cmote's |
+| mode 80 ⚠️ | behaviour ✅ + the mode 🤷 | `NamedPrivateMode` has no 80, so it is `Unknown(80)` — logged, ignored, and honestly reported `NotSupported` |
+| mode 2026 ⚠️ | batching ✅ + abort timeout ❌ | see below |
+
+`BEL` was the eighth: not a partial at all, but a refusal. `vte` dispatches it, `alacritty_terminal`
+implements it (`bell()` raises `Event::Bell`), and cmote's catch-all drops it — §6's rule, performed by
+cmote's own code. Re-marked 🛑, and noted as the last refusal in the document standing on a fall-through
+alone: OSC 52 got a field in §63, and the colour sets have a renderer that structurally cannot read them.
+
+`DECRQSS` and `XTGETTCAP` keep their ⚠️, and their notes now say what the mark means: every request draws
+a valid reply, and one setting (`m`, from the live pen) and two capabilities (`TN`, `Co`) carry data. The
+rest answer "not reported" rather than guessing. That is partial in the plain sense — one answer, given
+where it can be given truthfully.
+
+### The finding: a remote can hold the screen still
+
+Mode 2026 read *"parser batches; engine mode is a no-op; cmote already atomic"*. All three clauses are
+true, and together they are reassuring in a way the row does not deserve.
+
+Synchronized output lives in `vte`'s `Processor`, not in the engine. `BSU` (`CSI ? 2026 h`) starts
+buffering the stream; `ESU` flushes the whole buffer through the parser inside one `advance`. So far so
+good — the frame really is atomic, which is what the row was celebrating. But a program can crash between
+the two, and `vte` plans for that:
+
+```rust
+const SYNC_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
+
+pub fn advance<H>(&mut self, handler: &mut H, bytes: &[u8]) {
+    while processed != bytes.len() {
+        if self.state.sync_state.timeout.pending_timeout() {
+            processed += self.advance_sync(handler, &bytes[processed..]);
+        } else { /* normal parse */ }
+    }
+}
+```
+
+The timeout is *checked* on the way in, and never *expires* on its own: `advance_sync` only extends the
+buffer and looks for `BSU`/`ESU`. Expiry is the application's job — `Processor::sync_timeout()` returns
+the `Instant`, and the application calls `Processor::stop_sync()` once it passes. **cmote calls
+neither.** There is no hit for `sync_timeout`, `stop_sync` or `pending_timeout` anywhere in `src/`.
+
+So: a remote sends eight bytes and stops writing. cmote's PTY reader has nothing to read, so `advance` is
+never called again, so the buffered bytes are never flushed, so the grid keeps rendering the pre-BSU
+state. The screen is frozen until the remote sends `CSI ? 2026 l` or pushes 2 MiB (`SYNC_BUFFER_SIZE`,
+whose overflow path does flush).
+
+Worth being precise about the severity, in both directions. Nothing leaks, no state is corrupted, the
+session is alive, the user can still type, switch tabs, or disconnect — it is a stuck *picture*, not a
+stuck client, and any remote that can do this can already scribble on the screen. But it is a
+remote-triggered effect on cmote's own window that outlives the remote's writing, which is the category
+§6 spends its whole length refusing, and it is the only one that arrived by omission rather than by
+decision.
+
+### Not done
+
+- **The 2026 timeout is not driven yet.** The fix is small and the shape already exists in the codebase:
+  subscribe to `iced::window::frames()` while an update is pending — how `SnackbarTick` and `QuitTick`
+  are driven — and call `stop_sync` once `sync_timeout()`'s instant passes. §65 was an audit; taking this
+  is a change to `term/mod.rs` and `app.rs`, and belongs in its own pass with its own test.
+- **`CSI ! p` stays a ❌.** Implementing DECSTR beside the engine would mean cmote reproducing the
+  engine's own reset semantics through fed sequences — origin, autowrap, keypad, scrolling region, pen —
+  with no way to verify it against what the engine believes. `ESC c` works, and programs that care mostly
+  send that.
+- **The other locking shifts stay a ❌ too.** Invoking G2/G3 needs a shift-state cmote does not model, for
+  charsets `vte` will not designate anyway (only ASCII and line drawing).
+- **`BEL` is still unpinned.** A test at cmote's boundary cannot tell "the event was dropped" from "the
+  event never arrived" — the §63 wire-test limit exactly — and there is no config field to assert
+  instead. Stated in §6, marked 🛑 in §8, guarded by nothing.
+- **No test was added by this section at all.** It moved marks and corrected notes; the one thing it
+  found that deserves code is the item above.

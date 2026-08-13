@@ -30,6 +30,10 @@ answer a query fully and refuse a set, and the note charged the refused set with
 that never happens, since `mark_fully_damaged` sets a bool nothing in cmote reads. Both rows now name
 each of them a query answered in full and a set refused on purpose. Each is now **two rows**, the way
 `OSC 52` has been two rows since §62, and the refused half is pinned by a test in each direction.
+**§65 then audited every remaining ⚠️ row against the crates**, split seven more the same way, re-marked
+`BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote never
+drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight bytes
+(mode 2026, and §7).
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -442,6 +446,20 @@ test (`the_engine_is_told_to_refuse_the_remote_clipboard`) fails if the field go
 The **bell** is dropped for the same "no remote-driven side effects" reason. Answering an OSC 52 read
 query would be an injection vector and stays out.
 
+That bell is the **🛑** in §8, and §65 had to correct its mark to say so: it had been a ⚠️ reading
+"accepted, silent", as though nothing had decided anything. Something did. `vte` dispatches `BEL` and
+`alacritty_terminal` implements it — `bell()` is `self.event_proxy.send_event(Event::Bell)` — so the
+event genuinely arrives and cmote's catch-all drops it. It is the last refusal in this document standing
+on a fall-through alone: OSC 52 got a config field in §63, and the colour sets have a renderer that
+structurally cannot read them, but a bell has neither.
+
+**A blinking cursor** is refused on price rather than on principle, and it is cmote's own refusal
+(§8's `12 (the blink)`). A remote's `CSI ? 12 h` is tracked by the engine and reported back by DECRQM,
+but nothing draws it: `term/screen.rs`'s `CursorShape` deliberately carries no blink and cmote runs no
+animation timer, so the cursor is always steady — the same call §4 makes for SGR blink and DECSCUSR's
+blinking shapes. The cost is admitted: a program that blinks the cursor to draw the eye gets a steady
+one, and DECRQM will tell it the mode is set, which is true of the mode and not of the screen.
+
 **Remote colour *set* requests** — `OSC 4;n;<spec>`, `OSC 10 / 11 / 12` with a value, and the resets
 `OSC 104 / 110 / 111 / 112`. The theme is chrome the **user** chose and cmote owns, so a remote does not
 repaint it. Worth stating precisely what happens, because "ignored" is not quite it: the engine's
@@ -565,6 +583,19 @@ sequence it ignores. cmote now decodes sixel in-house, anchors each picture to a
 — plus the two answers that make programs *offer* pictures at all: **XTSMGRAPHICS**, and attribute 4
 added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows are in §5 and §8.
 
+**§65 swept the ⚠️ rows and turned up one item of real work.** Auditing all ten the way §60 taught —
+`vte`'s dispatch arms first, then which `Handler` methods the engine leaves at their empty default —
+split seven into an ✅ half and a refused-or-missing half, re-marked `BEL` as a 🛑, and confirmed two
+(DECRQSS, XTGETTCAP) as plainly partial. The finding is **mode 2026**: `vte` batches a synchronized
+update in its own `Processor` and bounds a stuck one with a 150 ms timeout, but that expiry is the
+application's to drive (`sync_timeout()` then `stop_sync()`), and cmote drives neither. A remote that
+sends `CSI ? 2026 h` and then stops writing holds the visible screen at its pre-BSU state until it sends
+the closing `l` or pushes 2 MiB. Nothing leaks and the session is unharmed — a stuck picture, not a stuck
+client — but it is a remote-triggered effect on cmote's own window, which is the thing §6 spends its
+length refusing. The fix is small and has a shape already in the codebase: an `iced::window::frames()`
+subscription while an update is pending, the way `SnackbarTick` and `QuitTick` are driven, calling
+`stop_sync` once the instant passes. Not taken in §65, which was an audit.
+
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
 decoder dependency — **no item of real UX value remains anywhere in this document.**
@@ -682,7 +713,10 @@ footnote:
   been split into `(write)` and `(read)` since §62, and §64 split `OSC 4` and `OSC 10 / 11 / 12` into
   `(query)` and `(set)` the same way. "Partial" on its own hides which half a program can rely on, and
   these halves are not partial in either direction — the query is answered in full and the set is refused
-  on purpose.
+  on purpose. **§65 swept the rest of the ⚠️ rows** and split seven more, in every pairing the marks
+  allow: ✅/🛑 (`SetUserVar`, mode 12), ✅/🤷 (mode 3, mode 80) and ✅/❌ (`CSI ! p`, the locking shifts,
+  mode 2026). Two ⚠️ rows survive that sweep, DECRQSS and XTGETTCAP, and both are partial in the plain
+  sense: one answer, given for some inputs and honestly declined for the rest.
 - **🛑** is a *decision* recorded in §6 that **cmote enforces**: a scanner allow-list, an event dropped
   in the listener, a renderer that never reads the value. It never becomes work, and the row names the
   code that performs it — usually with a test pinning it by name, so the refusal cannot regress
@@ -722,7 +756,8 @@ footnote:
 | iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
-| iTerm 1337 `SetUserVar` | Per-session variable | ⚠️ | **`gitBranch` only** — shown as a pill on the chip (§55). The allow-list applied to NAMES too: with no title template there is no reader for the others, so a remote cannot key a store. Value base64-decoded, UTF-8 checked, control chars stripped, capped at 32 chars, drawn BESIDE the endpoint label so it cannot pass for the host |
+| iTerm 1337 `SetUserVar=gitBranch` | Per-session variable | ✅ | shown as a pill on the chip (§55). Base64-decoded, UTF-8 checked, control chars stripped, capped at 32 chars — counted in `chars`, so a multi-byte branch name is cut at a character boundary and cannot panic — and drawn BESIDE the endpoint label so it cannot pass for the host. A value that fails to decode leaves the pill alone instead of clearing it (`a_value_that_will_not_decode_leaves_the_branch_alone`), the same rule §54 gives progress |
+| iTerm 1337 `SetUserVar` (any other name) | Per-session variable | 🛑 | §55's allow-list applied a second time, to the NAMES: `term/iterm.rs` matches the name whole against `gitBranch` **before decoding anything**, so there is deliberately no map for a remote to fill — and with no title template there would be no reader for a second name anyway. Pinned by `only_the_one_honoured_variable_name_is_kept`, which rejects `kubeContext`, `gitBranchy` and a bare value with no name (§65) |
 | iTerm 1337 `Copy` | Clipboard write | 🛑 | **OSC 52 write by another name** (§6, §55); pinned by a test so the refusal cannot regress |
 | iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | the fixed-scheme refusal in a new costume (§6, §55) |
 | iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
@@ -750,7 +785,8 @@ footnote:
 | K | Erase in line | ✅ | |
 | Ps " q | Character protection (DECSCA) | ✅ | cmote's own scanner (`term/protect.rs`, §56); the engine has no arm for it, so protection rides a bit cmote borrows in the engine's per-cell flag word — invisible to both the engine and the renderer, and guarded at build time |
 | ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | all three extents, applied by cmote in place (§56). Protected cells survive; a **plain** `CSI J` / `CSI K` still takes them, which is the point of two verbs |
-| ! p | Soft reset (DECSTR) | ⚠️ | no arm in `vte`, so the reset itself does nothing — cmote reads it only to drop DECSCA protection with the pen (§56), which is the one piece of soft-reset state it owns |
+| ! p (the DECSCA part) | Soft reset — protection | ✅ | cmote's own scanner drops DECSCA protection with the pen (`term/protect.rs`, §56), which is the one piece of soft-reset state cmote owns |
+| ! p (everything else) | Soft reset — the rest | ❌ | `vte`'s `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for DECRQM and **no arm for `('p', [b'!'])`**, so origin mode, autowrap, the keypad mode, cursor visibility, the scrolling region, the pen and the charset designations all survive a soft reset untouched. A **gap**, not a policy — nothing here refuses it, and `ESC c` (RIS) does have an arm, so a program that wants state cleared has a spelling that works (§65) |
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
@@ -784,9 +820,10 @@ footnote:
 | ESC c (RIS) | Full reset | ✅ | |
 | ESC = / ESC > | Keypad app / numeric | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | |
-| ESC ( / ESC ) | Designate charset G0 / G1 | ✅ | DEC line-drawing works |
+| ESC ( / ) / * / + | Designate charset G0 / G1 / G2 / G3 | ✅ | all four slots — `configure_charset` maps the four intermediates — but only ASCII (`B`) and DEC line drawing (`0`); any other final falls to `unhandled!()`. Designating G2 / G3 works and is inert in practice, since nothing can invoke them (below) |
 | ESC N / ESC O | Single shift G2 / G3 | ❌ | |
-| LS2 / LS3 / LS1R… | Locking shifts | ⚠️ | SO / SI + designation only |
+| SI / SO (LS0 / LS1) | Locking shift G0 / G1 | ✅ | `vte`'s `execute` maps SI to `set_active_charset(G0)` and SO to G1 — the two spellings anything in practice uses |
+| LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ | no `esc_dispatch` arm for `n`, `o`, `~`, `}` or `\|`, so each reaches no handler. With SS2 / SS3 missing too (above), G2 and G3 can be designated and never invoked — a gap nobody here declines (§65) |
 | ESC #3–6 | Double-height / width lines | ❌ | not represented (§5) |
 | ESC SP F / G | 7 / 8-bit control output | ❌ | |
 | ESC % G | UTF-8 charset | ✅ | engine is always UTF-8 |
@@ -795,8 +832,8 @@ footnote:
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| DCS $ q (DECRQSS) | Request status string | ⚠️ | SGR reported from the live pen; other settings honest `ps=0` (`term/query.rs`, §33) |
-| DCS + q (XTGETTCAP) | Termcap query | ⚠️ | terminal name + colour count answered; other caps honest unknown (§33) |
+| DCS $ q (DECRQSS) | Request status string | ⚠️ | genuinely partial, and honest about it — the mark stands after §65's audit. **Every** request draws a reply, but only `m` (SGR) carries data, rebuilt from the live pen so it is what the grid paints. Every other setting (DECSTBM, DECSCUSR, DECSCA…) answers `DCS 0 $ r ST`, the standard's "I do not report that", rather than a guess (`term/query.rs`, §33) |
+| DCS + q (XTGETTCAP) | Termcap query | ⚠️ | same shape, and it also stands: every request answered, two capabilities stated — `TN` (`xterm-256color`, the name cmote requested for the pty) and `Co` / `colors` (256). The rest reply unknown on purpose, since their wire values are ambiguous and 24-bit SGR works whether or not a capability query confirms it (§33) |
 | CSI > q (XTVERSION) | Terminal version | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
 | DCS … q | Sixel graphics | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). The alternate screen has its own page of them, on the same coordinate with the history at zero — so `ranger` previews and `mpv --vo=sixel` draw |
@@ -827,15 +864,18 @@ footnote:
 | Code | Mode | Status | Note |
 |---|---|---|---|
 | 1 | Application cursor keys | ✅ | arrows send SS3 |
-| 3 | 132 / 80 column | ⚠️ | DECCOLM clears screen, no resize (DECRQM: NotSupported) |
+| 3 (side effects) | DECCOLM's clear | ✅ | the engine's `deccolm` resets the scrolling region and clears the grid — what the sequence is actually used for |
+| 3 (column resize) | 132 / 80 columns | 🤷 | not performed, and not by cmote: the engine's own comment is *"setting 132 column font makes no sense, but run the other side effects"*, and its DECRQM answers `NotSupported`. cmote owns its tabbed window and would refuse a remote resize on the same grounds as `CSI 1–10 t` (§6) — but it is never asked (§65) |
 | 5 (DECSCNM) | Global reverse video | ❌ | |
 | 6 | Origin mode | ✅ | |
 | 7 | Auto-wrap | ✅ | |
-| 12 | Blinking cursor | ⚠️ | tracked, drawn steady |
+| 12 (the mode) | Blinking cursor — tracked | ✅ | the engine sets `cursor_style.blinking` and DECRQM reports it back |
+| 12 (the blink) | Blinking cursor — drawn | 🛑 | cmote runs no animation timer, so the cursor is always steady, and both lines of that are cmote's own: `term/screen.rs`'s `CursorShape` deliberately carries no blink, and the engine's `Event::CursorBlinkingChange` lands in the catch-all arm of `Replies::send_event`. Worth knowing about the ✅ above: DECRQM will report the mode **set**, which is true of the mode and false of the screen — cmote does not intercept the engine's reply to soften it (§65) |
 | 25 | Show / hide cursor | ✅ | |
 | 45 | Reverse wrap | ❌ | |
 | 69 (DECLRMM) | Left / right margin | ❌ | not in the engine's mode list, so setting it is ignored and DECRQM answers `0`, "not recognised" — the honest reply, and the one that tells a conformant program not to spell `CSI s` as DECSLRM. §57 covers the program that sends it anyway |
-| 80 | Sixel scrolling (DECSDM) | ⚠️ | the mode is not tracked; cmote always scrolls — the modern default, and what emitters assume (§41) |
+| 80 (behaviour) | Sixel scrolling | ✅ | cmote always scrolls — the modern default, and what emitters assume (§41) |
+| 80 (the mode) | DECSDM | 🤷 | `vte`'s `NamedPrivateMode` has no 80, so the engine takes it as `PrivateMode::Unknown(80)`, logs "ignoring unknown mode" and returns; DECRQM answers `NotSupported`, which is the honest reply. A program that sets DECSDM to *stop* scrolling does not get that, and nothing here declines it (§65) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | `term/mouse.rs` |
 | 1004 | Focus events | ✅ | cmote sends CSI I / CSI O |
 | 1006 | SGR mouse | ✅ | |
@@ -843,7 +883,8 @@ footnote:
 | 1016 | SGR-pixel mouse | ❌ | |
 | 1049 | Alternate screen | ✅ | no scrollback there, by design |
 | 2004 | Bracketed paste | ✅ | with an injection scrub |
-| 2026 | Synchronized output | ⚠️ | parser batches; engine mode is a no-op; cmote already atomic |
+| 2026 (batching) | Synchronized output | ✅ | and it is `vte`'s `Processor` that does it, not the engine: BSU buffers the stream, ESU flushes it inside one `advance`, so a frame really is atomic. The engine's own mode arm is `()` and its DECRQM answers `Reset` — both correct |
+| 2026 (abort timeout) | Synchronized output | ❌ | `vte` bounds a stuck update with `SYNC_UPDATE_TIMEOUT` (150 ms), but the expiry is the **application's** to drive — `Processor::sync_timeout()`, then `stop_sync()` — and cmote calls neither. A remote that sends BSU and then goes quiet holds the visible screen at its pre-BSU state until it sends ESU or pushes 2 MiB (`SYNC_BUFFER_SIZE`, which flushes). Found by §65's audit; see §7 |
 | 2027 | Grapheme clustering | ❌ | |
 | 2031 | Colour-scheme reporting | ❌ | |
 | 2048 | In-band resize | ❌ | |
@@ -869,7 +910,7 @@ footnote:
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
 | **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply back to restore the state. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it. **Resource 4 only**: XTMODKEYS carries seven, cmote holds one, and the reply being an XTMODKEYS control leaves no way to say "not mine" — so the other six draw silence rather than an invented level. Answered where the question sits in the stream, not where the chunk ends |
 | ENQ answerback | 🤷 | a lone `0x05` in binary output would type a string into the shell (§6, §36) — a decision cmote holds and nothing carries out: `vte`'s `execute` matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's scanner has no arm for it. Answerback is refused by never having been written, which is the cheapest refusal in the document and the least pinned |
-| BEL | ⚠️ | accepted, **silent** — bell event dropped |
+| BEL | 🛑 | accepted and **silent** by decision, not by absence: `vte` dispatches it and `alacritty_terminal` implements it as `Event::Bell`, so the event really arrives and the catch-all arm of `Replies::send_event` drops it (§6 — a remote may change what its own tab looks like and nothing more). The last refusal in this document riding a fall-through alone: unlike OSC 52 there is no config field to state it in, and unlike the colour sets there is no renderer that structurally cannot read it (§63, §65) |
 | BS / HT / LF / CR | ✅ | |
 | SO / SI | ✅ | charset shift |
 
@@ -965,6 +1006,16 @@ reason given for it was invented — the mirror image of §60's failure, where t
 and the outcome was right. Both come from the same habit: writing down what a sequence *ought* to cost
 instead of reading what it does.
 
+**§65 finished the sweep, and the ⚠️ rows turned out to be the least examined in the document.** Ten
+remained; seven were two answers under one mark and are now two rows each, one was a refusal wearing a
+partial's clothes (`BEL` — `alacritty_terminal` really does raise `Event::Bell`, and cmote's catch-all
+really does drop it, so it is a 🛑 and always was), and two are genuinely partial. The pattern is worth
+naming: a ❌ invites someone to close it and a 🛑 invites someone to check it, but a ⚠️ invites nothing —
+it has already admitted to being incomplete, so it is never asked *which part*. That is how mode 2026 sat
+for this long reading "cmote already atomic", which was true, beside an undriven abort timeout that lets a
+remote freeze the screen. The audit that finds a thing like that is the same one every time: read the
+dispatch arms, then ask who performs each half.
+
 ---
 
 ## Evidence
@@ -1042,6 +1093,22 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `('S', [])` (SU, `ansi.rs:1736`), so the `?`-prefixed XTSMGRAPHICS form falls through to the
   unhandled arm and is cmote's to answer. `('X', [])` (ECH, `:1766`) and LF are what cmote feeds back
   in to reserve a picture's cells.
+
+- **§65's audit anchors.** `execute` (`vte/src/ansi.rs:1296`) maps HT / BS / CR / LF / VT / FF / **BEL**
+  / SUB / **SI** / **SO** and drops the rest to a `debug!` — so `SI`/`SO` are the only locking shifts
+  that exist, and `bell()` (`term/mod.rs:1437`) really does raise `Event::Bell`. `esc_dispatch`
+  (`ansi.rs:1773`) designates charsets for G0-G3 through the `(`/`)`/`*`/`+` intermediates and has **no
+  arm** for `n`, `o`, `~`, `}` or `|`. `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for
+  DECRQM and **none for `('p', [b'!'])`**, so DECSTR reaches nothing. `deccolm` (`term/mod.rs:792`)
+  clears the region and grid with the comment *"setting 132 column font makes no sense"*, and DECRQM
+  answers `ColumnMode => NotSupported` (`:2085`). `BlinkingCursor` sets `cursor_style.blinking` and
+  raises `Event::CursorBlinkingChange` (`:1987`, `:2036`), and DECRQM reports it (`:2053`).
+  `PrivateMode::Unknown` — which is what 80 is, `NamedPrivateMode` having no DECSDM — is logged and
+  ignored (`:1937`, `:2000`) and reports `NotSupported` (`:2087`). Synchronized output lives in the
+  parser, not the engine: `SYNC_UPDATE_TIMEOUT = 150ms` and `SYNC_BUFFER_SIZE = 2MiB`
+  (`ansi.rs:36`, `:39`), `advance` enters `advance_sync` only when `pending_timeout()` is already true
+  (`:303`), and nothing expires a stuck update except the application calling `stop_sync` — which cmote
+  never does (no hit for `sync_timeout` / `stop_sync` / `pending_timeout` in `src/`).
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 
