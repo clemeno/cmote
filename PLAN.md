@@ -6989,3 +6989,126 @@ moved a decision from a comment into code that can fail.
 - **`Osc52::Disabled` is asserted, not proven end to end.** The proof that a remote cannot reach the
   clipboard is the engine's early return plus cmote never calling a clipboard API on a remote's behalf;
   no test can watch the Windows clipboard from inside the suite.
+
+## 64. The mark that hid two answers (v4.0.0)
+
+§62 gave the matrix's refusals marks of their own and §63 hardened the one refusal that turned out to be
+inherited rather than stated. Both passes only ever looked at ❌ rows. **§64 asked the same question of
+the ⚠️ rows**, starting with the three left in §8's OSC table — and a partial turns out to be the easiest
+mark to leave alone, precisely because it admits up front that something is missing. It draws none of the
+suspicion a ❌ or a 🛑 does.
+
+### One mark over two opposite answers
+
+`OSC 4` (palette entry) and `OSC 10 / 11 / 12` (default foreground / background / cursor) each do two
+unrelated things, and cmote's answer to the two is opposite:
+
+- the **query** is answered, in full, and accurately: `Replies::send_event` catches
+  `Event::ColorRequest`, `report_color` resolves the slot through `palette::xterm_256` or
+  `DEFAULT_FG` / `DEFAULT_BG` — the same const table `ui/grid.rs` paints from — and the engine's closure
+  formats the reply. Three tests already pinned it, one per role. This is the half that matters in
+  practice: `OSC 11 ?` is how a program picks a light or dark colourscheme, and cmote's answer is exactly
+  what the screen shows.
+- the **set** is refused, for the reason §6 gives: the theme is chrome the *user* chose. `set_color`
+  records the value in `Term::colors`, and **nothing in `src/` ever reads that table** — grep returns no
+  hit. The renderer cannot read it even in principle: the style resolver in `ui/grid.rs` takes a cell and
+  a const table, and is never handed a terminal to ask.
+
+One ⚠️ averaged those into "partial", which tells a reader neither. The rows now carry
+`**query ✅ / set 🛑**` and name each half — and the set half is explicitly the same refusal **row 104**
+carries as a plain 🛑, which is the inconsistency that made the averaging visible: identical mechanism,
+two different marks, only because one of the rows happens to have a query half attached.
+
+### A cost this document invented
+
+The `OSC 10 / 11 / 12` note justified the refusal with a price: *"**set** recorded by the engine and
+never read — a full repaint for no change"*, and §6 said the same at more length. It is not true.
+
+```rust
+fn set_color(&mut self, index: usize, color: Rgb) {
+    // Damage terminal if the color changed and it's not the cursor.
+    if index != NamedColor::Cursor as usize && self.colors[index] != Some(color) {
+        self.mark_fully_damaged();
+    }
+    self.colors[index] = Some(color);
+}
+
+fn mark_fully_damaged(&mut self) {
+    self.damage.full = true;
+}
+```
+
+One bool. And cmote calls neither `damage()` nor `reset_damage()` anywhere, so that bool is written and
+never read — it will simply stay `true` for the life of the terminal, harming nothing. A repaint does
+happen when a colour set arrives, for the same reason it happens for any output: bytes arrived. The
+marginal cost of the refusal is the bool.
+
+This is **§60's failure with the signs reversed**. There, the mechanism was invented and the outcome was
+right — rows credited to cmote's policy that the engine had already dropped. Here the mechanism was
+right and the *reason* was invented. Both come from the same habit: writing down what a sequence ought to
+cost rather than reading what it does. A refusal this cheap needs no cost argument at all, and giving it
+one made a policy look like a performance trade.
+
+### Two tests, and why they assert the set landed
+
+```rust
+let mut terminal = Terminal::new(10, 40);
+assert!(terminal.process(b"\x1b]4;3;rgb:ff/00/00\x07").is_empty());
+assert!(terminal.term.colors()[3].is_some());
+assert_eq!(
+	terminal.process(b"\x1b]4;3;?\x07"),
+	b"\x1b]4;3;rgb:8080/8080/0000\x07".to_vec()
+);
+```
+
+The middle line is the point. Without it the test would pass just as happily if `vte` had rejected
+`rgb:ff/00/00` outright, or if a future parser change stopped dispatching OSC 4 sets — a green test
+proving nothing, which is the failure §63 was about. `Term::colors()` is the crate's public accessor, so
+the test can say *the engine stored red* and then *the answer is still yellow* in the same breath.
+`a_default_colour_set_does_not_move_the_query_answer` does the same through `OSC 11`, the direction that
+matters most, since that is the one a program reads to choose its own contrast.
+
+Checked by breaking it: changing `report_color`'s palette arm to return red fails
+`a_palette_colour_set_does_not_move_the_query_answer` on the exact reply bytes. Reverted.
+
+The renderer's half needs no test — there is no route for a remote colour to reach the resolver, which is
+a stronger guarantee than an assertion. The *reply* half had no such structure: `report_color` sits in
+the same file as the listener that receives the set, and nothing but habit kept the two apart.
+
+### The third ⚠️, checked and left alone
+
+`iTerm 1337 SetUserVar` is the one ⚠️ in that table that earns the mark as written — partial **by
+design**, one honoured name. Re-read against `term/iterm.rs`: the name is matched whole against
+`HONOURED_VAR = b"gitBranch"` before anything is decoded, so there is deliberately no map for a remote to
+fill; the value is base64-decoded, UTF-8 checked, control-stripped and cut at `MAX_VALUE_CHARS = 32`
+counted in `chars` so a multi-byte branch name cannot panic; and a value that fails to decode returns
+`None` rather than `Some(None)`, so rubbish cannot clear a real reading. Every claim in the row holds.
+Widening the allow-list was considered and dropped: each new name needs somewhere on the chip, which
+already carries the endpoint label, the branch pill, the status dot and the progress bar — and a name
+with no reader is a store with no purpose.
+
+### What it cost
+
+Two tests (~30 lines with their comments), plus corrected rows and paragraphs across
+`TERMINAL_COMPATIBILITY_PLAN.md` §6, §7, §8's legend, the two rows themselves, the closing audit prose,
+the header state paragraph and the Evidence appendix. 1041 tests. **No behaviour changed and no row
+changed status** — the rows just stopped claiming more than they knew, and the cheapest refusal in the
+project stopped being described as an expensive one.
+
+### Not done
+
+- **Honouring the sets was considered and refused, twice over.** Fully honouring them means threading a
+  per-tab mutable palette into every cell lookup in `ui/grid.rs` (today a pure function of the cell plus
+  a const table), building the reset paths so `104 / 110 / 111 / 112` become real, and answering
+  precedence against the user's own scheme — for the reward of letting a remote set foreground equal to
+  background, or repaint to mimic another host. §6 already says no.
+- **Honouring the set in the *reply* only would be worse than either extreme**, and is worth naming so it
+  is not proposed later as a compromise: the query would then promise a colour the grid does not paint,
+  so a program choosing its contrast from the answer chooses against a background that does not exist.
+  The current asymmetry — set ignored, query honest about what is painted — is the useful one.
+- **The bell is still the last refusal riding the catch-all alone**, unchanged from §63's list: the
+  engine has no field to state it in, and unlike the colour sets there is nothing structural behind it
+  either — only the `_ => {}` arm. If any of these ever grows a pin, that is the one.
+- **The other ⚠️ rows outside the OSC table have not had this treatment** — DECSTR, locking shifts,
+  DECRQSS, XTGETTCAP, DECCOLM, blinking cursor, DECSDM, synchronized output, BEL. Each is a partial for
+  its own reason and each would need the same read-the-crate pass to say whether its note still holds.

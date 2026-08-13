@@ -1704,6 +1704,42 @@ mod tests {
 	}
 
 	#[test]
+	fn a_palette_colour_set_does_not_move_the_query_answer() {
+		// A remote sets slot 3 to red, then asks what slot 3 is: the answer is still the scheme's
+		// yellow (§6, §64). The set is not discarded on the way IN — the assertion in the middle
+		// proves the engine did record it — it is discarded on every way OUT: `report_color`
+		// resolves through the shared const palette, and `ui/grid.rs` paints from that same table
+		// via a style resolver that is never handed a terminal to ask. That makes the renderer's
+		// half of the refusal structural, but the reply's half was resting on nobody happening to
+		// wire `Term::colors` into `report_color`. This test is what would notice.
+		let mut terminal = Terminal::new(10, 40);
+		assert!(terminal.process(b"\x1b]4;3;rgb:ff/00/00\x07").is_empty());
+		assert!(terminal.term.colors()[3].is_some());
+		assert_eq!(
+			terminal.process(b"\x1b]4;3;?\x07"),
+			b"\x1b]4;3;rgb:8080/8080/0000\x07".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_default_colour_set_does_not_move_the_query_answer() {
+		// The same for the named roles: OSC 11 sets the background to red, and OSC 11 ? still
+		// reports the scheme's 0x1e. This is the direction that matters most to a program, because
+		// the background is what a colourscheme picker reads (see the query test above). An answer
+		// that followed the set would promise a colour the grid does not paint, and the program
+		// would then choose its contrast against a background that does not exist — which is why
+		// honouring the set in the reply alone would be worse than either honouring it fully or
+		// refusing it fully.
+		let mut terminal = Terminal::new(10, 40);
+		assert!(terminal.process(b"\x1b]11;rgb:ff/00/00\x07").is_empty());
+		assert!(terminal.term.colors()[NamedColor::Background as usize].is_some());
+		assert_eq!(
+			terminal.process(b"\x1b]11;?\x07"),
+			b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07".to_vec()
+		);
+	}
+
+	#[test]
 	fn a_pixel_size_query_multiplies_the_cell_size_by_the_grid() {
 		// CSI 14t "text area in pixels?" -> rows*cell_height by cols*cell_width, from the cell
 		// pixel size the GUI set: 10 rows * 17 = 170 high, 40 cols * 8 = 320 wide.
