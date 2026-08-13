@@ -7961,3 +7961,114 @@ does — they are capabilities, and §5 still costs them out as such.
   certainly right, and is the same exposure `reserve_cells` has had since §41. It is untested in both
   places, and it is really the mode 2026 timeout item (§65) wearing a different hat.
 - **`CSI 16t` is still a gap**, unchanged from §71's list — named there, decided by nobody yet.
+
+## 73. The refusal that was not in the column (v4.0.0)
+
+The question put to this section was narrow: should DECSLRM read ✅ or 🛑? The interesting part is
+what the question left out. The row read
+
+```
+| s (DECSLRM) | Left / right margins | ❌ **safely** | …
+```
+
+and ❌ was not on the menu, correctly. §66 retired the partial mark because a row that says two things
+cannot be checked; a mark with an adverb propped beside it says two things in a smaller space. "Safely"
+is there because the mark alone was wrong and the note knew it.
+
+### Not ✅, for two reasons — one of them new
+
+**There is nothing to translate into.** §72 worked because a soft reset is a *shorthand*: every item on
+DEC's list is a mode, a region, a pen or a charset the engine already takes an ordinary sequence for, so
+cmote feeds the engine the long spelling and the engine stays the only writer of its own state. Margins
+are a capability. Building them means the delegating `Handler` wrapper §5 costs out, and that wrapper
+wraps lines, moves the cursor and scrolls a column band *itself* — cmote becomes a second writer of
+engine state, which is precisely what §71 argued against and what §72 was built to avoid. The hazard is
+also unguardable: all 71 `Handler` methods have default empty bodies, so a method left unforwarded, or
+one a future `alacritty_terminal` adds, compiles clean and silently swallows a sequence. §57's borrowed
+flag bit gets a `const` assertion at build time. This gets nothing.
+
+**And §5's traffic claim was wrong.** It read "essentially nothing emits DECSLRM outside a conformance
+suite". §72's lesson is that a reason can be wrong on the facts and stay unread for sections, so it was
+checked rather than repeated. `xterm-256color` — the TERM cmote asks for — declares all four:
+
+```
+mgc=\E[?69l,
+smglp=\E[?69h\E[%i%p1%ds,
+smglr=\E[?69h\E[%i%p1%d;%p2%ds,
+smgrp=\E[?69h\E[%i;%p1%ds,
+```
+
+That is the same shape as §72's finding, which is why the difference in the answer is worth writing
+down. What made §72 real was *where the string sits*:
+
+```
+is2=\E[!p\E[?3;4l\E[4l\E>,
+rs2=\E[!p\E[?3;4l\E[4l\E>,
+```
+
+`\E[!p` is in both, so every `tput init`, every `reset` and every ncurses startup sent it unasked. No
+margin capability appears in any init or reset string. Those four go out only when an application
+deliberately decides to use margins, and ncurses' own rendering never does. **Declared is not emitted.**
+The conclusion survives; the sentence holding it up did not.
+
+### 🛑, and the legend already said so
+
+The legend defines ❌ as *a sequence that could still land*. This one cannot. `term/cancel.rs` cancels
+the final byte in flight and feeds the parser its own CAN, `process` splits the advance to do it,
+fifteen tests in the scanner pin the shapes and `a_cancelled_margin_request_prints_nothing_at_all` pins
+it end to end. That is the best-pinned refusal in the document, sitting under the mark for "nothing
+stops it".
+
+And the argument was already written in the legend, in the 🤷 bullet:
+
+> The distance between agreeing with a refusal and performing one is what §57 is about, and it is worth
+> seeing in the column rather than reading for.
+
+§57 **is** this row. The document names it as the reason the column splits 🛑 from 🤷, and then leaves
+§57's own row outside the split — which is the same failure as §65's `BEL`, found by reading the legend
+rather than the crates.
+
+### One row, one answer — the gap moves rather than disappearing
+
+Margins are still missing, and that is not the `s` row's business. The row that carries it is `? 69`
+(DECLRMM) in the private-mode table: nothing in cmote refuses the mode, the engine has no arm for it and
+answers DECRQM `0`, "not recognised". So the pair now reads
+
+- `s` — the **request**, stopped by cmote's own code → 🛑
+- `? 69` — the **capability**, missing and priced in §5, refused by nobody → ❌
+
+and it reads in the right order. A program that asks first is told the truth and never spells `s` as
+DECSLRM; the program that does not ask gets its request cancelled instead of its saved cursor stolen.
+
+### What the mark had to give up
+
+The 🛑 bullet said "a decision recorded in **§6**" and "it never becomes work". This decision is §5's —
+price, not policy — and the capability behind it is still priced. Rather than move margins into §6,
+where they would read as a stance cmote holds about margins (it holds none; they are simply expensive),
+the bullet now says what the mark actually reports: **who performs the refusal**, with the section it
+points at carrying **why it was taken**. The refusal itself still never becomes work. §6 gained a lead
+paragraph naming its one exception, so the section's own title does not over-claim.
+
+### A numbering slip, fixed in passing
+
+§72's paragraph in the compatibility plan opened "**§72 names the fourth: translate it**". §57's
+paragraph, six lines below it, already ended "'Refuse it properly' is the fourth way in". §56 named
+three; §57 made four; translate is the fifth. Written last section, read this one — which is the whole
+case for re-reading a section from the row below it.
+
+### What it cost
+
+Nothing in `src/`. The tests stand at 1072, none of them touched, because §57 built the mechanism and
+§73 only says so in the column. The matrix rescan: 163 rows unchanged, ✅ 101 unchanged, ❌ 28 → 27,
+🛑 25 → 26, 🤷 9 unchanged, and no row carrying two marks or none.
+
+### Not done
+
+- **The margins themselves.** Unchanged, and now with a corrected reason rather than a wrong one.
+- **Nothing tells the user when a margin request is cancelled.** An application that reaches for
+  `smglr` will draw into a page that never narrowed, and the output is simply wrong — quietly, which is
+  the one thing the §57 repair does not fix. Disclosed rather than solved: a note in the terminal would
+  be cmote talking over the remote, which no other refusal here does.
+- **DECRQM for mode 69 answers `0`.** That is the engine's, and it is the reply that keeps a conformant
+  program away from `CSI s`. Whether cmote should ever answer `4` ("permanently reset") instead — a
+  stronger statement, and a claim about a mode cmote does not implement — is not decided here.

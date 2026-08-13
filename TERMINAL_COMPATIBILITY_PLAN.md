@@ -73,6 +73,18 @@ and the cursor. And the sequence is not rare — cmote asks for `TERM=xterm-256c
 both *open* with `\E[!p`, so every `tput init`, every `reset` and every ncurses startup was sending cmote a
 reset it dropped on the floor. The row is ✅, and the two halves §65 split are one row again: the
 one-answer rule cuts both ways, and a row split because its halves disagreed rejoins when they stop.
+**§73 asked the same question of the next row down and got the opposite answer, which is the point of
+asking.** DECSLRM — left/right margins — read `❌ **safely**`, a mark with an adverb propped beside it,
+which is the partial mark §66 retired wearing a coat. Both halves of the row were re-derived: the
+*capability* stays unbuilt, because unlike a soft reset it has no shorthand to translate into and the
+delegating `Handler` wrapper that would build it makes cmote a second writer of engine state; and the
+*traffic* claim §5 rested on — "essentially nothing emits DECSLRM" — was wrong, `xterm-256color`
+declaring `mgc`, `smglp`, `smglr` and `smgrp`, though none of them from an init or reset string, which is
+the difference from §72. What did move is the mark. ❌ is defined here as a sequence that *could still
+land*, and since §57 this one cannot: `term/cancel.rs` cancels the final byte in flight, fifteen tests
+pin it, and the legend names §57 itself as the reason the 🛑 / 🤷 split exists in the column. So the row
+is **🛑**, the capability's ❌ moves to the row that actually carries it (mode 69, DECLRMM), and the 🛑
+legend widens to say that a refusal cmote performs may be taken on §5's price as well as §6's policy.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -416,8 +428,10 @@ short, and since §41 nothing left in it is high value:
   (single wide glyphs are; whole-line doubling is not). `[DEC]`.
 - **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
   (`set_scrolling_region(top, bottom)`), and horizontal ones reach into what printing, wrapping,
-  `IL`/`DL`, `ICH`/`DCH` and every scroll do. `[DEC]`, and **still ❌ — but as a cost, not a
-  capability.** An earlier reading of this row called it impossible without re-implementing the grid.
+  `IL`/`DL`, `ICH`/`DCH` and every scroll do. `[DEC]`, and **still unbuilt — as a cost, not a
+  capability.** Since §73 the ❌ for it is carried by the `? 69` (DECLRMM) row in §8; the sequence's own
+  row is the 🛑 `term/cancel.rs` performs.
+  An earlier reading of this row called it impossible without re-implementing the grid.
   That was wrong, and the correction is worth writing down because it is the only row in this document
   whose verdict rests on price rather than on a wall:
 
@@ -444,15 +458,35 @@ short, and since §41 nothing left in it is high value:
   caught at **build time** with a `const` assertion and this one cannot: a trait growing a defaulted
   method breaks nothing. Add the smaller ones — a margin wrap has to set `WRAPLINE` itself or copy,
   search and reflow read the line as two; margins are per-screen and have to ride the alternate-screen
-  swap; resize reflows assuming full width, so margins would reset on resize as xterm's do. Against
-  that: essentially nothing emits DECSLRM outside a conformance suite. So the answer is still no, on
-  price.
+  swap; resize reflows assuming full width, so margins would reset on resize as xterm's do. And there is
+  no §72 shortcut in reach: a soft reset could be *translated* into sequences the engine already takes,
+  but margins are a capability with no shorthand to translate into, so the wrapper would make cmote a
+  second writer of the engine's own state — cursor, wrap flag, scrolled cells — which is what §71 and §72
+  were both careful not to become.
+
+  Against that, the traffic. **§73 corrected this bullet on the facts**: it used to say "essentially
+  nothing emits DECSLRM outside a conformance suite", and the terminfo for the TERM cmote asks for says
+  otherwise, declaring all four margin capabilities.
+
+  ```
+  mgc=\E[?69l,
+  smglp=\E[?69h\E[%i%p1%ds,
+  smglr=\E[?69h\E[%i%p1%d;%p2%ds,
+  smgrp=\E[?69h\E[%i;%p1%ds,
+  ```
+
+  §72 found exactly this shape and it turned out to be a real gap, which is what makes the difference in
+  the answer worth stating. `\E[!p` sits in `is2` **and** `rs2`, so every `tput init`, every `reset` and
+  every ncurses startup was sending it unasked. No margin capability appears in any init or reset string
+  (`is2` and `rs2` are `\E[!p\E[?3;4l\E[4l\E>`, and `rs1` is RIS) — those four go out only when an
+  application deliberately decides to use margins, and ncurses' own rendering never does. Declared is not
+  emitted. So the answer is still no, on price.
 
   What **§57** changed is the cost of *refusing* it. DECSLRM shares its final byte with save-cursor,
   and `vte`'s arm for that byte ignores its parameters, so the refusal was not free: `CSI 5;70 s`
   *saved the cursor*, overwriting a value the program meant to restore from later. cmote now cancels
-  that byte in flight, so the request does nothing at all — the `s` row in §8, PLAN §57, and
-  `term/cancel.rs`.
+  that byte in flight, so the request does nothing at all — the `s` row in §8, which §73 re-marked 🛑 so
+  the column says who performs that, PLAN §57 and §73, and `term/cancel.rs`.
 - **~~VT420 rectangular ops~~ — SHIPPED in §58.** DECERA (`$ z`), DECSERA (`$ {`), DECFRA (`$ x`) and
   DECCRA (`$ v`) all read as engine limits until §56 built the hard half of them: writing cells
   straight into the grid, and knowing which of them a program protected. `vte` matches `$` only in the
@@ -480,6 +514,11 @@ short, and since §41 nothing left in it is high value:
 ---
 
 ## 6. Deliberately excluded (🛑 / 🤷 in §8 — policy, not gap)
+
+Nearly every refused row in §8 is one of these. **One is not, and §73 says so on the row**: DECSLRM is
+🛑 because `term/cancel.rs` stops the sequence dead, but the decision behind it is a *price* and lives in
+§5, not a policy and here. The mark records who performs a refusal; the section it points at records why
+it was taken.
 
 **OSC 52 clipboard read/write** — **refused at the engine boundary** since §63: `engine_config` sets
 `osc52: Osc52::Disabled`, so `clipboard_store` and `clipboard_load` return before an event exists. A
@@ -867,9 +906,11 @@ The last three are different in kind, which is why each carries its own mark rat
 footnote:
 
 - **❌** is a *gap* — a sequence that could still land, and several since have.
-- **🛑** is a *decision* recorded in §6 that **cmote enforces**: a scanner allow-list, an event dropped
-  in the listener, a renderer that never reads the value. It never becomes work, and the row names the
-  code that performs it — usually with a test pinning it by name, so the refusal cannot regress
+- **🛑** is a *decision* **cmote enforces**: a scanner allow-list, an event dropped in the listener, a
+  renderer that never reads the value, a final byte cancelled in flight. The mark says *who performs the
+  refusal*, not why it was taken — nearly all of them are §6's, on policy, and one is §5's, on price
+  (DECSLRM, §73) — so the row names its reason as well as the code that carries it out. The refusal
+  itself never becomes work, and it is usually pinned by a test the row names, so it cannot regress
   unnoticed.
 - **🤷** is the same decision with **nothing behind it**: the sequence dies upstream — no `vte` dispatch
   arm, or a `Handler` method `alacritty_terminal` leaves at its empty default body — so cmote is never
@@ -976,7 +1017,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | the vertical region in full, top and bottom, honoured by every operation that scrolls. The horizontal one is a different sequence with its own row below (`s`, DECSLRM) |
-| s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out, on **price rather than capability** — there is a seam (`Processor::advance` is generic over `Handler`, which `Term` merely implements), but a delegating wrapper over a 71-method trait whose every method has a default empty body degrades **silently** on an engine bump, and nothing emits DECSLRM outside a conformance suite. Costed in §5. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
+| s (DECSLRM) | Left / right margins | 🛑 | **cancelled in flight by cmote's own code** (`term/cancel.rs`, §57), so a margin request does nothing at all — which is what "unsupported" should mean. The refusal is a repair rather than a shrug: `vte`'s `('s', [])` arm is save-cursor and never reads its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one slot the program had its own value in. A parameter is the whole test — the bare `CSI s` is left alone and still saves — and `process` feeds the state machine's own **CAN** in place of the final byte, because withholding it would leave the engine's parser mid-CSI and hand this sequence the next final byte in the stream. Fifteen tests in the scanner, plus `a_cancelled_margin_request_prints_nothing_at_all` in `term/mod.rs` pinning it end to end. Read ❌ until §73, which is a mark this row could not carry: ❌ is a sequence that *could still land*, and since §57 this one cannot. The margins **themselves** are a gap, and it has a row of its own — `? 69` (DECLRMM) in the private-mode table, priced in §5, refused by nothing |
 | g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
@@ -1067,7 +1108,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | cmote runs no animation timer, so the cursor is always steady, and both lines of that are cmote's own: `term/screen.rs`'s `CursorShape` deliberately carries no blink, and the engine's `Event::CursorBlinkingChange` lands in the catch-all arm of `Replies::send_event`. Worth knowing about the ✅ above: DECRQM will report the mode **set**, which is true of the mode and false of the screen — cmote does not intercept the engine's reply to soften it (§65) |
 | 25 | Show / hide cursor | ✅ | |
 | 45 | Reverse wrap | ❌ | |
-| 69 (DECLRMM) | Left / right margin | ❌ | not in the engine's mode list, so setting it is ignored and DECRQM answers `0`, "not recognised" — the honest reply, and the one that tells a conformant program not to spell `CSI s` as DECSLRM. §57 covers the program that sends it anyway |
+| 69 (DECLRMM) | Left / right margin | ❌ | not in the engine's mode list, so setting it is ignored and DECRQM answers `0`, "not recognised" — the honest reply, and the one that tells a conformant program not to spell `CSI s` as DECSLRM. §57 covers the program that sends it anyway. **This is the row the margin gap lives on** since §73: nothing in cmote refuses the capability, the engine simply has none, and §5 prices what building one would cost — where the `s` row above is a 🛑 because cmote's code stops that sequence dead |
 | 80 (behaviour) | Sixel scrolling | ✅ | cmote always scrolls — the modern default, and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | `vte`'s `NamedPrivateMode` has no 80, so the engine takes it as `PrivateMode::Unknown(80)`, logs "ignoring unknown mode" and returns; DECRQM answers `NotSupported`, which is the honest reply. A program that sets DECSDM to *stop* scrolling does not get that, and nothing here declines it (§65) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | press, release and motion for **left, middle, right and the vertical wheel** (buttons 0-2 and 64/65, a scroll being a press that never releases). The extra buttons and the horizontal wheel (66/67) are not encoded, and neither is a modifier-less hover outside `1003`. `term/mouse.rs` |
@@ -1129,10 +1170,12 @@ cmote sees a byte. That leaves the plain ❌ column short, and worth reading as 
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the
-delegating-`Handler` build that would do it, and the reason it stays ❌ is that such a wrapper degrades
-silently on an engine bump, in
-exchange for a sequence nothing outside a conformance suite emits. Since §57 it is also a gap that
-costs nothing to have, rather than one that quietly took the program's saved cursor with it. All
+delegating-`Handler` build that would do it, and the reason it stays unbuilt is that such a wrapper
+degrades silently on an engine bump — in exchange for a sequence no init or reset string emits, which
+§73 checked against the terminfo rather than asserting. **§73 also moved which row carries it**: DECSLRM
+itself is 🛑, cancelled by `term/cancel.rs`, and the ❌ is the DECLRMM mode nothing refuses. Since §57 it
+is a gap that costs nothing to have, rather than one that quietly took the program's saved cursor with
+it. All
 catalogued with their cost in §5 — which read as the *only* section with anything open in it until
 §60's audit put one row back into §3.
 
@@ -1144,7 +1187,7 @@ aligned. So instead cmote borrowed the one unused bit in the engine's per-cell f
 engine carry protection as if it were bold. That is a third way in, next to "scan it out" and "accept
 the engine's limit", and the reason DECSERA above is now a rectangle rather than a wall.
 
-**§72 names the fourth: translate it.** A sequence the engine has no arm for can sometimes be spelled
+**§72 names a fifth — §57's, below, was the fourth: translate it.** A sequence the engine has no arm for can sometimes be spelled
 in sequences it does have arms for, and then the work is a lookup table rather than an implementation.
 DECSTR is exactly that shape — every item on DEC's list is a mode, a region, a pen or a charset the
 engine already takes an ordinary sequence for — so cmote scans the reset out and feeds the engine the
@@ -1161,7 +1204,9 @@ request cmote cannot honour was still costing the program its saved cursor. A se
 be scanned out and applied beside the grid, because the problem is not what cmote fails to do with it,
 it is what the engine does. So `process` now cancels the offending byte in flight — advance up to it,
 feed the state machine's own CAN in its place, resume after it. "Refuse it properly" is the fourth way
-in, and the cheapest: a ❌ that costs nothing is worth more than most ✅s.
+in, and the cheapest: a refusal that costs nothing is worth more than most ✅s. **§73 gave it the mark to
+match** — a row cmote's own code stops dead is a 🛑, and this one had been reading ❌ with the word
+*safely* propped beside it, which is the retired partial mark wearing a coat.
 
 §60 closed the last row of §8's CSI table and then swept the two tables above it against the crate
 sources, which turned up six rows the code and the doc disagreed about — and only one of them a gap.
