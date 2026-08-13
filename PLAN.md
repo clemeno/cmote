@@ -4373,6 +4373,11 @@ of their boxes.
   stream unasked. §53 decodes only a file the user pointed at and asked to open, one at a time, under
   caps, with the format chosen by magic bytes; nothing about that reaches the escape-sequence path,
   and the two are not the same decision wearing different clothes.
+  **§70 then made the compatibility matrix say the same thing**, which it had not: its `iTerm 1337 File`
+  row went on billing for the decoder long after §53 paid for it, so it read ❌ where the truth was 🛑 —
+  a key `term/iterm.rs` declines by allow-list and by payload cap, with a test on both. Kitty graphics
+  stays ❌ there, and §70 corrects why: `f=24` / `f=32` are raw RGB/RGBA and need no decoder at all, so
+  its cost is the protocol.
 - **A picture is not reflowed, it is dropped.** `ponytail:` a terminal with native graphics re-lays its
   images on resize; cmote drops them rather than leave one floating over whatever text landed on its old
   line.
@@ -6899,6 +6904,10 @@ item and the §8 closing prose.
 - **Images and DECSLRM keep plain ❌.** Both are refusals, but each is also a real cost — a PNG/JPEG
   decoder dependency (§41), a 71-method delegating wrapper that degrades silently on an engine bump
   (§5). A 🛑 would claim the price is not part of the reason, and it is.
+  **Half of that stopped being true in §53 and was corrected in §70.** The decoder dependency was taken,
+  for the file preview, so the price on iTerm2's `File=` had already been paid and the row is a 🛑 that
+  `term/iterm.rs` performs twice over. Kitty graphics keeps ❌ but for the protocol rather than the
+  parser, and DECSLRM's price is untouched — the reasoning above stands, it was the invoice that moved.
 - **The other six XTMODKEYS resources** (§61) are a refusal with no mark at all, having no row.
 
 
@@ -7545,3 +7554,133 @@ elides at 48 characters would be a crowding problem dressed up as a feature.
   OSC 133 emitters into a remote's rc file; it could offer the same for a `preexec` that names the running
   command. Deliberately not bundled here — this section is about reading what a remote already sends, and
   a hook that makes remotes send more is a separate decision with a separate consent question.
+
+
+## 70. A mark that outlived its argument (v4.0.0)
+
+§69 corrected a row's **answer**. This one corrects a row's **reason**, which is subtler and invisible to
+the method every sweep since §60 has used. The row was:
+
+```
+| iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder —
+                                        cmote's own images are sixel, which needs none (§5, §41) |
+```
+
+Every clause of that was true the day it was written, in §41.
+
+### What changed underneath it
+
+§53 shipped the file preview and took **`image 0.25` as a direct dependency** with five codecs turned on
+— PNG, JPEG, GIF, BMP, WebP. §53's own text was careful about the line it was crossing: it says it
+*narrows* §41's refusal rather than reversing it, and §41's "What is deliberately NOT here" was amended in
+the same pass to say the refusal still holds. What neither noticed is that a row in the compatibility
+matrix was still charging for a dependency that had just been paid for elsewhere.
+
+So the row was not wrong about the world. It was wrong about the **price**, and a mark that rests on a
+price is only as good as the last time anyone checked the invoice.
+
+### Why nine sweeps did not catch it
+
+§60 through §69 all work the same way, and it is the right way: re-derive each mark from the crates. Read
+`vte`'s dispatch arms, ask which `Handler` methods `alacritty_terminal` leaves at their empty default,
+mark accordingly. Against the crates this row read correctly — inline images are not supported, and no
+amount of re-reading `vte` says otherwise.
+
+The change was in cmote's own `Cargo.toml`, made for a different feature, in a section about opening a
+file the user picked. **A note that names a cost has to be re-read whenever that cost is paid somewhere
+else**, and nothing in the audit method points at `Cargo.toml`.
+
+### What is left when the price is taken out
+
+Exactly what §41 wrote down in advance, and it never needed the decoder to state:
+
+> The refusal was never "cmote owns no PNG parser" — it is that a REMOTE must not get one run on bytes it
+> pushed into the terminal stream unasked.
+
+The difference is **consent, not caps** — which matters precisely because caps are copyable and consent is
+not. Every bound §53 put around the preview decoder could be lifted into an `OSC 1337 File=` handler in an
+afternoon; none of them would answer the question that actually separates the two:
+
+| | §53's preview | `OSC 1337 File=` |
+|---|---|---|
+| who chose the bytes | the user pointed at the file | the remote pushed them |
+| how many | one, on demand | unbounded, at line rate |
+| where the format comes from | the leading bytes, reader pinned to them | whatever the payload says |
+| what a bad decode costs | one preview tab | the terminal the user is working in |
+
+There is a second difference the old note never made either. Sixel's decoder is `term/sixel.rs` — six
+hundred lines cmote wrote, auditable in this tree, on a format whose payload is printable ASCII. PNG,
+JPEG, GIF and WebP are third-party parsers on a path a remote drives. They are pure Rust, so this is not
+the memory-unsafety class of problem; panics and decompression bombs are the live one, and `image::Limits`
+bounds a decode the user asked for rather than a stream arriving as fast as the link allows.
+
+### And the refusal was already there, twice over
+
+`term/iterm.rs` has declined this key since §55, by two independent mechanisms:
+
+- the **allow-list** `parse` never matches `File`, at any size — the same property that makes a key
+  iTerm2 invents tomorrow safe by default;
+- **`MAX_PAYLOAD` = 4096** sits deliberately below what a base64 image needs, so a real payload overruns
+  the shared framer's cap and is abandoned mid-flight. cmote never holds it.
+
+One test asserts both — `refuses_the_inline_image_key_without_even_buffering_it` feeds the `File=` prefix,
+then `MAX_PAYLOAD + 1` bytes, then the terminator, and asserts nothing came out; then it feeds `SetMark`
+and asserts the scanner still works, so a flood costs the flood and nothing else.
+
+That is the definition of **🛑** as §54 wrote it: refused by cmote's own code, pinned by cmote's own test.
+The row has been in the wrong column since before that column existed.
+
+### The neighbour that did not move
+
+Kitty graphics keeps **❌**, but its note was wrong in both directions and is rewritten:
+
+- **The decoder was never the cost.** Kitty's `f=24` and `f=32` payloads are raw RGB and RGBA — no
+  decoder at all. Only `f=100` is PNG. So "its payloads are PNG/RGBA chunks, so it needs an
+  image-format decoder" billed for a parser that half the format space does not use.
+- **The cost is the protocol**, and it is real: chunked transmission (`m=1` continuations), image ids,
+  placements, deletion commands, unicode placeholders, animation. §41's placement, reservation,
+  compositing and eviction machinery is protocol-agnostic and would still serve — it is the scanner
+  above it that is large.
+- **Nothing in cmote refuses it.** Kitty graphics arrives as an **APC** string (`ESC _ G … ESC \`), and
+  `vte`'s parser routes `State::SosPmApcString` to `anywhere`, whose match is `0x18 | 0x1A` → execute and
+  return to ground, `0x1B` → escape, and `_ => ()`. Every payload byte is dropped without a single
+  `Perform` method being called (`vte-0.15.0/src/lib.rs`, :182, :359, :377, :438).
+
+So the two rows genuinely differ, and the old shared note — *"same reason as kitty: a PNG/JPEG payload"* —
+was wrong about both of them. One is a decision cmote enforces; the other is a cost cmote has not paid,
+and a refusal nothing performs.
+
+### What moved
+
+Documentation only, no code. Two rows change mark — `iTerm 1337 File` in the OSC table and
+`iTerm2 inline images (OSC 1337)` in the graphics table, both ❌ → 🛑 — and kitty's note is rewritten in
+place. Six prose passages that named the decoder as the reason are corrected: §0's header, §41's paragraph
+there, §5's bullet (now **two** bullets, since the three protocols no longer share an answer), §62's
+summary, §7's, and §8's "Shape of it". §6 gains an entry for the key, and the `term/iterm.rs` evidence
+bullet gains the second mechanism and the test that pins it.
+
+Matrix after: 163 rows, **❌ 32 → 30**, **🛑 21 → 23**, ✅ 101 and 🤷 9 unchanged. Verified mechanically —
+no row carrying two marks, no row carrying none.
+
+**A correction to the counts themselves.** The scan used through §69 read field 4 of every table row,
+which is the Status column in §8's four-column tables and the **Note** column in the three-column
+"Graphics, window ops, keyboard, C0" table — so it silently counted mark glyphs that happened to appear
+in prose. The figures quoted in §69 (145 rows, 92 / 26 / 20 / 7) were that script's; the real totals are
+163 rows, 101 / 30 / 23 / 9. No count is written into either document, so nothing in the text was wrong —
+only numbers quoted in passing. The fixed script reads each table's own header row for the column named
+`Status`, which is the only version worth keeping.
+
+### Not done
+
+- **Kitty graphics is ❌ and unpinned**, which is now stated rather than implied. Nothing in cmote
+  declines it, so if a future `vte` ever dispatched APC the sequence would arrive with no arm to meet it.
+  Same shape as OSC 22 and `kitty 99`, and the same answer would serve: a scanner arm that drops it on
+  purpose, or nothing at all, with the row saying which.
+- **Half of `File=`'s refusal rides a cap chosen for the namespace**, not for this key. If a later key
+  ever needs a bigger payload, raising `MAX_PAYLOAD` would quietly demote this refusal to the allow-list
+  alone — still correct, still tested, but one mechanism where there had been two. That wants a comment
+  at the constant, not a change to it.
+- **There is no sweep for expired reasons.** §70 exists because a reader asked about one row. The check
+  is cheap and mechanical — every note that names a dependency or a cost, re-read against `Cargo.toml`
+  and the tree — and it is nobody's job yet. It is also the only class of error the crate-by-crate method
+  structurally cannot find, which is the argument for making it somebody's.

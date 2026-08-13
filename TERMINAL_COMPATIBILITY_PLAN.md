@@ -49,6 +49,14 @@ answerable, and the answer was that cmote has a tab strip to put it on and two s
 today look identical. It is now scanned by cmote itself and drawn on the chip after the endpoint
 (`term/icon.rs`). Its other half went the other way: the icon half of `OSC 0` is refused, and §6 records
 why. One ❌ row became one ✅ and one 🛑.
+**§70 then found the reverse — a row whose *reason* had expired without anyone noticing.** `iTerm 1337
+File` carried ❌ because inline images "need an image-format decoder": true when it was written, and untrue
+since §53 took `image` as a direct dependency for the file preview. What is left is not a cost at all but a
+refusal cmote's own code performs twice over and a test already pins, so the row is 🛑. Its neighbour moved
+too, though not its mark: kitty graphics keeps ❌, because its cost is the *protocol* rather than the parser
+— part of its format space is raw RGBA — and because nothing in cmote refuses it, `vte` swallowing every
+APC byte before a `Perform` method runs. A mark can outlive the argument that set it, which is a different
+failure from the ones §66–§69 swept for, and the only one a re-read of the crates does not catch.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -62,9 +70,11 @@ are no-op debug logs, so a sixel payload is already followed to its terminator a
 sequence can be scanned out of the same byte stream that reaches the engine — the tactic §17, §9, §33 and
 §34 all use. So **cmote now draws sixel images** (`term/sixel.rs`, `term/graphics.rs`, PLAN §41), answers
 **XTSMGRAPHICS**, and amends the engine's own **DA1** reply to advertise attribute 4. The rows that moved
-are listed in §5 and §8; kitty graphics, iTerm2 OSC 1337 and ReGIS stay ❌, and the reason has changed
+are listed in §5 and §8; kitty graphics, iTerm2 OSC 1337 and ReGIS did not move, and the reason changed
 from "the engine cannot" to "their payloads are PNG/JPEG, which is a decoder dependency and an attack
-surface" (§5).
+surface" (§5). **Half of that second reason expired in §53 and the rows were corrected in §70**: the
+decoder is in the tree, so iTerm2's `File=` is now a 🛑 cmote's own code performs, and kitty keeps its ❌
+for the protocol rather than the parser.
 
 **§42 moves no row back the other way, but it does fix a defect on this surface.** Word and line
 selection (PLAN §42) is local UX, yet it needed the engine's line-wrap flag — and reading it exposed
@@ -368,13 +378,19 @@ short, and since §41 nothing left in it is high value:
   renderer draws it, and a build-time assertion fails the compile if a future engine version claims the
   bit. cmote then performs the erase itself, cell by cell, because the engine's own `CSI 2 J` scrolls
   the viewport into history rather than blanking it. See PLAN §56 and `term/protect.rs`.
-- **ReGIS / kitty graphics / iTerm2 inline images (OSC 1337)** — still ❌, but the reason has moved out
-  of this section's premise. Nothing about the engine blocks them either; kitty and iTerm2 carry
-  **PNG/JPEG** payloads, so each needs an image-format decoder — a parser fed bytes straight off the
-  wire, i.e. a dependency and a security decision rather than a rendering one — and ReGIS is a vector
-  language with no users worth the interpreter. `[DEC]` / `[vendor]`. The placement, reservation,
-  compositing and capability machinery §41 built is protocol-agnostic, so kitty would be a decoder plus
-  a scanner arm.
+- **ReGIS / kitty graphics** — still ❌, but the reason has moved out of this section's premise. Nothing
+  about the engine blocks either. ReGIS is a vector language with no users worth the interpreter; kitty's
+  cost is its **protocol** — chunked transmission, image ids, placements, deletion commands, unicode
+  placeholders, animation — and not the decoder this bullet billed for until §70, since `f=24` / `f=32`
+  are raw RGB/RGBA and need none. `[DEC]` / `[vendor]`. The placement, reservation, compositing and
+  capability machinery §41 built is protocol-agnostic, so kitty would still be a scanner over that
+  machinery rather than a rethink — it is the scanner that is large.
+- **iTerm2 inline images (`OSC 1337 File=`)** — 🛑 since §70, and no longer in this section on cost.
+  `image` has been a direct dependency since §53, so the decoder this bullet once charged for is already
+  in the tree; what stops the sequence is `term/iterm.rs`, by allow-list and by payload cap. The decision
+  it carries out is §6's, and it is about consent rather than parsers: a REMOTE must not get one run on
+  bytes it pushed into the terminal stream unasked, which is a different question from a file the user
+  pointed at and asked to open. `[vendor]`.
 - **Blink** (SGR 5/6) — `vte` parses it (`Attr::BlinkSlow` / `BlinkFast`), but the engine's
   `terminal_attribute` has no arm for either and its cell `Flags` hold no blink bit, so the attribute
   never reaches the grid (§36, moved here from §4). Showing it would take a per-cell scanner beside
@@ -557,6 +573,27 @@ refused while §54's progress on the same button is not. `ClearScrollback` destr
 of the session. Honoured: `SetMark` (a bookmark, additive over §34) and `CurrentDir=` (a third cwd
 spelling). Details in PLAN §55.
 
+**`File=` is the key in that namespace whose refusal outlived its stated reason** — until §70, which is
+worth recording because the correction went the opposite way from every other one in this document. The
+row read ❌ *"a PNG/JPEG payload, so it needs an image-format decoder"*, and that was true when it was
+written. It stopped being true in §53, which takes `image` as a **direct** dependency with five codecs on
+so the file preview can open what a user asked for. The dependency this key was refused over is already
+in the tree, and so are the placement, reservation, compositing and eviction machinery §41 built.
+
+What stands is the part §41 wrote down in advance and §53 was careful not to touch: *the refusal was
+never "cmote owns no PNG parser" — it is that a **remote** must not get one run on bytes it pushed into
+the terminal stream unasked.* The difference is **consent, not caps**, which matters because caps are
+copyable and consent is not. §53 decodes one file the user pointed at, with the format pinned to its
+leading bytes and the decode bounded by `image::Limits`; `File=` would be bytes a remote chose, at
+whatever rate and count it liked, in a format the payload itself names. There is a second difference
+worth saying: sixel's decoder is cmote's own six hundred lines, auditable here, while PNG / JPEG / GIF /
+WebP are third-party parsers on a path a remote drives — pure Rust, so not the memory-unsafety class, but
+panics and decompression bombs are live.
+
+So the mark is **🛑** and not ❌: `term/iterm.rs` refuses this key twice over, by allow-list and by a
+`MAX_PAYLOAD` set below what a base64 image needs, and one test asserts both. A cost that has already
+been paid elsewhere is not a reason, and leaving it written as one invites a later reader to "fix" it.
+
 **Remote-set mouse pointer shape** — `OSC 22` is **refused**, and the reason is not the one that first
 suggests itself. "The pointer is ours like the theme is ours" is the weaker half: a colour scheme is
 persistent identity the user chose, whereas a pointer shape is transient feedback about what sits under
@@ -663,8 +700,9 @@ mark is what the split is worth — three turned out to be refusals cmote perfor
 named.
 
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
-and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
-decoder dependency — **no item of real UX value remains anywhere in this document.**
+and kitty graphics — iTerm2's inline images left for the 🛑 column in §70) is legacy, rare, invisible in
+practice, or a whole protocol's worth of work — **no item of real UX value remains anywhere in this
+document.**
 
 **One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
 crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
@@ -732,8 +770,9 @@ picture's cells become ordinary scrollback that scrolls, evicts and reflows like
 
 Every `[engine-limit]` item that carried real UX value is now shipped, and it was shipped **without
 touching the engine** — the same beside-the-engine tactic, one more time. What remains there (blink,
-double-height lines, left/right margins, rectangular ops, synchronized output, kitty/iTerm2 images) is
-legacy, invisible in practice, or a PNG/JPEG decoder dependency. For "support *any* documented app UX",
+double-height lines, left/right margins, rectangular ops, synchronized output, kitty graphics) is legacy,
+invisible in practice, or a protocol nobody here has asked for; iTerm2's inline images were on this list
+until §70 moved them to the other column. For "support *any* documented app UX",
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
 refused with its reason written down.
 
@@ -816,6 +855,16 @@ name on the tab chip. The icon half of `OSC 0` is now 🛑, refused for a reason
 it had to be stated on its own line. The unsplit row could not have produced either: it had already told the
 reader there was nothing here to decide.
 
+**§70 is the first row corrected for a reason that expired rather than a reason that was wrong**, which is
+a failure mode none of §66–§69 would have caught. Every sweep before it re-derived the marks from the
+crates, and against the crates `iTerm 1337 File` read correctly: not supported. What had changed was
+somewhere else entirely — §53 took the decoder this row was refused over as a direct dependency, for the
+file preview — so the row's *cost* quietly became zero while its note went on charging for it. What was
+left underneath is a refusal `term/iterm.rs` performs twice and a test already pinned, i.e. a 🛑 that had
+been sitting in the ❌ column since before those marks existed. The lesson for the next sweep: a note that
+names a price has to be re-read whenever the price is paid somewhere else, and no amount of re-reading
+`vte` will surface that.
+
 ### OSC — Operating System Command
 
 | Code | Feature | Status | Note |
@@ -843,7 +892,7 @@ reader there was nothing here to decide.
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
 | Kitty 21 | Colour by semantic name | 🤷 | same fixed scheme as 4 / 10 / 11 / 12 — the theme is cmote's, not the remote's (§6) — but nothing performs the refusal: `vte`'s OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so OSC 21 reaches no handler, and cmote has no scanner for it |
 | Kitty 99 | Rich notifications | 🤷 | a notification, in a third spelling (§6, §54) — and, unlike OSC 9, one nothing here declines: no `vte` arm, no cmote scanner |
-| iTerm 1337 File | Inline images | ❌ | a PNG/JPEG payload, so it needs an image-format decoder — cmote's own images are sixel, which needs none (§5, §41) |
+| iTerm 1337 File | Inline images | 🛑 | refused **twice** by `term/iterm.rs`, and on consent rather than cost (§6, §70): the allow-list never matches `File`, and `MAX_PAYLOAD` = 4096 sits deliberately below what a base64 image needs, so the payload is abandoned mid-flight rather than buffered. One test pins both halves — `refuses_the_inline_image_key_without_even_buffering_it`, which feeds `MAX_PAYLOAD + 1` bytes. Read ❌ until §70 on the grounds that inline images "need an image-format decoder"; §53 put five decoders in the tree as a direct dependency, so that cost expired and the mark had outlived its argument |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
 | iTerm 1337 `SetUserVar=gitBranch` | Per-session variable | ✅ | shown as a pill on the chip (§55). Base64-decoded, UTF-8 checked, control chars stripped, capped at 32 chars — counted in `chars`, so a multi-byte branch name is cut at a character boundary and cannot panic — and drawn BESIDE the endpoint label so it cannot pass for the host. A value that fails to decode leaves the pill alone instead of clearing it (`a_value_that_will_not_decode_leaves_the_branch_alone`), the same rule §54 gives progress |
@@ -996,9 +1045,9 @@ reader there was nothing here to decide.
 | Feature | Status | Note |
 |---|---|---|
 | Sixel images | ✅ | decoded and composited by cmote itself, no engine work (§41) |
-| Kitty graphics protocol / unicode placeholders / animation | ❌ | its payloads are PNG/RGBA chunks, so it needs an image-format decoder — a dependency and a security decision, not a rendering gap (§5, §41) |
+| Kitty graphics protocol / unicode placeholders / animation | ❌ | still ❌ and still a real cost — but not the cost this row billed for until §70. `f=24` / `f=32` payloads are **raw RGB/RGBA and need no decoder at all**, so the parser was never the whole of it; the protocol is — chunked transmission (`m=1`), image ids, placements, deletion commands, unicode placeholders, animation. Nothing in cmote refuses it either: kitty graphics arrives as an **APC** string (`ESC _ G`), and `vte`'s parser routes `SosPmApcString` to `anywhere`, which drops every byte without calling a single `Perform` method — so the payload never reaches cmote and there is nothing here to pin (§5, §41, §70) |
 | ReGIS | ❌ | a vector language; no users worth an interpreter (§5) |
-| iTerm2 inline images (OSC 1337) | ❌ | same reason as kitty: a PNG/JPEG payload (§5, §41) |
+| iTerm2 inline images (OSC 1337) | 🛑 | **not** the same as kitty since §70, which is why these two rows no longer share a note: this one arrives on a framer cmote already runs, and `term/iterm.rs` declines it by allow-list and by payload cap, with a test on both. The OSC table's `iTerm 1337 File` row carries the detail |
 | Graphics capability report | ✅ | XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`) **read**, answered from the decoder's real limits — 256 registers, 4096×4096 / 4 Mpx (`term/query.rs`, §41). The *set* action is refused and has its own row in the CSI table |
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | cmote owns its tabbed window; a remote can't drive it (§6) — and the mark moved here in the same pass that added it: `vte`'s `('t', [])` arm handles **14 / 18 / 22 / 23 only** and sends every other parameter to `unhandled!()`, so there is no `Handler` method for window manipulation at all. Nothing to refuse, nothing to pin |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
@@ -1022,12 +1071,13 @@ protected-cell erase it dropped as well, and — since §58, §59 and §60 — t
 family, checksum query included. The **deliberate** part of what is missing used to be most of the ❌
 column and now carries two marks of its own. **🛑** is what cmote's code refuses and its tests pin:
 the remote clipboard (OSC 52 both ways), desktop notifications in the OSC 9 spelling, the dangerous
-half of iTerm's OSC 1337 namespace, and a fixed colour scheme that makes every palette set and reset a
-no-op. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
+half of iTerm's OSC 1337 namespace — **inline images among them since §70** — and a fixed colour scheme
+that makes every palette set and reset a no-op. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the remote pointer shape (OSC 22), the palette stack (`CSI # p / # q`), and
 notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
 cmote sees a byte. That leaves the plain ❌ column short, and worth reading as the real list: the
-PNG/JPEG image protocols (a decoder dependency and a security decision, §41), blink (the engine drops
+kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
+§70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the
 delegating-`Handler` build that would do it, and the reason it stays ❌ is that such a wrapper degrades
 silently on an engine bump, in
@@ -1378,8 +1428,12 @@ Audited file:line anchors behind the claims above, for later re-checking.
   returns `(offset, Report)` for the honoured keys only; `parse` strips the `1337;` prefix and matches
   `SetMark` **whole**, so `SetMarkAnything` is not it. One honoured key today, and everything else —
   including keys nobody here has heard of — yields nothing, which is what makes the namespace safe
-  without an enumerated deny-list. `MAX_PAYLOAD` is deliberately far below an `iTerm2 File=` payload:
-  refusing to buffer megabytes of base64 is the cheapest way to mean §41's refusal. The dangerous keys
+  without an enumerated deny-list. `MAX_PAYLOAD` = 4096 is deliberately far below an `iTerm2 File=`
+  payload: refusing to buffer megabytes of base64 is the cheapest way to mean §41's refusal, and it is
+  the **second** mechanism behind that key rather than the only one, since the allow-list would decline
+  `File` at any size. Both are asserted by the one test:
+  `refuses_the_inline_image_key_without_even_buffering_it` feeds `MAX_PAYLOAD + 1` bytes. That pair is
+  why the row is a 🛑 as of §70 and was an ❌ before it. The dangerous keys
   (`Copy`, `SetProfile`, `SetColors`, `SetBackgroundImageFile`, `StealFocus`, `RequestAttention`,
   `ClearScrollback`, `File`) each have a test asserting they produce nothing. `SetMark` is applied
   through `Terminal::process`'s split advance into `osc133::Prompts::record_user_mark`, kept in a ring
