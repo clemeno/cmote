@@ -28,7 +28,8 @@ them did.
 mark covering two opposite answers and one cost that does not exist: `OSC 4` and `OSC 10 / 11 / 12`
 answer a query fully and refuse a set, and the note charged the refused set with a full-screen repaint
 that never happens, since `mark_fully_damaged` sets a bool nothing in cmote reads. Both rows now name
-their two halves, and the refused half is pinned by a test in each direction.
+each of them a query answered in full and a set refused on purpose. Each is now **two rows**, the way
+`OSC 52` has been two rows since §62, and the refused half is pinned by a test in each direction.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -582,14 +583,16 @@ refusal explicit instead of a side effect of `OnlyCopy`, and gives the `refuses_
 function to make that assertable at all, so the kitty-keyboard flag beside it is now pinned too.
 
 **§64 then closed the smaller version of the same hole, one column over.** The two ⚠️ colour rows were a
-working query and a refused set under one mark, and the refused half had no test — it was held up by the
+working query and a refused set under one mark — now four rows, `(query)` ✅ and `(set)` 🛑 apiece — and
+the refused half had no test — it was held up by the
 renderer's structure (`ui/grid.rs` cannot reach the engine's colour table) plus the fact that nobody had
 wired that table into `report_color`. The first of those is a real guarantee; the second is the §63
 pattern exactly, a correct outcome nothing asserts. Two tests now set a colour and prove the answer does
 not move, and each asserts the engine *did* record the set first, so neither can pass because the set was
 silently dropped on the way in. The same pass deleted a cost this document had invented for the refusal
 (see §6): the full-screen repaint a colour set was said to cost does not happen, because cmote never
-reads the engine's damage flags. Nothing shipped and no row changed status — the rows just stopped
+reads the engine's damage flags. Nothing shipped and **no answer changed** — the two ⚠️ rows became a
+✅ and a 🛑 apiece because that is what they always were, and the rows just stopped
 claiming more than they knew.
 
 The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
@@ -675,10 +678,11 @@ The last three are different in kind, which is why each carries its own mark rat
 footnote:
 
 - **❌** is a *gap* — a sequence that could still land, and several since have.
-- **⚠️** also covers a row with **two halves that deserve opposite marks** — a query answered in full
-  and a set refused on purpose, which is what `OSC 4` and `OSC 10 / 11 / 12` are. Those notes name each
-  half (`query ✅ / set 🛑`) rather than averaging them into one mark, because "partial" on its own hides
-  which part a program can rely on. §64 is where that stopped being averaged.
+- A code whose **two halves deserve opposite marks gets two rows**, not one averaged mark: `OSC 52` has
+  been split into `(write)` and `(read)` since §62, and §64 split `OSC 4` and `OSC 10 / 11 / 12` into
+  `(query)` and `(set)` the same way. "Partial" on its own hides which half a program can rely on, and
+  these halves are not partial in either direction — the query is answered in full and the set is refused
+  on purpose.
 - **🛑** is a *decision* recorded in §6 that **cmote enforces**: a scanner allow-list, an event dropped
   in the listener, a renderer that never reads the value. It never becomes work, and the row names the
   code that performs it — usually with a test pinning it by name, so the refusal cannot regress
@@ -697,13 +701,15 @@ footnote:
 | 0 | Icon name + window title | ✅ | title shown; icon name dropped (`term/mod.rs`) |
 | 1 | Icon name alone | ❌ | no arm in `vte` — `0` and `2` both map to the title handler and `1` matches nothing at all, so it does nothing. Nothing is lost: cmote shows no icon name anywhere, so there would be nowhere to put it |
 | 2 | Window title | ✅ | control chars stripped (anti-spoof) |
-| 4 | Palette entry set / query | ⚠️ | **query ✅ / set 🛑** — two halves in one row, and the second is the refusal row 104 carries alone. The query is answered from cmote's scheme (`report_color`) and pinned by `a_palette_colour_query_reports_that_slot`. The **set** is recorded by the engine and read by nothing: `ui/grid.rs` paints from the shared const table via a style resolver that is never handed a terminal, so the renderer's half is structural, and since §64 the reply's half is pinned by `a_palette_colour_set_does_not_move_the_query_answer` — which proves the engine stored the set before asserting the answer ignores it |
+| 4 (query) | Palette entry query | ✅ | answered from cmote's scheme: `report_color` resolves the slot through the shared const table `ui/grid.rs` paints from, so the answer never disagrees with the screen. Pinned by `a_palette_colour_query_reports_that_slot` |
+| 4 (set) | Palette entry set | 🛑 | the theme is chrome the **user** chose (§6) — the same refusal row 104 carries for the reset side. The engine records the value in `Term::colors` and nothing in `src/` reads that table; `ui/grid.rs` paints through a style resolver that is never handed a terminal, so the renderer's half of the refusal is structural. Since §64 the reply's half is pinned by `a_palette_colour_set_does_not_move_the_query_answer`, which proves the engine stored the set before asserting the answer ignores it |
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 | Hyperlinks | ✅ | rendered + Ctrl-click; web/mail only (`link.rs`, §24) |
 | 9 | Desktop notification | 🛑 | a notification leaves the window and lands on the desktop (§6, §54). cmote's own scanners perform this one: `term/progress.rs` matches `9;4;` and `term/cwd.rs` matches `9;9;`, so a bare `9;<text>` is *seen* and declined — pinned by `the_other_osc_nine_sequences_are_left_alone`. `vte` has no OSC 9 arm, so the engine would never have offered it either |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
 | 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
-| 10 / 11 / 12 | Default fg / bg / cursor colour | ⚠️ | **query ✅ / set 🛑**, as row 4. The query is scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell. The **set** is recorded and never read, and costs nothing to ignore: this row claimed "a full repaint for no change" until §64, but `mark_fully_damaged` sets one bool and cmote calls neither `damage()` nor `reset_damage()`, so that repaint never happened. Pinned by `a_default_colour_set_does_not_move_the_query_answer` |
+| 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell. The half programs actually use: `OSC 11 ?` is how one picks a light or dark colourscheme to suit the terminal. Two tests pin it, one per role |
+| 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | same fixed scheme as `4 (set)` (§6), and it costs nothing to ignore: this was said to cost "a full repaint for no change" until §64, but `mark_fully_damaged` sets one bool and cmote calls neither `damage()` nor `reset_damage()`, so that repaint never happened. Pinned by `a_default_colour_set_does_not_move_the_query_answer` |
 | 22 | Mouse pointer shape | 🤷 | the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) — but **no cmote code performs this refusal**: `vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body, which `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. A decision cmote would make and a cost it does not pay; nothing enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it, the listener's catch-all would drop it — the outcome is robust, the *reason* is unpinned |
 | 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working |
 | 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6). Refused **at the boundary and again behind it** since §63: `engine_config` sets `osc52: Osc52::Disabled`, so `clipboard_store` returns before an event exists, and the catch-all arm of `Replies::send_event` would still drop the event if it ever arrived. Until §63 only the second of those was true, the field sitting at the crate's `OnlyCopy` default — the weakest 🛑 in this table, now the most explicit |
@@ -950,7 +956,8 @@ place where the reasoning lived outside the code.
 partial is easy to leave alone: it admits up front that something is missing, so it draws none of the
 suspicion a ❌ or a 🛑 does. Both colour rows turned out to be two rows in a trench coat — a query
 answered in full and pinned by a test, and a set refused exactly as row 104's 🛑 is refused — averaged
-into one mark that told a reader neither. Worse, the note *justified* the refused half with a cost:
+into one mark that told a reader neither, so they are two rows each now. Worse, the note *justified* the
+refused half with a cost:
 "a full repaint for no change". There is no repaint. `set_color` calls `mark_fully_damaged`, which sets
 one bool in the engine's damage tracking, and cmote calls neither `damage()` nor `reset_damage()`
 anywhere, so the flag is written and never read. The refusal was right, the mechanism was right, and the

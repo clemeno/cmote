@@ -7014,10 +7014,16 @@ unrelated things, and cmote's answer to the two is opposite:
   hit. The renderer cannot read it even in principle: the style resolver in `ui/grid.rs` takes a cell and
   a const table, and is never handed a terminal to ask.
 
-One ⚠️ averaged those into "partial", which tells a reader neither. The rows now carry
-`**query ✅ / set 🛑**` and name each half — and the set half is explicitly the same refusal **row 104**
-carries as a plain 🛑, which is the inconsistency that made the averaging visible: identical mechanism,
-two different marks, only because one of the rows happens to have a query half attached.
+One ⚠️ averaged those into "partial", which tells a reader neither. **Each is now two rows** — `4
+(query)` ✅ beside `4 (set)` 🛑, and the same for `10 / 11 / 12` — following the split `OSC 52 (write)` /
+`(read)` has carried since §62. A composite mark in one cell (`query ✅ / set 🛑`) was the first attempt
+and is worse: the status column exists to be read down in one pass, and a cell holding two marks makes
+the reader stop and parse prose to find out which applies to the thing they came for. Two rows cost one
+line and answer at a glance.
+
+The split also makes an inconsistency impossible to miss rather than merely visible: `4 (set)` and **row
+104** are now adjacent-in-kind — identical mechanism, identical mark — where before one was a 🛑 and the
+other was hidden inside a ⚠️, only because it happened to have a query half attached to it.
 
 ### A cost this document invented
 
@@ -7090,10 +7096,11 @@ with no reader is a store with no purpose.
 ### What it cost
 
 Two tests (~30 lines with their comments), plus corrected rows and paragraphs across
-`TERMINAL_COMPATIBILITY_PLAN.md` §6, §7, §8's legend, the two rows themselves, the closing audit prose,
-the header state paragraph and the Evidence appendix. 1041 tests. **No behaviour changed and no row
-changed status** — the rows just stopped claiming more than they knew, and the cheapest refusal in the
-project stopped being described as an expensive one.
+`TERMINAL_COMPATIBILITY_PLAN.md` §6, §7, §8's legend, the two rows themselves — now four — the closing
+audit prose, the header state paragraph and the Evidence appendix. 1041 tests. **No behaviour changed and
+no answer changed**: the two ⚠️ rows became a ✅ and a 🛑 apiece because that is what they had been all
+along. The rows just stopped claiming more than they knew, and the cheapest refusal in the project stopped
+being described as an expensive one.
 
 ### Not done
 
