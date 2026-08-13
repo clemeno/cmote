@@ -36,6 +36,11 @@ never drives `vte`'s synchronized-update timeout, so a remote can hold the visib
 bytes (mode 2026, and §7). **§66 split the last two and retired the ⚠️ class**: every row in §8 now states
 one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
 gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
+**§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
+much — an empty note being the explicit claim that nothing is withheld. Sweeping for rows that had been
+leaning on the reader found one supported sequence with no row at all (`1005`, UTF-8 mouse), one
+unsupported spelling with none (`CSI ? 6 n`), one row carrying two different reports (DSR, now `5n` and
+`6n`), and seven rows whose extent had been left to the reader.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -609,6 +614,13 @@ cursor "renders fixed" has been stale since §60 shipped the shapes. **XTGETTCAP
 and neither is urgent — a program that gets an honest "no" behaves correctly today, which is why they sat
 unnoticed under a mark that said "partial" and meant "unexamined".
 
+**§67 is the same discipline applied to ✅ itself.** "Full" was the one mark that asked a reader to
+believe a row rather than check it, so it now reads *supported* and the note carries the extent. The sweep
+cost nothing and paid for itself: one supported sequence had no row at all (`1005`, the UTF-8 mouse
+encoding, live on the seam since the mouse shipped), DSR was one row for two different reports, one row
+was right for a reason it never gave (`ESC % G`), and one more ❌ came to light (`CSI ? 6 n`). None of
+that is work — it is the table saying what it already does.
+
 The same rule has one more consequence, stated so it is not discovered as a surprise: **a few ✅ rows still
 carry a "but only…" clause** — `OSC 0` (title yes, icon name no), `OSC 8` (http/https/mailto only, the
 rest refused by `link.rs`), `ESC ( ) * +` (ASCII and line drawing only), `r` (DECSTBM, vertical only),
@@ -722,9 +734,16 @@ A per-sequence audit against the escape-sequence catalogue published at
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
 (`term/`, `ui/grid.rs`) — not from memory.
 
-Legend: **✅** full · **❌** not supported · **🛑** refused, by cmote's own code · **🤷** refused in
+Legend: **✅** supported · **❌** not supported · **🛑** refused, by cmote's own code · **🤷** refused in
 principle, by nothing in particular. **Four marks, since §66 retired a fifth** — **⚠️** "partial or a
 deliberate quirk", which is what the rule under the bullets below is about.
+
+**✅ says *supported*, not *complete*** — §67 narrowed it deliberately. The note carries the extent: which
+parameters, which spellings, which direction. A ✅ with an empty note is the strong claim, the row saying
+the whole sequence works with nothing withheld, and §67 swept the table so that claim is only made where
+it is true. The reason for the narrowing is the same one that retired the partial mark: "full" is a word
+a reader supplies for themselves, and every wrong row this document has found was one somebody read
+generously.
 
 The last three are different in kind, which is why each carries its own mark rather than one mark and a
 footnote:
@@ -797,7 +816,7 @@ each of those is two rows too.
 | A / B / C / D | Cursor up / down / fwd / back | ✅ | |
 | E / F | Cursor next / prev line | ✅ | |
 | G / H (+ f) | Absolute position | ✅ | HVP `f` too |
-| I / Z | Forward / backward tab | ✅ | |
+| I / Z | Forward / backward tab | ✅ | to the next / previous stop, over the stops `ESC H` and `CSI g` maintain — the engine's own table, eight columns apart at power-on |
 | d / \` | Vertical / horizontal PA | ✅ | |
 | a / e | Horizontal / vertical PR | ✅ | the parser aliases HPR to CUF and VPR to CUD (`ansi.rs`), so they move but do not have their own arm |
 | s / u | Save / restore cursor | ✅ | ANSI.SYS form. The **bare** `CSI s` only — a parametrised one is DECSLRM and is cancelled before the engine can mistake it for this (§57, below) |
@@ -814,7 +833,7 @@ each of those is two rows too.
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | vertical only |
 | s (DECSLRM) | Left / right margins | ❌ **safely** | the margins themselves stay out, on **price rather than capability** — there is a seam (`Processor::advance` is generic over `Handler`, which `Term` merely implements), but a delegating wrapper over a 71-method trait whose every method has a default empty body degrades **silently** on an engine bump, and nothing emits DECSLRM outside a conformance suite. Costed in §5. What §57 fixed is the **collision**: `vte`'s `('s', [])` arm is save-cursor and ignores its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one saved-cursor slot the program had its own value in. cmote now cancels that final byte before the engine sees it (`term/cancel.rs`), so a margin request does nothing at all — which is what "unsupported" should mean |
-| g | Tab clear | ✅ | |
+| g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
 | $ z (DECERA) | Erase rectangular area | ✅ | cmote's own scanner and cell writer (`term/rect.rs`, §58) — the engine matches `$` only in DECRQM, so all four of this family fall through unhandled. Corners default to the page edges, an end past the edge clamps, and a rectangle described backwards or starting off the page is a **no-op** rather than one cmote invents by swapping corners |
@@ -825,7 +844,9 @@ each of those is two rows too.
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | the attribute half of the family §58 shipped the content half of (§59) — corners first, then a small DEC-defined selector list, folded to three masks at parse time so the walk costs the same however long the list. `$ r` sets and clears (`0 1 4 5 7 22 24 25 27`, later wins); `$ t` flips (`0 1 4 5 7` only — "off" has no meaning for a verb that flips). Attributes only: never a colour, never a glyph, and **never the flag word wholesale**, which would take cmote's DECSCA protection bit with it (§56). An unknown selector is ignored and the rest of the list still applies, as an SGR does; a malformed *number* still drops the sequence. Blink is parsed and dropped — the engine has no bit for it |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | the one sequence in the family that answers rather than acts (`term/rect.rs`, §60). The algorithm is **xterm's `xtermCheckRect` at its DEC-compatible default**, copied rather than derived: each cell weighs its character code plus 0x04 protected / 0x08 hidden / 0x10 underline / 0x20 reverse / 0x80 bold, a plain space is trimmed unless it is the rectangle's first cell, and the total is negated and reported as `DCS Pid ! ~ XXXX ST`. The corners start at parameter **2**; the page number is ignored, cmote having one. Answered from the page as it stood **where the question sat**, and clamped to the visible page, so the scrollback cannot be read through it. Refused a rectangle under origin mode like the rest of the family — but still answered, with the checksum of no cells, because a query dropped on the floor stalls the program that asked. **Blink never lands** (no engine flag), a DEC-charset cell weighs its Unicode point, and a never-written cell reads as a written blank |
 | Ps SP q (DECSCUSR) | Cursor style | ✅ | block / underline / bar; blink dropped |
-| 5n / 6n | Device status report | ✅ | |
+| 5n | Device status report | ✅ | `CSI 0 n`, "terminal ok" — the whole of what DSR 5 is |
+| 6n | Cursor position report | ✅ | `CSI <row> ; <col> R`, one-based, from the live cursor |
+| ? 6 n | Extended cursor position (DECXCPR) | ❌ | `vte` has `('n', [])` and no `('n', [b'?'])`, so the private spelling reaches nothing — a program that wants the page number back gets silence. `CSI 6 n` is the spelling that works (§67) |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read ❌ until §41 spotted it, having been left behind when §36 shipped it |
 | ? Pi;Pa;Pv S | Graphics attributes (XTSMGRAPHICS) | ✅ | colour registers and max image size, from the decoder's real limits (§41) |
@@ -838,7 +859,7 @@ each of those is two rows too.
 |---|---|---|---|
 | ESC D / ESC M | Index / Reverse index | ✅ | |
 | ESC E | Next line | ✅ | |
-| ESC H | Set tab stop | ✅ | |
+| ESC H | Set tab stop | ✅ | at the cursor's column (HTS) |
 | ESC 7 / ESC 8 | Save / restore cursor | ✅ | |
 | ESC c (RIS) | Full reset | ✅ | |
 | ESC = / ESC > | Keypad app / numeric | ✅ | tracked, and encoded for the numpad keys with no NumLock meaning (Enter, `* + , - / =`); digits deliberately keep their NumLock behaviour (DECKPAM, §2, §36) |
@@ -849,7 +870,7 @@ each of those is two rows too.
 | LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ | no `esc_dispatch` arm for `n`, `o`, `~`, `}` or `\|`, so each reaches no handler. With SS2 / SS3 missing too (above), G2 and G3 can be designated and never invoked — a gap nobody here declines (§65) |
 | ESC #3–6 | Double-height / width lines | ❌ | not represented (§5) |
 | ESC SP F / G | 7 / 8-bit control output | ❌ | |
-| ESC % G | UTF-8 charset | ✅ | engine is always UTF-8 |
+| ESC % G | UTF-8 charset | ✅ | in the sense that matters and not in the sense the row implied: `vte`'s `esc_dispatch` has **no `%` arm at all**, so the sequence itself reaches nothing. Nothing is lost, because the parser decodes UTF-8 always — and for the same reason `ESC % @` (back to ISO-8859-1) has nowhere to go, which is the half this row never said (§67) |
 
 ### DCS — Device Control String
 
@@ -901,9 +922,10 @@ each of those is two rows too.
 | 69 (DECLRMM) | Left / right margin | ❌ | not in the engine's mode list, so setting it is ignored and DECRQM answers `0`, "not recognised" — the honest reply, and the one that tells a conformant program not to spell `CSI s` as DECSLRM. §57 covers the program that sends it anyway |
 | 80 (behaviour) | Sixel scrolling | ✅ | cmote always scrolls — the modern default, and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | `vte`'s `NamedPrivateMode` has no 80, so the engine takes it as `PrivateMode::Unknown(80)`, logs "ignoring unknown mode" and returns; DECRQM answers `NotSupported`, which is the honest reply. A program that sets DECSDM to *stop* scrolling does not get that, and nothing here declines it (§65) |
-| 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | `term/mouse.rs` |
+| 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | press, release and motion for **left, middle, right and the vertical wheel** (buttons 0-2 and 64/65, a scroll being a press that never releases). The extra buttons and the horizontal wheel (66/67) are not encoded, and neither is a modifier-less hover outside `1003`. `term/mouse.rs` |
 | 1004 | Focus events | ✅ | cmote sends CSI I / CSI O |
-| 1006 | SGR mouse | ✅ | |
+| 1006 | SGR mouse | ✅ | `CSI < b ; col ; row M` / `m`, so a release keeps its button and the coordinates are unbounded |
+| 1005 | UTF-8 mouse | ✅ | the wider coordinates of the classic encoding, engine-tracked and read off the seam (`Screen::mouse_encoding`) — undocumented in this table until §67, `1006` taking precedence when both are set |
 | 1007 | Alt-scroll | ✅ | |
 | 1016 | SGR-pixel mouse | ❌ | |
 | 1049 | Alternate screen | ✅ | no scrollback there, by design |
@@ -930,7 +952,7 @@ each of those is two rows too.
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
 | Cell size (CSI 16 t) | ❌ | |
-| Title stack (CSI 22 / 23 t) | ✅ | `push_title` / `pop_title` |
+| Title stack (CSI 22 / 23 t) | ✅ | the **window title** only, and only the first parameter: `vte` reads `22` / `23` and ignores the `; 0` / `; 1` / `; 2` that would name icon-title-only or window-title-only, so all three spellings push and pop the one title cmote has. The engine caps the stack at 4096 and drops the oldest entry rather than failing (§67) |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
 | **xterm modifyOtherKeys** — query (`CSI ? 4 m`) | ✅ | answered `CSI > 4 ; Pv m` by the same scanner (§61) — the SET form, so a program can write the reply back to restore the state. Read as ❌ between §60's audit, which found `vte` dispatching it to a `report_modify_other_keys` the engine leaves at its empty default, and §61, which closed it. **Resource 4 only**: XTMODKEYS carries seven, cmote holds one, and the reply being an XTMODKEYS control leaves no way to say "not mine" — so the other six draw silence rather than an invented level. Answered where the question sits in the stream, not where the chunk ends |
@@ -1050,6 +1072,19 @@ for four sections. The matrix now has four marks and one rule: **one row, one an
 value of that is not tidiness — it is that every row is now a claim narrow enough to be wrong, and
 therefore checkable. Six ✅ rows still carry a "but only…" clause and by the same rule are two rows each;
 §7 names them, and they are honest as written, which is the difference.
+
+**§67 then went after the last mark that could be read generously.** ✅ had meant "full", which put the
+burden on a row to be complete and on a reader to notice when it was not — and a reader who supplies the
+word "full" themselves is exactly the reader §60's six wrong rows survived. It now means **supported**,
+with the extent in the note and an empty note reserved for the strong claim. Sweeping the table under that
+definition was the cheapest audit in this sequence and still found `1005` — the UTF-8 mouse encoding,
+tracked by the engine and read off the seam since the mouse shipped, with no row anywhere — and DSR
+carrying two different reports under one tick. It also found a row that was ✅ for a reason it did not
+give: `ESC % G` is honoured by the parser being UTF-8 always, not by any `%` arm, `vte` having none, which
+is also why there is no way back out to ISO-8859-1. Seven rows gained the extent they had been leaving to
+the reader: tabs and HTS, `CSI g`'s two parameters, the mouse's buttons, the title stack's one title and
+4096-deep cap, and DSR's two halves. One new ❌: `CSI ? 6 n`, the private cursor-position spelling, which
+reaches nothing.
 
 ---
 

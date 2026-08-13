@@ -7294,3 +7294,69 @@ notation still reads correctly.
 - **The rule is not enforced by anything.** Nothing fails if a future row says two things at once — the
   same class of exposure §63 fixed for the clipboard, and unfixable here, since a markdown table has no
   test. The nearest thing to a pin is that the legend now states the rule in the same breath as the marks.
+
+## 67. What a tick was allowed to mean (v4.0.0)
+
+§66 retired the partial mark and left four. One of them was still loose: **✅** meant "full", which is a
+claim about completeness that a row makes and a reader takes on trust. §67 narrows it to **supported**, and
+moves the burden into the note: the row says *how much*, and an empty note becomes the strong claim rather
+than the lazy one.
+
+### Why "full" was the wrong word
+
+The failure this document keeps finding is a row read generously. §60's six rows were right about *what*
+and wrong about *who*. §64's colour rows averaged two answers. §65's partials had never been asked which
+part. Each survived because the reader supplied something the row had not said.
+
+"Full" invites exactly that, and it does it in the column where it is least visible. A row reading
+
+    | 5n / 6n | Device status report | ✅ | |
+
+says: this works. Which parameters? Both of the two named, and — as it turns out — not the private
+spelling `CSI ? 6 n`, which reaches no arm in `vte` at all. The row was not wrong. It just could not be
+wrong, which is the property §62 through §66 spent four sections removing from every other mark.
+
+### The sweep
+
+Reading every ✅ row and asking "supported *how much*" turned up this:
+
+| Row | Mark | What the sweep found |
+|---|---|---|
+| `1005` (UTF-8 mouse) | ✅ | **no row at all** — engine-tracked, read off `Screen::mouse_encoding`, supported since the mouse shipped and never written down |
+| `CSI ? 6 n` (DECXCPR) | ❌ | no row either — `vte` has `('n', [])` and no `('n', [b'?'])` |
+| `5n` / `6n` | ✅ ✅ | one row for two different reports, now one each |
+| `CSI g` (TBC) | ✅ | had a row and an empty note, which under the new definition claimed all six parameters; it is `0` and `3`, the others hitting `unhandled!()` |
+
+And one row that was right for a reason it did not give: **`ESC % G`** read "engine is always UTF-8",
+which is true, but `vte`'s `esc_dispatch` has no `%` arm whatsoever — the sequence reaches nothing. Same
+outcome, different mechanism, and the mechanism is the half that tells you `ESC % @` cannot switch back
+either.
+
+Seven rows gained the extent they had been leaving to the reader: `I`/`Z` and `ESC H` (whose stops the
+engine keeps, eight apart at power-on), DECSCUSR's three shapes, the mouse's three buttons and vertical
+wheel (66/67 not encoded), the title stack's single title and 4096-entry cap with the oldest dropped, and
+DSR's two reports.
+
+### What it cost
+
+Markdown only. Two new rows, one row split into two, seven notes made explicit, one legend paragraph.
+**No code changed and no answer changed** — every one of these sequences behaved this way before the row
+admitted it.
+
+One correction inside the section itself, which belongs here rather than in a silent edit: the first pass
+added a `CSI g` row and claimed TBC had none, having searched the table for "Clear tab" when the row said
+"Tab clear". The row existed, with an empty note. That is the same generous reading this section is about,
+committed while writing it — and it is the argument for the sweep rather than against it, since an empty
+note is precisely what stops a row from being findable by what it does.
+
+### Not done
+
+- **The bare-✅ rows were spot-checked, not re-derived.** Roughly thirty rows carry ✅ with an empty note
+  and now assert completeness by doing so. The obvious hiding places were checked against `vte` — cursor
+  movement, erase, insert/delete, the ANSI modes — but "I looked and saw nothing" is weaker than §65's
+  reading of every dispatch arm, and the next audit should start there rather than trust this sentence.
+- **Six ✅ rows still carry a "but only…" clause** and are two rows each by §66's rule — unchanged from
+  that section's list. §67 makes them *legal* (a ✅ with a stated extent is exactly what the mark now
+  means) without making them *ideal*.
+- **`CSI ? 6 n` is a real ❌ nobody will miss.** Answering it would mean inventing a page number cmote
+  does not have, and the standard spelling already works.
