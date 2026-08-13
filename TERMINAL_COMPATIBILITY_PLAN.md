@@ -33,7 +33,7 @@ each of them a query answered in full and a set refused on purpose. Each is now 
 **§65 then audited every remaining partial row against the crates**, split seven more the same way,
 re-marked `BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote
 never drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight
-bytes (mode 2026, and §7). **§66 split the last two and retired the ⚠️ class**: every row in §8 now states
+bytes (mode 2026, and §7). **§66 split the last two and retired the partial class**: every row in §8 now states
 one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
 gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
 **§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
@@ -603,7 +603,7 @@ length refusing. The fix is small and has a shape already in the codebase: an `i
 subscription while an update is pending, the way `SnackbarTick` and `QuitTick` are driven, calling
 `stop_sync` once the instant passes. Not taken in §65, which was an audit.
 
-**§66 retired the ⚠️ class and inherited two small gaps from it.** Splitting the last two partial rows —
+**§66 retired the partial class and inherited two small gaps from it.** Splitting the last two partial rows —
 DECRQSS and XTGETTCAP — meant deciding what their declined halves are, and neither is a refusal: cmote
 answers honestly ("not reported", "unknown") because it has no reporting code, not because a policy says
 no. So both are ❌, and both are answerable. **DECRQSS** could report three more selectors from state that
@@ -626,7 +626,7 @@ carry a "but only…" clause** — `OSC 0` (title yes, icon name no), `OSC 8` (h
 rest refused by `link.rs`), `ESC ( ) * +` (ASCII and line drawing only), `r` (DECSTBM, vertical only),
 `SP q` (DECSCUSR, shape yes and blink dropped) and `CSI ? 4 m` (resource 4 of XTMODKEYS' seven). By the
 one-answer-per-row rule each of those is two rows, in ✅/❌ or ✅/🛑 pairs. §66 did not split them: they
-are honest as written and their second halves are named in their own notes, whereas a ⚠️ named nothing.
+are honest as written and their second halves are named in their own notes, whereas a partial named nothing.
 
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
@@ -735,8 +735,8 @@ engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote
 (`term/`, `ui/grid.rs`) — not from memory.
 
 Legend: **✅** supported · **❌** not supported · **🛑** refused, by cmote's own code · **🤷** refused in
-principle, by nothing in particular. **Four marks, since §66 retired a fifth** — **⚠️** "partial or a
-deliberate quirk", which is what the rule under the bullets below is about.
+principle, by nothing in particular. **Four marks, and four is the whole set** — a fifth once meant
+"partial or a deliberate quirk", and §66 retired it for the reason the rule under the bullets gives.
 
 **✅ says *supported*, not *complete*** — §67 narrowed it deliberately. The note carries the extent: which
 parameters, which spellings, which direction. A ✅ with an empty note is the strong claim, the row saying
@@ -766,9 +766,10 @@ declines others gets a row for each, rather than one mark averaging them — `OS
 more (✅/🛑 for `SetUserVar` and mode 12, ✅/🤷 for modes 3 and 80, ✅/❌ for `CSI ! p`, the locking shifts
 and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. That is why there is no "partial" mark
 here: a row saying two things at once cannot be checked, and every finding this document has recorded came
-from checking one. Where a section below still writes ⚠️ it describes what a row used to carry, not a mark
-in use. The cost is admitted in §7 — a handful of ✅ rows still carry a "but only…" clause, and by this rule
-each of those is two rows too.
+from checking one. Sections below that speak of a row having been "partial" are describing what it used to
+carry, not a mark still in use — the symbol itself is gone from this document, so it cannot be copied into
+a new row by someone skimming for an example. The cost is admitted in §7 — a handful of ✅ rows still carry
+a "but only…" clause, and by this rule each of those is two rows too.
 
 ### OSC — Operating System Command
 

@@ -6994,7 +6994,7 @@ moved a decision from a comment into code that can fail.
 
 §62 gave the matrix's refusals marks of their own and §63 hardened the one refusal that turned out to be
 inherited rather than stated. Both passes only ever looked at ❌ rows. **§64 asked the same question of
-the ⚠️ rows**, starting with the three left in §8's OSC table — and a partial turns out to be the easiest
+the partial rows**, starting with the three left in §8's OSC table — and a partial turns out to be the easiest
 mark to leave alone, precisely because it admits up front that something is missing. It draws none of the
 suspicion a ❌ or a 🛑 does.
 
@@ -7014,7 +7014,7 @@ unrelated things, and cmote's answer to the two is opposite:
   hit. The renderer cannot read it even in principle: the style resolver in `ui/grid.rs` takes a cell and
   a const table, and is never handed a terminal to ask.
 
-One ⚠️ averaged those into "partial", which tells a reader neither. **Each is now two rows** — `4
+One mark averaged those into "partial", which tells a reader neither. **Each is now two rows** — `4
 (query)` ✅ beside `4 (set)` 🛑, and the same for `10 / 11 / 12` — following the split `OSC 52 (write)` /
 `(read)` has carried since §62. A composite mark in one cell (`query ✅ / set 🛑`) was the first attempt
 and is worse: the status column exists to be read down in one pass, and a cell holding two marks makes
@@ -7023,7 +7023,7 @@ line and answer at a glance.
 
 The split also makes an inconsistency impossible to miss rather than merely visible: `4 (set)` and **row
 104** are now adjacent-in-kind — identical mechanism, identical mark — where before one was a 🛑 and the
-other was hidden inside a ⚠️, only because it happened to have a query half attached to it.
+other was hidden inside a partial, only because it happened to have a query half attached to it.
 
 ### A cost this document invented
 
@@ -7081,9 +7081,9 @@ The renderer's half needs no test — there is no route for a remote colour to r
 a stronger guarantee than an assertion. The *reply* half had no such structure: `report_color` sits in
 the same file as the listener that receives the set, and nothing but habit kept the two apart.
 
-### The third ⚠️, checked and left alone
+### The third partial, checked and left alone
 
-`iTerm 1337 SetUserVar` is the one ⚠️ in that table that earns the mark as written — partial **by
+`iTerm 1337 SetUserVar` is the one partial in that table that earns the mark as written — partial **by
 design**, one honoured name. Re-read against `term/iterm.rs`: the name is matched whole against
 `HONOURED_VAR = b"gitBranch"` before anything is decoded, so there is deliberately no map for a remote to
 fill; the value is base64-decoded, UTF-8 checked, control-stripped and cut at `MAX_VALUE_CHARS = 32`
@@ -7098,7 +7098,7 @@ with no reader is a store with no purpose.
 Two tests (~30 lines with their comments), plus corrected rows and paragraphs across
 `TERMINAL_COMPATIBILITY_PLAN.md` §6, §7, §8's legend, the two rows themselves — now four — the closing
 audit prose, the header state paragraph and the Evidence appendix. 1041 tests. **No behaviour changed and
-no answer changed**: the two ⚠️ rows became a ✅ and a 🛑 apiece because that is what they had been all
+no answer changed**: the two partial rows became a ✅ and a 🛑 apiece because that is what they had been all
 along. The rows just stopped claiming more than they knew, and the cheapest refusal in the project stopped
 being described as an expensive one.
 
@@ -7116,13 +7116,13 @@ being described as an expensive one.
 - **The bell is still the last refusal riding the catch-all alone**, unchanged from §63's list: the
   engine has no field to state it in, and unlike the colour sets there is nothing structural behind it
   either — only the `_ => {}` arm. If any of these ever grows a pin, that is the one.
-- **The other ⚠️ rows outside the OSC table have not had this treatment** — DECSTR, locking shifts,
+- **The other partial rows outside the OSC table have not had this treatment** — DECSTR, locking shifts,
   DECRQSS, XTGETTCAP, DECCOLM, blinking cursor, DECSDM, synchronized output, BEL. Each is a partial for
   its own reason and each would need the same read-the-crate pass to say whether its note still holds.
 
 ## 65. Asking the partials which part (v4.0.0)
 
-§64 split the two ⚠️ colour rows and left the obvious question hanging: there were eight more ⚠️ rows in
+§64 split the two partial colour rows and left the obvious question hanging: there were eight more partial rows in
 the matrix, and none of them had ever been audited the way §60 audited the ❌ and 🛑 ones. This section
 audits all ten, and the result is lopsided enough to be worth stating first: **seven were two answers
 hiding under one mark, one was a refusal wearing a partial's clothes, and two were honestly partial.**
@@ -7130,7 +7130,7 @@ hiding under one mark, one was a refusal wearing a partial's clothes, and two we
 ### Why the partials were the least examined rows
 
 A ❌ invites someone to close it. A 🛑 invites someone to check whether the refusal is real — which is
-exactly what §62 and §63 did. A ⚠️ invites nothing. It has already admitted that something is missing, so
+exactly what §62 and §63 did. A partial invites nothing. It has already admitted that something is missing, so
 nobody asks *which part*, and a note of five words ("SO / SI + designation only") is never felt as thin.
 That is how the one real finding below sat in plain sight for this long.
 
@@ -7140,20 +7140,20 @@ Each is now two rows, following the `(query)` / `(set)` shape §64 settled on:
 
 | Was | Now | What the audit found |
 |---|---|---|
-| `SetUserVar` ⚠️ | `=gitBranch` ✅ + any other name 🛑 | the name is matched whole **before** anything is decoded, so there is no map for a remote to fill — pinned by `only_the_one_honoured_variable_name_is_kept` |
-| `CSI ! p` ⚠️ | DECSCA part ✅ + the rest ❌ | `vte` has `('p', [b'$'])` and `('p', [b'?', b'$'])` and **no `('p', [b'!'])`**, so a soft reset leaves origin mode, autowrap, the keypad, the scrolling region and the pen untouched. A gap, not a policy |
-| locking shifts ⚠️ | `SI`/`SO` ✅ + `LS2`/`LS3`/`LS1R`… ❌ | `execute` maps only SI and SO; `esc_dispatch` has no arm for `n`, `o`, `~`, `}`, `\|`. G2/G3 can be designated (`ESC * B`) and never invoked |
-| mode 3 ⚠️ | side effects ✅ + column resize 🤷 | the engine's `deccolm` clears the grid and region on purpose and declines the resize itself — cmote is never asked, so it is a 🤷, the same shape as `CSI 1–10 t` |
-| mode 12 ⚠️ | the mode ✅ + the blink 🛑 | engine tracks and DECRQM reports; `CursorShape` carries no blink and cmote runs no animation timer, and `Event::CursorBlinkingChange` hits the catch-all. Both halves of the refusal are cmote's |
-| mode 80 ⚠️ | behaviour ✅ + the mode 🤷 | `NamedPrivateMode` has no 80, so it is `Unknown(80)` — logged, ignored, and honestly reported `NotSupported` |
-| mode 2026 ⚠️ | batching ✅ + abort timeout ❌ | see below |
+| `SetUserVar` partial | `=gitBranch` ✅ + any other name 🛑 | the name is matched whole **before** anything is decoded, so there is no map for a remote to fill — pinned by `only_the_one_honoured_variable_name_is_kept` |
+| `CSI ! p` partial | DECSCA part ✅ + the rest ❌ | `vte` has `('p', [b'$'])` and `('p', [b'?', b'$'])` and **no `('p', [b'!'])`**, so a soft reset leaves origin mode, autowrap, the keypad, the scrolling region and the pen untouched. A gap, not a policy |
+| locking shifts partial | `SI`/`SO` ✅ + `LS2`/`LS3`/`LS1R`… ❌ | `execute` maps only SI and SO; `esc_dispatch` has no arm for `n`, `o`, `~`, `}`, `\|`. G2/G3 can be designated (`ESC * B`) and never invoked |
+| mode 3 partial | side effects ✅ + column resize 🤷 | the engine's `deccolm` clears the grid and region on purpose and declines the resize itself — cmote is never asked, so it is a 🤷, the same shape as `CSI 1–10 t` |
+| mode 12 partial | the mode ✅ + the blink 🛑 | engine tracks and DECRQM reports; `CursorShape` carries no blink and cmote runs no animation timer, and `Event::CursorBlinkingChange` hits the catch-all. Both halves of the refusal are cmote's |
+| mode 80 partial | behaviour ✅ + the mode 🤷 | `NamedPrivateMode` has no 80, so it is `Unknown(80)` — logged, ignored, and honestly reported `NotSupported` |
+| mode 2026 partial | batching ✅ + abort timeout ❌ | see below |
 
 `BEL` was the eighth: not a partial at all, but a refusal. `vte` dispatches it, `alacritty_terminal`
 implements it (`bell()` raises `Event::Bell`), and cmote's catch-all drops it — §6's rule, performed by
 cmote's own code. Re-marked 🛑, and noted as the last refusal in the document standing on a fall-through
 alone: OSC 52 got a field in §63, and the colour sets have a renderer that structurally cannot read them.
 
-`DECRQSS` and `XTGETTCAP` keep their ⚠️, and their notes now say what the mark means: every request draws
+`DECRQSS` and `XTGETTCAP` keep their partial mark, and their notes now say what the mark means: every request draws
 a valid reply, and one setting (`m`, from the live pen) and two capabilities (`TN`, `Co`) carry data. The
 rest answer "not reported" rather than guessing. That is partial in the plain sense — one answer, given
 where it can be given truthfully.
@@ -7217,7 +7217,7 @@ decision.
 
 ## 66. Retiring a mark (v4.0.0)
 
-§64 and §65 audited the ⚠️ rows and split nine of them. Two were left standing as "genuinely partial" —
+§64 and §65 audited the partial rows and split nine of them. Two were left standing as "genuinely partial" —
 DECRQSS and XTGETTCAP — and this section asks what they would be if the class did not exist, splits them,
 and deletes the mark.
 
@@ -7261,14 +7261,14 @@ The pattern across four sections:
 
 - **§60** — six rows wrong about *who* performed a behaviour.
 - **§62** — two more, plus the ❌/🛑/🤷 split so a row's mechanism sits in the column.
-- **§64** — two rows averaging two opposite answers into one ⚠️, plus a cost invented to justify one half.
+- **§64** — two rows averaging two opposite answers into one partial, plus a cost invented to justify one half.
 - **§65** — seven more of the same, one refusal mismarked as a partial, and a real gap (mode 2026's
   undriven abort timeout) sitting under a note that read as reassurance.
 
-Every one of those is the same failure: **a row making a claim too wide to be wrong.** ⚠️ is that failure
+Every one of those is the same failure: **a row making a claim too wide to be wrong.** The partial mark is that failure
 promoted to a mark. It says "something here is incomplete" and thereby answers, in advance, the only
 question worth asking of a row — *which part, and who decided?* A ❌ invites someone to close it. A 🛑
-invites someone to check the refusal is real. A ⚠️ invites nothing.
+invites someone to check the refusal is real. A partial invites nothing.
 
 So the matrix now runs on one rule: **one row, one answer, one mechanism.** Four marks, and any row that
 wants to say two things becomes two rows — which `OSC 52 (write)` / `(read)` had been doing since §62
@@ -7289,7 +7289,7 @@ notation still reads correctly.
   belongs in a section that changed no behaviour.
 - **Six ✅ rows still carry a "but only…" clause** — `OSC 0`, `OSC 8`, `ESC ( ) * +`, `r` (DECSTBM),
   `SP q` (DECSCUSR) and `CSI ? 4 m`. By the rule above each is two rows. They were left alone on purpose:
-  their second halves are stated in their own notes, which is exactly what a ⚠️ never did. Splitting them
+  their second halves are stated in their own notes, which is exactly what a partial never did. Splitting them
   is bookkeeping, and worth doing the next time one of them is touched for a real reason.
 - **The rule is not enforced by anything.** Nothing fails if a future row says two things at once — the
   same class of exposure §63 fixed for the clipboard, and unfixable here, since a markdown table has no
