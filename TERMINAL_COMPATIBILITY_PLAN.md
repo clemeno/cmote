@@ -43,6 +43,12 @@ unsupported spelling with none (`CSI ? 6 n`), one row carrying two different rep
 `6n`), and seven rows whose extent had been left to the reader. **§68 then split the last rows that stated
 two answers in one** — `OSC 0`, `OSC 8`, DECSCUSR, XTSMGRAPHICS, DECKPAM, charset designation and the
 XTMODKEYS query — so §8 now holds one answer and one mechanism per row, with no exceptions left over.
+**§69 then cashed one of those splits in, which is the first time this sequence of audits produced a
+feature rather than a correction.** `OSC 1` (icon name) had been half of a single ❌ row; alone, it was
+answerable, and the answer was that cmote has a tab strip to put it on and two shells on one host that
+today look identical. It is now scanned by cmote itself and drawn on the chip after the endpoint
+(`term/icon.rs`). Its other half went the other way: the icon half of `OSC 0` is refused, and §6 records
+why. One ❌ row became one ✅ and one 🛑.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -148,7 +154,12 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   (`CSI > q`), DECRQSS (`DCS $ q … ST`), XTGETTCAP (`DCS + q … ST`) and DA3 (`CSI = c`) — are sniffed
   from the stream and answered by cmote itself (`term::query`, §33, §36), so a program fingerprinting
   the terminal or reading back its SGR no longer stalls on a dropped query.
-- **Shows the window title** a program sets with OSC 0 / OSC 2 in the title bar (§23).
+- **Shows the window title** a program sets with OSC 0 / OSC 2 in the title bar (§23), and the **icon
+  name** a program sets with OSC 1 on that tab's own chip, after the endpoint (§69). The two are separate
+  surfaces on purpose: the title names the window, the icon name names the tab, which is what tells two
+  shells on the *same* host apart. Both are stripped of control characters before they are drawn, and the
+  icon name is capped where it is stored — a remote naming its own chip must not be able to spoof or crowd
+  the label that says which machine it is (`term/icon.rs`).
 - **Tracks and honours modes**: application-cursor DECCKM (arrows → SS3), application-keypad DECKPAM
   (the unambiguous numpad keys → SS3, §36), bracketed paste
   `?2004`, cursor visibility `?25`, mouse `?9 / 1000 / 1002 / 1003` in SGR / UTF-8 / classic
@@ -462,6 +473,23 @@ event genuinely arrives and cmote's catch-all drops it. It is the last refusal i
 on a fall-through alone: OSC 52 got a config field in §63, and the colour sets have a renderer that
 structurally cannot read them, but a bell has neither.
 
+**The icon half of OSC 0** — refused since §69, and the odd one out in this section, because nothing here is
+dangerous. `OSC 0` sets the icon name and the window title to the *same string*; cmote honours `OSC 1` and
+draws an icon name on the tab chip, so it could honour this spelling too at the cost of one `or_else`. It
+does not, because of what actually sends it: Debian's stock `PS1` carries `\[\e]0;\u@\h:\w\a\]`, so `OSC 0`
+arrives on **every prompt of every session**. Honouring the icon half would put `user@host: ~` permanently
+on every chip — the endpoint that is already on the chip, plus the directory that is already in the title
+bar — and would leave no room for the one thing an icon name is worth having for, a program naming itself.
+So this refusal is about noise rather than risk, which is a reason worth writing down precisely because it
+is the sort a later reader would otherwise undo as an oversight.
+
+It is a **🛑** and not a **🤷** even though `vte` drops the icon half too: `vte` routes `OSC 0` to the title
+handler, cmote takes the title from it, and it is `term::icon`'s prefix match — `1;` and nothing else — that
+declines the rest. The bytes are in cmote's hands when the decision is made, which is the whole difference
+§57 is about. Two tests hold it, and the second is the one that matters: it asserts the window title *moved*
+before asserting the icon name did not, so a future change that stopped parsing `OSC 0` at all would fail
+rather than quietly resemble the same refusal.
+
 **A blinking cursor** is refused on price rather than on principle, and it is cmote's own refusal
 (§8's `12 (the blink)`). A remote's `CSI ? 12 h` is tracked by the engine and reported back by DECRQM,
 but nothing draws it: `term/screen.rs`'s `CursorShape` deliberately carries no blink and cmote runs no
@@ -624,8 +652,8 @@ was right for a reason it never gave (`ESC % G`), and one more ❌ came to light
 that is work — it is the table saying what it already does.
 
 **§68 closed that consequence rather than leaving it as a note.** The ✅ rows carrying a "but only…"
-clause are now split in ✅/❌ or ✅/🛑 pairs: `OSC 0` (title) against `OSC 1` (the icon name, wherever it
-is spelled), `OSC 8`'s three openable schemes against every other one (drawn, never launched — `link.rs`),
+clause are now split in ✅/❌ or ✅/🛑 pairs: `OSC 0`'s title against its icon half (❌ at the time; a 🛑
+since §69 built the other half), `OSC 8`'s three openable schemes against every other one (drawn, never launched — `link.rs`),
 `ESC ( ) * +`'s `B` and `0` against the 94-charsets `vte` drops, DECSCUSR's shape against its blink (a
 refusal cmote performs, the engine having stored the flag), XTSMGRAPHICS' read against its set (answered
 `status 3`), DECKPAM's encoded keys against the numpad digits NumLock owns, and the XTMODKEYS query's
@@ -776,17 +804,25 @@ from checking one. Sections below that speak of a row having been "partial" are 
 carry, not a mark still in use — the symbol itself is gone from this document, so it cannot be copied into
 a new row by someone skimming for an example. **§68 paid the last of the cost**: the ✅ rows that had been
 carrying a "but only…" clause are split too, so every row in this table is now one answer — `OSC 0`'s title
-against `OSC 1`'s icon name, `OSC 8`'s three schemes against every other one, DECSCUSR's shape against its
+against its icon half, `OSC 8`'s three schemes against every other one, DECSCUSR's shape against its
 blink, XTSMGRAPHICS' read against its set, DECKPAM's keys against its digits, and the two charset finals
 that work against the rest. Where a row's second half already had a row of its own — DECSTBM's horizontal
 twin is DECSLRM — the note points at it instead of repeating it.
+
+**§69 is the first row a split turned into shipped work**, and the case for the rule. `OSC 0`/`OSC 1` had
+been one ❌ row reading "dropped wherever it is spelled"; splitting it in §68 made the two halves answerable
+separately, and they turned out to have opposite answers. `OSC 1` is now ✅ — a scanner of cmote's own, a
+name on the tab chip. The icon half of `OSC 0` is now 🛑, refused for a reason that only became visible once
+it had to be stated on its own line. The unsplit row could not have produced either: it had already told the
+reader there was nothing here to decide.
 
 ### OSC — Operating System Command
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
 | 0 (title half) | Window title | ✅ | the same handler `OSC 2` uses, control characters stripped (`term/mod.rs`) |
-| 1, and the icon half of 0 | Icon name | ❌ | `vte` maps `0` and `2` alike to the title handler and has no arm for `1` at all, so the icon name is dropped wherever it is spelled. Nothing is lost: cmote shows no icon name anywhere, so there would be nowhere to put it |
+| 0 (the icon half) | Icon name | 🛑 | `OSC 0` sets the icon name and the window title to the **same string**, so cmote already holds those bytes — they are the title in the row above. `term/icon.rs` matches `1;` and nothing else, on purpose: Debian's stock `PS1` carries `\[\e]0;\u@\h:\w\a\]` and fires this sequence on every prompt, so honouring the icon half would stamp onto every chip forever the endpoint that is already on it and the title that is already in the title bar (§69). Pinned from both sides — `the_icon_half_of_osc_0_is_not_honoured`, and `osc_0_moves_the_title_and_leaves_the_icon_name_alone`, which asserts the title DID move before asserting the icon name did not |
+| 1 | Icon name | ✅ | cmote's own scanner (`term/icon.rs`, §69) — `vte` has no arm for `1` at all, so nothing else in the stack ever sees it. The name is drawn on the tab chip **after** the endpoint and never in place of it (the §55 rule the branch pill carries), control characters stripped and capped at 24 characters where it is stored; an empty name clears it. What it buys: two shells on the same host, which the endpoint alone cannot tell apart |
 | 2 | Window title | ✅ | control chars stripped (anti-spoof) |
 | 4 (query) | Palette entry query | ✅ | answered from cmote's scheme: `report_color` resolves the slot through the shared const table `ui/grid.rs` paints from, so the answer never disagrees with the screen. Pinned by `a_palette_colour_query_reports_that_slot` |
 | 4 (set) | Palette entry set | 🛑 | the theme is chrome the **user** chose (§6) — the same refusal row 104 carries for the reset side. The engine records the value in `Term::colors` and nothing in `src/` reads that table; `ui/grid.rs` paints through a style resolver that is never handed a terminal, so the renderer's half of the refusal is structural. Since §64 the reply's half is pinned by `a_palette_colour_set_does_not_move_the_query_answer`, which proves the engine stored the set before asserting the answer ignores it |
@@ -1355,8 +1391,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   which is what means there is no remote-keyed map to bound. `parse_user_var` is three-valued so the
   three cases stay distinct: not an assignment (keep what we hold), an EMPTY value (the shell left the
   repository — clear it), a value fit to draw. A bad base64 or non-UTF-8 payload lands in the first
-  case, so rubbish cannot wipe a real reading. `sanitize` strips control characters and caps the value
-  at `MAX_VALUE_CHARS` counted in `chars`, on the way IN. Surfaced by `Terminal::branch` and drawn by
+  case, so rubbish cannot wipe a real reading. The value is strip-and-capped on the way IN by
+  `osc::sanitize` at `MAX_VALUE_CHARS` = 32 — a local copy until §69 gave that rule a second caller and
+  moved it to the shared module. Surfaced by `Terminal::branch` and drawn by
   `ui/tabs.rs` as a dim pill AFTER the endpoint label — remote-chosen text in cmote's own chrome must
   not be able to pass for the label that says which machine the user is typing into.
 - **`term/osc.rs`** — the shared OSC framer (§17, §34, §54, §55). One chunk-safe byte machine
@@ -1364,11 +1401,32 @@ Audited file:line anchors behind the claims above, for later re-checking.
   once per completed payload with the byte offset **just past its terminator** — the coordinate §34
   needs to line a mark up with the grid, and which §17 and §54 ignore. `Framer<CAP>` takes its payload
   cap as a const parameter, so each scanner keeps deriving `Default` and keeps its own limit named in
-  its own module (`cwd` 4096, `osc133` 512, `progress` 128); past the cap the payload is abandoned and
-  framing resumes (§12). This replaced three copies of the same machine that had already drifted.
-  **`graphics.rs` deliberately keeps its own**: a 16 MB binary payload whose overflow must keep
+  its own module (`cwd` 4096, `osc133` 512, `progress` 128, `icon` 512); past the cap the payload is
+  abandoned and framing resumes (§12). This replaced three copies of the same machine that had already
+  drifted. **`graphics.rs` deliberately keeps its own**: a 16 MB binary payload whose overflow must keep
   scanning to the real terminator while flagging the payload spoiled, which is a different policy, not
   a different number.
+  Since §69 it also holds **`sanitize(text, max_chars)`**, the strip-and-cap every scanner needs before
+  remote-chosen text is drawn in cmote's own chrome — control characters filtered, length capped in
+  `chars` so a multi-byte name cannot be cut mid-codepoint. Moved here from `iterm.rs` when `icon.rs`
+  became the second caller, which is this document's own "one adapter is a hypothetical seam, two is a
+  real one" applied to the module the drift had already been found in once. Note what it does *not*
+  have to cover on the scanner path: an ESC inside a payload either ends the OSC string or invalidates
+  it, so `Framer` settles that byte before `sanitize` is reached — the strip is for the rest, and for
+  any caller whose text did not come from a framed payload.
+- **`term/icon.rs`** — the icon name a remote sets (OSC 1, §69). `Icon::feed` runs on the shared framer
+  and keeps a latest-value `Option<String>`; `parse` matches the payload's `1;` prefix **whole**, so
+  `10;` / `11;` / `12;` / `104;` / `110;` / `112;` and `1337;` cannot be mistaken for it — the last
+  mattering most, since that namespace is one cmote actually reads. The name is trimmed, control-stripped
+  and capped at `MAX_NAME_CHARS` = 24 on the way IN, the number chosen against `ui/tabs.rs`'s
+  `MAX_LABEL_CHARS` = 48 so the usual `user@host — name` fits without eliding. An empty or
+  all-control name **clears** it rather than drawing an empty suffix, which is how a program hands the
+  chip back when its command ends. Surfaced by `Terminal::icon_name` (a borrow, not a clone — the scanner
+  is a plain field with no lock in front of it) and drawn by `App::Tab::strip_label` **after** the
+  endpoint, the §55 rule the branch pill carries. `vte` has no OSC 1 arm at all, so this scanner is the
+  only thing in the stack that ever sees the sequence. It also performs §6's refusal of the icon half of
+  `OSC 0` by not matching `0;`. Parse-only, no engine, no widgets — fully unit-tested, and the two
+  refusal tests were pinned by making `parse` accept `0;` and watching exactly those fail.
 - **`term/progress.rs`** — the command-progress scanner (OSC 9;4, §54). `Reports::feed` runs on the
   shared framer and keeps a latest-value `Progress` — `None` / `Indeterminate` / `Working(share)` /
   `Failed(share)` / `Paused(share)` for `st` 0 / 3 / 1 / 2 / 4, the share clamped to 100. Untrusted

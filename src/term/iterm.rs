@@ -168,24 +168,10 @@ fn parse_user_var(payload: &[u8]) -> Option<Option<String>> {
 		.decode(encoded)
 		.ok()?;
 	let text = String::from_utf8(decoded).ok()?;
-	let clean = sanitize(&text);
+	let clean = super::osc::sanitize(&text, MAX_VALUE_CHARS);
 	// A value that was nothing but control characters sanitises to empty. Treated as "no branch"
 	// rather than as an empty pill, which would be a smudge on the strip with nothing in it.
 	Some((!clean.is_empty()).then_some(clean))
-}
-
-/// Reduce a remote-set value to something safe to draw in the tab strip (§55): printable characters
-/// only, and no longer than `MAX_VALUE_CHARS`.
-///
-/// The control-character strip is the same rule — and for the same reason — as the window title's
-/// (`term::mod::sanitize_title`): the strip is chrome cmote owns, so a remote must not be able to
-/// smuggle a newline or an escape into it. The length cap is counted in `chars` rather than bytes so a
-/// multi-byte branch name is cut at a character boundary and cannot panic.
-fn sanitize(text: &str) -> String {
-	text.chars()
-		.filter(|character| !character.is_control())
-		.take(MAX_VALUE_CHARS)
-		.collect()
 }
 
 #[cfg(test)]

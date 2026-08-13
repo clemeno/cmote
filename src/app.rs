@@ -3389,10 +3389,26 @@ impl Tab {
 	/// user with several open can tell them apart.
 	fn strip_label(&self) -> String {
 		match &self.screen {
-			Screen::Terminal | Screen::Connecting { .. } => self
-				.connection
-				.clone()
-				.unwrap_or_else(|| "session".to_owned()),
+			Screen::Terminal | Screen::Connecting { .. } => {
+				let endpoint = self
+					.connection
+					.clone()
+					.unwrap_or_else(|| "session".to_owned());
+				// The icon name the remote set for this tab, if it set one (OSC 1, §69) — `vim`, a
+				// build, a tmux window. It is what tells two shells on the SAME host apart, which
+				// the endpoint alone cannot do.
+				//
+				// AFTER the endpoint, never in place of it. Same rule, and the same reason, as the
+				// branch pill's (§55): the endpoint is what says which machine this is, so
+				// remote-chosen text must never be readable as the start of it — a remote that
+				// could rename its own chip could dress a staging box as production. Already
+				// stripped of control characters and capped by `term::icon`, so this line draws it
+				// and does not police it.
+				match self.terminal.as_ref().and_then(term::Terminal::icon_name) {
+					Some(icon) => format!("{endpoint} — {icon}"),
+					None => endpoint,
+				}
+			}
 			Screen::Home => "Home".to_owned(),
 			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
 			// only an editor can have (§32, §53). Both halves of that are the viewer's own.

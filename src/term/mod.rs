@@ -41,12 +41,13 @@
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
+mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear (§69)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
-mod osc; // frames OSC strings out of the stream for the scanners below to read (§17, §34, §54, §55)
+mod osc; // frames OSC strings out of the stream for the scanners below, and sanitises what they keep (§17, §34, §54, §55, §69)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
@@ -247,6 +248,7 @@ impl Terminal {
 			prompts: osc133::Prompts::default(),
 			iterm: iterm::Iterm::default(),
 			progress: progress::Reports::default(),
+			icon: icon::Icon::default(),
 			protect: protect::Protect::default(),
 			cancels: cancel::Cancel::default(),
 			rectangles: rect::Rectangles::default(),
@@ -278,6 +280,10 @@ impl Terminal {
 		// with no position on the grid, so it needs no split in the advance below — only the order
 		// the reports arrive in, which its own scanner keeps.
 		self.progress.feed(bytes);
+		// The icon name a program set for its tab (OSC 1, §69). Another latest-value reading with no
+		// position on the grid, so it needs no split either — and `vte` has no arm for the code, so
+		// this scanner is the only thing in cmote that ever sees it.
+		self.icon.feed(bytes);
 		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
 		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
 		// for the usual flow where a program sets attributes and then queries in the same write.
@@ -878,6 +884,17 @@ impl Terminal {
 			.clone()
 	}
 
+	/// The icon name a program last set for this tab (OSC 1, §69), if any. `None` until one does,
+	/// and again once one clears it with an empty name.
+	///
+	/// A borrow rather than a clone, unlike `title` above: the scanner is a plain field on this
+	/// struct and not shared with the engine, so there is no lock to get out from behind. The tab
+	/// strip draws it AFTER the endpoint and never in place of it — see the module for why that is
+	/// load-bearing rather than cosmetic.
+	pub fn icon_name(&self) -> Option<&str> {
+		self.icon.name()
+	}
+
 	/// Resize the grid when the window changes (§9). This only reflows our local
 	/// view; the remote pty is told separately via `SshCommand::Resize`, so the
 	/// two are kept in step by the caller (`app::on_window_resized`).
@@ -1219,6 +1236,11 @@ pub struct Terminal {
 	/// Like the cwd, it is a latest-value reading with no place on the grid, so `process` feeds it
 	/// the whole chunk and never splits the advance for it.
 	progress: progress::Reports,
+	/// Reads the icon name a remote sets (OSC 1, §69), which the tab chip wears after the endpoint.
+	/// `vte` has no arm for that code at all, so — like the cwd, and with the same latest-value
+	/// shape and no place on the grid — the same bytes are scanned here. Its module also declines
+	/// the icon half of OSC 0, which is a decision and not an omission; the reasoning is there.
+	icon: icon::Icon,
 	/// Reads the selective-erase sequences the engine drops — DECSCA, DECSED and DECSEL (§56). Fed by
 	/// the split advance, but for the opposite reason to the marks above: each of its requests has to
 	/// be applied with the engine advanced PAST the sequence, not up to it. Protection itself is not
@@ -1783,6 +1805,34 @@ mod tests {
 		// input channel is for keystrokes and query answers only.
 		let mut terminal = Terminal::new(10, 40);
 		assert!(terminal.process(b"\x1b]2;build\x07").is_empty());
+	}
+
+	#[test]
+	fn an_icon_name_reaches_the_tab_strip_without_touching_the_title() {
+		// §69. OSC 1 is a code `vte` has no arm for, so this whole path is cmote's own scanner —
+		// and it must stay in ITS lane: the icon name goes to the chip and the title bar is left
+		// exactly as it was. Setting one is state, not a reply, so no bytes go back either.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]2;window\x07");
+		assert!(terminal.process(b"\x1b]1;vim\x07").is_empty());
+		assert_eq!(terminal.icon_name(), Some("vim"));
+		assert_eq!(terminal.title().as_deref(), Some("window"));
+	}
+
+	#[test]
+	fn osc_0_moves_the_title_and_leaves_the_icon_name_alone() {
+		// The refusal, pinned at the boundary (§69). OSC 0 sets icon name and window title to the
+		// SAME string, and cmote takes only the title half — so a stock Debian prompt, which fires
+		// this sequence on every prompt, cannot end up printed on every chip forever.
+		//
+		// The order of the two assertions is the argument: the title moving is what proves the
+		// sequence was parsed and applied, so the icon name staying `None` is a decision cmote
+		// made about bytes it HAD, not a sequence that never arrived.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]1;vim\x07");
+		terminal.process(b"\x1b]0;user@host: ~\x07");
+		assert_eq!(terminal.title().as_deref(), Some("user@host: ~"));
+		assert_eq!(terminal.icon_name(), Some("vim"));
 	}
 
 	#[test]

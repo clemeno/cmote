@@ -7384,6 +7384,11 @@ One row needed no split. **DECSTBM**'s "vertical only" is not a second answer: t
 a different sequence, DECSLRM, with a row of its own since §57. The note points at it now instead of
 carrying it.
 
+**The first row in that table did not survive the section.** §69 built `OSC 1` and refused the icon half of
+`OSC 0` on its own terms, so the pair is ✅/🛑 today and the ❌ above is what it read on the day of the
+split. Left as written, because the point of this section is what splitting a row makes visible, and this
+row made it visible faster than any of the other six.
+
 ### Why it was worth the edit
 
 Three of the seven second halves are refusals **cmote performs** — an allow-list, a seam that drops a flag
@@ -7415,3 +7420,128 @@ every one of these fourteen rows describes behaviour that predates the split.
   §67's definition of ✅ rather than a second answer under §66's rule. That line is worth keeping in mind
   the next time someone is tempted to split a row: the test is whether a program can send something and
   get a different answer.
+
+## 69. The tab has a name now, and OSC 0 does not get to write it (v4.0.0)
+
+§68 split `OSC 0` from `OSC 1` and marked the icon-name half **❌**, on a note that read: the sequence is
+"dropped wherever it is spelled", and "nothing is lost: cmote shows no icon name anywhere, so there would
+be nowhere to put it".
+
+The first clause was right. The second was a claim about cmote's own UI, written from the sequence's 1980s
+meaning — the label X11 put under an *iconified* window, a thing Windows does not have and winit exposes
+no API for. What terminals actually settled on is different, and iTerm2 made it the norm: **OSC 2 names
+the window, OSC 1 names the tab**, and OSC 0 (the older spelling) means both at once. cmote has had a tab
+strip since §26.
+
+So there was somewhere to put it, and the row that said otherwise was the second half of a pair that had
+existed for exactly one section. §68's closing argument was that a second half left inside a note is a
+decision nobody has had to make; this is the same finding one level down. Once the halves had their own
+rows, one of them turned out to be a feature and the other a refusal — and the merged row had been quietly
+asserting that neither was true.
+
+### Why it was worth building
+
+`App::Tab::strip_label` returns the **endpoint**. Open two shells on the same host and the two chips read
+identically — `user@host` and `user@host` — and the only way to tell them apart is to click one. That is
+the exact gap an icon name fills: `vim`, a long build, a tmux window, anything that names *itself*.
+
+The window title could not have covered it. It is one string for the whole window (§48 gives it to
+whichever region holds the keyboard), so it says what the focused tab is doing and nothing about the other
+five.
+
+### How it is read
+
+`vte` has no OSC 1 arm at all — the code falls through `osc_dispatch` to `_ => unhandled(params)` and is
+logged away — so nothing in the engine ever offered it. That is the same shape as the cwd (§17), the
+prompt marks (§34), the progress reports (§54) and the 1337 namespace (§55), and it gets the same answer:
+a scanner over `term/osc.rs`'s shared `Framer`, which is the fifth one now. `term/icon.rs` is 228 lines,
+most of them tests and reasoning.
+
+Two details worth naming:
+
+- **The prefix is matched whole — `1;` and nothing else.** `10;`, `11;`, `12;`, `104;`, `110;`, `112;`
+  and `1337;` all begin with a `1`, and the last of those is a namespace cmote genuinely reads. A
+  `strip_prefix(b"1")` would have swallowed every one of them.
+- **An empty name clears it**, rather than drawing an empty suffix. That is how a program hands the chip
+  back when its command exits, and a shell that sets one on `preexec` and clears it on `precmd` gets the
+  behaviour a user would expect without cmote guessing at command boundaries.
+
+### The two refusals, which are the same decision from either side
+
+**The name is appended to the chip, never substituted for it.** The label reads `user@host — vim`. This is
+§55's rule, already carried by the branch pill and written in its own comment: the endpoint is what says
+*which machine this is*, so remote-chosen text must never be readable as the start of it. A remote that
+could rename its own chip could dress a staging box as production.
+
+**The icon half of OSC 0 is declined** — and this one is worth the paragraph, because on the face of it it
+is free. OSC 0 sets the icon name and the window title to the *same string*, so cmote already holds those
+bytes; honouring the icon half costs one `or_else` and no parsing at all. The reason not to is what sends
+it. Debian's stock `PS1` carries `\[\e]0;\u@\h:\w\a\]`, which fires OSC 0 **on every prompt of every
+session**. Honour the icon half and every chip permanently reads `user@host: ~` — the endpoint that is
+already on the chip, plus the directory that is already in the title bar — with no room left for the one
+thing an icon name is worth having for.
+
+So the refusal is about noise, not risk, which is precisely why it needed writing down: a later reader
+finding `1;` matched and `0;` not would otherwise read it as an oversight and close it.
+
+It is a **🛑** and not a **🤷**. `vte` does drop the icon half, but it drops it by handing cmote the title
+and saying nothing about the rest — the bytes are in cmote's hands when the decision is made, and it is
+`term::icon`'s prefix match that declines them. §57 is the whole section on that difference.
+
+### What the pins found
+
+The refusal is held by two tests, and the second is the one that carries the argument:
+`osc_0_moves_the_title_and_leaves_the_icon_name_alone` asserts the window title **moved** before asserting
+the icon name did not. A test that only checked the icon name would pass just as well if `OSC 0` had
+stopped being parsed altogether — the same trick §64 used for the colour sets, where the engine is shown
+to have *stored* the value before the answer is shown to ignore it. Both were pinned by making `parse`
+accept `0;` as well and watching exactly those two fail, and nothing else.
+
+One test was written wrong and the code corrected it. `control_characters_are_stripped_from_the_name`
+originally asserted that `ESC [ 31 m` inside a name came out as `[31mb`. It comes out as **nothing**: an
+ESC inside an OSC payload either opens the ST terminator or invalidates the sequence, and `Framer`
+abandons the payload rather than guessing. The real behaviour is stricter than the one asserted, so the
+test now pins *that*, with a second half proving the scanner still works on the sequence after — a
+malformed name costs its own sequence and nothing more.
+
+### One rule extracted, because it got a second caller
+
+`iterm.rs` had a private `sanitize` — strip control characters, cap the length in `chars` — with a comment
+saying it was the same rule as the window title's, written out again. `icon.rs` needed exactly it. Rather
+than a third copy, it moved to `term/osc.rs` as `sanitize(text, max_chars)`, beside the framer, with each
+caller naming its own cap because the surfaces genuinely differ (a branch pill has different room from a
+tab label).
+
+That module is where it belongs for a reason it already records: `osc.rs` exists **because** the OSC
+framing had been copied three times and had already drifted between the copies. This is the same lesson,
+one layer up, caught at two copies instead of three. `sanitize_title` in `term/mod.rs` was left where it
+is — it has no cap, and giving it one is a decision about the title bar, not a refactor.
+
+### What it cost
+
+One new file (`term/icon.rs`, 228 lines), and small edits to four others: a module declaration, a struct
+field, one `feed` call in `process`, one accessor, and eight lines in `strip_label`. Sixteen new tests,
+1041 → 1057 in the suite, green on `cargo check --all-targets` / `test` / `clippy -D warnings` / `fmt`.
+
+No engine change, no widget change, no new dependency. The chip's layout is untouched — the name goes
+inside the existing label, not into a second pill, because two remote-chosen pills on a chip that already
+elides at 48 characters would be a crowding problem dressed up as a feature.
+
+### Not done
+
+- **A full reset (RIS) clears neither the title nor the icon name.** This is not new and it is not the
+  icon name's doing: `alacritty_terminal::Term::reset_state` assigns `self.title = None` **directly**,
+  without raising the `ResetTitle` event cmote's listener watches, so cmote's copy of the title has
+  survived RIS for as long as cmote has had one. The icon name now behaves the same way, which was the
+  deliberate choice — a user seeing one survive a reset and the other not would be looking at a bug
+  whichever way it had been guessed. Fixing it properly means a flag on the reply buffer and clearing
+  both from one place; worth doing, and worth doing to *both*, which is why it is not a footnote to this
+  section's feature.
+- **`strip_label` has no test.** The append-not-substitute rule lives in `app.rs`, where constructing a
+  `Tab` means most of the app; the scanner and the terminal boundary are pinned, the last four lines are
+  not. The same gap `OSC 8`'s drawn-but-refused links have (§68), and it wants the same answer: a seam in
+  `app.rs` worth testing through.
+- **Nothing writes an icon name into the shell hook.** §17's `integration.rs` can install the OSC 7 and
+  OSC 133 emitters into a remote's rc file; it could offer the same for a `preexec` that names the running
+  command. Deliberately not bundled here — this section is about reading what a remote already sends, and
+  a hook that makes remotes send more is a separate decision with a separate consent question.

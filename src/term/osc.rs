@@ -1,9 +1,15 @@
 // term/osc.rs — frame OSC strings out of the byte stream, once, for every scanner that reads them.
 //
 // Several features need to sniff an OSC sequence the engine ignores: the remote working directory
-// (§17), the shell-integration prompt marks (§34), and the progress a remote command reports (§54).
+// (§17), the shell-integration prompt marks (§34), the progress a remote command reports (§54), and
+// the icon name a remote gives its tab (§69).
 // Each one cares about a DIFFERENT sequence, but every one of them first has to solve the same
 // problem — find where an OSC string starts and ends in a stream that arrives in arbitrary chunks.
+//
+// Two of them then need the same SECOND thing, which is why `sanitize` is down there beside the
+// framer: text a remote chose, about to be drawn in chrome cmote owns, has to be stripped and
+// bounded first. That rule was written once in `iterm` and copied nowhere — until `icon` needed it,
+// at which point one copy was the whole lesson this module already exists to teach.
 //
 // An OSC string is `ESC ] payload (BEL | ESC \)`. Finding it is a small state machine rather than a
 // search over a buffer, because a sequence can be split anywhere: between the ESC and the `]`, in
@@ -115,6 +121,31 @@ impl<const CAP: usize> Framer<CAP> {
 	}
 }
 
+/// Reduce remote-chosen text to something safe to draw in cmote's own chrome: printable characters
+/// only, and no longer than `max_chars`.
+///
+/// The strip and the cap answer two different threats, which is why both are here and neither is
+/// optional. Control characters — a newline, a tab, a carriage return — would let a remote disrupt
+/// or SPOOF the surface its text is drawn on; the strip is the same rule, and for the same reason,
+/// as the window title's (`term::mod::sanitize_title`). One control character never gets this far
+/// on the scanner path above: an ESC inside a payload ends the OSC string or invalidates it, so
+/// `Framer` has already settled it. The strip is what covers the rest, and what covers a caller
+/// that got its text from somewhere other than a framed payload.
+///
+/// The cap stops a remote filling that surface with a name
+/// nobody asked for, and is applied where the value is STORED rather than where it is drawn, so a
+/// megabyte of it never sits in memory waiting for a widget to elide it.
+///
+/// Counted in `chars` rather than bytes so a multi-byte name is cut at a character boundary and
+/// cannot panic. Each caller names its own limit, because the surfaces genuinely differ — a branch
+/// pill and a tab label have different room.
+pub fn sanitize(text: &str, max_chars: usize) -> String {
+	text.chars()
+		.filter(|character| !character.is_control())
+		.take(max_chars)
+		.collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -208,5 +239,21 @@ mod tests {
 		// `ESC c` (full reset) and `ESC [ 0 m` (SGR) are not OSC strings and must not be framed.
 		let mut framer = Framer::<64>::default();
 		assert_eq!(frame(&mut framer, b"\x1bc\x1b[0mtext"), vec![]);
+	}
+
+	#[test]
+	fn sanitizing_drops_control_characters_and_keeps_the_text_around_them() {
+		// The spoofing case: a remote that wants its text to look like two lines, or to smuggle an
+		// escape sequence into a widget that will draw it verbatim. Both bytes go; the rest stays.
+		assert_eq!(sanitize("main\nfake prompt", 64), "mainfake prompt");
+		assert_eq!(sanitize("a\x1b[31mb", 64), "a[31mb");
+	}
+
+	#[test]
+	fn sanitizing_cuts_at_a_character_boundary_not_a_byte_one() {
+		// Counted in `chars`: four accented letters are eight BYTES, and cutting by byte would
+		// split one in half and panic. The cap is a limit on what is stored, so it is exact.
+		assert_eq!(sanitize("éèêë", 3), "éèê");
+		assert_eq!(sanitize("short", 64), "short");
 	}
 }
