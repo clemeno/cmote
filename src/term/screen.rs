@@ -608,6 +608,39 @@ mod tests {
 	}
 
 	#[test]
+	fn osc_50_is_a_second_spelling_of_the_same_shape() {
+		// `ESC ] 50 ; CursorShape=N BEL` — `vte` routes it to `set_cursor_shape`, the same field
+		// DECSCUSR writes, so cmote has always taken it without knowing (§60's audit found it
+		// working and undocumented). Pinned now that a THIRD spelling has been refused (§71): a
+		// refusal is only worth anything if the spellings that DO work are checked.
+		assert_eq!(
+			cursor_shape("\x1b]50;CursorShape=0\x07"),
+			CursorShape::Block
+		);
+		assert_eq!(cursor_shape("\x1b]50;CursorShape=1\x07"), CursorShape::Bar);
+		assert_eq!(
+			cursor_shape("\x1b]50;CursorShape=2\x07"),
+			CursorShape::Underline
+		);
+	}
+
+	#[test]
+	fn the_iterm_spelling_of_the_cursor_shape_is_not_honoured() {
+		// §71. `ESC ] 1337 ; CursorShape=N` is the same instruction a fourth time, and
+		// `term/iterm.rs`'s allow-list does not name it — a third SOURCE for one engine field buys
+		// nothing and is how two of them come to disagree.
+		//
+		// Asserting the shape after it, alone, would pass against a terminal that ignored every
+		// sequence. So a spelling cmote honours moves the shape first, and the refusal is that the
+		// shape it moved to SURVIVES.
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(b"\x1b[3 q");
+		assert_eq!(terminal.screen().cursor_shape(), CursorShape::Underline);
+		terminal.process(b"\x1b]1337;CursorShape=1\x07");
+		assert_eq!(terminal.screen().cursor_shape(), CursorShape::Underline);
+	}
+
+	#[test]
 	fn focus_reporting_follows_decset_1004() {
 		// Off until a program asks; `?1004h` turns it on and `?1004l` back off. This is what
 		// tells cmote whether to send `CSI I` / `CSI O` on a focus change (§23).

@@ -57,6 +57,13 @@ too, though not its mark: kitty graphics keeps ❌, because its cost is the *pro
 — part of its format space is raw RGBA — and because nothing in cmote refuses it, `vte` swallowing every
 APC byte before a `Perform` method runs. A mark can outlive the argument that set it, which is a different
 failure from the ones §66–§69 swept for, and the only one a re-read of the crates does not catch.
+**§71 took the row next to it**, which had been carrying two keys and one word — *redundant* — and found
+that the word was true and the mark was not. `CursorShape` and `ReportCellSize` are refused by the same
+allow-list that refuses `Copy` and `File`, so they are 🛑, and they are the first refusals in this document
+with **no danger behind them at all**: one is a fourth spelling of a field with a single writer, the other
+a question whose answer would advertise fluency in a protocol §70 declines. Both are now pinned by name —
+which matters more here than for the dangerous keys, because a refusal that protects nothing is the one a
+later reader deletes as a courtesy.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -594,6 +601,35 @@ So the mark is **🛑** and not ❌: `term/iterm.rs` refuses this key twice over
 `MAX_PAYLOAD` set below what a base64 image needs, and one test asserts both. A cost that has already
 been paid elsewhere is not a reason, and leaving it written as one invites a later reader to "fix" it.
 
+**`CursorShape=` and `ReportCellSize` are the two keys refused for no danger at all** — §71, and the odd
+pair in this section, since everything above it is here because something would go wrong. These are here
+because nothing would.
+
+`CursorShape=N` is the same instruction cmote already takes twice. DECSCUSR (`CSI Ps SP q`) and OSC 50
+are both dispatched by `vte` onto the engine's single `cursor_style.shape`, which `term/screen.rs` reads;
+a program that wants a bar cursor has two spellings here that work, and iTerm2's numbering is OSC 50's
+numbering. Taking a third would mean reaching that field from OUTSIDE the engine — cmote's scanner has no
+other way in — so it would be a second **source** for one piece of state rather than a second spelling of
+the first, which is the arrangement in which two of them eventually disagree and the renderer has to pick.
+The refusal costs a program nothing and the acceptance would cost a field its single writer.
+
+`ReportCellSize` is different in kind, because it is a **query**: honouring it means REPLYING, and a
+reply is an advertisement. cmote is not short of the answer — the GUI sets the cell size through
+`Terminal::set_cell_pixels`, and `CSI 14t` is answered by multiplying it by the grid. What makes this
+spelling the wrong one to answer is *why it is asked*: in iTerm2 the question is asked in order to size
+an **inline image**, which is `File=`, which is refused a few paragraphs up. Answering it precisely and
+then dropping the picture is a worse outcome for the sender than silence, which is what lets it fall back
+to a protocol cmote does draw. This is the same standard the rest of the document already holds itself
+to — §41 refuses an oversized sixel outright rather than clipping it, because "a refusal draws nothing;
+a clip would silently misreport what the host sent", and XTMODKEYS answers only its own resource because
+"there is no way to say *not mine* except by not answering". And the vendor key is not being singled out:
+`CSI 16t` is the standard spelling of the same question, and cmote answers that no more than this one.
+
+Both are **🛑** on the mechanism that refuses every unlisted key — the allow-list — and both are now
+pinned by name, which is the point of doing it at all. A refusal with a threat behind it defends itself;
+a refusal whose only reason is *"we already answer this"* is precisely the one a later reader deletes as
+a courtesy to a program that did not need it.
+
 **Remote-set mouse pointer shape** — `OSC 22` is **refused**, and the reason is not the one that first
 suggests itself. "The pointer is ours like the theme is ours" is the weaker half: a colour scheme is
 persistent identity the user chose, whereas a pointer shape is transient feedback about what sits under
@@ -884,7 +920,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell. The half programs actually use: `OSC 11 ?` is how one picks a light or dark colourscheme to suit the terminal. Two tests pin it, one per role |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | same fixed scheme as `4 (set)` (§6), and it costs nothing to ignore: this was said to cost "a full repaint for no change" until §64, but `mark_fully_damaged` sets one bool and cmote calls neither `damage()` nor `reset_damage()`, so that repaint never happened. Pinned by `a_default_colour_set_does_not_move_the_query_answer` |
 | 22 | Mouse pointer shape | 🤷 | the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) — but **no cmote code performs this refusal**: `vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body, which `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. A decision cmote would make and a cost it does not pay; nothing enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it, the listener's catch-all would drop it — the outcome is robust, the *reason* is unpinned |
-| 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working |
+| 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working, and **untested until §71** refused a fourth spelling: `osc_50_is_a_second_spelling_of_the_same_shape` pins all three values, because a refusal one row down is worth nothing if the spellings that DO work are only assumed to |
 | 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6). Refused **at the boundary and again behind it** since §63: `engine_config` sets `osc52: Osc52::Disabled`, so `clipboard_store` returns before an event exists, and the catch-all arm of `Replies::send_event` would still drop the event if it ever arrived. Until §63 only the second of those was true, the field sitting at the crate's `OnlyCopy` default — the weakest 🛑 in this table, now the most explicit |
 | 52 (read) | Clipboard read | 🛑 | remote must not read local clipboard (§6) — the same two lines, and the direction where being explicit matters most: `OnlyCopy` refused the read as a *side effect* of allowing the write, so the read's refusal was never stated anywhere. `Disabled` states both |
 | 104 | Reset palette entry | 🛑 | no effect — the reset side of the fixed scheme (§6): the engine restores its own table and `ui/grid.rs` never reads it |
@@ -902,7 +938,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | a theme repaint **and** a remote naming a file to decode (§6, §41, §55) |
 | iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | the effect escapes the tab (§6, §54, §55) |
 | iTerm 1337 `ClearScrollback` | Drop the scrollback | 🛑 | destroys the user's own record (§55); `CSI 3J` is the sanctioned spelling |
-| iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant — but not by the route this row claimed until §60's audit. `CursorShape` is DECSCUSR **and** OSC 50 over again. `ReportCellSize` follows from `CSI 14t` ÷ `CSI 18t`, pixels over cells; **`CSI 16t` is not the alternative** — it has no arm in `vte` and cmote does not answer it, as the window-ops table says |
+| iTerm 1337 `CursorShape` | Cursor shape | 🛑 | a **fourth** spelling of one field. DECSCUSR (`CSI Ps SP q`) and OSC 50 both reach the engine's single `cursor_style.shape` through `vte`; this one would have to reach it from outside, so it is a second *source* for that field rather than a second spelling — which is how two of them come to disagree, and buys a program nothing it cannot already say twice (§6, §71). Pinned from both ends: `refuses_the_two_keys_that_would_only_repeat_an_answer_cmote_already_gives` on the allow-list, and `the_iterm_spelling_of_the_cursor_shape_is_not_honoured` at the boundary, which sets a shape with DECSCUSR first so the refusal is the shape SURVIVING |
+| iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | cmote holds these numbers — the GUI sets them through `Terminal::set_cell_pixels` and `CSI 14t` is answered from them — and declines to say so in this spelling, because **a reply is an advertisement**. What asks this in iTerm2 asks in order to size an inline image, the `File=` protocol §70 refuses; answering precisely and then dropping the picture is worse for the sender than the silence that lets it fall back. Not a vendor key singled out: `CSI 16t` is the standard spelling of the same question and cmote answers that no more than this one (§6, §71). Pinned by `the_iterm_spelling_of_the_cell_size_question_gets_no_answer`, which asserts the silence and then answers `CSI 14t` on the same terminal, so the silence is shown to be a decision and not ignorance |
 | iTerm 1337 (every other key) | — | 🛑 | `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
 | 777 | urxvt notification | 🤷 | a notification, in a fourth spelling (§6, §54); no `vte` arm, no cmote scanner |
 
@@ -1052,7 +1089,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | cmote owns its tabbed window; a remote can't drive it (§6) — and the mark moved here in the same pass that added it: `vte`'s `('t', [])` arm handles **14 / 18 / 22 / 23 only** and sends every other parameter to `unhandled!()`, so there is no `Handler` method for window manipulation at all. Nothing to refuse, nothing to pin |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the two size *queries* are answered |
-| Cell size (CSI 16 t) | ❌ | |
+| Cell size (CSI 16 t) | ❌ | a **gap**, and named as one since §71 leans on it: `vte`'s `('t', [])` arm handles 14 / 18 / 22 / 23 and sends everything else to `unhandled!()`, so the sequence dies in the parser and cmote is never offered it. cmote holds the answer (`set_cell_pixels`) and could scan for this the way `term/modkeys.rs` scans, so the ❌ is a cost nobody has paid rather than a decision. It is also why refusing iTerm's `ReportCellSize` is not a vendor being singled out — the standard spelling of that question goes unanswered too |
 | Title stack (CSI 22 / 23 t) | ✅ | the **window title** only, and only the first parameter: `vte` reads `22` / `23` and ignores the `; 0` / `; 1` / `; 2` that would name icon-title-only or window-title-only, so all three spellings push and pop the one title cmote has. The engine caps the stack at 4096 and drops the oldest entry rather than failing (§67) |
 | **Kitty keyboard protocol** | ✅ | engine tracks the flag stack; cmote encodes CSI-u (`term/kitty.rs`, §25) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | scanned out of the stream by cmote (`term/modkeys.rs`, §9); the engine has no arm, this being an input-encoding hint rather than a screen operation |
@@ -1072,7 +1109,9 @@ family, checksum query included. The **deliberate** part of what is missing used
 column and now carries two marks of its own. **🛑** is what cmote's code refuses and its tests pin:
 the remote clipboard (OSC 52 both ways), desktop notifications in the OSC 9 spelling, the dangerous
 half of iTerm's OSC 1337 namespace — **inline images among them since §70** — and a fixed colour scheme
-that makes every palette set and reset a no-op. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
+that makes every palette set and reset a no-op. Since §71 it also holds two refusals with **no danger
+behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
+cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the remote pointer shape (OSC 22), the palette stack (`CSI # p / # q`), and
 notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
 cmote sees a byte. That leaves the plain ❌ column short, and worth reading as the real list: the
@@ -1435,7 +1474,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `refuses_the_inline_image_key_without_even_buffering_it` feeds `MAX_PAYLOAD + 1` bytes. That pair is
   why the row is a 🛑 as of §70 and was an ❌ before it. The dangerous keys
   (`Copy`, `SetProfile`, `SetColors`, `SetBackgroundImageFile`, `StealFocus`, `RequestAttention`,
-  `ClearScrollback`, `File`) each have a test asserting they produce nothing. `SetMark` is applied
+  `ClearScrollback`, `File`) each have a test asserting they produce nothing, and since §71 so do the
+  two harmless ones (`CursorShape`, `ReportCellSize`) — the module header carries their reasons, and
+  the boundary tests live where the effect would have been: `term/screen.rs` for the shape that must
+  survive, `term/mod.rs` for the reply that must not go out. `SetMark` is applied
   through `Terminal::process`'s split advance into `osc133::Prompts::record_user_mark`, kept in a ring
   separate from the prompt marks — a bookmark has no command state, exit code or output span, so
   `output_at_prompt` must never resolve one — surfaced by `Terminal::user_mark_rows` and drawn as an

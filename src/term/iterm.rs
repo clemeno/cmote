@@ -52,6 +52,26 @@
 //   CurrentDir=  a third spelling of "the shell's working directory", so it lives beside OSC 7 and
 //                OSC 9;9 in `term::cwd` — that module owns which sequences announce a directory.
 //
+// And two keys are refused for a reason that is neither danger nor oversight (§71). Worth writing down
+// precisely because a refusal with no threat behind it is the kind a later reader undoes as a courtesy:
+//
+//   CursorShape=    the same instruction cmote already takes TWICE — DECSCUSR (`CSI Ps SP q`) and
+//                   OSC 50, which `vte` dispatches to the one `cursor_style.shape` the engine owns.
+//                   A third way in would have to reach that field from OUTSIDE the engine, so it
+//                   would be a second source for one piece of state rather than a second spelling of
+//                   the first, and two sources for one field is how they come to disagree. Nothing is
+//                   bought: a program that wants a bar cursor has two spellings here that work.
+//
+//   ReportCellSize  a QUERY, so honouring it would mean REPLYING — and a reply is an advertisement.
+//                   cmote holds the numbers (the GUI sets them through `Terminal::set_cell_pixels`)
+//                   and answers the standard form of the question, `CSI 14t`, from them. It does not
+//                   answer this one, because what asks it in iTerm2 asks in order to size an inline
+//                   image — the `File=` protocol cmote refuses (§70). Answering precisely and then
+//                   dropping the picture is worse for the sender than not answering at all: silence
+//                   is what lets it fall back. cmote answers `CSI 16t` — the standard spelling of
+//                   this same question — no more than it answers this one, so the vendor key is not
+//                   being singled out.
+//
 // Framing (finding the sequence in a stream arriving in arbitrary chunks) is `term::osc`'s job.
 
 /// The longest OSC 1337 payload we will buffer. Generous for the keys above — a `CurrentDir` is a
@@ -387,6 +407,25 @@ mod tests {
 			iterm.feed(b"\x1b]1337;SetMark\x07"),
 			vec![(15, Report::Mark)]
 		);
+	}
+
+	#[test]
+	fn refuses_the_two_keys_that_would_only_repeat_an_answer_cmote_already_gives() {
+		// §71, and the odd pair in this file: neither key is dangerous, and both are refused. Pinned
+		// for exactly that reason — a refusal with no threat behind it is the one a later reader
+		// undoes as a courtesy. The reasons are in the header; the mechanism is the allow-list simply
+		// not naming them, which is the same mechanism that refuses the dangerous keys above.
+		for key in [
+			// A fourth spelling of the cursor shape, two of which cmote already honours.
+			&b"\x1b]1337;CursorShape=0\x07"[..],
+			&b"\x1b]1337;CursorShape=1\x07"[..],
+			&b"\x1b]1337;CursorShape=2\x07"[..],
+			// A question cmote can answer and declines to in this spelling. That the REPLY never goes
+			// out is pinned at the boundary, in `term::mod`, where the reply bytes exist.
+			&b"\x1b]1337;ReportCellSize\x07"[..],
+		] {
+			assert_eq!(scan(key), vec![], "honoured {key:?}");
+		}
 	}
 
 	#[test]

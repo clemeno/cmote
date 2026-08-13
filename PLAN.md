@@ -6213,9 +6213,13 @@ the chip, after the endpoint label.
   change what its own tab looks like and nothing more. `StealFocus` raises the window;
   `RequestAttention` flashes the taskbar button, which is an *interrupt demand* rather than §54's
   reading about work the user started; `ClearScrollback` destroys the user's own record of the session.
-- **The keys that are simply redundant** — `CursorShape=` (DECSCUSR already), `ClearScrollback`
-  (`CSI 3J` already), `ReportCellSize` (`CSI 14t`/`16t` already), `ShellIntegrationVersion` (OSC 133).
+- **The keys that are simply redundant** — `CursorShape=` (DECSCUSR already, and OSC 50 as well),
+  `ClearScrollback` (`CSI 3J` already), `ReportCellSize` (`CSI 14t` already — **not `CSI 16t`**, which
+  this line was wrong about until §60 and cmote does not answer), `ShellIntegrationVersion` (OSC 133).
   Nothing is gained by a second spelling of a sequence that already works.
+  **§71 moved the first and third of those from ❌ to 🛑** and pinned both by name. Redundancy is the
+  reason; the allow-list is the mechanism; and a refusal nobody checks is a refusal a later reader
+  removes as a courtesy — which is a likelier end for these two than for any dangerous key here.
 - **`AddAnnotation=`, `SetBadgeFormat=`** — real features with no consumer in cmote. A note attached to
   a line range, and a watermark over the grid, are each their own section if ever wanted.
 - **No user variable other than `gitBranch`, and no title template.** iTerm2's variables are useful
@@ -7684,3 +7688,122 @@ only numbers quoted in passing. The fixed script reads each table's own header r
   is cheap and mechanical — every note that names a dependency or a cost, re-read against `Cargo.toml`
   and the tree — and it is nobody's job yet. It is also the only class of error the crate-by-crate method
   structurally cannot find, which is the argument for making it somebody's.
+
+
+## 71. Two refusals with nothing behind them (v4.0.0)
+
+§70 corrected a row whose reason had expired. §71 takes the row directly beneath it, which had been
+carrying two keys, one dash and one word:
+
+```
+| iTerm 1337 `CursorShape` / `ReportCellSize` | — | ❌ | redundant — … |
+```
+
+The word was right. The mark was not, and the row was two rows.
+
+### Two problems, and neither was the word
+
+**It states one answer for two different kinds of sequence.** `CursorShape=N` is a *set*: a remote asks
+cmote to change something. `ReportCellSize` is a *query*: a remote asks cmote to say something. §68's
+split test applies exactly — a program can send either one alone and get a different kind of nothing back
+(one changes nothing, the other says nothing), and the reasons are not the same reason.
+
+**And ❌ was the wrong column**, for the reason §70 had just established one row up. `term/iterm.rs` is an
+**allow-list**: every key it does not name is refused by cmote's own code, on bytes cmote framed and is
+holding at the moment it declines them. That is the definition of 🛑. The catch-all row two lines below —
+`iTerm 1337 (every other key)` — has said 🛑 since §55, so the document was already contradicting itself
+about these two keys; it just did it quietly, in two tables that nobody reads side by side.
+
+### Why they are refused rather than built
+
+Both were live options. Neither is expensive.
+
+**`CursorShape=N`** uses the same numbering OSC 50 does — 0 block, 1 beam, 2 underline, confirmed in
+`vte`'s `b"50"` arm — and cmote honours *two* spellings of that instruction already: DECSCUSR
+(`CSI Ps SP q`) and OSC 50, both dispatched by `vte` onto the engine's single `cursor_style.shape`, which
+`term/screen.rs` reads. Taking a third would mean reaching that field from **outside** the engine, since
+cmote's scanner has no route in except feeding the engine synthetic bytes the way §41 feeds ECH + LF to
+reserve an image's cells. That works, and it is the wrong thing to do here: it would make a second
+**source** for one piece of state rather than a second spelling of the first, and two sources for one
+field is the arrangement in which they eventually disagree and the renderer has to pick. One field, one
+writer, is worth more than a spelling no program needs — a program that wants a bar cursor has two here
+that work.
+
+**`ReportCellSize`** is different in kind, because honouring a query means **replying**, and a reply is an
+advertisement. cmote is not short of the answer: the GUI sets the cell size through
+`Terminal::set_cell_pixels`, and `CSI 14t` is answered by multiplying it by the grid. What makes this
+spelling the wrong one to answer is *why it is asked* — in iTerm2 the question is asked in order to size
+an **inline image**, which is `File=`, which §70 refuses. Answering precisely and then dropping the
+picture is a worse outcome for the sender than silence, because silence is what lets it fall back to a
+protocol cmote does draw.
+
+That is the standard this document already holds itself to in two other places. §41 refuses an oversized
+sixel outright instead of clipping it, because *"a refusal draws nothing; a clip would silently misreport
+what the host sent"*. XTMODKEYS answers only the one resource cmote tracks, because the reply format is
+itself an XTMODKEYS control and *"there is no way to answer 'not mine' except by not answering"*. A cell
+size handed to a tool whose next move cmote will drop is the same mistake in a third costume.
+
+And it is not a vendor key being singled out: **`CSI 16t` is the standard spelling of the same question**,
+and cmote answers that no more than this one.
+
+### What declaring it cost
+
+No behaviour changed — the refusals have been in force since §55. Four tests, 1057 → 1061:
+
+- **`refuses_the_two_keys_that_would_only_repeat_an_answer_cmote_already_gives`** (`term/iterm.rs`) — the
+  allow-list, both keys by name, beside the `refuses_*` tests for the dangerous ones.
+- **`the_iterm_spelling_of_the_cursor_shape_is_not_honoured`** (`term/screen.rs`) — §64's shape. Asserting
+  the shape after the sequence would pass against a terminal that ignored everything, so a spelling cmote
+  honours moves the shape first and the refusal is the shape **surviving**.
+- **`the_iterm_spelling_of_the_cell_size_question_gets_no_answer`** (`term/mod.rs`) — asserts the silence,
+  then answers `CSI 14t` on the same terminal, so the silence is shown to be a decision rather than
+  ignorance.
+- **`osc_50_is_a_second_spelling_of_the_same_shape`** (`term/screen.rs`), which is not about the refusal
+  at all. OSC 50 has been ✅ since §60's audit found it working, and had never had a test. Refusing a
+  fourth spelling *on the grounds that two already work* is worth nothing if the two are only assumed to.
+
+### What breaking it showed
+
+Prefix-matching `CursorShape=` in `parse` failed **exactly one** test — the allow-list one — and pointedly
+**not** the `screen.rs` boundary test. That is correct, and worth writing down: nothing plumbs a cursor
+shape from the scanner, so the boundary test pins *"no effect end to end"* while the allow-list test pins
+*"not matched"*. Two different guarantees that should fail for two different reasons, which is what having
+both is for.
+
+`ReportCellSize` has no one-line break available, because there is no reply path to break. Its pin is the
+other shape instead — assert the silence, then prove the channel works in the same test.
+
+### The mark says who, not how bad
+
+These are the first 🛑 rows in the document with **no danger behind them at all**. Everything else in that
+column is there because something would go wrong: a clipboard read, a theme repaint, an effect escaping
+the tab, a parser run on pushed bytes. These two are there because nothing would.
+
+That is worth stating, because a column of stop signs reads as a severity ranking and it is not one. **🛑
+says cmote's own code performs the refusal and a test checks it. Nothing more.** §69's icon half of
+`OSC 0` had already come close — refused for noise rather than risk — and these two go the rest of the
+way, refused for redundancy.
+
+Which is exactly why they are pinned by name, and why their reasons live in `term/iterm.rs`'s header
+rather than only in the compatibility document. A refusal with a threat behind it defends itself. A
+refusal whose whole reason is *"we already answer this"* is the one a later reader deletes as a courtesy
+to a program that did not need the favour.
+
+### Not done
+
+- **`CSI 16t` is a gap, and is now named as one in its row.** cmote holds the cell size and does not
+  answer the standard question either — `vte`'s `('t', [])` arm handles 14 / 18 / 22 / 23 and sends the
+  rest to `unhandled!()`, so the sequence dies in the parser. Closing it would be a scanner shaped like
+  `term/modkeys.rs` plus a reply, and it is genuinely unclear it is worth paying for: `CSI 14t` ÷
+  `CSI 18t` gets a program the same number, and that is the pair sixel tools already send. Named so the
+  next reader decides it instead of inheriting it.
+- **A fifth mark was considered and refused.** The 🛑 column now mixes *"a remote must not read your
+  clipboard"* with *"we already answer this twice"*, and a reader sorting by mark gets both. Splitting it
+  would mean a new class to keep consistent across two rows, in a document that spent §66 through §68
+  *removing* marks for exactly that reason. The notes carry the difference; this records that the choice
+  was made rather than missed.
+- **The synthetic-bytes route makes a second source easy to add by accident.** §41 feeds the engine ECH +
+  LF as if the remote had sent them, which is the right tool for reserving cells and would also be the
+  mechanism by which some future key quietly became a second writer of engine state. The argument in this
+  section is about *sources*, not about this key — worth remembering the next time a scanner needs the
+  engine to change its mind.

@@ -1771,6 +1771,22 @@ mod tests {
 	}
 
 	#[test]
+	fn the_iterm_spelling_of_the_cell_size_question_gets_no_answer() {
+		// §71. A reply is an advertisement, and this question is asked in iTerm2 in order to size an
+		// inline image — the `File=` protocol cmote refuses (§70). Answering precisely and then
+		// dropping the picture is worse for the sender than not answering: silence is what lets it
+		// fall back.
+		//
+		// The silence has to be shown to be a DECISION rather than ignorance, so the same terminal
+		// answers the standard form of the same question on the next line, from numbers it plainly
+		// holds. 8 x 17 pixel cells over a 10 x 40 grid.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert!(terminal.process(b"\x1b]1337;ReportCellSize\x07").is_empty());
+		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
+	}
+
+	#[test]
 	fn a_character_size_query_still_reports_rows_and_columns() {
 		// CSI 18t "text area in characters?" is answered by the engine itself as a plain
 		// report; it must keep working alongside the queries we resolve. 10 rows by 40 columns.
