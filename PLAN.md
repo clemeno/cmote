@@ -7220,6 +7220,9 @@ decision.
   engine's own reset semantics through fed sequences — origin, autowrap, keypad, scrolling region, pen —
   with no way to verify it against what the engine believes. `ESC c` works, and programs that care mostly
   send that.
+  **Undone in §72**, which found both halves of this wrong: the fed sequences are a TRANSLATION rather than a
+  reimplementation, so nothing gains a second writer, and `xterm-256color` — the terminfo entry cmote asks
+  for — opens both `is2` and `rs2` with `\E[!p`, so the programs that care were sending it all along.
 - **The other locking shifts stay a ❌ too.** Invoking G2/G3 needs a shift-state cmote does not model, for
   charsets `vte` will not designate anyway (only ASCII and line drawing).
 - **`BEL` is still unpinned.** A test at cmote's boundary cannot tell "the event was dropped" from "the
@@ -7807,3 +7810,154 @@ to a program that did not need the favour.
   mechanism by which some future key quietly became a second writer of engine state. The argument in this
   section is about *sources*, not about this key — worth remembering the next time a scanner needs the
   engine to change its mind.
+
+## 72. The reset that reached nothing (v4.0.0)
+
+§65 audited the partial rows and left `CSI ! p` — DECSTR, the soft reset — split into a ✅ for the DECSCA
+bit and a ❌ for everything else, with a reason attached:
+
+> **`CSI ! p` stays a ❌.** Implementing DECSTR beside the engine would mean cmote reproducing the
+> engine's own reset semantics through fed sequences — origin, autowrap, keypad, scrolling region, pen —
+> with no way to verify it against what the engine believes. `ESC c` works, and programs that care mostly
+> send that.
+
+Three sections walked past that paragraph. This one reads it again, and finds it wrong twice — once about
+the work, once about the sequence.
+
+### Wrong about the work
+
+"Reproducing the engine's own reset semantics" is not what happens. Every item on DEC's DECSTR list is a
+mode, a region, a pen or a character set that the engine takes an **ordinary sequence** for. So cmote does
+not reproduce anything: it feeds the engine the long spelling of the reset and lets the engine do it.
+
+```
+CSI 0 m       the pen back to default (SGR)
+CSI ? 25 h    cursor visible (DECTCEM)
+CSI 4 l       replace rather than insert (IRM)
+CSI ? 6 l     absolute origin (DECOM)
+CSI ? 7 h     autowrap (DECAWM)
+CSI ? 1 l     normal cursor keys (DECCKM)
+ESC >         numeric keypad (DECNKM)
+ESC ( B …     G0-G3 all ASCII, then SI to make G0 the active set
+CSI r         the scrolling region back to the whole page (DECSTBM)
+CSI H         home, so the save below is of the corner
+ESC 7         the SAVED cursor to home, carrying the pen just reset (DECSC)
+```
+
+That is the whole implementation — a constant, plus the CUP that puts the real cursor back. The engine
+stays the only writer of its own state, which is §71's argument used the *other* way round: that section
+refused a fourth spelling of the cursor shape because honouring it would have needed a second **source**
+for one field, and this one is safe for exactly the reason that one was not. There is no new source here.
+There is one new *spelling*, and it resolves into the spellings that already existed.
+
+DECSCA, the eleventh item, was already cmote's and stays where it was. The rest of DEC's published list —
+KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM — names state that neither `vte`, nor the
+engine, nor cmote models at all, so there is nothing left stale by not sending it. Seven items that cost
+nothing because the terminal they belong to is not the one being emulated.
+
+And "no way to verify it against what the engine believes" had already stopped being true. Every item is
+observable from outside: DECRQM answers `?1 / ?6 / ?7 / ?25` and `4` straight out of the engine's own
+`TermMode`, DECRQSS `m` rebuilds the pen cmote paints with, the scrolling region shows through origin
+mode, the charset shows in a printed glyph, and the keypad has a seam `app.rs` already reads. The tests
+below check the engine's beliefs, not the bytes that were fed.
+
+### Wrong about the sequence
+
+"Programs that care mostly send `ESC c`" is the part that should have been checked rather than assumed.
+cmote asks the remote for `TERM=xterm-256color` (`ssh/client.rs`, `ssh/shell.rs`) and answers XTGETTCAP
+`TN` with the same name. Here is what that terminfo entry says, read locally:
+
+```
+$ infocmp -1 xterm-256color
+        is2=\E[!p\E[?3;4l\E[4l\E>,
+        rs1=\Ec\E]104\007,
+        rs2=\E[!p\E[?3;4l\E[4l\E>,
+```
+
+`is2` is the initialisation string and `rs2` the reset string, and **both open with `\E[!p`**. Every
+`tput init`, every `reset`, every ncurses program's startup was sending cmote a soft reset it dropped on
+the floor. RIS is `rs1`, one line up — and `reset` runs `rs1` then `rs2`, so it happened to work, which is
+how a gap this well-trafficked stayed invisible.
+
+The failure it caused is the classic one. A full-screen program dies leaving a scrolling region set and
+origin mode on; the user types `reset` or the shell's prompt hook runs `tput init`; on any other terminal
+the screen comes back, and on cmote it stayed broken. The row said "a **gap**, not a policy — nothing here
+refuses it", which was accurate and made it sound theoretical.
+
+### Two departures from DEC, both deliberate
+
+**Autowrap goes back ON, where the VT510 manual says a soft reset turns it off.** The manual describes
+hardware nobody is emulating. `xterm-256color` declares `am` — this terminal wraps — and its `rs2` sends
+this sequence *without* a following `\E[?7h`, so on the terminal cmote claims to be, a soft reset cannot
+be what leaves wrapping off, or `tput init` would break every program that ran it. Power-on default is the
+honest reading, and the engine's own power-on default (`TermMode::default()`) has `LINE_WRAP` in it.
+
+**The cursor is put back where the reset found it.** DECSTR does not move the cursor. But the engine's
+`set_scrolling_region` ends in `goto(0, 0)` — right for DECSTBM, which is defined to home the cursor, and
+wrong for a reset that has to borrow DECSTBM to clear the region. So the position is read before anything
+moves and restored with CUP once origin mode is off and coordinates are absolute again. The one thing that
+does not survive the round trip is the pending-wrap flag, which a reset has no business preserving.
+
+Both are in the `soft_reset` header rather than only here, because both look like bugs to a reader who
+knows the manual and not the reasoning.
+
+### What it cost
+
+One enum variant (`protect::Request::SoftReset`), ~20 lines of code under ~60 lines of comment in
+`term/mod.rs`, and eleven tests. 1061 → 1072, green on `cargo check --all-targets` / `test` /
+`clippy -D warnings` / `fmt`.
+
+The scanner needed nothing new. `term/protect.rs` has matched `CSI ! p` since §56 — it clears the pen, so
+it cleared DECSCA — at exactly the right offset, one past the final byte. What changed is that it now
+reports the whole reset instead of the smallest part of it. Writing a second scanner for the same sequence
+in a module of its own was the alternative, and would have meant two readers of one sequence, eventually
+disagreeing about what it was.
+
+Three of the eleven tests are about telling this sequence from its neighbours rather than about the reset:
+DECRQM is `CSI Ps $ p` and `CSI ? Ps $ p`, the two arms `vte` **does** have for this final byte, so a
+scanner matching on `p` alone would soft-reset the terminal every time a program asked what a mode was set
+to. `a_mode_request_is_not_read_as_a_soft_reset` asks twice and checks the answer did not change.
+
+### What breaking it showed
+
+Dropping `CSI r` from the fed string failed **two** tests, not one: the scrolling-region test, as
+intended — and the saved-cursor test, which had no business depending on it. `ESC 7` was landing on home
+only because `set_scrolling_region` had homed the cursor a few bytes earlier. One item's correctness was
+resting on another item's side effect, in a string where the whole point is that each line answers for one
+line of DEC's list.
+
+Fixed by sending `CSI H` before `ESC 7` — three bytes to make the dependency explicit rather than
+inherited. The break test found it; reading the string had not, twice.
+
+### The fourth way in
+
+§56 named three ways to handle something the engine drops: scan it out and keep the answer beside the grid,
+accept the engine's limit, or borrow a bit and let the engine carry it. This is the fourth: **translate
+it**. Where the missing sequence is a *shorthand* for things the engine already takes, the work is a
+lookup table rather than an implementation, and nothing gains a second writer.
+
+§41 had already done this once — a picture's cells are reserved by feeding ECH and LF as if the remote had
+sent them — and §71's last "Not done" bullet flagged the route as a way to acquire a second source of
+engine state by accident. Both are right, and the difference is worth stating precisely: feeding is safe
+when it *translates* a sequence into the engine's own vocabulary, and dangerous when it *originates* state
+the engine did not ask for. DECSTR is the first case. A hypothetical `CursorShape=` handler would have
+been the second.
+
+It also does not quietly empty the ❌ column, because it only works where there is something to translate
+into. Left-right margins, kitty graphics and blink have no shorthand relationship to anything the engine
+does — they are capabilities, and §5 still costs them out as such.
+
+### Not done
+
+- **DECSACE is deliberately not reset**, and the row now says so as a live decision rather than a moot
+  one. DEC's published DECSTR list does not name it, RIS does reset it (§59), and the temptation to
+  "finish the job" by adding it is exactly the kind of small invention that makes a terminal's behaviour
+  unpredictable for the program that read the manual.
+- **The cursor style (DECSCUSR) is not reset either**, for the same reason: not on the list. xterm's own
+  behaviour here is not something this section verified, and guessing at it would be worse than following
+  the document both ends can read.
+- **The fed string is not exercised under synchronized output.** If a remote opens `BSU` (mode 2026) and
+  then sends `CSI ! p`, the fed bytes join the parser's sync buffer like any others — which is almost
+  certainly right, and is the same exposure `reserve_cells` has had since §41. It is untested in both
+  places, and it is really the mode 2026 timeout item (§65) wearing a different hat.
+- **`CSI 16t` is still a gap**, unchanged from §71's list — named there, decided by nobody yet.

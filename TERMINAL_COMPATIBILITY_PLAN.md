@@ -64,6 +64,15 @@ with **no danger behind them at all**: one is a fourth spelling of a field with 
 a question whose answer would advertise fluency in a protocol §70 declines. Both are now pinned by name —
 which matters more here than for the dangerous keys, because a refusal that protects nothing is the one a
 later reader deletes as a courtesy.
+**§72 closed the gap the same three sections kept walking past.** `CSI ! p` — DECSTR, the soft reset — had
+been ❌ for everything except the DECSCA bit since §65, on the grounds that reproducing the engine's reset
+beside it could not be verified. Both halves of that turned out to be wrong. cmote does not reproduce
+anything: it feeds the engine the same reset spelled in the sequences the engine already handles, so the
+engine stays the only writer of its own state, and every item is then readable back through DECRQM, DECRQSS
+and the cursor. And the sequence is not rare — cmote asks for `TERM=xterm-256color`, whose `is2` and `rs2`
+both *open* with `\E[!p`, so every `tput init`, every `reset` and every ncurses startup was sending cmote a
+reset it dropped on the floor. The row is ✅, and the two halves §65 split are one row again: the
+one-answer rule cuts both ways, and a row split because its halves disagreed rejoins when they stop.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -873,7 +882,9 @@ And one rule over the three: **one row, one answer, one mechanism.** A code that
 declines others gets a row for each, rather than one mark averaging them — `OSC 52` has been `(write)` and
 `(read)` since §62, §64 split `OSC 4` and `OSC 10 / 11 / 12` into `(query)` and `(set)`, §65 split seven
 more (✅/🛑 for `SetUserVar` and mode 12, ✅/🤷 for modes 3 and 80, ✅/❌ for `CSI ! p`, the locking shifts
-and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. That is why there is no "partial" mark
+and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. **§72 rejoined one of them** — `CSI ! p`
+became ✅ on both halves, and a split whose halves agree is a row saying one thing in two places, which the
+rule is against for the same reason it is against the reverse. That is why there is no "partial" mark
 here: a row saying two things at once cannot be checked, and every finding this document has recorded came
 from checking one. Sections below that speak of a row having been "partial" are describing what it used to
 carry, not a mark still in use — the symbol itself is gone from this document, so it cannot be copied into
@@ -961,8 +972,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | K | Erase in line | ✅ | |
 | Ps " q | Character protection (DECSCA) | ✅ | cmote's own scanner (`term/protect.rs`, §56); the engine has no arm for it, so protection rides a bit cmote borrows in the engine's per-cell flag word — invisible to both the engine and the renderer, and guarded at build time |
 | ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | all three extents, applied by cmote in place (§56). Protected cells survive; a **plain** `CSI J` / `CSI K` still takes them, which is the point of two verbs |
-| ! p (the DECSCA part) | Soft reset — protection | ✅ | cmote's own scanner drops DECSCA protection with the pen (`term/protect.rs`, §56), which is the one piece of soft-reset state cmote owns |
-| ! p (everything else) | Soft reset — the rest | ❌ | `vte`'s `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for DECRQM and **no arm for `('p', [b'!'])`**, so origin mode, autowrap, the keypad mode, cursor visibility, the scrolling region, the pen and the charset designations all survive a soft reset untouched. A **gap**, not a policy — nothing here refuses it, and `ESC c` (RIS) does have an arm, so a program that wants state cleared has a spelling that works (§65) |
+| ! p (DECSTR) | Soft reset | ✅ | cmote's own, whole (§72). `vte`'s `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for DECRQM and **no arm for `('p', [b'!'])`**, so the sequence reached nothing at all — which mattered more than the ❌ suggested, cmote asking for `TERM=xterm-256color`, whose `is2` and `rs2` both open with `\E[!p`. `term/protect.rs` has matched it since §56 (it clears the pen, so it cleared DECSCA), and now reports the whole reset; `term/mod.rs` performs it by FEEDING the engine the same reset written in the sequences the engine does handle — SGR, DECTCEM, IRM, DECOM, DECAWM, DECCKM, the keypad, all four charset slots plus the active one, DECSTBM and the saved cursor. No second writer, so no second source to disagree with the engine later. Two departures, both deliberate: autowrap goes back **on** rather than off as the VT510 manual has it, because `xterm-256color` declares `am` and its `rs2` sends no `\E[?7h` after this, so on the terminal cmote claims to be a soft reset cannot be what leaves wrapping off; and the cursor is put back where the reset found it, the engine's `set_scrolling_region` homing it as DECSTBM is defined to. Eleven tests, including one that pins the near miss — DECRQM shares this final byte and must still be answered rather than read as a reset. Read ❌ for everything but the DECSCA bit from §65 until §72; the two rows that made are one row again |
 | b (REP) | Repeat character | ✅ | handled in the vte parser (`ansi.rs`) |
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | the vertical region in full, top and bottom, honoured by every operation that scrolls. The horizontal one is a different sequence with its own row below (`s`, DECSLRM) |
@@ -974,7 +984,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb (§58): protected cells stand, and the plain `$ z` still takes them. This was the piece §56 unblocked and left unbuilt — the per-cell protection it needed already existed |
 | $ x (DECFRA) | Fill rectangular area | ✅ | one character across a box, stamped from the **pen**, so the fill carries the colours and attributes a printed glyph would have (§58). `Pch` is an **allow-list** — 32–126 and 160–255, as xterm allows — so a remote cannot paint the page with C0, C1, DEL or unassigned code points |
 | $ v (DECCRA) | Copy rectangular area | ✅ | whole cells move, so colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph (§58). The source is read out **whole first**, because the overlapping case — scroll a sub-window by copying it over itself — is what the sequence is for. A copy running off the page is trimmed to what fits; the two page parameters are ignored, cmote having one page |
-| Ps * x (DECSACE) | Attribute change extent | ✅ | picks which shape the pair below act on: `0` / `1` the wrapped **stream** between two points (the default, and what a terminal powers up in), `2` the **rectangle** (§59). Absorbed by cmote's scanner rather than reported — it is a mode, and only the scanner sees a mode and the requests it governs in stream order, so each one leaves carrying the extent that was in force. A value DEC never defined leaves the mode where it was. RIS resets it; DECSTR does not, DEC's published list for that not naming it. Note the intermediate: `* x` is this, `$ x` is DECFRA |
+| Ps * x (DECSACE) | Attribute change extent | ✅ | picks which shape the pair below act on: `0` / `1` the wrapped **stream** between two points (the default, and what a terminal powers up in), `2` the **rectangle** (§59). Absorbed by cmote's scanner rather than reported — it is a mode, and only the scanner sees a mode and the requests it governs in stream order, so each one leaves carrying the extent that was in force. A value DEC never defined leaves the mode where it was. RIS resets it; DECSTR does not, DEC's published list for that not naming it — a distinction that was moot while DECSTR reached nothing and is a live one since §72, which honours the list rather than widening it. Note the intermediate: `* x` is this, `$ x` is DECFRA |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | the attribute half of the family §58 shipped the content half of (§59) — corners first, then a small DEC-defined selector list, folded to three masks at parse time so the walk costs the same however long the list. `$ r` sets and clears (`0 1 4 5 7 22 24 25 27`, later wins); `$ t` flips (`0 1 4 5 7` only — "off" has no meaning for a verb that flips). Attributes only: never a colour, never a glyph, and **never the flag word wholesale**, which would take cmote's DECSCA protection bit with it (§56). An unknown selector is ignored and the rest of the list still applies, as an SGR does; a malformed *number* still drops the sequence. Blink is parsed and dropped — the engine has no bit for it |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | the one sequence in the family that answers rather than acts (`term/rect.rs`, §60). The algorithm is **xterm's `xtermCheckRect` at its DEC-compatible default**, copied rather than derived: each cell weighs its character code plus 0x04 protected / 0x08 hidden / 0x10 underline / 0x20 reverse / 0x80 bold, a plain space is trimmed unless it is the rectangle's first cell, and the total is negated and reported as `DCS Pid ! ~ XXXX ST`. The corners start at parameter **2**; the page number is ignored, cmote having one. Answered from the page as it stood **where the question sat**, and clamped to the visible page, so the scrollback cannot be read through it. Refused a rectangle under origin mode like the rest of the family — but still answered, with the checksum of no cells, because a query dropped on the floor stalls the program that asked. **Blink never lands** (no engine flag), a DEC-charset cell weighs its Unicode point, and a never-written cell reads as a written blank |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | block, underline and bar, read off `cursor_style.shape` by `term/screen.rs`; `0` restores the default, `7`+ falls to `unhandled!()` in `vte` |
@@ -1105,7 +1115,8 @@ colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQ
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
 query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
 protected-cell erase it dropped as well, and — since §58, §59 and §60 — the whole VT420 rectangular
-family, checksum query included. The **deliberate** part of what is missing used to be most of the ❌
+family, checksum query included, and — since §72 — **DECSTR**, the soft reset every `tput init` opens
+with and no arm in `vte` ever heard. The **deliberate** part of what is missing used to be most of the ❌
 column and now carries two marks of its own. **🛑** is what cmote's code refuses and its tests pin:
 the remote clipboard (OSC 52 both ways), desktop notifications in the OSC 9 spelling, the dangerous
 half of iTerm's OSC 1337 namespace — **inline images among them since §70** — and a fixed colour scheme
@@ -1132,6 +1143,16 @@ scrolling and reflow, and a map of it would have meant re-implementing the grid 
 aligned. So instead cmote borrowed the one unused bit in the engine's per-cell flag word and let the
 engine carry protection as if it were bold. That is a third way in, next to "scan it out" and "accept
 the engine's limit", and the reason DECSERA above is now a rectangle rather than a wall.
+
+**§72 names the fourth: translate it.** A sequence the engine has no arm for can sometimes be spelled
+in sequences it does have arms for, and then the work is a lookup table rather than an implementation.
+DECSTR is exactly that shape — every item on DEC's list is a mode, a region, a pen or a charset the
+engine already takes an ordinary sequence for — so cmote scans the reset out and feeds the engine the
+long spelling of it. §41 did this in one place already (a picture's cells are reserved with ECH and LF
+rather than written), and the property that makes it worth naming is the one §71 argued for: nothing
+gains a second writer, so nothing can end up with two answers. It only works where the missing sequence
+is a *shorthand*; where it is a capability — margins, kitty graphics — there is nothing to translate
+into, which is why this does not quietly empty the ❌ column.
 
 §57 found a fourth, and a different kind of gap to go with it. Every row in these tables until now was
 some flavour of "the engine ignores this"; DECSLRM is the one where the engine ignores nothing and gets
@@ -1321,7 +1342,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   that exist, and `bell()` (`term/mod.rs:1437`) really does raise `Event::Bell`. `esc_dispatch`
   (`ansi.rs:1773`) designates charsets for G0-G3 through the `(`/`)`/`*`/`+` intermediates and has **no
   arm** for `n`, `o`, `~`, `}` or `|`. `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for
-  DECRQM and **none for `('p', [b'!'])`**, so DECSTR reaches nothing. `deccolm` (`term/mod.rs:792`)
+  DECRQM and **none for `('p', [b'!'])`**, so DECSTR reached nothing until §72 fed it back in as sequences
+  the engine does have arms for — and the two DECRQM arms are why the scanner matches marker and
+  intermediates as well as the final byte, a mode question being one keystroke away from a reset.
+  `deccolm` (`term/mod.rs:792`)
   clears the region and grid with the comment *"setting 132 column font makes no sense"*, and DECRQM
   answers `ColumnMode => NotSupported` (`:2085`). `BlinkingCursor` sets `cursor_style.blinking` and
   raises `Event::CursorBlinkingChange` (`:1987`, `:2036`), and DECRQM reports it (`:2053`).
@@ -1538,8 +1562,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   **active** tab only (`taskbar.rs`). Parse-only, no engine, no widgets — fully unit-tested.
 - **`term/protect.rs`** — the selective-erase scanner (§56), and the one place cmote writes *inside* the
   engine's cells. A chunk-safe CSI state machine (`Protect::feed`) reading **DECSCA** (`CSI Ps " q`),
-  **DECSED** (`CSI ? Ps J`), **DECSEL** (`CSI ? Ps K`), plus **RIS** and **DECSTR** as protection
-  clears, and — only while the pen is armed — every **SGR**, since `Attr::Reset` assigns the whole flag
+  **DECSED** (`CSI ? Ps J`), **DECSEL** (`CSI ? Ps K`), plus **RIS** as a protection clear, **DECSTR** as
+  the whole soft reset since §72 — the engine performs RIS itself, so only the borrowed bit is cmote's
+  business there, while `CSI ! p` reaches no engine arm at all and is cmote's entire — and — only while the pen is armed — every **SGR**, since `Attr::Reset` assigns the whole flag
   word and would otherwise unprotect a run mid-way. All three of final byte, private marker and
   intermediates are matched together, which is what keeps the near-misses out: `CSI 2 J` is a plain
   erase, `CSI > 4 ; 2 m` is XTMODKEYS not an SGR, `CSI 1 SP q` is DECSCUSR not a DECSCA. Offsets are

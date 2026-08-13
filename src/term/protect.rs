@@ -44,6 +44,14 @@
 // set is a no-op, so this deliberately over-reports rather than trying to work out which SGR lists
 // contain a reset: over-reporting costs a split, under-reporting would silently lose protection.
 //
+// One sequence here is not about protection at all. DECSTR, the soft reset (`CSI ! p`), clears the
+// pen like RIS does, so this scanner has matched it since §56 in order to drop protection with it —
+// and `vte` has no arm for it either (`('p', ['$'])` and `('p', ['?', '$'])` are DECRQM, and that is
+// all), so the REST of the reset was going nowhere. §72 gives it somewhere to go. The request it
+// reports is the whole soft reset now, and `term/mod.rs` carries it out; the scanner grew one enum
+// variant and no new state. Scanning the same bytes a second time, in a module of its own, was the
+// alternative and would have meant two readers of one sequence disagreeing eventually.
+
 // This module stays free of engine types on purpose — it deals in a `u16` flag word and in plain
 // row/column numbers, so the region arithmetic and the whole grammar are testable without building
 // a terminal, and the one file that knows the engine's names is still `term/mod.rs`.
@@ -112,10 +120,17 @@ pub enum Erase {
 /// advanced PAST the sequence that carried it (see `Protect::feed` on offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Request {
-	/// DECSCA moved the pen in or out of protecting what it writes. Also carries `false` for the
-	/// two full resets (RIS `ESC c` and DECSTR `CSI ! p`), which clear the pen outright and so
-	/// clear protection with it — the same as a real terminal.
+	/// DECSCA moved the pen in or out of protecting what it writes. Also carries `false` for RIS
+	/// (`ESC c`), which rebuilds the pen outright and so clears protection with it — the same as a
+	/// real terminal. The engine performs RIS itself, so nothing but the borrowed bit is cmote's
+	/// business there.
 	Protect(bool),
+	/// DECSTR — the soft reset, `CSI ! p`. Clears protection like RIS, and then everything else the
+	/// sequence is defined to clear, which the engine never hears about (§72). Its own variant
+	/// rather than a `Protect(false)` because the protection bit is the smallest part of what it
+	/// does: `term/mod.rs` answers it by feeding the engine the reset spelled in the sequences the
+	/// engine does handle.
+	SoftReset,
 	/// An SGR passed by while the pen was armed, and SGR 0 assigns the whole flag word, so the
 	/// protection bit has to be put back. Over-reported on purpose (see the module header).
 	Reassert,
@@ -240,10 +255,12 @@ impl Protect {
 				self.armed = self.first_param() == Some(1);
 				Some(Request::Protect(self.armed))
 			}
-			// DECSTR soft reset — `CSI ! p`. Clears the pen the way RIS does.
+			// DECSTR soft reset — `CSI ! p`. Clears the pen the way RIS does, and much else besides
+			// (§72), all of it `term/mod.rs`'s work. The scanner's own share is disarming: whatever
+			// the reset does downstream, an SGR after it is no longer worth a split.
 			(b'p', None, [b'!']) => {
 				self.armed = false;
-				Some(Request::Protect(false))
+				Some(Request::SoftReset)
 			}
 			// DECSED / DECSEL — the `?` spellings of erase, the two the engine drops.
 			(b'J', Some(b'?'), []) => self.extent().map(Erase::Display).map(Request::Erase),
@@ -371,18 +388,36 @@ mod tests {
 
 	#[test]
 	fn a_full_reset_stops_protecting() {
-		// RIS and DECSTR both rebuild the pen, so protection cannot outlive either.
+		// RIS rebuilds the pen, so protection cannot outlive it. The engine performs the rest of
+		// RIS itself, which is why this one reports nothing but the bit.
 		assert_eq!(scan(b"\x1bc"), vec![(2, Request::Protect(false))]);
-		assert_eq!(scan(b"\x1b[!p"), vec![(4, Request::Protect(false))]);
+	}
+
+	#[test]
+	fn a_soft_reset_is_reported_whole_rather_than_as_a_pen_change() {
+		// DECSTR clears protection too, but reporting it as `Protect(false)` would say the pen was
+		// all it touched — and the engine hears nothing else about it (§72).
+		assert_eq!(scan(b"\x1b[!p"), vec![(4, Request::SoftReset)]);
+	}
+
+	#[test]
+	fn a_soft_reset_is_not_confused_with_the_mode_requests_that_share_its_final_byte() {
+		// DECRQM is `CSI Ps $ p` and `CSI ? Ps $ p` — the two arms `vte` DOES have for this final
+		// byte, and the engine answers both. Claiming either here would soft-reset the terminal
+		// every time a program asked what a mode was set to.
+		assert!(scan(b"\x1b[4$p\x1b[?7$p").is_empty());
 	}
 
 	#[test]
 	fn a_reset_disarms_the_scanner_as_well_as_reporting_it() {
 		// Not just the report: the scanner must stop treating later SGRs as interesting, or every
-		// coloured byte of an ordinary session would cost `process` a split.
+		// coloured byte of an ordinary session would cost `process` a split. Both resets disarm.
 		let mut protect = Protect::default();
 		protect.feed(b"\x1b[1\"q");
 		protect.feed(b"\x1bc");
+		assert!(protect.feed(b"\x1b[31m").is_empty());
+		protect.feed(b"\x1b[1\"q");
+		protect.feed(b"\x1b[!p");
 		assert!(protect.feed(b"\x1b[31m").is_empty());
 	}
 

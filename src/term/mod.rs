@@ -150,6 +150,18 @@ const UNIT_ID: &str = "00434D45";
 /// rather than mapping a viewport row straight to a grid line.
 const SCROLLBACK: usize = 10_000;
 
+/// DECSTR, the soft reset, written in the sequences the engine itself handles (§72).
+///
+/// `CSI ! p` reaches nothing in `vte`, so `Terminal::soft_reset` feeds the engine this instead: the
+/// pen, the cursor's visibility, insert/replace, origin, autowrap, the cursor-key mode, the keypad,
+/// all four character-set slots plus the active one, the scrolling region, and finally the SAVED
+/// cursor — which `ESC 7` puts at home with the pen this string has just reset, DEC's own definition
+/// of the item. `soft_reset` appends the CUP that puts the real cursor back, since `CSI r` homes it.
+/// Every byte of it is a sequence the engine has an arm for, which is the point: the engine remains
+/// the only writer of its own state (see `soft_reset` for the two departures from DEC's list).
+const SOFT_RESET: &[u8] =
+	b"\x1b[0m\x1b[?25h\x1b[4l\x1b[?6l\x1b[?7h\x1b[?1l\x1b>\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[r\x1b[H\x1b7";
+
 /// The engine, specialised to our reply-collecting listener. `screen::Screen` borrows this
 /// to read the grid, so the alias is the one name that would change under another engine.
 pub(super) type Engine = Term<Replies>;
@@ -559,7 +571,77 @@ impl Terminal {
 			// Idempotent, which is why the scanner is free to over-report (see `term/protect.rs`).
 			protect::Request::Reassert => self.set_pen_protection(true),
 			protect::Request::Erase(erase) => self.selective_erase(erase),
+			// DECSTR (§72). The borrowed protection bit goes first and on its own, so that clearing
+			// it does not depend on where the SGR sits inside the reset below — the two are separate
+			// mechanisms and only one of them is the engine's.
+			protect::Request::SoftReset => {
+				self.set_pen_protection(false);
+				self.soft_reset();
+			}
 		}
+	}
+
+	/// Carry out DECSTR, the soft reset (`CSI ! p`), by feeding the engine the same reset spelled in
+	/// sequences it does handle (§72).
+	///
+	/// `vte`'s CSI dispatch has `('p', ['$'])` and `('p', ['?', '$'])` — both DECRQM — and no arm for
+	/// `('p', ['!'])`, so the sequence reached nothing at all. That is a gap worth closing rather than
+	/// a policy: cmote asks the remote for `TERM=xterm-256color`, and that terminfo entry opens both
+	/// `is2` and `rs2` with `\E[!p`. Every `tput init`, every `reset`, every ncurses startup sends
+	/// this — and a program that died leaving a scrolling region and origin mode set was, until now,
+	/// not put right by the sequence whose whole job is to put it right.
+	///
+	/// Fed rather than performed, which is the same choice `reserve_cells` makes and for the same
+	/// reason: the engine stays the ONLY writer of its own state, so there is no second source to
+	/// disagree with it later. Nothing here reaches into the grid, and the fed bytes go straight to
+	/// the parser, so cmote's own scanners never see them and this cannot feed itself.
+	///
+	/// What is sent, in order, against DEC's published DECSTR list:
+	///
+	///   CSI 0 m       the pen back to default (SGR)
+	///   CSI ? 25 h    cursor visible (DECTCEM)
+	///   CSI 4 l       replace rather than insert (IRM)
+	///   CSI ? 6 l     absolute origin (DECOM)
+	///   CSI ? 7 h     autowrap (DECAWM) — see below
+	///   CSI ? 1 l     normal cursor keys (DECCKM)
+	///   ESC >         numeric keypad (DECNKM)
+	///   ESC ( B …     G0–G3 all ASCII, then SI to make G0 the active set
+	///   CSI r         the scrolling region back to the whole page (DECSTBM)
+	///   CSI H         home, so the save below is of the corner
+	///   ESC 7         the SAVED cursor to home, carrying the pen just reset (DECSC)
+	///
+	/// The `CSI H` is not redundant, though it looks it: `set_scrolling_region` homes the cursor
+	/// itself, so the save would land on the corner without it. Dropping `CSI r` from this string
+	/// once broke the saved-cursor test as well as the region one, which is the shape of a hidden
+	/// dependency — one item's correctness resting on another item's side effect. Saying it costs
+	/// three bytes and means each line above is answerable on its own.
+	///
+	/// DECSCA, the eleventh item, is cleared by the caller above. The rest of DEC's list — KAM,
+	/// DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM — names state that neither `vte`, nor
+	/// the engine, nor cmote models at all, so there is nothing left stale by not sending it.
+	///
+	/// Two deliberate departures, both worth stating so they are not later "fixed":
+	///
+	/// **Autowrap goes ON, where the VT510 manual says a soft reset turns it off.** The manual
+	/// describes hardware nobody is emulating here. `xterm-256color` declares `am` — this terminal
+	/// wraps — and its `rs2` sends this sequence WITHOUT a following `\E[?7h`, so on the terminal
+	/// cmote claims to be, a soft reset cannot be what leaves wrapping off, or `tput init` would
+	/// break every program that ran it. Power-on default is the honest reading, and the engine's
+	/// power-on default (`TermMode::default()`) has `LINE_WRAP` in it.
+	///
+	/// **The cursor is put back where the reset found it.** DECSTR does not move the cursor, but the
+	/// engine's `set_scrolling_region` ends in `goto(0, 0)` — right for DECSTBM, which is defined to
+	/// home the cursor, and wrong for a reset that borrows it. So the position is read first and
+	/// restored with CUP once origin mode is off and the coordinates are absolute again. The one
+	/// thing that does not survive the round trip is the pending-wrap flag, which a reset has no
+	/// business preserving anyway.
+	fn soft_reset(&mut self) {
+		// Read before anything moves. A cursor waiting to wrap sits one past the last column, and
+		// CUP clamps it back onto the grid, which is where the next glyph would have gone regardless.
+		let (row, col) = self.screen().cursor_position();
+		let mut feed = SOFT_RESET.to_vec();
+		feed.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+		self.parser.advance(&mut self.term, &feed);
 	}
 
 	/// Arm or disarm DECSCA by setting cmote's borrowed flag bit on the engine's PEN (§56).
@@ -2601,6 +2683,127 @@ mod tests {
 		terminal.process(b"\x1b[1\"q\x1bcAfter");
 		terminal.process(b"\x1b[?2J");
 		assert_eq!(read(&terminal, 0, 0, 5).trim(), "");
+	}
+
+	/// The soft reset's share of the same rule (§72). DECSTR clears the pen, and the borrowed bit is
+	/// cleared beside it rather than left to the SGR inside the fed reset — this is what says so.
+	#[test]
+	fn a_soft_reset_stops_the_pen_protecting() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1\"q\x1b[!pAfter");
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(read(&terminal, 0, 0, 5).trim(), "");
+	}
+
+	/// The five modes DECSTR names that the engine actually models, asked for by the engine's own
+	/// DECRQM (§72). Each is first moved AWAY from where the reset must leave it, so a reply of "2"
+	/// is the reset's doing and not the power-on default sitting still.
+	#[test]
+	fn a_soft_reset_puts_back_the_modes_it_is_defined_to() {
+		let mut terminal = Terminal::new(6, 20);
+		// Origin on, autowrap off, cursor hidden, application cursor keys on, insert mode on.
+		terminal.process(b"\x1b[?6h\x1b[?7l\x1b[?25l\x1b[?1h\x1b[4h");
+		assert_eq!(
+			terminal.process(b"\x1b[?6$p\x1b[?7$p\x1b[?25$p\x1b[?1$p\x1b[4$p"),
+			b"\x1b[?6;1$y\x1b[?7;2$y\x1b[?25;2$y\x1b[?1;1$y\x1b[4;1$y".to_vec(),
+			"the five modes have to move before the reset can be shown to move them back"
+		);
+		terminal.process(b"\x1b[!p");
+		assert_eq!(
+			terminal.process(b"\x1b[?6$p\x1b[?7$p\x1b[?25$p\x1b[?1$p\x1b[4$p"),
+			b"\x1b[?6;2$y\x1b[?7;1$y\x1b[?25;1$y\x1b[?1;2$y\x1b[4;2$y".to_vec()
+		);
+	}
+
+	/// The item with real consequences: a program that died inside `CSI 2;3 r` leaves every later
+	/// scroll trapped in three rows, and DECSTR is the sequence `reset` sends to undo it (§72).
+	/// Read through origin mode, which is the only way the region is observable from outside.
+	#[test]
+	fn a_soft_reset_clears_the_scrolling_region() {
+		let mut terminal = Terminal::new(6, 20);
+		// With a region set, origin mode makes `CSI 1;1H` mean the region's top rather than the
+		// page's — so this first assertion is what proves the region was really in force.
+		terminal.process(b"\x1b[2;4r\x1b[?6h\x1b[1;1H");
+		assert_eq!(terminal.screen().cursor_position(), (1, 0));
+		terminal.process(b"\x1b[!p");
+		terminal.process(b"\x1b[?6h\x1b[1;1H");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+	}
+
+	/// DECSTR does not move the cursor — but the engine's `set_scrolling_region` homes it, and the
+	/// fed reset has to send `CSI r` to clear the region. The CUP that puts it back is what this
+	/// pins (§72); without it a `tput init` mid-screen would jump the shell's cursor to the corner.
+	#[test]
+	fn a_soft_reset_leaves_the_cursor_where_it_found_it() {
+		let mut terminal = Terminal::new(6, 20);
+		terminal.process(b"\x1b[4;6H");
+		assert_eq!(terminal.screen().cursor_position(), (3, 5));
+		terminal.process(b"\x1b[!p");
+		assert_eq!(terminal.screen().cursor_position(), (3, 5));
+	}
+
+	/// The SAVED cursor is a different matter: DEC's list puts it at home with a default pen, so a
+	/// restore after a soft reset lands at the corner rather than wherever the program last saved.
+	#[test]
+	fn a_soft_reset_homes_the_saved_cursor() {
+		let mut terminal = Terminal::new(6, 20);
+		terminal.process(b"\x1b[4;6H\x1b7");
+		terminal.process(b"\x1b[!p");
+		terminal.process(b"\x1b8");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+	}
+
+	/// The pen, read back through DECRQSS — cmote's own answer, built from the very template the
+	/// grid paints with (§33), so this checks the reset against what the engine believes rather
+	/// than against the bytes that were fed.
+	#[test]
+	fn a_soft_reset_puts_the_pen_back() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;4;7;31m");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;4;7;31m\x1b\\".to_vec()
+		);
+		terminal.process(b"\x1b[!p");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0m\x1b\\".to_vec()
+		);
+	}
+
+	/// All four character-set slots go back to ASCII, and G0 becomes the active one again. A program
+	/// left in line-drawing mode prints boxes instead of letters, which is the classic wedged
+	/// terminal `reset` exists for — and the wedge DECSTR alone was not clearing (§72).
+	#[test]
+	fn a_soft_reset_puts_the_character_sets_back() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b(0q");
+		assert_eq!(read(&terminal, 0, 0, 1), "─", "line drawing has to be on");
+		terminal.process(b"\x1b[!p\x1b[2;1Hq");
+		assert_eq!(read(&terminal, 1, 0, 1), "q");
+	}
+
+	/// The keypad back to numeric, the second half of what terminfo's `rs2` is for: a program that
+	/// exits without its `rmkx` leaves the numpad sending SS3 sequences the shell shows as letters.
+	#[test]
+	fn a_soft_reset_puts_the_keypad_back_to_numeric() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b=");
+		assert!(terminal.screen().application_keypad());
+		terminal.process(b"\x1b[!p");
+		assert!(!terminal.screen().application_keypad());
+	}
+
+	/// The near miss that would be a disaster: DECRQM shares this final byte, and `vte` DOES have
+	/// arms for it. A scanner that matched on `p` alone would soft-reset the terminal every time a
+	/// program asked what a mode was — so the request must still be answered, and change nothing.
+	#[test]
+	fn a_mode_request_is_not_read_as_a_soft_reset() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[?7l");
+		assert_eq!(terminal.process(b"\x1b[?7$p"), b"\x1b[?7;2$y".to_vec());
+		// Still off: asking the question did not reset it.
+		assert_eq!(terminal.process(b"\x1b[?7$p"), b"\x1b[?7;2$y".to_vec());
 	}
 
 	/// Protection dies with the cell it was on. A plain erase writes the cell fresh — flags and all —
