@@ -7214,3 +7214,83 @@ decision.
   instead. Stated in §6, marked 🛑 in §8, guarded by nothing.
 - **No test was added by this section at all.** It moved marks and corrected notes; the one thing it
   found that deserves code is the item above.
+
+## 66. Retiring a mark (v4.0.0)
+
+§64 and §65 audited the ⚠️ rows and split nine of them. Two were left standing as "genuinely partial" —
+DECRQSS and XTGETTCAP — and this section asks what they would be if the class did not exist, splits them,
+and deletes the mark.
+
+### What the last two really are
+
+Both are protocols cmote answers **completely** and reports **narrowly**. Every DECRQSS request draws a
+reply; only the SGR selector carries data. Every XTGETTCAP request draws a reply; only `TN` and
+`Co`/`colors` carry values. Nothing hangs, nothing lies.
+
+The interesting part is what the declined half is, once a row has to say. Three candidates:
+
+- **🛑** — a refusal cmote performs. No: nothing decided that a program should not learn the scroll
+  region. There is no policy here to point at, and §6 does not mention either sequence.
+- **🤷** — refused upstream, nothing offered. No either: these are cmote's own scanners (`term/query.rs`),
+  so cmote *is* offered the request and chooses what to answer.
+- **❌** — not supported. Yes, and uncomfortably so, because it is work rather than a stance.
+
+Writing the ❌ down is what exposed the thing this section is really about:
+
+```rust
+/// A DECRQSS request, reduced to what cmote can answer (§33). `Sgr` is the one setting cmote reads
+/// back truthfully … every other setting (cursor shape, scroll margins, conformance level) is
+/// `Unsupported`, because cmote either renders it fixed (a block cursor drawn by inverting the
+/// cell) or the engine does not expose it.
+```
+
+"cmote renders it fixed (a block cursor drawn by inverting the cell)" **stopped being true in §60**, which
+found DECSCUSR and OSC 50 both working and the shape drawn from `cursor_style.shape`. The seam has exposed
+`Screen::cursor_shape` ever since. So DECSCUSR is answerable from state that already exists; `" q`
+(DECSCA) is answerable from the protection bit §56 owns; `r` (DECSTBM) needs one new seam getter over a
+region the engine already keeps. Likewise XTGETTCAP's "the wire values are ambiguous" is true of exotic
+capabilities and not of `Tc` / `RGB`, the two a shell actually asks about, which cmote supports.
+
+None of that is large and none of it is urgent — a program that gets an honest "no" behaves correctly. The
+point is that **it was invisible**, and it was invisible because the row said "partial" and everybody read
+that as "fine".
+
+### Why the class had to go rather than be tidied
+
+The pattern across four sections:
+
+- **§60** — six rows wrong about *who* performed a behaviour.
+- **§62** — two more, plus the ❌/🛑/🤷 split so a row's mechanism sits in the column.
+- **§64** — two rows averaging two opposite answers into one ⚠️, plus a cost invented to justify one half.
+- **§65** — seven more of the same, one refusal mismarked as a partial, and a real gap (mode 2026's
+  undriven abort timeout) sitting under a note that read as reassurance.
+
+Every one of those is the same failure: **a row making a claim too wide to be wrong.** ⚠️ is that failure
+promoted to a mark. It says "something here is incomplete" and thereby answers, in advance, the only
+question worth asking of a row — *which part, and who decided?* A ❌ invites someone to close it. A 🛑
+invites someone to check the refusal is real. A ⚠️ invites nothing.
+
+So the matrix now runs on one rule: **one row, one answer, one mechanism.** Four marks, and any row that
+wants to say two things becomes two rows — which `OSC 52 (write)` / `(read)` had been doing since §62
+without anyone noticing it was a rule.
+
+### What it cost
+
+Four rows where there were two, a four-mark legend, and every mention of the retired class reworded across
+the header state paragraph, §6, §7, §8's legend and closing prose. Markdown only — **no code changed and
+no answer changed**; the two ❌ halves are inherited work items, not regressions. `PLAN.md`'s own §62-§65
+keep the mark in their prose because they are dated history, and history is the one place a retired
+notation still reads correctly.
+
+### Not done
+
+- **Neither inherited gap is closed.** DECRQSS's three answerable selectors (`SP q`, `" q`, `r`) and
+  XTGETTCAP's `Tc` / `RGB` are named in §7 and left there. Each is small, each needs a test, and neither
+  belongs in a section that changed no behaviour.
+- **Six ✅ rows still carry a "but only…" clause** — `OSC 0`, `OSC 8`, `ESC ( ) * +`, `r` (DECSTBM),
+  `SP q` (DECSCUSR) and `CSI ? 4 m`. By the rule above each is two rows. They were left alone on purpose:
+  their second halves are stated in their own notes, which is exactly what a ⚠️ never did. Splitting them
+  is bookkeeping, and worth doing the next time one of them is touched for a real reason.
+- **The rule is not enforced by anything.** Nothing fails if a future row says two things at once — the
+  same class of exposure §63 fixed for the clipboard, and unfixable here, since a markdown table has no
+  test. The nearest thing to a pin is that the legend now states the rule in the same breath as the marks.

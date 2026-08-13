@@ -24,16 +24,18 @@ refuses it) and **🤷** (nothing does; it dies upstream). **§63 then took the 
 up as work**: OSC 52's refusal moved from an inherited crate default plus a catch-all to a stated
 `osc52: Osc52::Disabled`, with a test on the field. No row changed status; the mechanism behind two of
 them did.
-**§64 ran the same check over the colour rows** — the last ⚠️ rows in §8's OSC table — and found one
+**§64 ran the same check over the colour rows** — the last partial rows in §8's OSC table — and found one
 mark covering two opposite answers and one cost that does not exist: `OSC 4` and `OSC 10 / 11 / 12`
 answer a query fully and refuse a set, and the note charged the refused set with a full-screen repaint
 that never happens, since `mark_fully_damaged` sets a bool nothing in cmote reads. Both rows now name
 each of them a query answered in full and a set refused on purpose. Each is now **two rows**, the way
 `OSC 52` has been two rows since §62, and the refused half is pinned by a test in each direction.
-**§65 then audited every remaining ⚠️ row against the crates**, split seven more the same way, re-marked
-`BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote never
-drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight bytes
-(mode 2026, and §7).
+**§65 then audited every remaining partial row against the crates**, split seven more the same way,
+re-marked `BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote
+never drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight
+bytes (mode 2026, and §7). **§66 split the last two and retired the ⚠️ class**: every row in §8 now states
+one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
+gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -446,7 +448,7 @@ test (`the_engine_is_told_to_refuse_the_remote_clipboard`) fails if the field go
 The **bell** is dropped for the same "no remote-driven side effects" reason. Answering an OSC 52 read
 query would be an injection vector and stays out.
 
-That bell is the **🛑** in §8, and §65 had to correct its mark to say so: it had been a ⚠️ reading
+That bell is the **🛑** in §8, and §65 had to correct its mark to say so: it had been a partial reading
 "accepted, silent", as though nothing had decided anything. Something did. `vte` dispatches `BEL` and
 `alacritty_terminal` implements it — `bell()` is `self.event_proxy.send_event(Event::Bell)` — so the
 event genuinely arrives and cmote's catch-all drops it. It is the last refusal in this document standing
@@ -583,7 +585,7 @@ sequence it ignores. cmote now decodes sixel in-house, anchors each picture to a
 — plus the two answers that make programs *offer* pictures at all: **XTSMGRAPHICS**, and attribute 4
 added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows are in §5 and §8.
 
-**§65 swept the ⚠️ rows and turned up one item of real work.** Auditing all ten the way §60 taught —
+**§65 swept the partial rows and turned up one item of real work.** Auditing all ten the way §60 taught —
 `vte`'s dispatch arms first, then which `Handler` methods the engine leaves at their empty default —
 split seven into an ✅ half and a refused-or-missing half, re-marked `BEL` as a 🛑, and confirmed two
 (DECRQSS, XTGETTCAP) as plainly partial. The finding is **mode 2026**: `vte` batches a synchronized
@@ -595,6 +597,24 @@ client — but it is a remote-triggered effect on cmote's own window, which is t
 length refusing. The fix is small and has a shape already in the codebase: an `iced::window::frames()`
 subscription while an update is pending, the way `SnackbarTick` and `QuitTick` are driven, calling
 `stop_sync` once the instant passes. Not taken in §65, which was an audit.
+
+**§66 retired the ⚠️ class and inherited two small gaps from it.** Splitting the last two partial rows —
+DECRQSS and XTGETTCAP — meant deciding what their declined halves are, and neither is a refusal: cmote
+answers honestly ("not reported", "unknown") because it has no reporting code, not because a policy says
+no. So both are ❌, and both are answerable. **DECRQSS** could report three more selectors from state that
+already exists: `SP q` (DECSCUSR) from `Screen::cursor_shape`, `" q` (DECSCA) from the protection bit
+§56 owns, and `r` (DECSTBM) from the engine's region behind one new seam getter — the note claiming the
+cursor "renders fixed" has been stale since §60 shipped the shapes. **XTGETTCAP** could state `Tc` and
+`RGB`, the two capabilities a shell actually asks about, cmote's 24-bit SGR being real. Neither is large
+and neither is urgent — a program that gets an honest "no" behaves correctly today, which is why they sat
+unnoticed under a mark that said "partial" and meant "unexamined".
+
+The same rule has one more consequence, stated so it is not discovered as a surprise: **a few ✅ rows still
+carry a "but only…" clause** — `OSC 0` (title yes, icon name no), `OSC 8` (http/https/mailto only, the
+rest refused by `link.rs`), `ESC ( ) * +` (ASCII and line drawing only), `r` (DECSTBM, vertical only),
+`SP q` (DECSCUSR, shape yes and blink dropped) and `CSI ? 4 m` (resource 4 of XTMODKEYS' seven). By the
+one-answer-per-row rule each of those is two rows, in ✅/❌ or ✅/🛑 pairs. §66 did not split them: they
+are honest as written and their second halves are named in their own notes, whereas a ⚠️ named nothing.
 
 What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and the PNG/JPEG-carrying kitty and iTerm2 image protocols) is legacy, rare, invisible in practice, or a
@@ -613,7 +633,7 @@ refusal explicit instead of a side effect of `OnlyCopy`, and gives the `refuses_
 `term/iterm.rs` a sibling to sit beside. The `Config` moved out of `Terminal::new` into a named
 function to make that assertable at all, so the kitty-keyboard flag beside it is now pinned too.
 
-**§64 then closed the smaller version of the same hole, one column over.** The two ⚠️ colour rows were a
+**§64 then closed the smaller version of the same hole, one column over.** The two partial colour rows were a
 working query and a refused set under one mark — now four rows, `(query)` ✅ and `(set)` 🛑 apiece — and
 the refused half had no test — it was held up by the
 renderer's structure (`ui/grid.rs` cannot reach the engine's colour table) plus the fact that nobody had
@@ -622,7 +642,7 @@ pattern exactly, a correct outcome nothing asserts. Two tests now set a colour a
 not move, and each asserts the engine *did* record the set first, so neither can pass because the set was
 silently dropped on the way in. The same pass deleted a cost this document had invented for the refusal
 (see §6): the full-screen repaint a colour set was said to cost does not happen, because cmote never
-reads the engine's damage flags. Nothing shipped and **no answer changed** — the two ⚠️ rows became a
+reads the engine's damage flags. Nothing shipped and **no answer changed** — the two partial rows became a
 ✅ and a 🛑 apiece because that is what they always were, and the rows just stopped
 claiming more than they knew.
 
@@ -698,25 +718,18 @@ text, no wait cursor through a long operation. See §6.
 
 A per-sequence audit against the escape-sequence catalogue published at
 [vtdn.dev](https://vtdn.dev), so support is legible one line at a time rather than only as the
-"still-missing" lens of §2–§6. Every ✅/⚠️/❌/🛑/🤷 below was verified against the real sources — the
+"still-missing" lens of §2–§6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
 (`term/`, `ui/grid.rs`) — not from memory.
 
-Legend: **✅** full · **⚠️** partial or a deliberate quirk · **❌** not supported · **🛑** refused, by
-cmote's own code · **🤷** refused in principle, by nothing in particular.
+Legend: **✅** full · **❌** not supported · **🛑** refused, by cmote's own code · **🤷** refused in
+principle, by nothing in particular. **Four marks, since §66 retired a fifth** — **⚠️** "partial or a
+deliberate quirk", which is what the rule under the bullets below is about.
 
 The last three are different in kind, which is why each carries its own mark rather than one mark and a
 footnote:
 
 - **❌** is a *gap* — a sequence that could still land, and several since have.
-- A code whose **two halves deserve opposite marks gets two rows**, not one averaged mark: `OSC 52` has
-  been split into `(write)` and `(read)` since §62, and §64 split `OSC 4` and `OSC 10 / 11 / 12` into
-  `(query)` and `(set)` the same way. "Partial" on its own hides which half a program can rely on, and
-  these halves are not partial in either direction — the query is answered in full and the set is refused
-  on purpose. **§65 swept the rest of the ⚠️ rows** and split seven more, in every pairing the marks
-  allow: ✅/🛑 (`SetUserVar`, mode 12), ✅/🤷 (mode 3, mode 80) and ✅/❌ (`CSI ! p`, the locking shifts,
-  mode 2026). Two ⚠️ rows survive that sweep, DECRQSS and XTGETTCAP, and both are partial in the plain
-  sense: one answer, given for some inputs and honestly declined for the rest.
 - **🛑** is a *decision* recorded in §6 that **cmote enforces**: a scanner allow-list, an event dropped
   in the listener, a renderer that never reads the value. It never becomes work, and the row names the
   code that performs it — usually with a test pinning it by name, so the refusal cannot regress
@@ -727,6 +740,16 @@ footnote:
   guarantees: an engine bump could start handing the sequence over, and then the listener's catch-all is
   the only thing standing there. The distance between agreeing with a refusal and performing one is what
   §57 is about, and it is worth seeing in the column rather than reading for.
+
+And one rule over the three: **one row, one answer, one mechanism.** A code that answers some requests and
+declines others gets a row for each, rather than one mark averaging them — `OSC 52` has been `(write)` and
+`(read)` since §62, §64 split `OSC 4` and `OSC 10 / 11 / 12` into `(query)` and `(set)`, §65 split seven
+more (✅/🛑 for `SetUserVar` and mode 12, ✅/🤷 for modes 3 and 80, ✅/❌ for `CSI ! p`, the locking shifts
+and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. That is why there is no "partial" mark
+here: a row saying two things at once cannot be checked, and every finding this document has recorded came
+from checking one. Where a section below still writes ⚠️ it describes what a row used to carry, not a mark
+in use. The cost is admitted in §7 — a handful of ✅ rows still carry a "but only…" clause, and by this rule
+each of those is two rows too.
 
 ### OSC — Operating System Command
 
@@ -832,8 +855,10 @@ footnote:
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| DCS $ q (DECRQSS) | Request status string | ⚠️ | genuinely partial, and honest about it — the mark stands after §65's audit. **Every** request draws a reply, but only `m` (SGR) carries data, rebuilt from the live pen so it is what the grid paints. Every other setting (DECSTBM, DECSCUSR, DECSCA…) answers `DCS 0 $ r ST`, the standard's "I do not report that", rather than a guess (`term/query.rs`, §33) |
-| DCS + q (XTGETTCAP) | Termcap query | ⚠️ | same shape, and it also stands: every request answered, two capabilities stated — `TN` (`xterm-256color`, the name cmote requested for the pty) and `Co` / `colors` (256). The rest reply unknown on purpose, since their wire values are ambiguous and 24-bit SGR works whether or not a capability query confirms it (§33) |
+| DCS $ q m (DECRQSS — SGR) | Report the pen | ✅ | rebuilt from the live pen — `pen_sgr` over the engine's cursor template — so the answer is exactly what the grid paints rather than a guess. Opens with `0` and then lists only what is set, framed `DCS 1 $ r <params> m ST` (`term/query.rs`, §33) |
+| DCS $ q (DECRQSS — any other setting) | Report another setting | ❌ | every request still draws a reply, and an honest one: `DCS 0 $ r ST`, the standard's "I do not report that", which lets the program move on instead of waiting. But the row said that as though it were a decision, and §66 found it is a **gap**: three of the selectors programs actually send are answerable from state cmote already holds — `" q` (DECSCA) from the protection bit it owns (§56), `SP q` (DECSCUSR) from the shape the seam already exposes (`Screen::cursor_shape`, drawn since §60), and `r` (DECSTBM) from the region the engine holds. The reason on file — that cmote "renders it fixed" — stopped being true in §60 |
+| DCS + q `TN` / `Co` (XTGETTCAP) | Report a capability | ✅ | the two facts cmote can state without lying: `TN` answers `xterm-256color`, the name it requested for the remote pty, and `Co` / `colors` answer `256`. Names arrive hex-encoded and are answered `DCS 1 + r <NAME>=<VALUE> ST` with both sides re-encoded to canonical upper-case hex, as xterm does (`term/query.rs`, §33) |
+| DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed — honest, and what keeps a querying shell from hanging. A gap rather than a policy, on the same reading as DECRQSS above: the reason on file is that the wire values are ambiguous, which holds for exotic caps and not for the two programs actually ask about, `Tc` and `RGB` (truecolor), which cmote does support and could state (§66) |
 | CSI > q (XTVERSION) | Terminal version | ✅ | replies `cmote(<ver>)` (`term/query.rs`, §33) |
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | replies a **constant** unit id `00434D45`, never a machine-derived one (`term/query.rs`, §36) |
 | DCS … q | Sixel graphics | ✅ | decoded in-house and composited over the grid; the picture is anchored to an absolute document line and reserves its cells (`term/sixel.rs`, `term/graphics.rs`, §41). The alternate screen has its own page of them, on the same coordinate with the history at zero — so `ranger` previews and `mpv --vo=sixel` draw |
@@ -993,7 +1018,7 @@ the least. That is the whole of what a change of marks turned into work, and a f
 column state its mechanism: nothing about the *behaviour* was wrong, and looking anyway found the one
 place where the reasoning lived outside the code.
 
-**§64 pointed the same question at the ⚠️ rows, which had never been asked to justify themselves.** A
+**§64 pointed the same question at the partial rows, which had never been asked to justify themselves.** A
 partial is easy to leave alone: it admits up front that something is missing, so it draws none of the
 suspicion a ❌ or a 🛑 does. Both colour rows turned out to be two rows in a trench coat — a query
 answered in full and pinned by a test, and a set refused exactly as row 104's 🛑 is refused — averaged
@@ -1006,15 +1031,25 @@ reason given for it was invented — the mirror image of §60's failure, where t
 and the outcome was right. Both come from the same habit: writing down what a sequence *ought* to cost
 instead of reading what it does.
 
-**§65 finished the sweep, and the ⚠️ rows turned out to be the least examined in the document.** Ten
+**§65 finished the sweep, and the partials turned out to be the least examined rows in the document.** Ten
 remained; seven were two answers under one mark and are now two rows each, one was a refusal wearing a
 partial's clothes (`BEL` — `alacritty_terminal` really does raise `Event::Bell`, and cmote's catch-all
 really does drop it, so it is a 🛑 and always was), and two are genuinely partial. The pattern is worth
-naming: a ❌ invites someone to close it and a 🛑 invites someone to check it, but a ⚠️ invites nothing —
-it has already admitted to being incomplete, so it is never asked *which part*. That is how mode 2026 sat
-for this long reading "cmote already atomic", which was true, beside an undriven abort timeout that lets a
-remote freeze the screen. The audit that finds a thing like that is the same one every time: read the
-dispatch arms, then ask who performs each half.
+naming: a ❌ invites someone to close it and a 🛑 invites someone to check it, but a partial invites
+nothing — it has already admitted to being incomplete, so it is never asked *which part*. That is how mode
+2026 sat for this long reading "cmote already atomic", which was true, beside an undriven abort timeout
+that lets a remote freeze the screen. The audit that finds a thing like that is the same one every time:
+read the dispatch arms, then ask who performs each half.
+
+**§66 then removed the mark itself.** The last two rows carrying it, DECRQSS and XTGETTCAP, were split
+into the answer each gives (✅) and the answer each declines (❌) — and writing the declined halves down
+settled what they are: not refusals. cmote says "not reported" and "unknown" because it has no reporting
+code, not because anything decided the program should not know. Both are answerable from state that
+already exists, which is precisely what a mark meaning "partial, and that is fine" had kept out of view
+for four sections. The matrix now has four marks and one rule: **one row, one answer, one mechanism.** The
+value of that is not tidiness — it is that every row is now a claim narrow enough to be wrong, and
+therefore checkable. Six ✅ rows still carry a "but only…" clause and by the same rule are two rows each;
+§7 names them, and they are honest as written, which is the difference.
 
 ---
 
