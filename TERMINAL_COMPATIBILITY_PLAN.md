@@ -1249,16 +1249,17 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for a palette slot, in `index ; spec` pairs so one sequence may ask about several; each is answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, §87, `report_color`) |
 | 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (§6, §64) |
 | 7 | Working directory | ✅ | `OSC 7 ; file://host/path` announces the shell's working directory (§17, `term/cwd.rs`) |
-| 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens and closes a hyperlink over a run of cells; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`) |
-| 8 (any other scheme) | Hyperlinks | 🛑 | the same sequence carrying any other URI scheme — a scheme decides which local program the OS launches, so the link is drawn and never opened (§24, `ALLOWED_SCHEMES`) |
+| 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens a hyperlink over the cells that follow and `OSC 8 ; ; ST` closes it; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`). `params` is a `:`-separated `key=value` list of which the spec defines exactly one key, `id`, to tie separated runs of one link together — **cmote does not read it**: the hover underline is the contiguous run of cells sharing the URI, so two runs with one `id` underline apart and two different links with one URI underline together (§88) |
+| 8 (any other scheme) | Hyperlinks | 🛑 | the same sequence carrying any other URI scheme — a scheme decides which local program the OS launches, so the link is drawn and never opened (§24, `ALLOWED_SCHEMES`). The spec leaves this open on purpose: "It's up to the terminal emulator to decide what schemes it supports" (§88) |
 | 9 | Desktop notification | 🛑 | `OSC 9 ; text` raises a desktop notification, which leaves the window and lands on the desktop (§6, §54, §79, `term/notify.rs`) |
 | 9;4 | Progress reporting | ✅ | `OSC 9 ; 4 ; state ; percent` reports task progress; all five states, drawn per tab and mirrored on the taskbar button (§54, `term/progress.rs`) |
 | 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; path` — ConEmu's working-directory spelling, a bare native Windows path, sometimes quoted (§17, `term/cwd.rs`) |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; a list walks UP from the code it starts at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background. Answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64, §87) |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (§6, §64) |
 | 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | `OSC 22 ; name` sets the mouse pointer shape over the grid; these five describe the content under the pointer, apply only while the pointer is inside the grid, and are cleared on both directions of the alternate-screen swap (§77, `term/pointer.rs`) |
-| 22 (any other shape) | Mouse pointer shape | 🛑 | the same sequence naming any other CSS shape — the resize and grab shapes are cmote's own vocabulary, and `wait`, `progress`, `not-allowed` and `no-drop` make a claim about the client (§77, `term/pointer.rs`) |
-| 50 | Cursor shape (`CursorShape=`) | ✅ | `OSC 50 ; CursorShape=0/1/2` sets the cursor to block, bar or underline — a third spelling of DECSCUSR's shape, with no blink to carry (§71) |
+| 22 (any other shape) | Mouse pointer shape | 🛑 | the same sequence naming any other CSS shape — the resize and grab shapes are cmote's own vocabulary, and `wait`, `progress`, `not-allowed` and `no-drop` make a claim about the client (§77, `term/pointer.rs`). One divergence from xterm, which on a name it does not know "uses the resource's default `xterm` shape": a refused name here leaves the pointer **as it was** rather than resetting it, so a remote cannot clear a shape it is not allowed to set (§88) |
+| 50 (`CursorShape=`) | Cursor shape | ✅ | `OSC 50 ; CursorShape=0/1/2` sets the cursor to block, bar or underline — a third spelling of DECSCUSR's shape, with no blink to carry. **Not xterm's `OSC 50`**, which is the row below: this payload is another terminal's convention that `vte` happens to parse on the same code (§71, §88) |
+| 50 (a font) | Set the font | 🤷 | xterm's own `OSC 50`: "Set Font to `Pt`", by name or by an index into its font menu (`#` for absolute, `#+` / `#-` relative). The font is chrome the **user** chose — the argument the fixed colour scheme rests on (§6) — and nothing here performs the refusal: `vte`'s `OSC 50` arm tests for the `CursorShape=` prefix and drops everything else to `unhandled` (§88) |
 | 52 (write) | Clipboard write | 🛑 | `OSC 52 ; c ; <base64>` writes the local clipboard (§6, §63) |
 | 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (§6, §63) |
 | 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
@@ -1714,6 +1715,21 @@ Audited file:line anchors behind the claims above, for later re-checking.
   (`:303`), and nothing expires a stuck update except the application calling `stop_sync` — which cmote
   never does (no hit for `sync_timeout` / `stop_sync` / `pending_timeout` in `src/`).
 
+- **The OSC payload buffer is unbounded in this build** — §79 left that question open and §88 answers
+  it. `MAX_OSC_RAW = 1024` (`vte-0.15.0/src/lib.rs:46`) bounds an `ArrayVec` that exists only
+  `#[cfg(not(feature = "std"))]` (`:62`); with `std` — which is what `alacritty_terminal` pulls in —
+  `osc_raw` is a plain `Vec<u8>` (`:64`) and `action_osc_put` (`:544`) pushes every byte with the
+  fullness check compiled out. So a remote that writes `ESC ]` and then never terminates the string
+  makes the parser accumulate the whole of it in memory. Ordinary text is bounded by `SCROLLBACK`
+  = 10 000 lines; an unterminated OSC is bounded by nothing.
+  **Why it was not fixed here.** `advance_osc_string` (`:407`) ends an OSC on `0x07`, `0x18`, `0x1A` or
+  `0x1B`, and every one of those routes through `osc_end`, which **dispatches** what has accumulated.
+  There is no abort that discards. So feeding a CAN the way §57 does for DECSLRM would deliver a
+  truncated OSC and then leave the rest of the runaway payload to be **printed to the screen** as
+  ground text — a megabyte of garbage in place of a memory cost. Discarding the bytes instead means
+  filtering the stream on its way in, which §41 refuses for its own reasons. The remaining honest fix
+  is a wrapper around the parser, which is the same price §5 puts on the margins. Recorded, priced, not
+  taken.
 - **The colour OSCs take lists, which the matrix had as single requests until §87.** `b"4"`
   (`ansi.rs:1366`) refuses an even parameter count and then walks `params[1..].chunks(2)`, so
   `OSC 4 ; 1 ; ? ; 3 ; ?` is two queries and two replies. `b"10" | b"11" | b"12"` (`:1422`) is one arm
@@ -1765,12 +1781,24 @@ Quoted where a row's wording now rests on it.
   §41 until §84. `query.rs`'s `graphics_request` reads item then action, so the code was right and only
   the row was wrong — and it answers action **2** with a status 0 as well, which no row had said.
 - **`CSI 16 t`** — "Report xterm character cell size in pixels. Result is `CSI 6 ; height ; width t`".
-- **The OSC list could not be read at all** (§87). Every fetch of this document returns it truncated
-  part-way through `Ps = 4` — "Change Color Number *c* to the color specif" — so `OSC 8`, `10`–`12`,
-  `22`, `50`, `52`, `104` and `110`–`112` were checked against `vte` instead, which is the operative
-  source for what cmote does but not for what the sequence MEANS. What the fetch did reach: "Change Icon
-  Name and Window Title to *Pt*" (`0`), "Change Icon Name to *Pt*" (`1`), "Change Window Title to *Pt*"
-  (`2`) — the three the matrix splits across four rows, and all three as written.
+- **The OSC list reads from the plain-text build, not the HTML one** (§87, §88). Every fetch of
+  `ctlseqs.html` returns it truncated part-way through `Ps = 4` — "Change Color Number *c* to the color
+  specif" — which is where §87 stopped. `ctlseqs.txt` reaches further and settled four rows:
+  "Change VT100 text foreground color to *Pt*" (`10`), the same for background (`11`) and "Change text
+  cursor color to *Pt*" (`12`); "Manipulate Selection Data… The parameter *Pt* is parsed as *Pc ; Pd*"
+  (`52`); **"Change pointer cursor shape to *Pt*… If *Pt* is empty, or does not match any of the
+  standard names, xterm uses the resource's default 'xterm' shape"** (`22`), which is the divergence
+  that row now names; and **"Set Font to *Pt*… If *Pt* begins with a '#', index in the font menu,
+  relative (if the next character is a plus or minus sign) or absolute"** (`50`) — xterm's `OSC 50` is
+  the FONT, and the cursor-shape payload the matrix had on that code is another terminal's convention
+  `vte` parses on the same number. §88 split the row. `OSC 8`, `104` and `110`–`112` are still past
+  where even the text build is returned, and rest on `vte`.
+- **OSC 8's own specification** (Egmont Koblinger's, the document VTE and iTerm2 implement): the
+  sequence is `OSC 8 ; params ; URI ST` and is closed with `OSC 8 ; ; ST`; "params is an optional list
+  of key=value assignments, separated by the `:` character", of which only `id` is defined — "character
+  cells that have the same target URI and the same nonempty id are always underlined together on
+  mouseover"; "both VTE and iTerm2 limit the URI to 2083 bytes"; and, for the row that refuses every
+  other scheme, "it's up to the terminal emulator to decide what schemes it supports".
 - **Two claims ctlseqs does *not* support**, and the rows now say so themselves: it gives **no accepted
   range for DECFRA's `Pch`** ("`Pc` is the character to use", and nothing more), so 32–126 / 160–255 is
   cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with

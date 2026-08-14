@@ -9269,3 +9269,90 @@ five errors survived four sweeps.
 - **`OSC 50` is a case in point and is left standing.** cmote reads it as a cursor shape because `vte`
   does; whose dialect that is, and what xterm means by `OSC 50`, is precisely what the truncated fetch
   could not say.
+
+## 88. The font on the cursor's code, and an answer §79 was owed (v4.0.0)
+
+§87 stopped at a blocker: ctlseqs' OSC list is past where a fetch of the HTML build returns. The plain
+text build reaches further, and it settled the sweep's most useful question first.
+
+### `OSC 50` is the font
+
+> **Set Font to *Pt***. These controls may be disabled using the `allowFontOps` resource. If *Pt*
+> begins with a `#`, index in the font menu, relative (if the next character is a plus or minus sign)
+> or absolute.
+
+The matrix has had `OSC 50` down as the cursor shape since §60 found it working. What actually happens
+is that `vte`'s `OSC 50` arm tests for a `CursorShape=` prefix, honours that, and drops everything else
+to `unhandled` — so cmote reads a **different terminal's convention** on the number xterm uses for the
+font, and the row said nothing about it.
+
+Split, on §68's rule. The `CursorShape=` spelling keeps its ✅ and now says whose it is. The font is a
+new 🤷 row with §6's own argument: the font is chrome the **user** chose, exactly the ground the fixed
+colour scheme stands on — and nothing here performs the refusal, the parser dropping it before cmote
+sees a byte.
+
+That is the fifth row this document has found describing one sequence under another's name, and the
+second in five sections (§84 was `CSI # p`). Both were found the same way: reading the number back
+against the document rather than against the crate that implements it.
+
+### `OSC 22` resets what it does not recognise
+
+> Change pointer cursor shape to *Pt*… If *Pt* is empty, or **does not match any of the standard
+> names, xterm uses the resource's default 'xterm' shape**.
+
+cmote's allow-list (§77) does the opposite: a refused name leaves the pointer as it was. That is the
+better behaviour here and now says so on the row — a remote that may not set a shape must not be able
+to clear one either, which xterm's fallback would hand it for free.
+
+### `OSC 8`'s spec, and the parameter cmote does not read
+
+The hyperlink spec settles three things the row was carrying loosely. The close is `OSC 8 ; ; ST`.
+`params` is "an optional list of key=value assignments, separated by the `:` character", of which
+exactly one is defined. And on the schemes: "it's up to the terminal emulator to decide what schemes it
+supports" — which is the ground `ALLOWED_SCHEMES` stands on, quoted on the row that refuses.
+
+The defined key is `id`, and **cmote does not read it**: "character cells that have the same target URI
+and the same nonempty id are always underlined together on mouseover", where `link_run_at`
+(`ui/grid.rs`) walks the contiguous run of cells sharing the URI. So two runs of one link with a
+matching `id` underline apart, and — the direction that is actually wrong — two *different* links that
+happen to share a URI underline together. Disclosed on the row rather than fixed, because fixing it
+means the engine storing the id, and `Cell::hyperlink` gives back a URI.
+
+### The answer §79 was owed
+
+§79 noticed `vte`'s OSC payload buffer and left the question open in as many words: *"whether a hostile
+stream can make the parser hold an unbounded OSC payload is a question about every OSC cmote sees, not
+about this row."* It can.
+
+`MAX_OSC_RAW = 1024` bounds an `ArrayVec` that only exists under `not(feature = "std")`. With `std` —
+which is what `alacritty_terminal` pulls in — the buffer is a plain `Vec<u8>` and the fullness check is
+compiled out, so a remote that writes `ESC ]` and never terminates the string makes the parser
+accumulate all of it. Ordinary text is bounded by `SCROLLBACK` = 10 000 lines. An unterminated OSC is
+bounded by nothing.
+
+It is recorded and priced rather than fixed, and the reason is in the state machine: every byte that
+ends an OSC in `vte` — BEL, CAN, SUB, ESC — routes through `osc_end`, which **dispatches** what has
+accumulated. There is no abort that discards. Feeding a CAN, the mechanism §57 uses for DECSLRM, would
+deliver a truncated OSC and then leave the rest of the payload to be printed to the screen as ordinary
+text: a megabyte of garbage in place of a megabyte of memory, which is a worse outcome for the person
+at the terminal. Discarding the bytes instead means filtering the stream on the way in, which §41
+refuses for reasons of its own. What is left is a wrapper around the parser — the same price §5 puts on
+the left/right margins, and the same answer for now.
+
+### What it cost
+
+- One row split (`OSC 50`), three notes amended (`OSC 8` both halves, `OSC 22`'s refusal).
+- Two Evidence bullets: the ctlseqs text-build quotes with the OSC 8 spec beside them, and the payload
+  buffer with its price.
+- Matrix 170 → **171 rows: ✅ 106 · ❌ 24 · 🛑 34 · 🤷 7**. No code changed.
+
+### Not done
+
+- **`OSC 8`, `104` and `110`–`112` are still unsourced.** Even the text build is returned short of them.
+- **The `id` parameter stays unread**, so the hover underline is wrong in both directions for links that
+  share a URI or split a run.
+- **The unbounded OSC payload stays open**, with the wrapper priced and not built. If it is ever built
+  it should carry DECSLRM (§73) with it, the two being the same purchase.
+- **The vendor rows still have no source**: `OSC 7`, `9`, `9;4`, `9;9`, `133`, `777`, kitty's `21` and
+  `99`, and the whole `iTerm 1337` namespace are other terminals' extensions, and §88 went to xterm.
+- **The SGR table is still unchecked.** Three sweeps have now gone past it.
