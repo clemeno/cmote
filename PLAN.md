@@ -9847,3 +9847,86 @@ answered.
 - **`OSC 777` is still folklore** (§89): the sequence is real and widely emitted, and "urxvt's",
   which this matrix and `term/notify.rs` both assert, has no citation and is contradicted by urxvt's
   own manual page.
+
+## 96. A second restatement, and the half of a rule nobody had written (v4.0.0)
+
+§95 took Contour's write-up of OSC 133 and closed with the shape of what it lacked. The user then
+supplied a second one, `vtdn.dev/docs/osc/osc133/`, which is the better of the two and still not the
+spec — it cites only VS Code's shell-integration page and gives no URL for FinalTerm or Bothner. Four
+things came out of it, and the fourth is not about OSC 133 at all.
+
+### It settles what §95 had to leave open
+
+§95 recorded that Contour writes `D`'s exit code as optional but never says what an absent one
+*means*, so cmote's reading — show "done", never a wrong number — stayed a judgement. vtdn gives the
+bare form **its own line in the syntax table**, "Command finished (no exit code)", and a grammar
+production to go with it: `"133", ";", "D", [ ";", exitcode ], ( 0x07 | 0x1b, "\\" )`.
+
+So `OSC 133 ; D` is a **documented spelling**, not a malformation cmote is being generous about. The
+behaviour does not change; what changes is that the test pinning it now says which of the two it is.
+
+### Two more rows, both gaps
+
+**`133 ; A ; cl=m`** is VS Code's, "to indicate a multi-line prompt". A ❌, and one that costs
+nothing to leave: a prompt jump anchors on the `A` mark's own line, which is the prompt's **first**
+line with or without the hint. Nothing in cmote needs the prompt's height.
+
+**Phase letters past the four** are real. vtdn's Konsole entry reads "REPL mode tracking for prompt
+(A/N/P), input (B), output (C), and completion (D)" — and then gives `N` and `P` no syntax and no
+meaning anywhere on the page, which is the same wall §95 hit from the other side. `Scanner::parse`
+already answers an unknown letter with `None`, and that is the right answer for a reason worth
+writing down: a **wrong** mark moves a prompt jump or mis-bounds a command's output, where **no**
+mark leaves both exactly as they were. Guessing `N` into the nearest phase would be a visible
+misbehaviour bought with a guess.
+
+### The citation §34 never had
+
+vtdn's support table lists eleven implementers and thirteen non-implementers, and **Alacritty is in
+the second list**. §34's founding claim — that the engine ignores OSC 133, so cmote must sniff the
+bytes itself — has been asserted from reading the crate since it was written. It is now also
+somebody else's published statement. The claim was never in doubt; it simply had one source, which
+was this project.
+
+### The half-rule
+
+The same table lists **xterm** as not implementing OSC 133 — and cmote answers `xterm-256color` in
+`TERM`, in XTVERSION and in XTGETTCAP's `TN`. That is the ground §78 refuses kitty's `OSC 21` on and
+§82 refuses the DEC-private status reports on: *"answering a question in a dialect it does not claim
+would be the one place it spoke as something else."*
+
+Read carelessly, this pass just found cmote reading a sequence its own declared dialect does not
+have — five of them, counting OSC 7 and iTerm's `SetMark`, `CurrentDir` and `SetUserVar`.
+
+It is not a contradiction, and the reason is in §82's verb. **Speaking** is what the dialect rule
+binds. A remote cannot detect that cmote read an OSC 133 mark: there is no reply, and no state it can
+query afterwards. What it produces is a dot on a tab and a place for Ctrl+Shift+Up to land — visible
+to the **user**, who chose this terminal, and invisible to the sender. Kitty's `OSC 21` is refused
+because `key=?` **answers**, and because setting a colour is observable through `OSC 4`/`10`/`11`.
+
+So the rule has two halves and only one was ever written:
+
+- **cmote may read any dialect, silently.** A read that produces no reply and no queryable state
+  cannot make cmote claim to be anything.
+- **cmote answers only in the dialect it claims.** A reply is an advertisement (§71), and an
+  advertisement in someone else's vocabulary is a claim to be them.
+
+Written down now because until this table put "xterm ✗" next to a feature cmote ships, the first half
+had never had to be defended.
+
+### What it cost
+
+- `term/osc133.rs`: the header block folds in the second source, the grammar and the letters past the
+  four; the parameter test grows a third case; one test added for the unrecognised letters.
+- Matrix: two rows, the `133` row's note, and the §89 evidence bullet gains vtdn beside Contour.
+- 177 → **179 rows: ✅ 108 · ❌ 28 · 🛑 37 · 🤷 6**. Tests 1203 → 1204.
+
+### Not done
+
+- **`N`, `P` and `L` have no syntax from any source reached so far.** Konsole's own documentation was
+  not fetched, and it is the one place vtdn points for them. Until then the letters are a named gap
+  rather than a decision.
+- **Bothner's specification is still unread**, and two restatements agreeing with each other is not
+  the same as either being right. Both were written by people reading the same wall this project hit.
+- **The half-rule is stated here and nowhere structural.** It is a description of what §17, §34, §55,
+  §78 and §82 already do, not a check anything enforces; the next silent read of a foreign dialect
+  will be judged the same way this one was — by hand.

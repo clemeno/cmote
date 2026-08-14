@@ -8,21 +8,33 @@
 //   OSC 133 ; C   ESC ] 133 ; C   BEL | ST   — input is done; the command's output begins
 //   OSC 133 ; D [ ; exit ]        BEL | ST   — the command finished, with this exit code
 //
-// Contour's write-up of the same four (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`,
-// read for §95) names two optional `key=value` fields beside them, and cmote reads neither:
+// `D`'s exit code is optional in the grammar — vtdn writes the production as
+// `"133", ";", "D", [ ";", exitcode ], ( 0x07 | 0x1b, "\\" )` and gives the bare form its own line,
+// "Command finished (no exit code)". Two write-ups are reachable, Contour's
+// (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`, read for §95) and vtdn's
+// (`vtdn.dev/docs/osc/osc133/`, read for §96), and between them they name three optional
+// `key=value` fields — cmote reads none of the three:
 //
 //   133 ; A ; click_events=1      — asks the terminal to report mouse clicks in the prompt area
+//   133 ; A ; cl=m                — VS Code's hint that the prompt spans several lines
 //   133 ; C ; cmdline_url=<pct>   — the command line being run, percent-encoded
 //
 // The first is refused (§95): it turns on input reporting from a payload whose declared job is
 // marking where the prompt sits, which is a side door around the mouse modes (§10) and would make a
-// click inside the prompt behave unlike a click one line above it. The second has no reader here.
+// click inside the prompt behave unlike a click one line above it. The other two have no reader
+// here — and for `cl=m` there is nothing to gain, because a prompt jump anchors on the `A` mark's
+// own line, which is the prompt's first line whether or not the prompt has more (§96).
+//
+// There are also phase letters past the four: vtdn records Konsole as tracking "A/N/P" for the
+// prompt. Neither source gives `N` or `P` a syntax or a meaning, so an unrecognised letter yields
+// no mark rather than a guess (§96).
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
 // success/failure glyph (§34). Like the cwd (§17), modifyOtherKeys (§9) and the identity queries
 // (§33), `alacritty_terminal` treats OSC 133 as an unknown OSC and ignores it, so cmote sniffs
-// the same bytes out of the stream itself.
+// the same bytes out of the stream itself — and that reading of the crate is what vtdn's support
+// table says too, listing Alacritty among the terminals that do not implement OSC 133 (§96).
 //
 // This scanner does ONE job: turn the byte stream into a list of completed marks, each tagged
 // with the byte offset just past its terminator. It deliberately does NOT decide where a prompt
@@ -525,7 +537,9 @@ mod tests {
 	#[test]
 	fn a_bare_done_mark_has_no_exit_code() {
 		// A shell that emits `133;D` with no code (it lost track of $?): the glyph shows "done",
-		// not a wrong number.
+		// not a wrong number. Not a tolerated malformation but a documented spelling — vtdn gives
+		// it its own line, "Command finished (no exit code)", and the grammar makes the field
+		// optional (§96).
 		assert_eq!(marks(b"\x1b]133;D\x07"), vec![Mark::CommandEnd(None)]);
 	}
 
@@ -536,9 +550,9 @@ mod tests {
 	}
 
 	#[test]
-	fn the_two_named_parameters_are_read_as_nothing_but_their_mark() {
-		// Contour names two optional fields on these marks, and cmote answers both with the bare
-		// mark and nothing else (§95).
+	fn the_named_parameters_are_read_as_nothing_but_their_mark() {
+		// Three optional fields are named between the two write-ups, and cmote answers each with
+		// the bare mark and nothing else (§95, §96).
 		//
 		// `click_events=1` on A asks the terminal to "enable mouse click reporting for the prompt
 		// area" — a remote turning on input reporting through a payload whose declared job is saying
@@ -556,6 +570,22 @@ mod tests {
 			marks(b"\x1b]133;C;cmdline_url=ls%20-la\x07"),
 			vec![Mark::OutputStart]
 		);
+		// `cl=m` on A is VS Code's hint that the prompt spans several lines. Ignoring it costs
+		// nothing: a prompt jump anchors on this mark's own line, which is the prompt's first line
+		// with or without the hint (§96).
+		assert_eq!(marks(b"\x1b]133;A;cl=m\x07"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn an_unrecognised_phase_letter_yields_no_mark() {
+		// The four letters are not the whole alphabet in use: vtdn records Konsole tracking the
+		// prompt as "A/N/P", and no source reachable from here gives `N` or `P` a syntax or a
+		// meaning. An unknown letter therefore produces nothing rather than being guessed into the
+		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output,
+		// where no mark just leaves both as they were (§96).
+		assert!(marks(b"\x1b]133;N\x07").is_empty());
+		assert!(marks(b"\x1b]133;P;k=v\x07").is_empty());
+		assert!(marks(b"\x1b]133;L\x07").is_empty());
 	}
 
 	#[test]
