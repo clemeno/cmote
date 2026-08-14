@@ -70,6 +70,19 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Which hand the window should be wearing, if either.
+///
+/// **Compiled on Windows and under `cfg(test)` only (§80).** Off Windows nothing asks the question:
+/// the toolkit has both hands of its own, `grab_interaction` asks it for them, and nothing here
+/// paints anything — so a mac binary would carry an enum and a decision procedure no code consults.
+/// `dead_code` says exactly that, and CI's clippy over the shipped `x86_64-apple-darwin` target runs
+/// with `-D warnings`, so it says it as an error. The right answer is not to silence the lint but to
+/// agree with it: this is Windows' half of the module.
+///
+/// `test` is in the predicate deliberately. The state machine below is plain atomics and no
+/// platform, so it is worth checking wherever the suite runs — CI runs `cargo test` natively on the
+/// mac runner too, and these tests should not quietly stop existing there just because the shipped
+/// mac build has no use for what they cover.
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hand {
 	/// Nothing to hold: leave the cursor to iced.
@@ -256,6 +269,10 @@ pub(crate) fn forget() {
 /// A drag outranks everything: once something is held, the hand stays closed wherever the pointer
 /// has got to — over a close button included, since the gesture is what is being reported. At rest,
 /// a control on the handle outranks the handle: the pointer is over something to click.
+///
+/// Windows and the tests only, for the reason given on `Hand` (§80) — off Windows the only caller
+/// this ever had, the `WM_SETCURSOR` subclass, is not compiled.
+#[cfg(any(windows, test))]
 pub fn hand() -> Hand {
 	if DRAGGING.load(Ordering::Relaxed) {
 		Hand::Closed
@@ -305,6 +322,17 @@ pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 }
 
 // --- the art ---
+//
+// EVERYTHING FROM HERE TO THE WINDOWS SEAM IS WINDOWS' AND THE TESTS' (§80). The drawings exist
+// because Windows has no hand cursors and iced offers no seam to pass a picture through; every
+// other platform draws its own, so off Windows there is nobody to hand a decoded PNG to. The bundled
+// bytes, the hotspot, the `Drawing` they decode into and the resampler that fits them are therefore
+// compiled for `windows` and for `test`, and for nothing else — `dead_code` is right about them on a
+// mac build, and CI's `-D warnings` over `x86_64-apple-darwin` is where that shows up.
+//
+// `test` keeps the drawings under test on EVERY platform, which is the half worth having: the
+// hotspot check and the resampler's alpha weighting are facts about the pictures and the arithmetic,
+// not about the OS, and CI runs `cargo test` on the mac runner as well as the Windows one.
 
 /// The two hands, as they were drawn (§51).
 ///
@@ -327,7 +355,9 @@ pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 /// for `Grab` / `Grabbing` — the four-arrow move cursor Windows collapses those to, which is what
 /// the strip showed before §51 (see `grab_interaction`). The file has to EXIST for `include_bytes!`
 /// to compile, which is why an empty one is the placeholder rather than no file at all.
+#[cfg(any(windows, test))]
 const GRAB_PNG: &[u8] = include_bytes!("../assets/cursor-grab.png");
+#[cfg(any(windows, test))]
 const GRABBING_PNG: &[u8] = include_bytes!("../assets/cursor-grabbing.png");
 
 /// Where the click lands, in the bundled drawing's OWN pixels (§51).
@@ -341,6 +371,7 @@ const GRABBING_PNG: &[u8] = include_bytes!("../assets/cursor-grabbing.png");
 /// it asks for (see `install`), so this is scaled along with the image. A test pins it on an opaque
 /// pixel of both drawings, so redrawing a hand that no longer covers it fails the build rather than
 /// quietly clicking somewhere the user is not pointing.
+#[cfg(any(windows, test))]
 const HOTSPOT: (u32, u32) = (30, 34);
 
 /// How much of the cursor BOX the hand is drawn into, as a fraction of the size Windows asks for
@@ -355,10 +386,17 @@ const HOTSPOT: (u32, u32) = (30, 34);
 /// So the hands are fitted to this fraction of the box instead, which puts them at about the arrow's
 /// own footprint. It is the one number to turn if they still read large or start to read small: at
 /// 100% scaling the box is 32 pixels, so the hands come out at 21.
+///
+/// `windows` alone rather than `any(windows, test)` like the rest of the art (§80), and the
+/// difference is a fact rather than a nicety: no test reads this number, because the thing it feeds
+/// — `scaled`, inside the Win32 seam — cannot run anywhere else. It is the one constant here whose
+/// value is checked by eye on a Windows desktop and by nothing at all.
+#[cfg(windows)]
 const COVERAGE: f32 = 0.65;
 
 /// One decoded cursor: its pixels as 32-bit BGRA, top row first — the order a Windows top-down DIB
 /// wants — and the size they are that of.
+#[cfg(any(windows, test))]
 struct Drawing {
 	bgra: Vec<u8>,
 	width: u32,
@@ -382,6 +420,7 @@ struct Drawing {
 /// two-tone hands (opaque or clear, nothing between) cannot tell apart either way. If a redrawn hand
 /// with soft edges ever comes out with a dark halo round it, that assumption is the thing to check:
 /// the fix is one multiply of each channel by the alpha before the swizzle below.
+#[cfg(any(windows, test))]
 fn decode(bytes: &'static [u8]) -> Option<Drawing> {
 	// `Cursor` only because the decoder wants to seek; the bytes are already in the binary.
 	let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
@@ -422,6 +461,7 @@ fn decode(bytes: &'static [u8]) -> Option<Drawing> {
 /// in a PNG still carries a colour, usually black, and averaging it in unweighted would ring every
 /// soft edge with a dark halo. Weighting means fully transparent neighbours contribute nothing,
 /// which is what "resize this shape" has to mean.
+#[cfg(any(windows, test))]
 fn resampled(drawing: &Drawing, width: u32, height: u32) -> Drawing {
 	let mut bgra = Vec::with_capacity((width * height * 4) as usize);
 	for y in 0..height {

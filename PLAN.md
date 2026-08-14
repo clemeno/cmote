@@ -8689,3 +8689,87 @@ the code it describes. The instruction named one row; the mechanism that satisfi
   ArrayVec, and the std build uses a plain `Vec`; whether a hostile stream can make the parser hold an
   unbounded OSC payload is a question about every OSC cmote sees, not about this row, and it is left
   open here rather than answered badly in passing.
+
+## 80. The half of a module that belongs to one platform (v4.0.0)
+
+CI's macOS job has been failing since f3d7ea6 — the commit that landed §51's hand cursors on 10 August
+— and the Windows job has been green for every one of those four days. Both facts have one cause, and
+it is not the cursors.
+
+### What the lint was saying
+
+`cursor.rs` is two halves. One is a state machine over five atomics — which handle has the pointer,
+which control on it is blocking, whether something is being dragged — and `app.rs` drives it on every
+platform. The other is a Win32 seam: decode two bundled PNGs, fit them to `SM_CXCURSOR`, build an
+`HCURSOR`, subclass the window and answer `WM_SETCURSOR` before winit does. That seam exists because
+Windows ships no hand cursors and iced exposes no seam to pass a picture through (§51), so it is behind
+`#[cfg(windows)]` and every other platform draws its own hands.
+
+Everything the seam CONSUMES was written unconditionally. Off Windows the seam is not compiled, so
+`Hand`, `hand()`, both `include_bytes!` drawings, `HOTSPOT`, `COVERAGE`, `Drawing`, `decode` and
+`resampled` have no reader at all — and `dead_code` said so as an error, because CI runs clippy over the
+shipped `x86_64-apple-darwin` target with `-D warnings`.
+
+The lint was RIGHT, and that is what decides the fix. `allow(dead_code)` was the fast answer and would
+have asserted something false: that these items are used and the compiler cannot see it. They are not
+used. They are Windows'.
+
+### The fix, and the one item that differs
+
+Seven items become `#[cfg(any(windows, test))]`, and one — `COVERAGE` — becomes `#[cfg(windows)]`.
+
+`test` is in the predicate deliberately. The hotspot check, "both hands are one square size", and the
+resampler's alpha weighting are facts about two pictures and some arithmetic rather than about an OS,
+and CI runs `cargo test` natively on the mac runner as well as the Windows one. Gating them to `windows`
+alone would have quietly halved where they run, to buy nothing.
+
+`COVERAGE` is the exception because nothing tests it: it feeds `scaled` inside the seam, and it is judged
+by eye on a Windows desktop. Its narrower cfg is therefore a true statement about test coverage rather
+than an inconsistency — and the control run below is what turned that up, because the mac TEST target
+fails on `COVERAGE` alone, which the CI log had not got as far as printing.
+
+### Verified without a mac
+
+The gate the README asks a developer to run is entirely on Windows, where `cfg(windows)` is true and none
+of this is dead. The local gate is therefore structurally incapable of seeing this class of fault, and a
+fix "verified" by running it would have been verified by nothing.
+
+So the predicates in `cursor.rs` were INVERTED on the Windows host — `windows` → `unix`, which is false
+there — putting that one file in exactly the configuration a mac build puts it in while the rest of the
+crate stayed as it was. Against HEAD it reproduced all nine errors, the eight in the CI log plus
+`COVERAGE` on the test target; against the fix, `cargo clippy --all-targets -- -D warnings` was clean for
+both the bin and the test target. The file was restored from a copy either way and no inverted line was
+committed.
+
+The same trick does NOT work crate-wide, which is worth writing down because it looks as though it should.
+Inverting all five files that carry a `windows` cfg produced three failures that are artifacts of the
+inversion rather than mac faults: `paths.rs` splits its non-Windows side again by `target_os = "macos"`,
+and `ssh/upload.rs` and `ssh/agent.rs` have genuine `cfg(unix)` arms — none of which a Windows host can
+turn on, so those files end up in a configuration no real platform is ever in. `cursor.rs` is the only one
+split plainly into `windows` and `not(windows)`, which is exactly why the file-local inversion is faithful.
+
+### What it cost
+
+- `src/cursor.rs` — eight cfg attributes and the three paragraphs saying why each is where it is. No
+  behaviour changes on any platform: on Windows every predicate is true and the file compiles as before.
+- Tests 1143, unchanged. Nothing was added, because there is nothing here a test can hold — the fault is
+  a CONFIGURATION the test runner cannot be in.
+
+### Not done
+
+- **The local gate still cannot see a non-Windows fault.** The inversion above is a one-off somebody has
+  to think of, not a check anybody runs. The real answer — `cargo check --target x86_64-apple-darwin` on
+  the development machine — needs a mac C toolchain for `ring`'s build script and so cannot run there at
+  all. CI remains the only honest check for the second target.
+- **Nothing pins the gating.** A Windows-only helper added later without a cfg fails on CI's mac job and
+  nowhere else, which is precisely the loop that just cost four days.
+- **Clippy's own lints on the mac target are still unseen.** `dead_code` is a rustc lint and it aborted
+  the build before clippy's late passes ran, so the mac job may yet have something to say once it gets
+  past this. That is what the next CI run is for; it is not something this box can answer.
+- **CI was red for four days and nothing announced it.** No notification is wired to the workflow, and
+  this was found by a person reading a run. A hole in the process rather than in the code, and not closed
+  here.
+- **The state machine still runs off Windows and does nothing.** Every hover, and every `frame_begin` /
+  `drawn` / `frame_end`, writes atomics that nothing on a mac reads. It costs a handful of relaxed stores
+  a frame and it keeps `cfg` out of `app.rs`'s message handling, which is the trade taken on purpose
+  rather than by oversight.
