@@ -8486,3 +8486,112 @@ back is something a program can say on purpose.
 - **`vertical-text` is refused for want of a target**, not for danger: iced has no such interaction. It
   is the one refused name that is a toolkit limit rather than a decision, and it is in the same list as
   the decisions, which is the kind of thing §73 exists to catch. Left there on purpose, and here.
+
+## 78. The row that was in the right column for a borrowed reason (v4.0.0)
+
+The question was whether `kitty 21` — colour by semantic name — could be supported. The answer is no,
+and the answer was already no; what §78 found is that the row had never argued for it. Three sections in
+a row had moved a mark (§75 ❌→🤷, §76 🤷→✅/🛑, §77 🤷→✅/🛑), so the useful outcome here is the other
+one: **the mark was right, the sentence under it was on loan, and only writing the reason out in full
+finds that.**
+
+### What the sequence actually does
+
+`OSC 21 ; key=value ; key=? ; key= ST` — three jobs in one sequence, any number of pairs at a time,
+addressed by NAME rather than by number: `foreground`, `background`, `cursor`, `cursor_text_color`,
+`selection_foreground`, `selection_background`, `visual_bell_color`, `transparent_background_color1`–`8`,
+`color0`–`color255`. A pair with a colour SETS, a pair with `?` QUERIES, a pair with nothing RESETS.
+
+### The argument that was on loan
+
+The row read "same fixed scheme as 4 / 10 / 11 / 12 — the theme is cmote's, not the remote's". That is
+exact for the set and reset pairs, and it is the same refusal `4 (set)` and `110`–`112` already carry.
+
+But rows `4` and `10 / 11 / 12` are each **split**: query ✅, set 🛑. cmote answers colour queries
+accurately on purpose — `report_color` resolves against `palette`, the same table `ui/grid.rs` paints
+from — and refuses only the sets. The `kitty 21` row had copied the SET half's reason and stretched it
+over a sequence that carries both halves, so the query half had no reason written anywhere.
+
+That is §76's shape, one family over: there a refusal charged the whole sequence for its most expensive
+PARAMETER; here a refusal charged the whole sequence for its most expensive HALF. The difference from
+§76 and §77 is where it landed. Those two found an argument that was wrong and a mark that moved with
+it; this one found an argument that was missing and a mark that survives being argued for properly.
+
+### The query half's own reasons
+
+Four, and they are about what asks rather than about what it would cost to answer:
+
+- **It is a dialect query, not a generic one.** The five in `term/query.rs` — XTVERSION, DECRQSS,
+  XTGETTCAP, DA3, XTSMGRAPHICS — are sent blind by programs that have concluded nothing about the
+  terminal, which is exactly why sniffing them out of the stream pays. OSC 21 is sent AFTER a caller has
+  concluded kitty, and nothing in this stack ever says kitty: cmote asks the remote for
+  `TERM=xterm-256color`, answers XTVERSION with `cmote(<version>)`, and answers XTGETTCAP `TN` with
+  `xterm-256color`.
+- **For the keys cmote could answer it carries nothing new.** `foreground`, `background`, `cursor` and
+  `color0`–`color255` all resolve through `report_color`, which is what `OSC 10` / `11` / `12` / `4`
+  answer from today. It would be a second READER of one source, not a second WRITER of one field as
+  `iTerm 1337 CursorShape` would have been (§71) — so unlike that row the two spellings could never
+  disagree. They could never differ either, which is the whole of what a second spelling would buy.
+- **The keys that would justify it have no single value here.** Selection changes only the BACKGROUND
+  (`SELECTION_BG`, `ui/grid.rs`), so `selection_foreground` is whatever the cell already had; the cursor
+  is drawn by INVERTING the cell, so `cursor_text_color` is per-cell too; `visual_bell_color`, the eight
+  transparent-background colours and the mark colours name features cmote does not have. Answering any
+  of them means inventing a colour, and `palette.rs` opens by saying why a terminal must not: an answer
+  that disagrees with what the grid paints breaks the colour-scheme detection the query exists for.
+- **It would be the first reply whose length the requester sets.** n `key=?` pairs produce n values in
+  one reply. Every reply cmote writes today is one bounded answer to one question. Cappable — `query.rs`
+  already holds `MAX_PARAMS` and `MAX_DATA` for exactly this — but a cost paid for a question nothing
+  here is asking.
+
+A fifth, weaker one, recorded because it is real: the reply syntax would have to be written from memory
+against a spec not open here, and this document pins replies with tests. A reply in the wrong shape is
+worse for a sender than silence, which is the same reasoning §71 used to leave `ReportCellSize`
+unanswered.
+
+### What would flip it
+
+Written down rather than left for a later reader to re-find, because the counters are genuine:
+
+- `selection_background` **is** answerable. `SELECTION_BG` is a constant in `ui/grid.rs`, and
+  `palette.rs`'s own charter — one source of truth for the renderer AND the query answerer — says that
+  is where it belongs. If it moves there for any other reason, one of the three interesting keys becomes
+  free.
+- **kitty's keyboard protocol does work here** (§25), so "nothing kitty lands in cmote" would overstate
+  the first reason. A program that found one kitty protocol answering has some grounds to try another.
+- `query.rs`'s own argument applies unchanged: a program that asks and hears nothing stalls until its
+  timeout. That is the case FOR answering, and it is the reason this is a judgement about what asks
+  rather than a wall.
+
+So: if cmote ever advertises kitty anywhere, or if `palette.rs` grows the selection colours, this row
+should be re-read. The implementable slice is small — a scanner on the shared `term::osc::Framer` and a
+`kitty21_reply` formatter beside `query.rs`'s five — which is precisely why the reason had to be about
+what asks and not about what it costs.
+
+### What it cost
+
+- No code. Tests unchanged at 1135, matrix unchanged at 165 rows / ✅ 104 / ❌ 25 / 🛑 28 / 🤷 8.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — the row rewritten to carry both halves and their two reasons, a §6
+  subsection for the query half beside the fixed-scheme policy it is NOT an instance of, the §7 sentence
+  that had stated the borrowed reason corrected in place, and a §78 paragraph in the header narrative.
+- The mark **verified rather than assumed**, which is §77's habit applied to a row that did not move:
+  `vte` 0.15.0's OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and
+  nothing else. No arm for 21, no cmote scanner, so 🤷 is the honest mark and not a shrug.
+
+### Not done
+
+- **The row is not split**, though `4` and `10 / 11 / 12` are. A row splits when the two halves ANSWER
+  differently; both halves here answer 🤷, for different reasons, and two identical marks side by side
+  would add a row to the matrix without adding an answer. Worth revisiting only if the query half is
+  ever built, at which point the split arrives with the mark change that justifies it.
+- **Nothing performs this refusal**, and nothing was written to. A scanner that saw OSC 21 only to drop
+  it would be code with no behaviour, and the OSC 9 precedent does not transfer: `9;<text>` is declined
+  by scanners that were already looking at `9;4;` and `9;9;`, so that refusal was free. Nothing in cmote
+  looks at OSC 21 by accident.
+- **`XTPUSHCOLORS` / `XTPOPCOLORS` (`CSI # p` / `# q`) were not re-read** in the same pass, though that
+  row is downstream of the same fixed scheme and carries the same 🤷 for the same upstream reason. It
+  has no query half, so the specific fault found here cannot apply — but that is an argument made from
+  this chair, not one checked against the sequence.
+- **The reply-syntax uncertainty is a fact about this session, not about the sequence.** It is recorded
+  as a reason above, which slightly overstates its weight: it argues against implementing TODAY without
+  the spec, not against implementing. Left visible rather than dropped, because the alternative is a
+  reason list that reads stronger than it is — §73's complaint in a smaller size.

@@ -139,6 +139,34 @@ remote's to choose, and the shapes that speak with cmote's own voice — `grab` 
 which are what the splitters and drag handles say, and `wait` / `progress` / `not-allowed`, which assert
 that cmote itself is busy or refusing — are not. §75, §76 and §77 in a row: the 🤷 column is where an
 argument goes to stop being re-read.
+
+**§78 asked a row in the neighbouring family and got the answer the previous three did not: the argument
+was wrong and the mark was still right.** `kitty 21` (colour by semantic name) carries set, reset *and*
+query in one sequence — `OSC 21 ; key=value ; key=? ; key= ST` — and its entry read "same fixed scheme as
+4 / 10 / 11 / 12 — the theme is cmote's, not the remote's". But rows `4` and `10 / 11 / 12` are each
+**split**, query ✅ and set 🛑, and this row had copied only the *set* half's reason and stretched it over
+a sequence that carries both. §76's shape, one family over: a refusal charged for its most expensive
+parameter. So the query half had never had a reason written, and writing one is the whole of §78. It is
+four things. OSC 21 is a **dialect** query rather than a generic one — the five in `term/query.rs` are
+sent blind by anything, while this one is sent after the caller has already concluded kitty, and nothing
+here says kitty (`TERM=xterm-256color`, XTVERSION answers `cmote(<ver>)`, XTGETTCAP `TN` answers
+`xterm-256color`). For the keys cmote *could* answer it is a second **reader** of `report_color`, not a
+second writer as `iTerm 1337 CursorShape` would have been — so the two spellings could never disagree,
+and equally could never differ, which is the point. The keys that would justify it are the ones with no
+single value here: selection changes only the *background*, so `selection_foreground` is whatever the
+cell already had, and the cursor is drawn by **inverting** the cell, so `cursor_text_color` is per-cell
+too — answering either means inventing a colour, which is precisely what `palette.rs` exists to stop.
+And it would be cmote's first reply whose **length the requester sets**, n `key=?` pairs to n values.
+None of that is an impossibility, and the entry now says so: `SELECTION_BG` is a real constant
+(`ui/grid.rs`) that `palette.rs`'s own charter says belongs there, kitty's *keyboard* protocol does work
+here (§25) so "nothing kitty lands" would overstate it, and `query.rs`'s own argument — an unanswered
+query stalls its sender — applies to anything that does send it. A judgement, with what would flip it
+named. The mark was then **verified rather than assumed**, which is §77's habit applied to a row that did
+not move: `vte` 0.15.0's OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112`
+and nothing else, so 🤷 is right. No split either — a row splits when the two halves *answer* differently,
+and here they answer the same for different reasons. **§73 asked which column a refusal belongs in; §78
+is the case where the column was right and the argument was borrowed**, and only writing the reason out
+in full finds that.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -670,6 +698,44 @@ honest answer, and the useful one for anything probing whether the set took. A p
 merely *assumes* success will draw text for a background it has not got. Honouring sets is the only fix,
 and that is exactly what this policy refuses.
 
+**kitty's `OSC 21` is this policy in one sequence — and its query half needed a reason of its own
+(§78).** `OSC 21 ; key=value ; key=? ; key= ST` does all three jobs at once, any number of `key=value`
+pairs per sequence, over semantic names rather than numbers: `foreground`, `background`, `cursor`,
+`cursor_text_color`, `selection_foreground`, `selection_background`, `visual_bell_color`,
+`transparent_background_color1`–`8`, `color0`–`color255`. The **set** and **reset** pairs are the fixed
+scheme above, verbatim — the same refusal `4 (set)` and `110` / `111` / `112` carry, in a namespace that
+happens to be spelled in words. The **query** pairs are not, and until §78 this section said they were:
+it borrowed the set half's sentence and let it cover the whole sequence, which is exactly the mistake
+§76 caught one family over.
+
+The query half is refused on its own four grounds. **It is a dialect query, not a generic one.** The
+five queries `term/query.rs` sniffs (XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS) are sent blind by
+programs that have concluded nothing about the terminal; OSC 21 is sent *after* a caller has concluded
+kitty, and nothing in this stack ever says kitty — cmote asks the remote for `TERM=xterm-256color`,
+answers XTVERSION with `cmote(<version>)` and XTGETTCAP `TN` with `xterm-256color`. **For the keys cmote
+could answer it carries no new information**: `foreground`, `background`, `cursor` and `color0`–`color255`
+all resolve through `report_color`, which is what `OSC 10` / `11` / `12` / `4` already answer from. That
+makes it a second *reader* of one source rather than a second *writer* of one field, so unlike the
+fourth cursor-shape spelling (§71) the two could never disagree — but they could never differ either,
+which is the whole of what a second spelling would buy. **The keys that would justify it have no single
+value here.** Selection changes only the background (`SELECTION_BG`, `ui/grid.rs`), so
+`selection_foreground` is whatever the cell already had; the cursor is drawn by inverting the cell, so
+`cursor_text_color` is per-cell as well; `visual_bell_color`, the eight transparent-background colours
+and the mark colours name features cmote does not have. Answering any of them means **inventing** a
+colour, and `palette.rs` opens by saying why a terminal must not: an answer that disagrees with what the
+grid paints breaks the colour-scheme detection the query exists for. **And it would be cmote's first
+reply whose length the requester sets** — n `key=?` pairs produce n values in one reply, where every
+reply cmote writes today is one bounded answer to one question.
+
+What this is *not* is an impossibility, and the row says so rather than leaving a later reader to
+rediscover it. `selection_background` is a genuine constant that `palette.rs`'s own charter — one source
+of truth for the renderer *and* the query answerer — says belongs in `palette.rs`. kitty's **keyboard**
+protocol does work here (§25), so a program that found one kitty protocol answering has some reason to
+try another. And `query.rs`'s own argument applies unchanged to anything that does send OSC 21: a
+program that asks and hears nothing stalls until its timeout. So this is a judgement about what asks,
+not a wall — and it would flip if cmote ever advertised kitty anywhere, or if `palette.rs` grew the
+selection colours for some other reason.
+
 **Remote-triggered desktop notifications** — `OSC 9;<text>`, `OSC 777` (urxvt) and `kitty 99` (rich
 notifications) are all the same feature in three spellings, and all three are **refused on purpose**
 (§54). A notification *leaves the window*: it lands on the user's desktop, outlives the tab, and on
@@ -985,7 +1051,10 @@ button mirroring the active tab. The same pass wrote down the stance the notific
 missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spellings and are **refused**
 (§6), because a notification escapes the tab and lands on the desktop; `kitty 21` is refused for the
 reason 4 / 10 / 11 / 12 already were, a fixed scheme. Those rows now read as choices rather than as
-work not yet done, which is the difference between a gap and a policy.
+work not yet done, which is the difference between a gap and a policy. **§78 later found that the
+`kitty 21` half of that sentence was doing two rows' work with one row's argument** — 4 / 10 / 11 / 12
+are *split*, query answered and set refused, and OSC 21 carries both halves in one sequence — so the
+query half got a reason of its own. Same mark, different sentence; see §6 and PLAN §78.
 
 **`OSC 22` was then decided too, which empties the OSC column: every row is now shipped or refused with
 its reason written down, and none is merely outstanding.** The mouse-pointer shape looked at first like
@@ -1101,7 +1170,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 104 | Reset palette entry | 🛑 | no effect — the reset side of the fixed scheme (§6): the engine restores its own table and `ui/grid.rs` never reads it |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | no effect — same fixed scheme (§6), named there beside the sets it undoes |
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
-| Kitty 21 | Colour by semantic name | 🤷 | same fixed scheme as 4 / 10 / 11 / 12 — the theme is cmote's, not the remote's (§6) — but nothing performs the refusal: `vte`'s OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so OSC 21 reaches no handler, and cmote has no scanner for it |
+| Kitty 21 | Colour by semantic name | 🤷 | **one sequence doing three jobs** — `OSC 21 ; key=value ; key=? ; key= ST` sets, queries and resets, any number of pairs at a time, over names (`foreground`, `background`, `cursor`, `cursor_text_color`, `selection_foreground`, `selection_background`, `visual_bell_color`, `transparent_background_color1`–`8`, `color0`–`color255`) instead of numbers. The **set** and **reset** pairs are the fixed scheme (§6) verbatim, the refusal `4 (set)` and `110`–`112` already carry. The **query** pairs are a different question, and until §78 this row did not ask it: it borrowed the set half's sentence, while rows `4` and `10 / 11 / 12` are each SPLIT query ✅ / set 🛑 — §76's mistake one family over. The query half's own four reasons: it is a **dialect** query, sent only after a caller has concluded kitty, and nothing here says kitty (`TERM=xterm-256color`, XTVERSION `cmote(<version>)`, XTGETTCAP `TN` `xterm-256color`) — unlike the five in `term/query.rs`, which anything sends blind; for the keys cmote could answer it is a second **reader** of `report_color`, not a second writer of one field as the fourth cursor-shape spelling would have been (§71), so the two could never disagree and equally never differ; the keys that would justify it have **no single value here** — selection changes only the background (`SELECTION_BG`, `ui/grid.rs`) so `selection_foreground` is whatever the cell had, the cursor is drawn by inverting the cell so `cursor_text_color` is per-cell, and `visual_bell_color` / the transparent-background eight / the mark colours name features cmote lacks, so answering means **inventing** a colour, which is the one thing `palette.rs` opens by forbidding; and it would be cmote's first reply whose **length the requester sets** (n `key=?` pairs → n values), where every reply today is one bounded answer. A judgement, not a wall, and the counters are recorded so a later reader need not re-find them: `selection_background` IS a real constant that `palette.rs`'s charter says belongs in `palette.rs`, kitty's **keyboard** protocol does work here (§25), and `query.rs`'s own argument — an unanswered query stalls its sender — applies to anything that does send this one. It would flip if cmote ever advertised kitty, or if `palette.rs` grew the selection colours for another reason. **Nothing performs the refusal**, and §78 checked that rather than repeating it: `vte` 0.15.0's OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so OSC 21 reaches no handler, and cmote has no scanner for it. Not split into two rows, because a row splits when the halves *answer* differently and both of these answer 🤷 |
 | Kitty 99 | Rich notifications | 🤷 | a notification, in a third spelling (§6, §54) — and, unlike OSC 9, one nothing here declines: no `vte` arm, no cmote scanner |
 | iTerm 1337 File | Inline images | 🛑 | refused **twice** by `term/iterm.rs`, and on consent rather than cost (§6, §70): the allow-list never matches `File`, and `MAX_PAYLOAD` = 4096 sits deliberately below what a base64 image needs, so the payload is abandoned mid-flight rather than buffered. One test pins both halves — `refuses_the_inline_image_key_without_even_buffering_it`, which feeds `MAX_PAYLOAD + 1` bytes. Read ❌ until §70 on the grounds that inline images "need an image-format decoder"; §53 put five decoders in the tree as a direct dependency, so that cost expired and the mark had outlived its argument |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
