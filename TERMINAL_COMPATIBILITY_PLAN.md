@@ -485,6 +485,22 @@ surface: a **one-character find-bar hit** (§35) and a **command whose output is
 were both being revealed and then not highlighted, because a range one cell wide was indistinguishable
 from a click that had not dragged.
 
+**§85 gives the pen a stack** — XTPUSHSGR / XTPOPSGR (`CSI Pm # {` and `CSI # }`, aliased `CSI # p` and
+`CSI # q`), which `vte` never sees: `csi_dispatch` matches no `#` intermediate at all. The row was in
+this document as the *colour* stack's spelling until §84 read it back against ctlseqs, so it had been
+declined with an argument about a palette nothing reads — while the attributes it actually stacks are
+bold, italic, underline, reverse and the two colours, every one of which the renderer draws. Ignoring it
+does not omit a feature, it leaves the **wrong pen**: a program that pushes, paints itself red and pops
+goes on painting red.
+
+Built on the two routes this layer already had. The pen is read where the push sat, through the same
+template `Cell` DECRQSS reports (§33), and a pop feeds the engine that pen spelled in SGR — §72's answer
+for DECSTR and §74's for DECST8C — so the engine stays the only writer of its own template (§71, §73).
+Two details are cmote's own and are stated on the row: the restore string uses `4:3` / `4:4` / `4:5` and
+SGR 58 so an underline substyle and its colour survive a round trip the DECRQSS reply could not describe,
+and the borrowed DECSCA protection bit (§56) is read across the restore and put back, a stack of video
+attributes having no business clearing a cell-protection setting.
+
 ---
 
 ## 5. The new engine's own ceiling (`[engine-limit]`)
@@ -1314,7 +1330,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pv $ y` in the ANSI spelling as well as the private one (§60) |
 | # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
-| # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ❌ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering (with `30` / `31` for the two colours, which have no SGR code of their own) and no parameter saves all of them, ten levels deep. `# p` and `# q` are xterm's aliases for the braces. Unlike the palette stack this one is over attributes cmote **does** draw (§84) |
+| # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel |
 
 ### ESC — single sequences
 
@@ -1707,7 +1723,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   rather than in cmote (§71). **Both `#` stacks** have no arm at all: the only `b'#'` in the file is
   `esc_dispatch`'s `(b'8', [b'#'])`, DECALN (`:1814`), so `csi_dispatch` never sees a `#` intermediate
   and the palette stack (`CSI # P` / `# Q`) and the video-attribute stack (`CSI # {` / `# }`, aliased
-  `# p` / `# q`) fall through whole — two different sequences the matrix had as one until §84.
+  `# p` / `# q`) fall through whole — two different sequences the matrix had as one until §84. The
+  second of them is cmote's own since §85 (`term/sgrstack.rs`), scanned out of the stream before the
+  engine ignores it; the first is still nobody's.
   **Kitty graphics** arrives as an APC string, and
   `State::SosPmApcString => self.anywhere(performer, byte)` (`vte-0.15.0/src/lib.rs:182`) drops every
   byte of it without calling a `Perform` method (§41, §70). **ENQ** and the two DECSET modes are in the
@@ -1815,6 +1833,21 @@ Quoted where a row's wording now rests on it.
   advanced exactly to the sequence and pushing the bytes into the same `replies` buffer the engine writes
   into — the path `rect.rs`'s checksum already took, and the reason two questions in one write come back
   in the order they were asked.
+- **`term/sgrstack.rs`** — XTPUSHSGR / XTPOPSGR (§85), the same chunk-safe CSI machine again, matching
+  the `#` intermediate with no private marker so DECSTR (`! p`), DECRQM (`$ p`) and DECSCUSR (`SP q`) are
+  each one intermediate away and left alone. `Mask` turns xterm's eleven parameter values into cmote's
+  own bitset once; an unrecognised value is ignored and the rest of the list applies (§59's DECCARA
+  rule), an unreadable one drops the sequence, and a pop carrying any parameter at all is not ours.
+  The state that outlives a chunk is in `term/mod.rs`: `saved_pens`, ten deep (`sgrstack::DEPTH`), and
+  `dropped_pushes`, which is the one deliberate departure from xterm — an overflowing push is dropped
+  there too, and counting it lets the matching pop be dropped with it so the levels below stay paired.
+  `apply_sgr_stack` reads `cursor.template` on a push and, on a pop, feeds `merged_pen`'s SGR string
+  back through `parser.advance`: the engine remains the only writer of its own template (§71, §73), and
+  fed bytes bypass every scanner so this cannot feed itself. `pen_restore` is deliberately **not**
+  `pen_sgr` — the DECRQSS reply reports every underline substyle as a plain `4`, which is honest as an
+  answer and lossy as a restore, so this one emits `4:3` / `4:4` / `4:5` and SGR 58's underline colour.
+  `protect::is_protected` is read across the restore and `set_pen_protection` puts it back, the opening
+  `CSI 0 m` otherwise assigning the borrowed DECSCA bit (§56) along with the flag word it lives in.
 - **`term/sixel.rs`** — the payload decoder (§41), pure and engine-free. `walk` is the single place the
   command grammar is written (`"` raster, `#` select/define, `!` repeat, `$` CR, `-` next band, and the
   `?`..`~` sixel bytes); `canvas_size` measures through it — preferring the raster attributes as the

@@ -67,6 +67,7 @@ mod rect; // reads the VT420 rectangular area operations the engine drops — DE
 pub mod scp; // reads SCP, the direction a line's characters are laid down in (§76)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
+mod sgrstack; // reads XTPUSHSGR / XTPOPSGR, the video-attribute stack the engine never sees (§85)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
 mod tabs; // reads DECST8C, the tab-stop reset the engine parses and drops (§74)
 
@@ -280,6 +281,9 @@ impl Terminal {
 			rectangles: rect::Rectangles::default(),
 			tabs: tabs::Tabs::default(),
 			dsr: dsr::Dsr::default(),
+			sgr_stack: sgrstack::SgrStack::default(),
+			saved_pens: Vec::new(),
+			dropped_pushes: 0,
 			scp: scp::Scp::default(),
 			paths: scp::Paths::default(),
 			graphics: graphics::Images::default(),
@@ -361,6 +365,10 @@ impl Terminal {
 		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
 		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
 		let paths = self.scp.feed(bytes);
+		// XTPUSHSGR / XTPOPSGR, the video-attribute stack (§85). Split-fed for the reason DECXCPR is:
+		// a push must read the pen as it stood where the push was written, and a pop must restore it
+		// there — a chunk that pushes, paints itself red and pops would otherwise save the red.
+		let sgr_stack = self.sgr_stack.feed(bytes);
 		let scanned = Scanned {
 			marks,
 			images,
@@ -371,6 +379,7 @@ impl Terminal {
 			tab_resets,
 			cursor_requests,
 			paths,
+			sgr_stack,
 		};
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
@@ -414,6 +423,7 @@ impl Terminal {
 					Split::TabStops => self.set_default_tabs(),
 					Split::CursorReport => self.report_cursor_position(),
 					Split::Path(request) => self.select_character_path(request),
+					Split::SgrStack(request) => self.apply_sgr_stack(request),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -736,6 +746,51 @@ impl Terminal {
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(&reply);
+	}
+
+	/// Carry out one push or pop of the video-attribute stack (§85), with the engine advanced to the
+	/// sequence that carried it.
+	///
+	/// A push READS the engine's template cell — the same field DECRQSS reports (§33) — and keeps a
+	/// copy. A pop writes nothing: it feeds the engine the SGR that spells the pen being restored, so
+	/// the engine stays the only writer of its own template (§71, §73). That is §72's route for DECSTR
+	/// and §74's for DECST8C, and fed bytes go straight to the parser, so cmote's own scanners never see
+	/// them and this cannot feed itself.
+	///
+	/// The protection bit is read across the restore and put back. cmote borrows a spare bit of the
+	/// engine's flag word for DECSCA (§56), the `CSI 0 m` that opens a restore assigns that whole word,
+	/// and a stack of VIDEO attributes has no business clearing a cell-protection setting — the same
+	/// care `protect::Request::Reassert` takes after an ordinary SGR, on the one path that does not go
+	/// through the scanner.
+	fn apply_sgr_stack(&mut self, request: sgrstack::Request) {
+		match request {
+			sgrstack::Request::Push(mask) => {
+				// A remote may not make cmote hold more than xterm's ten. The drop is counted so the
+				// pop that matches it is dropped too, keeping the levels below correctly paired.
+				if self.saved_pens.len() >= sgrstack::DEPTH {
+					self.dropped_pushes += 1;
+				} else {
+					let pen = self.term.grid().cursor.template.clone();
+					self.saved_pens.push((mask, pen));
+				}
+			}
+			sgrstack::Request::Pop => {
+				if self.dropped_pushes > 0 {
+					self.dropped_pushes -= 1;
+					return;
+				}
+				// A pop with nothing pushed is not an error and does nothing, which is what a terminal
+				// with an empty stack has to do.
+				let Some((mask, saved)) = self.saved_pens.pop() else {
+					return;
+				};
+				let protected =
+					protect::is_protected(self.term.grid().cursor.template.flags.bits());
+				let sgr = merged_pen(&self.term.grid().cursor.template, &saved, mask);
+				self.parser.advance(&mut self.term, sgr.as_bytes());
+				self.set_pen_protection(protected);
+			}
+		}
 	}
 
 	/// Carry out one character-path request (§76).
@@ -1486,6 +1541,19 @@ pub struct Terminal {
 	/// report where the cursor ENDED UP rather than where the question was asked. The other nine values
 	/// of `CSI ? Ps n` are refused by the same scanner, on an allow-list one value wide.
 	dsr: dsr::Dsr,
+	/// Finds XTPUSHSGR / XTPOPSGR, which `vte` has no arm for either — `csi_dispatch` never matches a
+	/// `#` intermediate at all (§84, §85). Fed by the split advance for DECXCPR's reason: the pen a push
+	/// saves is the pen where the push was WRITTEN, not where the chunk ended.
+	sgr_stack: sgrstack::SgrStack,
+	/// The pens that stack has saved, innermost last, each with the mask of what its push named. Ten
+	/// deep, as xterm's is (`sgrstack::DEPTH`), which is the whole of what a remote can make cmote hold
+	/// here. Cleared by nothing: a stack outlives a chunk by definition, and a program that never pops
+	/// simply leaves it standing.
+	saved_pens: Vec<(sgrstack::Mask, Cell)>,
+	/// How many pushes were dropped for overflow and are therefore owed a dropped POP. Without this the
+	/// pop that matches a dropped push would restore the level ABOVE it and every pop after that would
+	/// be one out — see `term/sgrstack.rs` for why xterm's own behaviour was not copied here.
+	dropped_pushes: usize,
 	/// Finds SCP, the character path, which no part of the engine has an arm for (§76). Reported by
 	/// the split feed like the prompt marks, because the sequence acts on "the line the cursor is on"
 	/// and that is only knowable at the point in the stream it sits.
@@ -1542,6 +1610,10 @@ enum Split {
 	CursorReport,
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::Request),
+	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
+	/// the only split whose effect is carried out by FEEDING the engine — a pop is spelled back as the
+	/// SGR that restores the pen, so the engine stays the only writer of its own template (§71, §73).
+	SgrStack(sgrstack::Request),
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -1562,6 +1634,7 @@ struct Scanned {
 	tab_resets: Vec<usize>,
 	cursor_requests: Vec<usize>,
 	paths: Vec<(usize, scp::Request)>,
+	sgr_stack: Vec<(usize, sgrstack::Request)>,
 }
 
 impl Scanned {
@@ -1577,6 +1650,7 @@ impl Scanned {
 			&& self.tab_resets.is_empty()
 			&& self.cursor_requests.is_empty()
 			&& self.paths.is_empty()
+			&& self.sgr_stack.is_empty()
 	}
 }
 
@@ -1595,6 +1669,7 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 		tab_resets,
 		cursor_requests,
 		paths,
+		sgr_stack,
 	} = scanned;
 	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
 		marks.len()
@@ -1605,7 +1680,8 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 			+ rectangles.len()
 			+ tab_resets.len()
 			+ cursor_requests.len()
-			+ paths.len(),
+			+ paths.len()
+			+ sgr_stack.len(),
 	);
 	merged.extend(
 		marks
@@ -1648,6 +1724,11 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 		paths
 			.into_iter()
 			.map(|(offset, request)| (offset, Split::Path(request))),
+	);
+	merged.extend(
+		sgr_stack
+			.into_iter()
+			.map(|(offset, request)| (offset, Split::SgrStack(request))),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -1765,6 +1846,138 @@ fn report_color(index: usize) -> (u8, u8, u8) {
 		i if i == NamedColor::Background as usize => palette::DEFAULT_BG,
 		_ => palette::DEFAULT_FG,
 	}
+}
+
+/// The SGR that restores a pen exactly — every attribute the engine can hold, spelled in sequences it
+/// parses (§85).
+///
+/// Deliberately **not** `pen_sgr` above, though the two look alike. That one builds a DECRQSS *reply*
+/// and reports a curly, dotted or dashed underline as a plain `4`, which is the truthful answer to
+/// "am I underlined?" without claiming a substyle that is an extension. Here the string is fed back
+/// into the engine, so a coarse answer is a LOSS: a pop would turn the program's curly underline
+/// straight. So the substyles get their own spellings (`4:3` / `4:4` / `4:5`), and the underline
+/// colour — which SGR 58 carries and DECRQSS never reports — comes back too.
+///
+/// It opens with `0`, a full reset, and then names everything set. That is what makes a restore exact
+/// rather than additive: an attribute the saved pen did not have is cleared by the reset instead of
+/// needing its own "off" code, which is where xterm's own `22` (neither bold nor faint) would take two
+/// attributes out at once.
+fn pen_restore(flags: Flags, fg: Color, bg: Color, underline: Option<Color>) -> String {
+	let mut codes = vec![String::from("0")];
+	if flags.contains(Flags::BOLD) {
+		codes.push("1".to_string());
+	}
+	if flags.contains(Flags::DIM) {
+		codes.push("2".to_string());
+	}
+	if flags.contains(Flags::ITALIC) {
+		codes.push("3".to_string());
+	}
+	// One underline at a time: the engine's flags are variants of one attribute, and the double is the
+	// only one with a plain SGR code of its own.
+	if flags.contains(Flags::DOUBLE_UNDERLINE) {
+		codes.push("21".to_string());
+	} else if flags.contains(Flags::UNDERCURL) {
+		codes.push("4:3".to_string());
+	} else if flags.contains(Flags::DOTTED_UNDERLINE) {
+		codes.push("4:4".to_string());
+	} else if flags.contains(Flags::DASHED_UNDERLINE) {
+		codes.push("4:5".to_string());
+	} else if flags.contains(Flags::UNDERLINE) {
+		codes.push("4".to_string());
+	}
+	if flags.contains(Flags::INVERSE) {
+		codes.push("7".to_string());
+	}
+	if flags.contains(Flags::HIDDEN) {
+		codes.push("8".to_string());
+	}
+	if flags.contains(Flags::STRIKEOUT) {
+		codes.push("9".to_string());
+	}
+	if let Some(foreground) = sgr_color(fg, false) {
+		codes.push(foreground);
+	}
+	if let Some(background) = sgr_color(bg, true) {
+		codes.push(background);
+	}
+	if let Some(colour) = underline.and_then(sgr_underline_color) {
+		codes.push(colour);
+	}
+	format!("\x1b[{}m", codes.join(";"))
+}
+
+/// The underline's own colour as SGR 58 (§85). `None` when it is a role rather than a colour, which
+/// the leading reset already puts back to "same as the text".
+///
+/// SGR 58 has no named form the way 30-37 do, so a named colour goes out as its palette index — which
+/// is what it is.
+fn sgr_underline_color(color: Color) -> Option<String> {
+	match color {
+		Color::Named(named) => {
+			let index = named as usize;
+			(index <= 15).then(|| format!("58;5;{index}"))
+		}
+		Color::Indexed(index) => Some(format!("58;5;{index}")),
+		Color::Spec(rgb) => Some(format!("58;2;{};{};{}", rgb.r, rgb.g, rgb.b)),
+	}
+}
+
+/// The pen a pop restores: the current one, with the attributes the matching push NAMED taken from the
+/// pen it saved (§85).
+///
+/// A push with no parameters names everything, which is the ordinary case and reduces to "the saved pen
+/// entire". A selective push is the interesting one — `CSI 4 # {` saves the underline and nothing else,
+/// so a pop has to put the underline back while leaving whatever the program has done to the colours
+/// since. Merging at POP time rather than emitting per-attribute "off" codes is what keeps that exact:
+/// the target pen is computed first and then written once, so no code in the string can take an
+/// attribute out that the merge meant to keep.
+///
+/// Two of xterm's eleven parameters cannot select anything here and are documented where they are
+/// parsed: `Ps = 5`, blink, which the engine has no flag for at all, and the difference between `4` and
+/// `21`, which name one underline field between them.
+fn merged_pen(current: &Cell, saved: &Cell, mask: sgrstack::Mask) -> String {
+	// Every underline variant moves together — they are one attribute in the engine, not five.
+	let underlines = Flags::UNDERLINE
+		| Flags::DOUBLE_UNDERLINE
+		| Flags::UNDERCURL
+		| Flags::DOTTED_UNDERLINE
+		| Flags::DASHED_UNDERLINE;
+	let groups = [
+		(sgrstack::Mask::BOLD, Flags::BOLD),
+		(sgrstack::Mask::FAINT, Flags::DIM),
+		(sgrstack::Mask::ITALIC, Flags::ITALIC),
+		(sgrstack::Mask::UNDERLINE, underlines),
+		(sgrstack::Mask::DOUBLY_UNDERLINED, underlines),
+		(sgrstack::Mask::INVERSE, Flags::INVERSE),
+		(sgrstack::Mask::INVISIBLE, Flags::HIDDEN),
+		(sgrstack::Mask::CROSSED_OUT, Flags::STRIKEOUT),
+	];
+	let mut flags = current.flags;
+	for (attribute, group) in groups {
+		if mask.contains(attribute) {
+			flags.remove(group);
+			flags.insert(saved.flags & group);
+		}
+	}
+	let underlined = mask.contains(sgrstack::Mask::UNDERLINE)
+		|| mask.contains(sgrstack::Mask::DOUBLY_UNDERLINED);
+	let foreground = if mask.contains(sgrstack::Mask::FOREGROUND) {
+		saved.fg
+	} else {
+		current.fg
+	};
+	let background = if mask.contains(sgrstack::Mask::BACKGROUND) {
+		saved.bg
+	} else {
+		current.bg
+	};
+	let underline = if underlined {
+		saved.underline_color()
+	} else {
+		current.underline_color()
+	};
+	pen_restore(flags, foreground, background, underline)
 }
 
 /// Rebuild the current SGR pen as a parameter string for a DECRQSS reply (§33). The pen is the
@@ -3248,6 +3461,143 @@ mod tests {
 		let mut terminal = Terminal::new(4, 20);
 		terminal.process(b"\x1b[?6n\x1b[?26nX");
 		assert_eq!(read(&terminal, 0, 0, 20), "X");
+	}
+
+	/// XTPUSHSGR / XTPOPSGR end to end (§85): the pen a program pushes is the pen it gets back, read
+	/// through DECRQSS so the assertion is made against the very template the grid paints with.
+	#[test]
+	fn a_pushed_pen_comes_back_on_the_pop() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;31m\x1b[#{");
+		terminal.process(b"\x1b[0;3;44m");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;3;44m\x1b\\".to_vec(),
+			"the program's own change lands while the push is outstanding"
+		);
+		terminal.process(b"\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
+		);
+	}
+
+	/// xterm's aliases, which exist "to work around language limitations of C#" — and which are the
+	/// spelling this row carried under the colour stack's name until §84.
+	#[test]
+	fn the_lower_case_aliases_are_the_same_stack() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[4m\x1b[#p\x1b[0;7m\x1b[#q");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;4m\x1b\\".to_vec()
+		);
+	}
+
+	/// A selective push saves what it names and nothing else, so the pop has to put that back while
+	/// leaving everything the program has done since. Here only the FOREGROUND is pushed: the italic
+	/// set afterwards survives the pop, and the bold that was set before it does not come back.
+	#[test]
+	fn a_selective_push_restores_only_what_it_named() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;31m\x1b[30#{");
+		terminal.process(b"\x1b[0;3;32m\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;3;31m\x1b\\".to_vec()
+		);
+	}
+
+	/// The pen is saved where the push SAT, which is why this is fed by the split advance. Both
+	/// sequences and the change between them are in one write: an implementation that pushed after the
+	/// chunk would save the italic too and restore it here.
+	#[test]
+	fn the_pen_is_saved_where_the_push_was_written() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1m\x1b[#{\x1b[3m\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1m\x1b\\".to_vec()
+		);
+	}
+
+	/// A pop with nothing pushed is not an error and must not disturb the pen — a program that pops
+	/// once too often would otherwise have its colours reset out from under it.
+	#[test]
+	fn a_pop_with_an_empty_stack_leaves_the_pen_alone() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;31m\x1b[#}\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
+		);
+	}
+
+	/// Ten levels, as xterm has it, and the eleventh push is dropped — together with the pop that
+	/// matches it, which is where cmote departs from xterm deliberately. Eleven pushes and eleven pops
+	/// therefore land back on the pen the FIRST push saw, rather than one level out.
+	#[test]
+	fn an_overflowing_push_drops_its_own_pop_so_the_levels_stay_paired() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[31m");
+		for level in 0..=sgrstack::DEPTH {
+			terminal.process(b"\x1b[#{");
+			// A different pen at every level, so a mispaired pop restores a colour that is not 31.
+			terminal.process(format!("\x1b[3{}m", level % 7 + 1).as_bytes());
+		}
+		for _ in 0..=sgrstack::DEPTH {
+			terminal.process(b"\x1b[#}");
+		}
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;31m\x1b\\".to_vec()
+		);
+	}
+
+	/// The stack is video attributes, so a restore must not take cmote's borrowed DECSCA protection
+	/// bit out of the pen with it (§56) — the `CSI 0 m` that opens a restore assigns the whole flag
+	/// word. Text written after the pop is still protected, so a selective erase leaves it standing.
+	#[test]
+	fn a_pop_does_not_clear_the_pens_protection() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1\"q\x1b[#{\x1b[0;31m\x1b[#}Kept");
+		terminal.process(b"\x1b[?2J");
+		assert_eq!(read(&terminal, 0, 0, 4), "Kept");
+	}
+
+	/// Neither sequence puts a byte on the screen — the near-miss test every scanner in `term/` gets,
+	/// because a final byte read wrongly shows up as text.
+	#[test]
+	fn the_stack_sequences_print_nothing_at_all() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[#{\x1b[1;4;31#{\x1b[#}\x1b[#qX");
+		assert_eq!(read(&terminal, 0, 0, 20), "X");
+	}
+
+	/// An underline substyle survives the round trip, which is the whole reason `pen_restore` exists
+	/// beside `pen_sgr`: the DECRQSS reply coarsens every substyle to a plain `4`, and feeding that
+	/// back would straighten a program's curly underline. Asserted on the string, since the reply
+	/// cannot tell the two apart.
+	#[test]
+	fn the_restore_string_keeps_the_underline_substyle_and_its_colour() {
+		let mut saved = Cell::default();
+		saved.flags.insert(Flags::UNDERCURL);
+		saved.set_underline_color(Some(Color::Indexed(196)));
+		let restored = merged_pen(&Cell::default(), &saved, sgrstack::Mask::ALL);
+		assert_eq!(restored, "\x1b[0;4:3;58;5;196m");
+	}
+
+	/// And the engine really does read that spelling back, so the string above is not written into a
+	/// vacuum: a curly underline set, pushed and popped is still an underline afterwards.
+	#[test]
+	fn a_curly_underline_survives_the_round_trip() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[4:3m\x1b[#{\x1b[0m\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;4m\x1b\\".to_vec(),
+			"DECRQSS reports every substyle as a plain 4 — what matters is that it is underlined"
+		);
 	}
 
 	/// SCP end to end (§76): the sequence puts the line the cursor is on onto a right-to-left

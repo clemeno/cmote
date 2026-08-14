@@ -19,16 +19,17 @@
 // a `?` in front of them — so the cost that kept this row shut was never being charged.
 //
 // WHY THE ALLOW-LIST. `CSI ? Ps n` is a family, and xterm answers nine more values of it: printer
-// status (15), UDK lock (25), keyboard nationality (26), locator availability and type (55 / 56),
+// status (15), UDK lock (25), keyboard status (26), locator availability and type (55 / 56),
 // macro space (62), a memory checksum (63), data integrity (75) and multi-session configuration (85).
 // Cmote answers exactly one of them, and the nine are refused rather than unimplemented, because a
 // reply is an advertisement (§71) and every one of these advertises a machine rather than a page:
 //
 //   * 15 / 25 / 62 / 63 / 75 / 85 describe hardware cmote does not have — a printer, a user-defined-key
-//     store, a macro store, that store's checksum, a memory self-test, a multi-session controller.
+//     store, a macro store, that store's checksum, a data-integrity check, a multi-session controller.
 //     "Ready", "unlocked" or a byte count would each be a claim about equipment that is not there.
-//   * 26 reports the KEYBOARD's nationality. §36 fixed the rule that this one would break: cmote's
-//     identity replies name the program and never the user's machine, which is why DA3 answers a
+//   * 26 reports the KEYBOARD's language — xterm answers `CSI ? 27 ; 1 ; 0 ; 0 n` for a North American
+//     one, the nationality sitting in the first parameter (§84). §36 fixed the rule this would break:
+//     cmote's identity replies name the program and never the user's machine, which is why DA3 answers a
 //     constant unit id rather than a serial number. A remote must not learn the layout in front of
 //     the person at the other end off a query they never see.
 //   * 55 / 56 describe the DEC locator, a pointing-device protocol cmote does not implement. An

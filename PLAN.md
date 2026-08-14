@@ -9058,3 +9058,104 @@ first to go looking for it deliberately.
   obviously the way.
 - **XTPUSHSGR is now a named gap and stays one.** It would cost a stack of the pen and a scanner, both
   of which cmote has the shape for, and no program has been named that sends it.
+
+## 85. The stack that was refused under another name (v4.0.0)
+
+§84 found `CSI # p` / `# q` wearing the colour stack's name and the colour stack's argument. This
+section answers the sequence that was actually there.
+
+**XTPUSHSGR / XTPOPSGR** — `CSI Pm # {` and `CSI # }`, with `CSI # p` and `CSI # q` as xterm's aliases
+"used to work around language limitations of C#" — push the current **video attributes** onto a stack
+and pop them back. `Pm` names which in SGR's own numbering (`1` bold … `21` doubly-underlined, plus `30`
+and `31` for the two colours, which have no SGR code of their own); no parameter at all saves them all;
+the stack is ten deep.
+
+### Why this was work rather than a refusal
+
+The argument the row had been carrying — *"a stack over a palette that is never read has nothing to save
+or restore"* — belongs to XTPUSHCOLORS, which is `CSI # P` / `# Q`. Against this sequence it is void.
+The attributes it stacks are bold, faint, italic, underline, reverse, conceal, strikeout and the
+foreground and background — every one of which cmote draws.
+
+And the failure mode of ignoring it is not an absent feature, it is a **wrong screen**. A program that
+pushes, paints itself red and pops expects the pen it had; a terminal that drops both halves goes on
+painting red. That is worse than the usual cost of an unimplemented sequence, which is that nothing
+happens.
+
+There was also no ground to refuse on. Nothing here leaves the tab, nothing speaks for the machine,
+nothing touches anything of the user's — §6's rule is that a remote may change what its own tab looks
+like, and this is exactly that. A 🛑 would have had to rest on price, as DECSLRM's does (§5, §73), and
+the price turned out to be a scanner and two functions.
+
+### What shipped
+
+`src/term/sgrstack.rs`, the same chunk-safe CSI machine `tabs.rs` and `dsr.rs` use, matching the `#`
+intermediate with no private marker — DECSTR (`! p`), DECRQM (`$ p`) and DECSCUSR (`SP q`) each sit one
+intermediate away, so all three of final byte, marker and intermediates are tested (§56's near-miss
+rule). `Mask` turns xterm's eleven values into cmote's own bitset once, where it can be tested without a
+terminal.
+
+**The pen is read, never written.** A push copies the engine's template cell — the same field DECRQSS
+reports (§33) — and a pop feeds the engine that pen spelled in SGR. §72's route for DECSTR and §74's for
+DECST8C, and for the same reason: the engine stays the only writer of its own template (§71, §73), so
+there is no second source to disagree with it later. Fed bytes go straight to the parser, so cmote's own
+scanners never see them and this cannot feed itself.
+
+**Split-fed**, for DECXCPR's reason (§82): the pen a push saves is the pen where the push was *written*.
+A chunk carrying `CSI [1m CSI # { CSI [3m CSI # }` must save bold and not bold-italic, and a test asks
+exactly that.
+
+Three details are cmote's own:
+
+- **`pen_restore` is not `pen_sgr`.** The DECRQSS reply reports a curly, dotted or dashed underline as a
+  plain `4` — honest as an answer, lossy as a restore, since feeding it back would straighten the
+  program's underline. So the restore string spells the substyles (`4:3` / `4:4` / `4:5`) and carries the
+  underline colour (SGR 58) that DECRQSS never reports at all.
+- **The protection bit survives.** cmote borrows a spare bit of the engine's flag word for DECSCA (§56),
+  and the `CSI 0 m` that opens a restore assigns that whole word. A stack of *video* attributes must not
+  clear a cell-protection setting, so it is read across the restore and put back — the care
+  `protect::Request::Reassert` takes after an ordinary SGR, on the one path that does not go through the
+  scanner.
+- **An overflowing push drops its own pop.** xterm's stack is ten deep and an eleventh push is dropped;
+  cmote drops it too, and *counts* it, so the pop that matches it is dropped as well. Without the count
+  every pop after an overflow is one level out — outer attributes restored at an inner level, with no
+  error anywhere. One `usize`, and a test that pushes eleven times and pops eleven times and lands back
+  on the pen the first push saw.
+
+**A selective push merges at pop time.** `CSI 30 # {` saves the foreground alone, so its pop has to put
+that back while leaving whatever the program has done to everything else. The target pen is computed
+first — current, with the named attributes taken from the saved one — and then written once, which
+avoids emitting per-attribute "off" codes and the trap in xterm's own `22` (neither bold nor faint),
+which takes two attributes out where one was meant.
+
+### What it cost
+
+- `src/term/sgrstack.rs`, new: the scanner, the mask and the request. Fifteen tests.
+- `src/term/mod.rs`: one scanner field, two state fields, a `Split` variant, `apply_sgr_stack`,
+  `merged_pen`, `pen_restore`, `sgr_underline_color`, and ten seam tests.
+- Tests 1159 → 1183. Matrix 170 rows, **✅ 105 → 106, ❌ 25 → 24**, 🛑 34 and 🤷 6 unchanged.
+- `term/dsr.rs`'s header carried §84's two errors in prose (`75` as a memory self-test, `26` as bare
+  "nationality") and was corrected with the matrix.
+
+### Not done
+
+- **`Ps = 5`, blink, names nothing.** The engine has no blink flag at all (§5), so a push that asks for
+  blink saves a value that does not exist and its pop restores nothing. Disclosed where it is parsed and
+  on the row, not worked around.
+- **`4` and `21` name one field between them.** xterm has them as separate parameters; cmote's underline
+  is one attribute with variants, so a selective push of either moves all of them and the underline
+  colour with them. A program that pushes `21` alone and expects its curly underline untouched gets it
+  restored too.
+- **The OSC 8 hyperlink does not travel.** It rides in the same cell as the attributes but is not an SGR
+  attribute, so a push does not save it and a pop does not restore it. xterm has no hyperlink in its
+  stack either, which is the argument for leaving it, not a proof.
+- **The stack is never cleared.** Not by RIS, not by DECSTR, not by the alternate-screen swap. A program
+  that pushes and dies leaves ten pens held until the tab closes — bounded, so not a hazard, but a
+  program that pushed before a full reset and pops after it gets a pen from before the reset. Which of
+  those DEC or xterm intends is not written down anywhere read so far.
+- **No consumer named.** Same as §82: nothing was found that sends this, and the decision rested on the
+  failure mode rather than a census. Unlike §82 there is not even a stalled sender to point at — this
+  sequence draws no reply, so a program that sends it into a terminal that ignores it simply renders
+  wrong and carries on.
+- **`term/` now holds a tenth chunk-safe CSI state machine**, near-identical to the ninth. §82 noticed
+  this and did not act; §85 has not either, and the case for factoring them is one row stronger.
