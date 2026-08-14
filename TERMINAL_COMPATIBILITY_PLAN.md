@@ -1284,7 +1284,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps " q | Character protection (DECSCA) | ✅ | DECSCA marks the cells written after it protected or erasable, which decides whether a selective erase takes them (§56, `term/protect.rs`) |
 | ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | DECSED / DECSEL are the selective erase — ED's and EL's three extents, sparing protected cells, where a plain `CSI J` / `CSI K` still takes them (§56) |
 | ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. Autowrap is left **on**, `xterm-256color` declaring `am` (§72) |
-| b (REP) | Repeat character | ✅ | repeats the last printed character `Ps` more times |
+| b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
 | s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
@@ -1294,9 +1294,9 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps ; 2 SP k | Select character path (SCP) — presentation to data | 🛑 | the other update mode of the same sequence: `Ps2 = 2` asks the terminal to write the drawing back into the data component — over the only copy of what the host sent (§76, `term/scp.rs`) |
 | $ z (DECERA) | Erase rectangular area | ✅ | erases the rectangle given by top, left, bottom and right; corners default to the page edges, an end past the edge clamps, and a backwards rectangle is a no-op (§58, `term/rect.rs`) |
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb: protected cells stand (§58) |
-| $ x (DECFRA) | Fill rectangular area | ✅ | fills a rectangle with one character stamped from the pen, so it carries the colours and attributes a printed glyph would. `Pch` is limited to 32–126 and 160–255, as xterm allows (§58) |
+| $ x (DECFRA) | Fill rectangular area | ✅ | fills a rectangle with one character stamped from the pen, so it carries the colours and attributes a printed glyph would. `Pch` is limited to 32–126 and 160–255, printable ASCII and printable Latin-1 — cmote's own allow-list, xterm's ctlseqs naming no range at all (§58, §84) |
 | $ v (DECCRA) | Copy rectangular area | ✅ | copies a rectangle to another origin, whole cells — colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph, and the overlapping case is read out whole first. The two page parameters are ignored (§58) |
-| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0`/`1` the wrapped stream between the corners, the power-on default, `2` the rectangle. RIS resets it and DECSTR does not. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59) |
+| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0`/`1` the wrapped stream between the corners, `2` the rectangle, exact. cmote powers up in stream; RIS resets it and DECSTR does not. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59) |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined |
@@ -1304,16 +1304,17 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
 | 6n | Cursor position report | ✅ | DSR 6 (CPR) asks where the cursor is; answered `CSI <row> ; <col> R`, one-based, from the live cursor |
 | ? 6 n | Extended cursor position (DECXCPR) | ✅ | DECXCPR, the DEC-private spelling of the same question; answered `CSI ? <row> ; <col> R`, one-based and with **no page parameter**, which is xterm's form and the reply cmote sends. Answered where the question sits in the stream, from the cursor the ANSI spelling reports — so both report the absolute row, ignoring origin mode (§74, §82, `term/dsr.rs`) |
-| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard nationality / data integrity / multi-session | 🛑 | the DEC-private status reports for a printer, a user-defined-key store's lock, the **keyboard's nationality**, a memory self-test and a multi-session controller — equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`) |
+| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`) |
 | ? 55 / 56 n | Locator status / type | 🛑 | ask whether a DEC locator is present and what type it is — a pointing-device protocol cmote does not implement. xterm's honest negatives, `CSI ? 53 n` and `CSI ? 57 ; 0 n`, are not sent either (§6, §82) |
-| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, in units of 16 bytes (§6, §82) |
+| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (§6, §82) |
 | ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (§6, §82) |
 | c / > c | Primary / secondary DA | ✅ | DA1 and DA2 — what the terminal is and what firmware it claims; cmote amends the engine's DA1 with attribute **4**, sixels (§41, `term/query.rs`) |
 | = c | Tertiary DA | ✅ | DA3 asks for the terminal's unit id; answered with the constant `00434D45` and never a machine-derived one (§36, `term/query.rs`) |
-| ? Pi;Pa;1 S / ? Pi;Pa;4 S | Graphics attributes — read (XTSMGRAPHICS) | ✅ | XTSMGRAPHICS reads a graphics limit: `Pi` names the item — colour registers or maximum image size — and `Pa` `1`/`4` its current or maximum value. Answered `status 0` from the decoder's real limits (§41, `term/query.rs`) |
-| ? Pi;Pa;3 S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, which moves a limit; answered `status 3`, failure (§41, `term/query.rs`) |
+| ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`) |
+| ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pv $ y` in the ANSI spelling as well as the private one (§60) |
-| # p / # q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | XTPUSHCOLORS / XTPOPCOLORS save and restore the whole palette on a stack — over a palette that is never read (§6) |
+| # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
+| # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ❌ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering (with `30` / `31` for the two colours, which have no SGR code of their own) and no parameter saves all of them, ten levels deep. `# p` and `# q` are xterm's aliases for the braces. Unlike the palette stack this one is over attributes cmote **does** draw (§84) |
 
 ### ESC — single sequences
 
@@ -1415,7 +1416,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | `CSI 1–10 t` lets a remote iconify, move, resize, raise, maximize or fullscreen the window cmote owns (§6) |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | ask whether the window is iconified and where it sits on the desktop |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the text area's size, asked in pixels and in characters |
-| Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71) |
+| Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels, whose reply is `CSI 6 ; height ; width t` — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71) |
 | Title stack (CSI 22 / 23 t) | ✅ | push and pop the window title; the `; 0` / `; 1` / `; 2` that would name icon or window title alone is ignored, and the stack is capped at 4096 (§67) |
 | **Kitty keyboard protocol** | ✅ | CSI-u key reporting over a flag stack — disambiguated keys, event types and associated text (§25, `term/kitty.rs`) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
@@ -1440,7 +1441,7 @@ half of iTerm's OSC 1337 namespace — **inline images among them since §70** �
 that makes every palette set and reset a no-op. Since §71 it also holds two refusals with **no danger
 behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
 cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
-control (`CSI 1–10 t`), the palette stack (`CSI # p / # q`), kitty's colour-by-name (`OSC 21`), and the
+control (`CSI 1–10 t`), the palette stack (`CSI # P / # Q`, §84), kitty's colour-by-name (`OSC 21`), and the
 two DECSET modes nothing can turn on (`3`, `80`) — each one dead in `vte` or in a `Handler` default
 before cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off;
 §77 then took off the **remote pointer shape** (OSC 22), which had sat there since §54. That is the one
@@ -1703,12 +1704,47 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `OSC 9`, kitty's `99` and urxvt's `777` all reach no handler (§78, §79). **XTWINOPS** is one arm,
   `('t', [])` (`ansi.rs:1739`), matching **14 / 18 / 22 / 23** and sending every other parameter to
   `unhandled!()` — which is why `CSI 1–10 t` has nothing to refuse and `CSI 16 t` is a gap in the parser
-  rather than in cmote (§71). The **palette stack** has no arm at all: the only `b'#'` in the file is
+  rather than in cmote (§71). **Both `#` stacks** have no arm at all: the only `b'#'` in the file is
   `esc_dispatch`'s `(b'8', [b'#'])`, DECALN (`:1814`), so `csi_dispatch` never sees a `#` intermediate
-  and `CSI # p` / `CSI # q` fall through whole. **Kitty graphics** arrives as an APC string, and
+  and the palette stack (`CSI # P` / `# Q`) and the video-attribute stack (`CSI # {` / `# }`, aliased
+  `# p` / `# q`) fall through whole — two different sequences the matrix had as one until §84.
+  **Kitty graphics** arrives as an APC string, and
   `State::SosPmApcString => self.anywhere(performer, byte)` (`vte-0.15.0/src/lib.rs:182`) drops every
   byte of it without calling a `Perform` method (§41, §70). **ENQ** and the two DECSET modes are in the
   bullet above.
+
+### xterm's ctlseqs (`invisible-island.net/xterm/ctlseqs/ctlseqs.html`, read for §84)
+
+The document cmote's `TERM` claims conformance to, and the source §84 checked §83's definitions against.
+Quoted where a row's wording now rests on it.
+
+- **`CSI # p` / `# q` are XTPUSH*SGR* / XTPOPSGR**, not the colour stack: "Push video attributes onto
+  stack (XTPUSHSGR), xterm. This is an alias for `CSI # {`, used to work around language limitations of
+  C#." The colour stack is the **capitals** — "`CSI # P` … Push current dynamic- and ANSI-palette colors
+  onto stack (XTPUSHCOLORS)". The matrix had the lower-case pair labelled as the colour stack from §65
+  until §84 split them. XTPUSHSGR's parameters "correspond to the SGR encoding for video attributes,
+  except for colors (which do not have a unique SGR code)" — `30` foreground, `31` background — and "if
+  no parameters are given, all of the video attributes are saved. The stack is limited to 10 levels."
+- **The DSR-DEC replies** §82 refuses, each quoted for the row that names it: printer `CSI ? 10 n`
+  (ready) / `? 11 n` (not ready); UDK `? 20 n` (unlocked) / `? 21 n` (locked); keyboard
+  `CSI ? 27 ; 1 ; 0 ; 0 n` (North American) — the **first parameter is the keyboard's language**, which
+  is the fact §36's rule turns on; data integrity `? 70 n` (ready, no errors); multi-session `? 83 n`
+  (not configured). Locator: "`CSI ? 50 n` Locator available" / "`CSI ? 53 n` No Locator", and
+  "`CSI ? 57 ; 1 n` Mouse" / "`CSI ? 57 ; 0 n` Cannot identify". Macro space is "Report macro space
+  (DECMSR). The response is `CSI Pn * {`" — **no unit is given**, and the matrix claimed "units of 16
+  bytes" until §84 removed it. Memory checksum "The response is `DCS Pt ! ~ x x x x ST`", which is the
+  envelope `term/rect.rs` writes for DECRQCRA.
+- **XTSMGRAPHICS' parameter order** is `CSI ? Pi ; Pa ; Pv S` — `Pi` the item (1 colour registers, 2
+  Sixel geometry, 3 ReGIS) and `Pa` the **second** parameter (1 read, 2 reset, 3 set, 4 read maximum).
+  The matrix spelled its two rows `? Pi;Pa;1 S` and `? Pi;Pa;3 S`, as though the action were third, from
+  §41 until §84. `query.rs`'s `graphics_request` reads item then action, so the code was right and only
+  the row was wrong — and it answers action **2** with a status 0 as well, which no row had said.
+- **`CSI 16 t`** — "Report xterm character cell size in pixels. Result is `CSI 6 ; height ; width t`".
+- **Two claims ctlseqs does *not* support**, and the rows now say so themselves: it gives **no accepted
+  range for DECFRA's `Pch`** ("`Pc` is the character to use", and nothing more), so 32–126 / 160–255 is
+  cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with
+  **no default named**, so "the state a terminal powers up in" is `rect.rs`'s `#[default] Stream` and the
+  VT420 manual behind it, not this document.
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 

@@ -8985,3 +8985,76 @@ dies*.
 - **The prose in §2–§7 was not touched.** It is longer than the table it explains, and several of its
   paragraphs are themselves summaries of `PLAN.md` sections — the same duplication one level up, left
   alone because this pass was about the column the user was reading.
+
+## 84. Reading the definitions back (v4.0.0)
+
+§83 left one thing undone on purpose and said so: *"the definitions are unquoted. Each says what the
+sequence does and none cites the page it came from… a wrong definition reads like a right one, and
+nothing in the row invites re-checking."* This section re-reads them against **xterm's ctlseqs**, the
+document cmote's `TERM` claims conformance to. Thirty-odd of the 170 rows were checked. **Five were
+wrong**, and only one of those was written by §83.
+
+### The palette stack was the wrong sequence
+
+`CSI # p` and `CSI # q` are **XTPUSHSGR / XTPOPSGR** — aliases of `CSI # {` and `CSI # }`, and a stack of
+**video attributes**. The colour stack is the capitals: `CSI # P` / `CSI # Q`, XTPUSHCOLORS / XTPOPCOLORS.
+The matrix has carried the lower-case pair under the colour stack's name since §65, and — worse than the
+label — under the colour stack's **justification**: *"downstream of the fixed scheme (§6): a stack over a
+palette that is never read has nothing to save or restore."*
+
+That is true of `# P` / `# Q` and **void** for the sequence the row actually named. Video attributes are
+not a palette cmote never reads; they are bold, italic, underline, reverse — everything the renderer
+draws. A row had been declining a real capability with an argument belonging to a different sequence.
+
+Two rows now. The colour stack keeps its 🤷 and its reason. The SGR stack is **❌**: nothing decided
+against it, it was never seen. Both still die in the parser — `csi_dispatch` has no `#` intermediate at
+all, the only `b'#'` in `vte`'s table being `esc_dispatch`'s DECALN — which is why the mistake was
+invisible from the crate side. Re-deriving the mark from the source would have confirmed the mark every
+time.
+
+### The other four
+
+- **`? 75 n` is "data integrity"**, not the memory self-test the row called it.
+- **DECMSR's reply is `CSI Pn * {`, and ctlseqs names no unit.** §83's note said "in units of 16 bytes" —
+  invented precision, written in the very pass that warned it could not detect invented precision.
+- **XTSMGRAPHICS had its parameters in the wrong order**, since §41: the rows read `? Pi;Pa;1 S` and
+  `? Pi;Pa;3 S`, as though the action were the third parameter. It is the second — `CSI ? Pi ; Pa ; Pv S`.
+  `query.rs`'s `graphics_request` reads item then action, so **the code was right and the row had never
+  been read back against it either**. The same row also missed that action `2`, reset, is answered with a
+  status 0: an action no row in this document mentioned.
+- **Two attributions ctlseqs does not carry.** DECFRA's `Pch` range was credited to xterm ("as xterm
+  allows") and DECSACE's stream extent to the terminal's power-on state. Both are true of cmote's code —
+  `rect.rs` enforces 32–126 / 160–255 and its `Extent` derives `#[default] Stream` — and neither is in
+  the document they were credited to. The rows now say whose claim each is.
+
+### What it says about the sweeps
+
+Four of the five predate §83; only DECMSR's units were written in that pass. So they sat in the notes
+through §67's sweep, §70's, §82's and every audit between, and none of those looked at them, because
+each re-derived the **mark** from the crates and the mark was right every time. §70 found a note whose
+price had expired and §82 a note whose reason was never true; §84 is the third of the same shape, and the
+first to go looking for it deliberately.
+
+### What it cost
+
+- Matrix 169 → **170 rows: ✅ 105 · ❌ 25 · 🛑 34 · 🤷 6**.
+- A new Evidence subsection, `### xterm's ctlseqs`, quoting the document for every claim §84 rests on —
+  **including the two claims it does not support**, which is the part a later sweep will want.
+- Six notes reworded, one row split in two, two Code cells corrected.
+
+### Not done
+
+- **One source, one pass.** ECMA-48 and the VT420 manual were not read. The rows resting on DEC's
+  definitions rather than xterm's — DECSCA, DECSED / DECSEL, the four rectangle operations, DECSACE's
+  default, whatever unit DECMSR really uses — are still unquoted, and DEC is where the terminal's own
+  vocabulary comes from.
+- **Roughly 140 rows were not checked.** The sweep went where the parameters are: the CSI query family,
+  the rectangles, the graphics rows, the modes. The SGR table was skimmed and the OSC table barely
+  touched — `OSC 104` and `110`–`112` did not appear in the fetched text at all, so their definitions
+  stand as written from memory.
+- **Nothing records which rows have been read back.** A reader cannot tell a verified definition from an
+  unverified one, which is the same complaint §83 made about the marks and now applies one column over.
+  A per-row checkmark would say it; a fifth symbol in a document that spent §66 retiring one is not
+  obviously the way.
+- **XTPUSHSGR is now a named gap and stays one.** It would cost a stack of the pen and a scanner, both
+  of which cmote has the shape for, and no program has been named that sends it.
