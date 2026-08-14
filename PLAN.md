@@ -8387,3 +8387,102 @@ compiled and then applied the wrong event at the wrong offset.
 - **Nothing tells a program its `Ps2 = 2` was dropped.** SCP has no reply and no DECRQM mode, so a
   program that asks for presentation-to-data gets silence — the same disclosure §57 makes about a
   cancelled margin request.
+
+## 77. The refusal that described a different program (v4.0.0)
+
+The question was what the difference is between two rows that both say "cursor". OSC 22 sets the MOUSE
+POINTER — the arrow under the user's hand; OSC 50 sets the TEXT CARET — block, bar or underline, in a
+grid cell. X11 called the mouse pointer a "cursor" (`XC_xterm`), which is why `vte` names its two
+handlers `set_mouse_cursor_icon` and `set_cursor_shape` and why the rows read as near-duplicates. The
+next question was whether OSC 22 could be supported if the shape were scoped to the terminal rather than
+to the window. It could — and the scoping turned out to be the only thing on offer.
+
+### Three reasons, checked
+
+The row had read 🤷 since §54, under three reasons written into §6. Checking them against the code was
+the whole of the work:
+
+- *"A pointer shape is window-wide, so it fails the same test §54 applies to progress."* True of
+  `winit::window::Window::set_cursor`, which is what the handler's NAME suggests and what a terminal
+  built straight on the windowing layer would have to call. cmote never goes near it. The grid is an
+  iced `mouse_area` (`ui/terminal.rs`), and `mouse_area::interaction` applies while the pointer is
+  inside that widget's bounds and nowhere else.
+- *"The pointer is already contested, and the arbitration is hand-rolled unsafe code."* The four
+  contested shapes are `ResizingHorizontally` on the explorer splitter, `ResizingVertically` on the
+  files splitter, and `Grab`/`Grabbing` on the dialog and tab-strip drags — the last two painted by
+  §51's own `WM_SETCURSOR` subclass, because Windows ships no hand cursor. All four sit on widgets that
+  are SIBLINGS of the grid and are never over it. There was no fifth voice to arbitrate, and nothing
+  was added to that subclass.
+- *"`none` is in the vocabulary, so a remote could hide the local pointer."* False.
+  `cursor_icon::CursorIcon` — which is what `vte` resolves an OSC 22 name through, and what every
+  terminal on this protocol uses — has no hidden variant, and its `from_str` has no `"none"` arm. The
+  hazard cannot be spelled. iced has `Interaction::Hidden`; nothing can reach it from the wire.
+
+Two of the three were arguing about an architecture cmote does not have, and the third was a claim about
+a sibling crate that had never been opened. That is the finding, and it is not the same one §76 made:
+there the refusal had charged the whole sequence for its most expensive PARAMETER; here the refusal had
+been written for a plausible terminal that was not this one.
+
+### What was actually underneath
+
+Something was, which is why this is a split rather than a straight ✅. The five shapes worth having
+describe **the content under the pointer** — `default`, `text`, `pointer`, `crosshair`, `cell` — and on
+the grid that content is the remote's own output, so the remote is the one that knows. The rest of the
+CSS cursor set divides into two refusals:
+
+- `grab`, `grabbing`, `move` and the fourteen resize shapes are **cmote's own vocabulary**. Those exact
+  shapes are what the two splitters and the two drag handles say, and §51 goes as far as drawing custom
+  art for two of them. A remote painting `col-resize` over the grid teaches the user that a grid edge
+  drags when it does not, and `grab` impersonates a cmote handle outright — §55's spoofed-chrome
+  argument, one surface over.
+- `wait`, `progress`, `not-allowed` and `no-drop` **speak for the client**. `wait` says cmote is hung;
+  `not-allowed` says cmote is refusing the user's input. A remote must not be able to say either.
+
+`help` and `context-menu` announce a menu that is cmote's; the remainder (`alias`, `copy`, `zoom-in`,
+`vertical-text`, …) have no meaning inside a text grid and can be added later with a reason attached.
+
+The allow-list **is the parser**: `term::pointer::Shape` names five variants and `from_css` matches
+those five, so a refused shape has no value to be carried in and no later caller can get round the
+list. That is `term/iterm.rs`'s construction for OSC 1337 and `link.rs`'s for URI schemes, third use.
+Deliberately not a re-export of `CursorIcon` or of `iced::mouse::Interaction`: re-exporting either would
+leave every refused shape nameable and keep it out by a check somewhere downstream.
+
+### What it cost
+
+- `src/term/pointer.rs`, new — the scanner on `term::osc`'s shared framer, the allow-list, the store.
+  Fifteen tests, none of which needs a terminal.
+- `src/term/mod.rs` — the ninth scanner, a `pointer_shape()` accessor, and the shape cleared on **both**
+  directions of the alternate-screen swap, beside the pictures (§41) and the character paths (§76).
+  That swap is exactly the moment a full-screen program starts or ends, which is the whole of the
+  lifetime management this row needs. Three tests.
+- `src/ui/terminal.rs` — one `.interaction()` on the grid's `mouse_area`, and `grid_interaction`, the
+  arm-by-arm translation from the five shapes to iced's twenty-seven. Two tests, one of them asserting
+  that no remote request reaches any shape cmote's own chrome uses.
+- Tests 1115 → 1135. Matrix: 164 rows → 165, ✅ 103 → 104, ❌ 25 unchanged, 🛑 27 → 28, 🤷 9 → 8.
+
+`Shape::Default` maps to `None` rather than to `Interaction::Idle`, which is the difference between
+handing the question back and answering it: with no `interaction` set, `mouse_area` lets the widget
+underneath decide, which is what the grid did before this row existed and what it must go back to doing
+the moment a program hands the pointer back. `default` is on the allow-list precisely so that handing it
+back is something a program can say on purpose.
+
+### Not done
+
+- **A refused name leaves the current shape alone** rather than resetting to `Default` — the rule `icon`
+  keeps for a payload that is not an icon name. Safe, because the shape that survives is one this same
+  remote asked for and this same list already passed, so a refusal cannot be turned into a way of
+  clearing a shape. But a program that sets `text` and then asks for `wait` is left with `text`, which
+  is not what it intended and which nothing tells it.
+- **Nothing tells a program its shape was dropped.** OSC 22 has no query and no reply, so a request for
+  `grab` gets silence — the same disclosure §57 makes about a cancelled margin request and §76 about a
+  refused update mode.
+- **RIS does not clear the shape.** The alternate-screen swap does, which covers the realistic case (a
+  TUI that quits), but `ESC c` on the primary screen leaves the last shape standing. Deliberate rather
+  than missed: clearing it would need this scanner to frame `ESC c` for itself, and the five shapes it
+  can be holding are all benign when stale — which is a property of the allow-list, not luck. Worth
+  revisiting only if the list ever grows a shape that is alarming to see for no reason.
+- **The shape is per-terminal, not per-pane-under-the-pointer.** With split panes it would be the
+  focused terminal's shape over any grid; there is one grid today, so the question has not been asked.
+- **`vertical-text` is refused for want of a target**, not for danger: iced has no such interaction. It
+  is the one refused name that is a toolkit limit rather than a decision, and it is in the same list as
+  the decisions, which is the kind of thing §73 exists to catch. Left there on purpose, and here.

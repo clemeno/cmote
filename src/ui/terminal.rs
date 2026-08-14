@@ -14,6 +14,7 @@ use crate::app::Message;
 use crate::explorer::Explorer;
 use crate::files::Files;
 use crate::term::Terminal;
+use crate::term::pointer;
 use crate::term::screen::Screen;
 use crate::transfer::{ClashChoice, Progress, Question, Queue};
 use crate::ui::selection::{Cell, Selection};
@@ -298,6 +299,16 @@ pub fn view<'a>(
 		.on_move(Message::GridMoved)
 		.on_release(Message::GridReleased)
 		.on_right_press(Message::GridRightPressed);
+
+	// And it is the one widget a remote may choose the POINTER over (OSC 22, §77). This is the whole
+	// of the scoping that made the feature cheap: `mouse_area::interaction` applies while the pointer
+	// is inside THIS widget's bounds, so the shape stops at the grid's edge and the splitters, the
+	// tab strip and the dialogs keep saying what they have always said. The shape itself has already
+	// been through `term::pointer`'s allow-list, so there is nothing left to check here.
+	let interactive_grid = match grid_interaction(terminal.pointer_shape()) {
+		Some(interaction) => interactive_grid.interaction(interaction),
+		None => interactive_grid,
+	};
 
 	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
 	let has_selection = selection.is_some_and(|selection| !selection.is_empty());
@@ -1188,6 +1199,28 @@ pub fn cell_under(screen: &Screen<'_>, point: Point) -> Cell {
 	}
 }
 
+/// The iced pointer shape for the one a remote asked for (OSC 22, §77), or `None` to leave the
+/// toolkit's own answer alone.
+///
+/// The translation is a `match` and not a cast because the two vocabularies are different sizes on
+/// purpose. `iced::mouse::Interaction` names twenty-seven shapes and the wire can spell thirty-five;
+/// `term::pointer::Shape` names five, and this arm-by-arm mapping is what makes that narrowing
+/// visible. A shape added to the enum without a reason will not compile past here.
+///
+/// `Shape::Default` maps to `None` rather than to `Interaction::Idle`, which is the difference
+/// between handing the question back and answering it: with no `interaction` set, `mouse_area` lets
+/// the widget underneath decide, which is what the grid did before this row existed and what it must
+/// go back to doing the moment a program hands the pointer back.
+fn grid_interaction(shape: pointer::Shape) -> Option<iced::mouse::Interaction> {
+	match shape {
+		pointer::Shape::Default => None,
+		pointer::Shape::Text => Some(iced::mouse::Interaction::Text),
+		pointer::Shape::Pointer => Some(iced::mouse::Interaction::Pointer),
+		pointer::Shape::Crosshair => Some(iced::mouse::Interaction::Crosshair),
+		pointer::Shape::Cell => Some(iced::mouse::Interaction::Cell),
+	}
+}
+
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
 /// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the files strip
 /// and its splitter take `reserved_height` off the height (§19) — zero when the pane is hidden
@@ -1311,6 +1344,74 @@ mod tests {
 		// And the identity holds on every other line, which never left data order.
 		let second_row = Point::new(GRID_PADDING + 0.5, GRID_PADDING + CELL_HEIGHT + 0.5);
 		assert_eq!(cell_under(&screen, second_row), cell_at(second_row, 4, 10));
+	}
+
+	/// The five shapes a remote may ask for each reach a real iced interaction, and the default
+	/// reaches none at all (§77).
+	///
+	/// The `None` arm is the one worth pinning: it is what leaves `mouse_area` without an
+	/// `interaction`, so the grid answers exactly as it did before this row existed. Mapping the
+	/// default onto `Interaction::Idle` instead would look identical on Windows today and would
+	/// quietly take the question away from every widget underneath.
+	#[test]
+	fn every_allowed_pointer_shape_reaches_the_toolkit() {
+		use crate::term::pointer::Shape;
+
+		assert_eq!(grid_interaction(Shape::Default), None);
+		assert_eq!(
+			grid_interaction(Shape::Text),
+			Some(iced::mouse::Interaction::Text)
+		);
+		assert_eq!(
+			grid_interaction(Shape::Pointer),
+			Some(iced::mouse::Interaction::Pointer)
+		);
+		assert_eq!(
+			grid_interaction(Shape::Crosshair),
+			Some(iced::mouse::Interaction::Crosshair)
+		);
+		assert_eq!(
+			grid_interaction(Shape::Cell),
+			Some(iced::mouse::Interaction::Cell)
+		);
+	}
+
+	/// None of the shapes cmote's own chrome uses can be reached from a remote's request (§77).
+	///
+	/// The allow-list is in `term::pointer` and pinned there; this is the assertion at the far end
+	/// of the pipe, which is where it would show if a later hand widened the mapping rather than the
+	/// list. `ResizingHorizontally` and `Grab` are the two that matter: they are what the explorer
+	/// splitter and the drag handles say, and a remote reaching either would be spoofing an
+	/// affordance the user is entitled to read as cmote's own.
+	#[test]
+	fn no_remote_request_can_reach_cmotes_own_shapes() {
+		use crate::term::pointer::Shape;
+
+		let cmotes_own = [
+			iced::mouse::Interaction::ResizingHorizontally,
+			iced::mouse::Interaction::ResizingVertically,
+			iced::mouse::Interaction::Grab,
+			iced::mouse::Interaction::Grabbing,
+			iced::mouse::Interaction::Wait,
+			iced::mouse::Interaction::Progress,
+			iced::mouse::Interaction::NotAllowed,
+			iced::mouse::Interaction::Hidden,
+		];
+		for shape in [
+			Shape::Default,
+			Shape::Text,
+			Shape::Pointer,
+			Shape::Crosshair,
+			Shape::Cell,
+		] {
+			let Some(interaction) = grid_interaction(shape) else {
+				continue;
+			};
+			assert!(
+				!cmotes_own.contains(&interaction),
+				"{shape:?} reached {interaction:?}"
+			);
+		}
 	}
 
 	#[test]

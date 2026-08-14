@@ -123,6 +123,22 @@ small was that cmote already had the second coordinate space §75 said it would 
 one-answer rule doing what it is for. The lesson is narrower than "re-derive everything": a refusal that
 rests on a *parameter's* cost has to name which parameter, or it charges the whole sequence for the
 expensive one.
+**§77 found the same shape one row over, and the tell was that the refusal described a different
+program.** `OSC 22` (the mouse pointer shape) had read 🤷 since §54 under three reasons, and only one of
+them was a claim about a *crate* rather than about cmote — "`none` is in the vocabulary, so a remote could
+hide the local pointer". Checked, it is false: `cursor_icon::CursorIcon` has no hidden variant and its
+`from_str` no `"none"` arm, so no payload any terminal accepts can spell it. The other two — that a
+pointer shape is *window-wide*, and that it would fight the four shapes cmote's own widgets ask for —
+describe `winit::window::Window::set_cursor` and a window cmote does not drive. The grid is an iced
+`mouse_area`; `mouse_area::interaction` stops at that widget's edge, and all four contested shapes are on
+widgets that are siblings of the grid and never over it. So the scoping the entry said would have to be
+built was the only thing on offer, and the arbitration it feared had no second party. **One row became
+two again, ✅ and 🛑** — but the split is not §76's. There the line ran between two *parameters*; here it
+runs between two *kinds of claim*: the five shapes that describe the text under the pointer are the
+remote's to choose, and the shapes that speak with cmote's own voice — `grab` and the resize family,
+which are what the splitters and drag handles say, and `wait` / `progress` / `not-allowed`, which assert
+that cmote itself is busy or refusing — are not. §75, §76 and §77 in a row: the 🤷 column is where an
+argument goes to stop being re-read.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -553,6 +569,15 @@ short, and since §41 nothing left in it is high value:
   whether a missing sequence has a **translation** rather than a price — the same question §73 put to
   margins and got "no shorthand" back from. It also turned up an engine defect in the cursor movements
   the walk had to choose between; see the `A / B / C / D` and `G` rows in §8. See PLAN §74.
+- **~~The mouse pointer shape~~ (`OSC 22`) — SHIPPED in §77, and it was never this section's item.** It
+  had the engine-limit signature — `vte` parses the sequence in full and hands it to
+  `set_mouse_cursor_icon`, a `Handler` method left at the trait's empty default — but it was filed as a
+  §6 policy, so this section never had to justify it. Both readings were arguing a **cost cmote does not
+  pay**: a pointer shape is window-wide only if a terminal drives the window, and cmote's grid is an iced
+  `mouse_area` whose `interaction` stops at that widget's edge. Third row in a row moved by the scanner
+  route, and the first where what had to be checked was not a sequence's semantics but a *sibling
+  crate's* — one of the three reasons on the record (`none` is in the vocabulary) was simply false about
+  `cursor_icon`. See PLAN §77.
 - **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
   `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
   (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
@@ -725,35 +750,41 @@ pinned by name, which is the point of doing it at all. A refusal with a threat b
 a refusal whose only reason is *"we already answer this"* is precisely the one a later reader deletes as
 a courtesy to a program that did not need it.
 
-**Remote-set mouse pointer shape** — `OSC 22` is **refused**, and the reason is not the one that first
-suggests itself. "The pointer is ours like the theme is ours" is the weaker half: a colour scheme is
-persistent identity the user chose, whereas a pointer shape is transient feedback about what sits under
-it, and there the remote program genuinely knows more than cmote does. Refusing it does cost something
-real — no I-beam over text in a full-screen editor, no wait cursor through a long operation.
+**Remote-set mouse pointer shape** — `OSC 22` is **half shipped and half refused** since §77, and the
+half that ships is the part this entry used to say was impossible. What survives here is only the
+refusal; the sequence's own row in §8 carries the rest.
 
-The load-bearing reasons are these three:
+This entry argued the refusal on three grounds and **two of them were wrong about cmote rather than
+about the sequence**, which is worth leaving on the record rather than quietly deleting:
 
-- **The pointer is already contested, and the arbitration is hand-rolled unsafe code.** cmote sets four
-  shapes of its own — `ResizingHorizontally` / `ResizingVertically` on the panel splitters, `Grab` /
-  `Grabbing` on every drag handle — and on Windows it *paints its own hands* through a `WM_SETCURSOR`
-  subclass that answers **before** winit, because Windows ships no hand cursor at all (§51). Both §51
-  and §52 went into getting that contest right. OSC 22 adds a remote as a fifth voice, and every pair
-  then needs a winner: the remote asks for `wait` while the pointer rests on a chip that wants the open
-  hand — which one? That question would be answered inside the subclass, the last place in cmote worth
-  adding a case to.
-- **A pointer shape is window-wide, so it fails the same test §54 applies to progress.** The cursor
-  travels over the tab strip, the file panes and the dialogs, none of which belong to the remote. Its
-  shape would either leak outside the grid — the effect escaping the tab — or the subclass would have
-  to learn the grid's bounds to fence it in, which is more contest in that same unsafe path.
-- **`none` is in the vocabulary.** OSC 22 carries cursor *names*, and hiding the pointer is one. A
-  remote that makes the local mouse pointer vanish over cmote's window is a real nuisance with no
-  obvious undo.
+- *"The pointer is window-wide, so it fails the same test §54 applies to progress"* — true of
+  `winit::window::Window::set_cursor`, which a terminal built straight on the windowing layer would
+  have to call, and which cmote never touches. The grid is an iced `mouse_area`;
+  `mouse_area::interaction` applies while the pointer is inside that widget and stops at its edge.
+- *"The pointer is already contested, and the arbitration is hand-rolled unsafe code"* — the four
+  contested shapes (`ResizingHorizontally` / `ResizingVertically` on the two splitters, `Grab` /
+  `Grabbing` on the drag handles, the last two painted by §51's own `WM_SETCURSOR` subclass because
+  Windows ships no hand cursor) sit on widgets that are **siblings** of the grid and never over it.
+  There was no fifth voice to arbitrate and nothing was added to that subclass.
+- *"`none` is in the vocabulary, so a remote could hide the local pointer"* — it is not.
+  `cursor_icon::CursorIcon`, which is what every terminal resolves an OSC 22 name through, has no
+  hidden variant and its `from_str` no `"none"` arm. The hazard cannot be spelled.
 
-Note this refuses nothing that works today: cmote sets **no** cursor over the terminal grid, so this is
-an unrealised nicety being declined, not a behaviour being removed. And note who does the declining:
-`vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method `alacritty_terminal` leaves at
-its empty default, so the sequence never reaches cmote at all. The reasoning above is why cmote would
-refuse it; nothing in cmote currently has to. That is the **🤷** in §8.
+What is genuinely refused, and refused by `term/pointer.rs`'s allow-list rather than by absence, is
+every shape that **makes a claim cmote's own chrome is entitled to make**. The five kept shapes
+(`default`, `text`, `pointer`, `crosshair`, `cell`) describe the content under the mouse, which on the
+grid is the remote's own output. The rest divide into two refusals and a remainder:
+
+- `grab`, `grabbing`, `move` and the fourteen resize shapes are **cmote's vocabulary**. Those exact
+  shapes are what the splitters and the drag handles say, so a remote painting one over the grid
+  teaches an affordance that is not there. Same class as a spoofed window title (§55, §69).
+- `wait`, `progress`, `not-allowed` and `no-drop` **speak for the client**. A remote must not be able
+  to make cmote look hung, or as though it were refusing the user's input.
+- `help` and `context-menu` announce a menu that is cmote's; everything else left over has no meaning
+  inside a text grid, and can be added later with a reason attached.
+
+That is a **🛑**: the list is the parser, and three tests pin it — two on the list itself and one at
+the seam, which sets an allowed shape first so the refusal is that shape surviving.
 
 **Answerback (ENQ `0x05`)** — refused for the same reason, and this is why xterm ships it empty too
 (§36). The trigger is a *single ordinary byte*, so any binary output that happens to contain `0x05`
@@ -959,12 +990,18 @@ work not yet done, which is the difference between a gap and a policy.
 **`OSC 22` was then decided too, which empties the OSC column: every row is now shipped or refused with
 its reason written down, and none is merely outstanding.** The mouse-pointer shape looked at first like
 the one cheap gap left — tab-local, and cmote already owns a cursor mechanism to hang it off (`cursor.rs`,
-§51). Looking properly reversed that. The pointer is *window-wide* chrome that travels over the strip,
-the panes and the dialogs, so a remote's shape either escapes the tab or needs fencing; `none` is one of
-the names it can carry, so a remote could hide the local pointer; and cmote's cursor is already contested
-by four shapes of its own, arbitrated inside a hand-rolled `WM_SETCURSOR` subclass that took §51 and §52
-to get right — the last place worth adding a fifth voice. Refused, with the cost admitted: no I-beam over
-text, no wait cursor through a long operation. See §6.
+§51). Looking properly reversed that, and **§77 reversed it back**, because two of the three reasons were
+about a cmote that does not exist. "The pointer is *window-wide* chrome that travels over the strip, the
+panes and the dialogs" describes `winit::window::Window::set_cursor`, which cmote never calls; the grid
+is an iced `mouse_area` and `mouse_area::interaction` stops at that widget's edge. "cmote's cursor is
+already contested by four shapes of its own, arbitrated inside a hand-rolled `WM_SETCURSOR` subclass" is
+true, and all four of those shapes are on widgets that are siblings of the grid and never over it, so
+there was no contest and nothing was added to the subclass. Only the third reason was checkable against a
+crate, and it was **false**: `none` is not in the vocabulary — `cursor_icon::CursorIcon` has no hidden
+variant and its `from_str` no `"none"` arm, so the hazard cannot be spelled. What was left underneath was
+the refusal that had never been separated out: the shapes that speak with cmote's own voice. The row is
+now ✅ for the five that describe the text under the pointer and 🛑 for the rest, and the cost the entry
+had admitted — no I-beam over text — is paid back. See §6 and §77.
 
 ---
 
@@ -1056,7 +1093,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell. The half programs actually use: `OSC 11 ?` is how one picks a light or dark colourscheme to suit the terminal. Two tests pin it, one per role |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | same fixed scheme as `4 (set)` (§6), and it costs nothing to ignore: this was said to cost "a full repaint for no change" until §64, but `mark_fully_damaged` sets one bool and cmote calls neither `damage()` nor `reset_damage()`, so that repaint never happened. Pinned by `a_default_colour_set_does_not_move_the_query_answer` |
-| 22 | Mouse pointer shape | 🤷 | the pointer is window-wide chrome and already contested by four of cmote's own shapes (§6) — but **no cmote code performs this refusal**: `vte` dispatches OSC 22 to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body, which `alacritty_terminal` never overrides, so the sequence dies in the engine and cmote is never offered it. A decision cmote would make and a cost it does not pay; nothing enforces it and no test pins it, unlike `term/iterm.rs`'s `refuses_*`. If an engine bump ever raised an event for it, the listener's catch-all would drop it — the outcome is robust, the *reason* is unpinned |
+| 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | cmote's own scanner (`term/pointer.rs`, §77). `vte` parses this one in full — it resolves the name through `cursor_icon::CursorIcon::from_str` — and hands it to `set_mouse_cursor_icon`, a `Handler` method left at its empty default body which `alacritty_terminal` never overrides, so it reached the engine and stopped. Read 🤷 until §77, on the grounds that a pointer shape is **window-wide** chrome that would fight the four shapes cmote's own widgets ask for. That is true of `winit::window::Window::set_cursor` — which is what the handler's name suggests, and what a terminal built straight on the windowing layer would have to call — and cmote never goes near it: the grid is an iced `mouse_area`, and `mouse_area::interaction` applies **while the pointer is inside that widget** and nowhere else. So the scoping the old note said would have to be built is the only thing the toolkit offers, and the four contested shapes — `ResizingHorizontally` on the explorer splitter, `ResizingVertically` on the files splitter, `Grab`/`Grabbing` on the dialog and tab-strip drags — all sit on widgets that are SIBLINGS of the grid and are never over it. No contest to arbitrate, no fence to build, and nothing added to §51's `WM_SETCURSOR` subclass. What it buys is the half the old note admitted was real: a TUI with clickable regions can say so, and an I-beam over a pager is honest in a way cmote cannot work out for itself. Cleared on **both** directions of the alternate-screen swap, beside the pictures (§41) and the character paths (§76), so a TUI's hand is not left hovering over the shell prompt the user quit back to. Fifteen tests in the module, three at the seam, two at the far end of the pipe (`ui::terminal::grid_interaction`) |
+| 22 (any other shape) | Mouse pointer shape | 🛑 | the allow-list **is** the parser — `term::pointer::Shape` names five variants and `from_css` matches those five — which is the construction `term/iterm.rs` uses for OSC 1337 and `link.rs` for URI schemes, and it is deliberately not a re-export of `CursorIcon` or of iced's `Interaction`: a refused shape has no value to be carried in, so no later caller can get round the list. The wire can spell 35, and the line between the five and the rest is **who the shape makes a claim about**. The five kept describe the CONTENT under the pointer, which on the grid is the remote's own output. `grab`, `grabbing`, `move` and the fourteen resize shapes are refused because they are cmote's OWN vocabulary — the two splitters and the two drag handles say exactly those, and §51 goes as far as drawing custom art for two of them — so a remote painting `col-resize` over the grid teaches an affordance that is not there, and `grab` impersonates a cmote handle outright: §55's spoof, one surface over. `wait`, `progress`, `not-allowed` and `no-drop` are refused because they make a claim about **the client**: a remote must not be able to make cmote look hung, busy, or as though it were declining the user's own input. `help` and `context-menu` announce a menu that is cmote's; the rest (`alias`, `copy`, `zoom-in`, `vertical-text`, …) have no meaning inside a text grid. Pinned from both ends: `the_shapes_that_are_cmotes_own_vocabulary_are_refused` and `the_shapes_that_would_speak_for_cmote_are_refused` on the list, `the_pointer_shapes_that_are_cmotes_own_are_refused_at_the_boundary` at the seam — which sets an allowed shape FIRST, so the refusal is that shape SURVIVING. And one hazard §6 charged this row for **does not exist**: `cursor_icon::CursorIcon` has no hidden variant and its `from_str` no `"none"` arm, so no OSC 22 payload any terminal accepts can make the local pointer vanish |
 | 50 | Cursor shape (`CursorShape=`) | ✅ | a **third** spelling of DECSCUSR's shape, and the one that arrives for free: `vte` dispatches it to `set_cursor_shape`, which writes the same `cursor_style.shape` DECSCUSR writes, and `term/screen.rs` reads that field. Block / bar / underline, with no blink to drop — this spelling has none. Undocumented until §60's audit found it working, and **untested until §71** refused a fourth spelling: `osc_50_is_a_second_spelling_of_the_same_shape` pins all three values, because a refusal one row down is worth nothing if the spellings that DO work are only assumed to |
 | 52 (write) | Clipboard write | 🛑 | remote must not poison local clipboard (§6). Refused **at the boundary and again behind it** since §63: `engine_config` sets `osc52: Osc52::Disabled`, so `clipboard_store` returns before an event exists, and the catch-all arm of `Replies::send_event` would still drop the event if it ever arrived. Until §63 only the second of those was true, the field sitting at the crate's `OnlyCopy` default — the weakest 🛑 in this table, now the most explicit |
 | 52 (read) | Clipboard read | 🛑 | remote must not read local clipboard (§6) — the same two lines, and the direction where being explicit matters most: `OnlyCopy` refused the read as a *side effect* of allowing the write, so the read's refusal was never stated anywhere. `Disabled` states both |
@@ -1250,12 +1288,14 @@ half of iTerm's OSC 1337 namespace — **inline images among them since §70** �
 that makes every palette set and reset a no-op. Since §71 it also holds two refusals with **no danger
 behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
 cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
-control (`CSI 1–10 t`), the remote pointer shape (OSC 22), the palette stack (`CSI # p / # q`),
+control (`CSI 1–10 t`), the palette stack (`CSI # p / # q`),
 and
 notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
-cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off, which is
-the one thing about 🤷 worth watching: it is the mark most likely to be a conclusion rather than a
-finding, because nothing fails while it is wrong. That leaves the plain ❌ column short, and worth reading as the real list: the
+cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off; §77 then
+took off the **remote pointer shape** (OSC 22), which had sat there since §54. That is the one thing about
+🤷 worth watching: it is the mark most likely to be a conclusion rather than a finding, because nothing
+fails while it is wrong — three sections in a row now, and both times the entry had argued the sequence
+against an architecture cmote does not have. That leaves the plain ❌ column short, and worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the

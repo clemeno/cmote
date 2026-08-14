@@ -49,6 +49,7 @@ pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key e
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 mod osc; // frames OSC strings out of the stream for the scanners below, and sanitises what they keep (§17, §34, §54, §55, §69)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
+pub mod pointer; // reads the mouse pointer shape a remote asks for, OSC 22 — an allow-list (§77)
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
@@ -263,6 +264,7 @@ impl Terminal {
 			iterm: iterm::Iterm::default(),
 			progress: progress::Reports::default(),
 			icon: icon::Icon::default(),
+			pointer: pointer::Pointer::default(),
 			protect: protect::Protect::default(),
 			cancels: cancel::Cancel::default(),
 			rectangles: rect::Rectangles::default(),
@@ -301,6 +303,11 @@ impl Terminal {
 		// position on the grid, so it needs no split either — and `vte` has no arm for the code, so
 		// this scanner is the only thing in cmote that ever sees it.
 		self.icon.feed(bytes);
+		// The mouse pointer shape a remote asks for over its own grid (OSC 22, §77). A third
+		// latest-value reading with no place on the grid, so no split either — and like the icon
+		// name, nothing else in the stack ever sees it: `vte` parses the sequence and hands it to a
+		// `Handler` method left at its empty default body, which the engine never overrides.
+		self.pointer.feed(bytes);
 		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
 		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
 		// for the usual flow where a program sets attributes and then queries in the same write.
@@ -525,6 +532,11 @@ impl Terminal {
 			// collide with paths set on the main screen (§76). Both directions of the swap clear them,
 			// exactly as the pictures above are cleared and for the same reason.
 			self.paths.clear();
+			// And the pointer goes back to cmote (§77). The swap is exactly the moment a full-screen
+			// program starts or ends, so this is where a hand left hovering over a TUI's buttons
+			// would otherwise be inherited by the shell prompt the user quit back to — or by the
+			// program starting up, which has not asked for anything yet.
+			self.pointer.clear();
 		}
 	}
 
@@ -1041,6 +1053,17 @@ impl Terminal {
 		self.icon.name()
 	}
 
+	/// The mouse pointer shape a program last asked for over this grid (OSC 22, §77).
+	///
+	/// `Shape::Default` until one does, and again once one hands the pointer back or a full-screen
+	/// program starts or ends. Only ever one of the five shapes the module's allow-list passes, so a
+	/// caller drawing this value cannot draw a refused one — the check is the parser, not the
+	/// renderer. `ui::terminal` is where it becomes an iced `Interaction`, and it is scoped to the
+	/// grid widget alone: the shape stops at the edge of the terminal's own rectangle.
+	pub fn pointer_shape(&self) -> pointer::Shape {
+		self.pointer.shape()
+	}
+
 	/// Resize the grid when the window changes (§9). This only reflows our local
 	/// view; the remote pty is told separately via `SshCommand::Resize`, so the
 	/// two are kept in step by the caller (`app::on_window_resized`).
@@ -1387,6 +1410,12 @@ pub struct Terminal {
 	/// shape and no place on the grid — the same bytes are scanned here. Its module also declines
 	/// the icon half of OSC 0, which is a decision and not an omission; the reasoning is there.
 	icon: icon::Icon,
+	/// Reads the mouse pointer shape a remote asks for over its own grid (OSC 22, §77). Same
+	/// latest-value shape as the two above and read out of the same bytes for the same reason — the
+	/// engine parses this one and then drops it into an empty default `Handler` method. Its module
+	/// is an ALLOW-LIST of five shapes, which is what keeps a remote from painting cmote's own
+	/// drag-and-resize vocabulary over the grid or claiming that cmote itself is busy.
+	pointer: pointer::Pointer,
 	/// Reads the selective-erase sequences the engine drops — DECSCA, DECSED and DECSEL (§56). Fed by
 	/// the split advance, but for the opposite reason to the marks above: each of its requests has to
 	/// be applied with the engine advanced PAST the sequence, not up to it. Protection itself is not
@@ -2066,6 +2095,50 @@ mod tests {
 		terminal.process(b"\x1b]0;user@host: ~\x07");
 		assert_eq!(terminal.title().as_deref(), Some("user@host: ~"));
 		assert_eq!(terminal.icon_name(), Some("vim"));
+	}
+
+	#[test]
+	fn a_pointer_shape_reaches_the_grid_without_touching_anything_else() {
+		// §77. OSC 22 is parsed by `vte` and dropped into an empty default `Handler` method, so
+		// this whole path is cmote's own scanner — and like the icon name it must stay in its lane:
+		// the shape is the grid's, and the title, the chip and the text caret are left alone.
+		// Setting one is state and not a reply, so no bytes go back either.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]2;window\x07\x1b]1;vim\x07");
+		assert!(terminal.process(b"\x1b]22;pointer\x07").is_empty());
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Pointer);
+		assert_eq!(terminal.title().as_deref(), Some("window"));
+		assert_eq!(terminal.icon_name(), Some("vim"));
+	}
+
+	#[test]
+	fn the_pointer_shapes_that_are_cmotes_own_are_refused_at_the_boundary() {
+		// The refusal (§77), pinned where a remote would actually make it. `grab` and `col-resize`
+		// are what cmote's drag handles and splitters say, and `wait` would say cmote itself is
+		// hung — none of the three may be reachable from the wire.
+		//
+		// The order is the argument, the same way §69's is: a shape is set FIRST and the assertion
+		// is that it SURVIVED. That makes the refusal a decision about bytes cmote had, rather than
+		// a scanner that happened to be asleep.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]22;text\x07");
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Text);
+		terminal.process(b"\x1b]22;grab\x07\x1b]22;col-resize\x07\x1b]22;wait\x07");
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Text);
+	}
+
+	#[test]
+	fn a_full_screen_program_gives_the_pointer_back_when_it_quits() {
+		// The alternate-screen swap clears the shape in both directions (§77), which is the whole
+		// of the lifetime management this row needs: a TUI's hand must not be left hovering over
+		// the shell prompt the user quit back to, and a TUI starting up must not inherit one.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]22;crosshair\x07\x1b[?1049h");
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Default);
+		terminal.process(b"\x1b]22;pointer\x07");
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Pointer);
+		terminal.process(b"\x1b[?1049l");
+		assert_eq!(terminal.pointer_shape(), pointer::Shape::Default);
 	}
 
 	#[test]
