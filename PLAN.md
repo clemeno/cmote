@@ -9552,3 +9552,82 @@ permissive reading would let through a payload cmote does not understand.
   program asking gets the same silence as one asking for a notification.
 - **`allowFontOps` is a setting where cmote has a rule.** If a user ever wants a remote to pick the
   font — a plausible thing for one's own machine — this is a policy to revisit, not a law.
+
+## 92. A link is not its address (v4.0.0)
+
+§88 read OSC 8's specification and found the one parameter it defines:
+
+> `params` is an optional list of key=value assignments, separated by the `:` character… Character
+> cells that have the same target URI **and the same nonempty id** are always underlined together on
+> mouseover.
+
+cmote read neither. `link_run_at` walked outward from the hovered cell while neighbouring cells
+carried the same **URI**, and returned that contiguous span. Two things were wrong with it, in
+opposite directions, and §92 replaces the walk rather than widening it.
+
+### Correcting §88 first
+
+§88's row note said the URI comparison meant "two different links with one URI underline together",
+and while writing this section that looked wrong: `alacritty_terminal`'s `Hyperlink` derives
+`PartialEq` over both its `id` and its `uri`, so comparing whole links would have told them apart.
+
+It is wrong one layer further down, and §88's claim survives: **cmote's own seam drops the id**.
+`term/screen.rs` built its cell with `hyperlink: cell.hyperlink().map(|link| link.uri().to_owned())`,
+so by the time the renderer compared anything, only the address was left. The engine could tell two
+links apart and cmote had thrown away what it needed to.
+
+### The two directions
+
+**One address written twice is two links.** A page that prints the same URL on two adjacent runs — a
+listing, a diff, a table of the same host — had both underlined when the pointer was over either.
+The engine gives every `ESC ] 8` that carries no `id=` an identifier of its own (`<counter>_alacritty`),
+so it always knew they were different; the seam did not.
+
+**And a link split into runs is one link.** This is the case the parameter exists for, and the
+specification's own worked example: a program writes part of a URL, something else, then the rest,
+tying them with `id=1`. The contiguous walk stopped at the gap and underlined half a link.
+
+### What shipped
+
+`term/screen.rs` carries a `Link { id, uri }` instead of a bare URI. `Cell::hyperlink` still hands
+back the URI on its own — that is what opening one needs, and `link.rs`, the context menu and the
+pointer path are untouched — and `Cell::link` hands back the pair, for the one question that needs
+it: are these two cells the same link?
+
+The id has **no accessor**. It is for comparing links, never for showing or following one, and a
+generated `3_alacritty` means nothing to anybody — so the only way to use it is the derived
+`PartialEq`, and there is no way to read it out and act on it.
+
+The renderer stops computing a span. `link_at` reads the link under the pointer, `plan_runs` carries
+that link rather than a range of row-major indices, and each cell asks whether it holds the very same
+one. That is O(1) per cell where the old walk was O(link length) per hover, it needs neither the row
+count nor the column count, and it implements the specification exactly — including the
+non-contiguous case, which no span could have expressed.
+
+### UX
+
+Nothing about the affordance changes: the same single underline, on the same Ctrl-hover, over the
+same cells in every case that behaved correctly before. What changes is the two cases that did not —
+one link too many underlined, or one link underlined by half.
+
+### What it cost
+
+- `term/screen.rs`: a `Link` type, one accessor beside the existing one, the id carried across the
+  seam.
+- `src/ui/grid.rs`: the walk deleted, `hovered_link_run` → `hovered_link`, `plan_runs` re-parameterised,
+  the per-cell test rewritten. `std::ops::RangeInclusive` is no longer imported there.
+- Three unit tests, one per direction and one for the ordinary case; the hover-underline test now
+  builds its argument from a real link rather than a hand-written range.
+- Tests 1198 → 1200. **No row's mark moves**: 174 rows, ✅ 107 · ❌ 24 · 🛑 37 · 🤷 6.
+
+### Not done
+
+- **The underline still stops at the visible page.** A link whose other run has scrolled off is
+  underlined only where it shows, which is what a renderer that draws the viewport can do, and is
+  worth stating rather than discovering.
+- **The `id` is not used for anything else**, though the specification's intent is broader: an id is
+  what would let a click on either run of a split link open one URI, which already works because both
+  runs carry the URI anyway.
+- **`link.rs`'s scheme policy is unchanged and unexamined here.** A refused scheme is still drawn and
+  never opened (§24), and now underlines whole when hovered — the affordance says "this is one link",
+  not "this will open".

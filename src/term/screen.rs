@@ -95,7 +95,37 @@ pub struct Cell {
 	inverse: bool,
 	wide: bool,
 	wide_continuation: bool,
-	hyperlink: Option<String>,
+	hyperlink: Option<Link>,
+}
+
+/// The OSC 8 hyperlink a cell carries: where it points, and the `id` that says which link it is
+/// (§92).
+///
+/// Both halves are needed to answer "are these two cells the same link?", which is the question the
+/// Ctrl-hover underline asks. The specification's rule is that "character cells that have the same
+/// target URI and the same nonempty id are always underlined together on mouseover" — so the URI
+/// alone is not the identity: a page listing one address twice is two links, and highlighting both
+/// because the pointer is over one of them would claim a connection the document never made.
+///
+/// The `id` is always present here even when the remote sent none, because the engine generates one
+/// per `ESC ] 8` that carries no `id=` (`<counter>_alacritty`). That is what makes comparing the
+/// pair correct in both directions: two separate links get two generated ids and stay apart, and one
+/// link split into runs by the program carries one explicit id and comes back together.
+///
+/// It has no accessor of its own on purpose. The identifier is for **comparing** links, never for
+/// showing or following one — a generated `3_alacritty` means nothing to anybody — so the only way
+/// to use it is the `PartialEq` above, and there is no way to read it out and act on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+	id: String,
+	uri: String,
+}
+
+impl Link {
+	/// The URI the link points at, verbatim as the remote sent it.
+	pub fn uri(&self) -> &str {
+		&self.uri
+	}
 }
 
 impl Cell {
@@ -179,7 +209,14 @@ impl Cell {
 	/// back so a click on the cell can open the link. The bytes are the remote's verbatim —
 	/// what may actually be opened is `link`'s decision, not the cell's.
 	pub fn hyperlink(&self) -> Option<&str> {
-		self.hyperlink.as_deref()
+		self.hyperlink.as_ref().map(Link::uri)
+	}
+
+	/// The whole link on this cell — URI and identifier — for asking whether two cells belong to
+	/// the SAME link rather than merely to the same address (§92). `hyperlink` above is the URI on
+	/// its own, which is what opening one needs.
+	pub fn link(&self) -> Option<&Link> {
+		self.hyperlink.as_ref()
 	}
 }
 
@@ -467,9 +504,13 @@ fn build_cell(cell: &EngineCell) -> Cell {
 		wide: cell.flags.contains(Flags::WIDE_CHAR),
 		wide_continuation: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
 		// The engine shares one `Arc<Hyperlink>` across a link's cells; cmote's cell is owned
-		// per read (like its `text`), so the URI is copied out here — links are rare, so a
-		// blank cell still allocates nothing.
-		hyperlink: cell.hyperlink().map(|link| link.uri().to_owned()),
+		// per read (like its `text`), so both halves are copied out here — links are rare, so a
+		// blank cell still allocates nothing. The `id` comes along since §92: without it two
+		// separate links to one address cannot be told apart, and the hover underline has to.
+		hyperlink: cell.hyperlink().map(|link| Link {
+			id: link.id().to_owned(),
+			uri: link.uri().to_owned(),
+		}),
 	}
 }
 
