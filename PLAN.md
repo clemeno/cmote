@@ -9930,3 +9930,117 @@ had never had to be defended.
 - **The half-rule is stated here and nowhere structural.** It is a description of what §17, §34, §55,
   §78 and §82 already do, not a check anything enforces; the next silent read of a foreign dialect
   will be judged the same way this one was — by hand.
+
+## 97. The field that was a bug, and the two that were a rule (v4.0.0)
+
+§95 and §96 left three OSC 133 rows sitting at ❌, and the user asked for each to be settled: support
+it or refuse it. Two settled together on a rule this project already had. The third turned out not to
+be a gap at all — it was a **live misbehaviour**, and finding it took one more source.
+
+### The source that mattered was not a specification
+
+Contour and vtdn both describe the protocol. **kitty's shell-integration page describes the shell
+code that emits it**, which is a different and better thing: it shows what a real shell actually
+puts on the wire. Two facts came straight out of its zsh half:
+
+```
+mark2=$'%{\e]133;A;k=s\a%}'
+[[ $PS2 == *$mark2* ]] || PS2=${mark2}${PS2}
+```
+
+`PS2` is the **continuation** prompt — the `>` a shell draws for each further line of a command still
+being typed — and kitty prepends `133;A;k=s` to it. `PS1` carries no `k=` at all.
+
+### What cmote was doing with that
+
+`parse` ignores every field past the letter, so `133;A;k=s` read as a plain `Mark::PromptStart`, and
+`Prompts::apply` does two things with one of those:
+
+```rust
+Mark::PromptStart => {
+    self.state = CommandState::Prompt;
+    self.record(history_size, row);
+    self.pending = Some(Pending { prompt: absolute, output: None });
+}
+```
+
+So typing a three-line `for` loop under zsh + kitty integration produced **three prompt anchors**:
+three gutter ticks, three stops for Ctrl+Shift+Up — and the second half is worse than the cosmetic
+half. Each `PromptStart` restarts `pending`, so the command finally filed at `D` was anchored to its
+**last continuation line** instead of its prompt. Click that prompt's tick and the output it resolves
+is not the one below it.
+
+This was never a missing feature. It was a wrong answer that nobody had a shell configured to
+produce.
+
+**Fixed by reading the field in order to drop the mark.** An `A` carrying exactly `k=s` yields
+`None`: cmote's model has four phases and a continuation prompt is none of them, and the stream is
+already in the prompt phase when it arrives, so producing nothing leaves the state exactly right —
+no new variant, no new state, one branch.
+
+The match is on the exact value, and that asymmetry is deliberate: an unknown `k=` keeps the old
+behaviour, because mistaking a real prompt for a continuation **loses** a jump anchor while the
+reverse only adds one. Between two guesses, take the recoverable one.
+
+### The two that were a rule
+
+**`133 ; C ; cmdline=` / `cmdline_url=`** carries the command line — kitty's zsh half shell-quotes
+it, its fish half percent-encodes it. **`133 ; A ; cl=m`** is VS Code's hint that the prompt spans
+several lines. Both refused, on one ground they share:
+
+> The command line is already on the grid, in the rows between `B` and `C`. The prompt's extent is
+> already on the grid, in the rows between `A` and `B`.
+
+Both fields are the shell's **assertion** about something cmote **observes**, which is §71's
+second-source rule exactly — the rule that refused a fourth spelling of the cursor shape and kept
+cmote a second *reader* of the engine's state rather than a second *writer* of it. An assertion
+beside an observation is two sources for one fact, and when they disagree the remote wins.
+
+There is a second reason for the command line and it is the user's own ordering: showing it needs a
+surface that does not exist, and a new visual surface is the thing this pass ranks last. `cl=m` does
+not even have that much — honouring it would change nothing, since a jump anchors on the `A` line,
+which is the prompt's first line with or without the hint.
+
+Worth naming the contrast, because all three fields are hints about the prompt and they did not go
+the same way: **`k=s` was read because ignoring it made an existing feature wrong.** The other two
+were refused because honouring them would have needed a new one.
+
+### The third row stays ❌, and that is the answer
+
+`N`, `P` and `L` cannot be settled, and the reason is not that they are undocumented — it is that the
+reachable accounts **disagree about what `P` is**:
+
+- vtdn has Konsole tracking "REPL mode … for prompt (A/N/P)".
+- A zsh write-up uses `133;P;k=i` for `PS1` and `133;P;k=s` for `PS2` — `P` as the prompt mark
+  itself, with `A` alongside.
+- A Ghostty fork uses `133;P` for a prompt **redraw**, explicitly one that must *not* open a new
+  semantic block.
+
+In two of those, ignoring `P` is right. In the third, ignoring it means seeing **no prompts at all**.
+A letter cannot be supported or refused until it means one thing, so the honest mark is the gap, and
+`_ => None` remains the safe answer for the reason the `k=` asymmetry has: a wrong mark moves a jump
+and mis-bounds a command; no mark leaves both alone.
+
+### What it cost
+
+- `term/osc133.rs`: one branch in `parse`, the header block rewritten around five named fields, two
+  tests added (the field itself, and a whole multi-line entry yielding one prompt start).
+- Matrix: `k=s` added as ✅, the command line and `cl=m` moved **❌ → 🛑**, the letters row rewritten
+  around the disagreement; kitty's page added to the Evidence.
+- 179 → **180 rows: ✅ 109 · ❌ 26 · 🛑 39 · 🤷 6**. Tests 1204 → 1206.
+
+### Not done
+
+- **No test drives the bug through `Prompts::apply`.** The two added tests pin the scanner, which is
+  where the fix is; the tick-and-anchor consequence is argued in this section and in the row, not
+  demonstrated. A test that fed a multi-line entry to a whole `Terminal` and counted `visible_rows`
+  would have shown the old behaviour failing, and it was not written.
+- **`special_key=1` has no row.** fish emits it on an ordinary prompt start, cmote correctly reads
+  that as a prompt start, and the main row's "trailing fields are ignored" already covers it. Named
+  in the module and in one test so the next reader does not have to re-derive that it is not a kind.
+- **Nobody has run cmote against zsh with kitty's integration installed.** The fix is reasoned from
+  kitty's published shell code and pinned by tests against that exact byte string; it has not been
+  watched working.
+- **`L` was never sourced at all** — it appears in no page read across §95, §96 or §97, only in this
+  project's own earlier guess that kitty and WezTerm emit it. That guess is now recorded as
+  unsupported: kitty's page has no `L`, and WezTerm's documents no marker letters whatsoever.

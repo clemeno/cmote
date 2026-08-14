@@ -12,22 +12,34 @@
 // `"133", ";", "D", [ ";", exitcode ], ( 0x07 | 0x1b, "\\" )` and gives the bare form its own line,
 // "Command finished (no exit code)". Two write-ups are reachable, Contour's
 // (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`, read for §95) and vtdn's
-// (`vtdn.dev/docs/osc/osc133/`, read for §96), and between them they name three optional
-// `key=value` fields — cmote reads none of the three:
+// (`vtdn.dev/docs/osc/osc133/`, read for §96), plus kitty's own shell integration
+// (`sw.kovidgoyal.net/kitty/shell-integration/`, read for §97), which is not a write-up of the
+// protocol but the shell code that emits it. Between them they name five optional `key=value`
+// fields, and cmote reads exactly ONE:
 //
+//   133 ; A ; k=s                 — a SECONDARY prompt (zsh's PS2) — READ, and it suppresses the
+//                                   mark, because a continuation prompt is not a new prompt (§97)
 //   133 ; A ; click_events=1      — asks the terminal to report mouse clicks in the prompt area
 //   133 ; A ; cl=m                — VS Code's hint that the prompt spans several lines
-//   133 ; C ; cmdline_url=<pct>   — the command line being run, percent-encoded
+//   133 ; A ; special_key=1       — fish's own field on an ordinary prompt start; not a kind
+//   133 ; C ; cmdline= | cmdline_url=
+//                                 — the command line being run, shell-quoted (zsh) or
+//                                   percent-encoded (fish)
 //
-// The first is refused (§95): it turns on input reporting from a payload whose declared job is
-// marking where the prompt sits, which is a side door around the mouse modes (§10) and would make a
-// click inside the prompt behave unlike a click one line above it. The other two have no reader
-// here — and for `cl=m` there is nothing to gain, because a prompt jump anchors on the `A` mark's
-// own line, which is the prompt's first line whether or not the prompt has more (§96).
+// `click_events=1` is refused (§95): it turns on input reporting from a payload whose declared job
+// is marking where the prompt sits, which is a side door around the mouse modes (§10) and would make
+// a click inside the prompt behave unlike a click one line above it.
 //
-// There are also phase letters past the four: vtdn records Konsole as tracking "A/N/P" for the
-// prompt. Neither source gives `N` or `P` a syntax or a meaning, so an unrecognised letter yields
-// no mark rather than a guess (§96).
+// `cl=m` and the command line are refused on one shared ground (§97): cmote can already SEE both.
+// The prompt's extent is the grid between `A` and `B`; the command line is the grid between `B` and
+// `C`. Taking the shell's word for either would put an assertion beside an observation cmote holds
+// itself, and §71's rule is that the two can then disagree — with the remote winning.
+//
+// There are also phase letters past the four: `N`, `P` and `L` are all emitted somewhere. They are
+// NOT implemented, and the reason is that the reachable accounts of them disagree — vtdn has Konsole
+// tracking the prompt as "A/N/P", one zsh write-up has `133;P;k=i` for PS1 and `133;P;k=s` for PS2,
+// and a Ghostty fork uses `133;P` for a prompt REDRAW that must not open a new block. An
+// unrecognised letter therefore yields no mark rather than a guess (§96, §97).
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
@@ -122,7 +134,28 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 	// The phase letter is the whole next field; a stray longer field (`133;AA`) is not a mark we
 	// know, so it must not be mistaken for `A`.
 	match fields.next() {
-		Some(b"A") => Some(Mark::PromptStart),
+		Some(b"A") => {
+			// `k=s` marks a SECONDARY prompt — zsh's PS2, the one drawn for each continuation line
+			// of a command still being typed (kitty's shell integration prepends this exact mark to
+			// PS2; PS1 carries no `k=` at all). It is the one trailing field cmote cannot afford to
+			// ignore, because a continuation prompt is not a new prompt and treating it as one costs
+			// twice over (§97): every continuation line gets a gutter tick and a jump anchor, and —
+			// worse — `Prompts::apply` starts a fresh `pending` span at each, so the finished command
+			// is filed against its LAST continuation line instead of its prompt.
+			//
+			// Answered by dropping the mark rather than by carrying a new variant: cmote's model has
+			// four phases and a continuation prompt is none of them. The stream is already in the
+			// prompt phase when this arrives, so producing nothing leaves the state exactly right.
+			//
+			// Matched on the exact value. An unknown `k=` keeps the old behaviour deliberately —
+			// mistaking a real prompt for a continuation would LOSE a jump anchor, where the reverse
+			// only adds one, and between two guesses the recoverable one wins.
+			if fields.any(|field| field == b"k=s") {
+				None
+			} else {
+				Some(Mark::PromptStart)
+			}
+		}
 		Some(b"B") => Some(Mark::PromptEnd),
 		Some(b"C") => Some(Mark::OutputStart),
 		Some(b"D") => {
@@ -574,6 +607,40 @@ mod tests {
 		// nothing: a prompt jump anchors on this mark's own line, which is the prompt's first line
 		// with or without the hint (§96).
 		assert_eq!(marks(b"\x1b]133;A;cl=m\x07"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn a_secondary_prompt_is_not_a_prompt_start() {
+		// zsh's PS2 under kitty's shell integration, once per continuation line of a command still
+		// being typed. It must not anchor a prompt: the ticks would multiply and the command would
+		// be filed against its last continuation line (§97).
+		assert!(marks(b"\x1b]133;A;k=s\x07").is_empty());
+		// A real prompt carries no `k=` — and fish's own field on the same mark is not a kind, so
+		// it stays a prompt start.
+		assert_eq!(marks(b"\x1b]133;A\x07"), vec![Mark::PromptStart]);
+		assert_eq!(
+			marks(b"\x1b]133;A;special_key=1\x07"),
+			vec![Mark::PromptStart]
+		);
+		// An unknown kind keeps the old behaviour on purpose: losing a jump anchor is worse than
+		// gaining one.
+		assert_eq!(marks(b"\x1b]133;A;k=x\x07"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn a_multi_line_entry_anchors_only_its_real_prompt() {
+		// The shape the fix is for: PS1, the first line typed, two PS2 continuations, then the
+		// command runs. One prompt start, not three.
+		let stream = b"\x1b]133;A\x07$ \x1b]133;B\x07for i in 1 2\r\n\x1b]133;A;k=s\x07> do echo\r\n\x1b]133;A;k=s\x07> done\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		assert_eq!(
+			marks(stream),
+			vec![
+				Mark::PromptStart,
+				Mark::PromptEnd,
+				Mark::OutputStart,
+				Mark::CommandEnd(Some(0)),
+			]
+		);
 	}
 
 	#[test]
