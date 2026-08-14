@@ -1,4 +1,5 @@
-// term/notify.rs — name the desktop-notification spellings, so the refusal is stated (PLAN §79).
+// term/notify.rs — name the OSC payloads cmote refuses outright, so the refusal is stated
+// (PLAN §79, §90).
 //
 // A remote asking the terminal to raise a desktop notification is ONE feature in three spellings,
 // each an OSC payload and each from a different terminal's vocabulary:
@@ -7,7 +8,29 @@
 //   ESC ] 777 ; notify ; <title> ; <body>   BEL | ST   urxvt
 //   ESC ] 99  ; <metadata> ; <body>         BEL | ST   kitty, the "rich" one
 //
-// All three are REFUSED, and the reason is one line: a notification LEAVES the window. It lands on
+// Neither of the last two is a citation. §89 went to look: urxvt's manual page documents no OSC 777
+// at all, and ConEmu's page documents `9;1` through `9;4` and `9;9` but no bare `9;<text>` — that
+// spelling may be Windows Terminal's alone. The sequences are real and widely emitted; the names
+// beside them are folklore, and are left here as the names people use rather than as sources.
+//
+// OSC 9 IS MULTIPLEXED FIVE WAYS, which §89 found by reading ConEmu's own page and §90 acts on. Only
+// two of the five were modelled here before, and the other three were being declined as
+// notifications — the right outcome reached through the wrong description:
+//
+//   ESC ] 9 ; 1 ; <ms>     sleep the terminal          REFUSED here, by name (§90)
+//   ESC ] 9 ; 2 ; "<txt>"  raise a GUI message box     REFUSED here, by name (§90)
+//   ESC ] 9 ; 3 ; "<txt>"  set the tab's text          HONOURED — `term/icon.rs` (§90)
+//   ESC ] 9 ; 4 ; st ; pr  progress                    HONOURED — `term/progress.rs` (§54)
+//   ESC ] 9 ; 9 ; "<cwd>"  working directory           HONOURED — `term/cwd.rs` (§17)
+//
+// The two refused there are not notifications and are not refused for the notification's reason.
+// `9;1` lets a remote STOP the terminal in front of the person using it, for as long as it likes —
+// every other refusal in this file is about something escaping the tab, and this one is about the
+// user's own time. `9;2` is the notification argument only more so: a notification leaves the
+// window, and a modal dialog leaves the window and takes the focus with it.
+//
+// All three NOTIFICATION spellings are refused, and the reason is one line: a notification LEAVES
+// the window. It lands on
 // the user's desktop, outlives the tab that asked for it, and on Windows sits in the Action Center
 // after the session is gone. That hands a remote a channel to the machine itself, and a compromised
 // or merely chatty host would spam it. cmote's rule throughout is that a remote may change what its
@@ -31,54 +54,86 @@
 // module that already frames every OSC payload cmote sees and already owned the bare-OSC-9 refusal
 // (§54) — so the check runs on the real stream rather than in a corner nothing feeds.
 //
-// It changes no behaviour today, and the row in TERMINAL_COMPATIBILITY_PLAN says so. What it
-// changes is that the refusal is performed by cmote's own code instead of being agreed with in
-// principle — which is the whole distinction between that table's 🛑 and 🤷 columns.
+// The notification half changes no behaviour, and the rows in TERMINAL_COMPATIBILITY_PLAN say so.
+// What it changes is that the refusal is performed by cmote's own code instead of being agreed with
+// in principle — the whole distinction between that table's 🛑 and 🤷 columns. `9;1` and `9;2` are
+// the same argument at one remove: nothing here would sleep or raise a dialog either, and until §90
+// nothing here could say which payload it was declining or why.
 
-/// Which spelling of the refused notification feature a payload turned out to be (§79). Carried
-/// out of `refused` rather than a bare `bool` so a test can say WHICH one it recognised, and so a
-/// later reader can see at a glance that the three are one decision and not three coincidences.
+/// What a refused payload turned out to be (§79, §90). Carried out of `refused` rather than a bare
+/// `bool` so a test can say WHICH one it recognised, and so a later reader can see at a glance that
+/// the three notification spellings are one decision and not three coincidences.
+///
+/// The last two are not notifications and are not spellings of one — they are the other two members
+/// of ConEmu's `OSC 9` multiplex that cmote refuses, kept here because this is the module that
+/// already owns "which `OSC 9` sub-code is this?" and splitting that question across two files is
+/// how the two halves come to disagree (§90).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Spelling {
+pub enum Refused {
 	/// `OSC 9 ; <text>` — ConEmu's, adopted by Windows Terminal. The likeliest of the three to
 	/// arrive here, because it is what a Windows-side script reaches for.
 	ConEmu,
 	/// `OSC 777 ; notify ; <title> ; <body>` — urxvt's, and the one `notify-send` wrappers emit.
 	Urxvt,
-	/// `OSC 99 ; <metadata> ; <body>` — kitty's, with per-notification identity, urgency and
-	/// icon metadata in the first field. Rich, and refused for exactly the same one reason.
+	/// `OSC 99 ; <metadata> ; <body>` — kitty's, whose first field is a `:`-separated `key=value`
+	/// list: `p` the payload type, `i` an identifier, `d` a done flag, `e` base64, `f` the
+	/// application name, `u` the urgency and `n` an icon (§89). Rich, and refused for the same one
+	/// reason as the two plain ones.
 	Kitty,
+	/// `OSC 9 ; 1 ; <ms>` — **sleep the terminal** for that many milliseconds (§90).
+	///
+	/// Not a notification and worse than one. Every other refusal in this module is about something
+	/// escaping the tab; this one is a remote stopping the terminal in front of the person using it,
+	/// for as long as it likes. A hostile or merely broken host could hold the UI still with a
+	/// handful of bytes, and there is no reason a remote should be able to spend the user's time.
+	Sleep,
+	/// `OSC 9 ; 2 ; "<txt>"` — raise a **GUI message box** (§90).
+	///
+	/// The notification argument, only more so: a notification leaves the window, and a modal dialog
+	/// leaves the window AND takes the focus with it. Text the remote chose, in a window wearing
+	/// cmote's identity, interrupting whatever the user was doing.
+	MessageBox,
 }
 
-/// Read one OSC payload as a request for a desktop notification, or `None` when it is not one.
+/// Read one OSC payload as something cmote refuses outright, or `None` when it is not one.
 ///
-/// The awkward case is OSC 9, which is MULTIPLEXED: `9;4;…` is the progress report `term::progress`
-/// reads and `9;9;…` is the Windows working directory `term::cwd` reads, while anything else after
-/// `9;` is the notification. So the two sub-codes cmote actually honours are excluded by name here,
-/// and they are excluded with their trailing `;` — the same prefixes those two modules strip — so
-/// this function and they can never disagree about which payload belongs to whom.
+/// The awkward case is OSC 9, which is MULTIPLEXED five ways (§89): `9;3;…` is the tab name
+/// `term::icon` reads, `9;4;…` the progress report `term::progress` reads and `9;9;…` the Windows
+/// working directory `term::cwd` reads, while `9;1;…` and `9;2;…` are refused here by name and
+/// anything else after `9;` is the notification. The three sub-codes cmote HONOURS are excluded with
+/// their trailing `;` — the same prefixes those three modules strip — so this function and they can
+/// never disagree about which payload belongs to whom.
 ///
 /// The match is on the whole numeric field, never on a prefix of it: `99;` is kitty's but `990;`
 /// and `999;` are somebody else's, and a prefix test would have swallowed both.
-pub fn refused(payload: &[u8]) -> Option<Spelling> {
+pub fn refused(payload: &[u8]) -> Option<Refused> {
 	if let Some(rest) = payload.strip_prefix(b"9;") {
-		// The two OSC 9 sub-codes cmote reads. Neither is a notification, and getting this wrong
-		// in the permissive direction would break two shipped features rather than leak one.
-		if rest.starts_with(b"4;") || rest.starts_with(b"9;") {
+		// The THREE OSC 9 sub-codes cmote reads. None is a notification, and getting this wrong in
+		// the permissive direction would break three shipped features rather than leak one.
+		if rest.starts_with(b"4;") || rest.starts_with(b"9;") || rest.starts_with(b"3;") {
 			return None;
 		}
-		return Some(Spelling::ConEmu);
+		// The two ConEmu defines that cmote refuses on their own terms. Named before the fall-through
+		// below, because until §90 they arrived here and were declined as NOTIFICATIONS — the right
+		// outcome reached through the wrong description, which is a refusal nobody can audit.
+		if rest.starts_with(b"1;") || rest == b"1" {
+			return Some(Refused::Sleep);
+		}
+		if rest.starts_with(b"2;") || rest == b"2" {
+			return Some(Refused::MessageBox);
+		}
+		return Some(Refused::ConEmu);
 	}
 	// urxvt's OSC 777 is itself a dispatcher — `777;<module>;…` — and only the `notify` module is
 	// this feature. A different module is not refused here because it is not this decision; it is
 	// unimplemented, which is a different row and a different mark.
 	if payload.starts_with(b"777;notify;") || payload == b"777;notify" {
-		return Some(Spelling::Urxvt);
+		return Some(Refused::Urxvt);
 	}
 	// kitty's carries metadata in its first field, so everything after the number varies. The
 	// number is the whole of what identifies it.
 	if payload.starts_with(b"99;") || payload == b"99" {
-		return Some(Spelling::Kitty);
+		return Some(Refused::Kitty);
 	}
 	None
 }
@@ -90,14 +145,14 @@ mod tests {
 	#[test]
 	fn the_three_spellings_are_one_refusal() {
 		// The point of the module: one decision, recognised in whichever dialect it arrives in.
-		assert_eq!(refused(b"9;Build finished"), Some(Spelling::ConEmu));
+		assert_eq!(refused(b"9;Build finished"), Some(Refused::ConEmu));
 		assert_eq!(
 			refused(b"777;notify;Build;finished in 4s"),
-			Some(Spelling::Urxvt)
+			Some(Refused::Urxvt)
 		);
 		assert_eq!(
 			refused(b"99;i=1:d=0:p=title;Build finished"),
-			Some(Spelling::Kitty)
+			Some(Refused::Kitty)
 		);
 	}
 
@@ -109,6 +164,38 @@ mod tests {
 		assert_eq!(refused(b"9;4;1;30"), None);
 		assert_eq!(refused(b"9;4;0"), None);
 		assert_eq!(refused(b"9;9;C:\\Users\\CLEm"), None);
+	}
+
+	/// The two ConEmu sub-codes that are refused on their own terms rather than as notifications
+	/// (§90). Named, so a later hand cannot start honouring a remote's sleep or its dialog by
+	/// widening some other arm.
+	#[test]
+	fn the_sleep_and_the_message_box_are_refused_as_themselves() {
+		assert_eq!(refused(b"9;1;500"), Some(Refused::Sleep));
+		assert_eq!(refused(b"9;2;\"are you sure?\""), Some(Refused::MessageBox));
+		// Malformed, missing their argument — still theirs, and still refused.
+		assert_eq!(refused(b"9;1"), Some(Refused::Sleep));
+		assert_eq!(refused(b"9;2"), Some(Refused::MessageBox));
+	}
+
+	/// And they are matched on the whole sub-code: `9;10;…` is not `9;1`, and reading it as one
+	/// would let a payload cmote does not understand wear a name it has a policy for.
+	#[test]
+	fn a_longer_sub_code_is_not_mistaken_for_a_shorter_one() {
+		assert_eq!(refused(b"9;10;500"), Some(Refused::ConEmu));
+		assert_eq!(refused(b"9;21;x"), Some(Refused::ConEmu));
+		assert_eq!(
+			refused(b"9;30;x"),
+			Some(Refused::ConEmu),
+			"not the tab text"
+		);
+	}
+
+	/// The tab text is ConEmu's third sub-code and cmote HONOURS it (§90, `term/icon.rs`), so this
+	/// function must not claim it — the exclusion that keeps the two modules from disagreeing.
+	#[test]
+	fn the_tab_text_is_not_a_notification() {
+		assert_eq!(refused(b"9;3;\"build\""), None);
 	}
 
 	#[test]
@@ -136,7 +223,7 @@ mod tests {
 	fn only_the_urxvt_notify_module_is_this_decision() {
 		// OSC 777 is a dispatcher. Refusing the whole number would be claiming a decision about
 		// modules nobody here has looked at.
-		assert_eq!(refused(b"777;notify;title;body"), Some(Spelling::Urxvt));
+		assert_eq!(refused(b"777;notify;title;body"), Some(Refused::Urxvt));
 		assert_eq!(refused(b"777;precmd"), None);
 		assert_eq!(refused(b"777;"), None);
 	}
@@ -145,9 +232,9 @@ mod tests {
 	fn a_notification_with_no_text_is_still_a_notification() {
 		// An empty body is a valid — and pointless — request in all three dialects. It is refused
 		// on what it ASKS for, not on whether it would have shown anything.
-		assert_eq!(refused(b"9;"), Some(Spelling::ConEmu));
-		assert_eq!(refused(b"99;"), Some(Spelling::Kitty));
-		assert_eq!(refused(b"99"), Some(Spelling::Kitty));
-		assert_eq!(refused(b"777;notify"), Some(Spelling::Urxvt));
+		assert_eq!(refused(b"9;"), Some(Refused::ConEmu));
+		assert_eq!(refused(b"99;"), Some(Refused::Kitty));
+		assert_eq!(refused(b"99"), Some(Refused::Kitty));
+		assert_eq!(refused(b"777;notify"), Some(Refused::Urxvt));
 	}
 }

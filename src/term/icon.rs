@@ -1,6 +1,16 @@
-// term/icon.rs — the icon name a remote sets, which cmote draws on the tab chip (PLAN §69).
+// term/icon.rs — the icon name a remote sets, which cmote draws on the tab chip (PLAN §69, §90).
 //
-//   OSC 1    ESC ] 1 ; name    BEL | ST
+//   OSC 1      ESC ] 1 ; name          BEL | ST   the standard spelling
+//   OSC 9;3    ESC ] 9 ; 3 ; "name"    BEL | ST   ConEmu's, quoted in its own documentation (§90)
+//
+// TWO SPELLINGS, ONE WRITER. ConEmu calls its sequence "set the tab text" and cmote's chip is the
+// only tab text it has, so the two mean the same thing and land in the same field through this one
+// module — which is what §71 asks of a second spelling. A second spelling is only refused when it
+// would be a second SOURCE for a field somebody else owns (iTerm's `CursorShape`, which would write
+// the engine's cursor from outside), and this is not that. It is honoured for the reason `9;9` is
+// (§17): cmote is a Windows client, and ConEmu's vocabulary is what a Windows-side shell reaches for.
+// The name is capped, sanitised and appended to the endpoint exactly as OSC 1's is — a remote gets
+// no more of the chip through the new spelling than it had through the old.
 //
 // The sequence is one of the oldest in the vocabulary and the one whose MEANING has moved furthest.
 // It was the label X11 put under a window that had been iconified — a thing Windows does not have,
@@ -91,11 +101,22 @@ impl Icon {
 /// `1337;` (iTerm2's namespace) all fail the match, and the last of those matters most because it
 /// is the one cmote actually reads elsewhere.
 fn parse(payload: &[u8]) -> Option<String> {
-	let rest = payload.strip_prefix(b"1;")?;
+	// ConEmu's spelling arrives quoted in its own documentation, exactly as `9;9`'s path does, and
+	// `term/cwd.rs` trims the quotes off that one for the same reason — they frame the value, they
+	// are not part of it.
+	let (rest, quoted) = match payload.strip_prefix(b"1;") {
+		Some(rest) => (rest, false),
+		None => (payload.strip_prefix(b"9;3;")?, true),
+	};
 	// Lossy rather than strict: a name is decoration, and a remote with one bad byte in a UTF-8
 	// sequence should get a replacement character on its chip, not silently keep the old name.
 	let text = String::from_utf8_lossy(rest);
-	Some(super::osc::sanitize(text.trim(), MAX_NAME_CHARS))
+	let text = if quoted {
+		text.trim().trim_matches('"')
+	} else {
+		text.trim()
+	};
+	Some(super::osc::sanitize(text, MAX_NAME_CHARS))
 }
 
 #[cfg(test)]
@@ -113,6 +134,38 @@ mod tests {
 	fn osc1_sets_the_icon_name() {
 		// The usual announcement, BEL-terminated: what `vim` sends when it opens a file.
 		assert_eq!(track(b"\x1b]1;vim\x07").as_deref(), Some("vim"));
+	}
+
+	/// ConEmu's spelling of the same thing (§90), quoted the way its own documentation writes it.
+	#[test]
+	fn the_conemu_spelling_sets_the_same_name() {
+		assert_eq!(track(b"\x1b]9;3;\"build\"\x07").as_deref(), Some("build"));
+		assert_eq!(
+			track(b"\x1b]9;3;build\x07").as_deref(),
+			Some("build"),
+			"the quotes frame the value and are optional"
+		);
+	}
+
+	/// And it clears the chip the same way, so a shell can hand the name back on either spelling.
+	#[test]
+	fn the_conemu_spelling_clears_with_an_empty_name() {
+		let mut icon = Icon::default();
+		icon.feed(b"\x1b]9;3;\"build\"\x07");
+		icon.feed(b"\x1b]9;3;\"\"\x07");
+		assert_eq!(icon.name(), None);
+	}
+
+	/// The other four members of ConEmu's OSC 9 multiplex are not this one (§89, §90). `9;4` and
+	/// `9;9` belong to other modules and `9;1` / `9;2` are refused outright — reading any of them
+	/// as a tab name would put a millisecond count or a dialog's text on the chip.
+	#[test]
+	fn the_other_osc_nine_sub_codes_are_not_a_tab_name() {
+		assert_eq!(track(b"\x1b]9;1;500\x07"), None, "sleep");
+		assert_eq!(track(b"\x1b]9;2;\"a dialog\"\x07"), None, "message box");
+		assert_eq!(track(b"\x1b]9;4;1;30\x07"), None, "progress");
+		assert_eq!(track(b"\x1b]9;9;\"C:\\\\Users\\\\CLEm\"\x07"), None, "cwd");
+		assert_eq!(track(b"\x1b]9;a notification\x07"), None, "the bare form");
 	}
 
 	#[test]

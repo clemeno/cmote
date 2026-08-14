@@ -2409,6 +2409,44 @@ mod tests {
 	}
 
 	#[test]
+	fn the_conemu_spelling_of_the_tab_name_reaches_the_same_chip() {
+		// §90. ConEmu's `OSC 9;3` is the same field as OSC 1, through the same module, so the two
+		// spellings must land in the same place and neither may touch the title. Asserted with the
+		// title set FIRST, so what this shows is the title SURVIVING — §77's ordering.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b]2;window\x07");
+		assert!(terminal.process(b"\x1b]9;3;\"build\"\x07").is_empty());
+		assert_eq!(terminal.icon_name(), Some("build"));
+		assert_eq!(terminal.title().as_deref(), Some("window"));
+		// And the standard spelling still wins the field afterwards — one writer, two doors.
+		terminal.process(b"\x1b]1;vim\x07");
+		assert_eq!(terminal.icon_name(), Some("vim"));
+	}
+
+	/// The two ConEmu sub-codes cmote refuses (§90) reach the screen as nothing at all — no tab
+	/// name, no printed text, no reply. A remote must not be able to sleep the terminal or raise a
+	/// dialog, and the test that says so is the only thing standing between the policy and a later
+	/// hand widening an arm.
+	#[test]
+	fn a_remotes_sleep_and_message_box_get_nothing() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b]1;kept\x07");
+		assert!(terminal.process(b"\x1b]9;1;5000\x07").is_empty());
+		assert!(
+			terminal
+				.process(b"\x1b]9;2;\"are you sure?\"\x07")
+				.is_empty()
+		);
+		terminal.process(b"X");
+		assert_eq!(read(&terminal, 0, 0, 20), "X", "none of it was printed");
+		assert_eq!(
+			terminal.icon_name(),
+			Some("kept"),
+			"and none of it named the tab"
+		);
+	}
+
+	#[test]
 	fn an_icon_name_reaches_the_tab_strip_without_touching_the_title() {
 		// §69. OSC 1 is a code `vte` has no arm for, so this whole path is cmote's own scanner —
 		// and it must stay in ITS lane: the icon name goes to the chip and the title bar is left

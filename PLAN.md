@@ -9441,3 +9441,74 @@ fourth *Not done* ("nothing records which rows have been read back") made visibl
 - **kitty's `OSC 30001` / `30101`** — push and pop the colour stack — have never appeared in this
   table at all. They are the same refusal as `OSC 21`'s set half and `CSI # P`, and they have no row.
 - **The SGR table is still unchecked.** Four sweeps have gone past it.
+
+## 90. ConEmu's OSC 9 is five sequences, and cmote knew two (v4.0.0)
+
+§89 read ConEmu's own page and found `OSC 9` multiplexed five ways where this project had modelled
+three of them — two honoured and everything else swept into one refusal:
+
+    ESC ] 9 ; 1 ; <ms>      sleep the terminal
+    ESC ] 9 ; 2 ; "<txt>"   raise a GUI message box
+    ESC ] 9 ; 3 ; "<txt>"   set the tab's text
+    ESC ] 9 ; 4 ; st ; pr   progress            — honoured since §54
+    ESC ] 9 ; 9 ; "<cwd>"   working directory   — honoured since §17
+
+The first three had no row. All three were refused, and all three were refused **as desktop
+notifications**, because `term/notify.rs` calls any `OSC 9` payload that is not `9;4;` or `9;9;` a
+notification. The outcome was right for two of them and wrong for the third, and the *description*
+was wrong for all three — which is the failure this document has now found six times, and the first
+time it has found it in cmote's own code rather than in a note.
+
+### The two that stay refused, now by name
+
+**`9;1` sleeps the terminal.** It is the one refusal in this project that is not about something
+leaving the tab. Everything else here — notifications, the clipboard, window ops, inline images — is
+refused because it reaches past the tab into the desktop or the user's own data. This one reaches
+into the user's **time**: a remote that can say `ESC ] 9 ; 1 ; 60000` holds the window still for a
+minute in front of the person at the keyboard, and a broken or hostile host can do it in a loop with
+eleven bytes a go. Nothing in cmote would honour it, and after §90 nothing can start to by accident.
+
+**`9;2` raises a GUI message box.** The notification argument at one further remove. A notification
+leaves the window; a modal dialog leaves the window **and takes the focus**, carrying text the remote
+chose in a window wearing cmote's identity. §54's line covers it and now says so.
+
+Both are `Refused::Sleep` and `Refused::MessageBox`, named in the enum `notify.rs` already used to
+say *which* refusal a payload was — the same reasoning §79 gave for that enum existing at all: a
+refusal that cannot say what it refused is one no test can audit.
+
+### The one that ships
+
+**`9;3` sets the tab's text**, which is what `OSC 1` already does and what cmote's chip already is.
+Two spellings of one field, through one module, which is exactly the test §71 set for a second
+spelling: a spelling is refused when it would be a second **source** for a field somebody else owns —
+iTerm's `CursorShape`, which would write the engine's cursor from outside — and honoured when it
+reaches the same field through the same writer, as `OSC 50` does for DECSCUSR's shape.
+
+It is honoured for `9;9`'s reason (§17): **cmote is a Windows client**, and ConEmu's vocabulary is
+what a Windows-side shell reaches for. The value is quoted in ConEmu's documentation exactly as
+`9;9`'s path is, and `term/icon.rs` trims the quotes the way `term/cwd.rs` already does for that one.
+
+Nothing about the chip's *rules* moves: the name is capped at 24 characters, sanitised, and appended
+**after** the endpoint (§55's anti-spoof rule), and an empty name clears it. A remote gets no more of
+the chip through the new door than it had through the old — which is the whole of why adding a second
+spelling is safe here and would not be if the chip's label could be replaced rather than extended.
+
+### What it cost
+
+- `term/notify.rs`: two enum variants, three lines of matching, `Spelling` renamed `Refused` for a
+  name that covers what it now carries, and the header's map of the multiplex.
+- `term/icon.rs`: one alternative prefix and the quote trim, plus the header's argument for two doors.
+- Three new matrix rows, six new tests, two at the seam.
+- Tests 1189 → 1197. Matrix 171 → **174 rows: ✅ 107 · ❌ 24 · 🛑 36 · 🤷 7**.
+
+### Not done
+
+- **`9;1` and `9;2` are still silent**, like every other refusal here. A program that asks for a
+  dialog and gets nothing cannot tell that from a terminal that has not heard of the sequence.
+- **The bare `OSC 9 ; <text>` attribution is still folklore.** ConEmu's page documents `9;1`–`9;4`
+  and `9;9` and no bare form, so the notification spelling this table credits to ConEmu may be
+  Windows Terminal's alone (§89). Recorded in the module header, not chased.
+- **Nothing tells the user a tab was renamed by the remote** rather than by cmote. That was true of
+  `OSC 1` before this and is no more or less true now, but a second spelling doubles the ways in.
+- **`9;3` is not cleared by RIS**, exactly as `OSC 1` is not (§69's note about the title's own
+  survival). Consistent with the old spelling, which is the point, and still nobody's decision.
