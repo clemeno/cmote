@@ -93,6 +93,16 @@ pub enum Refused {
 	/// leaves the window AND takes the focus with it. Text the remote chose, in a window wearing
 	/// cmote's identity, interrupting whatever the user was doing.
 	MessageBox,
+	/// `OSC 50 ; <font>` — xterm's font operations (§88, §91).
+	///
+	/// The font is chrome the **user** chose, which is the argument the fixed colour scheme stands on
+	/// (§6): a remote may change what its own tab shows, not what the application looks like. xterm
+	/// gates these behind an `allowFontOps` resource for the same reason, and its own default is off.
+	///
+	/// The one `OSC 50` payload cmote HONOURS is `CursorShape=`, another terminal's convention that
+	/// `vte` parses on the same number (§88) — excluded here by name, so this refusal and that
+	/// feature cannot come to disagree about which payload is which.
+	Font,
 }
 
 /// Read one OSC payload as something cmote refuses outright, or `None` when it is not one.
@@ -134,6 +144,14 @@ pub fn refused(payload: &[u8]) -> Option<Refused> {
 	// number is the whole of what identifies it.
 	if payload.starts_with(b"99;") || payload == b"99" {
 		return Some(Refused::Kitty);
+	}
+	// xterm's OSC 50 is the FONT (§88). The cursor-shape payload cmote honours on the same number is
+	// another terminal's, and is excluded first — the same shape of exclusion the OSC 9 sub-codes get
+	// above, and for the same reason: one number, two meanings, and the two must not disagree.
+	if let Some(rest) = payload.strip_prefix(b"50;")
+		&& !rest.starts_with(b"CursorShape=")
+	{
+		return Some(Refused::Font);
 	}
 	None
 }
@@ -196,6 +214,23 @@ mod tests {
 	#[test]
 	fn the_tab_text_is_not_a_notification() {
 		assert_eq!(refused(b"9;3;\"build\""), None);
+	}
+
+	/// xterm's `OSC 50` is the font, and the font is the user's (§88, §91). The cursor shape shares
+	/// the number and is honoured, so the exclusion is asserted from both sides — a refusal that
+	/// swallowed `CursorShape=` would break a shipped feature to tighten a policy that already holds.
+	#[test]
+	fn the_font_is_refused_and_the_cursor_shape_on_the_same_number_is_not() {
+		assert_eq!(refused(b"50;9x15bold"), Some(Refused::Font));
+		assert_eq!(refused(b"50;#+1"), Some(Refused::Font), "a font-menu index");
+		assert_eq!(
+			refused(b"50;"),
+			Some(Refused::Font),
+			"an empty payload is still xterm's font namespace, and refusing it is the conservative \
+			 reading — the permissive one would let a payload cmote does not understand through"
+		);
+		assert_eq!(refused(b"50;CursorShape=1"), None);
+		assert_eq!(refused(b"500;something"), None, "not a prefix match");
 	}
 
 	#[test]

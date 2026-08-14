@@ -9512,3 +9512,43 @@ spelling is safe here and would not be if the chip's label could be replaced rat
   `OSC 1` before this and is no more or less true now, but a second spelling doubles the ways in.
 - **`9;3` is not cleared by RIS**, exactly as `OSC 1` is not (§69's note about the title's own
   survival). Consistent with the old spelling, which is the point, and still nobody's decision.
+
+## 91. The font is the user's (v4.0.0)
+
+§88 found that xterm's `OSC 50` is **Set Font** and split the row: the `CursorShape=` payload cmote
+honours on that number is another terminal's convention, and the font half was left 🤷 — a refusal
+this document held and nothing in the program performed.
+
+§90 gave `term/notify.rs` a charter wide enough to hold it: not "the notification spellings" but
+"the OSC payloads cmote refuses outright". So the font goes in beside them.
+
+**The argument is §6's, unchanged.** The font is chrome the **user** chose, exactly as the colour
+scheme is, and a remote may change what its own tab shows rather than what the application looks
+like. xterm agrees in its own way: it gates these operations behind an `allowFontOps` resource whose
+default is off, which is a terminal shipping the same policy as a setting rather than as a rule.
+
+**What changes is who says it.** `vte` drops a non-`CursorShape=` payload on `OSC 50` to `unhandled`,
+so nothing here would have honoured it either way — the same position `kitty 99` and `OSC 777` were
+in before §79, and the same answer: a refusal resting on nobody happening to match is one no test can
+see and one an engine bump can undo in silence.
+
+**The exclusion is the careful part.** `OSC 50 ; CursorShape=N` is a shipped feature (§60, §71) on the
+number being refused, so it is excluded by name and asserted from both sides — a refusal that
+swallowed the cursor shape would break something working in order to tighten a policy that already
+held. An **empty** payload (`OSC 50 ;`) is refused: it is still xterm's font namespace, and the
+permissive reading would let through a payload cmote does not understand.
+
+### What it cost
+
+- `term/notify.rs`: one enum variant, four lines, one test asserting both directions.
+- The matrix row moves **🤷 → 🛑**. 174 rows: ✅ 107 · ❌ 24 · **🛑 37 · 🤷 6**.
+- Tests 1197 → 1198.
+
+### Not done
+
+- **It changes no behaviour, and is not claimed to.** Nothing in cmote could set a font if it wanted
+  to — there is no font-setting path to guard.
+- **Silent, like every refusal here.** xterm answers an `OSC 50 ; ?` font query; cmote does not, and a
+  program asking gets the same silence as one asking for a notification.
+- **`allowFontOps` is a setting where cmote has a rule.** If a user ever wants a remote to pick the
+  font — a plausible thing for one's own machine — this is a policy to revisit, not a law.
