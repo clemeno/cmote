@@ -9696,3 +9696,76 @@ order the questions were written.
   events (§10, modes 1000–1006), so "no locator" is true of the DEC protocol and might read to a
   careless caller as "no pointing device at all". The protocols are different and the answer is
   correct; the possible misreading is xterm's too.
+
+## 94. DEC's own manual, at last (v4.0.0)
+
+§84 read the definitions back against xterm and closed with: *"ECMA-48 and the VT420 manual were not
+read. The rows resting on DEC's definitions rather than xterm's — DECSCA, DECSED / DECSEL, the four
+rectangle operations, DECSACE's default, whatever unit DECMSR really uses — are still unquoted, and
+DEC is where the terminal's own vocabulary comes from."*
+
+`vt100.net` hosts the VT510 programmer reference one page per sequence, which is exactly the shape
+this needed. Four rows settled, one row added.
+
+### Two open questions, both closed in cmote's favour
+
+**DECSACE's default is `0`**, the wrapped stream — stated on DEC's own page, where ctlseqs lists the
+three values and names no default. §84 had softened the row to "cmote powers up in stream" because it
+could not confirm the claim; `rect.rs`'s `#[default] Stream` agrees with DEC, and the row can say so.
+
+**DECFRA's range is DEC's, and so is the behaviour.** "`Pch` can be any value from 32 to 126 or from
+160 to 255. If `Pch` is not in this range, then the terminal ignores the DECFRA command." §58 had the
+range right and credited it to xterm; §88, finding no range in ctlseqs, rewrote the row to call it
+"cmote's own allow-list". Both attributions were wrong and the range was right the whole time —
+including the part nobody had checked, that DEC prescribes **ignoring the command** rather than
+clamping or substituting, which is what `rect.rs` does.
+
+That is worth naming for what it is: two sections in a row **moved a correct fact between wrong
+owners**. §88's rewrite was more honest than §58's claim and still not right, because "the source I
+can reach does not say this" is not the same as "this has no source".
+
+### DECSTR's list, quoted rather than paraphrased
+
+Eighteen items. cmote sends the eleven anything in this stack models — DECTCEM, IRM, DECOM, DECAWM,
+DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA, DECSC — and the other seven (KAM, DECNRCM,
+DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM) name state neither `vte`, nor the engine, nor cmote
+has, so nothing is left stale by not sending them.
+
+And the departure §72 took on purpose is now citable rather than described: the list says **"Autowrap
+(DECAWM): No autowrap"**, and cmote leaves it on because `xterm-256color` declares `am` and its `rs2`
+sends no `\E[?7h` after a soft reset. Two documents, and cmote follows the one whose name it answers
+to in `TERM`.
+
+### The row that was missing
+
+**`CSI Ps # y` is XTCHECKSUM** — "the bits of `Ps` modify the calculation of the checksum returned by
+DECRQCRA", with bits for negating the result, reporting the VT100 video attributes, omitting blanks,
+omitting uninitialised cells, and masking the cell value to 8 bits.
+
+It has been carried on this project's list of noticed-and-unchased things since §60, and it matters
+to a row that ships: cmote's DECRQCRA answers with **xterm's algorithm at its DEC-compatible
+default**, and this is the sequence that would let a program ask for a different one. A program that
+sets it and then reads a checksum gets a number computed under rules it did not choose.
+
+It is a ❌ rather than a refusal — nobody decided against it — and it dies where §88 found the rest of
+the `#` intermediates dying: `csi_dispatch` matches no `#` at all, so XTCHECKSUM, XTPUSHSGR and both
+colour stacks reach the same nothing.
+
+### What it cost
+
+- Four notes corrected, one row added, one Evidence subsection for DEC's manual.
+- Matrix 174 → **175 rows: ✅ 108 · ❌ 25 · 🛑 36 · 🤷 6**. No code changed.
+
+### Not done
+
+- **DECSCA, DECSED and DECSEL were not read**, nor DECERA, DECSERA, DECCRA, DECCARA, DECRARA or
+  DECRQCRA itself. The manual has a page for each and this pass took five. The rectangle family's
+  behaviour is pinned by tests either way; what is unquoted is the *definitions*.
+- **ECMA-48 is still unread**, and SCP (§76) is its sequence, not DEC's — the one row in the CSI table
+  whose vocabulary comes from neither source this project has now consulted.
+- **XTCHECKSUM is a gap and stays one.** Implementing it means five bits of behaviour on a checksum
+  nobody has been observed to request, and the DEC-compatible default is the one a VT-conformant
+  program expects. Named now, so the next reader chooses rather than not knowing.
+- **DECMSR's unit is still unknown** (§84 asked; ctlseqs gives none; DEC's own DECMSR page was not
+  fetched in this pass). The row no longer claims one, which is enough for it to be right, and not
+  enough for it to be complete.

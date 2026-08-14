@@ -1303,7 +1303,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | K | Erase in line | ✅ | EL erases to the end of the line, to its start, or the whole line |
 | Ps " q | Character protection (DECSCA) | ✅ | DECSCA marks the cells written after it protected or erasable, which decides whether a selective erase takes them (§56, `term/protect.rs`) |
 | ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | DECSED / DECSEL are the selective erase — ED's and EL's three extents, sparing protected cells, where a plain `CSI J` / `CSI K` still takes them (§56) |
-| ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. Autowrap is left **on**, `xterm-256color` declaring `am` (§72) |
+| ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. DEC's published list is eighteen items and cmote sends the eleven anything here models — DECTCEM, IRM, DECOM, DECAWM, DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA and DECSC; the other seven (KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM) name state neither `vte` nor the engine nor cmote has. **One deliberate departure**: DEC's list says "Autowrap (DECAWM): No autowrap" and cmote leaves it **on**, because `xterm-256color` declares `am` and its `rs2` sends no `\E[?7h` after this (§72, §94) |
 | b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
@@ -1314,11 +1314,12 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps ; 2 SP k | Select character path (SCP) — presentation to data | 🛑 | the other update mode of the same sequence: `Ps2 = 2` asks the terminal to write the drawing back into the data component — over the only copy of what the host sent (§76, `term/scp.rs`) |
 | $ z (DECERA) | Erase rectangular area | ✅ | erases the rectangle given by top, left, bottom and right; corners default to the page edges, an end past the edge clamps, and a backwards rectangle is a no-op (§58, `term/rect.rs`) |
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb: protected cells stand (§58) |
-| $ x (DECFRA) | Fill rectangular area | ✅ | fills a rectangle with one character stamped from the pen, so it carries the colours and attributes a printed glyph would. `Pch` is limited to 32–126 and 160–255, printable ASCII and printable Latin-1 — cmote's own allow-list, xterm's ctlseqs naming no range at all (§58, §84) |
+| $ x (DECFRA) | Fill rectangular area | ✅ | fills a rectangle with one character stamped from the pen, so it carries the colours and attributes a printed glyph would. DEC's own range: "`Pch` can be any value from 32 to 126 or from 160 to 255. If `Pch` is not in this range, then the terminal ignores the DECFRA command" — which is what cmote does, dropping the whole sequence (§58, §84, §94) |
 | $ v (DECCRA) | Copy rectangular area | ✅ | copies a rectangle to another origin, whole cells — colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph, and the overlapping case is read out whole first. The two page parameters are ignored (§58) |
-| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0`/`1` the wrapped stream between the corners, `2` the rectangle, exact. cmote powers up in stream; RIS resets it and DECSTR does not. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59, §84) |
+| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0` (**DEC's stated default**) and `1` the wrapped stream between the corners, `2` the rectangle. RIS resets it and DECSTR does not — DEC's soft-reset list does not name it, and §72 honours that list rather than widening it. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59, §84, §94) |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
+| Ps # y (XTCHECKSUM) | Select checksum extension | ❌ | "the bits of `Ps` modify the calculation of the checksum returned by DECRQCRA": `0` do not negate the result, `1` do not report the VT100 video attributes, `2` do not omit the checksum for blanks, `3` omit it for cells never initialised, `4` do not mask the cell value to 8 bits. cmote always uses the DEC-compatible default the row above describes, and a program cannot ask for another — a **gap**, and one that dies in the parser: `csi_dispatch` matches no `#` intermediate at all, the same place XTPUSHSGR and both colour stacks end up (§60, §88, §94) |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined (§84) |
 | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`, §84) |
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
@@ -1332,7 +1333,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | = c | Tertiary DA | ✅ | DA3 asks for the terminal's unit id; answered with the constant `00434D45` and never a machine-derived one (§36, `term/query.rs`) |
 | ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`, §84) |
 | ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`, §84) |
-| Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pv $ y` in the ANSI spelling as well as the private one (§60) |
+| Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pm $ y` in the ANSI spelling as well as the private one, `Pm` being `0` not recognised, `1` set, `2` reset, `3` permanently set, `4` permanently reset (§60, §94) |
 | # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
 | # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel. **RIS empties the stack** — DECSTR does not, on the same split DECSACE has, and neither does the alternate-screen swap (§86) |
 
@@ -1807,6 +1808,33 @@ Quoted where a row's wording now rests on it.
   cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with
   **no default named**, so "the state a terminal powers up in" is `rect.rs`'s `#[default] Stream` and the
   VT420 manual behind it, not this document.
+
+### DEC's own manual (`vt100.net/docs/vt510-rm/`, read for §94)
+
+The VT510 programmer reference, one page per sequence — the source for everything in the CSI table
+that predates xterm, and the one §84 said it had not read.
+
+- **DECSACE's default is `0`**, the wrapped stream, stated as such on its own page: "`0` (default):
+  DECCARA or DECRARA affect the stream of character positions… `2`: DECCARA and DECRARA affect all
+  character positions in the rectangular area." §84 could not confirm this from ctlseqs, which lists
+  the three values and names no default, and softened the row to "cmote powers up in stream". It is
+  DEC's default as well, and `rect.rs`'s `#[default] Stream` matches it.
+- **DECFRA's range is DEC's, not xterm's.** "`Pch` can be any value from 32 to 126 or from 160 to
+  255. If `Pch` is not in this range, then the terminal ignores the DECFRA command." §88 credited the
+  range to xterm and recorded that ctlseqs states none; the range is real, the attribution was wrong,
+  and DEC also prescribes the *behaviour* cmote already had — ignore the command, rather than clamp
+  or substitute.
+- **DECSTR's list is eighteen items**, and cmote sends the eleven anything in this stack models:
+  DECTCEM, IRM, DECOM, DECAWM, DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA, DECSC. The other
+  seven — KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM — name state neither `vte`, nor
+  the engine, nor cmote has, so nothing is left stale by not sending them (§72). The list says
+  **"Autowrap (DECAWM): No autowrap"**, which is the departure §72 took deliberately and can now cite
+  rather than paraphrase.
+- **`CSI Ps # y` is XTCHECKSUM** (xterm's, from the text build of ctlseqs): "the bits of `Ps` modify
+  the calculation of the checksum returned by DECRQCRA", with five bits for negation, video
+  attributes, blanks, uninitialised cells and 8-bit masking. It had no row until §94.
+- **DECRQM's reply values**: `0` not recognised, `1` set, `2` reset, `3` permanently set,
+  `4` permanently reset.
 
 ### The vendor extensions (each terminal's own documentation, read for §89)
 
