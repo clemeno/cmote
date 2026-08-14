@@ -21,8 +21,9 @@
 // WHY THE ALLOW-LIST. `CSI ? Ps n` is a family, and xterm answers nine more values of it: printer
 // status (15), UDK lock (25), keyboard status (26), locator availability and type (55 / 56),
 // macro space (62), a memory checksum (63), data integrity (75) and multi-session configuration (85).
-// Cmote answers exactly one of them, and the nine are refused rather than unimplemented, because a
-// reply is an advertisement (§71) and every one of these advertises a machine rather than a page:
+// Cmote answers THREE of them — DECXCPR and the two locator questions (§93) — and the other seven
+// are refused rather than unimplemented, because a reply is an advertisement (§71) and every one of
+// those seven advertises a machine rather than a page:
 //
 //   * 15 / 25 / 62 / 63 / 75 / 85 describe hardware cmote does not have — a printer, a user-defined-key
 //     store, a macro store, that store's checksum, a data-integrity check, a multi-session controller.
@@ -32,9 +33,16 @@
 //     cmote's identity replies name the program and never the user's machine, which is why DA3 answers a
 //     constant unit id rather than a serial number. A remote must not learn the layout in front of
 //     the person at the other end off a query they never see.
-//   * 55 / 56 describe the DEC locator, a pointing-device protocol cmote does not implement. An
-//     honest negative exists here (`CSI ? 53 n`, "no locator") and is not sent — see PLAN §82's
-//     "Not done", which is the right place for a possibility nobody has asked for.
+//
+// TWO OF THE NINE CAME BACK OFF THAT LIST IN §93, and the line they crossed is worth stating.
+// `55` and `56` ask whether a DEC locator is present and what type it is — a pointing-device
+// protocol cmote does not implement. xterm's answers for a terminal without one are `CSI ? 53 n`
+// ("no locator") and `CSI ? 57 ; 0 n` ("cannot identify"), and those two advertise NOTHING: they
+// state an absence, which is the one thing a terminal lacking the equipment can say truthfully.
+// That is the whole test the other seven fail — "printer ready" or a macro-space byte count is a
+// claim about hardware that is not there, while "there is no locator" is a claim about hardware that
+// is not there being not there. The same shape as DECRQM's honest "not recognised" for mode 69,
+// which this project already prefers to silence, and it removes a sender left waiting out a timeout.
 //
 // The refusal is cmote's own, in the same construction `term/iterm.rs` uses for OSC 1337 keys,
 // `term/pointer.rs` for pointer shapes and `link.rs` for URI schemes: the scanner reads the whole
@@ -53,9 +61,14 @@
 /// The escape byte that leads every CSI sequence.
 const ESC: u8 = 0x1b;
 
-/// The one parameter cmote answers: DECXCPR, the cursor position. Every other value of `Ps` is on the
-/// far side of the allow-list the module header explains.
+/// DECXCPR, the cursor position — the parameter this module was built for (§82).
 const CURSOR_POSITION: u16 = 6;
+
+/// "Is there a locator?" (§93). Answered with the honest negative below.
+const LOCATOR_STATUS: u16 = 55;
+
+/// "What kind of locator?" (§93). Answered with the other honest negative.
+const LOCATOR_TYPE: u16 = 56;
 
 /// The longest parameter run buffered inside one sequence. DECXCPR's is a single digit; anything
 /// longer is malformed, and refusing to grow past this keeps a hostile stream from ballooning our
@@ -65,6 +78,18 @@ const MAX_PARAMS: usize = 32;
 /// The most intermediate bytes buffered. DECXCPR has none at all — they are collected only so that a
 /// near miss carrying one is rejected rather than mistaken for it.
 const MAX_INTERMEDIATES: usize = 4;
+
+/// Which of the DEC-private status reports cmote answers (§82, §93).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+	/// `CSI ? 6 n` — DECXCPR, where the cursor is. Answered from the live cursor, which is why this
+	/// whole module is split-fed.
+	CursorPosition,
+	/// `CSI ? 55 n` — is a locator available? Answered "no", which is a constant.
+	LocatorStatus,
+	/// `CSI ? 56 n` — what kind of locator? Answered "cannot identify", also a constant.
+	LocatorType,
+}
 
 /// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
 /// bytes, then intermediate bytes, then one final byte.
@@ -101,7 +126,7 @@ impl Dsr {
 	/// of the boundary is not about the engine's behaviour — it is about the cursor being read once
 	/// the whole sequence is behind it, so that a request cannot report a position from the middle of
 	/// its own final byte.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<usize> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -143,8 +168,8 @@ impl Dsr {
 					}
 					// The final byte ends the sequence, so this is where it is judged.
 					0x40..=0x7e => {
-						if self.is_cursor_request(byte) {
-							requests.push(index + 1);
+						if let Some(request) = self.request(byte) {
+							requests.push((index + 1, request));
 						}
 						self.state = Scan::Text;
 					}
@@ -159,21 +184,28 @@ impl Dsr {
 		requests
 	}
 
-	/// Whether the sequence just completed is DECXCPR — `CSI ? 6 n`, the marker and the parameter both
-	/// required, and no second parameter.
+	/// Which of the three questions cmote answers this is, or `None` for the rest of the family.
 	///
-	/// The near misses this keeps out: `CSI 6 n` without the marker is the ANSI spelling, which is the
-	/// ENGINE's and is answered there (answering it here as well would give the program two replies to
-	/// one question); `CSI > 6 n` carries a marker DEC never defined for this final byte; and every
-	/// other `Ps` is the allow-list doing its job.
+	/// `CSI ? Ps n` requires the marker and one parameter. The near misses this keeps out: `CSI 6 n`
+	/// without the marker is the ANSI spelling, which is the ENGINE's and is answered there (answering
+	/// it here as well would give the program two replies to one question); `CSI > 6 n` carries a
+	/// marker DEC never defined for this final byte; and every other `Ps` is the allow-list doing its
+	/// job.
 	///
 	/// A second parameter rules the sequence out rather than being ignored, which is a deliberate
 	/// tightening over `term/tabs.rs`'s reading of DECST8C. DSR takes exactly one `Ps`, so `CSI ? 6 ; 1 n`
 	/// is a sequence cmote does not fully understand — and answering the part it recognises would be
 	/// the generous reading this project keeps finding at the bottom of its own mistakes.
-	fn is_cursor_request(&self, final_byte: u8) -> bool {
-		(final_byte, self.marker, self.intermediates.as_slice()) == (b'n', Some(b'?'), &[][..])
-			&& self.only_param() == Some(CURSOR_POSITION)
+	fn request(&self, final_byte: u8) -> Option<Request> {
+		if (final_byte, self.marker, self.intermediates.as_slice()) != (b'n', Some(b'?'), &[][..]) {
+			return None;
+		}
+		match self.only_param()? {
+			CURSOR_POSITION => Some(Request::CursorPosition),
+			LOCATOR_STATUS => Some(Request::LocatorStatus),
+			LOCATOR_TYPE => Some(Request::LocatorType),
+			_ => None,
+		}
 	}
 
 	/// The sole parameter as a number. `None` when there is more than one, when the digits are
@@ -212,20 +244,46 @@ pub fn cursor_reply(row: u16, col: u16) -> Vec<u8> {
 	format!("\x1b[?{};{}R", row + 1, col + 1).into_bytes()
 }
 
+/// "There is no locator" — xterm's `CSI ? 53 n`, the answer to `CSI ? 55 n` (§93).
+///
+/// This and the one below are the two replies §82 disclosed and did not send. They are the exception
+/// that proves the rule the rest of the family is refused under: **a reply is an advertisement**
+/// (§71), and these advertise nothing. They state an ABSENCE, which is the one thing a terminal
+/// without the equipment can say truthfully — the same shape as DECRQM's honest "not recognised" for
+/// mode 69, which this project already prefers to silence.
+///
+/// The alternative was silence, and silence is not neutral: a program that asks whether a locator is
+/// there and hears nothing cannot tell that from a terminal still thinking about it, so it waits out
+/// its own timeout before deciding. `query.rs`'s founding argument, applied where §82 said it applied
+/// and then did not act.
+pub const NO_LOCATOR: &[u8] = b"\x1b[?53n";
+
+/// "Cannot identify the locator" — xterm's `CSI ? 57 ; 0 n`, the answer to `CSI ? 56 n` (§93).
+///
+/// The type question's negative. xterm answers `CSI ? 57 ; 1 n` for a mouse; the `0` says there is
+/// nothing to describe, which is true here and says nothing about the machine.
+pub const NO_LOCATOR_TYPE: &[u8] = b"\x1b[?57;0n";
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 
 	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
-	fn scan(bytes: &[u8]) -> Vec<usize> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
 		Dsr::default().feed(bytes)
+	}
+
+	/// Just the offsets, for the tests that are about WHERE a sequence was found rather than which
+	/// question it carried.
+	fn offsets(bytes: &[u8]) -> Vec<usize> {
+		scan(bytes).into_iter().map(|(offset, _)| offset).collect()
 	}
 
 	/// The sequence itself, and the offset it reports: ONE PAST the final byte.
 	#[test]
 	fn a_cursor_position_request_is_found_just_past_its_final_byte() {
-		assert_eq!(scan(b"\x1b[?6n"), vec![5]);
-		assert_eq!(scan(b"ab\x1b[?6ncd"), vec![7]);
+		assert_eq!(offsets(b"\x1b[?6n"), vec![5]);
+		assert_eq!(offsets(b"ab\x1b[?6ncd"), vec![7]);
 	}
 
 	/// The allow-list is one value wide, and it is matched on the whole number rather than a prefix of
@@ -239,12 +297,22 @@ mod tests {
 		assert!(scan(b"\x1b[?66n").is_empty());
 	}
 
-	/// The nine other values xterm answers, refused by name — the module header's argument, pinned so
+	/// The two locator questions, answered with xterm's own negatives (§93). Both are constants, so
+	/// what this pins is that the scanner tells them apart and that neither is mistaken for the other.
+	#[test]
+	fn the_locator_questions_get_their_honest_negatives() {
+		assert_eq!(scan(b"\x1b[?55n"), vec![(6, Request::LocatorStatus)]);
+		assert_eq!(scan(b"\x1b[?56n"), vec![(6, Request::LocatorType)]);
+		assert_eq!(NO_LOCATOR, b"\x1b[?53n", "xterm's 'no locator'");
+		assert_eq!(NO_LOCATOR_TYPE, b"\x1b[?57;0n", "and its 'cannot identify'");
+	}
+
+	/// The seven values xterm answers that cmote refuses by name — the module header's argument, pinned so
 	/// a later hand cannot start advertising a printer, a keyboard nationality or a macro store by
 	/// widening this list without a test going red.
 	#[test]
 	fn the_status_reports_that_would_speak_for_the_machine_are_refused() {
-		for parameter in [15, 25, 26, 55, 56, 62, 63, 75, 85] {
+		for parameter in [15, 25, 26, 62, 63, 75, 85] {
 			let request = format!("\x1b[?{parameter}n");
 			assert!(
 				scan(request.as_bytes()).is_empty(),
@@ -288,7 +356,7 @@ mod tests {
 		assert!(dsr.feed(b"[?").is_empty());
 		assert!(dsr.feed(b"6").is_empty());
 		// The offset is into THIS chunk, which is where the split advance uses it.
-		assert_eq!(dsr.feed(b"n"), vec![1]);
+		assert_eq!(dsr.feed(b"n"), vec![(1, Request::CursorPosition)]);
 	}
 
 	/// A control byte inside a CSI abandons the sequence rather than extending it, so the `n` that
@@ -311,7 +379,7 @@ mod tests {
 	/// they came, so each is answered from the cursor as it stood at its own sequence.
 	#[test]
 	fn two_requests_in_one_chunk_are_both_reported() {
-		assert_eq!(scan(b"\x1b[?6n\x1b[?6n"), vec![5, 10]);
+		assert_eq!(offsets(b"\x1b[?6n\x1b[?6n"), vec![5, 10]);
 	}
 
 	/// xterm's two-parameter form, one-based, with no page number — the quoted reply in the module

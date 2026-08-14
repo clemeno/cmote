@@ -9631,3 +9631,68 @@ one link too many underlined, or one link underlined by half.
 - **`link.rs`'s scheme policy is unchanged and unexamined here.** A refused scheme is still drawn and
   never opened (§24), and now underlines whole when hovered — the affordance says "this is one link",
   not "this will open".
+
+## 93. The two replies that advertise nothing (v4.0.0)
+
+§82 refused all nine of the DEC-private status reports beside DECXCPR, and disclosed two of them
+under *Not done*:
+
+> **`55` and `56` have an honest negative that is not sent.** xterm answers "no locator"
+> (`CSI ? 53 n`) and "cannot identify" (`CSI ? 57 ; 0 n`), and those advertise nothing… The
+> stalled-sender argument that carried DECXCPR applies to them exactly. They are silent because
+> nobody has asked, which is the honest reason and not a good one.
+
+They are sent now, and the line they cross is the point of this section.
+
+### Why these two and not the other seven
+
+The family is refused because **a reply is an advertisement** (§71). `CSI ? 15 n` answering "printer
+ready" is a claim about hardware that is not there; a macro-space byte count invents a store; and
+`CSI ? 26 n` would name the user's keyboard layout, which §36 forbids outright.
+
+The locator pair is different in kind, and the difference is not a matter of degree. xterm's answers
+for a terminal without a locator are **statements of absence**: "there is no locator", "the locator
+cannot be identified". A terminal lacking the equipment can say those truthfully, which is exactly
+what it cannot do for the other seven — there is no honest value for "how much macro space", only a
+fiction or a silence.
+
+So the rule the family is refused under does not reach them, and what is left is `query.rs`'s founding
+argument: an unanswered query stalls its sender. A program asking whether a locator is there and
+hearing nothing cannot tell that from a terminal still deciding, so it waits out its own timeout to
+learn what six bytes could have told it.
+
+It is the same shape as DECRQM's honest `0` for mode 69 — "not recognised" — which this document
+already prefers to silence, and it is worth noticing that the preference was on record for one row
+and not applied to these two for eleven sections.
+
+### What shipped
+
+`term/dsr.rs`'s allow-list widens from one value to three and its `feed` reports **which** question
+each offset carried, so `term/mod.rs` answers a cursor position from the live cursor and the two
+locator questions from constants. `Split::CursorReport` becomes `Split::Dsr(dsr::Request)`.
+
+The two negatives ride the split even though they are constants and could have waited for the end of
+the chunk like XTVERSION does. One route through one scanner is easier to keep right than two, and
+the ordering falls out for free — a test asks both in one write and gets the answers back in the
+order the questions were written.
+
+### What it cost
+
+- `term/dsr.rs`: two constants, a `Request` enum, the allow-list widened, two tests.
+- `term/mod.rs`: the split variant carries its request, `report_cursor_position` becomes `answer_dsr`,
+  one seam test added and one narrowed from nine parameters to seven.
+- The row moves **🛑 → ✅**. 174 rows: **✅ 108 · ❌ 24 · 🛑 36 · 🤷 6**.
+- Tests 1200 → 1202.
+
+### Not done
+
+- **The locator protocol itself is still absent** — DECELR, DECSLE, DECRQLP, the locator reports. The
+  row that moved is the two *questions*, and answering them honestly is what a terminal without the
+  protocol should do. There is no row for the protocol, and nobody has asked for one.
+- **The other seven stay silent**, and silence still tells a program nothing. The stalled-sender
+  argument applies to them too; what does not apply is an answer they could give truthfully, which is
+  why they are refused rather than deferred.
+- **`CSI ? 53 n` is sent even to a program that never asked about a mouse.** cmote does report mouse
+  events (§10, modes 1000–1006), so "no locator" is true of the DEC protocol and might read to a
+  careless caller as "no pointing device at all". The protocols are different and the answer is
+  correct; the possible misreading is xterm's too.

@@ -421,7 +421,7 @@ impl Terminal {
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
 					Split::TabStops => self.set_default_tabs(),
-					Split::CursorReport => self.report_cursor_position(),
+					Split::Dsr(request) => self.answer_dsr(request),
 					Split::Path(request) => self.select_character_path(request),
 					Split::SgrStack(request) => self.apply_sgr_stack(request),
 				}
@@ -738,9 +738,18 @@ impl Terminal {
 	/// the question sat, exactly as DECRQCRA's checksum does (§60). So a program that writes `CSI 5 n`
 	/// and `CSI ? 6 n` in one breath gets the two answers back in the order it asked for them, with no
 	/// second reply path to keep in step.
-	fn report_cursor_position(&self) {
-		let (row, col) = self.screen().cursor_position();
-		let reply = dsr::cursor_reply(row, col);
+	fn answer_dsr(&self, request: dsr::Request) {
+		let reply = match request {
+			dsr::Request::CursorPosition => {
+				let (row, col) = self.screen().cursor_position();
+				dsr::cursor_reply(row, col)
+			}
+			// The two honest negatives (§93). Constants, so unlike the cursor they would read the
+			// same answered after the chunk — they are answered here because they arrive through
+			// the same scanner, and one route is easier to keep right than two.
+			dsr::Request::LocatorStatus => dsr::NO_LOCATOR.to_vec(),
+			dsr::Request::LocatorType => dsr::NO_LOCATOR_TYPE.to_vec(),
+		};
 		self.replies
 			.lock()
 			.expect("reply buffer mutex poisoned")
@@ -1610,11 +1619,12 @@ enum Split {
 	/// one meaning and no parameters beyond the `5` that identifies it, so the offset is the whole
 	/// event. Applied on the far side of its sequence, as the two above are.
 	TabStops,
-	/// DECXCPR, the DEC-private cursor-position question (§82). Carries nothing — the sequence has one
-	/// parameter and it is the one that identifies it, so the offset is the whole event. The only split
-	/// in this list that produces a REPLY rather than an effect, which is why it has to be here at all:
-	/// the cursor it reports is the cursor with the engine advanced exactly to the question.
-	CursorReport,
+	/// One of the DEC-private status reports cmote answers — DECXCPR, or a locator question (§82,
+	/// §93). The only split in this list that produces a REPLY rather than an effect, which is why
+	/// DECXCPR has to be here at all: the cursor it reports is the cursor with the engine advanced
+	/// exactly to the question. The two locator answers are constants and ride along because they
+	/// come out of the same scanner.
+	Dsr(dsr::Request),
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::Request),
 	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
@@ -1639,7 +1649,7 @@ struct Scanned {
 	cancels: Vec<usize>,
 	rectangles: Vec<(usize, rect::Request)>,
 	tab_resets: Vec<usize>,
-	cursor_requests: Vec<usize>,
+	cursor_requests: Vec<(usize, dsr::Request)>,
 	paths: Vec<(usize, scp::Request)>,
 	sgr_stack: Vec<(usize, sgrstack::Request)>,
 }
@@ -1725,7 +1735,7 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 	merged.extend(
 		cursor_requests
 			.into_iter()
-			.map(|offset| (offset, Split::CursorReport)),
+			.map(|(offset, request)| (offset, Split::Dsr(request))),
 	);
 	merged.extend(
 		paths
@@ -3515,7 +3525,7 @@ mod tests {
 	fn the_status_reports_that_would_speak_for_the_machine_get_no_answer() {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"\x1b[6;7H");
-		for parameter in [15, 25, 26, 55, 56, 62, 63, 75, 85] {
+		for parameter in [15, 25, 26, 62, 63, 75, 85] {
 			let request = format!("\x1b[?{parameter}n");
 			assert!(
 				terminal.process(request.as_bytes()).is_empty(),
@@ -3525,6 +3535,19 @@ mod tests {
 		assert_eq!(terminal.process(b"\x1b[?6n"), b"\x1b[?6;7R".to_vec());
 		// And nothing any of them carried reached the page.
 		assert_eq!(read(&terminal, 0, 0, 40), "");
+	}
+
+	/// The two that came back off that list in §93. Both are answered, both with the negative xterm
+	/// sends for a terminal that has no locator — and asked in one write, so what this also shows is
+	/// the two answers arriving in the order the questions did.
+	#[test]
+	fn the_locator_questions_are_answered_with_the_absence() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[?55n"), b"\x1b[?53n".to_vec());
+		assert_eq!(terminal.process(b"\x1b[?56n"), b"\x1b[?57;0n".to_vec());
+		let both = terminal.process(b"\x1b[?56n\x1b[?55n");
+		assert_eq!(both, b"\x1b[?57;0n\x1b[?53n".to_vec());
+		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
 	}
 
 	/// A question is not text. Neither the sequence cmote answers nor the nine it refuses may leave a
