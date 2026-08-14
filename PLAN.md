@@ -8185,3 +8185,105 @@ that lands and silently does nothing.
   implementing a pile of VT400-and-later sequences: the whole rectangular family, DECRQCRA, and now this.
   xterm gates DECST8C on `terminal_id >= 400`. Whether the reply should say what cmote actually does is a
   real question and a separate one — it is a claim every program reads, not a row in a table.
+
+## 75. The stance that was living in a note (v4.0.0)
+
+Third time the same question, one row further down again: should SCP read ✅ or 🛑?
+
+```
+| Ps SP k | Select character path (SCP) | ❌ | parsed and dropped — same shape: `vte` calls
+  `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
+```
+
+`CSI Ps1 ; Ps2 SP k` selects the **character path** — `1` left-to-right, `2` right-to-left — and how the
+data and presentation components track each other. It is the bidirectional-text control.
+
+### Not ✅ — §72's question answers no
+
+The question §72 introduced: is this a **shorthand** for sequences the terminal already takes? §74's tab
+walk was, and got built out of TBC, CR, HTS and CUF. This one is not, and it is not even close. There is
+no sequence in cmote's repertoire that sets a direction, no per-cell or per-line direction state to set,
+and no renderer path that could act on one.
+
+What is actually being asked for is a **second coordinate space**. A terminal that reorders has the order
+the bytes arrived in and the order the glyphs are drawn in, and they are not the same. Everything §40
+built on the absolute document coordinate reads the first while the user points at the second: the
+selection, the find bar's match spans, the OSC 133 prompt marks, the Ctrl-hover link runs, the sixel
+placements, the rectangular family's corners. A character path is that second space threaded through all
+of them. This is §73's answer — a capability with nothing to translate into — with more behind it than
+margins had.
+
+### Not 🛑 — §74's question answers no
+
+§74's test for a 🛑: does cmote's own code refuse this, and if not, would writing that code repair
+anything? §57's cancel was a repair, because an unrefused DECSLRM stole the program's saved cursor. Here
+`vte` parses the sequence in full — both parameters, into `ScpCharPath` and `ScpUpdateMode`, with a third
+value for either reaching `unhandled!()` before the call — and hands it to `set_scp`, whose body in the
+trait is `{}` and which `alacritty_terminal` never overrides. Nothing is stolen, nothing is misparsed,
+nothing else is touched. A 🛑 would be refusal code written to keep a harmless sequence broken.
+
+### 🤷, which the legend already describes word for word
+
+> **🤷** is the same decision with **nothing behind it**: the sequence dies upstream — no `vte` dispatch
+> arm, or a `Handler` method `alacritty_terminal` leaves at its empty default body — so cmote is never
+> offered it and pays nothing to refuse it.
+
+That is this row exactly, second clause. And the giveaway had been sitting in the note the whole time:
+*"Bidi anyway, which cmote does not do."* That is a **stance**, and it was parked under ❌, the mark for a
+gap that could still become work. Same shape as §73, where a refusal cmote's own code performed was
+parked under the mark for a sequence that could still land. A note that argues with its own mark is the
+cheapest finding in this document and the one it keeps producing.
+
+### The work the row produced: the decision itself
+
+§6's title is *deliberately excluded — policy, not gap*, and it had no entry for bidi. So a 🤷 pointing at
+§6 would have pointed at nothing. §6 now states it, in the shape OSC 22's entry set: what is being
+refused, why, who does the declining, and the closing sentence that the reasoning is why cmote *would*
+refuse it while nothing in cmote has to.
+
+One line of the renderer is what makes the stance real rather than aspirational, and it was written for
+something else entirely. `ui/grid.rs` batches adjacent cells of one style into a run for drawing, and
+
+```rust
+let seals = is_wide || !glyph.is_ascii();
+```
+
+seals every non-ASCII cell into a run of its own — because a glyph the bundled font lacks needs the
+shaping-and-fallback path and ASCII does not. The side effect is that the text shaper is never handed
+more than one grapheme cluster at a time, so it has nothing to reorder. Glyphs go down one cell at a
+time, in grid order, and a remote cannot make this terminal display bytes in an order other than the one
+they arrived in.
+
+Worth being precise about what that is and is not. It is **not** a refusal — the renderer never sees the
+sequence, and a 🛑 would be the wrong mark for a property that falls out of font handling. It is why the
+request has nothing to act on. And it is not a claim about what the remote did before sending: whatever
+that host's shell or editor reordered is visible as sent, which is the honest behaviour for a terminal
+that does not reorder.
+
+### A pair that stopped being one
+
+PLAN §57's audit put DECST8C and SCP together, as "a *third* failure shape — the arm exists and does
+nothing — and harmless". That grouping was right about the shape and is now only half a group: §74 built
+DECST8C, because the shape a sequence fails in says nothing about whether it has a translation. The pair
+was about the engine; the answers were about the sequences.
+
+### What it cost
+
+Nothing in `src/`. Tests stand at 1090, untouched. Matrix: 163 rows unchanged, ✅ 102 unchanged, ❌ 26 →
+25, 🛑 26 unchanged, 🤷 9 → 10, no row with two marks or none.
+
+Four consecutive rows, four different answers, from one question asked of each: §72 translate, §73
+refuse, §74 translate again, §75 shrug on the record.
+
+### Not done
+
+- **Bidi itself.** Refused, not deferred — which is the difference between this row and the DECLRMM one,
+  where §5 quotes a price. No price is quoted here on purpose: the work is not in the sequence, so a line
+  count would be a fiction.
+- **No test pins the stance.** The renderer's sealing line is what keeps glyphs in grid order, and it is
+  there for font fallback — so a future change to how runs are batched could relax it without anyone
+  noticing this note. A test that draws a run of RTL codepoints and asserts one run per cell would pin
+  it. Not written here; the row is a documentation change and `src/` was left alone deliberately.
+- **The engine could grow `set_scp`.** 🤷 rows are stances, not guarantees, and this one has a sharper
+  edge than most: if `alacritty_terminal` implemented bidi, the grid would start holding cells in an
+  order cmote's renderer draws literally, and the divergence would be visible rather than inert.
