@@ -8922,3 +8922,66 @@ a scanner that had simply stopped matching would pass a weaker version of.
   it: DECXCPR needed the split and took it, while XTVERSION, DA3, XTGETTCAP and XTSMGRAPHICS go on being
   answered after the advance. For those four it makes no difference, and the ordering question between
   cmote's replies and the engine's within one chunk is still open where it was.
+
+## 83. The column that had become a document (v4.0.0)
+
+§8's matrix is 169 rows, and its Note column had quietly become the longest prose in the file: 7,876
+words, the longest single note 419 of them. A reader who wanted to know what `CSI ? 62 n` *is* had to
+read past a refusal, its reason and two section numbers to reach "reports how much room is left in the
+terminal's macro store" — the one sentence they came for. The column had been answering a question the
+Status column already answers.
+
+So the notes were rewritten to one job: **define the feature, briefly and exactly, then point at what
+argues the row.** 7,876 words → 3,640, longest note 62.
+
+### What a note is now
+
+The parameters the sequence takes, the reply it draws, and — where it qualifies the mark — the extent
+cmote honours. Then a pointer: the section number, and the module cmote's own code sits in.
+
+    | ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro
+    | store, in units of 16 bytes (§6, §82) |
+
+Nothing else. No history of the row, no test names, no crate arms, no argument for a refusal — all of
+which are in the sections the pointer names, which is where they were written first. The notes had
+become second copies, and a second copy is a thing that can disagree with the first: §70 and §82 were
+both rows whose *note* had gone stale while the section it summarised was fine.
+
+### The pointer is the whole of the trade
+
+Every note ends in at least one `§`, and that is what makes the deletion checkable rather than merely
+smaller. Three sweeps of the tree confirmed the facts a note used to carry survive where it points —
+`set_scp`, `set_mouse_cursor_icon`, `report_modify_other_keys`, `set_tabs`, `MAX_PAYLOAD`,
+`xtermCheckRect` and the rest are all still named in §2–§7 or under Evidence.
+
+Four were **not**, and they moved rather than dying: `vte`'s complete OSC arm list, the `('t', [])`
+parameter set that makes `CSI 16 t` a parser gap, the absence of any `#` intermediate in `csi_dispatch`
+(the palette stack), and the APC route that drops kitty graphics without calling a `Perform` method.
+They are now one Evidence bullet, which is where the 🤷 legend now sends a reader for *where a sequence
+dies*.
+
+### What it cost
+
+- 169 notes rewritten. **Only the fourth cell changed** — Code, Feature and Status were carried through
+  byte for byte, and the tally after the rewrite is identical to §82's: 169 rows, **✅ 105 · ❌ 24 ·
+  🛑 34 · 🤷 6**, and no mark anywhere in a note (§81's rule, re-checked).
+- The legend gained a paragraph and lost two claims that had stopped being true: "a ✅ with an empty note
+  is the strong claim" (no note is empty now) and "the row names *where* it dies".
+
+### Not done
+
+- **The definitions are unquoted.** Each says what the sequence does and none cites the page it came
+  from — not ctlseqs, not ECMA-48, not the VT420 manual. That is exactly the shape §82 walked into: a
+  wrong definition reads like a right one, and nothing in the row invites re-checking. The marks were
+  verified against the crates four times over; the definitions have been verified once, by writing them.
+- **The strong claim is harder to skim for.** §67's "everything works, nothing withheld" used to be
+  visible as an empty cell. It is now the *absence* of a qualifying clause inside a sentence, which is a
+  weaker signal than blank space and one no script can count.
+- **The Feature column and the note now overlap.** "Macro space (DECMSR)" and "DECMSR reports the space
+  left in the terminal's macro store" say much the same thing at two widths. Merging them would cost the
+  matrix its fixed shape, so it was not done, but the redundancy is real and it is new.
+- **Nothing enforces the rule**, as with §81. The next row someone adds may carry a paragraph, and the
+  only thing stopping it is this section.
+- **The prose in §2–§7 was not touched.** It is longer than the table it explains, and several of its
+  paragraphs are themselves summaries of `PLAN.md` sections — the same duplication one level up, left
+  alone because this pass was about the column the user was reading.
