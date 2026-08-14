@@ -56,6 +56,7 @@ mod rect; // reads the VT420 rectangular area operations the engine drops — DE
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
+mod tabs; // reads DECST8C, the tab-stop reset the engine parses and drops (§74)
 
 use std::sync::{Arc, Mutex};
 
@@ -264,6 +265,7 @@ impl Terminal {
 			protect: protect::Protect::default(),
 			cancels: cancel::Cancel::default(),
 			rectangles: rect::Rectangles::default(),
+			tabs: tabs::Tabs::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -324,6 +326,11 @@ impl Terminal {
 		// erase and with the same one-past offsets: these name their own coordinates and never touch
 		// the cursor, so the split is only about the order they land in against the text around them.
 		let rectangles = self.rectangles.feed(bytes);
+		// DECST8C, the tab-stop reset the engine parses and then does nothing with (§74). Split-fed
+		// with one-past offsets like the two above — and the order matters more here than for a
+		// rectangle: a chunk that resets its stops and then prints tabs has to see the new stops,
+		// so the reset cannot wait for the end of the chunk.
+		let tab_resets = self.tabs.feed(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
@@ -333,13 +340,20 @@ impl Terminal {
 			&& protections.is_empty()
 			&& cancels.is_empty()
 			&& rectangles.is_empty()
+			&& tab_resets.is_empty()
 		{
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in
-				splits(marks, images, bookmarks, protections, cancels, rectangles)
-			{
+			for (offset, split) in splits(
+				marks,
+				images,
+				bookmarks,
+				protections,
+				cancels,
+				rectangles,
+				tab_resets,
+			) {
 				// `start` can already be past this offset, because a cancelled final byte was stepped
 				// over just now (see `Split::Cancel`). No scanner can report an event INSIDE a CSI
 				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
@@ -371,6 +385,7 @@ impl Terminal {
 						start += 1;
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
+					Split::TabStops => self.set_default_tabs(),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -641,6 +656,26 @@ impl Terminal {
 		let (row, col) = self.screen().cursor_position();
 		let mut feed = SOFT_RESET.to_vec();
 		feed.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
+		self.parser.advance(&mut self.term, &feed);
+	}
+
+	/// Carry out DECST8C — clear every tab stop and set one every eight columns (§74).
+	///
+	/// The same answer §72 gave the soft reset, for the same reason: `vte` parses the sequence and
+	/// `alacritty_terminal` leaves `Handler::set_tabs` at the trait's empty default, so it reached the
+	/// engine and stopped. The engine's tab table is private, it is kept aligned across resize by the
+	/// engine itself, and cmote declines to become a second writer of engine state (§71, §73) — so
+	/// this feeds the engine the same request spelled in TBC, HTS and CUF and lets the engine write
+	/// its own table. Every byte fed is a sequence the compatibility matrix already marks ✅.
+	///
+	/// Only two numbers are read out first, both from the seam rather than the engine's internals:
+	/// the page's width, which says how many stops there are, and the cursor's column, which the walk
+	/// has to give back. Its ROW is never read and never moved — see `term/tabs.rs` for why the walk
+	/// is built out of CR and CUF rather than the CHA that would read more naturally.
+	fn set_default_tabs(&mut self) {
+		let (_, columns) = self.screen().size();
+		let (_, col) = self.screen().cursor_position();
+		let feed = tabs::every_eighth_column(columns, col);
 		self.parser.advance(&mut self.term, &feed);
 	}
 
@@ -1341,6 +1376,12 @@ pub struct Terminal {
 	/// one thing it does hold is DECSACE's extent, because only the scanner sees a mode and the
 	/// requests it governs in stream order.
 	rectangles: rect::Rectangles,
+	/// Finds DECST8C, the tab-stop reset `vte` parses and `alacritty_terminal` drops on the floor
+	/// (§74). Fed by the split advance like the erases above and for the same reason — the engine
+	/// has to be past the sequence it ignores before cmote answers it — and answered the way §72
+	/// answers the soft reset: by feeding the engine the same request written in TBC, HTS and CUF,
+	/// so the engine stays the only writer of its own tab table. Holds no state but the scan.
+	tabs: tabs::Tabs,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
@@ -1376,6 +1417,10 @@ enum Split {
 	/// A rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of cells. Applied
 	/// on the far side of its sequence, as a selective erase is, and for the same reason.
 	Rect(rect::Request),
+	/// DECST8C, the tab stops put back every eight columns (§74). Carries nothing — the sequence has
+	/// one meaning and no parameters beyond the `5` that identifies it, so the offset is the whole
+	/// event. Applied on the far side of its sequence, as the two above are.
+	TabStops,
 }
 
 /// Merge one chunk's prompt marks, image events, bookmarks, selective-erase requests and cancelled
@@ -1389,6 +1434,7 @@ fn splits(
 	protections: Vec<(usize, protect::Request)>,
 	cancels: Vec<usize>,
 	rectangles: Vec<(usize, rect::Request)>,
+	tab_resets: Vec<usize>,
 ) -> Vec<(usize, Split)> {
 	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
 		marks.len()
@@ -1396,7 +1442,8 @@ fn splits(
 			+ bookmarks.len()
 			+ protections.len()
 			+ cancels.len()
-			+ rectangles.len(),
+			+ rectangles.len()
+			+ tab_resets.len(),
 	);
 	merged.extend(
 		marks
@@ -1424,6 +1471,11 @@ fn splits(
 		rectangles
 			.into_iter()
 			.map(|(offset, request)| (offset, Split::Rect(request))),
+	);
+	merged.extend(
+		tab_resets
+			.into_iter()
+			.map(|offset| (offset, Split::TabStops)),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -2804,6 +2856,83 @@ mod tests {
 		assert_eq!(terminal.process(b"\x1b[?7$p"), b"\x1b[?7;2$y".to_vec());
 		// Still off: asking the question did not reset it.
 		assert_eq!(terminal.process(b"\x1b[?7$p"), b"\x1b[?7;2$y".to_vec());
+	}
+
+	/// DECST8C end to end (§74): a program moves its stops, then asks for the power-on ones back
+	/// and gets them. Read through a printed HT, which is the only way tab stops are observable
+	/// from outside the engine — the table itself is private, which is the whole reason this is
+	/// answered by feeding the engine sequences rather than by writing it.
+	#[test]
+	fn a_tab_reset_puts_the_stops_back_where_a_program_moved_them() {
+		let mut terminal = Terminal::new(4, 40);
+		// Clear every stop, then set a single one at column 3.
+		terminal.process(b"\x1b[3g\r\x1b[3C\x1bH\r");
+		terminal.process(b"\t");
+		assert_eq!(
+			terminal.screen().cursor_position().1,
+			3,
+			"the program's own stop has to be in force, or the reset below proves nothing"
+		);
+		terminal.process(b"\r\x1b[?5W\t");
+		assert_eq!(terminal.screen().cursor_position().1, 8);
+		// And the rest of the walk landed too, not only its first stop.
+		terminal.process(b"\t\t");
+		assert_eq!(terminal.screen().cursor_position().1, 24);
+	}
+
+	/// The walk crosses the whole page and has to give the cursor back. A `tput init` mid-screen
+	/// that left the shell's cursor in column 0 would be worse than the gap it closed — the same
+	/// hazard §72 found in the fed soft reset, and the same test.
+	#[test]
+	fn a_tab_reset_leaves_the_cursor_where_it_found_it() {
+		let mut terminal = Terminal::new(6, 40);
+		terminal.process(b"\x1b[3;14H\x1b[?5W");
+		assert_eq!(terminal.screen().cursor_position(), (2, 13));
+	}
+
+	/// Under origin mode with a scrolling region, `alacritty_terminal` routes CHA and VPA through a
+	/// `goto` that adds the region's top to the line it is handed — while handing it the line the
+	/// cursor is already on. A walk spelled with CHA would therefore drag the cursor down the page
+	/// once per stop. This is the test that says the walk is spelled with CR and CUF instead, and
+	/// it is the reason `term/tabs.rs` refuses the more natural spelling.
+	#[test]
+	fn a_tab_reset_under_origin_mode_leaves_the_row_alone() {
+		let mut terminal = Terminal::new(8, 40);
+		// A region that does not start at the top of the page is what makes the drag visible.
+		terminal.process(b"\x1b[3;7r\x1b[?6h\x1b[2;5H");
+		let before = terminal.screen().cursor_position();
+		assert_eq!(
+			before,
+			(3, 4),
+			"origin mode makes row 2 the region's second line"
+		);
+		terminal.process(b"\x1b[?5W");
+		assert_eq!(terminal.screen().cursor_position(), before);
+	}
+
+	/// The walk is movement only, so the page underneath it is untouched. Pinned because a walk
+	/// built out of printed spaces — which is how ncurses' own `reset` lays its stops down — would
+	/// have wiped the line the cursor was on.
+	#[test]
+	fn a_tab_reset_prints_nothing_at_all() {
+		let mut terminal = Terminal::new(4, 40);
+		// A solid run of glyphs across every column the walk visits, so anything the walk printed
+		// — a space included — would show up as a hole in it.
+		terminal.process("X".repeat(40).as_bytes());
+		terminal.process(b"\x1b[1;5H\x1b[?5W");
+		assert_eq!(read(&terminal, 0, 0, 40), "X".repeat(40));
+	}
+
+	/// The near miss, and the reason the scanner tests marker, parameter and intermediates
+	/// together: `CSI 5 W` without the private marker is CTC, a different sequence cmote does not
+	/// implement and must not mistake for this one. Shown by moving the stops and watching a plain
+	/// `CSI 5 W` leave them moved.
+	#[test]
+	fn a_tab_control_without_the_marker_is_not_a_tab_reset() {
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1b[3g\r\x1b[3C\x1bH\r");
+		terminal.process(b"\x1b[5W\t");
+		assert_eq!(terminal.screen().cursor_position().1, 3);
 	}
 
 	/// Protection dies with the cell it was on. A plain erase writes the cell fresh — flags and all —

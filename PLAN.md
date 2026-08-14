@@ -8072,3 +8072,116 @@ Nothing in `src/`. The tests stand at 1072, none of them touched, because §57 b
 - **DECRQM for mode 69 answers `0`.** That is the engine's, and it is the reply that keeps a conformant
   program away from `CSI s`. Whether cmote should ever answer `4` ("permanently reset") instead — a
   stronger statement, and a claim about a mode cmote does not implement — is not decided here.
+
+## 74. The row where the answer was neither refuse nor shrug (v4.0.0)
+
+Same question as §73, one row further down the same table: should DECST8C read ✅ or 🛑?
+
+```
+| ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | parsed and dropped — `vte` calls `set_tabs`,
+  and `alacritty_terminal` never overrides the empty default (§5) |
+```
+
+`CSI ? 5 W` says *clear every tab stop, then set one every eight columns* — the state a terminal powers
+up in, in one sequence rather than the dozen it otherwise takes.
+
+### Not 🛑, and the reason is what §73 was about
+
+§73's row was 🛑 because cmote's own code already stopped that sequence dead, and the mark had simply
+never caught up with the code. Here nothing in cmote refuses anything: `vte` parses the sequence,
+`alacritty_terminal` leaves `Handler::set_tabs` at the trait's empty default, and it dies there. Marking
+that 🛑 would mean **writing refusal code first** — and a refusal has to be for something.
+
+§57's refusal was a repair. DECSLRM shares its final byte with save-cursor and `vte`'s arm for that byte
+ignores its parameters, so an unrefused margin request *stole a value the program meant to restore from*.
+There is no such collateral here. `set_tabs` is its own trait method with its own empty body; nothing else
+is touched by the drop. And there is no policy objection either — tab stops are inside the tab, they set
+no chrome, they are not a second source for a field cmote already writes, and there is nothing a remote
+gains by moving them. A 🛑 would be work spent to make a harmless sequence stay broken.
+
+### ✅, because §72's question has a yes here
+
+The question §72 introduced is not "can cmote implement this" but "**is this a shorthand for sequences the
+terminal already takes**". §73 put it to margins and got no: a margin is a capability, the delegating
+`Handler` wrapper that would build one makes cmote a second writer of engine state, and there is nothing
+to translate into.
+
+A tab-stop reset is the opposite. Every piece of it is already ✅ in the matrix:
+
+- `CSI 3 g` — TBC, clear all stops. The engine has the arm.
+- `\r` — carriage return, to column 0.
+- `ESC H` — HTS, set a stop where the cursor is.
+- `CSI 8 C` — CUF, step to the next one.
+
+So `term/tabs.rs` scans DECST8C out of the stream and `term/mod.rs` feeds the engine the long spelling.
+The engine's tab table stays private, keeps being rebuilt correctly on every resize by the engine itself,
+and cmote never becomes its second writer. The two numbers cmote reads are the page's width and the
+cursor's column, both off the existing seam.
+
+### The measurement that decided how the walk is spelled
+
+The natural way to walk a page is `CSI n G` — absolute column, no arithmetic. It is the wrong way here,
+and finding out cost a probe rather than an argument.
+
+`alacritty_terminal` funnels most cursor movement through one `goto(line, col)`, which adds the scrolling
+region's top to the line it is handed. That is correct for CUP and VPA, which hand it a line from their
+own parameter. It is wrong for the movements that hand it **the line the cursor is already on** — they get
+the offset added a second time. Under a `CSI 3;7 r` region with origin mode on, cursor at `(3, 4)`:
+
+```
+CUU  CSI 1 A   (3,4) -> (4,4)     up one moves it DOWN one
+CUD  CSI 1 B   (3,4) -> (6,4)     down one moves it down three
+CHA  CSI 1 G   (3,4) -> (5,0)     a column move moves the row
+HPA  CSI 1 `   (3,4) -> (5,0)     same arm, same defect
+VPR  CSI 1 e   (3,4) -> (6,4)     aliased to CUD
+CUF  CSI 1 C   (3,4) -> (3,5)     exact
+CUB  CSI 1 D   (3,4) -> (3,3)     exact
+VPA  CSI 2 d   (3,4) -> (3,4)     exact
+CUP  CSI 2;1 H (3,4) -> (3,0)     exact
+```
+
+CR, CUF and CUB assign the column directly and never reach `goto`. So the walk is built out of exactly
+those, and it cannot move the cursor's row **under any mode** — which also means it needs to know nothing
+about origin mode, the scrolling region or the saved cursor, and reads no engine state to be correct.
+A walk spelled with CHA would have looked right in every test that did not think to set origin mode first,
+and would have dragged the cursor to the bottom of a region in real use. `term/mod.rs` has the test that
+fails for that spelling.
+
+Four ✅ rows in the compatibility matrix now carry the defect, two of them having had an **empty note**,
+which under §67's rule is the strong claim that nothing is withheld. It is disclosed rather than fixed:
+correcting it from outside means cmote writing the cursor the engine owns, which §71 and §73 both refused,
+and it is an upstream bug that belongs upstream.
+
+### The traffic, checked rather than assumed
+
+§73's lesson was that a note naming a reason has to be re-read, so this one was checked before it was
+written: **no terminfo capability emits DECST8C.** ncurses lays default stops down by hand — `clear_all_tabs`,
+then `init_tabs` columns of movement and `set_tab`, over and over — which is the same walk cmote now feeds
+the engine, only sent from the far end of the wire. So this is not §72, where `\E[!p` sat in `is2` and
+`rs2` and every `tput init` was sending it. The traffic is programs that spell VT510 sequences themselves.
+Worth saying plainly: the value here is smaller than §72's. What makes it worth building anyway is that
+the cost is a scanner and a string, the ingredients were all already ✅, and the alternative was a sequence
+that lands and silently does nothing.
+
+### What it cost
+
+- `src/term/tabs.rs`, new — the scanner and the walk, both pure and testable without a terminal.
+- `src/term/mod.rs` — the seventh scanner in the split feed, a `Split::TabStops` variant, and
+  `set_default_tabs`, which is five lines because the module above it is the whole of the thinking.
+- Tests 1072 → 1090. Thirteen in the module (grammar, near misses, chunk splitting, the exact walk for
+  four page widths, and one that asserts the walk emits **only** row-safe spellings), five end to end
+  (the stops really move, the cursor comes back, the row survives origin mode, nothing is printed, and
+  `CSI 5 W` without the marker is left alone).
+- Matrix: 163 rows unchanged, ✅ 101 → 102, ❌ 27 → 26, 🛑 26 unchanged, 🤷 9 unchanged.
+
+### Not done
+
+- **The engine's origin-mode cursor defect.** Disclosed on four rows and worked around in the one place
+  cmote controls. Reporting it upstream is the honest next step and is not done here.
+- **A cursor waiting to wrap loses that flag** across the reset, because CR and CUF both clear it. Not
+  detectable from outside the engine — a pending wrap looks like a cursor in the last column — and the
+  same small loss §72's soft reset takes.
+- **cmote answers DA1 as a VT102** (`CSI ? 6 c`, the engine's, plus §41's sixel attribute), while
+  implementing a pile of VT400-and-later sequences: the whole rectangular family, DECRQCRA, and now this.
+  xterm gates DECST8C on `terminal_id >= 400`. Whether the reply should say what cmote actually does is a
+  real question and a separate one — it is a claim every program reads, not a row in a table.

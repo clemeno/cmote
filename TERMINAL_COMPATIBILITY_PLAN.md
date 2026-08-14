@@ -85,6 +85,20 @@ land*, and since §57 this one cannot: `term/cancel.rs` cancels the final byte i
 pin it, and the legend names §57 itself as the reason the 🛑 / 🤷 split exists in the column. So the row
 is **🛑**, the capability's ❌ moves to the row that actually carries it (mode 69, DECLRMM), and the 🛑
 legend widens to say that a refusal cmote performs may be taken on §5's price as well as §6's policy.
+**§74 asked the same question one row further down the same table and got the third possible answer:
+build it.** DECST8C (`CSI ? 5 W` — clear every tab stop, then set one every eight columns) read ❌
+because `vte` parses it and `alacritty_terminal` leaves `Handler::set_tabs` at the trait's empty default.
+Accurate, and the wrong end of the question. §72's route asks whether a missing sequence is a *shorthand*
+for sequences the terminal already takes, and this one is — TBC, CR, HTS and CUF are all ✅ — so cmote
+scans it out (`term/tabs.rs`) and feeds the engine the long spelling, the engine writing its own tab table
+as it already writes its own reset. Three consecutive rows, three answers, from one question asked of each:
+§72 translate, §73 refuse, §74 translate again. The row also turned up something none of the sweeps had
+looked for, because choosing which movement the walk could use meant measuring them: `CSI A`, `CSI B`,
+`CSI G`, `` CSI ` `` and `CSI e` all hand the engine the line the cursor is **already** on, and the engine
+adds the scrolling region's top to whatever line it is handed — so under origin mode with a region below
+row 1, every one of them moves the cursor down the page. Four ✅ rows now carry that, two of which had an
+empty note, which under §67's rule was the strong claim. The walk is spelled with CR and CUF, which do
+not go near that code, and a test pins the choice.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -181,7 +195,7 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   the retained history rather than only the visible grid.
 - **Lets the engine interpret** the whole VT stream, no cmote papering-over: the **DEC
   line-drawing charset** (older programs box-draw with it), **origin mode** (so cursor reports
-  are origin-correct), **custom tab stops** (HTS / TBC), the **autowrap toggle** (DECAWM),
+  are origin-correct), **custom tab stops** (HTS / TBC, and DECST8C to put the default ones back since §74), the **autowrap toggle** (DECAWM),
   **REP** repeat, the (vertical) scroll region, and **alternate-screen** switching.
 - **Answers host queries.** Primary / secondary **DA** (`CSI c`, `CSI >c`), **DSR** status and
   cursor-position (`CSI 5n`, `CSI 6n`), and **DECRQM** request-mode are answered by the engine.
@@ -506,6 +520,15 @@ short, and since §41 nothing left in it is high value:
   three masks at parse time, then applied a named bit at a time so a cell keeps its italics, its
   underline style and cmote's DECSCA protection bit. **Blink is read and dropped** — the engine's
   flag word has no bit for it.
+- **~~Tab stops every 8 columns~~ (DECST8C, `CSI ? 5 W`) — SHIPPED in §74, and not by this section's
+  route.** It sat here as an engine limit on the strength of `Handler::set_tabs` being left at the
+  trait's empty default — true, and the wrong end of the question. A tab-stop reset is a **shorthand**
+  rather than a capability: TBC, CR, HTS and CUF are all ✅ already, so cmote scans the sequence out
+  (`term/tabs.rs`) and feeds the engine the long spelling, exactly as §72 does for the soft reset, and
+  the engine goes on being the only writer of its own tab table. This is the second row moved by asking
+  whether a missing sequence has a **translation** rather than a price — the same question §73 put to
+  margins and got "no shorthand" back from. It also turned up an engine defect in the cursor movements
+  the walk had to choose between; see the `A / B / C / D` and `G` rows in §8. See PLAN §74.
 - **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
   `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
   (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
@@ -999,12 +1022,12 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| A / B / C / D | Cursor up / down / fwd / back | ✅ | |
+| A / B / C / D | Cursor up / down / fwd / back | ✅ | `C` / `D` assign the column and never touch the row. `A` / `B` go through the engine's shared `goto`, which adds the scrolling region's top to the line it is handed — while these two hand it the line the cursor is **already** on. So under **origin mode with a region that does not start at the top**, `CSI 1 A` moves the cursor DOWN by the region's top rather than up one: measured `(3, 4)` → `(4, 4)` for CUU and `→ (6, 4)` for CUD under `CSI 3;7 r`. An engine defect, found by §74 while choosing which movement its tab walk could safely use, and disclosed rather than papered over — correcting it from outside would make cmote a second writer of the cursor (§71, §73). Origin mode is rare and a region starting below row 1 rarer, which is why it went unnoticed; without origin mode all four are exact |
 | E / F | Cursor next / prev line | ✅ | |
-| G / H (+ f) | Absolute position | ✅ | HVP `f` too |
-| I / Z | Forward / backward tab | ✅ | to the next / previous stop, over the stops `ESC H` and `CSI g` maintain — the engine's own table, eight columns apart at power-on |
-| d / \` | Vertical / horizontal PA | ✅ | |
-| a / e | Horizontal / vertical PR | ✅ | the parser aliases HPR to CUF and VPR to CUD (`ansi.rs`), so they move but do not have their own arm |
+| G / H (+ f) | Absolute position | ✅ | HVP `f` too. `H` / `f` are exact under every mode — they hand the engine the line from their own parameter, which is what its origin-mode offset is written for. `G` (CHA) carries the defect the row above names: it hands over the cursor's current absolute line, so under origin mode with a region below row 1 it moves the cursor DOWN as well as across (measured `(3, 4)` → `(5, 0)`, §74) |
+| I / Z | Forward / backward tab | ✅ | to the next / previous stop, over the stops `ESC H` and `CSI g` maintain — the engine's own table, eight columns apart at power-on and put back there by `CSI ? 5 W` since §74. The row is exact under origin mode: a tab moves the column only |
+| d / \` | Vertical / horizontal PA | ✅ | `d` (VPA) is exact, origin mode included — it passes its own parameter as the line. `` ` `` (HPA) shares CHA's arm and so shares its defect: under origin mode with a region below row 1 it moves the row too (§74, and the `G` row above) |
+| a / e | Horizontal / vertical PR | ✅ | the parser aliases HPR to CUF and VPR to CUD (`ansi.rs`), so they move but do not have their own arm — which also means each inherits its target's behaviour under origin mode: `a` is exact, `e` carries CUD's drag (§74, and the `A / B / C / D` row above) |
 | s / u | Save / restore cursor | ✅ | ANSI.SYS form. The **bare** `CSI s` only — a parametrised one is DECSLRM and is cancelled before the engine can mistake it for this (§57, below) |
 | @ / P / X | Insert / delete / erase char | ✅ | |
 | L / M | Insert / delete line | ✅ | |
@@ -1018,8 +1041,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | S / T | Scroll up / down | ✅ | |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | the vertical region in full, top and bottom, honoured by every operation that scrolls. The horizontal one is a different sequence with its own row below (`s`, DECSLRM) |
 | s (DECSLRM) | Left / right margins | 🛑 | **cancelled in flight by cmote's own code** (`term/cancel.rs`, §57), so a margin request does nothing at all — which is what "unsupported" should mean. The refusal is a repair rather than a shrug: `vte`'s `('s', [])` arm is save-cursor and never reads its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one slot the program had its own value in. A parameter is the whole test — the bare `CSI s` is left alone and still saves — and `process` feeds the state machine's own **CAN** in place of the final byte, because withholding it would leave the engine's parser mid-CSI and hand this sequence the next final byte in the stream. Fifteen tests in the scanner, plus `a_cancelled_margin_request_prints_nothing_at_all` in `term/mod.rs` pinning it end to end. Read ❌ until §73, which is a mark this row could not carry: ❌ is a sequence that *could still land*, and since §57 this one cannot. The margins **themselves** are a gap, and it has a row of its own — `? 69` (DECLRMM) in the private-mode table, priced in §5, refused by nothing |
-| g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67) |
-| ? 5 W | Tab stops every 8 columns (DECST8C) | ❌ | **parsed and dropped** — `vte` calls `set_tabs`, and `alacritty_terminal` never overrides the empty default (§5) |
+| g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67). `CSI 3 g` is also the first thing §74's tab-stop walk sends, so this row is load-bearing for the one below |
+| ? 5 W | Tab stops every 8 columns (DECST8C) | ✅ | cmote's own, by §72's route (§74). `vte` parses it — `('W', [b'?']) if next_param_or(0) == 5 => handler.set_tabs(8)` — and `alacritty_terminal` never overrides `Handler::set_tabs`, whose body in the trait is empty, so the sequence reached the engine and stopped there. Read ❌ for that until §74, which asked §72's question instead: this is a **shorthand**, not a capability, and TBC, CR, HTS and CUF are all ✅ already. So `term/tabs.rs` scans the sequence out and `term/mod.rs` feeds the engine the same request in the long spelling — the engine's tab table stays private, kept aligned across resize by the engine, with cmote never a second writer of it (§71, §73). The care is in **which** movement does the walking: the engine hands `CSI G`, `` CSI ` ``, `CSI A` and `CSI B` the line the cursor is *already* on and then adds the scrolling region's top to it, so under origin mode each of them drags the cursor down the page (measured: `(3, 4)` → `(5, 0)` for one `CSI 1 G` under a `3;7` region — see the rows above, which §74 annotated). CR and CUF do not go near that code, so the walk is built only out of those two, reads nothing but the page width and the cursor's column, and gives the row back untouched. Eighteen tests, five end to end, including one under origin mode that fails for any walk spelled with CHA. One loss, disclosed: a cursor waiting to wrap loses that flag, as it does across §72's soft reset |
 | Ps SP k | Select character path (SCP) | ❌ | **parsed and dropped** — same shape: `vte` calls `set_scp`, the engine never overrides it. Bidi anyway, which cmote does not do |
 | $ z (DECERA) | Erase rectangular area | ✅ | cmote's own scanner and cell writer (`term/rect.rs`, §58) — the engine matches `$` only in DECRQM, so all four of this family fall through unhandled. Corners default to the page edges, an end past the edge clamps, and a rectangle described backwards or starting off the page is a **no-op** rather than one cmote invents by swapping corners |
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb (§58): protected cells stand, and the plain `$ z` still takes them. This was the piece §56 unblocked and left unbuilt — the per-cell protection it needed already existed |
@@ -1046,7 +1069,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 |---|---|---|---|
 | ESC D / ESC M | Index / Reverse index | ✅ | |
 | ESC E | Next line | ✅ | |
-| ESC H | Set tab stop | ✅ | at the cursor's column (HTS) |
+| ESC H | Set tab stop | ✅ | at the cursor's column (HTS). The sequence §74's tab-stop reset is built out of — one of these per stop, rather than cmote writing the engine's table itself |
 | ESC 7 / ESC 8 | Save / restore cursor | ✅ | |
 | ESC c (RIS) | Full reset | ✅ | |
 | ESC = / ESC > | Keypad application / numeric | ✅ | tracked on the seam (`Screen::application_keypad`) and encoded for the numpad keys that have no NumLock meaning to lose — Enter and `* + , - / =` (DECKPAM, §2, §36) |
