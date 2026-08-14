@@ -774,6 +774,13 @@ impl Terminal {
 					self.saved_pens.push((mask, pen));
 				}
 			}
+			// RIS. Everything back to power-on, and a power-on terminal has nothing pushed — the
+			// counter with it, or the first pops after a reset would be swallowed by an overflow
+			// that belonged to the session before it (§86).
+			sgrstack::Request::Reset => {
+				self.saved_pens.clear();
+				self.dropped_pushes = 0;
+			}
 			sgrstack::Request::Pop => {
 				if self.dropped_pushes > 0 {
 					self.dropped_pushes -= 1;
@@ -3572,6 +3579,34 @@ mod tests {
 		let mut terminal = Terminal::new(4, 20);
 		terminal.process(b"\x1b[#{\x1b[1;4;31#{\x1b[#}\x1b[#qX");
 		assert_eq!(read(&terminal, 0, 0, 20), "X");
+	}
+
+	/// A hard reset empties the stack (§86). Without this the pop below would hand the program a pen
+	/// from before the reset — a remote's state outliving the sequence whose whole job is to remove it.
+	#[test]
+	fn a_hard_reset_throws_the_stack_away() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;31m\x1b[#{\x1bc");
+		terminal.process(b"\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0m\x1b\\".to_vec(),
+			"the pen is the one RIS left, not the one the push saved"
+		);
+	}
+
+	/// The soft reset does NOT, which is the same split DECSACE has: RIS resets it, DECSTR does not,
+	/// because DEC's published list for the soft reset does not name it and §72 honours that list
+	/// rather than widening it.
+	#[test]
+	fn a_soft_reset_leaves_the_stack_standing() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[1;31m\x1b[#{\x1b[!p");
+		terminal.process(b"\x1b[#}");
+		assert_eq!(
+			terminal.process(b"\x1bP$qm\x1b\\"),
+			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
+		);
 	}
 
 	/// An underline substyle survives the round trip, which is the whole reason `pen_restore` exists

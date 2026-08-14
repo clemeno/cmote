@@ -9159,3 +9159,56 @@ which takes two attributes out where one was meant.
   wrong and carries on.
 - **`term/` now holds a tenth chunk-safe CSI state machine**, near-identical to the ninth. §82 noticed
   this and did not act; §85 has not either, and the case for factoring them is one row stronger.
+
+## 86. What a hard reset takes with it (v4.0.0)
+
+§85 shipped the video-attribute stack and listed, under *Not done*: **"the stack is never cleared. Not
+by RIS, not by DECSTR, not by the alternate-screen swap… a program that pushed before a full reset and
+pops after it gets a pen from before the reset."** This closes the first of those three and states why
+the other two stay open.
+
+### RIS empties it
+
+`ESC c` puts the terminal back to power-on, and a power-on terminal has nothing pushed. Leaving the
+stack standing across it means a remote's state outliving the one sequence whose entire job is to remove
+it — and worse than a stale pen, a pen the program has no way to predict, since what it gets back
+depends on how many pushes preceded a reset it may not have sent itself.
+
+The `dropped_pushes` counter goes with it. A reset that emptied the pens and kept the counter would
+swallow the first pops of the NEW session to pay for an overflow in the old one.
+
+`term/sgrstack.rs` reads `ESC c` itself rather than taking `term/scp.rs`'s word for it, though that
+module already scans the same byte for its own store (§76). Two scanners reading one byte is the house
+arrangement — every scanner in `term/` reads the stream itself — and the alternative couples two
+features so that one's idea of where a sequence sat becomes the other's.
+
+### DECSTR does not, and the swap does not
+
+**The soft reset** is the split `term/rect.rs` already makes for DECSACE, one row over: RIS resets the
+attribute-change extent, DECSTR does not, because DEC's published DECSTR list does not name it and §72
+honours that list rather than widening it. XTPUSHSGR is an xterm extension DEC never listed at all, so
+widening the list to reach it would be inventing an item for a document that has one.
+
+**The alternate-screen swap** saves and restores the *pen* — that is what mode 1049 does, through DECSC
+and DECRC — and a stack of pens is not the pen. A program that pushes on the primary screen, swaps, and
+pops is doing something odd, but nothing about the swap says its stack should evaporate.
+
+Both are judgements rather than findings, which is worth saying plainly: **no source read so far states
+what xterm does with its own stack at either point.** ctlseqs describes XTPUSHSGR's parameters and its
+ten levels and says nothing about its lifetime. What is recorded here is the reasoning, so the next
+reader knows it is reasoning.
+
+### What it cost
+
+- `term/sgrstack.rs`: a `Request::Reset`, one arm in the scanner, two tests.
+- `term/mod.rs`: one match arm, two seam tests — one that a hard reset throws the stack away, one that a
+  soft reset leaves it standing.
+- Tests 1183 → 1187. No row's mark moves; the matrix row gains a sentence.
+
+### Not done
+
+- **The two open cases are open on purpose and unverified.** If xterm clears its stack on either, cmote
+  now differs from it in a way nothing here would notice.
+- **Nothing tests the counter across a reset in isolation** — the seam test asserts the pen, which is
+  what a program sees, and the counter only shows through it after an overflow. A test that overflows,
+  resets and then pops would pin it directly.

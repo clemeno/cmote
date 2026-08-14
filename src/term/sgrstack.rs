@@ -151,6 +151,19 @@ pub enum Request {
 	Push(Mask),
 	/// Restore the top of the stack. Nothing at all when the stack is empty.
 	Pop,
+	/// RIS (`ESC c`) — throw the whole stack away (§86).
+	///
+	/// A hard reset puts the terminal back to power-on, and a power-on terminal has nothing pushed.
+	/// Without this a program that pushed, reset and popped would be handed a pen from BEFORE the
+	/// reset — a remote's state outliving the one sequence whose whole job is to remove it.
+	///
+	/// **DECSTR does not do this**, deliberately, and that is the same split `term/rect.rs` makes for
+	/// DECSACE: RIS resets it, the soft reset does not, because DEC's published DECSTR list does not
+	/// name it and §72 honours that list rather than widening it. Neither does the alternate-screen
+	/// swap: the engine saves and restores the pen across it (DECSC / DECRC, mode 1049) and a stack of
+	/// pens is not the pen. No source read so far says what xterm does with its own stack at either —
+	/// see PLAN §86, where the reasoning is on the record rather than the finding.
+	Reset,
 }
 
 /// Where the scanner is in the byte stream — the CSI shape and nothing else.
@@ -201,6 +214,14 @@ impl SgrStack {
 						self.params.clear();
 						self.intermediates.clear();
 						self.state = Scan::Csi;
+					}
+					// RIS, which empties the stack — see `Request::Reset` for why this one and not
+					// the soft reset. Read here rather than borrowed from `term/scp.rs`, which reads
+					// the same byte for its own store: each scanner reads the stream itself, so
+					// neither can come to depend on the other's idea of where a sequence sat.
+					b'c' => {
+						requests.push((index + 1, Request::Reset));
+						self.state = Scan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
@@ -441,6 +462,26 @@ mod tests {
 		bytes.extend(std::iter::repeat_n(b'1', MAX_PARAMS + 10));
 		bytes.extend_from_slice(b"#{");
 		assert!(scan(&bytes).is_empty());
+	}
+
+	/// RIS is read here as well, because a hard reset must not leave a remote's pens standing (§86).
+	#[test]
+	fn a_hard_reset_is_reported_so_the_stack_can_be_emptied() {
+		assert_eq!(scan(b"\x1bc"), vec![(2, Request::Reset)]);
+		assert_eq!(
+			scan(b"\x1b[#{\x1bc"),
+			vec![(4, Request::Push(Mask::ALL)), (6, Request::Reset)]
+		);
+	}
+
+	/// And only RIS. The soft reset is a different sequence with a different published list (§72), and
+	/// the near neighbours on `ESC` must not be read as a reset either.
+	#[test]
+	fn the_other_escape_sequences_are_not_a_reset() {
+		assert!(scan(b"\x1b[!p").is_empty(), "DECSTR");
+		assert!(scan(b"\x1b7").is_empty(), "DECSC");
+		assert!(scan(b"\x1b#8").is_empty(), "DECALN");
+		assert!(scan(b"\x1bD").is_empty(), "IND");
 	}
 
 	/// A push and its pop in one chunk, both reported, in stream order — the split advance walks them

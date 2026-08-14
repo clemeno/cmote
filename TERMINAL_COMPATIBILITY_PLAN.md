@@ -1330,7 +1330,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pv $ y` in the ANSI spelling as well as the private one (§60) |
 | # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
-| # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel |
+| # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel. **RIS empties the stack** — DECSTR does not, on the same split DECSACE has, and neither does the alternate-screen swap (§86) |
 
 ### ESC — single sequences
 
@@ -1848,6 +1848,10 @@ Quoted where a row's wording now rests on it.
   answer and lossy as a restore, so this one emits `4:3` / `4:4` / `4:5` and SGR 58's underline colour.
   `protect::is_protected` is read across the restore and `set_pen_protection` puts it back, the opening
   `CSI 0 m` otherwise assigning the borrowed DECSCA bit (§56) along with the flag word it lives in.
+  The scanner reads `ESC c` as well (§86) and the stack is emptied on it, counter included — the same
+  byte `term/scp.rs` reads for its own store, read again here rather than borrowed, so neither module
+  depends on the other's idea of where a sequence sat. DECSTR is deliberately not a reset for this,
+  which is the split DECSACE already has.
 - **`term/sixel.rs`** — the payload decoder (§41), pure and engine-free. `walk` is the single place the
   command grammar is written (`"` raster, `#` select/define, `!` repeat, `$` CR, `-` next band, and the
   `?`..`~` sixel bytes); `canvas_size` measures through it — preferring the raster attributes as the
