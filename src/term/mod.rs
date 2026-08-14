@@ -53,6 +53,7 @@ pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
+pub mod scp; // reads SCP, the direction a line's characters are laid down in (§76)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
@@ -266,6 +267,8 @@ impl Terminal {
 			cancels: cancel::Cancel::default(),
 			rectangles: rect::Rectangles::default(),
 			tabs: tabs::Tabs::default(),
+			scp: scp::Scp::default(),
+			paths: scp::Paths::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 		}
@@ -331,29 +334,28 @@ impl Terminal {
 		// rectangle: a chunk that resets its stops and then prints tabs has to see the new stops,
 		// so the reset cannot wait for the end of the chunk.
 		let tab_resets = self.tabs.feed(bytes);
+		// The character path (§76), and the RIS that empties the store of them. Split-fed like the
+		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
+		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
+		let paths = self.scp.feed(bytes);
+		let scanned = Scanned {
+			marks,
+			images,
+			bookmarks,
+			protections,
+			cancels,
+			rectangles,
+			tab_resets,
+			paths,
+		};
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
-		if marks.is_empty()
-			&& images.is_empty()
-			&& bookmarks.is_empty()
-			&& protections.is_empty()
-			&& cancels.is_empty()
-			&& rectangles.is_empty()
-			&& tab_resets.is_empty()
-		{
+		if scanned.is_empty() {
 			self.parser.advance(&mut self.term, bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(
-				marks,
-				images,
-				bookmarks,
-				protections,
-				cancels,
-				rectangles,
-				tab_resets,
-			) {
+			for (offset, split) in splits(scanned) {
 				// `start` can already be past this offset, because a cancelled final byte was stepped
 				// over just now (see `Split::Cancel`). No scanner can report an event INSIDE a CSI
 				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
@@ -386,6 +388,7 @@ impl Terminal {
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
 					Split::TabStops => self.set_default_tabs(),
+					Split::Path(request) => self.select_character_path(request),
 				}
 			}
 			self.parser.advance(&mut self.term, &bytes[start..]);
@@ -518,6 +521,10 @@ impl Terminal {
 		if alternate != self.on_alternate {
 			self.on_alternate = alternate;
 			self.graphics.clear_alternate();
+			// The alternate page keeps no history, so its absolute lines start again from zero and would
+			// collide with paths set on the main screen (§76). Both directions of the swap clear them,
+			// exactly as the pictures above are cleared and for the same reason.
+			self.paths.clear();
 		}
 	}
 
@@ -539,7 +546,7 @@ impl Terminal {
 		}
 		// The screen borrows the engine and the store is borrowed mutably, so they are taken as
 		// separate fields rather than through `self.screen()`, which would borrow all of `self`.
-		let screen = screen::Screen::new(&self.term);
+		let screen = screen::Screen::new(&self.term, &self.paths);
 		self.graphics
 			.retire_covered_alternate(|placement| covered(&screen, placement));
 	}
@@ -677,6 +684,28 @@ impl Terminal {
 		let (_, col) = self.screen().cursor_position();
 		let feed = tabs::every_eighth_column(columns, col);
 		self.parser.advance(&mut self.term, &feed);
+	}
+
+	/// Carry out one character-path request (§76).
+	///
+	/// SCP acts on "the line the cursor is on", and the line is recorded as an ABSOLUTE document
+	/// index — `history_size + cursor row`, the same arithmetic the prompt marks use (§34) — so it
+	/// stays with its text as the screen scrolls under it, for free and for the same reason.
+	///
+	/// Nothing is written to the grid. The path is a rule the renderer applies when it derives a frame
+	/// from the grid, which is what ECMA-48's data and presentation components mean, and what keeps the
+	/// engine the only writer of its own state (§71, §73).
+	fn select_character_path(&mut self, request: scp::Request) {
+		match request {
+			scp::Request::Select(path) => {
+				let history = self.term.grid().history_size() as u64;
+				let (row, _) = self.screen().cursor_position();
+				self.paths.select(history + u64::from(row), path);
+			}
+			// RIS drops the history, which renumbers every line: a remembered index would then name
+			// different text. The engine performs the reset itself; forgetting is cmote's share.
+			scp::Request::Reset => self.paths.clear(),
+		}
 	}
 
 	/// Arm or disarm DECSCA by setting cmote's borrowed flag bit on the engine's PEN (§56).
@@ -1069,7 +1098,7 @@ impl Terminal {
 	/// The current screen, as cmote's engine-agnostic view (§9, §16, §23). The rest of the
 	/// app reads the grid only through this, so the engine stays behind `term/`.
 	pub fn screen(&self) -> screen::Screen<'_> {
-		screen::Screen::new(&self.term)
+		screen::Screen::new(&self.term, &self.paths)
 	}
 
 	/// The inline images the page ON SHOW is holding, oldest first (§41). Each names the absolute
@@ -1382,6 +1411,16 @@ pub struct Terminal {
 	/// answers the soft reset: by feeding the engine the same request written in TBC, HTS and CUF,
 	/// so the engine stays the only writer of its own tab table. Holds no state but the scan.
 	tabs: tabs::Tabs,
+	/// Finds SCP, the character path, which no part of the engine has an arm for (§76). Reported by
+	/// the split feed like the prompt marks, because the sequence acts on "the line the cursor is on"
+	/// and that is only knowable at the point in the stream it sits.
+	scp: scp::Scp,
+	/// Which document lines that sequence put right to left. Held here rather than in the engine —
+	/// the engine has no notion of a direction and does not need one: the grid stays in the order the
+	/// host sent, and the mirroring is a rule the RENDERER applies when it derives a frame from it. So
+	/// the scrollback, the search, the selection and a copy all go on reading data order, which is the
+	/// whole reason this is buildable without becoming a second writer of the grid (§71, §73).
+	paths: scp::Paths,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
 	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
@@ -1421,13 +1460,19 @@ enum Split {
 	/// one meaning and no parameters beyond the `5` that identifies it, so the offset is the whole
 	/// event. Applied on the far side of its sequence, as the two above are.
 	TabStops,
+	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
+	Path(scp::Request),
 }
 
-/// Merge one chunk's prompt marks, image events, bookmarks, selective-erase requests and cancelled
-/// final bytes into offset order. Every list arrives ascending, and the sort is stable, so two events
-/// at the very same offset keep the order they were scanned in — which is the only sensible
-/// tie-break, since no scanner can see another's.
-fn splits(
+/// Everything one chunk's scanners found, before it is merged into stream order.
+///
+/// A struct rather than eight positional arguments, which is where this arrived once §76 added the
+/// eighth: with lists this similar in type, an argument transposed at the call site would compile
+/// and then apply the wrong event at the wrong offset. Named fields make that a build error, and the
+/// emptiness test — the fast path every ordinary chunk takes — belongs with them rather than spelled
+/// out at the one call site.
+#[derive(Default)]
+struct Scanned {
 	marks: Vec<(usize, osc133::Mark)>,
 	images: Vec<(usize, graphics::Event)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
@@ -1435,7 +1480,39 @@ fn splits(
 	cancels: Vec<usize>,
 	rectangles: Vec<(usize, rect::Request)>,
 	tab_resets: Vec<usize>,
-) -> Vec<(usize, Split)> {
+	paths: Vec<(usize, scp::Request)>,
+}
+
+impl Scanned {
+	/// Whether no scanner found anything — the overwhelmingly common chunk, which is then fed to the
+	/// engine in one advance and pays for none of the machinery below.
+	fn is_empty(&self) -> bool {
+		self.marks.is_empty()
+			&& self.images.is_empty()
+			&& self.bookmarks.is_empty()
+			&& self.protections.is_empty()
+			&& self.cancels.is_empty()
+			&& self.rectangles.is_empty()
+			&& self.tab_resets.is_empty()
+			&& self.paths.is_empty()
+	}
+}
+
+/// Merge one chunk's prompt marks, image events, bookmarks, selective-erase requests and cancelled
+/// final bytes into offset order. Every list arrives ascending, and the sort is stable, so two events
+/// at the very same offset keep the order they were scanned in — which is the only sensible
+/// tie-break, since no scanner can see another's.
+fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
+	let Scanned {
+		marks,
+		images,
+		bookmarks,
+		protections,
+		cancels,
+		rectangles,
+		tab_resets,
+		paths,
+	} = scanned;
 	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
 		marks.len()
 			+ images.len()
@@ -1443,7 +1520,8 @@ fn splits(
 			+ protections.len()
 			+ cancels.len()
 			+ rectangles.len()
-			+ tab_resets.len(),
+			+ tab_resets.len()
+			+ paths.len(),
 	);
 	merged.extend(
 		marks
@@ -1476,6 +1554,11 @@ fn splits(
 		tab_resets
 			.into_iter()
 			.map(|offset| (offset, Split::TabStops)),
+	);
+	merged.extend(
+		paths
+			.into_iter()
+			.map(|(offset, request)| (offset, Split::Path(request))),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -2921,6 +3004,101 @@ mod tests {
 		terminal.process("X".repeat(40).as_bytes());
 		terminal.process(b"\x1b[1;5H\x1b[?5W");
 		assert_eq!(read(&terminal, 0, 0, 40), "X".repeat(40));
+	}
+
+	/// SCP end to end (§76): the sequence puts the line the cursor is on onto a right-to-left
+	/// character path, and the seam the renderer reads says so. Nothing about the grid changes —
+	/// asserted here, because "the data stays in the order the host sent" is the property that lets
+	/// the search, the selection and a copy go on working.
+	#[test]
+	fn a_character_path_lands_on_the_line_the_cursor_is_on() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2;1Habc\x1b[2 k");
+		assert!(terminal.screen().row_is_rtl(1));
+		assert!(!terminal.screen().row_is_rtl(0), "only the cursor's line");
+		assert_eq!(read(&terminal, 1, 0, 3), "abc", "the grid keeps data order");
+	}
+
+	/// Path 1 puts a line back, and path 0 — the implementation's default — means the same thing
+	/// here. A line has to be able to stop being right to left, or a program can only ever wedge one.
+	#[test]
+	fn a_line_can_be_put_back_left_to_right() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2 k");
+		assert!(terminal.screen().row_is_rtl(0));
+		terminal.process(b"\x1b[1 k");
+		assert!(!terminal.screen().row_is_rtl(0));
+		terminal.process(b"\x1b[2 k\x1b[0 k");
+		assert!(!terminal.screen().row_is_rtl(0));
+	}
+
+	/// The path is keyed by the ABSOLUTE document line (§40), like a prompt mark — so it stays with
+	/// its text as the screen scrolls under it, rather than staying on the row it was set at. This is
+	/// the test that says the store is anchored in the document rather than in the viewport.
+	#[test]
+	fn a_path_follows_its_line_as_the_screen_scrolls() {
+		// Two rows, four lines fed: two scroll off, so the text set right-to-left ends up in history.
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"first\x1b[2 k\r\nsecond\r\nthird\r\nfourth");
+		// Line 0 is "first", now two lines up in the scrollback.
+		assert!(terminal.screen().line_is_rtl(0));
+		assert!(!terminal.screen().line_is_rtl(1));
+		// Scrolled back to it, the row showing that line reports the path.
+		terminal.scroll(ScrollMotion::Lines(2));
+		assert!(terminal.screen().row_is_rtl(0));
+	}
+
+	/// RIS drops the history, which renumbers every line — so a remembered path would land on text
+	/// it was never set for. The store is emptied instead.
+	#[test]
+	fn a_full_reset_forgets_every_character_path() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2 k");
+		assert!(terminal.screen().row_is_rtl(0));
+		terminal.process(b"\x1bc");
+		assert!(!terminal.screen().row_is_rtl(0));
+	}
+
+	/// The alternate page keeps no history, so its line numbering starts again from zero and would
+	/// collide with paths set on the main screen. Both directions of the swap clear them — the same
+	/// rule the inline pictures follow (§41).
+	#[test]
+	fn a_swap_to_the_alternate_page_forgets_every_character_path() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2 k");
+		assert!(terminal.screen().row_is_rtl(0));
+		terminal.process(b"\x1b[?1049h");
+		assert!(!terminal.screen().row_is_rtl(0));
+		terminal.process(b"\x1b[2 k");
+		assert!(
+			terminal.screen().row_is_rtl(0),
+			"and the page can set its own"
+		);
+		terminal.process(b"\x1b[?1049l");
+		assert!(
+			!terminal.screen().row_is_rtl(0),
+			"and loses them on the way back"
+		);
+	}
+
+	/// `Ps2 = 2` — "presentation to data" — asks cmote to write the drawing back into the grid. That
+	/// is engine state cmote does not write (§71, §73) and the only copy of what the host sent, so
+	/// the whole sequence is a no-op rather than the path being taken and the update mode ignored.
+	#[test]
+	fn the_update_mode_that_would_rewrite_the_grid_changes_nothing() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2;2 k");
+		assert!(!terminal.screen().row_is_rtl(0));
+	}
+
+	/// The near miss: `CSI Ps k` with no intermediate is a different sequence, and must not be read
+	/// as this one — the rule §56 wrote down, applied to a final byte that is only SCP with a space
+	/// in front of it.
+	#[test]
+	fn a_sequence_without_the_space_is_not_a_character_path() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[2k");
+		assert!(!terminal.screen().row_is_rtl(0));
 	}
 
 	/// The near miss, and the reason the scanner tests marker, parameter and intermediates

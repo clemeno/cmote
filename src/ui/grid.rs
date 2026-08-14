@@ -32,12 +32,13 @@ use crate::app::Message;
 use crate::palette;
 use crate::term::graphics::Placement;
 use crate::term::mouse as report;
+use crate::term::scp;
 use crate::term::screen::{
 	Cell as ScreenCell, Color as CellColor, CursorShape, MouseMode, Screen, UnderlineStyle,
 };
 use crate::term::search::Highlight;
 use crate::ui::selection::{Cell, Selection};
-use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_at};
+use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_under};
 use iced::advanced::Renderer as _;
 use iced::advanced::image::{Image as RasterImage, Renderer as _};
 use iced::advanced::layout::{self, Layout};
@@ -262,10 +263,9 @@ impl Grid<'_> {
 		if !bounds.contains(position) {
 			return None;
 		}
-		let cell = cell_at(
+		let cell = cell_under(
+			&self.screen,
 			Point::new(position.x - bounds.x, position.y - bounds.y),
-			rows,
-			cols,
 		);
 		link_run_at(self.screen, cell, rows, cols)
 	}
@@ -522,11 +522,9 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			return;
 		};
 		let inside = bounds.contains(position);
-		let (rows, cols) = self.screen.size();
-		let cell = cell_at(
+		let cell = cell_under(
+			&self.screen,
 			Point::new(position.x - bounds.x, position.y - bounds.y),
-			rows,
-			cols,
 		);
 
 		let pointer_event = match pointer {
@@ -1346,7 +1344,35 @@ fn plan_runs(
 			cols: span_cols,
 		});
 	}
+	// The one place the DATA order becomes a PRESENTATION order (§76). Everything above walks the
+	// grid the host wrote; a line a program put on a right-to-left character path is drawn from the
+	// other edge, and this is where that happens — after the runs are built, so the styles, the
+	// selection fill, the match wash and the link underline all came out of data coordinates and
+	// travel with their cells.
+	if screen.line_is_rtl(line) {
+		mirror(&mut runs, cols);
+	}
 	runs
+}
+
+/// Turn a row's runs from data order into the presentation order of a right-to-left line (§76).
+///
+/// Two things move. A run's START becomes the mirror of its LAST column, because the run still
+/// spans rightwards from wherever it is drawn — `flip(col + cols - 1)`, not `flip(col)`. And the
+/// characters inside it reverse, since each of its cells has moved to the other side of the run.
+///
+/// Reversing by `char` is exact here, and only here, because of how the runs above are built: a
+/// cell that is not plain ASCII SEALS its run, so a run is either one cell wide or made of
+/// one-byte-one-cell ASCII. A grapheme cluster — a letter with a combining mark — is never split
+/// by this, because it can only ever be a run of its own. The `is_ascii` test is that invariant
+/// stated where it is relied on rather than left to the reader.
+fn mirror(runs: &mut [Run], cols: u16) {
+	for run in runs.iter_mut() {
+		run.col = scp::flip(run.col + run.cols.saturating_sub(1), cols);
+		if run.content.is_ascii() {
+			run.content = run.content.chars().rev().collect();
+		}
+	}
 }
 
 /// Resolve a cell's colors and attributes into a `CellStyle` (§9, §23). The order matters:
@@ -1624,6 +1650,105 @@ mod tests {
 		assert_eq!(runs[1].style.bg, SELECTION_BG);
 		assert_ne!(runs[0].style.bg, SELECTION_BG);
 		assert_ne!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	/// Which grid column a run draws `glyph` at: the run's own start plus how far into its content
+	/// the character sits. Written once because the mirrored case is only legible this way — a run
+	/// that spans the page has one column, and what moved is where each character is inside it.
+	fn column_of(run: &Run, glyph: char) -> usize {
+		let offset = run
+			.content
+			.chars()
+			.position(|char| char == glyph)
+			.unwrap_or_else(|| panic!("{glyph:?} is not in {:?}", run.content));
+		usize::from(run.col) + offset
+	}
+
+	/// A right-to-left character path is a rule about the DRAWING, not the grid (§76): the planner
+	/// walks the same cells in the same order and then mirrors what came out. Column 0 of the data
+	/// lands hard against the right edge, and the run's characters reverse with it.
+	#[test]
+	fn a_right_to_left_line_is_drawn_from_the_other_edge() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"abc\x1b[2 k");
+		let runs = plan_runs(terminal.screen(), 0, 10, false, 0, Marks::default(), None);
+		// The whole row is one run — the blanks past "abc" share its style — so the assertion is
+		// about where each character lands rather than where the run starts.
+		assert_eq!(runs.len(), 1);
+		let run = &runs[0];
+		assert_eq!(
+			column_of(run, 'a'),
+			9,
+			"data column 0 draws at the right edge"
+		);
+		assert_eq!(column_of(run, 'b'), 8);
+		assert_eq!(
+			column_of(run, 'c'),
+			7,
+			"and the line reads leftwards from there"
+		);
+	}
+
+	/// The same screen with no path set draws in data order — the control that says the test above
+	/// is measuring the mirror rather than the run planner.
+	#[test]
+	fn a_left_to_right_line_is_drawn_where_the_data_says() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"abc");
+		let runs = plan_runs(terminal.screen(), 0, 10, false, 0, Marks::default(), None);
+		assert_eq!(runs.len(), 1);
+		let run = &runs[0];
+		assert_eq!(column_of(run, 'a'), 0);
+		assert_eq!(column_of(run, 'b'), 1);
+		assert_eq!(column_of(run, 'c'), 2);
+	}
+
+	/// The selection fill travels with its cells through the mirror, because the mirror runs AFTER
+	/// the styles are resolved. A highlight that stayed in data columns would land on the text at
+	/// the other end of the line, which is the bug this ordering exists to avoid.
+	#[test]
+	fn a_selection_on_a_mirrored_line_moves_with_its_text() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process(b"abcde\x1b[2 k");
+		// Data columns 1..2 — "bc" — selected.
+		let selection =
+			Selection::new(Spot { line: 0, col: 1 }).with_head(Spot { line: 0, col: 2 });
+		let marks = Marks {
+			selection: Some(&selection),
+			..Marks::default()
+		};
+		let runs = plan_runs(terminal.screen(), 0, 10, false, 0, marks, None);
+		let filled: Vec<_> = runs
+			.iter()
+			.filter(|run| run.style.bg == SELECTION_BG)
+			.map(|run| (run.col, run.content.as_str()))
+			.collect();
+		// "bc" occupies data columns 1..2, so it is drawn at presentation columns 7..8, reversed.
+		let all: Vec<_> = runs
+			.iter()
+			.map(|run| (run.col, run.content.as_str()))
+			.collect();
+		assert_eq!(filled, vec![(7, "cb")], "all runs: {all:?}");
+	}
+
+	/// A run that is not plain ASCII is a single cell by construction — the planner seals it, for
+	/// font fallback — so the mirror never reverses a grapheme cluster into nonsense. This pins the
+	/// invariant `mirror` relies on rather than the behaviour that follows from it.
+	#[test]
+	fn a_non_ascii_cell_crosses_the_mirror_whole() {
+		let mut terminal = Terminal::new(2, 10);
+		// A letter with a combining acute: one cell, two chars.
+		terminal.process("ae\u{301}i\x1b[2 k".as_bytes());
+		let runs = plan_runs(terminal.screen(), 0, 10, false, 0, Marks::default(), None);
+		let combined = runs
+			.iter()
+			.find(|run| run.content.chars().count() > 1 && !run.content.is_ascii());
+		let combined = combined.expect("the combining cell should be a run of its own");
+		assert_eq!(
+			combined.content, "e\u{301}",
+			"unreversed, so still a letter"
+		);
+		assert_eq!(combined.cols, 1);
 	}
 
 	/// The selection is highlighted on whichever row is showing its line right now (§40): the

@@ -189,13 +189,18 @@ impl Cell {
 #[derive(Clone, Copy)]
 pub struct Screen<'a> {
 	engine: &'a Engine,
+	/// Which document lines a program asked to have drawn right to left (SCP, §76). Held beside the
+	/// engine rather than in it — the engine has no arm for the sequence and no notion of a
+	/// direction — and handed over here because this is the one view the renderer and the pointer
+	/// path both read, which is what keeps them agreeing about where a column went.
+	paths: &'a super::scp::Paths,
 }
 
 impl<'a> Screen<'a> {
 	/// Wrap the engine's terminal. Built by `Terminal::screen`; the engine type is the one
 	/// thing that changed when the emulator was swapped (§16, §23).
-	pub(crate) fn new(engine: &'a Engine) -> Self {
-		Self { engine }
+	pub(crate) fn new(engine: &'a Engine, paths: &'a super::scp::Paths) -> Self {
+		Self { engine, paths }
 	}
 
 	/// The grid size as `(rows, cols)`.
@@ -350,6 +355,19 @@ impl<'a> Screen<'a> {
 	pub fn line_at(&self, row: u16) -> u64 {
 		(u64::from(self.history_size()) + u64::from(row))
 			.saturating_sub(u64::from(self.display_offset()))
+	}
+
+	/// Whether this DOCUMENT line is drawn right to left (SCP, §76). The renderer asks by line,
+	/// because a line keeps its direction as the viewport scrolls under it.
+	pub fn line_is_rtl(&self, line: u64) -> bool {
+		self.paths.is_rtl(line)
+	}
+
+	/// The same question about a viewport ROW, for the pointer path — which starts from where the
+	/// mouse is rather than from which line is being drawn. Resolved through `line_at`, so a click
+	/// and the frame under it cannot disagree about which line they are talking about.
+	pub fn row_is_rtl(&self, row: u16) -> bool {
+		self.paths.is_rtl(self.line_at(row))
 	}
 
 	/// The cell at `(row, col)`, or `None` when it is out of bounds. `row`/`col` are in the

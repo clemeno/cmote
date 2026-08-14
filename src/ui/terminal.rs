@@ -14,6 +14,7 @@ use crate::app::Message;
 use crate::explorer::Explorer;
 use crate::files::Files;
 use crate::term::Terminal;
+use crate::term::screen::Screen;
 use crate::transfer::{ClashChoice, Progress, Question, Queue};
 use crate::ui::selection::{Cell, Selection};
 
@@ -744,8 +745,7 @@ pub fn human_bytes(bytes: u64) -> String {
 /// `'static` message.
 fn link_at(terminal: &Terminal, point: Point) -> Option<String> {
 	let screen = terminal.screen();
-	let (rows, cols) = screen.size();
-	let cell = cell_at(point, rows, cols);
+	let cell = cell_under(&screen, point);
 	screen
 		.cell(cell.row, cell.col)?
 		.hyperlink()
@@ -1164,6 +1164,30 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
 	}
 }
 
+/// The grid cell under a pointer position, in the coordinates the rest of cmote works in (§76).
+///
+/// `cell_at` above answers in PRESENTATION columns — where the glyph is on screen. Everything
+/// downstream of a click works in DATA columns: the selection, the link under the pointer, the
+/// search mask, the copy. On a line a program put on a right-to-left character path those two are
+/// mirror images, so this is where the crossing happens, once, through the same `flip` the renderer
+/// used to put the glyph there. Every caller that turns a pointer into a cell goes through here, so
+/// there is no path by which a presentation column reaches something expecting a data one.
+///
+/// On a left-to-right line — every line, until a program says otherwise — this is `cell_at` and
+/// nothing else.
+pub fn cell_under(screen: &Screen<'_>, point: Point) -> Cell {
+	let (rows, cols) = screen.size();
+	let cell = cell_at(point, rows, cols);
+	if screen.row_is_rtl(cell.row) {
+		Cell {
+			row: cell.row,
+			col: crate::term::scp::flip(cell.col, cols),
+		}
+	} else {
+		cell
+	}
+}
+
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
 /// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the files strip
 /// and its splitter take `reserved_height` off the height (§19) — zero when the pane is hidden
@@ -1264,6 +1288,29 @@ mod tests {
 		// Far past the grid clamps to the last cell, never off the grid.
 		let clamped = cell_at(Point::new(100_000.0, 100_000.0), 24, 80);
 		assert_eq!((clamped.row, clamped.col), (23, 79));
+	}
+
+	/// The pointer's half of the character path (§76). `cell_at` above answers in presentation
+	/// columns; `cell_under` hands back the DATA column, which is what the selection, the link
+	/// lookup and the copy all work in — so a click on the visually-leftmost glyph of a mirrored
+	/// line names the last character of the line, not the first.
+	///
+	/// Pinned because this is the half a reader is most likely to leave out: mirroring the drawing
+	/// alone looks right until something is selected.
+	#[test]
+	fn a_click_on_a_mirrored_line_names_the_data_column() {
+		// A ten-column page whose first line is put on a right-to-left path.
+		let mut terminal = crate::term::Terminal::new(4, 10);
+		terminal.process(b"abc[2 k");
+		let screen = terminal.screen();
+		// The pixel column the LAST cell is drawn at.
+		let at_right_edge = Point::new(GRID_PADDING + 9.0 * CELL_WIDTH + 0.5, GRID_PADDING + 0.5);
+		assert_eq!(cell_at(at_right_edge, 4, 10).col, 9, "presentation column");
+		assert_eq!(cell_under(&screen, at_right_edge).col, 0, "data column");
+
+		// And the identity holds on every other line, which never left data order.
+		let second_row = Point::new(GRID_PADDING + 0.5, GRID_PADDING + CELL_HEIGHT + 0.5);
+		assert_eq!(cell_under(&screen, second_row), cell_at(second_row, 4, 10));
 	}
 
 	#[test]

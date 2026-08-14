@@ -4985,8 +4985,7 @@ impl Tab {
 			// position against the new grid, exactly as a move would (§10). Without this a press that
 			// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
 			// the shrunken grid no longer has.
-			let (rows, cols) = terminal.screen().size();
-			self.hover_cell = ui::terminal::cell_at(self.pointer, rows, cols);
+			self.hover_cell = ui::terminal::cell_under(&terminal.screen(), self.pointer);
 		}
 		self.rescan_find();
 	}
@@ -6362,8 +6361,7 @@ impl Tab {
 			return;
 		};
 		let screen = terminal.screen();
-		let (rows, cols) = screen.size();
-		let hovered = ui::terminal::cell_at(point, rows, cols);
+		let hovered = ui::terminal::cell_under(&screen, point);
 		// The head is resolved to a DOCUMENT position here (§40), where the viewport's own numbers are
 		// still to hand: the pointer is over a screen row, but what it selects is the line that row is
 		// showing — so the selection keeps covering that text however the scrollback then moves.

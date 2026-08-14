@@ -109,6 +109,20 @@ repair, so a 🛑 would mean writing refusal code for a sequence that already di
 behind it, dying in a defaulted `Handler` method — and the work the row produced is the decision itself,
 which §6 had never stated. Four consecutive rows, four different answers: §72 translate, §73 refuse, §74
 translate again, §75 shrug, on the record.
+**§76 overturned §75 in the very next section, and landed on a mark neither had offered.**
+Asked to build SCP rather than to classify it, the re-derivation found what both readings had walked
+past: the sequence has **two update modes**, and every argument against it had been costing the wrong
+one. `Ps2 = 2`, "presentation to data", really does ask cmote to write the engine's grid — that is
+§73's refusal and it stands, with a 🛑 row of its own now. `Ps2 = 1`, "data to presentation", asks the
+terminal to derive its drawing from its data, which is what cmote does every frame from a grid it never
+stores a drawing in. So the character path is a rule about the derivation, the grid is untouched, and the
+scrollback, the search, the selection and a copy all go on reading the order the host sent. What made it
+small was that cmote already had the second coordinate space §75 said it would need: one function
+(`scp::flip`, its own inverse) shared by the renderer and the pointer path, and one crossing point
+(`cell_under`) that every click already went through. **One row became two, ✅ and 🛑**, which is the
+one-answer rule doing what it is for. The lesson is narrower than "re-derive everything": a refusal that
+rests on a *parameter's* cost has to name which parameter, or it charges the whole sequence for the
+expensive one.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -753,32 +767,43 @@ matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a 
 own scanner has no arm for it either. Answerback is refused by never having been written, which is a
 decision this section stands behind and no code enforces.
 
-**Bidirectional text (SCP, `CSI Ps SP k`)** — refused in principle, and §75 moved the row to say so
-rather than leaving it as a sentence under a gap mark. The sequence selects the **character path**: `1`
-left-to-right, `2` right-to-left, with a second parameter choosing how the data and presentation
-components track each other. cmote has no presentation component distinct from its data one, and that is
-the decision rather than an oversight.
+**Implicit bidi — the Unicode Bidirectional Algorithm** — refused, and this entry is what is left of a
+larger one. §75 put the whole of SCP here and §76 took most of it back out: the **character path** is
+shipped, per line, and the row in §8 is ✅. What stays refused is the other half of ECMA-48's bidi model,
+and the distinction is worth keeping because the two are usually said in one breath.
 
-A terminal that reorders is a terminal with two coordinate spaces — the order the bytes arrived in and the
-order the glyphs are drawn in — and everything built on §40's absolute document coordinate reads the first
-while the user points at the second: the selection, the find bar's match spans, the OSC 133 prompt marks,
-the Ctrl-hover link runs, the sixel placements, the rectangular family's corners. A character path is not
-a rendering flag, it is that second space threaded through all of them. `[ECMA-48]`, and deliberately not
-priced here the way margins are in §5: the work is not in the sequence, so a line count would be a fiction.
+ECMA-48 pairs SCP with **BDSM**, bidirectional support mode (`CSI 8 h` / `8 l`), and its default is
+**explicit**: the sender has already put the characters in the order it wants them laid down, and the
+terminal only has to know which way to lay them. That is the half cmote implements. **Implicit** mode is
+the other half — the terminal runs the Unicode Bidirectional Algorithm over each line and works the order
+out itself, so that a number inside an Arabic run comes out left-to-right without anyone saying so. cmote
+does not do that and is not going to.
 
-The stance is real rather than aspirational, and one line of the renderer is why — a line written for
-something else entirely. `ui/grid.rs` batches adjacent cells of one style into a run for drawing, and
-**seals every non-ASCII cell into a run of its own** (`let seals = is_wide || !glyph.is_ascii()`,
-`grid.rs:1301`), because a glyph the bundled font lacks needs the shaping-and-fallback path and ASCII does
-not. The side effect is that the text shaper is never handed more than one grapheme cluster at a time, so
-there is nothing for it to reorder: glyphs go down one cell at a time, in grid order, and a remote cannot
-make this terminal display bytes in an order other than the one they arrived in. What the remote's own
-shell or editor did before sending them is the remote's business, and shows as sent.
+The reason is that the algorithm is not the expensive part; the **ambiguity it introduces** is. Under
+implicit bidi the mapping between a data column and a presentation column stops being a function of the
+line's direction and becomes a function of its *content*, recomputed whenever the content changes. §76's
+mirror is one involution (`scp::flip`) shared by the renderer and the pointer, which is what makes a click
+on a mirrored line provably land on the character that was drawn there. A UBA-derived mapping is a
+per-line table that both sides would have to agree on, and it would have to be rebuilt on every write to
+that line, then threaded through the find bar's match spans, the Ctrl-hover link runs and the selection's
+own arithmetic. `[ECMA-48]`, and deliberately not priced the way margins are in §5: the work is not in the
+sequence, so a line count would be a fiction.
 
-And note who does the declining. `vte` parses SCP in full — both parameters, into `ScpCharPath` and
-`ScpUpdateMode` — and calls `set_scp`, a `Handler` method `alacritty_terminal` leaves at its empty
-default, so the sequence never reaches cmote at all. The reasoning above is why cmote would refuse it;
-nothing in cmote has to. That is the **🤷** in §8, and the same shape as OSC 22 above.
+Note what this costs a program, because it is not nothing and is not much. A host that wants right-to-left
+text laid out correctly has to run the algorithm itself and send the result — which is what a host does
+today for **every** terminal that has no bidi, xterm included, and cmote's contribution is that the path
+it then asks for is now honoured instead of dropped.
+
+And note who does the declining: nobody has to. `vte`'s `NamedMode` names only `Insert = 4` and
+`LineFeedNewLine = 20`, so BDSM arrives as `Mode::Unknown(8)` and reaches nothing. cmote is in explicit
+mode and cannot be asked out of it, which is consistent rather than lucky — this is the **🤷** shape, one
+paragraph after the OSC 22 entry above, except that it has no row of its own in §8 because no sequence
+carries it that cmote answers.
+
+One parameter of SCP itself is refused too, and that one **is** cmote's own code: `Ps2 = 2`,
+"presentation to data", asks the terminal to write the drawing back into the grid. That is the engine's
+state and the only copy of what the host sent, so `term/scp.rs` drops the whole sequence rather than
+taking the path and ignoring the update mode. It has its own row in §8 and its own 🛑.
 
 ---
 
@@ -1080,7 +1105,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | s (DECSLRM) | Left / right margins | 🛑 | **cancelled in flight by cmote's own code** (`term/cancel.rs`, §57), so a margin request does nothing at all — which is what "unsupported" should mean. The refusal is a repair rather than a shrug: `vte`'s `('s', [])` arm is save-cursor and never reads its parameters, so `CSI Pl;Pr s` used to *save the cursor*, overwriting the one slot the program had its own value in. A parameter is the whole test — the bare `CSI s` is left alone and still saves — and `process` feeds the state machine's own **CAN** in place of the final byte, because withholding it would leave the engine's parser mid-CSI and hand this sequence the next final byte in the stream. Fifteen tests in the scanner, plus `a_cancelled_margin_request_prints_nothing_at_all` in `term/mod.rs` pinning it end to end. Read ❌ until §73, which is a mark this row could not carry: ❌ is a sequence that *could still land*, and since §57 this one cannot. The margins **themselves** are a gap, and it has a row of its own — `? 69` (DECLRMM) in the private-mode table, priced in §5, refused by nothing |
 | g | Clear tab stop (TBC) | ✅ | `0` the stop under the cursor and `3` all of them — the two DEC defined for a terminal with one page; `1` / `2` / `4` reach `unhandled!()` in `vte` (§67). `CSI 3 g` is also the first thing §74's tab-stop walk sends, so this row is load-bearing for the one below |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ✅ | cmote's own, by §72's route (§74). `vte` parses it — `('W', [b'?']) if next_param_or(0) == 5 => handler.set_tabs(8)` — and `alacritty_terminal` never overrides `Handler::set_tabs`, whose body in the trait is empty, so the sequence reached the engine and stopped there. Read ❌ for that until §74, which asked §72's question instead: this is a **shorthand**, not a capability, and TBC, CR, HTS and CUF are all ✅ already. So `term/tabs.rs` scans the sequence out and `term/mod.rs` feeds the engine the same request in the long spelling — the engine's tab table stays private, kept aligned across resize by the engine, with cmote never a second writer of it (§71, §73). The care is in **which** movement does the walking: the engine hands `CSI G`, `` CSI ` ``, `CSI A` and `CSI B` the line the cursor is *already* on and then adds the scrolling region's top to it, so under origin mode each of them drags the cursor down the page (measured: `(3, 4)` → `(5, 0)` for one `CSI 1 G` under a `3;7` region — see the rows above, which §74 annotated). CR and CUF do not go near that code, so the walk is built only out of those two, reads nothing but the page width and the cursor's column, and gives the row back untouched. Eighteen tests, five end to end, including one under origin mode that fails for any walk spelled with CHA. One loss, disclosed: a cursor waiting to wrap loses that flag, as it does across §72's soft reset |
-| Ps SP k | Select character path (SCP) | 🤷 | **dies in a defaulted `Handler` method** — one of the two shapes the 🤷 bullet names. `vte` parses it in full, both parameters, into `ScpCharPath` (`Default` / `LTR` / `RTL`) and `ScpUpdateMode`, then calls `set_scp`, whose body in the trait is `{}` and which `alacritty_terminal` never overrides; a third value for either parameter reaches `unhandled!()` before the call. cmote is never offered the sequence and pays nothing to decline it. Read ❌ until §75, on the same terms §73 re-read DECSLRM: ❌ is a gap that could still become work, and the note here has said "bidi anyway, which cmote does not do" the whole time — a **stance sitting under the mark for a gap**. The stance is now stated, in §6. What makes it more than a shrug is one line of the renderer, and not one written for this: `ui/grid.rs` batches adjacent cells of a style into a run and **seals every non-ASCII cell into a run of its own** (`let seals = is_wide || !glyph.is_ascii()`, `grid.rs:1301`, there for font fallback), so the text shaper is never handed more than one grapheme cluster and has nothing to reorder. Glyphs go down one cell at a time in grid order. That is not a refusal — the renderer never sees the sequence — it is why the request has nothing to act on. This row and DECST8C were a pair until §74 took the other one |
+| Ps ; Ps SP k | Select character path (SCP) — data to presentation | ✅ | cmote's own, `term/scp.rs` (§76). `vte` parses it in full — both parameters, into `ScpCharPath` and `ScpUpdateMode` — and calls `set_scp`, whose body in the trait is `{}` and which `alacritty_terminal` never overrides, so the sequence reached the engine and stopped. Read ❌ and then 🤷 until §76, both on the same reasoning: bidi is a capability, so there is nothing to translate into. What that reasoning missed is that SCP has **two update modes and cmote had been costing the wrong one**. ECMA-48 gives a terminal a DATA component and a PRESENTATION component, and `Ps2 = 1` says the presentation is derived from the data — which is what cmote already does, every frame, from a grid it never stores a drawing in. So a right-to-left path is a rule about the derivation and **nothing about the grid changes**: `term/scp.rs` scans the sequence out, records the path against the cursor's ABSOLUTE document line (§40, the prompt marks' own anchor, so it rides scrolling for free), and `ui/grid.rs` mirrors that row's runs when it draws them. The scrollback, the search, the selection and a copy all go on reading data order. `Ps1`: `0` and `1` left to right, `2` right to left, anything else a no-op. The mirror is one function (`scp::flip`, its own inverse) used by the renderer AND by the pointer path, so a click on a mirrored line resolves to the data column it was drawn from — `ui::terminal::cell_under`, which every pointer call site now goes through. Twenty-four tests. Two extents, both deliberate: an inline picture is placed by column and is **not** mirrored, pictures not being characters; and the mirror is over the page's full width, so a short line on a right-to-left path sits against the right edge, which is what a character path running that way means |
+| Ps ; 2 SP k | Select character path (SCP) — presentation to data | 🛑 | **cmote's own scanner drops it** (`term/scp.rs`, §76). `Ps2 = 2` asks the terminal to write the *drawing* back into the data component — cmote writing the engine's grid, which §71 and §73 both declined, and over the only copy of what the host actually sent. The whole sequence is a no-op rather than the path being taken and the update mode quietly ignored, which would leave a program believing the two components had been re-synchronised. Pinned from both ends: `the_update_mode_that_would_rewrite_the_grid_is_refused` in the scanner and `the_update_mode_that_would_rewrite_the_grid_changes_nothing` at the boundary |
 | $ z (DECERA) | Erase rectangular area | ✅ | cmote's own scanner and cell writer (`term/rect.rs`, §58) — the engine matches `$` only in DECRQM, so all four of this family fall through unhandled. Corners default to the page edges, an end past the edge clamps, and a rectangle described backwards or starting off the page is a **no-op** rather than one cmote invents by swapping corners |
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb (§58): protected cells stand, and the plain `$ z` still takes them. This was the piece §56 unblocked and left unbuilt — the per-cell protection it needed already existed |
 | $ x (DECFRA) | Fill rectangular area | ✅ | one character across a box, stamped from the **pen**, so the fill carries the colours and attributes a printed glyph would have (§58). `Pch` is an **allow-list** — 32–126 and 160–255, as xterm allows — so a remote cannot paint the page with C0, C1, DEL or unassigned code points |
@@ -1225,9 +1251,11 @@ that makes every palette set and reset a no-op. Since §71 it also holds two ref
 behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
 cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the remote pointer shape (OSC 22), the palette stack (`CSI # p / # q`),
-notifications in their other three spellings, and — since §75 — the **character path** (SCP), which is
-bidi, which cmote does not do and now says so in §6 rather than only in a note. Each one dead in `vte` or
-in a `Handler` default before cmote sees a byte. That leaves the plain ❌ column short, and worth reading as the real list: the
+and
+notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
+cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off, which is
+the one thing about 🤷 worth watching: it is the mark most likely to be a conclusion rather than a
+finding, because nothing fails while it is wrong. That leaves the plain ❌ column short, and worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the

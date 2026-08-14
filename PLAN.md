@@ -8287,3 +8287,103 @@ refuse, §74 translate again, §75 shrug on the record.
 - **The engine could grow `set_scp`.** 🤷 rows are stances, not guarantees, and this one has a sharper
   edge than most: if `alacritty_terminal` implemented bidi, the grid would start holding cells in an
   order cmote's renderer draws literally, and the divergence would be visible rather than inert.
+
+## 76. The parameter the refusal had been charging for (v4.0.0)
+
+§75 marked SCP 🤷 and argued the case at length. The instruction after it was to implement the sequence
+anyway. The concern was restated once and overruled, which is how this section came to exist — and the
+re-derivation found something both earlier readings had walked straight past.
+
+### What §73's question missed
+
+Three sections had now asked the same thing of this row and got no from all three angles: no shorthand to
+translate into (§72's test), nothing to repair (§74's test), so a stance with nothing behind it (§75).
+The strongest of the three arguments was that a character path reaches into the engine — it reverses the
+direction of the cursor's advance, autowrap, IRM insert, `ICH`/`DCH` and `EL`, none of which cmote owns.
+
+That argument is true of **one of SCP's two update modes**, and the row had been charged for it whole.
+
+```
+CSI Ps1 ; Ps2 SP k     Ps1: 0 default   1 left-to-right   2 right-to-left
+                       Ps2: 0 implementation-dependent
+                            1 data to presentation
+                            2 presentation to data
+```
+
+ECMA-48 gives a terminal a **data component** — the characters, in the order they arrived — and a
+**presentation component**, where the glyphs go. `Ps2 = 2` says the presentation drives the data: edit the
+drawing and the stored characters follow. That is the mode every objection above was about, and it is
+refused, on §71's and §73's grounds exactly — it is cmote writing the engine's grid, over the only copy of
+what the host actually sent.
+
+`Ps2 = 1` says the opposite: the presentation is **derived** from the data. cmote already works that way
+and has since it was written. The engine's grid is the data; `ui/grid.rs` builds every frame out of it and
+stores no drawing anywhere. So a right-to-left character path is a rule about the derivation, and the
+grid is untouched by it.
+
+### What that made it
+
+- `term/scp.rs` — the scanner, and the store. A path is recorded against the cursor's **absolute
+  document line** (§40), which is the prompt marks' own anchor, so a line keeps its direction as the
+  screen scrolls under it for free and for the same reason they do.
+- `ui/grid.rs` — one call at the end of the run planner. The runs are built exactly as before, out of
+  data coordinates, so the styles, the selection fill, the match wash and the link underline are all
+  resolved before anything moves; then a right-to-left row's runs are mirrored.
+- `ui::terminal::cell_under` — the same mirror on the way back in. Every call site that turns a pointer
+  into a cell now goes through it, so a click on a mirrored line resolves to the data column the glyph
+  was drawn from.
+
+The piece that made this small is the one §75 said would make it large. A second coordinate space is
+real, and it turned out to be **one function and one crossing point**: `scp::flip` is its own inverse and
+is called by both sides, and `cell_at` was already the single place a pixel became a cell. §75 listed the
+selection, the match spans, the prompt marks, the link runs, the sixel placements and the rectangle
+corners as six places the space would have to be threaded through. Five of them never see a presentation
+column at all, because the mirror happens after they have had their say. The sixth is disclosed below.
+
+### One row became two
+
+The compatibility matrix now carries `Ps ; Ps SP k` as ✅ and `Ps ; 2 SP k` as 🛑, which is the
+one-answer rule doing the job it exists for: one mark averaging "we do this, except for the parameter
+that would be dangerous" is exactly the row §66 retired the partial mark over. Matrix: 163 rows → 164,
+✅ 102 → 103, ❌ 25 unchanged, 🛑 26 → 27, 🤷 10 → 9.
+
+The lesson is narrower than "re-derive everything", which §70 through §75 have already said in five
+different ways. It is this: **a refusal that rests on a parameter's cost has to name which parameter.**
+Three sections wrote "SCP reaches into the engine" without asking which value of `Ps2` did the reaching,
+and so charged the whole sequence for the expensive one.
+
+### A debt paid on the way past
+
+`splits()` took eight positional `Vec`s after this, and clippy's argument limit is seven. The fix was the
+struct this document has had on its deferred list since §58: `Scanned`, one named field per scanner, with
+the emptiness test — the fast path every ordinary chunk takes — as a method on it. Worth more than
+silencing a lint: with lists that similar in type, two arguments transposed at the call site would have
+compiled and then applied the wrong event at the wrong offset.
+
+### What it cost
+
+- `src/term/scp.rs`, new — scanner, store and mirror, all pure and testable without a terminal.
+- `src/term/screen.rs` — the seam carries the store, so the renderer and the pointer path read one source.
+- `src/term/mod.rs` — the eighth scanner, a `Split::Path`, `select_character_path`, and the store cleared
+  on RIS and on both directions of the alternate-screen swap, since each renumbers what a line index
+  means.
+- `src/ui/grid.rs`, `src/ui/terminal.rs`, `src/app.rs` — the mirror and its inverse.
+- Tests 1090 → 1115.
+
+### Not done
+
+- **Implicit bidi — the Unicode Bidirectional Algorithm.** Refused, and §6 now carries only that rather
+  than the whole of SCP. ECMA-48's BDSM defaults to *explicit*, which means the sender has already
+  ordered the characters; that is the half cmote implements. Under implicit mode the data-to-presentation
+  mapping stops being a function of the line's direction and becomes a function of its content,
+  recomputed on every write — a per-line table both sides would have to agree on, rather than one
+  involution. `vte` does not name mode 8, so BDSM reaches nothing and cmote cannot be asked out of
+  explicit mode, which makes the stance consistent rather than lucky.
+- **An inline picture is not mirrored.** Placements are anchored by column and drawn separately from the
+  runs, so a sixel on a right-to-left line stays where its columns say. Pictures are not characters and
+  ECMA-48's path is about characters — but it is a divergence, and it is here rather than nowhere.
+- **The mirror is over the page's full width.** A short line on a right-to-left path sits against the
+  right edge. That is what a character path running that way means, and it will still surprise someone.
+- **Nothing tells a program its `Ps2 = 2` was dropped.** SCP has no reply and no DECRQM mode, so a
+  program that asks for presentation-to-data gets silence — the same disclosure §57 makes about a
+  cancelled margin request.
