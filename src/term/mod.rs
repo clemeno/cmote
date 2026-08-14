@@ -47,6 +47,7 @@ pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
+mod notify; // names the desktop-notification spellings cmote refuses, so the refusal is stated (§79)
 mod osc; // frames OSC strings out of the stream for the scanners below, and sanitises what they keep (§17, §34, §54, §55, §69)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 pub mod pointer; // reads the mouse pointer shape a remote asks for, OSC 22 — an allow-list (§77)
@@ -1844,6 +1845,37 @@ mod tests {
 		let mut terminal = Terminal::new(4, 20);
 		assert!(terminal.process(b"\x1b]52;c;aGVsbG8=\x07").is_empty());
 		assert!(terminal.process(b"\x1b]52;c;?\x07").is_empty());
+		terminal.process(b"after");
+		assert_eq!(read(&terminal, 0, 0, 5), "after");
+	}
+
+	#[test]
+	fn a_desktop_notification_gets_nothing_in_any_of_its_three_spellings() {
+		// §79. ConEmu's `9;<text>`, urxvt's `777;notify;…` and kitty's `99;…` are one refused
+		// feature in three dialects (§6, §54), and since §79 cmote's own code declines each by
+		// name (`term::notify`) instead of leaving them to fall between the scanners.
+		//
+		// Three things are asserted, and the second is the one that makes this more than a
+		// restatement of the module's own tests. No reply goes back. The tab's own state is
+		// untouched — a progress report set BEFORE the notifications is still exactly where it
+		// was, which is what would break first if a notification were ever read as one, and the
+		// title is still the title. And none of the notification TEXT reaches the grid: a
+		// remote's title and body are consumed as OSC payloads, never printed as characters.
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1b]9;4;1;30\x07\x1b]2;window\x07");
+		assert!(terminal.process(b"\x1b]9;Build finished\x07").is_empty());
+		assert!(
+			terminal
+				.process(b"\x1b]777;notify;Build;finished in 4s\x07")
+				.is_empty()
+		);
+		assert!(
+			terminal
+				.process(b"\x1b]99;i=1:d=0:p=title;Build finished\x07")
+				.is_empty()
+		);
+		assert_eq!(terminal.progress(), progress::Progress::Working(30));
+		assert_eq!(terminal.title().as_deref(), Some("window"));
 		terminal.process(b"after");
 		assert_eq!(read(&terminal, 0, 0, 5), "after");
 	}

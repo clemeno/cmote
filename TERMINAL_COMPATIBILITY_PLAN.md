@@ -167,6 +167,23 @@ and nothing else, so 🤷 is right. No split either — a row splits when the tw
 and here they answer the same for different reasons. **§73 asked which column a refusal belongs in; §78
 is the case where the column was right and the argument was borrowed**, and only writing the reason out
 in full finds that.
+
+**§79 then moved two rows by writing code that changes nothing.** `kitty 99` and `OSC 777` are the
+desktop notification in two more spellings, and the decision on all of them has been settled since §54:
+a notification LEAVES the window — it lands on the desktop, outlives the tab, and on Windows sits in
+the Action Center after the session is gone. But the two vendor spellings read 🤷, because nothing here
+declined them: no `vte` arm, no cmote scanner. `term/notify.rs` now names all three in one place, and
+`term/progress::Reports::feed` — which already frames every OSC payload cmote sees, and already owned
+the bare-OSC-9 half — asks it about each payload before reading one. **Nothing on the screen changes**,
+and the rows say so: cmote could not raise a notification if it wanted to. What changes is exactly what
+§63 changed on the OSC 52 row, where the clipboard pair was refused only by a catch-all arm that
+happened to drop the event. A refusal that rests on nobody happening to match the sequence is one no
+test can see. §78's row is the mirror image and the two belong read together: there the mark was right
+and the argument borrowed, so the fix was words; here the argument was right and the mark was borrowed
+— 🤷 claims *upstream* refuses it, and upstream refused nothing, it simply never looked — so the fix was
+code. The exclusion runs both ways, too: the two OSC 9 sub-codes cmote *does* honour (`9;4;` progress,
+`9;9;` cwd) are named in the classifier with their trailing separator, so tightening this refusal can
+never quietly take a shipped feature with it. **🤷 8 → 6, 🛑 28 → 30**, with the row count unmoved.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
 answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
@@ -743,6 +760,21 @@ Windows sits in the Action Center after the session is gone. That hands a remote
 machine itself, and a compromised or merely chatty host would spam it. cmote's rule throughout is that
 a remote may change what its own tab looks like and nothing more.
 
+**Since §79 that refusal is performed rather than merely held.** `term/notify.rs` names the three
+spellings in one place and `term/progress::Reports::feed` — the module that already frames every OSC
+payload cmote sees, and that already owned the bare-OSC-9 half — asks it about each payload before
+reading one. **The behaviour is unchanged and the section does not pretend otherwise**: nothing in
+cmote could raise a notification if it wanted to, so none of the three was ever going to do anything.
+What changes is what §63 had to change on the OSC 52 row. There the clipboard pair was refused only by
+a catch-all arm that happened to drop the event; here `kitty 99` and `OSC 777` were refused by *nobody*
+— no `vte` arm, no cmote scanner — and the bare `OSC 9;<text>` only by the accident that the progress
+and cwd scanners are looking for `9;4;` and `9;9;` and so did not recognise it. A refusal that rests on
+nobody happening to match the sequence is one no test can see and one a later hand can undo without
+noticing they have. Three tests now fail if any of the three starts being read, and the exclusion runs
+the other way too: the two OSC 9 sub-codes cmote *does* honour are named in the classifier with their
+trailing `;`, so tightening this refusal can never quietly break progress (§54) or the working
+directory (§17).
+
 **This is what makes `OSC 9;4` progress a different question, not an inconsistency** — §54 implements
 it. OSC 9 is *multiplexed*: `9;9` is the Windows working-directory announcement cmote has read since
 §17, `9;4` is progress, and a bare `9;<text>` is the notification. Progress cannot leave the chip it
@@ -1045,7 +1077,8 @@ refused with its reason written down.
 **§54 then closed the OSC column's last item of real value, and turned four ❌ rows into decisions** —
 🛑 and 🤷 rows since the legend grew marks of their own — and the split was instructive: OSC 9 is
 refused by cmote's own scanner and pinned by a test, while `OSC 777` and `kitty 99` are refused by
-nobody at all, since `vte` has no arm for either.
+nobody at all, since `vte` has no arm for either. **§79 closed that split**: the three spellings are
+one decision, so they now sit in one place (`term/notify.rs`) under one mark, and all three read 🛑.
 `OSC 9;4` progress reporting shipped (`term/progress.rs`) — a per-tab bar on the chip and the taskbar
 button mirroring the active tab. The same pass wrote down the stance the notification rows had been
 missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spellings and are **refused**
@@ -1157,7 +1190,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 7 | Working directory | ✅ | cmote's own scanner (`term/cwd.rs`, §17) |
 | 8 (http / https / mailto) | Hyperlinks | ✅ | rendered, underlined under a Ctrl-hover, and followed on Ctrl-click or through the right-click menu (`link.rs`, §24) |
 | 8 (any other scheme) | Hyperlinks | 🛑 | still drawn as a link, never opened. A scheme decides which local program the OS launches and the URI comes from the remote, so `link.rs` holds a three-entry `ALLOWED_SCHEMES` allow-list and turns anything else — `file:`, an app scheme, a URI with no `:` at all — into a note to the user rather than a launch (§24) |
-| 9 | Desktop notification | 🛑 | a notification leaves the window and lands on the desktop (§6, §54). cmote's own scanners perform this one: `term/progress.rs` matches `9;4;` and `term/cwd.rs` matches `9;9;`, so a bare `9;<text>` is *seen* and declined — pinned by `the_other_osc_nine_sequences_are_left_alone`. `vte` has no OSC 9 arm, so the engine would never have offered it either |
+| 9 | Desktop notification | 🛑 | a notification leaves the window and lands on the desktop (§6, §54). cmote's own code performs this one, and since §79 it performs it **on purpose**: until then the refusal was an accident of two scanners looking for something else — `term/progress.rs` matches `9;4;`, `term/cwd.rs` matches `9;9;`, so a bare `9;<text>` matched neither and fell through. `term/notify.rs` now names it, and `the_two_osc_nine_sub_codes_cmote_reads_are_not_notifications` pins the exclusion from the other side: the two sub-codes cmote *does* read are excluded with their trailing `;`, the same prefixes those two modules strip, so the classifier and they cannot disagree about which payload belongs to whom. Still pinned by `the_other_osc_nine_sequences_are_left_alone` as well. `vte` has no OSC 9 arm, so the engine would never have offered it either |
 | 9;4 | Progress reporting | ✅ | per-tab bar on the chip + the taskbar button mirrors the active tab (`term/progress.rs`, §54); all five states, share clamped |
 | 9;9 | Working directory (ConEmu) | ✅ | the **Windows** spelling — a bare native path, sometimes quoted — read beside OSC 7 and iTerm's `CurrentDir` in the one scanner (`term/cwd.rs`, §17). This row was missing until §60's audit, which is odd company for the spelling a Windows client is likeliest to meet |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | scheme-accurate — `report_color` resolves against `palette`, the same source `ui/grid.rs` paints from; cursor reports the **fg**, since the cursor is drawn by inverting the cell. The half programs actually use: `OSC 11 ?` is how one picks a light or dark colourscheme to suit the terminal. Two tests pin it, one per role |
@@ -1171,7 +1204,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | no effect — same fixed scheme (§6), named there beside the sets it undoes |
 | 133 | Shell integration (semantic prompts) | ✅ | scanner (`term/osc133.rs`, §34): per-tab status dot + jump-to-prompt + select-command-output; A/B/C/D tracked, exit code from D |
 | Kitty 21 | Colour by semantic name | 🤷 | **one sequence doing three jobs** — `OSC 21 ; key=value ; key=? ; key= ST` sets, queries and resets, any number of pairs at a time, over names (`foreground`, `background`, `cursor`, `cursor_text_color`, `selection_foreground`, `selection_background`, `visual_bell_color`, `transparent_background_color1`–`8`, `color0`–`color255`) instead of numbers. The **set** and **reset** pairs are the fixed scheme (§6) verbatim, the refusal `4 (set)` and `110`–`112` already carry. The **query** pairs are a different question, and until §78 this row did not ask it: it borrowed the set half's sentence, while rows `4` and `10 / 11 / 12` are each SPLIT query ✅ / set 🛑 — §76's mistake one family over. The query half's own four reasons: it is a **dialect** query, sent only after a caller has concluded kitty, and nothing here says kitty (`TERM=xterm-256color`, XTVERSION `cmote(<version>)`, XTGETTCAP `TN` `xterm-256color`) — unlike the five in `term/query.rs`, which anything sends blind; for the keys cmote could answer it is a second **reader** of `report_color`, not a second writer of one field as the fourth cursor-shape spelling would have been (§71), so the two could never disagree and equally never differ; the keys that would justify it have **no single value here** — selection changes only the background (`SELECTION_BG`, `ui/grid.rs`) so `selection_foreground` is whatever the cell had, the cursor is drawn by inverting the cell so `cursor_text_color` is per-cell, and `visual_bell_color` / the transparent-background eight / the mark colours name features cmote lacks, so answering means **inventing** a colour, which is the one thing `palette.rs` opens by forbidding; and it would be cmote's first reply whose **length the requester sets** (n `key=?` pairs → n values), where every reply today is one bounded answer. A judgement, not a wall, and the counters are recorded so a later reader need not re-find them: `selection_background` IS a real constant that `palette.rs`'s charter says belongs in `palette.rs`, kitty's **keyboard** protocol does work here (§25), and `query.rs`'s own argument — an unanswered query stalls its sender — applies to anything that does send this one. It would flip if cmote ever advertised kitty, or if `palette.rs` grew the selection colours for another reason. **Nothing performs the refusal**, and §78 checked that rather than repeating it: `vte` 0.15.0's OSC arms are `0`/`2`, `4`, `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so OSC 21 reaches no handler, and cmote has no scanner for it. Not split into two rows, because a row splits when the halves *answer* differently and both of these answer 🤷 |
-| Kitty 99 | Rich notifications | 🤷 | a notification, in a third spelling (§6, §54) — and, unlike OSC 9, one nothing here declines: no `vte` arm, no cmote scanner |
+| Kitty 99 | Rich notifications | 🛑 | a notification, in kitty's spelling — with per-notification identity, urgency and icon metadata in the first field, all of it refused for the one reason the plain spellings are (§6, §54): **a notification leaves the window**, lands on the user's desktop, outlives the tab that asked and on Windows sits in the Action Center after the session is gone. Read 🤷 until §79 because nothing here declined it — no `vte` arm, no cmote scanner — which made it a policy the document held and the program did not. `term/notify.rs` now names all three spellings in one place and `term/progress.rs` asks it about every OSC payload before reading one, so cmote's own code sees `99;…` and declines it. **The refusal changes no behaviour**, and it is not claimed to: nothing in cmote could raise a notification if it wanted to, and this row would read the same on the screen either way. What it changes is §63's difference on the OSC 52 row — a refusal that rests on nobody happening to match the sequence is one no test can see and one an engine bump or a stray feature can undo in silence. Pinned by name at three depths: `the_three_spellings_are_one_refusal` on the classifier, `the_other_two_notification_spellings_are_declined_here_too` where it is called, and `a_desktop_notification_gets_nothing_in_any_of_its_three_spellings` at the seam — which sets a progress report FIRST, so the assertion is that the report SURVIVED all three, and then checks that none of the notification's own text reached the grid |
 | iTerm 1337 File | Inline images | 🛑 | refused **twice** by `term/iterm.rs`, and on consent rather than cost (§6, §70): the allow-list never matches `File`, and `MAX_PAYLOAD` = 4096 sits deliberately below what a base64 image needs, so the payload is abandoned mid-flight rather than buffered. One test pins both halves — `refuses_the_inline_image_key_without_even_buffering_it`, which feeds `MAX_PAYLOAD + 1` bytes. Read ❌ until §70 on the grounds that inline images "need an image-format decoder"; §53 put five decoders in the tree as a direct dependency, so that cost expired and the mark had outlived its argument |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | amber gutter tick + Ctrl+Shift+Up/Down (`term/iterm.rs`, §55); additive over §34, whose marks are prompt-derived and cannot mark mid-output |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | third spelling, read beside OSC 7 / 9;9 (`term/cwd.rs`, §55) |
@@ -1185,7 +1218,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | iTerm 1337 `CursorShape` | Cursor shape | 🛑 | a **fourth** spelling of one field. DECSCUSR (`CSI Ps SP q`) and OSC 50 both reach the engine's single `cursor_style.shape` through `vte`; this one would have to reach it from outside, so it is a second *source* for that field rather than a second spelling — which is how two of them come to disagree, and buys a program nothing it cannot already say twice (§6, §71). Pinned from both ends: `refuses_the_two_keys_that_would_only_repeat_an_answer_cmote_already_gives` on the allow-list, and `the_iterm_spelling_of_the_cursor_shape_is_not_honoured` at the boundary, which sets a shape with DECSCUSR first so the refusal is the shape SURVIVING |
 | iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | cmote holds these numbers — the GUI sets them through `Terminal::set_cell_pixels` and `CSI 14t` is answered from them — and declines to say so in this spelling, because **a reply is an advertisement**. What asks this in iTerm2 asks in order to size an inline image, the `File=` protocol §70 refuses; answering precisely and then dropping the picture is worse for the sender than the silence that lets it fall back. Not a vendor key singled out: `CSI 16t` is the standard spelling of the same question and cmote answers that no more than this one (§6, §71). Pinned by `the_iterm_spelling_of_the_cell_size_question_gets_no_answer`, which asserts the silence and then answers `CSI 14t` on the same terminal, so the silence is shown to be a decision and not ignorance |
 | iTerm 1337 (every other key) | — | 🛑 | `term/iterm.rs` is an **allow-list**, so an unvetted key does nothing by default (§55) |
-| 777 | urxvt notification | 🤷 | a notification, in a fourth spelling (§6, §54); no `vte` arm, no cmote scanner |
+| 777 (`notify`) | urxvt notification | 🛑 | the same refusal in urxvt's spelling, and it moved with kitty's in §79 rather than being left behind: one function refuses both, so leaving this row at 🤷 while `term/notify.rs` declined it by name would have been the document disagreeing with the code. Pinned by `the_three_spellings_are_one_refusal` and `only_the_urxvt_notify_module_is_this_decision`. OSC 777 is itself a **dispatcher** (`777;<module>;…`) and only the `notify` module is this feature; another module is not refused here, because it is unimplemented rather than declined — a different question with a different mark (§6, §54) |
 
 ### CSI — cursor movement & editing
 
@@ -1352,19 +1385,22 @@ protected-cell erase it dropped as well, and — since §58, §59 and §60 — t
 family, checksum query included, and — since §72 — **DECSTR**, the soft reset every `tput init` opens
 with and no arm in `vte` ever heard. The **deliberate** part of what is missing used to be most of the ❌
 column and now carries two marks of its own. **🛑** is what cmote's code refuses and its tests pin:
-the remote clipboard (OSC 52 both ways), desktop notifications in the OSC 9 spelling, the dangerous
+the remote clipboard (OSC 52 both ways), desktop notifications in **all three** spellings — the OSC 9
+one since §54, kitty's `99` and urxvt's `777` since §79 — the dangerous
 half of iTerm's OSC 1337 namespace — **inline images among them since §70** — and a fixed colour scheme
 that makes every palette set and reset a no-op. Since §71 it also holds two refusals with **no danger
 behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
 cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
-control (`CSI 1–10 t`), the palette stack (`CSI # p / # q`),
-and
-notifications in their other three spellings — each one dead in `vte` or in a `Handler` default before
-cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off; §77 then
-took off the **remote pointer shape** (OSC 22), which had sat there since §54. That is the one thing about
-🤷 worth watching: it is the mark most likely to be a conclusion rather than a finding, because nothing
-fails while it is wrong — three sections in a row now, and both times the entry had argued the sequence
-against an architecture cmote does not have. That leaves the plain ❌ column short, and worth reading as the real list: the
+control (`CSI 1–10 t`), the palette stack (`CSI # p / # q`), kitty's colour-by-name (`OSC 21`), and the
+two DECSET modes nothing can turn on (`3`, `80`) — each one dead in `vte` or in a `Handler` default
+before cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off;
+§77 then took off the **remote pointer shape** (OSC 22), which had sat there since §54. That is the one
+thing about 🤷 worth watching: it is the mark most likely to be a conclusion rather than a finding,
+because nothing fails while it is wrong — three sections in a row now, and both times the entry had
+argued the sequence against an architecture cmote does not have. **§79 found the fourth way it goes
+wrong**, and it is the plainest: 🤷 says *upstream* refuses this, and for `kitty 99` and `OSC 777`
+upstream refused nothing — it simply never looked, which is not the same claim. Six rows left in the
+column, and the two that left it did so without a single byte of behaviour changing. That leaves the plain ❌ column short, and worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the
@@ -1802,7 +1838,23 @@ Audited file:line anchors behind the claims above, for later re-checking.
   images, a progress reading has no place on the grid, so `resize` must not drop it. Fed the whole
   chunk by `process` with no split, like the cwd. Surfaced by `Terminal::progress`; drawn as a 3 px bar
   along the bottom of the tab chip (`ui/tabs.rs`) and mirrored onto the Windows taskbar button for the
-  **active** tab only (`taskbar.rs`). Parse-only, no engine, no widgets — fully unit-tested.
+  **active** tab only (`taskbar.rs`). Parse-only, no engine, no widgets — fully unit-tested. Since §79
+  `feed` also asks `term::notify` about every payload **before** reading one, and returns on a match:
+  this module is where cmote performs the desktop-notification refusal, because it is the one already
+  fed every OSC payload in the stream.
+- **`term/notify.rs`** — the desktop-notification refusal, stated (§79). Not a scanner: one pure
+  function, `refused(payload) -> Option<Spelling>`, naming the three dialects of a single decision —
+  ConEmu's `9;<text>`, urxvt's `777;notify;…`, kitty's `99;…`. It keeps nothing and answers nobody,
+  because there is nothing to keep: **it changes no behaviour**, and the rows it backs say so. Its
+  whole value is that the refusal is now performed by cmote's own code and checkable by name, which is
+  the difference §63 had to make on the OSC 52 row. The load-bearing detail is the *exclusion*: the two
+  OSC 9 sub-codes cmote honours are named here with their trailing `;` — the same prefixes
+  `term/progress.rs` and `term/cwd.rs` strip — so the classifier and those two can never disagree about
+  which payload belongs to whom, and a future tightening cannot silently take progress (§54) or the
+  working directory (§17) with it. Matching is on the whole numeric field, never a prefix of it, so
+  `990;` and `999;` are not read as kitty's `99;`. urxvt's `777` is a dispatcher and only its `notify`
+  module is this decision; another module is unimplemented rather than refused, which is a different
+  row and a different mark. Six tests, none of which needs a terminal.
 - **`term/protect.rs`** — the selective-erase scanner (§56), and the one place cmote writes *inside* the
   engine's cells. A chunk-safe CSI state machine (`Protect::feed`) reading **DECSCA** (`CSI Ps " q`),
   **DECSED** (`CSI ? Ps J`), **DECSEL** (`CSI ? Ps K`), plus **RIS** as a protection clear, **DECSTR** as

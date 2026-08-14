@@ -8595,3 +8595,97 @@ what asks and not about what it costs.
   as a reason above, which slightly overstates its weight: it argues against implementing TODAY without
   the spec, not against implementing. Left visible rather than dropped, because the alternative is a
   reason list that reads stronger than it is — §73's complaint in a smaller size.
+
+## 79. The refusal nobody was performing (v4.0.0)
+
+The instruction was to mark `kitty 99` — rich notifications — explicitly 🛑, because desktop
+notifications are not something this project will let a remote raise. The decision was not in question;
+it has been settled since §54 and written down in §6. What was in question, once the legend is taken at
+its word, is who was carrying it out. Nobody was.
+
+### What 🤷 was claiming
+
+The legend is precise: 🛑 is a refusal **cmote's own code performs**, 🤷 is one that **dies upstream** —
+no `vte` dispatch arm, or a `Handler` method left at its empty default body. §73 spent a whole section
+on getting a single row into the right one of those two columns.
+
+Read that way, `kitty 99` at 🤷 was making a claim about `vte`, and the claim was not quite true. `vte`
+does not REFUSE OSC 99; it has no arm for it, which is a different thing. Nothing upstream considered
+the sequence and declined it — the sequence simply arrived somewhere that was not looking. That is the
+gap a mark cannot express, and it is the fourth way §75 through §78 have now found for a 🤷 to be wrong.
+
+The same was true of `OSC 777`. And the bare `OSC 9;<text>` — which has read 🛑 since §54 — was only
+just on the right side of the line: it is refused because `term/progress.rs` matches `9;4;` and
+`term/cwd.rs` matches `9;9;`, so neither recognises it. Cmote's code does see the payload and does
+decline it, which satisfies the legend, but it declines it by looking for something else. A refusal that
+holds because of what two unrelated scanners happen not to match is one nobody wrote and nobody can find.
+
+### What was built
+
+`src/term/notify.rs`: one pure function, `refused(payload) -> Option<Spelling>`, naming the three
+dialects of a single decision — ConEmu's `9;<text>`, urxvt's `777;notify;…`, kitty's `99;…`. It is
+called from `term::progress::Reports::feed`, which returns immediately on a match.
+
+**It changes no behaviour, and every row it backs says so.** Nothing in cmote could raise a desktop
+notification if it wanted to: there is no toast code, no Action Center call, nothing. All three
+spellings were going to be ignored, and after §79 all three are still ignored. What changed is that the
+ignoring is now something cmote does on purpose, in a named place, checked by six tests that fail if a
+later hand starts reading any of the three.
+
+That is exactly the change §63 made on the OSC 52 row, and the parallel is worth stating because it is
+the argument for writing code that does nothing. There the clipboard pair was refused only by the
+listener's catch-all arm, with the engine's own `osc52` field sitting at its permissive default; §63 set
+the field explicitly and called the old state "the weakest 🛑 in this table, now the most explicit". A
+refusal that rests on nobody happening to match it is invisible to tests, and invisible to the next
+person to touch the file.
+
+### Why a function and not a scanner
+
+Every other module in `term/` that reads the stream keeps something the app reads or answers a query the
+engine dropped. A ninth scanner that kept nothing and answered nobody would be a no-op wearing a
+scanner's clothes, and it would need `Terminal::process` to hand it a copy of every chunk to be that.
+
+So the policy lives in a function and the calling is done by the module that already frames every OSC
+payload cmote sees — `term::progress` — and that already owned the bare-OSC-9 half of this refusal
+(§54). The cost is one early return on a path that already ran.
+
+The load-bearing part is not the refusal but the **exclusion**. OSC 9 is multiplexed three ways, and two
+of those ways are shipped features: `9;4;` is progress and `9;9;` is the Windows working directory. Both
+are named in the classifier WITH their trailing separator — the same prefixes `progress.rs` and `cwd.rs`
+strip — so the classifier and those two modules cannot disagree about which payload belongs to whom, and
+a later tightening of this refusal cannot quietly take a shipped feature with it. Matching is on the
+whole numeric field and never on a prefix of it, so `990;` and `999;` are not read as kitty's `99;`.
+
+### What it cost
+
+- `src/term/notify.rs`, new — the classifier and the `Spelling` enum. Six tests, none needing a terminal.
+- `src/term/progress.rs` — one early return in `feed`, the header paragraph that explains why the
+  refusal lives here, and one test that sets a progress report FIRST and asserts it survived both vendor
+  spellings (§77's ordering, reused: the refusal is a decision about bytes cmote had).
+- `src/term/mod.rs` — the module declaration, and one seam test asserting all three draw no reply, leave
+  the tab's own state alone, and — the half worth pinning — never land their TEXT on the grid.
+- Tests 1135 → 1143. Matrix: 165 rows unchanged, ✅ 104 and ❌ 25 unchanged, **🛑 28 → 30, 🤷 8 → 6**.
+
+`OSC 777` moved with `kitty 99` rather than being left behind, and that was not scope creep but the
+opposite: one function refuses both, so leaving 777 at 🤷 would have been the document disagreeing with
+the code it describes. The instruction named one row; the mechanism that satisfies it covers two.
+
+### Not done
+
+- **The refusal is inert and will stay inert**, which is the honest reading of the whole section. If a
+  reader wants a version of this that DOES something, the only candidates are a tab-local hint that a
+  remote asked to notify — additive, contained, and nobody has asked for it — or nothing. Nothing is the
+  right answer today and is what is here.
+- **`term::progress` is an odd landlord for a notification policy.** It is the right *place* — the one
+  module fed every OSC payload that also already performed half this refusal — but a reader looking for
+  where notifications are declined will not guess it from the module name. Mitigated by naming §79 in
+  both headers and in three rows, not fixed.
+- **Only the `notify` module of OSC 777 is classified.** urxvt's 777 is a dispatcher and its other
+  modules are unimplemented rather than refused, which is a different question with a different mark.
+  The row says so; no row was added for them, because nobody has enumerated them.
+- **Nothing tells a program its notification was dropped.** None of the three spellings has a reply, so
+  a remote that asks gets silence — the same disclosure §57, §76 and §77 each make for their own row.
+- **`vte`'s OSC payload buffer was noticed and not chased.** `MAX_OSC_RAW` is 1024 with the `no_std`
+  ArrayVec, and the std build uses a plain `Vec`; whether a hostile stream can make the parser hold an
+  unbounded OSC payload is a question about every OSC cmote sees, not about this row, and it is left
+  open here rather than answered badly in passing.

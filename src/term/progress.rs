@@ -19,6 +19,13 @@
 // progress cannot leave the tab it belongs to. That is the whole reason one is safe and the other is
 // not, and it is why implementing 9;4 does not reopen 9.
 //
+// Since §79 that refusal is STATED rather than implied, and it covers all three spellings of the
+// feature rather than only the one that shares this OSC number: `feed` asks `term::notify` about
+// every payload before reading it, so `9;<text>`, `777;notify;…` and kitty's `99;…` are declined by
+// name here. Nothing about the outcome changes — none of the three would have been read anyway —
+// but a refusal that rests on nobody happening to match it is the shape §63 had to correct on the
+// OSC 52 row, and this module is where every OSC payload already passes.
+//
 // Everything a remote sends here is untrusted, so the parse is defensive in a specific way: a
 // malformed or unknown sequence changes NOTHING. It does not clear the bar, because "the remote sent
 // us rubbish" must not be a way to wipe a real reading — and a percentage is clamped rather than
@@ -78,6 +85,15 @@ impl Reports {
 	pub fn feed(&mut self, bytes: &[u8]) {
 		let current = &mut self.current;
 		self.framer.feed(bytes, |_offset, payload| {
+			// The desktop notification cmote refuses, in whichever of its three spellings it
+			// arrived (§79). Declining it here rather than letting it fall off the end of `parse`
+			// is §63's move on the OSC 52 row: the payload was already going to be ignored, and a
+			// refusal that rests on being ignored is one no test can see and one a later reader
+			// can undo without noticing they have. This module performs it because it is the one
+			// that already frames every OSC payload and already owned the bare `9;<text>` half.
+			if super::notify::refused(payload).is_some() {
+				return;
+			}
 			// A command ending takes its bar with it (§34's `D`). This is judged HERE, payload by
 			// payload, rather than by the caller after the chunk, because the framer hands them over
 			// in stream order and one chunk can easily carry a `D` and then the first report of the
@@ -247,6 +263,19 @@ mod tests {
 		reports.feed(b"\x1b]9;9;C:\\Users\\CLEm\x07");
 		reports.feed(b"\x1b]9;Build finished\x07");
 		reports.feed(b"\x1b]0;a window title\x07");
+		assert_eq!(reports.current(), Progress::Working(30));
+	}
+
+	#[test]
+	fn the_other_two_notification_spellings_are_declined_here_too() {
+		// §79. This module is where cmote performs the refusal for all three dialects, not just
+		// the one that shares OSC 9 — so urxvt's and kitty's pass through `feed` and must leave a
+		// running bar exactly as they found it. The order is the argument, as in §77's: a real
+		// report is set FIRST, and the assertion is that it SURVIVED both.
+		let mut reports = Reports::default();
+		reports.feed(b"\x1b]9;4;1;30\x07");
+		reports.feed(b"\x1b]777;notify;Build;finished in 4s\x07");
+		reports.feed(b"\x1b]99;i=1:d=0:p=title;Build finished\x07");
 		assert_eq!(reports.current(), Progress::Working(30));
 	}
 
