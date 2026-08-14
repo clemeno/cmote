@@ -39,7 +39,7 @@ gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecol
 **§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
 much — an empty note being the explicit claim that nothing is withheld. Sweeping for rows that had been
 leaning on the reader found one supported sequence with no row at all (`1005`, UTF-8 mouse), one
-unsupported spelling with none (`CSI ? 6 n`), one row carrying two different reports (DSR, now `5n` and
+unsupported spelling with none (`CSI ? 6 n`, shipped in §82), one row carrying two different reports (DSR, now `5n` and
 `6n`), and seven rows whose extent had been left to the reader. **§68 then split the last rows that stated
 two answers in one** — `OSC 0`, `OSC 8`, DECSCUSR, XTSMGRAPHICS, DECKPAM, charset designation and the
 XTMODKEYS query — so §8 now holds one answer and one mechanism per row, with no exceptions left over.
@@ -391,6 +391,14 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   actually enforces — 256 colour registers, 4096×4096 and 4 Mpx — so a program sizing a picture is told
   a promise cmote keeps; a *set* (action 3) is honestly refused with the value cmote will keep to, and
   ReGIS (item 3) is answered "unknown item" rather than given a geometry it could never honour.
+
+- **DECXCPR** (`CSI ? 6 n`) → `CSI ? <row> ; <col> R`, the cursor's position in DEC's private spelling
+  (§82). `vte`'s CSI table holds `('n', [])` and no `('n', [b'?'])`, so the whole DEC-private DSR family
+  reached nothing. Answered **not** in `term/query.rs` but in `term/dsr.rs`, and reported through the
+  split advance, because a position is only true where the question sat: a version string and a unit id
+  can wait for the end of a chunk, a cursor cannot. The numbers are the engine's own
+  `grid.cursor.point`, so this spelling and the ANSI one cannot come to disagree. **Only `Ps = 6` is
+  answered** — the other nine values xterm defines describe the user's machine, and are refused; see §6.
 
 There is also one reply cmote does not *originate* but **amends**: the engine writes DA1 as `CSI ? 6 c`,
 and attribute **4** is how a terminal says it draws sixels — which is what chafa's auto mode, `lsix` and
@@ -848,6 +856,24 @@ pinned by name, which is the point of doing it at all. A refusal with a threat b
 a refusal whose only reason is *"we already answer this"* is precisely the one a later reader deletes as
 a courtesy to a program that did not need it.
 
+**The nine DEC-private status reports that describe the machine** — `CSI ? Ps n` is a family, and §82
+answers exactly one member of it. DECXCPR (`Ps = 6`) reports where the cursor is, which is a fact about
+the remote's own output and is now shipped. The other nine xterm defines report the terminal's
+**equipment**: a printer (`15`), the user-defined-key store's lock (`25`), the KEYBOARD's nationality
+(`26`), a locator's availability and type (`55` / `56`), macro space (`62`), a memory checksum (`63`),
+a data-integrity self-test (`75`) and a multi-session controller (`85`). Each is refused on the standard
+one paragraph up — a reply is an advertisement — and none of the equipment exists here, so "ready",
+"unlocked" or a byte count would each be a claim about hardware that is not there.
+
+`26` is the one refused on more than tidiness. It answers with the keyboard's nationality, and §36 fixed
+the rule it would break: **cmote's identity replies name the program, never the person's machine.** That
+is why DA3 sends a constant unit id rather than the serial number DEC hardware put there. A remote must
+not learn the layout in front of the user off a query the user never sees.
+
+The refusal is `term/dsr.rs`'s allow-list, one value wide — the construction `term/iterm.rs` uses for
+OSC 1337 keys and `term/pointer.rs` for pointer shapes — and it is pinned at both ends, in the scanner
+and at the boundary, by tests that name all nine.
+
 **Remote-set mouse pointer shape** — `OSC 22` is **half shipped and half refused** since §77, and the
 half that ships is the part this entry used to say was impossible. What survives here is only the
 refusal; the sequence's own row in §8 carries the rest.
@@ -983,7 +1009,8 @@ unnoticed under a mark that said "partial" and meant "unexamined".
 believe a row rather than check it, so it now reads *supported* and the note carries the extent. The sweep
 cost nothing and paid for itself: one supported sequence had no row at all (`1005`, the UTF-8 mouse
 encoding, live on the seam since the mouse shipped), DSR was one row for two different reports, one row
-was right for a reason it never gave (`ESC % G`), and one more ❌ came to light (`CSI ? 6 n`). None of
+was right for a reason it never gave (`ESC % G`), and one more ❌ came to light (`CSI ? 6 n`, which §82
+later shipped once its stated cost turned out not to exist). None of
 that is work — it is the table saying what it already does.
 
 **§68 closed that consequence rather than leaving it as a note.** The ✅ rows carrying a "but only…"
@@ -1265,7 +1292,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | cmote's refusal, not an absence: `vte` does carry the blink (`blinking: id % 2 == 1`) and the engine stores it, and cmote's own seam declines to — `CursorShape` has no blink variant and cmote runs no animation timer. The same refusal as mode `12 (the blink)`, one sequence over |
 | 5n | Device status report | ✅ | `CSI 0 n`, "terminal ok" — the whole of what DSR 5 is |
 | 6n | Cursor position report | ✅ | `CSI <row> ; <col> R`, one-based, from the live cursor |
-| ? 6 n | Extended cursor position (DECXCPR) | ❌ | `vte` has `('n', [])` and no `('n', [b'?'])`, so the private spelling reaches nothing — a program that wants the page number back gets silence. `CSI 6 n` is the spelling that works (§67) |
+| ? 6 n | Extended cursor position (DECXCPR) | ✅ | cmote's own scanner (`term/dsr.rs`, §82), answered `CSI ? <row> ; <col> R` — **xterm's two-parameter form, with no page number**: its ctlseqs reads "(assumes the default page, i.e., "1")". That quote is what reopened the row. It read as not supported from §67 on the grounds that answering "would mean inventing a page number cmote does not have", and the terminal cmote claims to be does not send one either, so the cost that kept the row shut was never being charged (§70's shape: a mark that outlived its argument). `vte` has `('n', [])` and no `('n', [b'?'])`, so the whole DEC-private family reached nothing. Answered from the split advance rather than after the chunk, like DECRQCRA and unlike everything in `term/query.rs`: a position is only true where the question sat, and a chunk that asks and then prints ten more columns must not report the tenth. The numbers are the engine's own `grid.cursor.point` — the field `device_status` reports for the ANSI spelling — so cmote is a second READER of the cursor and never a second source for it (§71, §73), and one test asks both spellings on one terminal so they cannot drift. One divergence rides in with that arithmetic and is disclosed rather than corrected: the engine ignores origin mode here, where DEC defines the report as relative to the scrolling region, so both spellings are wrong together rather than differently (§74, same engine defect) |
+| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard nationality / data integrity / multi-session | 🛑 | the same allow-list, refused (`term/dsr.rs`, §82): each reports **equipment**, and cmote has none of it — a printer, a user-defined-key store, a self-test, a multi-session controller. "Ready" or "unlocked" would be a claim about hardware that is not there, and a reply is an advertisement (§6, §71). `26` is refused on more than that: it answers with the KEYBOARD's nationality, and §36's rule is that cmote's identity replies name the program and never the user's machine — which is why DA3 sends a constant unit id rather than a serial number. Pinned from both ends, `the_status_reports_that_would_speak_for_the_machine_are_refused` in the scanner and `…_get_no_answer` at the boundary, the second of which answers DECXCPR **after** the nine so the refusals are shown to be silent while the one allowed value survives them |
+| ? 55 / 56 n | Locator status / type | 🛑 | the DEC locator is a pointing-device protocol cmote does not implement, so both questions are about equipment that is not here (§6, §82) — the same refusal as the row above, listed apart because an honest negative exists for these two and does not for those five: xterm answers `CSI ? 53 n` "no locator" and `CSI ? 57 ; 0 n` "cannot identify". Not sent. The stalled-sender argument that carried DECXCPR applies to them, and nobody has asked; see PLAN §82's *Not done*, which is where a possibility with no caller belongs |
+| ? 62 n | Macro space (DECMSR) | 🛑 | reports how much room is left in the terminal's **macro store** (§6, §82). cmote has no macro store, so every answer is a fiction: a size advertises one, and `0` invites a program to conclude the feature exists and is full |
+| ? 63 n | Memory checksum (DECCKSR) | 🛑 | checksums the terminal's own **memory** — macros and user-defined keys — which cmote does not have (§6, §82). Refused with its reply format sitting in the tree already: `DCS Pt ! ~ xxxx ST` is the shape `term/rect.rs` writes for DECRQCRA, which checksums a rectangle of the SCREEN. Two questions, one envelope, and answering this one out of the other's machinery would report the page as though it were the machine's memory |
 | c / > c | Primary / secondary DA | ✅ | unblocks vim / tmux startup; since §41 cmote amends the engine's DA1 to add attribute **4**, so programs know it draws sixels (`term/query.rs`) |
 | = c | Tertiary DA | ✅ | answered by cmote's scanner with a constant unit id (§36) — this row read as not supported until §41 spotted it, having been left behind when §36 shipped it |
 | ? Pi;Pa;1 S / ? Pi;Pa;4 S | Graphics attributes — read (XTSMGRAPHICS) | ✅ | colour registers and maximum image size, answered `status 0` from the decoder's real limits (§41) |
@@ -1533,7 +1564,8 @@ give: `ESC % G` is honoured by the parser being UTF-8 always, not by any `%` arm
 is also why there is no way back out to ISO-8859-1. Seven rows gained the extent they had been leaving to
 the reader: tabs and HTS, `CSI g`'s two parameters, the mouse's buttons, the title stack's one title and
 4096-deep cap, and DSR's two halves. One new ❌: `CSI ? 6 n`, the private cursor-position spelling, which
-reaches nothing.
+reaches nothing — and which §82 turned into a ✅, the reason recorded here for refusing it having been a
+page number xterm does not send either.
 
 **§68 spent the rule's last instalment.** §66 had named six ✅ rows that carried a "but only…" clause and
 left them, on the grounds that they at least *said* their second half — which was true, and was also the
@@ -1557,6 +1589,18 @@ Audited file:line anchors behind the claims above, for later re-checking.
   answers **primary** DA (`ESC[?6c`) and **secondary** DA (`ESC[>0;<ver>;1c`) — the `=`
   (tertiary) intermediate falls to a debug no-op. `device_status` (DSR, `term/mod.rs:1332`) and
   `report_mode` (DECRQM, `term/mod.rs:2135`) reply likewise.
+- **DSR is the ANSI spelling only** (§82). `vte-0.15.0/src/ansi.rs:1701` is
+  `('n', []) => handler.device_status(next_param_or(0) as usize)` and there is **no `('n', [b'?'])`
+  arm anywhere in the table**, so every DEC-private `CSI ? Ps n` reaches the unhandled arm. What the
+  ANSI one answers is two arms wide: `5` writes `\x1b[0n`, `6` writes
+  `format!("\x1b[{};{}R", pos.line + 1, pos.column + 1)` from `self.grid.cursor.point`
+  (`term/mod.rs:1339-1342`) — **absolute, with no reading of `TermMode::ORIGIN`**, which is the same
+  origin-mode divergence §74 measured on the movement sequences and which `term/dsr.rs` copies on
+  purpose so the two spellings cannot disagree. xterm's own definition of the private reply, quoted
+  from its ctlseqs: "`Ps = 6` ⇒ Report Cursor Position (DECXCPR). The response \[row;column\] is
+  returned as `CSI ? r ; c R` (assumes the default page, i.e., "1")" — **no page parameter**, which is
+  the fact that expired §67's reason for refusing the row. The same entry lists the nine other values
+  (`15`, `25`, `26`, `55`, `56`, `62`, `63`, `75`, `85`) cmote refuses in §6.
 - **Kitty keyboard**: fully implemented but **guarded on `config.kitty_keyboard`** — every
   handler (`push_keyboard_mode` `term/mod.rs:1288`, `pop_keyboard_modes` `:1308`,
   `report_keyboard_mode` `:1275`, `set_keyboard_mode` `:1029`) early-returns when the flag is off.
@@ -1698,6 +1742,19 @@ Audited file:line anchors behind the claims above, for later re-checking.
   enforces. `with_sixel_attribute` rewrites a DA1 reply the **engine** wrote (`CSI ? <params> c`) to
   carry attribute `4`, leaving a reply that already names it, and every non-DA1 `CSI ?` reply
   (DECRQM's `$y`, kitty's `u`), untouched.
+- **`term/dsr.rs`** — the DEC-private DSR scanner (§82), and the one query answerer that is **not** in
+  `query.rs`. `Dsr::feed` is the same chunk-safe CSI machine `term/tabs.rs` uses — marker, parameters and
+  intermediates kept apart so a near miss is rejected rather than mistaken — and reports offsets ONE PAST
+  the final byte. `is_cursor_request` is the allow-list: final byte `n`, marker `?`, no intermediates, and
+  a **sole** parameter equal to 6, a second parameter ruling the sequence out rather than being ignored
+  (a deliberate tightening over `tabs.rs`, DSR taking exactly one `Ps`). `cursor_reply(row, col)` is the
+  pure formatter — `CSI ? row+1 ; col+1 R`, xterm's two-parameter form with no page — and the `+ 1` is
+  the engine's own arithmetic from `device_status`, copied so the ANSI and DEC spellings of one question
+  cannot disagree, origin-mode divergence included. `term/mod.rs` answers inside the split loop
+  (`Split::CursorReport` → `report_cursor_position`), reading `screen().cursor_position()` with the engine
+  advanced exactly to the sequence and pushing the bytes into the same `replies` buffer the engine writes
+  into — the path `rect.rs`'s checksum already took, and the reason two questions in one write come back
+  in the order they were asked.
 - **`term/sixel.rs`** — the payload decoder (§41), pure and engine-free. `walk` is the single place the
   command grammar is written (`"` raster, `#` select/define, `!` repeat, `$` CR, `-` next band, and the
   `?`..`~` sixel bytes); `canvas_size` measures through it — preferring the raster attributes as the

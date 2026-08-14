@@ -27,6 +27,14 @@
 // amended on its way out to advertise sixel (`query::with_sixel_attribute`), because cmote draws
 // images the engine knows nothing about.
 //
+// One more query is answered outside that module because it cannot wait for the end of the chunk:
+// DECXCPR (`CSI ? 6 n`), the DEC-private spelling of "where is the cursor?", which `vte` has no arm
+// for (§82). A position is only true where the question sat, so `dsr` reports offsets and the split
+// advance below answers each one with the engine advanced exactly that far. The other nine values of
+// `CSI ? Ps n` — printer, UDK, keyboard nationality, locator, macro space, memory checksum, data
+// integrity, multi-session — are refused there by an allow-list, because each would advertise a piece
+// of the user's machine (§71, and §36's rule that cmote's replies name the program, never the person).
+//
 // Those images are the other thing the engine drops and cmote reads: a sixel picture arrives as a
 // DCS its parser ignores, so `graphics` scans it out of the same bytes, `sixel` decodes it, and
 // `process` reserves the cells it covers in the engine so the picture rides the grid as text does
@@ -40,6 +48,7 @@
 
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
+mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear (§69)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
@@ -270,6 +279,7 @@ impl Terminal {
 			cancels: cancel::Cancel::default(),
 			rectangles: rect::Rectangles::default(),
 			tabs: tabs::Tabs::default(),
+			dsr: dsr::Dsr::default(),
 			scp: scp::Scp::default(),
 			paths: scp::Paths::default(),
 			graphics: graphics::Images::default(),
@@ -342,6 +352,11 @@ impl Terminal {
 		// rectangle: a chunk that resets its stops and then prints tabs has to see the new stops,
 		// so the reset cannot wait for the end of the chunk.
 		let tab_resets = self.tabs.feed(bytes);
+		// DECXCPR, the cursor-position question in DEC's spelling, which reaches no arm in the parser
+		// (§82). Split-fed for a reason none of the scanners above share: this one ANSWERS, and the
+		// answer is only true at the point in the stream the question sat. `term/query.rs` may collect
+		// its queries and reply after the chunk because a version string and a unit id do not move.
+		let cursor_requests = self.dsr.feed(bytes);
 		// The character path (§76), and the RIS that empties the store of them. Split-fed like the
 		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
 		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
@@ -354,6 +369,7 @@ impl Terminal {
 			cancels,
 			rectangles,
 			tab_resets,
+			cursor_requests,
 			paths,
 		};
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
@@ -396,6 +412,7 @@ impl Terminal {
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
 					Split::TabStops => self.set_default_tabs(),
+					Split::CursorReport => self.report_cursor_position(),
 					Split::Path(request) => self.select_character_path(request),
 				}
 			}
@@ -697,6 +714,28 @@ impl Terminal {
 		let (_, col) = self.screen().cursor_position();
 		let feed = tabs::every_eighth_column(columns, col);
 		self.parser.advance(&mut self.term, &feed);
+	}
+
+	/// Answer DECXCPR — the cursor's position, in DEC's private spelling of the question (§82).
+	///
+	/// Read from the seam's `cursor_position`, which is the engine's own `grid.cursor.point` and so the
+	/// very field `device_status` reports for the ANSI spelling. cmote is a second READER of the cursor
+	/// here and never a second source for it, which is the property that keeps the two spellings of one
+	/// question from ever disagreeing (§71, §73) — see `term/dsr.rs` for what that costs under origin
+	/// mode, which is a divergence inherited on purpose rather than a second one invented here.
+	///
+	/// The reply goes into the same buffer the engine's own replies land in, at the point in the stream
+	/// the question sat, exactly as DECRQCRA's checksum does (§60). So a program that writes `CSI 5 n`
+	/// and `CSI ? 6 n` in one breath gets the two answers back in the order it asked for them, with no
+	/// second reply path to keep in step.
+	fn report_cursor_position(&self) {
+		let (row, col) = self.screen().cursor_position();
+		let reply = dsr::cursor_reply(row, col);
+		self.replies
+			.lock()
+			.expect("reply buffer mutex poisoned")
+			.bytes
+			.extend_from_slice(&reply);
 	}
 
 	/// Carry out one character-path request (§76).
@@ -1441,6 +1480,12 @@ pub struct Terminal {
 	/// answers the soft reset: by feeding the engine the same request written in TBC, HTS and CUF,
 	/// so the engine stays the only writer of its own tab table. Holds no state but the scan.
 	tabs: tabs::Tabs,
+	/// Finds DECXCPR, the DEC-private spelling of the cursor-position question, which `vte` has no arm
+	/// for at all — its CSI table holds `('n', [])` and no `('n', [b'?'])` (§82). Fed by the split
+	/// advance because a position report is only true where it sits: answered after the chunk, it would
+	/// report where the cursor ENDED UP rather than where the question was asked. The other nine values
+	/// of `CSI ? Ps n` are refused by the same scanner, on an allow-list one value wide.
+	dsr: dsr::Dsr,
 	/// Finds SCP, the character path, which no part of the engine has an arm for (§76). Reported by
 	/// the split feed like the prompt marks, because the sequence acts on "the line the cursor is on"
 	/// and that is only knowable at the point in the stream it sits.
@@ -1490,6 +1535,11 @@ enum Split {
 	/// one meaning and no parameters beyond the `5` that identifies it, so the offset is the whole
 	/// event. Applied on the far side of its sequence, as the two above are.
 	TabStops,
+	/// DECXCPR, the DEC-private cursor-position question (§82). Carries nothing — the sequence has one
+	/// parameter and it is the one that identifies it, so the offset is the whole event. The only split
+	/// in this list that produces a REPLY rather than an effect, which is why it has to be here at all:
+	/// the cursor it reports is the cursor with the engine advanced exactly to the question.
+	CursorReport,
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::Request),
 }
@@ -1510,6 +1560,7 @@ struct Scanned {
 	cancels: Vec<usize>,
 	rectangles: Vec<(usize, rect::Request)>,
 	tab_resets: Vec<usize>,
+	cursor_requests: Vec<usize>,
 	paths: Vec<(usize, scp::Request)>,
 }
 
@@ -1524,6 +1575,7 @@ impl Scanned {
 			&& self.cancels.is_empty()
 			&& self.rectangles.is_empty()
 			&& self.tab_resets.is_empty()
+			&& self.cursor_requests.is_empty()
 			&& self.paths.is_empty()
 	}
 }
@@ -1541,6 +1593,7 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 		cancels,
 		rectangles,
 		tab_resets,
+		cursor_requests,
 		paths,
 	} = scanned;
 	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
@@ -1551,6 +1604,7 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 			+ cancels.len()
 			+ rectangles.len()
 			+ tab_resets.len()
+			+ cursor_requests.len()
 			+ paths.len(),
 	);
 	merged.extend(
@@ -1584,6 +1638,11 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 		tab_resets
 			.into_iter()
 			.map(|offset| (offset, Split::TabStops)),
+	);
+	merged.extend(
+		cursor_requests
+			.into_iter()
+			.map(|offset| (offset, Split::CursorReport)),
 	);
 	merged.extend(
 		paths
@@ -3109,6 +3168,86 @@ mod tests {
 		terminal.process("X".repeat(40).as_bytes());
 		terminal.process(b"\x1b[1;5H\x1b[?5W");
 		assert_eq!(read(&terminal, 0, 0, 40), "X".repeat(40));
+	}
+
+	/// DECXCPR end to end (§82): the DEC-private spelling of "where is the cursor?" is answered, in
+	/// xterm's two-parameter form with the `?` kept — and answered with the SAME numbers the engine
+	/// gives for the ANSI spelling, which is asserted on the same terminal so the two cannot silently
+	/// drift apart. That agreement is the property `dsr::cursor_reply` is built to keep: cmote reads
+	/// the engine's cursor here, it never holds one of its own.
+	#[test]
+	fn the_dec_spelling_of_the_cursor_question_is_answered() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[4;5H");
+		assert_eq!(terminal.process(b"\x1b[?6n"), b"\x1b[?4;5R".to_vec());
+		assert_eq!(
+			terminal.process(b"\x1b[6n"),
+			b"\x1b[4;5R".to_vec(),
+			"the ANSI spelling is the engine's and must still answer, with the same numbers"
+		);
+	}
+
+	/// The reason this one is answered inside the split advance rather than after the chunk: a cursor
+	/// report is only true where the question sat. The query here is followed by ten more columns of
+	/// output in the SAME chunk, so an answer built at the end would report column 11 rather than 1.
+	#[test]
+	fn the_cursor_report_answers_from_where_the_question_sat() {
+		let mut terminal = Terminal::new(10, 40);
+		let reply = terminal.process(b"\x1b[3;1H\x1b[?6nabcdefghij");
+		assert_eq!(reply, b"\x1b[?3;1R".to_vec());
+		assert_eq!(
+			read(&terminal, 2, 0, 10),
+			"abcdefghij",
+			"and the text landed"
+		);
+	}
+
+	/// Two questions in one write come back as two answers in the order they were asked, because the
+	/// reply goes into the buffer the engine's own replies land in rather than into a second path
+	/// alongside it (§60's rule, first written for DECRQCRA).
+	#[test]
+	fn the_two_spellings_answer_in_the_order_they_were_asked() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[2;3H");
+		assert_eq!(
+			terminal.process(b"\x1b[5n\x1b[?6n"),
+			b"\x1b[0n\x1b[?2;3R".to_vec()
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[?6n\x1b[5n"),
+			b"\x1b[?2;3R\x1b[0n".to_vec(),
+			"asked the other way round, answered the other way round"
+		);
+	}
+
+	/// The allow-list at the boundary (§82). The nine other values of `CSI ? Ps n` each describe a
+	/// piece of the user's machine — a printer, a key store, the KEYBOARD's nationality — and none is
+	/// answered. The test sets a cursor position first and answers DECXCPR last, so what it asserts is
+	/// that the refusals are silent while the one allowed value SURVIVES them: a scanner that had
+	/// simply stopped matching would pass a weaker version of this test.
+	#[test]
+	fn the_status_reports_that_would_speak_for_the_machine_get_no_answer() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[6;7H");
+		for parameter in [15, 25, 26, 55, 56, 62, 63, 75, 85] {
+			let request = format!("\x1b[?{parameter}n");
+			assert!(
+				terminal.process(request.as_bytes()).is_empty(),
+				"CSI ? {parameter} n must get no answer"
+			);
+		}
+		assert_eq!(terminal.process(b"\x1b[?6n"), b"\x1b[?6;7R".to_vec());
+		// And nothing any of them carried reached the page.
+		assert_eq!(read(&terminal, 0, 0, 40), "");
+	}
+
+	/// A question is not text. Neither the sequence cmote answers nor the nine it refuses may leave a
+	/// digit on the grid — the engine drops all ten, and the scanner is a reader, not a consumer.
+	#[test]
+	fn a_cursor_question_prints_nothing_at_all() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[?6n\x1b[?26nX");
+		assert_eq!(read(&terminal, 0, 0, 20), "X");
 	}
 
 	/// SCP end to end (§76): the sequence puts the line the cursor is on onto a right-to-left

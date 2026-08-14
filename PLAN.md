@@ -8818,3 +8818,107 @@ The legend gained the rule, so it does not creep back with the next row.
 - **The four symbols are still what the tables are read by**, so a reader who cannot see them is no
   better served than before. Naming the marks in words inside the notes moves a little way toward a table
   that reads without them; it was not the reason for the change and it does not finish that job.
+
+## 82. The reason nobody had checked (v4.0.0)
+
+`CSI ? 6 n` is DECXCPR, "where is the cursor?" in DEC's private spelling. It has read ❌ since §67's
+sweep found it, with a reason recorded in that section's *Not done*:
+
+> **`CSI ? 6 n` is a real ❌ nobody will miss.** Answering it would mean inventing a page number cmote
+> does not have, and the standard spelling already works.
+
+The second half is true. The first half is not, and the way it fails is the one §70 named: a price that
+was never being charged. xterm's own ctlseqs, which is the document cmote's `TERM` claims conformance to:
+
+    Ps = 6  =>  Report Cursor Position (DECXCPR).  The response [row;column] is returned as
+    CSI ? r ; c R  (assumes the default page, i.e., "1").
+
+**No page is sent.** The reply is the two numbers the ANSI spelling already reports, with a `?` in front
+of them. DEC's VT420 manual does define a third parameter, and a terminal with one page has nothing to
+put in it — which is precisely why xterm leaves it out, and why the row's note went on charging for an
+invention nobody was asking for. Four sweeps re-derived this row's MARK from the crates and none of them
+re-read its REASON, because the mark was right: `vte`'s CSI table holds `('n', [])` and no
+`('n', [b'?'])`, so the sequence really did reach nothing. §70's lesson, in the one place it had not yet
+been applied.
+
+### What shipped
+
+`src/term/dsr.rs`, a scanner of the same shape as `term/tabs.rs`, and `term/mod.rs` answering it inside
+the split advance. Three decisions carry the section.
+
+**The reply is xterm's, not DEC's.** Two parameters, one-based, no page. Cmote claims to be
+`xterm-256color` in `TERM`, in XTGETTCAP's `TN` and in the DA1 it amends; answering a question in a
+dialect it does not claim would be the one place it spoke as something else.
+
+**The arithmetic is the engine's, copied.** `cursor_reply(row, col)` adds one to each, which is exactly
+what `device_status` does for `CSI 6 n`. That is what makes cmote a second READER of the cursor and never
+a second source for it — the property §71 and §73 both refused to give up, and the one that guarantees
+these two spellings of one question cannot come to disagree. One test asks both on the same terminal so
+the guarantee is pinned rather than argued.
+
+It copies a defect with the arithmetic, and that was the choice rather than an oversight. The engine
+reports the cursor's ABSOLUTE row, where DEC defines both spellings as reporting a position relative to
+the scrolling region when origin mode is set — the same `goto`-shaped divergence §74 measured on CUU,
+CUD and CHA. Correcting it here would make cmote's answer to the DEC spelling disagree with its answer to
+the ANSI one for the same cursor, which is worse than one shared divergence a row can name: a program
+that asked twice would get two different positions and have no way to tell which was the terminal's.
+
+**It is answered in the split advance, not in `term/query.rs`.** Every other query cmote answers itself
+is a constant — a version string, a unit id, the sixel decoder's limits — so `query.rs` may collect them
+and reply once the chunk has been applied. A cursor is not a constant. A chunk carrying `CSI ? 6 n`
+followed by ten more columns of output would, answered that way, report the eleventh column. So `dsr.rs`
+reports offsets, `term/mod.rs` reads the cursor with the engine advanced exactly that far, and the reply
+goes into the same buffer the engine's own replies land in. That is `rect.rs`'s route for DECRQCRA (§60),
+and it is why two questions asked in one write come back in the order they were asked.
+
+### The nine that are refused
+
+`CSI ? Ps n` is a family and xterm answers ten members of it. Cmote answers one, and the other nine are
+refused by an allow-list one value wide — the construction `term/iterm.rs` uses for OSC 1337 keys and
+`term/pointer.rs` for pointer shapes — rather than left to fall through it.
+
+They are refused because **a reply is an advertisement** (§71), and every one of them advertises
+equipment rather than a page: a printer (`15`), a user-defined-key store's lock (`25`), a locator
+(`55` / `56`), macro space (`62`), that store's checksum (`63`), a memory self-test (`75`), a
+multi-session controller (`85`). None of it exists here, so "ready" or a byte count would each be a claim
+about hardware that is not there.
+
+`26` is the one refused on more than that: it reports the **keyboard's nationality**. §36 fixed the rule
+it would break when it made DA3 answer a constant unit id rather than the serial number DEC hardware put
+there — cmote's identity replies name the program, never the person's machine. A remote must not learn
+the layout in front of the user off a query the user never sees.
+
+The refusal is pinned twice, in the scanner and at the boundary, and the boundary test answers DECXCPR
+**after** the nine so what it asserts is the allowed value SURVIVING the refusals — §77's ordering, which
+a scanner that had simply stopped matching would pass a weaker version of.
+
+### What it cost
+
+- `src/term/dsr.rs`, new — the scanner, the allow-list and the pure reply formatter. Eleven tests.
+- `src/term/mod.rs` — one field, one feed, one `Split` variant, one method, and five seam tests.
+- Tests 1143 → 1159. Matrix: 165 rows → 169, **✅ 104 → 105, ❌ 25 → 24, 🛑 30 → 34**, 🤷 unchanged at 6.
+
+### Not done
+
+- **The origin-mode divergence is inherited, not fixed.** Under DECOM both spellings report the absolute
+  row where DEC says relative. Fixing it means either correcting the engine's answer from outside — a
+  second source for a field the engine owns, refused in §71 and §73 — or fixing only cmote's spelling and
+  letting the two disagree. Neither was taken, and the row says so.
+- **`55` and `56` have an honest negative that is not sent.** xterm answers "no locator" (`CSI ? 53 n`)
+  and "cannot identify" (`CSI ? 57 ; 0 n`), and those advertise nothing — they are the same shape of
+  reply as DECRQM's honest "not recognised" for mode 69, which this document praises. The
+  stalled-sender argument that carried DECXCPR applies to them exactly. They are silent because nobody
+  has asked for them, which is the honest reason and not a good one.
+- **Nothing tells a program its question was refused.** The nine get silence, so a caller waits out its
+  timeout — the disclosure §57, §76, §77 and §79 each make for their own rows.
+- **No consumer was named.** The decision rested on `query.rs`'s own argument, that an unanswered query
+  stalls its sender, and deliberately not on a census: a census that came back empty would not have
+  changed the answer, since the cost of answering is a scanner and the cost of not answering falls on
+  whoever asks. But it does mean this may be a row of code nothing ever executes.
+- **`term/` now holds a ninth chunk-safe CSI state machine**, and this one is a near-copy of
+  `term/tabs.rs` down to the buffer bounds. Factoring them would couple modules that today can each be
+  read alone, and no one has decided that trade is worth taking; it is noticed here rather than acted on.
+- **`query.rs`'s own replies still land at the end of the chunk.** §82 avoided that rather than closing
+  it: DECXCPR needed the split and took it, while XTVERSION, DA3, XTGETTCAP and XTSMGRAPHICS go on being
+  answered after the advance. For those four it makes no difference, and the ordering question between
+  cmote's replies and the engine's within one chunk is still open where it was.
