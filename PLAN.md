@@ -9356,3 +9356,88 @@ the left/right margins, and the same answer for now.
 - **The vendor rows still have no source**: `OSC 7`, `9`, `9;4`, `9;9`, `133`, `777`, kitty's `21` and
   `99`, and the whole `iTerm 1337` namespace are other terminals' extensions, and §88 went to xterm.
 - **The SGR table is still unchecked.** Three sweeps have now gone past it.
+
+## 89. Two thirds of the OSC table is nobody's standard (v4.0.0)
+
+§87 and §88 went to xterm and found that most of the OSC table is not xterm's: `OSC 7`, `9`, `9;4`,
+`9;9`, `133`, `777`, kitty's `21` and `99` and the whole `iTerm 1337` namespace are extensions one
+terminal invented and others copied. §88 listed them as unsourced. This reads each against its own
+vendor's documentation.
+
+### What the vendors said
+
+- **kitty `OSC 21`.** The key names were wrong in three places — `cursor_text` not
+  `cursor_text_color`, `visual_bell` not `visual_bell_color`, `transparent_background_color1..7` not
+  `1–8` — and the palette keys are bare numbers, not `color0`–`color255`. The reset is a **bare key
+  with no `=`**, where the row had `key=`.
+- **kitty `OSC 99`.** The metadata keys are `p` `i` `d` `e` `f` `u` `n`, colon-separated; the row said
+  "identity, urgency and icon metadata" and can now name them.
+- **iTerm `OSC 1337`.** `RequestAttention` takes a value (`yes`, `once`, `no`, `fireworks`);
+  `SetBackgroundImageFile` takes base64 and an empty value removes the image; `SetColors` keys are
+  `fg` / `bg` / `bold` / `link`; and `ReportCellSize`'s reply carries a **scale** beside the height and
+  width, which the row had not mentioned.
+- **ConEmu `OSC 9`.** The five progress states are exactly what the row claimed.
+- **`OSC 7`** is macOS Terminal's, and its argument is a full `file://HOSTNAME/PATH` URL.
+
+### The finding that matters
+
+**ConEmu's `OSC 9` is multiplexed five ways and cmote's model of it had three.** Besides `9;4`
+progress and `9;9` the working directory, ConEmu defines:
+
+    ESC ] 9 ; 1 ; ms    ST      sleep the terminal for ms milliseconds
+    ESC ] 9 ; 2 ; "txt" ST      raise a GUI message box
+    ESC ] 9 ; 3 ; "txt" ST      set the tab's text
+
+None had a row. All three are refused today — but *by being classified as desktop notifications*, which
+is what `term/notify.rs` calls any `OSC 9` payload that is not `9;4;` or `9;9;`. The outcome is right
+and the reason is wrong, which is the failure this document has now found five times.
+
+Two of them are worth more than a relabel. **`9;1` is a remote pausing the terminal** — a denial of
+service against the person at the keyboard, not against the host. **`9;2` is a remote raising a modal
+dialog** on the desktop, which is the notification refusal's own argument only more so: it does not
+merely leave the window, it takes the focus. Both must stay refused, and §91 makes cmote's own code
+say so rather than leaving them to fall through an arm meant for something else.
+
+The third, `9;3`, is a *feature* — and §90 ships it.
+
+### And one argument that expired
+
+§78 refused kitty's `OSC 21` on four reasons, and the second was that answering the keys cmote lacks
+would mean **inventing a colour**, which `palette.rs` opens by forbidding. kitty's protocol has an
+answer for exactly that case: a query for a colour the terminal does not have is answered with an
+**empty value**. So the invention was never required.
+
+The row does not move. The **dialect** reason is the load-bearing one and it is untouched: `TERM`,
+XTVERSION and XTGETTCAP's `TN` all say xterm, and a caller sends `OSC 21` only after concluding kitty.
+But this is the fourth argument in this document found to have expired while its conclusion stayed
+right (§70, §82, §84, and now this), and the pattern is the same every time — the *reason* was never
+re-read because the *mark* kept checking out.
+
+### Two that could not be sourced
+
+- **`OSC 133`.** Its specification is Per Bothner's, on `gitlab.freedesktop.org`, which serves an
+  access-control page to this reader. Every terminal that documents OSC 133 points there instead of
+  restating it, so the whole chain is behind one door.
+- **`OSC 777`.** urxvt's manual page documents **no OSC 777 at all**. The sequence is real and widely
+  emitted, but "urxvt's" — which this table and `term/notify.rs` both assert — is an attribution
+  neither has a citation for. Recorded as folklore on the row rather than quietly kept.
+
+### Also in this pass
+
+Eleven CSI rows that §84 read against ctlseqs but never marked are stamped `§84`. Counting which rows
+have a source behind them is how §89 knew where to start, and the count was wrong by eleven — §84's own
+fourth *Not done* ("nothing records which rows have been read back") made visible by trying to use it.
+
+### What it cost
+
+- Ten notes corrected, eleven stamped, one Evidence subsection.
+- No mark moves and no row is added yet: **171 rows, ✅ 106 · ❌ 24 · 🛑 34 · 🤷 7**. The three ConEmu
+  sub-codes get their rows in §90 and §91, with the code that handles them.
+
+### Not done
+
+- **`OSC 133` and `OSC 777` stay unsourced**, and one of them is a feature cmote ships (§34).
+- **`OSC 8`, `104`, `110`–`112`** are still only `vte`'s, from §88.
+- **kitty's `OSC 30001` / `30101`** — push and pop the colour stack — have never appeared in this
+  table at all. They are the same refusal as `OSC 21`'s set half and `CSI # P`, and they have no row.
+- **The SGR table is still unchecked.** Four sweeps have gone past it.

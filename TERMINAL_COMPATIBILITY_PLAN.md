@@ -1248,12 +1248,12 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 2 | Window title | ✅ | `OSC 2 ; text` sets the window title alone; control characters stripped (anti-spoof) |
 | 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for a palette slot, in `index ; spec` pairs so one sequence may ask about several; each is answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, §87, `report_color`) |
 | 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (§6, §64) |
-| 7 | Working directory | ✅ | `OSC 7 ; file://host/path` announces the shell's working directory (§17, `term/cwd.rs`) |
+| 7 | Working directory | ✅ | `OSC 7 ; file://HOSTNAME/CURRENT/DIR ST` announces the shell's working directory — macOS Terminal's sequence originally, and the one a new tab inherits its directory from (§17, §89, `term/cwd.rs`) |
 | 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens a hyperlink over the cells that follow and `OSC 8 ; ; ST` closes it; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`). `params` is a `:`-separated `key=value` list of which the spec defines exactly one key, `id`, to tie separated runs of one link together — **cmote does not read it**: the hover underline is the contiguous run of cells sharing the URI, so two runs with one `id` underline apart and two different links with one URI underline together (§88) |
 | 8 (any other scheme) | Hyperlinks | 🛑 | the same sequence carrying any other URI scheme — a scheme decides which local program the OS launches, so the link is drawn and never opened (§24, `ALLOWED_SCHEMES`). The spec leaves this open on purpose: "It's up to the terminal emulator to decide what schemes it supports" (§88) |
 | 9 | Desktop notification | 🛑 | `OSC 9 ; text` raises a desktop notification, which leaves the window and lands on the desktop (§6, §54, §79, `term/notify.rs`) |
-| 9;4 | Progress reporting | ✅ | `OSC 9 ; 4 ; state ; percent` reports task progress; all five states, drawn per tab and mirrored on the taskbar button (§54, `term/progress.rs`) |
-| 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; path` — ConEmu's working-directory spelling, a bare native Windows path, sometimes quoted (§17, `term/cwd.rs`) |
+| 9;4 | Progress reporting | ✅ | `OSC 9 ; 4 ; st ; pr ST` reports task progress on what ConEmu drives as the Windows taskbar: `0` removes it, `1` sets it to `pr` (0–100), `2` is an error state, `3` indeterminate, `4` paused. All five, drawn per tab and mirrored on the taskbar button (§54, §89, `term/progress.rs`) |
+| 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; "cwd" ST` — ConEmu's working-directory spelling, a bare native Windows path, quoted in ConEmu's own documentation of it. Read beside OSC 7 and iTerm's `CurrentDir` in one scanner (§17, §89, `term/cwd.rs`) |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; a list walks UP from the code it starts at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background. Answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64, §87) |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (§6, §64) |
 | 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | `OSC 22 ; name` sets the mouse pointer shape over the grid; these five describe the content under the pointer, apply only while the pointer is inside the grid, and are cleared on both directions of the alternate-screen swap (§77, `term/pointer.rs`) |
@@ -1265,22 +1265,22 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (§6) |
 | 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D` marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from `D` (§34, `term/osc133.rs`) |
-| Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value` sets, queries and resets colours by semantic name (`foreground`, `cursor_text_color`, `selection_background`, `color0`–`color255`) instead of by number, any number of pairs at a time — kitty's dialect, which cmote never claims (§6, §78) |
-| Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body` — a desktop notification carrying identity, urgency and icon fields (§6, §54, §79, `term/notify.rs`) |
+| Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value ; … ST` names colours instead of numbering them — `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`, `visual_bell`, `transparent_background_color1`–`7`, and `0`–`255` for the palette. `key=?` queries, a **bare key with no `=`** resets, any number of pairs at a time. Refused as a **dialect** cmote never claims: `TERM`, XTVERSION and XTGETTCAP's `TN` all say xterm. §78's second reason expired — it held that answering the keys cmote lacks means inventing a colour, and the protocol's own answer for an undefined one is an **empty value** (§6, §78, §89) |
+| Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body ST` — a desktop notification whose metadata is a `:`-separated `key=value` list: `p` the payload type, `i` an identifier for updating a notification already shown, `d` a done flag, `e` base64, `f` the application name, `u` the urgency (`0` low, `1` normal, `2` critical) and `n` an icon name. Refused for the one reason the plain spellings are: **a notification leaves the window** (§6, §54, §79, §89, `term/notify.rs`) |
 | iTerm 1337 File | Inline images | 🛑 | `OSC 1337 ; File=<args>:<base64>` draws an inline image from a base64 payload (§6, §70, `term/iterm.rs`) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | `OSC 1337 ; SetMark` bookmarks the cursor's line; amber gutter tick, walked with Ctrl+Shift+Up/Down, and able to mark mid-output where §34's prompt-derived marks cannot (§55, `term/iterm.rs`) |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | `OSC 1337 ; CurrentDir=<path>` — iTerm's working-directory spelling, the third one (§55, `term/cwd.rs`) |
 | iTerm 1337 `SetUserVar=gitBranch` | Per-session variable | ✅ | `OSC 1337 ; SetUserVar=<name>=<base64>` sets a per-session variable; the one honoured name is drawn as a pill beside the endpoint, UTF-8 checked, control characters stripped, capped at 32 characters (§55, `term/iterm.rs`) |
 | iTerm 1337 `SetUserVar` (any other name) | Per-session variable | 🛑 | the same key under any other variable name — with no title template there is no reader for a second one (§55, `term/iterm.rs`) |
 | iTerm 1337 `Copy` | Clipboard write | 🛑 | `OSC 1337 ; Copy=:<base64>` writes the local clipboard — OSC 52's write by another name (§6, §55) |
-| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | switch the whole iTerm profile, or set colours by role name — the fixed scheme in another costume (§6, §55) |
-| iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | names a local image file to draw behind the grid (§6, §41, §55) |
-| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | raise the window, or flash it for attention — effects that leave the tab (§6, §54, §55) |
+| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | `SetProfile=<name>` switches the whole iTerm profile and `SetColors=<key>=<value>` sets one colour by role — `fg`, `bg`, `bold`, `link` — as RGB, RRGGBB or a preset name. The fixed scheme in another costume (§6, §55, §89) |
+| iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | `SetBackgroundImageFile=<base64>` names a local image file to draw behind the grid, an empty value removing it (§6, §41, §55, §89) |
+| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | `StealFocus` brings the window to the foreground; `RequestAttention=<yes\|once\|no\|fireworks>` flashes it for attention, for as long as the value says. Effects that leave the tab (§6, §54, §55, §89) |
 | iTerm 1337 `ClearScrollback` | Drop the scrollback | 🛑 | drops the scrollback; `CSI 3 J` is the sanctioned spelling (§55) |
 | iTerm 1337 `CursorShape` | Cursor shape | 🛑 | `OSC 1337 ; CursorShape=0/1/2` — a fourth spelling of the one cursor-shape field, and the only one that would reach it from outside the engine (§6, §71, `term/iterm.rs`) |
-| iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | `OSC 1337 ; ReportCellSize` asks for the cell's height and width in points; what asks it is sizing an inline image (§6, §71, `term/iterm.rs`) |
+| iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | `OSC 1337 ; ReportCellSize` asks for the cell's height and width, and a scale factor beside them; what asks it is sizing an inline image (§6, §71, §89, `term/iterm.rs`) |
 | iTerm 1337 (every other key) | — | 🛑 | the rest of iTerm's `OSC 1337` namespace, which `term/iterm.rs` meets as an allow-list (§55) |
-| 777 (`notify`) | urxvt notification | 🛑 | `OSC 777 ; notify ; title ; body` — urxvt's desktop notification. OSC 777 is a dispatcher and only its `notify` module is this feature (§6, §54, §79, `term/notify.rs`) |
+| 777 (`notify`) | urxvt notification | 🛑 | `OSC 777 ; notify ; title ; body` — the same refusal in urxvt's spelling. OSC 777 is a **dispatcher** (`777;<module>;…`) and only the `notify` module is this feature; another module is unimplemented rather than declined, a different question with a different mark. The attribution is folklore, not a citation: urxvt's own manual page documents no OSC 777 at all (§6, §54, §79, §89, `term/notify.rs`) |
 
 ### CSI — cursor movement & editing
 
@@ -1301,7 +1301,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps " q | Character protection (DECSCA) | ✅ | DECSCA marks the cells written after it protected or erasable, which decides whether a selective erase takes them (§56, `term/protect.rs`) |
 | ? J / ? K | Selective erase (DECSED / DECSEL) | ✅ | DECSED / DECSEL are the selective erase — ED's and EL's three extents, sparing protected cells, where a plain `CSI J` / `CSI K` still takes them (§56) |
 | ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. Autowrap is left **on**, `xterm-256color` declaring `am` (§72) |
-| b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it |
+| b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
 | s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
@@ -1313,22 +1313,22 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | $ { (DECSERA) | Selective erase rectangular area | ✅ | the same rectangle by the selective verb: protected cells stand (§58) |
 | $ x (DECFRA) | Fill rectangular area | ✅ | fills a rectangle with one character stamped from the pen, so it carries the colours and attributes a printed glyph would. `Pch` is limited to 32–126 and 160–255, printable ASCII and printable Latin-1 — cmote's own allow-list, xterm's ctlseqs naming no range at all (§58, §84) |
 | $ v (DECCRA) | Copy rectangular area | ✅ | copies a rectangle to another origin, whole cells — colour, attributes, the OSC 8 link and DECSCA protection travel with the glyph, and the overlapping case is read out whole first. The two page parameters are ignored (§58) |
-| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0`/`1` the wrapped stream between the corners, `2` the rectangle, exact. cmote powers up in stream; RIS resets it and DECSTR does not. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59) |
+| Ps * x (DECSACE) | Attribute change extent | ✅ | picks the shape the two requests below act on: `0`/`1` the wrapped stream between the corners, `2` the rectangle, exact. cmote powers up in stream; RIS resets it and DECSTR does not. Note the intermediate — `* x` is this, `$ x` is DECFRA (§59, §84) |
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
-| Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined |
-| Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`) |
+| Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined (§84) |
+| Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`, §84) |
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
 | 6n | Cursor position report | ✅ | DSR 6 (CPR) asks where the cursor is; answered `CSI <row> ; <col> R`, one-based, from the live cursor |
 | ? 6 n | Extended cursor position (DECXCPR) | ✅ | DECXCPR, the DEC-private spelling of the same question; answered `CSI ? <row> ; <col> R`, one-based and with **no page parameter**, which is xterm's form and the reply cmote sends. Answered where the question sits in the stream, from the cursor the ANSI spelling reports — so both report the absolute row, ignoring origin mode (§74, §82, `term/dsr.rs`) |
-| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`) |
-| ? 55 / 56 n | Locator status / type | 🛑 | ask whether a DEC locator is present and what type it is — a pointing-device protocol cmote does not implement. xterm's honest negatives, `CSI ? 53 n` and `CSI ? 57 ; 0 n`, are not sent either (§6, §82) |
-| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (§6, §82) |
-| ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (§6, §82) |
+| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`, §84) |
+| ? 55 / 56 n | Locator status / type | 🛑 | ask whether a DEC locator is present and what type it is — a pointing-device protocol cmote does not implement. xterm's honest negatives, `CSI ? 53 n` and `CSI ? 57 ; 0 n`, are not sent either (§6, §82, §84) |
+| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (§6, §82, §84) |
+| ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (§6, §82, §84) |
 | c / > c | Primary / secondary DA | ✅ | DA1 and DA2 — what the terminal is and what firmware it claims; cmote amends the engine's DA1 with attribute **4**, sixels (§41, `term/query.rs`) |
 | = c | Tertiary DA | ✅ | DA3 asks for the terminal's unit id; answered with the constant `00434D45` and never a machine-derived one (§36, `term/query.rs`) |
-| ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`) |
-| ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`) |
+| ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`, §84) |
+| ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`, §84) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pv $ y` in the ANSI spelling as well as the private one (§60) |
 | # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
 | # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel. **RIS empties the stack** — DECSTR does not, on the same split DECSACE has, and neither does the alternate-screen swap (§86) |
@@ -1433,7 +1433,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | `CSI 1–10 t` lets a remote iconify, move, resize, raise, maximize or fullscreen the window cmote owns (§6) |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | ask whether the window is iconified and where it sits on the desktop |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the text area's size, asked in pixels and in characters |
-| Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels, whose reply is `CSI 6 ; height ; width t` — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71) |
+| Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels, whose reply is `CSI 6 ; height ; width t` — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71, §84) |
 | Title stack (CSI 22 / 23 t) | ✅ | push and pop the window title; the `; 0` / `; 1` / `; 2` that would name icon or window title alone is ignored, and the stack is capped at 4096 (§67) |
 | **Kitty keyboard protocol** | ✅ | CSI-u key reporting over a flag stack — disambiguated keys, event types and associated text (§25, `term/kitty.rs`) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
@@ -1804,6 +1804,47 @@ Quoted where a row's wording now rests on it.
   cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with
   **no default named**, so "the state a terminal powers up in" is `rect.rs`'s `#[default] Stream` and the
   VT420 manual behind it, not this document.
+
+### The vendor extensions (each terminal's own documentation, read for §89)
+
+Two thirds of the OSC table is nobody's standard: sequences one terminal invented and others copied.
+§87 recorded that they had no source at all and §88 went to xterm, which does not have them either.
+This is that gap closed, one vendor at a time — and two of them could not be closed.
+
+- **kitty's `OSC 21`** (`sw.kovidgoyal.net/kitty/color-stack/`) is `OSC 21 ; key=value ; … ST` over
+  `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`,
+  `visual_bell`, `transparent_background_color1..7` and the numbers `0`–`255`. A query is `key=?`; a
+  **reset is the bare key with no `=`**, which the matrix had as `key=`. And the answer to a query for a
+  colour the terminal does not have is an **empty value** — `OSC 21 ; foreground=rgb:ff/00/00 ; cursor= ST`
+  is the documented example — which **falsifies §78's second reason** for refusing the row: answering
+  the keys cmote lacks would not mean inventing a colour, the protocol has a way to say "not set". The
+  dialect reason stands and the row does not move. Push and pop of the colour stack are `OSC 30001` /
+  `OSC 30101`, neither of which the matrix has ever mentioned.
+- **kitty's `OSC 99`** (`sw.kovidgoyal.net/kitty/desktop-notifications/`) is
+  `OSC 99 ; metadata ; payload ST` with the metadata a `:`-separated `key=value` list: `p` payload type,
+  `i` identifier, `d` done flag, `e` base64 encoding, `f` application name, `u` urgency (`0` low,
+  `1` normal, `2` critical), `n` icon name.
+- **iTerm2's `OSC 1337`** (`iterm2.com/documentation-escape-codes.html`) — the forms the matrix
+  refuses, as iTerm2 writes them: `SetUserVar=[key]=[base64]`, `Copy=:[base64]`, `SetProfile=[name]`,
+  `SetColors=[key]=[value]` over `fg`, `bg`, `bold` and `link`, `SetBackgroundImageFile=[base64]` with
+  an empty value removing it, `RequestAttention=[yes|once|no|fireworks]`, `CursorShape=[0|1|2]`, and
+  `ReportCellSize`, whose reply carries "height, width, and optional scale values" — the scale being a
+  third number the matrix had not mentioned.
+- **ConEmu's `OSC 9`** (`conemu.github.io/en/AnsiEscapeCodes.html`) is **multiplexed five ways**, and
+  the matrix had three of them: `9;4;st;pr` progress (`0` remove, `1` set to `pr` 0–100, `2` error,
+  `3` indeterminate, `4` paused), `9;9;"cwd"` the working directory — and **`9;1;ms` sleeps the
+  terminal, `9;2;"txt"` raises a GUI message box, `9;3;"txt"` sets the tab text**, none of which had a
+  row. What that page does *not* document is a bare `OSC 9 ; <text>` notification, which cmote's
+  `term/notify.rs` attributes to ConEmu; that spelling may be Windows Terminal's alone.
+- **`OSC 7`** is `\033]7;file://HOSTNAME/CURRENT/DIR\033\\`, "originates from macOS Terminal", and is
+  what lets a new tab inherit a pane's directory (`wezterm.org/shell-integration.html`).
+- **`OSC 133` could not be sourced.** Its specification is Per Bothner's, hosted on
+  `gitlab.freedesktop.org`, which serves an access-control interstitial to this reader. Every terminal
+  that documents OSC 133 points there rather than restating it.
+- **`OSC 777` could not be sourced either**, and that is worth more than a shrug: urxvt's own manual
+  page documents **no OSC 777 at all**. The attribution in this table and in `term/notify.rs` is
+  folklore — the sequence is real and widely emitted, but "urxvt's" is a claim neither has a citation
+  for.
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 
