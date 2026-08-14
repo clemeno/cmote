@@ -8773,3 +8773,48 @@ split plainly into `windows` and `not(windows)`, which is exactly why the file-l
   `drawn` / `frame_end`, writes atomics that nothing on a mac reads. It costs a handful of relaxed stores
   a frame and it keeps `cfg` out of `app.rs`'s message handling, which is the trade taken on purpose
   rather than by oversight.
+
+## 81. The marks belong to one column (v4.0.0)
+
+§8's tables are read down the Status column: one glyph a row, 165 of them, and the whole point of a
+symbol there is that a reader takes it in without reading the line. Sixteen of those rows also carried
+marks INSIDE the note — twenty-two of them, across four of the seven tables — because a note that tells
+the row's own history has to name what the row used to say: "Read ❌ until §70", "the weakest 🛑 in this
+table", "both of these answer 🤷".
+
+Every one of those was TRUE. That is why it survived eight sweeps: nothing here was a wrong claim, and a
+sweep that re-derives the marks from the crates has no reason to stop at a sentence that is right. The
+fault is not in what the notes said but in where they said it — three marks in a note sit on the same
+line as the one in the column, at the same size, in the same shapes, and several of them are the mark the
+row NO LONGER carries. A column read at a glance cannot afford a second answer on the same line, and
+`? 5 W` was the worst of them: ✅ in the column, and a note reciting ❌ and ✅ in two different jobs.
+
+### What changed
+
+The marks stay in Status; the notes say it in words, and the words are the legend's own — *supported*,
+*not supported*, *refused*, *refused with nothing behind it*. Most were a substitution. Three were not,
+because the symbol was doing a noun's work and the sentence had to be rewritten around its absence:
+"both of these answer 🤷" became "answer the same way, with nothing behind either", "Worth knowing about
+the ✅ above" became "the row above", and DECSLRM's "❌ is a sequence that could still land" reads as a
+phrase rather than a glyph. Two more said "the ❌" about a gap and now say "the gap", which is the word
+the legend gives that mark anyway.
+
+The legend gained the rule, so it does not creep back with the next row.
+
+### What it cost
+
+- `TERMINAL_COMPATIBILITY_PLAN.md` only. No code, no tests, and no row's mark or meaning moved.
+- Checked by re-tallying the Status column after the edit rather than by reading the diff: 165 rows,
+  ✅ 104 · ❌ 25 · 🛑 30 · 🤷 6, identical to §79's count, and every row still carries exactly one mark.
+  That is the check that matters here, because the one way this edit could do damage is by taking a
+  symbol out of a Status cell while meaning to take it out of a note.
+
+### Not done
+
+- **§2–§7 still use the marks in running prose, and should.** There is no column there for a symbol to
+  be mistaken for, and §6's own heading names two of them. The rule is about the tables.
+- **Nothing enforces it.** A row added tomorrow with "Read ❌ until §82" in its note breaks the rule and
+  only a reader will notice — the same shape of hole §80 left around the cfg gating, one document over.
+- **The four symbols are still what the tables are read by**, so a reader who cannot see them is no
+  better served than before. Naming the marks in words inside the notes moves a little way toward a table
+  that reads without them; it was not the reason for the change and it does not finish that job.
