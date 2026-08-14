@@ -1267,7 +1267,9 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (§6, §63) |
 | 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (§6) |
-| 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D` marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from `D` (§34, `term/osc133.rs`) |
+| 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D`, BEL- or ST-terminated, marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from the optional field after `D`. Trailing `key=value` fields are ignored — the two named ones have their own rows below (§34, §95, `term/osc133.rs`) |
+| 133 `A ; click_events=1` | Mouse clicks in the prompt area | 🛑 | the field on the prompt-start mark that asks the terminal to "enable mouse click reporting for the prompt area" — input reporting switched on by a payload whose declared job is saying where the prompt sits, around the modes that gate it (§10), after which a click inside the prompt would behave unlike one a line above. This scanner cannot reach a mouse mode; a test states the refusal rather than leaving it incidental (§95, `term/osc133.rs`) |
+| 133 `C ; cmdline_url=` | The command line being run | ❌ | the field on the output-start mark carrying the command line itself, percent-encoded. Dropped with every other trailing field: nothing in cmote names which command a range of output came from, so there is no reader for it (§95, `term/osc133.rs`) |
 | Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value ; … ST` names colours instead of numbering them — `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`, `visual_bell`, `transparent_background_color1`–`7`, and `0`–`255` for the palette. `key=?` queries, a **bare key with no `=`** resets, any number of pairs at a time. Refused as a **dialect** cmote never claims: `TERM`, XTVERSION and XTGETTCAP's `TN` all say xterm. §78's second reason expired — it held that answering the keys cmote lacks means inventing a colour, and the protocol's own answer for an undefined one is an **empty value** (§6, §78, §89) |
 | Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body ST` — a desktop notification whose metadata is a `:`-separated `key=value` list: `p` the payload type, `i` an identifier for updating a notification already shown, `d` a done flag, `e` base64, `f` the application name, `u` the urgency (`0` low, `1` normal, `2` critical) and `n` an icon name. Refused for the one reason the plain spellings are: **a notification leaves the window** (§6, §54, §79, §89, `term/notify.rs`) |
 | iTerm 1337 File | Inline images | 🛑 | `OSC 1337 ; File=<args>:<base64>` draws an inline image from a base64 payload (§6, §70, `term/iterm.rs`) |
@@ -1869,9 +1871,15 @@ This is that gap closed, one vendor at a time — and two of them could not be c
   `term/notify.rs` attributes to ConEmu; that spelling may be Windows Terminal's alone.
 - **`OSC 7`** is `\033]7;file://HOSTNAME/CURRENT/DIR\033\\`, "originates from macOS Terminal", and is
   what lets a new tab inherit a pane's directory (`wezterm.org/shell-integration.html`).
-- **`OSC 133` could not be sourced.** Its specification is Per Bothner's, hosted on
-  `gitlab.freedesktop.org`, which serves an access-control interstitial to this reader. Every terminal
-  that documents OSC 133 points there rather than restating it.
+- **`OSC 133` is sourced at one remove** (corrected in §95; this section had it as unsourced). Its
+  specification is Per Bothner's, hosted on `gitlab.freedesktop.org`, which serves an access-control
+  interstitial to this reader, and most terminals point there rather than restating it. **Contour
+  restates it** (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`): the four commands,
+  `ST` given as either `ESC \` or BEL, `D`'s exit code written `[ ; <ExitCode> ]` and so optional —
+  though with no statement of what an absent one means — and two optional `key=value` fields,
+  `click_events=1` on `A` and `cmdline_url=<percent-encoded>` on `C`, neither of which had a row. It
+  credits no author beyond "inspired by FinalTerm" and lists no implementers, so it is one vendor's
+  restatement standing in for the spec rather than the spec.
 - **`OSC 777` could not be sourced either**, and that is worth more than a shrug: urxvt's own manual
   page documents **no OSC 777 at all**. The attribution in this table and in `term/notify.rs` is
   folklore — the sequence is real and widely emitted, but "urxvt's" is a claim neither has a citation

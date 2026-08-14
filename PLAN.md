@@ -9769,3 +9769,81 @@ colour stacks reach the same nothing.
 - **DECMSR's unit is still unknown** (§84 asked; ctlseqs gives none; DEC's own DECMSR page was not
   fetched in this pass). The row no longer claims one, which is enough for it to be right, and not
   enough for it to be complete.
+
+## 95. OSC 133, sourced at one remove (v4.0.0)
+
+§89 closed with two sequences it could not source, and OSC 133 was the one that mattered most,
+because unlike OSC 777 it is a **feature cmote ships** — the per-tab status dot, jump-to-prompt and
+select-command-output all rest on it (§34). The section's finding was that Per Bothner's
+specification lives on `gitlab.freedesktop.org` behind an access-control interstitial, and that every
+terminal documenting OSC 133 points there rather than restating it.
+
+That last clause was wrong, and the user found the counter-example: **Contour restates it**
+(`contour-terminal.org/vt-extensions/osc-133-shell-integration/`).
+
+### What a restatement is worth, and what it is not
+
+It credits no author beyond "inspired by FinalTerm" and lists no implementers, so it does not stand in
+for the spec — it is one vendor's account of it, and the matrix's `[community]` tag for OSC 133 is
+unchanged. What it does close is the difference between *unsourced* and *sourced at one remove*, and
+§94 had just finished paying for confusing those two in the other direction.
+
+Three of its four facts confirm what cmote already does: the four commands, `ST` as either `ESC \` or
+BEL, and `D`'s exit code written `[ ; <ExitCode> ]` — **optional in the syntax**, which is what
+`Mark::CommandEnd(Option<i32>)` has always assumed. Contour does not say what an absent one *means*,
+so cmote's reading of it (show "done", never a wrong number) stays cmote's judgement and is now known
+to be one.
+
+### The fourth fact was a decision
+
+The page names two optional `key=value` fields neither this matrix nor `term/osc133.rs` had recorded.
+
+**`133 ; A ; click_events=1`** — *"indicates that the terminal should enable mouse click reporting
+for the prompt area."* Refused, and on two grounds that agree:
+
+- It is **input reporting switched on by a payload whose declared job is marking where the prompt
+  sits**. Mouse reporting has modes that gate it (§10, `?1000`–`?1006`); a program that wants clicks
+  can ask for clicks. This is the same shape as every side door this document has closed — a feature
+  reachable through a sequence that was documented as being about something else.
+- It is **inconsistent by construction**. A click inside the prompt region would go to the remote
+  while a click one line above it selects text locally, with no visible boundary between the two.
+  That is precisely the ordering the user set for this pass: UX stability and consistency over
+  visual features.
+
+**`133 ; C ; cmdline_url=<percent-encoded>`** — the command line being run. A ❌ rather than a
+refusal: nothing in cmote names which command a range of output came from, so there is no reader,
+and nobody has decided against having one.
+
+### The refusal was already true, and that is the interesting part
+
+`Scanner::parse` splits the payload on `;` and ignores every field past the letter, so
+`click_events=1` was already dropped — and `Mark` has four variants, none of which carries a field,
+so there is **no path from this scanner to a mouse mode at all**. The refusal is structural and
+predates the decision by sixty sections.
+
+Which makes this a 🛑 whose mechanism is a **test**, not a branch. Adding a branch to reject a field
+the code cannot act on would be theatre; what was missing was the *statement*, because an incidental
+drop and a deliberate one look identical until someone writes down which it is. The next reader who
+sees `cmdline_url` in a capture and thinks "we could show that" will find the field beside it already
+answered.
+
+### What it cost
+
+- `term/osc133.rs`: the header block gains the two fields and their reasons; one test pins both.
+- Matrix: the `133` row now says BEL-or-ST and that trailing fields are ignored; two rows added; the
+  §89 evidence bullet corrected from "could not be sourced" to what Contour supplies.
+- 175 → **177 rows: ✅ 108 · ❌ 26 · 🛑 37 · 🤷 6**. Tests 1202 → 1203.
+
+### Not done
+
+- **Bothner's specification is still unread.** The interstitial has not moved, and a restatement
+  cannot tell me what it leaves out — most obviously whether the `L` and `P` marks other terminals
+  emit are in it. Contour documents four commands and no others; kitty and WezTerm are said to speak
+  more, and neither was read in this pass.
+- **`cmdline_url` stays a gap with an obvious use.** Select-command-output (§34) already knows a
+  range of output belongs to one command; the field is that command's name. Nothing shows it because
+  nothing has anywhere to show it, and inventing a place is a visual feature — the thing this pass
+  was told to rank last.
+- **`OSC 777` is still folklore** (§89): the sequence is real and widely emitted, and "urxvt's",
+  which this matrix and `term/notify.rs` both assert, has no citation and is contradicted by urxvt's
+  own manual page.

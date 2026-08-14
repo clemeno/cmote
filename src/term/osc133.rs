@@ -8,6 +8,16 @@
 //   OSC 133 ; C   ESC ] 133 ; C   BEL | ST   — input is done; the command's output begins
 //   OSC 133 ; D [ ; exit ]        BEL | ST   — the command finished, with this exit code
 //
+// Contour's write-up of the same four (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`,
+// read for §95) names two optional `key=value` fields beside them, and cmote reads neither:
+//
+//   133 ; A ; click_events=1      — asks the terminal to report mouse clicks in the prompt area
+//   133 ; C ; cmdline_url=<pct>   — the command line being run, percent-encoded
+//
+// The first is refused (§95): it turns on input reporting from a payload whose declared job is
+// marking where the prompt sits, which is a side door around the mouse modes (§10) and would make a
+// click inside the prompt behave unlike a click one line above it. The second has no reader here.
+//
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
 // success/failure glyph (§34). Like the cwd (§17), modifyOtherKeys (§9) and the identity queries
@@ -523,6 +533,29 @@ mod tests {
 	fn the_st_terminator_and_trailing_fields_are_accepted() {
 		// ESC \ (ST) instead of BEL, and a `key=value` field after the letter that we ignore.
 		assert_eq!(marks(b"\x1b]133;A;aid=7\x1b\\"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn the_two_named_parameters_are_read_as_nothing_but_their_mark() {
+		// Contour names two optional fields on these marks, and cmote answers both with the bare
+		// mark and nothing else (§95).
+		//
+		// `click_events=1` on A asks the terminal to "enable mouse click reporting for the prompt
+		// area" — a remote turning on input reporting through a payload whose declared job is saying
+		// where the prompt sits, and a side door around the mouse modes (§10). There is no path from
+		// this scanner to a mouse mode at all: `Mark` has four variants and none carries a field, so
+		// the refusal is structural. This test is what makes it deliberate rather than incidental.
+		assert_eq!(
+			marks(b"\x1b]133;A;click_events=1\x07"),
+			vec![Mark::PromptStart]
+		);
+		// `cmdline_url=<percent-encoded>` on C carries the command line itself. Nothing in cmote
+		// shows which command a range of output belongs to, so there is no reader for it and it is
+		// dropped like any other trailing field rather than decoded and held.
+		assert_eq!(
+			marks(b"\x1b]133;C;cmdline_url=ls%20-la\x07"),
+			vec![Mark::OutputStart]
+		);
 	}
 
 	#[test]
