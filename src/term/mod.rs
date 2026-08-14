@@ -2282,6 +2282,34 @@ mod tests {
 		);
 	}
 
+	/// One sequence may ask about several slots — `OSC 4` reads its parameters in `index ; spec`
+	/// pairs — and each gets its own reply, in the order asked (§87). Written down because the row
+	/// claims it: §84's finding was a matrix full of definitions nothing had ever exercised.
+	#[test]
+	fn a_palette_query_may_ask_about_several_slots_at_once() {
+		let mut terminal = Terminal::new(10, 40);
+		let mut expected = b"\x1b]4;1;rgb:8080/0000/0000\x07".to_vec();
+		expected.extend_from_slice(b"\x1b]4;3;rgb:8080/8080/0000\x07");
+		assert_eq!(terminal.process(b"\x1b]4;1;?;3;?\x07"), expected);
+	}
+
+	/// The dynamic colours are one run rather than three codes: a list walks UP from the code it
+	/// started at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background (§87).
+	#[test]
+	fn a_default_colour_query_walks_up_from_the_code_it_started_at() {
+		let mut terminal = Terminal::new(10, 40);
+		let reply = terminal.process(b"\x1b]10;?;?\x07");
+		let reply = String::from_utf8(reply).expect("the reply is ASCII");
+		assert!(
+			reply.contains("\x1b]10;rgb:"),
+			"the foreground answers first: {reply:?}"
+		);
+		assert!(
+			reply.contains("\x1b]11;rgb:"),
+			"and the second `?` is the background: {reply:?}"
+		);
+	}
+
 	#[test]
 	fn a_palette_colour_set_does_not_move_the_query_answer() {
 		// A remote sets slot 3 to red, then asks what slot 3 is: the answer is still the scheme's

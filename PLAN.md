@@ -9212,3 +9212,60 @@ reader knows it is reasoning.
 - **Nothing tests the counter across a reset in isolation** — the seam test asserts the pen, which is
   what a program sees, and the counter only shows through it after an overflow. A test that overflows,
   resets and then pops would pin it directly.
+
+## 87. The sweep reaches the OSC table, and stops (v4.0.0)
+
+§84 read §83's definitions back against xterm's ctlseqs and left, explicitly: *"roughly 140 rows were
+not checked… the OSC table barely touched."* This is the next slice of that, and it produced two
+corrections, two new tests and one blocker worth writing down.
+
+### The blocker
+
+**ctlseqs' OSC list cannot be read through the fetch.** Every attempt returns the document truncated
+part-way through `Ps = 4` — it ends mid-sentence on "Change Color Number *c* to the color specif" — so
+`OSC 8`, `10`–`12`, `22`, `50`, `52`, `104` and `110`–`112` have no primary source behind them yet.
+Three did arrive and all three match the matrix as written: `0` changes the icon name *and* the window
+title, `1` the icon name, `2` the window title.
+
+What those rows were checked against instead is `vte` 0.15.0 — which is the operative source for what
+cmote *does* and not for what the sequence *means*. The distinction is the whole of §84: a row can
+describe the crate perfectly and still describe the sequence wrongly, which is exactly how `CSI # p`
+spent nineteen sections wearing the colour stack's name.
+
+### Two corrections, both of the same shape
+
+The colour OSCs take **lists**, and the matrix had all three as single requests.
+
+- **`OSC 4`** reads its parameters in `index ; spec` pairs — it refuses an even count outright and then
+  walks them two at a time — so `OSC 4 ; 1 ; ? ; 3 ; ?` is two questions and draws two replies.
+- **`OSC 10 / 11 / 12`** are one arm over three codes, and a list **walks up** from the code it started
+  at: `OSC 10 ; ? ; ?` asks for the foreground and then the background, stopping at the cursor.
+- **`OSC 104` bare resets all 256 slots.** The row said "puts one palette slot back". For a row that is
+  🛑 the practical difference is nil — cmote's renderer never reads that table either way — but the
+  definition was wrong about what was being refused, which is the thing §83 said a note is for.
+
+### Both query forms are now pinned
+
+The rows claim the list behaviour, so two tests exercise it: `OSC 4 ; 1 ; ? ; 3 ; ?` gets red and yellow
+back in the order asked, and `OSC 10 ; ? ; ?` gets a `10;` reply followed by an `11;` one. That is
+§84's finding turned into a habit — a matrix full of definitions nothing had ever run is how the last
+five errors survived four sweeps.
+
+### What it cost
+
+- Three notes reworded, two tests, two Evidence bullets — one for the crate's list handling, one
+  recording that the OSC section of ctlseqs is unread and why.
+- Tests 1187 → 1189. No mark moves; the matrix stays at 170 rows, ✅ 106 · ❌ 24 · 🛑 34 · 🤷 6.
+
+### Not done
+
+- **The OSC rows still have no primary source.** A different route to the document — the plain-text
+  build, or the manual page — would close it, and none was tried beyond the fetch that truncates.
+- **The SGR table is still unchecked**, and it is the table most likely to be right by familiarity and
+  therefore least likely to be read.
+- **The vendor rows have no source at all and cannot have one from xterm**: `OSC 7`, `9`, `9;4`, `9;9`,
+  `133`, `777`, kitty's `21` and `99`, and the whole `iTerm 1337` namespace are other terminals'
+  extensions, documented — where they are documented — by those terminals. §87 did not go looking.
+- **`OSC 50` is a case in point and is left standing.** cmote reads it as a cursor shape because `vte`
+  does; whose dialect that is, and what xterm means by `OSC 50`, is precisely what the truncated fetch
+  could not say.

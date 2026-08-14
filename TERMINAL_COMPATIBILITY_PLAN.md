@@ -1246,7 +1246,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 0 (the icon half) | Icon name | 🛑 | the icon-name half of that one sequence — the same string the title half already carries (§69, `term/icon.rs`) |
 | 1 | Icon name | ✅ | `OSC 1 ; text` sets the icon name alone; drawn on the tab chip after the endpoint, control characters stripped, capped at 24 characters, empty clears (§69, `term/icon.rs`) |
 | 2 | Window title | ✅ | `OSC 2 ; text` sets the window title alone; control characters stripped (anti-spoof) |
-| 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for one palette slot; answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, `report_color`) |
+| 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for a palette slot, in `index ; spec` pairs so one sequence may ask about several; each is answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, §87, `report_color`) |
 | 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (§6, §64) |
 | 7 | Working directory | ✅ | `OSC 7 ; file://host/path` announces the shell's working directory (§17, `term/cwd.rs`) |
 | 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens and closes a hyperlink over a run of cells; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`) |
@@ -1254,14 +1254,14 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 9 | Desktop notification | 🛑 | `OSC 9 ; text` raises a desktop notification, which leaves the window and lands on the desktop (§6, §54, §79, `term/notify.rs`) |
 | 9;4 | Progress reporting | ✅ | `OSC 9 ; 4 ; state ; percent` reports task progress; all five states, drawn per tab and mirrored on the taskbar button (§54, `term/progress.rs`) |
 | 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; path` — ConEmu's working-directory spelling, a bare native Windows path, sometimes quoted (§17, `term/cwd.rs`) |
-| 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64) |
+| 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; a list walks UP from the code it starts at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background. Answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64, §87) |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (§6, §64) |
 | 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | `OSC 22 ; name` sets the mouse pointer shape over the grid; these five describe the content under the pointer, apply only while the pointer is inside the grid, and are cleared on both directions of the alternate-screen swap (§77, `term/pointer.rs`) |
 | 22 (any other shape) | Mouse pointer shape | 🛑 | the same sequence naming any other CSS shape — the resize and grab shapes are cmote's own vocabulary, and `wait`, `progress`, `not-allowed` and `no-drop` make a claim about the client (§77, `term/pointer.rs`) |
 | 50 | Cursor shape (`CursorShape=`) | ✅ | `OSC 50 ; CursorShape=0/1/2` sets the cursor to block, bar or underline — a third spelling of DECSCUSR's shape, with no blink to carry (§71) |
 | 52 (write) | Clipboard write | 🛑 | `OSC 52 ; c ; <base64>` writes the local clipboard (§6, §63) |
 | 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (§6, §63) |
-| 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour — the reset side of the fixed scheme (§6) |
+| 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (§6) |
 | 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D` marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from `D` (§34, `term/osc133.rs`) |
 | Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value` sets, queries and resets colours by semantic name (`foreground`, `cursor_text_color`, `selection_background`, `color0`–`color255`) instead of by number, any number of pairs at a time — kitty's dialect, which cmote never claims (§6, §78) |
@@ -1714,6 +1714,13 @@ Audited file:line anchors behind the claims above, for later re-checking.
   (`:303`), and nothing expires a stuck update except the application calling `stop_sync` — which cmote
   never does (no hit for `sync_timeout` / `stop_sync` / `pending_timeout` in `src/`).
 
+- **The colour OSCs take lists, which the matrix had as single requests until §87.** `b"4"`
+  (`ansi.rs:1366`) refuses an even parameter count and then walks `params[1..].chunks(2)`, so
+  `OSC 4 ; 1 ; ? ; 3 ; ?` is two queries and two replies. `b"10" | b"11" | b"12"` (`:1422`) is one arm
+  over three codes and **increments** `dynamic_code` per parameter, so a list walks up from wherever it
+  started — `OSC 10 ; ? ; ?` is the foreground then the background — and stops at `NamedColor::Cursor`.
+  `b"104"` (`:1496`) resets **all 256** when given no parameters at all and otherwise one per parameter.
+  Both query forms are pinned end to end since §87, the rows having claimed them first.
 - **Where the 🤷 rows die, and the two ❌ rows beside them** (§83 — the anchors the notes used to carry,
   moved here when the Note column became a definition). `vte` 0.15.0's **OSC arms** are `0`/`2`, `4`,
   `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so kitty's `OSC 21`, plain
@@ -1758,6 +1765,12 @@ Quoted where a row's wording now rests on it.
   §41 until §84. `query.rs`'s `graphics_request` reads item then action, so the code was right and only
   the row was wrong — and it answers action **2** with a status 0 as well, which no row had said.
 - **`CSI 16 t`** — "Report xterm character cell size in pixels. Result is `CSI 6 ; height ; width t`".
+- **The OSC list could not be read at all** (§87). Every fetch of this document returns it truncated
+  part-way through `Ps = 4` — "Change Color Number *c* to the color specif" — so `OSC 8`, `10`–`12`,
+  `22`, `50`, `52`, `104` and `110`–`112` were checked against `vte` instead, which is the operative
+  source for what cmote does but not for what the sequence MEANS. What the fetch did reach: "Change Icon
+  Name and Window Title to *Pt*" (`0`), "Change Icon Name to *Pt*" (`1`), "Change Window Title to *Pt*"
+  (`2`) — the three the matrix splits across four rows, and all three as written.
 - **Two claims ctlseqs does *not* support**, and the rows now say so themselves: it gives **no accepted
   range for DECFRA's `Pch`** ("`Pc` is the character to use", and nothing more), so 32–126 / 160–255 is
   cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with
