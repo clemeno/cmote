@@ -10044,3 +10044,142 @@ and mis-bounds a command; no mark leaves both alone.
 - **`L` was never sourced at all** — it appears in no page read across §95, §96 or §97, only in this
   project's own earlier guess that kitty and WezTerm emit it. That guess is now recorded as
   unsupported: kitty's page has no `L`, and WezTerm's documents no marker letters whatsoever.
+
+## 98. The catalogues nobody had read (v4.0.0)
+
+§8 has been built against **one** catalogue since it existed, `vtdn.dev`, and every sweep since has
+re-derived its marks from the crates. Three more were read end to end for this one: contour's sequence
+index, four of its extension pages, and otty's OSC and CSI trees.
+
+**Not one mark moved for being wrong.** Thirty-four rows appeared that had never existed.
+
+That is a different failure from any this document has recorded. §70's row was right about the crates
+and wrong about a price that had been paid somewhere else; §88's was right that xterm does not document
+a range DEC does; §97's was a field read as the wrong thing. All three were rows being *re-read*. A
+catalogue you have not opened produces no row at all — and a table of correct rows looks exactly like a
+complete one, which is why "verified against the real sources" has never been the same claim as
+"finished".
+
+The 🤷 column went from six rows to twenty-six on one reading. Six was never how many sequences cmote
+declines by never having been offered them; six was how many had been noticed.
+
+### What the missing rows turned out to be
+
+- **Colours xterm itself defines and this table never listed**: `OSC 5` / `105` / `106`, the "special"
+  colours that tint an SGR *attribute* rather than a palette slot — bold, underline, blink, reverse,
+  italic; `13` / `14` the mouse pointer's; `15` / `16` / `18` the Tektronix window's; `17` / `19` the
+  selection's; and the resets `113`–`119` that pair with them. The fixed-scheme policy (§6) covered
+  every one of them already and had never been asked to.
+- **The consequences of being a one-page terminal**: the page family (NP, PP, PPA, PPR, PPB), the
+  status display (DECSASD, DECSSDT), and the three DCS sequences that leave something *behind* in a
+  terminal — a macro, a downloaded character set, a redefined function key.
+- **One absent piece of machinery wearing six names**: SL / SR, DECBI / DECFI and DECIC / DECDC are all
+  horizontal scrolling and column insertion, and all ❌ for the same missing thing. Worth seeing
+  together; separately each reads like an oversight.
+- **Two bulk screen readbacks**, which are where §60's line finally gets tested from the other side.
+- **`OSC 88`**, which is a category §6 did not have.
+
+### Three things shipped, and the first changes a rule
+
+**`CSI ? 996 n` is answered — "is your scheme dark or light?" — with `CSI ? 997 ; 1 n`, dark.**
+Contour's sequence, adopted by ghostty, kitty and GNOME's vte; asked by neovim, helix, zellij and tmux.
+It is a **constant**: cmote's scheme is fixed (§6) and `palette::DEFAULT_BG` is `#1e1e1e`. A test
+asserts the background is still dark, so the constant cannot outlive its own premise.
+
+It is also the first reply cmote sends in a sequence xterm does not define, which is exactly what §96's
+half-rule forbade two sections ago — *cmote may read any dialect, and answers only in the one it
+claims*. That rule is **narrowed** rather than excepted: what a reply must not do is name the **program**
+or the **machine** (§36's line, the one DA3's constant unit id keeps), and it must not become a second
+source for something cmote can observe (§71). "My background is dark" does neither, and it is not even
+new disclosure — `OSC 11 ; ?` is xterm's own spelling of the same fact and cmote already answers it.
+One writer, two doors.
+
+The check that the narrowing is not just a licence: kitty's `OSC 21` was refused in §78 on **four**
+grounds, of which the dialect was the first. Narrowing that one leaves the row exactly where it was,
+because the other three are untouched — answering the keys cmote lacks would invent colours, the
+reply's length is the requester's to set, and for the keys it could answer it carries nothing `OSC 4` /
+`10` / `11` / `12` do not. A rule that could be narrowed without moving the row it was written for is a
+rule that was carrying more weight than it needed to.
+
+And the reason to bother: silence is not neutral. A program that cannot learn the background paints for
+the one it guessed, and a light guess over `#1e1e1e` is a screen the user cannot read. That is the
+UX-stability harm this project ranks above every visual feature, caused by cmote declining to say
+something true about itself.
+
+**`OSC 30` is a third door to the tab chip.** contour's `SETTABNAME`, beside `OSC 1` and ConEmu's
+`OSC 9;3`, read through `term/icon.rs` so there is one writer and three doors — §71's test for a second
+spelling, and §90's argument verbatim: capped at 24 characters, sanitised, appended after the endpoint
+and never in place of it, so a remote gains no more of the chip than it already had.
+
+It is **the thinnest-sourced thing in this codebase** and that is written into the module rather than
+smoothed over: one line of contour's index, and the detail page behind it does not resolve. What makes
+it safe to act on anyway is the size of being wrong — an unrelated `OSC 30` payload would appear,
+sanitised and capped, after the endpoint on its own tab. The same misreading on a colour, a font or a
+clipboard would not have been worth it, and none of those is what this module writes.
+
+**Two refusals are now stated by name** in `term/notify.rs`, the module that exists for exactly this.
+`OSC 60` is contour's `SETFONTALL` — every face, style and size at once — and it is `OSC 50`'s refusal
+at a larger size, with no `CursorShape=` exception to carve out because this number carries one
+meaning. `OSC 88` is the Terminal Resume Protocol, and it is the only sequence found in this sweep
+whose intended effect is a **local process**: `arm ; cmd=<base64> ; args=<base64> ; cwd=<path>` hands
+the terminal a command line to run if it ever restarts. The proposal is reasonable where it was
+written, with the program and the terminal on one machine answering to one person. cmote is an SSH
+client and the two ends are not the same person. Its `query` operation is refused with the rest,
+because "supported" is the advertisement that brings the arm.
+
+### The two readbacks, and the line they cross
+
+`CSI > Pl ; Pr t` (contour's buffer capture) returns the screen's text in a run of `PM 314 ; … ST`
+strings. `CSI > Ps ; Pn b` (its semantic-block query, armed by DEC mode 2034) returns the **command
+lines, prompts, output and exit codes** as JSON.
+
+§60 allowed DECRQCRA to read the page, and the argument was that every byte on it came from the pty the
+reply goes back down — with two properties enforced rather than assumed: the rectangle clamps to the
+**visible page**, and what comes back is a 16-bit checksum rather than the text. Both of these break
+the first property and neither has the second. A capture's whole purpose is to reach into the
+scrollback, which in an SSH client can hold the output of a session that ended before this one began,
+on a different host, under a different account.
+
+The block query is worse in kind rather than in degree, and it is the cleanest illustration of §96's
+half-rule running the other way: cmote **reads** OSC 133, a dialect it does not claim, and that is
+allowed because a read produces no reply. This is the same data flowing outward, and outward is the
+direction the rule binds. That contour gates its own query behind a four-word token the terminal mints
+is the vendor agreeing about the danger, not disposing of it — the token travels the same wire the
+answer does.
+
+Both are 🤷: `vte` has no arm for either final byte under a `>` marker, so nothing here performs the
+refusal and §6 is the whole of it.
+
+### What it cost
+
+- `term/dsr.rs`: the allow-list widens from three values to four, one `Request` variant, one reply
+  constant, three tests — one of them on `palette::DEFAULT_BG` rather than on this module at all.
+- `term/icon.rs`: one more arm in `parse` and the quote-trimming kept to the one spelling whose source
+  quotes; two tests, including the two neighbours a prefix match would have swallowed (`OSC 3`,
+  kitty's `OSC 30001`).
+- `term/notify.rs`: `Refused::Font` grows a second number, `Refused::Resume` is new, two tests.
+- `term/mod.rs`: one arm in `answer_dsr`, three boundary tests.
+- Matrix 180 → **214 rows: ✅ 111 · ❌ 36 · 🛑 41 · 🤷 26**. Tests 1206 → 1214.
+
+### Not done
+
+- **Nothing was implemented for the ten new ❌ rows**, and two of them are worth a second look before
+  the next sweep calls this section thorough. **XTSAVE / XTRESTORE** (`CSI ? Pm s` / `r`) is the one
+  with a user-visible failure behind it: a program that saves `? 25`, hides the cursor and restores
+  gets no restore, so the cursor stays hidden after it exits — the stuck-state shape §72 exists to
+  prevent. **DECIC / DECDC** is the cheapest, `term/rect.rs` already moving whole cells with their
+  colour, link and protection attached.
+- **ECMA-48 is still unread**, and it is now load-bearing in two rows rather than one: SCP (§76) and
+  the page family, whose intermediates are taken from a catalogue that demonstrably drops them
+  elsewhere (contour writes SL as `CSI 0..1 @`, which is ICH's spelling).
+- **contour's line-reflow extension has no row** — its page does not resolve and no mode number was
+  found anywhere else, so nothing was invented for it.
+- **`OSC 30` rests on one unverifiable line**, and no other terminal was checked for a conflicting
+  meaning on that number.
+- **The readback rows are 🤷 and stay 🤷.** Nothing in cmote refuses `CSI > … t` or `CSI > … b`; §6 is
+  the whole refusal, and §79's lesson — that 🤷 sometimes means "upstream never looked" rather than
+  "upstream refused" — applies to both. A scanner that named them would make them 🛑, and would be the
+  first refusal in this codebase written for a sequence no reachable program sends.
+- **The SGR table still has not been checked**, eight sweeps running.
+- **`OSC 777` is still folklore**, and `OSC 888` was taken from contour's index with no detail page —
+  the same evidential footing as `OSC 30`, and it only reaches a 🤷 rather than shipped behaviour.

@@ -749,6 +749,9 @@ impl Terminal {
 			// the same scanner, and one route is easier to keep right than two.
 			dsr::Request::LocatorStatus => dsr::NO_LOCATOR.to_vec(),
 			dsr::Request::LocatorType => dsr::NO_LOCATOR_TYPE.to_vec(),
+			// Also a constant, and for a reason worth keeping in sight: cmote's colour scheme is
+			// fixed (§6), so "dark" cannot go stale between the question and the answer (§98).
+			dsr::Request::ColorScheme => dsr::DARK_SCHEME.to_vec(),
 		};
 		self.replies
 			.lock()
@@ -2456,6 +2459,49 @@ mod tests {
 		);
 	}
 
+	/// The two refusals §98 states by name, at the boundary (`term/notify.rs`). A remote asking cmote
+	/// to change every font face, or handing it a command line to run locally the next time the
+	/// terminal starts, gets nothing back and changes nothing — and, the part worth pinning here
+	/// rather than in the module's own tests, none of the payload is PRINTED either: an `arm` carrying
+	/// base64 must not spill onto the grid as text.
+	#[test]
+	fn a_remotes_font_change_and_relaunch_specification_get_nothing() {
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1b]1;kept\x07");
+		assert!(
+			terminal
+				.process(b"\x1b]60;regular=Comic Sans\x07")
+				.is_empty()
+		);
+		assert!(
+			terminal
+				.process(b"\x1b]88;arm;cmd=c3No;args=aG9zdA==\x07")
+				.is_empty()
+		);
+		assert!(
+			terminal.process(b"\x1b]88;query\x07").is_empty(),
+			"not even 'supported', which is what would bring the arm"
+		);
+		terminal.process(b"X");
+		assert_eq!(read(&terminal, 0, 0, 40).trim(), "X", "none of it printed");
+		assert_eq!(terminal.icon_name(), Some("kept"), "and none of it renamed");
+	}
+
+	/// contour's spelling of the tab name (§98) — the third door to the one writer `term/icon.rs` is,
+	/// asserted at the boundary because that is where a new spelling could collide with an old one.
+	#[test]
+	fn the_third_tab_name_spelling_reaches_the_same_chip() {
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1b]2;window\x07");
+		assert!(terminal.process(b"\x1b]30;build\x07").is_empty());
+		assert_eq!(terminal.icon_name(), Some("build"));
+		assert_eq!(
+			terminal.title().as_deref(),
+			Some("window"),
+			"and stays in its own lane"
+		);
+	}
+
 	#[test]
 	fn an_icon_name_reaches_the_tab_strip_without_touching_the_title() {
 		// §69. OSC 1 is a code `vte` has no arm for, so this whole path is cmote's own scanner —
@@ -3547,6 +3593,28 @@ mod tests {
 		assert_eq!(terminal.process(b"\x1b[?56n"), b"\x1b[?57;0n".to_vec());
 		let both = terminal.process(b"\x1b[?56n\x1b[?55n");
 		assert_eq!(both, b"\x1b[?57;0n\x1b[?53n".to_vec());
+		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
+	}
+
+	/// The fourth question on the allow-list (§98), and the only one whose sequence is not xterm's.
+	/// Answered "dark" from a constant, and asserted here against the door cmote already had for the
+	/// same fact: `OSC 11 ; ?` returns the background the grid paints, and dark-or-light is a function
+	/// of that number. Two spellings of one writer — if they ever disagreed, one of them would be a
+	/// second source (§71), which is the thing this project refuses rather than the answer itself.
+	#[test]
+	fn the_colour_scheme_question_is_answered_and_agrees_with_the_background() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[?996n"), b"\x1b[?997;1n".to_vec());
+		let background = terminal.process(b"\x1b]11;?\x07");
+		let background = String::from_utf8(background).expect("an rgb: reply is text");
+		let (red, green, blue) = palette::DEFAULT_BG;
+		// xterm's `rgb:` triplet, each channel doubled to sixteen bits.
+		let expected =
+			format!("rgb:{red:02x}{red:02x}/{green:02x}{green:02x}/{blue:02x}{blue:02x}");
+		assert!(
+			background.contains(&expected),
+			"the background reply is not the scheme's: {background}"
+		);
 		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
 	}
 

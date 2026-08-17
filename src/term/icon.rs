@@ -2,15 +2,26 @@
 //
 //   OSC 1      ESC ] 1 ; name          BEL | ST   the standard spelling
 //   OSC 9;3    ESC ] 9 ; 3 ; "name"    BEL | ST   ConEmu's, quoted in its own documentation (§90)
+//   OSC 30     ESC ] 30 ; name         BEL | ST   contour's `SETTABNAME` (§98)
 //
-// TWO SPELLINGS, ONE WRITER. ConEmu calls its sequence "set the tab text" and cmote's chip is the
-// only tab text it has, so the two mean the same thing and land in the same field through this one
-// module — which is what §71 asks of a second spelling. A second spelling is only refused when it
-// would be a second SOURCE for a field somebody else owns (iTerm's `CursorShape`, which would write
-// the engine's cursor from outside), and this is not that. It is honoured for the reason `9;9` is
-// (§17): cmote is a Windows client, and ConEmu's vocabulary is what a Windows-side shell reaches for.
-// The name is capped, sanitised and appended to the endpoint exactly as OSC 1's is — a remote gets
-// no more of the chip through the new spelling than it had through the old.
+// THREE SPELLINGS, ONE WRITER. ConEmu calls its sequence "set the tab text" and contour's is named
+// "Set Session/Tab Name"; cmote's chip is the only tab text it has, so all three mean the same thing
+// and land in the same field through this one module — which is what §71 asks of a second spelling. A
+// second spelling is only refused when it would be a second SOURCE for a field somebody else owns
+// (iTerm's `CursorShape`, which would write the engine's cursor from outside), and this is not that.
+// The first is honoured for the reason `9;9` is (§17): cmote is a Windows client, and ConEmu's
+// vocabulary is what a Windows-side shell reaches for. The name is capped, sanitised and appended to
+// the endpoint exactly as OSC 1's is — a remote gets no more of the chip through a new spelling than
+// it had through the old, which is the whole reason a third one costs nothing to accept.
+//
+// OSC 30 IS THE THINNEST-SOURCED THING IN THIS MODULE, and that is recorded rather than smoothed
+// over. It is one line of contour's sequence index — mnemonic, number, six words — and the detail
+// page behind it does not resolve, so nobody here has read a definition of its payload (§89's tiers
+// would call it a vendor restatement with the vendor's own page missing). What makes it safe to act
+// on anyway is that being WRONG about it costs a tab chip: the worst case is a remote's unrelated
+// `OSC 30` payload appearing, sanitised and capped at 24 characters, after the endpoint on its own
+// tab — and never in place of it. The same misreading on a colour, a font or a clipboard would not
+// have been worth the risk, and none of those is what this module writes.
 //
 // The sequence is one of the oldest in the vocabulary and the one whose MEANING has moved furthest.
 // It was the label X11 put under a window that had been iconified — a thing Windows does not have,
@@ -99,14 +110,20 @@ impl Icon {
 /// Matched by the FULL `1;` prefix, so none of the OSC codes that merely start with a `1` can be
 /// mistaken for it: `10;`/`11;`/`12;` (the dynamic colours), `104;`/`110;`/`112;` (their resets) and
 /// `1337;` (iTerm2's namespace) all fail the match, and the last of those matters most because it
-/// is the one cmote actually reads elsewhere.
+/// is the one cmote actually reads elsewhere. The same rule covers the third spelling twice over:
+/// `30;` is not `3;` (xterm's X11 window property) and not `30001;` (kitty's colour stack), neither
+/// of which cmote reads and both of which a prefix test would have swallowed.
 fn parse(payload: &[u8]) -> Option<String> {
 	// ConEmu's spelling arrives quoted in its own documentation, exactly as `9;9`'s path does, and
 	// `term/cwd.rs` trims the quotes off that one for the same reason — they frame the value, they
-	// are not part of it.
-	let (rest, quoted) = match payload.strip_prefix(b"1;") {
-		Some(rest) => (rest, false),
-		None => (payload.strip_prefix(b"9;3;")?, true),
+	// are not part of it. Only that one: quote-trimming a spelling whose source does not quote would
+	// eat a quotation mark a program meant to keep.
+	let (rest, quoted) = if let Some(rest) = payload.strip_prefix(b"1;") {
+		(rest, false)
+	} else if let Some(rest) = payload.strip_prefix(b"9;3;") {
+		(rest, true)
+	} else {
+		(payload.strip_prefix(b"30;")?, false)
 	};
 	// Lossy rather than strict: a name is decoration, and a remote with one bad byte in a UTF-8
 	// sequence should get a replacement character on its chip, not silently keep the old name.
@@ -144,6 +161,23 @@ mod tests {
 			track(b"\x1b]9;3;build\x07").as_deref(),
 			Some("build"),
 			"the quotes frame the value and are optional"
+		);
+	}
+
+	/// contour's spelling of the same thing (§98), unquoted — its index writes the payload as a bare
+	/// name, and a quote is only trimmed off the one spelling whose source puts it there.
+	#[test]
+	fn the_contour_spelling_sets_the_same_name() {
+		assert_eq!(track(b"\x1b]30;build\x07").as_deref(), Some("build"));
+		assert_eq!(
+			track(b"\x1b]30;\x07"),
+			None,
+			"and clears on the empty name like the other two"
+		);
+		assert_eq!(
+			track(b"\x1b]30;\"build\"\x07").as_deref(),
+			Some("\"build\""),
+			"a quote here is part of the name, not a frame around it"
 		);
 	}
 
@@ -252,6 +286,10 @@ mod tests {
 		assert_eq!(track(b"\x1b]104;3\x07"), None);
 		assert_eq!(track(b"\x1b]112\x07"), None);
 		assert_eq!(track(b"\x1b]1337;SetMark\x07"), None);
+		// The two the third spelling sits between (§98). `OSC 3` sets an X11 window property and
+		// `OSC 30001` is kitty's colour stack; a prefix test on `3` or `30` would have taken both.
+		assert_eq!(track(b"\x1b]3;WM_NAME=x\x07"), None);
+		assert_eq!(track(b"\x1b]30001;\x07"), None);
 	}
 
 	#[test]

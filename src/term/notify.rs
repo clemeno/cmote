@@ -93,7 +93,8 @@ pub enum Refused {
 	/// leaves the window AND takes the focus with it. Text the remote chose, in a window wearing
 	/// cmote's identity, interrupting whatever the user was doing.
 	MessageBox,
-	/// `OSC 50 ; <font>` — xterm's font operations (§88, §91).
+	/// `OSC 50 ; <font>` — xterm's font operations (§88, §91) — and `OSC 60 ; <faces>`, contour's
+	/// `SETFONTALL`, which sets every face, style and size at once (§98).
 	///
 	/// The font is chrome the **user** chose, which is the argument the fixed colour scheme stands on
 	/// (§6): a remote may change what its own tab shows, not what the application looks like. xterm
@@ -101,8 +102,23 @@ pub enum Refused {
 	///
 	/// The one `OSC 50` payload cmote HONOURS is `CursorShape=`, another terminal's convention that
 	/// `vte` parses on the same number (§88) — excluded here by name, so this refusal and that
-	/// feature cannot come to disagree about which payload is which.
+	/// feature cannot come to disagree about which payload is which. `OSC 60` carries no such
+	/// exception, being one vendor's sequence with one meaning.
 	Font,
+	/// `OSC 88 ; <op> [ ; <key>=<value> ]…` — the proposed Terminal Resume Protocol (§98).
+	///
+	/// A program declares how it should be **relaunched** if the terminal restarts: `cmd` (required)
+	/// and `args`, base64-encoded, plus a `cwd`. `arm` stores the spec, `clear` withdraws it, `query`
+	/// asks whether the terminal supports it.
+	///
+	/// This is the one refusal in this module that is not about something leaving the tab, or the
+	/// user's time, or their chrome. It is a remote choosing **what the local machine executes** — at
+	/// a moment nobody is watching, after a crash, from a command line that arrived over the wire.
+	/// cmote is an SSH client: the remote end is the thing being defended against, and no payload it
+	/// sends may ever become a local process. The `query` form is refused with the rest, and silence
+	/// is the right answer to it — "supported" is exactly the advertisement (§71) that would make a
+	/// program send the `arm` this refuses.
+	Resume,
 }
 
 /// Read one OSC payload as something cmote refuses outright, or `None` when it is not one.
@@ -152,6 +168,16 @@ pub fn refused(payload: &[u8]) -> Option<Refused> {
 		&& !rest.starts_with(b"CursorShape=")
 	{
 		return Some(Refused::Font);
+	}
+	// contour's `OSC 60` is the same decision at a larger size — every face at once (§98). The bare
+	// form is its query, and a query is refused with the set it would lead to.
+	if payload.starts_with(b"60;") || payload == b"60" {
+		return Some(Refused::Font);
+	}
+	// The Terminal Resume Protocol (§98). `88;` and not `8;` — OSC 8 is the hyperlink cmote ships —
+	// and not `888;`, which is contour's state dump and a different question with a different mark.
+	if payload.starts_with(b"88;") || payload == b"88" {
+		return Some(Refused::Resume);
 	}
 	None
 }
@@ -233,6 +259,37 @@ mod tests {
 		assert_eq!(refused(b"500;something"), None, "not a prefix match");
 	}
 
+	/// contour's `OSC 60` is the whole font stack in one payload — every face, style and size (§98).
+	/// One argument, two numbers, so it carries the same variant rather than a second one.
+	#[test]
+	fn the_other_font_sequence_is_the_same_refusal() {
+		assert_eq!(refused(b"60;regular=IBM Plex Mono"), Some(Refused::Font));
+		assert_eq!(refused(b"60"), Some(Refused::Font), "its bare query form");
+		assert_eq!(refused(b"600;x"), None, "not a prefix match");
+		assert_eq!(refused(b"6;x"), None, "nor read short");
+	}
+
+	/// The Terminal Resume Protocol (§98) — a remote handing the terminal a command line to run
+	/// locally if it ever restarts. Refused by name, including the `query` that would advertise it.
+	#[test]
+	fn a_relaunch_specification_is_refused_in_every_operation() {
+		assert_eq!(
+			refused(b"88;arm;cmd=c3No;args=aG9zdA==").expect("an arm is refused"),
+			Refused::Resume
+		);
+		assert_eq!(refused(b"88;clear"), Some(Refused::Resume));
+		assert_eq!(
+			refused(b"88;query"),
+			Some(Refused::Resume),
+			"answering 'supported' is what would bring the arm"
+		);
+		assert_eq!(refused(b"88"), Some(Refused::Resume));
+		// The neighbours on either side, neither of which is this. OSC 8 is the hyperlink cmote
+		// ships; OSC 888 is contour's state dump, unimplemented rather than refused.
+		assert_eq!(refused(b"8;;https://example.invalid"), None);
+		assert_eq!(refused(b"888;"), None);
+	}
+
 	#[test]
 	fn a_longer_osc_number_is_not_mistaken_for_a_shorter_one() {
 		// `99` must not be read out of `990` or `999`, and `9` must not be read out of `99`.
@@ -251,6 +308,9 @@ mod tests {
 		assert_eq!(refused(b"133;A"), None);
 		assert_eq!(refused(b"22;text"), None);
 		assert_eq!(refused(b"1337;SetMark"), None);
+		// The third tab-name spelling (§98). It sits two digits away from the font refusal above and
+		// must not be caught by it, the same way `9;3;` is excluded from the notification arm.
+		assert_eq!(refused(b"30;build"), None);
 		assert_eq!(refused(b""), None);
 	}
 

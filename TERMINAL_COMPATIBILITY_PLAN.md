@@ -400,6 +400,20 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   `grid.cursor.point`, so this spelling and the ANSI one cannot come to disagree. **Only `Ps = 6` is
   answered** — the other nine values xterm defines describe the user's machine, and are refused; see §6.
 
+- **The locator's two negatives** (`CSI ? 55 n` / `? 56 n`) → `CSI ? 53 n` "no locator" and
+  `CSI ? 57 ; 0 n` "cannot identify" (§93). The two members of that same DEC-private family that are
+  answered rather than refused, because a reply stating an **absence** advertises nothing.
+
+- **The colour scheme** (`CSI ? 996 n`) → `CSI ? 997 ; 1 n`, dark (§98). The newest reply here and the
+  only one whose sequence is nobody's standard: contour's, adopted by ghostty, kitty and GNOME's vte,
+  and asked by neovim, helix, zellij and tmux. Answered from a **constant** — the scheme is fixed (§6)
+  and `palette::DEFAULT_BG` is `#1e1e1e` — with a test that fails if the background ever stops being
+  dark, so the constant cannot outlive its own premise. It narrows the rule §96 wrote for dialects: a
+  reply must not name the program or the machine, and "my background is dark" names neither. It is not
+  new disclosure either, `OSC 11 ; ?` being xterm's own spelling of the same fact and already answered.
+  What made it worth doing is the failure it prevents: a program that cannot learn the background
+  paints for the one it guessed, and a light guess over a dark scheme is a screen nobody can read.
+
 There is also one reply cmote does not *originate* but **amends**: the engine writes DA1 as `CSI ? 6 c`,
 and attribute **4** is how a terminal says it draws sixels — which is what chafa's auto mode, `lsix` and
 ranger's previewer read at startup. Since §41 cmote rewrites that reply on its way out
@@ -777,6 +791,16 @@ program that asks and hears nothing stalls until its timeout. So this is a judge
 not a wall — and it would flip if cmote ever advertised kitty anywhere, or if `palette.rs` grew the
 selection colours for some other reason.
 
+**§98 narrowed the first of those four grounds and the row did not move**, which is the best evidence
+that four grounds were worth writing down separately. cmote now answers `CSI ? 996 n`, the dark/light
+question, and that sequence is no more xterm's than OSC 21 is — so "a dialect query, not a generic one"
+cannot by itself be what refuses a reply. What replaced it is narrower: a reply must not name the
+**program** or the **machine** (§36), and must not be a second source for something cmote can observe
+(§71). The dark/light answer is neither, and it restates a fact `OSC 11 ; ?` already gives out in
+xterm's own spelling. OSC 21's query half still fails the other three grounds untouched — it would
+invent colours cmote does not have, its reply's length is the requester's to choose, and for the keys
+it could answer it carries nothing `OSC 4` / `10` / `11` / `12` do not.
+
 **Remote-triggered desktop notifications** — `OSC 9;<text>`, `OSC 777` (urxvt) and `kitty 99` (rich
 notifications) are all the same feature in three spellings, and all three are **refused on purpose**
 (§54). A notification *leaves the window*: it lands on the user's desktop, outlives the tab, and on
@@ -937,6 +961,45 @@ The refusal is a **🤷** rather than a **🛑** in §8, and precisely because i
 matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's
 own scanner has no arm for it either. Answerback is refused by never having been written, which is a
 decision this section stands behind and no code enforces.
+
+**Reading the screen back in bulk — `CSI > Pl ; Pr t` (contour's buffer capture) and `CSI > Ps b`
+(its semantic-block query)** — refused since §98, and they are where §60's line finally gets tested
+from the other side. DECRQCRA is *allowed* to read the page, and the argument was that every byte on
+that page came from the pty the reply goes back down, plus two enforced properties: the rectangle
+clamps to the **visible page**, and what comes back is a 16-bit checksum rather than the text. Both of
+these break the first property and neither has the second. A capture's whole purpose is to reach into
+the scrollback — which in an SSH client can hold the output of a session that ended before this one
+began, on a different host, under a different account — and it returns the text itself. The block query
+is worse in kind, not in degree: it returns the **command lines, prompts, output and exit codes** cmote
+records for its own gutter marks (§34), which is the one thing in this program built by watching what
+the user does.
+
+It is also the cleanest illustration of §96's half-rule going the other way. cmote *reads* OSC 133,
+a dialect it does not claim, and that is allowed because a read produces no reply. The block query is
+the same data flowing outward, and outward is the direction the rule binds.
+
+Both are **🤷**: `vte` has no arm for either final byte under a `>` marker, so nothing here refuses
+them and this section is the whole of the refusal. Worth stating anyway — contour gates its own query
+behind a four-word token the terminal mints, which is the vendor agreeing about the danger rather than
+disposing of it, since the token travels the same wire the answer does.
+
+**A remote's payload becoming a local process — `OSC 88`, the Terminal Resume Protocol** — refused
+since §98, and it is a category this section did not have. Everything above is about a remote reaching
+something the user owns: their clipboard, their colours, their desktop, their keyboard. This one is a
+remote handing the terminal a **command line** — `arm ; cmd=<base64> ; args=<base64> ; cwd=<path>` — to
+be run if the terminal ever restarts. The proposal's own framing is that a program knows best how to
+relaunch itself, which is true in the situation it was written for, where the program and the terminal
+sit on one machine and answer to one person. cmote is an SSH client and the two ends are not the same
+person: the program declaring itself is on the far side of the wire, and the relaunch would happen
+here. Nothing that arrives over the pty becomes a local process, and there is no configuration that
+makes it one.
+
+That is a **🛑**, and the `query` operation is refused with the rest rather than answered "not
+supported". A reply is an advertisement (§71) and this one is the advertisement that *brings* the arm;
+the honest-negative exception §93 carved out does not reach it, because "I do not support this" is a
+statement about a feature the sender can then stop asking for, while here the whole exchange is one the
+terminal is better off never having been in. `term/notify.rs` names it, and a boundary test
+(`a_remotes_font_change_and_relaunch_specification_get_nothing`) fails if any of it starts being read.
 
 **Implicit bidi — the Unicode Bidirectional Algorithm** — refused, and this entry is what is left of a
 larger one. §75 put the whole of SCP here and §76 took most of it back out: the **character path** is
@@ -1150,11 +1213,13 @@ had admitted — no I-beam over text — is paid back. See §6 and §77.
 
 ---
 
-## 8. Feature support matrix (vs `vtdn.dev`)
+## 8. Feature support matrix (vs the published catalogues)
 
-A per-sequence audit against the escape-sequence catalogue published at
-[vtdn.dev](https://vtdn.dev), so support is legible one line at a time rather than only as the
-"still-missing" lens of §2–§6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
+A per-sequence audit against the escape-sequence catalogues published at
+[vtdn.dev](https://vtdn.dev), [contour](https://contour-terminal.org/vt-sequence/) and
+[otty](https://docs.otty.sh/vt/) — the first alone until §98, which added the other two and found
+thirty-four sequences this table had never named — so support is legible one line at a time rather
+than only as the "still-missing" lens of §2–§6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
 (`term/`, `ui/grid.rs`) — not from memory.
 
@@ -1246,8 +1311,10 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 0 (the icon half) | Icon name | 🛑 | the icon-name half of that one sequence — the same string the title half already carries (§69, `term/icon.rs`) |
 | 1 | Icon name | ✅ | `OSC 1 ; text` sets the icon name alone; drawn on the tab chip after the endpoint, control characters stripped, capped at 24 characters, empty clears (§69, `term/icon.rs`) |
 | 2 | Window title | ✅ | `OSC 2 ; text` sets the window title alone; control characters stripped (anti-spoof) |
+| 3 | X11 window property | 🤷 | `OSC 3 ; prop=value ST` sets a property on the terminal's X11 window, for another X client to read. There is no X server under this one — cmote is a Windows program — so the sequence names a thing that cannot exist here, and the refusal is of the *shape* rather than the effect: a remote does not get to write metadata the machine's other programs read (§6, §98) |
 | 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for a palette slot, in `index ; spec` pairs so one sequence may ask about several; each is answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, §87, `report_color`) |
 | 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (§6, §64) |
+| 5 / 105 / 106 | Special colours — set / reset / enable | 🤷 | `OSC 5 ; <slot> ; <spec> ST` tints an SGR ATTRIBUTE rather than a palette entry — slot `0` bold text, `1` underline, `2` blink, `3` reverse video, `4` italic — with `105` resetting them and `106` enabling or disabling one. The fixed scheme reaches further than the palette: a remote colouring "all bold text" is choosing what the user's screen looks like by another door (§6, §98) |
 | 7 | Working directory | ✅ | `OSC 7 ; file://HOSTNAME/CURRENT/DIR ST` announces the shell's working directory — macOS Terminal's sequence originally, and the one a new tab inherits its directory from (§17, §89, `term/cwd.rs`) |
 | 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens a hyperlink over the cells that follow and `OSC 8 ; ; ST` closes it; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`). `params` is a `:`-separated `key=value` list of which the spec defines exactly one key, `id`, tying a link's separated runs together: "character cells that have the same target URI and the same nonempty id are always underlined together on mouseover". The Ctrl-hover underline covers **every cell carrying that same link**, wherever it sits — the identity being the URI *and* the id, so a link the program split into runs lights up whole and one address written twice stays two links (§88, §92) |
 | 8 (any other scheme) | Hyperlinks | 🛑 | the same sequence carrying any other URI scheme — a scheme decides which local program the OS launches, so the link is drawn and never opened (§24, `ALLOWED_SCHEMES`). The spec leaves this open on purpose: "It's up to the terminal emulator to decide what schemes it supports" (§88) |
@@ -1259,12 +1326,18 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; "cwd" ST` — ConEmu's working-directory spelling, a bare native Windows path, quoted in ConEmu's own documentation of it. Read beside OSC 7 and iTerm's `CurrentDir` in one scanner (§17, §89, `term/cwd.rs`) |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; a list walks UP from the code it starts at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background. Answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64, §87) |
 | 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (§6, §64) |
+| 13 / 14 / 113 / 114 | Mouse pointer colours | 🤷 | the pointer's own foreground and background, and their resets — the ink of the cursor the user moves with their hand. `vte` reaches only as far as `12`, so these never arrive; the scheme argument covers them and one more besides, that the pointer belongs to the desktop rather than to the tab (§6, §98) |
+| 15 / 16 / 18 / 115 / 116 / 118 | Tektronix colours | 🤷 | foreground, cursor and background of the **Tektronix 4014 window** xterm can open beside its own, and their resets. There is no Tek emulation here and no plan for one, so the codes name a window that does not exist (§98) |
+| 17 / 19 / 117 / 119 | Selection colours | 🤷 | the highlight's background and foreground, and their resets. The selection is drawn by `ui/grid.rs` over cmote's own colours and is the one surface the **user** operates directly — a remote that could set both halves could make a selection invisible, which is the UX-stability argument rather than the scheme one (§6, §98) |
 | 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | `OSC 22 ; name` sets the mouse pointer shape over the grid; these five describe the content under the pointer, apply only while the pointer is inside the grid, and are cleared on both directions of the alternate-screen swap (§77, `term/pointer.rs`) |
 | 22 (any other shape) | Mouse pointer shape | 🛑 | the same sequence naming any other CSS shape — the resize and grab shapes are cmote's own vocabulary, and `wait`, `progress`, `not-allowed` and `no-drop` make a claim about the client (§77, `term/pointer.rs`). One divergence from xterm, which on a name it does not know "uses the resource's default `xterm` shape": a refused name here leaves the pointer **as it was** rather than resetting it, so a remote cannot clear a shape it is not allowed to set (§88) |
+| 30 | Tab name | ✅ | `OSC 30 ; name` — contour's `SETTABNAME`, the **third** spelling of the chip label beside `OSC 1` and ConEmu's `OSC 9;3`, read through the same module so there is one writer and three doors to it (§71's test). Capped at 24 characters, control characters stripped, appended after the endpoint and never in place of it, an empty name clearing it — a remote gains no more of the chip than the two older spellings already gave. Matched on the whole number, so `OSC 3` and kitty's `OSC 30001` are not it. **The thinnest-sourced row in this table**: one line of contour's sequence index, its detail page unreachable, and acted on anyway because being wrong costs a tab chip (§89, §98, `term/icon.rs`) |
 | 50 (`CursorShape=`) | Cursor shape | ✅ | `OSC 50 ; CursorShape=0/1/2` sets the cursor to block, bar or underline — a third spelling of DECSCUSR's shape, with no blink to carry. **Not xterm's `OSC 50`**, which is the row below: this payload is another terminal's convention that `vte` happens to parse on the same code (§71, §88) |
 | 50 (a font) | Set the font | 🛑 | xterm's own `OSC 50`: "Set Font to `Pt`", by name or by an index into its font menu (`#` for absolute, `#+` / `#-` relative). The font is chrome the **user** chose — the argument the fixed colour scheme rests on (§6), and the one xterm itself gates behind an `allowFontOps` resource that defaults to off. Refused by name in `term/notify.rs` since §91, the `CursorShape=` payload on the same number excluded first so the refusal and that feature cannot disagree; `vte` drops it to `unhandled` as well (§88, §91) |
+| 60 | Set every font face | 🛑 | `OSC 60 ; <faces>` — contour's `SETFONTALL`, which gets or sets every face, style and size at once. `OSC 50`'s refusal at a larger size and refused in the same place, by name, with no `CursorShape=` exception to carve out because this number carries one meaning (§6, §91, §98, `term/notify.rs`) |
 | 52 (write) | Clipboard write | 🛑 | `OSC 52 ; c ; <base64>` writes the local clipboard (§6, §63) |
 | 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (§6, §63) |
+| 88 | Terminal Resume Protocol | 🛑 | `OSC 88 ; <op> [ ; key=value ]… ST`, a **proposal** (v1, otty's): a program declares how it should be **relaunched** if the terminal restarts — `arm` stores a base64 `cmd`, `args` and `cwd`, `clear` withdraws it, `query` asks whether the terminal supports it. The one refusal in this document where the remote's payload would become a **local process**, at a moment nobody is watching; the query is refused with the rest, because "supported" is the advertisement that brings the arm (§6, §12, §98, `term/notify.rs`) |
 | 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
 | 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (§6) |
 | 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D`, BEL- or ST-terminated, marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from the optional field after `D` — optional in the grammar, `"D", [ ";", exitcode ]`, with the bare form a documented spelling rather than a tolerated malformation. Trailing `key=value` fields are ignored; the three named ones have their own rows below (§34, §95, §96, `term/osc133.rs`) |
@@ -1273,7 +1346,9 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 133 `C ; cmdline=` / `cmdline_url=` | The command line being run | 🛑 | the field on the output-start mark carrying the command line itself — shell-quoted by zsh, percent-encoded by fish. Refused on the second-source rule (§71): the command line is already on the grid, in the rows between the `B` and `C` marks, so the field is the shell's *assertion* about something cmote *observes*, and the two can disagree with the remote winning. Showing it would also need a surface that does not exist (§97, `term/osc133.rs`) |
 | 133 `A ; cl=m` | Multi-line prompt hint | 🛑 | VS Code's field on the prompt-start mark, saying the prompt runs over several lines. Refused on the same ground as the command line: the prompt's extent is the grid between `A` and `B`, which cmote already records, so the hint restates a fact it can read. Nothing would change if it were honoured — a jump anchors on the `A` line, the prompt's first, hint or no hint (§71, §97, `term/osc133.rs`) |
 | 133 (any other phase letter) | Further prompt phases | ❌ | the letter space past `A`/`B`/`C`/`D`. `N`, `P` and `L` are all emitted somewhere and the reachable accounts **disagree about what they mean**: Konsole is documented as tracking the prompt as "A/N/P", a zsh write-up uses `133;P;k=i` for `PS1` and `133;P;k=s` for `PS2`, and a Ghostty fork uses `133;P` for a prompt *redraw* that must not open a new block. Not a decision — a letter cannot be supported or refused until it means one thing. An unrecognised one yields no mark rather than the nearest guess, because a wrong mark moves a prompt jump or mis-bounds a command's output where no mark leaves both alone (§96, §97, `term/osc133.rs`) |
+| 888 | Dump internal state | 🤷 | contour's `DUMPSTATE`, which writes the emulator's internal state to its debug stream. A remote deciding when the terminal logs itself, and what into; the log is the developer's tool and not a channel a host gets to drive (§98) |
 | Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value ; … ST` names colours instead of numbering them — `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`, `visual_bell`, `transparent_background_color1`–`7`, and `0`–`255` for the palette. `key=?` queries, a **bare key with no `=`** resets, any number of pairs at a time. Refused as a **dialect** cmote never claims: `TERM`, XTVERSION and XTGETTCAP's `TN` all say xterm. §78's second reason expired — it held that answering the keys cmote lacks means inventing a colour, and the protocol's own answer for an undefined one is an **empty value** (§6, §78, §89) |
+| Kitty 30001 / 30101 | Colour stack — push / pop | 🤷 | the save and restore half of kitty's colour protocol, pushing the whole palette onto a stack and popping it back. Named in §89's reading of that page and given no row until now; refused as the same **dialect** the row above is, and over a palette that is never read either way (§6, §78, §89, §98) |
 | Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body ST` — a desktop notification whose metadata is a `:`-separated `key=value` list: `p` the payload type, `i` an identifier for updating a notification already shown, `d` a done flag, `e` base64, `f` the application name, `u` the urgency (`0` low, `1` normal, `2` critical) and `n` an icon name. Refused for the one reason the plain spellings are: **a notification leaves the window** (§6, §54, §79, §89, `term/notify.rs`) |
 | iTerm 1337 File | Inline images | 🛑 | `OSC 1337 ; File=<args>:<base64>` draws an inline image from a base64 payload (§6, §70, `term/iterm.rs`) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | `OSC 1337 ; SetMark` bookmarks the cursor's line; amber gutter tick, walked with Ctrl+Shift+Up/Down, and able to mark mid-output where §34's prompt-derived marks cannot (§55, `term/iterm.rs`) |
@@ -1311,6 +1386,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. DEC's published list is eighteen items and cmote sends the eleven anything here models — DECTCEM, IRM, DECOM, DECAWM, DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA and DECSC; the other seven (KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM) name state neither `vte` nor the engine nor cmote has. **One deliberate departure**: DEC's list says "Autowrap (DECAWM): No autowrap" and cmote leaves it **on**, because `xterm-256color` declares `am` and its `rs2` sends no `\E[?7h` after this (§72, §94) |
 | b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
+| Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ❌ | ECMA-48's horizontal twins of SU / SD, shifting the page sideways by `Ps` columns. A **gap** rather than a decision: nothing here refuses them, and the intermediate keeps them clear of ICH and CUU, which share their final bytes (§98) |
+| Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ❌ | contour's: SD, but the lines pulled in at the top come from the **scrollback** instead of being blank. A gap; cmote's scrollback is the user's to walk and no program has asked to push it back onto the page (§98) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
 | s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
 | g | Clear tab stop (TBC) | ✅ | TBC clears the tab stop under the cursor (`0`) or all of them (`3`) — the two DEC defined for a one-page terminal (§67) |
@@ -1325,6 +1402,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
 | Ps # y (XTCHECKSUM) | Select checksum extension | ❌ | "the bits of `Ps` modify the calculation of the checksum returned by DECRQCRA": `0` do not negate the result, `1` do not report the VT100 video attributes, `2` do not omit the checksum for blanks, `3` omit it for cells never initialised, `4` do not mask the cell value to 8 bits. cmote always uses the DEC-compatible default the row above describes, and a program cannot ask for another — a **gap**, and one that dies in the parser: `csi_dispatch` matches no `#` intermediate at all, the same place XTPUSHSGR and both colour stacks end up (§60, §88, §94) |
+| Ps ' } / Ps ' ~ (DECIC / DECDC) | Insert / delete column | ❌ | the column twins of IL / DL: open `Ps` blank columns at the cursor's column and push the rest of every line right, or delete `Ps` and pull the tail left. The VT420 family cmote finished in §58–§60 is the *rectangular* one; these two are its neighbours and nothing here refuses them — a **gap**, and the one in this table whose cost is best understood, since `term/rect.rs` already moves whole cells with their colour, link and protection attached (§58, §98) |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined (§84) |
 | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`, §84) |
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
@@ -1332,6 +1410,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ? 6 n | Extended cursor position (DECXCPR) | ✅ | DECXCPR, the DEC-private spelling of the same question; answered `CSI ? <row> ; <col> R`, one-based and with **no page parameter**, which is xterm's form and the reply cmote sends. Answered where the question sits in the stream, from the cursor the ANSI spelling reports — so both report the absolute row, ignoring origin mode (§74, §82, `term/dsr.rs`) |
 | ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`, §84) |
 | ? 55 / 56 n | Locator status / type | ✅ | ask whether a DEC locator is present and what type it is. Answered with xterm's own negatives — `CSI ? 53 n` "no locator" and `CSI ? 57 ; 0 n` "cannot identify" — which is the whole extent: the DEC locator protocol itself is not implemented and has no row. They are the two members of the family that are answered rather than refused, because they **advertise nothing**: a reply that states an absence is the one a terminal without the equipment can make truthfully, and silence would leave the sender waiting out a timeout to learn the same thing (§82, §84, §93, `term/dsr.rs`) |
+| ? 996 n | Colour scheme — dark or light | ✅ | asks whether the terminal's scheme is dark or light; answered `CSI ? 997 ; 1 n`, dark, from a constant — cmote's scheme is fixed (§6) and its background is `#1e1e1e`. **The one reply cmote sends in a sequence xterm does not define**, which narrows §96's half-rule rather than excepting it: a reply must not name the program or the machine (§36), and this names neither. Nor is it a new disclosure — `OSC 11 ; ?` is xterm's own spelling of the same fact and cmote answers it, so this is one writer with two doors (§71). Implemented by contour, ghostty, kitty and GNOME's vte; asked by neovim, helix, zellij and tmux, each of which paints for a guessed background when nobody answers (§93, §98, `term/dsr.rs`) |
+| ' z / ' { / ' \| (DECELR / DECSLE / DECRQLP) | DEC locator protocol | ❌ | DECELR enables locator reports, DECSLE picks which events fire one, DECRQLP asks for the pointer's position — DEC's own mouse protocol, whose two *status* questions cmote answers with the honest negative above and whose body §93 left with no row at all. A **gap** and not a refusal: cmote reports mouse events already, in xterm's spelling (modes 1000–1006), and nothing has asked for DEC's (§93, §98) |
 | ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (§6, §82, §84) |
 | ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (§6, §82, §84) |
 | c / > c | Primary / secondary DA | ✅ | DA1 and DA2 — what the terminal is and what firmware it claims; cmote amends the engine's DA1 with attribute **4**, sixels (§41, `term/query.rs`) |
@@ -1339,7 +1419,21 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`, §84) |
 | ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`, §84) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pm $ y` in the ANSI spelling as well as the private one, `Pm` being `0` not recognised, `1` set, `2` reset, `3` permanently set, `4` permanently reset (§60, §94) |
-| # P / # Q | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack and pop them back — over a palette that is never read (§6, §84) |
+| # P / # Q / # R | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack, pop them back, and — the third, added in §98 — report how many are on it, answered `CSI Pn # Q`. Over a palette that is never read, so the depth to report is always the depth of a stack nothing pushes to (§6, §84, §98) |
+| ? Pm s / ? Pm r (XTSAVE / XTRESTORE) | Save / restore private modes | ❌ | `CSI ? Pm s` remembers the current setting of each named DEC-private mode and `CSI ? Pm r` puts them back — xterm's, and the pair `term/cancel.rs` already tests it does *not* mistake for DECSLRM. A **gap** with a named risk: a program that saves `? 25`, hides the cursor and restores gets no restore, so the cursor stays hidden after it exits — a stuck state of exactly the shape §72's soft reset exists to prevent. Implementing it means reading and writing arbitrary private modes, which the engine's seam does not expose (§57, §98) |
+| > Ps ; Pn b (SBQUERY) | Query semantic command blocks | 🤷 | contour's: with DEC mode 2034 set, the terminal returns **the command line, the prompt, the output and the exit code** of recent blocks as JSON in a `DCS > 1 b … ST`, keyed by a four-word token it hands out when the mode is enabled. cmote records exactly this (§34) and would be the rare terminal that could answer — which is why it is worth stating that it will not. It is a **reply** in a dialect cmote does not claim (§78, §96), and it hands a host the output of commands it did not run. That contour gates its own feature behind a token is the vendor agreeing about the danger, not disposing of it (§6, §12, §98) |
+| > Pl ; Pr t (XTCAPTURE) | Report the screen buffer | 🤷 | contour's buffer capture: `Pl` picks logical or visual lines, `Pr` how many, and the terminal sends them back as UTF-8 text in a run of `PM 314 ; … ST` strings. The line §60 drew for DECRQCRA is exactly this one — the checksum is allowed because it is clamped to the **visible page**, and a capture's whole purpose is to reach past it into the scrollback, which in an SSH client can hold the output of a session that ended before this one began (§6, §12, §60, §98) |
+| > Ps s (XTSHIFTESCAPE) | Who gets shift-click | 🤷 | xterm's: lets the application ask for shift-modified mouse events instead of the terminal keeping them. Shift is the user's override — the way to select text while a program holds the mouse — and a remote does not get to take it (§6, §10, §98) |
+| > Ps M (SETMARK) | Bookmark the cursor's line | ❌ | contour's CSI spelling of what iTerm's `OSC 1337 ; SetMark` does, which cmote ships (§55). A **gap** and a cheap one — one writer, one more door — left open because a scanner is real work and nothing but contour's own integration emits it (§71, §98) |
+| Ps , ~ (DECPS) | Play a sound | 🤷 | DEC's tone generator: `Ps` gives volume, duration and a note, so a remote can play a tune on the machine's speaker. BEL's refusal with a keyboard attached — sound leaves the tab, and this one leaves it for as long as it likes (§6, §63, §98) |
+| Ps * z (DECINVM) | Invoke a macro | 🤷 | runs a macro previously defined by `DCS … ! z` (DECDMAC) — a stored sequence a remote plays back by number. cmote refuses to report a macro store (DECMSR, DECCKSR) and has none; nothing that arrives over the wire becomes a stored program here (§6, §82, §98) |
+| Ps $ \| / Ps * \| (DECSCPP / DECSNLS) | Columns / lines per page | 🤷 | set the page to 80 or 132 columns, or to a given number of lines — DECCOLM's argument in two more spellings, and a remote resizing the window the user sized (§6, §65, §98) |
+| Ps $ } / Ps $ ~ (DECSASD / DECSSDT) | Status display | 🤷 | split a status line off the page (`$ ~` picks its type) and direct output into it (`$ }`). A second writable surface with its own cursor, which is neither in the engine nor in cmote's grid model; DECSTR's published list names DECSASD, and §72 sends nothing for it for this reason (§72, §94, §98) |
+| Ps U / Ps V / Ps SP P / Ps SP Q / Ps SP R | Page positioning (NP / PP / PPA / PPR / PPB) | 🤷 | move to the next page, the previous one, or an absolute / relative / backward page. cmote is a **one-page** terminal — DECRQCRA's page parameter is ignored for the same reason (§60) — so there is nowhere to go. The intermediates are as ECMA-48 defines them; the index this row came from omits them, and ECMA-48 itself is still unread here (§98) |
+| Ps p (DECSSCLS) | Scroll speed | 🤷 | contour's: how fast the page scrolls, smooth against jump. cmote scrolls in one step and runs no animation timer — the same absence that keeps the cursor from blinking (§65, §98) |
+| Ps " p (DECSCL) | Conformance level | 🤷 | sets which VT level the terminal parses as — VT100, VT220 and up — and on xterm performs a **hard reset** along the way. cmote parses one dialect and says so in `TERM`, XTVERSION and XTGETTCAP alike; a remote switching it would be choosing how the user's screen is read, with a screen clear thrown in (§78, §96, §98) |
+| Ps " v (DECRQDE) | Report the displayed extent | ❌ | asks how much of the page is visible and where — answered `CSI Pn ; Pn ; Pn ; Pn ; Pn " w`. A gap, and an answerable one: cmote holds every number in it, and `CSI 18 t` already reports the same area in the spelling programs use (§98) |
+| Ps $ w (DECRQPSR) | Report presentation state | ❌ | asks for the cursor information report (DECCIR — position, pen, charsets, flags) or the tab-stop report (DECTABSR), each answered in a `DCS … ST` envelope. A gap; both describe state cmote holds, and the standard has an "I do not report that" (`DCS 0 $ u ST`) for the terminal that would rather not (§66, §98) |
 | # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel. **RIS empties the stack** — DECSTR does not, on the same split DECSACE has, and neither does the alternate-screen swap (§86) |
 
 ### ESC — single sequences
@@ -1353,6 +1447,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC c (RIS) | Full reset | ✅ | the hard reset: every setting back to power-on, the screen cleared |
 | ESC = / ESC > | Keypad application / numeric | ✅ | DECKPAM / DECKPNM put the numeric keypad in application or numeric mode; tracked on the seam and encoded for the keys with no NumLock meaning to lose — Enter and `* + , - / =` (§2, §36) |
 | ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (§2, §36, `term/keymap.rs`) |
+| ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap**, and one whose sideways scroll is the same missing machinery SL / SR name in the CSI table (§98) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | fills the screen with `E` and homes the cursor — the alignment test |
 | ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. G2 and G3 can be designated and nothing here can invoke them |
 | ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ | the other 94-character sets — UK, Dutch, Finnish and the rest — which nothing here would draw either |
@@ -1375,6 +1470,9 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | the reply half of DA3 — the terminal's unit id, a constant `00434D45` (§36, `term/query.rs`) |
 | DCS … q | Sixel graphics | ✅ | sixel graphics, a bitmap written six pixels at a time; decoded in-house and composited over the grid, anchored to an absolute document line and reserving its cells, with its own page on the alternate screen (§41, `term/sixel.rs`, `term/graphics.rs`) |
 | DCS tmux; … | tmux passthrough | ❌ | tmux's passthrough, which wraps a sequence meant for the terminal beyond tmux |
+| DCS … ! z / DCS … { / DCS … \| | Define macro / download charset / user-defined keys (DECDMAC / DECDLD / DECUDK) | 🤷 | the three sequences that let a host leave something **behind** in the terminal: a macro to be replayed by number (DECINVM's partner), a downloaded soft character set, and new meanings for the function keys. Each turns a remote's payload into terminal state that outlives the command that sent it, and the keyboard's meanings are the user's (§6, §36, §98) |
+| DCS $ p (STP) | Set terminal profile | 🤷 | contour's: replace the terminal's whole configuration profile by name. iTerm's `SetProfile` in DEC's envelope, and the fixed scheme's argument covers it whole (§6, §55, §98) |
+| DCS … ! g (GIP) | Good Image Protocol | ❌ | contour's image protocol — upload, render, release, oneshot and query, in a DCS envelope. A **gap** on the same footing as kitty's graphics protocol: the decoder is no longer the price (§70), the protocol's own bookkeeping is (§41, §98) |
 
 ### SGR — text styling
 
@@ -1424,7 +1522,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 2026 (batching) | Synchronized output | ✅ | synchronized output: BSU holds the visible screen still and ESU flushes the buffered stream inside one advance, so a frame is atomic (§65) |
 | 2026 (abort timeout) | Synchronized output | ❌ | the 150 ms bound on a stuck update, which the application must drive; a remote that sends BSU and goes quiet holds the screen until ESU or 2 MiB (§65, §7) |
 | 2027 | Grapheme clustering | ❌ | grapheme clustering — a cluster occupies one cell rather than each code point taking its own |
-| 2031 | Colour-scheme reporting | ❌ | the terminal tells the program when its colour scheme changes between light and dark |
+| 2031 | Colour-scheme reporting | ❌ | the **unsolicited** half of dark/light reporting: with it set the terminal sends `CSI ? 997 ; 1 n` / `; 2 n` every time its scheme changes. Not in the engine's mode list, so DECRQM answers `0`, not recognised — the truth rather than a shortfall, cmote's scheme having no way to change. A program told `0` polls instead, and the question it polls with is answered (the `? 996 n` row) (§98) |
+| 2034 | Semantic block reporting | 🤷 | arms contour's semantic-block query and mints the token that authenticates it. Refused with the query itself — a mode whose only effect is to enable a refused reply has nothing else left to do (§98) |
 | 2048 | In-band resize | ❌ | in-band resize notification — `CSI 48 ; …` on every size change, for a program that cannot see SIGWINCH |
 | 4 | Insert / replace (IRM) | ✅ | IRM — a printed glyph pushes the rest of the line right rather than overwriting it. An ANSI mode, not a `?` private one, hence out of the run above |
 | 9 | X10 mouse (press-only) | ❌ | the X10 mouse encoding, presses only |
@@ -1475,11 +1574,18 @@ thing about 🤷 worth watching: it is the mark most likely to be a conclusion r
 because nothing fails while it is wrong — three sections in a row now, and both times the entry had
 argued the sequence against an architecture cmote does not have. **§79 found the fourth way it goes
 wrong**, and it is the plainest: 🤷 says *upstream* refuses this, and for `kitty 99` and `OSC 777`
-upstream refused nothing — it simply never looked, which is not the same claim. Six rows left in the
-column, and the two that left it did so without a single byte of behaviour changing. That leaves the plain ❌ column short, and worth reading as the real list: the
+upstream refused nothing — it simply never looked, which is not the same claim. Six rows were left in the
+column at §79, and the two that left it did so without a single byte of behaviour changing. **§98 took it
+to twenty-six**, and that jump is the whole of what reading three more catalogues found: not one mark
+moved for being wrong, and thirty-four rows appeared that had never existed — the special and Tektronix
+and selection colours, the page family, DEC's macros and status line, contour's buffer capture and its
+semantic-block query. A column that quadruples on one reading was never six rows long; it was six rows
+*known*, and the same caution now applies to the other three. That leaves the plain ❌ column, worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
-it), the newer private modes (2027 / 2031 / 2048) and left-right margins. That last one is no longer a *capability* gap at all: §5 costs out the
+it), the newer private modes (2027 / 2031 / 2048), left-right margins, and — since §98 — the
+**horizontal-scroll family**, SL / SR, DECBI / DECFI and DECIC / DECDC, which is one piece of absent
+machinery wearing six names. That last one is no longer a *capability* gap at all: §5 costs out the
 delegating-`Handler` build that would do it, and the reason it stays unbuilt is that such a wrapper
 degrades silently on an engine bump — in exchange for a sequence no init or reset string emits, which
 §73 checked against the terminfo rather than asserting. **§73 also moved which row carries it**: DECSLRM
@@ -1904,6 +2010,58 @@ This is that gap closed, one vendor at a time — and two of them could not be c
   page documents **no OSC 777 at all**. The attribution in this table and in `term/notify.rs` is
   folklore — the sequence is real and widely emitted, but "urxvt's" is a claim neither has a citation
   for.
+
+### The sequence catalogues (read for §98)
+
+§8 was built against one catalogue, `vtdn.dev`. Three more were read end to end for §98 — contour's
+sequence index, its extension pages, and otty's OSC and CSI trees — and between them they named
+**thirty-odd sequences this table had never mentioned**. That is the finding: the gap was not in what
+the marks said but in which rows existed, and a catalogue only shows you the rows you already have.
+
+- **contour's sequence index** (`contour-terminal.org/vt-sequence/`) is the broadest of the four: every
+  control code, ESC, CSI, OSC and DCS it implements, with mnemonic, notation and a line of
+  description. What it gave this table: `OSC 3` (X11 property), `OSC 30` (`SETTABNAME`), `OSC 60`
+  (`SETFONTALL`), `OSC 888` (`DUMPSTATE`), `XTREPORTCOLORS` (`CSI # R`), `UNSCROLL` (`CSI Ps + T`),
+  `SETMARK` (`CSI > Ps M`), `DECSSCLS`, `DECSCL`, `XTSHIFTESCAPE`, `DECRQDE`, `DECRQPSR`, the locator
+  trio, `DECINVM`, `DECSCPP` / `DECSNLS`, `DECSASD` / `DECSSDT`, `DECIC` / `DECDC`, `DECPS`,
+  `DECBI` / `DECFI`, the page family, and the DCS macro / DRCS / UDK trio. Its notation drops the
+  intermediates on several entries — `SL` is written `CSI 0..1 @`, which is ICH's spelling — so the
+  rows above take the sequence from where it is defined and the *existence* of the row from here.
+- **contour's buffer capture** (`contour-terminal.org/vt-extensions/buffer-capture/`) is
+  `CSI > Pl ; Pr t`: `Pl` picks logical or visual lines, `Pr` how many, and the reply is the screen's
+  text in a run of `PM 314 ; <data> ST` strings ending in an empty one. The page carries **no security
+  note at all**, which is worth recording next to §60's argument for allowing DECRQCRA.
+- **contour's semantic block query** (`contour-terminal.org/vt-extensions/semantic-block-query/`) is
+  the one that reads the OSC 133 zones back out: DEC mode `2034` arms it and the terminal answers with
+  `DCS > 2034 ; 1 b T1 ; T2 ; T3 ; T4 ST`, four uint16s that every later query must echo;
+  `CSI > Ps ; Pn ; T1 ; T2 ; T3 ; T4 b` then asks for the last block (`1`), the last N (`2`) or the
+  one in flight (`3`), and the reply is JSON carrying **command, prompt, output, exit code**, with
+  control characters escaped so the payload cannot break its own terminator. The token is the vendor
+  agreeing that this is dangerous — and it defends only against a stream that did not see the enable
+  reply, since the token travels the same wire.
+- **contour's colour-scheme notification**
+  (`contour-terminal.org/vt-extensions/color-palette-update-notifications/`) gives the sequence §98
+  implements: `CSI ? 996 n` asks, `CSI ? 997 ; 1 n` is dark and `; 2 n` light, and DEC mode `2031`
+  turns the same report into an unsolicited one. Its implementer list is the reason this row moved and
+  the ones around it did not — contour, ghostty, kitty and **GNOME's vte** send it; neovim, helix,
+  zellij and tmux ask it.
+- **otty's OSC tree** (`docs.otty.sh/vt/osc/`) supplied the colour codes xterm defines and this table
+  had never listed: `OSC 5` / `105` / `106` (the "special" colours, slot `0` bold, `1` underline, `2`
+  blink, `3` reverse, `4` italic), `13` / `14` mouse pointer, `15` / `16` / `18` Tektronix, `17` / `19`
+  selection, and the resets `113`–`119` that pair with them. It is also the only catalogue of the four
+  that marks its own **partial** support — "parsed, not applied", "stored, not rendered" — which is the
+  distinction §66 retired a mark for and is worth seeing somebody else keep.
+- **otty's `OSC 88`** (`docs.otty.sh/vt/osc/osc-88`) is a **proposal, not a sequence in use**: the
+  Terminal Resume Protocol, `OSC 88 ; <op> [ ; key=value ]… ST`, where `arm` hands the terminal a
+  base64 `cmd`, `args` and `cwd` to **relaunch the program with** if the terminal restarts, `clear`
+  withdraws it and `query` answers `OSC 88 ; supported ; v=<max> ST`. otty ships the reference
+  implementation and the spec is open at `github.com/Otty-sh/osc-88`. It is the only sequence found in
+  this sweep whose intended effect is a **local process**, and the row for it says so.
+- **otty's CSI tree** (`docs.otty.sh/vt/csi/`) and **vtdn's CSI category**
+  (`vtdn.dev/docs/category/csi-sequences/`) added no row at all — every sequence either was already
+  here or arrived through contour's index. Two catalogues agreeing with the table is worth recording
+  as evidence too, since it is what says the additions above are contour's breadth rather than this
+  table's blindness.
 
 ### cmote (`c:/sources/github_clemeno/cmote/src/`)
 

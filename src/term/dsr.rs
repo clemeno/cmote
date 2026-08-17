@@ -44,6 +44,34 @@
 // is not there being not there. The same shape as DECRQM's honest "not recognised" for mode 69,
 // which this project already prefers to silence, and it removes a sender left waiting out a timeout.
 //
+// A FOURTH QUESTION IS ANSWERED, AND IT IS NOT XTERM'S (§98).
+//
+//   CSI ? 996 n    "is your colour scheme dark or light?" — answered `CSI ? 997 ; 1 n` (dark) or
+//                  `; 2 n` (light)
+//
+// Contour, ghostty, kitty and GNOME's vte all implement it; neovim, helix, zellij and tmux all ask
+// it. cmote answers `1`, dark, from a constant — the scheme is fixed (§6), so there is no state to
+// read and nothing that could ever move the answer.
+//
+// It sits oddly beside §78's dialect objection, which refuses kitty's OSC 21 because cmote never
+// claims to be kitty, and beside §96's half-rule, which lets cmote READ any dialect while answering
+// only in the one it claims. §98 NARROWS that rule rather than carving an exception out of it: what a
+// reply must not do is name the PROGRAM or the MACHINE — §36's line, the one DA3's constant unit id
+// keeps — and "my background is dark" names neither. Nor is it a new disclosure. `OSC 11 ; ?` is
+// xterm's own spelling of the same fact, cmote answers it already (§64, §87), and dark-or-light is a
+// function of the number that comes back. One writer, two doors, which is the test §71 sets for a
+// second spelling.
+//
+// The alternative was silence, and silence is not neutral here: a program that cannot learn the
+// background paints for the one it guessed, and a light guess over cmote's #1e1e1e is a screen the
+// user cannot read. That is the UX-stability harm this project ranks above every visual feature, and
+// it would be caused by cmote declining to say something true about itself.
+//
+// The UNSOLICITED half is NOT implemented. DEC mode 2031 asks the terminal to send this same report
+// every time the scheme changes; the engine has no such mode, so DECRQM answers `0`, "not
+// recognised", which is the truth — cmote's scheme cannot change, so no notification would ever
+// follow. A program told that polls instead, which is the sequence above.
+//
 // The refusal is cmote's own, in the same construction `term/iterm.rs` uses for OSC 1337 keys,
 // `term/pointer.rs` for pointer shapes and `link.rs` for URI schemes: the scanner reads the whole
 // parameter, compares it against a list of one, and a value that is not on the list produces nothing
@@ -70,6 +98,9 @@ const LOCATOR_STATUS: u16 = 55;
 /// "What kind of locator?" (§93). Answered with the other honest negative.
 const LOCATOR_TYPE: u16 = 56;
 
+/// "Is the colour scheme dark or light?" (§98). Answered from a constant, cmote's scheme being fixed.
+const COLOR_SCHEME: u16 = 996;
+
 /// The longest parameter run buffered inside one sequence. DECXCPR's is a single digit; anything
 /// longer is malformed, and refusing to grow past this keeps a hostile stream from ballooning our
 /// memory (§12).
@@ -89,6 +120,9 @@ pub enum Request {
 	LocatorStatus,
 	/// `CSI ? 56 n` — what kind of locator? Answered "cannot identify", also a constant.
 	LocatorType,
+	/// `CSI ? 996 n` — is the colour scheme dark or light? Answered "dark", a constant: the scheme
+	/// is fixed, so there is no state behind this and nothing that could change it (§6, §98).
+	ColorScheme,
 }
 
 /// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
@@ -204,6 +238,7 @@ impl Dsr {
 			CURSOR_POSITION => Some(Request::CursorPosition),
 			LOCATOR_STATUS => Some(Request::LocatorStatus),
 			LOCATOR_TYPE => Some(Request::LocatorType),
+			COLOR_SCHEME => Some(Request::ColorScheme),
 			_ => None,
 		}
 	}
@@ -264,6 +299,15 @@ pub const NO_LOCATOR: &[u8] = b"\x1b[?53n";
 /// nothing to describe, which is true here and says nothing about the machine.
 pub const NO_LOCATOR_TYPE: &[u8] = b"\x1b[?57;0n";
 
+/// "The colour scheme is dark" — `CSI ? 997 ; 1 n`, the answer to `CSI ? 996 n` (§98).
+///
+/// `1` is dark and `2` is light in contour's published table, and cmote's background is `#1e1e1e`
+/// (`palette::DEFAULT_BG`). So this is a constant rather than a reading, and it is the one value that
+/// can be right for as long as the scheme is fixed (§6) — a scheme the user could change would make
+/// this a function of that scheme and would make mode 2031's change notifications worth having.
+/// Neither is true today, and a test below fails if the scheme ever stops being dark.
+pub const DARK_SCHEME: &[u8] = b"\x1b[?997;1n";
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -286,15 +330,37 @@ mod tests {
 		assert_eq!(offsets(b"ab\x1b[?6ncd"), vec![7]);
 	}
 
-	/// The allow-list is one value wide, and it is matched on the whole number rather than a prefix of
-	/// it — `66` and `60` are not `6`, the same rule `term/notify.rs` keeps for OSC 9's sub-codes.
+	/// The allow-list is four values wide, and every one of them is matched on the whole number rather
+	/// than a prefix of it — `66` and `60` are not `6`, `9960` is not `996`, the same rule
+	/// `term/notify.rs` keeps for OSC 9's sub-codes.
 	#[test]
-	fn only_the_parameter_six_is_answered() {
+	fn only_the_listed_parameters_are_answered() {
 		assert!(scan(b"\x1b[?n").is_empty(), "an omitted parameter is not 6");
 		assert!(scan(b"\x1b[?0n").is_empty());
 		assert!(scan(b"\x1b[?5n").is_empty(), "DSR 5 is the ANSI form's own");
 		assert!(scan(b"\x1b[?60n").is_empty(), "not a prefix match");
 		assert!(scan(b"\x1b[?66n").is_empty());
+		assert!(scan(b"\x1b[?99n").is_empty(), "nor is 996 matched short");
+		assert!(scan(b"\x1b[?9960n").is_empty(), "nor matched long");
+	}
+
+	/// The dark/light question (§98) — the one answer on this list that is not xterm's sequence, and
+	/// the reply that says so. `1` is dark, which is what cmote's fixed scheme is.
+	#[test]
+	fn the_colour_scheme_question_is_answered_dark() {
+		assert_eq!(scan(b"\x1b[?996n"), vec![(7, Request::ColorScheme)]);
+		assert_eq!(DARK_SCHEME, b"\x1b[?997;1n", "contour's `1` is dark");
+	}
+
+	/// The reply above is a CONSTANT, so the thing that could quietly make it a lie is the scheme
+	/// moving under it rather than the code changing. cmote's background is fixed (§6) and dark; if
+	/// that ever stops being true this fails, which is the whole point of asserting it here rather
+	/// than trusting the comment beside the constant.
+	#[test]
+	fn the_scheme_the_reply_describes_is_still_a_dark_one() {
+		let (red, green, blue) = crate::palette::DEFAULT_BG;
+		let average = (u16::from(red) + u16::from(green) + u16::from(blue)) / 3;
+		assert!(average < 128, "background is no longer dark: {average}");
 	}
 
 	/// The two locator questions, answered with xterm's own negatives (§93). Both are constants, so
