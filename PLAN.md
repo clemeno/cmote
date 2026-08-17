@@ -10439,3 +10439,174 @@ one end renumbered and the other not would select from a prompt to a line that n
 - **The cursor does not move**, matching SD, and kitty's page does not say what it should do. A shell
   that expects its prompt to still be under the cursor after an unscroll will be repositioning it
   itself; nothing here checks that assumption against a real one.
+
+## §102 — The margins, and a place to stand
+
+`s (DECSLRM) | Left / right margins` moves **🛑 → ✅**, and takes three more rows with it: DECLRMM
+(mode 69) ❌ → ✅, DECIC / DECDC ❌ → ✅, and SL / SR keep their ✅ while losing the refusal they had
+carried since §100.
+
+**The verdict this reverses was refused twice, and on one sentence.** TERMINAL_COMPATIBILITY_PLAN §5
+costed the build in detail and turned it down both times, always at the same paragraph: every
+`Handler` method has a default empty body, so a method left unforwarded — or one a future
+`alacritty_terminal` adds — compiles cleanly and silently drops a sequence, and *"§57's could be
+caught at build time with a `const` assertion and this one cannot: a trait growing a defaulted method
+breaks nothing."*
+
+It can. `#[deny(clippy::missing_trait_methods)]` on the `impl` block reports every method left to its
+default, so a missing one is a build error under the gate's `-D warnings`; and if a future clippy
+drops the lint, `unknown_lints` fails the build instead. Verified by deleting `bell()` from the
+forwarding list and watching the build fail, rather than assumed — a guard nobody has seen fire is a
+guess about a guard.
+
+The lesson is not about clippy. **This document has re-derived its FACTS every sweep since §66 and has
+been carrying its PRICES forward unexamined.** §98 found the same failure in the row marks — a table
+of correct rows looks exactly like a complete one — and this is its twin in the prose: a price quoted
+three times is no better evidence than a row nobody re-read.
+
+### The sixth way in
+
+Five routes were named before this: accept the engine's limit, scan the sequence out and act beside
+the grid, borrow a bit of the engine's own state (§56), refuse the sequence properly (§57), translate
+it into sequences the engine already takes (§72). All five share a property — cmote never stands in
+the engine's way — and that is exactly what margins need.
+
+`term/gate.rs` implements `Handler` itself, holds `&mut Term`, and is passed to `Processor::advance` in
+the engine's place. Two things need it and nothing else can give them:
+
+- **Reading back what the engine decided.** `Term::scroll_region` is private, with no accessor and no
+  reply arm. A scanner can watch DECSTBM go past on the wire — but not the RESETS, which happen inside
+  the engine on RIS and on resize.
+- **Pre-empting a decision.** Margins change what printing does, and there is no repairing that
+  afterwards: by the time the glyph is on the grid it is at the wrong columns.
+
+What keeps it inside §71's rule is that a gate is not a second author. It pre-empts a decision and
+delegates; the engine still writes every cell it wrote before, except inside a narrowed band where the
+engine has no opinion at all.
+
+The forwards are macro-generated, and that is a correctness argument rather than a saving of typing.
+Sixty-odd hand-written bodies would be sixty-odd chances to pass `count` where `mode` was meant; with
+the macro the only thing that can be wrong is a signature, and a wrong signature does not compile.
+
+### The mirror that cannot drift
+
+`term/region.rs` holds the vertical scrolling region. It is exact by construction rather than by care:
+the engine assigns that field in exactly four places — `Term::new`, `Term::resize`, `reset_state` and
+`set_scrolling_region` — and the last two are `Handler` methods the gate sees while the first two are
+calls cmote itself makes. The arithmetic is a transcription of the engine's, down to the case where a
+zero top leaves the region starting *above* the first row, so the two can be compared by hand if they
+ever have to be.
+
+**Cashed in immediately for §100.** SL and SR were refused whenever origin mode was set, with DECOM
+standing in as evidence that a region existed that a shift ought to stop at. The proxy was both too
+much — a program with origin mode and no region got nothing — and too little, since a region set
+*without* origin mode was shifted straight through. The bound is now the real region.
+
+### The mode is the whole rule
+
+`CSI s` has two meanings on one final byte, and a real terminal tells them apart by DECLRMM. §57 could
+not: the engine refuses mode 69, so the only evidence left in the bytes was the parameter count and
+`term/cancel.rs` cancelled every parametrised `s` on it. cmote holds the mode now:
+
+- **mode 69 set** — DECSLRM. Margins applied, and the byte still cancelled, since the engine's arm for
+  it reads no parameters and would save the cursor on the way past.
+- **mode 69 reset** — SCOSC. Let through, and the engine saves the cursor, which is what a real xterm
+  does with it, parameters and all.
+
+That is not a loosening of §57. The proof was sitting in the terminfo §73 had already read: all four
+of `xterm-256color`'s margin capabilities set mode 69 **first**
+(`smglr=\E[?69h\E[%i%p1%d;%p2%ds`). A program that means margins says so before it asks.
+
+### What the margins actually do
+
+Everything keys off **narrowed**, not **enabled**. With the band at the page edges the engine keeps
+every operation, so an ordinary session runs on exactly the code it ran on before — reproducing the
+engine's behaviour is not the same as having it, and the difference would show first in which rows
+reach the scrollback.
+
+Once a column is excluded: a line breaks at the right margin and goes on at the left one; CR goes to
+the left margin, and to column 1 from left of the band; CUF, CUB, HT and BS stop at the margins; ICH
+and DCH push and pull within the band; SU, SD, IL, DL, IND, RI and NEL scroll only the band's columns;
+and under origin mode the columns a program names are counted from the left margin.
+
+**The deferred wrap had to become cmote's.** A terminal does not wrap when the last usable column is
+filled — it leaves the cursor there with the wrap owed, so a program that fills the line and then
+moves never wraps at all. The engine has that flag and fires it at the SCREEN edge, which for a band
+short of the edge never happens, and for a band at the edge wraps to column 0 instead of to the left
+margin.
+
+**A row pushed out of a narrowed band is discarded, never scrollbacked.** The history holds whole
+lines and this row is a slice of one; the columns outside the band are not leaving. xterm agrees, and
+it is also the only answer that leaves the history readable, since half-lines interleaved with whole
+ones would make every search, selection and copy downstream of it wrong.
+
+**A margin wrap sets no `WRAPLINE` flag**, and §5 predicted the opposite. The flag belongs to the
+whole row, and inside a narrow band the rest of that row is another column of the page — joining on it
+would splice unrelated text into every copy taken across a wrap. It costs a wrapped word being copied
+in two pieces and keeps the copy honest about what was on the screen.
+
+**Margins are not per-screen**, and §5 predicted that they would have to be. The reason is one the
+gate made visible: the ENGINE's vertical region is not per-screen either — `swap_alt` does not touch
+`scroll_region` — so making the horizontal axis behave differently from the vertical one would have
+been cmote inventing an asymmetry DEC did not write.
+
+### One rule written wrong, and corrected before it shipped
+
+The first version let text OUTSIDE the band keep the whole page and wrap at the screen edge, on the
+argument that a full-width status line should not be chopped into the band. It reads better and it is
+nobody's behaviour: xterm's `ScrnRightMargin` reads the mode and never the cursor, so with DECLRMM set
+a line breaks at the right margin wherever it started. §57's rule pointed the other way — where a
+reference implementation has decided, matching it beats improving on it. The test that pins it states
+the surprising half out loud rather than hiding it.
+
+### The traps only a gate can show you
+
+The engine implements `newline` by calling its **own** `linefeed` and `carriage_return`, and `goto_col`
+by calling its own `goto`. Forwarding either would run the margin-blind version of a method the gate
+had just replaced. Nothing warns about this; it is only visible from inside.
+
+The same reading turned up the engine defect §74 recorded against CHA and HPA: `goto` adds the
+scrolling region's top to the line it is given, so a pure column move through `goto_col` drags the
+cursor downward under origin mode. The gate's own column writes sidestep it, so the defect is gone on
+the margin path and untouched elsewhere — fixing it generally is a different change with its own row.
+
+### What it cost
+
+- `term/gate.rs`, new: the `Handler` impl, the lint guard, the forwarding macro, the margin-aware
+  methods and the band surgery.
+- `term/region.rs`, new: the mirror. Eleven tests.
+- `term/margins.rs`, new: the state and the arithmetic. Sixteen tests.
+- `term/cancel.rs`: carries the two numbers now, and no longer decides on its own. Six more tests.
+- `term/rect.rs`: DECIC / DECDC, in the same grammar as SL, SR and UNSCROLL.
+- `term/mod.rs`: the gate wiring, `shift_band_columns`, the margins on the soft-reset string, and
+  every advance routed through one place so a synthesised sequence passes the gate too.
+- `Cargo.toml`: `unicode-width`, for the one width question that has to be answered *before* the
+  engine answers it. Same crate at the same version `alacritty_terminal` already uses for exactly this
+  call.
+- Four rows move: **🛑 → ✅** (DECSLRM) and **❌ → ✅** (DECLRMM, DECIC / DECDC). 214 rows:
+  **✅ 116 · ❌ 31 · 🛑 40 · 🤷 27**. Tests 1236 → 1295.
+
+### Not done
+
+- **Nobody has run this against a real program that uses margins.** It is pinned against cmote's
+  reading of xterm's source and DEC's manual — the same disclosure §97, §100 and §101 all made, four
+  sections running. That is now the standing state of this work rather than a note on one section.
+- **ECMA-48 is still unread**, and it is load-bearing in three places: SCP (§76), the page family, and
+  SL / SR's new region bound. §100 refused where it was unsure; §102 acts where it is unsure and says
+  so, which is a different kind of claim.
+- **Erases are not margin-bounded.** ECH and EL run to the end of the line as they always did, on the
+  rule that operations which SHIFT cells are bounded and operations that erase in place are not. That
+  rule is cmote's reading, not a quotation; a program clearing to end-of-line inside a band will wipe
+  the column beside it.
+- **The `? 69` DECRQM answer is the only new thing cmote says.** It reports cmote's own state and names
+  neither the program nor the machine (§36, §96), so it clears the rule — but it is another reply
+  added to a list §33 called closed, and the list is now long enough that "closed" should probably
+  stop being said about it.
+- **A fifth writer of `scroll_region`** arriving in a version bump would break the mirror silently.
+  Four writers were counted by hand and nothing checks the count.
+- **The alternate screen shares the margins with the primary page**, which follows the engine's own
+  handling of the vertical region and is not what DEC describes. A full-screen program that sets
+  margins and exits leaves them set for the shell.
+- **`goto_line` is forwarded, so VPA keeps whatever the engine does with it.** Only the column paths
+  were taken over; a row path under margins has nothing to decide, which is true today and is an
+  assumption rather than a checked fact.

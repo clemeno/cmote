@@ -414,6 +414,14 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   What made it worth doing is the failure it prevents: a program that cannot learn the background
   paints for the one it guessed, and a light guess over a dark scheme is a screen nobody can read.
 
+- **DECRQM for private mode 69** (`CSI ? 69 $ p`) → `CSI ? 69 ; 1 $ y` set, `; 2` reset (§102). The
+  odd one in this list, because the engine ALREADY answers this question and the answer is the
+  problem: mode 69 is absent from its `NamedPrivateMode`, so it reports `0`, "not recognised". That
+  was true and useful until §102 — a program told the mode is unknown will not ask for margins — and
+  the moment cmote implemented the mode it became a lie a program acts on. Answered from the gate
+  rather than beside it, since the gate is where the mode is held. It reports nothing but cmote's own
+  state, so §71's second-source rule has nothing to catch: there is no other way to learn it.
+
 There is also one reply cmote does not *originate* but **amends**: the engine writes DA1 as `CSI ? 6 c`,
 and attribute **4** is how a terminal says it draws sixels — which is what chafa's auto mode, `lsix` and
 ranger's previewer read at startup. Since §41 cmote rewrites that reply on its way out
@@ -563,11 +571,36 @@ short, and since §41 nothing left in it is high value:
   low value.
 - **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
   (single wide glyphs are; whole-line doubling is not). `[DEC]`.
-- **Left / right margins** (DECSLRM, VT420) — the engine's scroll region is vertical only
+- **~~Left / right margins~~ (DECSLRM, VT420) — SHIPPED in §102.** Read this bullet as the record of
+  a verdict that was reversed, because the reversal turned on a single sentence being wrong.
+
+  The bullet below refused the build twice, on the hazard named under *What blocks it*: every
+  `Handler` method has a default empty body, so a method left unforwarded — or one a future
+  `alacritty_terminal` adds — compiles cleanly and silently drops a sequence, and that "**cannot**"
+  be caught at build time the way §57's borrowed flag bit could.
+
+  It can. **`#[deny(clippy::missing_trait_methods)]`** on the `impl` block reports every method left
+  to its default, so a missing one is a build error under the gate's `-D warnings`; and if a future
+  clippy drops the lint, `unknown_lints` fails the build instead. There is no version of the future
+  where the file goes quiet on its own. The deny was verified by removing `bell()` and watching the
+  build fail, rather than assumed. What it does NOT catch is a method present but forwarding wrongly,
+  which is ordinary code tested as ordinary code.
+
+  The lesson is not about clippy. **A cost estimate ages differently from a fact**, and this document
+  has been re-deriving its FACTS every sweep since §66 while carrying its PRICES forward unexamined.
+  The wall here was never the trait; it was one sentence about the tooling, written once and quoted
+  three times. §98 found the same failure in the row marks — a table of correct rows looking exactly
+  like a complete one — and this is its twin in the prose.
+
+  Everything below is left as it stood, since the arithmetic of the build was right and only the
+  verdict was wrong. The one number that came in low: it estimated 400–600 lines and the whole of
+  §102 — gate, region mirror, margins, DECIC/DECDC and their tests — came to rather more.
+
+  ---
+
+  The engine's scroll region is vertical only
   (`set_scrolling_region(top, bottom)`), and horizontal ones reach into what printing, wrapping,
-  `IL`/`DL`, `ICH`/`DCH` and every scroll do. `[DEC]`, and **still unbuilt — as a cost, not a
-  capability.** Since §73 the ❌ for it is carried by the `? 69` (DECLRMM) row in §8; the sequence's own
-  row is the 🛑 `term/cancel.rs` performs.
+  `IL`/`DL`, `ICH`/`DCH` and every scroll do. `[DEC]`.
   An earlier reading of this row called it impossible without re-implementing the grid.
   That was wrong, and the correction is worth writing down because it is the only row in this document
   whose verdict rests on price rather than on a wall:
@@ -593,13 +626,26 @@ short, and since §41 nothing left in it is high value:
   a method left unforwarded — or one a future `alacritty_terminal` adds — compiles cleanly and silently
   drops a sequence. That is the same class of hazard as §57's borrowed flag bit, except §57's could be
   caught at **build time** with a `const` assertion and this one cannot: a trait growing a defaulted
-  method breaks nothing. Add the smaller ones — a margin wrap has to set `WRAPLINE` itself or copy,
+  method breaks nothing. *[§102: this is the sentence that was wrong. See the head of the bullet.]*
+  Add the smaller ones — a margin wrap has to set `WRAPLINE` itself or copy,
   search and reflow read the line as two; margins are per-screen and have to ride the alternate-screen
   swap; resize reflows assuming full width, so margins would reset on resize as xterm's do. And there is
   no §72 shortcut in reach: a soft reset could be *translated* into sequences the engine already takes,
   but margins are a capability with no shorthand to translate into, so the wrapper would make cmote a
   second writer of the engine's own state — cursor, wrap flag, scrolled cells — which is what §71 and §72
   were both careful not to become.
+
+  *[§102 on the three smaller ones. The `WRAPLINE` half was answered the other way and deliberately:
+  a margin wrap sets **no** flag, because the flag belongs to the whole ROW and inside a narrow band
+  the rest of that row is another column of the page — joining on it would splice unrelated text into
+  every copy taken across a wrap. Costs a wrapped word being copied in two pieces; keeps the copy
+  honest. **Margins are not per-screen** either, and for a reason the wrapper made visible: the
+  ENGINE's vertical region is not per-screen — `swap_alt` does not touch `scroll_region` — so making
+  the horizontal axis behave differently from the vertical one would have been cmote inventing an
+  asymmetry DEC did not write. Resize does drop them, as predicted. And the "second writer" worry
+  turned out to be the wrong shape: the gate is a **gate**, not a second author — it pre-empts a
+  decision and then delegates, and the engine still writes every cell it wrote before, except inside
+  a narrowed band where the engine has no opinion at all.]*
 
   Against that, the traffic. **§73 corrected this bullet on the facts**: it used to say "essentially
   nothing emits DECSLRM outside a conformance suite", and the terminfo for the TERM cmote asks for says
@@ -624,6 +670,14 @@ short, and since §41 nothing left in it is high value:
   *saved the cursor*, overwriting a value the program meant to restore from later. cmote now cancels
   that byte in flight, so the request does nothing at all — the `s` row in §8, which §73 re-marked 🛑 so
   the column says who performs that, PLAN §57 and §73, and `term/cancel.rs`.
+
+  *[§102 on the traffic paragraph, which is the part that came out best. It is still true that no
+  init or reset string emits a margin capability — and the same terminfo turned out to prove
+  something the refusal never needed: all four capabilities **set mode 69 first**
+  (`smglr=\E[?69h\E[%i%p1%d;%p2%ds`). A program that means margins says so before it asks, which is
+  exactly what makes it safe to stop cancelling the parametrised `s` and let it mean save-cursor
+  again. §73 read this terminfo to check a traffic claim; the fact that settled §57's guess was
+  sitting in it the whole time.]*
 - **~~VT420 rectangular ops~~ — SHIPPED in §58.** DECERA (`$ z`), DECSERA (`$ {`), DECFRA (`$ x`) and
   DECCRA (`$ v`) all read as engine limits until §56 built the hard half of them: writing cells
   straight into the grid, and knowing which of them a program protected. `vte` matches `$` only in the
@@ -681,10 +735,14 @@ short, and since §41 nothing left in it is high value:
 
 ## 6. Deliberately excluded (🛑 / 🤷 in §8 — policy, not gap)
 
-Nearly every refused row in §8 is one of these. **One is not, and §73 says so on the row**: DECSLRM is
-🛑 because `term/cancel.rs` stops the sequence dead, but the decision behind it is a *price* and lives in
-§5, not a policy and here. The mark records who performs a refusal; the section it points at records why
-it was taken.
+Every refused row in §8 is one of these — and **since §102 that sentence is true again without an
+exception attached to it.** DECSLRM was the odd one out for twenty-nine sections: marked *refused by
+cmote's own code*, because `term/cancel.rs` stopped the sequence dead, but the decision behind it a
+*price* recorded in §5 rather than a policy recorded here. It is *supported* now, so the only thing
+left in this section is policy. The
+distinction the exception taught is worth keeping even though its example is gone: **the mark records
+who performs a refusal, the section it points at records why it was taken** — and a refusal filed
+under price is one to re-read when the price moves, which is exactly what happened to this one.
 
 **OSC 52 clipboard read/write** — **refused at the engine boundary** since §63: `engine_config` sets
 `osc52: Osc52::Disabled`, so `clipboard_store` and `clipboard_load` return before an event exists. A
@@ -1119,6 +1177,11 @@ and kitty graphics — iTerm2's inline images left for the 🛑 column in §70) 
 practice, or a whole protocol's worth of work — **no item of real UX value remains anywhere in this
 document.**
 
+*[That list has been overtaken twice over: the rectangular ops shipped in §58 and the margins in §102.
+Both were on it as things "left", and both turned out to be movable — which is the reading of this
+paragraph worth keeping. It was right that nothing here was blocking a user; it was wrong to let that
+double as a reason not to re-price the items.]*
+
 **One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
 crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
 `Osc52::OnlyCopy` — chosen upstream as *"a compromise between entirely disabling it (the most secure)
@@ -1190,6 +1253,12 @@ invisible in practice, or a protocol nobody here has asked for; iTerm2's inline 
 until §70 moved them to the other column. For "support *any* documented app UX",
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
 refused with its reason written down.
+
+*[§102 read this paragraph as a warning rather than a summary. "No outstanding ceiling-raiser left" was
+true of USER-visible features and was quietly doing duty as "nothing left worth costing" — and the
+margins, on that same list, went on to ship. The tactic named here also stopped being the whole story:
+§102's route stands IN FRONT of the engine rather than beside it, which is still not touching the
+engine and is not the same claim.]*
 
 **§54 then closed the OSC column's last item of real value, and turned four ❌ rows into decisions** —
 🛑 and 🤷 rows since the legend grew marks of their own — and the split was instructive: OSC 9 is
@@ -1386,7 +1455,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | I / Z | Forward / backward tab | ✅ | CHT / CBT move the cursor forward or back `Ps` tab stops, over the stops `ESC H` and `CSI g` maintain — eight columns apart at power-on. Column only, under every mode |
 | d / \` | Vertical / horizontal PA | ✅ | VPA sets the row and HPA the column, each leaving the other alone. `` ` `` shares CHA's arm and so its origin-mode drift (§74) |
 | a / e | Horizontal / vertical PR | ✅ | HPR / VPR move `Ps` columns right or rows down; the parser aliases them to CUF and CUD, so `e` inherits CUD's origin-mode drift (§74) |
-| s / u | Save / restore cursor | ✅ | SCOSC / SCORC, the ANSI.SYS save and restore of the cursor. The bare `CSI s` only — a parametrised one is DECSLRM (§57) |
+| s / u | Save / restore cursor | ✅ | SCOSC / SCORC, the ANSI.SYS save and restore of the cursor. A parametrised `CSI s` is DECSLRM **only while mode 69 is set** and is a save-cursor otherwise, which is the rule a real terminal uses and the one §102 gave back — §57 had to cancel every parametrised `s` on the parameter count alone. The deferred wrap rides along with the position (§57, §102) |
 | @ / P / X | Insert / delete / erase char | ✅ | ICH inserts blanks at the cursor, DCH deletes characters and pulls the line left, ECH erases in place without moving the tail |
 | L / M | Insert / delete line | ✅ | IL / DL insert or delete `Ps` lines at the cursor, scrolling the rest of the region |
 | J | Erase in display | ✅ | ED erases from the cursor to the end of the screen, to its start, or the whole screen |
@@ -1397,10 +1466,10 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. DEC's published list is eighteen items and cmote sends the eleven anything here models — DECTCEM, IRM, DECOM, DECAWM, DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA and DECSC; the other seven (KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM) name state neither `vte` nor the engine nor cmote has. **One deliberate departure**: DEC's list says "Autowrap (DECAWM): No autowrap" and cmote leaves it **on**, because `xterm-256color` declares `am` and its `rs2` sends no `\E[?7h` after this (§72, §94) |
 | b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
-| Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Refused while origin mode is set** — not because these name coordinates, they name none, but because DECOM is the one signal in reach that DECSTBM has cut a scrolling region a shift ought to stop at, and the engine keeps that region private (§58, §100, `term/rect.rs`) |
+| Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Bounded by the scrolling region** since §102: a shift is a scrolling operation, so a status line parked outside the band stays where it is while the band slides under it. That bound is what §100 wanted and could not have — the region is private inside the engine, so the shift was REFUSED under origin mode instead, DECOM standing in as evidence that a region existed. The proxy was both too much (a program with origin mode and no region got nothing) and too little (a region set without origin mode was shifted straight through); the mirror retired it (§58, §100, §102, `term/rect.rs`, `term/region.rs`) |
 | Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ✅ | **kitty's**, not contour's — contour's own definition credits it (`"Scroll Down with Scrollback Fill (kitty unscroll)"`), which §98 recorded the wrong way round. SD with the top filled from the **scrollback** instead of with blanks, for the shell that prints completions under the cursor and scrolls the user's text away: plain SD would blank exactly what this exists to restore. The lines are **moved**, not copied — a copy would leave the same text in the scrollback and on the page, once per completion, for the life of the session. `Ps` defaults to 1 and clamps to the page; the rows pushed off the bottom are discarded; the cursor does not move. Where the scrollback cannot fill the request the remainder is blank, which is kitty's own rule and what makes the **alternate screen** correct with no special case — that page keeps no history. The one operation here that changes how many lines the document has, so every absolute anchor cmote holds — prompt marks, bookmarks, command spans, picture anchors, right-to-left flags — is renumbered with it (§101, `term/rect.rs`) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
-| s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
+| s (DECSLRM) | Left / right margins | ✅ | sets the left and right margins, the horizontal half of DECSTBM — and everything that follows is a consequence rather than a separate feature: a line breaks at the **right margin** and goes on at the **left** one, a carriage return goes to the left margin, ICH and DCH stop at the margins, and every scroll (SU, SD, IL, DL, IND, RI) moves only the band of columns between them while the rest of the page stands. Under **origin mode** the columns a program names are counted from the left margin, the relationship DECOM already had with the region's rows. **The mode is the whole rule**: this byte is DECSLRM only while `? 69` below is set and is a save-cursor otherwise, which is how a real terminal reads it and what §57 could not do — it cancelled every parametrised `s` on the parameter count alone, because the engine refused the mode that settles it. A row pushed out of a narrowed band is **discarded, never scrollbacked**: the history holds whole lines and that row is a slice of one. Built on the `Handler` gate §5 costed and refused twice (§57, §73, §102, `term/margins.rs`, `term/gate.rs`) |
 | g | Clear tab stop (TBC) | ✅ | TBC clears the tab stop under the cursor (`0`) or all of them (`3`) — the two DEC defined for a one-page terminal (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ✅ | DECST8C puts tab stops back every eight columns; performed by walking the page with CR and CUF and setting each stop with HTS, so the engine's table stays its own (§74, `term/tabs.rs`) |
 | Ps ; Ps SP k | Select character path (SCP) — data to presentation | ✅ | SCP picks the character path for the line under the cursor — `Ps1` `2` is right to left — and `Ps2 = 1` says the presentation is derived from the data, so the row is mirrored as it is drawn while the grid, scrollback, search, selection and copy stay in data order. Pictures are placed by column and not mirrored (§76, `term/scp.rs`) |
@@ -1413,7 +1482,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
 | Ps # y (XTCHECKSUM) | Select checksum extension | 🤷 | "the bits of `Ps` modify the calculation of the checksum returned by DECRQCRA": `0` do not negate the result, `1` do not report the VT100 video attributes, `2` do not omit the checksum for blanks, `3` omit it for cells never initialised, `4` do not mask the cell value to 8 bits. cmote answers **one** calculation, the DEC-compatible default the row above describes. Decided in §99 rather than left open: bit `3` is one cmote *cannot* perform — the engine's grid starts full of blanks indistinguishable from written cells, §60's own disclosed divergence — and honouring four of five would hand a program that set the fifth a number computed under rules it did not choose. Dies in the parser, `csi_dispatch` matching no `#` intermediate at all, and pinned at the boundary by the checksum being the same number before and after the request (§60, §88, §94, §99) |
-| Ps ' } / Ps ' ~ (DECIC / DECDC) | Insert / delete column | ❌ | the column twins of IL / DL: open `Ps` blank columns at the cursor's column and push the rest of every line right, or delete `Ps` and pull the tail left. The VT420 family cmote finished in §58–§60 is the *rectangular* one; these two are its neighbours and nothing here refuses them — a **gap**, and since §100 one with a working precedent rather than an argument: SL and SR are the same shift, over the whole row instead of from the cursor's column, and `shift_columns` is what they would be built out of (§58, §98, §100) |
+| Ps ' } / Ps ' ~ (DECIC / DECDC) | Insert / delete column | ✅ | the column twins of IL / DL: open `Ps` blank columns at the cursor's column and push the rest of every line right, or delete `Ps` and pull the tail left — across **every row of the scrolling region**, which is the whole difference from ICH and DCH. Bounded by the left and right margins, and **legal without them**, the band then being the page; a column pushed past the right margin is gone and the ones that arrive carry the pen's background. Refused when the cursor sits outside either band, xterm's test and the one IL and DL apply. `vte` has no arm for the apostrophe intermediate at all, so unlike SL, SR and UNSCROLL these have no engine behaviour to be mistaken for — only each other (§58, §98, §100, §102, `term/rect.rs`) |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined (§84) |
 | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`, §84) |
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
@@ -1458,7 +1527,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC c (RIS) | Full reset | ✅ | the hard reset: every setting back to power-on, the screen cleared |
 | ESC = / ESC > | Keypad application / numeric | ✅ | DECKPAM / DECKPNM put the numeric keypad in application or numeric mode; tracked on the seam and encoded for the keys with no NumLock meaning to lose — Enter and `* + , - / =` (§2, §36) |
 | ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (§2, §36, `term/keymap.rs`) |
-| ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap** — and since §100 the sideways scroll it needs exists (`shift_columns`), leaving the cursor-at-the-margin condition as the only unwritten half (§98, §100) |
+| ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap with nothing left standing in its way**: §100 built the sideways scroll (`shift_columns`) and §102 built the margins the condition is written against, so both halves of the sentence above now exist as code. What it needs is the `Handler` arm — and `vte` dispatches `ESC 6` and `ESC 9` to nothing at all, so it needs a scanner, not a gate method (§98, §100, §102) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | fills the screen with `E` and homes the cursor — the alignment test |
 | ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. G2 and G3 can be designated and nothing here can invoke them |
 | ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ | the other 94-character sets — UK, Dutch, Finnish and the rest — which nothing here would draw either |
@@ -1519,7 +1588,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | the same mode as something drawn; cmote runs no animation timer, so the cursor is steady whatever DECRQM reports (§65) |
 | 25 | Show / hide cursor | ✅ | DECTCEM — whether the cursor is drawn at all |
 | 45 | Reverse wrap | ❌ | reverse wrap — a backspace in column 1 moves to the end of the line above |
-| 69 (DECLRMM) | Left / right margin | ❌ | enables the left and right margins DECSLRM would set; not in the engine's mode list, so DECRQM answers `0`, not recognised. **This is the row the margin gap lives on** (§5, §73) |
+| 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (§5, §73, §102, `term/margins.rs`) |
 | 80 (behaviour) | Sixel scrolling | ✅ | what sixel scrolling mode governs: cmote always scrolls, the modern default and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | DECSDM as a mode — setting it asks a sixel not to scroll the page (§65) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | mouse reporting: presses and releases, the same plus drag, or all motion. Left, middle, right and the vertical wheel are encoded; the extra buttons and the horizontal wheel are not (`term/mouse.rs`) |
@@ -1596,18 +1665,26 @@ kitty graphics protocol (a protocol's worth of work, not the decoder this docume
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048), left-right margins, and — since §98 — the
 **horizontal-scroll family**, SL / SR, DECBI / DECFI and DECIC / DECDC, which read as one piece of
-absent machinery wearing six names. **§100 built it and moved two of them**: SL and SR are ✅, and
-what it cost was forty lines beside the rectangles, because the hard half — writing cells into the
-engine's grid — had been paid in §56. The other four are now gaps with a working precedent rather
-than gaps with an argument. That last one is no longer a *capability* gap at all: §5 costs out the
-delegating-`Handler` build that would do it, and the reason it stays unbuilt is that such a wrapper
-degrades silently on an engine bump — in exchange for a sequence no init or reset string emits, which
-§73 checked against the terminfo rather than asserting. **§73 also moved which row carries it**: DECSLRM
-itself is 🛑, cancelled by `term/cancel.rs`, and the ❌ is the DECLRMM mode nothing refuses. Since §57 it
-is a gap that costs nothing to have, rather than one that quietly took the program's saved cursor with
-it. All
-catalogued with their cost in §5 — which read as the *only* section with anything open in it until
-§60's audit put one row back into §3.
+absent machinery wearing six names. **§100 built it and moved two of them**: SL and SR are supported,
+and what it cost was forty lines beside the rectangles, because the hard half — writing cells into the
+engine's grid — had been paid in §56.
+
+**§102 finished the family bar one pair.** The margins themselves and DECIC / DECDC are supported, so
+of the six names only DECBI / DECFI are left — and they are a gap with both halves of their definition
+already written as code, since §100 built the sideways scroll and §102 built the margins the condition
+is stated against. The family was named as one piece of machinery in §98 and turned out to be exactly
+that: each section that built part of it made the next part smaller.
+
+What made the margins movable was not new machinery but a corrected sentence. §5 had costed the
+delegating-`Handler` build twice and refused it both times because such a wrapper "degrades silently
+on an engine bump" and that could not be caught at build time — which stopped being true, and had
+probably stopped being true before either refusal was written. The head of §5's bullet carries the
+correction and the lesson: **this document re-derives its facts every sweep and had been carrying its
+prices forward unexamined.** §98 found the same failure in the marks; a price quoted three times is no
+better evidence than a row nobody re-read.
+
+Whatever is left of that list is still catalogued with its cost in §5 — which read as the *only*
+section with anything open in it until §60's audit put one row back into §3.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -1627,6 +1704,25 @@ gains a second writer, so nothing can end up with two answers. It only works whe
 is a *shorthand*; where it is a capability — margins, kitty graphics — there is nothing to translate
 into, which is why this does not quietly empty the ❌ column.
 
+**§102 names a sixth, and it is the one every earlier section had ruled out: stand in front of the
+engine.** `Processor::advance<H: Handler>` is generic over the handler and `Term` merely *implements*
+`Handler`, so a type holding `&mut Term` can be passed in its place, answer a dozen calls itself and
+forward the rest. Two things need it and nothing else can give them:
+
+- **Reading back what the engine decided.** The vertical scrolling region is private, with no
+  accessor and no reply arm. A scanner beside the stream can watch DECSTBM go past on the wire — but
+  not the RESETS, which happen inside the engine on RIS and on resize. The `Handler` boundary catches
+  all of them, because that is where the engine is TOLD.
+- **Pre-empting a decision.** Margins change what PRINTING does, and there is no repairing that
+  afterwards: by the time the glyph is on the grid it is at the wrong columns.
+
+The reason this was refused for seven sections is at the head of §5's margins bullet, and it comes
+down to one sentence about the tooling that had stopped being true. What makes it a *route* rather
+than a one-off is the guard: `#[deny(clippy::missing_trait_methods)]` turns a forgotten forward — or
+one a version bump introduces — into a build error, which is the property §5 said was unavailable.
+The distinction that keeps it inside §71's rule is that a gate is not a second author: it pre-empts a
+decision and delegates, and the engine still writes every cell it wrote before.
+
 §57 found a fourth, and a different kind of gap to go with it. Every row in these tables until now was
 some flavour of "the engine ignores this"; DECSLRM is the one where the engine ignores nothing and gets
 it *wrong* — `vte` dispatches its final `s` to save-cursor without reading the parameters, so a margin
@@ -1637,6 +1733,14 @@ feed the state machine's own CAN in its place, resume after it. "Refuse it prope
 in, and the cheapest: a refusal that costs nothing is worth more than most ✅s. **§73 gave it the mark to
 match** — a row cmote's own code stops dead is a 🛑, and this one had been reading ❌ with the word
 *safely* propped beside it, which is the retired partial mark wearing a coat.
+
+**§102 kept the machinery and retired the guess it rested on.** The byte is still cancelled and the
+CAN argument is unchanged — but only when mode 69 says the sequence really is DECSLRM. §57 had to
+decide on the parameter count alone, because the engine refused the mode that settles it; cmote holds
+the mode now, so a parametrised `s` without it is a save-cursor again, which is what a real xterm
+makes of it. Worth noting what that says about the fourth route: a refusal built on the best evidence
+available is still a refusal built on evidence, and it stops being right the moment better evidence
+turns up. The 🛑 that §73 was right to award is now a ✅, on the same code.
 
 §60 closed the last row of §8's CSI table and then swept the two tables above it against the crate
 sources, which turned up six rows the code and the doc disagreed about — and only one of them a gap.
@@ -1791,7 +1895,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `term/mod.rs:1060`). The catch is in the same place: `Handler` declares **71 methods and every one
   has a default empty body** (`ansi.rs:495`), so a forwarding gap — today's or a future version's — is
   a silent no-op rather than a compile error. That is the hazard §5 prices the feature against, and
-  unlike §57's borrowed flag bit it cannot be turned into a build failure.
+  unlike §57's borrowed flag bit it cannot be turned into a build failure. *[§102: the last clause is
+  the sentence that was wrong — `#[deny(clippy::missing_trait_methods)]` turns exactly that gap into a
+  build failure, and the row shipped on it. Everything before the clause was right, which is why the
+  build went in unchanged from what this entry describes.]*
 - **No arm for any rectangular operation** (what §58 walked into). `vte-0.15.0/src/ansi.rs`'s CSI
   dispatch matches the `$` intermediate in exactly two places — `('p', [b'$'])` at `:1703` and
   `('p', [b'?', b'$'])` at `:1707`, the two DECRQM spellings — so `$ z`, `$ {`, `$ x`, `$ v`, `$ r` and
@@ -1814,6 +1921,35 @@ Audited file:line anchors behind the claims above, for later re-checking.
   abandoned parameters cannot leak into the following sequence. SUB (0x1a) takes the same transition but
   calls `substitute()` (`term/mod.rs:1443`), which is a `trace!` today and displayable by definition —
   hence CAN.
+- **The seam the gate sits in** (read for §102). `Processor::advance<H>` is
+  `pub fn advance<H>(&mut self, handler: &mut H, bytes: &[u8]) where H: Handler`
+  (`vte-0.15.0/src/ansi.rs:298-301`) — `Handler` is the ONLY bound, so any type implementing it can be
+  passed where `Term` was. The trait itself is **71 methods, every one with a default empty body**
+  (`ansi.rs:488-732`). `Term` exposes what the gate needs publicly: `grid()` (`term/mod.rs:645`),
+  `grid_mut()` (`:650`), `mode()` (`:709`), and `Cursor::input_needs_wrap` is a `pub` field
+  (`grid/mod.rs:52`).
+- **The scrolling region has exactly four writers** (§102, and the reason a mirror cannot drift).
+  `Term::scroll_region` is private (`term/mod.rs:301`) and assigned only at `:420` (`Term::new`),
+  `:701` (`Term::resize`, "Reset scrolling region"), `:1843` (`reset_state`) and `:2174-2175`
+  (`set_scrolling_region`). The last two are `Handler` methods and so pass through the gate; the first
+  two are calls cmote itself makes. `swap_alt` (`:714-735`) does **not** touch it, which is why cmote's
+  margins are not per-screen either. A fifth writer arriving in a version bump is the one disclosed
+  hazard and nothing catches it at build time.
+- **Two engine methods call their own siblings, not the gate's** (§102, and the trap the whole gate has
+  to be read for). `Term::newline` (`:1470-1476`) is `self.linefeed(); if LINE_FEED_NEW_LINE {
+  self.carriage_return(); }`, and `Term::goto_col` (`:1189`) is `self.goto(self.grid.cursor.point.line.0,
+  col)`. Forwarding either would run the margin-blind version of a method the gate has just replaced.
+  `goto` (`:1155-1170`) also shows the origin-mode defect §74 recorded: it adds `scroll_region.start` to
+  the line it is given, so a pure COLUMN move through `goto_col` drags the cursor downward.
+- **`Term::input` decides width before it writes** (`:1062-1136`). `c.width()` from `unicode_width`,
+  then zero-width characters combine with the previous cell, then `input_needs_wrap` triggers
+  `wrapline()` (`:960-980`), which sets `Flags::WRAPLINE` and returns the cursor to `Column(0)` — the
+  wrong column under a left margin, and the reason the flag has to be taken away from the engine.
+- **`clippy::missing_trait_methods` exists and fires** (clippy 0.1.97, rustc 1.97.1 — read for §102).
+  Run across cmote it reports 117 sites; denied on the gate's `impl` it turns a forgotten forward into
+  `error: missing trait method provided by default: <name>`. Verified by deleting `bell()` from the
+  forwarding list and watching the build fail, not assumed. This is the fact that reversed §5's
+  refusal of the margins build.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
   crate source.
@@ -1858,7 +1994,12 @@ Audited file:line anchors behind the claims above, for later re-checking.
   ground text — a megabyte of garbage in place of a memory cost. Discarding the bytes instead means
   filtering the stream on its way in, which §41 refuses for its own reasons. The remaining honest fix
   is a wrapper around the parser, which is the same price §5 puts on the margins. Recorded, priced, not
-  taken.
+  taken. *[§102 paid that price for the margins and this row does **not** come with it. The gate wraps
+  the `Handler`, which sits DOWNSTREAM of the payload: the OSC string accumulates inside
+  `vte::Parser` and the gate first hears about it at `osc_dispatch`, with the megabyte already
+  buffered. Capping it needs interception UPSTREAM of the parser, which is a different and harder
+  thing than what §102 built. Worth stating so the new route is not mis-cashed against a row it cannot
+  reach.]*
 - **The colour OSCs take lists, which the matrix had as single requests until §87.** `b"4"`
   (`ansi.rs:1366`) refuses an even parameter count and then walks `params[1..].chunks(2)`, so
   `OSC 4 ; 1 ; ? ; 3 ; ?` is two queries and two replies. `b"10" | b"11" | b"12"` (`:1422`) is one arm
@@ -1943,6 +2084,28 @@ Quoted where a row's wording now rests on it.
   open rather than answered against cmote — which is why §100 refuses the case where a region is
   likeliest rather than guessing at it. ECMA-48 itself, where the definition actually lives, is still
   unread here.
+
+  *[§102 acted on the first half of that and not the second. SL and SR are now bounded by the
+  scrolling region, because the region became readable and a shift is a scrolling operation — the
+  refusal §100 built on DECOM is retired. Whether a real xterm agrees is **still open**: ctlseqs says
+  no more than it did, and ECMA-48 is **still unread**, which is the same load-bearing gap §76 left on
+  SCP. The bound is now cmote's reasoning rather than cmote's caution, which is a different kind of
+  claim and worth marking as one.]*
+
+- **The wrap column under margins is the mode's, not the cursor's** (§102). xterm's
+  `ScrnRightMargin` / `ScrnLeftMargin` read the LEFT_RIGHT mode flag and never the cursor's column, so
+  with DECLRMM set a line breaks at the right margin **wherever it started** — text begun left of the
+  band flows rightward, meets the right margin and continues at the left one. cmote wrote the other
+  rule first (text outside the band keeping the whole page), which reads better, is nobody's
+  behaviour, and would have been a dialect. Corrected before it shipped, and pinned by a test that
+  states the surprising half rather than hiding it.
+
+- **The terminfo proves margins announce themselves.** All four capabilities `xterm-256color`
+  declares set mode 69 before they place anything —
+  `smglr=\E[?69h\E[%i%p1%d;%p2%ds`, `smglp=\E[?69h\E[%i%p1%ds`, `smgrp=\E[?69h\E[%i;%p1%ds`,
+  `mgc=\E[?69l`. §73 read this to check a traffic claim; §102 read the same four lines for the fact
+  that made it safe to stop cancelling every parametrised `CSI s` — a program that means margins says
+  so first, so the mode can be trusted to tell DECSLRM from SCOSC.
 
 ### DEC's own manual (`vt100.net/docs/vt510-rm/`, read for §94)
 
@@ -2434,9 +2597,12 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   **DECSLRM**, the VT420 left/right margins, whose final byte `vte` dispatches to save-cursor
   (`('s', []) => handler.save_cursor_position()`, parameters unread). Left alone, a margin request
   overwrites the engine's one saved-cursor slot, and the program's own `CSI u` then lands wherever the
-  request happened to sit. The parameter count is the only evidence available, since DECLRMM (mode 69)
-  — the mode that disambiguates the byte on a real VT420 — is one the engine never accepts; the bare
-  `CSI s` therefore still saves the cursor, and every save-cursor in the wild is that spelling. Offsets
+  request happened to sit. **Until §102 the parameter count was the only evidence available**, since
+  DECLRMM (mode 69) — the mode that disambiguates the byte on a real VT420 — was one the engine never
+  accepted, so every parametrised `s` was cancelled on that guess. cmote holds mode 69 now, so the
+  scanner reports the sequence and its two numbers and `process` decides: with the mode set it is
+  DECSLRM and the byte is still cancelled, without it the byte is a save-cursor and is let through. The
+  bare `CSI s` never reaches the decision, and every save-cursor in the wild is that spelling. Offsets
   name **the final byte itself**, a third convention next to a prompt mark's start-of-sequence and a
   selective erase's one-past-the-end, because that byte is the one being replaced: `process` advances
   the engine up to it, feeds **CAN** (0x18) in its place and resumes after it. Feeding nothing would
@@ -2444,6 +2610,30 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   `CSI 5;70 s` then `hello` would dispatch `('h', [])` with parameters 5 and 70. CAN because the ANSI
   state machine defines it as the cancel (`anywhere()` → `execute`, state Ground, no dispatch), rather
   than SUB, which is *defined* to be displayable, or a final byte that merely has no arm today.
+- **`term/gate.rs`** — the one place cmote sits **between** the parser and the engine (§102), and the
+  odd one out in this whole list: every other module here reads the byte stream a second time and acts
+  beside the engine, which is why none of them can break what the engine does. This one implements
+  `Handler` itself, holds `&mut Engine`, and is passed to `Processor::advance` in the engine's place. It
+  answers about two dozen methods and forwards the rest through a `forward!` macro — generated rather
+  than hand-written because sixty-odd near-identical bodies are sixty-odd chances to pass the wrong
+  argument, while a wrong *signature* does not compile. `#[deny(clippy::missing_trait_methods)]` on the
+  impl is what makes the whole route usable: a method left out of the list, today's or a future
+  version's, is a build error rather than a silent no-op. Two traps it has to be read for — the engine's
+  `newline` calls its OWN `linefeed` and `carriage_return`, and `goto_col` its own `goto`, so neither can
+  be forwarded once the gate has replaced what they call.
+- **`term/region.rs`** — the engine's vertical scrolling region, mirrored (§102). `Term::scroll_region`
+  is private with no accessor and no reply arm, which cost §100 a refusal and would have cost §102 the
+  whole feature. The mirror is exact by construction: the field has **four writers**, two of them
+  `Handler` methods the gate sees and two of them calls cmote makes, and the arithmetic here is a
+  transcription of the engine's — including the case where a zero top leaves the region starting above
+  the first row, mirrored rather than clamped so the two cannot part company.
+- **`term/margins.rs`** — the left and right margins and the deferred wrap (§102). Pure state and
+  arithmetic, no engine types, so the band rules are unit-tested with no terminal: where a column lands
+  under origin mode, how far a cursor may travel, what an omitted or zero parameter means, and which
+  requests are refused outright. Everything keys off **narrowed** rather than **enabled** — with the
+  band at the page edges the engine keeps every operation, so an ordinary session runs on the code it
+  ran on before §102 existed. It also holds cmote's own pending-wrap flag, taken off the engine because
+  the engine fires its own at the screen edge and wraps to column 0 instead of to the left margin.
 - **`term/osc133.rs`** — the shell-integration scanner (§34). `Scanner::feed` runs on the shared
   framer and returns *a list* of `(offset, Mark)` — A / B / C / D, with D's exit
   code parsed from its next field. `Prompts` holds the command state (`Idle`/`Prompt`/`Running`), the
