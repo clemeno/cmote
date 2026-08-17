@@ -49,6 +49,7 @@
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
+mod gate; // the one place cmote sits between the parser and the engine, so a decision can be pre-empted (§102)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear (§69)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
@@ -64,6 +65,7 @@ pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
+mod region; // mirrors the engine's private vertical scrolling region, so cmote can read back what DECSTBM set (§102)
 pub mod scp; // reads SCP, the direction a line's characters are laid down in (§76)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
@@ -288,7 +290,22 @@ impl Terminal {
 			paths: scp::Paths::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
+			region: region::Region::full(rows as usize),
 		}
+	}
+
+	/// Feed bytes to the engine, through the gate that stands between them (§102).
+	///
+	/// Every advance in this file goes through here, including the ones that feed sequences cmote
+	/// SYNTHESISED — a soft reset's long spelling (§72), a tab-stop rebuild (§74), a restored pen
+	/// (§85). Those have to pass the gate too: a synthesised DECSTBM changes the scrolling region
+	/// just as a remote's does, and a mirror that only watched the wire would miss it.
+	///
+	/// The three borrows are disjoint fields of `self`, which is what lets the parser, the engine and
+	/// the state kept beside it all be borrowed mutably at once.
+	fn advance(&mut self, bytes: &[u8]) {
+		let mut gate = gate::Gate::new(&mut self.term, &mut self.region);
+		self.parser.advance(&mut gate, bytes);
 	}
 
 	/// Feed a chunk of raw output from the shell, and return the bytes to send BACK to it as
@@ -385,7 +402,7 @@ impl Terminal {
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
 		if scanned.is_empty() {
-			self.parser.advance(&mut self.term, bytes);
+			self.advance(bytes);
 		} else {
 			let mut start = 0;
 			for (offset, split) in splits(scanned) {
@@ -394,7 +411,7 @@ impl Terminal {
 				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
 				// from being built backwards.
 				let offset = offset.max(start);
-				self.parser.advance(&mut self.term, &bytes[start..offset]);
+				self.advance(&bytes[start..offset]);
 				start = offset;
 				match split {
 					Split::Prompt(mark) => {
@@ -416,7 +433,7 @@ impl Terminal {
 					// leave the engine's parser mid-CSI, waiting to take the next final byte in the
 					// stream as this sequence's — see `term/cancel.rs` for what that costs.
 					Split::Cancel => {
-						self.parser.advance(&mut self.term, &[cancel::CANCEL]);
+						self.advance(&[cancel::CANCEL]);
 						start += 1;
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
@@ -426,7 +443,7 @@ impl Terminal {
 					Split::SgrStack(request) => self.apply_sgr_stack(request),
 				}
 			}
-			self.parser.advance(&mut self.term, &bytes[start..]);
+			self.advance(&bytes[start..]);
 		}
 		// The chunk is applied, so this is where a swap on or off the alternate screen is noticed —
 		// including one that carried no picture with it, which the split loop above never sees (§41).
@@ -621,7 +638,7 @@ impl Terminal {
 			feed.extend_from_slice(down);
 		}
 		feed.push(b'\r');
-		self.parser.advance(&mut self.term, &feed);
+		self.advance(&feed);
 	}
 
 	/// Carry out one selective-erase request (§56), with the engine already advanced past the
@@ -703,7 +720,7 @@ impl Terminal {
 		let (row, col) = self.screen().cursor_position();
 		let mut feed = SOFT_RESET.to_vec();
 		feed.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
-		self.parser.advance(&mut self.term, &feed);
+		self.advance(&feed);
 	}
 
 	/// Carry out DECST8C — clear every tab stop and set one every eight columns (§74).
@@ -723,7 +740,7 @@ impl Terminal {
 		let (_, columns) = self.screen().size();
 		let (_, col) = self.screen().cursor_position();
 		let feed = tabs::every_eighth_column(columns, col);
-		self.parser.advance(&mut self.term, &feed);
+		self.advance(&feed);
 	}
 
 	/// Answer DECXCPR — the cursor's position, in DEC's private spelling of the question (§82).
@@ -806,7 +823,7 @@ impl Terminal {
 				let protected =
 					protect::is_protected(self.term.grid().cursor.template.flags.bits());
 				let sgr = merged_pen(&self.term.grid().cursor.template, &saved, mask);
-				self.parser.advance(&mut self.term, sgr.as_bytes());
+				self.advance(sgr.as_bytes());
 				self.set_pen_protection(protected);
 			}
 		}
@@ -913,17 +930,25 @@ impl Terminal {
 		// a question dropped on the floor leaves the program that asked waiting on a terminal that has
 		// already moved on (§33).
 		//
-		// SL and SR are caught by this guard too, and for a DIFFERENT reason worth writing down rather
-		// than inheriting silently (§100). They name no coordinates, so origin mode cannot misplace
-		// them. What origin mode is here is EVIDENCE: DECOM only means anything once DECSTBM has cut a
-		// scrolling region, and a shift is a scrolling operation that ought to stop at that region's
-		// edges — which cmote cannot see. So where the one signal in reach says a region is probably
-		// there, cmote does nothing rather than shift rows the program had walled off. It is a partial
-		// guard and known to be one: a region set WITHOUT origin mode is invisible from here, and the
-		// row in §8 says so. It answers for the cells it could reach, which under origin mode is
-		// none of them.
+		// SL and SR USED to be caught by this guard, for a reason that was never quite the same one
+		// (§100). They name no coordinates, so origin mode cannot misplace them; origin mode was
+		// serving as EVIDENCE instead — DECOM only means anything once DECSTBM has cut a scrolling
+		// region, a shift ought to stop at that region's edges, and cmote could not see the region. So
+		// where the one signal in reach said a region was probably there, cmote did nothing rather
+		// than shift rows the program had walled off. It was a partial guard and the row in §8 said
+		// so: a region set WITHOUT origin mode was invisible from here.
+		//
+		// §102 removed the blindness rather than the guard. The scrolling region is mirrored now
+		// (`term/region.rs`), so a shift can be BOUNDED by the real band instead of refused on a
+		// proxy for it — which is both more sequences honoured and a stricter answer, since a region
+		// set without origin mode used to be shifted straight through. So the shift leaves this guard
+		// and takes its bound from the mirror, and the refusal it inherited is retired.
 		let origin = self.term.mode().contains(TermMode::ORIGIN);
-		if origin && !matches!(request, rect::Request::Checksum { .. }) {
+		if origin
+			&& !matches!(
+				request,
+				rect::Request::Checksum { .. } | rect::Request::Shift { .. }
+			) {
 			return;
 		}
 		let (rows, cols) = {
@@ -1165,16 +1190,19 @@ impl Terminal {
 	/// `columns` arrives already defaulted to at least 1 and clamped to the page width, so a shift by
 	/// the whole width blanks the page and a shift by more than it cannot run off the end.
 	fn shift_columns(&mut self, direction: rect::Direction, columns: usize) {
-		let (rows, cols) = {
-			let grid = self.term.grid();
-			(grid.screen_lines(), grid.columns())
-		};
+		let cols = self.term.grid().columns();
 		if cols == 0 || columns == 0 {
 			return;
 		}
+		// The rows the shift may touch: the vertical scrolling region, not the whole page (§102). A
+		// shift is a scrolling operation, and DECSTBM walls off the rows a scrolling operation may
+		// move — so a status line parked outside the band stays where it is while the band slides
+		// under it. Until the region could be read back this was the argument for refusing the
+		// sequence outright under origin mode (§100); now it is the argument for a loop bound.
+		let band = self.region;
 		let background = self.term.grid().cursor.template.bg;
 		let grid = self.term.grid_mut();
-		for row in 0..rows {
+		for row in band.first_row()..=band.last_row() {
 			let line = Line(row as i32);
 			let source: Vec<Cell> = (0..cols)
 				.map(|column| grid[line][Column(column)].clone())
@@ -1375,6 +1403,12 @@ impl Terminal {
 		// document would leave each picture floating over whatever text ended up on its old line.
 		// `ponytail:` a terminal with native graphics reflows its images instead of dropping them.
 		self.graphics.clear();
+		// The engine throws the scrolling region away on every resize — `Term::resize` assigns the
+		// full page back over it, whatever DECSTBM had set. That happens INSIDE the call above, with
+		// no sequence on the wire and no `Handler` method to watch, so the mirror is corrected here.
+		// One of the two writers `term/region.rs` names that this file, not the gate, is answerable
+		// for (§102).
+		self.region.reset(rows as usize);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
@@ -1771,6 +1805,13 @@ pub struct Terminal {
 	/// off the page — throw them away, and noticing that needs the previous answer as well as the
 	/// current one.
 	on_alternate: bool,
+	/// The engine's vertical scrolling region, mirrored (§102). The engine implements DECSTBM fully
+	/// and then keeps the answer to itself — `Term::scroll_region` is private, and the sequence that
+	/// would report it reaches an arm the engine leaves empty. Kept here because everything that
+	/// writes it is observable: the two sequence-driven writes arrive through the gate, and the two
+	/// resets are calls cmote itself makes. `term/region.rs` names all four and what would break the
+	/// mirror.
+	region: region::Region,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
@@ -4719,19 +4760,91 @@ mod tests {
 		assert_eq!(terminal.process(b"\x1b[3 @\x1b[6n"), b"\x1b[2;5R".to_vec());
 	}
 
-	/// Refused under origin mode, and for a reason SL and SR do not share with the rectangles: they
-	/// name no coordinates to misplace. DECOM is EVIDENCE that DECSTBM has cut a scrolling region a
-	/// shift ought to stop at — a region the engine keeps private — so cmote does nothing rather than
-	/// shift rows the program walled off (§100).
+	/// Fill every row of the page with the same eight letters, so a shift's effect on each row can be
+	/// read off independently of the others.
+	fn fill_rows(terminal: &mut Terminal, rows: u16) {
+		for row in 1..=rows {
+			terminal.process(format!("\x1b[{row};1Habcdefgh").as_bytes());
+		}
+	}
+
+	/// A shift is a scrolling operation, so it stops at the scrolling region's edges — the rows
+	/// DECSTBM walled off do not move (§102).
+	///
+	/// This is what §100 wanted and could not have: the region is private inside the engine, so the
+	/// shift was refused on a proxy instead. With the region mirrored the bound is the real one.
 	#[test]
-	fn a_shift_is_refused_while_origin_mode_is_set() {
-		let mut terminal = Terminal::new(2, 8);
-		terminal.process(b"abcdefgh");
-		terminal.process(b"\x1b[?6h\x1b[3 @");
-		assert_eq!(read(&terminal, 0, 0, 8), "abcdefgh", "untouched");
-		// And it works again the moment origin mode is off, so this is a guard and not a one-way door.
-		terminal.process(b"\x1b[?6l\x1b[3 @");
-		assert_eq!(read(&terminal, 0, 0, 8), "defgh");
+	fn a_shift_leaves_the_rows_outside_the_scrolling_region_alone() {
+		let mut terminal = Terminal::new(4, 8);
+		fill_rows(&mut terminal, 4);
+		// Rows 2 and 3 on the wire, so rows 1 and 2 counting from zero.
+		terminal.process(b"\x1b[2;3r\x1b[3 @");
+		assert_eq!(read(&terminal, 0, 0, 8), "abcdefgh", "above the band");
+		assert_eq!(read(&terminal, 1, 0, 8), "defgh", "in the band");
+		assert_eq!(read(&terminal, 2, 0, 8), "defgh", "in the band");
+		assert_eq!(read(&terminal, 3, 0, 8), "abcdefgh", "below the band");
+	}
+
+	/// Origin mode no longer costs the shift (§102, retiring §100's refusal).
+	///
+	/// DECOM was standing in for a region cmote could not read, and refusing on it was both too much
+	/// — a program with origin mode and no region got nothing — and too little, since a region set
+	/// WITHOUT origin mode was shifted straight through. Now the region itself is the bound and
+	/// origin mode is not consulted at all.
+	#[test]
+	fn a_shift_runs_under_origin_mode_and_still_stops_at_the_region() {
+		let mut terminal = Terminal::new(4, 8);
+		fill_rows(&mut terminal, 4);
+		terminal.process(b"\x1b[2;3r\x1b[?6h\x1b[3 @");
+		assert_eq!(read(&terminal, 0, 0, 8), "abcdefgh", "above the band");
+		assert_eq!(read(&terminal, 1, 0, 8), "defgh", "shifted, not refused");
+		assert_eq!(read(&terminal, 3, 0, 8), "abcdefgh", "below the band");
+	}
+
+	/// A shift with no region set still takes the whole page, which is the overwhelmingly common case
+	/// and the one §100's tests already pinned. Kept as its own test because the bound moved.
+	#[test]
+	fn a_shift_with_no_region_set_still_takes_every_row() {
+		let mut terminal = Terminal::new(4, 8);
+		fill_rows(&mut terminal, 4);
+		terminal.process(b"\x1b[3 @");
+		for row in 0..4 {
+			assert_eq!(read(&terminal, row, 0, 8), "defgh");
+		}
+	}
+
+	/// RIS throws the scrolling region away INSIDE the engine — no sequence on the wire says so, and
+	/// nothing but the `Handler` boundary can see it happen. The mirror has to follow, or a shift
+	/// after a reset would go on obeying a band no longer there (§102).
+	#[test]
+	fn a_full_reset_puts_the_mirrored_region_back() {
+		let mut terminal = Terminal::new(4, 8);
+		terminal.process(b"\x1b[2;3r");
+		// RIS clears the page as well, so the text goes down after it rather than before.
+		terminal.process(b"\x1bc");
+		fill_rows(&mut terminal, 4);
+		terminal.process(b"\x1b[3 @");
+		for row in 0..4 {
+			assert_eq!(read(&terminal, row, 0, 8), "defgh", "the band is gone");
+		}
+	}
+
+	/// A resize does the same thing, and from a place even further out of reach: `Term::resize`
+	/// assigns the full page over the region with no `Handler` call at all, so this one is corrected
+	/// by `Terminal::resize` itself (§102).
+	#[test]
+	fn a_resize_puts_the_mirrored_region_back() {
+		let mut terminal = Terminal::new(4, 8);
+		terminal.process(b"\x1b[2;3r");
+		terminal.resize(4, 8);
+		// Same height, different width, so the engine reflows and resets the region without the row
+		// count moving under the test.
+		terminal.resize(4, 9);
+		fill_rows(&mut terminal, 4);
+		terminal.process(b"\x1b[3 @");
+		for row in 0..4 {
+			assert_eq!(read(&terminal, row, 0, 8), "defgh", "the band is gone");
+		}
 	}
 
 	/// XTCHECKSUM (`CSI Ps # y`) would move that calculation, and cmote answers **one** calculation —
