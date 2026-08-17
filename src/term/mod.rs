@@ -991,7 +991,9 @@ impl Terminal {
 		if origin
 			&& !matches!(
 				request,
-				rect::Request::Checksum { .. } | rect::Request::Shift { .. }
+				rect::Request::Checksum { .. }
+					| rect::Request::Shift { .. }
+					| rect::Request::Columns { .. }
 			) {
 			return;
 		}
@@ -1046,6 +1048,9 @@ impl Terminal {
 			}
 			rect::Request::Unscroll { lines } => {
 				self.unscroll(usize::from(lines).min(rows));
+			}
+			rect::Request::Columns { columns, insert } => {
+				self.shift_band_columns(usize::from(columns), insert);
 			}
 			rect::Request::Checksum { id, corners } => {
 				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
@@ -1281,6 +1286,69 @@ impl Terminal {
 			};
 			if let Some(column) = stranded {
 				grid[line][Column(column)] = background.into();
+			}
+		}
+	}
+
+	/// Insert or delete whole COLUMNS at the cursor — DECIC and DECDC (§102).
+	///
+	/// The vertical twins of IL and DL: where those open or close a row across the band's columns,
+	/// these open or close a column across the region's rows. A column pushed past the right margin
+	/// is gone; the columns that arrive are the pen's background, as they are for every other
+	/// operation here that has to lay something down behind itself (§58, §100).
+	///
+	/// **Legal without margins**, and this is why they are applied here rather than in the gate: with
+	/// no margins the band is the whole page, so the operation still means something — which is not
+	/// true of anything the gate takes over, all of which are the engine's own until a margin
+	/// narrows them. `Margins::band` is what resolves "no margins" to a band instead of a refusal.
+	///
+	/// Refused when the cursor sits outside the band or outside the scrolling region, which is
+	/// xterm's test and the same one IL and DL apply: there is no column to open from out there, and
+	/// guessing one would move text the program had walled off.
+	fn shift_band_columns(&mut self, columns: usize, insert: bool) {
+		let cols = self.term.grid().columns();
+		let (left, right) = self.margins.band(cols);
+		let (top, bottom) = (self.region.first_row(), self.region.last_row());
+		let (row, column) = {
+			let cursor = self.term.grid().cursor.point;
+			(cursor.line.0.max(0) as usize, cursor.column.0)
+		};
+		if bottom < top || column < left || column > right || row < top || row > bottom {
+			return;
+		}
+		let room = right - column + 1;
+		let columns = columns.min(room);
+		if columns == 0 {
+			return;
+		}
+		let background = self.term.grid().cursor.template.bg;
+		let grid = self.term.grid_mut();
+		for row in top..=bottom {
+			let line = Line(row as i32);
+			if columns < room {
+				// Read out and write back through a buffer, for `copy_area`'s reason: the source and
+				// destination overlap by definition, so choosing a walk direction and hoping the
+				// arithmetic holds is the version of this that goes wrong quietly.
+				let source: Vec<Cell> = (left..=right)
+					.map(|column| grid[line][Column(column)].clone())
+					.collect();
+				for destination in column..=right {
+					let from = if insert {
+						destination
+							.checked_sub(columns)
+							.filter(|from| *from >= column)
+					} else {
+						Some(destination + columns).filter(|from| *from <= right)
+					};
+					grid[line][Column(destination)] = match from {
+						Some(from) => source[from - left].clone(),
+						None => background.into(),
+					};
+				}
+			} else {
+				for destination in column..=right {
+					grid[line][Column(destination)] = background.into();
+				}
 			}
 		}
 	}
@@ -4544,6 +4612,82 @@ mod tests {
 			terminal.screen().history_size() > 0,
 			"a full-width scroll still reaches the history"
 		);
+	}
+
+	/// DECIC and DECDC open and close a whole COLUMN across every row — the vertical twins of IL and
+	/// DL, and legal with no margins at all, where the band is the whole page (§102).
+	#[test]
+	fn a_column_insert_and_delete_take_every_row_of_the_page() {
+		// Every row of the region, not the cursor's row alone — which is the whole difference from
+		// ICH and DCH, and why the two halves below need a page each rather than one page twice.
+		let mut inserted = Terminal::new(3, 8);
+		for row in 1..=3 {
+			inserted.process(format!("\x1b[{row};1HABCDEFGH").as_bytes());
+		}
+		// One column in at column 3, so `H` falls off the right edge of every row.
+		inserted.process(b"\x1b[1;3H\x1b['}");
+		for row in 0..3 {
+			assert_eq!(read(&inserted, row, 0, 8), "ABCDEFG", "row {row}");
+		}
+
+		let mut deleted = Terminal::new(3, 8);
+		for row in 1..=3 {
+			deleted.process(format!("\x1b[{row};1HABCDEFGH").as_bytes());
+		}
+		deleted.process(b"\x1b[1;3H\x1b['~");
+		for row in 0..3 {
+			assert_eq!(read(&deleted, row, 0, 8), "ABDEFGH", "row {row}");
+		}
+	}
+
+	/// With margins on they take the band and stop at the right one, so the neighbouring column's
+	/// text does not slide.
+	#[test]
+	fn a_column_insert_stops_at_the_right_margin() {
+		// Columns 4 to 7 on the wire, so the band is columns 3 to 6 counting from zero.
+		let mut inserted = Terminal::new(1, 8);
+		inserted.process(b"\x1b[1;1HABCDEFGH");
+		set_margins(&mut inserted, 4, 7);
+		inserted.process(b"\x1b[1;5H\x1b['}");
+		assert_eq!(
+			read(&inserted, 0, 0, 8),
+			"ABCDEFH",
+			"G fell off the margin, H stood still"
+		);
+
+		let mut deleted = Terminal::new(1, 8);
+		deleted.process(b"\x1b[1;1HABCDEFGH");
+		set_margins(&mut deleted, 4, 7);
+		deleted.process(b"\x1b[1;5H\x1b['~");
+		assert_eq!(read(&deleted, 0, 0, 8), "ABCDFGH", "and back the other way");
+	}
+
+	/// Refused from outside the band, which is xterm's test and the one IL and DL apply: there is no
+	/// column to open from out there, and guessing one would move text the program walled off.
+	#[test]
+	fn a_column_insert_from_outside_the_band_does_nothing() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"\x1b[1;1HABCDEFGH");
+		set_margins(&mut terminal, 4, 7);
+		terminal.process(b"\x1b[1;1H\x1b['}");
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH");
+	}
+
+	/// And bounded by the scrolling region's rows, since the region is the other half of the same
+	/// wall — a row the program walled off vertically is not a row a column operation may move.
+	#[test]
+	fn a_column_insert_leaves_rows_outside_the_scrolling_region_alone() {
+		let mut terminal = Terminal::new(4, 8);
+		for row in 1..=4 {
+			terminal.process(format!("\x1b[{row};1HABCDEFGH").as_bytes());
+		}
+		// Rows 2 and 3 on the wire, so rows 1 and 2 counting from zero.
+		terminal.process(b"\x1b[2;3r");
+		terminal.process(b"\x1b[2;3H\x1b['}");
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH", "above the region");
+		assert_eq!(read(&terminal, 1, 0, 8), "ABCDEFG", "inside it");
+		assert_eq!(read(&terminal, 2, 0, 8), "ABCDEFG", "inside it");
+		assert_eq!(read(&terminal, 3, 0, 8), "ABCDEFGH", "below the region");
 	}
 
 	/// The cancel has to END the sequence, not merely withhold its final byte: the parameters have

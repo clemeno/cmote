@@ -171,6 +171,19 @@ impl Margins {
 		self.right
 	}
 
+	/// The band an operation should act on, which is the whole page when there are no margins.
+	///
+	/// The gate never needs this — it steps aside entirely while the band is the page — but DECIC and
+	/// DECDC do: they are defined in terms of the margins and are legal without them, so "no margins"
+	/// has to resolve to a band rather than to a refusal (§102).
+	pub fn band(&self, cols: usize) -> (usize, usize) {
+		if self.narrowed(cols) {
+			(self.left, self.right)
+		} else {
+			(0, cols.saturating_sub(1))
+		}
+	}
+
 	/// Whether a wrap has been earned and not yet taken.
 	pub fn pending_wrap(&self) -> bool {
 		self.pending_wrap

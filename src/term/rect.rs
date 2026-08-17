@@ -329,6 +329,16 @@ pub enum Request {
 	///
 	/// `lines` is defaulted here and clamped where it is applied, which needs a page height.
 	Unscroll { lines: u16 },
+	/// DECIC and DECDC — insert or delete whole COLUMNS at the cursor, across every row of the
+	/// scrolling region, within the left and right margins (§102).
+	///
+	/// The vertical twins of IL and DL, and the only sequences in this module whose reach is decided
+	/// by state rather than by their own parameters: they take the band the margins mark out, and the
+	/// rows the scrolling region marks out, and touch nothing else.
+	///
+	/// `columns` is defaulted here to at least one and clamped where it is applied, which needs the
+	/// band.
+	Columns { columns: u16, insert: bool },
 	/// DECRQCRA — report a checksum of the rectangle, and change nothing (§60). `id` is the label
 	/// the program attached so it can match the answer to the question, echoed back untouched.
 	///
@@ -516,6 +526,18 @@ impl Rectangles {
 			// for SL and SR above.
 			(b'T', None, [b'+']) => Some(Request::Unscroll {
 				lines: number(&numbers, 0).max(1),
+			}),
+			// DECIC / DECDC — insert or delete columns, under an apostrophe intermediate `vte` has no
+			// arm for at all, so like the two above they reach nothing and are cmote's to read (§102).
+			// The near-miss rule again: `CSI Ps }` and `CSI Ps ~` without the intermediate are other
+			// sequences entirely, and the intermediate is the whole of what tells them apart.
+			(b'}', None, [b'\'']) => Some(Request::Columns {
+				columns: number(&numbers, 0).max(1),
+				insert: true,
+			}),
+			(b'~', None, [b'\'']) => Some(Request::Columns {
+				columns: number(&numbers, 0).max(1),
+				insert: false,
 			}),
 			// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
 			// mean anything; a fourth leaves the extent where it was, rather than guessing at a
@@ -1471,6 +1493,56 @@ mod tests {
 				"{sequence:?}"
 			);
 		}
+	}
+
+	/// DECIC and DECDC (§102), under an apostrophe intermediate `vte` has no arm for at all — so
+	/// unlike SL, SR and UNSCROLL these have no engine behaviour to be mistaken for, only each other.
+	#[test]
+	fn a_column_insert_and_delete_read_their_counts_and_their_direction() {
+		assert_eq!(
+			scan(b"\x1b[3'}"),
+			vec![(
+				5,
+				Request::Columns {
+					columns: 3,
+					insert: true
+				}
+			)]
+		);
+		assert_eq!(
+			scan(b"\x1b[2'~"),
+			vec![(
+				5,
+				Request::Columns {
+					columns: 2,
+					insert: false
+				}
+			)]
+		);
+		// Omitted and zero are both one column, as they are for every other `Ps`-counted operation.
+		assert_eq!(
+			scan(b"\x1b['}"),
+			vec![(
+				4,
+				Request::Columns {
+					columns: 1,
+					insert: true
+				}
+			)]
+		);
+		assert_eq!(
+			scan(b"\x1b[0'~"),
+			vec![(
+				5,
+				Request::Columns {
+					columns: 1,
+					insert: false
+				}
+			)]
+		);
+		assert!(scan(b"\x1b[3}").is_empty(), "no intermediate, not ours");
+		assert!(scan(b"\x1b[3 }").is_empty(), "a different intermediate");
+		assert!(scan(b"\x1b[?3'}").is_empty(), "a marker rules it out");
 	}
 
 	/// UNSCROLL (§101), and the neighbour it must not be read as: `CSI Ps T` is SD, which the engine
