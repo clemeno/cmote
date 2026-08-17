@@ -24,6 +24,18 @@
 
 use std::path::{Path, PathBuf};
 
+/// What every shell cmote can start understands as "leave now" (§104).
+///
+/// One word for all six, which is the rare case where the four dialects agree — `cd` needed a method
+/// per shell and this needs none. `exit` at a prompt is the shell's own way out, so it runs whatever
+/// that shell runs on the way: PSReadLine's history flush, a `~/.bash_logout`, an `EXIT` trap the user
+/// set. (cmd's `exit` takes a `/b` for leaving a batch file without leaving the interpreter; a shell at
+/// its prompt is not in one, so the bare word is right.)
+///
+/// It is TYPED, so it is only ever sent when typing makes sense — see `Tab::end_session`, which will not
+/// type at a full-screen program.
+pub const QUIT_COMMAND: &str = "exit";
+
 /// Which shell a button opens. The label and the session's endpoint text come off this, so it is
 /// what tells `pwsh` from `powershell` on screen — the two are different programs with different
 /// syntax, and a status bar that called both "PowerShell" would be lying about which one is running.

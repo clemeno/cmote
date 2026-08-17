@@ -45,6 +45,25 @@ use crate::ssh::client::SessionMsg;
 /// little slack costs nothing.
 const ANSWER_BOUND: usize = 8;
 
+/// How long a shell is given to leave on its own before it is killed (§104).
+///
+/// The GUI types the shell's own `exit` before it asks for a teardown (`Tab::end_session`), and a shell
+/// standing at its prompt acts on that in tens of milliseconds. This is roughly an order of magnitude
+/// more than that, so a slow profile or a shell writing its history still gets out on its own terms —
+/// and it is short enough that nobody watches it, since the GUI has already left for the home screen by
+/// the time this runs.
+///
+/// The wait is spent whether or not anything was typed: the session task cannot see the grid, so it
+/// does not know whether the GUI judged typing safe. That costs a full window on the one path where
+/// nothing was typed (a full-screen program was up), which is invisible except when quitting cmote.
+const GOODBYE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Quitting cmote waits for every live session to report itself down, and gives up after
+/// `QUIT_DRAIN_TIMEOUT` (§30). A goodbye window that reached into that budget would turn every quit
+/// with a local tab open into a wait for the timeout, and the drain would report a session that never
+/// came down. Checked here rather than remembered: the two constants live in different modules.
+const _: () = assert!(GOODBYE.as_millis() * 2 <= crate::app::QUIT_DRAIN_TIMEOUT.as_millis());
+
 /// Run a local session until the shell exits or the GUI asks it to stop.
 ///
 /// Every outcome is reported as exactly one terminal event, the same contract the SSH session task
@@ -237,14 +256,22 @@ pub async fn run(
 					| Some(SessionMsg::Passphrase(_))
 					| Some(SessionMsg::Interactive(_)) => {}
 
-					// Disconnect, or the command loop dropped the link (the tab closed, the app is
-					// quitting). The shell is killed rather than sent an EOF: cmote cannot know whether
-					// this one would exit on it — a `cmd.exe` at a prompt does, one running a program does
-					// not — and a Disconnect the user confirmed has to actually end the session.
-					Some(SessionMsg::Disconnect) | None => {
-						pty.close();
+					// Disconnect: the user confirmed one, the tab is closing, cmote is quitting. The GUI has
+					// typed the shell's own `exit` just before this wherever typing was safe (§104), so the
+					// shell is most likely already on its way out — give it a moment to finish going before
+					// the kill below, and it gets to run its own exit path instead of being terminated
+					// mid-history-write. A shell that will not go (something is running in front of it, it
+					// ignored the word) is killed a fraction of a second later, which is what happened
+					// immediately before this and is still the guarantee: a confirmed Disconnect ends the
+					// session.
+					Some(SessionMsg::Disconnect) => {
+						farewell(&mut stream).await;
 						break;
 					}
+					// The command loop dropped the link without a Disconnect — the tab was dropped, or the
+					// worker went away. Nothing was typed, so there is nothing to wait for and no one left
+					// to tell: straight to the kill.
+					None => break,
 				}
 			}
 		}
@@ -254,6 +281,41 @@ pub async fn run(
 	// above. Either way the session is over and the GUI is told once.
 	pty.close();
 	let _ = events.send(SshEvent::Disconnected).await;
+}
+
+/// Wait up to [`GOODBYE`] for the shell to exit on its own, and say whether it did (§104).
+///
+/// The output is DRAINED and dropped rather than forwarded. By the time this runs the GUI has already
+/// dropped its emulator and gone home, so a goodbye line has nowhere to be drawn — but the bytes still
+/// have to be taken, because the channel between the reader thread and here is bounded: a shell whose
+/// last words filled it would block writing them and never reach its own exit, and the wait would then
+/// time out on a shell that was trying to leave.
+///
+/// The return value is for the log only. Both outcomes are correct — one is the shell leaving, the other
+/// is the kill that follows doing its job — so nothing branches on it.
+async fn farewell(stream: &mut super::pty::Stream) -> bool {
+	let left = tokio::time::timeout(GOODBYE, async {
+		loop {
+			tokio::select! {
+				biased;
+				// Drained, not forwarded. `None` is the stream ending, which means the pty is already gone.
+				chunk = stream.bytes.recv() => {
+					if chunk.is_none() { break }
+				}
+				// The shell exited on its own, which is the whole point of waiting.
+				_ = stream.exited.recv() => break,
+			}
+		}
+	})
+	.await
+	.is_ok();
+	if !left {
+		// Not an error — a shell with a program running in front of it cannot act on a typed word. Logged
+		// because it is the difference between a shell that ended itself and one cmote terminated, and
+		// that difference is invisible from the GUI.
+		eprintln!("the local shell did not leave on its own; ending it the hard way");
+	}
+	left
 }
 
 /// A fresh cancel flag for a transfer about to start, keeping a clone for the ✕ to raise (§16).

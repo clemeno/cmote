@@ -61,7 +61,9 @@ references below (§n) point into it.
   asks **Quit cmote?** first — telling you how many live sessions it will disconnect — so a stray
   click never drops your work. On confirm, every session is **disconnected cleanly** (a proper SSH
   channel close, not a yanked socket) and only then does the process exit; a wedged session can't
-  hold quit open past a short timeout. **Ctrl+D** closes the current tab, but only once you're back
+  hold quit open past a short timeout. A **local** shell is asked to `exit` on its own first, so it
+  runs whatever it runs on the way out — PowerShell's history flush, a `.bash_logout` — and is only
+  terminated if it doesn't go (§104). **Ctrl+D** closes the current tab, but only once you're back
   on the home screen — on a live shell it stays EOF to the remote (the way you log out), so
   Ctrl+D logs out, and Ctrl+D again closes the tab, just like a terminal (§30). In a **local**
   **Command Prompt** or **PowerShell** tab, where the interpreter ignores EOF outright, cmote ends
@@ -1210,7 +1212,10 @@ screen), *not* close the tab; a second **Ctrl+D** there then closes it. Then the
 **local** tab: in **Git Bash** the shell itself logs out, and in **Command Prompt** / **PowerShell** —
 which drop the byte on the floor — cmote ends the session for them, with no confirmation card either
 way (§104). Start `more` (or any pager) in a local PowerShell tab first and press **Ctrl+D**: it
-should scroll half a page, because a full-screen program keeps the key.
+should scroll half a page, because a full-screen program keeps the key. To see the shell leave on its own
+terms rather than being terminated, run a local PowerShell tab, type a couple of commands, then
+**Disconnect** — and check `(Get-PSReadLineOption).HistorySavePath`: the commands should be in it, because
+cmote typed `exit` and waited for the shell to finish going.
 
 **17. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
 forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the

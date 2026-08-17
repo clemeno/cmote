@@ -10892,34 +10892,68 @@ key rather than two that happen to agree on QWERTY.
 
 ### What "ends the session" actually is
 
-Worth spelling out, because "cmote ends it" reads gentler than what happens. `end_local_shell` runs the
-confirmed Disconnect's teardown, and that teardown is **not** a shell being asked to leave:
+Worth spelling out, because "cmote ends it" read gentler than what the first version did. As written, a
+local teardown was **not** a shell being asked to leave:
 
-1. The **GUI goes first, synchronously**: the session is remembered (§22), transfers are abandoned,
+1. The **GUI went first, synchronously**: the session is remembered (§22), transfers are abandoned,
    `Disconnect` is *queued*, the emulator is dropped and the tab is on the home screen — before anything
    on the session side has happened. So the navigation does not wait for a clean anything.
-2. The session task then takes `Disconnect` and calls `Pty::close`, which is `TerminateProcess` on the
-   shell. No profile exit hook, no `exit` typed, nothing flushed on the way out.
+2. The session task then took `Disconnect` and called `Pty::close`, which is `TerminateProcess` on the
+   shell. No profile exit hook, no `exit`, nothing flushed on the way out.
 3. Dropping the master closes the pseudoconsole, and whatever the shell had started dies with it.
 
-That third step was measured, with the case that prompted the question: `node` at a local `pwsh` prompt,
-node v24.18.0, a real ConPTY. Node's REPL **stays on the main screen** (`is_alternate()` is `false`), which
-is why the pager guard does not save it — the key is claimed and node never sees the `0x04`. After the
-teardown the node process is **gone**, so nothing is orphaned; it was never asked to exit either. The grid
-goes with the emulator, so what was on screen is not there to read afterwards.
+Step three was measured with the case that prompted the question: `node` at a local `pwsh` prompt, node
+v24.18.0, a real ConPTY. The REPL **stays on the main screen** (`is_alternate()` is `false`), which is why
+the pager guard does not save it — the key is claimed and node never sees the `0x04`. After the teardown
+the node process is **gone**, so nothing is orphaned; it was never asked to exit either. The grid goes with
+the emulator, so what was on screen is not there to read afterwards.
 
-A remote Disconnect is cleaner than this by nature — it closes an SSH channel and the far side's shell
-gets a hangup it can act on. A local one is a kill. The tidier version types the shell's own `exit` and
-keeps the kill as the fallback after a timeout, which is a timer and a state machine, and is not done.
+A remote Disconnect is cleaner than that by nature: it closes an SSH channel and the far side's shell gets
+a hangup it can act on. A local session has no protocol to be clean *in*, which is why step two now has a
+shell being asked first.
+
+### Asking before killing
+
+`Tab::end_session` replaces the plain `Disconnect` at **every** teardown — the button, Ctrl+D, a tab
+closing, cmote quitting — because the difference was never in why the session ends. For a local session it
+types the shell's own `exit` (one word for all six shells, `shells::QUIT_COMMAND`) and then asks for the
+teardown; the session task waits up to `GOODBYE` (800 ms) for the child to actually go before the kill.
+The kill is now the fallback rather than the mechanism, so a shell gets its own exit path: PSReadLine
+flushing history, a `~/.bash_logout`, an exit trap the user wrote.
+
+Measured through the real session task with a real `pwsh`, from `Disconnect` to `Disconnected`:
+
+| | time | what happened |
+|---|---|---|
+| asked (the ordinary case) | **115 ms** | the shell exited on its own; no kill, no log line |
+| unasked (a full-screen program was up) | **801 ms** | the window elapses and the kill ends it |
+
+Two things about that, both deliberate:
+
+- **The word is not typed at a full-screen program.** `exit` is not a message, it is four keystrokes: at a
+  `vim` in normal mode `x` deletes the character under the cursor and `i` starts inserting, so the tidier
+  teardown would edit the user's file on the way out. The GUI holds this decision because only the GUI can
+  see the grid, and `end_session` runs before the emulator is dropped for exactly that reason.
+- **The wait is spent either way**, because the session task cannot see the grid and so cannot know whether
+  anything was typed. That is the 801 ms row: invisible everywhere except a quit, and `GOODBYE` is checked
+  at COMPILE TIME to be well inside `QUIT_DRAIN_TIMEOUT` (§30) so a quit can never end up waiting for the
+  drain's own timeout instead. Two constants in two modules, related by an assertion rather than by a
+  comment.
 
 ### What it cost
 
-- `local/shells.rs`: `Kind::quits_on_eof`, one method, plus the test that writes the split down per kind.
-- `app.rs`: one block in `on_key`, `end_local_shell` and `on_alternate_screen`, three tests — the shell
-  that ends, the two that keep the key (a local Git Bash and any remote), and the two presses excluded.
+- `local/shells.rs`: `Kind::quits_on_eof` and `QUIT_COMMAND`, plus the test that writes the EOF split down
+  per kind.
+- `app.rs`: one block in `on_key`, `end_local_shell`, `on_alternate_screen`, `end_session` at the three
+  teardown sites that had a plain `Disconnect`, and `QUIT_DRAIN_TIMEOUT` made `pub(crate)` so the goodbye
+  window can be checked against it. Four tests — the shell that ends, the two that keep the key (a local
+  Git Bash and any remote), the two presses excluded, and what a teardown types at which shell.
+- `local/session.rs`: `GOODBYE`, the compile-time tie to the quit budget, and `farewell` — which drains the
+  output while it waits, because the shell's last words must not fill a bounded channel and block the exit
+  they are on the way to.
 - `README.md`: the keyboard table, the tour's quit paragraph, and the manual-test step, which now names
   the pager case.
-- Tests 1333 → 1337.
+- Tests 1333 → 1339.
 
 ### Not done
 
@@ -10930,7 +10964,10 @@ keeps the kill as the fallback after a timeout, which is a timer and a state mac
   to write a cwd announcer into the user's own profile, and that refusal is what costs this. **Ctrl+Shift+D
   is the way out** and always was: it is excluded from the binding and `control_byte('D')` is the same
   `0x04`, so it reaches the program and quits it with the session intact. Undocumented as such, since it
-  exists as a consequence of the rule rather than as a decision.
+  exists as a consequence of the rule rather than as a decision. The teardown then types `exit` AT the
+  REPL, which answers with an error and is killed a fraction of a second later — noise in a scrollback
+  nobody reads, and the alternative is a heuristic for "is a program running" that cmote cannot honestly
+  compute.
 - **Ctrl+D still does nothing on a local shell inside a pager**, which is correct, and nothing tells the
   user which of the two states they are in. A terminal has never had to say.
 - **The probe was thrown away rather than kept.** It spawned three interactive shells and killed them,

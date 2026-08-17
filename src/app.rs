@@ -88,7 +88,12 @@ const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
 /// cut mid-flight. A session that never acknowledges (a wedged transport) must not wedge quit
 /// with it, so after this long the app leaves anyway. In practice the drain finishes in
 /// milliseconds — a local channel EOF, not a network round-trip — so this bound is never hit.
-const QUIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+///
+/// `pub(crate)` for one reason: a LOCAL session's teardown holds its own short window open for the shell
+/// to leave on its own (§104), and that window has to stay well inside this budget or a quit with a local
+/// tab open would always wait for this timeout. `local::session` checks the relationship at compile time
+/// rather than restating it in a comment.
+pub(crate) const QUIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
@@ -1219,7 +1224,9 @@ impl App {
 		for tab in self.tabs_mut().filter(|tab| tab.is_live()) {
 			// Saves each session before it goes (§22), the same snapshot a disconnect writes.
 			tab.persist_session();
-			tab.send_command(SshCommand::Disconnect);
+			// A local shell is asked to leave on its own first, which is why this is not a plain
+			// Disconnect (§104). The window it costs is a fraction of `QUIT_DRAIN_TIMEOUT`.
+			tab.end_session();
 		}
 		self.quit = Some(QuitPhase::Draining {
 			pending,
@@ -1307,10 +1314,11 @@ impl App {
 		let Some((pane, index)) = self.locate(id) else {
 			return iced::Task::none();
 		};
-		// Tear the session down cleanly first: the Disconnect closes the remote side; dropping the
-		// tab then drops its command sender, which ends its worker loop (§4, §26).
+		// Tear the session down cleanly first: the Disconnect closes the remote side — a local shell is
+		// asked to leave on its own before it (§104) — and dropping the tab then drops its command
+		// sender, which ends its worker loop (§4, §26).
 		if let Some(region) = self.regions.get_mut(pane) {
-			region.tabs[index].send_command(SshCommand::Disconnect);
+			region.tabs[index].end_session();
 		}
 		self.remove_tab(pane, index)
 	}
@@ -5068,11 +5076,42 @@ impl Tab {
 		// leaves the partial on the far side either way.
 		self.persist_session();
 		self.abandon_transfers();
-		self.send_command(SshCommand::Disconnect);
+		// Before the emulator is dropped on the next line: `end_session` reads the grid to decide whether
+		// typing at this shell is safe (§104), so the order of these two is not cosmetic.
+		self.end_session();
 		self.terminal = None;
 		self.forget_connection();
 		self.clear_grid_interaction();
 		self.go_home()
+	}
+
+	/// Ask this tab's session to end, giving a LOCAL shell the chance to end itself first (§104).
+	///
+	/// Every teardown goes through here — the Disconnect button, Ctrl+D, a tab closing, cmote quitting —
+	/// because the difference is not in why the session is ending but in what ending it means.
+	///
+	/// A **remote** needs nothing extra: `Disconnect` closes the SSH channel and the far side's shell gets
+	/// a hangup it can act on, which is the protocol's own clean path. A **local** session has no protocol
+	/// at all — the teardown underneath is `TerminateProcess` on the shell — so the shell is asked, in its
+	/// own language, to leave. `exit` at a prompt runs whatever that shell runs on the way out: PSReadLine
+	/// flushing its history, a `~/.bash_logout`, an exit trap the user wrote. The session task then waits a
+	/// fraction of a second for it to go before killing it, so the kill becomes the fallback rather than
+	/// the mechanism.
+	///
+	/// **Not while the alternate screen is up**, and that is the load-bearing half. `exit` is not a
+	/// message, it is four keystrokes: at a `vim` in normal mode `x` deletes the character under the cursor
+	/// and `i` starts inserting, so the tidier teardown would edit the user's file on its way out. A
+	/// session showing a full-screen program is therefore torn down the abrupt way, exactly as it was
+	/// before this existed. A line-based program (a `node` REPL) is not detectable this way and gets the
+	/// word as a line of input, which it answers with an error and cmote follows with the kill — noisy in
+	/// the scrollback nobody reads, and no worse than before.
+	fn end_session(&mut self) {
+		if self.local.is_some() && !self.on_alternate_screen() {
+			self.send_command(SshCommand::Input(
+				format!("{}\r", crate::local::shells::QUIT_COMMAND).into_bytes(),
+			));
+		}
+		self.send_command(SshCommand::Disconnect);
 	}
 
 	/// End a local session because Ctrl+D asked for it (§104).
@@ -9418,9 +9457,14 @@ mod tests {
 			iced::keyboard::Modifiers::CTRL,
 		));
 
+		assert_eq!(
+			next_input(&mut rx).as_deref(),
+			Some(&b"exit\r"[..]),
+			"the shell is asked to leave on its own terms first (§104)"
+		);
 		assert!(
 			matches!(next_command(&mut rx), Some(SshCommand::Disconnect)),
-			"the session is told to tear down"
+			"and then the session is told to tear down"
 		);
 		assert!(
 			app.connection.is_none() && app.local.is_none(),
@@ -9431,6 +9475,52 @@ mod tests {
 			matches!(app.screen, Screen::Home),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
 		);
+	}
+
+	/// What a teardown types, and at which shells (§104). A local session's kill is `TerminateProcess`,
+	/// so the shell is asked to leave first and gets to run its own exit path; the two cases that are NOT
+	/// asked are the point of the test.
+	///
+	/// A remote is not asked because closing the SSH channel already hangs its shell up properly, and a
+	/// session showing a full-screen program is not asked because `exit` is four keystrokes rather than a
+	/// message — at a `vim` in normal mode they would delete a character and start inserting.
+	#[test]
+	fn a_local_teardown_asks_the_shell_to_leave_and_a_remote_is_left_alone() {
+		let cases = [
+			(Some(crate::local::shells::Kind::Pwsh), false, true),
+			(Some(crate::local::shells::Kind::Pwsh), true, false),
+			(None, false, false),
+		];
+		for (local, alternate, asked) in cases {
+			let (mut app, mut rx) = app_with_terminal(16);
+			app.connection = Some("somewhere".to_owned());
+			app.local = local;
+			if alternate {
+				app.terminal
+					.as_mut()
+					.expect("the fixture's emulator")
+					.process(b"\x1b[?1049h");
+			}
+
+			app.end_session();
+
+			let case = format!("local: {local:?}, full-screen program: {alternate}");
+			if asked {
+				assert_eq!(
+					next_input(&mut rx).as_deref(),
+					Some(&b"exit\r"[..]),
+					"the shell is asked to leave ({case})"
+				);
+			}
+			assert!(
+				matches!(next_command(&mut rx), Some(SshCommand::Disconnect)),
+				"the teardown itself always follows ({case})"
+			);
+			assert!(
+				next_command(&mut rx).is_none(),
+				"and nothing else is sent ({case})"
+			);
+		}
 	}
 
 	/// Every shell that answers EOF itself keeps the key (§30, §104): a local Git Bash, whose exit is
