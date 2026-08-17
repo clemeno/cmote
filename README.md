@@ -66,8 +66,10 @@ references below (§n) point into it.
   terminated if it doesn't go (§104). **Ctrl+D** closes the current tab, but only once you're back
   on the home screen — on a live shell it stays EOF to the remote (the way you log out), so
   Ctrl+D logs out, and Ctrl+D again closes the tab, just like a terminal (§30). In a **local**
-  **Command Prompt** or **PowerShell** tab, where the interpreter ignores EOF outright, cmote ends
-  the session itself so the same two presses do the same two things on every shell (§104).
+  **Command Prompt** or **PowerShell** tab the byte still goes to the shell first — so a `node` or
+  `python` running there quits on it, exactly as in any terminal — and cmote ends the session only
+  when the shell hands the byte straight back, which is those interpreters' way of saying they have
+  no use for it (§104). Holding the key is one press, not two.
 - **Port forwarding — local, remote and dynamic tunnels.** The **Tunnels** button on the status
   bar opens a manager: add a **Local** (`-L`) forward to reach a service through the server, a
   **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
@@ -448,7 +450,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
 | Double-click a divider | Put the two regions back to an even share |
-| **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead — and in a local **cmd** / **PowerShell** tab, where EOF means nothing to the interpreter, it ends the session (§104), landing here so a second press closes the tab. A full-screen program keeps its own Ctrl+D |
+| **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. Holding the key is one press. On a live shell it stays EOF to the shell instead — and in a local **cmd** / **PowerShell** tab, where that byte means nothing to the interpreter, the shell echoes it back and cmote takes that as the log-out it cannot perform (§104), landing here so a second press closes the tab. A program that wanted the EOF gets it first, and a full-screen program keeps the key entirely; **Ctrl+Shift+D** sends a bare EOF and never ends a session |
 | Window title-bar **×** | Ask **Quit cmote?**, then disconnect every session cleanly and exit |
 | Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |
 | Drag inside a dialog's body | Select its text; **Ctrl+C** copies it |
@@ -1208,11 +1210,16 @@ header should wear the **open hand** on hover and the **closed** one from the pr
 exactly as a tab chip does — including when the card slides out from under the pointer mid-drag,
 which must not open the hand early. The body text keeps its I-beam and the ✕ its arrow. On a
 **live** shell, **Ctrl+D** should reach the remote as EOF (it logs you out, landing back on the home
-screen), *not* close the tab; a second **Ctrl+D** there then closes it. Then the same two presses in a
-**local** tab: in **Git Bash** the shell itself logs out, and in **Command Prompt** / **PowerShell** —
-which drop the byte on the floor — cmote ends the session for them, with no confirmation card either
-way (§104). Start `more` (or any pager) in a local PowerShell tab first and press **Ctrl+D**: it
-should scroll half a page, because a full-screen program keeps the key. To see the shell leave on its own
+screen), *not* close the tab; a second **Ctrl+D** there then closes it. **Hold** it down instead: the
+session should end and the tab should stay, because a repeat is not the second press. Then the same two
+presses in a **local** tab: in **Git Bash** the shell itself logs out, and in **Command Prompt** /
+**PowerShell** — which hand the byte straight back — cmote reads that as the log-out they cannot do and
+ends the session, with no confirmation card either way (§104). The case that proves the byte is really
+sent: run `node` (or `python`) at a local PowerShell prompt and press **Ctrl+D** — the REPL should quit
+and leave you AT THE PROMPT, session intact; press it again there and the session ends. **Ctrl+Shift+D**
+sends the same EOF and never ends a session. Start `more` (or any pager) in a local PowerShell tab and
+press **Ctrl+D**: it should scroll half a page, because a full-screen program keeps the key. To see the
+shell leave on its own
 terms rather than being terminated, run a local PowerShell tab, type a couple of commands, then
 **Disconnect** — and check `(Get-PSReadLineOption).HistorySavePath`: the commands should be in it, because
 cmote typed `exit` and waited for the shell to finish going.

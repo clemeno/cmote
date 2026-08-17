@@ -10846,49 +10846,77 @@ shell and does. Three of the four local shells do not.
 
 ### What EOF actually does to each of them
 
-Measured, not reasoned about — a throwaway probe drove a real ConPTY child of each catalogue entry
-through the real `local::pty`, waited for the prompt, wrote one `0x04`, and watched the child handle for
-six seconds:
+Measured, not reasoned about — a throwaway probe drove a real ConPTY child of each catalogue entry through
+the real `local::pty`, answered the cursor query the way the GUI does, waited for the prompt, wrote one
+`0x04`, and recorded both the child handle and every byte that came back:
 
-| Shell | `0x04` at the prompt |
-|---|---|
-| Git Bash (MSYS `bash`), and zsh/bash on macOS | logs out — the session ends by itself |
-| `pwsh` | nothing. No exit, no output |
-| `powershell` | nothing |
-| `cmd` | nothing |
+| Shell | `0x04` at the prompt | first byte back |
+|---|---|---|
+| Git Bash (MSYS `bash`), and zsh/bash on macOS | prints `logout` and **exits** — the session ends by itself | 1 ms |
+| `pwsh` | echoes `ESC[93m^D` onto its input line, keeps running | 10 ms |
+| `powershell` | the same 19 bytes, the same colour, keeps running | 17 ms |
+| `cmd` | echoes the two characters `^D` bare, keeps running | 0 ms |
 
-The three interpreters have an EOF and it is **Ctrl+Z**, but even that only ever means "end of stream" to
-a program *reading* one; there is no byte that tells the interpreter itself to stop. `exit` is a command,
-not a key. So the key had no meaning at all on three of the four shells cmote offers, and the second half
-of §30's gesture was unreachable on them: you could never get back to the home screen without the mouse.
+The three interpreters have an EOF and it is **Ctrl+Z**, but even that only ever means "end of stream" to a
+program *reading* one; there is no byte that tells the interpreter itself to stop. `exit` is a command, not a
+key. So the key had no useful meaning on three of the four shells cmote offers, and the second half of §30's
+gesture was unreachable on them: you could never get back to the home screen without the mouse.
 
-### The rule
+The echo column is the one that turned out to matter, and the first version of this section was **wrong**
+about it — it recorded "nothing. No exit, no output", because the first probe watched the child handle and
+never looked at the bytes. There is a signal here, and it was measured away by asking a narrower question
+than the design needed.
 
-Split in two, because the two halves have different lifetimes: the *fact* about each shell lives on the
-shell (`Kind::quits_on_eof`), and the *policy* lives with the other keyboard bindings (`on_key`).
+### The rule: send it, then read the answer
 
-On a local session whose shell does not quit on EOF, a plain **Ctrl+D** with the shell focused runs
-`end_local_shell` — which is the confirmed Disconnect's teardown, reached deliberately without its
-confirmation card. Ctrl+D at a bash prompt does not stop to ask, and a gesture that mirrors one shell but
-interrogates the user on another is not the same gesture. Nothing is risked: a shell holds no unsaved
-state of its own, and the screen it lands on has the Local bar on it, one click from the shell just
-closed. The Disconnect **button** keeps its modal — a click near a toolbar is an accident in a way that
-Ctrl+D at a prompt is not.
+Ctrl+D is **not taken**. It goes to the shell exactly as it would in any terminal, and what comes back
+decides.
 
-Two presses are left alone on purpose:
+The first attempt did take it: on a local shell that ignores EOF, the key ran the teardown directly. That
+was wrong in the case that matters most, and the report came back within the hour — with `node` running at
+that prompt, Ctrl+D belongs to node, and node quits on it. Taking the key threw away a program's own EOF
+handling in favour of something cruder, and a `pwsh` tab could not be used to run a REPL any more.
 
-- **Not while the alternate screen is up.** A full-screen program has its own Ctrl+D — half a page down
-  in `less` and everything built on it — and it asked for the whole screen to get it. The swap hands the
-  key back.
-- **Ctrl+Shift+D is not this binding**, though it encodes to the same `0x04`. Ctrl+Shift+letter is where
-  cmote's own shortcuts live (§34, §35); spending another one on a second spelling of this would buy
-  nothing and cost a key.
+What makes the honest version possible is the echo. A Windows interpreter handed a control byte it has no
+meaning for puts it in its input line and draws it as `^D`. So there are exactly two answers to read:
 
-Matched on the **logical character**, unlike the copy/paste bindings a few lines above it, which match
-the physical key so they hold on any layout. This one stands in for a byte the encoder derives from the
-character itself (`control_byte`), so the key that would have sent EOT is the key that gets this — and it
-is the same match §30's home-screen Ctrl+D already uses, which keeps the two halves of the gesture one
-key rather than two that happen to agree on QWERTY.
+- the answer contains **`^D`** → nothing consumed the byte, so this is the shell's own EOF being ignored,
+  and the session ends (`judge_eof` → `end_local_shell`);
+- **anything else** — a fresh prompt after node exited, a pager scrolling, a program's output → the byte did
+  its job and the session is not cmote's business.
+
+The cost of being right is one output round trip: 10-17 ms, measured.
+
+`judge_eof` settles on the FIRST chunk, with one exception — a chunk ending in `^` could be an echo cut in
+half by a read boundary, so that one waits for the next chunk. Nothing else keeps a probe armed, because a
+probe that outlives its keypress would weigh output belonging to something else entirely. Every wrong answer
+this can give reads as "Ctrl+D did nothing" and never as "the session ended by itself".
+
+Two presses are not listened to at all:
+
+- **Not while the alternate screen is up.** The echo test nearly covers this on its own — a pager scrolling
+  answers with a screenful, not with `^D` — so what the guard really covers is a pager showing a *file* that
+  contains the characters `^D`. And a full-screen program asked for the whole screen, so the key is its own.
+- **Ctrl+Shift+D is unwatched**, though it encodes to the same `0x04`. That makes it the escape hatch out of
+  this whole rule: the way to hand a bare EOF to a shell that would echo it, with the session left alone.
+
+Matched on the **logical character**, unlike the copy/paste bindings a few lines above it, which match the
+physical key so they hold on any layout. This one accompanies a byte the encoder derives from the character
+itself (`control_byte`), so the key that sends EOT is the key that is watched — and it is the same match
+§30's home-screen Ctrl+D uses, which keeps the two halves of the gesture one key rather than two that happen
+to agree on QWERTY.
+
+### A held key is one press
+
+The other half of the same report: "the tab just closed instantly". It had, and a single press cannot do
+that — ending a session lands on the home screen and leaves the tab alone. Two key events can, and a held
+Ctrl+D produces them: the first ended the shell, the **auto-repeat** arrived on the home screen a few tens
+of milliseconds later, and §30's second half closed the tab. The screen the gesture is meant to land on was
+never seen.
+
+`is_close_tab` now refuses a repeat, which is what §30 meant by two presses all along. Extracted as a
+predicate beside `is_typing` and `is_paste` for the ordinary reason: what a key MEANS is the testable half
+of a handler that otherwise only returns an opaque `iced::Task`.
 
 ### What "ends the session" actually is
 
@@ -10904,9 +10932,9 @@ local teardown was **not** a shell being asked to leave:
 
 Step three was measured with the case that prompted the question: `node` at a local `pwsh` prompt, node
 v24.18.0, a real ConPTY. The REPL **stays on the main screen** (`is_alternate()` is `false`), which is why
-the pager guard does not save it — the key is claimed and node never sees the `0x04`. After the teardown
-the node process is **gone**, so nothing is orphaned; it was never asked to exit either. The grid goes with
-the emulator, so what was on screen is not there to read afterwards.
+the pager guard could never have saved it — and why the rule above reads the shell's answer instead. After a
+teardown the node process is **gone**, so nothing is orphaned; it was never asked to exit either. The grid
+goes with the emulator, so what was on screen is not there to read afterwards.
 
 A remote Disconnect is cleaner than that by nature: it closes an SSH channel and the far side's shell gets
 a hangup it can act on. A local session has no protocol to be clean *in*, which is why step two now has a
@@ -10940,39 +10968,60 @@ Two things about that, both deliberate:
   drain's own timeout instead. Two constants in two modules, related by an assertion rather than by a
   comment.
 
+### The backspace that is not cosmetic
+
+A shell echoes `^D` because it PUT it in its input line, so on the path that reads the echo the line holds
+one character of rubbish — and that is the line the teardown's own `exit` is typed on. One backspace goes
+first, and the measurement is unambiguous. Same shell, same sequence, the erase the only difference:
+
+| | what the shell showed | outcome |
+|---|---|---|
+| with the backspace | `exit`, in PSReadLine's green for a recognised command | **exited after 99 ms** |
+| without it | `^Dexit`, in red | `exit: The term 'exit' is not recognized…`, still running at 2.5 s |
+
+So without the erase the tidy teardown is undone in exactly the case that reaches it most often: the shell
+would refuse the word, and the 800 ms kill would end the session after all.
+
 ### What it cost
 
 - `local/shells.rs`: `Kind::quits_on_eof` and `QUIT_COMMAND`, plus the test that writes the EOF split down
   per kind.
-- `app.rs`: one block in `on_key`, `end_local_shell`, `on_alternate_screen`, `end_session` at the three
-  teardown sites that had a plain `Disconnect`, and `QUIT_DRAIN_TIMEOUT` made `pub(crate)` so the goodbye
-  window can be checked against it. Four tests — the shell that ends, the two that keep the key (a local
-  Git Bash and any remote), the two presses excluded, and what a teardown types at which shell.
+- `app.rs`: the listening block in `on_key`, `judge_eof`, `eof_probe` on the tab, `EOF_ECHO` /
+  `EOF_ANSWER_CAP`, `end_local_shell` (with its backspace), `on_alternate_screen`, `is_close_tab` extracted
+  with its missing `repeat` term, `end_session` at the three teardown sites that had a plain `Disconnect`,
+  and `QUIT_DRAIN_TIMEOUT` made `pub(crate)` so the goodbye window can be checked against it. Seven tests:
+  the byte reaching the shell first, the echo ending the session (fed as two chunks, split inside the
+  needle), the two answers that keep it, the shells that are never listened to, the two presses excluded,
+  what a teardown types at which shell, and the held key.
 - `local/session.rs`: `GOODBYE`, the compile-time tie to the quit budget, and `farewell` — which drains the
   output while it waits, because the shell's last words must not fill a bounded channel and block the exit
   they are on the way to.
 - `README.md`: the keyboard table, the tour's quit paragraph, and the manual-test step, which now names
-  the pager case.
-- Tests 1333 → 1339.
+  the pager case and the history file.
+- Tests 1333 → 1342.
 
 ### Not done
 
-- **A line-based program that reads EOF is not told apart from the shell.** Measured, not supposed: a
-  `node` REPL in a local `pwsh` tab stays on the main screen, so Ctrl+D there ends the *session* and not
-  the REPL — where a real terminal would have quit node and left the prompt. Telling them apart means
-  knowing whether the shell is at its prompt, and on a local session nothing announces that — §103 refuses
-  to write a cwd announcer into the user's own profile, and that refusal is what costs this. **Ctrl+Shift+D
-  is the way out** and always was: it is excluded from the binding and `control_byte('D')` is the same
-  `0x04`, so it reaches the program and quits it with the session intact. Undocumented as such, since it
-  exists as a consequence of the rule rather than as a decision. The teardown then types `exit` AT the
-  REPL, which answers with an error and is killed a fraction of a second later — noise in a scrollback
-  nobody reads, and the alternative is a heuristic for "is a program running" that cmote cannot honestly
-  compute.
-- **Ctrl+D still does nothing on a local shell inside a pager**, which is correct, and nothing tells the
-  user which of the two states they are in. A terminal has never had to say.
-- **The probe was thrown away rather than kept.** It spawned three interactive shells and killed them,
-  which is a six-second test on a machine that has all three and a silent skip on one that does not; the
-  fact it established is written down here and asserted per kind instead.
+- **The rule reads two characters of the shell's own output.** `^D` is how all three interpreters render an
+  ignored control byte, so the needle is theirs and not cmote's invention — but it is still a string match on
+  a stream cmote does not control. It is only ever looked for in the answer to a Ctrl+D cmote itself sent one
+  round trip earlier, at a local shell, on the main screen, which is as narrow as the window gets without a
+  protocol nobody offers here. A program that answers a Ctrl+D by printing `^D` within that window would end
+  the session, and nothing else will.
+- **An echo split anywhere other than inside `^D`** — `ESC[?25l` in one chunk, `ESC[93m^D` in the next —
+  reads as "a program answered the byte" and leaves the session up. Nineteen bytes arrived as one read every
+  single time it was measured, and the cost of being wrong is one more press, so this is not bought off with
+  a timer.
+- **Ctrl+D inside a pager still does nothing to the session**, which is right, and nothing tells the user
+  which of the two states they are in. A terminal has never had to say.
+- **The teardown types `exit` at whatever is in front of the shell.** On the path where a program consumed
+  the byte the session is not ending, so this does not arise there; it arises when the Disconnect button is
+  pressed with `node` running, and node answers the word with an error and is killed 800 ms later. Telling a
+  running program from a prompt needs an announcement §103 refuses to install.
+- **The probes were thrown away rather than kept.** Three of them: what EOF does to each shell, what comes
+  back, and whether the backspace makes the `exit` land. Each spawns real interactive shells and kills them,
+  which is seconds of wall clock and a silent skip on a machine without them; what they established is
+  written down here and asserted against those exact byte strings in `app`'s tests.
 
 ## §105 — The Git that was there all along
 

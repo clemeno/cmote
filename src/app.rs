@@ -95,6 +95,20 @@ const SNACKBAR_DWELL: std::time::Duration = std::time::Duration::from_secs(3);
 /// rather than restating it in a comment.
 pub(crate) const QUIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How a Windows interpreter says it has no use for a control byte: it echoes it onto its input line,
+/// rendered as a caret and a letter (§104). Measured on all three — `pwsh` and `powershell` wrap it in
+/// PSReadLine's colour codes, `cmd` prints the two characters bare — and it is what tells "nothing
+/// consumed the Ctrl+D" from "a program did, and quit".
+///
+/// Two characters is a short needle, so it is only ever looked for in the answer to a Ctrl+D cmote itself
+/// just sent, and never in output at large.
+const EOF_ECHO: &[u8] = b"^D";
+
+/// How much of a shell's answer to a Ctrl+D is ever kept while waiting to see whether a trailing `^`
+/// becomes the echo (§104). Only a chunk ending mid-needle extends the wait at all, so this is a bound on
+/// a pathological case — output whose every chunk ends in `^` — and not a window anything normally uses.
+const EOF_ANSWER_CAP: usize = 64;
+
 /// Build and start the iced runtime. Called from `main`.
 pub fn run() -> iced::Result {
 	// The functional builder (iced 0.14): the first argument is the "boot"
@@ -2568,6 +2582,12 @@ pub struct Tab {
 	/// `connection` was built from, and the next thing to want it (an icon on the tab chip, a per-shell
 	/// default directory) will want the kind rather than the fact.
 	local: Option<crate::local::shells::Kind>,
+	/// A Ctrl+D sent to a local shell that may not act on it, and what has come back since (§104).
+	///
+	/// `Some` from the moment the byte goes out until the shell's answer has been weighed. The answer is
+	/// accumulated rather than judged chunk by chunk, because a nineteen-byte reply is free to arrive as
+	/// two reads and half an echo is not an echo.
+	eof_probe: Option<Vec<u8>>,
 	/// The active text selection over the terminal grid, if any (§10). Drives both
 	/// the on-screen highlight and what Copy puts on the clipboard; `None` when
 	/// nothing is selected.
@@ -4791,6 +4811,13 @@ impl Tab {
 				}
 			}
 			SshEvent::Output { bytes, .. } => {
+				// A Ctrl+D is in flight at a local shell (§104), and this chunk is the answer. If the shell
+				// echoed the byte back, nothing consumed it — so it is the shell's own EOF being ignored,
+				// and the session ends here instead of the key doing nothing. Weighed BEFORE the bytes
+				// reach the emulator, since the teardown drops it a line later either way.
+				if self.judge_eof(&bytes) {
+					return self.end_local_shell();
+				}
 				// Feed raw shell output into the emulator; the next render draws it.
 				// `process` also returns the engine's replies to the status/identity queries
 				// it carried (§9, §23): a program that sent one blocks reading its stdin until
@@ -5114,7 +5141,46 @@ impl Tab {
 		self.send_command(SshCommand::Disconnect);
 	}
 
-	/// End a local session because Ctrl+D asked for it (§104).
+	/// Weigh the shell's answer to a Ctrl+D that is in flight, and say whether the session should end
+	/// (§104).
+	///
+	/// `false` whenever no Ctrl+D is outstanding, which is almost every chunk of output cmote ever sees —
+	/// so the cost of this on the hot path is one `Option` test.
+	///
+	/// The FIRST chunk settles it, with one exception: a chunk ending in `^` could be an echo cut in half
+	/// by a read boundary, so that one waits for the next chunk before deciding. Everything else decides
+	/// now, which is what keeps a probe from outliving the keypress it belongs to — an armed probe left
+	/// lying around would weigh output that has nothing to do with the Ctrl+D that armed it.
+	///
+	/// A chunk that ends in `^` every time (a program drawing a box, say) would hold the probe open, so
+	/// [`EOF_ANSWER_CAP`] bounds what is kept. Running out means giving up, and giving up means the session
+	/// stays — the safe direction, since every wrong answer here should read as "Ctrl+D did nothing" and
+	/// never as "the session ended by itself".
+	///
+	/// `ponytail:` an echo split anywhere OTHER than inside `^D` — `ESC[?25l` in one chunk and `ESC[93m^D`
+	/// in the next — reads as "a program answered the byte" and leaves the session up. Measured nineteen
+	/// bytes arriving as one read every single time, and the cost of being wrong is one more press, so this
+	/// is left as it is rather than buying a timer to cover it.
+	fn judge_eof(&mut self, bytes: &[u8]) -> bool {
+		let Some(heard) = self.eof_probe.as_mut() else {
+			return false;
+		};
+		heard.extend_from_slice(bytes);
+		if heard
+			.windows(EOF_ECHO.len())
+			.any(|window| window == EOF_ECHO)
+		{
+			self.eof_probe = None;
+			return true;
+		}
+		// Keep listening only while the tail could still become the echo.
+		if !heard.ends_with(&EOF_ECHO[..1]) || heard.len() >= EOF_ANSWER_CAP {
+			self.eof_probe = None;
+		}
+		false
+	}
+
+	/// End a local session whose shell has just shown it will not end itself (§104).
 	///
 	/// The confirmed Disconnect's teardown, reached deliberately WITHOUT its confirmation modal: Ctrl+D
 	/// at a bash prompt does not stop to ask, and a gesture that mirrors one shell but interrogates the
@@ -5122,7 +5188,14 @@ impl Tab {
 	/// state of its own, and the screen it lands on has the Local bar on it, one click from the shell
 	/// that was just closed. The Disconnect BUTTON keeps its modal: a click near a toolbar is an
 	/// accident in a way that Ctrl+D, a key with one meaning at a prompt, is not.
+	///
+	/// One backspace goes first, and it is not cosmetic. The shell echoed the byte because it PUT it in
+	/// its input line, so the line now holds one character of rubbish — and the teardown's own `exit` is
+	/// typed on that line (§104). Without the erase the shell would be asked to run `^Dexit`, answer with
+	/// an error, and be killed by the fallback a moment later: the tidy teardown would be undone in
+	/// exactly the case that reaches it most often.
 	fn end_local_shell(&mut self) -> iced::Task<Message> {
+		self.send_command(SshCommand::Input(vec![0x08]));
 		self.on_disconnect_confirmed()
 	}
 
@@ -5144,6 +5217,9 @@ impl Tab {
 	fn forget_connection(&mut self) {
 		self.connection = None;
 		self.local = None;
+		// A Ctrl+D whose answer never came is answered by the session ending (§104). Left behind, it
+		// would weigh the FIRST chunk of the next session's output on this tab and could end that one.
+		self.eof_probe = None;
 	}
 
 	/// Open the shell-integration dialog and ask the server what it is looking at (§17).
@@ -5755,7 +5831,13 @@ impl Tab {
 	fn on_home_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
 
-		let iced::keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+		let iced::keyboard::Event::KeyPressed {
+			key,
+			modifiers,
+			repeat,
+			..
+		} = event
+		else {
 			return iced::Task::none();
 		};
 
@@ -5771,11 +5853,9 @@ impl Tab {
 		// so it is left to the terminal there; pressing it logs the shell out, which lands back
 		// here, and a second Ctrl+D then closes the tab — mirroring a terminal's own Ctrl+D twice.
 		// It routes through `TabCloseRequested`, so closing the last tab still asks to quit cmote.
-		if modifiers.control()
-			&& !modifiers.alt()
-			&& !modifiers.logo()
-			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
-		{
+		//
+		// An AUTO-REPEAT is not the second press — see `is_close_tab`, which is where that fix lives (§104).
+		if is_close_tab(&key, modifiers, repeat) {
 			return iced::Task::done(Message::TabCloseRequested(self.id));
 		}
 
@@ -6058,31 +6138,33 @@ impl Tab {
 			}
 		}
 
-		// Ctrl+D ends a local cmd / PowerShell session (§104) — the one keyboard gesture a local shell
-		// cannot answer for itself.
+		// Ctrl+D at a local shell that may not act on it (§104). The key is NOT taken here — it goes to
+		// the shell exactly as it would in any terminal, and what comes back decides whether the session
+		// ends. All this does is start listening.
 		//
-		// On every other session the key is left alone, because there it already works: EOF at a POSIX
-		// prompt is how you log out, and the shell exiting is what ends the session. The three Windows
-		// interpreters are the ones that drop the byte on the floor — measured, not assumed
-		// (`Kind::quits_on_eof`) — so pressing Ctrl+D in a `pwsh` tab did nothing whatsoever, while the
-		// same key in the Git Bash tab beside it logged out. cmote fills in exactly what the shell would
-		// have done: end the session and land on the home screen, where a second Ctrl+D closes the tab
-		// (§30). One gesture, the same on all four shells.
+		// The problem it solves: EOF at a POSIX prompt is how you log out, and the shell exiting is what
+		// ends the session — but the three Windows interpreters do not act on `0x04` at all, so the key
+		// did nothing whatsoever in a `pwsh` tab while the same key in the Git Bash tab beside it logged
+		// out. The first fix took the key and ended the session, which was wrong in the case that
+		// matters: with `node` running at that prompt, Ctrl+D belongs to node — and node quits on it,
+		// measured, leaving the shell exactly where it was. Taking the key threw away a program's own
+		// EOF handling to do something cruder.
+		//
+		// So the byte is sent and the shell is allowed to answer. There are only two answers, and they
+		// are told apart by what a Windows interpreter does with a control byte it has no meaning for: it
+		// ECHOES it, as the two characters `^D`, onto its input line. So an answer containing `^D` means
+		// nothing consumed the byte and the session ends (`judge_eof`); anything else — a fresh prompt
+		// after node exited, a pager scrolling — means the byte did its job and the session is left
+		// alone. The cost of being right is one output round trip, measured at 10-17 ms.
 		//
 		// Matched on the LOGICAL character rather than the physical key, unlike the copy bindings above,
-		// because this one stands in for a byte the encoder derives from that same character: whichever
-		// key would have sent EOT is the key that gets this. Plain Ctrl+D only — Ctrl+Shift+D also
-		// encodes to `0x04`, but Ctrl+Shift+<letter> is where cmote's own bindings live (§35, §34), and
-		// spending another one of them on a second spelling of this would be a poor trade.
+		// because the byte the encoder is about to derive comes from that same character. Plain Ctrl+D
+		// only: Ctrl+Shift+D encodes to the same `0x04` and is deliberately left unwatched, so it is the
+		// way to send a bare EOF to a shell that echoes it without ending the session.
 		//
-		// Not while the alternate screen is up: a full-screen program (`less`, a pager, an editor
-		// started from PowerShell) has its own Ctrl+D — half a page down — and it asked for the whole
-		// screen to get it, so the key belongs to it and goes down the channel untouched. A line-based
-		// program that reads EOF without swapping screens (a Python REPL, say) is NOT covered by that
-		// test and loses its session to this key; `ponytail:` telling those apart needs to know whether
-		// the shell is at its prompt, which on a local session nothing announces (§103 refuses to write
-		// a cwd announcer into the user's own profile). The cost is one recoverable click on the Local
-		// bar, so it is disclosed rather than guessed at.
+		// Not while the alternate screen is up, which is belt and braces on top of the echo test: a pager
+		// showing a file that happens to contain the text `^D` would otherwise be answering for the
+		// shell. A full-screen program asked for the whole screen, so the key is simply its own.
 		if modifiers.control()
 			&& !modifiers.shift()
 			&& !modifiers.alt()
@@ -6091,7 +6173,8 @@ impl Tab {
 			&& !self.on_alternate_screen()
 			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
 		{
-			return self.end_local_shell();
+			// Armed, and then deliberately NOT returned from: the encoder below sends the byte.
+			self.eof_probe = Some(Vec::new());
 		}
 
 		// Ctrl+Shift+Up / Ctrl+Shift+Down jump the scrollback to the previous / next shell prompt
@@ -8198,6 +8281,29 @@ fn is_typing(key: &iced::keyboard::Key, modifiers: iced::keyboard::Modifiers) ->
 		&& !modifiers.logo()
 }
 
+/// Whether this press is the home screen's close-tab gesture: Ctrl+D, deliberately pressed (§30, §104).
+///
+/// A predicate rather than an inline condition for one reason — the `repeat` term is a bug fix that wants
+/// a test, and what a key MEANS is the testable half of a handler that otherwise only returns an opaque
+/// `iced::Task`.
+///
+/// `repeat` is the term that was missing. The gesture is TWO deliberate presses, the first of which lands
+/// on the terminal screen and ends the shell; a Ctrl+D held for half a second arrived here as an
+/// auto-repeat and closed the tab as well, so the tab vanished and took the home screen the user was meant
+/// to land on with it. Holding a key is one press. Shift is not excluded, since Ctrl+Shift+D has no meaning
+/// on this screen — that exclusion belongs to the terminal screen, where it is the way to send a bare EOF.
+fn is_close_tab(
+	key: &iced::keyboard::Key,
+	modifiers: iced::keyboard::Modifiers,
+	repeat: bool,
+) -> bool {
+	modifiers.control()
+		&& !modifiers.alt()
+		&& !modifiers.logo()
+		&& !repeat
+		&& matches!(key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
+}
+
 /// Whether this press is the paste shortcut — Ctrl+V, or Ctrl+Shift+V (§10). Both paste the same
 /// plain text: a terminal takes bytes for the remote shell, so there is no styled paste to
 /// distinguish (pasting escape codes would be a paste-injection hazard, the one the
@@ -9441,40 +9547,153 @@ mod tests {
 		);
 	}
 
-	/// A local session on a shell that ignores EOF ends on Ctrl+D (§104), because nothing else will
-	/// end it: the byte reaches `pwsh`, `powershell` and `cmd` and is dropped, so before this the key
-	/// did nothing at all on three of the four local shells while the Git Bash tab beside them logged
-	/// out on it. The teardown is the confirmed Disconnect's, with no modal in the way.
-	#[test]
-	fn ctrl_d_ends_a_local_shell_that_ignores_eof() {
-		let (mut app, mut rx) = app_with_terminal(16);
-		app.connection = Some("local — pwsh".to_owned());
-		app.local = Some(crate::local::shells::Kind::Pwsh);
+	// A local session on a shell that may ignore EOF, ready for a Ctrl+D (§104).
+	fn local_shell_tab(kind: crate::local::shells::Kind) -> (Tab, mpsc::Receiver<SshCommand>) {
+		let (mut app, rx) = app_with_terminal(16);
+		app.connection = Some(format!("local — {}", kind.slug()));
+		app.local = Some(kind);
+		(app, rx)
+	}
 
-		let _ = app.on_key(character_press(
+	// Ctrl+D, the way the OS delivers it.
+	fn ctrl_d() -> iced::keyboard::Event {
+		character_press(
 			"d",
 			iced::keyboard::key::Code::KeyD,
 			iced::keyboard::Modifiers::CTRL,
-		));
+		)
+	}
+
+	/// Ctrl+D at a local shell goes TO the shell, exactly as it would in any terminal (§104). cmote takes
+	/// nothing and decides nothing yet — it only starts listening for the answer.
+	///
+	/// This is the half the first version got wrong: it claimed the key and ended the session, so a
+	/// `node` running at that prompt never got the EOF that would have quit it.
+	#[test]
+	fn ctrl_d_at_a_local_shell_reaches_the_shell_first() {
+		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+
+		let _ = app.on_key(ctrl_d());
 
 		assert_eq!(
 			next_input(&mut rx).as_deref(),
+			Some(&[0x04][..]),
+			"the byte goes down the channel like any other keystroke"
+		);
+		assert!(
+			app.eof_probe.is_some(),
+			"and cmote is listening for an answer"
+		);
+		assert!(
+			app.connection.is_some() && app.terminal.is_some(),
+			"nothing has been torn down on a guess"
+		);
+	}
+
+	/// The shell echoing the byte back is what says nothing consumed it (§104) — a Windows interpreter
+	/// handed a control byte it has no meaning for prints `^D` onto its input line. THEN the session ends,
+	/// with the echo erased first so the teardown's own `exit` is typed on a clean line.
+	///
+	/// Fed in two chunks on purpose: the reply arrives as one read every time it has been measured, but
+	/// nothing promises that, and half an echo must not read as "a program answered".
+	#[test]
+	fn the_shell_echoing_the_byte_back_ends_the_session() {
+		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+		let _ = app.on_key(ctrl_d());
+		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
+
+		// PSReadLine's real answer, split where it hurts most.
+		let _ = app.on_ssh_event(shell_output(b"\x1b[?25l\x1b[93m^"));
+		assert!(app.connection.is_some(), "half an echo decides nothing yet");
+		let _ = app.on_ssh_event(shell_output(b"D\x1b[?25h"));
+
+		assert_eq!(
+			next_input(&mut rx).as_deref(),
+			Some(&[0x08][..]),
+			"the echoed character is erased from the shell's input line"
+		);
+		assert_eq!(
+			next_input(&mut rx).as_deref(),
 			Some(&b"exit\r"[..]),
-			"the shell is asked to leave on its own terms first (§104)"
+			"then the shell is asked to leave on its own terms"
 		);
 		assert!(
 			matches!(next_command(&mut rx), Some(SshCommand::Disconnect)),
 			"and then the session is told to tear down"
 		);
 		assert!(
-			app.connection.is_none() && app.local.is_none(),
-			"and the tab has forgotten it had one"
+			app.connection.is_none() && app.local.is_none() && app.eof_probe.is_none(),
+			"the tab has forgotten it had a session"
 		);
 		assert!(app.terminal.is_none(), "the emulator went with it");
 		assert!(
 			matches!(app.screen, Screen::Home),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
 		);
+	}
+
+	/// The case the whole rule exists for: a program at that prompt takes the EOF and quits, the shell
+	/// prints a fresh prompt, and the SESSION IS LEFT ALONE (§104). Measured against real node — `0x04`
+	/// makes it exit and `pwsh` answers with `\r\nPS C:\Users\cme> `, which carries no echo.
+	///
+	/// The second case is the pathological one: output that ends in `^` holds the probe open (the echo could
+	/// be split there), and enough of it gives up rather than listening for ever. Both failure directions
+	/// are "Ctrl+D did nothing", never "the session ended by mistake".
+	#[test]
+	fn a_program_that_answers_the_byte_keeps_the_session() {
+		let carets = vec![b'^'; EOF_ANSWER_CAP + 1];
+		let answers: [&[u8]; 2] = [b"\r\nPS C:\\Users\\cme> ", &carets];
+		for answer in answers {
+			let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+			let _ = app.on_key(ctrl_d());
+			assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
+
+			let _ = app.on_ssh_event(shell_output(answer));
+
+			assert!(
+				app.connection.is_some() && app.terminal.is_some(),
+				"the byte did its job, so the session is none of cmote's business"
+			);
+			assert!(app.eof_probe.is_none(), "and the question is settled");
+			assert!(
+				next_command(&mut rx).is_none(),
+				"nothing was sent on the strength of it"
+			);
+		}
+	}
+
+	/// A held Ctrl+D is ONE press (§104). The gesture is two deliberate ones — the first ends the shell
+	/// and lands on the home screen, the second closes the tab — and an auto-repeat from the first used to
+	/// do both, so the tab vanished instantly and took the screen the user was meant to land on with it.
+	///
+	/// Asserted on the predicate `on_home_key` consults, the way `is_typing` and `is_paste` are tested:
+	/// what the key MEANS is the decision worth pinning, and an `iced::Task` cannot be looked inside from
+	/// here.
+	#[test]
+	fn a_held_ctrl_d_does_not_close_the_tab_behind_the_session_it_just_ended() {
+		let d = iced::keyboard::Key::Character("d".into());
+		let ctrl = iced::keyboard::Modifiers::CTRL;
+
+		assert!(
+			is_close_tab(&d, ctrl, false),
+			"a press of its own is the second half of the gesture"
+		);
+		assert!(
+			!is_close_tab(&d, ctrl, true),
+			"an auto-repeat of it never is"
+		);
+		// And the guards that were always there: it is Ctrl+D and nothing else.
+		assert!(!is_close_tab(&d, iced::keyboard::Modifiers::empty(), false));
+		assert!(!is_close_tab(
+			&d,
+			ctrl | iced::keyboard::Modifiers::ALT,
+			false
+		));
+		assert!(!is_close_tab(
+			&iced::keyboard::Key::Character("w".into()),
+			ctrl,
+			false
+		));
 	}
 
 	/// What a teardown types, and at which shells (§104). A local session's kill is `TerminateProcess`,
@@ -9523,9 +9742,11 @@ mod tests {
 		}
 	}
 
-	/// Every shell that answers EOF itself keeps the key (§30, §104): a local Git Bash, whose exit is
-	/// what ends the session, and any remote — where Ctrl+D is the way you log out and cmote has never
-	/// had a claim on it. Both get the plain `0x04` and neither session is touched from this side.
+	/// Every shell that answers EOF itself is not even listened to (§30, §104): a local Git Bash, whose exit
+	/// is what ends the session, and any remote — where Ctrl+D is the way you log out and cmote has never
+	/// had a claim on it. Both get the plain `0x04`, no probe is armed, and neither session is touched from
+	/// this side. The unarmed half matters: it is what keeps a `^D` printed by some program on a REMOTE from
+	/// ever being read as an answer to a key.
 	#[test]
 	fn ctrl_d_is_left_to_every_shell_that_answers_it() {
 		for local in [Some(crate::local::shells::Kind::GitBash), None] {
@@ -9533,11 +9754,7 @@ mod tests {
 			app.connection = Some("root@web-01:22".to_owned());
 			app.local = local;
 
-			let _ = app.on_key(character_press(
-				"d",
-				iced::keyboard::key::Code::KeyD,
-				iced::keyboard::Modifiers::CTRL,
-			));
+			let _ = app.on_key(ctrl_d());
 
 			assert_eq!(
 				next_input(&mut rx).as_deref(),
@@ -9545,19 +9762,26 @@ mod tests {
 				"EOF goes down the channel as it always has ({local:?})"
 			);
 			assert!(
+				app.eof_probe.is_none(),
+				"and nothing is listening for an echo ({local:?})"
+			);
+			// Even an answer that looks exactly like an echo decides nothing here.
+			let _ = app.on_ssh_event(shell_output(b"\x1b[93m^D"));
+			assert!(
 				app.connection.is_some() && app.terminal.is_some(),
-				"and the session is still up: the shell decides, not cmote ({local:?})"
+				"the session is still up: the shell decides, not cmote ({local:?})"
 			);
 		}
 	}
 
-	/// The two presses the §104 rule deliberately leaves alone, on the shell it otherwise claims.
+	/// The two presses §104 does not listen to, on the very shell it otherwise listens to.
 	///
-	/// A full-screen program owns Ctrl+D — half a page down in `less` and in every pager built on it —
-	/// and it asked for the whole screen to get it, so the swap to the alternate page hands the key
-	/// back. And Ctrl+SHIFT+D encodes to the same `0x04` but is not this binding: Ctrl+Shift+letter is
-	/// where cmote's own shortcuts live, so it stays available rather than becoming a second way to end
-	/// a session by accident.
+	/// A full-screen program owns Ctrl+D — half a page down in `less` and in every pager built on it — and
+	/// it asked for the whole screen to get it. The echo test alone would nearly cover that, since a pager
+	/// scrolling answers with a screenful and not with `^D`; not listening at all is what covers the pager
+	/// showing a FILE that happens to contain the characters `^D`. And Ctrl+SHIFT+D encodes to the same
+	/// `0x04` while staying unwatched, which makes it the way to hand a bare EOF to a shell that would echo
+	/// it — the escape hatch out of this whole rule.
 	#[test]
 	fn a_full_screen_program_and_a_shifted_press_keep_their_ctrl_d() {
 		let cases = [
@@ -9588,8 +9812,14 @@ mod tests {
 			assert_eq!(
 				next_input(&mut rx).as_deref(),
 				Some(&[0x04][..]),
-				"the byte reaches the shell instead ({why})"
+				"the byte reaches the shell ({why})"
 			);
+			assert!(
+				app.eof_probe.is_none(),
+				"and nothing is listening for an echo ({why})"
+			);
+			// So even the shell's own echo, arriving here, is just output.
+			let _ = app.on_ssh_event(shell_output(b"\x1b[93m^D"));
 			assert!(
 				app.connection.is_some(),
 				"and the session is untouched ({why})"
