@@ -10237,3 +10237,95 @@ number is the same on both sides of the request.
 - **Bit 5 was not checked.** Newer xterm documents a sixth bit ("do not ignore double-width cell
   values"); the reading this row rests on lists five. It changes nothing — the answer is the same for
   any number of bits — but the row should not be read as a count.
+
+## 100. The page moves sideways (v4.0.0)
+
+§98 filed SL and SR (`CSI Ps SP @` and `CSI Ps SP A`) as a **gap**, and grouped them with DECBI /
+DECFI and DECIC / DECDC as *"one piece of absent machinery wearing six names"*. The machinery is
+built. Two of the six now ship, and it cost forty lines — because §56 had already paid for the hard
+half, writing cells directly into the engine's grid.
+
+### What they are
+
+ECMA-48's horizontal twins of SU and SD. Every row of the visible page moves sideways by `Ps`
+columns; the edge the content moved away from goes blank. xterm's own wording is the whole of what
+any reachable source says about them: *"Shift left `Ps` column(s) (default = 1) (SL), ECMA-48."*
+
+Note the verb — **shift**, not scroll — and note what is absent, because it decided the shape of this
+section: ctlseqs says **nothing about the margins** for SL, SR, DECIC or DECDC. ECMA-48, where the
+definition lives, is still unread here.
+
+### Four rules, and where each came from
+
+**Whole cells move.** Colours, attributes, the OSC 8 link and DECSCA protection travel with the
+glyph — DECCRA's rule (§58), for the same reason: protection makes a cell unerasable, not immovable.
+The blanks that arrive carry the **pen's background**, which is what the erases write, so a shift
+across a coloured screen leaves a strip in that colour instead of a hole in the default one.
+
+**Each row is read out whole before it is written.** Source and destination overlap by definition
+here, so the copy goes through a buffer rather than through a walk direction chosen to make the
+arithmetic come out — `copy_area`'s argument, which is DECCRA's own.
+
+**The cursor does not move.** SL and SR shift the data *under* it. That is ECMA-48's behaviour, and it
+is also why this is written as a direct grid write instead of as a translation into per-row DCH and
+ICH (§72's fifth route): the translation would have had to move the cursor to each row and put it
+back, and the one saved-cursor slot it would have wanted belongs to the program (§57's whole subject).
+
+**A wide glyph cut in half is blanked.** A shift can push exactly one cell of a two-cell glyph off the
+page, leaving a lead with no continuation at the right edge or a continuation with no lead at the
+left. Neither is a state the renderer expects to meet and neither is a character anybody asked for.
+Only the two edge columns can be in it — every other pair moves together — so the fix is two `if`s and
+not a scan.
+
+### The scrolling region, and a guard that is honest about being partial
+
+A shift ought to stop at the scrolling region's edges. cmote cannot see them: `alacritty_terminal`
+keeps `scroll_region` private with no accessor, which is the same wall §58 hit and disclosed.
+
+So the refusal is aimed at the evidence rather than at the fact. **Origin mode refuses the shift** —
+not because SL and SR name coordinates that could be misplaced, they name none, but because DECOM only
+means anything once DECSTBM has cut a region. Where the one signal in reach says a region is probably
+there, cmote does nothing rather than shift rows the program walled off (§57: doing nothing is a
+correct refusal where acting on a guess is a wrong action).
+
+It is a **partial guard and the code says so**: a region set *without* origin mode is invisible from
+here, and a shift would then move rows outside it. That is written into `apply_rectangle`, into the
+§8 row, and into *Not done* below rather than left for a reader to discover.
+
+### Where the code went
+
+Into `term/rect.rs`, whose name is now one section out of date. What a module shares with its
+neighbours is not its grammar but its **mechanism**: SL and SR name no corners and are ECMA-48's
+rather than DEC's, but they move whole cells across the page with no engine arm behind them, against
+the same background, under the same origin-mode refusal, clamped to the same visible page. A second
+module doing cell-moving by its own rules is the duplication worth avoiding; two more arms in this
+scanner are not.
+
+The two arms are also the most dangerous near-miss in that scanner, and the tests say so: `CSI Ps @`
+with no intermediate is **ICH** and `CSI Ps A` is **CUU** — two sequences the engine implements and
+every program on earth uses, one byte away. The SPACE intermediate is the entire difference, and it is
+matched alongside the final byte and the absence of a private marker, which is §56's near-miss rule.
+
+### What it cost
+
+- `term/rect.rs`: a `Direction` enum, a `Request::Shift`, two arms in `classify`, three tests.
+- `term/mod.rs`: `shift_columns`, one arm in `apply_rectangle`, seven tests.
+- The row moves **❌ → ✅**. 214 rows: **✅ 112 · ❌ 34 · 🛑 41 · 🤷 27**. Tests 1215 → 1225.
+
+### Not done
+
+- **A scrolling region set without origin mode is not honoured**, and a shift will move rows outside
+  it. Closing it means cmote tracking DECSTBM itself, which makes it a second source for state the
+  engine owns (§71) — the trade §58 turned down and this section does not reopen.
+- **Whether a real xterm bounds SL and SR by the margins was not established.** ctlseqs does not say,
+  ECMA-48 is unread, and no implementation was read. cmote's page-wide reading is the only one its
+  sources describe, which is not the same as knowing it matches.
+- **DECIC / DECDC and DECBI / DECFI are still ❌**, and are now gaps with a working precedent rather
+  than gaps with an argument: DECIC and DECDC are this shift bounded to the columns from the cursor
+  rightward, and DECBI and DECFI are it triggered by a cursor sitting at a margin.
+- **Nothing was tested against a program that emits these.** They are pinned by cmote's own tests
+  against cmote's own reading, which is where §97 also stopped — the same disclosure, one section
+  after it was made.
+- **The scrollback is untouched by a shift**, deliberately and without a test saying so. The visible
+  page is what every operation in this family acts on (§60 clamps the checksum to it for a reason),
+  but no test would fail if a later hand widened this one.

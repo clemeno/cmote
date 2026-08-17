@@ -911,7 +911,16 @@ impl Terminal {
 		// Origin mode refuses every operation that ACTS, for the reason above. The one that ASKS is
 		// not let off it — it cannot place its rectangle either — but it is still let through, because
 		// a question dropped on the floor leaves the program that asked waiting on a terminal that has
-		// already moved on (§33). It answers for the cells it could reach, which under origin mode is
+		// already moved on (§33).
+		//
+		// SL and SR are caught by this guard too, and for a DIFFERENT reason worth writing down rather
+		// than inheriting silently (§100). They name no coordinates, so origin mode cannot misplace
+		// them. What origin mode is here is EVIDENCE: DECOM only means anything once DECSTBM has cut a
+		// scrolling region, and a shift is a scrolling operation that ought to stop at that region's
+		// edges — which cmote cannot see. So where the one signal in reach says a region is probably
+		// there, cmote does nothing rather than shift rows the program had walled off. It is a partial
+		// guard and known to be one: a region set WITHOUT origin mode is invisible from here, and the
+		// row in §8 says so. It answers for the cells it could reach, which under origin mode is
 		// none of them.
 		let origin = self.term.mode().contains(TermMode::ORIGIN);
 		if origin && !matches!(request, rect::Request::Checksum { .. }) {
@@ -962,6 +971,9 @@ impl Terminal {
 				{
 					self.copy_area(source, to_row, to_col);
 				}
+			}
+			rect::Request::Shift { direction, columns } => {
+				self.shift_columns(direction, usize::from(columns).min(cols));
 			}
 			rect::Request::Checksum { id, corners } => {
 				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
@@ -1126,6 +1138,75 @@ impl Terminal {
 			let row = to_row + index / width;
 			let column = to_col + index % width;
 			grid[Line(row as i32)][Column(column)] = cell;
+		}
+	}
+
+	/// Shift every row of the visible page sideways — SL and SR (§100).
+	///
+	/// Each row is read out whole before any of it is written, for DECCRA's reason (`copy_area`): the
+	/// source and destination overlap by definition here, so the copy is done through a buffer rather
+	/// than by choosing a direction to walk in and hoping the arithmetic holds.
+	///
+	/// Whole cells move, so a glyph's colours, attributes, OSC 8 link and DECSCA protection travel
+	/// with it — the rule DECCRA keeps, and for the same reason: protection makes a cell unerasable,
+	/// not immovable (§56). The cells shifted off the edge are gone; the ones that arrive are the
+	/// pen's background, which is what the erases write and what makes a shift over a coloured screen
+	/// leave a strip in that colour rather than in the default one.
+	///
+	/// **The cursor does not move.** SL and SR shift the data under it, so a cursor at column 40 is
+	/// still at column 40 afterwards, now over whatever slid into that cell. That is ECMA-48's and
+	/// xterm's behaviour and it is also the reason this needs no cursor bookkeeping at all: unlike a
+	/// translation into per-row DCH, which would have had to save and restore a cursor whose one saved
+	/// slot belongs to the program (§57).
+	///
+	/// `columns` arrives already defaulted to at least 1 and clamped to the page width, so a shift by
+	/// the whole width blanks the page and a shift by more than it cannot run off the end.
+	fn shift_columns(&mut self, direction: rect::Direction, columns: usize) {
+		let (rows, cols) = {
+			let grid = self.term.grid();
+			(grid.screen_lines(), grid.columns())
+		};
+		if cols == 0 || columns == 0 {
+			return;
+		}
+		let background = self.term.grid().cursor.template.bg;
+		let grid = self.term.grid_mut();
+		for row in 0..rows {
+			let line = Line(row as i32);
+			let source: Vec<Cell> = (0..cols)
+				.map(|column| grid[line][Column(column)].clone())
+				.collect();
+			for column in 0..cols {
+				// Where this cell's new content comes from, or `None` for the edge the content moved
+				// away from. `checked_sub` and the bound check are what make the edges fall out of
+				// the same loop as the middle instead of being two more loops to keep in step.
+				let from = match direction {
+					rect::Direction::Left => Some(column + columns).filter(|from| *from < cols),
+					rect::Direction::Right => column.checked_sub(columns),
+				};
+				grid[line][Column(column)] = match from {
+					Some(from) => source[from].clone(),
+					None => background.into(),
+				};
+			}
+			// A wide glyph occupies two cells, and a shift can push exactly one of them off the page —
+			// leaving a lead with no spacer at the right edge, or a spacer with no lead at the left.
+			// Neither is a state the renderer or the reflow expects to meet, and the half that is left
+			// is not a character anybody asked for, so it is blanked. Only the two edge columns can be
+			// in this state: every other pair moved together.
+			let stranded = match direction {
+				rect::Direction::Left => grid[line][Column(0)]
+					.flags
+					.contains(Flags::WIDE_CHAR_SPACER)
+					.then_some(0),
+				rect::Direction::Right => grid[line][Column(cols - 1)]
+					.flags
+					.contains(Flags::WIDE_CHAR)
+					.then_some(cols - 1),
+			};
+			if let Some(column) = stranded {
+				grid[line][Column(column)] = background.into();
+			}
 		}
 	}
 
@@ -4263,6 +4344,126 @@ mod tests {
 			terminal.process(b"\x1b[1;1;1;1;1;2*y"),
 			b"\x1bP1!~FF7D\x1b\\".to_vec()
 		);
+	}
+
+	/// SL — the page shifts left, the right edge goes blank, and nothing else moves (§100).
+	#[test]
+	fn a_shift_left_moves_the_page_and_blanks_the_right_edge() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"abcdefgh\r\n12345678");
+		terminal.process(b"\x1b[3 @");
+		assert_eq!(read(&terminal, 0, 0, 8), "defgh");
+		assert_eq!(read(&terminal, 1, 0, 8), "45678");
+		// The blanks are cells, not merely absent text: reading them back gives nothing at all.
+		assert!(!terminal.screen().cell(0, 5).unwrap().has_contents());
+		assert!(!terminal.screen().cell(0, 7).unwrap().has_contents());
+	}
+
+	/// SR — the same the other way, and the direction is the one thing here that cannot be got wrong
+	/// quietly: a shift that goes the wrong way is a screen no program can recover.
+	#[test]
+	fn a_shift_right_moves_the_page_and_blanks_the_left_edge() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"abcdefgh\r\n12345678");
+		terminal.process(b"\x1b[3 A");
+		// `read` yields a blank cell as nothing at all, so the three blanks show up as an absence in
+		// front and the content is asserted where it actually landed, from column 3.
+		assert_eq!(read(&terminal, 0, 0, 8), "abcde");
+		assert_eq!(read(&terminal, 0, 3, 5), "abcde");
+		assert_eq!(read(&terminal, 1, 3, 5), "12345");
+		for column in 0..3 {
+			assert!(
+				!terminal.screen().cell(0, column).unwrap().has_contents(),
+				"column {column} should be blank"
+			);
+		}
+	}
+
+	/// An omitted count is one column, and a count past the page's width blanks it rather than
+	/// running off the end of the grid.
+	#[test]
+	fn a_shift_defaults_to_one_column_and_clamps_to_the_page() {
+		let mut terminal = Terminal::new(1, 4);
+		terminal.process(b"abcd\x1b[ @");
+		assert_eq!(read(&terminal, 0, 0, 4), "bcd");
+
+		let mut wide = Terminal::new(1, 4);
+		wide.process(b"abcd\x1b[99 @");
+		assert_eq!(read(&wide, 0, 0, 4), "", "shifted away whole");
+	}
+
+	/// Whole cells move, so what slid across keeps its colours and attributes — DECCRA's rule (§58),
+	/// and the reason a shift is not the same as reprinting the text one column over. The blanks that
+	/// arrive carry the PEN's background, which is what the erases write.
+	#[test]
+	fn a_shift_carries_the_attributes_and_lays_the_pen_down_behind_it() {
+		let mut terminal = Terminal::new(1, 6);
+		// Bold red-on-blue `ab`, then the pen left on a green background — so what arrives at the
+		// blanked edge is green, and what moves keeps the red, the blue and the bold.
+		terminal.process(b"\x1b[1;31;44mab\x1b[0;42m");
+		terminal.process(b"\x1b[2 A");
+		let screen = terminal.screen();
+		let moved = screen.cell(0, 2).unwrap();
+		assert_eq!(moved.contents(), "a", "shifted two columns right");
+		assert_eq!(moved.fgcolor(), screen::Color::Indexed(1), "still red");
+		assert_eq!(moved.bgcolor(), screen::Color::Indexed(4), "still on blue");
+		assert!(moved.bold(), "and still bold");
+		// The cells that arrived carry the pen's background, which is what an erase writes — a shift
+		// over a coloured screen leaves a strip in that colour rather than in the default one.
+		let arrived = screen.cell(0, 0).unwrap();
+		assert!(!arrived.has_contents());
+		assert_eq!(
+			arrived.bgcolor(),
+			screen::Color::Indexed(2),
+			"the pen's green"
+		);
+	}
+
+	/// A wide glyph is two cells, and a shift can push exactly one of them off the page. The half left
+	/// behind is not a character anybody asked for, so it is blanked rather than drawn as a lead with
+	/// nothing after it or a continuation with nothing before it.
+	#[test]
+	fn a_wide_glyph_cut_in_half_by_a_shift_leaves_no_half_behind() {
+		// `世` occupies columns 0 and 1; shifting left by one would leave its continuation at column 0.
+		let mut terminal = Terminal::new(1, 6);
+		terminal.process("世ab".as_bytes());
+		terminal.process(b"\x1b[1 @");
+		let screen = terminal.screen();
+		assert!(!screen.cell(0, 0).unwrap().is_wide_continuation());
+		assert!(!screen.cell(0, 0).unwrap().has_contents());
+		assert_eq!(screen.cell(0, 1).unwrap().contents(), "a");
+
+		// And the mirror: shifting right leaves the LEAD at the last column with nothing to follow it.
+		let mut right = Terminal::new(1, 6);
+		right.process("ab世".as_bytes());
+		right.process(b"\x1b[1 A");
+		let screen = right.screen();
+		assert!(!screen.cell(0, 5).unwrap().is_wide());
+		assert!(!screen.cell(0, 5).unwrap().has_contents());
+	}
+
+	/// SL and SR move the data under the cursor and leave the cursor where it stands — so a program
+	/// that shifts mid-line goes on writing at the same column, over whatever slid into it.
+	#[test]
+	fn a_shift_leaves_the_cursor_where_it_was() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"\x1b[2;5H");
+		assert_eq!(terminal.process(b"\x1b[3 @\x1b[6n"), b"\x1b[2;5R".to_vec());
+	}
+
+	/// Refused under origin mode, and for a reason SL and SR do not share with the rectangles: they
+	/// name no coordinates to misplace. DECOM is EVIDENCE that DECSTBM has cut a scrolling region a
+	/// shift ought to stop at — a region the engine keeps private — so cmote does nothing rather than
+	/// shift rows the program walled off (§100).
+	#[test]
+	fn a_shift_is_refused_while_origin_mode_is_set() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"abcdefgh");
+		terminal.process(b"\x1b[?6h\x1b[3 @");
+		assert_eq!(read(&terminal, 0, 0, 8), "abcdefgh", "untouched");
+		// And it works again the moment origin mode is off, so this is a guard and not a one-way door.
+		terminal.process(b"\x1b[?6l\x1b[3 @");
+		assert_eq!(read(&terminal, 0, 0, 8), "defgh");
 	}
 
 	/// XTCHECKSUM (`CSI Ps # y`) would move that calculation, and cmote answers **one** calculation —

@@ -1386,7 +1386,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ! p (DECSTR) | Soft reset | ✅ | the soft reset: pen, modes, charsets, scrolling region and saved cursor back to their power-on values without clearing the screen. DEC's published list is eighteen items and cmote sends the eleven anything here models — DECTCEM, IRM, DECOM, DECAWM, DECNKM, DECCKM, DECSTBM, the charsets, SGR, DECSCA and DECSC; the other seven (KAM, DECNRCM, DECAUPSS, DECSASD, DECKPM, DECRLM, DECPCTERM) name state neither `vte` nor the engine nor cmote has. **One deliberate departure**: DEC's list says "Autowrap (DECAWM): No autowrap" and cmote leaves it **on**, because `xterm-256color` declares `am` and its `rs2` sends no `\E[?7h` after this (§72, §94) |
 | b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
-| Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ❌ | ECMA-48's horizontal twins of SU / SD, shifting the page sideways by `Ps` columns. A **gap** rather than a decision: nothing here refuses them, and the intermediate keeps them clear of ICH and CUU, which share their final bytes (§98) |
+| Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Refused while origin mode is set** — not because these name coordinates, they name none, but because DECOM is the one signal in reach that DECSTBM has cut a scrolling region a shift ought to stop at, and the engine keeps that region private (§58, §100, `term/rect.rs`) |
 | Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ❌ | contour's: SD, but the lines pulled in at the top come from the **scrollback** instead of being blank. A gap; cmote's scrollback is the user's to walk and no program has asked to push it back onto the page (§98) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
 | s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
@@ -1402,7 +1402,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | $ r / $ t (DECCARA / DECRARA) | Change / reverse attributes in a rectangle | ✅ | set or flip attributes over a rectangle, from a DEC-defined selector list — `$ r` takes `0 1 4 5 7 22 24 25 27`, `$ t` only `0 1 4 5 7`. Attributes alone: never a colour, never a glyph. Blink is parsed and dropped, the engine having no bit for it (§59) |
 | Pid;Pp;Pt;Pl;Pb;Pr * y (DECRQCRA) | Rectangle checksum | ✅ | checksums a rectangle and answers `DCS Pid ! ~ XXXX ST` — xterm's `xtermCheckRect` at its DEC-compatible default, clamped to the visible page so the scrollback cannot be read through it. The page number is ignored (§60, `term/rect.rs`) |
 | Ps # y (XTCHECKSUM) | Select checksum extension | 🤷 | "the bits of `Ps` modify the calculation of the checksum returned by DECRQCRA": `0` do not negate the result, `1` do not report the VT100 video attributes, `2` do not omit the checksum for blanks, `3` omit it for cells never initialised, `4` do not mask the cell value to 8 bits. cmote answers **one** calculation, the DEC-compatible default the row above describes. Decided in §99 rather than left open: bit `3` is one cmote *cannot* perform — the engine's grid starts full of blanks indistinguishable from written cells, §60's own disclosed divergence — and honouring four of five would hand a program that set the fifth a number computed under rules it did not choose. Dies in the parser, `csi_dispatch` matching no `#` intermediate at all, and pinned at the boundary by the checksum being the same number before and after the request (§60, §88, §94, §99) |
-| Ps ' } / Ps ' ~ (DECIC / DECDC) | Insert / delete column | ❌ | the column twins of IL / DL: open `Ps` blank columns at the cursor's column and push the rest of every line right, or delete `Ps` and pull the tail left. The VT420 family cmote finished in §58–§60 is the *rectangular* one; these two are its neighbours and nothing here refuses them — a **gap**, and the one in this table whose cost is best understood, since `term/rect.rs` already moves whole cells with their colour, link and protection attached (§58, §98) |
+| Ps ' } / Ps ' ~ (DECIC / DECDC) | Insert / delete column | ❌ | the column twins of IL / DL: open `Ps` blank columns at the cursor's column and push the rest of every line right, or delete `Ps` and pull the tail left. The VT420 family cmote finished in §58–§60 is the *rectangular* one; these two are its neighbours and nothing here refuses them — a **gap**, and since §100 one with a working precedent rather than an argument: SL and SR are the same shift, over the whole row instead of from the cursor's column, and `shift_columns` is what they would be built out of (§58, §98, §100) |
 | Ps SP q (DECSCUSR) — shape | Cursor style | ✅ | picks the cursor's shape: block, underline or bar, `0` the default; `7`+ is undefined (§84) |
 | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | the odd values of the same parameter ask for a blinking cursor; cmote runs no animation timer and its seam carries no blink, so the cursor is steady (§65, `term/screen.rs`, §84) |
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
@@ -1447,7 +1447,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC c (RIS) | Full reset | ✅ | the hard reset: every setting back to power-on, the screen cleared |
 | ESC = / ESC > | Keypad application / numeric | ✅ | DECKPAM / DECKPNM put the numeric keypad in application or numeric mode; tracked on the seam and encoded for the keys with no NumLock meaning to lose — Enter and `* + , - / =` (§2, §36) |
 | ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (§2, §36, `term/keymap.rs`) |
-| ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap**, and one whose sideways scroll is the same missing machinery SL / SR name in the CSI table (§98) |
+| ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap** — and since §100 the sideways scroll it needs exists (`shift_columns`), leaving the cursor-at-the-margin condition as the only unwritten half (§98, §100) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | fills the screen with `E` and homes the cursor — the alignment test |
 | ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. G2 and G3 can be designated and nothing here can invoke them |
 | ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ | the other 94-character sets — UK, Dutch, Finnish and the rest — which nothing here would draw either |
@@ -1584,8 +1584,11 @@ semantic-block query. A column that quadruples on one reading was never six rows
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
 it), the newer private modes (2027 / 2031 / 2048), left-right margins, and — since §98 — the
-**horizontal-scroll family**, SL / SR, DECBI / DECFI and DECIC / DECDC, which is one piece of absent
-machinery wearing six names. That last one is no longer a *capability* gap at all: §5 costs out the
+**horizontal-scroll family**, SL / SR, DECBI / DECFI and DECIC / DECDC, which read as one piece of
+absent machinery wearing six names. **§100 built it and moved two of them**: SL and SR are ✅, and
+what it cost was forty lines beside the rectangles, because the hard half — writing cells into the
+engine's grid — had been paid in §56. The other four are now gaps with a working precedent rather
+than gaps with an argument. That last one is no longer a *capability* gap at all: §5 costs out the
 delegating-`Handler` build that would do it, and the reason it stays unbuilt is that such a wrapper
 degrades silently on an engine bump — in exchange for a sequence no init or reset string emits, which
 §73 checked against the terminfo rather than asserting. **§73 also moved which row carries it**: DECSLRM
@@ -1919,6 +1922,16 @@ Quoted where a row's wording now rests on it.
   cmote's own allow-list rather than something xterm publishes; and it gives DECSACE's three values with
   **no default named**, so "the state a terminal powers up in" is `rect.rs`'s `#[default] Stream` and the
   VT420 manual behind it, not this document.
+
+- **SL and SR, read for §100**, are two lines and the whole of what any reachable source says about
+  them: **"Shift left `Ps` column(s) (default = 1) (SL), ECMA-48"** and **"Shift right `Ps`
+  column(s) (default = 1) (SR), ECMA-48"**. Note the verb — *shift*, not *scroll* — and note what is
+  absent: ctlseqs says **nothing about the margins**, neither DECSTBM's top and bottom nor DECSLRM's
+  left and right, for these or for DECIC / DECDC beside them. So cmote's page-wide reading is the only
+  one its sources describe, and the question of whether a real xterm stops at a scrolling region is
+  open rather than answered against cmote — which is why §100 refuses the case where a region is
+  likeliest rather than guessing at it. ECMA-48 itself, where the definition actually lives, is still
+  unread here.
 
 ### DEC's own manual (`vt100.net/docs/vt510-rm/`, read for §94)
 

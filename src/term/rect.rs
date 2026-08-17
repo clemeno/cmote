@@ -20,16 +20,30 @@
 //
 //   CSI Pid;Pp;Pt;Pl;Pb;Pr * y                   DECRQCRA — report a checksum of the rectangle
 //
+// TWO MORE JOINED IN §100, and they are not rectangles at all:
+//
+//   CSI Ps SP @                                  SL — shift the page left Ps columns
+//   CSI Ps SP A                                  SR — shift it right Ps columns
+//
+// They are ECMA-48's rather than DEC's and they name no corners at all. They live here because what
+// a module shares with its neighbours is not its grammar but its MECHANISM: SL and SR move whole
+// cells across the page with no engine arm behind them, against the same background the erases
+// write, under the same origin-mode refusal, clamped to the same visible page. A second module
+// doing cell-moving by its own rules is the duplication worth avoiding; one more pair of arms in
+// this scanner is not. The module's subject is therefore "operations that move cells the engine
+// will not", and the file name is one section out of date.
+//
 // They were the block operations of a forms terminal: clear a field, rule a line of `-` across a box,
 // scroll a sub-window by copying it up a row, underline a whole column of entry fields in one write.
 // A modern full-screen program repaints instead, so almost nothing emits these — but they are cheap
 // here, because everything they need already exists. §56 had to solve the hard half: writing cells
 // directly into the engine's grid, and knowing which of them a program marked as protected.
 //
-// `vte` has no arm for any of the eight. Its CSI dispatch matches `$` only in `('p', [b'$'])` and
-// `('p', [b'?', b'$'])` — the two DECRQM spellings — and matches `*` in no CSI at all, so every one
-// of them falls through to the unhandled arm and is dropped whole. That makes them cmote's, the same
-// way DECSCA and the `?` erases were.
+// `vte` has no arm for any of the ten. Its CSI dispatch matches `$` only in `('p', [b'$'])` and
+// `('p', [b'?', b'$'])` — the two DECRQM spellings — matches `*` in no CSI at all, and matches the
+// SPACE intermediate in exactly two places, `('k', [b' '])` and `('q', [b' '])`, which are SCP and
+// DECSCUSR. So every one of them falls through to the unhandled arm and is dropped whole. That makes
+// them cmote's, the same way DECSCA and the `?` erases were.
 //
 // This module is the grammar and the arithmetic, and nothing else: it deals in plain row and column
 // numbers, in a four-bit attribute mask of its own, and in the running total of a checksum, so every
@@ -137,6 +151,19 @@ pub struct Corners {
 	pub left: u16,
 	pub bottom: u16,
 	pub right: u16,
+}
+
+/// Which way SL and SR move the page (§100).
+///
+/// Named for what the CONTENT does, which is how both ECMA-48 and xterm write them: `SL` shifts the
+/// data left, so the blanks arrive on the right. Reading the name as "the blanks come from the left"
+/// gets it backwards, and a shift that goes the wrong way is a screen no program can recover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+	/// `CSI Ps SP @` — content moves left, blanks fill the right edge.
+	Left,
+	/// `CSI Ps SP A` — content moves right, blanks fill the left edge.
+	Right,
 }
 
 /// Which shape DECCARA and DECRARA act on — the whole content of DECSACE (§59).
@@ -284,6 +311,13 @@ pub enum Request {
 		extent: Extent,
 		change: Change,
 	},
+	/// SL / SR — shift every row of the visible page sideways by `columns`, blanking the edge the
+	/// content moved away from (§100).
+	///
+	/// `columns` is already defaulted here: an omitted or zero parameter is one column, which is what
+	/// ECMA-48 and xterm both spell as the default. It is not yet clamped to the page — that needs a
+	/// width, which is the applier's to know.
+	Shift { direction: Direction, columns: u16 },
 	/// DECRQCRA — report a checksum of the rectangle, and change nothing (§60). `id` is the label
 	/// the program attached so it can match the answer to the question, echoed back untouched.
 	///
@@ -446,6 +480,24 @@ impl Rectangles {
 			(b'y', None, [b'*']) => Some(Request::Checksum {
 				id: number(&numbers, 0),
 				corners: corners(&numbers, 2),
+			}),
+			// SL / SR — one parameter, and the SPACE intermediate is the whole of what tells them
+			// from their neighbours (§100). `CSI Ps @` with no intermediate is ICH, which inserts
+			// blanks at the cursor, and `CSI Ps A` is CUU, which moves the cursor up: two sequences
+			// the engine implements and every program uses, one byte away from these. Matching the
+			// intermediate alongside the final byte is what keeps them apart, the same near-miss rule
+			// §56 wrote down.
+			//
+			// An omitted or zero count is one column, as it is for ICH, CUU and every other
+			// `Ps`-counted movement — `vte`'s own `next_param_or(1)` reads a literal `0` that way too,
+			// so this agrees with how the engine would have read the same parameter.
+			(b'@', None, [b' ']) => Some(Request::Shift {
+				direction: Direction::Left,
+				columns: number(&numbers, 0).max(1),
+			}),
+			(b'A', None, [b' ']) => Some(Request::Shift {
+				direction: Direction::Right,
+				columns: number(&numbers, 0).max(1),
 			}),
 			// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
 			// mean anything; a fourth leaves the extent where it was, rather than guessing at a
@@ -1296,6 +1348,67 @@ mod tests {
 		// self-test. Claiming it here would answer a question nobody asked with a number.
 		assert!(scan(b"\x1b[2;1y").is_empty());
 		assert!(scan(b"\x1b[1;1;1;1;1;1$y").is_empty());
+	}
+
+	/// SL and SR, and the direction each of them names (§100).
+	#[test]
+	fn a_shift_reads_its_direction_and_its_column_count() {
+		assert_eq!(
+			scan(b"\x1b[3 @"),
+			vec![(
+				5,
+				Request::Shift {
+					direction: Direction::Left,
+					columns: 3
+				}
+			)]
+		);
+		assert_eq!(
+			scan(b"\x1b[3 A"),
+			vec![(
+				5,
+				Request::Shift {
+					direction: Direction::Right,
+					columns: 3
+				}
+			)]
+		);
+	}
+
+	/// One column is the default, and a literal `0` is the same request — the reading every
+	/// `Ps`-counted movement gets, and the one the engine would have given these parameters itself.
+	#[test]
+	fn a_shift_with_no_count_moves_one_column() {
+		for sequence in [&b"\x1b[ @"[..], &b"\x1b[0 @"[..]] {
+			assert_eq!(
+				scan(sequence),
+				vec![(
+					sequence.len(),
+					Request::Shift {
+						direction: Direction::Left,
+						columns: 1
+					}
+				)],
+				"{sequence:?}"
+			);
+		}
+	}
+
+	/// The near misses, and they are the most dangerous in this module: both neighbours are sequences
+	/// the ENGINE implements and every program uses, one intermediate byte away.
+	#[test]
+	fn the_two_sequences_a_shift_sits_beside_are_left_to_the_engine() {
+		assert!(scan(b"\x1b[3@").is_empty(), "ICH — insert blanks");
+		assert!(scan(b"\x1b[3A").is_empty(), "CUU — move the cursor up");
+		assert!(
+			scan(b"\x1b[3$@").is_empty(),
+			"another intermediate entirely"
+		);
+		assert!(scan(b"\x1b[?3 @").is_empty(), "a marker rules it out");
+		assert!(
+			scan(b"\x1b[3  @").is_empty(),
+			"two intermediates is not one"
+		);
 	}
 
 	#[test]
