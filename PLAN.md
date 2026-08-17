@@ -10880,12 +10880,41 @@ handling in favour of something cruder, and a `pwsh` tab could not be used to ru
 What makes the honest version possible is the echo. A Windows interpreter handed a control byte it has no
 meaning for puts it in its input line and draws it as `^D`. So there are exactly two answers to read:
 
-- the answer contains **`^D`** → nothing consumed the byte, so this is the shell's own EOF being ignored,
-  and the session ends (`judge_eof` → `end_local_shell`);
+- the answer contains **`^D`** → nothing consumed the byte, so this is the shell's own EOF being ignored, and
+  cmote runs the shell's own `exit` for it (`judge_eof` → `exit_the_local_shell`);
 - **anything else** — a fresh prompt after node exited, a pager scrolling, a program's output → the byte did
   its job and the session is not cmote's business.
 
 The cost of being right is one output round trip: 10-17 ms, measured.
+
+### What the echo is answered with: `exit`, not a teardown
+
+cmote tears nothing down on this path. It sends an interrupt to clear the input line — which is carrying the
+`^D` the shell just echoed onto it — and types `exit`. Then the shell does what `exit` does: runs its exit
+path, leaves, and the session ends because its shell ended, arriving through the same `Disconnected` route as
+a shell the user quit by hand.
+
+That indirection is the point, and it buys three things a teardown could not:
+
+- **What ends is what echoed.** Measured, because it is the argument for the whole design: a `pwsh` started
+  inside the tab's `pwsh` echoes `^D` too, and the sequence ends THAT one — the output comes back at the
+  outer `PS C:\Users\cme>` prompt and the session's own shell is still running. A version that ran the
+  session's teardown would have closed the tab out from under a nested shell.
+- **Nothing is ever killed here.** No `Disconnect`, so no 800 ms window and no `TerminateProcess` fallback.
+- **"Nothing happened" is a real outcome.** A shell that refuses the word leaves the session exactly where it
+  was, which is the direction this rule fails in everywhere else too.
+
+The interrupt is not politeness; it is what makes the word land. Same shell, same sequence, on an empty line
+and on a half-typed one, with only the prefix changed:
+
+| prefix | what happened |
+|---|---|
+| `0x03` (Ctrl+C) | the shell left, in **all six** cases |
+| `0x08` (backspace) | fine on an empty line; on `Get-Chi` `pwsh` ran `Get-` with a PSReadLine suggestion attached and `powershell` ran `Get-exit` |
+| nothing | `^Dexit` — refused everywhere |
+
+So `shells::quit_sequence` is `0x03` + `exit` + CR, and it is what the Disconnect button's tidy teardown types
+too (§104's "Asking before killing"): the half-typed line it used to garble was the same bug measured here.
 
 `judge_eof` settles on the FIRST chunk, with one exception — a chunk ending in `^` could be an echo cut in
 half by a read boundary, so that one waits for the next chunk. Nothing else keeps a probe armed, because a
@@ -10968,31 +10997,26 @@ Two things about that, both deliberate:
   drain's own timeout instead. Two constants in two modules, related by an assertion rather than by a
   comment.
 
-### The backspace that is not cosmetic
+### The prefix that is not cosmetic
 
-A shell echoes `^D` because it PUT it in its input line, so on the path that reads the echo the line holds
-one character of rubbish — and that is the line the teardown's own `exit` is typed on. One backspace goes
-first, and the measurement is unambiguous. Same shell, same sequence, the erase the only difference:
-
-| | what the shell showed | outcome |
-|---|---|---|
-| with the backspace | `exit`, in PSReadLine's green for a recognised command | **exited after 99 ms** |
-| without it | `^Dexit`, in red | `exit: The term 'exit' is not recognized…`, still running at 2.5 s |
-
-So without the erase the tidy teardown is undone in exactly the case that reaches it most often: the shell
-would refuse the word, and the 800 ms kill would end the session after all.
+Worth keeping the intermediate result, because it is why the prefix is an interrupt and not an erase. A
+backspace was tried first, on the reasoning that the echo is exactly one character: with it, `pwsh` showed
+`exit` in PSReadLine's green and left in **99 ms**; without it, `^Dexit` in red, `exit: The term 'exit' is not
+recognized…`, still running at 2.5 s. Both true, and both measured on an EMPTY line — which is what made the
+erase look sufficient. It is not: a line the user had started typing on needs the whole line gone, not one
+character, and the table above is what that costs when you get it wrong.
 
 ### What it cost
 
-- `local/shells.rs`: `Kind::quits_on_eof` and `QUIT_COMMAND`, plus the test that writes the EOF split down
-  per kind.
+- `local/shells.rs`: `Kind::quits_on_eof`, `QUIT_COMMAND` and `quit_sequence` (with the prefix table in its
+  doc), plus the test that writes the EOF split down per kind.
 - `app.rs`: the listening block in `on_key`, `judge_eof`, `eof_probe` on the tab, `EOF_ECHO` /
-  `EOF_ANSWER_CAP`, `end_local_shell` (with its backspace), `on_alternate_screen`, `is_close_tab` extracted
-  with its missing `repeat` term, `end_session` at the three teardown sites that had a plain `Disconnect`,
-  and `QUIT_DRAIN_TIMEOUT` made `pub(crate)` so the goodbye window can be checked against it. Seven tests:
-  the byte reaching the shell first, the echo ending the session (fed as two chunks, split inside the
-  needle), the two answers that keep it, the shells that are never listened to, the two presses excluded,
-  what a teardown types at which shell, and the held key.
+  `EOF_ANSWER_CAP`, `exit_the_local_shell`, `on_alternate_screen`, `is_close_tab` extracted with its missing
+  `repeat` term, `end_session` at the three teardown sites that had a plain `Disconnect`, and
+  `QUIT_DRAIN_TIMEOUT` made `pub(crate)` so the goodbye window can be checked against it. Seven tests: the
+  byte reaching the shell first, the echo answered with `exit` and the session ending only when the shell
+  does (the echo fed as two chunks, split inside the needle), the two answers that keep it, the shells that
+  are never listened to, the two presses excluded, what a teardown types at which shell, and the held key.
 - `local/session.rs`: `GOODBYE`, the compile-time tie to the quit budget, and `farewell` — which drains the
   output while it waits, because the shell's last words must not fill a bounded channel and block the exit
   they are on the way to.
@@ -11006,22 +11030,29 @@ would refuse the word, and the 800 ms kill would end the session after all.
   ignored control byte, so the needle is theirs and not cmote's invention — but it is still a string match on
   a stream cmote does not control. It is only ever looked for in the answer to a Ctrl+D cmote itself sent one
   round trip earlier, at a local shell, on the main screen, which is as narrow as the window gets without a
-  protocol nobody offers here. A program that answers a Ctrl+D by printing `^D` within that window would end
-  the session, and nothing else will.
+  protocol nobody offers here. A program that answers a Ctrl+D by printing `^D` within that window gets an
+  interrupt and the word `exit` typed at it, and nothing worse: no teardown rides on this any more.
+- **A half-typed command is discarded rather than kept.** The interrupt clears the line, so a Ctrl+D pressed
+  after typing `Get-Chi` throws that away and exits — where `bash` would have done nothing at all, since its
+  Ctrl+D only means EOF on an empty line. cmote cannot tell an empty prompt from a full one (the echo says
+  where the cursor is, not what is left of it), and of the two ways to be wrong, exiting is the one the key
+  was pressed for.
 - **An echo split anywhere other than inside `^D`** — `ESC[?25l` in one chunk, `ESC[93m^D` in the next —
   reads as "a program answered the byte" and leaves the session up. Nineteen bytes arrived as one read every
   single time it was measured, and the cost of being wrong is one more press, so this is not bought off with
   a timer.
 - **Ctrl+D inside a pager still does nothing to the session**, which is right, and nothing tells the user
   which of the two states they are in. A terminal has never had to say.
-- **The teardown types `exit` at whatever is in front of the shell.** On the path where a program consumed
-  the byte the session is not ending, so this does not arise there; it arises when the Disconnect button is
-  pressed with `node` running, and node answers the word with an error and is killed 800 ms later. Telling a
-  running program from a prompt needs an announcement §103 refuses to install.
-- **The probes were thrown away rather than kept.** Three of them: what EOF does to each shell, what comes
-  back, and whether the backspace makes the `exit` land. Each spawns real interactive shells and kills them,
-  which is seconds of wall clock and a silent skip on a machine without them; what they established is
-  written down here and asserted against those exact byte strings in `app`'s tests.
+- **The Disconnect BUTTON still types at whatever is in front of the shell.** Ctrl+D no longer does — it only
+  types where the echo proved there is a prompt — but the button, a tab close and a quit have no such proof
+  and type anyway. With `node` running that is an interrupt plus a word node answers with an error, and the
+  800 ms kill a moment later. Telling a running program from a prompt needs an announcement §103 refuses to
+  install; the echo trick cannot help, because there is no key press to answer.
+- **The probes were thrown away rather than kept.** Five of them: what EOF does to each shell, what comes back
+  from it, whether an erase makes the `exit` land, which prefix lands it on a half-typed line, and what the
+  sequence ends when a shell is nested. Each spawns real interactive shells and kills them, which is seconds
+  of wall clock and a silent skip on a machine without them; what they established is written down here and
+  asserted against those exact byte strings in `app`'s tests.
 
 ## §105 — The Git that was there all along
 

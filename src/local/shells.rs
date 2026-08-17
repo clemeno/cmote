@@ -33,8 +33,39 @@ use std::path::{Path, PathBuf};
 /// its prompt is not in one, so the bare word is right.)
 ///
 /// It is TYPED, so it is only ever sent when typing makes sense — see `Tab::end_session`, which will not
-/// type at a full-screen program.
+/// type at a full-screen program. And it is never typed alone: see [`quit_sequence`].
 pub const QUIT_COMMAND: &str = "exit";
+
+/// Everything that has to go to a local shell to make it leave: cancel whatever is on its input line,
+/// then its own `exit` (§104).
+///
+/// The `0x03` is not politeness, it is what makes the word land, and the alternatives were measured on all
+/// three Windows interpreters with an empty line and with a half-typed one:
+///
+/// | prefix | what happened |
+/// |---|---|
+/// | `0x03` (Ctrl+C) | the shell left, in all six cases |
+/// | `0x08` (backspace) | fine on an empty line; on `Get-Chi` it ran `Get-exit`, and PSReadLine had a
+///   predictive suggestion attached to the line as well |
+/// | nothing | `^Dexit` — refused everywhere |
+///
+/// Two things end up on that line without the user meaning them to: a command they started typing and
+/// changed their mind about, and — on the Ctrl+D path — the `^D` the shell itself echoed there. Ctrl+C
+/// discards both and gives a fresh prompt, which is exactly what a person does before typing `exit`.
+///
+/// A shell with a program in FRONT of it gets the interrupt instead, which is the same thing that would
+/// happen if the user pressed the key. That path is not this one's problem: it only ends up here when the
+/// caller already believes there is a prompt (§104).
+pub fn quit_sequence() -> Vec<u8> {
+	let mut bytes = vec![CANCEL_LINE];
+	bytes.extend_from_slice(QUIT_COMMAND.as_bytes());
+	bytes.push(b'\r');
+	bytes
+}
+
+/// The byte a terminal sends for Ctrl+C: "throw away the line I was typing". Every shell here answers it
+/// with a fresh prompt.
+const CANCEL_LINE: u8 = 0x03;
 
 /// Which shell a button opens. The label and the session's endpoint text come off this, so it is
 /// what tells `pwsh` from `powershell` on screen — the two are different programs with different

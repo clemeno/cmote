@@ -4816,7 +4816,7 @@ impl Tab {
 				// and the session ends here instead of the key doing nothing. Weighed BEFORE the bytes
 				// reach the emulator, since the teardown drops it a line later either way.
 				if self.judge_eof(&bytes) {
-					return self.end_local_shell();
+					return self.exit_the_local_shell();
 				}
 				// Feed raw shell output into the emulator; the next render draws it.
 				// `process` also returns the engine's replies to the status/identity queries
@@ -5126,17 +5126,15 @@ impl Tab {
 	/// the mechanism.
 	///
 	/// **Not while the alternate screen is up**, and that is the load-bearing half. `exit` is not a
-	/// message, it is four keystrokes: at a `vim` in normal mode `x` deletes the character under the cursor
-	/// and `i` starts inserting, so the tidier teardown would edit the user's file on its way out. A
-	/// session showing a full-screen program is therefore torn down the abrupt way, exactly as it was
-	/// before this existed. A line-based program (a `node` REPL) is not detectable this way and gets the
-	/// word as a line of input, which it answers with an error and cmote follows with the kill — noisy in
-	/// the scrollback nobody reads, and no worse than before.
+	/// message, it is keystrokes: at a `vim` in normal mode `x` deletes the character under the cursor and
+	/// `i` starts inserting, so the tidier teardown would edit the user's file on its way out. A session
+	/// showing a full-screen program is therefore torn down the abrupt way, exactly as it was before this
+	/// existed. A line-based program (a `node` REPL) is not detectable this way and gets the interrupt and
+	/// the word as input, which it answers with an error and cmote follows with the kill — noisy in the
+	/// scrollback nobody reads, and no worse than before.
 	fn end_session(&mut self) {
 		if self.local.is_some() && !self.on_alternate_screen() {
-			self.send_command(SshCommand::Input(
-				format!("{}\r", crate::local::shells::QUIT_COMMAND).into_bytes(),
-			));
+			self.send_command(SshCommand::Input(crate::local::shells::quit_sequence()));
 		}
 		self.send_command(SshCommand::Disconnect);
 	}
@@ -5180,23 +5178,28 @@ impl Tab {
 		false
 	}
 
-	/// End a local session whose shell has just shown it will not end itself (§104).
+	/// Answer a Ctrl+D the shell handed straight back: run the shell's OWN `exit` (§104).
 	///
-	/// The confirmed Disconnect's teardown, reached deliberately WITHOUT its confirmation modal: Ctrl+D
-	/// at a bash prompt does not stop to ask, and a gesture that mirrors one shell but interrogates the
-	/// user on another is not the same gesture. Nothing is risked by that — a shell holds no unsaved
-	/// state of its own, and the screen it lands on has the Local bar on it, one click from the shell
-	/// that was just closed. The Disconnect BUTTON keeps its modal: a click near a toolbar is an
-	/// accident in a way that Ctrl+D, a key with one meaning at a prompt, is not.
+	/// cmote tears nothing down here. It cancels the input line — which is carrying the `^D` the shell just
+	/// echoed into it — and types `exit`, and then the shell does what `exit` does: runs its exit path,
+	/// leaves, and the session ends because its shell ended. `Disconnected` arrives through the ordinary
+	/// route and the tab lands on the home screen exactly as it does when the user types the word by hand.
 	///
-	/// One backspace goes first, and it is not cosmetic. The shell echoed the byte because it PUT it in
-	/// its input line, so the line now holds one character of rubbish — and the teardown's own `exit` is
-	/// typed on that line (§104). Without the erase the shell would be asked to run `^Dexit`, answer with
-	/// an error, and be killed by the fallback a moment later: the tidy teardown would be undone in
-	/// exactly the case that reaches it most often.
-	fn end_local_shell(&mut self) -> iced::Task<Message> {
-		self.send_command(SshCommand::Input(vec![0x08]));
-		self.on_disconnect_confirmed()
+	/// That indirection is the whole point of it, and it buys three things the earlier version could not:
+	///
+	///   * **What ends is what echoed.** A `pwsh` started inside the tab's `pwsh` also echoes `^D`, and this
+	///     ends THAT one, back to the outer prompt with the session intact. A version that ran the session's
+	///     teardown would have closed the tab's shell from under a nested one.
+	///   * **The shell is never killed on this path.** No `Disconnect`, so no 800 ms window and no
+	///     `TerminateProcess` fallback: the word landed or nothing happened.
+	///   * **Nothing happened is a real outcome.** If the shell refuses the word the session is simply still
+	///     there — the safe direction this whole rule is built to fail in.
+	///
+	/// No confirmation card, and now for a plainer reason than before: this is not a teardown to confirm, it
+	/// is four characters typed at a prompt. The Disconnect BUTTON keeps its modal.
+	fn exit_the_local_shell(&mut self) -> iced::Task<Message> {
+		self.send_command(SshCommand::Input(crate::local::shells::quit_sequence()));
+		iced::Task::none()
 	}
 
 	/// Whether a full-screen program currently owns the grid (§104). No terminal at all counts as "no",
@@ -9590,42 +9593,48 @@ mod tests {
 		);
 	}
 
-	/// The shell echoing the byte back is what says nothing consumed it (§104) — a Windows interpreter
-	/// handed a control byte it has no meaning for prints `^D` onto its input line. THEN the session ends,
-	/// with the echo erased first so the teardown's own `exit` is typed on a clean line.
+	/// The shell echoing the byte back is what says nothing consumed it (§104) — a Windows interpreter handed
+	/// a control byte it has no meaning for prints `^D` onto its input line. cmote answers by running the
+	/// shell's OWN `exit`: an interrupt to clear the line the echo landed on, then the word. Nothing is torn
+	/// down from this side, and the session ends when the shell does.
 	///
 	/// Fed in two chunks on purpose: the reply arrives as one read every time it has been measured, but
 	/// nothing promises that, and half an echo must not read as "a program answered".
 	#[test]
-	fn the_shell_echoing_the_byte_back_ends_the_session() {
+	fn the_shell_echoing_the_byte_back_is_told_to_exit() {
 		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
 		let _ = app.on_key(ctrl_d());
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
 
 		// PSReadLine's real answer, split where it hurts most.
 		let _ = app.on_ssh_event(shell_output(b"\x1b[?25l\x1b[93m^"));
-		assert!(app.connection.is_some(), "half an echo decides nothing yet");
+		assert!(app.eof_probe.is_some(), "half an echo decides nothing yet");
 		let _ = app.on_ssh_event(shell_output(b"D\x1b[?25h"));
 
 		assert_eq!(
 			next_input(&mut rx).as_deref(),
-			Some(&[0x08][..]),
-			"the echoed character is erased from the shell's input line"
-		);
-		assert_eq!(
-			next_input(&mut rx).as_deref(),
-			Some(&b"exit\r"[..]),
-			"then the shell is asked to leave on its own terms"
+			Some(&b"\x03exit\r"[..]),
+			"the line the echo landed on is cancelled, then the shell's own exit is typed"
 		);
 		assert!(
-			matches!(next_command(&mut rx), Some(SshCommand::Disconnect)),
-			"and then the session is told to tear down"
+			next_command(&mut rx).is_none(),
+			"and nothing else: no Disconnect, so no kill — the shell leaves because it was asked to"
 		);
 		assert!(
-			app.connection.is_none() && app.local.is_none() && app.eof_probe.is_none(),
+			app.connection.is_some() && app.terminal.is_some(),
+			"the session is still up until the shell actually goes"
+		);
+		assert!(
+			app.eof_probe.is_none(),
+			"the question is settled either way"
+		);
+
+		// And when it goes, the ordinary hangup path lands the tab where §30 wants it.
+		let _ = app.on_ssh_event(SshEvent::Disconnected);
+		assert!(
+			app.connection.is_none() && app.local.is_none() && app.terminal.is_none(),
 			"the tab has forgotten it had a session"
 		);
-		assert!(app.terminal.is_none(), "the emulator went with it");
 		assert!(
 			matches!(app.screen, Screen::Home),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
@@ -9727,8 +9736,8 @@ mod tests {
 			if asked {
 				assert_eq!(
 					next_input(&mut rx).as_deref(),
-					Some(&b"exit\r"[..]),
-					"the shell is asked to leave ({case})"
+					Some(&b"\x03exit\r"[..]),
+					"the input line is cancelled and the shell asked to leave ({case})"
 				);
 			}
 			assert!(
