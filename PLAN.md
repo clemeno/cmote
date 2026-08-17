@@ -160,6 +160,7 @@ Each decision below is a thing to learn from, not just a dependency.
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
 | `serde` / `serde_json` | 1.0 | serialize `targets.json` — saved profiles + the per-target session snapshot (§14, §22) | `derive` on the profile structs; a corrupt store is logged and treated as empty, never a crash |
 | `open` | 5 | launch an OSC 8 hyperlink in the OS browser (§24) | pure Rust, no C toolchain; hands the URI to PowerShell `Start-Process` as data (an env var), never a shell command line — the `cmd /C start` inject path is behind an off-by-default `insecure` feature we do not enable. cmote still gates the scheme to http/https/mailto first (`link`) |
+| `portable-pty` | 0.9 | a pseudo-terminal on THIS machine, for the local shells the home screen's Local bar opens (§103) | wezterm's crate. ConPTY on Windows, `forkpty` on macOS, one API — and §2 says both, so hand-rolling meant two backends of a thing whose traps are all in the lifecycle. Pure Rust, no C toolchain. Two costs paid knowingly: it brings **`winapi`**, a second Windows-bindings crate beside `windows-sys` (the taskbar note in §54 declared a COM vtable by hand to avoid exactly that), and its `serial2` / `winreg` dependencies are **not optional** in 0.9, so a serial-port pty cmote never opens is dead weight in the binary. It also has a real bug cmote works around: `WinChildKiller::kill` inverts its success test, returning `Err(last_os_error())` when `TerminateProcess` succeeded — so `local::pty::close` drops the result and says why |
 | `anyhow` | 1.0 | app-level error handling (`Result<_, anyhow::Error>`) | context-rich errors, `?` everywhere |
 | `thiserror` | 1.x | *(deferred)* typed error enums for module boundaries | add when a module becomes a real API |
 | `tempfile` | 3 | *(dev-dependency)* temp dirs for tests writing `known_hosts` fixtures (§13) | test-only; not linked into the shipped binary |
@@ -10610,3 +10611,218 @@ the margin path and untouched elsewhere — fixing it generally is a different c
 - **`goto_line` is forwarded, so VPA keeps whatever the engine does with it.** Only the column paths
   were taken over; a row path under margins has nothing to decide, which is true today and is an
   assumption rather than a checked fact.
+
+---
+
+## §103 — Local
+
+The home screen grows a **Local bar**: a row of buttons above the target list, one per shell this
+machine can start — PowerShell 7, Windows PowerShell, Command Prompt, Git Bash. Pressing one opens a
+session that looks like every other session cmote opens: the shell in the grid, the folder tree and
+the files pane beside it showing **this** machine, the editor and the picture preview a double-click
+away. No form, no host key, no credential.
+
+### The observation the whole thing rests on
+
+**The GUI never talks to SSH.** It talks to `bridge`, in `SshCommand`s out and `SshEvent`s in, and it
+is `ssh::client::run` that turns those into a connection. Look at what that loop actually does with
+thirty of its thirty-two arms: it forwards the command to a `SessionMsg` channel and looks at nothing.
+
+So a session task that consumes the same `SessionMsg`s and answers in the same `SshEvent`s is, to
+everything above it, a connection. That is not a metaphor — it is the literal type. The cost of a
+local session was therefore:
+
+- one new command, `SshCommand::ConnectLocal(Shell)`;
+- one arm in `run` to start a local link instead of an SSH one;
+- one constructor, `SessionLink::start_local`, differing from `start` by having no host-key one-shot.
+
+Nothing else between the GUI and the shell changed. The terminal, the keymap, the query answering, the
+scrollback, the find bar, the tree, the pane, the details popup, the transfer queue, the editor and the
+preview all run over a local session without knowing one exists.
+
+That is the same seam §46 found from the other side. §46 put three file backends behind one value
+(`Browse` / `Files`) because the question "as which account?" had three answers; this puts two whole
+SESSIONS behind one channel because the question "on which machine?" now has two. The lesson repeated
+is that the honest seam is rarely where the feature is — it is wherever the code already stopped
+caring.
+
+### What could not be borrowed
+
+Four things, and each one is a decision rather than a translation.
+
+**The path dialect.** The panes speak POSIX, and not by choice: SFTP puts `/`-separated paths on the
+wire whatever the server runs, so `explorer` was written against one dialect and every path in the
+tree, the pane, the editor and the queue is a `/`-rooted string. Windows is not that. `local::path`
+maps between them, keeping the panes' single root and still showing every drive:
+
+```
+/                 the VIRTUAL root — no native path; listing it lists the drives
+/C:               a drive's root       ->  C:\
+/C:/Users/cme     a folder on it       ->  C:\Users\cme
+```
+
+A drive is a directory named `C:` inside `/`, which costs nothing anywhere else — `explorer::join`
+composes it like any other name and the tree's arithmetic is untouched. Rooting the panes at one drive
+was the alternative, and there is no honest way for a machine with four drives to show one.
+
+`to_native` is the local file layer's **security boundary**, and it is one-directional: everything
+downstream of it takes a real `PathBuf` and never a string, so a path it refuses cannot reach the
+filesystem at all. It refuses a `..` or `.` component, a `:` anywhere but the drive (on NTFS that names
+an alternate data stream, so `notes.txt` and `notes.txt:hidden` are two files and only one is the row
+on screen), a `\` inside a component, and a first component that is not a drive.
+
+**Which shells exist.** The bar is built from a search, not a list: a machine without PowerShell 7 must
+not offer a button that fails. Two rules matter. The programs are found in the locations Windows and
+the installers use, or by walking `PATH` for a known name — **nothing the user types reaches this**, so
+there is no place a crafted string could name a program to run. And `System32\bash.exe` is excluded on
+purpose: that name is WSL's launcher, not Git Bash, and running it starts a Linux distribution in a VM
+while the file panes beside it describe this machine's drives. A `bash.exe` is accepted only through a
+Git installation, which is why the `PATH` half of that search looks for `git.exe` and never for `bash`.
+Git Bash also gets `--login -i`, because that is what its own shortcut passes and without it the MSYS2
+profile never runs — a bash that cannot find `ls`.
+
+**The `cd` the panes type.** Sync, the tree's and the pane's "Open in terminal" and the tree's Enter key
+all move the shell by typing a line at it. `cd '<pane path>'` is right for a remote and wrong here
+twice over: the path is not a path on this platform, and the four shells disagree about the command as
+well as the path.
+
+| Shell | What it is sent | Why |
+|---|---|---|
+| Command Prompt | `cd /d "C:\Users\cme"` | without `/d`, a `cd` to another drive moves the directory *on* that drive and leaves the prompt where it was — a no-op that reads as a bug |
+| PowerShell (both) | `Set-Location -LiteralPath 'C:\Users\cme'` | `cd` there routes through `-Path`, which treats `[`, `]` and `?` as wildcards; a folder with a bracket in its name is not exotic, and a wildcard matching nothing is an error rather than a move |
+| Git Bash | `cd '/c/Users/cme'` | MSYS spelling: the drive letter becomes a top-level directory |
+| zsh / bash | `cd '/Users/cme'` | the dialects already agree |
+
+A path that will not translate — the virtual root has no directory to move to — types **nothing**,
+rather than putting a failing command in the user's own shell history.
+
+**Where the panes open.** A remote session opens at `/` because that is the top of a machine cmote has
+just met. A local one opens at the user's own folder, because the shell is already standing there from
+its first prompt and the drive list would put two clicks in front of the first folder anyone wants.
+
+### What the transfers cost: nothing
+
+The user asked for the file layer whole, trees included. It came to one module, and mostly because of
+a naming accident that turned out to be a fact: **`ssh::transfer` is not about SSH.** It is about
+copying — where a resume picks up, when a progress event is worth sending, what the six-way collision
+answers mean and which of them stick, and the difference between a failure that can be resumed and one
+that cannot. All of it is direction-agnostic and network-agnostic, and `local::copy` is its third and
+fourth caller. The local tree walk is shared the same way: `ssh::upload::walk_local` reads this
+machine's disk and describes what it found, symlink cycle rules and all, so it became `pub(crate)` and
+gained a caller rather than a copy.
+
+What is left in `local::copy` is one copy engine and one tree walk. "Upload" and "download" are two
+directions because a remote session has two machines; here they are the same operation, and the
+direction decides only which pair of terminal events the outcome is reported in — because the transfer
+queue's state machine listens for the pair belonging to the direction it started, and reporting the
+wrong one would leave its slot occupied for the rest of the session.
+
+One refusal is new and has no network equivalent: **copying a file onto itself.** Over a network it
+cannot happen; here it can, and the naive answer truncates the user's file to nothing before reading a
+byte of it. Both paths are resolved with `canonicalize` first, so a symlink, a `.` on the way or a
+different case on a case-insensitive volume are all caught.
+
+### Three things ConPTY taught us, none of them by reading
+
+Every one of these was found by a test that ran a real child on a real pty, and every one of them was
+wrong in the first version of the code.
+
+**A shell exiting does not close the pty.** The first design ended a session on EOF — the reader thread
+reaching the end of the stream. On Windows the ConPTY object owns the output pipe and holds it open
+until `ClosePseudoConsole`, which happens when the master is dropped, which happens when the session
+decides it is over. Ending on EOF is waiting for a consequence of the decision to be made before making
+it, and the test that asked for it sat there for twenty seconds. A third thread now waits on the child,
+and its exit is the event; the reader is unblocked afterwards, by the teardown.
+
+**A ConPTY asks the terminal a question and holds everything until it is answered.** `portable-pty`
+creates it with `PSUEDOCONSOLE_INHERIT_CURSOR` — hard-coded, not a choice it offers — and a ConPTY made
+that way sends `CSI 6 n`, "where is the cursor?", before a byte of the child's output arrives. cmote
+answers it as a matter of course: the engine replies to DSR (§23) and `app` sends whatever
+`Terminal::process` hands back straight down the input path. Nothing had to be added. But it is
+load-bearing — a version of the test that only collected bytes hung for twenty seconds and saw exactly
+four of them, `\x1b[6n` — so the exchange is asserted rather than left to be rediscovered.
+
+**`tokio::select!` cancels the branches that lose.** The exit signal started as a `oneshot::Receiver`
+inside `Pty`, behind an `async fn exit(&mut self)` that took it out of an `Option`. The very first chunk
+of output cancelled that future — *after* it had taken the receiver, which was then dropped with it — so
+every later call parked forever and the shell could exit unnoticed. It looked exactly like
+`child.wait()` not working. Both receivers are now `tokio::sync::mpsc`, whose `recv` is documented
+cancel-safe, and they are handed to the session loop as a struct beside the pty rather than reached
+through it — which also stops a `&mut pty` borrow from locking out the write in the branch next door.
+
+The loop is `biased` as well, so bytes the shell has already produced are delivered before the fact
+that it has stopped producing them.
+
+### What is refused, and why each is a refusal
+
+Three features have no meaning without a remote. Each is refused **with its reason** by the session
+task, and each has its button removed from the GUI — a control whose only possible answer is "not here"
+teaches nothing.
+
+- **Another account (§45).** Elevation is a program run on an existing connection. Becoming another
+  user on Windows means UAC, which is a separate process at a different integrity level and not another
+  shell on this one; there is nothing here for `sudo -u` to be.
+- **Port forwarding (§27).** A tunnel carries a connection through the remote's network. There is no
+  remote.
+- **Shell integration (§17).** It writes a cwd announcer into the shell's config file. Here that file is
+  the user's own everyday profile on this machine, which is a much larger promise than "open a
+  terminal" and not one a context-menu item should make.
+
+The consequence of that last one is felt: none of the four shells announces its working directory by
+default, so cmote does not know where the local shell is. **Reveal** stays dim, exactly as it does on a
+silent remote `bash` (§17), and the tree does not follow a `cd` typed by hand. **Sync** works — it types,
+it does not listen.
+
+### What it cost
+
+- `local/`, new, six modules: `shells` (the catalogue and the per-shell `cd`), `pty` (the pseudo-
+  terminal), `path` (the dialect), `fs` (the panes' answers), `copy` (the transfers), `session` (the
+  `SessionMsg` loop, twin of `ssh::client::stream`). Thirty-eight tests, three of which drive a real child
+  on a real pty and a real session end to end.
+- `bridge.rs`: one command, `ConnectLocal`.
+- `ssh/client.rs`: one arm, one constructor. `ssh/upload.rs`: `walk_local` gained a second caller and
+  the visibility to match.
+- `app.rs`: `HomeLocalPressed`, `dial_local`, a `local: Option<Kind>` on `Tab`, `forget_connection` so
+  the three session endings cannot clear half of it, `default_files_root`, and the per-shell `cd`.
+- `ui/home.rs`: the Local bar, and the menu placement told about its height.
+- `ui/terminal.rs`: `endpoint: &str` became a `Session { endpoint, local }` pair — `view` was exactly on
+  clippy's argument limit, and the flag gates the Tunnels button and the shell-integration item.
+- `Cargo.toml`: `portable-pty`, plus `Win32_System_Time` (the machine's timezone, for the pane's mtimes)
+  and `Win32_Storage_FileSystem` (`GetLogicalDrives`, so the virtual root does not spin up a floppy
+  drive asking whether `A:\` is a directory).
+- Tests 1295 → 1333.
+
+### Not done
+
+- **Nobody has clicked a Local button.** The binary builds and starts, a real child runs on a real pty
+  and a real session answers a real listing — all under test — but the GUI path from the button to the
+  grid has been exercised by the compiler and not by a hand. The fifth section running with a
+  disclosure of this shape (§97, §100, §101, §102).
+- **The local shell's working directory is unknown**, for the reason above. That is the one place a
+  local session feels thinner than a remote one, and it is the price of not editing the user's profile.
+  A `cd` cmote itself typed could be tracked without any announcement at all, which is the cheap half of
+  the fix and is not done.
+- **A local copy does not carry the source's modification time**, where an SFTP upload does. `std` can
+  read a file time and not write one, and setting one means `SetFileTime` on Windows and `futimens` on
+  macOS — two more platform calls for a cosmetic property. A copy lands stamped "now", like Explorer's
+  copy-paste or `cp` without `-p`.
+- **On Windows the details popup shows no owner, group or permission word.** Those are unix facts; the
+  owner is behind a security descriptor and the other two do not exist. Left empty rather than invented,
+  which is what the pane already does for a server that volunteers no attributes (§20).
+- **macOS is written and unrun.** The Local bar offers zsh, bash and `pwsh` there; the paths, the copy
+  engine and the session loop are the same code, but the zone is left at UTC because
+  `GetTimeZoneInformation` has no counterpart in the bindings cmote already carries — so a local pane's
+  times would be right about the instant and wrong about the wall clock.
+- **UNC paths have no place in the `/C:` scheme.** `\\server\share` has no drive letter to be the first
+  component, so it is refused rather than half-translated.
+- **A local session is never a saved target**, so nothing about it is remembered between runs: no
+  per-shell folder, no pane layout, no sort. §22's remembering is keyed on an endpoint, and a local
+  session deliberately has nothing shaped like one.
+- **Two local tabs on the same shell are indistinguishable** — same label, same chip. Fine while the bar
+  is one row of four; not fine the moment anyone opens two `pwsh` tabs and looks for the right one.
+- **The catalogue is searched once per run.** A shell installed while cmote is open needs a restart to
+  appear. The alternative is a dozen filesystem probes per frame, since the home screen redraws
+  continuously.
+- **`LOCAL_BAR_HEIGHT` is another eyeballed constant** in the home screen's context-menu placement,
+  beside the two `ponytail:` ones already there. It is right for the current layout and nothing checks
+  it.
