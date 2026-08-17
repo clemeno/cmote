@@ -10890,6 +10890,28 @@ character itself (`control_byte`), so the key that would have sent EOT is the ke
 is the same match §30's home-screen Ctrl+D already uses, which keeps the two halves of the gesture one
 key rather than two that happen to agree on QWERTY.
 
+### What "ends the session" actually is
+
+Worth spelling out, because "cmote ends it" reads gentler than what happens. `end_local_shell` runs the
+confirmed Disconnect's teardown, and that teardown is **not** a shell being asked to leave:
+
+1. The **GUI goes first, synchronously**: the session is remembered (§22), transfers are abandoned,
+   `Disconnect` is *queued*, the emulator is dropped and the tab is on the home screen — before anything
+   on the session side has happened. So the navigation does not wait for a clean anything.
+2. The session task then takes `Disconnect` and calls `Pty::close`, which is `TerminateProcess` on the
+   shell. No profile exit hook, no `exit` typed, nothing flushed on the way out.
+3. Dropping the master closes the pseudoconsole, and whatever the shell had started dies with it.
+
+That third step was measured, with the case that prompted the question: `node` at a local `pwsh` prompt,
+node v24.18.0, a real ConPTY. Node's REPL **stays on the main screen** (`is_alternate()` is `false`), which
+is why the pager guard does not save it — the key is claimed and node never sees the `0x04`. After the
+teardown the node process is **gone**, so nothing is orphaned; it was never asked to exit either. The grid
+goes with the emulator, so what was on screen is not there to read afterwards.
+
+A remote Disconnect is cleaner than this by nature — it closes an SSH channel and the far side's shell
+gets a hangup it can act on. A local one is a kill. The tidier version types the shell's own `exit` and
+keeps the kill as the fallback after a timeout, which is a timer and a state machine, and is not done.
+
 ### What it cost
 
 - `local/shells.rs`: `Kind::quits_on_eof`, one method, plus the test that writes the split down per kind.
@@ -10901,12 +10923,14 @@ key rather than two that happen to agree on QWERTY.
 
 ### Not done
 
-- **A line-based program that reads EOF is not told apart from the shell.** A Python or Node REPL started
-  in a local PowerShell tab does not swap screens, so Ctrl+D there ends the *session* rather than the
-  REPL. Telling them apart means knowing whether the shell is at its prompt, and on a local session
-  nothing announces that — §103 refuses to write a cwd announcer into the user's own profile, and that
-  refusal is what costs this. The failure is recoverable in one click, so it is disclosed rather than
-  guessed at with a heuristic.
+- **A line-based program that reads EOF is not told apart from the shell.** Measured, not supposed: a
+  `node` REPL in a local `pwsh` tab stays on the main screen, so Ctrl+D there ends the *session* and not
+  the REPL — where a real terminal would have quit node and left the prompt. Telling them apart means
+  knowing whether the shell is at its prompt, and on a local session nothing announces that — §103 refuses
+  to write a cwd announcer into the user's own profile, and that refusal is what costs this. **Ctrl+Shift+D
+  is the way out** and always was: it is excluded from the binding and `control_byte('D')` is the same
+  `0x04`, so it reaches the program and quits it with the session intact. Undocumented as such, since it
+  exists as a consequence of the rule rather than as a decision.
 - **Ctrl+D still does nothing on a local shell inside a pager**, which is correct, and nothing tells the
   user which of the two states they are in. A terminal has never had to say.
 - **The probe was thrown away rather than kept.** It spawned three interactive shells and killed them,
