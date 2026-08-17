@@ -5075,6 +5075,26 @@ impl Tab {
 		self.go_home()
 	}
 
+	/// End a local session because Ctrl+D asked for it (§104).
+	///
+	/// The confirmed Disconnect's teardown, reached deliberately WITHOUT its confirmation modal: Ctrl+D
+	/// at a bash prompt does not stop to ask, and a gesture that mirrors one shell but interrogates the
+	/// user on another is not the same gesture. Nothing is risked by that — a shell holds no unsaved
+	/// state of its own, and the screen it lands on has the Local bar on it, one click from the shell
+	/// that was just closed. The Disconnect BUTTON keeps its modal: a click near a toolbar is an
+	/// accident in a way that Ctrl+D, a key with one meaning at a prompt, is not.
+	fn end_local_shell(&mut self) -> iced::Task<Message> {
+		self.on_disconnect_confirmed()
+	}
+
+	/// Whether a full-screen program currently owns the grid (§104). No terminal at all counts as "no",
+	/// which is the same answer for the purpose here: nothing is holding the keyboard.
+	fn on_alternate_screen(&self) -> bool {
+		self.terminal
+			.as_ref()
+			.is_some_and(|terminal| terminal.screen().is_alternate())
+	}
+
 	/// Forget which session this tab was showing (§10, §103): the label the status bar reads and, with
 	/// it, which KIND of session it was.
 	///
@@ -5997,6 +6017,42 @@ impl Tab {
 				}
 				_ => {}
 			}
+		}
+
+		// Ctrl+D ends a local cmd / PowerShell session (§104) — the one keyboard gesture a local shell
+		// cannot answer for itself.
+		//
+		// On every other session the key is left alone, because there it already works: EOF at a POSIX
+		// prompt is how you log out, and the shell exiting is what ends the session. The three Windows
+		// interpreters are the ones that drop the byte on the floor — measured, not assumed
+		// (`Kind::quits_on_eof`) — so pressing Ctrl+D in a `pwsh` tab did nothing whatsoever, while the
+		// same key in the Git Bash tab beside it logged out. cmote fills in exactly what the shell would
+		// have done: end the session and land on the home screen, where a second Ctrl+D closes the tab
+		// (§30). One gesture, the same on all four shells.
+		//
+		// Matched on the LOGICAL character rather than the physical key, unlike the copy bindings above,
+		// because this one stands in for a byte the encoder derives from that same character: whichever
+		// key would have sent EOT is the key that gets this. Plain Ctrl+D only — Ctrl+Shift+D also
+		// encodes to `0x04`, but Ctrl+Shift+<letter> is where cmote's own bindings live (§35, §34), and
+		// spending another one of them on a second spelling of this would be a poor trade.
+		//
+		// Not while the alternate screen is up: a full-screen program (`less`, a pager, an editor
+		// started from PowerShell) has its own Ctrl+D — half a page down — and it asked for the whole
+		// screen to get it, so the key belongs to it and goes down the channel untouched. A line-based
+		// program that reads EOF without swapping screens (a Python REPL, say) is NOT covered by that
+		// test and loses its session to this key; `ponytail:` telling those apart needs to know whether
+		// the shell is at its prompt, which on a local session nothing announces (§103 refuses to write
+		// a cwd announcer into the user's own profile). The cost is one recoverable click on the Local
+		// bar, so it is disclosed rather than guessed at.
+		if modifiers.control()
+			&& !modifiers.shift()
+			&& !modifiers.alt()
+			&& !modifiers.logo()
+			&& self.local.is_some_and(|kind| !kind.quits_on_eof())
+			&& !self.on_alternate_screen()
+			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
+		{
+			return self.end_local_shell();
 		}
 
 		// Ctrl+Shift+Up / Ctrl+Shift+Down jump the scrollback to the previous / next shell prompt
@@ -9344,6 +9400,111 @@ mod tests {
 			None,
 			"and the shell hears no interrupt"
 		);
+	}
+
+	/// A local session on a shell that ignores EOF ends on Ctrl+D (§104), because nothing else will
+	/// end it: the byte reaches `pwsh`, `powershell` and `cmd` and is dropped, so before this the key
+	/// did nothing at all on three of the four local shells while the Git Bash tab beside them logged
+	/// out on it. The teardown is the confirmed Disconnect's, with no modal in the way.
+	#[test]
+	fn ctrl_d_ends_a_local_shell_that_ignores_eof() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		app.connection = Some("local — pwsh".to_owned());
+		app.local = Some(crate::local::shells::Kind::Pwsh);
+
+		let _ = app.on_key(character_press(
+			"d",
+			iced::keyboard::key::Code::KeyD,
+			iced::keyboard::Modifiers::CTRL,
+		));
+
+		assert!(
+			matches!(next_command(&mut rx), Some(SshCommand::Disconnect)),
+			"the session is told to tear down"
+		);
+		assert!(
+			app.connection.is_none() && app.local.is_none(),
+			"and the tab has forgotten it had one"
+		);
+		assert!(app.terminal.is_none(), "the emulator went with it");
+		assert!(
+			matches!(app.screen, Screen::Home),
+			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
+		);
+	}
+
+	/// Every shell that answers EOF itself keeps the key (§30, §104): a local Git Bash, whose exit is
+	/// what ends the session, and any remote — where Ctrl+D is the way you log out and cmote has never
+	/// had a claim on it. Both get the plain `0x04` and neither session is touched from this side.
+	#[test]
+	fn ctrl_d_is_left_to_every_shell_that_answers_it() {
+		for local in [Some(crate::local::shells::Kind::GitBash), None] {
+			let (mut app, mut rx) = app_with_terminal(16);
+			app.connection = Some("root@web-01:22".to_owned());
+			app.local = local;
+
+			let _ = app.on_key(character_press(
+				"d",
+				iced::keyboard::key::Code::KeyD,
+				iced::keyboard::Modifiers::CTRL,
+			));
+
+			assert_eq!(
+				next_input(&mut rx).as_deref(),
+				Some(&[0x04][..]),
+				"EOF goes down the channel as it always has ({local:?})"
+			);
+			assert!(
+				app.connection.is_some() && app.terminal.is_some(),
+				"and the session is still up: the shell decides, not cmote ({local:?})"
+			);
+		}
+	}
+
+	/// The two presses the §104 rule deliberately leaves alone, on the shell it otherwise claims.
+	///
+	/// A full-screen program owns Ctrl+D — half a page down in `less` and in every pager built on it —
+	/// and it asked for the whole screen to get it, so the swap to the alternate page hands the key
+	/// back. And Ctrl+SHIFT+D encodes to the same `0x04` but is not this binding: Ctrl+Shift+letter is
+	/// where cmote's own shortcuts live, so it stays available rather than becoming a second way to end
+	/// a session by accident.
+	#[test]
+	fn a_full_screen_program_and_a_shifted_press_keep_their_ctrl_d() {
+		let cases = [
+			(true, iced::keyboard::Modifiers::CTRL, "a pager is up"),
+			(
+				false,
+				iced::keyboard::Modifiers::CTRL | iced::keyboard::Modifiers::SHIFT,
+				"the press is shifted",
+			),
+		];
+		for (alternate, modifiers, why) in cases {
+			let (mut app, mut rx) = app_with_terminal(16);
+			app.connection = Some("local — pwsh".to_owned());
+			app.local = Some(crate::local::shells::Kind::Pwsh);
+			if alternate {
+				app.terminal
+					.as_mut()
+					.expect("the fixture's emulator")
+					.process(b"\x1b[?1049h");
+			}
+
+			let _ = app.on_key(character_press(
+				"d",
+				iced::keyboard::key::Code::KeyD,
+				modifiers,
+			));
+
+			assert_eq!(
+				next_input(&mut rx).as_deref(),
+				Some(&[0x04][..]),
+				"the byte reaches the shell instead ({why})"
+			);
+			assert!(
+				app.connection.is_some(),
+				"and the session is untouched ({why})"
+			);
+		}
 	}
 
 	/// A command from the terminal's own surface — here Paste, off the grid's right-click menu —

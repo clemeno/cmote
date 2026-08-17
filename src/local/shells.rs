@@ -71,6 +71,27 @@ impl Kind {
 		}
 	}
 
+	/// Whether this shell ends itself when it is sent EOF — the `0x04` a Ctrl+D produces (§104).
+	///
+	/// On a POSIX shell that is how you log out: at an empty prompt, "no more input" means there is
+	/// nothing left to read, so the shell exits, the session ends, and the tab lands back on the home
+	/// screen — where a second Ctrl+D closes it (§30). The three Windows shells do not play: their EOF
+	/// is Ctrl+Z, and it only ever means EOF to a program *reading a stream*, never to the interpreter
+	/// itself. `0x04` reaches them and is simply dropped.
+	///
+	/// That was measured rather than assumed. A probe drove a real ConPTY child of each of `pwsh`,
+	/// `powershell` and `cmd`, waited for the prompt, wrote one `0x04`, and watched the child handle for
+	/// six seconds: none of the three exited, and none printed anything either. So on those three the
+	/// key does nothing at all, which is what `app` fills in — see `Tab::end_local_shell`.
+	pub fn quits_on_eof(self) -> bool {
+		match self {
+			// MSYS bash and the macOS shells are POSIX shells and log out on EOF.
+			Self::GitBash | Self::Zsh | Self::Bash => true,
+			// The interpreters that ignore the byte.
+			Self::Pwsh | Self::PowerShell | Self::Cmd => false,
+		}
+	}
+
 	/// The command line that moves THIS shell to `pane` — the Sync button, the tree's and the pane's
 	/// "Open in terminal", the tree's Enter key (§19, §103).
 	///
@@ -412,6 +433,29 @@ mod tests {
 		}
 		// Git Bash is an MSYS shell, so the drive becomes a top-level directory.
 		assert_eq!(Kind::GitBash.cd(pane).as_deref(), Some("cd '/c/Users/cme'"));
+	}
+
+	#[test]
+	fn only_the_posix_shells_end_themselves_on_eof() {
+		// Which side of this split a shell falls on decides whether Ctrl+D is the shell's key or cmote's
+		// (§104), so it is written down per kind rather than inferred from a name at the call site.
+		for shell in [Kind::GitBash, Kind::Zsh, Kind::Bash] {
+			assert!(
+				shell.quits_on_eof(),
+				"{} logs out on EOF, the way every POSIX shell does",
+				shell.label()
+			);
+		}
+		// Measured against real ConPTY children of all three: one `0x04` at the prompt, six seconds of
+		// watching the process handle, no exit and no output. Their EOF is Ctrl+Z, and even that means
+		// EOF only to a program reading a stream — never to the interpreter itself.
+		for shell in [Kind::Pwsh, Kind::PowerShell, Kind::Cmd] {
+			assert!(
+				!shell.quits_on_eof(),
+				"{} drops the byte, so cmote is the one that has to end the session",
+				shell.label()
+			);
+		}
 	}
 
 	#[cfg(windows)]

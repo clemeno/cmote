@@ -3243,6 +3243,9 @@ the tab — exactly a terminal's own "Ctrl+D twice" to close a window. It routes
 alternative — the universal close-tab key, no EOF conflict — but the shell-EOF-then-close pairing was
 the chosen feel.)
 
+That pairing rests on the shell answering EOF, which every remote cmote can reach does and three of the
+four **local** shells do not — see §104.
+
 ### What is deliberately NOT here
 
 - **No quit on a non-last tab close.** Closing a tab when others remain is unchanged (§26): an idle tab
@@ -10794,10 +10797,10 @@ it does not listen.
 
 ### Not done
 
-- **Nobody has clicked a Local button.** The binary builds and starts, a real child runs on a real pty
-  and a real session answers a real listing — all under test — but the GUI path from the button to the
-  grid has been exercised by the compiler and not by a hand. The fifth section running with a
-  disclosure of this shape (§97, §100, §101, §102).
+- ~~**Nobody has clicked a Local button.**~~ Retired the same day: §104 exists because the user opened
+  local `pwsh`, `powershell` and `cmd` tabs and pressed a key in them. The path from the button to the
+  grid works, and the first thing a hand found on it was a keyboard gesture that could not work — which
+  is the argument for the disclosure, not against it.
 - **The local shell's working directory is unknown**, for the reason above. That is the one place a
   local session feels thinner than a remote one, and it is the price of not editing the user's profile.
   A `cd` cmote itself typed could be tracked without any announcement at all, which is the cheap half of
@@ -10826,3 +10829,83 @@ it does not listen.
 - **`LOCAL_BAR_HEIGHT` is another eyeballed constant** in the home screen's context-menu placement,
   beside the two `ponytail:` ones already there. It is right for the current layout and nothing checks
   it.
+
+## §104 — The key three shells drop
+
+The first thing a hand found on §103's local sessions: **Ctrl+D does nothing** in a `pwsh`, `powershell`
+or `cmd` tab, while the same key in a Git Bash tab logs out.
+
+That is not a local-session bug. It is §30's gesture meeting a shell it was never designed against.
+§30 pairs two presses into one motion — Ctrl+D at the shell is EOF, the shell logs out, the tab lands on
+the home screen, and a second Ctrl+D closes the tab, exactly a terminal's own "Ctrl+D twice". The pairing
+has an assumption in its first half: that the shell answers EOF. Every remote cmote can reach is a POSIX
+shell and does. Three of the four local shells do not.
+
+### What EOF actually does to each of them
+
+Measured, not reasoned about — a throwaway probe drove a real ConPTY child of each catalogue entry
+through the real `local::pty`, waited for the prompt, wrote one `0x04`, and watched the child handle for
+six seconds:
+
+| Shell | `0x04` at the prompt |
+|---|---|
+| Git Bash (MSYS `bash`), and zsh/bash on macOS | logs out — the session ends by itself |
+| `pwsh` | nothing. No exit, no output |
+| `powershell` | nothing |
+| `cmd` | nothing |
+
+The three interpreters have an EOF and it is **Ctrl+Z**, but even that only ever means "end of stream" to
+a program *reading* one; there is no byte that tells the interpreter itself to stop. `exit` is a command,
+not a key. So the key had no meaning at all on three of the four shells cmote offers, and the second half
+of §30's gesture was unreachable on them: you could never get back to the home screen without the mouse.
+
+### The rule
+
+Split in two, because the two halves have different lifetimes: the *fact* about each shell lives on the
+shell (`Kind::quits_on_eof`), and the *policy* lives with the other keyboard bindings (`on_key`).
+
+On a local session whose shell does not quit on EOF, a plain **Ctrl+D** with the shell focused runs
+`end_local_shell` — which is the confirmed Disconnect's teardown, reached deliberately without its
+confirmation card. Ctrl+D at a bash prompt does not stop to ask, and a gesture that mirrors one shell but
+interrogates the user on another is not the same gesture. Nothing is risked: a shell holds no unsaved
+state of its own, and the screen it lands on has the Local bar on it, one click from the shell just
+closed. The Disconnect **button** keeps its modal — a click near a toolbar is an accident in a way that
+Ctrl+D at a prompt is not.
+
+Two presses are left alone on purpose:
+
+- **Not while the alternate screen is up.** A full-screen program has its own Ctrl+D — half a page down
+  in `less` and everything built on it — and it asked for the whole screen to get it. The swap hands the
+  key back.
+- **Ctrl+Shift+D is not this binding**, though it encodes to the same `0x04`. Ctrl+Shift+letter is where
+  cmote's own shortcuts live (§34, §35); spending another one on a second spelling of this would buy
+  nothing and cost a key.
+
+Matched on the **logical character**, unlike the copy/paste bindings a few lines above it, which match
+the physical key so they hold on any layout. This one stands in for a byte the encoder derives from the
+character itself (`control_byte`), so the key that would have sent EOT is the key that gets this — and it
+is the same match §30's home-screen Ctrl+D already uses, which keeps the two halves of the gesture one
+key rather than two that happen to agree on QWERTY.
+
+### What it cost
+
+- `local/shells.rs`: `Kind::quits_on_eof`, one method, plus the test that writes the split down per kind.
+- `app.rs`: one block in `on_key`, `end_local_shell` and `on_alternate_screen`, three tests — the shell
+  that ends, the two that keep the key (a local Git Bash and any remote), and the two presses excluded.
+- `README.md`: the keyboard table, the tour's quit paragraph, and the manual-test step, which now names
+  the pager case.
+- Tests 1333 → 1337.
+
+### Not done
+
+- **A line-based program that reads EOF is not told apart from the shell.** A Python or Node REPL started
+  in a local PowerShell tab does not swap screens, so Ctrl+D there ends the *session* rather than the
+  REPL. Telling them apart means knowing whether the shell is at its prompt, and on a local session
+  nothing announces that — §103 refuses to write a cwd announcer into the user's own profile, and that
+  refusal is what costs this. The failure is recoverable in one click, so it is disclosed rather than
+  guessed at with a heuristic.
+- **Ctrl+D still does nothing on a local shell inside a pager**, which is correct, and nothing tells the
+  user which of the two states they are in. A terminal has never had to say.
+- **The probe was thrown away rather than kept.** It spawned three interactive shells and killed them,
+  which is a six-second test on a machine that has all three and a silent skip on one that does not; the
+  fact it established is written down here and asserted per kind instead.

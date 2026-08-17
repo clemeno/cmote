@@ -63,7 +63,9 @@ references below (§n) point into it.
   channel close, not a yanked socket) and only then does the process exit; a wedged session can't
   hold quit open past a short timeout. **Ctrl+D** closes the current tab, but only once you're back
   on the home screen — on a live shell it stays EOF to the remote (the way you log out), so
-  Ctrl+D logs out, and Ctrl+D again closes the tab, just like a terminal (§30).
+  Ctrl+D logs out, and Ctrl+D again closes the tab, just like a terminal (§30). In a **local**
+  **Command Prompt** or **PowerShell** tab, where the interpreter ignores EOF outright, cmote ends
+  the session itself so the same two presses do the same two things on every shell (§104).
 - **Port forwarding — local, remote and dynamic tunnels.** The **Tunnels** button on the status
   bar opens a manager: add a **Local** (`-L`) forward to reach a service through the server, a
   **Remote** (`-R`) forward to expose a local service on the server, or a **Dynamic** (`-D`)
@@ -444,7 +446,7 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | Click a region | Give it the keyboard; its strip lights up |
 | Drag a divider | Re-share the room between the two regions either side of it |
 | Double-click a divider | Put the two regions back to an even share |
-| **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead |
+| **Ctrl+D** (home screen only) | Close the current tab; closing the last one asks to quit cmote. On a live shell it stays EOF to the remote instead — and in a local **cmd** / **PowerShell** tab, where EOF means nothing to the interpreter, it ends the session (§104), landing here so a second press closes the tab. A full-screen program keeps its own Ctrl+D |
 | Window title-bar **×** | Ask **Quit cmote?**, then disconnect every session cleanly and exit |
 | Drag a dialog's header | Move the dialog; **Esc** or ✕ takes the dialog's safe way out |
 | Drag inside a dialog's body | Select its text; **Ctrl+C** copies it |
@@ -1204,7 +1206,11 @@ header should wear the **open hand** on hover and the **closed** one from the pr
 exactly as a tab chip does — including when the card slides out from under the pointer mid-drag,
 which must not open the hand early. The body text keeps its I-beam and the ✕ its arrow. On a
 **live** shell, **Ctrl+D** should reach the remote as EOF (it logs you out, landing back on the home
-screen), *not* close the tab; a second **Ctrl+D** there then closes it.
+screen), *not* close the tab; a second **Ctrl+D** there then closes it. Then the same two presses in a
+**local** tab: in **Git Bash** the shell itself logs out, and in **Command Prompt** / **PowerShell** —
+which drop the byte on the floor — cmote ends the session for them, with no confirmation card either
+way (§104). Start `more` (or any pager) in a local PowerShell tab first and press **Ctrl+D**: it
+should scroll half a page, because a full-screen program keeps the key.
 
 **17. Port forwards.** In a live session click **Tunnels** on the status bar. Add a **Local**
 forward — listen `8080`, to `localhost:22` (or any service the remote can reach) — and expect the
