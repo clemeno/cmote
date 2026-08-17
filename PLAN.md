@@ -10183,3 +10183,57 @@ refusal and §6 is the whole of it.
 - **The SGR table still has not been checked**, eight sweeps running.
 - **`OSC 777` is still folklore**, and `OSC 888` was taken from contour's index with no detail page —
   the same evidential footing as `OSC 30`, and it only reaches a 🤷 rather than shipped behaviour.
+
+## 99. One calculation, and the bit that could not be honoured (v4.0.0)
+
+§94 added the XTCHECKSUM row (`CSI Ps # y` — "the bits of `Ps` modify the calculation of the checksum
+returned by DECRQCRA") and closed by leaving it open: *"Named now, so the next reader chooses rather
+than not knowing."* This is that choice, and it goes the way it does for a reason that only appears
+once the five bits are counted against what cmote can do.
+
+Four of them are mechanical — do not negate the result, do not weigh the video attributes, do not drop
+blank cells, do not mask the cell value to eight bits. The fifth is **omit the checksum for cells the
+program never initialised**, and cmote cannot perform it at all: the engine's grid starts full of
+blanks that read identically to written ones, which is the divergence §60 already discloses as the one
+place cmote's number differs from xterm's.
+
+So the choice was never "support it or not". It was **support four fifths of it or none**, and four
+fifths is the worse of the two: a program that sets the bit cmote cannot honour would receive a number
+computed under rules it did not choose — which is precisely the harm §94 wrote the row to name. A
+checksum's whole value is comparability (§60: *"a number nobody else computes the same way is worth
+less than no number at all"*), and a request that silently changes some of the calculation and not the
+rest destroys exactly that.
+
+cmote therefore answers **one** calculation, always: xterm's `xtermCheckRect` at its DEC-compatible
+default, the mode tuned against screenshots from a real VT520 and the one a VT-conformant program
+expects when it has asked for nothing else.
+
+The mark is **🤷** and not 🛑, and the distinction is the one §57 is about. Nothing in cmote refuses
+this sequence — `csi_dispatch` matches no `#` intermediate at all, so XTCHECKSUM dies in the parser
+beside XTPUSHSGR's spelling and both colour stacks. The decision is this section's and §6's; no code
+performs it. What the code now does carry is the *consequence*, stated as behaviour rather than as a
+note: a boundary test asks for every bit at once and then re-checksums an unchanged rectangle, and the
+number is the same on both sides of the request.
+
+### What it cost
+
+- One test in `term/mod.rs`. No production code, because there is none to write for a decision to
+  keep doing what it already does.
+- The row moves **❌ → 🤷**. 214 rows: **✅ 111 · ❌ 35 · 🛑 41 · 🤷 27**. Tests 1214 → 1215.
+
+### Not done
+
+- **A 🛑 was available and not taken.** `term/rect.rs` already scans this final byte's neighbours
+  (`* y` is DECRQCRA), so an arm that recognised `# y` and deliberately produced nothing would move
+  the mark and make the refusal cmote's own — §95's "mechanism-is-a-test" pattern. It is not written,
+  because it would add a parse for a sequence no program has been observed to send, and 🤷 says
+  truthfully what is there today.
+- **The other eight ❌ rows in the CSI table are unbuilt features, not open questions** — SL / SR,
+  UNSCROLL, DECIC / DECDC, the locator trio, XTSAVE / XTRESTORE, SETMARK, DECRQDE and DECRQPSR. Each
+  would be accepted if it were written; none is refused. **XTSAVE / XTRESTORE is the one whose cost is
+  understated by that sentence**: restoring an arbitrary private mode means holding a copy of the
+  engine's mode state, which makes cmote a second source for it (§71) — the rule that has decided more
+  rows in this document than any other, and the reason this is not the cheap row it looks like.
+- **Bit 5 was not checked.** Newer xterm documents a sixth bit ("do not ignore double-width cell
+  values"); the reading this row rests on lists five. It changes nothing — the answer is the same for
+  any number of bits — but the row should not be read as a count.

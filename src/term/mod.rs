@@ -4265,6 +4265,32 @@ mod tests {
 		);
 	}
 
+	/// XTCHECKSUM (`CSI Ps # y`) would move that calculation, and cmote answers **one** calculation —
+	/// the DEC-compatible default xterm tuned against a real VT520 (§60, §99). This is the decision
+	/// stated as behaviour rather than as a note: the request draws no reply of its own, and the
+	/// checksum of an unchanged rectangle is the same number before and after it.
+	///
+	/// Why refuse rather than honour it. Four of the five bits are mechanical, and the fifth — "omit
+	/// the checksum for cells never initialised" — is one cmote **cannot** perform: the engine's grid
+	/// starts full of blanks that read identically to written ones, which §60 already discloses as the
+	/// one place cmote's number can differ from xterm's. Honouring four of five would hand a program
+	/// that set the fifth a number computed under rules it did not choose, which is exactly the harm
+	/// §94 named when it opened this row — so the whole request is left alone instead.
+	#[test]
+	fn a_checksum_extension_request_leaves_the_calculation_alone() {
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"AB");
+		let before = terminal.process(b"\x1b[1;1;1;1;1;2*y");
+		assert_eq!(before, b"\x1bP1!~FF7D\x1b\\".to_vec());
+		// Every bit xterm defines, asked for at once, then the same rectangle again.
+		assert!(
+			terminal.process(b"\x1b[31#y").is_empty(),
+			"the extension request answers nothing itself"
+		);
+		assert_eq!(terminal.process(b"\x1b[1;1;1;1;1;2*y"), before);
+		assert_eq!(read(&terminal, 0, 0, 4), "AB", "and printed nothing");
+	}
+
 	/// The answer is the page as it stood WHERE THE QUESTION SAT, not as the rest of the chunk left
 	/// it. That is what the split-fed offset buys, and the only rectangular operation that needs it
 	/// for anything but ordering (§60).
