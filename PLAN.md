@@ -10823,6 +10823,9 @@ it does not listen.
   session deliberately has nothing shaped like one.
 - **Two local tabs on the same shell are indistinguishable** — same label, same chip. Fine while the bar
   is one row of four; not fine the moment anyone opens two `pwsh` tabs and looks for the right one.
+- **The README has no Local section.** Its tour describes every other screen and the keyboard table now
+  mentions the local Ctrl+D (§104), but the bar itself — what it offers, that the offer depends on what is
+  installed, that the panes then show this machine — is described here and nowhere a user reads.
 - **The catalogue is searched once per run.** A shell installed while cmote is open needs a restart to
   appear. The alternative is a dozen filesystem probes per frame, since the home screen redraws
   continuously.
@@ -10909,3 +10912,55 @@ key rather than two that happen to agree on QWERTY.
 - **The probe was thrown away rather than kept.** It spawned three interactive shells and killed them,
   which is a six-second test on a machine that has all three and a silent skip on one that does not; the
   fact it established is written down here and asserted per kind instead.
+
+## §105 — The Git that was there all along
+
+Found while measuring §104: this machine has Git for Windows, and cmote's Local bar has never offered
+Git Bash on it. The shell whose Ctrl+D the whole of §104 was written *against* could not be opened.
+
+§103's search looked in two places, and Git for Windows fits in neither:
+
+- **The Program Files folders**, plus `%LOCALAPPDATA%\Programs\Git` for a per-user install. This Git is
+  in `C:\git`, because the installer accepts any directory and people use that.
+- **`PATH`**, by naming `git.exe` and walking two levels up. The installer's PATH question has a "use Git
+  from Git Bash only" answer that adds nothing to `PATH` at all — and neither the machine `PATH` nor the
+  user `PATH` here contains anything of Git's.
+
+So both searches were sound and both missed, silently, which is the worst shape a search can have: the
+bar's contract is that a button which appears can be pressed, and it says nothing about a shell it failed
+to find.
+
+### The third place to look
+
+The installer writes its own root to `HKLM\SOFTWARE\GitForWindows\InstallPath` (`HKCU` for a per-user
+install). `recorded_git_roots` reads it with one `RegGetValueW` and hands the roots to the same test every
+other candidate passes — `<root>\bin\bash.exe` has to exist before a button is offered.
+
+This is still a **known location** in the sense the module note means, and that distinction is the whole
+security story of this module: the key is fixed, its value is written by an installer, and nothing the
+user types at cmote reaches any part of it. What comes out is a path that must resolve to a real
+`bash.exe` inside a Git installation — which is also what keeps `System32\bash.exe`, WSL's launcher, out
+(§103).
+
+### What it cost
+
+- `local/shells.rs`: `recorded_git_roots`, `registry_string`, `wide` — about seventy lines, most of it the
+  `SAFETY` note and the reason the key counts as a known location. One test, which asserts that the search
+  agrees with the installer's record and skips honestly on a machine with no Git.
+- `Cargo.toml`: `Win32_System_Registry`, one feature for one call.
+- Tests 1337 → 1338.
+
+### Not done
+
+- **Nothing reads `CurrentVersion` beside it.** cmote takes the root and looks for `bin\bash.exe`; a key
+  left behind by an uninstall names a root with no bash in it and is discarded by the same check that
+  discards a bad guess.
+- **A machine with two Git installations offers one button.** The per-machine install wins, being read
+  first, and the per-user one is not offered as a second Git Bash — two buttons with the same label would
+  be worse than one (§103 has the same complaint about two `pwsh` tabs).
+- **The 32-bit registry view is not searched.** A 32-bit Git on a 64-bit Windows writes under
+  `WOW6432Node`, and cmote's process reads the 64-bit view. `RRF_SUBKEY_WOW6464KEY`'s sibling flag would
+  add it; a 32-bit Git for Windows on a machine new enough to run cmote is not worth the second call until
+  someone has one.
+- **macOS has no equivalent and needs none** — `zsh` and `bash` are at `/bin`, and the search there is
+  `PATH` plus that one folder.

@@ -174,11 +174,18 @@ zeroize = "1.9.0"
 # `GetLogicalDrives` is one bitmask; the alternative is asking whether `A:\` through `Z:\` are
 # directories, and two of those 26 questions are the ones that hurt — `A:\` spins up a floppy drive
 # and an empty optical drive can block for seconds.
+#
+# `Win32_System_Registry` — where Git for Windows says it installed itself (PLAN §105). Its installer
+# accepts any directory and can be told to keep `git.exe` off `PATH`, so neither the Program Files
+# search nor the `PATH` one finds such an install, and the Local bar then offers no Git Bash on a
+# machine that has it. `RegGetValueW` reads the one key the installer writes; the alternative is
+# scanning the disk, which is not a search anyone should run at start-up.
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Gdi",
 	"Win32_Storage_FileSystem",
 	"Win32_System_Com",
+	"Win32_System_Registry",
 	"Win32_System_Time",
 	"Win32_UI_HiDpi",
 	"Win32_UI_Shell",

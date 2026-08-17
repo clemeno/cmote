@@ -317,10 +317,97 @@ fn git_bash_path() -> Option<PathBuf> {
 	{
 		roots.push(root.to_path_buf());
 	}
+	// And the root its own installer wrote down (§105), which is the only search that finds a Git
+	// installed somewhere of the user's choosing and kept off `PATH`.
+	roots.extend(recorded_git_roots());
 	roots
 		.into_iter()
 		.map(|root| root.join(r"bin\bash.exe"))
 		.find(|candidate| candidate.is_file())
+}
+
+/// Where the Git for Windows installer says it put itself, per machine and per user (§105).
+///
+/// The other two searches both miss a Git that is neither in a Program Files folder nor reachable
+/// through `PATH` — and that is not a corner case: the installer lets you choose any directory, and its
+/// "use Git from Git Bash only" PATH option deliberately leaves `git.exe` off `PATH`. On the machine this
+/// was written for, Git lives in `C:\git` and nothing about it is on `PATH`, so the Local bar had no Git
+/// Bash button on a machine that has Git Bash — the one shell whose Ctrl+D behaviour §104 was written
+/// against could not be opened at all.
+///
+/// This is still a **known location**, in the sense the module note means: one fixed key, written by the
+/// installer and not by anything the user types at cmote, and whatever comes out of it still has to be a
+/// `bin\bash.exe` that exists before a button is offered. `HKLM` is a per-machine install and `HKCU` the
+/// "for me only" one; a machine with both gets the per-machine one first, which is the order the
+/// installer itself prefers.
+#[cfg(windows)]
+fn recorded_git_roots() -> Vec<PathBuf> {
+	use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+
+	[HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+		.into_iter()
+		.filter_map(|root| registry_string(root, r"SOFTWARE\GitForWindows", "InstallPath"))
+		.collect()
+}
+
+/// One `REG_SZ` value, as a path — `None` if the key is absent, the value is absent, it is not a string,
+/// or it is empty.
+///
+/// A missing key is the ordinary answer here (a machine with no Git for Windows), so nothing is logged:
+/// this is a search, and finding nothing is a result.
+#[cfg(windows)]
+fn registry_string(
+	root: windows_sys::Win32::System::Registry::HKEY,
+	subkey: &str,
+	value: &str,
+) -> Option<PathBuf> {
+	use std::os::windows::ffi::OsStringExt;
+	use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+	use windows_sys::Win32::System::Registry::{RRF_RT_REG_SZ, RegGetValueW};
+
+	let subkey = wide(subkey);
+	let value = wide(value);
+	// Room to spare for a path: `MAX_PATH` is 260 units, and an install root long enough to overflow
+	// this could not be typed into the installer's own dialog. An oversize value fails the call with
+	// `ERROR_MORE_DATA` and is treated as "not found", which is the honest answer for a value cmote
+	// cannot read rather than a truncated path it would then try to run.
+	let mut buffer = [0u16; 512];
+	let mut bytes = std::mem::size_of_val(&buffer) as u32;
+	// SAFETY: both names are NUL-terminated wide strings owned by this frame, so they outlive the call.
+	// The data pointer and `bytes` describe `buffer` exactly — `RegGetValueW` writes at most that many
+	// bytes and replaces `bytes` with what it actually wrote — and `RRF_RT_REG_SZ` makes it refuse any
+	// value whose type is not a string, so what lands in the buffer is UTF-16 or nothing. The null
+	// `pdwtype` says the type is not wanted back, which the API allows.
+	let status = unsafe {
+		RegGetValueW(
+			root,
+			subkey.as_ptr(),
+			value.as_ptr(),
+			RRF_RT_REG_SZ,
+			std::ptr::null_mut(),
+			buffer.as_mut_ptr().cast(),
+			&raw mut bytes,
+		)
+	};
+	if status != ERROR_SUCCESS {
+		return None;
+	}
+	// The length comes back in BYTES and counts the terminator, and the API guarantees one is there —
+	// so the string is whatever precedes the first NUL, and the `min` is belt and braces against a
+	// length longer than the buffer that was just handed in.
+	let units = (bytes as usize / 2).min(buffer.len());
+	let text: Vec<u16> = buffer[..units]
+		.iter()
+		.copied()
+		.take_while(|unit| *unit != 0)
+		.collect();
+	(!text.is_empty()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&text)))
+}
+
+/// A NUL-terminated UTF-16 copy of `text`, which is what a Windows `PCWSTR` parameter wants.
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+	text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// A shell named on `PATH` (or at its usual `/bin` home), for the macOS entries where the name is
@@ -433,6 +520,34 @@ mod tests {
 		}
 		// Git Bash is an MSYS shell, so the drive becomes a top-level directory.
 		assert_eq!(Kind::GitBash.cd(pane).as_deref(), Some("cd '/c/Users/cme'"));
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn a_git_installed_where_it_liked_is_still_offered() {
+		// The gap §105 closed. Git for Windows takes any directory and can be told to keep `git.exe` off
+		// `PATH` — the machine this was found on has it in `C:\git` with nothing of it on `PATH` — so the
+		// Program Files search and the `PATH` search both missed it, and the bar offered no Git Bash on a
+		// machine that has Git Bash.
+		//
+		// Skipped rather than failed where there is nothing to find: what is asserted is that the search
+		// AGREES with the installer's own record, not that Git is installed.
+		let Some(root) = super::recorded_git_roots().into_iter().next() else {
+			eprintln!("skipped: no Git for Windows install is recorded in the registry");
+			return;
+		};
+		if !root.join(r"bin\bash.exe").is_file() {
+			eprintln!(
+				"skipped: the recorded root {} holds no bash",
+				root.display()
+			);
+			return;
+		}
+		assert!(
+			catalogue().iter().any(|shell| shell.kind == Kind::GitBash),
+			"the install recorded at {} is offered on the bar",
+			root.display()
+		);
 	}
 
 	#[test]
