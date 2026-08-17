@@ -852,6 +852,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "two-face",
+ "unicode-width",
  "windows-sys 0.61.2",
  "zeroize",
 ]

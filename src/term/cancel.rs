@@ -11,19 +11,23 @@
 //   CSI Pl ; Pr s   DECSLRM — set the LEFT and RIGHT margins (VT420)
 //
 // Two unrelated meanings on one final byte. A real VT420 tells them apart by a mode: DECSLRM only
-// means margins once DECLRMM (`CSI ? 69 h`) has been set, and means save-cursor otherwise. cmote has
-// no margins to give — the engine's scroll region is vertical only
-// (`set_scrolling_region(top, bottom)`) — and the engine refuses mode 69 outright, answering a DECRQM
-// for it with `0`, "not recognised". A program that asks is therefore told the truth and will not
-// spell `s` as DECSLRM.
+// means margins once DECLRMM (`CSI ? 69 h`) has been set, and means save-cursor otherwise.
 //
-// Not having them is a decision about price, not a limit of the engine: `Processor::advance` is
-// generic over `Handler` and `Term` merely implements it, so a wrapper could sit in between and give
-// cmote the dozen methods margins reach into. It stays unbuilt because every method of that 71-method
-// trait has a default empty body, so a forwarding gap — one missed today, or one a future version
-// adds — silently drops a sequence instead of failing the build. TERMINAL_COMPATIBILITY_PLAN §5 costs
-// it out. None of that changes anything below: whether the margins arrive one day or never, the byte
-// that asks for them must not be allowed to mean save-cursor.
+// **§102 gave cmote that mode, and with it the real rule.** Until then the engine refused mode 69
+// outright — it is not in `NamedPrivateMode`, so DECSET dropped it and DECRQM answered `0`, "not
+// recognised" — and cmote had no margins to give either. So the only evidence left in the bytes was
+// the parameter count, and this scanner cancelled EVERY parametrised `s` on it. That guess is now
+// retired. The scanner reports the sequence and its two numbers; `Terminal::process` decides:
+//
+//   mode 69 SET      DECSLRM. The margins are applied and the byte is still cancelled, because the
+//                    engine's arm for it would save the cursor on the way past.
+//   mode 69 RESET    SCOSC. The byte is let through and the engine saves the cursor, which is what
+//                    a real xterm does with it, parameters and all.
+//
+// Letting the byte through is not a loosening of §57. The harm §57 closed was a margin request
+// costing a program its saved cursor, and the terminfo is the proof it cannot happen now: all four
+// of `xterm-256color`'s margin capabilities SET MODE 69 FIRST
+// (`smglr=\E[?69h\E[%i%p1%d;%p2%ds`). A program that means margins says so before it asks.
 //
 // The problem is the program that does not ask. `vte`'s dispatch is
 //
@@ -57,10 +61,9 @@
 // that would rest on the absence of an arm, which is exactly the kind of thing a version bump adds.
 // CAN is a cancel in the state machine itself.
 //
-// The rule for telling the two meanings apart, then: a parameter makes it DECSLRM. That is the only
-// evidence in the bytes, since the mode that would settle it is one the engine never accepts. It
-// costs the reading of `CSI 0 s` as a save-cursor, which nothing writes — every save-cursor in the
-// wild is the bare `CSI s`, and that one is left alone and still works.
+// What this scanner still decides on its own is which sequences are CANDIDATES, and there the test
+// is unchanged: a parametrised, unmarked, unintermediated `s`. The bare `CSI s` — every save-cursor
+// in the wild — never reaches the decision at all.
 
 /// The byte fed to the engine in place of a final byte cmote refuses to let it dispatch.
 ///
@@ -75,6 +78,27 @@ const ESC: u8 = 0x1b;
 /// a longer run is malformed, and abandoning the sequence keeps a hostile stream from being able to
 /// hold this scanner in its CSI state indefinitely (§12).
 const MAX_PARAMS: usize = 32;
+
+/// One DECSLRM found in the stream (§57, §102).
+///
+/// The offset is the position of the final byte ITSELF, and the two numbers are what the sequence
+/// asked for — `None` where the parameter was omitted, which DEC reads as the page edge.
+///
+/// The scanner reports the sequence; it does not decide what happens to it. That decision needs the
+/// margin mode, which lives with the rest of the margin state, so `Terminal::process` makes it: with
+/// mode 69 set this is a margin request and the byte is cancelled, and without it the byte is a
+/// save-cursor and is let through (`term/margins.rs` argues why that is the right split).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Request {
+	pub offset: usize,
+	pub left: Option<u16>,
+	pub right: Option<u16>,
+}
+
+/// The most parameters this scanner will keep. DECSLRM has two and everything past them is somebody
+/// else's sequence — kept as a named number rather than a literal `2` because the loop below reads
+/// better when the bound has the reason attached.
+const KEPT_PARAMS: usize = 2;
 
 /// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then
 /// intermediate bytes, then one final byte — only the final byte decides anything here.
@@ -101,18 +125,25 @@ pub struct Cancel {
 	/// (`< = > ?`) or an intermediate (0x20–0x2f) makes it a different sequence altogether —
 	/// `CSI ? s` is XTSAVE, which the engine drops harmlessly — so neither is DECSLRM.
 	plain: bool,
+	/// The two numbers DECSLRM carries, as far as they have been read. `None` is an omitted parameter
+	/// and `Some(0)` one written as an explicit zero — kept apart here because it is the READER that
+	/// decides the two mean the same thing (§102, `term/margins.rs`).
+	numbers: [Option<u16>; KEPT_PARAMS],
+	/// Which of the two the digits are landing in. Past the end the digits are dropped: a sequence
+	/// with three parameters is not DECSLRM, but its final byte still has to be judged.
+	slot: usize,
 }
 
 impl Cancel {
-	/// Scan a chunk of shell output, returning the offsets of the final bytes to cancel. Safe at any
-	/// chunk boundary: the state machine carries over between calls, so a sequence may be split
-	/// anywhere, even between the ESC and the `[`.
+	/// Scan a chunk of shell output, returning each DECSLRM it carried. Safe at any chunk boundary:
+	/// the state machine carries over between calls, so a sequence may be split anywhere, even
+	/// between the ESC and the `[`.
 	///
 	/// Each offset is the position of the final byte ITSELF — a third convention, next to the start
 	/// of the sequence that a prompt mark reports (§34) and the byte one PAST it that a selective
-	/// erase reports (§56). It is the byte being replaced, so it is the byte named: the engine is
-	/// advanced up to it, fed a CAN instead of it, and resumed after it.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<usize> {
+	/// erase reports (§56). It is the byte that may be replaced, so it is the byte named: the engine
+	/// is advanced up to it, fed a CAN instead of it, and resumed after it.
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Request> {
 		let mut cancels = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -125,6 +156,8 @@ impl Cancel {
 					b'[' => {
 						self.params = 0;
 						self.plain = true;
+						self.numbers = [None; KEPT_PARAMS];
+						self.slot = 0;
 						self.state = Scan::Csi;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
@@ -132,13 +165,32 @@ impl Cancel {
 					_ => self.state = Scan::Text,
 				},
 				Scan::Csi => match byte {
-					// Parameter bytes: the digits and the two separators.
-					0x30..=0x3b => {
+					// A digit, folded into the parameter it belongs to. Saturating, so a run of
+					// nines cannot wrap the number round into something small and plausible — a
+					// margin past the page is clamped by the reader, but a wrapped one would be
+					// obeyed.
+					b'0'..=b'9' => {
 						self.params += 1;
 						if self.params > MAX_PARAMS {
 							self.state = Scan::Text;
+						} else if let Some(number) = self.numbers.get_mut(self.slot) {
+							let digit = u16::from(byte - b'0');
+							*number =
+								Some(number.unwrap_or(0).saturating_mul(10).saturating_add(digit));
 						}
 					}
+					// The separator between parameters.
+					b';' => {
+						self.params += 1;
+						if self.params > MAX_PARAMS {
+							self.state = Scan::Text;
+						} else {
+							self.slot += 1;
+						}
+					}
+					// A sub-parameter separator. DECSLRM has no sub-parameters, so this is some
+					// other sequence and the `s` it may end with is not ours to touch.
+					b':' => self.plain = false,
 					// A private marker. Legal only as the first parameter byte, and either way this
 					// is not DECSLRM.
 					0x3c..=0x3f => self.plain = false,
@@ -146,8 +198,15 @@ impl Cancel {
 					0x20..=0x2f => self.plain = false,
 					// The final byte ends the sequence, so this is where it is judged.
 					0x40..=0x7e => {
-						if byte == b's' && self.plain && self.params > 0 {
-							cancels.push(index);
+						// More than two parameters is not DECSLRM either, and `slot` counts the
+						// separators seen rather than the numbers stored, so it is the test.
+						if byte == b's' && self.plain && self.params > 0 && self.slot < KEPT_PARAMS
+						{
+							cancels.push(Request {
+								offset: index,
+								left: self.numbers[0],
+								right: self.numbers[1],
+							});
 						}
 						self.state = Scan::Text;
 					}
@@ -167,10 +226,24 @@ impl Cancel {
 mod tests {
 	use super::*;
 
-	/// Feed one byte slice to a fresh scanner and read what it asked to cancel.
+	/// Feed one byte slice to a fresh scanner and read back where it found a DECSLRM. The numbers the
+	/// sequence carried have their own tests below; most of these are about which sequences are
+	/// candidates at all.
 	fn scan(bytes: &[u8]) -> Vec<usize> {
 		let mut cancel = Cancel::default();
-		cancel.feed(bytes)
+		cancel
+			.feed(bytes)
+			.into_iter()
+			.map(|request| request.offset)
+			.collect()
+	}
+
+	/// Feed one byte slice and read back the two numbers of the single request it carried.
+	fn numbers(bytes: &[u8]) -> (Option<u16>, Option<u16>) {
+		let mut cancel = Cancel::default();
+		let found = cancel.feed(bytes);
+		assert_eq!(found.len(), 1, "expected exactly one request");
+		(found[0].left, found[0].right)
 	}
 
 	#[test]
@@ -243,8 +316,46 @@ mod tests {
 		let mut cancel = Cancel::default();
 		assert!(cancel.feed(b"text\x1b").is_empty());
 		assert!(cancel.feed(b"[5;7").is_empty());
-		// The offset counts from the start of the chunk that completed the sequence.
-		assert_eq!(cancel.feed(b"0shello"), vec![1]);
+		// The offset counts from the start of the chunk that completed the sequence — and the numbers
+		// survive the boundary, since `70` was written across it.
+		let found = cancel.feed(b"0shello");
+		assert_eq!(found.len(), 1);
+		assert_eq!(found[0].offset, 1);
+		assert_eq!((found[0].left, found[0].right), (Some(5), Some(70)));
+	}
+
+	#[test]
+	fn the_two_numbers_come_out_as_the_sequence_wrote_them() {
+		assert_eq!(numbers(b"\x1b[5;70s"), (Some(5), Some(70)));
+	}
+
+	#[test]
+	fn an_omitted_parameter_is_not_the_same_as_a_zero() {
+		// The reader treats both as "the page edge" (§102), but that is the READER's decision, so the
+		// scanner keeps them apart and hands over what was actually written.
+		assert_eq!(numbers(b"\x1b[5s"), (Some(5), None));
+		assert_eq!(numbers(b"\x1b[;70s"), (None, Some(70)));
+		assert_eq!(numbers(b"\x1b[0;70s"), (Some(0), Some(70)));
+	}
+
+	#[test]
+	fn a_third_parameter_rules_the_sequence_out() {
+		// DECSLRM has two. Three means some other sequence ending in `s`, and cancelling it would
+		// take a save-cursor a program is entitled to.
+		assert!(scan(b"\x1b[1;2;3s").is_empty());
+	}
+
+	#[test]
+	fn a_sub_parameter_rules_the_sequence_out() {
+		// Colons introduce sub-parameters, which DECSLRM does not have.
+		assert!(scan(b"\x1b[1:2s").is_empty());
+	}
+
+	#[test]
+	fn a_run_of_digits_saturates_instead_of_wrapping() {
+		// A margin past the page is clamped by the reader; one that WRAPPED round would be a small
+		// plausible number and would be obeyed. Six nines is already past `u16`.
+		assert_eq!(numbers(b"\x1b[999999;5s"), (Some(u16::MAX), Some(5)));
 	}
 
 	#[test]

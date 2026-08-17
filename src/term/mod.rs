@@ -55,6 +55,7 @@ mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear 
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
+mod margins; // holds the left and right margins a program sets, and the arithmetic they imply (§102)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
 mod notify; // names the desktop-notification spellings cmote refuses, so the refusal is stated (§79)
@@ -173,10 +174,18 @@ const SCROLLBACK: usize = 10_000;
 /// all four character-set slots plus the active one, the scrolling region, and finally the SAVED
 /// cursor — which `ESC 7` puts at home with the pen this string has just reset, DEC's own definition
 /// of the item. `soft_reset` appends the CUP that puts the real cursor back, since `CSI r` homes it.
-/// Every byte of it is a sequence the engine has an arm for, which is the point: the engine remains
-/// the only writer of its own state (see `soft_reset` for the two departures from DEC's list).
-const SOFT_RESET: &[u8] =
-	b"\x1b[0m\x1b[?25h\x1b[4l\x1b[?6l\x1b[?7h\x1b[?1l\x1b>\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[r\x1b[H\x1b7";
+/// Every byte of it is a sequence the engine has an arm for — with ONE exception since §102, the
+/// `\E[?69l` that turns the left and right margins off, which is a sequence the GATE has an arm for.
+/// The point holds either way: the reset is spelled in sequences something downstream already
+/// implements, so nothing here becomes a second writer of state (see `soft_reset` for the departures
+/// from DEC's list).
+///
+/// The margins are on this string for a reason worth stating, because DEC's published list does not
+/// name them and §72 was careful not to widen that list. `CSI r` is on it — DECSTR puts the
+/// scrolling region back to the whole page — and the margins are the same object's other axis. A
+/// reset that freed the rows and left the columns walled off would hand the next program half a
+/// page and no sequence to discover it with.
+const SOFT_RESET: &[u8] = b"\x1b[0m\x1b[?25h\x1b[4l\x1b[?6l\x1b[?7h\x1b[?1l\x1b>\x1b(B\x1b)B\x1b*B\x1b+B\x0f\x1b[?69l\x1b[r\x1b[H\x1b7";
 
 /// The engine, specialised to our reply-collecting listener. `screen::Screen` borrows this
 /// to read the grid, so the alias is the one name that would change under another engine.
@@ -291,6 +300,7 @@ impl Terminal {
 			graphics: graphics::Images::default(),
 			on_alternate: false,
 			region: region::Region::full(rows as usize),
+			margins: margins::Margins::default(),
 		}
 	}
 
@@ -304,7 +314,12 @@ impl Terminal {
 	/// The three borrows are disjoint fields of `self`, which is what lets the parser, the engine and
 	/// the state kept beside it all be borrowed mutably at once.
 	fn advance(&mut self, bytes: &[u8]) {
-		let mut gate = gate::Gate::new(&mut self.term, &mut self.region);
+		let mut gate = gate::Gate::new(
+			&mut self.term,
+			&mut self.region,
+			&mut self.margins,
+			&self.replies,
+		);
 		self.parser.advance(&mut gate, bytes);
 	}
 
@@ -360,8 +375,9 @@ impl Terminal {
 		// that wiped it and an erase after the engine has ignored it. An unarmed stream that sends no
 		// `?`-erase reports nothing, so the common case still pays for no split.
 		let protections = self.protect.feed(bytes);
-		// The one sequence the engine reads as something else (§57). Unlike every scanner above, this
-		// one is not reporting something to apply — it is reporting a byte the engine must not be let
+		// DECSLRM, the one sequence the engine reads as something else (§57, §102). Unlike every
+		// scanner above, this one is not reporting something to apply — it is reporting a byte the
+		// engine must not be let
 		// near, so its offset is the final byte itself and the split loop steps OVER it.
 		let cancels = self.cancels.feed(bytes);
 		// The VT420 rectangular operations the engine drops (§58, §59). Split-fed like the selective
@@ -428,13 +444,24 @@ impl Terminal {
 						self.prompts.record_user_mark(history, row);
 					}
 					Split::Protect(request) => self.apply_protection(request),
-					// End the sequence instead of letting the engine dispatch it, and step over the
-					// final byte so it is neither dispatched nor printed. Feeding nothing here would
-					// leave the engine's parser mid-CSI, waiting to take the next final byte in the
-					// stream as this sequence's — see `term/cancel.rs` for what that costs.
-					Split::Cancel => {
-						self.advance(&[cancel::CANCEL]);
-						start += 1;
+					// A parametrised `CSI … s`, which is DECSLRM or SCOSC depending on a mode (§102).
+					//
+					// With mode 69 set it is a margin request: the margins are placed, and the final
+					// byte is still ended rather than dispatched, because the engine's arm for it
+					// reads no parameters and would save the cursor on the way past. Feeding NOTHING
+					// in place of it would leave the engine's parser mid-CSI, waiting to take the
+					// next final byte in the stream as this sequence's — `term/cancel.rs` says what
+					// that costs and why the replacement is a CAN.
+					//
+					// Without the mode it is a save-cursor, and the byte is left alone: the engine's
+					// reading of it is the right one, which is the whole reason §57's guess could be
+					// retired.
+					Split::Margins(request) => {
+						if self.margins.enabled() {
+							self.advance(&[cancel::CANCEL]);
+							start += 1;
+							self.set_margins(request);
+						}
 					}
 					Split::Rect(request) => self.apply_rectangle(request),
 					Split::TabStops => self.set_default_tabs(),
@@ -721,6 +748,23 @@ impl Terminal {
 		let mut feed = SOFT_RESET.to_vec();
 		feed.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
 		self.advance(&feed);
+	}
+
+	/// Place the left and right margins — DECSLRM, with mode 69 already known to be set (§102).
+	///
+	/// A rejected request moves nothing, not even the cursor: `Margins::set` applies xterm's test
+	/// (the left margin strictly left of the right, the right clamped to the page) and says whether
+	/// it took.
+	///
+	/// An accepted one HOMES the cursor, as DECSTBM does — and it is fed as a CUP rather than
+	/// written, so the one piece of code that knows where "home" is under origin mode stays the
+	/// gate's `goto`: the engine puts the row at the top of the scrolling region and the gate puts
+	/// the column at the left margin. §72's route, on a sequence cmote has just started to own.
+	fn set_margins(&mut self, request: cancel::Request) {
+		let cols = self.term.grid().columns();
+		if self.margins.set(request.left, request.right, cols) {
+			self.advance(b"\x1b[H");
+		}
 	}
 
 	/// Carry out DECST8C — clear every tab stop and set one every eight columns (§74).
@@ -1409,6 +1453,10 @@ impl Terminal {
 		// One of the two writers `term/region.rs` names that this file, not the gate, is answerable
 		// for (§102).
 		self.region.reset(rows as usize);
+		// And the margins go with it (§102). A band of columns 10 to 40 means nothing on a window
+		// that is now 30 columns wide, and reflow makes it worse than arbitrary: the text those
+		// columns held has moved. xterm drops margins on resize for the same reason.
+		self.margins.reset();
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
@@ -1812,6 +1860,10 @@ pub struct Terminal {
 	/// resets are calls cmote itself makes. `term/region.rs` names all four and what would break the
 	/// mirror.
 	region: region::Region,
+	/// The left and right margins, DECSLRM's half of the same object the region above is (§102).
+	/// Unlike the region this is not a mirror of anything — the engine has no margins, so cmote is
+	/// their only holder and the gate performs every operation they change.
+	margins: margins::Margins,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
@@ -1831,9 +1883,10 @@ enum Split {
 	/// far side of it. Both work through the same loop because a split is a split — the difference is
 	/// only which side of the boundary the scanner asked for.
 	Protect(protect::Request),
-	/// A final byte the engine must not dispatch (§57). The only split that is not something to
-	/// apply: it marks the byte itself, and the loop replaces it with a CAN rather than feeding it.
-	Cancel,
+	/// A parametrised `CSI … s` — DECSLRM or SCOSC, depending on whether mode 69 is set (§57, §102).
+	/// The only split whose offset is the final byte ITSELF rather than one side of the sequence,
+	/// because with the mode on the loop replaces that byte with a CAN rather than feeding it.
+	Margins(cancel::Request),
 	/// A rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of cells. Applied
 	/// on the far side of its sequence, as a selective erase is, and for the same reason.
 	Rect(rect::Request),
@@ -1868,7 +1921,7 @@ struct Scanned {
 	images: Vec<(usize, graphics::Event)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
 	protections: Vec<(usize, protect::Request)>,
-	cancels: Vec<usize>,
+	cancels: Vec<cancel::Request>,
 	rectangles: Vec<(usize, rect::Request)>,
 	tab_resets: Vec<usize>,
 	cursor_requests: Vec<(usize, dsr::Request)>,
@@ -1943,7 +1996,11 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 			.into_iter()
 			.map(|(offset, request)| (offset, Split::Protect(request))),
 	);
-	merged.extend(cancels.into_iter().map(|offset| (offset, Split::Cancel)));
+	merged.extend(
+		cancels
+			.into_iter()
+			.map(|request| (request.offset, Split::Margins(request))),
+	);
 	merged.extend(
 		rectangles
 			.into_iter()
@@ -4148,12 +4205,14 @@ mod tests {
 	/// The collision §57 is about: `CSI Pl;Pr s` is a margin request, and the engine's arm for the
 	/// final `s` is save-cursor with its parameters ignored. Unhandled, it silently overwrites the one
 	/// saved-cursor slot, and the program's own restore then lands wherever the margin request sat.
+	///
+	/// Mode 69 is set here, because since §102 that is what makes the byte a margin request at all.
 	#[test]
 	fn a_margin_request_does_not_move_the_saved_cursor() {
 		let mut terminal = Terminal::new(4, 20);
 		// The status-line shape: save, go somewhere, write, come back.
 		terminal.process(b"\x1b[1;1Hhome\x1b[s");
-		terminal.process(b"\x1b[3;1Hstatus\x1b[5;70s");
+		terminal.process(b"\x1b[3;1Hstatus\x1b[?69h\x1b[5;70s");
 		terminal.process(b"\x1b[uBACK");
 		assert_eq!(
 			read(&terminal, 0, 0, 8),
@@ -4167,6 +4226,326 @@ mod tests {
 		);
 	}
 
+	/// The other half of the rule §102 restored: WITHOUT mode 69 the same bytes are a save-cursor,
+	/// parameters and all, which is what a real xterm makes of them.
+	///
+	/// §57 could not tell the two apart and cancelled both, because the mode that settles it was one
+	/// the engine refused. cmote holds the mode now, so the guess is retired — and the program that
+	/// means margins is not harmed by it, since every terminfo margin capability sets the mode first.
+	#[test]
+	fn a_parametrised_save_cursor_without_the_mode_is_a_save_cursor() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b[3;1Hhere\x1b[5;70s");
+		terminal.process(b"\x1b[1;1H\x1b[uX");
+		assert_eq!(
+			read(&terminal, 2, 0, 6),
+			"hereX",
+			"the restore landed where the parametrised `s` sat"
+		);
+	}
+
+	/// A terminal with DECLRMM set and the margins placed, one-based exactly as a program writes them.
+	fn margined(rows: u16, cols: u16, left: u16, right: u16) -> Terminal {
+		let mut terminal = Terminal::new(rows, cols);
+		terminal.process(format!("\x1b[?69h\x1b[{left};{right}s").as_bytes());
+		terminal
+	}
+
+	/// Write the same letter across a whole row, so a band operation's effect can be read off against
+	/// the columns it was supposed to leave alone.
+	///
+	/// Called BEFORE the margins go on, in the tests that use it, which is both realistic — a program
+	/// draws its page and then walls off the column it wants to scroll — and necessary: text starting
+	/// left of the band crosses INTO it, and the band is exactly where the line then breaks.
+	fn fill_row(terminal: &mut Terminal, row: u16, letter: char, cols: u16) {
+		let text = std::iter::repeat_n(letter, cols as usize).collect::<String>();
+		terminal.process(format!("\x1b[{};1H{text}", row + 1).as_bytes());
+	}
+
+	/// Put margins on a terminal that already has something on it, one-based as on the wire.
+	fn set_margins(terminal: &mut Terminal, left: u16, right: u16) {
+		terminal.process(format!("\x1b[?69h\x1b[{left};{right}s").as_bytes());
+	}
+
+	/// Fill every row of a small page with its own letter, then wall off a band of columns.
+	fn banded_page(rows: u16, cols: u16, left: u16, right: u16) -> Terminal {
+		let mut terminal = Terminal::new(rows, cols);
+		for row in 0..rows {
+			let letter = char::from(b'A' + row as u8);
+			fill_row(&mut terminal, row, letter, cols);
+		}
+		set_margins(&mut terminal, left, right);
+		terminal
+	}
+
+	/// The sequence's whole point: a line breaks at the RIGHT MARGIN and goes on at the LEFT one,
+	/// instead of running to the screen edge and coming back to column 1 (§102).
+	#[test]
+	fn a_line_breaks_at_the_right_margin_and_goes_on_at_the_left_one() {
+		// Columns 5 to 10 on the wire — a band six wide, from column 4 to column 9 counting from zero.
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[1;5Habcdefgh");
+		assert_eq!(read(&terminal, 0, 4, 6), "abcdef", "the band filled");
+		assert_eq!(
+			read(&terminal, 1, 4, 6),
+			"gh",
+			"and went on at the left margin"
+		);
+		assert_eq!(
+			read(&terminal, 0, 10, 10),
+			"",
+			"nothing past the right margin"
+		);
+	}
+
+	/// A terminal does not wrap when the last usable column is filled — it leaves the cursor ON that
+	/// column with the wrap OWED, so a program that fills the line and then moves never wraps at all.
+	///
+	/// The engine has its own flag for this and fires it at the screen edge, which is the wrong column
+	/// and, for a band that stops short of the edge, never happens. So the flag becomes cmote's.
+	#[test]
+	fn filling_the_band_leaves_the_cursor_on_the_margin_with_the_wrap_owed() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[1;5Habcdef");
+		assert_eq!(
+			terminal.process(b"\x1b[6n"),
+			b"\x1b[1;10R".to_vec(),
+			"still on the right margin, not on the next row"
+		);
+		// And a carriage return cancels the owed wrap rather than performing it.
+		terminal.process(b"\rX");
+		assert_eq!(read(&terminal, 0, 4, 6), "Xbcdef");
+		assert_eq!(
+			read(&terminal, 1, 0, 20),
+			"",
+			"the second row was never reached"
+		);
+	}
+
+	/// CR goes to the left margin — and to column 1 when the cursor is left of the band, so a program
+	/// writing outside its own band is not dragged into it.
+	#[test]
+	fn a_carriage_return_goes_to_the_left_margin_only_from_inside_the_band() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[1;8H\rX");
+		assert_eq!(read(&terminal, 0, 4, 1), "X", "from inside the band");
+		terminal.process(b"\x1b[2;2H\rY");
+		assert_eq!(read(&terminal, 1, 0, 1), "Y", "from left of it");
+	}
+
+	/// CUF and CUB stop at the margins when the cursor started between them.
+	#[test]
+	fn cursor_motion_stops_at_the_margins() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[1;6H\x1b[40CX");
+		assert_eq!(
+			read(&terminal, 0, 9, 1),
+			"X",
+			"forward, held at the right margin"
+		);
+		terminal.process(b"\x1b[2;8H\x1b[40DY");
+		assert_eq!(
+			read(&terminal, 1, 4, 1),
+			"Y",
+			"back, held at the left margin"
+		);
+	}
+
+	/// Under origin mode the columns a program names are counted from the LEFT MARGIN — the same
+	/// relationship origin mode already had with the scrolling region's rows, which the engine
+	/// implements and, having no margins, never had to implement for columns.
+	#[test]
+	fn origin_mode_counts_columns_from_the_left_margin() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[?6h\x1b[1;1HX");
+		assert_eq!(read(&terminal, 0, 4, 1), "X");
+		// And cannot be aimed past the right one.
+		terminal.process(b"\x1b[?6h\x1b[2;99HY");
+		assert_eq!(read(&terminal, 1, 9, 1), "Y");
+	}
+
+	/// A scroll moves only the band. Everything either side of it is another column of the page and
+	/// is not scrolling — which is the whole reason a program sets margins.
+	#[test]
+	fn a_line_feed_at_the_bottom_scrolls_only_the_band() {
+		let mut terminal = banded_page(3, 12, 5, 8);
+		// The cursor on the last row and inside the band, so the line feed scrolls rather than moves.
+		terminal.process(b"\x1b[3;5H\n");
+		assert_eq!(read(&terminal, 0, 0, 12), "AAAABBBBAAAA");
+		assert_eq!(read(&terminal, 1, 0, 12), "BBBBCCCCBBBB");
+		assert_eq!(
+			read(&terminal, 2, 0, 12),
+			"CCCCCCCC",
+			"the band blanked, the rest standing"
+		);
+	}
+
+	/// A row pushed out of a narrowed band is DISCARDED, never pushed to the scrollback: the history
+	/// holds whole lines and this row is a slice of one. Half-lines interleaved with whole ones would
+	/// make every search, selection and copy downstream of it wrong (§102).
+	#[test]
+	fn a_band_scroll_puts_nothing_in_the_scrollback() {
+		let mut terminal = banded_page(3, 12, 5, 8);
+		terminal.process(b"\x1b[3;5H\n\n\n\n");
+		assert_eq!(terminal.screen().history_size(), 0);
+	}
+
+	/// SU and SD take the whole scrolling region, and only the band's columns of it.
+	#[test]
+	fn a_scroll_up_moves_only_the_bands_columns() {
+		let mut terminal = banded_page(3, 12, 5, 8);
+		terminal.process(b"\x1b[S");
+		assert_eq!(read(&terminal, 0, 0, 12), "AAAABBBBAAAA");
+		assert_eq!(read(&terminal, 2, 0, 12), "CCCCCCCC");
+	}
+
+	/// IL and DL open and close lines inside the band alone.
+	#[test]
+	fn a_line_insert_opens_a_gap_in_the_band_and_nowhere_else() {
+		let mut terminal = banded_page(3, 12, 5, 8);
+		terminal.process(b"\x1b[2;5H\x1b[L");
+		assert_eq!(
+			read(&terminal, 0, 0, 12),
+			"AAAAAAAAAAAA",
+			"above the cursor, untouched"
+		);
+		assert_eq!(read(&terminal, 1, 0, 12), "BBBBBBBB", "the band opened");
+		assert_eq!(
+			read(&terminal, 2, 0, 12),
+			"CCCCBBBBCCCC",
+			"and what was there moved down"
+		);
+	}
+
+	/// Refused outright when the cursor is outside the margins, which is xterm's test: there is no
+	/// band to open lines in from out there, and guessing one would move text the program walled off.
+	#[test]
+	fn a_line_insert_from_outside_the_band_does_nothing() {
+		let mut terminal = banded_page(3, 12, 5, 8);
+		terminal.process(b"\x1b[2;1H\x1b[L");
+		assert_eq!(read(&terminal, 1, 0, 12), "BBBBBBBBBBBB");
+		assert_eq!(read(&terminal, 2, 0, 12), "CCCCCCCCCCCC");
+	}
+
+	/// ICH and DCH push and pull within the band, so the neighbouring column's text does not slide.
+	#[test]
+	fn a_character_insert_and_delete_stop_at_the_right_margin() {
+		let mut terminal = Terminal::new(2, 12);
+		terminal.process(b"\x1b[1;1HABCDEFGHIJKL");
+		terminal.process(b"\x1b[2;1HABCDEFGHIJKL");
+		set_margins(&mut terminal, 5, 8);
+		terminal.process(b"\x1b[1;5H\x1b[1@");
+		assert_eq!(
+			read(&terminal, 0, 0, 12),
+			"ABCDEFGIJKL",
+			"EFGH became _EFG, I stood still"
+		);
+		terminal.process(b"\x1b[2;5H\x1b[1P");
+		assert_eq!(
+			read(&terminal, 1, 0, 12),
+			"ABCDFGHIJKL",
+			"EFGH became FGH_, I stood still"
+		);
+	}
+
+	/// The wrap column is the right margin WHEREVER the cursor is, not only inside the band (§102).
+	///
+	/// xterm's rule — its `ScrnRightMargin` reads the mode and never the cursor — so text starting
+	/// left of the band flows rightward, meets the right margin, and continues at the LEFT margin. It
+	/// looks wrong written down and it is what the terminal these programs were built against does;
+	/// the tempting alternative, letting text outside the band keep the whole page, is nobody's
+	/// behaviour and would be cmote inventing a dialect.
+	///
+	/// It is also why the tests above draw their page BEFORE the margins go on.
+	#[test]
+	fn text_written_outside_the_band_still_wraps_at_the_right_margin() {
+		let mut terminal = margined(3, 12, 5, 8);
+		terminal.process(b"\x1b[1;1HABCDEFGHIJKL");
+		assert_eq!(
+			read(&terminal, 0, 0, 12),
+			"ABCDEFGH",
+			"out to the right margin"
+		);
+		assert_eq!(read(&terminal, 1, 0, 12), "IJKL", "and on at the left one");
+	}
+
+	/// A two-cell glyph with only one column left before the right margin takes the wrap whole rather
+	/// than putting its continuation in the next column of the page, which belongs to somebody else.
+	#[test]
+	fn a_wide_glyph_that_will_not_fit_takes_the_wrap_whole() {
+		let mut terminal = margined(3, 12, 5, 8);
+		terminal.process("\x1b[1;5Habc世".as_bytes());
+		assert_eq!(read(&terminal, 0, 4, 4), "abc");
+		assert_eq!(read(&terminal, 1, 4, 2), "世", "whole, on the next row");
+	}
+
+	/// DECRQM has to answer for a mode cmote implements. The engine's own answer is `0`, "not
+	/// recognised" — which was true until §102 and is now a lie a program acts on.
+	#[test]
+	fn the_margin_mode_answers_a_request_about_itself() {
+		let mut terminal = Terminal::new(4, 20);
+		assert_eq!(
+			terminal.process(b"\x1b[?69$p"),
+			b"\x1b[?69;2$y".to_vec(),
+			"reset"
+		);
+		terminal.process(b"\x1b[?69h");
+		assert_eq!(
+			terminal.process(b"\x1b[?69$p"),
+			b"\x1b[?69;1$y".to_vec(),
+			"set"
+		);
+	}
+
+	/// A soft reset takes the margins with it (§102). DEC's published DECSTR list does not name them,
+	/// and `CSI r` — the scrolling region — is on it: the margins are the same object's other axis, so
+	/// a reset that freed the rows and left the columns walled off would hand the next program half a
+	/// page and no sequence to discover it with.
+	#[test]
+	fn a_soft_reset_takes_the_margins_with_it() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.process(b"\x1b[!p");
+		assert_eq!(terminal.process(b"\x1b[?69$p"), b"\x1b[?69;2$y".to_vec());
+		terminal.process(b"\x1b[1;1H0123456789");
+		assert_eq!(
+			read(&terminal, 0, 0, 10),
+			"0123456789",
+			"the whole page again"
+		);
+	}
+
+	/// And a resize does too: a band of columns 5 to 10 means nothing on a window that is now eight
+	/// columns wide, and reflow makes it worse than arbitrary since the text those columns held has
+	/// moved.
+	#[test]
+	fn a_resize_takes_the_margins_with_it() {
+		let mut terminal = margined(4, 20, 5, 10);
+		terminal.resize(4, 24);
+		assert_eq!(terminal.process(b"\x1b[?69$p"), b"\x1b[?69;2$y".to_vec());
+	}
+
+	/// Turning the mode off gives the page back, so a program can put margins away without leaving
+	/// the next one to guess.
+	#[test]
+	fn turning_the_mode_off_gives_the_page_back() {
+		let mut terminal = margined(2, 10, 3, 6);
+		terminal.process(b"\x1b[?69l\x1b[1;1H0123456789");
+		assert_eq!(read(&terminal, 0, 0, 10), "0123456789");
+	}
+
+	/// Margins at the page edges are not margins: the band is the whole width, so every operation
+	/// goes to the engine exactly as it did before §102 — including the one thing cmote's band scroll
+	/// deliberately does not do, which is fill the scrollback.
+	#[test]
+	fn a_band_spanning_the_page_leaves_the_scrollback_working() {
+		let mut terminal = margined(3, 12, 1, 12);
+		terminal.process(b"\x1b[3;1Hlast\n\n");
+		assert!(
+			terminal.screen().history_size() > 0,
+			"a full-width scroll still reaches the history"
+		);
+	}
+
 	/// The cancel has to END the sequence, not merely withhold its final byte: the parameters have
 	/// already reached the engine's parser, so without one the next final byte in the stream would be
 	/// taken as this sequence's. Here that is the `h` of `hello`, which would dispatch as set-mode
@@ -4174,7 +4553,9 @@ mod tests {
 	#[test]
 	fn the_text_after_a_margin_request_is_printed_and_not_eaten() {
 		let mut terminal = Terminal::new(4, 20);
-		terminal.process(b"\x1b[5;70shello");
+		// Margins 5 to 20 on a twenty-column page. DECSLRM homes the cursor, and home without origin
+		// mode is column 1 — outside the band, which is xterm's behaviour and not an accident here.
+		terminal.process(b"\x1b[?69h\x1b[5;20shello");
 		assert_eq!(read(&terminal, 0, 0, 5), "hello");
 	}
 
@@ -4183,8 +4564,10 @@ mod tests {
 	#[test]
 	fn a_cancelled_margin_request_prints_nothing_at_all() {
 		let mut terminal = Terminal::new(4, 20);
-		terminal.process(b"a\x1b[5;70sb");
-		assert_eq!(read(&terminal, 0, 0, 4), "ab");
+		// Each request homes the cursor, so both letters land at column 1 and the second overwrites
+		// the first. What must not appear is a substitute glyph or a stray `s` anywhere on the row.
+		terminal.process(b"\x1b[?69h\x1b[5;20sa\x1b[6;20sb");
+		assert_eq!(read(&terminal, 0, 0, 20), "b");
 	}
 
 	/// The other meaning of the same final byte, which cmote keeps: a bare `CSI s` is the universal

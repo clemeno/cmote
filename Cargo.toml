@@ -38,6 +38,14 @@ anyhow = "1.0.104"
 # hand-rolled because the input is remote-controlled: a decoder is exactly the kind of small,
 # fiddly, boundary-condition-heavy code that should not be written twice in the world.
 base64 = "0.22"
+# How many columns a character occupies, for the one decision cmote has to make BEFORE the engine
+# makes it: whether a glyph still fits before the right margin, or the line has to break first
+# (PLAN §102). Every other width question in cmote is answered by reading the grid after the fact,
+# where the engine has already marked the wide cells — this one cannot be, because by then the glyph
+# is at the wrong columns. Same crate at the same version `alacritty_terminal` already uses for
+# exactly this call, so the two can never disagree about where a line breaks, and the dependency
+# graph does not grow. The `base64` precedent above.
+unicode-width = "0.2"
 # Writes styled HTML to the system clipboard for a rich Ctrl+C (PLAN §10): the terminal grid
 # carries per-cell colour and attributes, so a copy can preserve the look when pasted into a
 # rich editor, with a plain-text fallback riding alongside for editors (and the shell) that read
