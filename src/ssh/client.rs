@@ -61,6 +61,13 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 				// session sees its command channel close and winds down.
 				session = Some(SessionLink::start(params, events.clone()));
 			}
+			// A session on this machine instead (§103). Everything below this arm is untouched by it:
+			// the loop's job is to reach the current session, and a local one is reached down exactly
+			// the same `SessionMsg` channel — which is what lets one worker serve both kinds and keeps
+			// every other arm in this match ignorant of the difference.
+			SshCommand::ConnectLocal(shell) => {
+				session = Some(SessionLink::start_local(shell, events.clone()));
+			}
 			SshCommand::HostKeyResponse(choice) => {
 				if let Some(link) = session.as_mut() {
 					link.send_decision(choice);
@@ -470,6 +477,20 @@ impl SessionLink {
 		Self {
 			to_session: to_session_tx,
 			decision: Some(decision_tx),
+		}
+	}
+
+	/// Spawn a LOCAL session task instead (§103) and return the same handle to talk to it.
+	///
+	/// The one-shot is `None`, and that is the whole difference visible from here: there is no host
+	/// key to gate, so there is no decision to deliver. `send_decision` on such a link is already a
+	/// no-op by construction, so nothing above has to check which kind it is holding.
+	fn start_local(shell: crate::local::shells::Shell, events: mpsc::Sender<SshEvent>) -> Self {
+		let (to_session_tx, to_session_rx) = mpsc::channel::<SessionMsg>(256);
+		tokio::spawn(crate::local::session::run(shell, events, to_session_rx));
+		Self {
+			to_session: to_session_tx,
+			decision: None,
 		}
 	}
 

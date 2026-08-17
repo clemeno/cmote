@@ -105,6 +105,27 @@ open = "5"
 # read a PNG and turning its `png` feature on would only add this crate behind another layer.
 png = "0.18.1"
 rfd = "0.17.2"
+# A pseudo-terminal on THIS machine, for the local shells the home screen's Local bar opens
+# (PLAN §103). cmote's whole terminal side already speaks to a pty — the remote one SSH asks the
+# server for — so a local session needs exactly the same thing without the network: a pty pair, a
+# child process on its slave end, and a resize call. On Windows that is ConPTY
+# (`CreatePseudoConsole` + a `STARTUPINFOEX` attribute list), on macOS `forkpty`.
+#
+# Taken rather than hand-rolled, unlike the two Win32 calls `taskbar.rs` declares itself. Those are
+# one-shot calls with no lifecycle; a pty is the opposite — the traps are all in the teardown and
+# the handle order (a slave handle left open means the reader never sees EOF, so the session never
+# ends; closing the ConPTY before the child exits truncates its last output), and they differ per
+# platform. §2 says Windows AND macOS, so hand-rolling means TWO backends of that kind. This crate
+# is wezterm's, which has run those paths under every Windows build since ConPTY shipped.
+#
+# Pure Rust, no C toolchain, so the portable build holds (§11). Two costs, both real and both
+# accepted rather than argued away. It brings `winapi`, a SECOND Windows-bindings crate beside
+# `windows-sys` — the taskbar note above deliberately declared a COM vtable by hand to avoid exactly
+# that. And its `serial2` / `winreg` dependencies are NOT optional in 0.9 (`default = []` turns
+# nothing off): the crate carries a serial-port pty implementation cmote never opens, so that is
+# dead weight in the binary. The trade is taken because what is being avoided is not a binding but a
+# protocol, and a pty lifecycle got wrong is a session that never ends or loses its last line.
+portable-pty = "0.9"
 # default-features=false drops russh's default `aws-lc-rs` crypto backend (needs
 # a C toolchain + NASM to build). We use `ring` instead: it ships pre-generated
 # assembly for x86_64-pc-windows-msvc, so it builds without NASM and keeps the
@@ -142,10 +163,23 @@ zeroize = "1.9.0"
 # it), so `taskbar.rs` declares the interface's IID and vtable itself. That is the trade: ~40 lines of
 # hand-written declaration instead of pulling in the full `windows` crate, a second and much larger
 # Windows-bindings crate, for two calls.
+# Two features were added for the local session (PLAN §103), each for one call.
+#
+# `Win32_System_Time` — the machine's timezone. A files pane renders every mtime against the zone of
+# the machine the files are on (§20), and for a REMOTE that answer comes from a `date +'%z %Z'`
+# probe. There is nothing to run here, and std can tell the time but not the offset, so
+# `GetTimeZoneInformation` answers it without spawning a shell per session to ask.
+#
+# `Win32_Storage_FileSystem` — which drives exist, for the file panes' virtual root (`local::path`).
+# `GetLogicalDrives` is one bitmask; the alternative is asking whether `A:\` through `Z:\` are
+# directories, and two of those 26 questions are the ones that hurt — `A:\` spins up a floppy drive
+# and an empty optical drive can block for seconds.
 windows-sys = { version = "0.61", features = [
 	"Win32_Foundation",
 	"Win32_Graphics_Gdi",
+	"Win32_Storage_FileSystem",
 	"Win32_System_Com",
+	"Win32_System_Time",
 	"Win32_UI_HiDpi",
 	"Win32_UI_Shell",
 	"Win32_UI_WindowsAndMessaging",

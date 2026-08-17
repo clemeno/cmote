@@ -1,0 +1,417 @@
+// local/session.rs — one local session's whole life (PLAN §103).
+//
+// This is the twin of `ssh::client::stream`, and it is deliberately the same shape: a `select!` over
+// the shell's output and the commands from the GUI, answering both in the same events. It consumes
+// the SAME [`SessionMsg`] the SSH session task does, which is the whole trick behind §103 — the
+// command loop in `ssh::client::run` forwards every message without caring which kind of session is
+// on the other end, so nothing between the GUI and here had to learn that local sessions exist.
+//
+// What a local session does NOT have is as important as what it does, and each absence is answered
+// rather than ignored:
+//
+//   * **No handshake and no authentication.** `Connected` is sent immediately — there is no host key
+//     to verify and no credential to prove. That is why the Local bar's buttons go straight to a
+//     terminal with no form in between.
+//   * **No second account (§45).** Elevating on Windows means UAC, which is a new process at a new
+//     integrity level and not another shell on this one; there is nothing here for `sudo -u` to be.
+//     An `Elevate` is refused with that reason rather than dropped, so the GUI's own flow ends
+//     cleanly instead of waiting for a shell that will never open.
+//   * **No port forwarding (§27).** A tunnel's whole purpose is to carry a connection through the
+//     remote's network. There is no remote, so a forward is refused with that sentence.
+//   * **No shell integration (§17).** That feature writes a cwd announcer into the REMOTE's shell
+//     config so cmote can learn where the shell is. Refused here on purpose rather than made to work:
+//     it would be cmote editing the user's own everyday profile, which is a much larger promise than
+//     "open a terminal" — see §103's Not done.
+//
+// The one thing that ends a local session by itself is the shell exiting — there is no other party to
+// hear it from. What SAYS the shell exited is the child process being waited on, not the output stream
+// running dry: on Windows the ConPTY keeps that stream open until cmote closes the pty, so ending on it
+// would be waiting for a consequence of the decision to be made before making it. `pty::Pty::exit` is
+// the branch that matters, and `pty`'s module note has the whole story.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use tokio::sync::mpsc;
+
+use super::pty::Pty;
+use super::shells::Shell;
+use super::{copy, fs};
+use crate::bridge::{ConflictChoice, SshEvent};
+use crate::ssh::client::SessionMsg;
+
+/// How many conflict answers may queue for a recursive copy. Two would do — the user answers one
+/// question at a time — but a sticky "…all" answer can be followed immediately by the next, so a
+/// little slack costs nothing.
+const ANSWER_BOUND: usize = 8;
+
+/// Run a local session until the shell exits or the GUI asks it to stop.
+///
+/// Every outcome is reported as exactly one terminal event, the same contract the SSH session task
+/// has: `Error` when the shell could not be started at all, `Disconnected` for every other ending —
+/// the user typed `exit`, the program died, or Disconnect was confirmed.
+pub async fn run(
+	shell: Shell,
+	events: mpsc::Sender<SshEvent>,
+	mut commands: mpsc::Receiver<SessionMsg>,
+) {
+	let (mut pty, mut stream) = match Pty::open(&shell) {
+		Ok(opened) => opened,
+		Err(error) => {
+			// The detail goes to the log and a plain sentence to the user, the same rule the SSH task
+			// follows (§12) — except that here the sentence can safely NAME the program, because it is
+			// one cmote found on this machine rather than anything a remote said.
+			eprintln!("could not start the local shell: {error:#}");
+			let _ = events
+				.send(SshEvent::Error(format!(
+					"Could not start {}.",
+					shell.kind.label()
+				)))
+				.await;
+			return;
+		}
+	};
+
+	// A shell is running: from the GUI's point of view this is exactly a connection opening, so it
+	// gets the event that moves it to the terminal screen.
+	let _ = events.send(SshEvent::Connected).await;
+	// The pane renders every mtime against the machine's zone (§20). For a remote that is a probe with
+	// a round trip, so it is deferred until the first listing; here it is one call, so it is answered
+	// up front and the first listing is already correct rather than being re-rendered a moment later.
+	fs::report_zone(&events).await;
+
+	// The reply channel for the recursive copy currently running, and its cancel flag — held exactly
+	// as `ssh::client::stream` holds them, and for the same reason: one transfer runs at a time, so
+	// starting another simply replaces these, and a stale one belongs to a transfer that has ended and
+	// is harmless.
+	let mut conflicts: Option<mpsc::Sender<ConflictChoice>> = None;
+	let mut cancel: Option<Arc<AtomicBool>> = None;
+
+	loop {
+		tokio::select! {
+			// Output first, always. `select!` picks at random among the branches that are ready, so
+			// without this a shell's last line could be sitting in the channel while the exit branch
+			// wins the toss and breaks the loop out from under it. Biased polling costs nothing and
+			// says the priority out loud: bytes the shell has already produced are delivered before
+			// the fact that it has stopped producing them.
+			biased;
+
+			// The shell printed something. `None` is the pty stream ending, which on Windows only happens
+			// once cmote itself tore the pty down — so it is a way OUT of this loop but never the reason,
+			// and the reason is the branch below.
+			chunk = stream.bytes.recv() => {
+				match chunk {
+					Some(bytes) => {
+						let _ = events
+							.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
+							.await;
+					}
+					None => break,
+				}
+			}
+			// The shell exited: the user typed `exit`, or the program died. THIS is what ends a local
+			// session by itself — see `pty`'s note on why waiting for the output stream to end instead
+			// would be waiting on something this decision causes.
+			//
+			// One last flush before leaving. `biased` above already guarantees that anything QUEUED has
+			// been delivered; this catches what the reader thread has read but not yet handed over,
+			// which is a different race and a real one — the exit is observed on its own thread, and a
+			// shell's final line can be in flight when the process is already gone.
+			_ = stream.exited.recv() => {
+				while let Ok(bytes) = stream.bytes.try_recv() {
+					let _ = events
+						.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
+						.await;
+				}
+				break;
+			}
+			command = commands.recv() => {
+				match command {
+					// Typing, and the emulator's own replies to the queries a program sent (§23). Both go
+					// to the one shell this session has, which is why neither needs its identity read.
+					Some(SessionMsg::Data(bytes)) | Some(SessionMsg::Reply { bytes, .. }) => {
+						pty.write(bytes).await;
+					}
+					Some(SessionMsg::Resize { cols, rows }) => pty.resize(cols, rows),
+
+					// The file panes, the details popup and both viewers (§18, §19, §20, §32, §53). Each
+					// runs on its own blocking task so a crowded directory or a large file never holds up
+					// the terminal — the same rule the SFTP listings follow.
+					Some(SessionMsg::ListDir(path)) => fs::list(&events, path).await,
+					Some(SessionMsg::ListFiles { path, request }) => {
+						fs::list_all(&events, path, request).await;
+					}
+					Some(SessionMsg::ReadLink(path)) => fs::read_link(&events, path).await,
+					Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path).await,
+					Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths).await,
+					Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to).await,
+					Some(SessionMsg::FileLoad { viewer_id, path, limit, .. }) => {
+						fs::load(&events, viewer_id, path, limit).await;
+					}
+					Some(SessionMsg::EditSave { viewer_id, path, bytes, .. }) => {
+						fs::save(&events, viewer_id, path, bytes).await;
+					}
+
+					// The transfers (§16, §17, §19). A fresh cancel flag per transfer, kept here so the
+					// status bar's ✕ can reach the one in flight; a fresh answer channel for the recursive
+					// ones, which can park mid-way to ask about a collision.
+					Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
+						let flag = arm(&mut cancel);
+						copy::upload(&events, local, remote, overwrite, resume, flag).await;
+					}
+					Some(SessionMsg::Download { remote, local, resume }) => {
+						let flag = arm(&mut cancel);
+						copy::download(&events, remote, local, resume, flag).await;
+					}
+					Some(SessionMsg::CheckUploads { dir, names }) => {
+						copy::precheck(&events, dir, names).await;
+					}
+					Some(SessionMsg::UploadTree { local, remote, resume }) => {
+						let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
+						conflicts = Some(answers);
+						let flag = arm(&mut cancel);
+						copy::upload_tree(&events, local, remote, resume, receiver, flag).await;
+					}
+					Some(SessionMsg::DownloadTree { remote, local, resume }) => {
+						let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
+						conflicts = Some(answers);
+						let flag = arm(&mut cancel);
+						copy::download_tree(&events, remote, local, resume, receiver, flag).await;
+					}
+					// Forward the answer to the copy parked on it. A send that fails is nothing to act
+					// on: the transfer already ended, so the answer simply had no one waiting.
+					Some(SessionMsg::ResolveConflict(choice)) => {
+						if let Some(answers) = conflicts.as_ref() {
+							let _ = answers.send(choice).await;
+						}
+					}
+					Some(SessionMsg::CancelTransfer) => {
+						if let Some(flag) = cancel.as_ref() {
+							flag.store(true, Ordering::Relaxed);
+						}
+					}
+
+					// The three features a local session does not have (see the module note). Each is
+					// REFUSED with its reason rather than dropped, so the GUI flow that asked ends instead
+					// of waiting on an answer that would never come.
+					Some(SessionMsg::Elevate { identity, .. }) => {
+						let _ = events
+							.send(SshEvent::IdentityEnded {
+								identity,
+								reason: Some(
+									"A local session has one shell. Becoming another user on Windows means \
+									 UAC, which starts a separate process at a different integrity level \
+									 rather than another shell on this one."
+										.to_owned(),
+								),
+							})
+							.await;
+					}
+					Some(SessionMsg::AddForward { id, .. }) => {
+						let _ = events
+							.send(SshEvent::ForwardFailed {
+								id,
+								reason: "A local session has no connection to tunnel through.".to_owned(),
+							})
+							.await;
+					}
+					Some(SessionMsg::ProbeIntegration { .. })
+					| Some(SessionMsg::WriteIntegration { .. }) => {
+						let _ = events
+							.send(SshEvent::IntegrationFailed(
+								"Shell integration writes a cwd announcer into a REMOTE shell's config. \
+								 cmote does not edit your own profile on this machine."
+									.to_owned(),
+							))
+							.await;
+					}
+
+					// Nothing to do, and nothing to report. `SelectIdentity` and `CloseIdentity` name
+					// accounts a local session cannot have; `RemoveForward` names a forward that was
+					// refused when it was asked for; the two auth answers belong to a handshake that never
+					// happened. Each of them is the GUI being tidy, not the GUI being wrong.
+					Some(SessionMsg::SelectIdentity(_))
+					| Some(SessionMsg::CloseIdentity(_))
+					| Some(SessionMsg::RemoveForward(_))
+					| Some(SessionMsg::ElevateAnswer { .. })
+					| Some(SessionMsg::Passphrase(_))
+					| Some(SessionMsg::Interactive(_)) => {}
+
+					// Disconnect, or the command loop dropped the link (the tab closed, the app is
+					// quitting). The shell is killed rather than sent an EOF: cmote cannot know whether
+					// this one would exit on it — a `cmd.exe` at a prompt does, one running a program does
+					// not — and a Disconnect the user confirmed has to actually end the session.
+					Some(SessionMsg::Disconnect) | None => {
+						pty.close();
+						break;
+					}
+				}
+			}
+		}
+	}
+
+	// Every ending but a failed start arrives here: the shell exited on its own, or it was killed
+	// above. Either way the session is over and the GUI is told once.
+	pty.close();
+	let _ = events.send(SshEvent::Disconnected).await;
+}
+
+/// A fresh cancel flag for a transfer about to start, keeping a clone for the ✕ to raise (§16).
+///
+/// One transfer at a time, so each start simply replaces the previous flag; the copy loop polling an
+/// old one is a loop that has already finished.
+fn arm(cancel: &mut Option<Arc<AtomicBool>>) -> Arc<AtomicBool> {
+	let flag = Arc::new(AtomicBool::new(false));
+	*cancel = Some(flag.clone());
+	flag
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{SessionMsg, SshEvent, arm, mpsc, run};
+	use crate::local::shells;
+	use std::sync::atomic::Ordering;
+
+	/// Drive a real local session: start the first shell the Local bar would offer, send it `commands`,
+	/// and hand back every event it produced until it was disconnected.
+	///
+	/// This is the only test that runs the whole pipe — a real pty, the real select loop, the real path
+	/// translation and the real `std::fs` — so it is the one that would catch a file arm wired to the
+	/// wrong function or a pane path that never reaches the disk. `None` on a machine with no shell to
+	/// start, which is how the assertions below step aside rather than failing on a bare box.
+	async fn drive(commands: Vec<SessionMsg>) -> Option<Vec<SshEvent>> {
+		/// How long to wait for the session to go quiet before ending it. Every file operation runs on
+		/// its own detached task, so `Disconnect` sent straight after the commands would break the loop
+		/// while the answers were still being computed — and they would then arrive AFTER `Disconnected`,
+		/// which is exactly what happened the first time this was written. That ordering is fine in the
+		/// app (the tab has gone home and drops them, §19) and useless in a test.
+		const QUIET: std::time::Duration = std::time::Duration::from_secs(2);
+
+		let shell = shells::catalogue().first()?.clone();
+		let (event_tx, mut event_rx) = mpsc::channel::<SshEvent>(256);
+		let (command_tx, command_rx) = mpsc::channel::<SessionMsg>(64);
+		let session = tokio::spawn(run(shell, event_tx, command_rx));
+
+		for command in commands {
+			command_tx.send(command).await.expect("the session is live");
+		}
+
+		let mut events = Vec::new();
+		while let Ok(Some(event)) = tokio::time::timeout(QUIET, event_rx.recv()).await {
+			events.push(event);
+		}
+		let _ = command_tx.send(SessionMsg::Disconnect).await;
+		while let Ok(Some(event)) = tokio::time::timeout(QUIET, event_rx.recv()).await {
+			let done = matches!(event, SshEvent::Disconnected);
+			events.push(event);
+			if done {
+				break;
+			}
+		}
+		let _ = session.await;
+		Some(events)
+	}
+
+	#[tokio::test]
+	async fn a_session_opens_answers_a_listing_and_ends() {
+		// The whole shape of §103 in one test: no handshake (`Connected` arrives first and immediately),
+		// the machine's own timezone volunteered up front so the first listing's times are already right,
+		// a real directory listed through the real path translation, and a clean `Disconnected`.
+		let home = crate::local::path::home();
+		let Some(events) = drive(vec![
+			SessionMsg::ListDir(home.clone()),
+			SessionMsg::ListFiles {
+				path: home.clone(),
+				request: 7,
+			},
+		])
+		.await
+		else {
+			eprintln!("skipped the session round trip: this machine offers no local shell");
+			return;
+		};
+
+		assert!(
+			matches!(events.first(), Some(SshEvent::Connected)),
+			"a local session opens with no question to answer: {events:?}"
+		);
+		assert!(
+			events
+				.iter()
+				.any(|event| matches!(event, SshEvent::Zone(_))),
+			"the machine's zone is volunteered before the first listing: {events:?}"
+		);
+		assert!(
+			events
+				.iter()
+				.any(|event| matches!(event, SshEvent::DirListed { path, .. } if *path == home)),
+			"the tree's listing came back for the folder it asked about: {events:?}"
+		);
+		// The pane's listing arrives in batches keyed by the request number, exactly as SFTP's does —
+		// that is what lets the pane drop an answer for a directory it has already left (§19).
+		assert!(
+			events.iter().any(|event| matches!(
+				event,
+				SshEvent::FilesChunk {
+					request: 7,
+					done: true,
+					..
+				}
+			)),
+			"the pane's listing finished, and under its own request number: {events:?}"
+		);
+		assert!(
+			matches!(events.last(), Some(SshEvent::Disconnected)),
+			"and the session ended once: {events:?}"
+		);
+	}
+
+	#[tokio::test]
+	async fn a_pane_path_that_is_not_on_this_machine_fails_the_listing_rather_than_the_session() {
+		// `/etc` is not a place on Windows. The refusal happens in `local::path` before anything touches
+		// the disk, and it has to come back as that listing failing — not as the session dying, and not
+		// as an empty folder, which would read as "this directory is empty".
+		let Some(events) = drive(vec![SessionMsg::ListFiles {
+			path: "/nowhere-on-this-machine".to_owned(),
+			request: 3,
+		}])
+		.await
+		else {
+			eprintln!("skipped: this machine offers no local shell");
+			return;
+		};
+
+		if cfg!(windows) {
+			assert!(
+				events.iter().any(|event| matches!(
+					event,
+					SshEvent::FilesFailed { request: 3, reason } if reason.contains("not a path on this machine")
+				)),
+				"the refusal names the path and the reason: {events:?}"
+			);
+		}
+		assert!(
+			matches!(events.last(), Some(SshEvent::Disconnected)),
+			"and the session survived it: {events:?}"
+		);
+	}
+
+	#[test]
+	fn each_transfer_starts_with_its_own_unset_flag() {
+		// A flag left raised by the previous transfer would cancel the next one the instant it began.
+		let mut held = None;
+		let first = arm(&mut held);
+		first.store(true, Ordering::Relaxed);
+		let second = arm(&mut held);
+		assert!(!second.load(Ordering::Relaxed));
+		// And the ✕ reaches the CURRENT transfer, which is the one the kept clone points at.
+		held.as_ref()
+			.expect("a flag is kept")
+			.store(true, Ordering::Relaxed);
+		assert!(second.load(Ordering::Relaxed));
+		assert!(
+			first.load(Ordering::Relaxed),
+			"the old flag is simply unread"
+		);
+	}
+}

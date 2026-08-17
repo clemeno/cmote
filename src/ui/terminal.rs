@@ -212,6 +212,21 @@ pub struct Panels<'a> {
 	pub height: f32,
 }
 
+/// Which session this screen is showing (§10, §103): the label the status bar centres, and whether
+/// it is a session on THIS machine.
+///
+/// A pair rather than two arguments, because the second is only ever read to decide what to say about
+/// the first — and because `view` sits exactly on clippy's argument limit, so the next thing that has
+/// to travel with the endpoint would have widened the signature past it. `local` gates the two
+/// controls that cannot mean anything without a remote: the tunnels manager (§27) and the context
+/// menu's shell integration (§17). Both are hidden rather than disabled — a button whose only possible
+/// answer is "not here" teaches nothing.
+#[derive(Debug, Clone, Copy)]
+pub struct Session<'a> {
+	pub endpoint: &'a str,
+	pub local: bool,
+}
+
 /// What every overlay on this screen needs (§10): whether the Disconnect confirmation is
 /// open, the shared selectable body buffer whichever dialog is showing, and where the
 /// card sits. Grouped because they always travel together — and because each dialog
@@ -244,7 +259,7 @@ pub struct Modals<'a> {
 /// selection and the dialog body all share the returned element's lifetime.
 pub fn view<'a>(
 	terminal: &'a Terminal,
-	endpoint: &'a str,
+	session: Session<'a>,
 	selection: Option<&'a Selection>,
 	menu: Option<Point>,
 	modals: Modals<'a>,
@@ -358,7 +373,7 @@ pub fn view<'a>(
 	// view's `'a` lifetime.
 	let mut stacked = column![
 		status_bar(
-			endpoint,
+			session,
 			has_selection,
 			Follow {
 				sync: can_sync,
@@ -423,7 +438,12 @@ pub fn view<'a>(
 		// straight from it; a non-link cell leaves the menu with only its usual items.
 		let link = link_at(terminal, point);
 		layers.push(crate::ui::menu::dismiss_layer(Message::MenuDismissed));
-		layers.push(context_menu(point, has_selection, link.as_deref()));
+		layers.push(context_menu(
+			point,
+			has_selection,
+			link.as_deref(),
+			session.local,
+		));
 	}
 	// The explorer's own right-click menu (§18), placed against the panel rather than the
 	// pointer, and its click-away dismiss layer. The tree sits in the browser strip now, so its
@@ -559,7 +579,7 @@ pub fn view<'a>(
 /// the `user@` the centre already carries; a bar that says the same thing twice reads as though the
 /// two could differ.
 fn status_bar<'a>(
-	endpoint: &'a str,
+	session: Session<'a>,
 	has_selection: bool,
 	follow: Follow,
 	transfers: &'a Queue,
@@ -611,13 +631,19 @@ fn status_bar<'a>(
 	.on_press(Message::Files(crate::files::FilesMessage::Toggled));
 	// The tunnels manager (§27): opens the port-forwards dialog. The label carries the live
 	// count so the bar shows at a glance how many are up without opening it.
-	let tunnels_label = if forward_count > 0 {
-		format!("Tunnels ({forward_count})")
-	} else {
-		"Tunnels".to_owned()
-	};
-	let tunnels =
-		button(text(tunnels_label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed);
+	//
+	// Absent on a local session (§103), not disabled: a tunnel's whole purpose is to carry a
+	// connection through the remote's network, and there is no remote. The session task refuses a
+	// forward with that sentence if one is somehow asked for, so this is about not putting the
+	// question rather than about stopping the answer.
+	let tunnels = (!session.local).then(|| {
+		let label = if forward_count > 0 {
+			format!("Tunnels ({forward_count})")
+		} else {
+			"Tunnels".to_owned()
+		};
+		button(text(label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed)
+	});
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
@@ -647,19 +673,21 @@ fn status_bar<'a>(
 	let left = container(buttons)
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Left);
-	let center = container(center_zone(endpoint, transfers))
+	let center = container(center_zone(session.endpoint, transfers))
 		.width(Length::Fill)
 		.align_x(iced::alignment::Horizontal::Center);
 	// `align_y` on each group, not only on the row of groups: a row aligns its own children to each
 	// other, so without it these settle at the top of whichever child is tallest. That is invisible
 	// while a group is all buttons of one height, and shows the moment a label or a select joins them.
-	let right = container(
-		row![tree, pane, tunnels, disconnect]
-			.spacing(10)
-			.align_y(iced::alignment::Vertical::Center),
-	)
-	.width(Length::Fill)
-	.align_x(iced::alignment::Horizontal::Right);
+	let mut group = row![tree, pane]
+		.spacing(10)
+		.align_y(iced::alignment::Vertical::Center);
+	if let Some(tunnels) = tunnels {
+		group = group.push(tunnels);
+	}
+	let right = container(group.push(disconnect))
+		.width(Length::Fill)
+		.align_x(iced::alignment::Horizontal::Right);
 
 	container(
 		row![left, center, right]
@@ -854,6 +882,7 @@ fn context_menu(
 	point: Point,
 	has_selection: bool,
 	link: Option<&str>,
+	local: bool,
 ) -> Element<'static, Message> {
 	let mut items = vec![
 		crate::ui::menu::item(
@@ -864,15 +893,21 @@ fn context_menu(
 		// Send local files into the shell's own working directory (§17): the picker opens,
 		// then the confirmation with that folder already filled in.
 		crate::ui::menu::item("Upload…".to_owned(), Some(Message::TerminalUploadPressed)),
-		// Teach this remote's shell to announce its directory (§17). It lives in the menu rather
-		// than on the status bar because it is a once-per-server act, not a per-moment one — and
-		// the bar's Sync and Reveal, dimmed for want of exactly this, are the tell that sends
-		// people looking for it.
-		crate::ui::menu::item(
+	];
+	// Teach this remote's shell to announce its directory (§17). It lives in the menu rather
+	// than on the status bar because it is a once-per-server act, not a per-moment one — and
+	// the bar's Sync and Reveal, dimmed for want of exactly this, are the tell that sends
+	// people looking for it.
+	//
+	// Not offered on a local session (§103). The block it installs goes in the shell's own config
+	// file, and here that file is the user's own everyday profile on this machine — a much larger
+	// promise than "open a terminal", and not one an item on a context menu should make.
+	if !local {
+		items.push(crate::ui::menu::item(
 			"Shell integration…".to_owned(),
 			Some(Message::IntegrationPressed),
-		),
-	];
+		));
+	}
 	// On a link cell, follow or copy the link too (§24). Both carry the URI, so the menu is
 	// the one place the whole address is offered — handy when a link's visible text hides it.
 	if let Some(uri) = link {

@@ -153,6 +153,14 @@ pub struct ConnectParams {
 pub enum SshCommand {
 	/// Open a new connection with these parameters.
 	Connect(ConnectParams),
+	/// Open a session on THIS machine instead, running `shell` (§103). The home screen's Local bar
+	/// sends this; there is no form, no handshake and no credential, so the next event is `Connected`.
+	///
+	/// It sits beside `Connect` rather than being a variant of it because a local session shares none
+	/// of a connection's parameters — there is no host, no port and no account to be. What the two DO
+	/// share is everything after this point: the session task, whichever kind it is, answers the same
+	/// `SshCommand`s in the same `SshEvent`s, which is why nothing else in the command list is doubled.
+	ConnectLocal(crate::local::shells::Shell),
 	/// The user's answer to a host-key prompt (§8): reject, trust just this session, or pin the
 	/// key. Answers both the first-contact (`HostKey`) and the mismatch (`HostKeyChanged`) prompts
 	/// — the SSH task reads the choice against whichever verdict it is waiting on (§8).

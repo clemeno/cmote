@@ -61,6 +61,13 @@ const ROW_HEIGHT: f32 = 34.0;
 const LIST_TOP: f32 = 151.0;
 const MENU_LEFT: f32 = 40.0;
 
+/// How much further down the list starts when the Local bar is on screen (§103) — the bar's own
+/// height (a button plus its padding, inside a bordered container) plus the column's spacing above
+/// it. Added to `LIST_TOP` rather than folded into it, because the bar is not always there: a machine
+/// where cmote found no shell to offer shows no bar, and the menu must still land beside the right
+/// row there.
+const LOCAL_BAR_HEIGHT: f32 = 54.0;
+
 /// The current inline-rename edit: which target (by endpoint key) is being renamed and
 /// the text typed so far. Held by `app`; `None` when no rename is in progress.
 #[derive(Debug, Clone, Default)]
@@ -85,6 +92,11 @@ pub struct View<'a> {
 	pub confirm_delete: bool,
 	pub dialog_body: &'a text_editor::Content,
 	pub card: dialog::Card,
+	/// The local shells this machine can open (§103), for the Local bar above the list. `'static`
+	/// because the catalogue is searched once per run and kept (`local::shells::catalogue`) — a search
+	/// per frame would put a dozen filesystem probes in the paint loop. Empty on a machine where none
+	/// was found, and then no bar is drawn at all.
+	pub shells: &'static [crate::local::shells::Shell],
 }
 
 /// Render the home screen. `targets` are already in display order (`profiles` keeps
@@ -119,20 +131,22 @@ pub fn view<'a>(
 		.filter(|target| target.matches(state.filter))
 		.collect();
 
-	let base: Element<'a, Message> = column![
-		header,
-		hint,
-		filter_bar(state.filter, shown.len(), targets.len()),
-		target_list(
+	// The Local bar (§103), above the filter rather than inside the list: it is not a saved target
+	// and must not be filtered away by a pattern typed to find one.
+	let mut page = column![header, hint].spacing(12);
+	if !state.shells.is_empty() {
+		page = page.push(local_bar(state.shells));
+	}
+	let base: Element<'a, Message> = page
+		.push(filter_bar(state.filter, shown.len(), targets.len()))
+		.push(target_list(
 			&shown,
 			!state.filter.is_empty(),
 			state.selected,
-			state.rename
-		),
-	]
-	.spacing(12)
-	.padding(20)
-	.into();
+			state.rename,
+		))
+		.padding(20)
+		.into();
 
 	// The menu only shows for a real selection; find that row's index to place it. If
 	// the selection has somehow gone stale, fall back to just the base view.
@@ -144,7 +158,7 @@ pub fn view<'a>(
 	let mut layers: Vec<Element<'a, Message>> = vec![base];
 	if let Some(index) = menu_index {
 		layers.push(menu::dismiss_layer(Message::HomeMenuDismissed));
-		layers.push(context_menu(index));
+		layers.push(context_menu(index, state.shells.is_empty()));
 	}
 	// Deleting a target cannot be undone, so it goes through the same confirmation
 	// chrome as Disconnect (§10) rather than acting on the menu click. The list stays
@@ -189,6 +203,45 @@ fn confirm_delete_panel(
 		],
 		card,
 	)
+}
+
+/// The Local bar (§103): one button per shell cmote found on this machine, each opening a session on
+/// THIS machine — a terminal running that shell, with the local filesystem in the folder tree and the
+/// files pane beside it.
+///
+/// It sits above the filter and outside the list on purpose. A local shell is not a saved target: it
+/// has no host, no account and nothing to remember, so it cannot be renamed, deleted or filtered, and
+/// putting it among the rows would invite all four. A bar of its own says "these are the other kind of
+/// thing you can open here", which is what it is.
+///
+/// The buttons are the catalogue in its own order, and the catalogue holds only what is really
+/// installed — so a button on screen can always be pressed. Nothing is shown disabled: a greyed
+/// "Git Bash" on a machine without Git teaches the user nothing they can act on.
+fn local_bar(shells: &'static [crate::local::shells::Shell]) -> Element<'static, Message> {
+	let mut bar = row![
+		text("Local")
+			.size(12)
+			.style(text::secondary)
+			.width(Length::Fixed(48.0)),
+	]
+	.spacing(8)
+	.align_y(Vertical::Center);
+
+	for shell in shells {
+		// The `Shell` is cloned into the message rather than being looked up again on the press: it
+		// carries the program path cmote resolved, so nothing re-searches the disk — and nothing the
+		// user can type ever becomes a program to run (`local::shells`).
+		bar = bar.push(
+			button(text(shell.kind.label()).size(12))
+				.on_press(Message::HomeLocalPressed(shell.clone())),
+		);
+	}
+
+	container(bar)
+		.width(Length::Fill)
+		.padding(Padding::from([8.0, 10.0]))
+		.style(container::bordered_box)
+		.into()
 }
 
 /// The filter box above the list (§49), with a `shown of total` tally beside it once something
@@ -333,14 +386,24 @@ fn rename_row(value: &str) -> Element<'_, Message> {
 /// and the fixed `ROW_HEIGHT` (iced does not expose the laid-out position, so we compute
 /// it). `ponytail:` no scroll-offset or edge clamping — fine for the short lists this
 /// screen holds.
-fn context_menu(index: usize) -> Element<'static, Message> {
+///
+/// `no_local_bar` is the one piece of layout it cannot assume: the Local bar (§103) pushes every row
+/// down by its own height, and it is absent on a machine where cmote found no shell to offer. Passed
+/// as a flag rather than read here, so the one place that decides whether the bar is drawn is also the
+/// one place that accounts for it.
+fn context_menu(index: usize, no_local_bar: bool) -> Element<'static, Message> {
 	let panel = menu::panel(vec![
 		menu::item("Open".to_owned(), Some(Message::HomeMenuOpen)),
 		menu::item("Rename".to_owned(), Some(Message::HomeMenuRename)),
 		menu::item("Delete".to_owned(), Some(Message::HomeMenuDelete)),
 	]);
 
-	let top = LIST_TOP + (index as f32) * ROW_HEIGHT + ROW_HEIGHT;
+	let list_top = if no_local_bar {
+		LIST_TOP
+	} else {
+		LIST_TOP + LOCAL_BAR_HEIGHT
+	};
+	let top = list_top + (index as f32) * ROW_HEIGHT + ROW_HEIGHT;
 	container(panel)
 		.width(Length::Fill)
 		.height(Length::Fill)

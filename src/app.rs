@@ -2548,6 +2548,18 @@ pub struct Tab {
 	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
 	/// secret, so it is safe in `Debug`.
 	connection: Option<String>,
+	/// Which local shell this tab is running, or `None` for an SSH session (§103).
+	///
+	/// Set beside `connection` when a Local bar button is pressed and cleared with it. It exists for
+	/// the two features that are meaningless without a remote — the tunnels manager (§27) and shell
+	/// integration (§17) — whose buttons are not offered while it is `Some`. The session task refuses
+	/// both with their reason anyway, so this is about not asking rather than about safety: a button
+	/// that can only ever answer "not here" is a button that should not be there.
+	///
+	/// It holds the KIND and not a `bool` because the kind is the thing worth knowing: it is what
+	/// `connection` was built from, and the next thing to want it (an icon on the tab chip, a per-shell
+	/// default directory) will want the kind rather than the fact.
+	local: Option<crate::local::shells::Kind>,
 	/// The active text selection over the terminal grid, if any (§10). Drives both
 	/// the on-screen highlight and what Copy puts on the clipboard; `None` when
 	/// nothing is selected.
@@ -2840,6 +2852,13 @@ pub enum Message {
 	// --- home screen: saved targets (§14) ---
 	/// Open a blank connect form for a brand-new connection.
 	HomeNewPressed,
+	/// A button on the home screen's Local bar was pressed (§103): open a session on THIS machine
+	/// running that shell. It carries the whole `Shell` — the program cmote resolved and the arguments
+	/// it wants — rather than an index into the catalogue, so nothing re-searches the disk on the press
+	/// and a stale index can never open the wrong program.
+	///
+	/// There is no form and no `Connecting` question to answer: the next event is `Connected`.
+	HomeLocalPressed(crate::local::shells::Shell),
 	/// A target row was left-clicked — select it (payload: its endpoint key).
 	HomeTargetClicked(String),
 	/// A target row was right-clicked — select it and open the context menu.
@@ -3713,6 +3732,9 @@ impl Tab {
 		match message {
 			// --- home screen (§14) ---
 			Message::HomeNewPressed => return self.open_form_new(),
+			// A Local bar button (§103). It goes straight to the session — no form, because there is
+			// nothing to fill in, and no host key or credential, because there is no other machine.
+			Message::HomeLocalPressed(shell) => return self.dial_local(shell),
 			Message::HomeTargetClicked(key) => {
 				self.home_menu_open = false;
 				// First click selects (so F2 / rename / delete have a target); clicking
@@ -4192,6 +4214,44 @@ impl Tab {
 		iced::Task::none()
 	}
 
+	/// Where the file panels open when this session remembers nowhere (§22, §103).
+	///
+	/// A REMOTE session opens at `/`, because that is the top of the server and there is nothing better
+	/// to say about a machine cmote has just met. A LOCAL one can do better: the shell is standing in
+	/// the user's own folder from its first prompt, and opening the panes at the drive list would put
+	/// two clicks between the session and the first folder anyone wants. So the two panels start where
+	/// the shell already is.
+	fn default_files_root(&self) -> String {
+		if self.local.is_some() {
+			crate::local::path::home()
+		} else {
+			explorer::ROOT.to_owned()
+		}
+	}
+
+	/// Open a session on THIS machine (§103) — the home screen's Local bar.
+	///
+	/// The twin of [`dial`], and shorter for everything it does not have to do. There is no profile to
+	/// capture (a local shell is not a target: no host, no account, nothing to remember), no secret to
+	/// store, and no passphrase state to reset — so `abandon_attempt` runs to drop anything a previous,
+	/// abandoned connect attempt left behind rather than to prepare for this one.
+	///
+	/// What it does share with `dial` is the shape: send the command, and move to `Connecting` only if
+	/// it left. The status is a full sentence rather than "connecting to …:22" because nothing is being
+	/// connected to; it is on screen for a frame or two, until `Connected` arrives.
+	fn dial_local(&mut self, shell: crate::local::shells::Shell) -> iced::Task<Message> {
+		self.abandon_attempt();
+		let status = format!("starting {}…", shell.kind.label());
+		let endpoint = shell.endpoint();
+		let kind = shell.kind;
+		if self.send_command(SshCommand::ConnectLocal(shell)) {
+			self.connection = Some(endpoint);
+			self.local = Some(kind);
+			self.screen = Screen::Connecting { status };
+		}
+		iced::Task::none()
+	}
+
 	/// This connection attempt is over without opening a session (§14, §16): drop the two things
 	/// it was carrying on the promise that it would.
 	///
@@ -4667,7 +4727,7 @@ impl Tab {
 				// first connection or a shell that never announced a cwd — the previous
 				// behaviour. The pane opens at its own remembered directory; the tree opens the
 				// chain down to it and selects it, so both panels start on the resume point.
-				let files_start = resume_files.unwrap_or_else(|| explorer::ROOT.to_owned());
+				let files_start = resume_files.unwrap_or_else(|| self.default_files_root());
 				let needed = self.panes.tree.reveal_if_new(&files_start);
 				self.list_dirs(needed);
 				if let Some(request) = self.panes.pane.show(&files_start) {
@@ -4896,7 +4956,7 @@ impl Tab {
 				self.abandon_transfers();
 				self.abandon_attempt();
 				self.terminal = None;
-				self.connection = None;
+				self.forget_connection();
 				self.clear_grid_interaction();
 				self.forget_identities();
 				return self.go_home();
@@ -4912,7 +4972,7 @@ impl Tab {
 				// the promise of succeeding goes now, secret first (§12, §16).
 				self.abandon_attempt();
 				self.terminal = None;
-				self.connection = None;
+				self.forget_connection();
 				self.clear_grid_interaction();
 				self.forget_identities();
 				self.show_error(&message);
@@ -5010,9 +5070,21 @@ impl Tab {
 		self.abandon_transfers();
 		self.send_command(SshCommand::Disconnect);
 		self.terminal = None;
-		self.connection = None;
+		self.forget_connection();
 		self.clear_grid_interaction();
 		self.go_home()
+	}
+
+	/// Forget which session this tab was showing (§10, §103): the label the status bar reads and, with
+	/// it, which KIND of session it was.
+	///
+	/// One method rather than two assignments at each of the three endings, because the two are one
+	/// fact — a tab with no connection is not a local one either — and an ending that cleared only the
+	/// label would leave a `local` flag behind, hiding the Tunnels button on the next session this tab
+	/// opens to a real server.
+	fn forget_connection(&mut self) {
+		self.connection = None;
+		self.local = None;
 	}
 
 	/// Open the shell-integration dialog and ask the server what it is looking at (§17).
@@ -7248,10 +7320,20 @@ impl Tab {
 	/// program (vim, less) is running these bytes go to it instead, since cmote cannot tell a
 	/// prompt from an editor. Upgrade path: only offer it between prompts, which the OSC
 	/// announcements could mark.
+	/// On a LOCAL session (§103) neither half of that line holds: the pane path is not a path on this
+	/// platform, and the four shells the Local bar offers disagree about both the spelling of a path and
+	/// the name of the command. So the shell composes its own (`local::shells::Kind::cd`), and a path
+	/// that will not translate types nothing at all rather than a `cd` to somewhere invented.
 	fn move_shell_to(&mut self, path: &str) {
 		self.resume_cwd = None;
-		let line = format!("cd {}\r", explorer::shell_quote(path));
-		self.send_command(SshCommand::Input(line.into_bytes()));
+		let command = match self.local {
+			Some(kind) => kind.cd(path),
+			None => Some(format!("cd {}", explorer::shell_quote(path))),
+		};
+		let Some(command) = command else {
+			return;
+		};
+		self.send_command(SshCommand::Input(format!("{command}\r").into_bytes()));
 	}
 
 	/// The status bar's "Sync" button (§19): move the console into the directory the files
@@ -7737,6 +7819,9 @@ impl Tab {
 					confirm_delete: self.confirm_delete,
 					dialog_body: &self.dialog_body,
 					card,
+					// The shells this machine can open (§103), searched once per run and kept — see
+					// `local::shells::catalogue`, which is why this is free to ask for on every frame.
+					shells: crate::local::shells::catalogue(),
 				},
 			),
 			// The connect form, and — when the flow is holding a question — the dialog that asks
@@ -7783,7 +7868,10 @@ impl Tab {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
-						self.connection.as_deref().unwrap_or(""),
+						ui::terminal::Session {
+							endpoint: self.connection.as_deref().unwrap_or(""),
+							local: self.local.is_some(),
+						},
 						self.selection.as_ref(),
 						self.menu,
 						ui::terminal::Modals {

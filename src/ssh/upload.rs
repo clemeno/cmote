@@ -812,7 +812,12 @@ async fn ensure_remote_dir(sftp: &SftpSession, path: &str) -> Result<()> {
 /// `ponytail:` the whole listing is held in memory before a byte is sent — fine for an ordinary
 /// folder, but a tree of millions of files would be felt. Upgrade path: stream the walk and the
 /// transfer together, the way the files pane's batched listing does (§19).
-async fn walk_local(root: &Path) -> Result<TreePlan> {
+///
+/// `pub(crate)` for a second caller since §103: a LOCAL session's transfers have a local tree at both
+/// ends, so both directions walk it with this. Nothing about the walk is about SSH — it reads this
+/// machine's disk and describes what it found — so it is shared rather than copied, and the symlink
+/// rules above (follow, but never into a cycle) hold for a local copy without being restated.
+pub(crate) async fn walk_local(root: &Path) -> Result<TreePlan> {
 	let mut plan = TreePlan::default();
 	// Each frontier item is a directory to read, its path RELATIVE to the root (empty for the root
 	// itself, which is created by the caller, not listed here), and its CANONICAL path — the one
