@@ -10916,10 +10916,27 @@ and on a half-typed one, with only the prefix changed:
 So `shells::quit_sequence` is `0x03` + `exit` + CR, and it is what the Disconnect button's tidy teardown types
 too (§104's "Asking before killing"): the half-typed line it used to garble was the same bug measured here.
 
-`judge_eof` settles on the FIRST chunk, with one exception — a chunk ending in `^` could be an echo cut in
-half by a read boundary, so that one waits for the next chunk. Nothing else keeps a probe armed, because a
-probe that outlives its keypress would weigh output belonging to something else entirely. Every wrong answer
-this can give reads as "Ctrl+D did nothing" and never as "the session ended by itself".
+`judge_eof` accumulates the answer across reads until the echo appears or `EOF_ANSWER_CAP` (64) bytes have
+gone by. Every wrong answer it can give reads as "Ctrl+D did nothing" and never as "the session ended by
+itself".
+
+That accumulation is the fix for a bug this shipped with, and the bug is worth keeping because of where it
+came from. The first version settled on the FIRST chunk, on the reasoning that a probe outliving its keypress
+would weigh unrelated output — with one exception for a chunk ending in `^`, in case a read boundary fell
+inside the needle. Both PowerShells then failed in the user's hands: `^D` appeared on screen and nothing else
+happened. The echo arrives in **two** reads —
+
+| chunk | bytes |
+|---|---|
+| 1 | `ESC[?25l` — six bytes, hiding the cursor. No echo, and not a partial one either |
+| 2 | `ESC[93m^D…` — the echo, in PSReadLine's colour |
+
+— so the rule decided "a program answered" on chunk one and disarmed. `cmd` answers in a single two-byte
+read and worked; one shell of three passing is what a wrong boundary assumption looks like from outside.
+
+Three probes had already been run over this exact exchange and none could have caught it: each one
+concatenated every chunk into a `String` before printing, because what was being asked was "what does the
+shell say", not "how does it arrive". The bytes were right in all three. The boundaries were invisible.
 
 Two presses are not listened to at all:
 
@@ -11022,7 +11039,7 @@ character, and the table above is what that costs when you get it wrong.
   they are on the way to.
 - `README.md`: the keyboard table, the tour's quit paragraph, and the manual-test step, which now names
   the pager case and the history file.
-- Tests 1333 → 1342.
+- Tests 1333 → 1343, one of which drives a real shell end to end.
 
 ### Not done
 
@@ -11037,10 +11054,10 @@ character, and the table above is what that costs when you get it wrong.
   Ctrl+D only means EOF on an empty line. cmote cannot tell an empty prompt from a full one (the echo says
   where the cursor is, not what is left of it), and of the two ways to be wrong, exiting is the one the key
   was pressed for.
-- **An echo split anywhere other than inside `^D`** — `ESC[?25l` in one chunk, `ESC[93m^D` in the next —
-  reads as "a program answered the byte" and leaves the session up. Nineteen bytes arrived as one read every
-  single time it was measured, and the cost of being wrong is one more press, so this is not bought off with
-  a timer.
+- **The needle has to arrive within 64 bytes of the answer.** A shell that clears half the screen before
+  echoing would spend the budget first and be read as having consumed the byte. Six bytes is what the
+  measured shells say beforehand, so there is an order of magnitude of room, and the failure is one more
+  press.
 - **Ctrl+D inside a pager still does nothing to the session**, which is right, and nothing tells the user
   which of the two states they are in. A terminal has never had to say.
 - **The Disconnect BUTTON still types at whatever is in front of the shell.** Ctrl+D no longer does — it only
@@ -11048,11 +11065,15 @@ character, and the table above is what that costs when you get it wrong.
   and type anyway. With `node` running that is an interrupt plus a word node answers with an error, and the
   800 ms kill a moment later. Telling a running program from a prompt needs an announcement §103 refuses to
   install; the echo trick cannot help, because there is no key press to answer.
-- **The probes were thrown away rather than kept.** Five of them: what EOF does to each shell, what comes back
-  from it, whether an erase makes the `exit` land, which prefix lands it on a half-typed line, and what the
-  sequence ends when a shell is nested. Each spawns real interactive shells and kills them, which is seconds
-  of wall clock and a silent skip on a machine without them; what they established is written down here and
-  asserted against those exact byte strings in `app`'s tests.
+- **The probes were thrown away rather than kept — six of them**, and one test was kept instead. What EOF does
+  to each shell, what comes back from it, whether an erase makes the `exit` land, which prefix lands it on a
+  half-typed line, what the sequence ends when a shell is nested, and finally how the answer is CHUNKED. The
+  fixture-fed unit tests could not have found that last one, so `a_real_local_shell_answers_ctrl_d_by_leaving`
+  now drives a live `pwsh` through the session task, the tab's own handlers and the translation `ssh::client`
+  does between them, and asserts the shell leaves. It was run against the broken `judge_eof` first, to check
+  that it fails rather than passes — and it exposed a second sharp edge in doing so: awaiting a session task
+  whose shell never left hangs the test instead of failing it, so the cleanup now disconnects first and gives
+  up after five seconds. A test that hangs is not a test.
 
 ## §105 — The Git that was there all along
 

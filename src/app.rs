@@ -104,9 +104,14 @@ pub(crate) const QUIT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::
 /// just sent, and never in output at large.
 const EOF_ECHO: &[u8] = b"^D";
 
-/// How much of a shell's answer to a Ctrl+D is ever kept while waiting to see whether a trailing `^`
-/// becomes the echo (§104). Only a chunk ending mid-needle extends the wait at all, so this is a bound on
-/// a pathological case — output whose every chunk ends in `^` — and not a window anything normally uses.
+/// How many bytes of a shell's answer to a Ctrl+D are examined before the probe gives up (§104).
+///
+/// It has to cover whatever the shell says BEFORE the echo, and the measured answers are six bytes
+/// (`ESC[?25l`, both PowerShells, in a read of its own) and none at all (`cmd`). Sixty-four is an order of
+/// magnitude of room for a shell that clears more, or repaints a right-hand prompt, on its way to echoing.
+///
+/// It is also the window in which a `^D` printed by something else would be mistaken for the echo, so it is
+/// deliberately small rather than generous: one round trip's worth of output, not a screenful.
 const EOF_ANSWER_CAP: usize = 64;
 
 /// Build and start the iced runtime. Called from `main`.
@@ -5145,20 +5150,24 @@ impl Tab {
 	/// `false` whenever no Ctrl+D is outstanding, which is almost every chunk of output cmote ever sees —
 	/// so the cost of this on the hot path is one `Option` test.
 	///
-	/// The FIRST chunk settles it, with one exception: a chunk ending in `^` could be an echo cut in half
-	/// by a read boundary, so that one waits for the next chunk before deciding. Everything else decides
-	/// now, which is what keeps a probe from outliving the keypress it belongs to — an armed probe left
-	/// lying around would weigh output that has nothing to do with the Ctrl+D that armed it.
+	/// The answer is accumulated across chunks until the echo shows up or [`EOF_ANSWER_CAP`] bytes have
+	/// gone by, and NOT settled on the first chunk. That distinction is the whole of a bug this shipped
+	/// with: both PowerShells answer in **two** reads —
 	///
-	/// A chunk that ends in `^` every time (a program drawing a box, say) would hold the probe open, so
-	/// [`EOF_ANSWER_CAP`] bounds what is kept. Running out means giving up, and giving up means the session
-	/// stays — the safe direction, since every wrong answer here should read as "Ctrl+D did nothing" and
-	/// never as "the session ended by itself".
+	/// | chunk | bytes |
+	/// |---|---|
+	/// | 1 | `ESC[?25l` — six bytes, hiding the cursor. No echo, and no partial one either |
+	/// | 2 | `ESC[93m^D…` — the echo, in PSReadLine's colour |
 	///
-	/// `ponytail:` an echo split anywhere OTHER than inside `^D` — `ESC[?25l` in one chunk and `ESC[93m^D`
-	/// in the next — reads as "a program answered the byte" and leaves the session up. Measured nineteen
-	/// bytes arriving as one read every single time, and the cost of being wrong is one more press, so this
-	/// is left as it is rather than buying a timer to cover it.
+	/// — so a rule that decided on chunk one read "some program answered the byte", disarmed, and left the
+	/// echo to be drawn on screen with nothing else happening. Which is exactly what a user saw, and exactly
+	/// what three earlier probes had missed by concatenating every chunk into one string before printing it.
+	/// (`cmd` answers in a single two-byte read, so `cmd` worked. One shell out of three passing is what a
+	/// wrong boundary assumption looks like from the outside.)
+	///
+	/// The budget is what stops a probe outliving its keypress. Running out means giving up, and giving up
+	/// means the session stays — the safe direction, since every wrong answer here should read as "Ctrl+D did
+	/// nothing" and never as "the session ended by itself".
 	fn judge_eof(&mut self, bytes: &[u8]) -> bool {
 		let Some(heard) = self.eof_probe.as_mut() else {
 			return false;
@@ -5171,8 +5180,7 @@ impl Tab {
 			self.eof_probe = None;
 			return true;
 		}
-		// Keep listening only while the tail could still become the echo.
-		if !heard.ends_with(&EOF_ECHO[..1]) || heard.len() >= EOF_ANSWER_CAP {
+		if heard.len() >= EOF_ANSWER_CAP {
 			self.eof_probe = None;
 		}
 		false
@@ -9567,6 +9575,109 @@ mod tests {
 		)
 	}
 
+	/// The whole of §104 against a REAL shell: a live `pwsh` on a real pty, its bytes arriving in whatever
+	/// reads the ConPTY chooses, one Ctrl+D pressed at its prompt, and the shell expected to leave.
+	///
+	/// This test exists because the unit tests above could not catch what shipped. Every one of them feeds
+	/// bytes cmote's author typed, so they encode an assumption about where a read boundary falls — and the
+	/// assumption was wrong: the echo comes in two reads, not one, and the rule decided on the first. Only a
+	/// real shell has an opinion about that. It skips on a machine with no such shell, which is the price of
+	/// the coverage being real.
+	///
+	/// It drives the same three parts the app wires together: `local::session` on one side, the tab's own
+	/// `on_ssh_event` / `on_key` on the other, and the translation `ssh::client` normally does in between.
+	#[cfg(windows)]
+	#[tokio::test]
+	async fn a_real_local_shell_answers_ctrl_d_by_leaving() {
+		let Some(shell) = crate::local::shells::catalogue()
+			.iter()
+			.find(|shell| !shell.kind.quits_on_eof())
+			.cloned()
+		else {
+			eprintln!("skipped: this machine offers no shell that ignores EOF");
+			return;
+		};
+		let (mut tab, mut commands) = app_with_terminal(256);
+		tab.local = Some(shell.kind);
+		tab.connection = Some(shell.endpoint());
+
+		let (event_tx, mut events) = mpsc::channel::<SshEvent>(256);
+		let (to_session, from_tab) = mpsc::channel::<crate::ssh::client::SessionMsg>(64);
+		let session = tokio::spawn(crate::local::session::run(shell, event_tx, from_tab));
+
+		// The shell prints for a while as its profile runs; the press goes in once it has been quiet for a
+		// moment, which is this test's definition of "at a prompt".
+		const SETTLED: std::time::Duration = std::time::Duration::from_millis(2500);
+		let mut pressed = false;
+		let mut typed = false;
+		let mut ended = false;
+		let _ = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+			loop {
+				tokio::select! {
+					biased;
+					event = events.recv() => {
+						let Some(event) = event else { break };
+						let done = matches!(event, SshEvent::Disconnected);
+						let _ = tab.on_ssh_event(event);
+						if done { ended = true; break }
+					}
+					command = commands.recv() => {
+						use crate::ssh::client::SessionMsg;
+						let Some(command) = command else { break };
+						// What `ssh::client::run` does for a real session, in three arms.
+						let forwarded = match command {
+							SshCommand::Input(bytes) => {
+								typed |= bytes == crate::local::shells::quit_sequence();
+								Some(SessionMsg::Data(bytes))
+							}
+							SshCommand::Reply { identity, bytes } => {
+								Some(SessionMsg::Reply { identity, bytes })
+							}
+							SshCommand::Disconnect => Some(SessionMsg::Disconnect),
+							_ => None,
+						};
+						if let Some(message) = forwarded {
+							let _ = to_session.send(message).await;
+						}
+					}
+					() = tokio::time::sleep(SETTLED) => {
+						if pressed { continue }
+						pressed = true;
+						let _ = tab.on_key(ctrl_d());
+					}
+				}
+			}
+		})
+		.await;
+		// Cleanup before the assertions, and bounded: if the shell did NOT leave, the session task is
+		// still holding a live pty, and awaiting it would hang this test rather than fail it. Which it did,
+		// the first time it was run against a deliberately broken `judge_eof` — a test that hangs instead of
+		// failing is not a test.
+		let _ = to_session
+			.send(crate::ssh::client::SessionMsg::Disconnect)
+			.await;
+		if tokio::time::timeout(std::time::Duration::from_secs(5), session)
+			.await
+			.is_err()
+		{
+			eprintln!("the local session did not come down; the pty goes with the test process");
+		}
+
+		assert!(pressed, "the shell settled at a prompt and the key went in");
+		assert!(
+			typed,
+			"the shell handed the byte back, so cmote typed its own exit at it"
+		);
+		assert!(
+			ended,
+			"and the shell left, which is what ends the session — no kill was involved"
+		);
+		assert!(
+			matches!(tab.screen, Screen::Home) && tab.connection.is_none(),
+			"the tab landed on the home screen, where a second Ctrl+D closes it (§30)"
+		);
+	}
+
 	/// Ctrl+D at a local shell goes TO the shell, exactly as it would in any terminal (§104). cmote takes
 	/// nothing and decides nothing yet — it only starts listening for the answer.
 	///
@@ -9598,18 +9709,29 @@ mod tests {
 	/// shell's OWN `exit`: an interrupt to clear the line the echo landed on, then the word. Nothing is torn
 	/// down from this side, and the session ends when the shell does.
 	///
-	/// Fed in two chunks on purpose: the reply arrives as one read every time it has been measured, but
-	/// nothing promises that, and half an echo must not read as "a program answered".
+	/// Fed as the TWO CHUNKS a real `pwsh` sends, which is the boundary this shipped a bug on: the first read
+	/// is six bytes of cursor-hiding with no echo in it at all, and a version that decided on the first chunk
+	/// concluded "a program answered" and left the echo to be drawn with nothing else happening. The bytes
+	/// below are copied from a probe that printed each read separately — earlier ones concatenated them and
+	/// so could not have shown this.
 	#[test]
 	fn the_shell_echoing_the_byte_back_is_told_to_exit() {
 		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
 		let _ = app.on_key(ctrl_d());
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
 
-		// PSReadLine's real answer, split where it hurts most.
-		let _ = app.on_ssh_event(shell_output(b"\x1b[?25l\x1b[93m^"));
-		assert!(app.eof_probe.is_some(), "half an echo decides nothing yet");
-		let _ = app.on_ssh_event(shell_output(b"D\x1b[?25h"));
+		let _ = app.on_ssh_event(shell_output(b"\x1b[?25l"));
+		assert!(
+			app.eof_probe.is_some(),
+			"the first read carries no echo and must not settle it"
+		);
+		assert!(
+			next_command(&mut rx).is_none(),
+			"and nothing is sent on the strength of it"
+		);
+		let _ = app.on_ssh_event(shell_output(
+			b"\x1b[93m^D\x1b[97m\x1b[2m\x1b[3mexit\x1b[2;20H\x1b[?25h",
+		));
 
 		assert_eq!(
 			next_input(&mut rx).as_deref(),
@@ -9645,14 +9767,15 @@ mod tests {
 	/// prints a fresh prompt, and the SESSION IS LEFT ALONE (§104). Measured against real node — `0x04`
 	/// makes it exit and `pwsh` answers with `\r\nPS C:\Users\cme> `, which carries no echo.
 	///
-	/// The second case is the pathological one: output that ends in `^` holds the probe open (the echo could
-	/// be split there), and enough of it gives up rather than listening for ever. Both failure directions
-	/// are "Ctrl+D did nothing", never "the session ended by mistake".
+	/// The second case is the budget: a program that answers with more than a round trip's worth of output and
+	/// no echo in it has consumed the byte, and the probe gives up rather than listening indefinitely. Both
+	/// failure directions are "Ctrl+D did nothing", never "the session ended by mistake".
 	#[test]
 	fn a_program_that_answers_the_byte_keeps_the_session() {
-		let carets = vec![b'^'; EOF_ANSWER_CAP + 1];
-		let answers: [&[u8]; 2] = [b"\r\nPS C:\\Users\\cme> ", &carets];
-		for answer in answers {
+		let chatter = vec![b'.'; EOF_ANSWER_CAP + 1];
+		// The second entry says whether the answer is long enough to exhaust the budget on its own.
+		let answers: [(&[u8], bool); 2] = [(b"\r\nPS C:\\Users\\cme> ", false), (&chatter, true)];
+		for (answer, spent) in answers {
 			let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
 			let _ = app.on_key(ctrl_d());
 			assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
@@ -9661,12 +9784,16 @@ mod tests {
 
 			assert!(
 				app.connection.is_some() && app.terminal.is_some(),
-				"the byte did its job, so the session is none of cmote's business"
+				"the byte did its job, so the session is none of cmote's business ({spent})"
 			);
-			assert!(app.eof_probe.is_none(), "and the question is settled");
 			assert!(
 				next_command(&mut rx).is_none(),
-				"nothing was sent on the strength of it"
+				"and nothing was sent on the strength of it ({spent})"
+			);
+			assert_eq!(
+				app.eof_probe.is_none(),
+				spent,
+				"the probe lives exactly as long as its budget, no further ({spent})"
 			);
 		}
 	}
