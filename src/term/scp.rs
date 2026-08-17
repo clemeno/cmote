@@ -267,6 +267,16 @@ impl Paths {
 		self.rtl.contains(&line)
 	}
 
+	/// Move every remembered line through a renumbering of the document (§101).
+	///
+	/// UNSCROLL is the one sequence that renumbers without clearing: it moves lines from the
+	/// scrollback back onto the page, so a line's direction has to travel with it. The set is
+	/// rebuilt rather than edited in place, because the shift can move a line onto a number the set
+	/// already holds and an in-place walk would then read its own output.
+	pub fn renumber(&mut self, remap: impl Fn(u64) -> Option<u64>) {
+		self.rtl = self.rtl.iter().filter_map(|line| remap(*line)).collect();
+	}
+
 	/// Forget every path. RIS renumbers the document by dropping the history, and a swap on or off
 	/// the alternate screen restarts numbering against a page that keeps none — in both cases a
 	/// remembered line number would now name different text.

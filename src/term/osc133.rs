@@ -445,6 +445,70 @@ impl Prompts {
 		self.restart_walk();
 	}
 
+	/// Move every remembered line through a renumbering of the document (§101).
+	///
+	/// The one operation that needs this is UNSCROLL, which moves lines from the scrollback back onto
+	/// the page and drops the page's bottom rows — so absolute indices below the seam shift, and the
+	/// discarded ones stop naming anything. `remap` answers both questions at once: a new number, or
+	/// `None` for a line whose content is gone.
+	///
+	/// Everything is renumbered together and a command is dropped whole if ANY of its three lines is,
+	/// which is the conservative reading and the right one: a span with one end renumbered and the
+	/// other not would select from a prompt to a line that no longer follows it. `clear` is the
+	/// blunt version of this and stays for the cases where nothing can be salvaged — a reflow moves
+	/// text between lines rather than moving lines, so there is no mapping to apply.
+	pub fn renumber(&mut self, remap: impl Fn(u64) -> Option<u64>) {
+		self.marks.retain_mut(|line| match remap(*line) {
+			Some(moved) => {
+				*line = moved;
+				true
+			}
+			None => false,
+		});
+		self.user_marks.retain_mut(|line| match remap(*line) {
+			Some(moved) => {
+				*line = moved;
+				true
+			}
+			None => false,
+		});
+		self.commands.retain_mut(|command| {
+			match (
+				remap(command.prompt),
+				remap(command.output),
+				remap(command.end),
+			) {
+				(Some(prompt), Some(output), Some(end)) => {
+					command.prompt = prompt;
+					command.output = output;
+					command.end = end;
+					true
+				}
+				_ => false,
+			}
+		});
+		// A half-built command is dropped rather than repaired for the same reason: its remaining
+		// marks will be recorded against the new numbering, and a `Pending` holding one of each would
+		// file a span that spans the seam.
+		if let Some(pending) = self.pending {
+			let prompt = remap(pending.prompt);
+			let output = pending.output.map(remap);
+			self.pending = match (prompt, output) {
+				(Some(prompt), None) => Some(Pending {
+					prompt,
+					output: None,
+				}),
+				(Some(prompt), Some(Some(output))) => Some(Pending {
+					prompt,
+					output: Some(output),
+				}),
+				_ => None,
+			};
+		}
+		// The walk indexes into `commands`, which may just have lost entries under it.
+		self.restart_walk();
+	}
+
 	/// Where the command cycle stands (§34), for the status glyph.
 	pub fn state(&self) -> CommandState {
 		self.state

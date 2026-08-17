@@ -975,6 +975,9 @@ impl Terminal {
 			rect::Request::Shift { direction, columns } => {
 				self.shift_columns(direction, usize::from(columns).min(cols));
 			}
+			rect::Request::Unscroll { lines } => {
+				self.unscroll(usize::from(lines).min(rows));
+			}
 			rect::Request::Checksum { id, corners } => {
 				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
 				// origin-mode refusal above — is answered with the checksum of nothing, which is
@@ -1208,6 +1211,100 @@ impl Terminal {
 				grid[line][Column(column)] = background.into();
 			}
 		}
+	}
+
+	/// Scroll the page down and fill the top from the SCROLLBACK — kitty's UNSCROLL (§101).
+	///
+	/// The sequence exists for one situation: a shell prints a block of completions under the cursor,
+	/// the screen scrolls, and text the user was reading is pushed into the scrollback. When the
+	/// completion is over the shell asks for those lines back. Plain SD would scroll the page down and
+	/// fill with BLANKS, which erases exactly the text this is meant to restore, so the fill has to
+	/// come from the history or not happen at all.
+	///
+	/// The lines are **moved**, not copied — kitty's specification is explicit, and it is the only
+	/// reading that leaves the document coherent: a copy would leave the user scrolling back over the
+	/// same text twice, once per completion, for as long as the session lasts.
+	///
+	/// WHAT THE ENGINE GIVES AND WHAT IT DOES NOT. Rows can be read and written at any line, history
+	/// included (`Line(-1)` is the newest scrollback row). What has no accessor is *shortening* the
+	/// history at the end nearest the page: `Grid::update_history` shrinks by dropping the OLDEST
+	/// rows, because `Storage::shrink_lines` only lowers a length and the ring's index arithmetic puts
+	/// the oldest row at the far end. So the newest rows cannot be dropped — they have to be
+	/// **overwritten**. This walks the remaining history up over the consumed rows, leaving the
+	/// spares at the oldest end, and then asks `update_history` to drop exactly that many from there.
+	/// The limit is put straight back, since `update_history` sets it as well as shrinking.
+	///
+	/// Rows are MOVED rather than cloned, through `mem::replace` with a single row cloned up front as
+	/// the placeholder supply. A deep copy per row would be a megabyte of cells on a full scrollback,
+	/// on a sequence a shell may send on every tab press; moving a `Row` moves a `Vec` header.
+	///
+	/// The ALTERNATE screen needs no special case and gets none. That page keeps no history, so
+	/// `from_history` is zero, every inserted line is blank, and what happens is exactly SD — which is
+	/// what kitty's specification requires there ("if there is no scrollback buffer, the newly
+	/// inserted lines must be empty").
+	fn unscroll(&mut self, lines: usize) {
+		let (rows, cols) = {
+			let grid = self.term.grid();
+			(grid.screen_lines(), grid.columns())
+		};
+		if lines == 0 || cols == 0 || rows == 0 {
+			return;
+		}
+		let history = self.term.grid().history_size();
+		// Only what the scrollback actually holds can be restored; the rest of the request is blanks,
+		// which is the specification's own answer for a terminal with nothing to give back.
+		let from_history = lines.min(history);
+		let blanks = lines - from_history;
+		let background = self.term.grid().cursor.template.bg;
+		{
+			let grid = self.term.grid_mut();
+			// One deep copy, and the only one: every move below leaves this row behind as a
+			// placeholder and takes the next one out, so a single spare circulates through the lot.
+			let mut carry = grid[Line(0)].clone();
+			// The page slides down, from the bottom up so a row is read before it is written over.
+			for destination in (lines..rows).rev() {
+				let source = destination - lines;
+				let row = std::mem::replace(&mut grid[Line(source as i32)], carry);
+				carry = std::mem::replace(&mut grid[Line(destination as i32)], row);
+			}
+			// The scrollback's newest rows come in above what was already on the page, newest
+			// lowest, so the restored text joins the text it used to sit above with no seam.
+			for taken in 0..from_history {
+				let source = -(1 + taken as i32);
+				let destination = (lines - 1 - taken) as i32;
+				let row = std::mem::replace(&mut grid[Line(source)], carry);
+				carry = std::mem::replace(&mut grid[Line(destination)], row);
+			}
+			// Whatever the scrollback could not fill is blanked in the pen's background, the same
+			// thing an erase writes — these rows are recycled and still hold their old text.
+			for row in 0..blanks {
+				for column in 0..cols {
+					grid[Line(row as i32)][Column(column)] = background.into();
+				}
+			}
+			// Close the gap the consumed rows left: the rest of the history walks up over them, and
+			// the placeholders end up at the oldest end, which is the end that can be dropped.
+			for step in 1..=(history - from_history) {
+				let source = -((step + from_history) as i32);
+				let destination = -(step as i32);
+				let row = std::mem::replace(&mut grid[Line(source)], carry);
+				carry = std::mem::replace(&mut grid[Line(destination)], row);
+			}
+		}
+		if from_history > 0 {
+			let grid = self.term.grid_mut();
+			// Drops exactly the placeholders parked at the oldest end. The second call restores the
+			// retention limit the first one lowered — it only shrinks when the history is longer than
+			// what it is given, so this adds nothing back.
+			grid.update_history(history - from_history);
+			grid.update_history(SCROLLBACK);
+		}
+		// And now the part that makes this more than a grid operation: every line number cmote
+		// remembers about the session has to move with the text (§101).
+		let moved = rect::Unscrolled::new(history, rows, lines, from_history);
+		self.prompts.renumber(|line| moved.map(line));
+		self.graphics.renumber(|line| moved.map(line));
+		self.paths.renumber(|line| moved.map(line));
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -4343,6 +4440,177 @@ mod tests {
 		assert_eq!(
 			terminal.process(b"\x1b[1;1;1;1;1;2*y"),
 			b"\x1bP1!~FF7D\x1b\\".to_vec()
+		);
+	}
+
+	/// Read a whole DOCUMENT line — history included — which is the only way to see whether an
+	/// unscroll left a line in the scrollback as well as on the page (§101).
+	fn read_line(terminal: &Terminal, line: u64, len: u16) -> String {
+		let screen = terminal.screen();
+		(0..len)
+			.filter_map(|col| screen.line_cell(line, col))
+			.map(|cell| cell.contents().to_owned())
+			.collect()
+	}
+
+	/// UNSCROLL brings the scrollback back onto the page (§101) — the whole point of the sequence.
+	#[test]
+	fn an_unscroll_brings_the_scrollback_back_onto_the_page() {
+		let mut terminal = Terminal::new(3, 8);
+		// Six lines through a three-row page: three scroll off, three are shown.
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+		assert_eq!(read(&terminal, 0, 0, 8), "four");
+		assert_eq!(terminal.screen().history_size(), 3);
+
+		terminal.process(b"\x1b[2+T");
+		// The two lines that had scrolled off are back, the page has slid down, and the two rows
+		// that fell off the bottom are gone.
+		assert_eq!(read(&terminal, 0, 0, 8), "two");
+		assert_eq!(read(&terminal, 1, 0, 8), "three");
+		assert_eq!(read(&terminal, 2, 0, 8), "four");
+	}
+
+	/// The lines are MOVED, not copied. This is the assertion that separates a faithful unscroll from
+	/// the cheap one: after it, the restored text must appear on the page and NOT still in the
+	/// scrollback, or every completion would leave the user scrolling back over the same lines twice.
+	#[test]
+	fn an_unscroll_takes_the_lines_out_of_the_scrollback() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+		terminal.process(b"\x1b[2+T");
+
+		assert_eq!(
+			terminal.screen().history_size(),
+			1,
+			"three lines of history less the two taken back"
+		);
+		// The document reads straight through with no line said twice: one, then two on the page.
+		assert_eq!(read_line(&terminal, 0, 8), "one");
+		assert_eq!(read_line(&terminal, 1, 8), "two");
+		assert_eq!(read_line(&terminal, 2, 8), "three");
+		assert_eq!(read_line(&terminal, 3, 8), "four");
+		// And nothing past the end of the shortened document.
+		assert_eq!(read_line(&terminal, 4, 8), "");
+	}
+
+	/// The compaction loop, over a history long enough for an off-by-one to have somewhere to hide.
+	/// Twenty lines through a four-row page, three taken back, and then the WHOLE document is read
+	/// end to end: every line in order, once each, nothing repeated and nothing missing.
+	#[test]
+	fn an_unscroll_leaves_a_long_history_in_order() {
+		let mut terminal = Terminal::new(4, 8);
+		for line in 0..20 {
+			terminal.process(format!("L{line}\r\n").as_bytes());
+		}
+		// Twenty lines and their trailing newline: nineteen scrolled off, the page holds the rest.
+		let history = terminal.screen().history_size();
+		terminal.process(b"\x1b[3+T");
+		assert_eq!(terminal.screen().history_size(), history - 3);
+
+		// `L0` through `L19` still read in order from the top of the document, wherever the seam
+		// between the scrollback and the page now falls.
+		for line in 0..17u64 {
+			assert_eq!(
+				read_line(&terminal, line, 8),
+				format!("L{line}"),
+				"document line {line}"
+			);
+		}
+	}
+
+	/// The retention limit is put back after the shrink. `Grid::update_history` sets the cap as well
+	/// as trimming, so an unscroll that forgot to restore it would silently pin the scrollback at
+	/// whatever length it had at that moment — a session that stops remembering, with nothing to show
+	/// for it but a number.
+	#[test]
+	fn an_unscroll_leaves_the_scrollback_able_to_grow_again() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"a\r\nb\r\nc\r\nd\r\ne");
+		terminal.process(b"\x1b[2+T");
+		assert_eq!(terminal.screen().history_size(), 0, "both taken back");
+
+		for line in 0..10 {
+			terminal.process(format!("x{line}\r\n").as_bytes());
+		}
+		assert!(
+			terminal.screen().history_size() > 2,
+			"the scrollback was pinned at the length the unscroll left it"
+		);
+	}
+
+	/// A request larger than the scrollback is filled as far as it goes and blanked for the rest —
+	/// kitty's own rule for a terminal with nothing to give back, and exactly what happens on the
+	/// alternate screen, which keeps no history at all.
+	#[test]
+	fn an_unscroll_with_nothing_to_give_back_inserts_blanks() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree");
+		assert_eq!(terminal.screen().history_size(), 0);
+
+		terminal.process(b"\x1b[2+T");
+		assert_eq!(read(&terminal, 0, 0, 8), "", "blank");
+		assert_eq!(read(&terminal, 1, 0, 8), "", "blank");
+		assert_eq!(read(&terminal, 2, 0, 8), "one", "the page slid down");
+	}
+
+	/// The alternate screen reaches the same answer through the same code and no special case: that
+	/// page keeps no scrollback, so an unscroll there is a plain SD with blank fill.
+	#[test]
+	fn an_unscroll_on_the_alternate_screen_is_a_plain_scroll_down() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+		terminal.process(b"\x1b[?1049h");
+		terminal.process(b"\x1b[1;1Halt");
+		terminal.process(b"\x1b[1+T");
+		assert_eq!(
+			read(&terminal, 0, 0, 8),
+			"",
+			"blank, not the primary history"
+		);
+		assert_eq!(read(&terminal, 1, 0, 8), "alt", "the page slid down");
+	}
+
+	/// The part that makes this more than a grid operation (§101): a prompt mark is an absolute line,
+	/// and when the scrollback can fill the request no absolute line moves — so the mark must still be
+	/// on the text it was recorded against, which is now three rows further down the page.
+	#[test]
+	fn an_unscroll_keeps_the_prompt_marks_on_their_own_lines() {
+		let mut terminal = Terminal::new(4, 8);
+		// A prompt on the first line, then enough output to scroll it into the scrollback.
+		terminal.process(b"\x1b]133;A\x07$ ls\r\na\r\nb\r\nc\r\nd\r\ne");
+		assert_eq!(terminal.screen().history_size(), 2);
+		// The prompt is above the page now, so no tick is drawn.
+		assert!(terminal.prompt_rows().is_empty());
+
+		terminal.process(b"\x1b[2+T");
+		// It came back onto the page, and the tick is beside it — on the row the text is actually on.
+		assert_eq!(terminal.prompt_rows(), vec![0]);
+		assert_eq!(
+			read(&terminal, 0, 0, 8),
+			"$ls",
+			"a blank cell reads as nothing"
+		);
+	}
+
+	/// And when blanks had to be inserted, the marks move with the text rather than staying on a
+	/// number that now names a blank line.
+	#[test]
+	fn an_unscroll_that_inserts_blanks_moves_the_marks_with_the_text() {
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"\x1b]133;A\x07$ x\r\na\r\nb");
+		assert_eq!(terminal.prompt_rows(), vec![0], "on the page, top row");
+
+		// Two lines asked for with an empty scrollback: two blanks go in above everything.
+		terminal.process(b"\x1b[2+T");
+		assert_eq!(
+			read(&terminal, 2, 0, 8),
+			"$x",
+			"a blank cell reads as nothing"
+		);
+		assert_eq!(
+			terminal.prompt_rows(),
+			vec![2],
+			"the tick followed its line down"
 		);
 	}
 

@@ -10329,3 +10329,113 @@ matched alongside the final byte and the absence of a private marker, which is �
 - **The scrollback is untouched by a shift**, deliberately and without a test saying so. The visible
   page is what every operation in this family acts on (§60 clamps the checksum to it for a reason),
   but no test would fail if a later hand widened this one.
+
+## 101. Giving the scrollback back (v4.0.0)
+
+`CSI Ps + T` — UNSCROLL. Scroll the page down, and fill the top from the **scrollback** instead of
+with blanks.
+
+§98 filed it as contour's. It is **kitty's**, and contour's own definition says so in as many words:
+`"Scroll Down with Scrollback Fill (kitty unscroll)"`, tagged `VTExtension::Unknown`. That is the
+first thing this section fixed and the lesson worth keeping: a catalogue lists what a terminal
+*implements*, and §98 read one as a list of what a terminal *invented*.
+
+kitty's own page has what an index line cannot: the lines are **moved**, not copied; the rows pushed
+off the bottom "are removed from display"; where there is no scrollback "the newly inserted lines
+must be empty"; and the motivation — "many modern shells will show completions in a block of lines
+under the cursor, this causes some of the on-screen text to be lost even after the completion is
+completed. This escape code allows that text to be restored."
+
+That motivation is the whole argument for implementing it properly rather than approximately. Plain
+SD would scroll the page down and fill with blanks — **erasing exactly the text the sequence exists to
+restore**. And a copy rather than a move would leave the same lines in the scrollback and on the page,
+once per tab press, for the life of the session.
+
+### The wall, and the way round it
+
+Rows can be read and written anywhere, history included: `Line(-1)` is the newest scrollback row.
+What has no accessor is **shortening the history at the end nearest the page**. `Grid::update_history`
+is the only public trim and it drops the OLDEST rows — `Storage::shrink_lines` lowers a length, and
+the ring's `compute_index` puts the oldest row at the far end of it.
+
+So the rows nearest the page are not dropped, they are **overwritten**:
+
+1. the page slides down by `lines`, bottom-up, and its last `lines` rows fall off;
+2. the newest `N` scrollback rows come in above what is left, newest lowest;
+3. whatever the scrollback could not fill is blanked in the pen's background;
+4. the rest of the history walks up over the consumed rows, which leaves the spare rows at the
+   **oldest** end — the end that *can* be dropped;
+5. `update_history(history - N)` drops exactly those, and a second call puts the retention limit back,
+   since that method sets the cap as well as trimming.
+
+Every row is **moved**, through `mem::replace` around a single row cloned up front as the placeholder
+supply. Deep-copying rows would be a megabyte of cells on a full scrollback, on a sequence a shell may
+send on every tab press; moving a `Row` moves a `Vec` header.
+
+The **alternate screen** needs no special case and gets none: that page keeps no history, so `N` is
+zero, every inserted line is blank, and what happens is exactly SD — which is what kitty's
+specification requires there. The restriction and the implementation meet without a branch.
+
+### The half that is not a grid operation
+
+Every position cmote remembers about a session is an **absolute line index**, `history_size + row` at
+the moment it was taken: prompt marks and bookmarks (§34, §55), a finished command's output span
+(§34), a picture's anchor (§40), a line's right-to-left flag (§76). Unscrolling moves the boundary
+between the scrollback and the page, so it is the only operation in this terminal that can change what
+those numbers mean.
+
+The arithmetic is worth writing out, because the ordinary case looks like nothing happens — which is a
+very easy thing to get wrong by not thinking about it at all. Writing the document as
+`[history 0..H][page 0..R]`:
+
+```
+before   [ history 0..H-N ][ history H-N..H ]              [ page 0..R-lines ][ discarded ]
+after    [ history 0..H-N ][ blanks × (lines-N) ][ the same H-N..H ][ the same 0..R-lines ]
+```
+
+A line above the consumed history keeps its number. Everything from there down moves by the number of
+**blanks** — not by `lines`. And when the scrollback held everything asked for, which is the ordinary
+case because a program unscrolls what it just scrolled, the blank count is zero and **not one number
+changes**; the document simply gets shorter at the end.
+
+The discarded lines are not merely left alone. Their content is gone and the document will grow back
+over those indices with new output, so an anchor left there would reappear one day on text it never
+described. `rect::Unscrolled::map` answers both questions at once — a new number, or `None` — and each
+store renumbers through it: `Prompts` (marks, bookmarks, command spans, the half-built one),
+`Graphics` (the primary page's anchors; the alternate page's are rows and cannot be reached by this),
+and `Paths` (rebuilt rather than edited, since a shift can move a line onto a number the set already
+holds).
+
+A command is dropped whole if any of its three lines is, which is conservative and right: a span with
+one end renumbered and the other not would select from a prompt to a line that no longer follows it.
+
+### What it cost
+
+- `term/rect.rs`: `Request::Unscroll`, one arm in `classify`, and `Unscrolled` — the line arithmetic,
+  testable without a terminal, which is what this module is for. Three tests.
+- `term/mod.rs`: `unscroll`, the whole surgery, and one arm. Eight tests.
+- `term/osc133.rs`, `term/graphics.rs`, `term/scp.rs`: one `renumber` each.
+- The row moves **❌ → ✅** and its attribution is corrected. 214 rows: **✅ 113 · ❌ 33 · 🛑 41 ·
+  🤷 27**. Tests 1225 → 1236.
+
+### Not done
+
+- **The user's text SELECTION is not renumbered.** It lives in `app.rs` beside the find bar, outside
+  the terminal, and holds absolute lines like everything else. It is left alone deliberately rather
+  than cleared: in the case that matters — the scrollback filling the request — no number moves and
+  the selection stays exactly right, so clearing it would destroy a correct selection to fix a rare
+  wrong one. The find bar needs nothing: its matches are already invalidated by any output arriving
+  (§44). A selection made across an unscroll that had to insert blanks will point one screenful off
+  until the next click.
+- **This depends on which end `update_history` trims from**, which alacritty documents nowhere — only
+  its arithmetic says so. A version bump could reverse it and nothing would fail to compile. What
+  would catch it is behavioural and is written: a document read end to end after an unscroll, in
+  order, with nothing repeated and nothing missing.
+- **Nobody has run this against kitty's shell integration.** It is pinned against cmote's reading of
+  kitty's page, which is the same disclosure §97 and §100 both made, three sections running.
+- **`Ps` is clamped to the page height** and kitty's "maximum is implementation-defined but must
+  support at least one full screen" is satisfied exactly, not generously. A program asking for two
+  screens gets one.
+- **The cursor does not move**, matching SD, and kitty's page does not say what it should do. A shell
+  that expects its prompt to still be under the cursor after an unscroll will be repositioning it
+  itself; nothing here checks that assumption against a real one.

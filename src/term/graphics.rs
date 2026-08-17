@@ -172,6 +172,20 @@ impl Store {
 		self.bytes = self.placements.iter().map(Placement::bytes).sum();
 	}
 
+	/// Move each placement's anchor through `remap`, dropping the ones it answers `None` for (§101).
+	/// The byte total is re-summed for the same reason `retain` does it: entries may have gone.
+	fn renumber(&mut self, remap: impl Fn(u64) -> Option<u64>) {
+		self.placements
+			.retain_mut(|placement| match remap(placement.line) {
+				Some(line) => {
+					placement.line = line;
+					true
+				}
+				None => false,
+			});
+		self.bytes = self.placements.iter().map(Placement::bytes).sum();
+	}
+
 	/// Drop every picture on this page.
 	fn clear(&mut self) {
 		self.placements.clear();
@@ -480,6 +494,20 @@ impl Images {
 	pub fn clear_scrollback(&mut self, first_visible: u64) {
 		self.primary
 			.retain(|placement| placement.line >= first_visible);
+	}
+
+	/// Move every picture's anchor through a renumbering of the document (§101).
+	///
+	/// UNSCROLL pulls lines out of the scrollback and onto the page, which shifts absolute anchors
+	/// below the seam and discards the page's bottom rows. A picture whose anchor line is discarded
+	/// goes with it — the same call `clear_screen` makes and for the same reason, that a picture on a
+	/// line that no longer exists would be drawn against text it never described.
+	///
+	/// The ALTERNATE page is untouched, and cannot be reached by this: its anchors are page rows
+	/// rather than document lines (§41), and a page that keeps no scrollback has nothing to unscroll
+	/// from.
+	pub fn renumber(&mut self, remap: impl Fn(u64) -> Option<u64>) {
+		self.primary.renumber(remap);
 	}
 
 	/// Drop the alternate page's pictures and nothing else (§41) — for the swap on or off that page,

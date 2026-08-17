@@ -631,6 +631,17 @@ short, and since §41 nothing left in it is high value:
   arithmetic and four small methods (`term/rect.rs`). One limit is disclosed rather than solved:
   **origin mode is refused**, because with DECOM set the corners count from the top of the scrolling
   region and the engine keeps that region private. See PLAN §58.
+- **The scrollback's newest end cannot be shortened, and §101 worked around it rather than through
+  it.** `Grid::update_history` is the only public way to drop history rows and it drops the OLDEST
+  ones: `Storage::shrink_lines` lowers a length, and the ring's `compute_index` puts the oldest row at
+  the far end of that length. kitty's UNSCROLL needs the opposite — the rows nearest the page, moved
+  onto it and gone from the history. So the rows nearest the page are **overwritten**: the rest of the
+  history walks up over them, the spares end up at the oldest end, and `update_history` is then asked
+  to drop exactly that many from there. Rows are moved rather than copied (`mem::replace` around one
+  cloned spare), so a full scrollback costs pointer moves and not a megabyte of cells. This is the one
+  place cmote depends on **which end** an engine method trims from — a fact its documentation does not
+  state, only its arithmetic — and the tests that would catch a change are behavioural: a document read
+  end to end after an unscroll, in order, with nothing repeated. See PLAN §101.
 - **DRCS soft fonts and the VT320 status line** some conformance suites block on. `[DEC]`.
   ~~The DECRQCRA checksum query (`* y`)~~ **SHIPPED in §60**: it was §33's kind of work rather than
   §58's, and it is worth nothing unless the four digits match, so the algorithm was **copied** from
@@ -1387,7 +1398,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | b (REP) | Repeat character | ✅ | repeats the preceding graphic character `Ps` times — the engine prints that many more copies of it (§84) |
 | S / T | Scroll up / down | ✅ | SU / SD scroll the region up or down `Ps` lines, the cursor staying where it is |
 | Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Refused while origin mode is set** — not because these name coordinates, they name none, but because DECOM is the one signal in reach that DECSTBM has cut a scrolling region a shift ought to stop at, and the engine keeps that region private (§58, §100, `term/rect.rs`) |
-| Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ❌ | contour's: SD, but the lines pulled in at the top come from the **scrollback** instead of being blank. A gap; cmote's scrollback is the user's to walk and no program has asked to push it back onto the page (§98) |
+| Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ✅ | **kitty's**, not contour's — contour's own definition credits it (`"Scroll Down with Scrollback Fill (kitty unscroll)"`), which §98 recorded the wrong way round. SD with the top filled from the **scrollback** instead of with blanks, for the shell that prints completions under the cursor and scrolls the user's text away: plain SD would blank exactly what this exists to restore. The lines are **moved**, not copied — a copy would leave the same text in the scrollback and on the page, once per completion, for the life of the session. `Ps` defaults to 1 and clamps to the page; the rows pushed off the bottom are discarded; the cursor does not move. Where the scrollback cannot fill the request the remainder is blank, which is kitty's own rule and what makes the **alternate screen** correct with no special case — that page keeps no history. The one operation here that changes how many lines the document has, so every absolute anchor cmote holds — prompt marks, bookmarks, command spans, picture anchors, right-to-left flags — is renumbered with it (§101, `term/rect.rs`) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
 | s (DECSLRM) | Left / right margins | 🛑 | sets the left and right margins, the horizontal half of DECSTBM. Cancelled in flight so it cannot be taken for the save-cursor that shares its final byte (§57, `term/cancel.rs`); the capability itself is the `? 69` row |
 | g | Clear tab stop (TBC) | ✅ | TBC clears the tab stop under the cursor (`0`) or all of them (`3`) — the two DEC defined for a one-page terminal (§67) |
@@ -2012,6 +2023,17 @@ This is that gap closed, one vendor at a time — and two of them could not be c
   (Contour, foot, Ghostty, iTerm2, kitty, Konsole, VTE, WezTerm, Windows Terminal, tmux, cy) and
   thirteen that do not implement it — **Alacritty and xterm among them**, which is the citation §34's
   founding claim never had.
+- **kitty's `unscroll`** (`sw.kovidgoyal.net/kitty/unscroll/`, read for §101) is the specification
+  behind a row §98 attributed to the wrong terminal. Contour's own definition says so —
+  `"Scroll Down with Scrollback Fill (kitty unscroll)"`, tagged `VTExtension::Unknown` — and kitty's
+  page is where the semantics are: `CSI n + T`, the `+` chosen because it is "legal under ECMA 48
+  and previously unused"; the lines are **moved** from the scrollback rather than copied; lines
+  pushed off the bottom "are removed from display"; the maximum is implementation-defined but must
+  reach one screenful; and where there is no scrollback — the alternate screen, an empty history —
+  "the newly inserted lines must be empty". The motivation is quoted on the row: "many modern shells
+  will show completions in a block of lines under the cursor, this causes some of the on-screen text
+  to be lost even after the completion is completed… This escape code allows that text to be
+  restored." Added in kitty 0.20.2.
 - **kitty's shell integration** (`sw.kovidgoyal.net/kitty/shell-integration/`, read for §97) is not a
   write-up of the protocol but **the shell code that emits it**, which makes it the most useful of
   the three. Its zsh half prepends `\e]133;A;k=s\a` to `PS2` — "PS2 mark is needed when clearing the
@@ -2040,6 +2062,9 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   `DECBI` / `DECFI`, the page family, and the DCS macro / DRCS / UDK trio. Its notation drops the
   intermediates on several entries — `SL` is written `CSI 0..1 @`, which is ICH's spelling — so the
   rows above take the sequence from where it is defined and the *existence* of the row from here.
+  **And it is a catalogue of what contour implements, not of what contour invented**: §101 found
+  `UNSCROLL` credited in contour's own source to kitty, after §98 had filed it as contour's. An index
+  entry names a sequence; it does not name an author.
 - **contour's buffer capture** (`contour-terminal.org/vt-extensions/buffer-capture/`) is
   `CSI > Pl ; Pr t`: `Pl` picks logical or visual lines, `Pr` how many, and the reply is the screen's
   text in a run of `PM 314 ; <data> ST` strings ending in an empty one. The page carries **no security

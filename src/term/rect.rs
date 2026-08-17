@@ -25,6 +25,11 @@
 //   CSI Ps SP @                                  SL — shift the page left Ps columns
 //   CSI Ps SP A                                  SR — shift it right Ps columns
 //
+// AND A THIRD IN §101, which is the only one here that moves the boundary between the page and the
+// scrollback:
+//
+//   CSI Ps + T                                   UNSCROLL — scroll down, filling from the scrollback
+//
 // They are ECMA-48's rather than DEC's and they name no corners at all. They live here because what
 // a module shares with its neighbours is not its grammar but its MECHANISM: SL and SR move whole
 // cells across the page with no engine arm behind them, against the same background the erases
@@ -318,6 +323,12 @@ pub enum Request {
 	/// ECMA-48 and xterm both spell as the default. It is not yet clamped to the page — that needs a
 	/// width, which is the applier's to know.
 	Shift { direction: Direction, columns: u16 },
+	/// UNSCROLL — scroll the page down `lines` lines and fill the top from the SCROLLBACK rather than
+	/// with blanks (§101). kitty's, and the only operation in this module that changes how many lines
+	/// the document has.
+	///
+	/// `lines` is defaulted here and clamped where it is applied, which needs a page height.
+	Unscroll { lines: u16 },
 	/// DECRQCRA — report a checksum of the rectangle, and change nothing (§60). `id` is the label
 	/// the program attached so it can match the answer to the question, echoed back untouched.
 	///
@@ -498,6 +509,13 @@ impl Rectangles {
 			(b'A', None, [b' ']) => Some(Request::Shift {
 				direction: Direction::Right,
 				columns: number(&numbers, 0).max(1),
+			}),
+			// UNSCROLL — SD's final byte under a `+` intermediate, which kitty chose because it is
+			// "legal under ECMA 48 and previously unused" (§101). `CSI Ps T` with no intermediate is
+			// SD itself and belongs to the engine; the intermediate is the whole difference, as it is
+			// for SL and SR above.
+			(b'T', None, [b'+']) => Some(Request::Unscroll {
+				lines: number(&numbers, 0).max(1),
 			}),
 			// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
 			// mean anything; a fourth leaves the extent where it was, rather than guessing at a
@@ -760,6 +778,67 @@ impl Checksum {
 	pub fn finish(self) -> u16 {
 		let low = (self.total & 0xffff) as u16;
 		low.wrapping_neg()
+	}
+}
+
+/// Where an absolute document line ends up after an UNSCROLL (§101).
+///
+/// This is the whole reason unscrolling is more than a grid operation. Every position cmote
+/// remembers about the session — a prompt mark, a bookmark, a command's output span, a picture's
+/// anchor, a line's right-to-left flag — is an ABSOLUTE line index, `history_size + row` at the
+/// moment it was taken (§34, §40, §76). Unscrolling moves the boundary between the scrollback and
+/// the page, so it is the one operation in this terminal that can change what those numbers mean.
+///
+/// Three numbers describe the move, and the arithmetic behind them is worth writing out because the
+/// happy case looks like nothing happens — which is a very easy thing to get wrong by not thinking
+/// about it. Write the document as `[history 0..H] [page 0..R]`, absolute index being the position
+/// in that list, and unscroll `lines` of which `N` could be filled from the scrollback:
+///
+///   before   [ history 0..H-N ][ history H-N..H ]                 [ page 0..R-lines ][ discarded ]
+///   after    [ history 0..H-N ][ blanks × (lines-N) ][ the same H-N..H ][ the same 0..R-lines ]
+///
+/// So a line before the consumed history keeps its number; everything from there down moves by the
+/// number of BLANKS, not by `lines`; and the page's bottom `lines` rows are gone. When the
+/// scrollback held everything asked for — the ordinary case, since a program unscrolls what it just
+/// scrolled — `N == lines`, the blank count is zero, and **not one number changes**. The document
+/// simply gets shorter at the end.
+///
+/// The lines past `discard_from` must not merely be left alone: their content is gone, and the
+/// document will grow back over those indices with new output, so an anchor left there would
+/// reappear one day on text it never described.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unscrolled {
+	/// The first absolute line the move touches — the oldest scrollback line pulled onto the page.
+	pub cut: u64,
+	/// How far everything from `cut` down moves: the number of blank lines inserted, which is zero
+	/// whenever the scrollback could fill the request.
+	pub shift: u64,
+	/// The first absolute line whose content is discarded off the bottom of the page.
+	pub discard_from: u64,
+}
+
+impl Unscrolled {
+	/// Work the three numbers out from the page's own measurements: the history and page sizes as
+	/// they stood BEFORE the move, the number of lines asked for, and how many of them the
+	/// scrollback could supply.
+	pub fn new(history: usize, rows: usize, lines: usize, from_history: usize) -> Self {
+		let history = history as u64;
+		Self {
+			cut: history - from_history as u64,
+			shift: (lines - from_history) as u64,
+			discard_from: history + (rows - lines) as u64,
+		}
+	}
+
+	/// Where `line` goes, or `None` when its content was pushed off the bottom and no longer exists.
+	pub fn map(&self, line: u64) -> Option<u64> {
+		if line >= self.discard_from {
+			None
+		} else if line >= self.cut {
+			Some(line + self.shift)
+		} else {
+			Some(line)
+		}
 	}
 }
 
@@ -1392,6 +1471,50 @@ mod tests {
 				"{sequence:?}"
 			);
 		}
+	}
+
+	/// UNSCROLL (§101), and the neighbour it must not be read as: `CSI Ps T` is SD, which the engine
+	/// implements and which fills with BLANKS — the one behaviour this sequence exists to avoid.
+	#[test]
+	fn an_unscroll_reads_its_line_count_and_is_not_a_plain_scroll_down() {
+		assert_eq!(scan(b"\x1b[3+T"), vec![(5, Request::Unscroll { lines: 3 })]);
+		assert_eq!(scan(b"\x1b[+T"), vec![(4, Request::Unscroll { lines: 1 })]);
+		assert_eq!(scan(b"\x1b[0+T"), vec![(5, Request::Unscroll { lines: 1 })]);
+		assert!(scan(b"\x1b[3T").is_empty(), "SD is the engine's");
+		assert!(scan(b"\x1b[3 T").is_empty(), "a different intermediate");
+		assert!(scan(b"\x1b[?3+T").is_empty(), "a marker rules it out");
+	}
+
+	/// The ordinary case, and the one worth pinning hardest: when the scrollback holds everything
+	/// asked for, unscrolling moves **no line number at all**. The document only gets shorter at the
+	/// end, so every mark, picture and path anchored above the seam stays exactly where it was.
+	#[test]
+	fn an_unscroll_the_scrollback_can_fill_moves_no_line_number() {
+		// Five lines of history, a four-row page, two lines asked for and two available.
+		let moved = Unscrolled::new(5, 4, 2, 2);
+		assert_eq!(moved.shift, 0);
+		for line in 0..7 {
+			assert_eq!(moved.map(line), Some(line), "line {line} must not move");
+		}
+		// The page's bottom two rows are gone: absolute 7 and 8 name nothing now.
+		assert_eq!(moved.map(7), None);
+		assert_eq!(moved.map(8), None);
+	}
+
+	/// And the case that does move numbers: more lines were asked for than the scrollback holds, so
+	/// the difference arrives as blanks — which INSERTS lines, pushing everything below them down.
+	#[test]
+	fn an_unscroll_the_scrollback_cannot_fill_pushes_the_rest_down() {
+		// One line of history, a four-row page, three asked for: one restored, two blanks.
+		let moved = Unscrolled::new(1, 4, 3, 1);
+		assert_eq!((moved.cut, moved.shift, moved.discard_from), (0, 2, 2));
+		// The restored history line and the page's first surviving row both move down by the two
+		// blanks that were inserted above them.
+		assert_eq!(moved.map(0), Some(2));
+		assert_eq!(moved.map(1), Some(3));
+		// The page's last three rows went off the bottom.
+		assert_eq!(moved.map(2), None);
+		assert_eq!(moved.map(4), None);
 	}
 
 	/// The near misses, and they are the most dangerous in this module: both neighbours are sequences
