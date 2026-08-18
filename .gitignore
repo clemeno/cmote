@@ -4,6 +4,10 @@
 # Rust build output.
 /target
 
+# The second build directory, used only while a cmote.exe is running and holding a
+# lock on `target/debug` — the gate has to build somewhere.
+/target-verify
+
 # Portable runtime data written beside the exe (known_hosts, etc.). Never commit
 # host keys or any per-user data.
 /cmote-data/
