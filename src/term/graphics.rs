@@ -324,9 +324,15 @@ impl Images {
 						// `CSI 2 J` erases the screen and `CSI 3 J` the scrollback; `CSI J` and
 						// `CSI 0/1 J` erase only part of one line's worth, which no image spans, so
 						// they are left alone.
-						match self.params.as_slice() {
-							b"2" => found.push((began, Event::ClearScreen)),
-							b"3" => found.push((began, Event::ClearScrollback)),
+						//
+						// Read as a NUMBER, the way the engine reads it: ED's parameter arrives there
+						// through `next_param_or(0)`, so `CSI 002 J` is 2 and `CSI 2;5 J` is 2 with a
+						// second parameter the engine ignores. Comparing the parameter bytes to `b"2"`
+						// agreed with that on the one spelling everything sends and on no other, and the
+						// cost of the disagreement was pictures left on a screen whose text had gone.
+						match first_param(&self.params) {
+							2 => found.push((began, Event::ClearScreen)),
+							3 => found.push((began, Event::ClearScrollback)),
 							_ => {}
 						}
 						self.state = Scan::Text;
@@ -549,6 +555,26 @@ fn cells(pixels: u16, cell: u16) -> u16 {
 	count.clamp(1, u32::from(u16::MAX)) as u16
 }
 
+/// The first of `params` as a number, with an omitted one reading as 0 — the engine's own
+/// `next_param_or(0)`, spelled here so an erase means the same thing on both sides of `process`.
+///
+/// Saturating rather than checked, and for the same reason as everywhere else in this module: a
+/// parameter past `u16` is a parameter nobody can act on, and clamping it keeps a long digit run from
+/// wrapping round into a small plausible number like 2. Parameters here are only ever digits and
+/// semicolons (the scanner pushes nothing else), so there is no unparseable case to report.
+fn first_param(params: &[u8]) -> u16 {
+	params
+		.split(|&byte| byte == b';')
+		.next()
+		.unwrap_or_default()
+		.iter()
+		.fold(0u16, |value, &byte| {
+			value
+				.saturating_mul(10)
+				.saturating_add(u16::from(byte.wrapping_sub(b'0')))
+		})
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -642,6 +668,29 @@ mod tests {
 		assert!(scan(b"\x1b[K").is_empty());
 		// A shell's `clear` sends both erases, which between them clear everything.
 		assert_eq!(scan(b"\x1b[3J\x1b[H\x1b[2J").len(), 2);
+	}
+
+	#[test]
+	fn an_erase_is_read_as_a_number_the_way_the_engine_reads_it() {
+		// The engine takes ED's parameter with `next_param_or(0)`: leading zeros are just zeros, and a
+		// second parameter is ignored. So `CSI 002 J` and `CSI 2;5 J` both erase the screen there, and a
+		// scanner that compared the parameter BYTES to `b"2"` said nothing about either — leaving the
+		// pictures on a screen whose text had gone.
+		assert!(matches!(
+			scan(b"\x1b[002J").as_slice(),
+			[(0, Event::ClearScreen)]
+		));
+		assert!(matches!(
+			scan(b"\x1b[2;5J").as_slice(),
+			[(0, Event::ClearScreen)]
+		));
+		assert!(matches!(
+			scan(b"\x1b[003J").as_slice(),
+			[(0, Event::ClearScrollback)]
+		));
+		// And the partial erases stay silent, however they are spelled.
+		assert!(scan(b"\x1b[000J").is_empty());
+		assert!(scan(b"\x1b[;2J").is_empty());
 	}
 
 	#[test]
