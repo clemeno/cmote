@@ -74,11 +74,6 @@ pub const CANCEL: u8 = 0x18;
 /// The escape byte that leads every CSI sequence.
 const ESC: u8 = 0x1b;
 
-/// The longest parameter run we will count inside one sequence. DECSLRM carries two small numbers;
-/// a longer run is malformed, and abandoning the sequence keeps a hostile stream from being able to
-/// hold this scanner in its CSI state indefinitely (§12).
-const MAX_PARAMS: usize = 32;
-
 /// One DECSLRM found in the stream (§57, §102).
 ///
 /// The offset is the position of the final byte ITSELF, and the two numbers are what the sequence
@@ -120,6 +115,16 @@ pub struct Cancel {
 	state: Scan,
 	/// How many parameter bytes the sequence in flight has carried. Non-zero is the whole test for
 	/// DECSLRM against SCOSC.
+	///
+	/// Deliberately UNBOUNDED, unlike the buffered scanners beside it, and that is a correctness point
+	/// rather than an oversight. There is nothing here to grow — two `u16`s, a slot index and this
+	/// counter, whatever length of digit run arrives — so §12's rule about unbounded remote input has
+	/// nothing to bite on. A cap would buy no memory and would cost agreement with the engine, which
+	/// counts PARAMETERS rather than parameter bytes and saturates a long digit run instead of
+	/// abandoning it. Abandoning here means the final byte is never judged, so the engine goes on to
+	/// read a padded DECSLRM as a save-cursor: the margins silently not set, and a cursor the program
+	/// never asked to save overwritten. What bounds this sequence is the shape test below — a third
+	/// parameter rules it out — not the number of bytes spent on the first two.
 	params: usize,
 	/// Whether the sequence is still the plain `CSI <parameters> <final>` shape. A private marker
 	/// (`< = > ?`) or an intermediate (0x20–0x2f) makes it a different sequence altogether —
@@ -171,22 +176,17 @@ impl Cancel {
 					// obeyed.
 					b'0'..=b'9' => {
 						self.params += 1;
-						if self.params > MAX_PARAMS {
-							self.state = Scan::Text;
-						} else if let Some(number) = self.numbers.get_mut(self.slot) {
+						if let Some(number) = self.numbers.get_mut(self.slot) {
 							let digit = u16::from(byte - b'0');
 							*number =
 								Some(number.unwrap_or(0).saturating_mul(10).saturating_add(digit));
 						}
 					}
-					// The separator between parameters.
+					// The separator between parameters. Counted past the two that are kept, because it
+					// is the count that rules a third-parameter sequence out.
 					b';' => {
 						self.params += 1;
-						if self.params > MAX_PARAMS {
-							self.state = Scan::Text;
-						} else {
-							self.slot += 1;
-						}
+						self.slot += 1;
 					}
 					// A sub-parameter separator. DECSLRM has no sub-parameters, so this is some
 					// other sequence and the `s` it may end with is not ours to touch.
@@ -366,12 +366,38 @@ mod tests {
 	}
 
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		// A hostile stream must not be able to hold the scanner in its CSI state for ever. Dropping
-		// the sequence is the safe end: the engine then reads it as a save-cursor, which is where we
-		// started, rather than cmote acting on unbounded input (§12).
+	fn a_long_parameter_run_is_still_judged_because_the_engine_judges_it() {
+		// The engine counts PARAMETERS, and it never abandons a sequence over the length of a digit
+		// run: `vte` saturates the number and dispatches anyway (its params are a fixed array of 32,
+		// and a digit is folded in with `saturating_mul`). So a DECSLRM padded with leading zeros still
+		// reaches `('s', [])` there — and a scanner that had given up on it would leave the engine to
+		// read it as a save-cursor, which is the exact harm §57 exists to prevent: the margins silently
+		// not set, AND a cursor the program never asked to save overwritten.
+		let mut margins = vec![b'\x1b', b'['];
+		margins.extend(std::iter::repeat_n(b'0', 40));
+		margins.extend_from_slice(b"1;80s");
+		assert_eq!(numbers(&margins), (Some(1), Some(80)));
+	}
+
+	#[test]
+	fn a_runaway_digit_run_saturates_rather_than_abandoning_the_sequence() {
+		// What §12 asks of this scanner is that a hostile stream cannot grow its state, and a digit run
+		// cannot: there is no buffer here, only two numbers and two counters. So the answer to a runaway
+		// run is the engine's own answer — saturate — and NOT a drop, because the engine will not drop
+		// it and the two have to agree about what this byte stream was.
 		let mut params = vec![b'\x1b', b'['];
-		params.extend(std::iter::repeat_n(b'1', MAX_PARAMS + 10));
+		params.extend(std::iter::repeat_n(b'9', 500));
+		params.push(b's');
+		assert_eq!(numbers(&params), (Some(u16::MAX), None));
+	}
+
+	#[test]
+	fn a_runaway_separator_run_is_not_a_margin_request() {
+		// The other half of the same rule: length is not what rules a sequence out, SHAPE is. Five
+		// hundred separators is five hundred and one parameters, which is not DECSLRM — and the engine
+		// stops counting at 32 and drops it too, so both sides leave it alone.
+		let mut params = vec![b'\x1b', b'['];
+		params.extend(std::iter::repeat_n(b';', 500));
 		params.push(b's');
 		assert!(scan(&params).is_empty());
 	}
