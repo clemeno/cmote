@@ -11268,17 +11268,20 @@ it is what the last four defects were.
 
 ### Not done
 
-- **Nine scanners still carry their own grammar.** This paid for the limits, not the framer: `dsr`,
+- **Nine scanners still carry their own grammar**, minus the two rules that have been hoisted out of it.
+  This paid for the limits and the control bytes, not the framer: `dsr`,
   `tabs`, `scp`, `sgrstack`, `rect`, `modkeys` and `query` still declare their own `enum Scan` and their
   own bounds. Their disagreements with the engine are currently **unobservable** — it has no live arm
   behind any of their sequences — which is a fact about today's `vte` and not a property of the code. A
   version bump that fills one of those empty trait bodies makes them observable, and the framer is what
   would make that a non-event.
-- **The control-byte rule is fixed in three scanners and wrong in five.** `dsr`, `tabs`, `scp`, `sgrstack`
-  and `rect` still abandon a sequence on a C0 the engine runs and reads through. Unobservable for the same
-  reason as above, and one call to `csi::passes_through` away — left undone deliberately, because a fix
-  with no failing test behind it is a change, not a fix, and the differential harness cannot write one for
-  a sequence the engine has no arm for.
+- ~~The control-byte rule is fixed in three scanners and wrong in five.~~ **Done**, and the reason it was
+  parked is worth keeping: the note said a fix with no failing test behind it is a change rather than a fix,
+  and that the harness could not write one for a sequence the engine has no arm for. Half right. There is no
+  engine ACTION to compare against, but SELF-CONSISTENCY is testable and worth the same — a stray byte the
+  engine reads through must not change cmote's verdict, or the two disagree the moment a version bump fills
+  one of those empty handler bodies. All five failed that test, which was written first. All eleven scanners
+  now defer to `csi::passes_through`.
 - **A parameter byte after an intermediate is still read differently**, and now has a test saying so. The
   engine drops the whole sequence; cmote's scanners take parameter bytes at any point and classify it. The
   framer settles it.

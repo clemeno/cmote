@@ -2656,7 +2656,9 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   built on** — `alacritty_terminal` re-exports `vte`, so no new dependency — records what it dispatched,
   refused (`ignore`) and executed, and compares that against what cmote's scanner made of the same bytes.
   It found the fourth defect on its first run: the parser runs a mid-sequence C0 and carries on with the
-  sequence around it, where all three scanners gave up. Five tests are agreements pinned from both sides;
+  sequence around it, where every scanner gave up — fixed in the three the engine has an arm for, and
+  then in the other five on a self-consistency test, since a stray byte must not change cmote's own
+  verdict either. Five tests are agreements pinned from both sides;
   one is the divergence that remains — a parameter byte after an intermediate, which the parser refuses
   and cmote classifies — asserted as it behaves, so the framer has to flip it on purpose. What it does
   NOT cover: it compares the parser rather than the handler, and six chosen sequences rather than a
