@@ -226,6 +226,16 @@ impl Protect {
 							self.state = Scan::Text;
 						} else if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
+						} else if byte >= 0x3c {
+							// A private marker after the parameters have started. Legal only as the very
+							// first parameter byte, and the engine drops the whole sequence when one arrives
+							// later (`vte`'s CSI-param state, `lib.rs:249`, straight to `CsiIgnore`).
+							//
+							// Found by the shape sweep, and the worst of the three shapes it caught here:
+							// `CSI ? 1;2 ? J` classified as a selective erase, because `first_param` reads
+							// only the first field and the stray marker was hiding in the second. So cmote
+							// erased cells for a sequence nothing else in the world obeys (§106).
+							self.state = Scan::Text;
 						} else if !self.params.push(byte) {
 							// More parameters than the engine reads, so it ignores the sequence and so
 							// do we.

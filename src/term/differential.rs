@@ -175,6 +175,90 @@ fn variants(params: &[u8], final_byte: u8) -> Vec<(String, Vec<u8>)> {
 	out
 }
 
+/// Every SHAPE a CSI can have, across the parts that decide which sequence it is (§106).
+///
+/// [`variants`] rewrites a sequence's spelling and keeps its shape. This does the opposite: it walks the
+/// shape space — private marker × intermediates × parameter run × final byte — and leaves the spelling
+/// alone. The two axes found different defects, which is the argument for having both: a padded parameter
+/// was a spelling bug, and a parameter byte after an intermediate was a shape bug.
+///
+/// The final bytes are the ones cmote's own scanners claim, so the sweep is aimed at the sequences where
+/// acting alone would matter rather than at the whole alphabet.
+#[cfg(test)]
+fn shapes() -> Vec<(String, Vec<u8>)> {
+	const MARKERS: [Option<u8>; 5] = [None, Some(b'?'), Some(b'>'), Some(b'<'), Some(b'=')];
+	/// Including runs of two and three, which is past the engine's `MAX_INTERMEDIATES` of 2 once the
+	/// private marker is counted against it as the engine does — the case cmote's own limit of 4 lets
+	/// through, and the one this sweep is here to keep honest.
+	const INTERMEDIATES: [&[u8]; 8] = [b"", b" ", b"\"", b"#", b"$", b"!", b" \"", b"\"$#"];
+	const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
+	/// Every final byte any scanner in this directory watches for.
+	const FINALS: &[u8] = b"smqpJKWk{}zn";
+
+	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
+	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
+	/// that only emits well-formed sequences cannot catch cmote obeying a malformed one.
+	///
+	/// That is not hypothetical. This sweep was written with the well-formed order alone, passed, and was
+	/// then run against §106's ordering fix reverted — where it passed again. A green test that cannot fail
+	/// is worse than no test, so the two malformed orders are the reason the sweep exists at all.
+	#[derive(Clone, Copy)]
+	enum Order {
+		/// `CSI <marker> <params> <intermediates> <final>` — the grammar as ECMA-48 defines it.
+		WellFormed,
+		/// A parameter byte after the intermediates. `vte` drops the whole sequence for this
+		/// (`lib.rs:232`), and cmote obeyed it until §106.
+		ParamAfterIntermediate,
+		/// A private marker after the parameters. `vte` drops that too (`lib.rs:249`).
+		MarkerAfterParams,
+	}
+
+	let mut out = Vec::new();
+	for marker in MARKERS {
+		for intermediates in INTERMEDIATES {
+			for params in PARAMS {
+				for &final_byte in FINALS {
+					for order in [
+						Order::WellFormed,
+						Order::ParamAfterIntermediate,
+						Order::MarkerAfterParams,
+					] {
+						let mut bytes = vec![0x1b, b'['];
+						bytes.extend(marker);
+						bytes.extend_from_slice(params);
+						match order {
+							Order::WellFormed => bytes.extend_from_slice(intermediates),
+							Order::ParamAfterIntermediate => {
+								bytes.extend_from_slice(intermediates);
+								bytes.push(b'2');
+							}
+							Order::MarkerAfterParams => {
+								bytes.push(b'?');
+								bytes.extend_from_slice(intermediates);
+							}
+						}
+						bytes.push(final_byte);
+						let shape = format!(
+							"CSI {}{}{}{} {}",
+							marker.map(char::from).unwrap_or(' '),
+							String::from_utf8_lossy(params),
+							String::from_utf8_lossy(intermediates),
+							match order {
+								Order::WellFormed => "",
+								Order::ParamAfterIntermediate => " +param",
+								Order::MarkerAfterParams => " +marker",
+							},
+							char::from(final_byte)
+						);
+						out.push((shape, bytes));
+					}
+				}
+			}
+		}
+	}
+	out
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -473,6 +557,85 @@ mod tests {
 				"{cancel_byte:#04x} ends it for cmote too"
 			);
 		}
+	}
+
+	#[test]
+	fn no_scanner_acts_on_a_sequence_the_parser_threw_away() {
+		// The one-directional property, swept over the whole shape space. It is one-directional because the
+		// converse is false by design: the parser frames a great deal that cmote deliberately ignores, and
+		// that is the normal case rather than a divergence.
+		//
+		// What must never happen is the other way round — cmote acting on bytes the parser refused outright,
+		// because then cmote is the only terminal in the world obeying that spelling. §106 shipped exactly
+		// one of those (a parameter byte after an intermediate) and this is the net that would have caught it
+		// without anyone thinking of the case.
+		//
+		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
+		// all eleven can answer in common.
+		let scanners: [Claim; 10] = [
+			("cancel", b"", |bytes| {
+				!Cancel::default().feed(bytes).is_empty()
+			}),
+			("protect", b"", |bytes| {
+				!protect::Protect::default().feed(bytes).is_empty()
+			}),
+			("protect, armed", b"", |bytes| {
+				let mut scanner = protect::Protect::default();
+				scanner.feed(b"\x1b[1\"q");
+				!scanner.feed(bytes).is_empty()
+			}),
+			("graphics", b"", |bytes| {
+				!graphics::Images::default().feed(bytes).is_empty()
+			}),
+			("dsr", b"", |bytes| {
+				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
+			}),
+			("tabs", b"", |bytes| {
+				!super::super::tabs::Tabs::default().feed(bytes).is_empty()
+			}),
+			("scp", b"", |bytes| {
+				!super::super::scp::Scp::default().feed(bytes).is_empty()
+			}),
+			("sgrstack", b"", |bytes| {
+				!super::super::sgrstack::SgrStack::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			("rect", b"", |bytes| {
+				!super::super::rect::Rectangles::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			("modkeys", b"", |bytes| {
+				!super::super::modkeys::ModKeys::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+		];
+
+		let shapes = shapes();
+		assert_eq!(
+			shapes.len(),
+			5760,
+			"5 markers x 8 intermediates x 4 params x 12 finals x 3 orders"
+		);
+		// Collected rather than asserted case by case: the first failure is never the whole story, and an
+		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".
+		let mut alone = Vec::new();
+		for (shape, bytes) in shapes {
+			let framed = !engine(&bytes).dispatched.is_empty();
+			for (who, _, claimed) in scanners {
+				if claimed(&bytes) && !framed {
+					alone.push(format!("{who} on {shape}"));
+				}
+			}
+		}
+		assert!(
+			alone.is_empty(),
+			"{} sequences cmote acts on and the parser threw away: {}",
+			alone.len(),
+			alone.join(", ")
+		);
 	}
 
 	#[test]
