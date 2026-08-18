@@ -212,8 +212,17 @@ impl Cancel {
 					}
 					// A fresh ESC restarts the match.
 					ESC => self.state = Scan::Escape,
-					// A C0 control byte or DEL inside a CSI: malformed, so drop the sequence rather
-					// than let a stray byte extend it indefinitely.
+					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
+					// THROUGH: it runs a C0 control where it sits, ignores DEL, and does nothing with a
+					// high byte — and in every one of those cases the sequence goes on (§106). So it goes
+					// on here too. Abandoning was §57's harm by a second route: `CSI 5;` LF `70 s` is a
+					// margin request the engine dispatches as a save-cursor, and this scanner was the
+					// thing that would have stopped it.
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB, the only two bytes that really do cancel a sequence in flight — the
+					// ANSI state machine's own definition, and the engine's (`anywhere`: run it, then back
+					// to ground). CAN is also the byte cmote itself feeds in place of a refused final byte,
+					// which is the same fact read from the other side.
 					_ => self.state = Scan::Text,
 				},
 			}
@@ -403,9 +412,22 @@ mod tests {
 	}
 
 	#[test]
-	fn a_control_byte_inside_a_csi_abandons_the_sequence() {
-		// A newline mid-sequence means the stream is not sending what we thought.
-		assert!(scan(b"\x1b[5;\n70s").is_empty());
+	fn a_control_byte_inside_a_csi_does_not_end_it() {
+		// This test used to assert the opposite, and that was the disagreement (§106). The engine runs the
+		// line feed where it sits and goes on reading the sequence around it, so `CSI 5;` LF `70 s` reaches
+		// its save-cursor arm — and a scanner that had given up on it would be the reason the margins were
+		// not applied and the saved cursor was overwritten. Same harm as a padded run, a different route.
+		assert_eq!(numbers(b"\x1b[5;\n70s"), (Some(5), Some(70)));
+	}
+
+	#[test]
+	fn only_can_and_sub_really_cancel_a_sequence() {
+		// The two bytes the ANSI state machine defines as cancels, which is why cmote feeds one of them in
+		// place of a final byte it refuses. The engine leaves the sequence for the same pair and no others.
+		assert!(scan(b"\x1b[5;70\x18s").is_empty());
+		assert!(scan(b"\x1b[5;70\x1as").is_empty());
+		// And DEL is not one of them: the engine ignores it and keeps reading.
+		assert_eq!(numbers(b"\x1b[5;70\x7fs"), (Some(5), Some(70)));
 	}
 
 	#[test]

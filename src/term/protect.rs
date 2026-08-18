@@ -242,8 +242,12 @@ impl Protect {
 					}
 					// A fresh ESC restarts the match.
 					ESC => self.state = Scan::Escape,
-					// A C0 control byte or DEL inside a CSI: malformed, so drop the sequence
-					// rather than let a stray byte extend it indefinitely.
+					// A byte the grammar above does not claim, but which the engine reads straight through
+					// and keeps the sequence across (§106, `csi::passes_through`). Abandoning it here cost
+					// the same thing the parameter cap did: `CSI 0;` LF `1 m` is an SGR the engine applies,
+					// `Attr::Reset` and all, so a scanner that gave up on it lost the protection bit.
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB — the two bytes that do end a sequence, here and in the engine.
 					_ => self.state = Scan::Text,
 				},
 			}
@@ -608,10 +612,26 @@ mod tests {
 	}
 
 	#[test]
-	fn a_control_byte_inside_a_csi_abandons_the_sequence() {
-		// A newline mid-sequence means the stream is not sending what we thought; the bytes after
-		// it are ordinary output, not the rest of a DECSCA.
-		assert!(scan(b"\x1b[1\n\"q").is_empty());
+	fn a_control_byte_inside_a_csi_does_not_end_it() {
+		// The reverse of what this asserted before §106. The engine runs the line feed and keeps reading the
+		// sequence, so `CSI 0;` LF `1 m` is an SGR it applies — `Attr::Reset` and all — and a scanner that
+		// gave up on the sequence lost the protection bit across it. The DECSCA spelling is the same rule
+		// seen from cmote's own side.
+		assert_eq!(scan(b"\x1b[1\n\"q"), vec![(6, Request::Protect(true))]);
+		assert_eq!(
+			scan_armed(b"\x1b[0;\n1m"),
+			vec![(7, Request::Reassert)],
+			"the SGR is still reported, so the bit is still put back"
+		);
+	}
+
+	#[test]
+	fn only_can_and_sub_really_cancel_a_sequence() {
+		// The two bytes the ANSI state machine defines as cancels, and the only two the engine leaves a
+		// sequence for. DEL is not one of them.
+		assert!(scan(b"\x1b[1\x18\"q").is_empty());
+		assert!(scan(b"\x1b[1\x1a\"q").is_empty());
+		assert_eq!(scan(b"\x1b[1\x7f\"q"), vec![(6, Request::Protect(true))]);
 	}
 
 	#[test]

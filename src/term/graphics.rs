@@ -339,7 +339,13 @@ impl Images {
 						self.state = Scan::Text;
 					}
 					ESC => self.begin(index),
-					// Any other CSI: a colour, a cursor move, a private mode. Not ours.
+					// A byte the engine reads straight through, keeping the sequence across it (§106,
+					// `csi::passes_through`). `CSI 0` LF `2 J` erases the screen as far as the engine is
+					// concerned — the line feed runs, the parameter goes on accumulating — so giving up on
+					// it here left the pictures behind, exactly as the old parameter cap did.
+					byte if super::csi::passes_through(byte) => {}
+					// Any other CSI: a colour, a cursor move, a private mode, or one of the two bytes that
+					// really cancel a sequence. Not ours.
 					_ => self.state = Scan::Text,
 				},
 				Scan::Dcs => match byte {

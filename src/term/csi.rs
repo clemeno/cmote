@@ -42,6 +42,21 @@ pub const MAX_PARAMS: usize = 32;
 /// separators, which is under 200 bytes.
 pub const MAX_DIGITS: usize = 5;
 
+/// Whether the engine would keep reading a sequence across `byte` — the bytes a CSI's own grammar does
+/// not claim, but which do not end it either (§106).
+///
+/// `vte`'s CSI states run a C0 control where it sits and CARRY ON with the sequence around it
+/// (`lib.rs:190`, `:219`, `:230`, `:241`), ignore DEL (`:222`, `:251`), and pass a byte past `0x7f` to
+/// `anywhere`, which does nothing with it (`:438-449`). Only CAN (`0x18`) and SUB (`0x1a`) abandon the
+/// sequence, which is the ANSI state machine's own definition of them, and ESC restarts it.
+///
+/// A scanner that gave up on one of these bytes would leave the engine to dispatch a sequence cmote never
+/// judged, which is how §57's and §56's harm was reachable a second time over: `CSI 5;` LF `70 s` is a
+/// margin request to the engine and was nothing at all to the scanner shadowing it.
+pub fn passes_through(byte: u8) -> bool {
+	matches!(byte, 0x00..=0x17 | 0x19 | 0x1c..=0x1f | 0x7f | 0x80..=0xff)
+}
+
 /// The parameter run of the CSI or DCS sequence a scanner is in the middle of reading.
 ///
 /// Two scanners hold one of these today (§56's selective erase and §41's pictures), which is what makes
