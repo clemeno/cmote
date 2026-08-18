@@ -50,9 +50,11 @@ const BEL: u8 = 0x07;
 /// send it.
 const ST: u8 = 0x9c;
 
-/// The longest DCS parameter run buffered before the final byte. A sixel's is `P1;P2;P3` at most; a
-/// longer one is malformed, and refusing to grow keeps a hostile stream out of our memory (§12).
-const MAX_PARAMS: usize = 16;
+// The parameter run, bounded the way the engine bounds one (§106). This used to be a sixteen-BYTE cap
+// that abandoned the sequence, which was wrong on the CSI side: a padded `CSI 0000000000000002 J` erases
+// the screen as far as the engine is concerned, and giving up on it here left the pictures on a screen
+// whose text had gone. The DCS side never parses its parameters at all, so the bound costs it nothing.
+use super::csi::Params;
 
 /// The most payload bytes buffered for one image. A screen-sized photograph is a megabyte or two of
 /// sixel; 16 MiB leaves generous room for a big one while capping what a single DCS can make cmote
@@ -236,7 +238,7 @@ enum Scan {
 #[derive(Debug)]
 pub struct Images {
 	state: Scan,
-	params: Vec<u8>,
+	params: Params,
 	payload: Vec<u8>,
 	/// Whether the payload being read has already outgrown `MAX_PAYLOAD`. Kept as a flag rather than
 	/// by abandoning the state, so the DCS is still followed to its terminator.
@@ -263,7 +265,7 @@ impl Default for Images {
 	fn default() -> Self {
 		Self {
 			state: Scan::default(),
-			params: Vec::new(),
+			params: Params::default(),
 			payload: Vec::new(),
 			overflowed: false,
 			sequence_start: None,
@@ -315,8 +317,7 @@ impl Images {
 				},
 				Scan::Csi => match byte {
 					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						if self.params.len() > MAX_PARAMS {
+						if !self.params.push(byte) {
 							self.state = Scan::Text;
 						}
 					}
@@ -330,7 +331,7 @@ impl Images {
 						// second parameter the engine ignores. Comparing the parameter bytes to `b"2"`
 						// agreed with that on the one spelling everything sends and on no other, and the
 						// cost of the disagreement was pictures left on a screen whose text had gone.
-						match first_param(&self.params) {
+						match first_param(self.params.bytes()) {
 							2 => found.push((began, Event::ClearScreen)),
 							3 => found.push((began, Event::ClearScrollback)),
 							_ => {}
@@ -345,8 +346,7 @@ impl Images {
 					// A sixel's parameters are `P1;P2;P3`; they change no pixel (see `sixel::decode`)
 					// so they are collected only to be stepped over.
 					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						if self.params.len() > MAX_PARAMS {
+						if !self.params.push(byte) {
 							self.state = Scan::Other;
 						}
 					}
@@ -691,6 +691,17 @@ mod tests {
 		// And the partial erases stay silent, however they are spelled.
 		assert!(scan(b"\x1b[000J").is_empty());
 		assert!(scan(b"\x1b[;2J").is_empty());
+	}
+
+	#[test]
+	fn a_long_parameter_run_before_an_erase_is_still_an_erase() {
+		// The other half of reading the parameter the engine's way: it counts PARAMETERS, not parameter
+		// bytes, and saturates a long digit run rather than abandoning the sequence. So a padded ED
+		// erases the screen there — and a scanner that gave up on the byte count left the pictures on it.
+		assert!(matches!(
+			scan(b"\x1b[000000000000000002J").as_slice(),
+			[(0, Event::ClearScreen)]
+		));
 	}
 
 	#[test]

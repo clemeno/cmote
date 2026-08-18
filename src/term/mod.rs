@@ -47,6 +47,7 @@
 // engine a CAN in place of it (§57).
 
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
+mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
 mod gate; // the one place cmote sits between the parser and the engine, so a decision can be pre-empted (§102)

@@ -61,13 +61,23 @@ use std::ops::Range;
 /// The escape byte that leads every CSI sequence.
 const ESC: u8 = 0x1b;
 
-/// The longest parameter run we will buffer inside one sequence. The real payloads here are tiny
-/// (`1`, `?2`); a longer run is malformed, and refusing to grow past this keeps a hostile stream
-/// from ballooning our memory (§12).
-const MAX_PARAMS: usize = 32;
+// The parameter run, bounded the way the engine bounds one (§106).
+//
+// This scanner used to cap the parameter BYTES at 32 and abandon the sequence past them, which is where
+// §56's worst bug lived: an SGR long enough to pass it — thirty-three bytes, which true colour reaches
+// with room to spare — was dropped here while the engine applied it, so the `Attr::Reset` inside it took
+// the borrowed protection bit and nothing put the bit back. Protection was silently lost on the one
+// sequence this scanner exists to watch for.
+use super::csi::Params;
 
 /// The most intermediate bytes we will buffer. A real CSI has at most one or two (`"` for DECSCA,
-/// `!` for DECSTR); the cap is for the same reason as `MAX_PARAMS`.
+/// `!` for DECSTR), and refusing to grow past this keeps a hostile stream out of our memory (§12).
+///
+/// Still a local number, and still LOOSER than the engine's two (`vte`'s `MAX_INTERMEDIATES`, which
+/// counts the private marker against it as well). Unlike the parameter bound this one cannot be
+/// observed: the classifier below matches on the intermediates it knows, so a sequence carrying three
+/// of them falls through to `None` here and is dropped there — both sides ignore it, by different
+/// routes. It belongs with the rest of the grammar in `term/csi.rs` when the framer arrives (§106).
 const MAX_INTERMEDIATES: usize = 4;
 
 /// The bit cmote borrows inside the engine's 16-bit per-cell flag word to mean "DECSCA-protected".
@@ -159,7 +169,7 @@ pub struct Protect {
 	/// The private marker, if the sequence opened with one (`?` for DECSED and DECSEL). Kept apart
 	/// from `params` so the parameter digits parse the same whether a marker was there or not.
 	marker: Option<u8>,
-	params: Vec<u8>,
+	params: Params,
 	intermediates: Vec<u8>,
 	/// Whether DECSCA has the pen protecting right now. The scanner keeps this because it is what
 	/// decides whether an SGR is worth reporting — the common case, an unarmed stream, reports
@@ -208,13 +218,12 @@ impl Protect {
 					// Parameter bytes: the digits and separators, plus the private markers
 					// (`< = > ?`, 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
-						if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
+						if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
-							}
+						} else if !self.params.push(byte) {
+							// More parameters than the engine reads, so it ignores the sequence and so
+							// do we.
+							self.state = Scan::Text;
 						}
 					}
 					// Intermediate bytes — `"` makes DECSCA, `!` makes DECSTR.
@@ -279,6 +288,7 @@ impl Protect {
 	fn first_param(&self) -> Option<u16> {
 		let digits = self
 			.params
+			.bytes()
 			.split(|&byte| byte == b';')
 			.next()
 			.unwrap_or_default();
@@ -288,7 +298,12 @@ impl Protect {
 		let mut value: u16 = 0;
 		for &byte in digits {
 			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-			value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
+			// Saturating on OVERFLOW, `None` only on a byte that is not a digit at all. The engine
+			// saturates too (`vte` folds each digit in with `saturating_mul`), so a number past `u16`
+			// reads the same on both sides; refusing to classify it here would have meant cmote ignoring
+			// a sequence the engine acted on, which is §106's whole subject. A non-digit is different —
+			// it says this field is not a number, and guessing at one would be §54's forbidden reset.
+			value = value.saturating_mul(10).saturating_add(u16::from(digit));
 		}
 		Some(value)
 	}
@@ -359,6 +374,22 @@ mod tests {
 		let mut protect = Protect::default();
 		protect.feed(b"\x1b[1\"q");
 		protect.feed(bytes)
+	}
+
+	#[test]
+	fn a_long_sgr_still_reasserts_because_the_engine_still_applies_it() {
+		// True colour spends five parameters on one colour, so a real SGR run passes thirty-two
+		// parameter BYTES easily — this one carries thirty-three. The engine counts PARAMETERS, allows
+		// thirty-two of them, and saturates a long digit run instead of abandoning anything, so it
+		// applies this SGR — including the `Attr::Reset` that assigns the flag word whole and takes the
+		// borrowed protection bit with it. A scanner that gave up on the byte count said nothing, and
+		// protection was silently lost on the far side of it.
+		let long = b"\x1b[0;1;2;3;4;5;7;9;21;30;31;38;5;196m";
+		assert_eq!(
+			scan_armed(long),
+			vec![(long.len(), Request::Reassert)],
+			"the reassert is reported one past the SGR's final byte"
+		);
 	}
 
 	#[test]
@@ -539,11 +570,37 @@ mod tests {
 	}
 
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		// A hostile stream must not be able to grow our buffer, and dropping the sequence is the
-		// safe end: an erase that never happens beats one built from unbounded input (§12).
+	fn a_runaway_digit_run_is_clamped_rather_than_abandoned() {
+		// §12's rule is that a hostile stream cannot grow our buffer, and clamping keeps that promise
+		// while still classifying the sequence — which matters, because the engine does not abandon a
+		// long run either. So this DECSCA is read, its `Ps` is not 1, and the pen ends up unprotected:
+		// the same answer the engine's saturated number would give.
 		let mut params = vec![b'\x1b', b'['];
-		params.extend(std::iter::repeat_n(b'1', MAX_PARAMS + 10));
+		params.extend(std::iter::repeat_n(b'1', 500));
+		params.extend_from_slice(b"\"q");
+		let mut protect = Protect::default();
+		assert_eq!(
+			protect.feed(&params),
+			vec![(params.len(), Request::Protect(false))]
+		);
+		assert!(!protect.armed);
+		assert!(
+			protect.params.bytes().len()
+				<= super::super::csi::MAX_PARAMS * super::super::csi::MAX_DIGITS,
+			"five hundred digits cost us five"
+		);
+	}
+
+	#[test]
+	fn a_runaway_separator_run_is_abandoned() {
+		// The bound that IS a cap, because here giving up is what the engine does: past thirty-two
+		// parameters its own array is full, the parser starts ignoring, and `ansi.rs` drops the whole
+		// sequence. Both sides ignoring the same bytes is the agreement this is for.
+		let mut params = vec![b'\x1b', b'['];
+		params.extend(std::iter::repeat_n(
+			b';',
+			super::super::csi::MAX_PARAMS + 10,
+		));
 		params.extend_from_slice(b"\"q");
 		let mut protect = Protect::default();
 		assert!(protect.feed(&params).is_empty());
