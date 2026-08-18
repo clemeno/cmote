@@ -264,22 +264,34 @@ fn engine_config() -> Config {
 	}
 }
 
+/// Stand up an engine and the reply buffer its listener writes into, the way `Terminal` stands them up.
+///
+/// A named function with two callers rather than a literal inside `Terminal::new`, for the same reason
+/// `engine_config` is one: `term/gatediff.rs` builds a SECOND engine beside cmote's and compares the two
+/// grids, and that comparison is worth nothing unless both engines were built identically. Written here,
+/// the guarantee holds by construction; written twice, an edit to this one would silently turn the oracle
+/// into a different terminal that agrees with cmote about nothing in particular.
+fn new_engine(rows: u16, cols: u16) -> (Engine, Arc<Mutex<ReplyBuffer>>) {
+	let replies = Arc::new(Mutex::new(ReplyBuffer {
+		rows,
+		cols,
+		..ReplyBuffer::default()
+	}));
+	let engine = Term::new(
+		engine_config(),
+		&GridSize {
+			rows: rows as usize,
+			cols: cols as usize,
+		},
+		Replies(Arc::clone(&replies)),
+	);
+	(engine, replies)
+}
+
 impl Terminal {
 	/// Create an emulator with a `rows`×`cols` grid, matching the remote pty.
 	pub fn new(rows: u16, cols: u16) -> Self {
-		let replies = Arc::new(Mutex::new(ReplyBuffer {
-			rows,
-			cols,
-			..ReplyBuffer::default()
-		}));
-		let term = Term::new(
-			engine_config(),
-			&GridSize {
-				rows: rows as usize,
-				cols: cols as usize,
-			},
-			Replies(Arc::clone(&replies)),
-		);
+		let (term, replies) = new_engine(rows, cols);
 		Self {
 			term,
 			parser: Processor::new(),
