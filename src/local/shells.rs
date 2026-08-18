@@ -123,9 +123,12 @@ impl Kind {
 	/// itself. `0x04` reaches them and is simply dropped.
 	///
 	/// That was measured rather than assumed. A probe drove a real ConPTY child of each of `pwsh`,
-	/// `powershell` and `cmd`, waited for the prompt, wrote one `0x04`, and watched the child handle for
-	/// six seconds: none of the three exited, and none printed anything either. So on those three the
-	/// key does nothing at all, which is what `app` fills in — see `Tab::end_local_shell`.
+	/// `powershell` and `cmd`, waited for the prompt, wrote one `0x04`, and watched both the child handle
+	/// and the bytes for six seconds: none of the three exited. They do not stay silent, though — each
+	/// ECHOES the byte onto its input line as the two characters `^D`, and that echo is the signal `app`
+	/// reads to tell "nothing consumed the Ctrl+D" from "a program did" (see `Tab::judge_eof`). The first
+	/// probe watched only the handle and so recorded no output at all, which is a narrower question than
+	/// the design needed. `docs/ctrl-d-on-windows-consoles.md` has the whole of it.
 	pub fn quits_on_eof(self) -> bool {
 		match self {
 			// MSYS bash and the macOS shells are POSIX shells and log out on EOF.
@@ -605,8 +608,9 @@ mod tests {
 			);
 		}
 		// Measured against real ConPTY children of all three: one `0x04` at the prompt, six seconds of
-		// watching the process handle, no exit and no output. Their EOF is Ctrl+Z, and even that means
-		// EOF only to a program reading a stream — never to the interpreter itself.
+		// watching, and none of them exited — each echoed the byte back as `^D` instead. Their EOF is
+		// Ctrl+Z, and even that means EOF only to a program reading a stream, never to the interpreter
+		// itself.
 		for shell in [Kind::Pwsh, Kind::PowerShell, Kind::Cmd] {
 			assert!(
 				!shell.quits_on_eof(),

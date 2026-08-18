@@ -11039,6 +11039,14 @@ character, and the table above is what that costs when you get it wrong.
   they are on the way to.
 - `README.md`: the keyboard table, the tour's quit paragraph, and the manual-test step, which now names
   the pager case and the history file.
+- `docs/ctrl-d-on-windows-consoles.md`, the first file in a new `docs/` folder: the whole rule in one
+  place — every guard with its reason, every measured table, the two-read answer, the tests and what each
+  pins, and a "where to change what" map — with four hand-written SVGs under `docs/img/` (the decision
+  flow, the two-chunk answer beside the buffer it accumulates into, the probe's two states, and the
+  teardown times against the two budgets). Written because this section is a *log* — it records how the
+  design was arrived at, including the two wrong turns — and someone changing the code needs the result
+  without reading the history. The stale half of `quits_on_eof`'s own doc comment (the first probe's "no
+  output", and a pointer to a `Tab::end_local_shell` that no longer exists) was corrected on the way.
 - Tests 1333 → 1343, one of which drives a real shell end to end.
 
 ### Not done

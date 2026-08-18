@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 720" width="1040" height="720" role="img" aria-label="The echo of a Ctrl+D arrives in two reads, and how the probe accumulates them">
+	<defs>
+		<marker id="arrow2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+			<path d="M 0 0 L 10 5 L 0 10 z" fill="#8b95a5"/>
+		</marker>
+	</defs>
+
+	<rect x="0" y="0" width="1040" height="720" fill="#1c1f26"/>
+
+	<text x="24" y="36" font-family="system-ui, sans-serif" font-size="19" fill="#d7dbe0">The answer arrives in two reads, not one</text>
+	<text x="24" y="58" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">Measured on pwsh and powershell through the real pty. cmd answers in a single 2-byte read.</text>
+
+	<!-- lanes -->
+	<rect x="110" y="80" width="240" height="38" rx="5" fill="#262b33" stroke="#4a5566"/>
+	<text x="230" y="105" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#d7dbe0">cmote (tab + session task)</text>
+	<line x1="230" y1="118" x2="230" y2="500" stroke="#3c4453" stroke-width="1.5" stroke-dasharray="5 4"/>
+
+	<rect x="690" y="80" width="240" height="38" rx="5" fill="#262b33" stroke="#4a5566"/>
+	<text x="810" y="105" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#d7dbe0">pwsh, through ConPTY</text>
+	<line x1="810" y1="118" x2="810" y2="500" stroke="#3c4453" stroke-width="1.5" stroke-dasharray="5 4"/>
+
+	<!-- 0x04 -->
+	<text x="30" y="155" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">t = 0</text>
+	<line x1="230" y1="150" x2="806" y2="150" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow2)"/>
+	<text x="518" y="142" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">0x04    (the key, not consumed)</text>
+
+	<!-- chunk 1 -->
+	<text x="30" y="210" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">+10 ms</text>
+	<line x1="810" y1="205" x2="234" y2="205" stroke="#c9a227" stroke-width="1.5" marker-end="url(#arrow2)"/>
+	<text x="522" y="197" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#e6c860">chunk 1 — ESC[?25l — 6 bytes, hides the cursor</text>
+	<text x="522" y="224" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">no echo, and not a partial one either</text>
+
+	<!-- chunk 2 -->
+	<line x1="810" y1="270" x2="234" y2="270" stroke="#4caf7d" stroke-width="1.5" marker-end="url(#arrow2)"/>
+	<text x="522" y="262" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#8fdcae">chunk 2 — ESC[93m^D ESC[97m ESC[2m ESC[3mexit ESC[2;20H ESC[?25h</text>
+	<text x="522" y="289" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">the echo, in PSReadLine's colour, with its own prediction attached</text>
+
+	<!-- quit sequence -->
+	<line x1="230" y1="340" x2="806" y2="340" stroke="#4caf7d" stroke-width="1.5" marker-end="url(#arrow2)"/>
+	<text x="518" y="332" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#8fdcae">0x03  'e' 'x' 'i' 't'  0x0d      shells::quit_sequence()</text>
+	<text x="518" y="359" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">the interrupt clears the line the echo is sitting on</text>
+
+	<!-- shell exits -->
+	<rect x="640" y="382" width="340" height="44" rx="5" fill="#1f3324" stroke="#4caf7d"/>
+	<text x="810" y="410" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#8fdcae">runs its own exit path, flushes history, leaves</text>
+
+	<line x1="810" y1="452" x2="234" y2="452" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow2)"/>
+	<text x="522" y="444" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">the stream ends -&gt; SshEvent::Disconnected</text>
+
+	<rect x="80" y="470" width="300" height="40" rx="5" fill="#1f3324" stroke="#4caf7d"/>
+	<text x="230" y="496" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#8fdcae">the tab lands on the home screen</text>
+
+	<!-- buffer panel -->
+	<line x1="24" y1="536" x2="1016" y2="536" stroke="#3c4453"/>
+	<text x="24" y="562" font-family="system-ui, sans-serif" font-size="15" fill="#d7dbe0">what the probe holds after each read</text>
+
+	<rect x="24" y="576" width="480" height="112" rx="6" fill="#332f1e" stroke="#c9a227"/>
+	<text x="40" y="600" font-family="system-ui, sans-serif" font-size="13" fill="#e6c860">after chunk 1 — heard = 6 bytes</text>
+	<text x="40" y="622" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">1b 5b 3f 32 35 6c</text>
+	<text x="40" y="648" font-family="system-ui, sans-serif" font-size="12" fill="#e58f7a">the bug: the first rule disarmed here</text>
+	<text x="40" y="670" font-family="system-ui, sans-serif" font-size="12" fill="#8fdcae">now: keep listening, 6 of 64 bytes spent</text>
+
+	<rect x="536" y="576" width="480" height="112" rx="6" fill="#1f3324" stroke="#4caf7d"/>
+	<text x="552" y="600" font-family="system-ui, sans-serif" font-size="13" fill="#8fdcae">after chunk 2 — heard = 43 bytes</text>
+	<text x="552" y="622" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">1b 5b 3f 32 35 6c 1b 5b 39 33 6d <tspan fill="#8fdcae">5e 44</tspan> ...</text>
+	<text x="552" y="648" font-family="system-ui, sans-serif" font-size="12" fill="#8fdcae">the needle "^D" is there — fire</text>
+	<text x="552" y="670" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">a boundary inside the needle survives this too</text>
+
+	<text x="24" y="710" font-family="system-ui, sans-serif" font-size="12" fill="#6f7885">Three earlier probes concatenated every chunk into one string before printing. The bytes were right; the boundaries were invisible.</text>
+</svg>

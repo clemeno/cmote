@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 900" width="1040" height="900" role="img" aria-label="Decision flow for Ctrl+D at a local Windows shell in cmote">
+	<defs>
+		<marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+			<path d="M 0 0 L 10 5 L 0 10 z" fill="#8b95a5"/>
+		</marker>
+	</defs>
+
+	<rect x="0" y="0" width="1040" height="900" fill="#1c1f26"/>
+
+	<text x="24" y="36" font-family="system-ui, sans-serif" font-size="19" fill="#d7dbe0">Ctrl+D at a local Windows shell — what decides what</text>
+	<text x="24" y="58" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">cmote does not take the key. It sends the byte, then reads the answer.</text>
+
+	<!-- press -->
+	<rect x="290" y="76" width="360" height="44" rx="6" fill="#262b33" stroke="#4a5566"/>
+	<text x="470" y="104" text-anchor="middle" font-family="system-ui, sans-serif" font-size="15" fill="#d7dbe0">Ctrl+D pressed, shell focused</text>
+	<line x1="470" y1="120" x2="470" y2="144" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<!-- guards -->
+	<rect x="170" y="146" width="600" height="124" rx="6" fill="#332f1e" stroke="#c9a227"/>
+	<text x="470" y="170" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#e6c860">all five guards pass? (app.rs, on_key)</text>
+	<text x="190" y="194" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">self.local.is_some()                     — a local session, not a remote one</text>
+	<text x="190" y="214" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!kind.quits_on_eof()                     — pwsh / powershell / cmd only</text>
+	<text x="190" y="234" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!self.on_alternate_screen()               — no full-screen program</text>
+	<text x="190" y="254" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">ctrl only, no shift/alt/logo + Key::Character("d")</text>
+
+	<line x1="770" y1="190" x2="796" y2="190" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+	<text x="783" y="182" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">no</text>
+	<rect x="798" y="160" width="222" height="62" rx="6" fill="#262b33" stroke="#4a5566"/>
+	<text x="909" y="184" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#9fb8dd">not armed</text>
+	<text x="909" y="204" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">an ordinary keystroke</text>
+
+	<line x1="470" y1="270" x2="470" y2="292" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+	<text x="484" y="286" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">yes</text>
+
+	<!-- arm -->
+	<rect x="290" y="294" width="360" height="44" rx="6" fill="#262b33" stroke="#4a5566"/>
+	<text x="470" y="322" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="14" fill="#d7dbe0">eof_probe = Some(Vec::new())</text>
+	<line x1="470" y1="338" x2="470" y2="360" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<!-- send -->
+	<rect x="250" y="362" width="440" height="62" rx="6" fill="#262b33" stroke="#4a5566"/>
+	<text x="470" y="386" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#d7dbe0">the encoder sends 0x04 — the key is NOT consumed</text>
+	<text x="470" y="408" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#8b95a5">term::keymap::control_byte("d")</text>
+	<line x1="470" y1="424" x2="470" y2="446" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<!-- shell -->
+	<rect x="250" y="448" width="440" height="58" rx="6" fill="#22303c" stroke="#5b8fd6"/>
+	<text x="470" y="472" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#9fb8dd">the shell — or whatever program is in front of it</text>
+	<text x="470" y="493" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">a program that wants EOF acts on it here; an interpreter echoes it</text>
+	<line x1="470" y1="506" x2="470" y2="528" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<!-- accumulate -->
+	<rect x="230" y="530" width="460" height="52" rx="6" fill="#262b33" stroke="#4a5566"/>
+	<text x="460" y="551" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">SshEvent::Output { bytes } -&gt; judge_eof</text>
+	<text x="460" y="571" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#8b95a5">heard.extend_from_slice(bytes)</text>
+	<line x1="470" y1="582" x2="470" y2="608" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<!-- needle test -->
+	<rect x="290" y="610" width="360" height="52" rx="6" fill="#332f1e" stroke="#c9a227"/>
+	<text x="470" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="14" fill="#e6c860">heard contains "^D" ?</text>
+
+	<line x1="650" y1="636" x2="726" y2="636" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+	<text x="688" y="628" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">no</text>
+
+	<rect x="730" y="610" width="290" height="52" rx="6" fill="#332f1e" stroke="#c9a227"/>
+	<text x="875" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="14" fill="#e6c860">heard.len() &gt;= 64 ?</text>
+
+	<!-- loop back: no, wait for the next chunk -->
+	<polyline points="875,662 875,690 710,690 710,556 692,556" fill="none" stroke="#8b95a5" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>
+	<text x="790" y="684" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">no — wait for the next chunk</text>
+
+	<line x1="875" y1="690" x2="875" y2="716" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+	<text x="890" y="710" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">yes</text>
+	<rect x="730" y="718" width="290" height="62" rx="6" fill="#22303c" stroke="#5b8fd6"/>
+	<text x="875" y="742" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#9fb8dd">give up — the session stays</text>
+	<text x="875" y="763" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">a program answered the byte</text>
+
+	<line x1="470" y1="662" x2="470" y2="716" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+	<text x="484" y="694" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">yes — nothing consumed it</text>
+
+	<!-- exit -->
+	<rect x="180" y="718" width="440" height="62" rx="6" fill="#1f3324" stroke="#4caf7d"/>
+	<text x="400" y="742" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#8fdcae">exit_the_local_shell -&gt; quit_sequence()</text>
+	<text x="400" y="763" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#8b95a5">0x03  'e' 'x' 'i' 't'  0x0d</text>
+	<line x1="400" y1="780" x2="400" y2="806" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+	<rect x="180" y="808" width="440" height="66" rx="6" fill="#1f3324" stroke="#4caf7d"/>
+	<text x="400" y="832" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#8fdcae">the shell runs its OWN exit path and leaves</text>
+	<text x="400" y="853" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">stream ends -&gt; SshEvent::Disconnected -&gt; home screen</text>
+
+	<text x="24" y="890" font-family="system-ui, sans-serif" font-size="12" fill="#6f7885">No teardown rides on this path: no Disconnect, no goodbye window, no TerminateProcess.</text>
+</svg>

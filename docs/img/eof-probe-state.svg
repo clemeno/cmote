@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 460" width="1000" height="460" role="img" aria-label="The two states of a tab's eof_probe and every transition between them">
+	<defs>
+		<marker id="arrow3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+			<path d="M 0 0 L 10 5 L 0 10 z" fill="#8b95a5"/>
+		</marker>
+	</defs>
+
+	<rect x="0" y="0" width="1000" height="460" fill="#1c1f26"/>
+
+	<text x="24" y="36" font-family="system-ui, sans-serif" font-size="19" fill="#d7dbe0">Tab::eof_probe — two states, and it can only ever fail towards "kept"</text>
+	<text x="24" y="58" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">One Option per tab. Almost every chunk of output cmote ever sees costs exactly one test of it.</text>
+
+	<!-- self loop above Listening -->
+	<path d="M 700 148 C 705 92 890 92 895 148" fill="none" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow3)"/>
+	<text x="797" y="84" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">another chunk, no echo yet, still under the cap</text>
+	<text x="797" y="104" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#d7dbe0">heard.extend_from_slice(bytes)</text>
+
+	<!-- states -->
+	<rect x="80" y="150" width="284" height="78" rx="8" fill="#262b33" stroke="#4a5566" stroke-width="2"/>
+	<text x="222" y="180" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="15" fill="#d7dbe0">eof_probe = None</text>
+	<text x="222" y="204" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">nothing outstanding</text>
+	<text x="222" y="221" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">judge_eof returns false at once</text>
+
+	<rect x="616" y="150" width="304" height="78" rx="8" fill="#332f1e" stroke="#c9a227" stroke-width="2"/>
+	<text x="768" y="180" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="15" fill="#e6c860">eof_probe = Some(heard)</text>
+	<text x="768" y="204" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">a Ctrl+D is in flight; the answer</text>
+	<text x="768" y="221" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">accumulates here, read by read</text>
+
+	<!-- arm -->
+	<line x1="366" y1="172" x2="612" y2="172" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow3)"/>
+	<text x="489" y="164" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#d7dbe0">armed: the five guards passed</text>
+	<text x="489" y="196" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">re-arming replaces the buffer,</text>
+	<text x="489" y="213" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">so a second press starts over</text>
+
+	<!-- disarm -->
+	<path d="M 612 208 C 520 292 440 292 368 212" fill="none" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow3)"/>
+	<text x="489" y="288" text-anchor="middle" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0">disarmed — three ways, below</text>
+
+	<!-- legend -->
+	<rect x="80" y="316" width="840" height="122" rx="6" fill="#21252c" stroke="#3c4453"/>
+	<text x="100" y="342" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">what disarms it, and what each one does</text>
+
+	<circle cx="106" cy="364" r="4" fill="#4caf7d"/>
+	<text x="120" y="369" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#8fdcae">"^D" in heard</tspan> — nothing consumed the byte: run the shell's own exit. The session ends because its shell did.</text>
+
+	<circle cx="106" cy="392" r="4" fill="#5b8fd6"/>
+	<text x="120" y="397" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#9fb8dd">heard.len() &gt;= 64</tspan> — the budget is spent: a program answered the byte, so the session is left alone.</text>
+
+	<circle cx="106" cy="420" r="4" fill="#8b95a5"/>
+	<text x="120" y="425" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#c8ced6">forget_connection()</tspan> — the session ended: a probe left behind would weigh the NEXT session's first chunk.</text>
+</svg>

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 420" width="1000" height="420" role="img" aria-label="Measured local teardown times against the goodbye window and the quit drain budget">
+	<rect x="0" y="0" width="1000" height="420" fill="#1c1f26"/>
+
+	<text x="24" y="36" font-family="system-ui, sans-serif" font-size="19" fill="#d7dbe0">Asking before killing — measured, and the two budgets it lives inside</text>
+	<text x="24" y="58" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">Real pwsh through the real session task, Disconnect to Disconnected. 1 ms = 0.4 px.</text>
+
+	<!-- grid -->
+	<line x1="140" y1="84" x2="140" y2="322" stroke="#3c4453"/>
+	<line x1="340" y1="84" x2="340" y2="322" stroke="#2a3038"/>
+	<line x1="540" y1="84" x2="540" y2="322" stroke="#2a3038"/>
+	<line x1="740" y1="84" x2="740" y2="322" stroke="#2a3038"/>
+	<line x1="940" y1="84" x2="940" y2="322" stroke="#2a3038"/>
+	<line x1="140" y1="322" x2="940" y2="322" stroke="#3c4453"/>
+
+	<text x="140" y="342" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">0</text>
+	<text x="340" y="342" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">500 ms</text>
+	<text x="540" y="342" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">1000 ms</text>
+	<text x="740" y="342" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">1500 ms</text>
+	<text x="940" y="342" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#6f7885">2000 ms</text>
+
+	<!-- asked -->
+	<text x="24" y="112" font-family="system-ui, sans-serif" font-size="13" fill="#8fdcae">asked</text>
+	<rect x="140" y="98" width="46" height="26" rx="3" fill="#2f6b4c" stroke="#4caf7d"/>
+	<text x="200" y="116" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#8fdcae">115 ms</tspan> — the shell took the typed exit and left on its own. No kill, no log line.</text>
+
+	<!-- unasked -->
+	<text x="24" y="167" font-family="system-ui, sans-serif" font-size="13" fill="#e58f7a">unasked</text>
+	<rect x="140" y="153" width="320" height="26" rx="3" fill="#5c3b33" stroke="#e58f7a"/>
+	<text x="474" y="171" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#e58f7a">801 ms</tspan> — a full-screen program was up, so nothing was typed: the window elapses, then TerminateProcess.</text>
+
+	<!-- GOODBYE -->
+	<text x="24" y="222" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#e6c860">GOODBYE</text>
+	<rect x="140" y="208" width="320" height="26" rx="3" fill="none" stroke="#c9a227" stroke-dasharray="6 4"/>
+	<text x="474" y="226" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#e6c860">800 ms</tspan> — local/session.rs: how long farewell() waits for the child before the kill.</text>
+
+	<!-- quit drain -->
+	<text x="24" y="277" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#9fb8dd">quit drain</text>
+	<rect x="140" y="263" width="800" height="26" rx="3" fill="none" stroke="#5b8fd6" stroke-dasharray="6 4"/>
+	<text x="152" y="281" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#9fb8dd">QUIT_DRAIN_TIMEOUT = 2000 ms</tspan> — app.rs: how long a quit waits for every session to report itself down.</text>
+
+	<!-- the tie -->
+	<line x1="140" y1="306" x2="780" y2="306" stroke="#8b95a5" stroke-width="1.5" stroke-dasharray="3 3"/>
+	<line x1="140" y1="300" x2="140" y2="312" stroke="#8b95a5" stroke-width="1.5"/>
+	<line x1="780" y1="300" x2="780" y2="312" stroke="#8b95a5" stroke-width="1.5"/>
+	<text x="792" y="311" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">2 x GOODBYE = 1600 ms</text>
+
+	<rect x="140" y="366" width="800" height="38" rx="5" fill="#21252c" stroke="#3c4453"/>
+	<text x="156" y="390" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#c8ced6">const _: () = assert!(GOODBYE.as_millis() * 2 &lt;= crate::app::QUIT_DRAIN_TIMEOUT.as_millis());</text>
+	<text x="24" y="390" font-family="system-ui, sans-serif" font-size="12" fill="#6f7885">the tie</text>
+</svg>
