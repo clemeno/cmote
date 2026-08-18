@@ -53,6 +53,8 @@ pub mod cwd; // tracks the remote working directory announced by the shell (§17
 mod differential; // drives the engine's own parser beside cmote's scanners and compares them (§106)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
 mod gate; // the one place cmote sits between the parser and the engine, so a decision can be pre-empted (§102)
+#[cfg(test)]
+mod gatediff; // drives a second, ungated engine beside cmote's and compares the grids they produce (§102, §106)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear (§69)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
