@@ -11282,11 +11282,17 @@ it is what the last four defects were.
   engine reads through must not change cmote's verdict, or the two disagree the moment a version bump fills
   one of those empty handler bodies. All five failed that test, which was written first. All eleven scanners
   now defer to `csi::passes_through`.
-- **A parameter byte after an intermediate is still read differently**, and now has a test saying so. The
-  engine drops the whole sequence; cmote's scanners take parameter bytes at any point and classify it. The
-  framer settles it.
+- ~~A parameter byte after an intermediate is still read differently.~~ **Done**, and it was the one
+  divergence leaning the other way: cmote acting ALONE rather than failing to act, on a spelling the engine
+  refuses outright (`lib.rs:232` → `CsiIgnore`, then nothing dispatched). No engine behaviour was being
+  compensated for, so there was no upside to weigh. The four scanners that buffer intermediates abandon the
+  sequence now; `dsr` and `tabs` need no guard, because their classifiers already fall through to no
+  request when an intermediate they do not expect is there — a check would be dead code.
 - **`MAX_INTERMEDIATES` is still 4 in six places**, against the engine's 2 — and the engine counts the
-  private marker against that budget while cmote counts it separately. Unobservable for the same reason.
+  private marker against that budget while cmote counts it separately. Reachable only with a sequence
+  carrying three intermediates, which no scanner here claims: each matches on the intermediates it expects,
+  so a longer run falls through to no request while the engine sets `ignoring` and drops it. Both refuse, by
+  different routes, which is agreement of a weaker kind than the rest of §106 settles for.
 - **A sub-parameter is counted like a separator, not like the engine's shared budget.** `Params` counts
   `:` against `MAX_PARAMS`, which is the right order of magnitude and not the same arithmetic. The case
   that would tell them apart is an SGR with 33 sub-parameters, where cmote would reassert protection that
