@@ -11349,10 +11349,150 @@ the code under test look wrong.
   time as well, and the verdict has to hold — the property §104's Ctrl+D rule broke, on a two-read answer
   it settled after the first read. The other eight scanners make the same claim in their own docs with
   only their own hand-written boundary test behind it.
-- **It compares the PARSER, not the engine.** `vte::Parser` says what would be dispatched; it does not say
+- ~~It compares the PARSER, not the engine.~~ **Answered in §107**, which compares the handler by running a
+  second engine with no gate in front of it. The gap as it stood: `vte::Parser` says what would be
+  dispatched; it does not say
   what `alacritty_terminal`'s handler then did with it, and `ansi.rs` has arms that discard a sequence the
   parser was happy with. So "the engine dispatched it" is a lower bound on agreement, and a scanner could
   still act on something the handler ignores.
-- **§102's region mirror wants the same treatment.** Its arithmetic is a transcription of the engine's, and
-  its eleven tests all check the transcription against itself. Set a region, scroll, and compare the grid
-  against what the mirror predicted — that is the differential test for it, and it does not exist.
+- ~~§102's region mirror wants the same treatment.~~ **Looked at in §107, and aimed elsewhere.** Its
+  arithmetic is a transcription of the engine's and its eleven tests all check the transcription against
+  itself, which is what made it look like the risk. It is not: the gate hands the SAME two parameters to
+  the mirror and to the engine on consecutive lines, so there is no second derivation to diverge. What the
+  mirror FEEDS — the gate's own re-implementations of a dozen engine methods — is where the differential
+  test was owed, and §107 is it.
+
+## §107 — The other side of the gate
+
+§106 closed with two admissions. Its harness compared the **parser** and not the handler, so "the engine
+would have dispatched this" was only a lower bound on agreement. And §102's region mirror — the one piece
+of cmote that copies engine state rather than reading the stream beside it — had no differential test at
+all, eleven tests that all checked a transcription against itself.
+
+This section is those two, and the second one turned out to be aimed at the wrong module.
+
+### The mirror was not the risk
+
+`term/region.rs` looks like the dangerous thing: cmote holding a copy of a private engine field. Reading
+`gate.rs:457` says otherwise.
+
+```rust
+fn set_scrolling_region(&mut self, top: usize, bottom: Option<usize>) {
+    self.region.set(top, bottom, self.term.screen_lines());
+    self.term.set_scrolling_region(top, bottom);
+}
+```
+
+**The same two parameters go to both.** Not a re-derivation from the bytes, not a second parse — one
+`Option<usize>` handed to the mirror and to the engine in consecutive lines, with the page height read off
+the engine itself. The arithmetic that follows is a transcription of `Term::set_scrolling_region`
+(`term/mod.rs:2155`) line for line: the same `bottom.unwrap_or(screen_lines)`, the same `top >= bottom`
+refusal, the same two `min`s against the page. For the two to disagree, one of those five lines would have
+to be wrong — and a test written from the same reading of the engine that produced them would agree with
+whichever way it was wrong. That is the tautology: an expected value derived the way the code derives it
+cannot disagree with the code.
+
+So the mirror got no new tests. What it FEEDS got them.
+
+### What the mirror feeds
+
+`term/gate.rs` re-implements about a dozen of the engine's own `Handler` methods so that a left or right
+margin can bound them — LF, NEL, RI, SU, SD, IL, DL, ICH, DCH, CUF, CUB, CR, HT, and the glyph path
+itself. It is the most dangerous file in `term/` for a reason that has nothing to do with mirroring: every
+other module there acts *beside* the engine and cannot break what the engine does, while this one stands
+**in its place**. And it had **no tests of its own** — zero — being exercised only through the 194 that go
+in at `Terminal::process`.
+
+Every one of those arms opens the same way:
+
+```rust
+if !self.narrowed() { self.term.<the engine's own>(…); return }
+```
+
+Which is a property worth stating out loud: **with no margins, cmote's arithmetic must not run at all.**
+Bytes in, the engine's own answer out. That is what an ordinary session — every session, since no shell
+sets margins — actually depends on, and nothing checked it.
+
+### An oracle that is measured rather than read
+
+`term/gatediff.rs` builds a **second engine**: same `engine_config()`, same page, and no gate in front of
+it. Both are fed the same stream and the whole document is compared — every cell's character, attribute
+bits and both colours, the cursor, and the scrollback depth.
+
+The point is where the expected values come from. §106's harness had the same virtue one layer down: not
+"here is what I believe `vte` does", but `vte` itself, running. Here it is not "here is what I believe the
+engine's `linefeed` does" but the engine's `linefeed`, run on the same bytes. **Measured, not
+transcribed.** That is the whole difference between this and the region tests it replaced the idea of.
+
+Fifteen margin-free streams, chosen to reach the arms rather than to be pretty: a line feed past the last
+row (which has to reach the scrollback), a line feed on the last row of a region, SU and SD, IL and DL both
+inside a region and with the cursor outside it, RI at a region's first row, a region whose top is zero (the
+one the engine stores *above* the page), a region as tall as the page, CNL and CPL, an autowrap over the
+page edge, the deferred wrap held on the last column, cursor motion that stops at the edges, a tab, a
+region set backwards, and NEL — which the engine builds out of two methods the gate has replaced, so it
+cannot be forwarded and is the trap `gate.rs`'s header warns about.
+
+### Four properties, and the proof each could fail
+
+Green on the first run, every one of them. A pass-through is *supposed* to be green, which is exactly the
+situation §106 spent a subsection on: a test that cannot fail also reports the area as covered. So each was
+broken on purpose before being kept.
+
+| property | broken how | what the sweep then said |
+|---|---|---|
+| with no margins the gate is the engine | `linefeed`'s `!narrowed()` disabled | 6 of 15 streams, first line `scrollback depth: gated 0, engine alone 2` |
+| margins as wide as the page are not margins | `narrowed`'s `right + 1 < cols` widened to `<=` | 5 of 15, **two of them only in the `WRAPLINE` flag** |
+| a band operation leaves the columns outside it alone | `scroll_band` given the whole width | 238 disturbed cells |
+| a band scroll files nothing in the scrollback | the gate made never to narrow | depth 0 → 2 on SU, 0 → 1 on a line feed |
+
+Two of those deserve reading twice.
+
+**The scrollback line.** `scroll_band` discards the row it pushes out of a band, on purpose — the history
+holds whole lines and a band row is a slice of one (`margins.rs`'s header argues it, xterm agrees). Correct
+for a band, catastrophic for a page: a gate that performed a band scroll where it should have forwarded
+would look *perfect on screen* and silently drop every line that scrolled off. Nothing but a scrollback
+comparison sees that, which is why the seam was agreed to include one.
+
+**The `WRAPLINE` flag.** Two of the five divergences differ in no character at all — only in bit 4 of the
+attribute word. That is the flag search, selection and copy read to join a wrapped line back into one
+logical line (§35, §40), and the band wrap deliberately does not set it (`gate.rs:246`). Had the sweep
+compared characters only, a change that quietly unstitched every wrapped line in the find bar would have
+passed it.
+
+### The margins-on half is a reading, and says so
+
+The user asked for the margins-ON rows too, and they cannot be oracle-backed: the engine does not implement
+a left margin, so there is no second implementation to measure against. Those two properties come from
+xterm's own definition — an operation bounded by the margins moves the columns between them and nothing
+else, and a row leaving the band is discarded — and the module labels them as such where they are
+declared, beside the streams that are measurements. Twelve operations, each run on a page filled row by row
+and then photographed before and after, so while the RULE is a reading, the expected value for every cell
+outside the band is the cell that was already there.
+
+What they do NOT say is that the band moved *correctly*. That is `mod.rs`'s fifteen margins tests, which
+came with §102. These say only that the operation stayed where it belongs.
+
+### What it cost
+
+Two commits, one new test-only module of 380 lines, and no production code changed at all — the four
+breakages were each reverted by hand, and `git diff --numstat` was checked against `HEAD` before every
+commit, because §106 lost an uncommitted fix to a careless `git checkout --` and that lesson was expensive
+enough once.
+
+`cargo test`: 1370 → 1374.
+
+### Not done
+
+- **The corpus is hand-picked, not generated.** §106 ends with a 5760-shape generator; this has 15 streams
+  and 12 operations, chosen by reading the gate for what it forwards. A generator over sequences × cursor
+  positions × band placements would be the same idea, and the shape sweep's lesson says the axis to add is
+  the one that makes the code look wrong.
+- **The `!narrowed()` guard is checked, not enforced.** A new arm added without it fails these tests only
+  if a stream in the corpus reaches it. `#[deny(clippy::missing_trait_methods)]` makes a MISSING method a
+  build error; nothing makes a *wrongly implemented* one anything but a test away from silence.
+- **`Terminal::process` is compared, so cmote's synthesised sequences are out of scope.** The corpus is
+  deliberately narrow — scrolling, cursor motion, plain text. A stream carrying selective erase (§56),
+  rectangular areas (§58), pictures (§41) or a soft reset (§72) differs from a bare engine *by design*, and
+  the harness would be wrong to call that a defect. Which means it says nothing about those paths.
+- **The framer is still the review's top recommendation and still unbuilt.** §106 hoisted two rules out of
+  the eleven scanners' duplicated grammar; nine of them still carry the machine itself.

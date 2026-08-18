@@ -1469,7 +1469,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Bounded by the scrolling region** since §102: a shift is a scrolling operation, so a status line parked outside the band stays where it is while the band slides under it. That bound is what §100 wanted and could not have — the region is private inside the engine, so the shift was REFUSED under origin mode instead, DECOM standing in as evidence that a region existed. The proxy was both too much (a program with origin mode and no region got nothing) and too little (a region set without origin mode was shifted straight through); the mirror retired it (§58, §100, §102, `term/rect.rs`, `term/region.rs`) |
 | Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ✅ | **kitty's**, not contour's — contour's own definition credits it (`"Scroll Down with Scrollback Fill (kitty unscroll)"`), which §98 recorded the wrong way round. SD with the top filled from the **scrollback** instead of with blanks, for the shell that prints completions under the cursor and scrolls the user's text away: plain SD would blank exactly what this exists to restore. The lines are **moved**, not copied — a copy would leave the same text in the scrollback and on the page, once per completion, for the life of the session. `Ps` defaults to 1 and clamps to the page; the rows pushed off the bottom are discarded; the cursor does not move. Where the scrollback cannot fill the request the remainder is blank, which is kitty's own rule and what makes the **alternate screen** correct with no special case — that page keeps no history. The one operation here that changes how many lines the document has, so every absolute anchor cmote holds — prompt marks, bookmarks, command spans, picture anchors, right-to-left flags — is renumbered with it (§101, `term/rect.rs`) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
-| s (DECSLRM) | Left / right margins | ✅ | sets the left and right margins, the horizontal half of DECSTBM — and everything that follows is a consequence rather than a separate feature: a line breaks at the **right margin** and goes on at the **left** one, a carriage return goes to the left margin, ICH and DCH stop at the margins, and every scroll (SU, SD, IL, DL, IND, RI) moves only the band of columns between them while the rest of the page stands. Under **origin mode** the columns a program names are counted from the left margin, the relationship DECOM already had with the region's rows. **The mode is the whole rule**: this byte is DECSLRM only while `? 69` below is set and is a save-cursor otherwise, which is how a real terminal reads it and what §57 could not do — it cancelled every parametrised `s` on the parameter count alone, because the engine refused the mode that settles it. A row pushed out of a narrowed band is **discarded, never scrollbacked**: the history holds whole lines and that row is a slice of one. Built on the `Handler` gate §5 costed and refused twice (§57, §73, §102, `term/margins.rs`, `term/gate.rs`) |
+| s (DECSLRM) | Left / right margins | ✅ | sets the left and right margins, the horizontal half of DECSTBM — and everything that follows is a consequence rather than a separate feature: a line breaks at the **right margin** and goes on at the **left** one, a carriage return goes to the left margin, ICH and DCH stop at the margins, and every scroll (SU, SD, IL, DL, IND, RI) moves only the band of columns between them while the rest of the page stands. Under **origin mode** the columns a program names are counted from the left margin, the relationship DECOM already had with the region's rows. **The mode is the whole rule**: this byte is DECSLRM only while `? 69` below is set and is a save-cursor otherwise, which is how a real terminal reads it and what §57 could not do — it cancelled every parametrised `s` on the parameter count alone, because the engine refused the mode that settles it. A row pushed out of a narrowed band is **discarded, never scrollbacked**: the history holds whole lines and that row is a slice of one. Built on the `Handler` gate §5 costed and refused twice (§57, §73, §102, `term/margins.rs`, `term/gate.rs`, `term/gatediff.rs`) |
 | g | Clear tab stop (TBC) | ✅ | TBC clears the tab stop under the cursor (`0`) or all of them (`3`) — the two DEC defined for a one-page terminal (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ✅ | DECST8C puts tab stops back every eight columns; performed by walking the page with CR and CUF and setting each stop with HTS, so the engine's table stays its own (§74, `term/tabs.rs`) |
 | Ps ; Ps SP k | Select character path (SCP) — data to presentation | ✅ | SCP picks the character path for the line under the cursor — `Ps1` `2` is right to left — and `Ps2 = 1` says the presentation is derived from the data, so the row is mirrored as it is drawn while the grid, scrollback, search, selection and copy stay in data order. Pictures are placed by column and not mirrored (§76, `term/scp.rs`) |
@@ -1588,7 +1588,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | the same mode as something drawn; cmote runs no animation timer, so the cursor is steady whatever DECRQM reports (§65) |
 | 25 | Show / hide cursor | ✅ | DECTCEM — whether the cursor is drawn at all |
 | 45 | Reverse wrap | ❌ | reverse wrap — a backspace in column 1 moves to the end of the line above |
-| 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (§5, §73, §102, `term/margins.rs`) |
+| 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (§5, §73, §102, `term/margins.rs`, `term/gatediff.rs`) |
 | 80 (behaviour) | Sixel scrolling | ✅ | what sixel scrolling mode governs: cmote always scrolls, the modern default and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | DECSDM as a mode — setting it asks a sixel not to scroll the page (§65) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | mouse reporting: presses and releases, the same plus drag, or all motion. Left, middle, right and the vertical wheel are encoded; the extra buttons and the horizontal wheel are not (`term/mouse.rs`) |
@@ -2658,11 +2658,15 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   It found the fourth defect on its first run: the parser runs a mid-sequence C0 and carries on with the
   sequence around it, where every scanner gave up — fixed in the three the engine has an arm for, and
   then in the other five on a self-consistency test, since a stray byte must not change cmote's own
-  verdict either. Five tests are agreements pinned from both sides;
-  one is the divergence that remains — a parameter byte after an intermediate, which the parser refuses
-  and cmote classifies — asserted as it behaves, so the framer has to flip it on purpose. What it does
-  NOT cover: it compares the parser rather than the handler, and six chosen sequences rather than a
-  generated corpus.
+  verdict either. Thirteen tests: agreements pinned from both sides, and
+  three **generated sweeps** — every spelling of a sequence (padding, and a read-through byte at each
+  position), the same verdict when the bytes arrive one at a time, and 5760 shapes over marker ×
+  intermediates × parameters × final byte × the ORDER of those parts. The sweeps found the last two
+  defects, one of them only after an axis was added: the shape generator emitted the parts in the legal
+  order alone, so it passed against the very guard it was written for until a malformed interleaving
+  was generated too. What it does NOT cover: it compares the parser rather than the handler, which is
+  the gap `term/gatediff.rs` below now fills; and `MAX_INTERMEDIATES` is still 4 in six scanners
+  against the engine's 2, which both sides refuse but by different routes.
 - **`term/gate.rs`** — the one place cmote sits **between** the parser and the engine (§102), and the
   odd one out in this whole list: every other module here reads the byte stream a second time and acts
   beside the engine, which is why none of them can break what the engine does. This one implements
@@ -2674,6 +2678,24 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   version's, is a build error rather than a silent no-op. Two traps it has to be read for — the engine's
   `newline` calls its OWN `linefeed` and `carriage_return`, and `goto_col` its own `goto`, so neither can
   be forwarded once the gate has replaced what they call.
+- **`term/gatediff.rs`** — test-only, and the other half of the harness above (§102, §106). The gate
+  re-implements a dozen of the engine's own `Handler` methods so margins can bound them, which is the
+  most dangerous thing in this directory: every other module here acts *beside* the engine and cannot
+  break it, while this one stands in its place. Each of those arms opens with `if !self.narrowed()` and
+  forwards, so with no margins the gate must be a **pass-through** — checked by building a SECOND
+  engine with the same config and no gate in front of it, feeding both the same stream, and comparing
+  the whole document: every cell's character, attribute bits and both colours, the cursor, and the
+  scrollback depth. Fifteen margin-free streams, then the same fifteen again behind a full-width
+  `CSI ? 69 h` `CSI 1 ; 10 s`, because a band at the page edges is not a band. The oracle is
+  **measured**, not transcribed, which is what separates it from `term/region.rs`'s tests. The
+  margins-ON rows have no oracle — the engine has no left margin to ask — so those two properties are
+  a reading of xterm's definition and are labelled as such where they are declared: a band operation
+  moves only the columns between the margins (twelve operations, compared against a photograph of the
+  page taken before), and a row leaving a narrowed band is **discarded rather than filed in the
+  scrollback**. All four properties were proved able to fail before being kept — a disabled
+  `!narrowed()` guard costs two scrollback lines, a `narrowed()` widened by one column diverges on
+  five streams (two only in the `WRAPLINE` flag), and a `scroll_band` given the whole width disturbs
+  238 cells outside the band.
 - **`term/region.rs`** — the engine's vertical scrolling region, mirrored (§102). `Term::scroll_region`
   is private with no accessor and no reply arm, which cost §100 a refusal and would have cost §102 the
   whole feature. The mirror is exact by construction: the field has **four writers**, two of them
