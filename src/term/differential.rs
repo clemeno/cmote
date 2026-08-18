@@ -96,6 +96,73 @@ impl Engine {
 	}
 }
 
+/// Every spelling of one sequence that leaves the ENGINE's reading of it unchanged (§106).
+///
+/// The six hand-written tests below confirm the four defects are fixed. This is the part that goes
+/// looking: it takes a sequence a scanner claims, rewrites its parameter region every way the engine is
+/// indifferent to, and hands back each variant with a name to fail by.
+///
+/// Two kinds of rewrite, and both were a live defect before §106:
+///
+///   * **Padding.** Leading zeros do not change a number, so `CSI 2 J` and `CSI 002 J` are one sequence
+///     as far as the engine is concerned.
+///   * **Interruption.** A byte the CSI grammar does not claim but which the engine reads straight
+///     through — a C0 it runs where it sits, DEL, anything past `0x7f` — inserted at every position in
+///     the parameter region, one at a time.
+///
+/// The point of generating rather than listing is that neither of those defects was found by thinking of
+/// a case. Both were found afterwards, by asking what else was in the same family.
+fn variants(params: &[u8], final_byte: u8) -> Vec<(String, Vec<u8>)> {
+	/// The bytes the engine reads through without ending the sequence, each with a name for the failure
+	/// message. Deliberately one of each KIND rather than all 30-odd values: NUL and LF are C0s it
+	/// executes, US is the top of that range, DEL is the one it ignores, and the two high bytes are the
+	/// `anywhere` fall-through — including `0x9c`, which is ST as a single byte and the most plausible one
+	/// to arrive by accident.
+	const READ_THROUGH: [(u8, &str); 6] = [
+		(0x00, "NUL"),
+		(b'\n', "LF"),
+		(0x1f, "US"),
+		(0x7f, "DEL"),
+		(0x80, "high"),
+		(0x9c, "ST8"),
+	];
+
+	let sequence = |params: &[u8]| {
+		let mut bytes = vec![0x1b, b'['];
+		bytes.extend_from_slice(params);
+		bytes.push(final_byte);
+		bytes
+	};
+
+	let mut out = vec![("plain".to_owned(), sequence(params))];
+
+	// Padding: each field zero-padded to four digits, then the whole run padded at its head.
+	let padded: Vec<u8> = params
+		.split(|&byte| byte == b';')
+		.map(|field| {
+			let mut field = field.to_vec();
+			for _ in 0..3 {
+				field.insert(0, b'0');
+			}
+			field
+		})
+		.collect::<Vec<_>>()
+		.join(&b';');
+	out.push(("every field padded".to_owned(), sequence(&padded)));
+
+	// Interruption: one read-through byte at each position inside the parameter region, including both
+	// ends of it — the boundary cases, since a byte right after the `[` or right before the final byte is
+	// where an off-by-one in the state machine shows up.
+	for (byte, name) in READ_THROUGH {
+		for at in 0..=params.len() {
+			let mut interrupted = params.to_vec();
+			interrupted.insert(at, byte);
+			out.push((format!("{name} at {at}"), sequence(&interrupted)));
+		}
+	}
+	out
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -201,6 +268,132 @@ mod tests {
 		let found = Cancel::default().feed(bytes);
 		assert_eq!(found.len(), 1, "and cmote judges it now");
 		assert_eq!((found[0].left, found[0].right), (Some(5), Some(70)));
+	}
+
+	#[test]
+	fn every_spelling_of_a_margin_request_is_read_by_both() {
+		// The sweep, in the shape the four defects taught: not "does this case work" but "does cmote claim
+		// this sequence exactly when the engine dispatches it". Both directions matter — cmote missing one
+		// is a cursor overwritten, cmote claiming one the engine threw away is a save-cursor stolen from a
+		// program that is entitled to it.
+		let cases = variants(b"5;70", b's');
+		assert_eq!(
+			cases.len(),
+			32,
+			"1 plain + 1 padded + 6 bytes x 5 positions"
+		);
+		for (name, bytes) in cases {
+			let dispatched = engine(&bytes).dispatched_plain('s', 5);
+			let found = Cancel::default().feed(&bytes);
+			assert_eq!(
+				dispatched,
+				found.len() == 1,
+				"{name}: the engine dispatched {dispatched}, cmote found {}",
+				found.len()
+			);
+			if dispatched {
+				assert_eq!(
+					(found[0].left, found[0].right),
+					(Some(5), Some(70)),
+					"{name}: and it read the same two numbers"
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn every_spelling_of_an_erase_is_read_by_both() {
+		// `CSI 2 J` takes the pictures with the text. Every way of writing it has to, or a picture outlives
+		// the screen it was drawn on — and the padded spelling is exactly how that shipped.
+		for (name, bytes) in variants(b"2", b'J') {
+			let dispatched = engine(&bytes).dispatched_plain('J', 2);
+			let found = graphics::Images::default().feed(&bytes);
+			let cleared = matches!(found.as_slice(), [(_, graphics::Event::ClearScreen)]);
+			assert_eq!(
+				dispatched, cleared,
+				"{name}: engine {dispatched}, cmote {cleared}"
+			);
+		}
+	}
+
+	#[test]
+	fn every_spelling_of_an_sgr_is_reasserted_across() {
+		// An SGR the engine applies while DECSCA is armed must be reported, whatever it is spelled like,
+		// because `Attr::Reset` assigns the flag word whole and cmote's borrowed protection bit goes with
+		// it. Over-reporting is free here (re-asserting a bit that is still set is a no-op); missing one
+		// silently unprotects a run.
+		for (name, bytes) in variants(b"0;1", b'm') {
+			let dispatched = engine(&bytes).dispatched_plain('m', 0);
+			let mut scanner = protect::Protect::default();
+			scanner.feed(b"\x1b[1\"q");
+			let found = scanner.feed(&bytes);
+			let reasserted = matches!(found.as_slice(), [(_, protect::Request::Reassert)]);
+			assert_eq!(
+				dispatched, reasserted,
+				"{name}: engine {dispatched}, cmote {reasserted}"
+			);
+		}
+	}
+
+	#[test]
+	fn no_scanner_changes_its_mind_when_the_bytes_arrive_one_at_a_time() {
+		// Every scanner's doc claims it is safe at any chunk boundary, and the engine's parser is safe at one
+		// by construction. This is the sweep for that claim, and it is here rather than in each module
+		// because the claim is identical in all of them and a boundary bug has already cost this project a
+		// release: §104's Ctrl+D rule settled on the first chunk of a two-read answer and shipped broken.
+		//
+		// Offsets are deliberately not compared — they are measured within the chunk that completed the
+		// sequence, so a byte-at-a-time feed reports 0 and a whole-slice feed reports where it sat. What
+		// must not change is the VERDICT.
+		for (name, bytes) in variants(b"5;70", b's') {
+			let whole = Cancel::default()
+				.feed(&bytes)
+				.iter()
+				.map(|request| (request.left, request.right))
+				.collect::<Vec<_>>();
+			let mut scanner = Cancel::default();
+			let split = bytes
+				.iter()
+				.flat_map(|&byte| scanner.feed(&[byte]))
+				.map(|request| (request.left, request.right))
+				.collect::<Vec<_>>();
+			assert_eq!(whole, split, "margins, {name}");
+		}
+
+		for (name, bytes) in variants(b"2", b'J') {
+			let cleared = |found: &[(usize, graphics::Event)]| {
+				matches!(found, [(_, graphics::Event::ClearScreen)])
+			};
+			let whole = graphics::Images::default().feed(&bytes);
+			let mut scanner = graphics::Images::default();
+			let split: Vec<_> = bytes
+				.iter()
+				.flat_map(|&byte| scanner.feed(&[byte]))
+				.collect();
+			assert_eq!(
+				cleared(&whole),
+				cleared(&split),
+				"erase, {name}: whole {}, split {}",
+				cleared(&whole),
+				cleared(&split)
+			);
+		}
+
+		for (name, bytes) in variants(b"0;1", b'm') {
+			let armed = || {
+				let mut scanner = protect::Protect::default();
+				scanner.feed(b"\x1b[1\"q");
+				scanner
+			};
+			let whole: Vec<_> = armed().feed(&bytes).into_iter().map(|(_, it)| it).collect();
+			let mut scanner = armed();
+			let split: Vec<_> = bytes
+				.iter()
+				.flat_map(|&byte| scanner.feed(&[byte]))
+				.map(|(_, it)| it)
+				.collect();
+			assert_eq!(whole, split, "sgr, {name}");
+		}
 	}
 
 	#[test]
