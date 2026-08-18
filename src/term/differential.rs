@@ -397,6 +397,60 @@ mod tests {
 	}
 
 	#[test]
+	fn the_scanners_with_no_engine_arm_read_through_a_stray_byte_too() {
+		// The other five CSI scanners, and the reason this test is here rather than in each of them: the rule
+		// they are being held to is the ENGINE's (`csi::passes_through`), and the only thing that makes it
+		// their business is that they shadow the same byte stream.
+		//
+		// The engine has no live arm behind any of these five sequences, so there is nothing to compare a
+		// verdict against — `vte` frames them and `ansi.rs` drops them. What can still be asserted is
+		// SELF-CONSISTENCY, and it is worth exactly as much: a stray byte the engine reads through must not
+		// change what cmote makes of a sequence, or the two will disagree the moment a version bump fills one
+		// of those empty handler bodies. All five gave up on the line feed before this test existed.
+		let interrupted = |sequence: &[u8], at: usize| {
+			let mut bytes = sequence.to_vec();
+			bytes.insert(at, b'\n');
+			bytes
+		};
+
+		/// One scanner's claim on one sequence: what it is, the sequence itself, where the stray byte is
+		/// inserted, and how to ask that scanner whether it still claimed it. A named type because the
+		/// five scanners return five different verdicts and only "did you claim it" is common to them.
+		type Claim = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
+
+		let claims: [Claim; 5] = [
+			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
+				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
+			}),
+			("tabs, DECST8C", b"\x1b[?5W", 3, |bytes| {
+				!super::super::tabs::Tabs::default().feed(bytes).is_empty()
+			}),
+			("scp, SCP", b"\x1b[2 k", 3, |bytes| {
+				!super::super::scp::Scp::default().feed(bytes).is_empty()
+			}),
+			("sgrstack, XTPUSHSGR", b"\x1b[#{", 2, |bytes| {
+				!super::super::sgrstack::SgrStack::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			("rect, DECERA", b"\x1b[2;3;5;7$z", 4, |bytes| {
+				!super::super::rect::Rectangles::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+		];
+
+		for (what, sequence, at, claimed) in claims {
+			assert!(claimed(sequence), "{what}: the plain spelling is claimed");
+			assert!(
+				claimed(&interrupted(sequence, at)),
+				"{what}: and so is the one with a line feed in the middle, because the engine reads it \
+				 through and goes on with the sequence"
+			);
+		}
+	}
+
+	#[test]
 	fn can_and_sub_end_a_sequence_for_both() {
 		// The other half of the same rule, so "keep reading" cannot quietly become "keep reading for ever".
 		// CAN and SUB are the ANSI machine's cancels; the engine runs the byte and drops back to ground.

@@ -209,8 +209,13 @@ impl Dsr {
 					}
 					// A fresh ESC restarts the match.
 					ESC => self.state = Scan::Escape,
-					// A C0 control byte or DEL inside a CSI: malformed, so drop the sequence rather
-					// than let a stray byte extend it indefinitely.
+					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
+					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
+					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
+					// would mean cmote and the engine disagreeing about what this byte stream even was,
+					// which is how three defects reached a release.
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
 					_ => self.state = Scan::Text,
 				},
 			}
@@ -428,8 +433,14 @@ mod tests {
 	/// A control byte inside a CSI abandons the sequence rather than extending it, so the `n` that
 	/// follows is not read as this sequence's final byte.
 	#[test]
-	fn a_control_byte_abandons_the_sequence() {
-		assert!(scan(b"\x1b[?6\x07n").is_empty());
+	fn a_control_byte_does_not_abandon_the_sequence() {
+		// This asserted the opposite until §106. The engine runs a mid-sequence control byte where it sits
+		// and carries on with the sequence around it, so giving up here would leave cmote and the engine
+		// disagreeing about what the stream sent — which is how three defects reached a release.
+		assert!(!scan(b"\x1b[?6\x07n").is_empty());
+		// The converse, so "keep reading" cannot become "keep reading for ever": CAN and SUB are the two
+		// bytes that really do cancel a sequence, here and in the engine.
+		assert!(scan(b"\x1b[?6\x18n").is_empty());
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound.

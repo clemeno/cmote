@@ -136,8 +136,13 @@ impl Tabs {
 					}
 					// A fresh ESC restarts the match.
 					ESC => self.state = Scan::Escape,
-					// A C0 control byte or DEL inside a CSI: malformed, so drop the sequence rather
-					// than let a stray byte extend it indefinitely.
+					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
+					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
+					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
+					// would mean cmote and the engine disagreeing about what this byte stream even was,
+					// which is how three defects reached a release.
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
 					_ => self.state = Scan::Text,
 				},
 			}
@@ -274,8 +279,12 @@ mod tests {
 	/// A control byte inside a CSI abandons the sequence rather than extending it, so the `W` that
 	/// follows is not read as this sequence's final byte.
 	#[test]
-	fn a_control_byte_abandons_the_sequence() {
-		assert!(scan(b"\x1b[?5\x07W").is_empty());
+	fn a_control_byte_does_not_abandon_the_sequence() {
+		// The reverse of what this asserted before §106: the engine reads a mid-sequence control byte
+		// through and keeps the sequence, so cmote does too, or the two disagree about the same bytes.
+		assert!(!scan(b"\x1b[?5\x07W").is_empty());
+		// CAN and SUB are the only two that really cancel one.
+		assert!(scan(b"\x1b[?5\x18W").is_empty());
 	}
 
 	/// A hostile stream must not be able to make the scanner buffer without bound.

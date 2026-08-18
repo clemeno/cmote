@@ -447,8 +447,13 @@ impl Rectangles {
 					}
 					// A fresh ESC restarts the match.
 					ESC => self.state = Scan::Escape,
-					// A C0 control byte or DEL inside a CSI: malformed, so drop the sequence rather
-					// than let a stray byte extend it indefinitely.
+					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
+					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
+					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
+					// would mean cmote and the engine disagreeing about what this byte stream even was,
+					// which is how three defects reached a release.
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
 					_ => self.state = Scan::Text,
 				},
 			}
@@ -1259,8 +1264,13 @@ mod tests {
 	}
 
 	#[test]
-	fn a_control_byte_inside_a_csi_abandons_the_sequence() {
-		assert!(scan(b"\x1b[2;3\n;5;7$z").is_empty());
+	fn a_control_byte_inside_a_csi_does_not_abandon_it() {
+		// The reverse of what this asserted before §106. The engine runs the line feed where it sits and
+		// keeps reading the rectangle's corners around it, so a scanner that gave up would be describing a
+		// different stream from the one the engine saw.
+		assert!(!scan(b"\x1b[2;3\n;5;7$z").is_empty());
+		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
+		assert!(scan(b"\x1b[2;3\x18;5;7$z").is_empty());
 	}
 
 	#[test]
