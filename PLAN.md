@@ -11244,6 +11244,49 @@ scanners classify anyway. Harmless for now — the sequence it lands on is cmote
 no engine action to contradict — and written down as code so the framer has to flip it on purpose rather
 than silently. A divergence with a test around it is an inventory item. A divergence with a comment around
 it is what the last four defects were.
+
+### The sweep that could not fail
+
+The shape sweep is the fifth defect's story and a lesson about tests, in that order.
+
+A generator over private marker × intermediates × parameter run × final byte, 1920 sequences, asking one
+question in one direction: **does any scanner act on bytes the parser threw away?** The converse is not a
+defect — the parser frames a great deal cmote deliberately ignores — but this direction means cmote is the
+only terminal in the world obeying a spelling, which is exactly the shape §106's ordering fix had been.
+
+It passed. Then it was run against that ordering fix **reverted**, to check it could fail. It passed again.
+
+The generator emitted the parts in the order the grammar defines — marker, then parameters, then
+intermediates — so the malformed interleaving the bug needed was one the sweep never produced. 1920 green
+cases, and a hole where the thing being tested was. A test that cannot fail is worse than no test, because
+it also reports that the area is covered.
+
+So the generator grew an **Order** axis: the well-formed one, a parameter byte after the intermediates
+(`lib.rs:232` → `CsiIgnore`), and a private marker after the parameters (`lib.rs:249`, the same). 5760
+sequences, and it now fails against either guard reverted — 16 cases for one, 19 for the other.
+
+With the axis in, it found a live defect: **19 sequences, every one of them `protect`, every one a marker
+arriving after the parameters.**
+
+| the stream sends | what protect made of it | what the engine did |
+|---|---|---|
+| `CSI ? 1;2 ? J` | a selective **erase** — cells wiped | dropped the sequence whole |
+| `CSI 1 ? m` | a spurious `Reassert` (a no-op, since re-asserting a set bit changes nothing) | dropped it |
+| `CSI 1 " ? q` | a spurious DECSCA | dropped it |
+
+The first row is the one that matters: cmote erased cells for a sequence nothing else obeys. The reason it
+got that far is worth keeping — `first_param` reads only the FIRST field of the run, so the stray marker sat
+in the second where nothing looked at it.
+
+Only `protect` needed the guard, and the other three that buffer a parameter run are clean for a reason
+worth writing down rather than leaning on: their classifiers parse the whole run as numbers, so a marker
+byte inside it fails the parse and the sequence falls through. `protect`'s does not — two of its five arms
+never look at the parameters at all, which is what let a malformed one through to an erase.
+
+Two things this leaves behind. The three clean scanners are clean **by consequence**, not by rule, and the
+sweep is what would notice if that consequence ever changed. And the lesson generalises past this section:
+a generated corpus is only as good as the axis it varies, and the axis worth adding is the one that makes
+the code under test look wrong.
 
 ### What it cost
 
@@ -11297,12 +11340,11 @@ it is what the last four defects were.
   `:` against `MAX_PARAMS`, which is the right order of magnitude and not the same arithmetic. The case
   that would tell them apart is an SGR with 33 sub-parameters, where cmote would reassert protection that
   was never cleared: a no-op, disclosed rather than fixed.
-- **The sweep covers one family, not the grammar.** It generates every spelling of a claimed sequence that
-  the engine reads identically — padding, and one read-through byte at every position — and all 86 cases
-  agree, in both feed modes. What it does NOT vary is the shape: private markers, intermediates and
-  sub-parameters are still only tested by the hand-written cases, and those are the shapes the remaining
-  divergence lives in. A generator over final byte × marker × intermediate × sub-parameter is the version
-  that would find a fifth defect if there is one.
+- ~~The sweep covers one family, not the grammar.~~ **Done, and it found the fifth defect.** The shape
+  generator walks marker × intermediates × params × final byte × ORDER — 5760 sequences — and asks the
+  one-directional question: does any scanner act on bytes the parser threw away? The converse is fine (the
+  parser frames plenty cmote ignores); this direction means cmote is the only terminal in the world obeying
+  a spelling. See "the sweep that could not fail" above.
 - **Chunk-safety is swept for three scanners and claimed by eleven.** Every variant is fed one byte at a
   time as well, and the verdict has to hold — the property §104's Ctrl+D rule broke, on a two-read answer
   it settled after the first read. The other eight scanners make the same claim in their own docs with
