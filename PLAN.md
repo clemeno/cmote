@@ -11258,8 +11258,10 @@ it is what the last four defects were.
 - `term/graphics.rs`: `Params`, and a `first_param` spelling `next_param_or(0)`.
 - `term/csi.rs` again: `passes_through`, the control-byte rule the fourth defect needed.
 - `term/differential.rs`: the harness — a `vte::Perform` that records what the parser dispatched, refused
-  and executed, and six tests. Five are agreements pinned from both sides; one is the divergence that
-  remains, asserted as it behaves.
+  and executed, plus a generator for every spelling of a sequence the engine reads identically. Eleven
+  tests: six hand-written (five agreements pinned from both sides, one the divergence that remains,
+  asserted as it behaves), three sweeps over 86 generated cases, and one that feeds every case a byte at a
+  time and requires the same verdict.
 - Tests 1343 → 1364. Four commits, one per defect, each red before green.
 - `TERMINAL_COMPATIBILITY_PLAN.md`: a `term/csi.rs` entry, the three scanners' entries, the ED row, the
   cancel test count, and a mangled sentence in `protect.rs`'s entry that had been sitting there since §72.
@@ -11286,10 +11288,16 @@ it is what the last four defects were.
   `:` against `MAX_PARAMS`, which is the right order of magnitude and not the same arithmetic. The case
   that would tell them apart is an SGR with 33 sub-parameters, where cmote would reassert protection that
   was never cleared: a no-op, disclosed rather than fixed.
-- **The harness covers six sequences, not the grammar.** It is a handful of cases somebody thought of, not
-  a sweep: a generated corpus (every final byte, with and without markers, intermediates, sub-parameters
-  and controls in every position) would answer "where else do these two disagree" instead of confirming
-  where they no longer do. That is the version that finds the fifth defect.
+- **The sweep covers one family, not the grammar.** It generates every spelling of a claimed sequence that
+  the engine reads identically — padding, and one read-through byte at every position — and all 86 cases
+  agree, in both feed modes. What it does NOT vary is the shape: private markers, intermediates and
+  sub-parameters are still only tested by the hand-written cases, and those are the shapes the remaining
+  divergence lives in. A generator over final byte × marker × intermediate × sub-parameter is the version
+  that would find a fifth defect if there is one.
+- **Chunk-safety is swept for three scanners and claimed by eleven.** Every variant is fed one byte at a
+  time as well, and the verdict has to hold — the property §104's Ctrl+D rule broke, on a two-read answer
+  it settled after the first read. The other eight scanners make the same claim in their own docs with
+  only their own hand-written boundary test behind it.
 - **It compares the PARSER, not the engine.** `vte::Parser` says what would be dispatched; it does not say
   what `alacritty_terminal`'s handler then did with it, and `ansi.rs` has arms that discard a sequence the
   parser was happy with. So "the engine dispatched it" is a lower bound on agreement, and a scanner could
