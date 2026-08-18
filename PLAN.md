@@ -11143,8 +11143,9 @@ spelled thirteen times and `MAX_PARAMS` spelled eight times at **three different
 
 A scanner beside the stream and the engine inside it read the same bytes. Wherever the two disagree about
 whether a sequence is well formed, one of them acts and the other does not — and that, not the copying,
-is what the numbers were quietly costing. Three disagreements were reachable, all three verified against
-the vendored `vte`, all three fixed here with a failing test first.
+is what the numbers were quietly costing. **Four** disagreements turned out to be reachable, each verified
+against the vendored `vte` and each fixed here with a failing test first. Three were found by hand. The
+fourth was found by a harness built *because* finding them by hand had stopped being funny.
 
 ### What the engine actually does
 
@@ -11208,6 +11209,42 @@ arrived", since a dropped leading zero leaves it true. A caller reads emptiness 
 still legal here", so without the flag `CSI 0?J` — which the engine drops outright — would have
 classified as a selective erase. A fix's own side effects are where the next defect lives.
 
+### Asking the engine instead of reading it
+
+Three defects found by reading a crate and noticing a constant counted the wrong thing. That does not
+scale, and it does not survive a version bump: the next `vte` could change any of the five facts in the
+table above and every one of cmote's scanners would go on agreeing with a note about the old ones.
+
+So `term/differential.rs` asks the question directly. `alacritty_terminal` re-exports `vte`, which means a
+test can drive the **actual parser the engine is built on**, record what it dispatched, and compare that
+with what cmote's scanner made of the same bytes. No new dependency, and no crate-reading in the loop:
+the answers come from the parser rather than from a paragraph about the parser.
+
+**It found the fourth defect on its first run**, which is the whole argument for it. The parser runs a C0
+control that arrives mid-sequence and CARRIES ON with the sequence around it (`lib.rs:190`, `:230`,
+`:241`), ignores DEL (`:222`, `:251`), and hands a byte past `0x7f` to `anywhere`, which does nothing with
+it (`:438-449`). Only CAN (`0x18`) and SUB (`0x1a`) abandon a sequence — the ANSI state machine's own
+definition, and the reason cmote feeds CAN in place of a final byte it refuses — and ESC restarts one. All
+three scanners gave up on **every** one of those bytes, so:
+
+| the stream sends | the engine does | cmote did | what it cost |
+|---|---|---|---|
+| `CSI 5;` LF `70 s` | runs the line feed, dispatches save-cursor | gave up at the LF | §57 again: margins not applied, saved cursor overwritten |
+| `CSI 0;` LF `1 m` while DECSCA is armed | runs the line feed, applies the SGR | gave up | §56 again: `Attr::Reset` takes the protection bit, nothing puts it back |
+| `CSI 0` LF `2 J` | runs the line feed, erases the screen | gave up | §41 again: the pictures outlive the text |
+
+`csi::passes_through` names the rule once, with the parser's `path:line` per arm, and the three scanners
+defer to it. Three of their tests were rewritten, because each was asserting the disagreement — and each
+now asserts the rule *and its converse*, since "keep reading" must not quietly become "keep reading for
+ever": only CAN and SUB cancel, and DEL is not one of them.
+
+The remaining divergence gets a test that asserts it **as it behaves today**, not as it should behave: a
+parameter byte after an intermediate, which the parser refuses outright (`lib.rs:232`) and which cmote's
+scanners classify anyway. Harmless for now — the sequence it lands on is cmote's own feature, so there is
+no engine action to contradict — and written down as code so the framer has to flip it on purpose rather
+than silently. A divergence with a test around it is an inventory item. A divergence with a comment around
+it is what the last four defects were.
+
 ### What it cost
 
 - `term/csi.rs`: `MAX_PARAMS`, `MAX_DIGITS`, `Params`, and five tests including the leading-zero case and
@@ -11219,7 +11256,11 @@ classified as a selective erase. A fix's own side effects are where the next def
   and stays a no-op), and the intermediates cap left local with a note that it is looser than the
   engine's two and cannot be observed.
 - `term/graphics.rs`: `Params`, and a `first_param` spelling `next_param_or(0)`.
-- Tests 1343 → 1355. Three commits, one per defect, each red before green.
+- `term/csi.rs` again: `passes_through`, the control-byte rule the fourth defect needed.
+- `term/differential.rs`: the harness — a `vte::Perform` that records what the parser dispatched, refused
+  and executed, and six tests. Five are agreements pinned from both sides; one is the divergence that
+  remains, asserted as it behaves.
+- Tests 1343 → 1364. Four commits, one per defect, each red before green.
 - `TERMINAL_COMPATIBILITY_PLAN.md`: a `term/csi.rs` entry, the three scanners' entries, the ED row, the
   cancel test count, and a mangled sentence in `protect.rs`'s entry that had been sitting there since §72.
 
@@ -11231,17 +11272,28 @@ classified as a selective erase. A fix's own side effects are where the next def
   behind any of their sequences — which is a fact about today's `vte` and not a property of the code. A
   version bump that fills one of those empty trait bodies makes them observable, and the framer is what
   would make that a non-event.
-- **Two grammar disagreements are settled nowhere.** The six-family scanners accept a parameter byte
-  *after* an intermediate, where the engine drops the whole sequence, and they abandon on C0/DEL, where
-  the engine executes the control and stays inside the sequence. Both are uniform across the six and
-  independent of any constant, so both belong to the framer rather than to a per-scanner patch.
+- **The control-byte rule is fixed in three scanners and wrong in five.** `dsr`, `tabs`, `scp`, `sgrstack`
+  and `rect` still abandon a sequence on a C0 the engine runs and reads through. Unobservable for the same
+  reason as above, and one call to `csi::passes_through` away — left undone deliberately, because a fix
+  with no failing test behind it is a change, not a fix, and the differential harness cannot write one for
+  a sequence the engine has no arm for.
+- **A parameter byte after an intermediate is still read differently**, and now has a test saying so. The
+  engine drops the whole sequence; cmote's scanners take parameter bytes at any point and classify it. The
+  framer settles it.
 - **`MAX_INTERMEDIATES` is still 4 in six places**, against the engine's 2 — and the engine counts the
   private marker against that budget while cmote counts it separately. Unobservable for the same reason.
 - **A sub-parameter is counted like a separator, not like the engine's shared budget.** `Params` counts
   `:` against `MAX_PARAMS`, which is the right order of magnitude and not the same arithmetic. The case
   that would tell them apart is an SGR with 33 sub-parameters, where cmote would reassert protection that
   was never cleared: a no-op, disclosed rather than fixed.
-- **Nothing tests cmote and the engine against each other.** Every claim in the table above was read out
-  of the crate by hand, and the tests assert cmote's side of the agreement only. A differential test —
-  feed both, compare what each did with the same bytes — would have caught all three of these without
-  anyone reading `vte`, and it is the shape §102's region mirror wants as well.
+- **The harness covers six sequences, not the grammar.** It is a handful of cases somebody thought of, not
+  a sweep: a generated corpus (every final byte, with and without markers, intermediates, sub-parameters
+  and controls in every position) would answer "where else do these two disagree" instead of confirming
+  where they no longer do. That is the version that finds the fifth defect.
+- **It compares the PARSER, not the engine.** `vte::Parser` says what would be dispatched; it does not say
+  what `alacritty_terminal`'s handler then did with it, and `ansi.rs` has arms that discard a sequence the
+  parser was happy with. So "the engine dispatched it" is a lower bound on agreement, and a scanner could
+  still act on something the handler ignores.
+- **§102's region mirror wants the same treatment.** Its arithmetic is a transcription of the engine's, and
+  its eleven tests all check the transcription against itself. Set a region, scroll, and compare the grid
+  against what the mirror predicted — that is the differential test for it, and it does not exist.

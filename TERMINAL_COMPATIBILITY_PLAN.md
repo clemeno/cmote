@@ -2378,7 +2378,9 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   default: it used to be compared byte-for-byte against `b"2"` and `b"3"`, which agreed with the engine
   on the one spelling everything sends and on no other — `CSI 002 J` and `CSI 2;5 J` both erase the
   screen there, and the pictures stayed on it. The run itself now comes from `csi::Params`, whose
-  16-byte predecessor abandoned a padded erase for the same reason and to the same effect.
+  16-byte predecessor abandoned a padded erase for the same reason and to the same effect. A mid-sequence
+  control byte is read through as well (`csi::passes_through`), since `CSI 0` LF `2 J` erases the screen
+  as far as the engine is concerned.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
@@ -2549,7 +2551,9 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   Nothing put the borrowed bit back, so **protection was silently lost across a long SGR**. `first_param`
   now saturates on overflow the way the engine does and still refuses a non-digit, which is the
   distinction that matters: a number past `u16` reads the same on both sides, while a field that is not
-  a number at all is §54's malformed input and has to stay a no-op.
+  a number at all is §54's malformed input and has to stay a no-op. A mid-sequence control byte no longer
+  ends the sequence here either (`csi::passes_through`): `CSI 0;` LF `1 m` is an SGR the engine applies,
+  `Attr::Reset` included, so giving up on it lost the borrowed bit exactly as the parameter cap did.
 - **`term/rect.rs`** — the rectangular-operations scanner and geometry (§58). One chunk-safe CSI
   machine reading the four `$` sequences the engine drops — **DECERA** (`$ z`), **DECSERA** (`$ {`),
   **DECFRA** (`$ x`), **DECCRA** (`$ v`) — and two pure functions doing all the arithmetic: `area`
@@ -2626,7 +2630,11 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   Since §106 the parameter run carries **no cap at all**, which is the one scanner here where that is
   the safe answer: nothing is buffered — two `u16`s and two counters, whatever arrives — so §12's rule
   about unbounded remote input has nothing to bite on, while a cap meant abandoning a padded DECSLRM
-  the engine went on to dispatch as a save-cursor. What rules the sequence out is its shape.
+  the engine went on to dispatch as a save-cursor. What rules the sequence out is its shape. A stray
+  byte no longer ends the sequence either (`csi::passes_through`): the engine RUNS a mid-sequence C0
+  where it sits and carries on, so `CSI 5;` LF `70 s` is a margin request there — and this scanner,
+  the thing that would have stopped it reaching save-cursor, had stopped reading. Only CAN and SUB
+  cancel a sequence, which is the same fact as cmote feeding CAN in place of a refused final byte.
 - **`term/csi.rs`** — the facts every CSI scanner has to agree with the ENGINE about (§106), and the
   first stone of the shared CSI framer that `osc.rs` is the template for. A scanner's limits are not a
   private choice: cmote and the engine read the same bytes, so wherever the two disagree about whether a
@@ -2642,6 +2650,17 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   scanners that buffer one, and keeps `started` apart from `bytes.is_empty()` because a dropped leading
   zero would leave the latter true — and a caller reads that as "a private marker is still legal here",
   which would make `CSI 0?J`, a sequence the engine drops outright, classify as a selective erase.
+- **`term/differential.rs`** — test-only, and the answer to how §106's defects were found (§106). Three of
+  them came from reading `vte`'s source by hand and noticing that a constant counted the wrong thing,
+  which neither scales nor survives a version bump. This module drives the **actual parser the engine is
+  built on** — `alacritty_terminal` re-exports `vte`, so no new dependency — records what it dispatched,
+  refused (`ignore`) and executed, and compares that against what cmote's scanner made of the same bytes.
+  It found the fourth defect on its first run: the parser runs a mid-sequence C0 and carries on with the
+  sequence around it, where all three scanners gave up. Five tests are agreements pinned from both sides;
+  one is the divergence that remains — a parameter byte after an intermediate, which the parser refuses
+  and cmote classifies — asserted as it behaves, so the framer has to flip it on purpose. What it does
+  NOT cover: it compares the parser rather than the handler, and six chosen sequences rather than a
+  generated corpus.
 - **`term/gate.rs`** — the one place cmote sits **between** the parser and the engine (§102), and the
   odd one out in this whole list: every other module here reads the byte stream a second time and acts
   beside the engine, which is why none of them can break what the engine does. This one implements
