@@ -96,6 +96,18 @@ impl Engine {
 	}
 }
 
+/// One scanner's claim on one sequence: what to call it in a failure message, the bytes themselves, and
+/// how to ask that scanner whether it claimed them.
+///
+/// Named types because the eleven scanners answer with eleven different verdicts, and the only question
+/// common to all of them is "did you act on this at all".
+#[cfg(test)]
+type Claim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
+
+/// The same, plus where in the sequence a stray byte is to be inserted.
+#[cfg(test)]
+type ClaimAt = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
+
 /// Every spelling of one sequence that leaves the ENGINE's reading of it unchanged (§106).
 ///
 /// The six hand-written tests below confirm the four defects are fixed. This is the part that goes
@@ -413,12 +425,7 @@ mod tests {
 			bytes
 		};
 
-		/// One scanner's claim on one sequence: what it is, the sequence itself, where the stray byte is
-		/// inserted, and how to ask that scanner whether it still claimed it. A named type because the
-		/// five scanners return five different verdicts and only "did you claim it" is common to them.
-		type Claim = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
-
-		let claims: [Claim; 5] = [
+		let claims: [ClaimAt; 5] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
 			}),
@@ -469,27 +476,44 @@ mod tests {
 	}
 
 	#[test]
-	fn a_parameter_after_an_intermediate_is_where_the_two_still_disagree() {
-		// NOT an approval either, and this one leans the other way: the parser refuses a parameter byte
-		// once an intermediate has arrived (`lib.rs:232`, straight to `CsiIgnore`), so it dispatches
-		// nothing at all — while cmote's scanners take parameter bytes at any point and classify the
-		// sequence. So cmote honours a spelling the engine calls malformed.
+	fn a_parameter_after_an_intermediate_is_refused_by_both() {
+		// The last of the grammar divergences, and it leans the other way from the control bytes: the parser
+		// refuses a parameter byte once an intermediate has arrived (`lib.rs:232`, straight to `CsiIgnore`,
+		// and `:216-224` then swallows the rest and dispatches nothing), while cmote's scanners used to take
+		// parameter bytes at any point and classify the sequence anyway. So cmote honoured a spelling the
+		// engine calls malformed — acting alone, which is the direction that has no upside at all: there is
+		// no engine behaviour to compensate for, only a sequence nobody else in the world would obey.
 		//
-		// Harmless where it is today (DECSCA is cmote's own feature, so there is no engine action to
-		// contradict), and it is still the two of us reading one grammar differently. The framer settles
-		// it; until then it is written down here.
-		let bytes = b"\x1b[1\"2q";
-		let engine = engine(bytes);
-		assert!(
-			engine.dispatched.is_empty(),
-			"the engine threw the whole sequence away"
-		);
+		// Every scanner that buffers intermediates, each fed its own sequence with a parameter byte pushed in
+		// after the intermediate.
+		let cases: [Claim; 4] = [
+			("protect, DECSCA", b"\x1b[1\"2q", |bytes| {
+				!protect::Protect::default().feed(bytes).is_empty()
+			}),
+			("scp, SCP", b"\x1b[2 1k", |bytes| {
+				!super::super::scp::Scp::default().feed(bytes).is_empty()
+			}),
+			("sgrstack, XTPUSHSGR", b"\x1b[1#2{", |bytes| {
+				!super::super::sgrstack::SgrStack::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			("rect, DECERA", b"\x1b[2;3;5;7$1z", |bytes| {
+				!super::super::rect::Rectangles::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+		];
 
-		let mut scanner = protect::Protect::default();
-		assert_eq!(
-			scanner.feed(bytes),
-			vec![(bytes.len(), protect::Request::Protect(false))],
-			"while cmote classified it as a DECSCA"
-		);
+		for (what, bytes, claimed) in cases {
+			assert!(
+				engine(bytes).dispatched.is_empty(),
+				"{what}: the engine threw the whole sequence away"
+			);
+			assert!(
+				!claimed(bytes),
+				"{what}: and cmote no longer acts on it alone"
+			);
+		}
 	}
 }

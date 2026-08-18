@@ -147,7 +147,13 @@ impl Scp {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
-						if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
+						if !self.intermediates.is_empty() {
+							// A parameter byte after an intermediate. The engine refuses the whole sequence
+							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
+							// carrying on would mean acting alone on a spelling nothing else in the world
+							// obeys (§106).
+							self.state = Scan::Text;
+						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
 						} else {
 							self.params.push(byte);
