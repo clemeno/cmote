@@ -11134,3 +11134,114 @@ user types at cmote reaches any part of it. What comes out is a path that must r
   someone has one.
 - **macOS has no equivalent and needs none** — `zsh` and `bash` are at `/bin`, and the search there is
   `PATH` plus that one folder.
+
+## §106 — A limit the engine does not share
+
+The architecture review that followed §105 found, as its top recommendation, that the eleven CSI scanners in `term/` each carry their own copy of one grammar, with `const ESC`
+spelled thirteen times and `MAX_PARAMS` spelled eight times at **three different values** — 16, 32 and
+64. The duplication was the finding. The values were the defect.
+
+A scanner beside the stream and the engine inside it read the same bytes. Wherever the two disagree about
+whether a sequence is well formed, one of them acts and the other does not — and that, not the copying,
+is what the numbers were quietly costing. Three disagreements were reachable, all three verified against
+the vendored `vte`, all three fixed here with a failing test first.
+
+### What the engine actually does
+
+Read out of `vte-0.15.0`, because every claim below had been assumed rather than looked up:
+
+| fact | value | source |
+|---|---|---|
+| parameter limit | `MAX_PARAMS = 32`, counting **PARAMETERS** | `params.rs:5`, full test `:49-51` |
+| exceeding it | `ignoring = true`, then the whole sequence is dropped | `lib.rs:454-517`, `ansi.rs:1545-1548` |
+| digits per parameter | **no limit** — folded in with `saturating_mul` | `lib.rs:514-515` |
+| intermediates | `MAX_INTERMEDIATES = 2`, and a private marker counts against it | `lib.rs:44`, `:207-210` |
+| sub-parameters | share the parameter budget | `params.rs:16-19` |
+
+Two of cmote's own numbers were counting the wrong thing entirely: `MAX_PARAMS` was a cap on parameter
+**bytes**, which is neither of the two things the engine bounds.
+
+### The three defects
+
+- **§57 — a padded DECSLRM reached the engine as a save-cursor.** `cancel.rs` gave up past 32 parameter
+  bytes, so `CSI 000…0001;80s` was never judged; the engine counts two parameters, dispatches
+  `('s', [])`, and saves the cursor. With mode 69 set that is the margins silently not applied **and** a
+  cursor the program never asked to save overwritten — the exact harm §57 exists to prevent, reached
+  through the limit that was supposed to protect it.
+- **§56 — protection was silently lost across a long SGR.** `protect.rs` gave up past 32 parameter bytes
+  too. `CSI 0;1;2;3;4;5;7;9;21;30;31;38;5;196m` is 33 of them, which true colour reaches with room to
+  spare: the scanner dropped it, the engine applied it, and the `Attr::Reset` inside it assigned the flag
+  word whole and took the borrowed protection bit with it. Nothing reported the SGR, so nothing put the
+  bit back. This is the worst of the three — the feature quietly stops working on the very sequence the
+  scanner was written to watch for.
+- **§41 — pictures outlived the text they sat beside.** Two ways at once. `graphics.rs` compared the
+  erase's parameter BYTES to `b"2"`, so `CSI 002 J` and `CSI 2;5 J` — both an erase-the-screen to the
+  engine, which reads `Ps` through `next_param_or(0)` — said nothing; and its 16-byte cap dropped a
+  padded one for the same reason as the two above.
+
+### One cap, one clamp
+
+`term/csi.rs` is new, and holds the engine's numbers once with their `path:line` beside them. It is also
+where the shared framer lands, so the module exists early rather than being invented twice.
+
+The rule it settles is that the two bounds are **not the same kind of bound**:
+
+- **Too many parameters ends the sequence.** Giving up is right here, because the engine gives up too:
+  both sides ignoring the same bytes is agreement.
+- **A long digit run is CLAMPED, not capped.** Copying the engine literally would mean buffering
+  unbounded remote input, which §12 refuses; abandoning is what caused all three defects. So digits past
+  five SIGNIFICANT ones are dropped and the sequence lives — exactly the engine's answer, because five
+  digits already reach past `u16::MAX`, so any value a sixth could produce is one the engine has
+  saturated too. What a hostile stream can make cmote hold is then under 200 bytes.
+
+`cancel.rs` needed neither: it buffers nothing at all — two `u16`s and two counters — so §12 has nothing
+to bite on there and the run is simply uncapped. Worth writing down, because "no limit" reads like an
+oversight and here it is the only correct answer.
+
+**Leading zeros cost nothing**, and that was the second attempt rather than the first. Clamping the first
+five digits of `000000000000000002` keeps `00000` and reads 2 as **0** — the same defect wearing the fix's
+clothes, and it survived until the test written for the erase failed on it. Zeros are not significant, the
+engine's fold over them is the identity, so they are dropped and counted against nothing.
+
+`Params::started` exists for a consequence of that: `bytes.is_empty()` no longer answers "has a parameter
+arrived", since a dropped leading zero leaves it true. A caller reads emptiness as "a private marker is
+still legal here", so without the flag `CSI 0?J` — which the engine drops outright — would have
+classified as a selective erase. A fix's own side effects are where the next defect lives.
+
+### What it cost
+
+- `term/csi.rs`: `MAX_PARAMS`, `MAX_DIGITS`, `Params`, and five tests including the leading-zero case and
+  one asserting that `u16::MAX` fits inside the clamp, which is the whole argument for clamping.
+- `term/cancel.rs`: the cap gone, the field's doc explaining why nothing replaces it, and the test that
+  asserted the old behaviour rewritten — it was asserting the disagreement.
+- `term/protect.rs`: `Params`, `first_param` saturating on overflow while still refusing a non-digit (a
+  number past `u16` reads the same on both sides; a field that is not a number is §54's malformed input
+  and stays a no-op), and the intermediates cap left local with a note that it is looser than the
+  engine's two and cannot be observed.
+- `term/graphics.rs`: `Params`, and a `first_param` spelling `next_param_or(0)`.
+- Tests 1343 → 1355. Three commits, one per defect, each red before green.
+- `TERMINAL_COMPATIBILITY_PLAN.md`: a `term/csi.rs` entry, the three scanners' entries, the ED row, the
+  cancel test count, and a mangled sentence in `protect.rs`'s entry that had been sitting there since §72.
+
+### Not done
+
+- **Nine scanners still carry their own grammar.** This paid for the limits, not the framer: `dsr`,
+  `tabs`, `scp`, `sgrstack`, `rect`, `modkeys` and `query` still declare their own `enum Scan` and their
+  own bounds. Their disagreements with the engine are currently **unobservable** — it has no live arm
+  behind any of their sequences — which is a fact about today's `vte` and not a property of the code. A
+  version bump that fills one of those empty trait bodies makes them observable, and the framer is what
+  would make that a non-event.
+- **Two grammar disagreements are settled nowhere.** The six-family scanners accept a parameter byte
+  *after* an intermediate, where the engine drops the whole sequence, and they abandon on C0/DEL, where
+  the engine executes the control and stays inside the sequence. Both are uniform across the six and
+  independent of any constant, so both belong to the framer rather than to a per-scanner patch.
+- **`MAX_INTERMEDIATES` is still 4 in six places**, against the engine's 2 — and the engine counts the
+  private marker against that budget while cmote counts it separately. Unobservable for the same reason.
+- **A sub-parameter is counted like a separator, not like the engine's shared budget.** `Params` counts
+  `:` against `MAX_PARAMS`, which is the right order of magnitude and not the same arithmetic. The case
+  that would tell them apart is an SGR with 33 sub-parameters, where cmote would reassert protection that
+  was never cleared: a no-op, disclosed rather than fixed.
+- **Nothing tests cmote and the engine against each other.** Every claim in the table above was read out
+  of the crate by hand, and the tests assert cmote's side of the agreement only. A differential test —
+  feed both, compare what each did with the same bytes — would have caught all three of these without
+  anyone reading `vte`, and it is the shape §102's region mirror wants as well.

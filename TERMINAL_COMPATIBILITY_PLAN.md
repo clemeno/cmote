@@ -81,7 +81,7 @@ delegating `Handler` wrapper that would build it makes cmote a second writer of 
 *traffic* claim §5 rested on — "essentially nothing emits DECSLRM" — was wrong, `xterm-256color`
 declaring `mgc`, `smglp`, `smglr` and `smgrp`, though none of them from an init or reset string, which is
 the difference from §72. What did move is the mark. ❌ is defined here as a sequence that *could still
-land*, and since §57 this one cannot: `term/cancel.rs` cancels the final byte in flight, fifteen tests
+land*, and since §57 this one cannot: `term/cancel.rs` cancels the final byte in flight, twenty-two tests
 pin it, and the legend names §57 itself as the reason the 🛑 / 🤷 split exists in the column. So the row
 is **🛑**, the capability's ❌ moves to the row that actually carries it (mode 69, DECLRMM), and the 🛑
 legend widens to say that a refusal cmote performs may be taken on §5's price as well as §6's policy.
@@ -1458,7 +1458,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | s / u | Save / restore cursor | ✅ | SCOSC / SCORC, the ANSI.SYS save and restore of the cursor. A parametrised `CSI s` is DECSLRM **only while mode 69 is set** and is a save-cursor otherwise, which is the rule a real terminal uses and the one §102 gave back — §57 had to cancel every parametrised `s` on the parameter count alone. The deferred wrap rides along with the position (§57, §102) |
 | @ / P / X | Insert / delete / erase char | ✅ | ICH inserts blanks at the cursor, DCH deletes characters and pulls the line left, ECH erases in place without moving the tail |
 | L / M | Insert / delete line | ✅ | IL / DL insert or delete `Ps` lines at the cursor, scrolling the rest of the region |
-| J | Erase in display | ✅ | ED erases from the cursor to the end of the screen, to its start, or the whole screen |
+| J | Erase in display | ✅ | ED erases from the cursor to the end of the screen, to its start, or the whole screen. `Ps` is read as a NUMBER on cmote's side of it too, so an inline picture goes when `CSI 002 J` or `CSI 2;5 J` takes the text it sat beside and not only when `CSI 2 J` does (§106, `term/graphics.rs`) |
 | 3 J | Erase scrollback | ✅ | xterm's extension to ED: drop the scrollback |
 | K | Erase in line | ✅ | EL erases to the end of the line, to its start, or the whole line |
 | Ps " q | Character protection (DECSCA) | ✅ | DECSCA marks the cells written after it protected or erasable, which decides whether a selective erase takes them (§56, `term/protect.rs`) |
@@ -2374,6 +2374,11 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   id instead of re-uploading every frame. Caps: `MAX_PAYLOAD` 16 MiB per picture (past it the DCS is
   still followed, nothing decoded), `MAX_IMAGES` 64 and `MAX_TOTAL_BYTES` 64 MiB, evicted oldest-first;
   `clear_screen` / `clear_scrollback` split on the first visible line, `clear` takes everything.
+  The erase's parameter is read as a **number** since §106, with the engine's own `next_param_or(0)`
+  default: it used to be compared byte-for-byte against `b"2"` and `b"3"`, which agreed with the engine
+  on the one spelling everything sends and on no other — `CSI 002 J` and `CSI 2;5 J` both erase the
+  screen there, and the pictures stayed on it. The run itself now comes from `csi::Params`, whose
+  16-byte predecessor abandoned a padded erase for the same reason and to the same effect.
 - **`term/screen.rs`** — engine-agnostic view. `Cell` getters: `contents`, `is_wide`,
   `is_wide_continuation`, `fgcolor`, `bgcolor`, `bold`, `dim`, `italic`, `hidden` (conceal),
   `strikeout`, `underline` (`UnderlineStyle`), `underline_color`, `inverse`, `hyperlink` (the
@@ -2520,7 +2525,8 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   engine's cells. A chunk-safe CSI state machine (`Protect::feed`) reading **DECSCA** (`CSI Ps " q`),
   **DECSED** (`CSI ? Ps J`), **DECSEL** (`CSI ? Ps K`), plus **RIS** as a protection clear, **DECSTR** as
   the whole soft reset since §72 — the engine performs RIS itself, so only the borrowed bit is cmote's
-  business there, while `CSI ! p` reaches no engine arm at all and is cmote's entire — and — only while the pen is armed — every **SGR**, since `Attr::Reset` assigns the whole flag
+  business there, while `CSI ! p` reaches no engine arm at all and is cmote's entire responsibility —
+  and, only while the pen is armed, every **SGR**, since `Attr::Reset` assigns the whole flag
   word and would otherwise unprotect a run mid-way. All three of final byte, private marker and
   intermediates are matched together, which is what keeps the near-misses out: `CSI 2 J` is a plain
   erase, `CSI > 4 ; 2 m` is XTMODKEYS not an SGR, `CSI 1 SP q` is DECSCUSR not a DECSCA. Offsets are
@@ -2536,7 +2542,14 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   `reserve_cells`'s inject-VT-sequences rule, because the engine's plain `CSI 2 J` *scrolls the
   viewport into history* rather than blanking it, and the CUP+ECH alternative would move a cursor the
   erase is defined never to move. `spans` is pure row/column arithmetic, so all six region shapes are
-  tested without a terminal.
+  tested without a terminal. The parameter run comes from `csi::Params` since §106, which fixed the
+  worst bug this scanner has had: it used to cap the run at 32 **bytes** and abandon the sequence past
+  them, so an SGR of 33 parameter bytes — `CSI 0;1;2;3;4;5;7;9;21;30;31;38;5;196m`, which true colour
+  reaches with room to spare — was dropped here while the engine applied it, `Attr::Reset` and all.
+  Nothing put the borrowed bit back, so **protection was silently lost across a long SGR**. `first_param`
+  now saturates on overflow the way the engine does and still refuses a non-digit, which is the
+  distinction that matters: a number past `u16` reads the same on both sides, while a field that is not
+  a number at all is §54's malformed input and has to stay a no-op.
 - **`term/rect.rs`** — the rectangular-operations scanner and geometry (§58). One chunk-safe CSI
   machine reading the four `$` sequences the engine drops — **DECERA** (`$ z`), **DECSERA** (`$ {`),
   **DECFRA** (`$ x`), **DECCRA** (`$ v`) — and two pure functions doing all the arithmetic: `area`
@@ -2610,6 +2623,25 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   `CSI 5;70 s` then `hello` would dispatch `('h', [])` with parameters 5 and 70. CAN because the ANSI
   state machine defines it as the cancel (`anywhere()` → `execute`, state Ground, no dispatch), rather
   than SUB, which is *defined* to be displayable, or a final byte that merely has no arm today.
+  Since §106 the parameter run carries **no cap at all**, which is the one scanner here where that is
+  the safe answer: nothing is buffered — two `u16`s and two counters, whatever arrives — so §12's rule
+  about unbounded remote input has nothing to bite on, while a cap meant abandoning a padded DECSLRM
+  the engine went on to dispatch as a save-cursor. What rules the sequence out is its shape.
+- **`term/csi.rs`** — the facts every CSI scanner has to agree with the ENGINE about (§106), and the
+  first stone of the shared CSI framer that `osc.rs` is the template for. A scanner's limits are not a
+  private choice: cmote and the engine read the same bytes, so wherever the two disagree about whether a
+  sequence is well formed, one acts and the other does not — and two of those disagreements were live
+  defects. `MAX_PARAMS` 32 is `vte`'s own (`params.rs:5`, the `is_full` test at `:49-51`, `ignoring` set
+  at `lib.rs:454-517`, the sequence then dropped at `ansi.rs:1545-1548`), and exceeding it means
+  abandoning the sequence *because that is what the engine does with it*. `MAX_DIGITS` 5 is **not** a
+  limit the engine has — it folds every digit in with `saturating_mul` and never gives up on a run — so
+  the run is CLAMPED rather than capped: digits past five SIGNIFICANT ones are dropped and the sequence
+  lives, which is the engine's saturated answer (five digits already reach past `u16::MAX`) while
+  bounding what a hostile stream can make cmote hold to under 200 bytes. Leading zeros cost nothing;
+  counting them was the first attempt and read `CSI 000…002 J` as 0. `Params` holds the run for the two
+  scanners that buffer one, and keeps `started` apart from `bytes.is_empty()` because a dropped leading
+  zero would leave the latter true — and a caller reads that as "a private marker is still legal here",
+  which would make `CSI 0?J`, a sequence the engine drops outright, classify as a selective erase.
 - **`term/gate.rs`** — the one place cmote sits **between** the parser and the engine (§102), and the
   odd one out in this whole list: every other module here reads the byte stream a second time and acts
   beside the engine, which is why none of them can break what the engine does. This one implements

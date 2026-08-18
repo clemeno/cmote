@@ -2,9 +2,9 @@
 //
 // Eleven modules in this directory scan CSI sequences beside the stream, each for its own reason, and
 // each currently carries its own copy of the grammar. That duplication is a known debt with a plan
-// attached (`docs/architecture-review` calls it "give the CSI family the floor OSC already has"):
-// `osc::Framer` proved the shape works for the OSC family, and one `csi::Framer` is meant to move in
-// here and leave the scanners with only the part that is theirs — deciding what a sequence MEANS.
+// attached — §106's architecture review put it first, as "give the CSI family the floor OSC already
+// has": `osc::Framer` proved the shape works for the OSC family, and one `csi::Framer` is meant to move
+// in here and leave the scanners with only the part that is theirs — deciding what a sequence MEANS.
 //
 // This module starts with the part that could not wait for it. A scanner's LIMITS are not a private
 // choice: cmote and the engine read the same bytes, and wherever the two disagree about whether a
