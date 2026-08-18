@@ -11429,10 +11429,13 @@ row (which has to reach the scrollback), a line feed on the last row of a region
 inside a region and with the cursor outside it, RI at a region's first row, a region whose top is zero (the
 one the engine stores *above* the page), a region as tall as the page, CNL and CPL, an autowrap over the
 page edge, the deferred wrap held on the last column, cursor motion that stops at the edges, a tab, a
-region set backwards, and NEL — which the engine builds out of two methods the gate has replaced, so it
-cannot be forwarded and is the trap `gate.rs`'s header warns about.
+region set backwards, and NEL — which the PARSER expands into `linefeed()` then `carriage_return()`
+(`vte-0.15.0/src/ansi.rs:1802-1805`), so the stream exercises the two methods the gate has replaced while
+`Handler::newline` is never dispatched at all. That last part was found by the code review below, and it
+means `Gate::newline` is unreachable — it exists because `#[deny(clippy::missing_trait_methods)]` requires
+every method to be written out, which is the deny doing its job rather than a defect.
 
-### Four properties, and the proof each could fail
+### Six properties, and the proof each could fail
 
 Green on the first run, every one of them. A pass-through is *supposed* to be green, which is exactly the
 situation §106 spent a subsection on: a test that cannot fail also reports the area as covered. So each was
@@ -11442,8 +11445,10 @@ broken on purpose before being kept.
 |---|---|---|
 | with no margins the gate is the engine | `linefeed`'s `!narrowed()` disabled | 6 of 15 streams, first line `scrollback depth: gated 0, engine alone 2` |
 | margins as wide as the page are not margins | `narrowed`'s `right + 1 < cols` widened to `<=` | 5 of 15, **two of them only in the `WRAPLINE` flag** |
-| a band operation leaves the columns outside it alone | `scroll_band` given the whole width | 238 disturbed cells |
+| a band operation leaves everything outside the band alone | `scroll_band` given the whole width | 238 disturbed cells |
 | a band scroll files nothing in the scrollback | the gate made never to narrow | depth 0 → 2 on SU, 0 → 1 on a line feed |
+| a band operation leaves the cursor inside the band | (arithmetic, not a mutation — see below) | — |
+| an operation refused outside the band changes nothing at all | both `cursor_in_band()` guards deleted | 2 refusals acted, each naming a cell **inside** the band |
 
 Two of those deserve reading twice.
 
@@ -11465,21 +11470,54 @@ The user asked for the margins-ON rows too, and they cannot be oracle-backed: th
 a left margin, so there is no second implementation to measure against. Those two properties come from
 xterm's own definition — an operation bounded by the margins moves the columns between them and nothing
 else, and a row leaving the band is discarded — and the module labels them as such where they are
-declared, beside the streams that are measurements. Twelve operations, each run on a page filled row by row
+declared, beside the streams that are measurements. Ten operations that act and four that are refused, each
+run on a page filled row by row
 and then photographed before and after, so while the RULE is a reading, the expected value for every cell
 outside the band is the cell that was already there.
 
 What they do NOT say is that the band moved *correctly*. That is `mod.rs`'s fifteen margins tests, which
 came with §102. These say only that the operation stayed where it belongs.
 
+### A property a refusal satisfies for free
+
+The review of this section found the same shape of hole §106 had found in itself, one layer along, and it
+is worth writing down twice because it arrived from a different direction both times.
+
+Two of the twelve band operations were **refusals** — IL and DL with the cursor outside the band, which the
+gate declines outright. They sat in the same list as the ten that act, and both sweeps over that list
+asserted only two things: that the columns OUTSIDE the band were untouched, and that the scrollback depth
+had not moved.
+
+A refusal satisfies both of those by doing nothing. So does an operation that wrongly went ahead **inside**
+the band. The two assertions could not tell those apart, and the consequence was measurable: with both
+`cursor_in_band()` guards deleted, every test still passed.
+
+The fix is a sweep of its own, and the one place in this module where the WHOLE document has to come back
+identical — cells, cursor, history, inside the band and out, because a refusal is the one case with nothing
+legitimate to change. Four operations, since `ICH` and `DCH` are refused too, by `shift_cells`'s own cursor
+test rather than by `cursor_in_band`. With the two guards removed it now reports both refusals, each naming
+a cell *inside* the band that changed — a `'C'` that became a blank, and a `'C'` that became an `'E'`.
+
+Removing `shift_cells`'s test instead produced something better than a failed assertion: a panic on
+`right - cursor + 1`, because `cursor` is past `right` in exactly the case the test refuses. That guard is
+holding up the arithmetic as well as the meaning, which nothing had said out loud.
+
+**The lesson, stated generally.** A test whose assertion is "nothing outside X changed" cannot test a rule
+whose subject is "nothing changed", and a corpus that mixes acting cases with no-op cases will report the
+no-ops as covered. §106's version of this was a generator that never emitted the malformed order its guard
+was written for. This one was a list that mixed two kinds of entry. Both times the tell was the same, and
+both times it was only visible by asking the question the other way round: not "does this pass?", but
+"what would have to break for this to fail?"
+
 ### What it cost
 
-Two commits, one new test-only module of 380 lines, and no production code changed at all — the four
+Three commits, one new test-only module of 604 lines, and the only production code touched is one
+constructor extracted so both engines are built by the same function — the five
 breakages were each reverted by hand, and `git diff --numstat` was checked against `HEAD` before every
 commit, because §106 lost an uncommitted fix to a careless `git checkout --` and that lesson was expensive
 enough once.
 
-`cargo test`: 1370 → 1374.
+`cargo test`: 1370 → 1376.
 
 ### Not done
 

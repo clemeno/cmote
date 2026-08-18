@@ -2690,12 +2690,20 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   **measured**, not transcribed, which is what separates it from `term/region.rs`'s tests. The
   margins-ON rows have no oracle — the engine has no left margin to ask — so those two properties are
   a reading of xterm's definition and are labelled as such where they are declared: a band operation
-  moves only the columns between the margins (twelve operations, compared against a photograph of the
-  page taken before), and a row leaving a narrowed band is **discarded rather than filed in the
-  scrollback**. All four properties were proved able to fail before being kept — a disabled
-  `!narrowed()` guard costs two scrollback lines, a `narrowed()` widened by one column diverges on
-  five streams (two only in the `WRAPLINE` flag), and a `scroll_band` given the whole width disturbs
-  238 cells outside the band.
+  moves only the columns between the margins and leaves the cursor inside them (ten operations that act,
+  each compared against a photograph of the page taken before), a row leaving a narrowed band is
+  **discarded rather than filed in the scrollback** (depth AND history contents, which is why the page is
+  built with three lines already scrolled off), and an operation the gate REFUSES because the cursor is
+  outside the band changes **nothing whatsoever** — the one property where the whole document must come
+  back identical, and the one the first version of this module got wrong: the refusals sat in the acting
+  list, where an assertion about the columns outside the band was satisfied for free, and both
+  `cursor_in_band()` guards could be deleted with every test still green. Five of the six properties are
+  proved able to fail by mutation before being kept — a disabled `!narrowed()` guard costs two scrollback
+  lines, a `narrowed()` widened by one column diverges on five streams (two only in the `WRAPLINE` flag),
+  a `scroll_band` given the whole width disturbs 238 cells, and the two deleted `cursor_in_band()` guards
+  let both refusals corrupt cells inside the band; deleting `shift_cells`'s cursor test instead PANICS on
+  `right - cursor + 1`, so that one guards the arithmetic too. The sixth, the cursor's exact landing place,
+  is arithmetic on a known page.
 - **`term/region.rs`** — the engine's vertical scrolling region, mirrored (§102). `Term::scroll_region`
   is private with no accessor and no reply arm, which cost §100 a refusal and would have cost §102 the
   whole feature. The mirror is exact by construction: the field has **four writers**, two of them
