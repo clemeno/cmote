@@ -1785,18 +1785,18 @@ mod tests {
 
 		// The top visible row is showing line 5, so the picture's line 7 is two rows down.
 		let (pixels, reserved) = image_bounds(&placement, origin, 5);
-		assert_eq!(pixels.x, 10.0 + 2.0 * CELL_WIDTH);
-		assert_eq!(pixels.y, 20.0 + 2.0 * CELL_HEIGHT);
+		assert_px!(pixels.x, 10.0 + 2.0 * CELL_WIDTH);
+		assert_px!(pixels.y, 20.0 + 2.0 * CELL_HEIGHT);
 		// Drawn at its own size, inside a box of whole cells that is never smaller than it.
 		assert_eq!((pixels.width, pixels.height), (25.0, 40.0));
-		assert_eq!(reserved.width, 4.0 * CELL_WIDTH);
-		assert_eq!(reserved.height, 3.0 * CELL_HEIGHT);
+		assert_px!(reserved.width, 4.0 * CELL_WIDTH);
+		assert_px!(reserved.height, 3.0 * CELL_HEIGHT);
 		assert!(reserved.width >= pixels.width && reserved.height >= pixels.height);
 
 		// Scrolled down so the anchor is two rows ABOVE the viewport: the box hangs off the top and
 		// the clip against the grid is what leaves only the visible slice.
 		let (pixels, _) = image_bounds(&placement, origin, 9);
-		assert_eq!(pixels.y, 20.0 - 2.0 * CELL_HEIGHT);
+		assert_px!(pixels.y, 20.0 - 2.0 * CELL_HEIGHT);
 	}
 
 	#[test]

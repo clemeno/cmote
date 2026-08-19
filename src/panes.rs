@@ -412,8 +412,8 @@ mod tests {
 		let resume = after.restore(snapshot, window);
 
 		assert_eq!(after.show_hidden(), before.show_hidden());
-		assert_eq!(after.tree.width(), before.tree.width());
-		assert_eq!(after.pane.height(), before.pane.height());
+		assert_px!(after.tree.width(), before.tree.width());
+		assert_px!(after.pane.height(), before.pane.height());
 		// The path is handed back rather than applied: driving it needs the shell.
 		assert_eq!(resume.pane.as_deref(), Some("/srv/data"));
 		assert_eq!(after.pane.path(), None);
@@ -432,8 +432,8 @@ mod tests {
 		let window = iced::Size::new(1000.0, 800.0);
 		let _ = panes.restore(huge, window);
 
-		assert_eq!(panes.tree.width(), 1000.0 * MAX_PANE_FRACTION);
-		assert_eq!(panes.pane.height(), 800.0 * MAX_PANE_FRACTION);
+		assert_px!(panes.tree.width(), 1000.0 * MAX_PANE_FRACTION);
+		assert_px!(panes.pane.height(), 800.0 * MAX_PANE_FRACTION);
 	}
 
 	/// Before the window has been measured, a remembered size is not applied at all — otherwise a
@@ -451,8 +451,8 @@ mod tests {
 			},
 			iced::Size::new(0.0, 0.0),
 		);
-		assert_eq!(panes.tree.width(), width);
-		assert_eq!(panes.pane.height(), height);
+		assert_px!(panes.tree.width(), width);
+		assert_px!(panes.pane.height(), height);
 	}
 
 	/// One refusal, one message, in both panes (§18).

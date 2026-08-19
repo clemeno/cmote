@@ -2057,14 +2057,14 @@ mod tests {
 	#[test]
 	fn a_hidden_pane_takes_no_room_from_the_grid() {
 		let mut files = Files::default();
-		assert_eq!(files.reserved(), DEFAULT_HEIGHT + SPLITTER_HEIGHT);
+		assert_px!(files.reserved(), DEFAULT_HEIGHT + SPLITTER_HEIGHT);
 		files.toggle();
-		assert_eq!(files.reserved(), 0.0);
+		assert_px!(files.reserved(), 0.0);
 
 		files.set_height(10.0, 400.0);
-		assert_eq!(files.height(), MIN_HEIGHT);
+		assert_px!(files.height(), MIN_HEIGHT);
 		files.set_height(5_000.0, 400.0);
-		assert_eq!(files.height(), 400.0);
+		assert_px!(files.height(), 400.0);
 	}
 
 	#[test]

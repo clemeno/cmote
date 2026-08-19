@@ -6590,12 +6590,16 @@ impl Tab {
 			return iced::Task::none();
 		};
 		let row = index / ui::files::columns(self.files_width());
+		let current = self.panes.pane.scroll();
+		// Already visible falls back to where it already is: the model and the widget are told the
+		// offset either way, because the details popup is placed against it on this very frame.
 		let offset = keep_visible(
-			self.panes.pane.scroll(),
+			current,
 			ui::files::grid_height(&self.panes.pane),
 			ui::files::row_top(row),
 			ui::files::CELL_HEIGHT,
-		);
+		)
+		.unwrap_or(current);
 		self.panes.pane.set_scroll(offset);
 		iced::widget::operation::scroll_to(
 			ui::files::GRID_ID,
@@ -6608,8 +6612,9 @@ impl Tab {
 		let Some(index) = self.panes.tree.selected_index() else {
 			return iced::Task::none();
 		};
+		let current = self.panes.tree.scroll();
 		let offset = keep_visible(
-			self.panes.tree.scroll(),
+			current,
 			ui::explorer::tree_height(
 				self.panes.pane.height(),
 				self.panes.pane.path(),
@@ -6617,7 +6622,8 @@ impl Tab {
 			),
 			index as f32 * ui::explorer::ROW_HEIGHT,
 			ui::explorer::ROW_HEIGHT,
-		);
+		)
+		.unwrap_or(current);
 		self.panes.tree.set_scroll(offset);
 		iced::widget::operation::scroll_to(
 			ui::explorer::TREE_ID,
@@ -8510,18 +8516,27 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 /// currently scrolled to `offset` (§20) — shared by both panes, since "keep the thing
 /// the arrow keys just selected on screen" is the same question for a row and a cell.
 ///
-/// Already visible means *do not move*: a keyboard walk across a screenful of entries
-/// should scroll only when it reaches an edge, not re-centre on every press.
-fn keep_visible(offset: f32, view: f32, top: f32, height: f32) -> f32 {
-	if top < offset {
+/// `None` means *do not move*: a keyboard walk across a screenful of entries should scroll only when
+/// it reaches an edge, not re-centre on every press.
+///
+/// Two different cases answer `None`, and the second is why this is not as simple as it looks (§111).
+/// The band being already inside the window is the obvious one. The other is a band the window CANNOT
+/// contain — a cell in a pane dragged shorter than one row — where the clamp below computes an offset
+/// that turns out to be the one already in force. The comparison is on `to_bits`, because the question
+/// is not "are these numbers close" but "will the widget be handed a different f32 than it holds": a
+/// scroll offset is stored and rendered verbatim, so the honest test is a bit-level one, and spelling
+/// it as integers says that rather than leaving a bare `==` on floats for a reader to second-guess.
+fn keep_visible(offset: f32, view: f32, top: f32, height: f32) -> Option<f32> {
+	let wanted = if top < offset {
 		top
 	} else if top + height > offset + view {
 		// Park it against the bottom edge — but never past its own top, or an item taller
 		// than the window (a cell in a pane dragged short) would be shown headless.
 		(top + height - view).max(0.0).min(top)
 	} else {
-		offset
-	}
+		return None;
+	};
+	(wanted.to_bits() != offset.to_bits()).then_some(wanted)
 }
 
 /// Scroll the editor buffer so the cursor line is on screen, updating the model to match (§32).
@@ -8535,10 +8550,7 @@ fn follow_editor_cursor(editor: &mut crate::editor::Editor) -> Option<f32> {
 		return None;
 	}
 	let top = ui::editor::line_top(editor.cursor_line());
-	let offset = keep_visible(editor.scroll(), view_height, top, ui::editor::LINE_HEIGHT);
-	if offset == editor.scroll() {
-		return None;
-	}
+	let offset = keep_visible(editor.scroll(), view_height, top, ui::editor::LINE_HEIGHT)?;
 	// Pre-seat the offset so a second keystroke arriving before the scrollable reports back still
 	// measures against the value we just asked for.
 	editor.set_scroll_y(offset);
@@ -8560,10 +8572,7 @@ fn follow_editor_cursor_x(editor: &mut crate::editor::Editor) -> Option<f32> {
 		view_width,
 		left,
 		ui::editor::CHAR_ADVANCE,
-	);
-	if offset == editor.scroll_x() {
-		return None;
-	}
+	)?;
 	editor.set_scroll_x(offset);
 	Some(offset)
 }
@@ -10944,16 +10953,21 @@ mod tests {
 
 	#[test]
 	fn scrolling_a_selection_into_view_moves_only_at_the_edges() {
-		// A 100-tall window over 20-tall rows, scrolled to the top.
-		assert_eq!(keep_visible(0.0, 100.0, 40.0, 20.0), 0.0, "already visible");
+		// A 100-tall window over 20-tall rows, scrolled to the top. `None` IS the assertion here:
+		// an already-visible row must produce no scroll at all, not a scroll to where it already is.
+		assert_eq!(
+			keep_visible(0.0, 100.0, 40.0, 20.0),
+			None,
+			"already visible"
+		);
 		// Off the bottom: scroll just far enough that its bottom edge lands on the
 		// window's, not far enough to re-centre it.
-		assert_eq!(keep_visible(0.0, 100.0, 120.0, 20.0), 40.0);
+		assert_eq!(keep_visible(0.0, 100.0, 120.0, 20.0), Some(40.0));
 		// Off the top: its own top becomes the offset.
-		assert_eq!(keep_visible(200.0, 100.0, 60.0, 20.0), 60.0);
+		assert_eq!(keep_visible(200.0, 100.0, 60.0, 20.0), Some(60.0));
 		// A row taller than the window is shown from its top rather than its bottom.
-		assert_eq!(keep_visible(0.0, 30.0, 10.0, 50.0), 10.0);
-		assert_eq!(keep_visible(0.0, 30.0, 0.0, 50.0), 0.0);
+		assert_eq!(keep_visible(0.0, 30.0, 10.0, 50.0), Some(10.0));
+		assert_eq!(keep_visible(0.0, 30.0, 0.0, 50.0), None);
 	}
 
 	/// A reconnect resumes the shell and the pane where the last session left them (§22), and
@@ -12332,8 +12346,8 @@ mod tests {
 		let before = app.window;
 		let old = app.focus;
 		let grown = split(&mut app, ui::split::Way::Horizontal);
-		assert_eq!(grown.width, before.width * 2.0, "twice as wide");
-		assert_eq!(grown.height, before.height, "no taller");
+		assert_px!(grown.width, before.width * 2.0, "twice as wide");
+		assert_px!(grown.height, before.height, "no taller");
 		assert_eq!(
 			app.window, grown,
 			"the app measures against the grown window"
@@ -12354,8 +12368,8 @@ mod tests {
 		let mut app = tab_app();
 		let before = app.window;
 		let grown = split(&mut app, ui::split::Way::Vertical);
-		assert_eq!(grown.width, before.width);
-		assert_eq!(grown.height, before.height * 2.0);
+		assert_px!(grown.width, before.width);
+		assert_px!(grown.height, before.height * 2.0);
 	}
 
 	#[test]
@@ -12367,8 +12381,8 @@ mod tests {
 		let boxes = ui::split::regions(&app.regions, app.window);
 		for (pane, rect) in &boxes {
 			let region = app.regions.get(*pane).expect("a live region");
-			assert_eq!(region.active().window_size.width, rect.width);
-			assert_eq!(
+			assert_px!(region.active().window_size.width, rect.width);
+			assert_px!(
 				region.active().window_size.height,
 				rect.height - ui::tabs::STRIP_HEIGHT
 			);
@@ -12423,7 +12437,7 @@ mod tests {
 		// Every region's tab agrees with its new box — the drag is not finished until the grids know.
 		for (pane, rect) in &boxes {
 			let region = app.regions.get(*pane).expect("a live region");
-			assert_eq!(region.active().window_size.width, rect.width);
+			assert_px!(region.active().window_size.width, rect.width);
 		}
 	}
 
@@ -12450,14 +12464,14 @@ mod tests {
 		assert_eq!(app.focused_pane(), kept, "the keyboard followed");
 		// The window gave the space back, so the survivor spans it exactly as it did before — the
 		// mirror of the grow, and the reason nothing in it reflows either way (§48).
-		assert_eq!(app.window.height, 800.0, "the other axis is untouched");
+		assert_px!(app.window.height, 800.0, "the other axis is untouched");
 		assert!(
 			(app.window.width - (1200.0 - ui::split::SPACING / 2.0)).abs() < 1.0,
 			"back to its pre-split width, less the half seam the split cost it: {}",
 			app.window.width
 		);
 		let boxes = ui::split::regions(&app.regions, app.window);
-		assert_eq!(boxes[&kept].width, app.window.width, "and it has all of it");
+		assert_px!(boxes[&kept].width, app.window.width, "and it has all of it");
 		assert_eq!(
 			app.regions
 				.get(kept)
@@ -12481,7 +12495,7 @@ mod tests {
 		let _ = split(&mut app, ui::split::Way::Vertical);
 		let only_tab = strip(&app)[0].id;
 		let _ = app.request_close(only_tab);
-		assert_eq!(app.window.width, 1200.0, "the other axis is untouched");
+		assert_px!(app.window.width, 1200.0, "the other axis is untouched");
 		assert!(
 			(app.window.height - (800.0 - ui::split::SPACING / 2.0)).abs() < 1.0,
 			"back to its pre-split height: {}",
@@ -12502,8 +12516,8 @@ mod tests {
 		let only_tab = strip(&app)[0].id;
 		let _ = app.request_close(only_tab);
 		assert_eq!(region_count(&app), 1);
-		assert_eq!(app.window.width, crate::settings::MIN_WINDOW);
-		assert_eq!(app.window.height, 600.0, "the untouched axis is not raised");
+		assert_px!(app.window.width, crate::settings::MIN_WINDOW);
+		assert_px!(app.window.height, 600.0, "the untouched axis is not raised");
 	}
 
 	#[test]

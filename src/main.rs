@@ -9,6 +9,43 @@
 // are visible while developing. `cfg_attr` applies the attribute conditionally.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// How close two pixel measurements have to be for a test to call them the same (§111).
+///
+/// A tenth of a pixel is not a layout difference — nothing on screen can express one — while an `f32`
+/// carrying a few thousand pixels resolves to about a ten-thousandth, so this is four orders of
+/// magnitude above the arithmetic's noise and four below anything a user could see.
+#[cfg(test)]
+const PIXEL_TOLERANCE: f32 = 0.1;
+
+/// Assert that two pixel measurements agree (§111).
+///
+/// Layout numbers are `f32`, and the tests that check them compare a measurement against the
+/// arithmetic that produced it — `1000.0 * MAX_PANE_FRACTION`, `(1000.0 - DIALOG_WIDTH) / 2.0`. Those
+/// comparisons were `assert_eq!`, which asks for identical bits and got them, because both sides are
+/// the same operations in the same order. That is luck rather than a property: reorder the
+/// multiplication, or let one side arrive via a widget that rounds, and an equality that never had a
+/// reason to hold starts failing for a difference no screen can show.
+///
+/// So the tests say what they mean instead. Declared here at the crate root, before the modules, so
+/// every `mod` below sees it by textual scope without an import — seven test modules use it.
+#[cfg(test)]
+macro_rules! assert_px {
+	($actual:expr, $expected:expr) => {
+		assert_px!($actual, $expected, "")
+	};
+	($actual:expr, $expected:expr, $note:expr) => {{
+		let (actual, expected): (f32, f32) = ($actual, $expected);
+		assert!(
+			(actual - expected).abs() < $crate::PIXEL_TOLERANCE,
+			"{} px is not {} px (to within {} px) {}",
+			actual,
+			expected,
+			$crate::PIXEL_TOLERANCE,
+			$note
+		);
+	}};
+}
+
 // Module declarations. Each `mod` maps to a file (or a folder with `mod.rs`)
 // under `src/`. See PLAN.md §5 for the responsibility of each module.
 mod app; // iced application: State, Message, update, view, subscription

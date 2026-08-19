@@ -867,7 +867,7 @@ mod tests {
 			"extent reaches past the final column"
 		);
 		// A column's x advances by exactly one character each step, offset by the left padding.
-		assert_eq!(col_x(1) - col_x(0), CHAR_ADVANCE);
-		assert_eq!(col_x(0), TEXT_PAD_X);
+		assert_px!(col_x(1) - col_x(0), CHAR_ADVANCE);
+		assert_px!(col_x(0), TEXT_PAD_X);
 	}
 }

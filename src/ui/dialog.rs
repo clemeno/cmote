@@ -416,8 +416,8 @@ mod tests {
 	#[test]
 	fn a_card_opens_centred_and_at_rest() {
 		let card = Card::opened(ROOMY);
-		assert_eq!(card.pos().x, (1000.0 - DIALOG_WIDTH) / 2.0);
-		assert_eq!(card.pos().y, (800.0 - DIALOG_HEIGHT_ESTIMATE) / 2.0);
+		assert_px!(card.pos().x, (1000.0 - DIALOG_WIDTH) / 2.0);
+		assert_px!(card.pos().y, (800.0 - DIALOG_HEIGHT_ESTIMATE) / 2.0);
 		assert!(!card.is_dragging(), "a card opens ready to read, not held");
 	}
 
@@ -486,8 +486,8 @@ mod tests {
 		card.grab();
 		card.drag_to(Point::new(0.0, 0.0), ROOMY);
 		card.drag_to(Point::new(5000.0, 5000.0), ROOMY);
-		assert_eq!(card.pos().x, 1000.0 - DIALOG_WIDTH);
-		assert_eq!(card.pos().y, 800.0 - DIALOG_DRAG_MIN_VISIBLE);
+		assert_px!(card.pos().x, 1000.0 - DIALOG_WIDTH);
+		assert_px!(card.pos().y, 800.0 - DIALOG_DRAG_MIN_VISIBLE);
 
 		card.drag_to(Point::new(-5000.0, -5000.0), ROOMY);
 		assert_eq!(card.pos(), Point::ORIGIN);
@@ -504,7 +504,7 @@ mod tests {
 
 		let small = iced::Size::new(500.0, 400.0);
 		card.reflow(small);
-		assert_eq!(card.pos().x, (500.0 - DIALOG_WIDTH).max(0.0));
-		assert_eq!(card.pos().y, 400.0 - DIALOG_DRAG_MIN_VISIBLE);
+		assert_px!(card.pos().x, (500.0 - DIALOG_WIDTH).max(0.0));
+		assert_px!(card.pos().y, 400.0 - DIALOG_DRAG_MIN_VISIBLE);
 	}
 }

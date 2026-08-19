@@ -1198,15 +1198,15 @@ mod tests {
 	#[test]
 	fn a_hidden_pane_takes_no_room_from_the_grid() {
 		let mut explorer = Explorer::default();
-		assert_eq!(explorer.reserved(), DEFAULT_WIDTH + SPLITTER_WIDTH);
+		assert_px!(explorer.reserved(), DEFAULT_WIDTH + SPLITTER_WIDTH);
 		explorer.toggle();
-		assert_eq!(explorer.reserved(), 0.0);
+		assert_px!(explorer.reserved(), 0.0);
 
 		// The splitter can never squeeze the pane below its minimum, nor past the cap
 		// the caller derives from the window.
 		explorer.set_width(10.0, 600.0);
-		assert_eq!(explorer.width(), MIN_WIDTH);
+		assert_px!(explorer.width(), MIN_WIDTH);
 		explorer.set_width(5_000.0, 600.0);
-		assert_eq!(explorer.width(), 600.0);
+		assert_px!(explorer.width(), 600.0);
 	}
 }
