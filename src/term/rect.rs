@@ -164,7 +164,7 @@ pub struct Corners {
 /// data left, so the blanks arrive on the right. Reading the name as "the blanks come from the left"
 /// gets it backwards, and a shift that goes the wrong way is a screen no program can recover.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
+pub enum RectDirection {
 	/// `CSI Ps SP @` — content moves left, blanks fill the right edge.
 	Left,
 	/// `CSI Ps SP A` — content moves right, blanks fill the left edge.
@@ -177,7 +177,7 @@ pub enum Direction {
 /// rectangle, whatever this is set to, which is why `from_corners` below takes it as an argument rather than
 /// reading it from anywhere: the call site says which family it belongs to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Extent {
+pub enum RectExtent {
 	/// `CSI 0 * x` and `CSI 1 * x`, and the state a terminal powers up in: the wrapped RUN of
 	/// character positions from the top-left corner to the bottom-right one — out to the end of the
 	/// first row, every whole row between, then in from the start of the last. The shape a mouse
@@ -264,10 +264,10 @@ impl Rect {
 	/// the last row starts at the edge and stops at the right corner, and everything between is
 	/// whole. A one-row area is both at once and comes out as the plain span, which is what makes
 	/// `CSI 3;10;3;20;4$r` underline ten cells of one line under either extent.
-	pub fn columns_on(&self, row: usize, extent: Extent, cols: usize) -> RangeInclusive<usize> {
+	pub fn columns_on(&self, row: usize, extent: RectExtent, cols: usize) -> RangeInclusive<usize> {
 		match extent {
-			Extent::Rectangle => self.columns(),
-			Extent::Stream => {
+			RectExtent::Rectangle => self.columns(),
+			RectExtent::Stream => {
 				let first = if row == self.top { self.left } else { 0 };
 				let last = if row == self.bottom {
 					self.right
@@ -313,7 +313,7 @@ pub enum RectRequest {
 	/// it is applied, because DECSACE is a mode and only the scanner sees the two in stream order.
 	Attributes {
 		corners: Corners,
-		extent: Extent,
+		extent: RectExtent,
 		change: Change,
 	},
 	/// SL / SR — shift every row of the visible page sideways by `columns`, blanking the edge the
@@ -322,7 +322,10 @@ pub enum RectRequest {
 	/// `columns` is already defaulted here: an omitted or zero parameter is one column, which is what
 	/// ECMA-48 and xterm both spell as the default. It is not yet clamped to the page — that needs a
 	/// width, which is the applier's to know.
-	Shift { direction: Direction, columns: u16 },
+	Shift {
+		direction: RectDirection,
+		columns: u16,
+	},
 	/// UNSCROLL — scroll the page down `lines` lines and fill the top from the SCROLLBACK rather than
 	/// with blanks (§101). kitty's, and the only operation in this module that changes how many lines
 	/// the document has.
@@ -373,7 +376,7 @@ pub struct Rectangles {
 	params: Vec<u8>,
 	intermediates: Vec<u8>,
 	/// The extent DECSACE last selected, stamped onto each attribute request as it goes out (§59).
-	extent: Extent,
+	extent: RectExtent,
 }
 
 impl Rectangles {
@@ -413,7 +416,7 @@ impl Rectangles {
 					// RIS resets everything a terminal holds, and DECSACE is one of those things
 					// (§59). Nothing else here has state to clear.
 					b'c' => {
-						self.extent = Extent::default();
+						self.extent = RectExtent::default();
 						self.state = RectScan::Text;
 					}
 					_ => self.state = RectScan::Text,
@@ -524,11 +527,11 @@ impl Rectangles {
 			// `Ps`-counted movement — `vte`'s own `next_param_or(1)` reads a literal `0` that way too,
 			// so this agrees with how the engine would have read the same parameter.
 			(b'@', None, [b' ']) => Some(RectRequest::Shift {
-				direction: Direction::Left,
+				direction: RectDirection::Left,
 				columns: number(&numbers, 0).max(1),
 			}),
 			(b'A', None, [b' ']) => Some(RectRequest::Shift {
-				direction: Direction::Right,
+				direction: RectDirection::Right,
 				columns: number(&numbers, 0).max(1),
 			}),
 			// UNSCROLL — SD's final byte under a `+` intermediate, which kitty chose because it is
@@ -555,8 +558,8 @@ impl Rectangles {
 			// shape the program did not name (§54's rule, and §58's).
 			(b'x', None, [b'*']) => {
 				match number(&numbers, 0) {
-					0 | 1 => self.extent = Extent::Stream,
-					2 => self.extent = Extent::Rectangle,
+					0 | 1 => self.extent = RectExtent::Stream,
+					2 => self.extent = RectExtent::Rectangle,
 					_ => {}
 				}
 				None
@@ -695,7 +698,12 @@ fn fill_char(code: u16) -> Option<char> {
 /// with the same numbers is ordinary — `CSI 1;70;5;10;4$r` underlines from row 1 column 70, round
 /// the wrap, to row 5 column 10 — so left and right are only compared when the run is confined to a
 /// single row. Top below bottom is a crossing under either.
-pub fn from_corners(corners: Corners, extent: Extent, rows: usize, cols: usize) -> Option<Rect> {
+pub fn from_corners(
+	corners: Corners,
+	extent: RectExtent,
+	rows: usize,
+	cols: usize,
+) -> Option<Rect> {
 	if rows == 0 || cols == 0 {
 		return None;
 	}
@@ -717,8 +725,8 @@ pub fn from_corners(corners: Corners, extent: Extent, rows: usize, cols: usize) 
 		return None;
 	}
 	let columns_cross = match extent {
-		Extent::Rectangle => left > right,
-		Extent::Stream => top == bottom && left > right,
+		RectExtent::Rectangle => left > right,
+		RectExtent::Stream => top == bottom && left > right,
 	};
 	if columns_cross {
 		return None;
@@ -908,12 +916,12 @@ mod tests {
 	/// Resolve corners as a rectangle — the extent all four §58 operations use, and DECSACE's
 	/// second choice for the two of §59.
 	fn boxed(corners: Corners, rows: usize, cols: usize) -> Option<Rect> {
-		from_corners(corners, Extent::Rectangle, rows, cols)
+		from_corners(corners, RectExtent::Rectangle, rows, cols)
 	}
 
 	/// Resolve corners as a wrapped run — DECSACE's default, and so the one an unarmed program gets.
 	fn streamed(corners: Corners, rows: usize, cols: usize) -> Option<Rect> {
-		from_corners(corners, Extent::Stream, rows, cols)
+		from_corners(corners, RectExtent::Stream, rows, cols)
 	}
 
 	#[test]
@@ -1014,7 +1022,7 @@ mod tests {
 				15,
 				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
-					extent: Extent::Stream,
+					extent: RectExtent::Stream,
 					change: Change {
 						on: BOLD | UNDERLINE,
 						off: 0,
@@ -1033,7 +1041,7 @@ mod tests {
 				13,
 				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
-					extent: Extent::Stream,
+					extent: RectExtent::Stream,
 					change: Change {
 						on: 0,
 						off: 0,
@@ -1153,14 +1161,14 @@ mod tests {
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
-		assert_eq!(extent, Extent::Rectangle);
+		assert_eq!(extent, RectExtent::Rectangle);
 		// And back: 0 and 1 both mean the stream.
 		assert!(rectangles.feed(b"\x1b[1*x").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
-		assert_eq!(extent, Extent::Stream);
+		assert_eq!(extent, RectExtent::Stream);
 	}
 
 	#[test]
@@ -1171,7 +1179,7 @@ mod tests {
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
-		assert_eq!(extent, Extent::Rectangle);
+		assert_eq!(extent, RectExtent::Rectangle);
 	}
 
 	#[test]
@@ -1184,13 +1192,13 @@ mod tests {
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
-		assert_eq!(extent, Extent::Rectangle);
+		assert_eq!(extent, RectExtent::Rectangle);
 		assert!(rectangles.feed(b"\x1bc").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
 		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
-		assert_eq!(extent, Extent::Stream);
+		assert_eq!(extent, RectExtent::Stream);
 	}
 
 	#[test]
@@ -1336,17 +1344,17 @@ mod tests {
 		// Rows 2–4 of an 80-column page, from column 3 to column 7: out to the edge, all of the
 		// middle, then in from the edge. The box of the same corners is five columns on each row.
 		let run = streamed(box_of(2, 3, 4, 7), 24, 80).expect("inside the page");
-		assert_eq!(run.columns_on(1, Extent::Stream, 80), 2..=79);
-		assert_eq!(run.columns_on(2, Extent::Stream, 80), 0..=79);
-		assert_eq!(run.columns_on(3, Extent::Stream, 80), 0..=6);
-		assert_eq!(run.columns_on(2, Extent::Rectangle, 80), 2..=6);
+		assert_eq!(run.columns_on(1, RectExtent::Stream, 80), 2..=79);
+		assert_eq!(run.columns_on(2, RectExtent::Stream, 80), 0..=79);
+		assert_eq!(run.columns_on(3, RectExtent::Stream, 80), 0..=6);
+		assert_eq!(run.columns_on(2, RectExtent::Rectangle, 80), 2..=6);
 	}
 
 	#[test]
 	fn a_one_row_stream_is_the_same_span_as_the_box() {
 		let run = streamed(box_of(3, 10, 3, 20), 24, 80).expect("inside the page");
-		assert_eq!(run.columns_on(2, Extent::Stream, 80), 9..=19);
-		assert_eq!(run.columns_on(2, Extent::Rectangle, 80), 9..=19);
+		assert_eq!(run.columns_on(2, RectExtent::Stream, 80), 9..=19);
+		assert_eq!(run.columns_on(2, RectExtent::Rectangle, 80), 9..=19);
 	}
 
 	#[test]
@@ -1475,7 +1483,7 @@ mod tests {
 			vec![(
 				5,
 				RectRequest::Shift {
-					direction: Direction::Left,
+					direction: RectDirection::Left,
 					columns: 3
 				}
 			)]
@@ -1485,7 +1493,7 @@ mod tests {
 			vec![(
 				5,
 				RectRequest::Shift {
-					direction: Direction::Right,
+					direction: RectDirection::Right,
 					columns: 3
 				}
 			)]
@@ -1502,7 +1510,7 @@ mod tests {
 				vec![(
 					sequence.len(),
 					RectRequest::Shift {
-						direction: Direction::Left,
+						direction: RectDirection::Left,
 						columns: 1
 					}
 				)],

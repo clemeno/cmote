@@ -107,7 +107,7 @@ pub fn unmark(flags: u16) -> u16 {
 /// How far a selective erase reaches, the `Ps` of DECSED and DECSEL. The same three values the
 /// plain `CSI J` / `CSI K` take, so a reader who knows those knows these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Extent {
+pub enum ProtectExtent {
 	/// From the cursor to the end of the line (or of the screen). `Ps = 0`, and the default when
 	/// the parameter is omitted.
 	ToEnd,
@@ -121,9 +121,9 @@ pub enum Extent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Erase {
 	/// DECSED — `CSI ? Ps J`, over the screen.
-	Display(Extent),
+	Display(ProtectExtent),
 	/// DECSEL — `CSI ? Ps K`, over the cursor's line.
-	Line(Extent),
+	Line(ProtectExtent),
 }
 
 /// Something the stream asked cmote to do about protection, to be applied once the engine has been
@@ -331,11 +331,11 @@ impl Protect {
 	/// How far this erase reaches. `None` for anything else, including `Ps = 3`: plain `CSI 3 J`
 	/// drops the scrollback, and there is no selective version of that — protection is a property
 	/// of cells on the screen, and history is not erased a cell at a time.
-	fn extent(&self) -> Option<Extent> {
+	fn extent(&self) -> Option<ProtectExtent> {
 		match self.first_param()? {
-			0 => Some(Extent::ToEnd),
-			1 => Some(Extent::ToStart),
-			2 => Some(Extent::All),
+			0 => Some(ProtectExtent::ToEnd),
+			1 => Some(ProtectExtent::ToStart),
+			2 => Some(ProtectExtent::All),
 			_ => None,
 		}
 	}
@@ -365,17 +365,17 @@ pub fn spans(
 	let row = row.min(rows - 1);
 	let whole = |line: usize| (line, 0..cols);
 	match erase {
-		Erase::Line(Extent::ToEnd) => vec![(row, col..cols)],
-		Erase::Line(Extent::ToStart) => vec![(row, 0..col + 1)],
-		Erase::Line(Extent::All) => vec![whole(row)],
-		Erase::Display(Extent::ToEnd) => std::iter::once((row, col..cols))
+		Erase::Line(ProtectExtent::ToEnd) => vec![(row, col..cols)],
+		Erase::Line(ProtectExtent::ToStart) => vec![(row, 0..col + 1)],
+		Erase::Line(ProtectExtent::All) => vec![whole(row)],
+		Erase::Display(ProtectExtent::ToEnd) => std::iter::once((row, col..cols))
 			.chain((row + 1..rows).map(whole))
 			.collect(),
-		Erase::Display(Extent::ToStart) => (0..row)
+		Erase::Display(ProtectExtent::ToStart) => (0..row)
 			.map(whole)
 			.chain(std::iter::once((row, 0..col + 1)))
 			.collect(),
-		Erase::Display(Extent::All) => (0..rows).map(whole).collect(),
+		Erase::Display(ProtectExtent::All) => (0..rows).map(whole).collect(),
 	}
 }
 
@@ -520,19 +520,28 @@ mod tests {
 	fn selective_erase_in_the_display_reads_all_three_extents() {
 		assert_eq!(
 			scan(b"\x1b[?J"),
-			vec![(4, ProtectRequest::Erase(Erase::Display(Extent::ToEnd)))]
+			vec![(
+				4,
+				ProtectRequest::Erase(Erase::Display(ProtectExtent::ToEnd))
+			)]
 		);
 		assert_eq!(
 			scan(b"\x1b[?0J"),
-			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::ToEnd)))]
+			vec![(
+				5,
+				ProtectRequest::Erase(Erase::Display(ProtectExtent::ToEnd))
+			)]
 		);
 		assert_eq!(
 			scan(b"\x1b[?1J"),
-			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::ToStart)))]
+			vec![(
+				5,
+				ProtectRequest::Erase(Erase::Display(ProtectExtent::ToStart))
+			)]
 		);
 		assert_eq!(
 			scan(b"\x1b[?2J"),
-			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::All)))]
+			vec![(5, ProtectRequest::Erase(Erase::Display(ProtectExtent::All)))]
 		);
 	}
 
@@ -540,15 +549,18 @@ mod tests {
 	fn selective_erase_in_the_line_reads_all_three_extents() {
 		assert_eq!(
 			scan(b"\x1b[?K"),
-			vec![(4, ProtectRequest::Erase(Erase::Line(Extent::ToEnd)))]
+			vec![(4, ProtectRequest::Erase(Erase::Line(ProtectExtent::ToEnd)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?1K"),
-			vec![(5, ProtectRequest::Erase(Erase::Line(Extent::ToStart)))]
+			vec![(
+				5,
+				ProtectRequest::Erase(Erase::Line(ProtectExtent::ToStart))
+			)]
 		);
 		assert_eq!(
 			scan(b"\x1b[?2K"),
-			vec![(5, ProtectRequest::Erase(Erase::Line(Extent::All)))]
+			vec![(5, ProtectRequest::Erase(Erase::Line(ProtectExtent::All)))]
 		);
 	}
 
@@ -596,7 +608,10 @@ mod tests {
 			vec![
 				(5, ProtectRequest::Protect(true)),
 				(15, ProtectRequest::Protect(false)),
-				(20, ProtectRequest::Erase(Erase::Display(Extent::All))),
+				(
+					20,
+					ProtectRequest::Erase(Erase::Display(ProtectExtent::All))
+				),
 			]
 		);
 	}
@@ -687,7 +702,7 @@ mod tests {
 	#[test]
 	fn erase_in_line_to_end_starts_at_the_cursor() {
 		assert_eq!(
-			spans(Erase::Line(Extent::ToEnd), 2, 4, 5, 10),
+			spans(Erase::Line(ProtectExtent::ToEnd), 2, 4, 5, 10),
 			vec![(2, 4..10)]
 		);
 	}
@@ -697,7 +712,7 @@ mod tests {
 		// The inclusive end is what the plain EL does, and a form clearing back to the margin
 		// expects the cell under the cursor to go with it.
 		assert_eq!(
-			spans(Erase::Line(Extent::ToStart), 2, 4, 5, 10),
+			spans(Erase::Line(ProtectExtent::ToStart), 2, 4, 5, 10),
 			vec![(2, 0..5)]
 		);
 	}
@@ -705,7 +720,7 @@ mod tests {
 	#[test]
 	fn erase_in_line_all_covers_the_whole_row_and_only_that_row() {
 		assert_eq!(
-			spans(Erase::Line(Extent::All), 2, 4, 5, 10),
+			spans(Erase::Line(ProtectExtent::All), 2, 4, 5, 10),
 			vec![(2, 0..10)]
 		);
 	}
@@ -713,7 +728,7 @@ mod tests {
 	#[test]
 	fn erase_in_display_to_end_runs_from_the_cursor_to_the_last_row() {
 		assert_eq!(
-			spans(Erase::Display(Extent::ToEnd), 2, 4, 5, 10),
+			spans(Erase::Display(ProtectExtent::ToEnd), 2, 4, 5, 10),
 			vec![(2, 4..10), (3, 0..10), (4, 0..10)]
 		);
 	}
@@ -721,7 +736,7 @@ mod tests {
 	#[test]
 	fn erase_in_display_to_start_runs_from_the_first_row_to_the_cursor() {
 		assert_eq!(
-			spans(Erase::Display(Extent::ToStart), 2, 4, 5, 10),
+			spans(Erase::Display(ProtectExtent::ToStart), 2, 4, 5, 10),
 			vec![(0, 0..10), (1, 0..10), (2, 0..5)]
 		);
 	}
@@ -729,7 +744,7 @@ mod tests {
 	#[test]
 	fn erase_in_display_all_covers_every_row() {
 		assert_eq!(
-			spans(Erase::Display(Extent::All), 2, 4, 3, 4),
+			spans(Erase::Display(ProtectExtent::All), 2, 4, 3, 4),
 			vec![(0, 0..4), (1, 0..4), (2, 0..4)]
 		);
 	}
@@ -739,11 +754,11 @@ mod tests {
 		// The cursor sits at column `cols` when it has filled the last cell and not yet wrapped.
 		// Indexing there would be out of bounds, so it clamps back onto the grid.
 		assert_eq!(
-			spans(Erase::Line(Extent::ToEnd), 0, 10, 5, 10),
+			spans(Erase::Line(ProtectExtent::ToEnd), 0, 10, 5, 10),
 			vec![(0, 9..10)]
 		);
 		assert_eq!(
-			spans(Erase::Line(Extent::ToStart), 0, 10, 5, 10),
+			spans(Erase::Line(ProtectExtent::ToStart), 0, 10, 5, 10),
 			vec![(0, 0..10)]
 		);
 	}
@@ -751,14 +766,14 @@ mod tests {
 	#[test]
 	fn a_cursor_below_the_last_row_clamps_onto_the_grid() {
 		assert_eq!(
-			spans(Erase::Line(Extent::All), 99, 0, 5, 10),
+			spans(Erase::Line(ProtectExtent::All), 99, 0, 5, 10),
 			vec![(4, 0..10)]
 		);
 	}
 
 	#[test]
 	fn a_grid_with_no_cells_yields_no_spans() {
-		assert!(spans(Erase::Display(Extent::All), 0, 0, 0, 0).is_empty());
-		assert!(spans(Erase::Line(Extent::ToStart), 0, 0, 5, 0).is_empty());
+		assert!(spans(Erase::Display(ProtectExtent::All), 0, 0, 0, 0).is_empty());
+		assert!(spans(Erase::Line(ProtectExtent::ToStart), 0, 0, 5, 0).is_empty());
 	}
 }

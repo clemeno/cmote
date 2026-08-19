@@ -8259,11 +8259,11 @@ fn scroll_motion(named: &iced::keyboard::key::Named) -> Option<term::ScrollMotio
 /// The prompt-jump direction a Ctrl+Shift+arrow asks for, or `None` for any other key (§34). Up
 /// climbs to the previous prompt, Down returns toward the live one — the direction the arrow
 /// itself points through the scrollback.
-fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Direction> {
+fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Osc133Direction> {
 	use iced::keyboard::key::Named;
 	match named {
-		Named::ArrowUp => Some(term::osc133::Direction::Previous),
-		Named::ArrowDown => Some(term::osc133::Direction::Next),
+		Named::ArrowUp => Some(term::osc133::Osc133Direction::Previous),
+		Named::ArrowDown => Some(term::osc133::Osc133Direction::Next),
 		_ => None,
 	}
 }
@@ -10888,11 +10888,11 @@ mod tests {
 
 		assert_eq!(
 			prompt_jump(&Named::ArrowUp),
-			Some(term::osc133::Direction::Previous)
+			Some(term::osc133::Osc133Direction::Previous)
 		);
 		assert_eq!(
 			prompt_jump(&Named::ArrowDown),
-			Some(term::osc133::Direction::Next)
+			Some(term::osc133::Osc133Direction::Next)
 		);
 		assert_eq!(prompt_jump(&Named::ArrowLeft), None);
 		assert_eq!(prompt_jump(&Named::PageUp), None);

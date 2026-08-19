@@ -53,12 +53,12 @@ const CHUNK: usize = 256 * 1024;
 /// outcome is reported in, because the transfer queue's state machine listens for the pair belonging
 /// to the direction it started (§17, §19) — report the wrong one and the queue never frees its slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Direction {
+enum CopyDirection {
 	Up,
 	Down,
 }
 
-impl Direction {
+impl CopyDirection {
 	/// The word the status bar uses for this direction, so a message reads as the action the user took
 	/// rather than as "copy", which is what both of them actually are.
 	fn noun(self) -> &'static str {
@@ -115,7 +115,7 @@ pub async fn upload(
 			return;
 		}
 		let outcome = one_file(&source, &native, resume, &events, &cancel).await;
-		report(&events, Direction::Up, outcome, destination).await;
+		report(&events, CopyDirection::Up, outcome, destination).await;
 	});
 }
 
@@ -140,7 +140,7 @@ pub async fn download(
 		};
 		let landed = destination.to_string_lossy().into_owned();
 		let outcome = one_file(&native, &destination, resume, &events, &cancel).await;
-		report(&events, Direction::Down, outcome, landed).await;
+		report(&events, CopyDirection::Down, outcome, landed).await;
 	});
 }
 
@@ -189,7 +189,7 @@ pub async fn upload_tree(
 			.as_ref()
 			.ok()
 			.and_then(|done| done.as_ref().map(|name| explorer::join(&destination, name)));
-		report_tree(&events, Direction::Up, outcome, landed).await;
+		report_tree(&events, CopyDirection::Up, outcome, landed).await;
 	});
 }
 
@@ -223,7 +223,7 @@ pub async fn download_tree(
 			done.as_ref()
 				.map(|name| destination.join(name).to_string_lossy().into_owned())
 		});
-		report_tree(&events, Direction::Down, outcome, landed).await;
+		report_tree(&events, CopyDirection::Down, outcome, landed).await;
 	});
 }
 
@@ -565,7 +565,7 @@ fn native(pane: &str) -> Result<PathBuf, String> {
 /// one, so it is final and an error; anything else KEPT its partial, so it is offered as a Resume.
 async fn report(
 	events: &mpsc::Sender<SshEvent>,
-	direction: Direction,
+	direction: CopyDirection,
 	outcome: Result<CopyOutcome>,
 	landed: String,
 ) {
@@ -593,7 +593,7 @@ async fn report(
 /// is why the cancel arm reads it off the outcome rather than off a missing path.
 async fn report_tree(
 	events: &mpsc::Sender<SshEvent>,
-	direction: Direction,
+	direction: CopyDirection,
 	outcome: Result<Option<String>>,
 	landed: Option<String>,
 ) {
@@ -625,7 +625,7 @@ async fn report_tree(
 
 #[cfg(test)]
 mod tests {
-	use super::{CHUNK, Direction, free_leaf, same_file, stream};
+	use super::{CHUNK, CopyDirection, free_leaf, same_file, stream};
 	use crate::bridge::SshEvent;
 	use crate::ssh::transfer::{CopyOutcome, Ticker};
 	use std::sync::Arc;
@@ -797,19 +797,19 @@ mod tests {
 		// The only thing the direction decides. Report the wrong pair and the transfer queue never
 		// frees its slot, so every later transfer in that tab is stuck behind a finished one.
 		assert!(matches!(
-			Direction::Up.done("x".to_owned()),
+			CopyDirection::Up.done("x".to_owned()),
 			SshEvent::UploadDone(_)
 		));
 		assert!(matches!(
-			Direction::Down.done("x".to_owned()),
+			CopyDirection::Down.done("x".to_owned()),
 			SshEvent::DownloadDone(_)
 		));
 		assert!(matches!(
-			Direction::Up.failed("x".to_owned()),
+			CopyDirection::Up.failed("x".to_owned()),
 			SshEvent::UploadFailed(_)
 		));
 		assert!(matches!(
-			Direction::Down.failed("x".to_owned()),
+			CopyDirection::Down.failed("x".to_owned()),
 			SshEvent::DownloadFailed(_)
 		));
 	}

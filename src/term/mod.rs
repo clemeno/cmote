@@ -558,13 +558,13 @@ impl Terminal {
 	///
 	/// Returns whether a picture was placed on the alternate page, which `process` uses to leave that
 	/// page's covered-cell sweep alone for the chunk.
-	fn apply_graphics(&mut self, event: graphics::Event) -> bool {
+	fn apply_graphics(&mut self, event: graphics::GraphicsEvent) -> bool {
 		// A swap earlier in this same chunk has already been applied to the engine by the split
 		// advance, so ask before doing anything: the picture arriving belongs to the page that is up
 		// NOW, and the page it swapped away from should already have been emptied.
 		self.sync_alternate();
 		match event {
-			graphics::Event::Image(image) => {
+			graphics::GraphicsEvent::Image(image) => {
 				// Read the cursor before the reservation moves it. On the primary screen the absolute
 				// line is history + the row (§40) — safe to read first, because scrolling grows the
 				// history by exactly as much as it moves the content up, so the line goes on naming the
@@ -584,7 +584,7 @@ impl Terminal {
 			// page there is no such split — it is one screen with no history behind it — so `CSI 2 J`
 			// takes all of its pictures and `CSI 3 J` says nothing about a scrollback that is not
 			// there.
-			graphics::Event::ClearScreen => {
+			graphics::GraphicsEvent::ClearScreen => {
 				if self.on_alternate {
 					self.graphics.clear_alternate();
 				} else {
@@ -592,14 +592,14 @@ impl Terminal {
 						.clear_screen(self.term.grid().history_size() as u64);
 				}
 			}
-			graphics::Event::ClearScrollback => {
+			graphics::GraphicsEvent::ClearScrollback => {
 				if !self.on_alternate {
 					self.graphics
 						.clear_scrollback(self.term.grid().history_size() as u64);
 				}
 			}
 			// RIS resets the terminal itself, so it takes everything wherever the session is.
-			graphics::Event::Reset => self.graphics.clear(),
+			graphics::GraphicsEvent::Reset => self.graphics.clear(),
 		}
 		false
 	}
@@ -1027,21 +1027,21 @@ impl Terminal {
 		match request {
 			rect::RectRequest::Erase(corners) => {
 				if let Some(bounds) =
-					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+					rect::from_corners(corners, rect::RectExtent::Rectangle, rows, cols)
 				{
 					self.erase_rect(bounds, false);
 				}
 			}
 			rect::RectRequest::SelectiveErase(corners) => {
 				if let Some(bounds) =
-					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+					rect::from_corners(corners, rect::RectExtent::Rectangle, rows, cols)
 				{
 					self.erase_rect(bounds, true);
 				}
 			}
 			rect::RectRequest::Fill(glyph, corners) => {
 				if let Some(bounds) =
-					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+					rect::from_corners(corners, rect::RectExtent::Rectangle, rows, cols)
 				{
 					self.fill_rect(glyph, bounds);
 				}
@@ -1059,7 +1059,8 @@ impl Terminal {
 				}
 			}
 			rect::RectRequest::Copy { source, top, left } => {
-				let Some(source) = rect::from_corners(source, rect::Extent::Rectangle, rows, cols)
+				let Some(source) =
+					rect::from_corners(source, rect::RectExtent::Rectangle, rows, cols)
 				else {
 					return;
 				};
@@ -1086,7 +1087,7 @@ impl Terminal {
 				let bounds = if origin {
 					None
 				} else {
-					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+					rect::from_corners(corners, rect::RectExtent::Rectangle, rows, cols)
 				};
 				let checksum = bounds.map_or(0, |bounds| self.checksum_rect(bounds));
 				// Into the same buffer the engine's own replies land in, at the point in the stream
@@ -1186,7 +1187,7 @@ impl Terminal {
 	fn attribute_rect(
 		&mut self,
 		bounds: rect::Rect,
-		extent: rect::Extent,
+		extent: rect::RectExtent,
 		change: rect::Change,
 		cols: usize,
 	) {
@@ -1264,7 +1265,7 @@ impl Terminal {
 	///
 	/// `columns` arrives already defaulted to at least 1 and clamped to the page width, so a shift by
 	/// the whole width blanks the page and a shift by more than it cannot run off the end.
-	fn shift_columns(&mut self, direction: rect::Direction, columns: usize) {
+	fn shift_columns(&mut self, direction: rect::RectDirection, columns: usize) {
 		let cols = self.term.grid().columns();
 		if cols == 0 || columns == 0 {
 			return;
@@ -1287,8 +1288,8 @@ impl Terminal {
 				// away from. `checked_sub` and the bound check are what make the edges fall out of
 				// the same loop as the middle instead of being two more loops to keep in step.
 				let from = match direction {
-					rect::Direction::Left => Some(column + columns).filter(|from| *from < cols),
-					rect::Direction::Right => column.checked_sub(columns),
+					rect::RectDirection::Left => Some(column + columns).filter(|from| *from < cols),
+					rect::RectDirection::Right => column.checked_sub(columns),
 				};
 				grid[line][Column(column)] = match from {
 					Some(from) => source[from].clone(),
@@ -1301,11 +1302,11 @@ impl Terminal {
 			// is not a character anybody asked for, so it is blanked. Only the two edge columns can be
 			// in this state: every other pair moved together.
 			let stranded = match direction {
-				rect::Direction::Left => grid[line][Column(0)]
+				rect::RectDirection::Left => grid[line][Column(0)]
 					.flags
 					.contains(Flags::WIDE_CHAR_SPACER)
 					.then_some(0),
-				rect::Direction::Right => grid[line][Column(cols - 1)]
+				rect::RectDirection::Right => grid[line][Column(cols - 1)]
 					.flags
 					.contains(Flags::WIDE_CHAR)
 					.then_some(cols - 1),
@@ -1665,7 +1666,7 @@ impl Terminal {
 	/// there was one to move to (so the caller can leave the view be when there is not). The target
 	/// offset is `osc133`'s to choose; here it is turned into the signed delta the engine scrolls
 	/// by — positive climbs into history — relative to where the viewport sits now.
-	pub fn jump_prompt(&mut self, direction: osc133::Direction) -> bool {
+	pub fn jump_prompt(&mut self, direction: osc133::Osc133Direction) -> bool {
 		let grid = self.term.grid();
 		let history = grid.history_size();
 		let offset = grid.display_offset();
@@ -1966,7 +1967,7 @@ pub struct Terminal {
 /// would place the later kinds at the wrong point in the stream.
 enum Interruption {
 	Prompt(osc133::Mark),
-	Graphics(graphics::Event),
+	Graphics(graphics::GraphicsEvent),
 	/// An explicit bookmark a script dropped with `OSC 1337 ; SetMark` (§55). Carries nothing: the
 	/// whole content of the event is the line it arrived on, which is why it has to be applied here
 	/// rather than after the chunk.
@@ -2012,7 +2013,7 @@ enum Interruption {
 #[derive(Default)]
 struct Scanned {
 	marks: Vec<(usize, osc133::Mark)>,
-	images: Vec<(usize, graphics::Event)>,
+	images: Vec<(usize, graphics::GraphicsEvent)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
 	protections: Vec<(usize, protect::ProtectRequest)>,
 	cancels: Vec<cancel::CancelRequest>,

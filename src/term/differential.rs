@@ -319,7 +319,7 @@ mod tests {
 
 		assert!(matches!(
 			graphics::Images::default().feed(bytes).as_slice(),
-			[(0, graphics::Event::ClearScreen)]
+			[(0, graphics::GraphicsEvent::ClearScreen)]
 		));
 	}
 
@@ -404,7 +404,10 @@ mod tests {
 		for (name, bytes) in variants(b"2", b'J') {
 			let dispatched = engine(&bytes).dispatched_plain('J', 2);
 			let found = graphics::Images::default().feed(&bytes);
-			let cleared = matches!(found.as_slice(), [(_, graphics::Event::ClearScreen)]);
+			let cleared = matches!(
+				found.as_slice(),
+				[(_, graphics::GraphicsEvent::ClearScreen)]
+			);
 			assert_eq!(
 				dispatched, cleared,
 				"{name}: engine {dispatched}, cmote {cleared}"
@@ -457,8 +460,8 @@ mod tests {
 		}
 
 		for (name, bytes) in variants(b"2", b'J') {
-			let cleared = |found: &[(usize, graphics::Event)]| {
-				matches!(found, [(_, graphics::Event::ClearScreen)])
+			let cleared = |found: &[(usize, graphics::GraphicsEvent)]| {
+				matches!(found, [(_, graphics::GraphicsEvent::ClearScreen)])
 			};
 			let whole = graphics::Images::default().feed(&bytes);
 			let mut scanner = graphics::Images::default();

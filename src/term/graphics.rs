@@ -89,7 +89,7 @@ const FALLBACK_CELL_HEIGHT: u16 = 14;
 ///     instant it applies the erase (`CSI 3 J` drops its whole history, so asking afterwards is
 ///     asking a terminal that no longer remembers).
 #[derive(Debug)]
-pub enum Event {
+pub enum GraphicsEvent {
 	/// A complete, decoded sixel image, ready to be placed at wherever the cursor then is.
 	Image(sixel::Image),
 	/// `CSI 2 J` — the program erased the visible screen. The pictures ON that screen go with it;
@@ -244,7 +244,7 @@ pub struct Images {
 	/// by abandoning the state, so the DCS is still followed to its terminator.
 	overflowed: bool,
 	/// Where in THIS chunk the escape sequence being read began, for the events that have to be acted
-	/// on before their own bytes reach the engine (see `Event`). `None` once a sequence has run over a
+	/// on before their own bytes reach the engine (see `GraphicsEvent`). `None` once a sequence has run over a
 	/// chunk boundary: its bytes then start at the very beginning of this chunk, which is offset 0.
 	sequence_start: Option<usize>,
 	/// The PRIMARY screen's pictures, anchored to absolute document lines (§40) and living as long as
@@ -280,9 +280,9 @@ impl Default for Images {
 impl Images {
 	/// GraphicsScan a chunk of shell output. Each returned event carries the offset the engine should be
 	/// advanced to before it is acted on — past its own bytes for a picture, before them for an erase,
-	/// for the reasons on `Event` — so the caller advances, acts, and carries on: the split-advance
+	/// for the reasons on `GraphicsEvent` — so the caller advances, acts, and carries on: the split-advance
 	/// `osc133` established (§34).
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Event)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, GraphicsEvent)> {
 		let mut found = Vec::new();
 		// Any sequence still open from the last chunk began before this one did.
 		self.sequence_start = None;
@@ -309,7 +309,7 @@ impl Images {
 					}
 					// RIS: the terminal is reset, so nothing that was drawn survives it.
 					b'c' => {
-						found.push((began, Event::Reset));
+						found.push((began, GraphicsEvent::Reset));
 						self.state = GraphicsScan::Text;
 					}
 					ESC => self.begin(index),
@@ -332,8 +332,8 @@ impl Images {
 						// agreed with that on the one spelling everything sends and on no other, and the
 						// cost of the disagreement was pictures left on a screen whose text had gone.
 						match first_param(self.params.bytes()) {
-							2 => found.push((began, Event::ClearScreen)),
-							3 => found.push((began, Event::ClearScrollback)),
+							2 => found.push((began, GraphicsEvent::ClearScreen)),
+							3 => found.push((began, GraphicsEvent::ClearScrollback)),
 							_ => {}
 						}
 						self.state = GraphicsScan::Text;
@@ -415,14 +415,14 @@ impl Images {
 	/// Finish the payload being read: decode it, and hand the picture on if there was one. An
 	/// oversized, empty or undecodable payload produces no event at all — the caller then reserves
 	/// no cells either, so a picture cmote cannot draw leaves the screen exactly as it was.
-	fn complete(&mut self, past: usize, found: &mut Vec<(usize, Event)>) {
+	fn complete(&mut self, past: usize, found: &mut Vec<(usize, GraphicsEvent)>) {
 		self.state = GraphicsScan::Text;
 		let payload = std::mem::take(&mut self.payload);
 		if self.overflowed {
 			return;
 		}
 		if let Some(image) = sixel::decode(&payload) {
-			found.push((past, Event::Image(image)));
+			found.push((past, GraphicsEvent::Image(image)));
 		}
 	}
 
@@ -589,14 +589,14 @@ mod tests {
 	const RED_COLUMN: &[u8] = b"\x1bPq#0;2;100;0;0~\x1b\\";
 
 	/// Feed one slice to a fresh scanner and return what it found.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Event)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, GraphicsEvent)> {
 		Images::default().feed(bytes)
 	}
 
 	/// The single image in a scan result, or a panic naming what was found instead.
-	fn only_image(found: Vec<(usize, Event)>) -> (usize, sixel::Image) {
+	fn only_image(found: Vec<(usize, GraphicsEvent)>) -> (usize, sixel::Image) {
 		match found.into_iter().next() {
-			Some((offset, Event::Image(image))) => (offset, image),
+			Some((offset, GraphicsEvent::Image(image))) => (offset, image),
 			other => panic!("expected one image, found {other:?}"),
 		}
 	}
@@ -659,17 +659,20 @@ mod tests {
 	fn an_erase_sequence_asks_for_the_right_pictures_to_go() {
 		// `CSI 2 J` is the screen, `CSI 3 J` the scrollback, `ESC c` the lot — each reported at the
 		// offset its own bytes START at, so the caller decides which pictures it takes from a screen
-		// the engine has not erased yet (see `Event`). A partial erase (`CSI 0 J`, `CSI K`) spans no
+		// the engine has not erased yet (see `GraphicsEvent`). A partial erase (`CSI 0 J`, `CSI K`) spans no
 		// picture, so it says nothing.
 		assert!(matches!(
 			scan(b"text\x1b[2J").as_slice(),
-			[(4, Event::ClearScreen)]
+			[(4, GraphicsEvent::ClearScreen)]
 		));
 		assert!(matches!(
 			scan(b"text\x1b[3J").as_slice(),
-			[(4, Event::ClearScrollback)]
+			[(4, GraphicsEvent::ClearScrollback)]
 		));
-		assert!(matches!(scan(b"text\x1bc").as_slice(), [(4, Event::Reset)]));
+		assert!(matches!(
+			scan(b"text\x1bc").as_slice(),
+			[(4, GraphicsEvent::Reset)]
+		));
 		assert!(scan(b"\x1b[0J").is_empty());
 		assert!(scan(b"\x1b[K").is_empty());
 		// A shell's `clear` sends both erases, which between them clear everything.
@@ -684,15 +687,15 @@ mod tests {
 		// pictures on a screen whose text had gone.
 		assert!(matches!(
 			scan(b"\x1b[002J").as_slice(),
-			[(0, Event::ClearScreen)]
+			[(0, GraphicsEvent::ClearScreen)]
 		));
 		assert!(matches!(
 			scan(b"\x1b[2;5J").as_slice(),
-			[(0, Event::ClearScreen)]
+			[(0, GraphicsEvent::ClearScreen)]
 		));
 		assert!(matches!(
 			scan(b"\x1b[003J").as_slice(),
-			[(0, Event::ClearScrollback)]
+			[(0, GraphicsEvent::ClearScrollback)]
 		));
 		// And the partial erases stay silent, however they are spelled.
 		assert!(scan(b"\x1b[000J").is_empty());
@@ -706,7 +709,7 @@ mod tests {
 		// erases the screen there — and a scanner that gave up on the byte count left the pictures on it.
 		assert!(matches!(
 			scan(b"\x1b[000000000000000002J").as_slice(),
-			[(0, Event::ClearScreen)]
+			[(0, GraphicsEvent::ClearScreen)]
 		));
 	}
 
@@ -718,7 +721,7 @@ mod tests {
 		assert!(images.feed(b"text\x1b[").is_empty());
 		assert!(matches!(
 			images.feed(b"2J").as_slice(),
-			[(0, Event::ClearScreen)]
+			[(0, GraphicsEvent::ClearScreen)]
 		));
 	}
 

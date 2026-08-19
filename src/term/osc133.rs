@@ -10,7 +10,7 @@
 //
 // `D`'s exit code is optional in the grammar — vtdn writes the production as
 // `"133", ";", "D", [ ";", exitcode ], ( 0x07 | 0x1b, "\\" )` and gives the bare form its own line,
-// "Command finished (no exit code)". Two write-ups are reachable, Contour's
+// "Osc133Command finished (no exit code)". Two write-ups are reachable, Contour's
 // (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`, read for §95) and vtdn's
 // (`vtdn.dev/docs/osc/osc133/`, read for §96), plus kitty's own shell integration
 // (`sw.kovidgoyal.net/kitty/shell-integration/`, read for §97), which is not a write-up of the
@@ -188,7 +188,7 @@ pub enum CommandState {
 /// Which way a prompt jump moves through the marks (§34): to the prompt above the viewport, or
 /// the one below it toward the live bottom.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
+pub enum Osc133Direction {
 	Previous,
 	Next,
 }
@@ -209,13 +209,13 @@ const MAX_COMMANDS: usize = MAX_MARKS;
 /// line it finished on (the D mark, where the next prompt will draw). The output therefore occupies
 /// the half-open line range `output .. end`, so a command that printed nothing has `output == end`.
 #[derive(Debug, Clone, Copy)]
-struct Command {
+struct Osc133Command {
 	prompt: u64,
 	output: u64,
 	end: u64,
 }
 
-impl Command {
+impl Osc133Command {
 	/// This command's output as an absolute half-open `(start, end)` line range, or `None` when it
 	/// printed nothing (`output == end`, e.g. a bare Enter or a `cd`). The selection paths use this
 	/// so an output-less command resolves to nothing to select rather than an empty highlight.
@@ -265,7 +265,7 @@ pub struct Prompts {
 	/// The finished commands' output spans (§34), a bounded ring like `marks`. Built from the C and
 	/// D marks so a command's output can be turned into a text selection; separate from `marks`,
 	/// which holds only the prompt-start lines the ticks and jumps use.
-	commands: Vec<Command>,
+	commands: Vec<Osc133Command>,
 	/// The command currently being assembled from its marks, if a prompt has started but not yet
 	/// finished (§34). `None` at rest and between commands.
 	pending: Option<Pending>,
@@ -363,7 +363,7 @@ impl Prompts {
 	/// click on its prompt tick resolves (to nothing) rather than falling through to a stray text
 	/// selection.
 	fn file_command(&mut self, pending: Pending, end: u64) {
-		self.commands.push(Command {
+		self.commands.push(Osc133Command {
 			prompt: pending.prompt,
 			output: pending.output.unwrap_or(end),
 			end,
@@ -555,7 +555,7 @@ impl Prompts {
 	/// is asking for "the last interesting line", not for a particular kind of interesting.
 	pub fn jump(
 		&self,
-		direction: Direction,
+		direction: Osc133Direction,
 		history_size: usize,
 		display_offset: usize,
 	) -> Option<usize> {
@@ -567,8 +567,8 @@ impl Prompts {
 			.map(|&mark| mark as i64);
 		let target = match direction {
 			// Strictly above the top so a repeated press keeps climbing rather than sticking.
-			Direction::Previous => anywhere.filter(|&mark| mark < top).max()?,
-			Direction::Next => anywhere.filter(|&mark| mark > top).min()?,
+			Osc133Direction::Previous => anywhere.filter(|&mark| mark < top).max()?,
+			Osc133Direction::Next => anywhere.filter(|&mark| mark > top).min()?,
 		};
 		let offset = (history_size as i64 - target).clamp(0, history_size as i64);
 		Some(offset as usize)
@@ -635,7 +635,7 @@ mod tests {
 	fn a_bare_done_mark_has_no_exit_code() {
 		// A shell that emits `133;D` with no code (it lost track of $?): the glyph shows "done",
 		// not a wrong number. Not a tolerated malformation but a documented spelling — vtdn gives
-		// it its own line, "Command finished (no exit code)", and the grammar makes the field
+		// it its own line, "Osc133Command finished (no exit code)", and the grammar makes the field
 		// optional (§96).
 		assert_eq!(marks(b"\x1b]133;D\x07"), vec![Mark::CommandEnd(None)]);
 	}
@@ -860,11 +860,11 @@ mod tests {
 		for line in [2u64, 8, 14] {
 			prompts.apply(Mark::PromptStart, line as usize, 0);
 		}
-		assert_eq!(prompts.jump(Direction::Previous, 20, 0), Some(6));
+		assert_eq!(prompts.jump(Osc133Direction::Previous, 20, 0), Some(6));
 		// From there (offset 6, top row is absolute 14) the next one up is 8 -> offset 12.
-		assert_eq!(prompts.jump(Direction::Previous, 20, 6), Some(12));
+		assert_eq!(prompts.jump(Osc133Direction::Previous, 20, 6), Some(12));
 		// And back down from offset 12 (top absolute 8) the next prompt below is 14 -> offset 6.
-		assert_eq!(prompts.jump(Direction::Next, 20, 12), Some(6));
+		assert_eq!(prompts.jump(Osc133Direction::Next, 20, 12), Some(6));
 	}
 
 	#[test]
@@ -874,8 +874,8 @@ mod tests {
 		let mut prompts = Prompts::default();
 		prompts.apply(Mark::PromptStart, 5, 0);
 		// Viewing with the prompt already on the top row (offset = history - 5): nothing above it.
-		assert_eq!(prompts.jump(Direction::Previous, 5, 0), None);
-		assert_eq!(prompts.jump(Direction::Next, 5, 0), None);
+		assert_eq!(prompts.jump(Osc133Direction::Previous, 5, 0), None);
+		assert_eq!(prompts.jump(Osc133Direction::Next, 5, 0), None);
 	}
 
 	#[test]
@@ -906,11 +906,11 @@ mod tests {
 		let mut prompts = Prompts::default();
 		prompts.apply(Mark::PromptStart, 2, 0);
 		prompts.record_user_mark(14, 0);
-		assert_eq!(prompts.jump(Direction::Previous, 20, 0), Some(6));
+		assert_eq!(prompts.jump(Osc133Direction::Previous, 20, 0), Some(6));
 		// Carrying on up from there reaches the prompt at 2 -> offset 18.
-		assert_eq!(prompts.jump(Direction::Previous, 20, 6), Some(18));
+		assert_eq!(prompts.jump(Osc133Direction::Previous, 20, 6), Some(18));
 		// And back down from above the prompt, the bookmark is the next one below.
-		assert_eq!(prompts.jump(Direction::Next, 20, 18), Some(6));
+		assert_eq!(prompts.jump(Osc133Direction::Next, 20, 18), Some(6));
 	}
 
 	#[test]

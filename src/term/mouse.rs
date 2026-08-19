@@ -57,7 +57,7 @@ impl Button {
 /// motion modes differ on exactly that: `ButtonMotion` reports a drag only, `AnyMotion`
 /// reports a bare hover too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Event {
+pub enum MouseEvent {
 	Press(Button),
 	Release(Button),
 	Motion(Option<Button>),
@@ -69,7 +69,7 @@ pub enum Event {
 pub fn encode(
 	mode: MouseMode,
 	encoding: MouseEncoding,
-	event: Event,
+	event: MouseEvent,
 	row: u16,
 	col: u16,
 	modifiers: Modifiers,
@@ -81,13 +81,13 @@ pub fn encode(
 	// The button field. A release in the classic encoding says only "some button came up"
 	// (3); SGR keeps the real button and marks the release with its final byte instead. A
 	// move adds 32, and "no button held" is that same 3.
-	let released = matches!(event, Event::Release(_));
+	let released = matches!(event, MouseEvent::Release(_));
 	let sgr = encoding == MouseEncoding::Sgr;
 	let mut field = match event {
-		Event::Press(button) => button.code(),
-		Event::Release(button) if sgr => button.code(),
-		Event::Release(_) => 3,
-		Event::Motion(held) => held.map_or(3, Button::code) + 32,
+		MouseEvent::Press(button) => button.code(),
+		MouseEvent::Release(button) if sgr => button.code(),
+		MouseEvent::Release(_) => 3,
+		MouseEvent::Motion(held) => held.map_or(3, Button::code) + 32,
 	};
 	// Every mode we can be in carries the modifier bits (the engine does not implement the
 	// ancient X10 protocol, which predated them, §23).
@@ -128,10 +128,10 @@ pub fn encode(
 /// Whether `mode` asks to hear about `event` at all. Presses and releases go to every
 /// reporting mode; a move only to the two motion modes, and `ButtonMotion` wants it only
 /// while a button is down.
-fn wants(mode: MouseMode, event: Event) -> bool {
+fn wants(mode: MouseMode, event: MouseEvent) -> bool {
 	match event {
-		Event::Press(_) | Event::Release(_) => mode != MouseMode::None,
-		Event::Motion(held) => match mode {
+		MouseEvent::Press(_) | MouseEvent::Release(_) => mode != MouseMode::None,
+		MouseEvent::Motion(held) => match mode {
 			MouseMode::ButtonMotion => held.is_some(),
 			MouseMode::AnyMotion => true,
 			_ => false,
@@ -155,7 +155,7 @@ mod tests {
 			encode(
 				MouseMode::None,
 				MouseEncoding::Sgr,
-				Event::Press(Button::Left),
+				MouseEvent::Press(Button::Left),
 				0,
 				0,
 				none()
@@ -170,7 +170,7 @@ mod tests {
 		let press = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
-			Event::Press(Button::Left),
+			MouseEvent::Press(Button::Left),
 			4,
 			9,
 			none(),
@@ -178,7 +178,7 @@ mod tests {
 		let release = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
-			Event::Release(Button::Left),
+			MouseEvent::Release(Button::Left),
 			4,
 			9,
 			none(),
@@ -193,7 +193,7 @@ mod tests {
 		let report = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Default,
-			Event::Press(Button::Right),
+			MouseEvent::Press(Button::Right),
 			0,
 			0,
 			none(),
@@ -207,7 +207,7 @@ mod tests {
 		let classic = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Default,
-			Event::Release(Button::Right),
+			MouseEvent::Release(Button::Right),
 			0,
 			0,
 			none(),
@@ -217,7 +217,7 @@ mod tests {
 		let sgr = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
-			Event::Release(Button::Right),
+			MouseEvent::Release(Button::Right),
 			0,
 			0,
 			none(),
@@ -233,7 +233,7 @@ mod tests {
 		let report = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Default,
-			Event::Press(Button::Left),
+			MouseEvent::Press(Button::Left),
 			0,
 			400,
 			none(),
@@ -244,7 +244,7 @@ mod tests {
 		let sgr = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
-			Event::Press(Button::Left),
+			MouseEvent::Press(Button::Left),
 			0,
 			400,
 			none(),
@@ -256,7 +256,7 @@ mod tests {
 	#[test]
 	fn motion_is_reported_only_by_the_modes_that_asked_for_it() {
 		// A drag: ButtonMotion wants it, PressRelease does not.
-		let drag = Event::Motion(Some(Button::Left));
+		let drag = MouseEvent::Motion(Some(Button::Left));
 		assert!(
 			encode(
 				MouseMode::PressRelease,
@@ -283,7 +283,7 @@ mod tests {
 		);
 
 		// A bare hover: only AnyMotion wants it, and it says "no button" (3 + 32).
-		let hover = Event::Motion(None);
+		let hover = MouseEvent::Motion(None);
 		assert!(
 			encode(
 				MouseMode::ButtonMotion,
@@ -316,7 +316,7 @@ mod tests {
 			encode(
 				MouseMode::PressRelease,
 				MouseEncoding::Sgr,
-				Event::Press(Button::WheelUp),
+				MouseEvent::Press(Button::WheelUp),
 				0,
 				0,
 				none()
@@ -328,7 +328,7 @@ mod tests {
 			encode(
 				MouseMode::PressRelease,
 				MouseEncoding::Sgr,
-				Event::Press(Button::WheelDown),
+				MouseEvent::Press(Button::WheelDown),
 				0,
 				0,
 				none()
@@ -344,7 +344,7 @@ mod tests {
 		let report = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Sgr,
-			Event::Press(Button::Left),
+			MouseEvent::Press(Button::Left),
 			0,
 			0,
 			Modifiers::CTRL | Modifiers::ALT,
@@ -359,7 +359,7 @@ mod tests {
 		let report = encode(
 			MouseMode::PressRelease,
 			MouseEncoding::Utf8,
-			Event::Press(Button::Left),
+			MouseEvent::Press(Button::Left),
 			0,
 			300,
 			none(),

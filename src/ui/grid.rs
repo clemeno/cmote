@@ -533,7 +533,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					return;
 				}
 				state.held = Some(button);
-				report::Event::Press(button)
+				report::MouseEvent::Press(button)
 			}
 			mouse::Event::ButtonReleased(button) => {
 				let Some(button) = press_button(*button) else {
@@ -545,7 +545,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					return;
 				}
 				state.held = None;
-				report::Event::Release(button)
+				report::MouseEvent::Release(button)
 			}
 			mouse::Event::WheelScrolled { delta } => {
 				let Some(button) = wheel_button(*delta) else {
@@ -554,14 +554,14 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				if !inside {
 					return;
 				}
-				report::Event::Press(button)
+				report::MouseEvent::Press(button)
 			}
 			mouse::Event::CursorMoved { .. } => {
 				if !inside || state.last == Some(cell) {
 					return;
 				}
 				state.last = Some(cell);
-				report::Event::Motion(state.held)
+				report::MouseEvent::Motion(state.held)
 			}
 			_ => return,
 		};
@@ -580,7 +580,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// A click belongs to the program, not to our selection or context menu, so it is
 		// captured. A move is left alone: the hover tracking above us still wants it, and
 		// the program has already been told.
-		if !matches!(pointer_event, report::Event::Motion(_)) {
+		if !matches!(pointer_event, report::MouseEvent::Motion(_)) {
 			shell.capture_event();
 		}
 	}

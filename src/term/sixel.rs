@@ -122,7 +122,7 @@ pub fn decode(payload: &[u8]) -> Option<Image> {
 /// One command from the payload. `Run` folds the plain sixel character and the `!Pn` repeat into
 /// one shape — a repeat IS a run of one character — so both passes handle a single case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Command {
+enum SixelCommand {
 	/// Raster attributes: the image's own idea of its size in pixels.
 	Raster { width: u16, height: u16 },
 	/// Paint `count` columns of the six pixels `bits` selects, in the current register.
@@ -149,7 +149,7 @@ enum Command {
 /// lines short, stray whitespace, a byte from a truncated command — is skipped. A tolerant reader
 /// is the right call here: half a picture is worth more to the user than none, and there is nothing
 /// to exploit in a byte we drop.
-fn walk(payload: &[u8], mut sink: impl FnMut(Command)) {
+fn walk(payload: &[u8], mut sink: impl FnMut(SixelCommand)) {
 	let mut index = 0;
 	while index < payload.len() {
 		let byte = payload[index];
@@ -159,7 +159,7 @@ fn walk(payload: &[u8], mut sink: impl FnMut(Command)) {
 			b'"' => {
 				let numbers = numbers(payload, &mut index);
 				if let [_, _, width, height] = *numbers.as_slice() {
-					sink(Command::Raster { width, height });
+					sink(SixelCommand::Raster { width, height });
 				}
 			}
 			// `#` is both "use this register" and "this register means this colour", told apart by
@@ -167,10 +167,10 @@ fn walk(payload: &[u8], mut sink: impl FnMut(Command)) {
 			b'#' => {
 				let numbers = numbers(payload, &mut index);
 				match *numbers.as_slice() {
-					[register] => sink(Command::Select {
+					[register] => sink(SixelCommand::Select {
 						register: register_index(register),
 					}),
-					[register, coding, x, y, z] => sink(Command::Define {
+					[register, coding, x, y, z] => sink(SixelCommand::Define {
 						register: register_index(register),
 						coding,
 						values: [x, y, z],
@@ -190,15 +190,15 @@ fn walk(payload: &[u8], mut sink: impl FnMut(Command)) {
 				if let Some(&repeated) = payload.get(index) {
 					index += 1;
 					if let Some(bits) = sixel_bits(repeated) {
-						sink(Command::Run { count, bits });
+						sink(SixelCommand::Run { count, bits });
 					}
 				}
 			}
-			b'$' => sink(Command::CarriageReturn),
-			b'-' => sink(Command::NextBand),
+			b'$' => sink(SixelCommand::CarriageReturn),
+			b'-' => sink(SixelCommand::NextBand),
 			_ => {
 				if let Some(bits) = sixel_bits(byte) {
-					sink(Command::Run { count: 1, bits });
+					sink(SixelCommand::Run { count: 1, bits });
 				}
 			}
 		}
@@ -223,8 +223,10 @@ fn canvas_size(payload: &[u8]) -> Option<(u32, u32)> {
 	let mut painted_bands: u32 = 0;
 
 	walk(payload, |command| match command {
-		Command::Raster { width, height } => raster = Some((u32::from(width), u32::from(height))),
-		Command::Run { count, bits } => {
+		SixelCommand::Raster { width, height } => {
+			raster = Some((u32::from(width), u32::from(height)))
+		}
+		SixelCommand::Run { count, bits } => {
 			x += u32::from(count);
 			// Only a character with a bit set extends the picture; one that sets none is a step
 			// across transparent space, which no more belongs to the image than the margin does.
@@ -233,12 +235,12 @@ fn canvas_size(payload: &[u8]) -> Option<(u32, u32)> {
 				painted_bands = painted_bands.max(band + 1);
 			}
 		}
-		Command::CarriageReturn => x = 0,
-		Command::NextBand => {
+		SixelCommand::CarriageReturn => x = 0,
+		SixelCommand::NextBand => {
 			band += 1;
 			x = 0;
 		}
-		Command::Select { .. } | Command::Define { .. } => {}
+		SixelCommand::Select { .. } | SixelCommand::Define { .. } => {}
 	});
 
 	let (width, height) = match raster {
@@ -270,8 +272,8 @@ fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
 	let mut band: u32 = 0;
 
 	walk(payload, |command| match command {
-		Command::Select { register: chosen } => register = usize::from(chosen),
-		Command::Define {
+		SixelCommand::Select { register: chosen } => register = usize::from(chosen),
+		SixelCommand::Define {
 			register: defined,
 			coding,
 			values,
@@ -285,7 +287,7 @@ fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
 			// it in one colour.
 			register = usize::from(defined);
 		}
-		Command::Run { count, bits } => {
+		SixelCommand::Run { count, bits } => {
 			let ink = palette[register];
 			for _ in 0..count {
 				// A run can walk off the right edge (an overlong band, or a raster crop): keep
@@ -311,12 +313,12 @@ fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
 				x += 1;
 			}
 		}
-		Command::CarriageReturn => x = 0,
-		Command::NextBand => {
+		SixelCommand::CarriageReturn => x = 0,
+		SixelCommand::NextBand => {
 			band += 1;
 			x = 0;
 		}
-		Command::Raster { .. } => {}
+		SixelCommand::Raster { .. } => {}
 	});
 }
 
