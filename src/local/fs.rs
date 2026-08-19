@@ -222,13 +222,15 @@ pub async fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String,
 				.metadata()
 				.map_err(|error| format!("Could not read the file: {error}"))?;
 			if meta.len() > limit {
-				// The remote reader's own wording and its own formatter (`ssh::edit::human_size`), so a
-				// file too big to open says the same sentence whichever machine it is on. A second
-				// spelling of one refusal is a second thing to keep true.
+				// The remote reader's own wording and the same formatter (`human::bytes`), so a file
+				// too big to open says the same sentence whichever machine it is on. A second
+				// spelling of one refusal is a second thing to keep true — which the formatter
+				// itself proved: it used to exist twice, and the two copies disagreed about
+				// whether 1024 bytes are a `KB` or a `KiB` (§109).
 				return Err(format!(
 					"This file is {} — too large to open (limit {}).",
-					crate::ssh::edit::human_size(meta.len()),
-					crate::ssh::edit::human_size(limit)
+					crate::human::bytes(meta.len()),
+					crate::human::bytes(limit)
 				));
 			}
 			std::fs::read(native).map_err(|error| format!("Could not read the file: {error}"))

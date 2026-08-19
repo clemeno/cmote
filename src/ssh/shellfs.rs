@@ -220,8 +220,8 @@ pub async fn read_all(runner: &Runner, path: &str, limit: u64) -> Result<Vec<u8>
 	match size(runner, path).await {
 		Some(bytes) if bytes > limit => bail!(
 			"the file is {} — larger than the {} cmote will open",
-			super::edit::human_size(bytes),
-			super::edit::human_size(limit)
+			crate::human::bytes(bytes),
+			crate::human::bytes(limit)
 		),
 		Some(_) => {}
 		None => bail!("could not read the file"),

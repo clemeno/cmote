@@ -716,11 +716,15 @@ fn center_zone<'a>(endpoint: &str, transfers: &'a Queue) -> Element<'a, Message>
 		// heard the file's size (§19) — or a zero-byte file — so the bar stays empty and
 		// the label shows only what has actually moved.
 		let (fraction, label) = if total == 0 {
-			(0.0, human_bytes(sent))
+			(0.0, crate::human::bytes(sent))
 		} else {
 			(
 				sent as f32 / total as f32,
-				format!("{} / {}", human_bytes(sent), human_bytes(total)),
+				format!(
+					"{} / {}",
+					crate::human::bytes(sent),
+					crate::human::bytes(total)
+				),
 			)
 		};
 		return row![
@@ -754,27 +758,6 @@ fn center_zone<'a>(endpoint: &str, transfers: &'a Queue) -> Element<'a, Message>
 		.into();
 	}
 	notice.into()
-}
-
-/// A byte count in the units a person reads (§17). Binary units, one decimal above a
-/// kibibyte — enough precision for a progress readout, no rounding surprises at the
-/// boundaries.
-pub fn human_bytes(bytes: u64) -> String {
-	const KIB: f64 = 1024.0;
-	let value = bytes as f64;
-	if value < KIB {
-		return format!("{bytes} B");
-	}
-	for (limit, unit) in [
-		(KIB * KIB, "KiB"),
-		(KIB * KIB * KIB, "MiB"),
-		(KIB * KIB * KIB * KIB, "GiB"),
-	] {
-		if value < limit {
-			return format!("{:.1} {unit}", value / (limit / KIB));
-		}
-	}
-	format!("{:.1} TiB", value / (KIB * KIB * KIB * KIB))
 }
 
 /// The URI of the OSC 8 hyperlink under a grid-local point, if the cell there is part of a
@@ -1447,17 +1430,5 @@ mod tests {
 				"{shape:?} reached {interaction:?}"
 			);
 		}
-	}
-
-	#[test]
-	fn byte_counts_read_in_binary_units() {
-		// Under a kibibyte stays exact; above it switches unit at each 1024 boundary,
-		// which is what the upload progress readout shows (§17).
-		assert_eq!(human_bytes(0), "0 B");
-		assert_eq!(human_bytes(1023), "1023 B");
-		assert_eq!(human_bytes(1024), "1.0 KiB");
-		assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
-		assert_eq!(human_bytes(3 * 1024 * 1024 / 2), "1.5 MiB");
-		assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GiB");
 	}
 }

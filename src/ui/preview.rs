@@ -74,7 +74,7 @@ fn toolbar(preview: &Preview, tab_id: u64) -> Element<'_, Message> {
 		// really a PNG says PNG here, which is the one place a user would ever find that out.
 		info = info.push(badge(picture.format));
 		info = info.push(badge(&format!("{}×{}", picture.width, picture.height)));
-		info = info.push(badge(&crate::ui::terminal::human_bytes(picture.bytes)));
+		info = info.push(badge(&crate::human::bytes(picture.bytes)));
 	}
 
 	let bar = row![

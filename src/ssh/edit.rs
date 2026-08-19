@@ -118,8 +118,8 @@ pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Res
 	{
 		bail!(
 			"This file is {} — too large to open (limit {}).",
-			human_size(size),
-			human_size(limit)
+			crate::human::bytes(size),
+			crate::human::bytes(limit)
 		);
 	}
 
@@ -136,7 +136,10 @@ pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Res
 		}
 		buffer.extend_from_slice(&chunk[..read]);
 		if buffer.len() as u64 > limit {
-			bail!("This file is over the {} limit.", human_size(limit));
+			bail!(
+				"This file is over the {} limit.",
+				crate::human::bytes(limit)
+			);
 		}
 	}
 	Ok(buffer)
@@ -248,21 +251,4 @@ pub(crate) async fn write_atomic(sftp: &SftpSession, path: &str, bytes: &[u8]) -
 		}
 	}
 	Ok(())
-}
-
-/// A file size in the terse `4.0 KB` / `8.0 MB` form the refusal message shows (§32). Local to this
-/// module so the network layer carries no dependency on the files pane's own formatter.
-pub(crate) fn human_size(bytes: u64) -> String {
-	const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
-	let mut value = bytes as f64;
-	let mut unit = 0;
-	while value >= 1024.0 && unit < UNITS.len() - 1 {
-		value /= 1024.0;
-		unit += 1;
-	}
-	if unit == 0 {
-		format!("{bytes} {}", UNITS[0])
-	} else {
-		format!("{value:.1} {}", UNITS[unit])
-	}
 }

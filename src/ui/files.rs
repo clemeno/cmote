@@ -739,7 +739,7 @@ fn wrapped_rows(line: &str) -> usize {
 /// two differ (§20). "4.2 KiB" is what you scan for; "4311 B" is what you need when the
 /// difference matters.
 fn human_size(size: u64) -> String {
-	let human = crate::ui::terminal::human_bytes(size);
+	let human = crate::human::bytes(size);
 	if size < 1024 {
 		human
 	} else {
@@ -853,7 +853,7 @@ fn meta_line(entry: &Entry, files: &Files) -> String {
 	let size = entry
 		.meta
 		.size
-		.map_or_else(|| "—".to_owned(), crate::ui::terminal::human_bytes);
+		.map_or_else(|| "—".to_owned(), crate::human::bytes);
 	format!("{size} · {date} · {access}")
 }
 
