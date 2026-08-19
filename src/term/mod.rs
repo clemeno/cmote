@@ -387,7 +387,7 @@ impl Terminal {
 		// The explicit bookmarks a script dropped (§55). Grid-anchored like a prompt mark, and for the
 		// same reason: the event's whole content is the line it arrived on.
 		let bookmarks = self.iterm.feed(bytes);
-		// The selective-erase sequences the engine drops (§56). Split-fed like the marks, but its
+		// The selective-erase sequences the engine drops (§56). Interruption-fed like the marks, but its
 		// offsets sit one PAST each sequence, because a pen change has to be applied after the SGR
 		// that wiped it and an erase after the engine has ignored it. An unarmed stream that sends no
 		// `?`-erase reports nothing, so the common case still pays for no split.
@@ -395,27 +395,27 @@ impl Terminal {
 		// DECSLRM, the one sequence the engine reads as something else (§57, §102). Unlike every
 		// scanner above, this one is not reporting something to apply — it is reporting a byte the
 		// engine must not be let
-		// near, so its offset is the final byte itself and the split loop steps OVER it.
+		// near, so its offset is the final byte itself and the interruption loop steps OVER it.
 		let cancels = self.cancels.feed(bytes);
-		// The VT420 rectangular operations the engine drops (§58, §59). Split-fed like the selective
+		// The VT420 rectangular operations the engine drops (§58, §59). Interruption-fed like the selective
 		// erase and with the same one-past offsets: these name their own coordinates and never touch
 		// the cursor, so the split is only about the order they land in against the text around them.
 		let rectangles = self.rectangles.feed(bytes);
-		// DECST8C, the tab-stop reset the engine parses and then does nothing with (§74). Split-fed
+		// DECST8C, the tab-stop reset the engine parses and then does nothing with (§74). Interruption-fed
 		// with one-past offsets like the two above — and the order matters more here than for a
 		// rectangle: a chunk that resets its stops and then prints tabs has to see the new stops,
 		// so the reset cannot wait for the end of the chunk.
 		let tab_resets = self.tabs.feed(bytes);
 		// DECXCPR, the cursor-position question in DEC's spelling, which reaches no arm in the parser
-		// (§82). Split-fed for a reason none of the scanners above share: this one ANSWERS, and the
+		// (§82). Interruption-fed for a reason none of the scanners above share: this one ANSWERS, and the
 		// answer is only true at the point in the stream the question sat. `term/query.rs` may collect
 		// its queries and reply after the chunk because a version string and a unit id do not move.
 		let cursor_requests = self.dsr.feed(bytes);
-		// The character path (§76), and the RIS that empties the store of them. Split-fed like the
+		// The character path (§76), and the RIS that empties the store of them. Interruption-fed like the
 		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
 		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
 		let paths = self.scp.feed(bytes);
-		// XTPUSHSGR / XTPOPSGR, the video-attribute stack (§85). Split-fed for the reason DECXCPR is:
+		// XTPUSHSGR / XTPOPSGR, the video-attribute stack (§85). Interruption-fed for the reason DECXCPR is:
 		// a push must read the pen as it stood where the push was written, and a pop must restore it
 		// there — a chunk that pushes, paints itself red and pops would otherwise save the red.
 		let sgr_stack = self.sgr_stack.feed(bytes);
@@ -438,29 +438,31 @@ impl Terminal {
 			self.advance(bytes);
 		} else {
 			let mut start = 0;
-			for (offset, split) in splits(scanned) {
+			for (offset, interruption) in interruptions(scanned) {
 				// `start` can already be past this offset, because a cancelled final byte was stepped
-				// over just now (see `Split::Cancel`). No scanner can report an event INSIDE a CSI
+				// over just now (see `Interruption::Cancel`). No scanner can report an event INSIDE a CSI
 				// sequence, so nothing is ever skipped by this clamp — it only keeps the slice below
 				// from being built backwards.
 				let offset = offset.max(start);
 				self.advance(&bytes[start..offset]);
 				start = offset;
-				match split {
-					Split::Prompt(mark) => {
+				match interruption {
+					Interruption::Prompt(mark) => {
 						let history = self.term.grid().history_size();
 						let (row, _) = self.screen().cursor_position();
 						self.prompts.apply(mark, history, row);
 					}
-					Split::Graphics(event) => placed_on_alternate |= self.apply_graphics(event),
+					Interruption::Graphics(event) => {
+						placed_on_alternate |= self.apply_graphics(event)
+					}
 					// A bookmark is read the same way a prompt mark is — the cursor, now that the
 					// engine has been advanced to the sequence, names the line the script meant.
-					Split::UserMark => {
+					Interruption::UserMark => {
 						let history = self.term.grid().history_size();
 						let (row, _) = self.screen().cursor_position();
 						self.prompts.record_user_mark(history, row);
 					}
-					Split::Protect(request) => self.apply_protection(request),
+					Interruption::Protect(request) => self.apply_protection(request),
 					// A parametrised `CSI … s`, which is DECSLRM or SCOSC depending on a mode (§102).
 					//
 					// With mode 69 set it is a margin request: the margins are placed, and the final
@@ -473,24 +475,24 @@ impl Terminal {
 					// Without the mode it is a save-cursor, and the byte is left alone: the engine's
 					// reading of it is the right one, which is the whole reason §57's guess could be
 					// retired.
-					Split::Margins(request) => {
+					Interruption::Margins(request) => {
 						if self.margins.enabled() {
 							self.advance(&[cancel::CANCEL]);
 							start += 1;
 							self.set_margins(request);
 						}
 					}
-					Split::Rect(request) => self.apply_rectangle(request),
-					Split::TabStops => self.set_default_tabs(),
-					Split::Dsr(request) => self.answer_dsr(request),
-					Split::Path(request) => self.select_character_path(request),
-					Split::SgrStack(request) => self.apply_sgr_stack(request),
+					Interruption::Rect(request) => self.apply_rectangle(request),
+					Interruption::TabStops => self.set_default_tabs(),
+					Interruption::Dsr(request) => self.answer_dsr(request),
+					Interruption::Path(request) => self.select_character_path(request),
+					Interruption::SgrStack(request) => self.apply_sgr_stack(request),
 				}
 			}
 			self.advance(&bytes[start..]);
 		}
 		// The chunk is applied, so this is where a swap on or off the alternate screen is noticed —
-		// including one that carried no picture with it, which the split loop above never sees (§41).
+		// including one that carried no picture with it, which the interruption loop above never sees (§41).
 		self.sync_alternate();
 		if !placed_on_alternate {
 			self.retire_covered_images();
@@ -1962,7 +1964,7 @@ pub struct Terminal {
 /// byte offset its event sits at, and the engine can only be advanced forwards, so the lists are
 /// merged into this single ordered one — otherwise applying all the marks and then all the images
 /// would place the later kinds at the wrong point in the stream.
-enum Split {
+enum Interruption {
 	Prompt(osc133::Mark),
 	Graphics(graphics::Event),
 	/// An explicit bookmark a script dropped with `OSC 1337 ; SetMark` (§55). Carries nothing: the
@@ -1972,11 +1974,11 @@ enum Split {
 	/// A selective-erase request (§56). The odd one out in this list: every other kind is applied
 	/// with the engine advanced UP TO its offset, because the cursor then names the line the event
 	/// belongs on, while `protect` reports offsets one past the sequence so its requests land on the
-	/// far side of it. Both work through the same loop because a split is a split — the difference is
+	/// far side of it. Both work through the same loop because an interruption is an interruption — the difference is
 	/// only which side of the boundary the scanner asked for.
 	Protect(protect::Request),
 	/// A parametrised `CSI … s` — DECSLRM or SCOSC, depending on whether mode 69 is set (§57, §102).
-	/// The only split whose offset is the final byte ITSELF rather than one side of the sequence,
+	/// The only interruption whose offset is the final byte ITSELF rather than one side of the sequence,
 	/// because with the mode on the loop replaces that byte with a CAN rather than feeding it.
 	Margins(cancel::Request),
 	/// A rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of cells. Applied
@@ -1987,7 +1989,7 @@ enum Split {
 	/// event. Applied on the far side of its sequence, as the two above are.
 	TabStops,
 	/// One of the DEC-private status reports cmote answers — DECXCPR, or a locator question (§82,
-	/// §93). The only split in this list that produces a REPLY rather than an effect, which is why
+	/// §93). The only interruption in this list that produces a REPLY rather than an effect, which is why
 	/// DECXCPR has to be here at all: the cursor it reports is the cursor with the engine advanced
 	/// exactly to the question. The two locator answers are constants and ride along because they
 	/// come out of the same scanner.
@@ -1995,7 +1997,7 @@ enum Split {
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::Request),
 	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
-	/// the only split whose effect is carried out by FEEDING the engine — a pop is spelled back as the
+	/// the only interruption whose effect is carried out by FEEDING the engine — a pop is spelled back as the
 	/// SGR that restores the pen, so the engine stays the only writer of its own template (§71, §73).
 	SgrStack(sgrstack::Request),
 }
@@ -2042,7 +2044,7 @@ impl Scanned {
 /// final bytes into offset order. Every list arrives ascending, and the sort is stable, so two events
 /// at the very same offset keep the order they were scanned in — which is the only sensible
 /// tie-break, since no scanner can see another's.
-fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
+fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 	let Scanned {
 		marks,
 		images,
@@ -2055,7 +2057,7 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 		paths,
 		sgr_stack,
 	} = scanned;
-	let mut merged: Vec<(usize, Split)> = Vec::with_capacity(
+	let mut merged: Vec<(usize, Interruption)> = Vec::with_capacity(
 		marks.len()
 			+ images.len()
 			+ bookmarks.len()
@@ -2070,53 +2072,53 @@ fn splits(scanned: Scanned) -> Vec<(usize, Split)> {
 	merged.extend(
 		marks
 			.into_iter()
-			.map(|(offset, mark)| (offset, Split::Prompt(mark))),
+			.map(|(offset, mark)| (offset, Interruption::Prompt(mark))),
 	);
 	merged.extend(
 		images
 			.into_iter()
-			.map(|(offset, event)| (offset, Split::Graphics(event))),
+			.map(|(offset, event)| (offset, Interruption::Graphics(event))),
 	);
 	merged.extend(bookmarks.into_iter().map(|(offset, report)| {
-		let split = match report {
-			iterm::Report::Mark => Split::UserMark,
+		let interruption = match report {
+			iterm::Report::Mark => Interruption::UserMark,
 		};
-		(offset, split)
+		(offset, interruption)
 	}));
 	merged.extend(
 		protections
 			.into_iter()
-			.map(|(offset, request)| (offset, Split::Protect(request))),
+			.map(|(offset, request)| (offset, Interruption::Protect(request))),
 	);
 	merged.extend(
 		cancels
 			.into_iter()
-			.map(|request| (request.offset, Split::Margins(request))),
+			.map(|request| (request.offset, Interruption::Margins(request))),
 	);
 	merged.extend(
 		rectangles
 			.into_iter()
-			.map(|(offset, request)| (offset, Split::Rect(request))),
+			.map(|(offset, request)| (offset, Interruption::Rect(request))),
 	);
 	merged.extend(
 		tab_resets
 			.into_iter()
-			.map(|offset| (offset, Split::TabStops)),
+			.map(|offset| (offset, Interruption::TabStops)),
 	);
 	merged.extend(
 		cursor_requests
 			.into_iter()
-			.map(|(offset, request)| (offset, Split::Dsr(request))),
+			.map(|(offset, request)| (offset, Interruption::Dsr(request))),
 	);
 	merged.extend(
 		paths
 			.into_iter()
-			.map(|(offset, request)| (offset, Split::Path(request))),
+			.map(|(offset, request)| (offset, Interruption::Path(request))),
 	);
 	merged.extend(
 		sgr_stack
 			.into_iter()
-			.map(|(offset, request)| (offset, Split::SgrStack(request))),
+			.map(|(offset, request)| (offset, Interruption::SgrStack(request))),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -3119,7 +3121,7 @@ mod tests {
 
 	#[test]
 	fn a_bookmark_and_a_prompt_in_one_chunk_each_land_on_their_own_line() {
-		// The ordering the merged split list exists for: both scanners report offsets into the same
+		// The ordering the merged interruption list exists for: both scanners report offsets into the same
 		// chunk, and the engine only advances forwards, so applying all of one kind and then the
 		// other would put the second kind on the wrong line.
 		let mut terminal = Terminal::new(10, 40);
@@ -4890,7 +4892,7 @@ mod tests {
 		assert_eq!(read(&terminal, 2, 0, 6), "cccccc");
 	}
 
-	/// A margin request in the middle of a chunk that also carries a split of another kind — the two
+	/// A margin request in the middle of a chunk that also carries an interruption of another kind — the two
 	/// conventions meet here, since a selective erase reports the byte one PAST its sequence and a
 	/// cancel reports the final byte itself.
 	#[test]
@@ -5425,7 +5427,7 @@ mod tests {
 	}
 
 	/// The answer is the page as it stood WHERE THE QUESTION SAT, not as the rest of the chunk left
-	/// it. That is what the split-fed offset buys, and the only rectangular operation that needs it
+	/// it. That is what the interruption-fed offset buys, and the only rectangular operation that needs it
 	/// for anything but ordering (§60).
 	#[test]
 	fn a_checksum_answers_from_the_page_the_question_arrived_on() {

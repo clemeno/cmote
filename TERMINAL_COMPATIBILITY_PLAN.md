@@ -2289,7 +2289,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   query becomes a reply — XTVERSION / XTGETTCAP / DA3 from static facts (`VERSION`, `UNIT_ID`),
   `Decrqss(Sgr)` from the live pen via `pen_sgr(self.term.grid().cursor.template)`, built after the
   advance so a set-then-query in one write is seen. **§41 added the inline-image half**: `process` merges
-  the prompt marks and the image events of a chunk into one offset-ordered list (`splits`, since the
+  the prompt marks and the image events of a chunk into one offset-ordered list (`interruptions`, since the
   engine only advances forwards), `apply_graphics` anchors a picture at `history_size + cursor row` and
   column, and `reserve_cells` feeds the engine `CSI <cols> X` + LF per row and a closing CR, so the
   picture's box is erased, its cells become ordinary scrollback and the cursor lands at the left margin
@@ -2329,7 +2329,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   pure formatter — `CSI ? row+1 ; col+1 R`, xterm's two-parameter form with no page — and the `+ 1` is
   the engine's own arithmetic from `device_status`, copied so the ANSI and DEC spellings of one question
   cannot disagree, origin-mode divergence included. `term/mod.rs` answers inside the split loop
-  (`Split::CursorReport` → `report_cursor_position`), reading `screen().cursor_position()` with the engine
+  (`Interruption::CursorReport` → `report_cursor_position`), reading `screen().cursor_position()` with the engine
   advanced exactly to the sequence and pushing the bytes into the same `replies` buffer the engine writes
   into — the path `rect.rs`'s checksum already took, and the reason two questions in one write come back
   in the order they were asked.

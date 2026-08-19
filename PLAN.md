@@ -4260,7 +4260,7 @@ the alternate screen, for the reason below), then CR:
   creep onto the row below.
 
 `process` now has two scanners that fire mid-chunk, so their events are merged into one **offset-ordered**
-list (`splits`) — the engine can only be advanced forwards, and applying all the marks and then all the
+list (`interruptions`) — the engine can only be advanced forwards, and applying all the marks and then all the
 images would place the second kind at the wrong point in the stream. The two kinds want that offset on
 opposite sides of their own bytes, which is the subtlety in this section: a **picture** is applied *past*
 its DCS (it goes where the cursor is, which is only right once everything before it has been drawn),
@@ -6337,7 +6337,7 @@ what the engine's own erase writes: the pen's background colour and no glyph.
 
 ### What it cost, and what it unblocked
 
-One new module (`term/protect.rs`), two methods in `term/mod.rs`, one arm on `Split`. The region
+One new module (`term/protect.rs`), two methods in `term/mod.rs`, one arm on `Interruption`. The region
 arithmetic is a pure function over row and column numbers, so all six shapes of DECSED/DECSEL are
 tested without building a terminal.
 
@@ -6429,7 +6429,7 @@ The offsets are a third convention, and worth naming as such: a prompt mark repo
 
 ### What it cost
 
-One module (`term/cancel.rs`, 15 tests), one `Split` arm, five engine-level tests. No new state, no
+One module (`term/cancel.rs`, 15 tests), one `Interruption` arm, five engine-level tests. No new state, no
 buffering, no rewriting of the stream — the chunk is still fed to the engine as slices of the caller's
 bytes, with one byte swapped on the way past.
 
@@ -6525,7 +6525,7 @@ rather than left to be discovered.
 
 ### What it cost
 
-One module (`term/rect.rs`, 30 tests), one `Split` arm, four methods and eight engine-level tests. The
+One module (`term/rect.rs`, 30 tests), one `Interruption` arm, four methods and eight engine-level tests. The
 overlapping copy, the protection split, the pen-attributed fill, the trimmed copy, the origin-mode
 refusal and the undrawable rectangle each have one.
 
@@ -6629,7 +6629,7 @@ fails the stream tests, and assigning the flag word fails the protection test.
 
 - ~~**DECRQCRA** (`* y`) is still the only piece of the family left~~ — **done in §60**, below.
 - **Origin mode** is refused here as it is for the rest of §58's family, and for the same reason.
-- **`term/mod.rs` grew again** (~2700 lines). `splits()` now takes six positional lists and could use
+- **`term/mod.rs` grew again** (~2700 lines). `interruptions()` now takes six positional lists and could use
   a struct; the six scanners could plausibly become one. Neither is urgent, both are noted.
 
 ---
@@ -8170,7 +8170,7 @@ that lands and silently does nothing.
 ### What it cost
 
 - `src/term/tabs.rs`, new — the scanner and the walk, both pure and testable without a terminal.
-- `src/term/mod.rs` — the seventh scanner in the split feed, a `Split::TabStops` variant, and
+- `src/term/mod.rs` — the seventh scanner in the split feed, a `Interruption::TabStops` variant, and
   `set_default_tabs`, which is five lines because the module above it is the whole of the thinking.
 - Tests 1072 → 1090. Thirteen in the module (grammar, near misses, chunk splitting, the exact walk for
   four page widths, and one that asserts the walk emits **only** row-safe spellings), five end to end
@@ -8358,7 +8358,7 @@ and so charged the whole sequence for the expensive one.
 
 ### A debt paid on the way past
 
-`splits()` took eight positional `Vec`s after this, and clippy's argument limit is seven. The fix was the
+`interruptions()` took eight positional `Vec`s after this, and clippy's argument limit is seven. The fix was the
 struct this document has had on its deferred list since §58: `Scanned`, one named field per scanner, with
 the emptiness test — the fast path every ordinary chunk takes — as a method on it. Worth more than
 silencing a lint: with lists that similar in type, two arguments transposed at the call site would have
@@ -8368,7 +8368,7 @@ compiled and then applied the wrong event at the wrong offset.
 
 - `src/term/scp.rs`, new — scanner, store and mirror, all pure and testable without a terminal.
 - `src/term/screen.rs` — the seam carries the store, so the renderer and the pointer path read one source.
-- `src/term/mod.rs` — the eighth scanner, a `Split::Path`, `select_character_path`, and the store cleared
+- `src/term/mod.rs` — the eighth scanner, a `Interruption::Path`, `select_character_path`, and the store cleared
   on RIS and on both directions of the alternate-screen swap, since each renumbers what a line index
   means.
 - `src/ui/grid.rs`, `src/ui/terminal.rs`, `src/app.rs` — the mirror and its inverse.
@@ -8899,7 +8899,7 @@ a scanner that had simply stopped matching would pass a weaker version of.
 ### What it cost
 
 - `src/term/dsr.rs`, new — the scanner, the allow-list and the pure reply formatter. Eleven tests.
-- `src/term/mod.rs` — one field, one feed, one `Split` variant, one method, and five seam tests.
+- `src/term/mod.rs` — one field, one feed, one `Interruption` variant, one method, and five seam tests.
 - Tests 1143 → 1159. Matrix: 165 rows → 169, **✅ 104 → 105, ❌ 25 → 24, 🛑 30 → 34**, 🤷 unchanged at 6.
 
 ### Not done
@@ -9135,7 +9135,7 @@ which takes two attributes out where one was meant.
 ### What it cost
 
 - `src/term/sgrstack.rs`, new: the scanner, the mask and the request. Fifteen tests.
-- `src/term/mod.rs`: one scanner field, two state fields, a `Split` variant, `apply_sgr_stack`,
+- `src/term/mod.rs`: one scanner field, two state fields, a `Interruption` variant, `apply_sgr_stack`,
   `merged_pen`, `pen_restore`, `sgr_underline_color`, and ten seam tests.
 - Tests 1159 → 1183. Matrix 170 rows, **✅ 105 → 106, ❌ 25 → 24**, 🛑 34 and 🤷 6 unchanged.
 - `term/dsr.rs`'s header carried §84's two errors in prose (`75` as a memory self-test, `26` as bare
@@ -9673,7 +9673,7 @@ and not applied to these two for eleven sections.
 
 `term/dsr.rs`'s allow-list widens from one value to three and its `feed` reports **which** question
 each offset carried, so `term/mod.rs` answers a cursor position from the live cursor and the two
-locator questions from constants. `Split::CursorReport` becomes `Split::Dsr(dsr::Request)`.
+locator questions from constants. `Interruption::CursorReport` becomes `Interruption::Dsr(dsr::Request)`.
 
 The two negatives ride the split even though they are constants and could have waited for the end of
 the chunk like XTVERSION does. One route through one scanner is easier to keep right than two, and
