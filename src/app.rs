@@ -8075,7 +8075,7 @@ impl Tab {
 						// the pane's drop highlight all read it, and it is the only thing that
 						// knows what it is holding.
 						&self.transfers,
-						ui::terminal::Panels {
+						ui::terminal::PanesView {
 							explorer: &self.panes.tree,
 							files: &self.panes.pane,
 							focus: self.focus,

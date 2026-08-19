@@ -195,7 +195,7 @@ struct Follow {
 /// on the pane's right, both draw overlays, and the tree owns the dot-entry toggle that
 /// filters the pane.
 #[derive(Debug, Clone, Copy)]
-pub struct Panels<'a> {
+pub struct PanesView<'a> {
 	pub explorer: &'a Explorer,
 	pub files: &'a Files,
 	/// Which of the three the keyboard belongs to (§20): the panels draw a ring when it is
@@ -264,9 +264,9 @@ pub fn view<'a>(
 	menu: Option<Point>,
 	modals: Modals<'a>,
 	transfers: &'a Queue,
-	panels: Panels<'a>,
+	panels: PanesView<'a>,
 ) -> Element<'a, Message> {
-	let Panels {
+	let PanesView {
 		explorer,
 		files,
 		focus,
