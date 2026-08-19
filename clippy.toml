@@ -1,0 +1,40 @@
+# clippy.toml — configuration for clippy's own lints (PLAN §111).
+#
+# `clippy::doc_markdown` wants every CamelCase word in a doc comment wrapped in backticks, because a
+# word shaped like an identifier usually IS one. It is right about `known_hosts` and `WM_SETCURSOR`,
+# which are now backticked. It is wrong about the names below, and the difference matters:
+#
+#   * A proper noun is not code. `ConEmu`, `PuTTY`, `PSReadLine` and `ConPTY` are the names of
+#     programs and Windows APIs; `ReGIS` is DEC's graphics protocol, `BusyBox` a shell, `TextMate` a
+#     grammar format, `HiDPI` a display class. Backticking them would claim they are identifiers in
+#     this crate's namespace, which reads as a false promise that `grep` will find them.
+#
+#   * A keycap label is not code either. `NumLock`, `PageUp`, `PageDown` and `AltGr` are what is
+#     printed on the key the user presses. The rest of the crate writes those bare — Ctrl+D, Ctrl+W,
+#     Ctrl+Shift+F — and only these four happen to be CamelCase, so backticking them would make the
+#     spelling of a key depend on whether its name has a capital in the middle.
+#
+# This is configuration, not suppression: `doc-valid-idents` is the escape the lint's own authors
+# built for exactly this case, so the lint stays ON everywhere and keeps catching the real thing. An
+# `allow` would switch it off for a whole item and hide the next genuine identifier written bare.
+#
+# `".."` KEEPS clippy's built-in list (`OAuth`, `GitHub`, `WebGL`, …) — without it, the entries below
+# would REPLACE the defaults rather than extend them.
+doc-valid-idents = [
+	"..",
+	# Programs and platform APIs
+	"BusyBox",
+	"ConEmu",
+	"ConPTY",
+	"PSReadLine",
+	"PowerShells",
+	"PuTTY",
+	"ReGIS",
+	"TextMate",
+	# Display and input
+	"AltGr",
+	"HiDPI",
+	"NumLock",
+	"PageDown",
+	"PageUp",
+]

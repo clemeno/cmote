@@ -875,8 +875,8 @@ fn access_line(entry: &Entry) -> String {
 }
 
 /// The Material Icons code point for a category (§19). The names are the font's own:
-/// folder, link, image, code, folder_zip, description, audiotrack, movie,
-/// insert_drive_file.
+/// `folder`, `link`, `image`, `code`, `folder_zip`, `description`, `audiotrack`, `movie`,
+/// `insert_drive_file`.
 fn glyph(category: Category) -> char {
 	match category {
 		Category::Folder => '\u{e2c7}',

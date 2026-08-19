@@ -77,7 +77,7 @@ impl ForwardKind {
 pub struct ForwardSpec {
 	pub kind: ForwardKind,
 	/// The interface the listener binds. Local/Dynamic: a local address (defaults to loopback).
-	/// Remote: the address the SERVER binds (loopback unless its GatewayPorts allows otherwise).
+	/// Remote: the address the SERVER binds (loopback unless its `GatewayPorts` allows otherwise).
 	pub listen_host: String,
 	/// The port the listener binds. A Remote (`-R`) forward may be 0 — "let the server choose the
 	/// port" — and the port it assigns is reported back and shown on the row (`ForwardEntry::

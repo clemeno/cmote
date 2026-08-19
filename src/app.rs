@@ -2952,9 +2952,9 @@ pub enum Message {
 	/// Reject a host-key prompt (unknown or changed): refuse the connection — the safe default,
 	/// also emitted by the dialog's ✕ and a backdrop click.
 	RejectHostKey,
-	/// Override a CHANGED key for this session only, without touching known_hosts (§8).
+	/// Override a CHANGED key for this session only, without touching `known_hosts` (§8).
 	TrustHostKeyOnce,
-	/// Override a CHANGED key by replacing the stale known_hosts entry with the new one (§8).
+	/// Override a CHANGED key by replacing the stale `known_hosts` entry with the new one (§8).
 	ReplaceHostKey,
 	// --- key passphrase prompt (§7), shown only when the key is encrypted ---
 	/// The user edited the passphrase prompt field.
@@ -7552,7 +7552,7 @@ impl Tab {
 	/// Four things happen, and all four are the point:
 	///
 	/// * the tree opens the chain down to the cwd and selects it — through `Explorer::reveal`, the
-	///   UNguarded one, since the whole reason to press this is that the tree has been walked away
+	///   **unguarded** one, since the whole reason to press this is that the tree has been walked away
 	///   from a cwd that never changed;
 	/// * the pane shows that directory (`Files::show`, the deliberate move, not `follow`); and
 	/// * both follow-guards are seeded with the same path, so the next prompt's announcement is

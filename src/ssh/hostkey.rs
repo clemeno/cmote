@@ -17,7 +17,7 @@ use russh::keys::{HashAlg, PublicKey};
 
 use crate::paths;
 
-/// The outcome of checking a server key against the known_hosts store. This is
+/// The outcome of checking a server key against the `known_hosts` store. This is
 /// the whole TOFU decision surface (§8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostKeyVerdict {
@@ -27,7 +27,7 @@ pub enum HostKeyVerdict {
 	/// consent, then `learn` it (trust on first use).
 	Unknown,
 	/// A key is pinned for this host but it is different. Treat as hostile
-	/// (rotation *or* MITM) and refuse. `line` is the offending known_hosts line.
+	/// (rotation *or* MITM) and refuse. `line` is the offending `known_hosts` line.
 	Changed { line: usize },
 }
 
@@ -37,7 +37,7 @@ pub fn fingerprint(pubkey: &PublicKey) -> String {
 	pubkey.fingerprint(HashAlg::Sha256).to_string()
 }
 
-/// Check a server key against the known_hosts file at `path`. Never mutates the
+/// Check a server key against the `known_hosts` file at `path`. Never mutates the
 /// file. A missing file is not an error — it simply means every host is unknown.
 pub fn verify(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<HostKeyVerdict> {
 	match russh::keys::check_known_hosts_path(host, port, pubkey, path) {
@@ -50,7 +50,7 @@ pub fn verify(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<
 	}
 }
 
-/// Pin a newly-accepted host key by appending it to the known_hosts file at
+/// Pin a newly-accepted host key by appending it to the `known_hosts` file at
 /// `path`. Only ever called after the user has explicitly accepted the
 /// fingerprint (§8) — never automatically. Creates the file/parent if needed.
 pub fn learn(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<()> {
@@ -58,7 +58,7 @@ pub fn learn(host: &str, port: u16, pubkey: &PublicKey, path: &Path) -> Result<(
 		.context("failed to record host key in known_hosts")
 }
 
-/// The SHA-256 fingerprint of the key CURRENTLY pinned for a host, read from the known_hosts line
+/// The SHA-256 fingerprint of the key CURRENTLY pinned for a host, read from the `known_hosts` line
 /// `verify` flagged as changed (§8). The mismatch dialog shows this beside the presented key's
 /// fingerprint, so the user compares what was trusted before against what the server sends now —
 /// the whole point of an override being a judgement, not a reflex. `line` is 1-indexed, exactly as
@@ -85,7 +85,7 @@ pub fn stored_fingerprint(path: &Path, line: usize) -> Result<String> {
 	Ok(fingerprint(&pubkey))
 }
 
-/// Replace the stale key pinned for a host (§8): drop the offending known_hosts line, then pin the
+/// Replace the stale key pinned for a host (§8): drop the offending `known_hosts` line, then pin the
 /// newly-accepted key in its place. Only ever reached after the user explicitly chose "Replace
 /// key" in the mismatch dialog — never automatically. `line` is 1-indexed, as `verify` reports.
 /// After this, future connections verify silently against the new key.
@@ -94,7 +94,7 @@ pub fn replace(host: &str, port: u16, pubkey: &PublicKey, path: &Path, line: usi
 	learn(host, port, pubkey, path)
 }
 
-/// Remove the 1-indexed `line` from a known_hosts file, rewriting the rest verbatim. The helper
+/// Remove the 1-indexed `line` from a `known_hosts` file, rewriting the rest verbatim. The helper
 /// behind `replace`: drop the stale entry before the new key is learned. `lines()` strips the
 /// terminator, so the kept lines are re-joined with `\n` and the file is newline-ended — the
 /// OpenSSH format is one entry per line, each newline-terminated.
@@ -116,7 +116,7 @@ fn remove_line(path: &Path, line: usize) -> Result<()> {
 	std::fs::write(path, rebuilt).context("failed to rewrite known_hosts")
 }
 
-/// Resolve the portable known_hosts path (§11): the shared data directory
+/// Resolve the portable `known_hosts` path (§11): the shared data directory
 /// (`cmote-data/` beside the exe, or the per-user fallback — see `paths::data_dir`)
 /// with the `known_hosts` file name joined on.
 pub fn known_hosts_path() -> Result<PathBuf> {

@@ -153,8 +153,8 @@ impl FormStop {
 	}
 
 	/// The text-input id to focus natively at this stop, or `None` when the stop is a
-	/// radio or button (which iced cannot focus). Under key auth the Credential stop is
-	/// the Browse button, so it has no input id; the KeyPassphrase stop is a text field.
+	/// radio or button (which iced cannot focus). Under key auth the `Credential` stop is
+	/// the Browse button, so it has no input id; the `KeyPassphrase` stop is a text field.
 	pub fn input_id(self, auth: AuthKind) -> Option<&'static str> {
 		match self {
 			FormStop::Host => Some(HOST_INPUT_ID),

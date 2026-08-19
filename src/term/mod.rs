@@ -230,7 +230,7 @@ pub struct OutputSpan {
 /// `Terminal::new`, so that a test can read it back: every field here overrides an
 /// `alacritty_terminal` default on purpose, and two of them are decisions this project argued at
 /// length. A decision nothing checks is a decision that leaves quietly on the next crate bump —
-/// which is exactly the failure §62 of TERMINAL_COMPATIBILITY_PLAN went looking for.
+/// which is exactly the failure §62 of `TERMINAL_COMPATIBILITY_PLAN` went looking for.
 fn engine_config() -> Config {
 	Config {
 		scrolling_history: SCROLLBACK,

@@ -159,7 +159,7 @@ pub fn host_key_view(body: &text_editor::Content, card: dialog::Card) -> Element
 /// auto-accept. It shows a bright warning line plus BOTH fingerprints (stored vs presented, carried
 /// in the selectable `body` for out-of-band comparison) and three deliberate choices:
 ///   * **Reject** — refuse; the safe default, also on ✕ / a backdrop click.
-///   * **Trust once** — connect this session only, leaving known_hosts unchanged (warns again).
+///   * **Trust once** — connect this session only, leaving `known_hosts` unchanged (warns again).
 ///   * **Replace key** — pin the new key, so future connections verify against it silently.
 ///
 /// `body` (`App::dialog_body`) holds the warning copy and the two fingerprints as one selectable

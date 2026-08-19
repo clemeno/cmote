@@ -699,7 +699,7 @@ mod platform {
 	/// nothing to answer, and both halves of that matter. A press that does not move the pointer
 	/// still has to close the hand; and the pointer coming to rest on a close button ON a handle
 	/// (§52) has to give the hand up there and then, rather than keep it until the user happens to
-	/// move again — that arrival is one move, and the WM_SETCURSOR it came with was answered before
+	/// move again — that arrival is one move, and the `WM_SETCURSOR` it came with was answered before
 	/// the enter event reached iced.
 	///
 	/// Handing it back is done by asking the window the same question Windows would: the message
