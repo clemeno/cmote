@@ -222,7 +222,7 @@ pub struct PanesView<'a> {
 /// menu's shell integration (§17). Both are hidden rather than disabled — a button whose only possible
 /// answer is "not here" teaches nothing.
 #[derive(Debug, Clone, Copy)]
-pub struct Session<'a> {
+pub struct UiTerminalSession<'a> {
 	pub endpoint: &'a str,
 	pub local: bool,
 }
@@ -259,7 +259,7 @@ pub struct Modals<'a> {
 /// selection and the dialog body all share the returned element's lifetime.
 pub fn view<'a>(
 	terminal: &'a Terminal,
-	session: Session<'a>,
+	session: UiTerminalSession<'a>,
 	selection: Option<&'a Selection>,
 	menu: Option<Point>,
 	modals: Modals<'a>,
@@ -579,7 +579,7 @@ pub fn view<'a>(
 /// the `user@` the centre already carries; a bar that says the same thing twice reads as though the
 /// two could differ.
 fn status_bar<'a>(
-	session: Session<'a>,
+	session: UiTerminalSession<'a>,
 	has_selection: bool,
 	follow: Follow,
 	transfers: &'a Queue,

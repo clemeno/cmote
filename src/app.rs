@@ -8057,7 +8057,7 @@ impl Tab {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
-						ui::terminal::Session {
+						ui::terminal::UiTerminalSession {
 							endpoint: self.connection.as_deref().unwrap_or(""),
 							local: self.local.is_some(),
 						},
