@@ -11716,3 +11716,123 @@ compat plan's Evidence section is how §106 and §107 justify themselves.
 - **`AGENTS.md` is prose, so nothing enforces it.** The gate and the lint table are enforced; "one
   file header per module" and "no `allow`" are not, and a reader who skips the file is not stopped
   by anything.
+
+## §110 — A file that says what it is
+
+Two of the four on-disk files were written by a program that assumed it was the only program that
+would ever read them. `targets.json` was a bare JSON array; `settings.json` was a bare object. Neither
+said which format it was, and both were written with a plain `std::fs::write`.
+
+That is two separate defects wearing one section.
+
+### The write that could lose everything
+
+`std::fs::write` truncates the file and then fills it. A crash, a full disk or a killed process
+between those two steps leaves a truncated file — and a truncated JSON file does not parse.
+
+Which matters here more than it would elsewhere, because of a rule §14 got right: **a corrupt store
+must never stop the user from connecting.** `Targets::load_from` therefore treats an unparseable file
+as EMPTY. Put the two together and the failure is silent and total: crash mid-save, and the next run
+reads no targets, shows an empty home screen, and the save after that writes that emptiness back over
+what was left. No error anywhere in the chain.
+
+The vault never had this problem. It has always sealed its blob into a temp file beside the real one
+and renamed it over the top, because for `secrets.age` a truncated write means losing every stored
+secret at once, and that was obvious enough to handle when it was written (§16).
+
+So the vault's own pattern is now `src/store.rs`, and all three writers use it. Two details are worth
+stating because both are easy to get wrong:
+
+- **The temp file goes in the target's own directory.** A rename is only atomic within one
+  filesystem, so a temp in `%TEMP%` could be on another volume, where `rename` degrades to
+  copy-then-delete and the window comes straight back.
+- **`<name>.tmp` appends to the whole file name.** `with_extension` REPLACES it, so `secrets.age`
+  would become `secrets.tmp` and `targets.json` would become `targets.tmp` — two stores, one temp
+  path. There is a test whose only job is to pin that.
+
+### The version that was not there
+
+An older cmote reading a newer file deserializes what it recognises, ignores the rest, and then
+writes its own shape back. Whatever the newer build stored is gone. For a **portable** app this is the
+expected case rather than a hypothesis: the whole point of `cmote-data/` beside the binary (§11) is
+that the store travels on a stick between machines, which is exactly how it meets a different version
+of itself.
+
+`targets.json` grows an envelope; `settings.json` takes the field inline, since it is already an
+object:
+
+```json
+{ "version": "2", "targets": [ … ] }
+{ "version": "2", "window": [1000.0, 700.0] }
+```
+
+The version is a **string**, because both files are meant to be read and edited by hand (§22) and
+`"2"` reads as one of the other quoted values. **Version 1 is the unversioned shape** — the bare array,
+the bare object — so "version N" and "the Nth format" stay the same number for good.
+
+Which shape a `targets.json` is in is decided by its first non-whitespace byte: `[` is the array, `{`
+is the envelope. That is the point of the change, stated as plainly as it can be: **a format that says
+what it is can be recognised without guessing, forever.**
+
+### Three answers, and the difference between two of them
+
+| what is on disk | what happens |
+|---|---|
+| version 1 (unversioned) | loaded as before, and marked. The first save writes the envelope and preserves the original as `<file>.bak` |
+| version 2 | loaded |
+| anything else | **refused, both ways.** Nothing is read — not even the fields this build understands — and the save side returns an error rather than writing, so the file is byte-identical afterwards |
+| neither shape | read as empty, keeping §14's rule |
+
+The last two rows look alike and must not be treated alike. A **refusal** means the user's data is
+intact on disk and this build is too old to read it, so it must never be overwritten. A **corruption**
+means there is nothing to protect, so it must stay overwritable — otherwise one bad byte would lock
+the user out of saving anything ever again.
+
+The backup is written **once**. A backup refreshed on every save would be overwritten by the migrated
+file on the second run, leaving no copy of the original — which is the only thing this backup is for.
+
+### Telling the user, and where
+
+A refused `targets.json` is **shown**, in danger styling, where "No saved targets yet" would otherwise
+be. That is the one place someone looking for their targets is already looking, and the alternative is
+worse than silence: an empty home screen invites the user to make a new connection, which writes a new
+file over the one that still holds everything.
+
+Q23's answer said "snackbar", and it turned out not to be available — snackbars are per-tab and
+`Targets::load()` runs before any tab exists. The home screen's own empty state is the equivalent
+surface, and it already distinguished "nothing saved" from "nothing matching", so it was a third case
+rather than a new mechanism.
+
+`settings.json` gets no surface, deliberately. It holds a window size and the editor themes: a refusal
+costs a remembered window, while overwriting would cost whatever a newer build keeps there. The
+protection worth having is the one on the write.
+
+### What it cost
+
+Three commits, one new module of 93 lines, and 12 tests. `cargo test`: 1381 → 1390.
+
+Two of those tests are older ones that changed, and they were right to fail:
+`a_missing_file_reads_as_defaults` and `a_first_run_serializes_to_an_empty_object` both encoded the
+pre-§110 contract. `{}` was the tidiest possible first-run file, and that is precisely the problem this
+section is about.
+
+The `[lints]` table from §108 shaped two commits rather than merely passing them. `back_up_once` was
+written in the first slice and removed again, because it had no caller until the second and
+`warnings = "deny"` makes that a build error rather than a warning. And `Targets::refusal()` could not
+be landed without its reader, which is why the user-facing half of the refusal is in the same commit
+as the refusal itself instead of being left for later.
+
+### Not done
+
+- **`known_hosts` and `secrets.age` are unversioned, on purpose.** `known_hosts` is OpenSSH's format
+  and not ours to version. The vault's would have to sit outside the seal to be readable, which
+  weakens it — if it is ever needed it goes INSIDE the sealed payload, and not before there is a
+  second format to tell apart.
+- **Nothing reads the `.bak`.** It is a copy for a human with a text editor, not a recovery path. An
+  automatic fallback would have to decide when the live file is "bad enough", and §14's rule already
+  says a bad file reads as empty rather than as an error.
+- **A refusal is not offered a way out.** The message says to use a newer cmote or move the file
+  aside; there is no "open it anyway" or "start fresh here" button, because both are one click from
+  destroying data this build cannot see.
+- **The migration is one step wide.** There is one older format and one current one, so "migrate"
+  means "read the array". A third format would want the chain Q17 asked about, and this is not it yet.

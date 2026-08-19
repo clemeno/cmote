@@ -642,6 +642,14 @@ across restarts — §31), and, only once you opt in to remembering a secret,
 the sole place any secret is stored). All live in the same directory, resolved at
 runtime (§11, `paths::data_dir`):
 
+Both JSON files carry the format they are in — `{"version": "2", …}` (§110). A store written by a
+**newer** cmote is left strictly alone: nothing is read from it and nothing is written over it, and the
+home screen says so instead of showing an empty list. That matters for a portable install, because a
+`cmote-data/` on a stick is the normal way one version of cmote meets another. Upgrading the other
+way is automatic: an older store is read as before, and the first save keeps the original beside it as
+`targets.json.bak` — once, so it stays the original. Every store is written by replacing the file
+atomically, so a crash mid-save can no longer truncate one.
+
 1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
    is writable. This keeps the data travelling with the app — on macOS the binary lives
    in `cmote.app/Contents/MacOS/`, so the store sits inside the bundle.
