@@ -68,7 +68,7 @@ fn outside_the_band(column: usize) -> bool {
 /// wrap deliberately does not set: a change that unstitched every wrapped line in the find bar would
 /// leave every character exactly where it was. The flags are kept as `Flags` rather than as their bits so
 /// that a failure prints `WRAPLINE` instead of a number to look up.
-type Cell = (char, Flags, Color, Color);
+type GatediffCell = (char, Flags, Color, Color);
 
 /// Everything observable about an engine after a stream: the cursor, the scrollback depth, and every cell
 /// of the document — history rows included.
@@ -82,7 +82,7 @@ struct Document {
 	/// How many lines sit above the visible page.
 	history: usize,
 	/// The document top-down, starting at the oldest history line.
-	rows: Vec<Vec<Cell>>,
+	rows: Vec<Vec<GatediffCell>>,
 }
 
 /// Read an engine's whole document out.
