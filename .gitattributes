@@ -1,0 +1,18 @@
+# Line endings, settled here so they never depend on a machine (PLAN §108).
+#
+# Before this file, `core.autocrlf` decided them — a per-machine git setting the
+# repo said nothing about. The result was a repo that looked different depending
+# on who checked it out: PLAN.md stored CRLF while every other document stored
+# LF, twelve .rs files CRLF in the working copy and the other 83 LF, and
+# bundle-macos.sh CRLF locally (harmless only because the index held LF, which is
+# what the macOS runner checks out).
+#
+# LF everywhere, in the index AND in the working copy. That retires the rule that
+# four documents had to be edited through Python to keep their CRLF — the files
+# were CRLF by accident of history, nothing ever needed them to be, and the rule
+# was the most frequently tripped hazard in the project.
+* text=auto eol=lf
+
+# Fonts and cursor bitmaps: never touch a byte.
+*.ttf binary
+*.png binary

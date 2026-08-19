@@ -42,15 +42,12 @@ rebuild.
 
 ## Line endings
 
-`PLAN.md`, `README.md`, `TERMINAL_COMPATIBILITY_PLAN.md` and `CONTEXT.md` are **pure CRLF**.
-An editing tool that rewrites a file will silently convert them. Edit those four with Python:
+**LF, everywhere.** Enforced by `.gitattributes` (`* text=auto eol=lf`) and by `rustfmt.toml`'s
+`newline_style = "Unix"`, so it no longer depends on anybody's `core.autocrlf`. Edit any file
+with any tool; there is nothing to preserve and nothing to verify afterwards.
 
-```python
-with io.open(path, 'r', encoding='utf-8', newline='') as f: text = f.read()
-```
-
-then write back the same way, and verify the file is 100% CRLF before committing. Everything
-else — `Cargo.toml`, every `.rs` — is LF.
+A carriage return in a text file is now a mistake, not a convention. Fonts (`*.ttf`) and the
+cursor bitmaps (`*.png`) are marked `binary` and must never be rewritten.
 
 ## Writing code here
 

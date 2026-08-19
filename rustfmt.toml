@@ -6,3 +6,8 @@
 # the code matches the style in the Rust docs/examples the project learns from.
 edition = "2024"
 hard_tabs = true
+# LF, matching `.gitattributes` (PLAN §108). rustfmt's default is `Auto`, which
+# means "whatever this file already has" and, for a file rustfmt creates, the
+# platform's native ending — so on Windows a new module would arrive with CRLF
+# and nothing would object. Naming it here makes the formatter agree with git.
+newline_style = "Unix"

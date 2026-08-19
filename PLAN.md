@@ -11244,7 +11244,7 @@ scanners classify anyway. Harmless for now — the sequence it lands on is cmote
 no engine action to contradict — and written down as code so the framer has to flip it on purpose rather
 than silently. A divergence with a test around it is an inventory item. A divergence with a comment around
 it is what the last four defects were.
-
+
 ### The sweep that could not fail
 
 The shape sweep is the fifth defect's story and a lesson about tests, in that order.
@@ -11647,6 +11647,44 @@ warning. All 528 get **fixed**, not allowed: an `allow` hides a question instead
 and the 231 casts are a real question about boundaries. A `deny` is the opposite and stays
 welcome — `#[deny(clippy::missing_trait_methods)]` in `gate.rs` is what makes a missing `Handler`
 method a build error, and §107 rests on it.
+
+### The line endings nobody had declared
+
+Four documents were "pure CRLF", and the rule that came with them — edit them through Python,
+because any ordinary tool silently converts them — was the most frequently tripped hazard in the
+project. Looking at where that invariant actually lived turned up something worse than an
+inconvenience.
+
+It lived in `core.autocrlf=true`, **a per-machine git setting the repo never mentioned.** The index
+told the real story: `PLAN.md` was the only file stored with CRLF. `CONTEXT.md`, `AGENTS.md`, every
+one of the 95 `.rs` files, `Cargo.toml` and `bundle-macos.sh` were all stored LF, and the CRLF in
+the working copy was git converting on checkout. Twelve `.rs` files showed CRLF locally and 83
+showed LF, for no reason except which ones a tool had last rewritten.
+
+So the invariant was never a property of the repository — it was a property of one machine. A clone
+elsewhere would look different, and nothing would say so.
+
+`.gitattributes` now says it, once, for everything:
+
+```
+* text=auto eol=lf
+*.ttf binary
+*.png binary
+```
+
+LF in the index and in the working copy. `rustfmt.toml` gains `newline_style = "Unix"`, because
+rustfmt's default is `Auto` — "whatever the file already has", and the platform's native ending for
+a file it creates, so on Windows a new module would arrive with CRLF and nothing would object.
+
+The whole CRLF rule is therefore **deleted** rather than documented: the four files were CRLF by
+accident of history, nothing ever needed them to be, and `PLAN.md` can now be edited by ordinary
+tools. One commit shows all 11,680 of its lines changed, which is the honest cost of storing a file
+one way and reading it another for a hundred sections.
+
+The conversion also turned up a defect it would never have found otherwise: line 11247 of `PLAN.md`
+was a blank line containing `\r\r`, left by one of §106's own Python round-trips — a lone CR in the
+text, doubled by a normalise-and-restore pass. It had been in the file, invisible, since then. A
+rule enforced by hand collects that sort of thing; a rule enforced by `.gitattributes` cannot.
 
 ### What follows, and where it will be recorded
 
