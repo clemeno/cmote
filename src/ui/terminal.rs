@@ -1,4 +1,4 @@
-// ui/terminal.rs — the terminal screen: status bar, grid, panels, modals (PLAN §9-§10).
+// ui/terminal.rs — the terminal screen: status bar, grid, panes, modals (PLAN §9-§10).
 //
 // This lays the screen out and owns its chrome. The grid itself is one widget of its own
 // (`ui::grid`), which draws every cell at an exact pixel position; the metrics both sides
@@ -189,7 +189,7 @@ struct Follow {
 	reveal: bool,
 }
 
-/// The two browser panels in the strip under the grid (§18, §19), grouped so `view` keeps
+/// The two browser panes in the strip under the grid (§18, §19), grouped so `view` keeps
 /// a readable signature — the same reason `Modals` exists. They travel
 /// together: the files pane takes the strip's height off the grid and the tree sits in it
 /// on the pane's right, both draw overlays, and the tree owns the dot-entry toggle that
@@ -198,7 +198,7 @@ struct Follow {
 pub struct PanesView<'a> {
 	pub explorer: &'a Explorer,
 	pub files: &'a Files,
-	/// Which of the three the keyboard belongs to (§20): the panels draw a ring when it is
+	/// Which of the three the keyboard belongs to (§20): the panes draw a ring when it is
 	/// theirs, and the files pane places its details popup from the pane's width.
 	pub focus: crate::app::Focus,
 	/// The files pane's width — the window less the folder tree's column beside it (§18, §19).
@@ -264,7 +264,7 @@ pub fn view<'a>(
 	menu: Option<Point>,
 	modals: Modals<'a>,
 	transfers: &'a Queue,
-	panels: PanesView<'a>,
+	panes: PanesView<'a>,
 ) -> Element<'a, Message> {
 	let PanesView {
 		explorer,
@@ -272,7 +272,7 @@ pub fn view<'a>(
 		focus,
 		width,
 		height,
-	} = panels;
+	} = panes;
 	let Modals {
 		open: modal,
 		forwards,
@@ -388,7 +388,7 @@ pub fn view<'a>(
 	]
 	.spacing(0);
 	if files.visible() {
-		let pane = crate::ui::files::panel(
+		let pane = crate::ui::files::pane(
 			files,
 			explorer.show_hidden(),
 			width,
@@ -402,11 +402,7 @@ pub fn view<'a>(
 			iced::widget::row![
 				pane,
 				crate::ui::explorer::splitter(explorer.splitter_active()),
-				crate::ui::explorer::panel(
-					explorer,
-					files.path(),
-					focus == crate::app::Focus::Tree
-				),
+				crate::ui::explorer::pane(explorer, files.path(), focus == crate::app::Focus::Tree),
 			]
 			.spacing(0)
 			.width(Length::Fill)
@@ -445,16 +441,16 @@ pub fn view<'a>(
 			session.local,
 		));
 	}
-	// The explorer's own right-click menu (§18), placed against the panel rather than the
+	// The explorer's own right-click menu (§18), placed against the pane rather than the
 	// pointer, and its click-away dismiss layer. The tree sits in the browser strip now, so its
 	// top in window coordinates is the strip's top — the window height less the pane's own
 	// height — not the status bar. Only drawn while the tree is actually shown.
 	if tree_shown
-		&& let Some(panel_menu) =
+		&& let Some(pane_menu) =
 			crate::ui::explorer::context_menu(explorer, terminal.cwd(), height - files.height())
 	{
 		layers.push(crate::ui::explorer::dismiss_layer());
-		layers.push(panel_menu);
+		layers.push(pane_menu);
 	}
 	// The files pane's own right-click menu (§19), anchored the same way — `width` so a menu
 	// near the right edge slides back inside instead of spilling off it.
@@ -607,7 +603,7 @@ fn status_bar<'a>(
 	let pick = button(text("Files…").size(STATUS_BAR_TEXT)).on_press(Message::UploadPickPressed);
 	let send = button(text("Upload").size(STATUS_BAR_TEXT))
 		.on_press_maybe(transfers.can_send().then_some(Message::UploadPressed));
-	// The explorer toggle (§18): its label says what the panel currently is, so the
+	// The explorer toggle (§18): its label says what the pane currently is, so the
 	// button reads as a state rather than a command.
 	let tree = button(
 		text(if explorer_visible {

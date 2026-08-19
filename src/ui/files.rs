@@ -4,7 +4,7 @@
 // order, this file turns them into an icon grid. Five pieces, mirroring the folder
 // tree's (§18):
 //
-//   * `panel`        — the full-width pane: header, the wrapping grid, a notice line.
+//   * `pane`        — the full-width pane: header, the wrapping grid, a notice line.
 //   * `details`      — the popup beside the selected cell: type, time, size, owner (§20).
 //   * `splitter`     — the grab bar above it; dragging it resizes the pane.
 //   * `context_menu` — the right-click menu, drawn by the caller as a full-window overlay.
@@ -20,7 +20,7 @@
 // face has no such glyph, and drawing them by hand would be a canvas per cell — hundreds
 // of them in a crowded directory.
 //
-// The palette is the tree's, imported rather than copied: the two panels sit against
+// The palette is the tree's, imported rather than copied: the two panes sit against
 // each other and must read as one region.
 
 use iced::alignment::{Horizontal, Vertical};
@@ -77,7 +77,7 @@ const LABEL_SIZE: f32 = 11.0;
 /// space between the two lines.
 const META_SIZE: f32 = 10.0;
 const META_GAP: f32 = 2.0;
-/// The hairline round every cell (§19): a subtle grey a shade lighter than the panel, so the grid
+/// The hairline round every cell (§19): a subtle grey a shade lighter than the pane, so the grid
 /// reads as a field of distinct tiles rather than one run of names. The splitter bar's own value —
 /// quiet enough to frame a cell without competing with its icon, and it sits UNDER the selection
 /// fill so a chosen cell keeps the same footprint as its neighbours, just filled blue.
@@ -152,7 +152,7 @@ const COLLAPSE_GLYPH: char = '\u{e5d6}';
 const SORT_GLYPH: char = '\u{e164}';
 const HEADER_ICON_SIZE: f32 = 16.0;
 
-/// Icon colours by category (§19). Muted enough to sit on the dark panel, distinct
+/// Icon colours by category (§19). Muted enough to sit on the dark pane, distinct
 /// enough that a directory of mixed content is scannable.
 const FOLDER_COLOR: Color = Color::from_rgb8(0xe0, 0xb0, 0x60);
 const LINK_COLOR: Color = Color::from_rgb8(0x80, 0xc0, 0xe0);
@@ -173,7 +173,7 @@ const DROP_TARGET_FG: Color = Color::from_rgb8(0x5a, 0xc0, 0x7a);
 /// icon grid, and — when something went wrong — a notice line under it. Fixed to the
 /// model's current height so `grid_size` can subtract exactly that (§19).
 ///
-/// `show_hidden` is the folder tree's flag (§18): one toggle filters both panels, which
+/// `show_hidden` is the folder tree's flag (§18): one toggle filters both panes, which
 /// is why it is passed in rather than owned here.
 ///
 /// The whole pane is wrapped in a `mouse_area` that reports the pointer, because a
@@ -183,7 +183,7 @@ const DROP_TARGET_FG: Color = Color::from_rgb8(0x5a, 0xc0, 0x7a);
 /// details popup beside it — sit (§20). `focused` draws the ring that says the keyboard
 /// is here; `drop_target` draws the green ring that says a dragged-in file will land in this
 /// folder (§29), and it wins over the focus ring while a drag is in progress.
-pub fn panel(
+pub fn pane(
 	files: &Files,
 	show_hidden: bool,
 	width: f32,
@@ -221,7 +221,7 @@ pub fn panel(
 			.style(move |_theme| container::Style {
 				background: Some(PANEL_BG.into()),
 				// A drag in progress paints the drop ring over the focus ring: while one is being
-				// dragged in, where it will land matters more than which panel holds the keyboard.
+				// dragged in, where it will land matters more than which pane holds the keyboard.
 				border: if drop_target {
 					drop_border()
 				} else {
@@ -254,7 +254,7 @@ fn drop_border() -> iced::Border {
 
 /// The rubber band itself (§21): a translucent rectangle over the grid, clipped to the
 /// grid's own bounds so a drag that runs past the pane never paints over the header, the
-/// notice line or the panel next door.
+/// notice line or the pane next door.
 fn band_layer<'a>(rect: iced::Rectangle, files: &Files, width: f32) -> Element<'a, Message> {
 	let top = rect.y.max(HEADER_HEIGHT);
 	let bottom = (rect.y + rect.height).min(HEADER_HEIGHT + grid_height(files));
@@ -437,9 +437,9 @@ fn up_button(enabled: bool) -> Element<'static, Message> {
 /// the up button beside it so the two read as one toolbar; `on_press_maybe(None)` dims and
 /// deadens it before the first listing, when there is no path to put on the clipboard.
 ///
-/// `pub(crate)` and message-agnostic because both panel headers wear one — the pane below
+/// `pub(crate)` and message-agnostic because both pane headers wear one — the pane below
 /// and the tree beside it (§22) — each copying its own path. The face is the same one the
-/// file icons use, so the two panels' chrome stays of a piece.
+/// file icons use, so the two panes' chrome stays of a piece.
 pub(crate) fn copy_button(enabled: bool, message: Message) -> Element<'static, Message> {
 	button(
 		text(COPY_GLYPH.to_string())
@@ -483,7 +483,7 @@ pub(crate) fn header_icon_button(glyph: char, message: Message) -> Element<'stat
 	.into()
 }
 
-/// The header "refresh" button (§18, §19): re-lists whatever the panel is showing, so its content
+/// The header "refresh" button (§18, §19): re-lists whatever the pane is showing, so its content
 /// is current after a change made outside the GUI — a `mv` or a `mkdir` typed in the console. Both
 /// headers wear one — the tree re-lists its open folders, the pane re-lists its directory — each
 /// passing its own message.
@@ -828,7 +828,7 @@ fn cell<'a>(
 /// How many characters of a name the cell can draw before the shared middle-ellipsis (§22)
 /// has to trim it: the label's two lines' worth, from its width and an average glyph advance.
 /// The actual cut lives in `crate::ui::elide_middle` — this only owns the cell's "how many
-/// fit" estimate, the same split of concerns the panel headers and the connect form use.
+/// fit" estimate, the same split of concerns the pane headers and the connect form use.
 fn label_budget() -> usize {
 	let per_line = (LABEL_WIDTH / LABEL_CHAR).floor().max(1.0) as usize;
 	per_line * LABEL_LINES

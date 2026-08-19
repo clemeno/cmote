@@ -3,8 +3,8 @@
 // A pure view over `explorer::Explorer`: the model decides which rows exist and in
 // what order (`Explorer::rows`), this file turns them into widgets. Three pieces:
 //
-//   * `panel`     — the fixed-width column: header, the scrollable tree, a notice line.
-//   * `splitter`  — the grab bar between grid and panel; dragging it resizes the panel.
+//   * `pane`     — the fixed-width column: header, the scrollable tree, a notice line.
+//   * `splitter`  — the grab bar between grid and pane; dragging it resizes the pane.
 //   * `menu`      — the right-click menu, drawn by the caller as a full-window overlay
 //                   (the same stacking trick the terminal's own menu uses, §10).
 //
@@ -31,7 +31,7 @@ pub const TREE_ID: &str = "explorer-tree";
 
 /// Panel surfaces: a touch darker than the status bar so the tree reads as its own
 /// region, with the selected row taking the same blue the grid's selection uses. Shared
-/// with the files pane below (§19) — the two panels are one region visually, so the
+/// with the files pane below (§19) — the two panes are one region visually, so the
 /// palette has exactly one definition.
 pub(crate) const PANEL_BG: Color = Color::from_rgb8(0x25, 0x25, 0x25);
 pub(crate) const HEADER_BG: Color = Color::from_rgb8(0x2d, 0x2d, 0x2d);
@@ -44,9 +44,9 @@ pub(crate) const SPLITTER_HOVER: Color = Color::from_rgb8(0x5a, 0x5a, 0x5a);
 pub(crate) const FG: Color = Color::from_rgb8(0xd0, 0xd0, 0xd0);
 pub(crate) const MUTED_FG: Color = Color::from_rgb8(0x90, 0x90, 0x90);
 pub(crate) const SELECTED_BG: Color = Color::from_rgb8(0x2f, 0x4f, 0x7a);
-/// The notice line's colour — a warm red that stays readable on the panel's dark fill.
+/// The notice line's colour — a warm red that stays readable on the pane's dark fill.
 pub(crate) const NOTICE_FG: Color = Color::from_rgb8(0xe0, 0x80, 0x70);
-/// The ring drawn round whichever panel currently owns the keyboard (§20).
+/// The ring drawn round whichever pane currently owns the keyboard (§20).
 pub(crate) const FOCUS_FG: Color = Color::from_rgb8(0x5a, 0x8a, 0xd0);
 
 /// Type size and row geometry. `ROW_HEIGHT` is fixed for the same reason the home
@@ -60,7 +60,7 @@ const INDENT: f32 = 12.0;
 /// The header's padding and the height of one wrapped line of the path (§22). The path can
 /// be any length, so the header is no longer a fixed height — it grows a line at a time as
 /// the path wraps. At a single line it still comes to the tree row's own height, so a short
-/// path lines the two panels' headers up as before.
+/// path lines the two panes' headers up as before.
 const HEADER_PAD_V: f32 = 6.0;
 const HEADER_PAD_H: f32 = 8.0;
 const PATH_LINE_HEIGHT: f32 = 16.0;
@@ -79,7 +79,7 @@ const COPY_BUTTON_WIDTH: f32 = 28.0;
 const REFRESH_BUTTON_WIDTH: f32 = 28.0;
 const COLLAPSE_BUTTON_WIDTH: f32 = 28.0;
 const AVG_CHAR_WIDTH: f32 = 8.0;
-/// The notice line's height, fixed so both panels can subtract it from their scrollable
+/// The notice line's height, fixed so both panes can subtract it from their scrollable
 /// area exactly rather than guessing at a padded line of text (§20).
 pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
 
@@ -88,22 +88,18 @@ pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
 /// files pane (§19).
 pub(crate) const MENU_INSET: f32 = 8.0;
 
-/// The tree panel: a header (title plus the hidden-folder toggle), the rows, and — when
+/// The tree pane: a header (title plus the hidden-folder toggle), the rows, and — when
 /// something went wrong — a notice line pinned under them. Fixed to the model's current
 /// width so `grid_size` can subtract exactly that (§18).
 ///
-/// The whole panel is wrapped in a `mouse_area` that reports the pointer, because a
+/// The whole pane is wrapped in a `mouse_area` that reports the pointer, because a
 /// right-press carries no coordinates of its own — the same trick the terminal grid uses
 /// to place its own menu (§10). The rows inside handle their own presses, so this only
 /// picks up the moves they ignore.
 /// `focused` draws the ring that says the keyboard is here (§20). `path` is the files
-/// view's directory (`Files::path`), shown in the header so this panel names the same
+/// view's directory (`Files::path`), shown in the header so this pane names the same
 /// location as the pane beneath it (§22).
-pub fn panel<'a>(
-	explorer: &'a Explorer,
-	path: Option<&str>,
-	focused: bool,
-) -> Element<'a, Message> {
+pub fn pane<'a>(explorer: &'a Explorer, path: Option<&str>, focused: bool) -> Element<'a, Message> {
 	let mut content = column![header(explorer, path), tree_view(explorer)].spacing(0);
 	if let Some(notice) = explorer.notice() {
 		content = content.push(
@@ -125,13 +121,13 @@ pub fn panel<'a>(
 			}),
 	)
 	.on_move(|point| Message::Explorer(ExplorerMessage::PointerMoved(point)))
-	// A press anywhere in the panel gives it the keyboard (§20).
+	// A press anywhere in the pane gives it the keyboard (§20).
 	.on_press(Message::Explorer(ExplorerMessage::PanePressed))
 	.into()
 }
 
-/// The border a panel wears while it owns the keyboard (§20) — and no border at all
-/// otherwise, so the two panels only ever differ by the one that has the focus. Shared
+/// The border a pane wears while it owns the keyboard (§20) — and no border at all
+/// otherwise, so the two panes only ever differ by the one that has the focus. Shared
 /// with the files pane, which is the other end of the same Ctrl+Tab ring.
 pub(crate) fn focus_border(focused: bool) -> Border {
 	Border {
@@ -146,7 +142,7 @@ pub(crate) fn focus_border(focused: bool) -> Border {
 }
 
 /// How tall the scrollable part of the tree is (§20): the browser strip's height — which the
-/// tree now shares with the files pane beside it (§18, §19) — less this panel's own header.
+/// tree now shares with the files pane beside it (§18, §19) — less this pane's own header.
 /// What "on screen" means when the app scrolls a keyboard-moved row back into view.
 ///
 /// `ponytail:` the notice line, when one is showing, is not subtracted — the estimate is
@@ -156,7 +152,7 @@ pub fn tree_height(pane_height: f32, path: Option<&str>, width: f32) -> f32 {
 	(pane_height - header_height(path, width)).max(0.0)
 }
 
-/// How many characters of the path fit on one header line in a panel `width` wide — the
+/// How many characters of the path fit on one header line in a pane `width` wide — the
 /// usable width (less the `.*` toggle, the copy button and the padding) over an average glyph
 /// advance. Shared by `header`, which middle-ellipsises the path to `PATH_LINES` of these, and
 /// `header_height`, which counts the wrapped lines, so the two agree on what "a line" holds.
@@ -171,7 +167,7 @@ fn path_per_line(width: f32) -> f32 {
 	(usable / AVG_CHAR_WIDTH).floor().max(1.0)
 }
 
-/// Roughly how tall the header is for `path` in a panel `width` wide (§20, §22). The path
+/// Roughly how tall the header is for `path` in a pane `width` wide (§20, §22). The path
 /// wraps a line at a time but no further than `PATH_LINES` — beyond that `header` trims it with
 /// a middle `…` — so the header grows to at most two lines and `tree_height` subtracts that.
 ///
@@ -186,7 +182,7 @@ pub fn header_height(path: Option<&str>, width: f32) -> f32 {
 	2.0 * HEADER_PAD_V + lines * PATH_LINE_HEIGHT
 }
 
-/// The dot-entry toggle, shared by this panel's header and the files pane's (§19) —
+/// The dot-entry toggle, shared by this pane's header and the files pane's (§19) —
 /// there is ONE flag (`Explorer::show_hidden`) and it filters both, so both checkboxes
 /// show and flip the same state. A real `checkbox`: its tick comes from iced's built-in
 /// icon font, so it needs no glyph from the system fonts. Its colours are spelled out
@@ -211,7 +207,7 @@ pub(crate) fn hidden_toggle(shown: bool) -> Element<'static, Message> {
 		.into()
 }
 
-/// The panel header: the current directory (§22), wrapped across as many lines as it needs
+/// The pane header: the current directory (§22), wrapped across as many lines as it needs
 /// so the whole path stays legible in this narrow column, with the dot-folder toggle pinned
 /// to its top-right. `path` is the files view's directory, passed in so the two views name
 /// the SAME location — the tree can be scrolled or its selection can sit elsewhere, but this
@@ -342,13 +338,13 @@ fn row_view<'a>(
 		.into()
 }
 
-/// The grab bar between the grid and the panel (§18). Pressing it starts a resize; the
+/// The grab bar between the grid and the pane (§18). Pressing it starts a resize; the
 /// pointer-capture layer added while dragging reports the moves and the release, so
 /// tracking survives the pointer leaving the bar — the same construction a dragged
 /// dialog uses (§10).
 ///
 /// `active` lights the bar (hovered or dragging, from `Explorer::splitter_active`); the
-/// `ResizingHorizontally` cursor (a ↔) shows over it because it resizes the panel's WIDTH,
+/// `ResizingHorizontally` cursor (a ↔) shows over it because it resizes the pane's WIDTH,
 /// and `on_enter`/`on_exit` feed the hover half of that highlight back to the model.
 pub fn splitter(active: bool) -> Element<'static, Message> {
 	let fill = if active { SPLITTER_HOVER } else { SPLITTER_BG };
@@ -386,9 +382,9 @@ pub fn drag_layer() -> Element<'static, Message> {
 ///
 /// `cwd` is the shell's working directory: "Copy relative path" is only meaningful
 /// against one, so the item is disabled when the shell has never announced it (§17).
-/// `top` is where the panel starts in window coordinates (the status bar's height); the
-/// rest of the placement comes from the last pointer position over the panel, so the menu
-/// opens under the cursor whatever the panel's width and however far the tree is
+/// `top` is where the pane starts in window coordinates (the status bar's height); the
+/// rest of the placement comes from the last pointer position over the pane, so the menu
+/// opens under the cursor whatever the pane's width and however far the tree is
 /// scrolled.
 pub fn context_menu<'a>(
 	explorer: &'a Explorer,
@@ -435,8 +431,8 @@ pub fn context_menu<'a>(
 		item("Refresh", ExplorerMessage::RefreshDir(path)),
 	]);
 
-	// Placed from the pointer, right-aligned. The panel's right edge IS the window's
-	// right edge, so `panel width - pointer.x` is the pointer's distance from that edge;
+	// Placed from the pointer, right-aligned. The pane's right edge IS the window's
+	// right edge, so `pane width - pointer.x` is the pointer's distance from that edge;
 	// taking the menu's own width off that puts its LEFT edge under the cursor. Clamping
 	// at `MENU_INSET` is what keeps a menu opened near the right edge inside the window
 	// (it then slides left instead of hanging off). Aligning right also means the view
