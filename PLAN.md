@@ -11723,6 +11723,150 @@ compat plan's Evidence section is how §106 and §107 justify themselves.
   file header per module" and "no `allow`" are not, and a reader who skips the file is not stopped
   by anything.
 
+## §109 — One name, one thing, and the four shapes of rename damage
+
+§108 wrote the rule down: **one name means one thing crate-wide** — types, `pub` and private free
+functions, tests included. This is the section that applied it, over 31 commits with the gate green
+at each, and it is recorded here mostly for what went WRONG, because the renames themselves were
+easy and the damage they did was not.
+
+### Two rules, because types and functions disambiguate differently
+
+A duplicated TYPE takes its module's prefix: `sixel::Command` becomes `SixelCommand`. A duplicated
+FUNCTION takes a better object instead, because a prefix stutters — `link::open_link` reads worse
+than `link::open_uri`, which also says the thing that matters (it gates the **scheme** before handing
+a URI to the OS).
+
+In both cases only the **less-canonical side moves**. Where a module owns a word, it keeps it:
+`term::progress::Progress` is the OSC 9;4 progress a remote reports, `settings::Settings` is the
+app's settings, `term::screen::Screen` is the grid — so `transfer::Progress`, `syntax::Settings` and
+`app::Screen` are the ones that took a prefix. `files::Entry` and `files::Files` keep their names
+because a listing entry and a pane of them are what those words mean here; `asuser`'s pair became
+`AsuserEntry` / `AsuserFiles`.
+
+The bulk was mechanical and batched — nine generic names in `term/` and `local/`, the four that meant
+a match or a row or a status (113 sites), the files cluster (110 sites), `Kind` / `Progress` /
+`Settings` / `Screen` (271 sites, of which `Kind` alone was 72 in `files.rs`). Eleven private `enum
+Scan`s became `CancelScan`, `DsrScan` and nine more; six `Request`s became `CancelRequest`,
+`RectRequest` and four more. Same ROLE in every case, six unrelated sets of variants.
+
+### The renames that were a judgment, not a prefix
+
+- **`term::rect::Area` → `Rect`.** Two unrelated things wore one word: a resolved rectangle of cells,
+  and a place on screen a tab can be sent to. `CONTEXT.md` gives *area* to the window, where a user
+  can point at one, so the terminal side took the name its own module already had.
+- **`term::mod::Split` → `Interruption`.** It had nothing to do with splitting a window. Its own doc
+  says what it is: one thing `process` has to do part-way through a chunk — a prompt mark, a picture,
+  a rectangular operation — each carrying the byte offset it sits at. *Split* belongs to §48's window
+  cut.
+- **`files::Zone` → `TimeZone`.** The zone an mtime is rendered in, which is the server's own because
+  the files being listed are its. `CONTEXT.md` already listed *zone* under **Area**'s `_Avoid_` for
+  exactly the reason a reader would assume otherwise.
+- **`ui::selection::Cell` → `ScreenSpot`, `Spot` → `DocSpot`.** `Cell` meant three things, two of
+  them opposites: content in `term::screen`, a viewport position here, a document position beside it.
+  `ui/grid.rs` is the proof it had to change — it imported both, so bare `Cell` there meant the
+  coordinate while the content had to be aliased to `ScreenCell`. **The file that draws cells could
+  not call a cell a cell.**
+- **`Shell` was the most crowded name in the crate** — five things, three of them ours.
+  `integration::Shell` → `IntegrationShell`, `shells::Shell` → `LocalShell`, `ssh::shell::Shell` →
+  `SshShell`, with `iced::advanced::Shell` (imported bare in `ui/grid.rs`) and a `windows_sys` module
+  making up the five.
+- **`differential::Engine` → `EngineTrace`**, because it records what the engine's parser did and is
+  not an engine — a prefix would have preserved a wrong word. `term::region::Region` → `ScrollRegion`
+  and `app::Claim` → `KeyboardClaim` on the same reasoning.
+
+### Two that were deletions rather than renames
+
+Applying the rule turned up code written twice, which is how one rule comes to be applied two ways.
+
+`native` was byte-for-byte identical in `local/fs.rs` and `local/copy.rs`. It now lives once in
+`local/path.rs`, beside the translation it wraps — and that matters more than tidiness, because
+`local::path::to_native` is the local file layer's one-directional security boundary (§103). Two
+copies of the check that guards it is two places for the check and its message to drift apart. Nine
+call sites now go through one function.
+
+`ui::terminal::human_bytes` divided by 1024 and said `KiB`; `ssh::edit::human_size` did the identical
+arithmetic and said `KB`. So the files pane offered "1.5 KiB" while the message refusing to open that
+file said "1.5 KB". The duplicate was structural rather than careless — the correct one lived in
+`ui::terminal`, and `ssh::edit` will not depend on the UI layer to format a string — so it moved to a
+module neither layer owns, `src/human.rs`, "how a byte count is spelled for a person".
+
+### The two vocabulary sweeps
+
+**`profile` → `target`** (§14's remembered way to reach a machine): the file (`git mv`, so history
+follows), the module, 29 references, and the prose — 26 in `src`, 15 in `PLAN.md`, 5 in `README.md`,
+including a string a user reads in the delete dialog.
+
+**`panel` → `pane`** turned up something Q28 had not anticipated: **panel has three legitimate
+meanings here and only one of them is wrong.** One of the two browser panes (wrong); a floating card
+of items (`ui::menu::panel`, the eight dialog builders, `PANEL_BG` as their shared chrome); and, in
+`cursor.rs`, a laptop display panel. A blanket sweep would have broken correct English in two senses
+to fix one, so the files where every use is sense 1 went as a batch, and the three view files that
+used the word BOTH ways — sometimes in one function, `pub fn panel` building the pane while `let
+panel = menu::panel(..)` two hundred lines below was a menu — were read line by line: 26 lines swept
+and 6 kept in `ui/explorer.rs`, 13 swept and 14 kept in `ui/files.rs`.
+
+`CONTEXT.md` gained a **Panel** entry as a result, because the sweep PROVED it is a real concept and
+not merely the wrong word. **Pane**'s `_Avoid_` no longer says "panel" flatly; it points at **Panel**
+as a different thing.
+
+### The four shapes of rename damage
+
+This is the part worth carrying forward, and every one of them was found the hard way.
+
+**1. Identifiers.** The compiler checks these. They are not the problem.
+
+**2. Prose, which nothing checks.** A batch of thirteen function renames used a bare word-boundary
+pattern where a later batch correctly required a `(`. A function name only ever appears before a
+paren; the same WORD in a sentence does not. So 88 doc comments were rewritten into the identifier —
+"the remote file `entry_grid` under the terminal", "A `entry_grid` tall enough for five whole rows".
+Two widget ids went with them.
+
+Then the same shape again, in a way my own check was built to miss. The eleven scanners each document
+their entry point as "**Scan** a chunk of shell output", and the `Scan` → `<Module>Scan` rename ran
+through those sentences: "DsrScan a chunk", "TabsScan a whole chunk". My check afterwards looked at
+the bare `Scan` occurrences that SURVIVED — in files with no `Scan` type — saw the verb intact, and
+concluded the verb was safe. **It was safe in the files the rename never touched.** The eleven it did
+touch were the ones to look at. The later audit missed them too, because the list I checked for prose
+damage was the duplicate-TYPE list, and by then `Scan` and `Request` were no longer duplicates.
+
+**3. String literals, which users read.** Worse than the prose damage, and invisible to everything:
+the type renames ran through quoted spans.
+
+```
+ui/explorer.rs    "Rename…"  ->  "ExplorerRename…"    context menu item
+ui/files.rs       "Rename…"  ->  "FilesRename…"       context menu item
+local/session.rs  "Shell integration writes…"  ->  "LocalShell integration writes…"
+ssh/asuser.rs     "…Files cannot be read…"     ->  "…AsuserFiles cannot be read…"
+```
+
+The app had been showing `ExplorerRename…` in its right-click menu for several commits. Nothing
+failed — 1390 tests, clippy clean — because **a literal is not an identifier, so the compiler had
+nothing to say either.**
+
+**4. Docs in other files.** `Split` → `Interruption` left twenty-three places calling the mechanism
+"the split advance", "the split loop", "the split point" — nine in `PLAN.md` and the compat plan,
+fourteen in `src/term/` doc comments. Found only because `TERMINAL_COMPATIBILITY_PLAN.md` happened to
+be opened. The four hand-built SVGs under `docs/img/` were the last of this shape: their `<text>`
+labels carry the vocabulary at hand-placed coordinates where nothing checks them, and one had gone
+stale for a different reason — §45 gave `SshEvent::Output` an `identity` field, so the arm the
+diagram named no longer existed.
+
+**The checks that find shapes 2, 3 and 4.** After a rename, grep the **new** name inside comments and
+inside quoted spans — the new name, not the old, because what you are looking for is where the
+substitution went somewhere it should not have. And the systematic version, which is what finally
+caught the stale doc names: **extract every backticked identifier from the documents and test each
+one against `src/`.** A name in backticks is a claim that `grep` will find it, so a name that does
+not resolve is a defect whether or not it was ever renamed.
+
+### The carve-out
+
+**Verbatim quotes of somebody else's words keep their spelling** — alacritty's source, xterm's
+`ctlseqs`, DEC's manuals. A renamed quote is no longer evidence for the claim it supports, and the
+compat plan's Evidence section is how §106 and §107 justify themselves. The same line applies to
+ordinary English: a rename follows the **type**, not the word, so a window split, a table's split and
+the split between two parameters were all left alone.
+
 ## §110 — A file that says what it is
 
 Two of the four on-disk files were written by a program that assumed it was the only program that
