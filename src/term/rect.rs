@@ -210,7 +210,7 @@ pub const ALL_ATTRIBUTES: u8 = BOLD | UNDERLINE | BLINK | REVERSE;
 /// `1;22` is bold off, not both. Folding at parse time means the loop over the cells does the same
 /// tiny amount of work per cell however long the list was.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Change {
+pub struct AttributeChange {
 	/// Attributes to turn on (DECCARA only).
 	pub on: u8,
 	/// Attributes to turn off (DECCARA only).
@@ -219,7 +219,7 @@ pub struct Change {
 	pub flip: u8,
 }
 
-impl Change {
+impl AttributeChange {
 	/// The attributes a cell currently at `current` should end up with.
 	///
 	/// The three masks never overlap in practice — DECCARA fills only `on` and `off`, DECRARA only
@@ -314,7 +314,7 @@ pub enum RectRequest {
 	Attributes {
 		corners: Corners,
 		extent: RectExtent,
-		change: Change,
+		change: AttributeChange,
 	},
 	/// SL / SR — shift every row of the visible page sideways by `columns`, blanking the edge the
 	/// content moved away from (§100).
@@ -622,8 +622,8 @@ fn selectors(numbers: &[u16]) -> &[u16] {
 /// cells were meant, while `3` (italic, which DEC never gave DECCARA) is a perfectly clear request
 /// for an attribute this sequence cannot name. Ignoring the one it cannot do and honouring the rest
 /// is what an SGR does with an unknown attribute.
-fn changes(selectors: &[u16]) -> Change {
-	let mut change = Change::default();
+fn changes(selectors: &[u16]) -> AttributeChange {
+	let mut change = AttributeChange::default();
 	for &selector in selectors {
 		let (attribute, turn_on) = match selector {
 			0 => (ALL_ATTRIBUTES, false),
@@ -658,8 +658,8 @@ fn changes(selectors: &[u16]) -> Change {
 /// Repeats cancel — `1;1` flips bold twice and leaves it — because the selectors are applied in
 /// order, the same rule DECCARA follows. Neither reading is written down by DEC, and "apply each in
 /// turn" is the one that matches its sibling.
-fn reversals(selectors: &[u16]) -> Change {
-	let mut change = Change::default();
+fn reversals(selectors: &[u16]) -> AttributeChange {
+	let mut change = AttributeChange::default();
 	for &selector in selectors {
 		let attribute = match selector {
 			0 => ALL_ATTRIBUTES,
@@ -1023,7 +1023,7 @@ mod tests {
 				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
 					extent: RectExtent::Stream,
-					change: Change {
+					change: AttributeChange {
 						on: BOLD | UNDERLINE,
 						off: 0,
 						flip: 0,
@@ -1042,7 +1042,7 @@ mod tests {
 				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
 					extent: RectExtent::Stream,
-					change: Change {
+					change: AttributeChange {
 						on: 0,
 						off: 0,
 						flip: REVERSE,
@@ -1058,7 +1058,7 @@ mod tests {
 		// over the cells costs the same however long the list was.
 		assert_eq!(
 			changes(&[1, 22]),
-			Change {
+			AttributeChange {
 				on: 0,
 				off: BOLD,
 				flip: 0
@@ -1066,7 +1066,7 @@ mod tests {
 		);
 		assert_eq!(
 			changes(&[22, 1]),
-			Change {
+			AttributeChange {
 				on: BOLD,
 				off: 0,
 				flip: 0
@@ -1080,7 +1080,7 @@ mod tests {
 		// cmote's protection bit with it (§56).
 		assert_eq!(
 			changes(&[0]),
-			Change {
+			AttributeChange {
 				on: 0,
 				off: ALL_ATTRIBUTES,
 				flip: 0
@@ -1088,7 +1088,7 @@ mod tests {
 		);
 		assert_eq!(
 			reversals(&[0]),
-			Change {
+			AttributeChange {
 				on: 0,
 				off: 0,
 				flip: ALL_ATTRIBUTES
@@ -1103,7 +1103,7 @@ mod tests {
 		// drops the sequence because it leaves the cells themselves in doubt.
 		assert_eq!(
 			changes(&[3, 4, 38]),
-			Change {
+			AttributeChange {
 				on: UNDERLINE,
 				off: 0,
 				flip: 0
@@ -1124,7 +1124,7 @@ mod tests {
 		assert!(reversals(&[1, 1]).is_empty());
 		assert_eq!(
 			reversals(&[0, 1]),
-			Change {
+			AttributeChange {
 				on: 0,
 				off: 0,
 				flip: UNDERLINE | BLINK | REVERSE
@@ -1149,7 +1149,7 @@ mod tests {
 		assert_eq!(reversals(&[1]).apply(BOLD | REVERSE), REVERSE);
 		assert_eq!(reversals(&[1]).apply(REVERSE), BOLD | REVERSE);
 		// The empty change is the identity, which is what makes skipping it safe.
-		assert_eq!(Change::default().apply(BOLD), BOLD);
+		assert_eq!(AttributeChange::default().apply(BOLD), BOLD);
 	}
 
 	#[test]

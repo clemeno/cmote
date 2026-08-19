@@ -11862,3 +11862,108 @@ as the refusal itself instead of being left for later.
   destroying data this build cannot see.
 - **The migration is one step wide.** There is one older format and one current one, so "migrate"
   means "read the array". A third format would want the chain Q17 asked about, and this is not it yet.
+
+## §111 — Pedantic, without a single `allow`
+
+`clippy::pedantic` was 561 warnings when this section opened. Not one of them gets an `allow`.
+
+That was Q42's decision and it is worth restating as a rule, because it is the whole shape of the
+section: **an `allow` is a lint switched off for an item; a fix is a lint that keeps working.** The two
+look equally green in CI and they are not the same. A file with `#[allow(clippy::cast_possible_truncation)]`
+at the top is a file where the NEXT cast — the one nobody thought about — is also silent. `deny` is
+fine, because denying is enforcement rather than suppression, and `clippy.toml` is fine, because
+configuring what a lint should consider correct is what its authors built it for.
+
+### What the warnings actually were
+
+They arrive as one number and they are not one problem. Sorted by what fixing them costs:
+
+| family | count | what it wants |
+|---|---|---|
+| the five cast lints | ~224 | `as` replaced by a conversion that cannot silently lie |
+| `doc_markdown` | 59 | identifiers in doc comments wrapped in backticks |
+| `float_cmp` | 24 | `==` on `f32`/`f64` |
+| `unused_async` | 14 | `async fn` with nothing to await |
+| `too_many_lines` | 11 | functions over 100 lines |
+| `match_same_arms` | 10 | arms with identical bodies |
+| `trivially_copy_pass_by_ref` | 9 | `&u16` where `u16` is smaller than the pointer |
+| `needless_pass_by_value` | 8 | a value taken and only read |
+| `items_after_statements` | 8 | a `fn` or `const` declared mid-body |
+| `struct_excessive_bools` | 7 | three or more `bool` fields |
+| sixteen singles | 16 | one site each |
+
+### The sixteen singles, and why they are not all the same fix
+
+Small counts, but three of them changed what the code SAYS rather than how it says it, and those are
+the interesting ones.
+
+**`option_option` — three sites, and one of them was a security property.** `Option<Option<T>>` is a
+tri-state written in a way that reads wrong as easily as right: `None` and `Some(None)` sit one
+keystroke apart and mean opposite things. Both places using it — `SessionState`'s remembered sort (§22)
+and `iterm`'s user variable (§55) — had paid for that in prose, eight lines of doc comment each
+explaining which nesting level was which. In `iterm` the distinction is not a nicety: `Keep` is "we
+ignored this payload" and `Clear` is "the shell said the value is empty", and a remote that could
+turn the first into the second could CLEAR a real reading by sending rubbish — the same rule §54
+applies to progress.
+
+So the three answers get names, in `src/change.rs`:
+
+```rust
+pub enum Change<T> { Keep, Clear, Set(T) }
+```
+
+`Keep` is the `Default`, so a snapshot built field-by-field says nothing until told to — the safe
+direction, since the other default would erase stored values nobody asked to erase. `fold_into` applies
+one to a stored `Option<T>` and returns whether anything actually changed, which is exactly what
+`set_session` needs to decide whether to write the file at all. Two call sites, not one, which is what
+makes it a type rather than speculative generality.
+
+It also made `panes::restore` strictly better by accident. It used to require BOTH halves of the sort
+to be present (`if let (Some(sort), Some(dir)) = …`), so a half-filled snapshot applied neither; now
+each half folds onto what the pane already holds. A real capture always reports both, so the result is
+the same by a route that cannot be wrong-footed.
+
+Naming it `Change` needed `term::rect::Change` — "what one DECCARA or DECRARA does to a cell's
+attributes" — to become `AttributeChange`, which is what it always was. §109's rule, applied to a name
+that was merely vague until something more general wanted it.
+
+**`struct_field_names` — two sites where a field was named after its own struct.** `Shells.shells`
+became `Shells.by_identity`, which says what the `HashMap` is keyed by and reads better at every use
+(`by_identity.get(&self.selected)`). `Highlighter.highlighter` — our type holding `syntect`'s — became
+`Highlighter.colours`, named for its job rather than its type.
+
+**`similar_names` — three pairs one letter apart.** `writer`/`writes` in the pty (the pty's own write
+half versus the channel the GUI hands bytes to, now `to_pty`), `underlined`/`underline` in the SGR
+stack (a bool about the MASK versus the value it selects, now `underline_masked`), and
+`match_fg`/`match_bg` in the editor gutter (now `match_text`/`match_wash`). All three were typos
+waiting to happen, and clippy is right that the fix is a better name rather than more care.
+
+The rest were mechanical: `manual_let_else` ×2, `assigning_clones` ×3, `format_push_string` ×2
+(`write!` straight into the `String` instead of `push_str(&format!(…))`), and one
+`match_wildcard_for_single_variants` — that last one now names `iced::keyboard::Event::ModifiersChanged`
+explicitly, so a keyboard event iced adds later is a compile error here instead of a silently dropped
+keystroke.
+
+### `doc_markdown`: the lint is right about code and wrong about names
+
+Fifty-nine doc-comment words shaped like identifiers, splitting three ways.
+
+**Genuinely identifiers** — backticked: `known_hosts` (eleven sites; it is OpenSSH's file name),
+`WM_SETCURSOR`, `GatewayPorts`, `TERMINAL_COMPATIBILITY_PLAN`, two `FormStop` variants, and the
+Material Icons names in `ui::files::glyph`. That last one got all nine backticked rather than the two
+clippy noticed: it is one list of font names, and half-marked reads as if the others were English.
+
+**Not identifiers at all** — `clippy.toml`'s `doc-valid-idents`: `ConEmu`, `PuTTY`, `PSReadLine`,
+`ConPTY`, `ReGIS`, `BusyBox`, `TextMate`, `HiDPI`, `PowerShells`. Backticking them would claim they are
+names this crate declares, which reads as a promise that `grep` will find them.
+
+**Keycap labels** — same file, separate reason: `NumLock`, `PageUp`, `PageDown`, `AltGr`. The crate
+writes keys bare everywhere — Ctrl+D, Ctrl+W, Ctrl+Shift+F — and only these four happen to be
+CamelCase. Backticking exactly those would make a key's spelling depend on whether its name has a
+capital in the middle.
+
+The configuration was PROVED rather than assumed: a throwaway `/// A ProveItToken` doc comment was
+added and clippy flagged it, so `doc-valid-idents` narrows the lint instead of switching it off. `".."`
+comes first in the list to KEEP clippy's built-in names rather than replace them.
+
+One word was neither: `UNguarded`, which was emphasis of mine and is now `**unguarded**`.

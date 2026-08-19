@@ -84,7 +84,10 @@ struct SshShell {
 
 /// Every shell on one connection (§45), and which one typing belongs to.
 pub struct Shells {
-	shells: HashMap<u64, SshShell>,
+	/// Every open shell, keyed by the identity running it — `LOGIN_IDENTITY` for the one the session
+	/// started with, and one more per elevation. Named for the key rather than the contents, so the
+	/// lookups read as what they are: `by_identity.get(&self.selected)`.
+	by_identity: HashMap<u64, SshShell>,
 	/// The identity the GUI has on screen, told to us by `SelectIdentity`. `Input` goes here and
 	/// nowhere else — a keystroke must never be broadcast, or one line typed at a root prompt
 	/// would also run in the login shell.
@@ -103,7 +106,7 @@ impl Shells {
 	pub fn new(login: Channel<client::Msg>) -> (Self, mpsc::Receiver<ShellMsg>) {
 		let (to_loop, from_shells) = mpsc::channel::<ShellMsg>(CHANNEL_BOUND_SHELL);
 		let mut shells = Self {
-			shells: HashMap::new(),
+			by_identity: HashMap::new(),
 			selected: LOGIN_IDENTITY,
 			size: (term::DEFAULT_COLS, term::DEFAULT_ROWS),
 			to_loop,
@@ -136,7 +139,7 @@ impl Shells {
 				})
 				.await;
 		});
-		self.shells.insert(identity, SshShell { write, state });
+		self.by_identity.insert(identity, SshShell { write, state });
 	}
 
 	/// Open another shell on this connection running `command`, to become another account (§45).
@@ -228,7 +231,7 @@ impl Shells {
 				// A channel reports its end more than once (an exit status, then a close), so the
 				// removal is what makes this idempotent: the second message finds no shell and
 				// reports nothing.
-				if let Some(shell) = self.shells.remove(&identity) {
+				if let Some(shell) = self.by_identity.remove(&identity) {
 					let reason = match shell.state {
 						// It died mid-conversation: the last thing it said is why, and those are
 						// the remote's own words about its own policy.
@@ -256,7 +259,7 @@ impl Shells {
 		bytes: Vec<u8>,
 		events: &mpsc::Sender<SshEvent>,
 	) -> After {
-		let Some(shell) = self.shells.get_mut(&identity) else {
+		let Some(shell) = self.by_identity.get_mut(&identity) else {
 			return After::Nothing; // a late chunk for a shell already gone
 		};
 		match &mut shell.state {
@@ -311,7 +314,7 @@ impl Shells {
 	/// other question answers `false`, so a one-time code is used once and never kept. That judgement
 	/// is `Handshake::answered`'s, where it can be tested; the write is this function's.
 	pub async fn answer(&mut self, identity: u64, secret: Secret) -> bool {
-		let Some(shell) = self.shells.get_mut(&identity) else {
+		let Some(shell) = self.by_identity.get_mut(&identity) else {
 			return false;
 		};
 		let ShellState::Elevating(handshake) = &mut shell.state else {
@@ -331,7 +334,7 @@ impl Shells {
 	/// A shell still elevating gets nothing: its channel is a credential conversation, and a
 	/// keystroke arriving in the middle of one would be read as part of the answer.
 	pub async fn input(&self, bytes: Vec<u8>) {
-		if let Some(shell) = self.shells.get(&self.selected)
+		if let Some(shell) = self.by_identity.get(&self.selected)
 			&& matches!(shell.state, ShellState::Live)
 		{
 			let _ = shell.write.data_bytes(bytes).await;
@@ -345,7 +348,7 @@ impl Shells {
 	/// A shell still elevating gets nothing, for the same reason as `input`: its channel is a
 	/// credential conversation, and it has no emulator to have asked anything.
 	pub async fn reply(&self, identity: u64, bytes: Vec<u8>) {
-		if let Some(shell) = self.shells.get(&identity)
+		if let Some(shell) = self.by_identity.get(&identity)
 			&& matches!(shell.state, ShellState::Live)
 		{
 			let _ = shell.write.data_bytes(bytes).await;
@@ -363,7 +366,7 @@ impl Shells {
 	/// the moment the user switched to them.
 	pub async fn resize(&mut self, cols: u16, rows: u16) {
 		self.size = (cols, rows);
-		for shell in self.shells.values() {
+		for shell in self.by_identity.values() {
 			let _ = shell
 				.write
 				.window_change(u32::from(cols), u32::from(rows), 0, 0)
@@ -380,14 +383,14 @@ impl Shells {
 		if identity == LOGIN_IDENTITY {
 			return;
 		}
-		if let Some(shell) = self.shells.get(&identity) {
+		if let Some(shell) = self.by_identity.get(&identity) {
 			let _ = shell.write.eof().await;
 		}
 	}
 
 	/// End every shell, for a session that is shutting down.
 	pub async fn eof_all(&self) {
-		for shell in self.shells.values() {
+		for shell in self.by_identity.values() {
 			let _ = shell.write.eof().await;
 		}
 	}

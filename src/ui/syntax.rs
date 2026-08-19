@@ -155,8 +155,9 @@ impl SyntaxHighlight {
 pub struct Highlighter {
 	/// The grammar for this file's token, resolved once (falls back to plain text if unknown).
 	syntax: &'static SyntaxReference,
-	/// The colour engine, bound to the CME theme for the run.
-	highlighter: highlighting::Highlighter<'static>,
+	/// The colour engine, bound to the CME theme for the run. Named for its job rather than its type
+	/// (`syntect`'s own `Highlighter`), so it does not read as this struct holding one of itself.
+	colours: highlighting::Highlighter<'static>,
 	/// Parser + scope-stack snapshots, one per `LINES_PER_SNAPSHOT`, for incremental re-highlight.
 	caches: Vec<(ParseState, ScopeStack)>,
 	/// The next line `highlight_line` will process.
@@ -175,12 +176,12 @@ impl highlighter::Highlighter for Highlighter {
 		let syntax = SYNTAXES
 			.find_syntax_by_name(&settings.grammar)
 			.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
-		let highlighter = highlighting::Highlighter::new(&CME_THEME);
+		let colours = highlighting::Highlighter::new(&CME_THEME);
 		let parser = ParseState::new(syntax);
 		let stack = ScopeStack::new();
 		Highlighter {
 			syntax,
-			highlighter,
+			colours,
 			caches: vec![(parser, stack)],
 			current_line: 0,
 		}
@@ -190,7 +191,7 @@ impl highlighter::Highlighter for Highlighter {
 		self.syntax = SYNTAXES
 			.find_syntax_by_name(&new_settings.grammar)
 			.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
-		self.highlighter = highlighting::Highlighter::new(&CME_THEME);
+		self.colours = highlighting::Highlighter::new(&CME_THEME);
 		// Restart from the top with the new grammar.
 		self.change_line(0);
 	}
@@ -223,7 +224,7 @@ impl highlighter::Highlighter for Highlighter {
 
 		let (parser, stack) = self.caches.last_mut().expect("caches must not be empty");
 		let ops = parser.parse_line(line, &SYNTAXES).unwrap_or_default();
-		Box::new(scope_iterator(ops, line, stack, &self.highlighter))
+		Box::new(scope_iterator(ops, line, stack, &self.colours))
 	}
 
 	fn current_line(&self) -> usize {

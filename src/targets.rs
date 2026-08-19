@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::change::Change;
 use crate::files::{SortDir, SortKey};
 use crate::forward::ForwardSpec;
 use crate::ui::connect::AuthKind;
@@ -109,10 +110,11 @@ pub struct Target {
 /// the shell and files pane were, the `.*` filter, and the two pane sizes. A transfer
 /// struct, not stored directly — `Target` keeps these as flat fields (so the JSON stays flat
 /// and older files still load), and this is what `capture` fills, `restore` reads and
-/// `set_session` writes. Every field is optional and means "leave what is stored" when
-/// `None`, so a value a session could not determine (a shell that announced no cwd) never
-/// erases a good one an earlier session recorded. Adding another remembered value is one
-/// field here, one on `Target`, and one line each in capture / restore / `set_session`.
+/// `set_session` writes. Every field means "leave what is stored" when it is absent — `None` for the
+/// two-valued ones, `Change::Keep` for the sort — so a value a session could not determine (a shell
+/// that announced no cwd) never erases a good one an earlier session recorded. Adding another
+/// remembered value is one field here, one on `Target`, and one line each in capture / restore /
+/// `set_session`.
 #[derive(Debug, Default, Clone)]
 pub struct SessionState {
 	pub terminal_path: Option<String>,
@@ -120,12 +122,12 @@ pub struct SessionState {
 	pub show_hidden: Option<bool>,
 	pub explorer_width: Option<f32>,
 	pub files_height: Option<f32>,
-	/// The pane's sort, both halves (§19). The OUTER `Option` is the snapshot's usual "did this
-	/// session determine it" — always `Some` from a real capture — and the INNER one is the value
-	/// itself, which is legitimately unset when no key (or no direction) is chosen. So `None` means
-	/// "leave the stored sort alone" and `Some(None)` means "the session had no sort, clear it".
-	pub sort: Option<Option<SortKey>>,
-	pub sort_dir: Option<Option<SortDir>>,
+	/// The pane's sort, both halves (§19). Not an `Option` like the fields above, because a sort has
+	/// THREE answers rather than two: `Keep` leaves the stored sort alone, `Clear` records that this
+	/// session had no sort, and `Set` names one. A real capture never says `Keep` — the pane always
+	/// knows its own sort, even when that sort is unset (§111, `change::Change`).
+	pub sort: Change<SortKey>,
+	pub sort_dir: Change<SortDir>,
 }
 
 /// Serde default for `show_hidden` — matches the panes' own default (shown), so a
@@ -174,10 +176,11 @@ impl Target {
 			show_hidden: Some(self.show_hidden),
 			explorer_width: self.explorer_width,
 			files_height: self.files_height,
-			// The stored sort is always known (both halves may be unset), so it comes back as
-			// `Some`, carrying the exact tri-state — key and direction — for the next connection.
-			sort: Some(self.sort),
-			sort_dir: Some(self.sort_dir),
+			// The stored sort is always known (both halves may be unset), so `reported` is the right
+			// constructor: it carries the exact tri-state — key and direction — for the next
+			// connection, and never says `Keep`.
+			sort: Change::reported(self.sort),
+			sort_dir: Change::reported(self.sort_dir),
 		}
 	}
 }
@@ -461,21 +464,13 @@ impl Targets {
 			target.files_height = Some(height);
 			changed = true;
 		}
-		// The sort's two halves fold in like the rest: each `Some` overwrites, each `None` leaves
-		// the stored value alone. The inner value is itself an `Option`, so `Some(None)` writes
-		// "no key / no direction" — the way a session that cleared its sort is remembered as cleared.
-		if let Some(sort) = session.sort
-			&& target.sort != sort
-		{
-			target.sort = sort;
-			changed = true;
-		}
-		if let Some(sort_dir) = session.sort_dir
-			&& target.sort_dir != sort_dir
-		{
-			target.sort_dir = sort_dir;
-			changed = true;
-		}
+		// The sort's two halves fold in like the rest, except that their tri-state carries the
+		// difference the `Option` fields above cannot express: `Clear` writes "no key / no
+		// direction", which is how a session that cleared its sort is remembered as cleared, while
+		// `Keep` leaves the stored value alone. `|=` rather than `||`, so the second half is folded
+		// in even when the first already reported a change.
+		changed |= session.sort.fold_into(&mut target.sort);
+		changed |= session.sort_dir.fold_into(&mut target.sort_dir);
 		changed
 	}
 
@@ -792,8 +787,8 @@ mod tests {
 				show_hidden: Some(false),
 				explorer_width: Some(300.0),
 				files_height: Some(240.0),
-				sort: Some(Some(SortKey::Size)),
-				sort_dir: Some(Some(SortDir::Descending)),
+				sort: Change::Set(SortKey::Size),
+				sort_dir: Change::Set(SortDir::Descending),
 			},
 		);
 		let session = targets.find("u@h:1").unwrap().session();
@@ -802,10 +797,10 @@ mod tests {
 		assert_eq!(session.show_hidden, Some(false));
 		assert_eq!(session.explorer_width, Some(300.0));
 		assert_eq!(session.files_height, Some(240.0));
-		assert_eq!(session.sort, Some(Some(SortKey::Size)));
-		assert_eq!(session.sort_dir, Some(Some(SortDir::Descending)));
+		assert_eq!(session.sort, Change::Set(SortKey::Size));
+		assert_eq!(session.sort_dir, Change::Set(SortDir::Descending));
 
-		// An all-`None` snapshot changes nothing and skips the write.
+		// A snapshot that says nothing about anything changes nothing and skips the write.
 		assert!(!targets.set_session("u@h:1", SessionState::default()));
 	}
 
@@ -843,8 +838,8 @@ mod tests {
 
 		// Act: sort the first one by size, descending, through the one snapshot setter.
 		let by_size_desc = SessionState {
-			sort: Some(Some(SortKey::Size)),
-			sort_dir: Some(Some(SortDir::Descending)),
+			sort: Change::Set(SortKey::Size),
+			sort_dir: Change::Set(SortDir::Descending),
 			..SessionState::default()
 		};
 		assert!(targets.set_session("u@h:1", by_size_desc.clone()));
@@ -859,11 +854,11 @@ mod tests {
 		assert_eq!(targets.find("u@h:2").unwrap().sort, None);
 		assert!(!targets.set_session("u@h:1", by_size_desc));
 
-		// Clearing the sort back to the default order is a real change (`Some(None)`), not "leave
-		// it alone" (`None`): a session that cleared its sort must be remembered as cleared.
+		// Clearing the sort back to the default order is a real change (`Change::Clear`), not "leave
+		// it alone" (`Change::Keep`): a session that cleared its sort must be remembered as cleared.
 		let cleared = SessionState {
-			sort: Some(None),
-			sort_dir: Some(None),
+			sort: Change::Clear,
+			sort_dir: Change::Clear,
 			..SessionState::default()
 		};
 		assert!(targets.set_session("u@h:1", cleared));
@@ -875,7 +870,7 @@ mod tests {
 		targets.set_session(
 			"u@h:1",
 			SessionState {
-				sort: Some(Some(SortKey::Extension)),
+				sort: Change::Set(SortKey::Extension),
 				..SessionState::default()
 			},
 		);

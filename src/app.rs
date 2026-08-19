@@ -1308,9 +1308,9 @@ impl App {
 	/// to flow on to `update` untouched — the Quit/Cancel buttons, SSH events and the drain tick.
 	fn quit_key_intercept(&mut self, message: &Message) -> Option<iced::Task<Message>> {
 		use iced::keyboard::key::Named;
-		let event = match message {
-			Message::Key(event) | Message::HomeKey(event) | Message::FormKey(event) => event,
-			_ => return None,
+		let (Message::Key(event) | Message::HomeKey(event) | Message::FormKey(event)) = message
+		else {
+			return None;
 		};
 		if matches!(self.quit, Some(QuitPhase::Confirming))
 			&& let iced::keyboard::Event::KeyPressed { key, .. } = event
@@ -4419,8 +4419,8 @@ impl Tab {
 	/// stored secret and one auth kind, so the destination is unambiguous.
 	fn fill_secret_field(&mut self, secret: &Secret) {
 		match self.form.auth_kind {
-			AuthKind::Password => self.form.password = secret.expose().to_owned(),
-			AuthKind::Key => self.form.passphrase = secret.expose().to_owned(),
+			AuthKind::Password => secret.expose().clone_into(&mut self.form.password),
+			AuthKind::Key => secret.expose().clone_into(&mut self.form.passphrase),
 			// The promptless methods have no stored secret to fill — interactive types every
 			// factor live and agent auth signs with a key the agent already holds (§7). A
 			// remembered target is never one of these, so these arms are not reached in practice.
@@ -6012,7 +6012,10 @@ impl Tab {
 				modifiers,
 				term::kitty::KeyEvent::Release,
 			),
-			_ => return iced::Task::none(),
+			// Named rather than `_`, so that a keyboard event iced adds later is a COMPILE error
+			// here instead of a silently dropped keystroke. This one arm is already handled by the
+			// early return above; it is spelled out only to close the match.
+			iced::keyboard::Event::ModifiersChanged(_) => return iced::Task::none(),
 		};
 		self.modifiers = modifiers;
 

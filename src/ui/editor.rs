@@ -569,8 +569,10 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let width = (count.to_string().len() as f32) * DIGIT_WIDTH + BAR_WIDTH + GUTTER_PAD * 2.0;
 	let mark = p.changed;
 	let muted = p.muted;
-	let match_fg = p.fg;
-	let match_bg = p.match_line;
+	// `match_text` / `match_wash` rather than `match_fg` / `match_bg`: two names one letter apart, for
+	// the number's colour and the band behind it, are a typo waiting to happen.
+	let match_text = p.fg;
+	let match_wash = p.match_line;
 
 	let (first, last) = visible_lines(editor.scroll(), editor.view_height(), count);
 	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(last - first + 2);
@@ -582,7 +584,7 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		// The current match's number is the bright foreground on the same wash the buffer line wears;
 		// a changed line keeps its amber; every other number is dimmed.
 		let number_color = if is_match {
-			match_fg
+			match_text
 		} else if is_changed {
 			mark
 		} else {
@@ -618,7 +620,7 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 					left: 0.0,
 				})
 				.style(move |_theme| container::Style {
-					background: is_match.then(|| match_bg.into()),
+					background: is_match.then(|| match_wash.into()),
 					..container::Style::default()
 				})
 				.into(),

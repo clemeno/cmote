@@ -74,6 +74,8 @@
 //
 // Framing (finding the sequence in a stream arriving in arbitrary chunks) is `term::osc`'s job.
 
+use crate::change::Change;
+
 /// The longest OSC 1337 payload we will buffer. Generous for the keys above — a `CurrentDir` is a
 /// path — while bounding what a hostile stream can make us hold (§12). Deliberately far below what
 /// an `iTerm2 File=` inline image would need: that key is refused, and refusing to BUFFER it is the
@@ -128,12 +130,10 @@ impl Iterm {
 				reports.push((offset, report));
 				return;
 			}
-			// A variable assignment we honour. `Some(None)` is a real answer — the shell said the value
-			// is empty — and is distinct from `None`, which means this payload was not an assignment at
+			// A variable assignment we honour. `Clear` is a real answer — the shell said the value is
+			// empty — and is distinct from `Keep`, which means this payload was not an assignment at
 			// all and must leave what we hold alone.
-			if let Some(value) = parse_user_var(payload) {
-				*branch = value;
-			}
+			parse_user_var(payload).fold_into(branch);
 		});
 		reports
 	}
@@ -161,37 +161,48 @@ fn parse(payload: &[u8]) -> Option<Report> {
 ///
 /// Three-valued on purpose, and the distinction is load-bearing:
 ///
-///   `None`        this payload is not an assignment we act on — a different key, a different variable
-///                 name, or a value we could not trust. Whatever we already hold stays.
-///   `Some(None)`  the shell announced an EMPTY value: it left the repository. Clear the pill.
-///   `Some(Some)`  a value fit to draw.
+///   `Keep`   this payload is not an assignment we act on — a different key, a different variable
+///            name, or a value we could not trust. Whatever we already hold stays.
+///   `Clear`  the shell announced an EMPTY value: it left the repository. Clear the pill.
+///   `Set`    a value fit to draw.
 ///
-/// A value that fails to decode lands in the first case, not the second. That matters: a remote must
-/// not be able to CLEAR a real reading by sending rubbish, the same rule §54 applies to progress.
-fn parse_user_var(payload: &[u8]) -> Option<Option<String>> {
-	let rest = payload.strip_prefix(b"1337;SetUserVar=")?;
+/// A value that fails to decode lands in the FIRST case, not the second. That matters: a remote must
+/// not be able to CLEAR a real reading by sending rubbish, the same rule §54 applies to progress. That
+/// is also why the three answers are named rather than nested `Option`s (§111) — here the difference
+/// between "we ignored this" and "the shell said empty" is a security property, not a nicety.
+fn parse_user_var(payload: &[u8]) -> Change<String> {
+	let Some(rest) = payload.strip_prefix(b"1337;SetUserVar=") else {
+		return Change::Keep;
+	};
 	// `name=<base64>`. The name is matched whole against the one name we keep, so a variable cmote has
 	// no reader for is never stored — there is deliberately no map here for a remote to fill.
-	let equals = rest.iter().position(|&byte| byte == b'=')?;
+	let Some(equals) = rest.iter().position(|&byte| byte == b'=') else {
+		return Change::Keep;
+	};
 	if &rest[..equals] != HONOURED_VAR {
-		return None;
+		return Change::Keep;
 	}
 	let encoded = &rest[equals + 1..];
 	// An empty payload is the shell saying "no branch" and needs no decode. iTerm2's own integration
 	// sends this on leaving a repository.
 	if encoded.is_empty() {
-		return Some(None);
+		return Change::Clear;
 	}
 
 	use base64::Engine as _;
-	let decoded = base64::engine::general_purpose::STANDARD
-		.decode(encoded)
-		.ok()?;
-	let text = String::from_utf8(decoded).ok()?;
+	let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+		return Change::Keep;
+	};
+	let Ok(text) = String::from_utf8(decoded) else {
+		return Change::Keep;
+	};
 	let clean = super::osc::sanitize(&text, MAX_VALUE_CHARS);
 	// A value that was nothing but control characters sanitises to empty. Treated as "no branch"
 	// rather than as an empty pill, which would be a smudge on the strip with nothing in it.
-	Some((!clean.is_empty()).then_some(clean))
+	if clean.is_empty() {
+		return Change::Clear;
+	}
+	Change::Set(clean)
 }
 
 #[cfg(test)]

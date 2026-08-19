@@ -1188,7 +1188,7 @@ impl Terminal {
 		&mut self,
 		bounds: rect::Rect,
 		extent: rect::RectExtent,
-		change: rect::Change,
+		change: rect::AttributeChange,
 		cols: usize,
 	) {
 		let grid = self.term.grid_mut();
@@ -2351,7 +2351,9 @@ fn merged_pen(current: &Cell, saved: &Cell, mask: sgrstack::Mask) -> String {
 			flags.insert(saved.flags & group);
 		}
 	}
-	let underlined = mask.contains(sgrstack::Mask::UNDERLINE)
+	// `underline_masked`, not `underlined`: it says whether the mask COVERS the underline attributes,
+	// not whether anything is underlined. One letter apart from the `underline` value below otherwise.
+	let underline_masked = mask.contains(sgrstack::Mask::UNDERLINE)
 		|| mask.contains(sgrstack::Mask::DOUBLY_UNDERLINED);
 	let foreground = if mask.contains(sgrstack::Mask::FOREGROUND) {
 		saved.fg
@@ -2363,7 +2365,7 @@ fn merged_pen(current: &Cell, saved: &Cell, mask: sgrstack::Mask) -> String {
 	} else {
 		current.bg
 	};
-	let underline = if underlined {
+	let underline = if underline_masked {
 		saved.underline_color()
 	} else {
 		current.underline_color()

@@ -34,6 +34,7 @@
 // the shape `transfer::Queue` already uses (§16), for the same reason: it makes every rule in here
 // answerable in a test with no window and no server.
 
+use crate::change::Change;
 use crate::explorer::{self, Explorer};
 use crate::files::{Entry, Files};
 use crate::targets::SessionState;
@@ -218,10 +219,10 @@ impl Panes {
 			show_hidden: Some(self.tree.show_hidden()),
 			explorer_width: Some(self.tree.width()),
 			files_height: Some(self.pane.height()),
-			// The pane always knows its sort (both halves may be unset), so it is always `Some`
-			// here — `set_session` then writes the tri-state through as-is (§19, §22).
-			sort: Some(self.pane.sort_key()),
-			sort_dir: Some(self.pane.sort_dir()),
+			// The pane always knows its sort (both halves may be unset), so `reported` is right and
+			// `Keep` never appears — `set_session` then writes the tri-state through as-is (§19, §22).
+			sort: Change::reported(self.pane.sort_key()),
+			sort_dir: Change::reported(self.pane.sort_dir()),
 		}
 	}
 
@@ -235,11 +236,15 @@ impl Panes {
 		if let Some(show_hidden) = session.show_hidden {
 			self.tree.set_hidden(show_hidden);
 		}
-		// Both halves travel together from `capture`, so they are applied together; `set_sort`
-		// writes the tri-state outright rather than toggling.
-		if let (Some(sort), Some(sort_dir)) = (session.sort, session.sort_dir) {
-			self.pane.set_sort(sort, sort_dir);
-		}
+		// Each half folds onto what the pane already holds, so a `Keep` keeps the pane's own value
+		// rather than abandoning the other half with it. A real snapshot reports both (§22), so this
+		// is the same result by a route that cannot be wrong-footed by a half-filled one. `set_sort`
+		// writes outright rather than toggling.
+		let mut sort = self.pane.sort_key();
+		let mut sort_dir = self.pane.sort_dir();
+		session.sort.fold_into(&mut sort);
+		session.sort_dir.fold_into(&mut sort_dir);
+		self.pane.set_sort(sort, sort_dir);
 		if let Some(width) = session.explorer_width
 			&& window.width > 1.0
 		{

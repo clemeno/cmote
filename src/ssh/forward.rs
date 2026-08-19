@@ -251,11 +251,10 @@ async fn listen(
 		.await;
 
 	loop {
-		let (tcp, peer) = match listener.accept().await {
-			Ok(pair) => pair,
-			// A transient accept error (a connection reset before we took it) is not fatal —
-			// keep listening rather than tearing the whole forward down.
-			Err(_) => continue,
+		// A transient accept error (a connection reset before we took it) is not fatal — keep
+		// listening rather than tearing the whole forward down.
+		let Ok((tcp, peer)) = listener.accept().await else {
+			continue;
 		};
 
 		let resolved = match spec.kind {

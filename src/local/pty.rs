@@ -141,14 +141,16 @@ impl Pty {
 
 		let (output_tx, output_rx) = mpsc::channel::<Vec<u8>>(CHANNEL_BOUND);
 		spawn_reader(reader, output_tx);
-		let writes = spawn_writer(writer);
+		// Named apart from `writer` above: that is the pty's own write half, this is the channel the
+		// GUI hands bytes to, which the writer thread drains.
+		let to_pty = spawn_writer(writer);
 		let exited = spawn_waiter(child);
 
 		Ok((
 			Self {
 				master: pair.master,
 				killer,
-				writes,
+				writes: to_pty,
 			},
 			Stream {
 				bytes: output_rx,

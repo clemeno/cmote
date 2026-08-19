@@ -945,7 +945,7 @@ impl Queue {
 		self.notice = None;
 		// Remembered so completion re-lists this folder if a pane is on it (§29) — the same
 		// refresh a single-file upload gets. `close_batch` clears it at the end.
-		self.dest = dir.clone();
+		self.dest.clone_from(&dir);
 		self.slot = Some(TransferProgress::default());
 		Effects::send(SshCommand::UploadTree {
 			local,

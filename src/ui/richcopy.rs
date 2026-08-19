@@ -12,6 +12,8 @@
 // cells that differ carry a <span>. Consecutive cells sharing a style are merged into one span,
 // which keeps the HTML small for the common case of long same-colour runs.
 
+use std::fmt::Write as _;
+
 use crate::palette;
 use crate::term::screen::{Cell, Color, Screen, UnderlineStyle};
 use crate::ui::selection::Selection;
@@ -134,11 +136,14 @@ fn style_of(cell: &Cell) -> Style {
 /// span). Only the properties that differ from the default are emitted.
 fn style_css(style: &Style) -> String {
 	let mut css = String::new();
+	// `write!` rather than `push_str(&format!(…))`: it formats straight into `css` instead of
+	// building a throwaway `String` first. Writing to a `String` cannot fail, so the `Result` is
+	// discarded — `fmt::Write` returns one only because the trait also covers fallible sinks.
 	if style.fg != palette::DEFAULT_FG {
-		css.push_str(&format!("color:{};", hex_color(style.fg)));
+		let _ = write!(css, "color:{};", hex_color(style.fg));
 	}
 	if style.bg != palette::DEFAULT_BG {
-		css.push_str(&format!("background-color:{};", hex_color(style.bg)));
+		let _ = write!(css, "background-color:{};", hex_color(style.bg));
 	}
 	if style.bold {
 		css.push_str("font-weight:bold;");
