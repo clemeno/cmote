@@ -91,7 +91,7 @@ impl CopyDirection {
 /// a real path off the file dialog. The existence check runs first and answers `UploadExists`, so a
 /// file already there becomes the same question it is over a network rather than a casualty — the
 /// copy below truncates, so by the time a write failed the old contents would be gone.
-pub async fn upload(
+pub fn upload(
 	events: &mpsc::Sender<SshEvent>,
 	source: PathBuf,
 	destination: String,
@@ -122,7 +122,7 @@ pub async fn upload(
 /// Copy a file OUT of the pane's folder — what the GUI calls a download (§19).
 ///
 /// No existence question: the destination came from a save dialog, which has already asked (§21).
-pub async fn download(
+pub fn download(
 	events: &mpsc::Sender<SshEvent>,
 	source: String,
 	destination: PathBuf,
@@ -147,7 +147,7 @@ pub async fn download(
 /// Which of `names` are already taken in the pane folder `dir`, each with a free `name-1` beside it
 /// (§17) — the answer that lets the GUI ask the "some are already there" question once for a whole
 /// batch instead of once per file.
-pub async fn precheck(events: &mpsc::Sender<SshEvent>, dir: String, names: Vec<String>) {
+pub fn precheck(events: &mpsc::Sender<SshEvent>, dir: String, names: Vec<String>) {
 	let events = events.clone();
 	tokio::spawn(async move {
 		let native_dir = match path::native(&dir) {
@@ -168,7 +168,7 @@ pub async fn precheck(events: &mpsc::Sender<SshEvent>, dir: String, names: Vec<S
 }
 
 /// Copy a whole folder INTO the pane's folder (§17), keeping its own name inside the destination.
-pub async fn upload_tree(
+pub fn upload_tree(
 	events: &mpsc::Sender<SshEvent>,
 	source: PathBuf,
 	destination: String,
@@ -194,7 +194,7 @@ pub async fn upload_tree(
 }
 
 /// Copy a whole folder OUT of the pane's folder (§19) — the mirror of [`upload_tree`].
-pub async fn download_tree(
+pub fn download_tree(
 	events: &mpsc::Sender<SshEvent>,
 	source: String,
 	destination: PathBuf,

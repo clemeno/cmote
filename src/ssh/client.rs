@@ -761,7 +761,7 @@ async fn stream(
 					}
 					Some(SessionMsg::ReadLink(path)) => {
 						let backend = accounts.browse(session).await;
-						browse::read_link(backend, events, path).await;
+						browse::read_link(backend, events, path);
 					}
 					Some(SessionMsg::Download { remote, local, resume }) => {
 						let flag = Arc::new(AtomicBool::new(false));
@@ -811,11 +811,11 @@ async fn stream(
 					// root's `.bashrc`, where it would do nothing for the session that asked.
 					Some(SessionMsg::ProbeIntegration { user }) => {
 						let backend = accounts.files_as(session, crate::bridge::LOGIN_IDENTITY).await;
-						integration::probe(backend, events, user).await;
+						integration::probe(backend, events, user);
 					}
 					Some(SessionMsg::WriteIntegration { path, shell, install }) => {
 						let backend = accounts.files_as(session, crate::bridge::LOGIN_IDENTITY).await;
-						integration::write(backend, events, path, shell, install).await;
+						integration::write(backend, events, path, shell, install);
 					}
 					// Forward a collision answer to the transfer parked on it. A send that fails —
 					// the transfer already finished, or there was never a recursive one — is

@@ -92,7 +92,7 @@ pub async fn list_all(events: &mpsc::Sender<SshEvent>, pane: String, request: u6
 /// Create a folder (§18). The destination is checked FIRST, for the same reason the SFTP path checks
 /// it: `create_dir` on an occupied path gives a terse OS error, and "already exists" is the reason
 /// worth showing.
-pub async fn make_dir(events: &mpsc::Sender<SshEvent>, pane: String) {
+pub fn make_dir(events: &mpsc::Sender<SshEvent>, pane: String) {
 	let events = events.clone();
 	spawn(async move {
 		let event = match blocking(&pane, |native| {
@@ -117,7 +117,7 @@ pub async fn make_dir(events: &mpsc::Sender<SshEvent>, pane: String) {
 /// Rename a folder (§18). Like the SFTP path, an occupied destination is refused rather than
 /// replaced: `std::fs::rename` on Windows replaces a file without asking, and a folder quietly
 /// replaced is not something the user can undo.
-pub async fn rename(events: &mpsc::Sender<SshEvent>, from: String, to: String) {
+pub fn rename(events: &mpsc::Sender<SshEvent>, from: String, to: String) {
 	let events = events.clone();
 	spawn(async move {
 		let event = match rename_now(&from, &to).await {
@@ -149,7 +149,7 @@ async fn rename_now(from: &str, to: &str) -> Result<(), String> {
 /// delete whatever it points at, which is somewhere the user did not select. On Windows a directory
 /// symlink and a junction both need `remove_dir` rather than `remove_file`, so the two are told apart
 /// before the removal rather than by trying one and catching the other.
-pub async fn remove(events: &mpsc::Sender<SshEvent>, panes: Vec<String>) {
+pub fn remove(events: &mpsc::Sender<SshEvent>, panes: Vec<String>) {
 	let events = events.clone();
 	spawn(async move {
 		let event = match remove_now(&panes).await {
@@ -179,7 +179,7 @@ async fn remove_now(panes: &[String]) -> Result<(), String> {
 
 /// Resolve one symlink for the details popup (§20). Reports nothing when it will not resolve, which
 /// is what a broken link is — the popup simply has no target line.
-pub async fn read_link(events: &mpsc::Sender<SshEvent>, pane: String) {
+pub fn read_link(events: &mpsc::Sender<SshEvent>, pane: String) {
 	let events = events.clone();
 	spawn(async move {
 		let Ok(target) = blocking(&pane, |native| {
@@ -214,7 +214,7 @@ pub async fn report_zone(events: &mpsc::Sender<SshEvent>) {
 
 /// Read a whole file for a viewer tab (§32, §53), refusing one over `limit` off its metadata before a
 /// byte is read — the same order the remote path uses, so a huge file costs a stat and not a read.
-pub async fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, limit: u64) {
+pub fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, limit: u64) {
 	let events = events.clone();
 	spawn(async move {
 		let read = blocking(&pane, move |native| {
@@ -251,7 +251,7 @@ pub async fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String,
 /// Write the editor's buffer back (§32), atomically: a temp sibling then a rename over the target, so
 /// a crash mid-write cannot truncate the user's file. The same shape as the remote save, for the same
 /// reason.
-pub async fn save(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, bytes: Vec<u8>) {
+pub fn save(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, bytes: Vec<u8>) {
 	let events = events.clone();
 	spawn(async move {
 		let event = match blocking(&pane, move |native| save_atomically(native, &bytes)).await {

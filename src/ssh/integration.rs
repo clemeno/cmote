@@ -38,7 +38,7 @@ const FALLBACKS: [(&str, IntegrationShell); 2] = [
 
 /// Look at the login account's shell config and report what could be done to it (§17). Reads only:
 /// the dialog shows the block and the file, and nothing is written until the user says so.
-pub async fn probe(backend: AsuserFiles, events: &mpsc::Sender<SshEvent>, user: String) {
+pub fn probe(backend: AsuserFiles, events: &mpsc::Sender<SshEvent>, user: String) {
 	let events = events.clone();
 	tokio::spawn(async move {
 		let outcome = look(&backend, &user).await;
@@ -64,7 +64,7 @@ pub async fn probe(backend: AsuserFiles, events: &mpsc::Sender<SshEvent>, user: 
 
 /// Put cmote's block into `path`, or cut it back out (§17). Reports the file's state AFTER the
 /// write, so the dialog says what is now true rather than what was asked for.
-pub async fn write(
+pub fn write(
 	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	path: String,

@@ -410,7 +410,7 @@ async fn remove_subtree(sftp: &RawSftpSession, root: &str) -> Result<()> {
 ///
 /// One link at a time, on the user's selection: doing it for every entry in a listing is
 /// a round trip per link, which is the cost the pane exists to avoid (§19).
-pub async fn read_link(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
+pub fn read_link(backend: Browse, events: &mpsc::Sender<SshEvent>, path: String) {
 	let events = events.clone();
 	match backend {
 		Browse::Sftp(sftp) => {

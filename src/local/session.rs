@@ -156,19 +156,25 @@ pub async fn run(
 							// The file panes, the details popup and both viewers (§18, §19, §20, §32, §53). Each
 							// runs on its own blocking task so a crowded directory or a large file never holds up
 							// the terminal — the same rule the SFTP listings follow.
+							//
+							// Only the two listings are awaited, and the `.await` marks a real difference rather
+							// than a habit: those two answer the VIRTUAL ROOT inline (the drive list is already in
+							// hand, so there is nothing to spawn), and everything else hands its work to a task and
+							// returns at once. An arm with no `.await` is an arm that cannot report anything before
+							// the loop comes round again.
 							Some(SessionMsg::ListDir(path)) => fs::list(&events, path).await,
 							Some(SessionMsg::ListFiles { path, request }) => {
 								fs::list_all(&events, path, request).await;
 							}
-							Some(SessionMsg::ReadLink(path)) => fs::read_link(&events, path).await,
-							Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path).await,
-							Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths).await,
-							Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to).await,
+							Some(SessionMsg::ReadLink(path)) => fs::read_link(&events, path),
+							Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path),
+							Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths),
+							Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to),
 							Some(SessionMsg::FileLoad { viewer_id, path, limit, .. }) => {
-								fs::load(&events, viewer_id, path, limit).await;
+								fs::load(&events, viewer_id, path, limit);
 							}
 							Some(SessionMsg::EditSave { viewer_id, path, bytes, .. }) => {
-								fs::save(&events, viewer_id, path, bytes).await;
+								fs::save(&events, viewer_id, path, bytes);
 							}
 
 							// The transfers (§16, §17, §19). A fresh cancel flag per transfer, kept here so the
@@ -176,26 +182,26 @@ pub async fn run(
 							// ones, which can park mid-way to ask about a collision.
 							Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
 								let flag = arm(&mut cancel);
-								copy::upload(&events, local, remote, overwrite, resume, flag).await;
+								copy::upload(&events, local, remote, overwrite, resume, flag);
 							}
 							Some(SessionMsg::Download { remote, local, resume }) => {
 								let flag = arm(&mut cancel);
-								copy::download(&events, remote, local, resume, flag).await;
+								copy::download(&events, remote, local, resume, flag);
 							}
 							Some(SessionMsg::CheckUploads { dir, names }) => {
-								copy::precheck(&events, dir, names).await;
+								copy::precheck(&events, dir, names);
 							}
 							Some(SessionMsg::UploadTree { local, remote, resume }) => {
 								let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
 								conflicts = Some(answers);
 								let flag = arm(&mut cancel);
-								copy::upload_tree(&events, local, remote, resume, receiver, flag).await;
+								copy::upload_tree(&events, local, remote, resume, receiver, flag);
 							}
 							Some(SessionMsg::DownloadTree { remote, local, resume }) => {
 								let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
 								conflicts = Some(answers);
 								let flag = arm(&mut cancel);
-								copy::download_tree(&events, remote, local, resume, receiver, flag).await;
+								copy::download_tree(&events, remote, local, resume, receiver, flag);
 							}
 							// Forward the answer to the copy parked on it. A send that fails is nothing to act
 							// on: the transfer already ended, so the answer simply had no one waiting.
