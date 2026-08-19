@@ -19,11 +19,11 @@
 //   $                 carriage return — back to the left edge of the CURRENT band
 //   -                 new line — down one band, back to the left edge
 //
-// Decoding runs the payload TWICE. The first walk measures (or reads the raster attributes) so
+// Decoding runs the payload TWICE. The first walk_payload measures (or reads the raster attributes) so
 // the canvas can be allocated once, at a size we have already bounded; the second paints into it.
 // The alternative — growing a row-major RGBA buffer sideways as the picture reveals its width —
 // would restride every row on every growth, and would size an allocation from a number the remote
-// chose before checking it. The grammar is written once (`walk`) and both passes are just
+// chose before checking it. The grammar is written once (`walk_payload`) and both passes are just
 // different sinks for the commands it emits, so the two can never disagree about what the bytes
 // mean.
 //
@@ -42,9 +42,9 @@ pub const MAX_WIDTH: u16 = 4096;
 pub const MAX_HEIGHT: u16 = 4096;
 pub const MAX_PIXELS: usize = 4_194_304;
 
-/// How many colour registers the palette holds. 256 is the VT340's count and what cmote reports to
+/// How many colour registers the default_registers holds. 256 is the VT340's count and what cmote reports to
 /// XTSMGRAPHICS; a register index past it is clamped, so a sender using more collides two colours
-/// rather than reaching past the palette.
+/// rather than reaching past the default_registers.
 pub const COLOR_REGISTERS: usize = 256;
 
 /// How many parameters one command's number run keeps. The longest is a colour definition's five
@@ -149,7 +149,7 @@ enum SixelCommand {
 /// lines short, stray whitespace, a byte from a truncated command — is skipped. A tolerant reader
 /// is the right call here: half a picture is worth more to the user than none, and there is nothing
 /// to exploit in a byte we drop.
-fn walk(payload: &[u8], mut sink: impl FnMut(SixelCommand)) {
+fn walk_payload(payload: &[u8], mut sink: impl FnMut(SixelCommand)) {
 	let mut index = 0;
 	while index < payload.len() {
 		let byte = payload[index];
@@ -215,14 +215,14 @@ fn walk(payload: &[u8], mut sink: impl FnMut(SixelCommand)) {
 /// blank columns emitters pad a band with do not widen the canvas.
 fn canvas_size(payload: &[u8]) -> Option<(u32, u32)> {
 	let mut raster = None;
-	// Where the walk is, and how far it has reached: `x` counts columns from the left edge of the
+	// Where the walk_payload is, and how far it has reached: `x` counts columns from the left edge of the
 	// current band, `band` counts bands from the top.
 	let mut x: u32 = 0;
 	let mut band: u32 = 0;
 	let mut painted_width: u32 = 0;
 	let mut painted_bands: u32 = 0;
 
-	walk(payload, |command| match command {
+	walk_payload(payload, |command| match command {
 		SixelCommand::Raster { width, height } => {
 			raster = Some((u32::from(width), u32::from(height)))
 		}
@@ -266,19 +266,19 @@ fn canvas_size(payload: &[u8]) -> Option<(u32, u32)> {
 /// `width`/`height`, so a raster attribute smaller than the payload's real extent simply crops it
 /// and one larger leaves the surplus transparent — either way nothing is written outside `rgba`.
 fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
-	let mut palette = palette();
+	let mut default_registers = default_registers();
 	let mut register = 0usize;
 	let mut x: u32 = 0;
 	let mut band: u32 = 0;
 
-	walk(payload, |command| match command {
+	walk_payload(payload, |command| match command {
 		SixelCommand::Select { register: chosen } => register = usize::from(chosen),
 		SixelCommand::Define {
 			register: defined,
 			coding,
 			values,
 		} => {
-			palette[usize::from(defined)] = color(coding, values);
+			default_registers[usize::from(defined)] = parse_color(coding, values);
 			// A colour introducer SELECTS its register as well as defining it. That is not obvious
 			// from the format's description — the two forms read like separate commands — but it is
 			// what every emitter relies on: `#0;2;100;0;0~` defines red and expects the sixel right
@@ -288,9 +288,9 @@ fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
 			register = usize::from(defined);
 		}
 		SixelCommand::Run { count, bits } => {
-			let ink = palette[register];
+			let ink = default_registers[register];
 			for _ in 0..count {
-				// A run can walk off the right edge (an overlong band, or a raster crop): keep
+				// A run can walk_payload off the right edge (an overlong band, or a raster crop): keep
 				// counting columns so a later `$` still lines up, but paint nothing out there.
 				if x < width {
 					for bit in 0..BAND_HEIGHT {
@@ -322,14 +322,14 @@ fn paint(payload: &[u8], rgba: &mut [u8], width: u32, height: u32) {
 	});
 }
 
-/// A fresh palette: the VT340's sixteen defaults, then black for the rest.
-fn palette() -> [[u8; 3]; COLOR_REGISTERS] {
-	let mut palette = [[0u8; 3]; COLOR_REGISTERS];
-	palette[..DEFAULT_PALETTE.len()].copy_from_slice(&DEFAULT_PALETTE);
-	palette
+/// A fresh default_registers: the VT340's sixteen defaults, then black for the rest.
+fn default_registers() -> [[u8; 3]; COLOR_REGISTERS] {
+	let mut default_registers = [[0u8; 3]; COLOR_REGISTERS];
+	default_registers[..DEFAULT_PALETTE.len()].copy_from_slice(&DEFAULT_PALETTE);
+	default_registers
 }
 
-/// A colour register index, clamped into the palette. A payload naming a register past cmote's 256
+/// A colour register index, clamped into the default_registers. A payload naming a register past cmote's 256
 /// (xterm allows more) folds onto the last one rather than being dropped: two of its colours then
 /// collide, which shows as a wrong shade — far less confusing than a hole where the pixels should be.
 fn register_index(register: u16) -> u8 {
@@ -340,7 +340,7 @@ fn register_index(register: u16) -> u8 {
 /// (0-100, not 0-255 — the classic sixel trap), and `Pu` 1 is DEC's HLS. Any other coding is
 /// treated as RGB: it is the overwhelmingly common one, so guessing it keeps a mislabelled payload
 /// looking right instead of painting it black.
-fn color(coding: u16, [x, y, z]: [u16; 3]) -> [u8; 3] {
+fn parse_color(coding: u16, [x, y, z]: [u16; 3]) -> [u8; 3] {
 	if coding == 1 {
 		hls(x, y, z)
 	} else {
@@ -430,7 +430,7 @@ impl Numbers {
 ///
 /// An omitted parameter (`#;2;…`) counts as a zero, as the VT spec says. Digits accumulate with
 /// saturation, so a remote's `99999999` clamps at `u16::MAX` instead of wrapping to a small number
-/// that would look plausible; a run longer than `MAX_NUMBERS` is consumed to keep the walk in step
+/// that would look plausible; a run longer than `MAX_NUMBERS` is consumed to keep the walk_payload in step
 /// but its surplus is dropped.
 fn numbers(payload: &[u8], index: &mut usize) -> Numbers {
 	let mut values = [0u16; MAX_NUMBERS];
@@ -526,7 +526,7 @@ mod tests {
 	#[test]
 	fn a_payload_that_defines_nothing_draws_in_the_default_palette() {
 		// `#1~` selects register 1 without defining it: the VT340 default, blue. Emitters that lean
-		// on the built-in palette are the reason it is here rather than sixteen blacks.
+		// on the built-in default_registers are the reason it is here rather than sixteen blacks.
 		let image = decode(b"#1~").expect("a picture");
 		assert_eq!(pixel(&image, 0, 0), [0x33, 0x33, 0xcc, 0xff]);
 	}

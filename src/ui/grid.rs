@@ -1386,15 +1386,15 @@ fn cell_style(
 		};
 	};
 
-	let mut fg = resolve(cell.fgcolor(), DEFAULT_FG);
-	let mut bg = resolve(cell.bgcolor(), DEFAULT_BG);
+	let mut fg = to_iced_color(cell.fgcolor(), DEFAULT_FG);
+	let mut bg = to_iced_color(cell.bgcolor(), DEFAULT_BG);
 	// Faint is a property of the ink, so fade it toward the background before any swap.
 	if cell.dim() {
 		fg = blend(bg, fg, DIM_STRENGTH);
 	}
 	// The underline's explicit colour (SGR 58), resolved now so it tracks the ink; the
 	// fallback to the foreground is applied after the swap, below, so it follows inverse too.
-	let explicit_underline = cell.underline_color().map(|color| resolve(color, fg));
+	let explicit_underline = cell.underline_color().map(|color| to_iced_color(color, fg));
 
 	if cell.inverse() ^ is_cursor {
 		std::mem::swap(&mut fg, &mut bg);
@@ -1453,7 +1453,7 @@ fn blend(from: Color, to: Color, t: f32) -> Color {
 
 /// Map a cell color to an iced color. `Default` becomes the caller's default (different
 /// for fg and bg); indexed colors go through the shared xterm-256 palette.
-fn resolve(color: CellColor, default: Color) -> Color {
+fn to_iced_color(color: CellColor, default: Color) -> Color {
 	match color {
 		CellColor::Default => default,
 		CellColor::Indexed(index) => rgb(palette::xterm_256(index)),

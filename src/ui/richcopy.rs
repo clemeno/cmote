@@ -44,8 +44,8 @@ pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 	// cell needs no markup and the whole block reads as the terminal shows it.
 	let mut html = format!(
 		"<pre style=\"font-family:'Courier New',monospace;color:{};background-color:{};\">",
-		hex(palette::DEFAULT_FG),
-		hex(palette::DEFAULT_BG),
+		hex_color(palette::DEFAULT_FG),
+		hex_color(palette::DEFAULT_BG),
 	);
 
 	for (index, row) in rows.iter().enumerate() {
@@ -109,8 +109,8 @@ fn flush_run(html: &mut String, run: &str, style: Option<&Style>) {
 /// the grid renders it; conceal paints the glyph in its own background so copied-as-shown text
 /// stays invisible (the plain-text fallback still carries the real characters).
 fn style_of(cell: &Cell) -> Style {
-	let mut fg = resolve(cell.fgcolor(), palette::DEFAULT_FG);
-	let mut bg = resolve(cell.bgcolor(), palette::DEFAULT_BG);
+	let mut fg = to_rgb(cell.fgcolor(), palette::DEFAULT_FG);
+	let mut bg = to_rgb(cell.bgcolor(), palette::DEFAULT_BG);
 	if cell.inverse() {
 		std::mem::swap(&mut fg, &mut bg);
 	}
@@ -135,10 +135,10 @@ fn style_of(cell: &Cell) -> Style {
 fn style_css(style: &Style) -> String {
 	let mut css = String::new();
 	if style.fg != palette::DEFAULT_FG {
-		css.push_str(&format!("color:{};", hex(style.fg)));
+		css.push_str(&format!("color:{};", hex_color(style.fg)));
 	}
 	if style.bg != palette::DEFAULT_BG {
-		css.push_str(&format!("background-color:{};", hex(style.bg)));
+		css.push_str(&format!("background-color:{};", hex_color(style.bg)));
 	}
 	if style.bold {
 		css.push_str("font-weight:bold;");
@@ -159,7 +159,7 @@ fn style_css(style: &Style) -> String {
 /// Resolve a cell colour to RGB: the terminal default falls back to `default`, an indexed slot
 /// goes through the shared xterm-256 palette, and a truecolor value passes through — the same
 /// resolution the grid uses, so the copy matches what is on screen (PLAN §9).
-fn resolve(color: Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
+fn to_rgb(color: Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
 	match color {
 		Color::Default => default,
 		Color::Indexed(index) => palette::xterm_256(index),
@@ -173,8 +173,8 @@ fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
 	(mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
 }
 
-/// Format an RGB triple as a CSS hex colour (`#rrggbb`).
-fn hex((r, g, b): (u8, u8, u8)) -> String {
+/// Format an RGB triple as a CSS hex_color colour (`#rrggbb`).
+fn hex_color((r, g, b): (u8, u8, u8)) -> String {
 	format!("#{r:02x}{g:02x}{b:02x}")
 }
 
@@ -248,8 +248,8 @@ mod tests {
 		// SGR 7 with default colours: the foreground becomes the default background and vice
 		// versa, so the span states both explicitly.
 		let html = html_of(6, "\x1b[7mx");
-		let fg = hex(palette::DEFAULT_BG);
-		let bg = hex(palette::DEFAULT_FG);
+		let fg = hex_color(palette::DEFAULT_BG);
+		let bg = hex_color(palette::DEFAULT_FG);
 		assert!(html.contains(&format!("color:{fg};background-color:{bg};")));
 	}
 

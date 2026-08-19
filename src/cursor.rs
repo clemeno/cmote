@@ -326,7 +326,7 @@ pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 // EVERYTHING FROM HERE TO THE WINDOWS SEAM IS WINDOWS' AND THE TESTS' (§80). The drawings exist
 // because Windows has no hand cursors and iced offers no seam to pass a picture through; every
 // other platform draws its own, so off Windows there is nobody to hand a decoded PNG to. The bundled
-// bytes, the hotspot, the `Drawing` they decode into and the resampler that fits them are therefore
+// bytes, the hotspot, the `Drawing` they decode_png into and the resampler that fits them are therefore
 // compiled for `windows` and for `test`, and for nothing else — `dead_code` is right about them on a
 // mac build, and CI's `-D warnings` over `x86_64-apple-darwin` is where that shows up.
 //
@@ -421,7 +421,7 @@ struct Drawing {
 /// with soft edges ever comes out with a dark halo round it, that assumption is the thing to check:
 /// the fix is one multiply of each channel by the alpha before the swizzle below.
 #[cfg(any(windows, test))]
-fn decode(bytes: &'static [u8]) -> Option<Drawing> {
+fn decode_png(bytes: &'static [u8]) -> Option<Drawing> {
 	// `Cursor` only because the decoder wants to seek; the bytes are already in the binary.
 	let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
 	decoder.set_transformations(
@@ -526,7 +526,7 @@ mod platform {
 	};
 
 	use super::{
-		COVERAGE, Drawing, GRAB_PNG, GRABBING_PNG, HOTSPOT, Hand, decode, hand, resampled,
+		COVERAGE, Drawing, GRAB_PNG, GRABBING_PNG, HOTSPOT, Hand, decode_png, hand, resampled,
 	};
 
 	/// The two cursors, built once when the window is subclassed. Held as `isize` because a raw
@@ -566,7 +566,7 @@ mod platform {
 		// A drawing that cannot be read leaves the whole feature switched off, exactly as a subclass
 		// that cannot be fitted does: the handles fall back to the move cursor (`grab_interaction`)
 		// and nothing else notices.
-		let (Some(open), Some(closed)) = (decode(GRAB_PNG), decode(GRABBING_PNG)) else {
+		let (Some(open), Some(closed)) = (decode_png(GRAB_PNG), decode_png(GRABBING_PNG)) else {
 			return;
 		};
 		// The size Windows wants a cursor to be. `SetCursor` does NOT scale, so handing over the
@@ -642,7 +642,7 @@ mod platform {
 	}
 
 	/// A drawing at the size asked for, or untouched when the answer is unusable or already right.
-	/// Split out so `install` reads as the three steps it is: decode, fit, build.
+	/// Split out so `install` reads as the three steps it is: decode_png, fit, build.
 	fn fitted(drawing: Drawing, width: i32, height: i32) -> Drawing {
 		let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
 			return drawing;
@@ -835,7 +835,9 @@ mod tests {
 		if bytes.is_empty() {
 			return None;
 		}
-		Some(decode(bytes).expect("a bundled cursor that is not empty has to be a readable PNG"))
+		Some(
+			decode_png(bytes).expect("a bundled cursor that is not empty has to be a readable PNG"),
+		)
 	}
 
 	#[test]

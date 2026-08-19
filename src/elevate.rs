@@ -301,7 +301,7 @@ pub fn prompt(buffer: &str) -> Option<String> {
 	// Sanitized BEFORE the shape is judged, not after: a coloured prompt ends with the escape
 	// sequence that turns the colour off, so testing the raw bytes would decide that `Verification
 	// code:` in red is not a question at all.
-	let label = sanitize(tail);
+	let label = sanitize_line(tail);
 	let label = label.trim_end();
 	if !label.ends_with(':') && !label.ends_with('?') {
 		return None;
@@ -335,7 +335,7 @@ pub fn refusal(buffer: &str) -> Option<String> {
 	lines
 		.into_iter()
 		.rev()
-		.map(|line| sanitize(line).trim().to_owned())
+		.map(|line| sanitize_line(line).trim().to_owned())
 		.find(|line| {
 			let lowered = line.to_lowercase();
 			REFUSAL_WORDS.iter().any(|word| lowered.contains(word))
@@ -356,7 +356,7 @@ pub fn looks_like_shell(buffer: &str) -> bool {
 	else {
 		return false;
 	};
-	let trimmed = sanitize(tail);
+	let trimmed = sanitize_line(tail);
 	let trimmed = trimmed.trim_end();
 	trimmed.ends_with(SHELL_ENDINGS)
 }
@@ -373,7 +373,7 @@ pub fn reason(buffer: &str) -> Option<String> {
 	buffer
 		.lines()
 		.rev()
-		.map(sanitize)
+		.map(sanitize_line)
 		.find(|line| !line.trim().is_empty())
 		.map(|line| line.trim().to_owned())
 }
@@ -385,7 +385,7 @@ pub fn reason(buffer: &str) -> Option<String> {
 /// and OSC sequences, and a label is not a terminal (the grid is the only thing in cmote that
 /// interprets them). Stripping them here means a prompt cannot repaint, reposition or retitle
 /// anything by being shown.
-fn sanitize(line: &str) -> String {
+fn sanitize_line(line: &str) -> String {
 	let mut out = String::with_capacity(line.len());
 	let mut chars = line.chars();
 	while let Some(c) = chars.next() {

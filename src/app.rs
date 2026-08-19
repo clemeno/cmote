@@ -1608,7 +1608,7 @@ impl App {
 	/// this one function precisely so the answer cannot differ between them. The decision is by
 	/// EXTENSION rather than by content, because it chooses which tab to open and that has to happen
 	/// before a byte has been read; the DECODER, in contrast, is chosen by the bytes themselves
-	/// (`preview::decode`), so a mislabelled file still opens correctly once it arrives.
+	/// (`preview::decode_image`), so a mislabelled file still opens correctly once it arrives.
 	///
 	/// The tab opens in `pane`, the region the file was clicked in (§48) — beside its own session's
 	/// chip, in the same strip. It could be argued the other way, that a file wants a region of its
@@ -3706,7 +3706,7 @@ impl Tab {
 				// pane showed, so it is the one the toolbar repeats back — not the decoded pixels',
 				// which would be a bigger number the user has no way to recognise.
 				let size = bytes.len() as u64;
-				match crate::preview::decode(&bytes) {
+				match crate::preview::decode_image(&bytes) {
 					Ok(decoded) => picture.set_loaded(decoded, size),
 					Err(reason) => picture.load_failed(reason),
 				}
@@ -3733,7 +3733,7 @@ impl Tab {
 			return iced::Task::none();
 		};
 		match event {
-			SshEvent::FileLoaded { bytes, .. } => match crate::editor::decode(&bytes) {
+			SshEvent::FileLoaded { bytes, .. } => match crate::editor::decode_text(&bytes) {
 				Some((text, encoding)) => editor.set_loaded(text, encoding),
 				None => editor.load_failed(
 					"This file is not text in a supported encoding (UTF-8 or UTF-16).".to_owned(),

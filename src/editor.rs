@@ -92,9 +92,9 @@ impl Encoding {
 /// file. A `None` is the caller's cue to refuse the file rather than show mojibake.
 ///
 /// Detection is BOM-first: a mark picks the UTF and is stripped from the text (it is metadata, not a
-/// character); with no mark the bytes are read as UTF-8-without-BOM. A file whose bytes do not decode
+/// character); with no mark the bytes are read as UTF-8-without-BOM. A file whose bytes do not decode_text
 /// cleanly under the chosen encoding is unsupported.
-pub fn decode(bytes: &[u8]) -> Option<(String, Encoding)> {
+pub fn decode_text(bytes: &[u8]) -> Option<(String, Encoding)> {
 	if bytes.starts_with(&BOM_UTF8) {
 		let text = std::str::from_utf8(&bytes[BOM_UTF8.len()..]).ok()?;
 		return Some((
@@ -1046,7 +1046,7 @@ mod tests {
 		// Arrange
 		let bytes = b"hello\nworld";
 		// Act
-		let (text, encoding) = decode(bytes).expect("valid UTF-8 opens");
+		let (text, encoding) = decode_text(bytes).expect("valid UTF-8 opens");
 		// Assert
 		assert_eq!(text, "hello\nworld");
 		assert_eq!(encoding, Encoding::UTF8_NO_BOM);
@@ -1056,7 +1056,7 @@ mod tests {
 	fn a_utf8_bom_is_detected_and_stripped_but_remembered() {
 		let mut bytes = BOM_UTF8.to_vec();
 		bytes.extend_from_slice(b"hi");
-		let (text, encoding) = decode(&bytes).expect("UTF-8 BOM opens");
+		let (text, encoding) = decode_text(&bytes).expect("UTF-8 BOM opens");
 		// The BOM is metadata, not a character, so it is not in the text...
 		assert_eq!(text, "hi");
 		// ...but it is remembered so the save re-emits it.
@@ -1074,20 +1074,20 @@ mod tests {
 		// "AB" in UTF-16 LE and BE, each with its BOM.
 		let le = [0xFF, 0xFE, b'A', 0x00, b'B', 0x00];
 		let be = [0xFE, 0xFF, 0x00, b'A', 0x00, b'B'];
-		assert_eq!(decode(&le).unwrap().0, "AB");
-		assert_eq!(decode(&le).unwrap().1.charset, Charset::Utf16Le);
-		assert_eq!(decode(&be).unwrap().0, "AB");
-		assert_eq!(decode(&be).unwrap().1.charset, Charset::Utf16Be);
+		assert_eq!(decode_text(&le).unwrap().0, "AB");
+		assert_eq!(decode_text(&le).unwrap().1.charset, Charset::Utf16Le);
+		assert_eq!(decode_text(&be).unwrap().0, "AB");
+		assert_eq!(decode_text(&be).unwrap().1.charset, Charset::Utf16Be);
 	}
 
 	#[test]
 	fn binary_and_utf32_are_unsupported() {
 		// An invalid UTF-8 byte with no BOM.
-		assert!(decode(&[0xFF, 0x00, 0x9A]).is_none());
+		assert!(decode_text(&[0xFF, 0x00, 0x9A]).is_none());
 		// A UTF-32 LE BOM must not be mis-read as UTF-16.
-		assert!(decode(&[0xFF, 0xFE, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).is_none());
+		assert!(decode_text(&[0xFF, 0xFE, 0x00, 0x00, 0x41, 0x00, 0x00, 0x00]).is_none());
 		// A UTF-32 BE BOM is not valid UTF-8 either.
-		assert!(decode(&[0x00, 0x00, 0xFE, 0xFF]).is_none());
+		assert!(decode_text(&[0x00, 0x00, 0xFE, 0xFF]).is_none());
 	}
 
 	#[test]
@@ -1109,7 +1109,7 @@ mod tests {
 			},
 		] {
 			let bytes = encode(text, encoding);
-			let (back, detected) = decode(&bytes).expect("our own output decodes");
+			let (back, detected) = decode_text(&bytes).expect("our own output decodes");
 			assert_eq!(back, text, "text survives {}", encoding.label());
 			assert_eq!(detected, encoding, "encoding survives {}", encoding.label());
 		}

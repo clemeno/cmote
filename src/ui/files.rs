@@ -1,16 +1,16 @@
-// ui/files.rs — the remote file grid under the terminal (PLAN §19).
+// ui/files.rs — the remote file entry_grid under the terminal (PLAN §19).
 //
 // A pure view over `files::Files`: the model decides which entries exist and in what
-// order, this file turns them into an icon grid. Five pieces, mirroring the folder
+// order, this file turns them into an icon entry_grid. Five pieces, mirroring the folder
 // tree's (§18):
 //
-//   * `panel`        — the full-width pane: header, the wrapping grid, a notice line.
+//   * `panel`        — the full-width pane: header, the wrapping entry_grid, a notice line.
 //   * `details`      — the popup beside the selected cell: type, time, size, owner (§20).
 //   * `splitter`     — the grab bar above it; dragging it resizes the pane.
 //   * `context_menu` — the right-click menu, drawn by the caller as a full-window overlay.
 //   * `drag_layer` / `dismiss_layer` — the pointer-capture and click-away layers.
 //
-// It also owns the grid's *geometry* (`columns`, `row_top`, `grid_height`): iced never
+// It also owns the entry_grid's *geometry* (`columns`, `row_top`, `grid_height`): iced never
 // says where a laid-out cell ended up, so the popup places itself with the same
 // arithmetic the layout wraps with — and `app` borrows it to move the selection a whole
 // row with the arrow keys and to scroll it back into view (§20).
@@ -45,9 +45,9 @@ use crate::ui::menu;
 /// rename starts — the user types straight away, no click needed (§14, §18).
 pub const RENAME_INPUT_ID: &str = "files-rename";
 
-/// The widget id of the icon grid's scrollable, so `app` can scroll a keyboard-moved
+/// The widget id of the icon entry_grid's scrollable, so `app` can scroll a keyboard-moved
 /// selection back into view (§20).
-pub const GRID_ID: &str = "files-grid";
+pub const GRID_ID: &str = "files-entry_grid";
 
 /// The bundled icon face (Material Icons, Apache-2.0 — see assets/). Named exactly as
 /// the font declares itself, the same discipline as the terminal's Fira Mono: iced
@@ -55,8 +55,8 @@ pub const GRID_ID: &str = "files-grid";
 /// font that has none of these glyphs.
 const ICON_FONT: Font = Font::with_name("Material Icons");
 
-/// One cell of the grid, and the pieces inside it. The cell is a wide, short row — a small
-/// icon in front of a left-aligned name — so it reads like a list line while the grid still
+/// One cell of the entry_grid, and the pieces inside it. The cell is a wide, short row — a small
+/// icon in front of a left-aligned name — so it reads like a list line while the entry_grid still
 /// wraps into columns. Fixed so the wrapping layout tiles evenly and a long name cannot push
 /// its neighbours around; the height fits two wrapped lines and the cell clips a name that
 /// runs longer (the details popup always shows it in full, §20). Every cell is the same
@@ -77,7 +77,7 @@ const LABEL_SIZE: f32 = 11.0;
 /// space between the two lines.
 const META_SIZE: f32 = 10.0;
 const META_GAP: f32 = 2.0;
-/// The hairline round every cell (§19): a subtle grey a shade lighter than the panel, so the grid
+/// The hairline round every cell (§19): a subtle grey a shade lighter than the panel, so the entry_grid
 /// reads as a field of distinct tiles rather than one run of names. The splitter bar's own value —
 /// quiet enough to frame a cell without competing with its icon, and it sits UNDER the selection
 /// fill so a chosen cell keeps the same footprint as its neighbours, just filled blue.
@@ -98,8 +98,8 @@ const LABEL_CHAR: f32 = 6.2;
 const LABEL_LINES: usize = 2;
 
 /// The pane header's height, matching the tree's so the two headers line up. Public
-/// because it is also the grid's top edge, which is what says whether a press landed in
-/// the grid — and so whether it starts a rubber band (§21).
+/// because it is also the entry_grid's top edge, which is what says whether a press landed in
+/// the entry_grid — and so whether it starts a rubber band (§21).
 pub const HEADER_HEIGHT: f32 = 28.0;
 
 /// Sizing the header path's middle-ellipsis (§22). Unlike the narrow tree beside it, this
@@ -114,7 +114,7 @@ pub const HEADER_HEIGHT: f32 = 28.0;
 /// toolbar truly take — so the char budget lands under what the line really holds and the `…`
 /// always trims the path with margin to spare, never a hair too late. The trade is a path cut
 /// a little sooner than strictly needed; containment wins. (The same all-wide-glyph tolerance
-/// the grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
+/// the entry_grid notes still holds — a line of all `W`s is the one input an average cannot bound.)
 const HEADER_CONTROLS_WIDTH: f32 = 268.0;
 const HEADER_CHAR: f32 = 8.0;
 
@@ -142,13 +142,13 @@ const POPUP_BUTTON_ROW: f32 = 16.0;
 
 /// The header buttons: Material Icons' `arrow_upward` (up one folder), `content_copy`
 /// (copy the path on show), `refresh` (re-list what is on show) and `unfold_less` (collapse the
-/// tree to its top level), all sized to sit with the header text rather than with the grid's icons.
+/// tree to its top level), all sized to sit with the header text rather than with the entry_grid's icons.
 const UP_GLYPH: char = '\u{e5d8}';
 const COPY_GLYPH: char = '\u{e14d}';
 const REFRESH_GLYPH: char = '\u{e5d5}';
 const COLLAPSE_GLYPH: char = '\u{e5d6}';
 /// Material Icons' `sort`: the header button that drops the sort menu (§19). Lit (foreground) when
-/// a sort is in effect, dimmed like a disabled control when the grid is in its default order.
+/// a sort is in effect, dimmed like a disabled control when the entry_grid is in its default order.
 const SORT_GLYPH: char = '\u{e164}';
 const HEADER_ICON_SIZE: f32 = 16.0;
 
@@ -170,7 +170,7 @@ const PLAIN_COLOR: Color = Color::from_rgb8(0xa8, 0xa8, 0xa8);
 const DROP_TARGET_FG: Color = Color::from_rgb8(0x5a, 0xc0, 0x7a);
 
 /// The files pane: a header (the directory, the entry count, the shared `.*` toggle), the
-/// icon grid, and — when something went wrong — a notice line under it. Fixed to the
+/// icon entry_grid, and — when something went wrong — a notice line under it. Fixed to the
 /// model's current height so `grid_size` can subtract exactly that (§19).
 ///
 /// `show_hidden` is the folder tree's flag (§18): one toggle filters both panels, which
@@ -178,7 +178,7 @@ const DROP_TARGET_FG: Color = Color::from_rgb8(0x5a, 0xc0, 0x7a);
 ///
 /// The whole pane is wrapped in a `mouse_area` that reports the pointer, because a
 /// right-press carries no coordinates of its own — the same trick the tree uses (§18).
-/// `width` is the window's, which is also the pane's: the grid wraps at it, so it is what
+/// `width` is the window's, which is also the pane's: the entry_grid wraps at it, so it is what
 /// says how many columns there are and therefore where the selected cell — and the
 /// details popup beside it — sit (§20). `focused` draws the ring that says the keyboard
 /// is here; `drop_target` draws the green ring that says a dragged-in file will land in this
@@ -190,8 +190,11 @@ pub fn panel(
 	focused: bool,
 	drop_target: bool,
 ) -> Element<'_, Message> {
-	let mut content =
-		column![header(files, show_hidden, width), grid(files, show_hidden)].spacing(0);
+	let mut content = column![
+		header(files, show_hidden, width),
+		entry_grid(files, show_hidden)
+	]
+	.spacing(0);
 	if let Some(notice) = files.notice() {
 		content = content.push(
 			container(text(notice.to_owned()).size(TEXT_SIZE).color(NOTICE_FG))
@@ -201,7 +204,7 @@ pub fn panel(
 		);
 	}
 
-	// The band and the popup float over the grid rather than in it: either one in the flow
+	// The band and the popup float over the entry_grid rather than in it: either one in the flow
 	// would reshuffle the cells every time the selection moved.
 	let mut layers: Vec<Element<'_, Message>> = vec![content.into()];
 	if let Some(band) = files.band() {
@@ -229,7 +232,7 @@ pub fn panel(
 	)
 	.on_move(|point| Message::Files(FilesMessage::PointerMoved(point)))
 	// A press anywhere in the pane — a cell or the empty space beside one — is what
-	// gives it the keyboard (§20); one on the grid's empty space also starts a band (§21).
+	// gives it the keyboard (§20); one on the entry_grid's empty space also starts a band (§21).
 	.on_press(Message::Files(FilesMessage::PanelPressed))
 	.on_release(Message::Files(FilesMessage::PanelReleased))
 	// A right-press on the empty space opens the pane's own menu (§17). A cell's own
@@ -249,8 +252,8 @@ fn drop_border() -> iced::Border {
 	}
 }
 
-/// The rubber band itself (§21): a translucent rectangle over the grid, clipped to the
-/// grid's own bounds so a drag that runs past the pane never paints over the header, the
+/// The rubber band itself (§21): a translucent rectangle over the entry_grid, clipped to the
+/// entry_grid's own bounds so a drag that runs past the pane never paints over the header, the
 /// notice line or the panel next door.
 fn band_layer<'a>(rect: iced::Rectangle, files: &Files, width: f32) -> Element<'a, Message> {
 	let top = rect.y.max(HEADER_HEIGHT);
@@ -283,10 +286,10 @@ fn band_layer<'a>(rect: iced::Rectangle, files: &Files, width: f32) -> Element<'
 	.into()
 }
 
-/// Which grid entries a rubber band covers (§21), as indices into the rows on show.
+/// Which entry_grid entries a rubber band covers (§21), as indices into the rows on show.
 ///
 /// `rect` is in PANE coordinates, which is what the pointer reports: the header sits above
-/// the grid and the grid may be scrolled, so both are taken out before any cell is tested.
+/// the entry_grid and the entry_grid may be scrolled, so both are taken out before any cell is tested.
 /// Only the rows the band actually spans are walked, so a band over a directory of
 /// thousands costs the same as one over a directory of ten.
 pub fn band_hits(rect: iced::Rectangle, columns: usize, count: usize, scroll: f32) -> Vec<usize> {
@@ -328,7 +331,7 @@ pub fn columns(width: f32) -> usize {
 	((usable / (CELL_WIDTH + CELL_SPACING)) as usize).max(1)
 }
 
-/// The top edge of grid row `row`, in the scrollable's own coordinates (§20).
+/// The top edge of entry_grid row `row`, in the scrollable's own coordinates (§20).
 pub fn row_top(row: usize) -> f32 {
 	CELL_SPACING + row as f32 * (CELL_HEIGHT + CELL_SPACING)
 }
@@ -346,10 +349,10 @@ pub fn grid_height(files: &Files) -> f32 {
 }
 
 /// How many rows a PageUp / PageDown jump moves the cursor (§20). A page is a screenful of the
-/// grid — the full rows that fit in `grid_height` at the cell pitch — LESS ONE, so a row of
+/// entry_grid — the full rows that fit in `grid_height` at the cell pitch — LESS ONE, so a row of
 /// context carries across the jump, the same courtesy a pager or an editor's PageDown gives.
 /// Never zero: a pane dragged down to a sliver still moves by a whole row rather than standing
-/// still. The geometry lives here with the rest of the grid's layout; `app` multiplies this by
+/// still. The geometry lives here with the rest of the entry_grid's layout; `app` multiplies this by
 /// the column count to get the model-space delta it hands `Files::step`.
 pub fn page_rows(files: &Files) -> usize {
 	let pitch = CELL_HEIGHT + CELL_SPACING;
@@ -489,7 +492,7 @@ pub(crate) fn refresh_button(message: Message) -> Element<'static, Message> {
 }
 
 /// The tree header's "collapse all" button (§18): closes every branch back to the root's own
-/// children. Only the tree wears one — the flat file grid has nothing to collapse.
+/// children. Only the tree wears one — the flat file entry_grid has nothing to collapse.
 pub(crate) fn collapse_all_button(message: Message) -> Element<'static, Message> {
 	header_icon_button(COLLAPSE_GLYPH, message)
 }
@@ -497,7 +500,7 @@ pub(crate) fn collapse_all_button(message: Message) -> Element<'static, Message>
 /// The pane header's "sort" button (§19): drops the sort menu. Shaped like the refresh button
 /// beside it — same face, same hover fill — but with the copy/up buttons' lit-or-dimmed trick:
 /// `active` (a sort is in effect) paints it foreground, the default order leaves it muted, so the
-/// toolbar says at a glance whether the grid is in its natural order or one the user chose.
+/// toolbar says at a glance whether the entry_grid is in its natural order or one the user chose.
 fn sort_button(active: bool) -> Element<'static, Message> {
 	button(
 		text(SORT_GLYPH.to_string())
@@ -540,10 +543,10 @@ fn copy_details_button(description: String) -> Element<'static, Message> {
 	.into()
 }
 
-/// The scrollable icon grid. `Row::wrap` flows the cells and breaks the line whenever
+/// The scrollable icon entry_grid. `Row::wrap` flows the cells and breaks the line whenever
 /// the next one would not fit, so the column count follows the window's width without
 /// this view ever being told what that width is.
-fn grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
+fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 	let directory = files.path().unwrap_or(explorer::ROOT);
 	let editing = files.editing();
 
@@ -563,7 +566,7 @@ fn grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 		.padding(CELL_SPACING),
 	)
 	.id(GRID_ID)
-	// Reported so the popup can be placed against a scrolled grid, and so keyboard
+	// Reported so the popup can be placed against a scrolled entry_grid, and so keyboard
 	// navigation knows what is already on screen before it scrolls (§20).
 	.on_scroll(|viewport| Message::Files(FilesMessage::Scrolled(viewport.absolute_offset().y)))
 	.width(Length::Fill)
@@ -579,7 +582,7 @@ fn grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 ///
 /// Placed beside the cell rather than under the pointer, because the selection moves by
 /// keyboard as well as by click. iced does not say where a laid-out cell ended up, so the
-/// position is computed from the same geometry the grid is laid out with — the index, the
+/// position is computed from the same geometry the entry_grid is laid out with — the index, the
 /// column count and the scroll offset — and flipped to the cell's left when the card would
 /// hang off the right edge.
 fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Element<'a, Message>> {
@@ -670,7 +673,7 @@ fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Elemen
 /// The popup's lines for a single entry (§20).
 fn entry_lines(files: &Files, entry: &Entry) -> Vec<String> {
 	// The name heads the card because it is the one thing the cell below may have shortened:
-	// the grid middle-ellipsises a name too long for its two lines, this is what the entry
+	// the entry_grid middle-ellipsises a name too long for its two lines, this is what the entry
 	// is actually called.
 	let mut lines = vec![entry.name.clone()];
 	if entry.kind == FilesKind::Link {
@@ -1270,7 +1273,7 @@ mod tests {
 			[0, 1, 2, 3, 4, 5, 6]
 		);
 
-		// A scrolled grid: the same rectangle on screen now covers the row below.
+		// A scrolled entry_grid: the same rectangle on screen now covers the row below.
 		assert_eq!(
 			band_hits(
 				band(0.0, first_row, 2.0 * CELL_WIDTH, 10.0),
@@ -1288,7 +1291,7 @@ mod tests {
 
 	#[test]
 	fn a_page_is_a_screenful_of_rows_less_one() {
-		// A grid tall enough for five whole rows — its header plus five cell pitches — so a
+		// A entry_grid tall enough for five whole rows — its header plus five cell pitches — so a
 		// PageDown steps by four, leaving one row of context across the jump.
 		let mut files = Files::default();
 		files.set_height(HEADER_HEIGHT + 5.0 * (CELL_HEIGHT + CELL_SPACING), 10_000.0);

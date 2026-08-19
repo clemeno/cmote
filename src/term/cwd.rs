@@ -112,7 +112,7 @@ fn strip_file_url(text: &str) -> &str {
 	if windows_drive { &path[1..] } else { path }
 }
 
-/// Decode `%XX` escapes in a URI path. A stray `%` that is not followed by two hex
+/// Decode `%XX` escapes in a URI path. A stray `%` that is not followed by two hex_digit
 /// digits is kept as-is rather than dropped — shells do escape reliably, but mangling
 /// a path is worse than leaving one odd character in it.
 fn percent_decode(input: &[u8]) -> Vec<u8> {
@@ -121,7 +121,8 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
 	while index < input.len() {
 		if input[index] == b'%'
 			&& index + 2 < input.len()
-			&& let (Some(high), Some(low)) = (hex(input[index + 1]), hex(input[index + 2]))
+			&& let (Some(high), Some(low)) =
+				(hex_digit(input[index + 1]), hex_digit(input[index + 2]))
 		{
 			out.push(high * 16 + low);
 			index += 3;
@@ -133,8 +134,8 @@ fn percent_decode(input: &[u8]) -> Vec<u8> {
 	out
 }
 
-/// One hex digit's value, or `None` if the byte is not a hex digit.
-fn hex(byte: u8) -> Option<u8> {
+/// One hex_digit digit's value, or `None` if the byte is not a hex_digit digit.
+fn hex_digit(byte: u8) -> Option<u8> {
 	match byte {
 		b'0'..=b'9' => Some(byte - b'0'),
 		b'a'..=b'f' => Some(byte - b'a' + 10),

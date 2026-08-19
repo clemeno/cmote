@@ -5917,7 +5917,7 @@ This is the load-bearing distinction, and the two answers come from different pl
   chosen before a single byte has been read. Both entry points send the same message and arrive at
   that one function, so the rule cannot end up half-applied — the double-click and the menu row can
   never disagree about what a `.png` is.
-- **The decoder is chosen by the file's MAGIC BYTES** (`preview::decode`), never by its name. The
+- **The decoder is chosen by the file's MAGIC BYTES** (`preview::decode_image`), never by its name. The
   name is the remote's to pick, and letting it steer which parser runs would hand an attacker the
   only decision that matters here. The pleasant side effect is that a mislabelled file simply opens:
   a `.jpg` carrying PNG bytes previews fine, and the toolbar says PNG — the one place a user would

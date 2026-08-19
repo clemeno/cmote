@@ -1,9 +1,9 @@
-// ui/explorer.rs — the remote folder tree beside the terminal (PLAN §18).
+// ui/explorer.rs — the remote folder tree_view beside the terminal (PLAN §18).
 //
 // A pure view over `explorer::Explorer`: the model decides which rows exist and in
 // what order (`Explorer::rows`), this file turns them into widgets. Three pieces:
 //
-//   * `panel`     — the fixed-width column: header, the scrollable tree, a notice line.
+//   * `panel`     — the fixed-width column: header, the scrollable tree_view, a notice line.
 //   * `splitter`  — the grab bar between grid and panel; dragging it resizes the panel.
 //   * `menu`      — the right-click menu, drawn by the caller as a full-window overlay
 //                   (the same stacking trick the terminal's own menu uses, §10).
@@ -25,11 +25,11 @@ use crate::ui::menu;
 /// rename starts — the user types straight away, no click needed (§14, §18).
 pub const RENAME_INPUT_ID: &str = "explorer-rename";
 
-/// The widget id of the tree's scrollable, so `app` can scroll a keyboard-moved selection
+/// The widget id of the tree_view's scrollable, so `app` can scroll a keyboard-moved selection
 /// back into view (§20).
-pub const TREE_ID: &str = "explorer-tree";
+pub const TREE_ID: &str = "explorer-tree_view";
 
-/// Panel surfaces: a touch darker than the status bar so the tree reads as its own
+/// Panel surfaces: a touch darker than the status bar so the tree_view reads as its own
 /// region, with the selected row taking the same blue the grid's selection uses. Shared
 /// with the files pane below (§19) — the two panels are one region visually, so the
 /// palette has exactly one definition.
@@ -59,14 +59,14 @@ const INDENT: f32 = 12.0;
 
 /// The header's padding and the height of one wrapped line of the path (§22). The path can
 /// be any length, so the header is no longer a fixed height — it grows a line at a time as
-/// the path wraps. At a single line it still comes to the tree row's own height, so a short
+/// the path wraps. At a single line it still comes to the tree_view row's own height, so a short
 /// path lines the two panels' headers up as before.
 const HEADER_PAD_V: f32 = 6.0;
 const HEADER_PAD_H: f32 = 8.0;
 const PATH_LINE_HEIGHT: f32 = 16.0;
 /// The most lines the path is allowed to wrap to before the shared middle-ellipsis (§22)
 /// trims it — kept to the same two the file grid's names use, so a deep path can no longer
-/// grow the header without bound and crowd the tree beneath it.
+/// grow the header without bound and crowd the tree_view beneath it.
 const PATH_LINES: usize = 2;
 /// The room the copy button, the refresh button, the collapse-all button and the `.*` toggle take
 /// along the header's first line, and a glyph advance at `TEXT_SIZE`. These size the path's
@@ -88,7 +88,7 @@ pub(crate) const NOTICE_HEIGHT: f32 = 21.0;
 /// files pane (§19).
 pub(crate) const MENU_INSET: f32 = 8.0;
 
-/// The tree panel: a header (title plus the hidden-folder toggle), the rows, and — when
+/// The tree_view panel: a header (title plus the hidden-folder toggle), the rows, and — when
 /// something went wrong — a notice line pinned under them. Fixed to the model's current
 /// width so `grid_size` can subtract exactly that (§18).
 ///
@@ -104,7 +104,7 @@ pub fn panel<'a>(
 	path: Option<&str>,
 	focused: bool,
 ) -> Element<'a, Message> {
-	let mut content = column![header(explorer, path), tree(explorer)].spacing(0);
+	let mut content = column![header(explorer, path), tree_view(explorer)].spacing(0);
 	if let Some(notice) = explorer.notice() {
 		content = content.push(
 			container(text(notice.to_owned()).size(TEXT_SIZE).color(NOTICE_FG))
@@ -145,12 +145,12 @@ pub(crate) fn focus_border(focused: bool) -> Border {
 	}
 }
 
-/// How tall the scrollable part of the tree is (§20): the browser strip's height — which the
-/// tree now shares with the files pane beside it (§18, §19) — less this panel's own header.
+/// How tall the scrollable part of the tree_view is (§20): the browser strip's height — which the
+/// tree_view now shares with the files pane beside it (§18, §19) — less this panel's own header.
 /// What "on screen" means when the app scrolls a keyboard-moved row back into view.
 ///
 /// `ponytail:` the notice line, when one is showing, is not subtracted — the estimate is
-/// then one line generous and the tree scrolls very slightly further than it had to. The
+/// then one line generous and the tree_view scrolls very slightly further than it had to. The
 /// pane's own `grid_height` is exact because it owns its height; this one is derived from it.
 pub fn tree_height(pane_height: f32, path: Option<&str>, width: f32) -> f32 {
 	(pane_height - header_height(path, width)).max(0.0)
@@ -176,7 +176,7 @@ fn path_per_line(width: f32) -> f32 {
 /// a middle `…` — so the header grows to at most two lines and `tree_height` subtracts that.
 ///
 /// `ponytail:` the average-advance guess makes this approximate for a proportional font — a
-/// long path may make the tree scroll a line more than it strictly must, the same tolerance
+/// long path may make the tree_view scroll a line more than it strictly must, the same tolerance
 /// the notice line already carries. The clamp mirrors the cap `header` draws to; the header is
 /// still `Shrink`, so a short path shrinks it back to one line.
 pub fn header_height(path: Option<&str>, width: f32) -> f32 {
@@ -214,14 +214,14 @@ pub(crate) fn hidden_toggle(shown: bool) -> Element<'static, Message> {
 /// The panel header: the current directory (§22), wrapped across as many lines as it needs
 /// so the whole path stays legible in this narrow column, with the dot-folder toggle pinned
 /// to its top-right. `path` is the files view's directory, passed in so the two views name
-/// the SAME location — the tree can be scrolled or its selection can sit elsewhere, but this
+/// the SAME location — the tree_view can be scrolled or its selection can sit elsewhere, but this
 /// header tracks the pane beneath it. Empty before the first listing, like the pane's own.
 fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> {
 	// The button reads live from `Files::path` (§22), so it needs nothing but whether one
 	// exists yet — before the first listing there is nothing to copy and it dims.
 	let has_path = path.is_some();
 	// Trimmed to two lines' worth of glyphs so a deep path stays legible in this narrow column
-	// without pushing the tree off the bottom (§22); the copy button holds the whole path.
+	// without pushing the tree_view off the bottom (§22); the copy button holds the whole path.
 	let per_line = path_per_line(explorer.width()) as usize;
 	let path = crate::ui::elide_middle(path.unwrap_or("no directory yet"), per_line * PATH_LINES);
 	container(
@@ -238,10 +238,10 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 				has_path,
 				Message::Explorer(ExplorerMessage::CopyCurrentPath),
 			),
-			// Re-list every open folder in one press: the tree's header refresh, matched by
+			// Re-list every open folder in one press: the tree_view's header refresh, matched by
 			// the pane's own below (§18).
 			crate::ui::files::refresh_button(Message::Explorer(ExplorerMessage::RefreshTree)),
-			// Close every branch back to the root's children — the tree's own control, no pane twin.
+			// Close every branch back to the root's children — the tree_view's own control, no pane twin.
 			crate::ui::files::collapse_all_button(Message::Explorer(ExplorerMessage::CollapseAll)),
 			hidden_toggle(explorer.show_hidden()),
 		]
@@ -261,7 +261,7 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 }
 
 /// The scrollable list of folder rows.
-fn tree(explorer: &Explorer) -> Element<'_, Message> {
+fn tree_view(explorer: &Explorer) -> Element<'_, Message> {
 	let selected = explorer.selected();
 	let editing = explorer.editing();
 	let rows = explorer
@@ -388,7 +388,7 @@ pub fn drag_layer() -> Element<'static, Message> {
 /// against one, so the item is disabled when the shell has never announced it (§17).
 /// `top` is where the panel starts in window coordinates (the status bar's height); the
 /// rest of the placement comes from the last pointer position over the panel, so the menu
-/// opens under the cursor whatever the panel's width and however far the tree is
+/// opens under the cursor whatever the panel's width and however far the tree_view is
 /// scrolled.
 pub fn context_menu<'a>(
 	explorer: &'a Explorer,
@@ -429,9 +429,9 @@ pub fn context_menu<'a>(
 		),
 		item("Copy full path", ExplorerMessage::CopyPath(path.clone())),
 		// "Refresh", not "Expand": re-list this folder AND its parent, so its contents, its name
-		// and its very existence are all checked — the word a user hunts for when the tree has
+		// and its very existence are all checked — the word a user hunts for when the tree_view has
 		// gone stale under a shell command. Collapsing a single folder is the row click or ←; the
-		// header's collapse-all handles the whole tree, so neither needs a menu item.
+		// header's collapse-all handles the whole tree_view, so neither needs a menu item.
 		item("Refresh", ExplorerMessage::RefreshDir(path)),
 	]);
 
