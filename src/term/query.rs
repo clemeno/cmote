@@ -150,6 +150,10 @@ pub struct Queries {
 impl Queries {
 	/// Scan a chunk of shell output and return the queries that completed in it (usually none).
 	/// Safe at any chunk boundary — the state machine carries over between calls.
+	#[expect(
+		clippy::too_many_lines,
+		reason = "one arm per answered query (§36): a table of sequences, not nested logic"
+	)]
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Query> {
 		let mut found = Vec::new();
 		for &byte in bytes {

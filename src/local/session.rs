@@ -69,6 +69,10 @@ const _: () = assert!(GOODBYE.as_millis() * 2 <= crate::app::QUIT_DRAIN_TIMEOUT.
 /// Every outcome is reported as exactly one terminal event, the same contract the SSH session task
 /// has: `Error` when the shell could not be started at all, `Disconnected` for every other ending —
 /// the user typed `exit`, the program died, or Disconnect was confirmed.
+#[expect(
+	clippy::too_many_lines,
+	reason = "the local session's message loop, deliberately the same shape as ssh::client::run (§103)"
+)]
 pub async fn run(
 	shell: LocalShell,
 	events: mpsc::Sender<SshEvent>,

@@ -3763,6 +3763,10 @@ impl Tab {
 
 	/// The heart of the Elm loop: apply one `Message` to the state. Returns a
 	/// `Task` for any async follow-up work (none yet in the skeleton).
+	#[expect(
+		clippy::too_many_lines,
+		reason = "the Elm loop's dispatch table, one arm per Message: length is 101 variants"
+	)]
 	fn update(&mut self, message: Message) -> iced::Task<Message> {
 		match message {
 			// --- home screen (§14) ---
@@ -4633,6 +4637,10 @@ impl Tab {
 	/// React to an event from the SSH task. Returns a `Task` for any follow-up
 	/// work — most events have none, but a freshly opened shell fetches the window
 	/// size to fit its grid right away (§9).
+	#[expect(
+		clippy::too_many_lines,
+		reason = "a dispatch over SshEvent: length is the number of events, not depth"
+	)]
 	fn on_ssh_event(&mut self, event: SshEvent) -> iced::Task<Message> {
 		match event {
 			SshEvent::Ready(sender) => {
@@ -5976,6 +5984,10 @@ impl Tab {
 	/// Non-input keys (bare modifiers, unmapped keys) encode to nothing and are
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
 	/// subscription is added only there), so no extra screen check is needed.
+	#[expect(
+		clippy::too_many_lines,
+		reason = "a dispatch over the keyboard: length is the number of keys claimed, not depth"
+	)]
 	fn on_key(&mut self, event: iced::keyboard::Event) -> iced::Task<Message> {
 		use iced::keyboard::key::{Code, Named, Physical};
 
@@ -7360,6 +7372,10 @@ impl Tab {
 	/// action means; this only relays the network side of it — the listings it asks for,
 	/// the `cd` it types into the shell, the clipboard writes — and refits the grid when
 	/// the pane's footprint changes.
+	#[expect(
+		clippy::too_many_lines,
+		reason = "a dispatch over ExplorerMessage: length is the number of tree actions, not depth"
+	)]
 	fn on_explorer(&mut self, message: ExplorerMessage) -> iced::Task<Message> {
 		match message {
 			ExplorerMessage::Toggled => {
@@ -7621,6 +7637,10 @@ impl Tab {
 	/// handler: the model decides what an action means, this relays the network side of
 	/// it — the listings, the `cd`, the clipboard writes, the download — and refits the
 	/// grid when the pane's footprint changes.
+	#[expect(
+		clippy::too_many_lines,
+		reason = "a dispatch over FilesMessage: length is the number of pane actions, not depth"
+	)]
 	fn on_files(&mut self, message: FilesMessage) -> iced::Task<Message> {
 		match message {
 			FilesMessage::Toggled => {

@@ -12,15 +12,29 @@ license = "MIT"
 # too means a plain `cargo build` already fails on the warning the gate would reject — the
 # difference between finding out in ten seconds and finding out at commit time.
 #
-# `clippy::pedantic` is deliberately NOT here yet. It reports 528 warnings today (231 of them
-# casts in the grid arithmetic), and it switches on in the same commit that clears the last of
-# them (§108). Turning it on first would leave every commit in between failing its own gate,
-# which teaches everyone to ignore the gate.
+# `clippy::pedantic` is ON as of §111, and this is the commit that turned it on — the same commit
+# that cleared the last of its 561 warnings, which is why it could be. Turning it on first would
+# have left every commit in between failing its own gate, and a gate that is expected to fail is a
+# gate nobody reads.
+#
+# Not one of the 561 was answered with a suppression at file or crate scope. Where a lint's advice
+# could not be taken, the escape is an `#[expect]` with a `reason` on the smallest item that needs
+# one, so the lint stays live everywhere else and `expect` fails the build if it ever stops firing
+# there. There are 27, and they are three answers rather than twenty-seven (§111):
+#
+#   11  too_many_lines            dispatch tables and event loops, whose length is a variant count
+#    7  struct_excessive_bools    independent composable attributes: SGR flags, protocol bits
+#    9  the three float lints     the layout boundary, where std offers no exact conversion
+#
+# The nine float ones are eight functions in `ui`/`sixel`/`human` plus one that predates §111 in
+# `cursor`. `clippy.toml` carries the two configurations, which are the lint being told what this
+# project counts as correct rather than being told to look away.
 [lints.rust]
 warnings = "deny"
 
 [lints.clippy]
 all = "deny"
+pedantic = "deny"
 
 [dependencies]
 # The encrypted secret vault for opt-in credential persistence (PLAN §16). A saved

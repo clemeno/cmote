@@ -257,6 +257,10 @@ pub struct Modals<'a> {
 /// dialogs read (§17).
 /// The grid widget borrows the emulator's screen for the frame, so the terminal, the
 /// selection and the dialog body all share the returned element's lifetime.
+#[expect(
+	clippy::too_many_lines,
+	reason = "one view, assembled top to bottom: strip, grid, panes, status bar"
+)]
 pub fn view<'a>(
 	terminal: &'a Terminal,
 	session: UiTerminalSession<'a>,

@@ -290,6 +290,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		layout::atomic(limits, Length::Fill, Length::Fill)
 	}
 
+	#[expect(
+		clippy::too_many_lines,
+		reason = "a widget's paint: backdrop, then rows, then the cursor and images, in order"
+	)]
 	fn draw(
 		&self,
 		tree: &Tree,

@@ -51,303 +51,174 @@ const CHANNEL_BOUND_FORWARD: usize = 64;
 /// The SSH task loop. Owns the channels to the one live session (v1 is single-
 /// session) and routes commands to it. Returns when the GUI drops its command
 /// sender (app exit).
+///
+/// What is left after §111 halved it is a TABLE: one line per command that is simply relayed, plus
+/// four arms above it that are not relays. Its length is now the number of `SshCommand` variants (32,
+/// several destructuring four fields each) and nothing else, so a cut through it would be a cut
+/// through an alphabet.
+#[expect(
+	clippy::too_many_lines,
+	reason = "a 32-variant command-to-message table; the forwarding it used to repeat is now `forward`"
+)]
 pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<SshEvent>) {
 	let mut session: Option<SessionLink> = None;
 
 	while let Some(command) = commands.recv().await {
-		match command {
+		// Most arms do exactly one thing: turn a command from the GUI into the `SessionMsg` the live
+		// session understands, and send it if there is a session to send it to. That used to be five
+		// lines of `if let Some(link) = session.as_ref()` per arm, twenty times over (§111) — so the
+		// mapping is a table now, and `forward` is the one place that knows what "no session" means.
+		// The arms that are NOT that shape are the ones below the table, and each is different for a
+		// reason worth seeing on its own.
+		let message = match command {
+			// --- opening and closing a session: these OWN the link rather than send down it ---
 			SshCommand::Connect(params) => {
 				// Starting a new session drops any previous link; the old
 				// session sees its command channel close and winds down.
 				session = Some(SessionLink::start(params, events.clone()));
+				continue;
 			}
-			// A session on this machine instead (§103). Everything below this arm is untouched by it:
-			// the loop's job is to reach the current session, and a local one is reached down exactly
-			// the same `SessionMsg` channel — which is what lets one worker serve both kinds and keeps
-			// every other arm in this match ignorant of the difference.
+			// A session on this machine instead (§103). Everything else here is untouched by it: the
+			// loop's job is to reach the current session, and a local one is reached down exactly the
+			// same `SessionMsg` channel — which is what lets one worker serve both kinds and keeps
+			// every other arm ignorant of the difference.
 			SshCommand::ConnectLocal(shell) => {
 				session = Some(SessionLink::start_local(shell, events.clone()));
+				continue;
 			}
+			// Not a `SessionMsg` at all: the host-key answer travels down its own oneshot, because
+			// the session task is parked mid-handshake waiting on exactly that (§8).
 			SshCommand::HostKeyResponse(choice) => {
 				if let Some(link) = session.as_mut() {
 					link.send_decision(choice);
 				}
+				continue;
 			}
-			SshCommand::Passphrase(secret) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::Passphrase(secret)).await;
+			// `take`, not `as_ref`: a disconnect ends this session, so the link goes with the message.
+			SshCommand::Disconnect => {
+				if let Some(link) = session.take() {
+					let _ = link.to_session.send(SessionMsg::Disconnect).await;
 				}
+				continue;
 			}
-			SshCommand::Interactive(answers) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::Interactive(answers)).await;
-				}
-			}
-			SshCommand::Input(bytes) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::Data(bytes)).await;
-				}
-			}
-			SshCommand::Resize { cols, rows } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::Resize { cols, rows })
-						.await;
-				}
-			}
-			// The elevation commands (§45), all forwarded the same way as the rest: the session
-			// task owns its shells, so this loop only has to reach the right session.
+
+			// --- the table: one command in, one message out ---
+			SshCommand::Input(bytes) => SessionMsg::Data(bytes),
+			SshCommand::Resize { cols, rows } => SessionMsg::Resize { cols, rows },
+			SshCommand::Passphrase(secret) => SessionMsg::Passphrase(secret),
+			SshCommand::Interactive(answers) => SessionMsg::Interactive(answers),
+			// The elevation commands (§45): the session task owns its shells, so this loop only has
+			// to reach the right session.
 			SshCommand::Elevate {
 				identity,
 				kind,
 				user,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::Elevate {
-							identity,
-							kind,
-							user,
-						})
-						.await;
-				}
-			}
+			} => SessionMsg::Elevate {
+				identity,
+				kind,
+				user,
+			},
 			SshCommand::ElevateAnswer { identity, secret } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::ElevateAnswer { identity, secret })
-						.await;
-				}
+				SessionMsg::ElevateAnswer { identity, secret }
 			}
-			SshCommand::SelectIdentity(identity) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::SelectIdentity(identity))
-						.await;
-				}
-			}
-			SshCommand::Reply { identity, bytes } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::Reply { identity, bytes })
-						.await;
-				}
-			}
-			SshCommand::CloseIdentity(identity) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::CloseIdentity(identity))
-						.await;
-				}
-			}
+			SshCommand::SelectIdentity(identity) => SessionMsg::SelectIdentity(identity),
+			SshCommand::Reply { identity, bytes } => SessionMsg::Reply { identity, bytes },
+			SshCommand::CloseIdentity(identity) => SessionMsg::CloseIdentity(identity),
 			SshCommand::Upload {
 				local,
 				remote,
 				overwrite,
 				resume,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::Upload {
-							local,
-							remote,
-							overwrite,
-							resume,
-						})
-						.await;
-				}
-			}
-			SshCommand::CheckUploads { dir, names } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::CheckUploads { dir, names })
-						.await;
-				}
-			}
-			SshCommand::ListDir(path) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::ListDir(path)).await;
-				}
-			}
-			SshCommand::ListFiles { path, request } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::ListFiles { path, request })
-						.await;
-				}
-			}
-			SshCommand::ReadLink(path) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::ReadLink(path)).await;
-				}
-			}
+			} => SessionMsg::Upload {
+				local,
+				remote,
+				overwrite,
+				resume,
+			},
+			SshCommand::CheckUploads { dir, names } => SessionMsg::CheckUploads { dir, names },
 			SshCommand::Download {
 				remote,
 				local,
 				resume,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::Download {
-							remote,
-							local,
-							resume,
-						})
-						.await;
-				}
-			}
+			} => SessionMsg::Download {
+				remote,
+				local,
+				resume,
+			},
 			SshCommand::UploadTree {
 				local,
 				remote,
 				resume,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::UploadTree {
-							local,
-							remote,
-							resume,
-						})
-						.await;
-				}
-			}
+			} => SessionMsg::UploadTree {
+				local,
+				remote,
+				resume,
+			},
 			SshCommand::DownloadTree {
 				remote,
 				local,
 				resume,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::DownloadTree {
-							remote,
-							local,
-							resume,
-						})
-						.await;
-				}
-			}
+			} => SessionMsg::DownloadTree {
+				remote,
+				local,
+				resume,
+			},
+			SshCommand::ResolveConflict(choice) => SessionMsg::ResolveConflict(choice),
+			SshCommand::CancelTransfer => SessionMsg::CancelTransfer,
+			SshCommand::ListDir(path) => SessionMsg::ListDir(path),
+			SshCommand::ListFiles { path, request } => SessionMsg::ListFiles { path, request },
+			SshCommand::ReadLink(path) => SessionMsg::ReadLink(path),
+			SshCommand::MakeDir(path) => SessionMsg::MakeDir(path),
+			SshCommand::Delete(paths) => SessionMsg::Delete(paths),
+			SshCommand::RenameDir { from, to } => SessionMsg::RenameDir { from, to },
 			SshCommand::FileLoad {
 				identity,
 				viewer_id,
 				path,
 				limit,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::FileLoad {
-							identity,
-							viewer_id,
-							path,
-							limit,
-						})
-						.await;
-				}
-			}
+			} => SessionMsg::FileLoad {
+				identity,
+				viewer_id,
+				path,
+				limit,
+			},
 			SshCommand::EditSave {
 				identity,
 				viewer_id,
 				path,
 				bytes,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::EditSave {
-							identity,
-							viewer_id,
-							path,
-							bytes,
-						})
-						.await;
-				}
-			}
-			SshCommand::ProbeIntegration { user } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::ProbeIntegration { user })
-						.await;
-				}
-			}
+			} => SessionMsg::EditSave {
+				identity,
+				viewer_id,
+				path,
+				bytes,
+			},
+			SshCommand::ProbeIntegration { user } => SessionMsg::ProbeIntegration { user },
 			SshCommand::WriteIntegration {
 				path,
 				shell,
 				install,
-			} => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::WriteIntegration {
-							path,
-							shell,
-							install,
-						})
-						.await;
-				}
-			}
-			SshCommand::ResolveConflict(choice) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::ResolveConflict(choice))
-						.await;
-				}
-			}
-			SshCommand::CancelTransfer => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::CancelTransfer).await;
-				}
-			}
-			SshCommand::MakeDir(path) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::MakeDir(path)).await;
-				}
-			}
-			SshCommand::Delete(paths) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::Delete(paths)).await;
-				}
-			}
-			SshCommand::RenameDir { from, to } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::RenameDir { from, to })
-						.await;
-				}
-			}
-			SshCommand::AddForward { id, spec } => {
-				if let Some(link) = session.as_ref() {
-					let _ = link
-						.to_session
-						.send(SessionMsg::AddForward { id, spec })
-						.await;
-				}
-			}
-			SshCommand::RemoveForward(id) => {
-				if let Some(link) = session.as_ref() {
-					let _ = link.to_session.send(SessionMsg::RemoveForward(id)).await;
-				}
-			}
-			SshCommand::Disconnect => {
-				if let Some(link) = session.take() {
-					let _ = link.to_session.send(SessionMsg::Disconnect).await;
-				}
-			}
-		}
+			} => SessionMsg::WriteIntegration {
+				path,
+				shell,
+				install,
+			},
+			SshCommand::AddForward { id, spec } => SessionMsg::AddForward { id, spec },
+			SshCommand::RemoveForward(id) => SessionMsg::RemoveForward(id),
+		};
+		forward(session.as_ref(), message).await;
+	}
+}
+
+/// Send one message to the live session, if there is one.
+///
+/// A command that arrives with no session is DROPPED, silently and on purpose: it means the user
+/// disconnected between the click and this loop reading it, and there is nobody left to act on it.
+/// The send's own error is dropped for the same reason — a closed channel is a session that has
+/// already gone.
+async fn forward(session: Option<&SessionLink>, message: SessionMsg) {
+	if let Some(link) = session {
+		let _ = link.to_session.send(message).await;
 	}
 }
 
@@ -609,6 +480,10 @@ async fn connect_and_run(
 /// The shell is no longer a single channel: `shell::Shells` holds every shell the session has —
 /// the login one and any account elevated into (§45) — and hands this loop one receiver for all of
 /// them, so the `select!` below stays the same shape however many are open.
+#[expect(
+	clippy::too_many_lines,
+	reason = "an async event loop: one select! arm per command the session accepts"
+)]
 async fn stream(
 	channel: Channel<client::Msg>,
 	session: &client::Handle<Handler>,
