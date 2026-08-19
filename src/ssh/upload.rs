@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
-use crate::ssh::asuser::{Files, Runner};
+use crate::ssh::asuser::{AsuserFiles, Runner};
 use crate::ssh::shellfs;
 use crate::ssh::transfer::{
 	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, Ticker, TreePlan, resume_start,
@@ -41,7 +41,7 @@ const CHUNK: usize = 32 * 1024;
 /// happened in the session loop: a spawned task cannot hold a borrow, so only owned values move
 /// into it and the terminal stays live throughout.
 pub async fn start(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	local: PathBuf,
 	remote: String,
@@ -50,7 +50,7 @@ pub async fn start(
 	cancel: Arc<AtomicBool>,
 ) {
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(transfer(
 				sftp,
 				local,
@@ -61,7 +61,7 @@ pub async fn start(
 				cancel,
 			));
 		}
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let events = events.clone();
 			tokio::spawn(async move {
 				// The same question the SFTP path asks first, and for the same reason: a write
@@ -77,7 +77,7 @@ pub async fn start(
 				report(outcome, &remote, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 		}
 	}
@@ -94,15 +94,15 @@ pub async fn start(
 /// rather than guessing a path is free — guessing would let the batch overwrite silently, the
 /// same caution the transfer itself takes (§17).
 pub async fn precheck(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	dir: String,
 	names: Vec<String>,
 ) {
 	let sftp = match backend {
-		Files::Sftp(sftp) => sftp,
+		AsuserFiles::Sftp(sftp) => sftp,
 		// The shell backend answers the same question with `[ -e path ]`, one command per name.
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let mut collisions: Vec<(String, String)> = Vec::new();
 			for name in &names {
 				let remote = crate::explorer::join(&dir, name);
@@ -113,7 +113,7 @@ pub async fn precheck(
 			let _ = events.send(SshEvent::UploadPrescan { collisions }).await;
 			return;
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 			return;
 		}
@@ -441,7 +441,7 @@ async fn stamp_remote(
 /// whose destination is already taken — so it is handed the `answers` receiver `run()` keeps the
 /// other end of, and parks on it while the shell keeps flowing behind the prompt.
 pub async fn start_tree(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	local: PathBuf,
 	remote: String,
@@ -450,7 +450,7 @@ pub async fn start_tree(
 	cancel: Arc<AtomicBool>,
 ) {
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(transfer_tree(
 				sftp,
 				local,
@@ -461,7 +461,7 @@ pub async fn start_tree(
 				cancel,
 			));
 		}
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let events = events.clone();
 			let mut answers = answers;
 			tokio::spawn(async move {
@@ -478,7 +478,7 @@ pub async fn start_tree(
 				report_tree(outcome, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events.send(SshEvent::UploadFailed(reason)).await;
 		}
 	}

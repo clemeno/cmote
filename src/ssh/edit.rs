@@ -21,7 +21,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
-use crate::ssh::asuser::Files;
+use crate::ssh::asuser::AsuserFiles;
 use crate::ssh::shellfs;
 
 /// The largest file the EDITOR will open (§32). The whole file becomes one editable in-memory
@@ -44,7 +44,7 @@ const TEMP_SUFFIX: &str = "~cmote.tmp";
 /// reply routes to the tab that asked, not the session tab whose channel carried it, and `limit` is
 /// that viewer's ceiling — the editor's and the preview's differ (§53).
 pub async fn load(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	viewer_id: u64,
 	path: String,
@@ -52,7 +52,7 @@ pub async fn load(
 ) {
 	let events = events.clone();
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(async move {
 				let outcome = read_file(&sftp, &path, limit).await;
 				let _ = sftp.close().await;
@@ -60,13 +60,13 @@ pub async fn load(
 			});
 		}
 		// Same file, read with `cat` under the elevation instead (§46).
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			tokio::spawn(async move {
 				let outcome = shellfs::read_all(&runner, &path, limit).await;
 				report_load(outcome, viewer_id, path, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events
 				.send(SshEvent::FileLoadFailed { viewer_id, reason })
 				.await;
@@ -146,7 +146,7 @@ pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Res
 /// or `EditSaveFailed`. The write is atomic: the bytes go to a temp sibling first and only a rename
 /// makes them the file, so a connection dropped mid-write cannot leave a half-written file.
 pub async fn save(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	viewer_id: u64,
 	path: String,
@@ -154,7 +154,7 @@ pub async fn save(
 ) {
 	let events = events.clone();
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(async move {
 				let outcome = write_atomic(&sftp, &path, &bytes).await;
 				let _ = sftp.close().await;
@@ -163,13 +163,13 @@ pub async fn save(
 		}
 		// The shell backend writes to a temp sibling and `mv`s it over the target, which is the same
 		// commit point by a different name (§46).
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			tokio::spawn(async move {
 				let outcome = shellfs::write_all(&runner, &path, &bytes).await;
 				report_save(outcome, viewer_id, path, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events
 				.send(SshEvent::EditSaveFailed { viewer_id, reason })
 				.await;

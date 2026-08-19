@@ -477,7 +477,7 @@ pub enum Browse {
 
 /// The same, for the operations that open a channel of their own per job — transfers and the
 /// editor. A fresh `SftpSession` each time, exactly as before §46.
-pub enum Files {
+pub enum AsuserFiles {
 	Sftp(SftpSession),
 	Shell(Runner),
 	Denied(String),
@@ -490,7 +490,7 @@ pub enum Files {
 /// binary is, whether sudo wants a password, whether SFTP works at all — so the cost of finding out
 /// is paid once per connection rather than per click.
 pub struct Accounts {
-	entries: HashMap<u64, Entry>,
+	entries: HashMap<u64, AsuserEntry>,
 	/// The login account's runner, kept apart from the entries because a new entry is built from its
 	/// channel factory whatever account is selected.
 	login: Runner,
@@ -504,7 +504,7 @@ pub struct Accounts {
 }
 
 /// What one account has learned about reading files as itself.
-struct Entry {
+struct AsuserEntry {
 	runner: Runner,
 	/// The persistent browse session, opened on the first listing and kept — a tree asks many
 	/// small questions, and paying a channel setup per click would be felt (§18).
@@ -526,7 +526,7 @@ impl Accounts {
 	pub fn new(channels: Channels) -> Self {
 		let login = Runner::login(channels);
 		let mut entries = HashMap::new();
-		entries.insert(LOGIN_IDENTITY, Entry::new(login.clone()));
+		entries.insert(LOGIN_IDENTITY, AsuserEntry::new(login.clone()));
 		Self {
 			entries,
 			login,
@@ -540,7 +540,7 @@ impl Accounts {
 	/// again, and one that does is ready without a second message.
 	pub fn add(&mut self, identity: u64, kind: Kind, user: String) {
 		let runner = Runner::elevated(self.login.channels.clone(), kind, user, None);
-		self.entries.insert(identity, Entry::new(runner));
+		self.entries.insert(identity, AsuserEntry::new(runner));
 	}
 
 	/// Forget an account whose shell has gone (§45). Its sftp session goes with it, which ends the
@@ -570,7 +570,7 @@ impl Accounts {
 	pub fn deny_second_factor(&mut self, identity: u64) {
 		if let Some(entry) = self.entries.get_mut(&identity) {
 			entry.denied = Some(
-				"Logging in as this account needed a second factor. Files cannot be read as it: a \
+				"Logging in as this account needed a second factor. AsuserFiles cannot be read as it: a \
 				 file channel can repeat a password to sudo, but it cannot ask for a code."
 					.to_owned(),
 			);
@@ -625,7 +625,7 @@ impl Accounts {
 	}
 
 	/// The per-job backend for a transfer or the editor: its own fresh SFTP session, or the shell.
-	pub async fn files(&mut self, session: &client::Handle<super::client::Handler>) -> Files {
+	pub async fn files(&mut self, session: &client::Handle<super::client::Handler>) -> AsuserFiles {
 		self.files_as(session, self.selected).await
 	}
 
@@ -636,21 +636,21 @@ impl Accounts {
 		&mut self,
 		session: &client::Handle<super::client::Handler>,
 		identity: u64,
-	) -> Files {
+	) -> AsuserFiles {
 		let Some(entry) = self.entries.get_mut(&identity) else {
-			return Files::Denied("That account is no longer open.".to_owned());
+			return AsuserFiles::Denied("That account is no longer open.".to_owned());
 		};
 		if let Some(denied) = entry.denied.as_ref() {
-			return Files::Denied(denied.clone());
+			return AsuserFiles::Denied(denied.clone());
 		}
 		match entry.open_sftp(session).await {
-			Ok(sftp) => Files::Sftp(sftp),
-			Err(reason) => Files::Shell(entry.fall_back(reason)),
+			Ok(sftp) => AsuserFiles::Sftp(sftp),
+			Err(reason) => AsuserFiles::Shell(entry.fall_back(reason)),
 		}
 	}
 }
 
-impl Entry {
+impl AsuserEntry {
 	fn new(runner: Runner) -> Self {
 		Self {
 			runner,
@@ -830,15 +830,16 @@ fn handshake_failed(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::{
-		Accounts, Channels, Entry, Kind, LOGIN_IDENTITY, Output, Runner, Secret, wants_password,
+		Accounts, AsuserEntry, Channels, Kind, LOGIN_IDENTITY, Output, Runner, Secret,
+		wants_password,
 	};
 
 	/// An entry for an elevated account, with or without a cached password. No session and no
 	/// network: `Channels` is only an mpsc sender, so the DECISIONS in here are testable on their own
 	/// — which is the point of keeping them separate from the I/O.
-	fn entry(secret: Option<&str>) -> Entry {
+	fn entry(secret: Option<&str>) -> AsuserEntry {
 		let (channels, _requests) = Channels::new();
-		Entry::new(Runner::elevated(
+		AsuserEntry::new(Runner::elevated(
 			channels,
 			Kind::Sudo,
 			"root".to_owned(),

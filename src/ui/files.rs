@@ -32,7 +32,7 @@ use iced::{Color, Element, Font, Length, Padding, mouse};
 
 use crate::app::Message;
 use crate::explorer;
-use crate::files::{Category, Entry, Files, FilesMessage, Kind, Rename, SortDir, SortKey};
+use crate::files::{Category, Entry, Files, FilesMessage, FilesRename, Kind, SortDir, SortKey};
 use crate::ui::explorer::{
 	FG, HEADER_BG, MENU_INSET, MUTED_FG, NOTICE_FG, NOTICE_HEIGHT, PANEL_BG, SELECTED_BG,
 	SPLITTER_BG, SPLITTER_HOVER, TEXT_SIZE, focus_border, hidden_toggle,
@@ -749,7 +749,7 @@ fn cell<'a>(
 	entry: &Entry,
 	directory: &str,
 	files: &Files,
-	editing: Option<&'a Rename>,
+	editing: Option<&'a FilesRename>,
 ) -> Element<'a, Message> {
 	let path = explorer::join(directory, &entry.name);
 	let category = crate::files::category(entry);
@@ -1042,7 +1042,7 @@ pub fn context_menu<'a>(
 			(is_dir && !many).then(|| Message::Files(FilesMessage::DownloadFolder(path.clone()))),
 		),
 		menu::item(
-			"Rename…".to_owned(),
+			"FilesRename…".to_owned(),
 			(!many).then(|| Message::Files(FilesMessage::RenameStarted(path.clone()))),
 		),
 		// Remove the selection — one entry or many, folders and their contents included (§18).

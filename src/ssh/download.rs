@@ -5,8 +5,8 @@
 // the shell pump, and progress reported through the session's own event channel.
 //
 // Since §46 that channel is not necessarily the LOGIN account's, and not necessarily SFTP: the
-// caller resolves which account the transfer reads as into one `Files` value, and a remote with no
-// `sftp-server` to run as that account arrives here as `Files::Shell` — the same transfer, driven
+// caller resolves which account the transfer reads as into one `AsuserFiles` value, and a remote with no
+// `sftp-server` to run as that account arrives here as `AsuserFiles::Shell` — the same transfer, driven
 // by `cat` and `wc` instead (`shellfs`). Both backends report their outcome identically, which is
 // why that reporting is factored out of the two paths rather than written twice.
 //
@@ -28,7 +28,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer;
-use crate::ssh::asuser::{Files, Runner};
+use crate::ssh::asuser::{AsuserFiles, Runner};
 use crate::ssh::shellfs;
 use crate::ssh::transfer::{
 	self, CopyOutcome, FileAction, PlannedFile, Start, Sticky, Ticker, TreePlan, resume_start,
@@ -42,7 +42,7 @@ const CHUNK: usize = 32 * 1024;
 /// could offer (§46). Opening a channel borrows the session handle, so that already happened in the
 /// session loop; only owned values move into the spawned task.
 pub async fn start(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	remote: String,
 	local: PathBuf,
@@ -50,10 +50,10 @@ pub async fn start(
 	cancel: Arc<AtomicBool>,
 ) {
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(fetch(sftp, remote, local, resume, events.clone(), cancel));
 		}
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let events = events.clone();
 			tokio::spawn(async move {
 				let outcome =
@@ -61,7 +61,7 @@ pub async fn start(
 				report(outcome, &local, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events.send(SshEvent::DownloadFailed(reason)).await;
 		}
 	}
@@ -338,7 +338,7 @@ fn remote_mode(meta: &FileAttributes) -> Option<u32> {
 /// of `start_tree` on the upload side: the transfer may pause to ask the user about a local file
 /// already there, so it is handed the `answers` receiver `run()` keeps the other end of.
 pub async fn start_tree(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	remote: String,
 	local: PathBuf,
@@ -347,7 +347,7 @@ pub async fn start_tree(
 	cancel: Arc<AtomicBool>,
 ) {
 	match backend {
-		Files::Sftp(sftp) => {
+		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(fetch_tree(
 				sftp,
 				remote,
@@ -358,7 +358,7 @@ pub async fn start_tree(
 				cancel,
 			));
 		}
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let events = events.clone();
 			let mut answers = answers;
 			tokio::spawn(async move {
@@ -375,7 +375,7 @@ pub async fn start_tree(
 				report_tree(outcome, &events).await;
 			});
 		}
-		Files::Denied(reason) => {
+		AsuserFiles::Denied(reason) => {
 			let _ = events.send(SshEvent::DownloadFailed(reason)).await;
 		}
 	}

@@ -18,7 +18,7 @@ use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, tex
 use iced::{Border, Color, Element, Length, Padding, mouse};
 
 use crate::app::Message;
-use crate::explorer::{Explorer, ExplorerMessage, ExplorerRow, Rename};
+use crate::explorer::{Explorer, ExplorerMessage, ExplorerRename, ExplorerRow};
 use crate::ui::menu;
 
 /// The widget id of the inline rename field, so `app` can focus it the instant the
@@ -286,7 +286,7 @@ fn tree(explorer: &Explorer) -> Element<'_, Message> {
 fn row_view<'a>(
 	row: ExplorerRow,
 	selected: Option<&str>,
-	editing: Option<&'a Rename>,
+	editing: Option<&'a ExplorerRename>,
 ) -> Element<'a, Message> {
 	let indent = Length::Fixed(f32::from(row.depth) * INDENT);
 	if let Some(rename) = editing.filter(|rename| rename.path == row.path) {
@@ -415,7 +415,10 @@ pub fn context_menu<'a>(
 			"Upload folder…",
 			ExplorerMessage::UploadFolderHere(path.clone()),
 		),
-		item("Rename…", ExplorerMessage::RenameStarted(path.clone())),
+		item(
+			"ExplorerRename…",
+			ExplorerMessage::RenameStarted(path.clone()),
+		),
 		// Remove this folder and everything inside it, once confirmed (§18).
 		item("Delete…", ExplorerMessage::DeleteStarted(path.clone())),
 		item("Copy name", ExplorerMessage::CopyName(path.clone())),

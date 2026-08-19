@@ -183,7 +183,7 @@ pub enum FilesMessage {
 	/// An entry was double-clicked (or Enter pressed): browse the PANE into it, if it is a
 	/// directory. This no longer moves the console — that is Sync or "Open in terminal" (§19).
 	EntryOpened(String),
-	/// Menu "Open in terminal": move the console into this directory (§19). Split off from
+	/// FilesMenu "Open in terminal": move the console into this directory (§19). Split off from
 	/// `EntryOpened` so a double-click browses the pane while this deliberately moves the
 	/// console — the two used to be one action.
 	OpenInTerminal(String),
@@ -212,9 +212,9 @@ pub enum FilesMessage {
 	/// The empty-space menu's "New folder…" (§18): open the dialog to create a folder in the
 	/// pane's current directory.
 	NewFolderHere,
-	/// Menu "Delete…": open the confirmation to remove the selection — one entry or many (§18).
+	/// FilesMenu "Delete…": open the confirmation to remove the selection — one entry or many (§18).
 	DeleteStarted(String),
-	/// Menu "Download folder…": recreate this remote directory's whole tree on this machine (§19).
+	/// FilesMenu "Download folder…": recreate this remote directory's whole tree on this machine (§19).
 	/// Offered only for a lone directory; a file uses `Download`, a mixed selection its files.
 	DownloadFolder(String),
 	/// The pointer moved while a band is being dragged, reported by the full-window capture
@@ -242,7 +242,7 @@ pub enum FilesMessage {
 	SortDirPicked(SortDir),
 	/// Re-list the directory on show — the refresh for a folder changed from the shell.
 	Refresh,
-	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
+	/// FilesMenu "Copy name" / "Copy relative path" / "Copy full path".
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),
@@ -254,13 +254,13 @@ pub enum FilesMessage {
 	/// card shows — onto the clipboard. Carries the already-joined text, built in the view
 	/// from the same lines it draws, so the model side does not recompute it.
 	CopyDetails(String),
-	/// Menu "Rename": turn the cell's label into an edit field.
+	/// FilesMenu "FilesRename": turn the cell's label into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
 	RenameEdited(String),
 	/// The inline rename was submitted (Enter) — ask the server to do it.
 	RenameCommitted,
-	/// Menu "Download": pick a local destination, then pull the file.
+	/// FilesMenu "Download": pick a local destination, then pull the file.
 	Download(String),
 	/// The menu's open item, or a double-click on a file: open it in a new viewer tab — the text
 	/// editor, or a picture preview if it is an image (§32, §53). A directory has nothing to open
@@ -305,7 +305,7 @@ impl Band {
 /// is frozen when the menu opens — a menu that tracked the live pointer would walk out
 /// from under the cursor before an item could be clicked (§18).
 #[derive(Debug, Clone)]
-pub struct Menu {
+pub struct FilesMenu {
 	pub path: String,
 	pub kind: Kind,
 	pub at: Point,
@@ -313,7 +313,7 @@ pub struct Menu {
 
 /// The in-progress inline rename: which entry, and the text typed so far.
 #[derive(Debug, Clone)]
-pub struct Rename {
+pub struct FilesRename {
 	pub path: String,
 	pub text: String,
 }
@@ -355,13 +355,13 @@ pub struct Files {
 	/// replacing it.
 	band: Option<Band>,
 	band_base: HashSet<String>,
-	menu: Option<Menu>,
+	menu: Option<FilesMenu>,
 	/// The empty-space menu's anchor when it is open (§17): a right-click on the grid's
 	/// blank area, not on a cell. Kept apart from `menu` because it acts on the pane's own
 	/// directory ("Upload… here"), not on any one entry — only one of the two is ever up.
 	pane_menu: Option<Point>,
 	pointer: Point,
-	rename: Option<Rename>,
+	rename: Option<FilesRename>,
 	notice: Option<String>,
 	/// How far the grid is scrolled, in pixels (§20).
 	scroll: f32,
@@ -640,7 +640,7 @@ impl Files {
 	}
 
 	/// The open context menu, if any.
-	pub fn menu(&self) -> Option<&Menu> {
+	pub fn menu(&self) -> Option<&FilesMenu> {
 		self.menu.as_ref()
 	}
 
@@ -725,7 +725,7 @@ impl Files {
 	}
 
 	/// The in-progress inline rename, if any.
-	pub fn editing(&self) -> Option<&Rename> {
+	pub fn editing(&self) -> Option<&FilesRename> {
 		self.rename.as_ref()
 	}
 
@@ -866,7 +866,7 @@ impl Files {
 		self.pane_menu = None;
 		// Only one surface is ever up, and the sort menu is one of them (§19).
 		self.sort_menu_open = false;
-		self.menu = Some(Menu {
+		self.menu = Some(FilesMenu {
 			path,
 			kind,
 			at: self.pointer,
@@ -1008,7 +1008,7 @@ impl Files {
 	pub fn start_rename(&mut self, path: String) {
 		self.menu = None;
 		let text = crate::explorer::name(&path).to_owned();
-		self.rename = Some(Rename { path, text });
+		self.rename = Some(FilesRename { path, text });
 	}
 
 	/// The inline rename field changed.

@@ -52,7 +52,7 @@ pub enum ExplorerMessage {
 	/// The tree was scrolled; the payload is its absolute vertical offset. Tracked so
 	/// arrow-key navigation can tell whether the row it moved to is already on screen (§20).
 	Scrolled(f32),
-	/// Menu "Refresh" (one folder): re-list this folder's *contents*, and re-list its *parent* so
+	/// ExplorerMenu "Refresh" (one folder): re-list this folder's *contents*, and re-list its *parent* so
 	/// its own name and existence are checked too — a rename or deletion made from the shell shows
 	/// up in the parent's listing, not the folder's. So a right-click Refresh answers "is it still
 	/// there, under this name, holding these children?" in one go. Named "Refresh", not "Expand",
@@ -66,24 +66,24 @@ pub enum ExplorerMessage {
 	/// the clean top-level view after exploring deep. A single folder still collapses by clicking
 	/// its open row or pressing ←; only the menu item is gone.
 	CollapseAll,
-	/// Menu "Open in terminal": send a `cd` for this folder to the shell.
+	/// ExplorerMenu "Open in terminal": send a `cd` for this folder to the shell.
 	Cd(String),
-	/// Menu "Upload…": pick local files to send into this folder (§17). Carries the folder's
+	/// ExplorerMenu "Upload…": pick local files to send into this folder (§17). Carries the folder's
 	/// path, so the files land in the one that was right-clicked, not wherever the shell sits.
 	UploadHere(String),
-	/// Menu "Upload folder…": pick a local folder to send, tree and all, into this one (§17).
+	/// ExplorerMenu "Upload folder…": pick a local folder to send, tree and all, into this one (§17).
 	UploadFolderHere(String),
-	/// Menu "New folder…": open the dialog to create a subfolder inside this one (§18).
+	/// ExplorerMenu "New folder…": open the dialog to create a subfolder inside this one (§18).
 	NewFolderHere(String),
-	/// Menu "Delete…": open the confirmation to remove this folder and everything inside it (§18).
+	/// ExplorerMenu "Delete…": open the confirmation to remove this folder and everything inside it (§18).
 	DeleteStarted(String),
-	/// Menu "Rename": turn the row into an edit field.
+	/// ExplorerMenu "ExplorerRename": turn the row into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
 	RenameEdited(String),
 	/// The inline rename was submitted (Enter) — ask the server to do it.
 	RenameCommitted,
-	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
+	/// ExplorerMenu "Copy name" / "Copy relative path" / "Copy full path".
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),
@@ -121,7 +121,7 @@ struct Node {
 /// is captured when the menu opens, NOT read live — otherwise the panel keeps reporting
 /// pointer moves and the menu slides away from under the cursor before it can be clicked.
 #[derive(Debug, Clone)]
-pub struct Menu {
+pub struct ExplorerMenu {
 	pub path: String,
 	pub at: iced::Point,
 }
@@ -129,7 +129,7 @@ pub struct Menu {
 /// The in-progress inline rename: which folder, and the text typed so far (§18).
 /// Same shape as the home screen's rename (§14), because it is the same interaction.
 #[derive(Debug, Clone)]
-pub struct Rename {
+pub struct ExplorerRename {
 	pub path: String,
 	pub text: String,
 }
@@ -158,11 +158,11 @@ pub struct Explorer {
 	splitter_hovered: bool,
 	nodes: BTreeMap<String, Node>,
 	selected: Option<String>,
-	menu: Option<Menu>,
+	menu: Option<ExplorerMenu>,
 	/// The last pointer position over the panel, in panel-local coordinates. Only read
 	/// when a menu opens, which freezes it as that menu's anchor (§18).
 	pointer: iced::Point,
-	rename: Option<Rename>,
+	rename: Option<ExplorerRename>,
 	notice: Option<String>,
 	/// How far the tree is scrolled, in pixels (§20).
 	scroll: f32,
@@ -282,7 +282,7 @@ impl Explorer {
 	}
 
 	/// The open context menu — the folder it acts on and where it is drawn — if any.
-	pub fn menu(&self) -> Option<&Menu> {
+	pub fn menu(&self) -> Option<&ExplorerMenu> {
 		self.menu.as_ref()
 	}
 
@@ -293,7 +293,7 @@ impl Explorer {
 	}
 
 	/// The in-progress inline rename, if any.
-	pub fn editing(&self) -> Option<&Rename> {
+	pub fn editing(&self) -> Option<&ExplorerRename> {
 		self.rename.as_ref()
 	}
 
@@ -343,7 +343,7 @@ impl Explorer {
 	/// anchor is a snapshot: the panel goes on reporting moves while the menu is up, and
 	/// a menu that tracked them would walk out from under the cursor.
 	pub fn open_menu(&mut self, path: String) {
-		self.menu = Some(Menu {
+		self.menu = Some(ExplorerMenu {
 			path,
 			at: self.pointer,
 		});
@@ -524,7 +524,7 @@ impl Explorer {
 			return;
 		}
 		let text = name(&path).to_owned();
-		self.rename = Some(Rename { path, text });
+		self.rename = Some(ExplorerRename { path, text });
 	}
 
 	/// The inline rename field changed.

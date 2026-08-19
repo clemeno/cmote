@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use crate::bridge::SshEvent;
 use crate::explorer::shell_quote;
 use crate::integration::{self, Shell};
-use crate::ssh::asuser::Files;
+use crate::ssh::asuser::AsuserFiles;
 use crate::ssh::{edit, shellfs};
 
 /// Where the accounts are recorded on a Unix host. Read to learn the login shell — the one answer
@@ -35,7 +35,7 @@ const FALLBACKS: [(&str, Shell); 2] = [(".zshrc", Shell::Zsh), (".bashrc", Shell
 
 /// Look at the login account's shell config and report what could be done to it (§17). Reads only:
 /// the dialog shows the block and the file, and nothing is written until the user says so.
-pub async fn probe(backend: Files, events: &mpsc::Sender<SshEvent>, user: String) {
+pub async fn probe(backend: AsuserFiles, events: &mpsc::Sender<SshEvent>, user: String) {
 	let events = events.clone();
 	tokio::spawn(async move {
 		let outcome = look(&backend, &user).await;
@@ -62,7 +62,7 @@ pub async fn probe(backend: Files, events: &mpsc::Sender<SshEvent>, user: String
 /// Put cmote's block into `path`, or cut it back out (§17). Reports the file's state AFTER the
 /// write, so the dialog says what is now true rather than what was asked for.
 pub async fn write(
-	backend: Files,
+	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	path: String,
 	shell: Shell,
@@ -94,7 +94,7 @@ pub async fn write(
 /// already there. The shell is `None` when nothing could establish it — a shell cmote has no block
 /// for, or an account it cannot find — and the path then still names the file that WOULD be
 /// written, so the dialog can say what it was looking at.
-async fn look(backend: &Files, user: &str) -> Result<(Option<Shell>, String, bool)> {
+async fn look(backend: &AsuserFiles, user: &str) -> Result<(Option<Shell>, String, bool)> {
 	let home = home(backend).await?;
 
 	// The authoritative answer first: what `/etc/passwd` says this account logs into. A remote that
@@ -137,7 +137,7 @@ async fn look(backend: &Files, user: &str) -> Result<(Option<Shell>, String, boo
 /// Read the file, apply the edit, write it back — the whole of an install or a removal. A file
 /// that is already in the asked-for state is reported as an error rather than rewritten
 /// needlessly, so the dialog never claims to have changed something it did not.
-async fn edit_file(backend: &Files, path: &str, shell: Shell, install: bool) -> Result<()> {
+async fn edit_file(backend: &AsuserFiles, path: &str, shell: Shell, install: bool) -> Result<()> {
 	// A missing file is empty, not a failure: installing into an account with no `.bashrc` yet
 	// creates one, which is what the shell would read if it existed.
 	let existing = read_text(backend, path).await.unwrap_or_default();
@@ -155,13 +155,13 @@ async fn edit_file(backend: &Files, path: &str, shell: Shell, install: bool) -> 
 /// SFTP answers by resolving `.`, which for a freshly opened session IS the home directory: the
 /// server starts every sftp session there. The shell backend asks the shell for `$HOME` instead,
 /// which is the same answer by the other road.
-async fn home(backend: &Files) -> Result<String> {
+async fn home(backend: &AsuserFiles) -> Result<String> {
 	match backend {
-		Files::Sftp(sftp) => sftp
+		AsuserFiles::Sftp(sftp) => sftp
 			.canonicalize(".".to_owned())
 			.await
 			.context("could not work out the home directory on the server"),
-		Files::Shell(runner) => {
+		AsuserFiles::Shell(runner) => {
 			let home = runner
 				.stdout("printf %s \"$HOME\"")
 				.await
@@ -172,7 +172,7 @@ async fn home(backend: &Files) -> Result<String> {
 			}
 			Ok(home.to_owned())
 		}
-		Files::Denied(reason) => bail!("{reason}"),
+		AsuserFiles::Denied(reason) => bail!("{reason}"),
 	}
 }
 
@@ -180,13 +180,13 @@ async fn home(backend: &Files) -> Result<String> {
 /// cap, which for a config file is generous past any real one. Invalid UTF-8 is refused rather than
 /// lossily converted: a config file is written back out, and mangling bytes we did not understand
 /// would corrupt the user's own lines.
-async fn read_text(backend: &Files, path: &str) -> Result<String> {
+async fn read_text(backend: &AsuserFiles, path: &str) -> Result<String> {
 	let bytes = match backend {
 		// A shell config file is text, so it is read under the TEXT ceiling (§53) — the same one the
 		// editor opens it with, since Install writes back what this read showed.
-		Files::Sftp(sftp) => edit::read_file(sftp, path, edit::MAX_SIZE).await?,
-		Files::Shell(runner) => shellfs::read_all(runner, path, edit::MAX_SIZE).await?,
-		Files::Denied(reason) => bail!("{reason}"),
+		AsuserFiles::Sftp(sftp) => edit::read_file(sftp, path, edit::MAX_SIZE).await?,
+		AsuserFiles::Shell(runner) => shellfs::read_all(runner, path, edit::MAX_SIZE).await?,
+		AsuserFiles::Denied(reason) => bail!("{reason}"),
 	};
 	String::from_utf8(bytes).with_context(|| format!("{path} is not text cmote can edit safely"))
 }
@@ -194,32 +194,32 @@ async fn read_text(backend: &Files, path: &str) -> Result<String> {
 /// Write the file back atomically — a temp sibling, then a rename over the target. A config file is
 /// the one file on a server where a half-written copy locks the user out, so the commit point
 /// matters more here than anywhere else cmote writes.
-async fn write_text(backend: &Files, path: &str, contents: &str) -> Result<()> {
+async fn write_text(backend: &AsuserFiles, path: &str, contents: &str) -> Result<()> {
 	match backend {
-		Files::Sftp(sftp) => edit::write_atomic(sftp, path, contents.as_bytes()).await,
-		Files::Shell(runner) => shellfs::write_all(runner, path, contents.as_bytes()).await,
-		Files::Denied(reason) => bail!("{reason}"),
+		AsuserFiles::Sftp(sftp) => edit::write_atomic(sftp, path, contents.as_bytes()).await,
+		AsuserFiles::Shell(runner) => shellfs::write_all(runner, path, contents.as_bytes()).await,
+		AsuserFiles::Denied(reason) => bail!("{reason}"),
 	}
 }
 
 /// Whether a path is there at all. Only ever asked about the candidate config files, where "could
 /// not ask" and "not there" lead to the same next step.
-async fn exists(backend: &Files, path: &str) -> bool {
+async fn exists(backend: &AsuserFiles, path: &str) -> bool {
 	match backend {
-		Files::Sftp(sftp) => sftp.metadata(path.to_owned()).await.is_ok(),
-		Files::Shell(runner) => {
+		AsuserFiles::Sftp(sftp) => sftp.metadata(path.to_owned()).await.is_ok(),
+		AsuserFiles::Shell(runner) => {
 			runner
 				.succeeds(&format!("[ -e {} ]", shell_quote(path)))
 				.await
 		}
-		Files::Denied(_) => false,
+		AsuserFiles::Denied(_) => false,
 	}
 }
 
 /// Give the sftp channel back when the errand is done. The shell backend has nothing to close —
 /// each command it runs opens and ends its own channel.
-async fn close(backend: Files) {
-	if let Files::Sftp(sftp) = backend {
+async fn close(backend: AsuserFiles) {
+	if let AsuserFiles::Sftp(sftp) = backend {
 		let _ = sftp.close().await;
 	}
 }
