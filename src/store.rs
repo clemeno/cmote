@@ -37,6 +37,22 @@ pub fn write_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
 	Ok(())
 }
 
+/// Copy `path` to `path.bak`, once, before a migration rewrites it (§110).
+///
+/// "Once" is the whole point. A migration runs on the first save after an upgrade, and a backup
+/// refreshed on every save would be overwritten by the migrated file on the next run — leaving no
+/// copy of the ORIGINAL, which is the only thing this backup is for. So an existing `.bak` is left
+/// alone. A missing source is not an error either: on a first run there is nothing to preserve.
+pub fn back_up_once(path: &Path) -> Result<()> {
+	let backup = with_suffix(path, ".bak");
+	if backup.exists() || !path.exists() {
+		return Ok(());
+	}
+	std::fs::copy(path, &backup)
+		.with_context(|| format!("failed to back up {}", path.display()))?;
+	Ok(())
+}
+
 /// `<path>.tmp`, beside the target. `with_extension` would be wrong: it REPLACES the extension, so
 /// `secrets.age` would become `secrets.tmp` and two different stores could collide on one temp name.
 fn temp_beside(path: &Path) -> PathBuf {
@@ -52,7 +68,7 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-	use super::{with_suffix, write_atomically};
+	use super::{back_up_once, with_suffix, write_atomically};
 
 	#[test]
 	fn the_temp_name_keeps_the_whole_file_name() {
@@ -89,5 +105,30 @@ mod tests {
 		write_atomically(&path, b"first").unwrap();
 		write_atomically(&path, b"second").unwrap();
 		assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+	}
+
+	#[test]
+	fn the_backup_keeps_the_original_and_never_the_migrated_copy() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(&path, "the original").unwrap();
+		back_up_once(&path).unwrap();
+		// The migration writes the new shape, and the next save runs the backup again.
+		write_atomically(&path, b"the migrated shape").unwrap();
+		back_up_once(&path).unwrap();
+		assert_eq!(
+			std::fs::read_to_string(with_suffix(&path, ".bak")).unwrap(),
+			"the original",
+			"a refreshed backup would hold the migrated file and preserve nothing"
+		);
+	}
+
+	#[test]
+	fn backing_up_a_file_that_is_not_there_is_not_an_error() {
+		// First run: no store yet, so nothing to preserve and no reason to fail.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		back_up_once(&path).unwrap();
+		assert!(!with_suffix(&path, ".bak").exists());
 	}
 }

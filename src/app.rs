@@ -8010,6 +8010,10 @@ impl Tab {
 					// The shells this machine can open (§103), searched once per run and kept — see
 					// `local::shells::catalogue`, which is why this is free to ask for on every frame.
 					shells: crate::local::shells::catalogue(),
+					// Why the store was not read, when it was not (§110) — shown where the
+					// "no saved targets yet" hint would otherwise be, which is the one place a
+					// user looking for their targets is already looking.
+					refusal: self.targets.borrow().refusal().map(str::to_owned),
 				},
 			),
 			// The connect form, and — when the flow is holding a question — the dialog that asks

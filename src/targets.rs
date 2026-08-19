@@ -196,9 +196,110 @@ pub struct Targets {
 	/// Always kept in display order (see `sort`): by name (case-insensitively),
 	/// ties broken by endpoint so the order is deterministic.
 	items: Vec<Target>,
+	/// Why this store was refused, when it was (§110): the file on disk declares a format version
+	/// this build does not know, which means a NEWER cmote wrote it — the expected case for a
+	/// portable install carried between machines on a stick. Set means two things: the list is
+	/// empty because nothing was read, and `save_to` must refuse, because writing this build's
+	/// shape over a newer one would destroy whatever the newer fields hold.
+	refusal: Option<String>,
+	/// Whether what was loaded came from an older shape, so the first save preserves the original
+	/// as `targets.json.bak` before replacing it (§110).
+	migrated: bool,
+}
+
+/// The format version this build writes (§110).
+///
+/// A STRING rather than a number, because `targets.json` is meant to be readable and editable by
+/// hand (§22) and `"2"` beside the other quoted values reads as one of them. Version 1 is the
+/// UNVERSIONED shape — a bare JSON array — which is what every cmote up to §110 wrote; calling it 1
+/// keeps "version N" and "the Nth format" the same number for good.
+const FORMAT: &str = "2";
+
+/// What version 2 looks like on disk: the array, under a version that says which array it is.
+///
+/// Deserialize-only. Writing goes through [`Written`], which borrows instead of cloning the whole
+/// list to serialize it.
+#[derive(Deserialize)]
+struct Stored {
+	version: String,
+	targets: Vec<Target>,
+}
+
+/// The write side of [`Stored`], borrowing what it serializes.
+#[derive(Serialize)]
+struct Written<'a> {
+	version: &'a str,
+	targets: &'a [Target],
 }
 
 impl Targets {
+	/// Why this store was refused, for the home screen to show instead of "no saved targets yet"
+	/// (§110). An empty list and a refusal look identical otherwise, and they must not: one means
+	/// "connect somewhere to add one" and the other means "your targets are still on disk, and this
+	/// cmote is too old to read them".
+	pub fn refusal(&self) -> Option<&str> {
+		self.refusal.as_deref()
+	}
+
+	/// Read `text` as a store, whichever shape it is in (§110).
+	///
+	/// The shape is told apart by the first non-whitespace byte, which is all it takes: `[` is the
+	/// unversioned array, `{` is the envelope. That is why the envelope was worth the change — a
+	/// format that says what it is can be recognised without guessing, forever.
+	fn parse(text: &str, path: &Path) -> Self {
+		match text.trim_start().as_bytes().first() {
+			// Version 1: the bare array every cmote before §110 wrote. Loaded and marked for
+			// migration, so the next save writes the envelope and keeps the original beside it.
+			Some(b'[') => match serde_json::from_str::<Vec<Target>>(text) {
+				Ok(items) => Self {
+					items,
+					refusal: None,
+					migrated: true,
+				},
+				Err(error) => {
+					eprintln!(
+						"ignoring an unreadable targets file {}: {error}",
+						path.display()
+					);
+					Self::default()
+				}
+			},
+			Some(b'{') => match serde_json::from_str::<Stored>(text) {
+				Ok(stored) if stored.version == FORMAT => Self {
+					items: stored.targets,
+					refusal: None,
+					migrated: false,
+				},
+				// Any other version in an envelope is one this build does not know. Refused
+				// rather than guessed at: the fields it cannot see are the ones a newer cmote
+				// is relying on, and a save would drop them silently (§110).
+				Ok(stored) => Self {
+					items: Vec::new(),
+					refusal: Some(format!(
+						"{} is version {} — this cmote reads version {FORMAT}. Nothing was loaded, 						 and nothing will be written over it. Use a newer cmote, or move the file 						 aside.",
+						path.display(),
+						stored.version
+					)),
+					migrated: false,
+				},
+				Err(error) => {
+					eprintln!(
+						"ignoring an unreadable targets file {}: {error}",
+						path.display()
+					);
+					Self::default()
+				}
+			},
+			_ => {
+				eprintln!(
+					"ignoring a targets file that is neither an array nor an object: {}",
+					path.display()
+				);
+				Self::default()
+			}
+		}
+	}
+
 	/// The targets in display order. The home screen renders these top-to-bottom and
 	/// indexes into this slice for click/selection.
 	pub fn items(&self) -> &[Target] {
@@ -403,16 +504,7 @@ impl Targets {
 	/// user from connecting (`ponytail:` we do not try to recover partial entries).
 	pub fn load_from(path: &Path) -> Self {
 		let mut targets = match std::fs::read_to_string(path) {
-			Ok(text) => match serde_json::from_str::<Vec<Target>>(&text) {
-				Ok(items) => Self { items },
-				Err(error) => {
-					eprintln!(
-						"ignoring unreadable targets file {}: {error}",
-						path.display()
-					);
-					Self::default()
-				}
-			},
+			Ok(text) => Self::parse(&text, path),
 			// `NotFound` is the normal first-run case; anything else is worth a line.
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
 			Err(error) => {
@@ -429,7 +521,20 @@ impl Targets {
 	/// Write the targets to `path` as pretty JSON (readable, since it is a plain
 	/// config file). Creates the parent directory if needed.
 	pub fn save_to(&self, path: &Path) -> Result<()> {
-		let json = serde_json::to_string_pretty(&self.items).context("failed to encode targets")?;
+		if let Some(reason) = &self.refusal {
+			anyhow::bail!("refusing to write the targets file: {reason}");
+		}
+		// The original is preserved before the FIRST save that changes its shape, and only then:
+		// `back_up_once` leaves an existing `.bak` alone, so what is kept is the version-1 file and
+		// not a migrated copy of it (§110).
+		if self.migrated {
+			crate::store::back_up_once(path)?;
+		}
+		let written = Written {
+			version: FORMAT,
+			targets: &self.items,
+		};
+		let json = serde_json::to_string_pretty(&written).context("failed to encode targets")?;
 		crate::store::write_atomically(path, json.as_bytes())
 	}
 
@@ -929,5 +1034,122 @@ mod tests {
 		let path = dir.path().join("targets.json");
 		std::fs::write(&path, "{ this is not json").unwrap();
 		assert!(Targets::load_from(&path).items().is_empty());
+	}
+
+	// ---- §110: the format version, the migration, and the refusal ----
+
+	/// A real version-1 file: the bare array every cmote up to §110 wrote. Kept as a literal rather
+	/// than a checked-in fixture so the shape being migrated FROM is readable beside the test that
+	/// migrates it.
+	const VERSION_1: &str = r#"[
+  {
+    "name": "bastion",
+    "host": "10.0.0.9",
+    "port": 22,
+    "user": "tester",
+    "auth_kind": "password",
+    "show_hidden": true
+  }
+]"#;
+
+	#[test]
+	fn an_unversioned_array_still_loads() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(&path, VERSION_1).unwrap();
+		let targets = Targets::load_from(&path);
+		assert_eq!(targets.items().len(), 1);
+		assert_eq!(targets.items()[0].name, "bastion");
+		assert!(targets.refusal().is_none());
+		assert!(
+			targets.migrated,
+			"a version-1 file must be marked for migration"
+		);
+	}
+
+	#[test]
+	fn the_first_save_after_a_migration_keeps_the_original_beside_it() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(&path, VERSION_1).unwrap();
+		let targets = Targets::load_from(&path);
+		targets.save_to(&path).unwrap();
+
+		// The store is now the envelope, and says which shape it is.
+		let written = std::fs::read_to_string(&path).unwrap();
+		assert!(
+			written.starts_with('{'),
+			"the migrated store is an object: {written}"
+		);
+		assert!(written.contains(r#""version": "2""#), "{written}");
+		// The original is preserved verbatim — this is the only copy of it that will ever exist.
+		let backup = std::fs::read_to_string(dir.path().join("targets.json.bak")).unwrap();
+		assert_eq!(backup, VERSION_1);
+	}
+
+	#[test]
+	fn a_version_2_store_round_trips() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("10.0.0.9", 22, "tester", AuthKind::Password, None, None);
+		targets.save_to(&path).unwrap();
+
+		let reloaded = Targets::load_from(&path);
+		assert_eq!(reloaded.items().len(), 1);
+		assert!(reloaded.refusal().is_none());
+		assert!(
+			!reloaded.migrated,
+			"an envelope this build wrote needs no migration, so no backup"
+		);
+		assert!(!dir.path().join("targets.json.bak").exists());
+	}
+
+	#[test]
+	fn a_newer_version_is_refused_and_never_written_over() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		// What a newer cmote might write: a version this build does not know, carrying a field it
+		// cannot see. Both must survive.
+		let newer = r#"{"version": "3", "targets": [], "tunnels_by_default": true}"#;
+		std::fs::write(&path, newer).unwrap();
+
+		let targets = Targets::load_from(&path);
+		assert!(
+			targets.items().is_empty(),
+			"nothing may be loaded from a shape we cannot read"
+		);
+		let refusal = targets
+			.refusal()
+			.expect("a refusal must be reported, not logged and dropped");
+		assert!(refusal.contains("version 3"), "{refusal}");
+		assert!(refusal.contains("version 2"), "{refusal}");
+
+		// And the save side refuses too, which is the half that protects the data.
+		assert!(targets.save_to(&path).is_err());
+		assert_eq!(
+			std::fs::read_to_string(&path).unwrap(),
+			newer,
+			"the file must be byte-identical after a refused save"
+		);
+		assert!(
+			!dir.path().join("targets.json.bak").exists(),
+			"a refusal is not a migration, so nothing is backed up"
+		);
+	}
+
+	#[test]
+	fn a_file_that_is_neither_shape_is_treated_as_empty() {
+		// The pre-existing rule (§14) survives the envelope: a corrupt store must never stop the
+		// user from connecting, so it reads as "no targets" rather than as an error.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("targets.json");
+		std::fs::write(&path, "this is not JSON at all").unwrap();
+		let targets = Targets::load_from(&path);
+		assert!(targets.items().is_empty());
+		assert!(
+			targets.refusal().is_none(),
+			"garbage is not a version refusal — it must stay overwritable"
+		);
 	}
 }

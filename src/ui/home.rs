@@ -97,6 +97,13 @@ pub struct View<'a> {
 	/// per frame would put a dozen filesystem probes in the paint loop. Empty on a machine where none
 	/// was found, and then no bar is drawn at all.
 	pub shells: &'static [crate::local::shells::LocalShell],
+	/// Why the saved store was not read, when it was not (§110). An empty list means one of three
+	/// things now, and they must not read alike: nothing saved yet, nothing matching the filter, or
+	/// a store this build is too old to open. Only the third is the user's data still being there.
+	/// Owned rather than borrowed: the store is read through a short-lived `RefCell` borrow, and a
+	/// `&str` from it would tie this view's return value to that temporary. It allocates only in the
+	/// refusal case, which is the one frame where an allocation is not the interesting cost.
+	pub refusal: Option<String>,
 }
 
 /// Render the home screen. `targets` are already in display order (`targets` keeps
@@ -144,6 +151,7 @@ pub fn view<'a>(
 			!state.filter.is_empty(),
 			state.selected,
 			state.rename,
+			state.refusal,
 		))
 		.padding(20)
 		.into();
@@ -285,8 +293,14 @@ fn target_list<'a>(
 	filtering: bool,
 	selected: Option<&str>,
 	rename: Option<&'a RenameState>,
+	refusal: Option<String>,
 ) -> Element<'a, Message> {
 	if targets.is_empty() {
+		// A refusal is checked FIRST and worded as itself: the store is on disk and intact, and
+		// telling this user to add a connection would invite them to write a new file over it (§110).
+		if let Some(reason) = refusal {
+			return text(reason).style(text::danger).into();
+		}
 		let empty = if filtering {
 			"No target matches this filter."
 		} else {
