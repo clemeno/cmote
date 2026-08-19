@@ -23,7 +23,7 @@
 //   * the renderer resolves the other way, once per row: a viewport row becomes the line it is
 //     showing (`Marks::top_line` in `ui::grid`).
 //
-// The pointer, of course, is still on screen. `Cell` is that on-screen position and `Cell::spot` is
+// The pointer, of course, is still on screen. `ScreenSpot` is that on-screen position and `ScreenSpot::spot` is
 // the single door between the two spaces.
 //
 // A press can also select on its own, without any drag (§42): a double click takes the WORD under
@@ -36,7 +36,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::term::screen::{Cell as ScreenCell, Screen};
+use crate::term::screen::{Cell, Screen};
 
 /// How long after a press a second one on the same target still counts as part of the same
 /// multi-click (§42). Half a second is Windows' own default double-click time
@@ -58,21 +58,21 @@ const WORD_PUNCTUATION: &str = "_-./~+=@%&#?:";
 /// A single grid position ON SCREEN. `row`/`col` are 0-based viewport cells — row 0 is the top
 /// visible line — the same space `screen::Screen::cell`, the renderer and the pointer
 /// (`ui::terminal::cell_at`) use. `Default` is the origin cell, which lets `App` (which owns a
-/// "last hovered cell") derive `Default`. Turn one into a `Spot` before it goes anywhere near a
+/// "last hovered cell") derive `Default`. Turn one into a `DocSpot` before it goes anywhere near a
 /// selection (§40).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Cell {
+pub struct ScreenSpot {
 	pub row: u16,
 	pub col: u16,
 }
 
-impl Cell {
+impl ScreenSpot {
 	/// This on-screen cell as the DOCUMENT position it is showing right now (§40) — the one crossing
 	/// between the two coordinate spaces. The arithmetic itself belongs to `Screen::line_at`, so a
 	/// click, a prompt tick (§34) and a search match (§35) can never disagree about which line is
 	/// which.
-	pub fn spot(self, screen: Screen<'_>) -> Spot {
-		Spot {
+	pub fn to_doc(self, screen: Screen<'_>) -> DocSpot {
+		DocSpot {
 			line: screen.line_at(self.row),
 			col: self.col,
 		}
@@ -81,16 +81,16 @@ impl Cell {
 
 /// A single position in the DOCUMENT (§40): an absolute line — 0 is the oldest line the session
 /// still retains, `history_size` is the top of the live screen — plus a grid column. Deliberately a
-/// different type from `Cell`, so a viewport row can never be handed to something expecting a
+/// different type from `ScreenSpot`, so a viewport row can never be handed to something expecting a
 /// document line; the same discipline `search::Match` and `search::Highlight` keep between the two
 /// spaces (§39).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Spot {
+pub struct DocSpot {
 	pub line: u64,
 	pub col: u16,
 }
 
-impl Spot {
+impl DocSpot {
 	/// Reading-order key: lines dominate, then columns. Comparing these two keys
 	/// orders any two positions the way text flows, which is all the selection math
 	/// needs (no need to know the grid width).
@@ -117,7 +117,7 @@ pub enum Click {
 ///
 /// Consecutive presses must be on the SAME TARGET, not merely within a few pixels as a
 /// general-purpose widget would ask, and `T` is what "the same" means. The grid counts presses on a
-/// [`Cell`] (§42): the cell IS the target there, and it is the cell a word or line then expands
+/// [`ScreenSpot`] (§42): the cell IS the target there, and it is the cell a word or line then expands
 /// from, so nudging the pointer inside one cell between two clicks must not break the double click
 /// and crossing into the next cell must. The window's dividers count presses on a
 /// `pane_grid::Split` (§48), where the seam is the target the same way — the pointer may wander
@@ -178,8 +178,8 @@ enum Origin {
 /// positions (§40), so the selection keeps covering its own text however the view then scrolls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-	anchor: Spot,
-	head: Spot,
+	anchor: DocSpot,
+	head: DocSpot,
 	origin: Origin,
 }
 
@@ -187,7 +187,7 @@ impl Selection {
 	/// Begin a selection anchored at `anchor`, with the head on the same position. Until
 	/// the pointer moves to another cell this is "empty" (see `is_empty`): a bare
 	/// click selects nothing, matching a terminal.
-	pub fn new(anchor: Spot) -> Self {
+	pub fn new(anchor: DocSpot) -> Self {
 		Self {
 			anchor,
 			head: anchor,
@@ -197,7 +197,7 @@ impl Selection {
 
 	/// Move the head as the pointer drags. The anchor stays put, so dragging in any
 	/// direction grows or shrinks the run between the two positions.
-	pub fn with_head(self, head: Spot) -> Self {
+	pub fn with_head(self, head: DocSpot) -> Self {
 		Self {
 			anchor: self.anchor,
 			head,
@@ -209,7 +209,7 @@ impl Selection {
 	/// a command's output (§34), a search hit (§35), a word or a line (§42). Inclusive of both ends,
 	/// and — unlike a drag — never empty, so a range one cell wide is highlighted and copyable instead
 	/// of reading as "nothing selected" (see `Origin`).
-	pub fn spanning(start: Spot, end: Spot) -> Self {
+	pub fn spanning(start: DocSpot, end: DocSpot) -> Self {
 		Self {
 			anchor: start,
 			head: end,
@@ -226,7 +226,7 @@ impl Selection {
 	/// WRAP: output that ran past the right margin is one logical line, so a path broken across two
 	/// rows is still one word — and, because a copy re-joins wrapped rows, it comes back off the
 	/// clipboard in one piece.
-	pub fn word(screen: Screen<'_>, spot: Spot) -> Option<Self> {
+	pub fn word(screen: Screen<'_>, spot: DocSpot) -> Option<Self> {
 		if !is_word(screen, spot) {
 			return None;
 		}
@@ -251,7 +251,7 @@ impl Selection {
 	/// the session no longer holds. Logical, not physical: the run walks back to the first row of a
 	/// wrapped line and on to its last, so one long command — or one long path — is taken in full
 	/// however many rows it occupies.
-	pub fn line(screen: Screen<'_>, spot: Spot) -> Option<Self> {
+	pub fn line(screen: Screen<'_>, spot: DocSpot) -> Option<Self> {
 		// A line with no cell at column 0 is not a line the document has (§40).
 		screen.line_cell(spot.line, 0)?;
 		let (_, cols) = screen.size();
@@ -268,11 +268,11 @@ impl Selection {
 			last += 1;
 		}
 		Some(Self::spanning(
-			Spot {
+			DocSpot {
 				line: first,
 				col: 0,
 			},
-			Spot {
+			DocSpot {
 				line: last,
 				col: cols.saturating_sub(1),
 			},
@@ -288,7 +288,7 @@ impl Selection {
 
 	/// The selection as an ordered `(start, end)` pair in reading order, so callers
 	/// never have to care which end the drag started from.
-	fn bounds(&self) -> (Spot, Spot) {
+	fn bounds(&self) -> (DocSpot, DocSpot) {
 		if self.anchor.order_key() <= self.head.order_key() {
 			(self.anchor, self.head)
 		} else {
@@ -344,7 +344,7 @@ impl Selection {
 			let from = if line == start.line { start.col } else { 0 };
 			let to = if line == end.line { end.col } else { last_col };
 
-			let mut cells: Vec<ScreenCell> = Vec::new();
+			let mut cells: Vec<Cell> = Vec::new();
 			let mut col = from;
 			while col <= to {
 				let Some(cell) = screen.line_cell(line, col) else {
@@ -410,7 +410,7 @@ impl Selection {
 /// so the two can never disagree about where the pasted text breaks.
 #[derive(Debug, Clone)]
 pub struct Row {
-	pub cells: Vec<ScreenCell>,
+	pub cells: Vec<Cell>,
 	pub wrapped: bool,
 }
 
@@ -420,7 +420,7 @@ pub struct Row {
 /// A wide glyph's trailing half carries no text of its own — the lead cell in the column before it
 /// owns the glyph — so the question is passed to that cell instead. Without this every CJK word would
 /// end after its first character.
-fn is_word(screen: Screen<'_>, spot: Spot) -> bool {
+fn is_word(screen: Screen<'_>, spot: DocSpot) -> bool {
 	let Some(cell) = screen.line_cell(spot.line, spot.col) else {
 		return false;
 	};
@@ -447,9 +447,9 @@ fn is_word_char(ch: char) -> bool {
 /// The position one cell before `spot` within its LOGICAL line (§42), or `None` at the start of one.
 /// At column 0 that means the last column of the line above — but only when the line above is marked
 /// as continuing into this one, otherwise the two are separate lines and the word ends here.
-fn step_left(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
+fn step_left(screen: Screen<'_>, spot: DocSpot) -> Option<DocSpot> {
 	if spot.col > 0 {
-		return Some(Spot {
+		return Some(DocSpot {
 			line: spot.line,
 			col: spot.col - 1,
 		});
@@ -459,7 +459,7 @@ fn step_left(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
 		return None;
 	}
 	let (_, cols) = screen.size();
-	Some(Spot {
+	Some(DocSpot {
 		line: previous,
 		col: cols.saturating_sub(1),
 	})
@@ -468,10 +468,10 @@ fn step_left(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
 /// The position one cell after `spot` within its LOGICAL line (§42), or `None` at the end of one —
 /// the mirror of `step_left`, crossing into column 0 of the next line only when this one wraps into
 /// it and the document actually holds it.
-fn step_right(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
+fn step_right(screen: Screen<'_>, spot: DocSpot) -> Option<DocSpot> {
 	let (_, cols) = screen.size();
 	if spot.col + 1 < cols {
-		return Some(Spot {
+		return Some(DocSpot {
 			line: spot.line,
 			col: spot.col + 1,
 		});
@@ -479,7 +479,7 @@ fn step_right(screen: Screen<'_>, spot: Spot) -> Option<Spot> {
 	if !screen.line_wrapped(spot.line) {
 		return None;
 	}
-	let next = Spot {
+	let next = DocSpot {
 		line: spot.line + 1,
 		col: 0,
 	};
@@ -493,8 +493,8 @@ mod tests {
 
 	// A document position. On a screen with no history yet (most tests below) line N is simply
 	// viewport row N, which keeps the geometry tests readable.
-	fn spot(line: u64, col: u16) -> Spot {
-		Spot { line, col }
+	fn spot(line: u64, col: u16) -> DocSpot {
+		DocSpot { line, col }
 	}
 
 	// A fresh emulator fed `input`, so tests can select over real grid contents.
@@ -505,8 +505,8 @@ mod tests {
 	}
 
 	// An on-screen cell, for the multi-click tally (which counts cells, not document lines).
-	fn at(row: u16, col: u16) -> Cell {
-		Cell { row, col }
+	fn at(row: u16, col: u16) -> ScreenSpot {
+		ScreenSpot { row, col }
 	}
 
 	// The text a word selection around `col` on the first line copies, or `None` when there is no

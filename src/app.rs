@@ -2308,8 +2308,8 @@ struct Workspace {
 	terminal: Option<term::Terminal>,
 	selection: Option<ui::selection::Selection>,
 	selecting: bool,
-	hover_cell: ui::selection::Cell,
-	clicks: ui::selection::Clicks<ui::selection::Cell>,
+	hover_cell: ui::selection::ScreenSpot,
+	clicks: ui::selection::Clicks<ui::selection::ScreenSpot>,
 	search: Option<term::search::Search>,
 	search_stale: bool,
 }
@@ -2603,11 +2603,11 @@ pub struct Tab {
 	selecting: bool,
 	/// The grid cell currently under the pointer (§10). Updated on every pointer
 	/// move so a press can anchor the selection here.
-	hover_cell: ui::selection::Cell,
+	hover_cell: ui::selection::ScreenSpot,
 	/// The multi-click tally over the grid (§42): how many presses in a row landed on one cell, so a
 	/// press knows whether it is a plain click, a word (double) or a line (triple). `mouse_area`
 	/// reports presses one at a time and counts nothing itself.
-	clicks: ui::selection::Clicks<ui::selection::Cell>,
+	clicks: ui::selection::Clicks<ui::selection::ScreenSpot>,
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Holds the query
 	/// and the match list; the current match is shown as an ordinary `selection`, so the highlight
 	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
@@ -6626,7 +6626,7 @@ impl Tab {
 		// The head is resolved to a DOCUMENT position here (§40), where the viewport's own numbers are
 		// still to hand: the pointer is over a screen row, but what it selects is the line that row is
 		// showing — so the selection keeps covering that text however the scrollback then moves.
-		let head = hovered.spot(screen);
+		let head = hovered.to_doc(screen);
 		self.hover_cell = hovered;
 		if self.selecting
 			&& let Some(selection) = self.selection
@@ -6656,7 +6656,7 @@ impl Tab {
 		};
 		// The cell pressed on, as the document position it is showing (§40) — resolved before any of
 		// the branches below, so the one place a mouse selection is anchored reads the viewport once.
-		let anchor = self.hover_cell.spot(terminal.screen());
+		let anchor = self.hover_cell.to_doc(terminal.screen());
 		// A click on a prompt tick in the left padding gutter selects that command's output (§34)
 		// instead of starting a text selection. The ticks live inside `GRID_PADDING`; a press there
 		// on a row whose prompt has a finished command resolves to it, and anything else — the gutter
@@ -6710,7 +6710,7 @@ impl Tab {
 	/// The URI of the OSC 8 hyperlink on a grid cell, if any (§24). `None` with no session,
 	/// an out-of-bounds cell, or a cell that is not part of a link. Returned owned so the
 	/// short-lived screen borrow is dropped before the caller acts on it.
-	fn link_at(&self, cell: ui::selection::Cell) -> Option<String> {
+	fn link_at(&self, cell: ui::selection::ScreenSpot) -> Option<String> {
 		self.terminal
 			.as_ref()?
 			.screen()
@@ -6798,11 +6798,11 @@ impl Tab {
 	/// interaction does. The span is already in document lines (§40), so an output taller than the
 	/// screen is selected — and copied — in full.
 	fn set_output_selection(&mut self, span: term::OutputSpan) {
-		let start = ui::selection::Spot {
+		let start = ui::selection::DocSpot {
 			line: span.start_line,
 			col: 0,
 		};
-		let head = ui::selection::Spot {
+		let head = ui::selection::DocSpot {
 			line: span.end_line,
 			col: span.last_col,
 		};
@@ -7123,11 +7123,11 @@ impl Tab {
 		if !terminal.reveal_line(found.line) {
 			return;
 		}
-		let start = ui::selection::Spot {
+		let start = ui::selection::DocSpot {
 			line: found.line,
 			col: found.start_col,
 		};
-		let head = ui::selection::Spot {
+		let head = ui::selection::DocSpot {
 			line: found.line,
 			col: found.end_col,
 		};
@@ -10186,7 +10186,7 @@ mod tests {
 
 		// The prompt sits on viewport row 0; a gutter press there (x < GRID_PADDING) selects it.
 		app.pointer = iced::Point::new(1.0, 1.0);
-		app.hover_cell = ui::selection::Cell { row: 0, col: 0 };
+		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 0 };
 		app.on_grid_pressed();
 
 		let selection = app.selection.expect("the tick click selected the output");
@@ -10208,7 +10208,7 @@ mod tests {
 
 		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
 		app.pointer = iced::Point::new(50.0, 5.0);
-		app.hover_cell = ui::selection::Cell { row: 0, col: 6 };
+		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 6 };
 
 		// One press selects nothing on its own …
 		app.on_grid_pressed();
@@ -10252,8 +10252,8 @@ mod tests {
 			"the query matched before the resize"
 		);
 		app.selection = Some(ui::selection::Selection::spanning(
-			ui::selection::Spot { line: 0, col: 0 },
-			ui::selection::Spot { line: 0, col: 4 },
+			ui::selection::DocSpot { line: 0, col: 0 },
+			ui::selection::DocSpot { line: 0, col: 4 },
 		));
 		app.selecting = true;
 
@@ -10287,7 +10287,7 @@ mod tests {
 
 		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
 		app.pointer = iced::Point::new(50.0, 5.0);
-		app.hover_cell = ui::selection::Cell { row: 0, col: 6 };
+		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 6 };
 		app.on_grid_pressed();
 
 		app.on_window_resized(ui::terminal::window_size(60, 24, reserved));
@@ -10296,7 +10296,7 @@ mod tests {
 		// press would take the word if the resize had not reset the count.
 		assert_eq!(
 			app.hover_cell,
-			ui::selection::Cell { row: 0, col: 6 },
+			ui::selection::ScreenSpot { row: 0, col: 6 },
 			"the hovered cell is resolved again against the new grid"
 		);
 		app.on_grid_pressed();

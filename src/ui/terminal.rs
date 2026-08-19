@@ -17,7 +17,7 @@ use crate::term::Terminal;
 use crate::term::pointer;
 use crate::term::screen::Screen;
 use crate::transfer::{ClashChoice, Progress, Question, Queue};
-use crate::ui::selection::{Cell, Selection};
+use crate::ui::selection::{ScreenSpot, Selection};
 
 /// Glyph size and line spacing. A fixed monospace metric — the whole grid shares
 /// it, so columns line up and rows tile without gaps.
@@ -1198,13 +1198,13 @@ fn transfer_conflict_panel<'a>(
 /// to the grid cell under it (§10). Subtracts the grid padding, divides by the cell
 /// metrics, and clamps into the grid so a drag past an edge selects the edge cell
 /// rather than a phantom one off the grid.
-pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
+pub fn cell_at(point: Point, rows: u16, cols: u16) -> ScreenSpot {
 	let x = (point.x - GRID_PADDING).max(0.0);
 	let y = (point.y - GRID_PADDING).max(0.0);
 	// `as u16` truncates toward zero; x/y are non-negative, so this floors.
 	let col = (x / CELL_WIDTH) as u16;
 	let row = (y / CELL_HEIGHT) as u16;
-	Cell {
+	ScreenSpot {
 		row: row.min(rows.saturating_sub(1)),
 		col: col.min(cols.saturating_sub(1)),
 	}
@@ -1221,11 +1221,11 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> Cell {
 ///
 /// On a left-to-right line — every line, until a program says otherwise — this is `cell_at` and
 /// nothing else.
-pub fn cell_under(screen: &Screen<'_>, point: Point) -> Cell {
+pub fn cell_under(screen: &Screen<'_>, point: Point) -> ScreenSpot {
 	let (rows, cols) = screen.size();
 	let cell = cell_at(point, rows, cols);
 	if screen.row_is_rtl(cell.row) {
-		Cell {
+		ScreenSpot {
 			row: cell.row,
 			col: crate::term::scp::flip(cell.col, cols),
 		}

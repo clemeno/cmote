@@ -4134,15 +4134,15 @@ still a stream selection in reading order — and no widget, message or keybind 
 The pointer is on screen and the text is in the document, so exactly one conversion has to exist, and
 it now exists exactly once: **`Screen::line_at(row)`** = `history_size + row - display_offset`. It is
 the same arithmetic §34's ticks and §39's washes are placed by, written down in one function that both
-`Screen::cell` and `ui::selection::Cell::spot` read through.
+`Screen::cell` and `ui::selection::ScreenSpot::to_doc` read through.
 
 - **`Screen::line_cell(line, col)` is the read that does not care where the viewport is.** The engine
   keeps scrolled-off lines on the *negative* grid lines below the live screen's line 0 (§23), so a
   document line maps onto the grid by subtracting `history_size`; anything outside `-history_size ..=
   screen_lines - 1` is a line the session no longer has. `Screen::cell` — the renderer's per-cell read
   — is now `line_cell(line_at(row), col)`, so the viewport and document readers cannot drift apart.
-- **`Cell` and `Spot` are two types, and that is the point.** `Cell` is where the pointer is (row 0 is
-  the top visible line); `Spot` is where the text is. `Cell::spot(screen)` is the only crossing, so a
+- **`ScreenSpot` and `DocSpot` are two types, and that is the point.** `ScreenSpot` is where the pointer is (row 0 is
+  the top visible line); `DocSpot` is where the text is. `ScreenSpot::to_doc(screen)` is the only crossing, so a
   viewport row cannot reach a selection without passing through the conversion — the same discipline
   `Match` / `Highlight` keep (§39), and the reason this refactor was a series of compile errors rather
   than a hunt for wrong highlights.

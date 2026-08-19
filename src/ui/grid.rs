@@ -32,10 +32,10 @@ use crate::term::graphics::Placement;
 use crate::term::mouse as report;
 use crate::term::scp;
 use crate::term::screen::{
-	Cell as ScreenCell, Color as CellColor, CursorShape, Link, MouseMode, Screen, UnderlineStyle,
+	Cell, Color as CellColor, CursorShape, Link, MouseMode, Screen, UnderlineStyle,
 };
 use crate::term::search::Highlight;
-use crate::ui::selection::{Cell, Selection};
+use crate::ui::selection::{ScreenSpot, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_under};
 use iced::advanced::Renderer as _;
 use iced::advanced::image::{Image as RasterImage, Renderer as _};
@@ -237,7 +237,7 @@ pub fn grid<'a>(
 struct State {
 	modifiers: Modifiers,
 	held: Option<report::Button>,
-	last: Option<Cell>,
+	last: Option<ScreenSpot>,
 }
 
 impl Grid<'_> {
@@ -1179,7 +1179,7 @@ struct Run {
 /// each other.
 ///
 /// Pure (no renderer, no widget), so it stays unit-testable on its own.
-fn link_at(screen: Screen<'_>, cell: Cell) -> Option<Link> {
+fn link_at(screen: Screen<'_>, cell: ScreenSpot) -> Option<Link> {
 	screen.cell(cell.row, cell.col)?.link().cloned()
 }
 
@@ -1289,7 +1289,7 @@ fn plan_runs(
 		// link the program split into separate runs lights up whole, and one address written twice
 		// stays two links.
 		let is_link_hover =
-			hovered_link.is_some() && cell.as_ref().and_then(ScreenCell::link) == hovered_link;
+			hovered_link.is_some() && cell.as_ref().and_then(Cell::link) == hovered_link;
 		let style = cell_style(
 			cell.as_ref(),
 			is_cursor,
@@ -1368,7 +1368,7 @@ fn mirror(runs: &mut [Run], cols: u16) {
 /// run-grouping key, either fill (and any per-cell attribute) breaks its run off from its
 /// neighbours (§10, §39).
 fn cell_style(
-	cell: Option<&ScreenCell>,
+	cell: Option<&Cell>,
 	is_cursor: bool,
 	is_selected: bool,
 	is_match: bool,
@@ -1471,7 +1471,7 @@ const fn rgb((r, g, b): (u8, u8, u8)) -> Color {
 mod tests {
 	use super::*;
 	use crate::term::Terminal;
-	use crate::ui::selection::Spot;
+	use crate::ui::selection::DocSpot;
 
 	// Pack row 0 of a grid after feeding `input` to a fresh emulator. The cursor is left
 	// out (`on_cursor_row = false`) so the tests exercise the column packing alone, not
@@ -1621,7 +1621,7 @@ mod tests {
 		let mut terminal = Terminal::new(1, 5);
 		terminal.process(b"abcde");
 		let selection =
-			Selection::new(Spot { line: 0, col: 1 }).with_head(Spot { line: 0, col: 2 });
+			Selection::new(DocSpot { line: 0, col: 1 }).with_head(DocSpot { line: 0, col: 2 });
 		let marks = Marks {
 			selection: Some(&selection),
 			..Marks::default()
@@ -1696,7 +1696,7 @@ mod tests {
 		terminal.process(b"abcde\x1b[2 k");
 		// Data columns 1..2 — "bc" — selected.
 		let selection =
-			Selection::new(Spot { line: 0, col: 1 }).with_head(Spot { line: 0, col: 2 });
+			Selection::new(DocSpot { line: 0, col: 1 }).with_head(DocSpot { line: 0, col: 2 });
 		let marks = Marks {
 			selection: Some(&selection),
 			..Marks::default()
@@ -1745,7 +1745,7 @@ mod tests {
 		terminal.process(b"aaaaa\r\nbbbbb\r\nccccc\r\nddddd");
 		// Line 1 ("bbbbb") is selected whole — up in the history, off the screen.
 		let selection =
-			Selection::new(Spot { line: 1, col: 0 }).with_head(Spot { line: 1, col: 4 });
+			Selection::new(DocSpot { line: 1, col: 0 }).with_head(DocSpot { line: 1, col: 4 });
 
 		// At the live bottom the top row shows line 2, so nothing on screen is selected.
 		let marks = |terminal: &Terminal| Marks {
@@ -1817,7 +1817,7 @@ mod tests {
 			},
 		];
 		let selection =
-			Selection::new(Spot { line: 0, col: 3 }).with_head(Spot { line: 0, col: 4 });
+			Selection::new(DocSpot { line: 0, col: 3 }).with_head(DocSpot { line: 0, col: 4 });
 		let mask = match_mask(&hits, 1, 5);
 		let marks = Marks {
 			selection: Some(&selection),
@@ -2023,14 +2023,15 @@ mod tests {
 		let mut terminal = Terminal::new(1, cols);
 		terminal.process(b"\x1b]8;;https://example.com\x07site\x1b]8;;\x07X");
 		let screen = terminal.screen();
-		let first = link_at(screen, Cell { row: 0, col: 0 }).expect("the first cell is linked");
+		let first =
+			link_at(screen, ScreenSpot { row: 0, col: 0 }).expect("the first cell is linked");
 		assert_eq!(first.uri(), "https://example.com");
 		assert_eq!(
-			link_at(screen, Cell { row: 0, col: 2 }).as_ref(),
+			link_at(screen, ScreenSpot { row: 0, col: 2 }).as_ref(),
 			Some(&first),
 			"every cell of one link reads back as the same link"
 		);
-		assert_eq!(link_at(screen, Cell { row: 0, col: 4 }), None);
+		assert_eq!(link_at(screen, ScreenSpot { row: 0, col: 4 }), None);
 	}
 
 	#[test]
@@ -2045,8 +2046,8 @@ mod tests {
 			b"\x1b]8;;https://example.com\x07ab\x1b]8;;\x07\x1b]8;;https://example.com\x07cd\x1b]8;;\x07",
 		);
 		let screen = terminal.screen();
-		let left = link_at(screen, Cell { row: 0, col: 0 }).expect("linked");
-		let right = link_at(screen, Cell { row: 0, col: 2 }).expect("linked");
+		let left = link_at(screen, ScreenSpot { row: 0, col: 0 }).expect("linked");
+		let right = link_at(screen, ScreenSpot { row: 0, col: 2 }).expect("linked");
 		assert_eq!(left.uri(), right.uri(), "the same address");
 		assert_ne!(left, right, "and still not the same link");
 	}
@@ -2062,11 +2063,11 @@ mod tests {
 			b"\x1b]8;id=1;https://example.com\x07ab\x1b]8;;\x07 \x1b]8;id=1;https://example.com\x07cd\x1b]8;;\x07",
 		);
 		let screen = terminal.screen();
-		let first = link_at(screen, Cell { row: 0, col: 0 }).expect("linked");
-		let second = link_at(screen, Cell { row: 0, col: 3 }).expect("linked");
+		let first = link_at(screen, ScreenSpot { row: 0, col: 0 }).expect("linked");
+		let second = link_at(screen, ScreenSpot { row: 0, col: 3 }).expect("linked");
 		assert_eq!(first, second, "one id, one link, across the gap");
 		assert_eq!(
-			link_at(screen, Cell { row: 0, col: 2 }),
+			link_at(screen, ScreenSpot { row: 0, col: 2 }),
 			None,
 			"and the gap between them is not part of it"
 		);
@@ -2087,7 +2088,7 @@ mod tests {
 				.all(|run| run.style.underline == UnderlineStyle::None)
 		);
 
-		let link = link_at(terminal.screen(), Cell { row: 0, col: 0 }).expect("the link");
+		let link = link_at(terminal.screen(), ScreenSpot { row: 0, col: 0 }).expect("the link");
 		let hovered = plan_runs(
 			terminal.screen(),
 			0,

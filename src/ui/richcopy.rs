@@ -195,12 +195,12 @@ fn escape_into(out: &mut String, text: &str) {
 mod tests {
 	use super::*;
 	use crate::term::Terminal;
-	use crate::ui::selection::{Selection, Spot};
+	use crate::ui::selection::{DocSpot, Selection};
 
 	// A document position (absolute line, column) — the space the selection endpoints live in (§40).
 	// Nothing has scrolled off in these tests, so line N is the emulator's row N.
-	fn grid_cell(line: u64, col: u16) -> Spot {
-		Spot { line, col }
+	fn grid_cell(line: u64, col: u16) -> DocSpot {
+		DocSpot { line, col }
 	}
 
 	// A fresh emulator fed `input`, so a test can serialise real grid contents.

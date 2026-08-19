@@ -384,7 +384,7 @@ impl<'a> Screen<'a> {
 	/// coordinate the OSC 133 prompt marks (§34) and the search matches (§35) are stored in.
 	///
 	/// This is the one place the mapping `history_size + row - display_offset` is written down.
-	/// `cell` reads through it, and a click resolves through it (`ui::selection::Cell::spot`), so a
+	/// `cell` reads through it, and a click resolves through it (`ui::selection::ScreenSpot::spot`), so a
 	/// clicked cell, a prompt tick and a found match cannot disagree about what "line 12" means.
 	/// The subtraction cannot underflow — the engine clamps the display offset to the history it
 	/// actually retains, so it is never deeper than `history_size` — and `saturating_sub` says as
