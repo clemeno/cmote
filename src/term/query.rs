@@ -148,7 +148,7 @@ pub struct Queries {
 }
 
 impl Queries {
-	/// QueryScan a chunk of shell output and return the queries that completed in it (usually none).
+	/// Scan a chunk of shell output and return the queries that completed in it (usually none).
 	/// Safe at any chunk boundary — the state machine carries over between calls.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Query> {
 		let mut found = Vec::new();

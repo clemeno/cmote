@@ -380,7 +380,7 @@ pub struct Rectangles {
 }
 
 impl Rectangles {
-	/// RectScan a chunk of shell output, returning what to do and where. Safe at any chunk boundary — the
+	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary — the
 	/// state machine carries over between calls, so a sequence may be split anywhere, even between the
 	/// ESC and the `[`.
 	///

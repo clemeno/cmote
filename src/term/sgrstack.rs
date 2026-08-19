@@ -191,7 +191,7 @@ pub struct SgrStack {
 }
 
 impl SgrStack {
-	/// SgrStackScan a chunk of shell output, returning `(offset, request)` for each sequence found. Safe at
+	/// Scan a chunk of shell output, returning `(offset, request)` for each sequence found. Safe at
 	/// any chunk boundary — the state machine carries over between calls, so a sequence may be split
 	/// anywhere, even between the ESC and the `[`.
 	///
@@ -330,7 +330,7 @@ impl SgrStack {
 mod tests {
 	use super::*;
 
-	/// SgrStackScan a whole chunk in one go — the shape of every test below that is not about splitting.
+	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<(usize, SgrStackRequest)> {
 		SgrStack::default().feed(bytes)
 	}

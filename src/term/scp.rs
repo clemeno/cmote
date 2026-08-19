@@ -108,7 +108,7 @@ pub struct Scp {
 }
 
 impl Scp {
-	/// ScpScan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
+	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -310,7 +310,7 @@ pub fn flip(col: u16, cols: u16) -> u16 {
 mod tests {
 	use super::*;
 
-	/// ScpScan a whole chunk in one go.
+	/// Scan a whole chunk in one go.
 	fn scan(bytes: &[u8]) -> Vec<(usize, ScpRequest)> {
 		Scp::default().feed(bytes)
 	}

@@ -107,7 +107,7 @@ pub struct ModKeys {
 }
 
 impl ModKeys {
-	/// ModKeysScan a chunk of shell output for a `modifyOtherKeys` change or a question about one, and
+	/// Scan a chunk of shell output for a `modifyOtherKeys` change or a question about one, and
 	/// return the reply bytes owed. Safe at any chunk boundary — the state machine carries over
 	/// between calls.
 	///

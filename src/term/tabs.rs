@@ -79,7 +79,7 @@ pub struct Tabs {
 }
 
 impl Tabs {
-	/// TabsScan a chunk of shell output, returning where each DECST8C sat. Safe at any chunk boundary —
+	/// Scan a chunk of shell output, returning where each DECST8C sat. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -222,7 +222,7 @@ pub fn every_eighth_column(columns: u16, col: u16) -> Vec<u8> {
 mod tests {
 	use super::*;
 
-	/// TabsScan a whole chunk in one go — the shape of every test below that is not about splitting.
+	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<usize> {
 		Tabs::default().feed(bytes)
 	}

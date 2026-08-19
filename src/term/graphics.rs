@@ -278,7 +278,7 @@ impl Default for Images {
 }
 
 impl Images {
-	/// GraphicsScan a chunk of shell output. Each returned event carries the offset the engine should be
+	/// Scan a chunk of shell output. Each returned event carries the offset the engine should be
 	/// advanced to before it is acted on — past its own bytes for a picture, before them for an erase,
 	/// for the reasons on `GraphicsEvent` — so the caller advances, acts, and carries on: the split-advance
 	/// `osc133` established (§34).

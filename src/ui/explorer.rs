@@ -411,10 +411,7 @@ pub fn context_menu<'a>(
 			"Upload folder…",
 			ExplorerMessage::UploadFolderHere(path.clone()),
 		),
-		item(
-			"Rename…",
-			ExplorerMessage::RenameStarted(path.clone()),
-		),
+		item("Rename…", ExplorerMessage::RenameStarted(path.clone())),
 		// Remove this folder and everything inside it, once confirmed (§18).
 		item("Delete…", ExplorerMessage::DeleteStarted(path.clone())),
 		item("Copy name", ExplorerMessage::CopyName(path.clone())),

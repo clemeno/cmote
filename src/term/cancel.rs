@@ -140,7 +140,7 @@ pub struct Cancel {
 }
 
 impl Cancel {
-	/// CancelScan a chunk of shell output, returning each DECSLRM it carried. Safe at any chunk boundary:
+	/// Scan a chunk of shell output, returning each DECSLRM it carried. Safe at any chunk boundary:
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
