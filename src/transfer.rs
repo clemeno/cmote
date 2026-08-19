@@ -920,9 +920,7 @@ impl Queue {
 	/// Put one file on the wire (§17). A fresh file starting means the previous transfer's resume
 	/// offer, if any, is stale (§16); this file is remembered so its own failure can be resumed.
 	fn start_upload(&mut self, local: PathBuf, remote: String) -> Effects {
-		let total = std::fs::metadata(&local)
-			.map(|meta| meta.len())
-			.unwrap_or(0);
+		let total = std::fs::metadata(&local).map_or(0, |meta| meta.len());
 		self.resumable = None;
 		self.in_flight = Some(Resumable::Upload {
 			local: local.clone(),

@@ -977,10 +977,10 @@ fn confirm_upload_panel<'a>(
 /// batch, the twin of the download's `download_clash_panel` (§21) — same chrome and same four
 /// answers, but each wired to `UploadClashResolved`. Every dismissal route cancels, so backing
 /// out sends nothing.
-fn upload_clash_panel<'a>(
-	dialog_body: &'a text_editor::Content,
+fn upload_clash_panel(
+	dialog_body: &text_editor::Content,
 	card: crate::ui::dialog::Card,
-) -> Element<'a, Message> {
+) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Some of these files are already there".to_owned(),
 		Message::UploadClashResolved(ClashChoice::Cancel),
@@ -1007,10 +1007,10 @@ fn upload_clash_panel<'a>(
 /// and some of those names are already in it. Asked once for the whole batch rather than
 /// once per file — twenty files with twenty collisions is one decision, not twenty. Every
 /// dismissal route cancels, so backing out downloads nothing.
-fn download_clash_panel<'a>(
-	dialog_body: &'a text_editor::Content,
+fn download_clash_panel(
+	dialog_body: &text_editor::Content,
 	card: crate::ui::dialog::Card,
-) -> Element<'a, Message> {
+) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Some of these files are already there".to_owned(),
 		Message::DownloadClash(ClashChoice::Cancel),
@@ -1112,10 +1112,10 @@ fn integration_panel<'a>(
 /// The delete confirmation (§18), in the shared dialog chrome: the warning and the names in the
 /// (selectable) body, then Cancel / Delete. The ✕ and the backdrop both keep the entries, so
 /// dismissing never deletes — the destructive action is only ever the explicit button.
-fn delete_panel<'a>(
-	dialog_body: &'a text_editor::Content,
+fn delete_panel(
+	dialog_body: &text_editor::Content,
 	card: crate::ui::dialog::Card,
-) -> Element<'a, Message> {
+) -> Element<'_, Message> {
 	crate::ui::dialog::dialog(
 		"Delete from the server?".to_owned(),
 		Message::DeleteCancelled,

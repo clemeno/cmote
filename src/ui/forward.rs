@@ -185,11 +185,7 @@ fn add_form(form: &ForwardForm) -> Element<'_, Message> {
 }
 
 /// One kind-selector button, tinted when it is the chosen kind (§27).
-fn kind_button<'a>(
-	label: &'a str,
-	kind: ForwardKind,
-	selected: ForwardKind,
-) -> Element<'a, Message> {
+fn kind_button(label: &str, kind: ForwardKind, selected: ForwardKind) -> Element<'_, Message> {
 	let is_selected = kind == selected;
 	button(text(label).size(BODY_SIZE))
 		.padding([4, 10])

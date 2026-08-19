@@ -633,7 +633,7 @@ mod tests {
 		resume: bool,
 	) -> (anyhow::Result<CopyOutcome>, Vec<SshEvent>) {
 		let (tx, mut rx) = mpsc::channel::<SshEvent>(64);
-		let size = source.metadata().map(|meta| meta.len()).unwrap_or(0);
+		let size = source.metadata().map_or(0, |meta| meta.len());
 		let mut ticker = Ticker::default();
 		let outcome = stream(
 			source,

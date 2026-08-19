@@ -221,12 +221,12 @@ mod platform {
 				ptr::null_mut(),
 				CLSCTX_INPROC_SERVER,
 				&IID_ITASKBARLIST3,
-				&mut created,
+				&raw mut created,
 			);
 			if status != S_OK || created.is_null() {
 				return None;
 			}
-			created as *mut Interface
+			created.cast::<Interface>()
 		};
 		// SAFETY: `taskbar` is the interface just created. `HrInit` is slot 3 and must be called
 		// before any other method on it; a failure means the shell is not ready to talk to us, and

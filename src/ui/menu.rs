@@ -114,7 +114,7 @@ pub fn separator() -> Element<'static, Message> {
 
 /// The menu surface holding the items. Fixed width, rounded like the dialog card, and
 /// clipped so a hovered item's fill respects the corners.
-pub fn panel<'a>(items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+pub fn panel(items: Vec<Element<'_, Message>>) -> Element<'_, Message> {
 	container(column(items).spacing(1))
 		.width(Length::Fixed(WIDTH))
 		.padding(4)

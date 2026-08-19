@@ -62,7 +62,7 @@ pub fn remote_table() -> RemoteTable {
 fn lock(table: &RemoteTable) -> std::sync::MutexGuard<'_, HashMap<u16, (String, u16, u64)>> {
 	table
 		.lock()
-		.unwrap_or_else(|poisoned| poisoned.into_inner())
+		.unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A TCP connection a local/dynamic listener accepted, handed back to `stream` so it can open
@@ -135,64 +135,61 @@ impl Forwards {
 					lock(&self.table)
 						.insert(requested, (spec.target_host.clone(), spec.target_port, id));
 				}
-				match session
+				if let Ok(assigned) = session
 					.tcpip_forward(spec.listen_host.clone(), u32::from(requested))
 					.await
 				{
-					Ok(assigned) => {
-						// russh returns the server-chosen port for a 0 request and 0 for a concrete
-						// one (RFC 4254), so the port actually bound is the assignment when we asked
-						// for 0, else exactly what we asked for.
-						let bound = if requested == 0 {
-							match u16::try_from(assigned) {
-								Ok(port) if port != 0 => port,
-								// A server that accepted `-R 0` without naming a real port leaves
-								// nothing to map or cancel: treat it as a refusal rather than dangle.
-								_ => {
-									let _ = events
-										.send(SshEvent::ForwardFailed {
-											id,
-											reason: "the server assigned no port for the remote \
-											         forward"
-												.to_owned(),
-										})
-										.await;
-									return;
-								}
+					// russh returns the server-chosen port for a 0 request and 0 for a concrete
+					// one (RFC 4254), so the port actually bound is the assignment when we asked
+					// for 0, else exactly what we asked for.
+					let bound = if requested == 0 {
+						match u16::try_from(assigned) {
+							Ok(port) if port != 0 => port,
+							// A server that accepted `-R 0` without naming a real port leaves
+							// nothing to map or cancel: treat it as a refusal rather than dangle.
+							_ => {
+								let _ = events
+									.send(SshEvent::ForwardFailed {
+										id,
+										reason: "the server assigned no port for the remote \
+    											         forward"
+											.to_owned(),
+									})
+									.await;
+								return;
 							}
-						} else {
-							requested
-						};
-						// For a `-R 0` the mapping could not be inserted up front — do it now, keyed
-						// by the port the server actually bound (what its `forwarded-tcpip` channels
-						// will report).
-						if requested == 0 {
-							lock(&self.table)
-								.insert(bound, (spec.target_host.clone(), spec.target_port, id));
 						}
-						// Remember the BOUND port (not the requested 0) so removal cancels and prunes
-						// the right one.
-						self.remote.insert(id, (spec.listen_host.clone(), bound));
-						// Tell the GUI the assigned port only when the server chose it; a concrete
-						// request already knows its own port.
-						let assigned_port = (requested == 0).then_some(bound);
-						let _ = events
-							.send(SshEvent::ForwardReady { id, assigned_port })
-							.await;
+					} else {
+						requested
+					};
+					// For a `-R 0` the mapping could not be inserted up front — do it now, keyed
+					// by the port the server actually bound (what its `forwarded-tcpip` channels
+					// will report).
+					if requested == 0 {
+						lock(&self.table)
+							.insert(bound, (spec.target_host.clone(), spec.target_port, id));
 					}
-					Err(_) => {
-						// The server refused: undo the bookkeeping so nothing dangles. (Nothing was
-						// inserted for a `-R 0`, so the remove is a harmless no-op there.)
-						if requested != 0 {
-							lock(&self.table).remove(&requested);
-						}
-						let _ = events
-							.send(SshEvent::ForwardFailed {
-								id,
-								reason: "the server refused the remote forward".to_owned(),
-							})
-							.await;
+					// Remember the BOUND port (not the requested 0) so removal cancels and prunes
+					// the right one.
+					self.remote.insert(id, (spec.listen_host.clone(), bound));
+					// Tell the GUI the assigned port only when the server chose it; a concrete
+					// request already knows its own port.
+					let assigned_port = (requested == 0).then_some(bound);
+					let _ = events
+						.send(SshEvent::ForwardReady { id, assigned_port })
+						.await;
+				} else {
+					// The server refused: undo the bookkeeping so nothing dangles. (Nothing was
+					// inserted for a `-R 0`, so the remove is a harmless no-op there.)
+					if requested != 0 {
+						lock(&self.table).remove(&requested);
 					}
+					let _ = events
+						.send(SshEvent::ForwardFailed {
+							id,
+							reason: "the server refused the remote forward".to_owned(),
+						})
+						.await;
 				}
 			}
 		}
@@ -304,7 +301,7 @@ pub async fn open_local_tunnel<H: RusshHandler>(
 		peer,
 	} = accepted;
 
-	match session
+	if let Ok(channel) = session
 		.channel_open_direct_tcpip(
 			target_host,
 			u32::from(target_port),
@@ -313,21 +310,18 @@ pub async fn open_local_tunnel<H: RusshHandler>(
 		)
 		.await
 	{
-		Ok(channel) => {
-			let mut stream = channel.into_stream();
-			tokio::spawn(async move {
-				let mut tcp = tcp;
-				// The channel is open, so a connection is now flowing: raise the row's gauge, pump
-				// until either end closes (errors here are ordinary connection ends), then lower it.
-				let _ = events.send(SshEvent::ForwardConnectionOpened { id }).await;
-				let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
-				let _ = events.send(SshEvent::ForwardConnectionClosed { id }).await;
-			});
-		}
-		Err(_) => {
-			// The server would not open the channel (target refused, policy): let `tcp` drop,
-			// which closes the client's side. Nothing flowed, so the gauge is left untouched.
-		}
+		let mut stream = channel.into_stream();
+		tokio::spawn(async move {
+			let mut tcp = tcp;
+			// The channel is open, so a connection is now flowing: raise the row's gauge, pump
+			// until either end closes (errors here are ordinary connection ends), then lower it.
+			let _ = events.send(SshEvent::ForwardConnectionOpened { id }).await;
+			let _ = tokio::io::copy_bidirectional(&mut tcp, &mut stream).await;
+			let _ = events.send(SshEvent::ForwardConnectionClosed { id }).await;
+		});
+	} else {
+		// The server would not open the channel (target refused, policy): let `tcp` drop,
+		// which closes the client's side. Nothing flowed, so the gauge is left untouched.
 	}
 }
 

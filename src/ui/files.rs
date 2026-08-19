@@ -585,7 +585,7 @@ fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 /// position is computed from the same geometry the grid is laid out with — the index, the
 /// column count and the scroll offset — and flipped to the cell's left when the card would
 /// hang off the right edge.
-fn details<'a>(files: &'a Files, show_hidden: bool, width: f32) -> Option<Element<'a, Message>> {
+fn details(files: &Files, show_hidden: bool, width: f32) -> Option<Element<'_, Message>> {
 	let index = files.selected_index(show_hidden)?;
 	let rows = files.rows(show_hidden);
 	let entry = *rows.get(index)?;
@@ -1078,12 +1078,12 @@ pub fn context_menu<'a>(
 /// rather than spilling off it — the panel is a fixed `menu::WIDTH` wide, so once `anchor.x`
 /// would push its right edge past `width`, it is pinned `MENU_INSET` in from that edge. `width`
 /// is the pane's, which is the window's.
-fn place_menu<'a>(
-	panel: Element<'a, Message>,
+fn place_menu(
+	panel: Element<'_, Message>,
 	anchor: iced::Point,
 	height: f32,
 	width: f32,
-) -> Element<'a, Message> {
+) -> Element<'_, Message> {
 	let bottom = (height - anchor.y).max(MENU_INSET);
 	let left = anchor.x.min((width - menu::WIDTH - MENU_INSET).max(0.0));
 	container(panel)

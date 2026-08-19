@@ -262,7 +262,7 @@ fn local_bar(shells: &'static [crate::local::shells::LocalShell]) -> Element<'st
 /// selected target while the cursor is still in the box. Type, arrow nothing, press Enter,
 /// connect. Backspace and Delete go the other way: the focused field captures those, so the
 /// Delete key cannot reach the list and raise a delete prompt while a pattern is being edited.
-fn filter_bar<'a>(filter: &'a str, shown: usize, total: usize) -> Element<'a, Message> {
+fn filter_bar(filter: &str, shown: usize, total: usize) -> Element<'_, Message> {
 	let field = text_input(
 		"Filter targets — a fragment, or a glob with * and ?",
 		filter,

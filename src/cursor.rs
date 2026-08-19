@@ -759,7 +759,7 @@ mod platform {
 				dc,
 				ptr::from_ref(&header).cast::<BITMAPINFO>(),
 				DIB_RGB_COLORS,
-				&mut bits,
+				&raw mut bits,
 				ptr::null_mut(),
 				0,
 			);
@@ -783,7 +783,7 @@ mod platform {
 				hbmMask: mask,
 				hbmColor: color,
 			};
-			let cursor = CreateIconIndirect(&info);
+			let cursor = CreateIconIndirect(&raw const info);
 			// The bitmaps are copied into the cursor, so both are ours to drop right away.
 			DeleteObject(mask);
 			DeleteObject(color);
@@ -823,7 +823,7 @@ mod tests {
 	fn held() -> std::sync::MutexGuard<'static, ()> {
 		let guard = TEST_LOCK
 			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner());
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		forget();
 		guard
 	}

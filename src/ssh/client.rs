@@ -723,7 +723,7 @@ async fn stream(
 					Some(SessionMsg::CloseIdentity(identity)) => shells.close(identity).await,
 					// Passphrase and keyboard-interactive answers only matter during auth;
 					// ignore any that arrive late, once the shell is already streaming.
-					Some(SessionMsg::Passphrase(_)) | Some(SessionMsg::Interactive(_)) => {}
+					Some(SessionMsg::Passphrase(_) | SessionMsg::Interactive(_)) => {}
 					// The transfer runs on its own channel and its own task, so the
 					// shell keeps flowing while a big file goes across (§17).
 					Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {

@@ -453,7 +453,7 @@ impl Terminal {
 						self.prompts.apply(mark, history, row);
 					}
 					Interruption::Graphics(event) => {
-						placed_on_alternate |= self.apply_graphics(event)
+						placed_on_alternate |= self.apply_graphics(event);
 					}
 					// A bookmark is read the same way a prompt mark is — the cursor, now that the
 					// engine has been advanced to the sequence, names the line the script meant.

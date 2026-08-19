@@ -108,7 +108,7 @@ impl Output {
 	/// close the channel without sending one, and the alternative — calling every such command a
 	/// failure — would break listings on those servers.
 	pub fn ok(&self) -> bool {
-		!self.status.is_some_and(|code| code != 0)
+		self.status.is_none_or(|code| code == 0)
 	}
 
 	/// The remote's own words about the failure, for a notice line. Its stderr when it wrote any,

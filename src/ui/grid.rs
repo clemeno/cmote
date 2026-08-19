@@ -1266,12 +1266,14 @@ fn plan_runs(
 		// cell's two-column run, so emit nothing for it.
 		if cell
 			.as_ref()
-			.is_some_and(|cell| cell.is_wide_continuation())
+			.is_some_and(super::super::term::screen::Cell::is_wide_continuation)
 		{
 			continue;
 		}
 
-		let is_wide = cell.as_ref().is_some_and(|cell| cell.is_wide());
+		let is_wide = cell
+			.as_ref()
+			.is_some_and(super::super::term::screen::Cell::is_wide);
 		let glyph = match &cell {
 			Some(cell) if cell.has_contents() => cell.contents().to_string(),
 			_ => " ".to_string(),

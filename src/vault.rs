@@ -69,7 +69,7 @@ impl Vault {
 	/// CREATE a master passphrase (first time, typed twice to confirm) and prompting to UNLOCK
 	/// an existing one (typed once). A path that cannot be resolved is treated as "no vault".
 	pub fn exists() -> bool {
-		vault_path().map(|path| path.exists()).unwrap_or(false)
+		vault_path().is_ok_and(|path| path.exists())
 	}
 
 	/// Create a fresh, empty vault held only in memory. Nothing is written until the first

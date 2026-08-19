@@ -169,7 +169,7 @@ fn to_rgb(color: Color, default: (u8, u8, u8)) -> (u8, u8, u8) {
 
 /// Fade `fg` halfway toward `bg` — how the grid draws faint (SGR 2) text.
 fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
-	let mix = |a: u8, b: u8| ((u16::from(a) + u16::from(b)) / 2) as u8;
+	let mix = |a: u8, b: u8| u16::midpoint(u16::from(a), u16::from(b)) as u8;
 	(mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
 }
 

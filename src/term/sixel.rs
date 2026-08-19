@@ -224,7 +224,7 @@ fn canvas_size(payload: &[u8]) -> Option<(u32, u32)> {
 
 	walk_payload(payload, |command| match command {
 		SixelCommand::Raster { width, height } => {
-			raster = Some((u32::from(width), u32::from(height)))
+			raster = Some((u32::from(width), u32::from(height)));
 		}
 		SixelCommand::Run { count, bits } => {
 			x += u32::from(count);

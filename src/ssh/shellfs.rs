@@ -239,7 +239,7 @@ pub async fn read_all(runner: &Runner, path: &str, limit: u64) -> Result<Vec<u8>
 				}
 			}
 			ChannelMsg::ExtendedData { data, .. } => {
-				stderr.push_str(&String::from_utf8_lossy(&data))
+				stderr.push_str(&String::from_utf8_lossy(&data));
 			}
 			ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
 			ChannelMsg::Eof | ChannelMsg::Close => break,
@@ -314,7 +314,7 @@ async fn finish_write(channel: &mut Channel<client::Msg>) -> Result<()> {
 	while let Some(message) = channel.wait().await {
 		match message {
 			ChannelMsg::ExtendedData { data, .. } => {
-				stderr.push_str(&String::from_utf8_lossy(&data))
+				stderr.push_str(&String::from_utf8_lossy(&data));
 			}
 			ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
 			ChannelMsg::Eof | ChannelMsg::Close => break,
@@ -386,7 +386,7 @@ pub async fn fetch(
 				}
 			}
 			ChannelMsg::ExtendedData { data, .. } => {
-				stderr.push_str(&String::from_utf8_lossy(&data))
+				stderr.push_str(&String::from_utf8_lossy(&data));
 			}
 			ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
 			ChannelMsg::Eof | ChannelMsg::Close => break,

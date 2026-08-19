@@ -153,8 +153,7 @@ async fn copy(
 		let have = tokio::fs::metadata(local)
 			.await
 			.ok()
-			.map(|meta| meta.len())
-			.unwrap_or(0);
+			.map_or(0, |meta| meta.len());
 		if total > 0 {
 			match resume_start(true, Some(have), total) {
 				Start::Skip => {

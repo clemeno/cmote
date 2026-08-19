@@ -403,7 +403,7 @@ impl Explorer {
 	/// background to catch any shell-side change.
 	pub fn collapse(&mut self, path: &str) {
 		let prefix = format!("{}/", path.trim_end_matches('/'));
-		for (key, node) in self.nodes.iter_mut() {
+		for (key, node) in &mut self.nodes {
 			if key == path || key.starts_with(&prefix) {
 				node.open = false;
 			}
@@ -417,7 +417,7 @@ impl Explorer {
 	/// background. The root is left open because it is the tree's anchor — closing it would
 	/// collapse the pane to a single "/" row.
 	pub fn collapse_all(&mut self) {
-		for (key, node) in self.nodes.iter_mut() {
+		for (key, node) in &mut self.nodes {
 			if key.as_str() != ROOT {
 				node.open = false;
 			}
@@ -574,7 +574,7 @@ impl Explorer {
 	/// branch you cannot see, and a fetch in flight will bring the fresh listing itself.
 	pub fn refresh_open(&mut self) -> Vec<String> {
 		let mut needed = Vec::new();
-		for (path, node) in self.nodes.iter_mut() {
+		for (path, node) in &mut self.nodes {
 			if node.open && node.children.is_some() && !node.loading {
 				node.loading = true;
 				needed.push(path.clone());
@@ -598,7 +598,7 @@ impl Explorer {
 	/// is the ordinary reason to do it, so the same folder is exactly where they want to land.
 	pub fn reread(&mut self) -> Vec<String> {
 		let mut needed = Vec::new();
-		for (path, node) in self.nodes.iter_mut() {
+		for (path, node) in &mut self.nodes {
 			node.children = None;
 			node.loading = node.open;
 			if node.open {

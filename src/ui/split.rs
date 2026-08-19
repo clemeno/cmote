@@ -393,8 +393,8 @@ mod tests {
 		// `LEEWAY` exists because a four-pixel target is a fussy thing to hit: what is DRAWN stays
 		// `SPACING` wide, what can be GRABBED is `SPACING + LEEWAY`. Just inside that band hits,
 		// and a pixel past it misses — the same band the drag itself uses.
-		let inside = (SPACING + LEEWAY) / 2.0 - 1.0;
-		let outside = (SPACING + LEEWAY) / 2.0 + 1.0;
+		let inside = f32::midpoint(SPACING, LEEWAY) - 1.0;
+		let outside = f32::midpoint(SPACING, LEEWAY) + 1.0;
 		assert_eq!(
 			seam_at(&state, window, Point::new(500.0 - inside, 300.0)),
 			Some(split)

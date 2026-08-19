@@ -172,7 +172,9 @@ pub(crate) fn mark_refused(error: anyhow::Error) -> anyhow::Error {
 /// only the outermost link, so a caller between the refusal and the report stays free to add its
 /// own context without hiding the class underneath it.
 pub(crate) fn was_refused(error: &anyhow::Error) -> bool {
-	error.chain().any(|link| link.is::<TransferRefused>())
+	error
+		.chain()
+		.any(<dyn std::error::Error + 'static>::is::<TransferRefused>)
 }
 
 /// Where a copy should begin, given whether this is a resume and how big the destination already

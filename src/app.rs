@@ -4502,18 +4502,17 @@ impl Tab {
 	/// missing/closed channel becomes a visible error rather than a silent drop.
 	/// `try_send` is non-blocking, so it is safe on the synchronous GUI thread.
 	fn send_command(&mut self, command: SshCommand) -> bool {
-		match &self.command_tx {
-			Some(sender) => match sender.try_send(command) {
+		if let Some(sender) = &self.command_tx {
+			match sender.try_send(command) {
 				Ok(()) => true,
 				Err(error) => {
 					self.show_error(&format!("Could not reach the SSH worker: {error}"));
 					false
 				}
-			},
-			None => {
-				self.show_error("SSH worker is not ready yet.");
-				false
 			}
+		} else {
+			self.show_error("SSH worker is not ready yet.");
+			false
 		}
 	}
 
@@ -4977,7 +4976,7 @@ impl Tab {
 			}
 			SshEvent::IntegrationFailed(reason) => self.on_integration_failed(&reason),
 			SshEvent::ForwardReady { id, assigned_port } => {
-				self.mark_forward_ready(id, assigned_port)
+				self.mark_forward_ready(id, assigned_port);
 			}
 			SshEvent::ForwardFailed { id, reason } => {
 				self.set_forward_status(id, crate::forward::ForwardStatus::Failed(reason));
@@ -10749,7 +10748,9 @@ mod tests {
 			"cme's scrollback survived the round trip"
 		);
 		assert_eq!(
-			app.search.as_ref().map(|search| search.count()),
+			app.search
+				.as_ref()
+				.map(super::super::term::search::Search::count),
 			Some(1),
 			"and so did its find bar, query and all"
 		);
@@ -11575,7 +11576,7 @@ mod tests {
 	fn a_dialog_header_and_a_chip_drive_the_same_hand() {
 		let _held = crate::cursor::TEST_LOCK
 			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner());
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		crate::cursor::forget();
 		let mut app = tab_app();
 
@@ -11616,7 +11617,7 @@ mod tests {
 	fn a_chip_that_vanishes_under_the_pointer_lets_go_of_the_hand() {
 		let _held = crate::cursor::TEST_LOCK
 			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner());
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
 		crate::cursor::forget();
 		let mut app = tab_app();
 		let pane = app.focus;

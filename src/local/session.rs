@@ -108,173 +108,170 @@ pub async fn run(
 
 	loop {
 		tokio::select! {
-			// Output first, always. `select!` picks at random among the branches that are ready, so
-			// without this a shell's last line could be sitting in the channel while the exit branch
-			// wins the toss and breaks the loop out from under it. Biased polling costs nothing and
-			// says the priority out loud: bytes the shell has already produced are delivered before
-			// the fact that it has stopped producing them.
-			biased;
+					// Output first, always. `select!` picks at random among the branches that are ready, so
+					// without this a shell's last line could be sitting in the channel while the exit branch
+					// wins the toss and breaks the loop out from under it. Biased polling costs nothing and
+					// says the priority out loud: bytes the shell has already produced are delivered before
+					// the fact that it has stopped producing them.
+					biased;
 
-			// The shell printed something. `None` is the pty stream ending, which on Windows only happens
-			// once cmote itself tore the pty down — so it is a way OUT of this loop but never the reason,
-			// and the reason is the branch below.
-			chunk = stream.bytes.recv() => {
-				match chunk {
-					Some(bytes) => {
-						let _ = events
-							.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
-							.await;
-					}
-					None => break,
-				}
-			}
-			// The shell exited: the user typed `exit`, or the program died. THIS is what ends a local
-			// session by itself — see `pty`'s note on why waiting for the output stream to end instead
-			// would be waiting on something this decision causes.
-			//
-			// One last flush before leaving. `biased` above already guarantees that anything QUEUED has
-			// been delivered; this catches what the reader thread has read but not yet handed over,
-			// which is a different race and a real one — the exit is observed on its own thread, and a
-			// shell's final line can be in flight when the process is already gone.
-			_ = stream.exited.recv() => {
-				while let Ok(bytes) = stream.bytes.try_recv() {
-					let _ = events
-						.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
-						.await;
-				}
-				break;
-			}
-			command = commands.recv() => {
-				match command {
-					// Typing, and the emulator's own replies to the queries a program sent (§23). Both go
-					// to the one shell this session has, which is why neither needs its identity read.
-					Some(SessionMsg::Data(bytes)) | Some(SessionMsg::Reply { bytes, .. }) => {
-						pty.write(bytes).await;
-					}
-					Some(SessionMsg::Resize { cols, rows }) => pty.resize(cols, rows),
-
-					// The file panes, the details popup and both viewers (§18, §19, §20, §32, §53). Each
-					// runs on its own blocking task so a crowded directory or a large file never holds up
-					// the terminal — the same rule the SFTP listings follow.
-					Some(SessionMsg::ListDir(path)) => fs::list(&events, path).await,
-					Some(SessionMsg::ListFiles { path, request }) => {
-						fs::list_all(&events, path, request).await;
-					}
-					Some(SessionMsg::ReadLink(path)) => fs::read_link(&events, path).await,
-					Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path).await,
-					Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths).await,
-					Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to).await,
-					Some(SessionMsg::FileLoad { viewer_id, path, limit, .. }) => {
-						fs::load(&events, viewer_id, path, limit).await;
-					}
-					Some(SessionMsg::EditSave { viewer_id, path, bytes, .. }) => {
-						fs::save(&events, viewer_id, path, bytes).await;
-					}
-
-					// The transfers (§16, §17, §19). A fresh cancel flag per transfer, kept here so the
-					// status bar's ✕ can reach the one in flight; a fresh answer channel for the recursive
-					// ones, which can park mid-way to ask about a collision.
-					Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
-						let flag = arm(&mut cancel);
-						copy::upload(&events, local, remote, overwrite, resume, flag).await;
-					}
-					Some(SessionMsg::Download { remote, local, resume }) => {
-						let flag = arm(&mut cancel);
-						copy::download(&events, remote, local, resume, flag).await;
-					}
-					Some(SessionMsg::CheckUploads { dir, names }) => {
-						copy::precheck(&events, dir, names).await;
-					}
-					Some(SessionMsg::UploadTree { local, remote, resume }) => {
-						let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
-						conflicts = Some(answers);
-						let flag = arm(&mut cancel);
-						copy::upload_tree(&events, local, remote, resume, receiver, flag).await;
-					}
-					Some(SessionMsg::DownloadTree { remote, local, resume }) => {
-						let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
-						conflicts = Some(answers);
-						let flag = arm(&mut cancel);
-						copy::download_tree(&events, remote, local, resume, receiver, flag).await;
-					}
-					// Forward the answer to the copy parked on it. A send that fails is nothing to act
-					// on: the transfer already ended, so the answer simply had no one waiting.
-					Some(SessionMsg::ResolveConflict(choice)) => {
-						if let Some(answers) = conflicts.as_ref() {
-							let _ = answers.send(choice).await;
+					// The shell printed something. `None` is the pty stream ending, which on Windows only happens
+					// once cmote itself tore the pty down — so it is a way OUT of this loop but never the reason,
+					// and the reason is the branch below.
+					chunk = stream.bytes.recv() => {
+						match chunk {
+							Some(bytes) => {
+								let _ = events
+									.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
+									.await;
+							}
+							None => break,
 						}
 					}
-					Some(SessionMsg::CancelTransfer) => {
-						if let Some(flag) = cancel.as_ref() {
-							flag.store(true, Ordering::Relaxed);
+					// The shell exited: the user typed `exit`, or the program died. THIS is what ends a local
+					// session by itself — see `pty`'s note on why waiting for the output stream to end instead
+					// would be waiting on something this decision causes.
+					//
+					// One last flush before leaving. `biased` above already guarantees that anything QUEUED has
+					// been delivered; this catches what the reader thread has read but not yet handed over,
+					// which is a different race and a real one — the exit is observed on its own thread, and a
+					// shell's final line can be in flight when the process is already gone.
+					_ = stream.exited.recv() => {
+						while let Ok(bytes) = stream.bytes.try_recv() {
+							let _ = events
+								.send(SshEvent::Output { identity: crate::bridge::LOGIN_IDENTITY, bytes })
+								.await;
 						}
-					}
-
-					// The three features a local session does not have (see the module note). Each is
-					// REFUSED with its reason rather than dropped, so the GUI flow that asked ends instead
-					// of waiting on an answer that would never come.
-					Some(SessionMsg::Elevate { identity, .. }) => {
-						let _ = events
-							.send(SshEvent::IdentityEnded {
-								identity,
-								reason: Some(
-									"A local session has one shell. Becoming another user on Windows means \
-									 UAC, which starts a separate process at a different integrity level \
-									 rather than another shell on this one."
-										.to_owned(),
-								),
-							})
-							.await;
-					}
-					Some(SessionMsg::AddForward { id, .. }) => {
-						let _ = events
-							.send(SshEvent::ForwardFailed {
-								id,
-								reason: "A local session has no connection to tunnel through.".to_owned(),
-							})
-							.await;
-					}
-					Some(SessionMsg::ProbeIntegration { .. })
-					| Some(SessionMsg::WriteIntegration { .. }) => {
-						let _ = events
-							.send(SshEvent::IntegrationFailed(
-								"LocalShell integration writes a cwd announcer into a REMOTE shell's config. \
-								 cmote does not edit your own profile on this machine."
-									.to_owned(),
-							))
-							.await;
-					}
-
-					// Nothing to do, and nothing to report. `SelectIdentity` and `CloseIdentity` name
-					// accounts a local session cannot have; `RemoveForward` names a forward that was
-					// refused when it was asked for; the two auth answers belong to a handshake that never
-					// happened. Each of them is the GUI being tidy, not the GUI being wrong.
-					Some(SessionMsg::SelectIdentity(_))
-					| Some(SessionMsg::CloseIdentity(_))
-					| Some(SessionMsg::RemoveForward(_))
-					| Some(SessionMsg::ElevateAnswer { .. })
-					| Some(SessionMsg::Passphrase(_))
-					| Some(SessionMsg::Interactive(_)) => {}
-
-					// Disconnect: the user confirmed one, the tab is closing, cmote is quitting. The GUI has
-					// typed the shell's own `exit` just before this wherever typing was safe (§104), so the
-					// shell is most likely already on its way out — give it a moment to finish going before
-					// the kill below, and it gets to run its own exit path instead of being terminated
-					// mid-history-write. A shell that will not go (something is running in front of it, it
-					// ignored the word) is killed a fraction of a second later, which is what happened
-					// immediately before this and is still the guarantee: a confirmed Disconnect ends the
-					// session.
-					Some(SessionMsg::Disconnect) => {
-						farewell(&mut stream).await;
 						break;
 					}
-					// The command loop dropped the link without a Disconnect — the tab was dropped, or the
-					// worker went away. Nothing was typed, so there is nothing to wait for and no one left
-					// to tell: straight to the kill.
-					None => break,
+					command = commands.recv() => {
+						match command {
+							// Typing, and the emulator's own replies to the queries a program sent (§23). Both go
+							// to the one shell this session has, which is why neither needs its identity read.
+							Some(SessionMsg::Data(bytes) | SessionMsg::Reply { bytes, .. }) => {
+								pty.write(bytes).await;
+							}
+							Some(SessionMsg::Resize { cols, rows }) => pty.resize(cols, rows),
+
+							// The file panes, the details popup and both viewers (§18, §19, §20, §32, §53). Each
+							// runs on its own blocking task so a crowded directory or a large file never holds up
+							// the terminal — the same rule the SFTP listings follow.
+							Some(SessionMsg::ListDir(path)) => fs::list(&events, path).await,
+							Some(SessionMsg::ListFiles { path, request }) => {
+								fs::list_all(&events, path, request).await;
+							}
+							Some(SessionMsg::ReadLink(path)) => fs::read_link(&events, path).await,
+							Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path).await,
+							Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths).await,
+							Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to).await,
+							Some(SessionMsg::FileLoad { viewer_id, path, limit, .. }) => {
+								fs::load(&events, viewer_id, path, limit).await;
+							}
+							Some(SessionMsg::EditSave { viewer_id, path, bytes, .. }) => {
+								fs::save(&events, viewer_id, path, bytes).await;
+							}
+
+							// The transfers (§16, §17, §19). A fresh cancel flag per transfer, kept here so the
+							// status bar's ✕ can reach the one in flight; a fresh answer channel for the recursive
+							// ones, which can park mid-way to ask about a collision.
+							Some(SessionMsg::Upload { local, remote, overwrite, resume }) => {
+								let flag = arm(&mut cancel);
+								copy::upload(&events, local, remote, overwrite, resume, flag).await;
+							}
+							Some(SessionMsg::Download { remote, local, resume }) => {
+								let flag = arm(&mut cancel);
+								copy::download(&events, remote, local, resume, flag).await;
+							}
+							Some(SessionMsg::CheckUploads { dir, names }) => {
+								copy::precheck(&events, dir, names).await;
+							}
+							Some(SessionMsg::UploadTree { local, remote, resume }) => {
+								let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
+								conflicts = Some(answers);
+								let flag = arm(&mut cancel);
+								copy::upload_tree(&events, local, remote, resume, receiver, flag).await;
+							}
+							Some(SessionMsg::DownloadTree { remote, local, resume }) => {
+								let (answers, receiver) = mpsc::channel::<ConflictChoice>(ANSWER_BOUND);
+								conflicts = Some(answers);
+								let flag = arm(&mut cancel);
+								copy::download_tree(&events, remote, local, resume, receiver, flag).await;
+							}
+							// Forward the answer to the copy parked on it. A send that fails is nothing to act
+							// on: the transfer already ended, so the answer simply had no one waiting.
+							Some(SessionMsg::ResolveConflict(choice)) => {
+								if let Some(answers) = conflicts.as_ref() {
+									let _ = answers.send(choice).await;
+								}
+							}
+							Some(SessionMsg::CancelTransfer) => {
+								if let Some(flag) = cancel.as_ref() {
+									flag.store(true, Ordering::Relaxed);
+								}
+							}
+
+							// The three features a local session does not have (see the module note). Each is
+							// REFUSED with its reason rather than dropped, so the GUI flow that asked ends instead
+							// of waiting on an answer that would never come.
+							Some(SessionMsg::Elevate { identity, .. }) => {
+								let _ = events
+									.send(SshEvent::IdentityEnded {
+										identity,
+										reason: Some(
+											"A local session has one shell. Becoming another user on Windows means \
+											 UAC, which starts a separate process at a different integrity level \
+											 rather than another shell on this one."
+												.to_owned(),
+										),
+									})
+									.await;
+							}
+							Some(SessionMsg::AddForward { id, .. }) => {
+								let _ = events
+									.send(SshEvent::ForwardFailed {
+										id,
+										reason: "A local session has no connection to tunnel through.".to_owned(),
+									})
+									.await;
+							}
+							Some(SessionMsg::ProbeIntegration { .. } | SessionMsg::WriteIntegration { ..
+		}) => {
+								let _ = events
+									.send(SshEvent::IntegrationFailed(
+										"LocalShell integration writes a cwd announcer into a REMOTE shell's config. \
+										 cmote does not edit your own profile on this machine."
+											.to_owned(),
+									))
+									.await;
+							}
+
+							// Nothing to do, and nothing to report. `SelectIdentity` and `CloseIdentity` name
+							// accounts a local session cannot have; `RemoveForward` names a forward that was
+							// refused when it was asked for; the two auth answers belong to a handshake that never
+							// happened. Each of them is the GUI being tidy, not the GUI being wrong.
+							Some(SessionMsg::SelectIdentity(_) | SessionMsg::CloseIdentity(_) |
+		SessionMsg::RemoveForward(_) | SessionMsg::ElevateAnswer { .. } |
+		SessionMsg::Passphrase(_) | SessionMsg::Interactive(_)) => {}
+
+							// Disconnect: the user confirmed one, the tab is closing, cmote is quitting. The GUI has
+							// typed the shell's own `exit` just before this wherever typing was safe (§104), so the
+							// shell is most likely already on its way out — give it a moment to finish going before
+							// the kill below, and it gets to run its own exit path instead of being terminated
+							// mid-history-write. A shell that will not go (something is running in front of it, it
+							// ignored the word) is killed a fraction of a second later, which is what happened
+							// immediately before this and is still the guarantee: a confirmed Disconnect ends the
+							// session.
+							Some(SessionMsg::Disconnect) => {
+								farewell(&mut stream).await;
+								break;
+							}
+							// The command loop dropped the link without a Disconnect — the tab was dropped, or the
+							// worker went away. Nothing was typed, so there is nothing to wait for and no one left
+							// to tell: straight to the kill.
+							None => break,
+						}
+					}
 				}
-			}
-		}
 	}
 
 	// Every ending but a failed start arrives here: the shell exited on its own, or it was killed

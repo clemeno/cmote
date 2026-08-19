@@ -112,18 +112,17 @@ async fn look(
 
 	// Failing that, the config files themselves are the evidence: a file that exists is read by the
 	// shell that reads it.
-	let shell = match named {
-		Some(shell) => Some(shell),
-		None => {
-			let mut found = None;
-			for (file, shell) in FALLBACKS {
-				if exists(backend, &crate::explorer::join(&home, file)).await {
-					found = Some(shell);
-					break;
-				}
+	let shell = if let Some(shell) = named {
+		Some(shell)
+	} else {
+		let mut found = None;
+		for (file, shell) in FALLBACKS {
+			if exists(backend, &crate::explorer::join(&home, file)).await {
+				found = Some(shell);
+				break;
 			}
-			found
 		}
+		found
 	};
 
 	// With no shell established there is no config file either, so the path names the home

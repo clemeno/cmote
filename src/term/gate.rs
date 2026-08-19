@@ -319,7 +319,7 @@ impl<'a> Gate<'a> {
 		let blanked: Vec<usize> = if up {
 			((bottom + 1 - lines)..=bottom).collect()
 		} else {
-			(top..=(top + lines - 1)).collect()
+			(top..(top + lines)).collect()
 		};
 		for row in blanked {
 			for column in left..=right {

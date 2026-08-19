@@ -331,7 +331,7 @@ pub fn interactive_view<'a>(
 	// field — server prompts can be a full sentence — and the answer is looked up by index so
 	// the field shows what has been typed. Enter in any field submits the whole set.
 	for (index, prompt) in prompts.iter().enumerate() {
-		let value = answers.get(index).map(String::as_str).unwrap_or("");
+		let value = answers.get(index).map_or("", String::as_str);
 		let field = text_input("", value)
 			.id(interactive_field_id(index))
 			.secure(!prompt.echo)

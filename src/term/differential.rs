@@ -240,7 +240,7 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 						bytes.push(final_byte);
 						let shape = format!(
 							"CSI {}{}{}{} {}",
-							marker.map(char::from).unwrap_or(' '),
+							marker.map_or(' ', char::from),
 							String::from_utf8_lossy(params),
 							String::from_utf8_lossy(intermediates),
 							match order {

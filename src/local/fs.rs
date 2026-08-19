@@ -552,7 +552,7 @@ fn zone() -> TimeZone {
 	// nothing else. A zeroed value is a valid one to hand it, and the returned id says whether it
 	// wrote anything worth reading.
 	let mut info: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
-	let id = unsafe { GetTimeZoneInformation(&mut info) };
+	let id = unsafe { GetTimeZoneInformation(&raw mut info) };
 	const TIME_ZONE_ID_INVALID: u32 = u32::MAX;
 	const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 	if id == TIME_ZONE_ID_INVALID {
