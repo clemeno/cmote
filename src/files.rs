@@ -319,6 +319,11 @@ pub struct FilesRename {
 }
 
 /// The remote file browser (§19).
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "the tree's two settings and two pointer facts, plus a listing in flight and an open \
+	          menu — all of which can hold at once (§111)"
+)]
 #[derive(Debug)]
 pub struct Files {
 	visible: bool,

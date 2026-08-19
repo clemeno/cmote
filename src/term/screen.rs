@@ -80,6 +80,12 @@ pub enum CursorShape {
 /// so the type never exposes the engine's own cell representation — the glyph is
 /// materialised once when the cell is read. `text` is empty for a blank cell, so it costs
 /// no allocation and `has_contents` is simply "non-empty".
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "SGR attributes are independent and composable by definition: bold italic strikeout \
+	          text is one cell wearing three of them. Every field is private behind an accessor \
+	          already, so a bitset would change the representation and not the interface (§111)"
+)]
 #[derive(Debug, Clone)]
 pub struct Cell {
 	text: String,

@@ -375,6 +375,25 @@ pub enum EditorStatus {
 	Failed(String),
 }
 
+/// Whether a save is in flight, and what should happen when it lands (§32).
+///
+/// One value rather than the `saving` / `close_after_save` pair it replaces (§111). The pair could
+/// express a state that has no meaning — "close when the save lands" while no save is in flight — and
+/// nothing stopped it: the close flag was set immediately after `saving`, and had to be cleared by
+/// hand on the failure path purely so a failed "Save & close" would not close the tab later. Here
+/// there is no such state to get into, and no such clearing to remember.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum SaveFlight {
+	/// Nothing in flight. Save is offered when the buffer is dirty and a channel exists.
+	#[default]
+	Idle,
+	/// A save is in flight; the toolbar disables Save so a second cannot race the first.
+	Saving,
+	/// The same, from the unsaved-changes prompt's "Save & close": the tab drops itself once the
+	/// write lands, and stays — showing the error — if it does not.
+	SavingToClose,
+}
+
 /// Which colour scheme an editor tab paints with (§32). Only the choice lives here in the model —
 /// the concrete colours are the view's (`ui::editor`), so the split stays clean. The choice is held
 /// on the tab and remembered per file extension in `Settings`, so reopening a `.json` comes up in
@@ -494,8 +513,8 @@ pub struct Editor {
 	original: Vec<String>,
 	/// Loading / Ready / Failed (§32).
 	pub status: EditorStatus,
-	/// A save is in flight: the toolbar disables Save so a second cannot race the first.
-	pub saving: bool,
+	/// Whether a save is in flight, and what should happen when it lands (§32).
+	flight: SaveFlight,
 	/// A transient message shown in the toolbar (a save failure). Distinct from `EditorStatus::Failed`,
 	/// which replaces the whole buffer — a save error must not throw away the edits it failed to
 	/// persist, so it rides here and leaves the buffer editable.
@@ -510,9 +529,6 @@ pub struct Editor {
 	/// Whether the buffer differs from `original`. Drives the dirty dot and gates Save / the
 	/// close-with-unsaved prompt.
 	dirty: bool,
-	/// Set by "Save & close" (§32): once the save lands the tab drops itself; on a save FAILURE the
-	/// flag is cleared and the tab stays, showing the error, so a failed save never silently closes.
-	close_after_save: bool,
 	/// The colour scheme this editor paints with (§32). Seeded from `App`'s per-extension memory when
 	/// the tab opens, and changed by the toolbar's theme select.
 	pub theme: EditorTheme,
@@ -552,13 +568,12 @@ impl Editor {
 			content: text_editor::Content::new(),
 			original: Vec::new(),
 			status: EditorStatus::Loading,
-			saving: false,
+			flight: SaveFlight::Idle,
 			notice: None,
 			save_as: None,
 			parent_gone: false,
 			changed: Vec::new(),
 			dirty: false,
-			close_after_save: false,
 			theme,
 			scroll: 0.0,
 			view_height: 0.0,
@@ -604,16 +619,26 @@ impl Editor {
 
 	/// A save succeeded: the current text becomes the new baseline, so the marks and the dirty dot
 	/// clear (§32).
-	pub fn mark_saved(&mut self) {
+	///
+	/// Returns whether the TAB should now close itself — a "Save & close" waits on exactly this. The
+	/// answer rides out of here rather than sitting in a flag for the caller to collect, because the
+	/// two-call version had an order the caller could get wrong: clearing the flight first would have
+	/// thrown the intent away before anyone read it.
+	pub fn mark_saved(&mut self) -> bool {
 		self.original = lines_of(&self.content);
-		self.saving = false;
+		let closing = self.flight == SaveFlight::SavingToClose;
+		self.flight = SaveFlight::Idle;
 		self.notice = None;
 		self.recompute();
+		closing
 	}
 
 	/// A save failed: keep the buffer dirty and surface the reason without disturbing the edits.
+	///
+	/// Any pending close goes with the flight, so a FAILED "Save & close" keeps the tab and shows the
+	/// error rather than closing over it. That used to be a separate call the caller had to remember.
 	pub fn save_failed(&mut self, reason: String) {
-		self.saving = false;
+		self.flight = SaveFlight::Idle;
 		self.notice = Some(reason);
 	}
 
@@ -883,14 +908,19 @@ impl Editor {
 	/// through. Returns whether the caller should flush the bytes to the network.
 	pub fn begin_save(&mut self) -> bool {
 		if !self.dirty
-			|| self.saving
+			|| self.is_saving()
 			|| self.parent_gone
 			|| !matches!(self.status, EditorStatus::Ready)
 		{
 			return false;
 		}
-		self.saving = true;
+		self.flight = SaveFlight::Saving;
 		true
+	}
+
+	/// Whether a save is in flight (§32) — the toolbar disables Save and Save As while one is.
+	pub fn is_saving(&self) -> bool {
+		self.flight != SaveFlight::Idle
 	}
 
 	/// Begin a Save that closes the tab once it lands (§32) — the unsaved-changes prompt's "Save &
@@ -898,16 +928,10 @@ impl Editor {
 	/// means the caller should just close the tab.
 	pub fn begin_save_and_close(&mut self) -> bool {
 		if self.begin_save() {
-			self.close_after_save = true;
+			self.flight = SaveFlight::SavingToClose;
 			return true;
 		}
 		false
-	}
-
-	/// Read and clear the "close once saved" flag (§32). The tab calls this on a successful save to
-	/// learn whether to drop itself; a failed save clears it too, so the error can be seen instead.
-	pub fn take_close_after_save(&mut self) -> bool {
-		std::mem::take(&mut self.close_after_save)
 	}
 
 	/// Open the Save As prompt, pre-filled with the current path (§32).
@@ -942,7 +966,7 @@ impl Editor {
 		}
 		self.path = path;
 		self.save_as = None;
-		self.saving = true;
+		self.flight = SaveFlight::Saving;
 		true
 	}
 

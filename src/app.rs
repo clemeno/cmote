@@ -2490,6 +2490,10 @@ enum KeyboardClaim {
 /// tab is one of these, fully independent: a tab can sit at the home list while another runs a
 /// shell. Everything here is per-tab EXCEPT the two `Rc<RefCell<…>>` fields, which are shared
 /// clones of the single app-wide target list and secret vault (see `App`).
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "eight unrelated facts about six subsystems, not one state in disguise — see §111"
+)]
 #[derive(Debug, Default)]
 pub struct Tab {
 	/// This tab's stable identity, handed out by `App` and never reused (§26). It keys the
@@ -3742,17 +3746,15 @@ impl Tab {
 			SshEvent::FileLoadFailed { reason, .. } => editor.load_failed(reason),
 			SshEvent::EditSaved { path, .. } => {
 				editor.path = path;
-				editor.mark_saved();
-				// A "Save & close" waits on exactly this: the write landed, so drop the tab now (§32).
-				if editor.take_close_after_save() {
+				// `mark_saved` answers whether this was a "Save & close": the write landed, so drop
+				// the tab now (§32). A failed save answers nothing and keeps the tab, showing the
+				// error — which is why the intent rides out of the model rather than being collected
+				// from it afterwards.
+				if editor.mark_saved() {
 					return iced::Task::done(Message::EditorCloseNow(id));
 				}
 			}
-			SshEvent::EditSaveFailed { reason, .. } => {
-				// Clear any pending close so a FAILED "Save & close" keeps the tab, showing the error.
-				editor.take_close_after_save();
-				editor.save_failed(reason);
-			}
+			SshEvent::EditSaveFailed { reason, .. } => editor.save_failed(reason),
 			// Not an editor event; nothing to do.
 			_ => {}
 		}

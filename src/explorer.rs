@@ -146,6 +146,10 @@ pub struct ExplorerRow {
 }
 
 /// The remote folder tree (§18).
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "two settings and two pointer facts that co-occur; a drag continues off the bar (§111)"
+)]
 #[derive(Debug)]
 pub struct Explorer {
 	visible: bool,

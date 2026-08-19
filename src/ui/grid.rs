@@ -1296,10 +1296,12 @@ fn plan_runs(
 			hovered_link.is_some() && cell.as_ref().and_then(Cell::link) == hovered_link;
 		let style = cell_style(
 			cell.as_ref(),
-			is_cursor,
-			is_selected,
-			is_match,
-			is_link_hover,
+			CellMarks {
+				cursor: is_cursor,
+				selected: is_selected,
+				matched: is_match,
+				link_hover: is_link_hover,
+			},
 		);
 
 		// Extend only when this cell joins freely AND the open run is an unsealed run of
@@ -1363,6 +1365,26 @@ fn mirror(runs: &mut [Run], cols: u16) {
 	}
 }
 
+/// What the RENDERER knows about one cell that the cell itself does not (§9, §111): the cursor is on
+/// it, it is selected, it is inside a search match, a Ctrl-hovered link covers it.
+///
+/// A struct rather than four `bool` parameters, which is what these were. All four can hold at once —
+/// the cursor can sit on a selected cell inside a match under a hovered link — so they are not a state
+/// to be folded into an enum; the problem with four adjacent bools is the CALL, where
+/// `cell_style(cell, false, true, false, true)` is one transposition away from painting the wrong
+/// thing and the compiler has nothing to say. Named fields fix exactly that.
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "four independent marks on one cell; naming them is the point, see the doc above"
+)]
+#[derive(Debug, Clone, Copy)]
+struct CellMarks {
+	cursor: bool,
+	selected: bool,
+	matched: bool,
+	link_hover: bool,
+}
+
 /// Resolve a cell's colors and attributes into a `CellStyle` (§9, §23). The order matters:
 /// faint fades the ink toward its own background first; then inverse video and the cursor
 /// each swap fg/bg (together they cancel, matching how a real terminal draws the cursor over
@@ -1371,13 +1393,7 @@ fn mirror(runs: &mut [Run], cols: u16) {
 /// the final background so it holds its cell but shows nothing. Because `CellStyle` is the
 /// run-grouping key, either fill (and any per-cell attribute) breaks its run off from its
 /// neighbours (§10, §39).
-fn cell_style(
-	cell: Option<&Cell>,
-	is_cursor: bool,
-	is_selected: bool,
-	is_match: bool,
-	is_link_hover: bool,
-) -> CellStyle {
+fn cell_style(cell: Option<&Cell>, marks: CellMarks) -> CellStyle {
 	let Some(cell) = cell else {
 		return CellStyle {
 			fg: DEFAULT_FG,
@@ -1400,17 +1416,17 @@ fn cell_style(
 	// fallback to the foreground is applied after the swap, below, so it follows inverse too.
 	let explicit_underline = cell.underline_color().map(|color| to_iced_color(color, fg));
 
-	if cell.inverse() ^ is_cursor {
+	if cell.inverse() ^ marks.cursor {
 		std::mem::swap(&mut fg, &mut bg);
 	}
 	// The find bar's matches (§39): a wash under every hit on screen. Applied BEFORE the selection,
 	// so the current hit — which revealing already turned into an ordinary selection (§35) — keeps
 	// the selection's fill and stays the one the eye lands on. That ordering is the whole reason the
 	// match list can include the current match and stay ignorant of which one it is.
-	if is_match {
+	if marks.matched {
 		bg = MATCH_BG;
 	}
-	if is_selected {
+	if marks.selected {
 		bg = SELECTION_BG;
 	}
 	if cell.hidden() {
@@ -1428,7 +1444,7 @@ fn cell_style(
 	// single one in the foreground while it is the hover target, so the link shows as one. A cell
 	// already underlined keeps its own rule — it is visibly a link already — so the hover never
 	// downgrades a program's fancier underline (a spell-check curly, say) to a plain line.
-	if is_link_hover && underline == UnderlineStyle::None {
+	if marks.link_hover && underline == UnderlineStyle::None {
 		underline = UnderlineStyle::Single;
 		underline_color = fg;
 	}

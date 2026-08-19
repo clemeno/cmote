@@ -35,6 +35,11 @@ const ESC: u8 = 0x1b;
 /// The five progressive-enhancement flags a program can push, as cmote's own copy of the engine's
 /// mode bits (`Screen::kitty_flags` fills it in). A plain `Default` — every flag off — is the
 /// legacy state, in which `keymap` never routes here at all.
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "the kitty protocol's own five bits, pushed and popped independently by the program — a \
+	          named field per bit is harder to mix up than a bit position (§25, §111)"
+)]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct KittyFlags {
 	/// Report otherwise-ambiguous keys (Esc, Ctrl+key, the keypad) as `CSI u` codes.

@@ -219,7 +219,7 @@ fn toolbar<'a>(editor: &'a Editor, tab_id: u64, p: &Palette) -> Element<'a, Mess
 	]
 	.spacing(10)
 	.align_y(Vertical::Center);
-	if editor.saving {
+	if editor.is_saving() {
 		info = info.push(text("Saving…").size(11).color(p.muted));
 	}
 	if editor.parent_gone {
@@ -232,8 +232,8 @@ fn toolbar<'a>(editor: &'a Editor, tab_id: u64, p: &Palette) -> Element<'a, Mess
 		info = info.push(text(notice.clone()).size(11).color(p.notice));
 	}
 
-	let can_save = dirty && !editor.saving && !editor.parent_gone && ready;
-	let can_save_as = ready && !editor.parent_gone && !editor.saving;
+	let can_save = dirty && !editor.is_saving() && !editor.parent_gone && ready;
+	let can_save_as = ready && !editor.parent_gone && !editor.is_saving();
 	let buttons = row![
 		tool_button("Save", Message::Editor(EditorMessage::Save), can_save, p),
 		tool_button(

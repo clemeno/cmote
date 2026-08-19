@@ -21,6 +21,11 @@ use crate::ui::selection::Selection;
 /// The resolved appearance of a run of cells: RGB foreground/background (already accounting for
 /// reverse video, faint and conceal) and the boolean text attributes. Equality drives run
 /// merging — adjacent cells with an equal `Style` share one <span>.
+#[expect(
+	clippy::struct_excessive_bools,
+	reason = "the four SGR attributes that map one-to-one onto CSS properties, independent as SGR \
+	          defines them (§111)"
+)]
 #[derive(PartialEq, Eq)]
 struct Style {
 	fg: (u8, u8, u8),

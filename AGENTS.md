@@ -66,6 +66,21 @@ cursor bitmaps (`*.png`) are marked `binary` and must never be rewritten.
   forces every `Handler` method to be written out, so a new margin-aware arm cannot be silently
   forwarded.
 
+- **`#[expect]` is not `allow`, and it is the one escape.** Where a lint's advice cannot be taken —
+  the layout boundary in `ui`, where std offers no exact conversion between an integer and an `f32`
+  in either direction (§111) — the answer is an `#[expect]` carrying a `reason`, on the smallest item
+  that needs it, and never a lint switched off for a file or a crate. Three things make that different
+  from an `allow`: the lint stays enabled everywhere else, so the same mistake written elsewhere is
+  still a build error; the `reason` is a sentence a reader can disagree with; and `expect` FAILS the
+  build if the lint stops firing there, so the escape cannot outlive its cause. If the same `#[expect]`
+  starts appearing in several places, that is the signal to give the boundary one home and route
+  everything through it, which is what `ui::pixels` / `ui::cells` are.
+
+- **A lint's configuration is not a suppression either.** `clippy.toml` is where a lint is told what
+  this project counts as correct — `doc-valid-idents` for proper nouns that are not identifiers (§111).
+  Prefer it to an `#[expect]` when the answer is "the lint's default list is wrong for us" rather than
+  "this one site is an exception".
+
 ## Tests
 
 AAA structure, descriptive names, 80% target on logic; anything needing a live server is manual
