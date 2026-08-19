@@ -78,7 +78,7 @@ This document is the reference to build against.
 
 ---
 
-## 1. Locked decisions
+## §1 — Locked decisions
 
 | Area | Decision |
 |---|---|
@@ -99,7 +99,7 @@ This document is the reference to build against.
 
 ---
 
-## 2. Why these choices (didactic)
+## §2 — Why these choices (didactic)
 
 Each decision below is a thing to learn from, not just a dependency.
 
@@ -145,7 +145,7 @@ Each decision below is a thing to learn from, not just a dependency.
 
 ---
 
-## 3. Tech stack + versions (mid-2026)
+## §3 — Tech stack + versions (mid-2026)
 
 | Crate | Version | Purpose | Notes |
 |---|---|---|---|
@@ -173,7 +173,7 @@ pins are unnecessary.
 
 ---
 
-## 4. Architecture — the async ↔ GUI bridge (core pattern)
+## §4 — Architecture — the async ↔ GUI bridge (core pattern)
 
 The single most important pattern in this app. Two worlds that must not block each
 other, joined by two channels.
@@ -213,7 +213,7 @@ other, joined by two channels.
 
 ---
 
-## 5. Repo layout (single crate, many small files)
+## §5 — Repo layout (single crate, many small files)
 
 Not a workspace — one binary crate. Small, cohesive modules (per the <800-line rule),
 organized by responsibility:
@@ -306,7 +306,7 @@ cmote/
 
 ---
 
-## 6. Connection + authentication flow
+## §6 — Connection + authentication flow
 
 Ordered so cheap validation and security gates come first.
 
@@ -354,7 +354,7 @@ Ordered so cheap validation and security gates come first.
 
 ---
 
-## 7. Key handling (PEM / OpenSSH / PPK)
+## §7 — Key handling (PEM / OpenSSH / PPK)
 
 Two format families; only one is native to the SSH ecosystem.
 
@@ -416,7 +416,7 @@ fall-back to bare-key auth.
 
 ---
 
-## 8. Host-key verification (security)
+## §8 — Host-key verification (security)
 
 The one control that stops a man-in-the-middle. Implemented in `Handler::check_server_key`.
 
@@ -457,7 +457,7 @@ The one control that stops a man-in-the-middle. Implemented in `Handler::check_s
 
 ---
 
-## 9. Terminal emulator
+## §9 — Terminal emulator
 
 Turning a raw byte stream into a screen.
 
@@ -633,7 +633,7 @@ Turning a raw byte stream into a screen.
 
 ---
 
-## 10. UI (iced)
+## §10 — UI (iced)
 
 A small state machine drives the single window.
 
@@ -895,7 +895,7 @@ in `update`. No mutable global state, no `unsafe`.
 
 ---
 
-## 11. Portability / config / build
+## §11 — Portability / config / build
 
 "Portable" is a hard requirement: copy one `.exe`, run it anywhere, leave no trace in
 the registry.
@@ -935,7 +935,7 @@ the registry.
 
 ---
 
-## 12. Security
+## §12 — Security
 
 Threat model: a desktop SSH client handling the user's credentials and talking to
 possibly-hostile networks. Rust removes whole bug classes (memory safety, data races)
@@ -1002,7 +1002,7 @@ for free; the rest is deliberate.
 
 ---
 
-## 13. Testing (AAA pattern, 80% target on logic)
+## §13 — Testing (AAA pattern, 80% target on logic)
 
 Pure logic is unit-tested; anything needing a live server is integration/manual.
 
@@ -1109,7 +1109,7 @@ unsigned by decision (§16), so nothing here is waiting on a signing step either
 
 ---
 
-## 14. Saved connection targets (v1.3)
+## §14 — Saved connection targets (v1.3)
 
 The home screen (`ui/home.rs`) is the landing screen: a list of previously used
 connection **targets**, so reconnecting is a click instead of re-typing the form.
@@ -1180,7 +1180,7 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
 
 ---
 
-## 15. Coding conventions — DECIDED: idiomatic Rust
+## §15 — Coding conventions — DECIDED: idiomatic Rust
 
 **Decision (locked):** this project uses **idiomatic Rust** — `snake_case` items,
 `SCREAMING_SNAKE_CASE` constants, no Hungarian prefixes, `rustfmt` defaults, and a
@@ -1209,7 +1209,7 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 
 ---
 
-## 16. Deferred (with upgrade paths)
+## §16 — Deferred (with upgrade paths)
 
 - **Credential persistence (secrets at rest)** — *done (v3.0), as a PORTABLE opt-in.* Saved
   profiles carried metadata only (§14); a password / key passphrase is now optionally kept too,
@@ -1405,7 +1405,7 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
 
 ---
 
-## 17. Remote working directory + file upload (v1.4)
+## §17 — Remote working directory + file upload (v1.4)
 
 Two features that only make sense together: the status bar gained a **file picker** and
 an **Upload** button, and the upload's default destination is *the directory the shell is
@@ -1771,7 +1771,7 @@ always on, the friendlier default for a GUI than scp/rsync's `-p` flag.
 
 ---
 
-## 18. Remote folder explorer (v2.0)
+## §18 — Remote folder explorer (v2.0)
 
 The headline of v2: a **2D tree of the remote filesystem** in the browser strip along the
 bottom, to the right of the files pane (§19) — the terminal keeps the whole width above it —
@@ -1943,7 +1943,7 @@ announced path carries one.
 
 ---
 
-## 19. Remote files pane (v2.1)
+## §19 — Remote files pane (v2.1)
 
 An **icon grid of every entry in one directory**, in the browser strip under the terminal.
 The strip runs the window's full width; the pane fills it, save for the folder tree's column
@@ -2235,7 +2235,7 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
 
 ---
 
-## 20. Keyboard focus and entry details (v2.1)
+## §20 — Keyboard focus and entry details (v2.1)
 
 Two panels now sit beside the shell, and both want the arrow keys. This section is the
 answer to "who gets the keystroke", plus what the files pane shows about the entry the
@@ -2360,7 +2360,7 @@ keyboard just landed on.
 
 ---
 
-## 21. Selecting many entries at once (v2.1)
+## §21 — Selecting many entries at once (v2.1)
 
 §20 gave the files pane one selected entry. This section makes it a *set*: a rubber band
 pulled over the grid, Ctrl+click, Shift+click, Shift+arrow and Ctrl+A, and what the menu
@@ -2419,7 +2419,7 @@ does when an action has nine targets instead of one.
   directory entry rather than of its contents, so it is left out of the total instead of
   making it wrong.
 
-## 22. Resuming where you left off (v2.2)
+## §22 — Resuming where you left off (v2.2)
 
 A reconnect to a saved target used to drop you at the shell's login directory with both
 panels at the root. This section remembers where the last session was — the shell and the
@@ -2515,7 +2515,7 @@ header so both panels name the same place.
   button and the header can never name different directories, and it dims before the first
   listing when there is nothing to copy.
 
-## 23. Terminal engine swap: vt100 → alacritty_terminal (v3.0)
+## §23 — Terminal engine swap: vt100 → alacritty_terminal (v3.0)
 
 The engine under the terminal is being replaced. This section records **why**, **which**,
 and **how** — the decision so it is not re-litigated, and the staging so the work stays
@@ -2678,7 +2678,7 @@ as input.
 
 ---
 
-## 24. OSC 8 hyperlinks (v3.0.0)
+## §24 — OSC 8 hyperlinks (v3.0.0)
 
 A modern program can mark a run of text as a **clickable link** with the OSC 8 escape —
 `ESC ] 8 ; params ; URI ST`, the text, then `ESC ] 8 ; ; ST` to close — so `ls --hyperlink`,
@@ -2736,7 +2736,7 @@ safe envelope.
 
 ---
 
-## 25. Kitty keyboard protocol (v3.0.0)
+## §25 — Kitty keyboard protocol (v3.0.0)
 
 The classic terminal input alphabet loses information the moment a key is anything but a plain
 letter. `Ctrl+I` collapses onto Tab (both `0x09`), `Ctrl+M` onto Enter (`0x0d`); `Ctrl+digit`
@@ -2807,7 +2807,7 @@ stricter and more complete of the pair — it disambiguates *every* key, not jus
 main-keyboard combos, and it is the one modern editors reach for. modifyOtherKeys stays for the
 programs that still emit only `CSI > 4 ; p m`.
 
-## 26. Multiple sessions in tabs (v3.0.0)
+## §26 — Multiple sessions in tabs (v3.0.0)
 
 The window held one session. Now it holds a **strip of tabs**, each a **fully independent**
 session: a tab can sit on the home list while another runs a shell, dial a second connection while
@@ -2867,7 +2867,7 @@ fed a height already reduced by `STRIP_HEIGHT` (`App` trims it off every `Window
 delegating), so the grid fits the space it has rather than overrunning it by a row. A tab switch
 refits the newly shown terminal, in case the window resized while it was backgrounded.
 
-## 27. Port forwarding (v3.0.0)
+## §27 — Port forwarding (v3.0.0)
 
 The live SSH connection can carry more than a shell. cmote now runs **port forwards** — tunnels —
 over it, in all three shapes OpenSSH offers, managed from a **Tunnels** dialog on the terminal
@@ -2975,7 +2975,7 @@ connect the target's saved forwards are re-established automatically; on any tea
 
 ---
 
-## 28. Host-key mismatch override (v3.0.0)
+## §28 — Host-key mismatch override (v3.0.0)
 
 The one host-key case v1 dead-ended is the one that matters most in practice: a key that was
 pinned but no longer matches. §8's TOFU refused it outright — `check_server_key` returned
@@ -3055,7 +3055,7 @@ What the exploration DID find is in §16 above: the remembered-secret capture ou
 it belonged to. That is fixed. The friction was never the shape of the flow — it was one rule
 stated at two ends with nothing joining them, which is now `abandon_attempt`.
 
-## 29. Drag-and-drop upload (v3.0.0)
+## §29 — Drag-and-drop upload (v3.0.0)
 
 Uploading already had four doors (§17) — all of them a picker or a menu. This adds the obvious
 fifth: drag files off the desktop and drop them onto the window, and they upload into the files
@@ -3172,7 +3172,7 @@ folders is the caller's business. The order is deliberate:
   which is exactly true — but a positional highlight would need iced to report the pointer during a
   drag, which it does not.
 
-## 30. Confirmed, clean quit (v3.0.0)
+## §30 — Confirmed, clean quit (v3.0.0)
 
 Two gaps closed at once: cmote used to *never* exit by closing tabs (the last tab silently reopened a
 fresh home tab, §26), and clicking the OS window's title-bar **×** tore the process down on the spot —
@@ -3255,7 +3255,7 @@ four **local** shells do not — see §104.
 - `ponytail:` the drain waits on the **live (Terminal-screen) tabs only**. A tab still handshaking has
   no shell to disconnect and its worker unwinds when its link drops; the timeout covers any straggler.
 
-## 31. App-wide window size, and pane-handle feedback (v4.0.0)
+## §31 — App-wide window size, and pane-handle feedback (v4.0.0)
 
 Two small layout niceties. cmote already remembered the panel sizes per target (§22); it did
 not remember the WINDOW, so every launch opened at the built-in default however the user last
@@ -3310,7 +3310,7 @@ that they were grabbable at all was something you learned by trying. This sectio
 
 ---
 
-## 32. Remote text editor in a tab (v4.0.0)
+## §32 — Remote text editor in a tab (v4.0.0)
 
 A **basic text editor** for a remote file, opened in **its own tab** in the strip (§26). Until now
 a tab was always a session (a home list or a live shell); now a tab can also be an editor, so the
@@ -3561,7 +3561,7 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
   syntect-backed `Highlighter` and the CME `syntect::Theme` (behind the `two-face` dependency, pure-Rust
   `fancy-regex`); **`ui/files.rs`** adds the Edit… item and the double-click-a-file path.
 
-## 33. Answering the identity queries the engine drops (v4.0.0)
+## §33 — Answering the identity queries the engine drops (v4.0.0)
 
 The terminal engine (`alacritty_terminal`, §23) answers the queries that touch the grid — DSR,
 DA, DECRQM, cursor-position and text-area reports — and cmote drains those replies straight through
@@ -3610,7 +3610,7 @@ ignores — and formats a reply.
   query.rs`** is the scanner, the reply formatters, the small capability map and the hex codec — free
   of any engine type, so every parse and every reply shape is unit-tested with no terminal.
 
-## 34. Shell-integration prompt marks — OSC 133 (v4.0.0)
+## §34 — Shell-integration prompt marks — OSC 133 (v4.0.0)
 
 A shell with "shell integration" configured brackets every command it runs with OSC 133 escape
 sequences — the FinalTerm/iTerm2 convention every modern terminal now reads:
@@ -3727,7 +3727,7 @@ exactly that reason.)
 
 ---
 
-## 35. Finding text in the scrollback (v4.0.0)
+## §35 — Finding text in the scrollback (v4.0.0)
 
 The terminal retains 10 000 lines of history (§23) and the wheel, Shift+Page and jump-to-prompt
 (§34) all move through it — but until now the only way to *find* something up there was to scroll
@@ -3815,7 +3815,7 @@ reveal-scroll, and "a found thing becomes an ordinary selection".
 
 ---
 
-## 36. The last input and query gaps — DA3, and DECKPAM where it is safe (v4.0.0)
+## §36 — The last input and query gaps — DA3, and DECKPAM where it is safe (v4.0.0)
 
 With the engine swap (§23), `modifyOtherKeys`, kitty keyboard (§25), OSC 8 (§24), OSC 133 (§34) and
 scrollback search (§35) all done, the terminal-compatibility audit had four items left outside the
@@ -3881,7 +3881,7 @@ in the encoder, reading the mode out of the grouped `keymap::Modes` beside DECCK
   *and* a repaint timer cmote deliberately runs for nothing — the same call made for the cursor.
 - **DA3 as anything but a constant, and any other `CSI =` sequence.** See the security note above.
 
-## 37. Closing a tab returns you to where you were (v4.0.0)
+## §37 — Closing a tab returns you to where you were (v4.0.0)
 
 Tabs (§26) kept `active` as an **index into the strip**, so closing the tab on screen fell back to
 strip arithmetic: keep the index, or step back one if the last tab went. With three or more tabs open
@@ -3946,7 +3946,7 @@ tab brought forward by a close painted against whatever size it last saw until t
 - **The quit flow is untouched (§30).** Quitting closes every tab, so which one would have come
   forward is moot; closing the *last* tab is still a request to quit, not a fallback.
 
-## 38. The strip's order is the user's — files beside their session, and drag to rearrange (v4.0.0)
+## §38 — The strip's order is the user's — files beside their session, and drag to rearrange (v4.0.0)
 
 §37 fixed *which* tab a close brings forward. This section is about the other half of the strip's
 order: **where a tab sits**, and who decides. Two changes, both of them the same idea — the strip
@@ -4029,7 +4029,7 @@ another chip and release, and the grabbed tab takes that chip's slot. No separat
 
 ---
 
-## 39. Every match on screen, washed — the find bar shows where else the query is (v4.0.0)
+## §39 — Every match on screen, washed — the find bar shows where else the query is (v4.0.0)
 
 §35 shipped the scrollback find bar with one hit marked: the current one, revealed and turned into an
 ordinary selection so the existing highlight and Copy served it with no rendering work at all. That
@@ -4115,7 +4115,7 @@ unchanged apart from a test**: the wash is a pure function of state the view alr
 
 ---
 
-## 40. The selection speaks document lines — text that scrolls stays selected (v4.0.0)
+## §40 — The selection speaks document lines — text that scrolls stays selected (v4.0.0)
 
 Three features had grown into absolute document coordinates — the OSC 133 prompt marks (§34), the
 search matches (§35), the washes over them (§39) — while the thing they all end up *becoming*, the text
@@ -4191,7 +4191,7 @@ because a `Highlight` was *already* a projection.
 
 ---
 
-## 41. Inline images — sixel pictures in the scrollback (v4.0.0)
+## §41 — Inline images — sixel pictures in the scrollback (v4.0.0)
 
 The compatibility plan (§5, §7) had one item left with real UX value: **graphics**. A program that
 wants to show a picture in a terminal — `img2sixel`, `chafa -f sixel`, gnuplot's sixel terminal, timg,
@@ -4398,7 +4398,7 @@ of their boxes.
 
 ---
 
-## 42. Select by word and by line — the double and triple click (v4.0.0)
+## §42 — Select by word and by line — the double and triple click (v4.0.0)
 
 Selecting text in cmote's grid needed a **drag**, and only a drag. Every terminal ever shipped also
 selects a **word** on a double click and a **line** on a triple, and its absence was the kind of gap
@@ -4491,7 +4491,7 @@ through `Selection::spanning`, which is the same call the word and line expansio
 
 ---
 
-## 43. A resize invalidates what was anchored to the grid (v4.0.0)
+## §43 — A resize invalidates what was anchored to the grid (v4.0.0)
 
 Everything §40 gained by anchoring the selection in **absolute document lines** rests on those numbers
 meaning the same thing from one frame to the next. A **resize** is where they stop: re-wrapping the
@@ -4553,7 +4553,7 @@ puts it back.
 
 ---
 
-## 44. The find bar keeps up with live output (v4.0.0)
+## §44 — The find bar keeps up with live output (v4.0.0)
 
 §43 closed one half of a two-part hole: a match list is built once, and it describes the document *as
 it was at that moment*. A resize was the loud half. **Output arriving** is the quiet one, and it goes
@@ -5458,7 +5458,7 @@ for a click on the grid. Reporting the ring rather than the OS window is what ma
 
 ---
 
-## 51. The hand over everything you can pick up (v4.0.0)
+## §51 — The hand over everything you can pick up (v4.0.0)
 
 §38 made every chip in the strip a drag handle and asked iced for the two cursors the web has
 taught everyone to read: `Interaction::Grab`, an open hand, over a chip at rest, and
@@ -5664,7 +5664,7 @@ pointer and still cannot be picked up.
 
 ---
 
-## 52. Sending a tab to another area of the window (v4.0.0)
+## §52 — Sending a tab to another area of the window (v4.0.0)
 
 §48 cut the window in two and gave each half its own strip. §38 let a chip be dragged along its
 strip. Neither let a tab **cross the seam**: the drag is reported by the chips themselves — the
@@ -5878,7 +5878,7 @@ no hook for a widget leaving the tree.
 
 ---
 
-## 53. A picture opens as a picture (v4.0.0)
+## §53 — A picture opens as a picture (v4.0.0)
 
 §32 gave a file two ways into a tab: a **double-click** in the files pane, and the menu's **Edit…**.
 Both went to the text editor, because the text editor was the only viewer there was. Double-click a
@@ -6033,7 +6033,7 @@ account the pane happened to be showing.
 
 ---
 
-## 54. A remote command says how far along it is (v4.0.0)
+## §54 — A remote command says how far along it is (v4.0.0)
 
 A build, a `dd`, an `apt upgrade` and a `rsync` all know their own progress, and until now cmote had
 no way to hear it. The convention ConEmu introduced and Windows Terminal adopted is one OSC:
@@ -6114,7 +6114,7 @@ make every chip resize the moment a command started, and the whole strip would t
 
 ---
 
-## 55. A script says "look here" (v4.0.0)
+## §55 — A script says "look here" (v4.0.0)
 
 iTerm2's OSC 1337 is not one sequence. It is a private namespace — a `key=value` grab-bag sharing one
 OSC number, about twenty keys deep:
@@ -6237,7 +6237,7 @@ the chip, after the endpoint label.
 
 ---
 
-## 56. The labels a program asked us not to wipe (v4.0.0)
+## §56 — The labels a program asked us not to wipe (v4.0.0)
 
 A VT220 had **two** erases. The plain one wipes everything; the *selective* one leaves alone whatever
 the program marked as protected first:
@@ -6358,7 +6358,7 @@ it, which is a different sentence from the one that was there before.
 
 ---
 
-## 57. Refusing a sequence without paying for it (v4.0.0)
+## §57 — Refusing a sequence without paying for it (v4.0.0)
 
 The next ❌ down the matrix was left/right margins, and it is a different animal from everything above
 it. Two sequences, one final byte:
@@ -6458,7 +6458,7 @@ next to "scan it out", "borrow a bit", and "accept the engine's limit" — is **
 
 ---
 
-## 58. Acting on a box instead of a line (v4.0.0)
+## §58 — Acting on a box instead of a line (v4.0.0)
 
 Everything a terminal erases, it erases in lines. `CSI K` takes part of one, `CSI J` takes the rest of
 the screen, and the selective pair §56 added take the same shapes. A VT420 could also act on a **box**:
@@ -6542,7 +6542,7 @@ refusal and the undrawable rectangle each have one.
 
 ---
 
-## 59. Changing how a box looks without moving what is in it (v4.0.0)
+## §59 — Changing how a box looks without moving what is in it (v4.0.0)
 
 §58 built the half of the VT420 rectangular family that changes what the cells **hold**. This is the
 half that changes what they **look like**, leaving every character exactly where it stands:
@@ -6634,7 +6634,7 @@ fails the stream tests, and assigning the flag word fails the protection test.
 
 ---
 
-## 60. Answering a question about a box (v4.0.0)
+## §60 — Answering a question about a box (v4.0.0)
 
 The last row of the rectangular family, and the only one that writes bytes back down the pty:
 
@@ -6774,7 +6774,7 @@ failure §33 exists to prevent. Closed in **§61**, below.
 
 ---
 
-## 61. Answering the one question the audit found (v4.0.0)
+## §61 — Answering the one question the audit found (v4.0.0)
 
 §60's audit turned up exactly one thing that was work rather than wording:
 
@@ -6840,7 +6840,7 @@ every resource fails the two that exist to stop it.
   order. No program has been seen to care, and fixing it means the split machinery §58 built.
 
 
-## 62. A refusal that nothing performs (v4.0.0)
+## §62 — A refusal that nothing performs (v4.0.0)
 
 The compatibility matrix had one column doing two jobs. A **❌** meant "a program cannot use this", and
 a parenthetical *(policy)* in the note said whether that was a gap or a decision. Worse, the two rows
@@ -6919,7 +6919,7 @@ item and the §8 closing prose.
 - **The other six XTMODKEYS resources** (§61) are a refusal with no mark at all, having no row.
 
 
-## 63. Saying the refusal out loud (v4.0.0)
+## §63 — Saying the refusal out loud (v4.0.0)
 
 §62 split the matrix's refusals into **🛑** (cmote refuses it) and **🤷** (nothing does), and the one
 row that would not sit still under that question was **OSC 52**, the remote clipboard — the oldest
@@ -7007,7 +7007,7 @@ moved a decision from a comment into code that can fail.
   clipboard is the engine's early return plus cmote never calling a clipboard API on a remote's behalf;
   no test can watch the Windows clipboard from inside the suite.
 
-## 64. The mark that hid two answers (v4.0.0)
+## §64 — The mark that hid two answers (v4.0.0)
 
 §62 gave the matrix's refusals marks of their own and §63 hardened the one refusal that turned out to be
 inherited rather than stated. Both passes only ever looked at ❌ rows. **§64 asked the same question of
@@ -7137,7 +7137,7 @@ being described as an expensive one.
   DECRQSS, XTGETTCAP, DECCOLM, blinking cursor, DECSDM, synchronized output, BEL. Each is a partial for
   its own reason and each would need the same read-the-crate pass to say whether its note still holds.
 
-## 65. Asking the partials which part (v4.0.0)
+## §65 — Asking the partials which part (v4.0.0)
 
 §64 split the two partial colour rows and left the obvious question hanging: there were eight more partial rows in
 the matrix, and none of them had ever been audited the way §60 audited the ❌ and 🛑 ones. This section
@@ -7235,7 +7235,7 @@ decision.
 - **No test was added by this section at all.** It moved marks and corrected notes; the one thing it
   found that deserves code is the item above.
 
-## 66. Retiring a mark (v4.0.0)
+## §66 — Retiring a mark (v4.0.0)
 
 §64 and §65 audited the partial rows and split nine of them. Two were left standing as "genuinely partial" —
 DECRQSS and XTGETTCAP — and this section asks what they would be if the class did not exist, splits them,
@@ -7315,7 +7315,7 @@ notation still reads correctly.
   same class of exposure §63 fixed for the clipboard, and unfixable here, since a markdown table has no
   test. The nearest thing to a pin is that the legend now states the rule in the same breath as the marks.
 
-## 67. What a tick was allowed to mean (v4.0.0)
+## §67 — What a tick was allowed to mean (v4.0.0)
 
 §66 retired the partial mark and left four. One of them was still loose: **✅** meant "full", which is a
 claim about completeness that a row makes and a reader takes on trust. §67 narrows it to **supported**, and
@@ -7381,7 +7381,7 @@ note is precisely what stops a row from being findable by what it does.
 - **`CSI ? 6 n` is a real ❌ nobody will miss.** Answering it would mean inventing a page number cmote
   does not have, and the standard spelling already works.
 
-## 68. Paying the rest of the rule (v4.0.0)
+## §68 — Paying the rest of the rule (v4.0.0)
 
 §66 set the rule — one row, one answer, one mechanism — and named six ✅ rows that broke it, then left
 them alone. The reason given was that they *said* their second half in the note, unlike a partial, which
@@ -7441,7 +7441,7 @@ every one of these fourteen rows describes behaviour that predates the split.
   the next time someone is tempted to split a row: the test is whether a program can send something and
   get a different answer.
 
-## 69. The tab has a name now, and OSC 0 does not get to write it (v4.0.0)
+## §69 — The tab has a name now, and OSC 0 does not get to write it (v4.0.0)
 
 §68 split `OSC 0` from `OSC 1` and marked the icon-name half **❌**, on a note that read: the sequence is
 "dropped wherever it is spelled", and "nothing is lost: cmote shows no icon name anywhere, so there would
@@ -7567,7 +7567,7 @@ elides at 48 characters would be a crowding problem dressed up as a feature.
   a hook that makes remotes send more is a separate decision with a separate consent question.
 
 
-## 70. A mark that outlived its argument (v4.0.0)
+## §70 — A mark that outlived its argument (v4.0.0)
 
 §69 corrected a row's **answer**. This one corrects a row's **reason**, which is subtler and invisible to
 the method every sweep since §60 has used. The row was:
@@ -7697,7 +7697,7 @@ only numbers quoted in passing. The fixed script reads each table's own header r
   structurally cannot find, which is the argument for making it somebody's.
 
 
-## 71. Two refusals with nothing behind them (v4.0.0)
+## §71 — Two refusals with nothing behind them (v4.0.0)
 
 §70 corrected a row whose reason had expired. §71 takes the row directly beneath it, which had been
 carrying two keys, one dash and one word:
@@ -7815,7 +7815,7 @@ to a program that did not need the favour.
   section is about *sources*, not about this key — worth remembering the next time a scanner needs the
   engine to change its mind.
 
-## 72. The reset that reached nothing (v4.0.0)
+## §72 — The reset that reached nothing (v4.0.0)
 
 §65 audited the partial rows and left `CSI ! p` — DECSTR, the soft reset — split into a ✅ for the DECSCA
 bit and a ❌ for everything else, with a reason attached:
@@ -7966,7 +7966,7 @@ does — they are capabilities, and §5 still costs them out as such.
   places, and it is really the mode 2026 timeout item (§65) wearing a different hat.
 - **`CSI 16t` is still a gap**, unchanged from §71's list — named there, decided by nobody yet.
 
-## 73. The refusal that was not in the column (v4.0.0)
+## §73 — The refusal that was not in the column (v4.0.0)
 
 The question put to this section was narrow: should DECSLRM read ✅ or 🛑? The interesting part is
 what the question left out. The row read
@@ -8077,7 +8077,7 @@ Nothing in `src/`. The tests stand at 1072, none of them touched, because §57 b
   program away from `CSI s`. Whether cmote should ever answer `4` ("permanently reset") instead — a
   stronger statement, and a claim about a mode cmote does not implement — is not decided here.
 
-## 74. The row where the answer was neither refuse nor shrug (v4.0.0)
+## §74 — The row where the answer was neither refuse nor shrug (v4.0.0)
 
 Same question as §73, one row further down the same table: should DECST8C read ✅ or 🛑?
 
@@ -8190,7 +8190,7 @@ that lands and silently does nothing.
   xterm gates DECST8C on `terminal_id >= 400`. Whether the reply should say what cmote actually does is a
   real question and a separate one — it is a claim every program reads, not a row in a table.
 
-## 75. The stance that was living in a note (v4.0.0)
+## §75 — The stance that was living in a note (v4.0.0)
 
 Third time the same question, one row further down again: should SCP read ✅ or 🛑?
 
@@ -8292,7 +8292,7 @@ refuse, §74 translate again, §75 shrug on the record.
   edge than most: if `alacritty_terminal` implemented bidi, the grid would start holding cells in an
   order cmote's renderer draws literally, and the divergence would be visible rather than inert.
 
-## 76. The parameter the refusal had been charging for (v4.0.0)
+## §76 — The parameter the refusal had been charging for (v4.0.0)
 
 §75 marked SCP 🤷 and argued the case at length. The instruction after it was to implement the sequence
 anyway. The concern was restated once and overruled, which is how this section came to exist — and the
@@ -8392,7 +8392,7 @@ compiled and then applied the wrong event at the wrong offset.
   program that asks for presentation-to-data gets silence — the same disclosure §57 makes about a
   cancelled margin request.
 
-## 77. The refusal that described a different program (v4.0.0)
+## §77 — The refusal that described a different program (v4.0.0)
 
 The question was what the difference is between two rows that both say "cursor". OSC 22 sets the MOUSE
 POINTER — the arrow under the user's hand; OSC 50 sets the TEXT CARET — block, bar or underline, in a
@@ -8491,7 +8491,7 @@ back is something a program can say on purpose.
   is the one refused name that is a toolkit limit rather than a decision, and it is in the same list as
   the decisions, which is the kind of thing §73 exists to catch. Left there on purpose, and here.
 
-## 78. The row that was in the right column for a borrowed reason (v4.0.0)
+## §78 — The row that was in the right column for a borrowed reason (v4.0.0)
 
 The question was whether `kitty 21` — colour by semantic name — could be supported. The answer is no,
 and the answer was already no; what §78 found is that the row had never argued for it. Three sections in
@@ -8600,7 +8600,7 @@ what asks and not about what it costs.
   the spec, not against implementing. Left visible rather than dropped, because the alternative is a
   reason list that reads stronger than it is — §73's complaint in a smaller size.
 
-## 79. The refusal nobody was performing (v4.0.0)
+## §79 — The refusal nobody was performing (v4.0.0)
 
 The instruction was to mark `kitty 99` — rich notifications — explicitly 🛑, because desktop
 notifications are not something this project will let a remote raise. The decision was not in question;
@@ -8694,7 +8694,7 @@ the code it describes. The instruction named one row; the mechanism that satisfi
   unbounded OSC payload is a question about every OSC cmote sees, not about this row, and it is left
   open here rather than answered badly in passing.
 
-## 80. The half of a module that belongs to one platform (v4.0.0)
+## §80 — The half of a module that belongs to one platform (v4.0.0)
 
 CI's macOS job has been failing since f3d7ea6 — the commit that landed §51's hand cursors on 10 August
 — and the Windows job has been green for every one of those four days. Both facts have one cause, and
@@ -8778,7 +8778,7 @@ split plainly into `windows` and `not(windows)`, which is exactly why the file-l
   a frame and it keeps `cfg` out of `app.rs`'s message handling, which is the trade taken on purpose
   rather than by oversight.
 
-## 81. The marks belong to one column (v4.0.0)
+## §81 — The marks belong to one column (v4.0.0)
 
 §8's tables are read down the Status column: one glyph a row, 165 of them, and the whole point of a
 symbol there is that a reader takes it in without reading the line. Sixteen of those rows also carried
@@ -8823,7 +8823,7 @@ The legend gained the rule, so it does not creep back with the next row.
   better served than before. Naming the marks in words inside the notes moves a little way toward a table
   that reads without them; it was not the reason for the change and it does not finish that job.
 
-## 82. The reason nobody had checked (v4.0.0)
+## §82 — The reason nobody had checked (v4.0.0)
 
 `CSI ? 6 n` is DECXCPR, "where is the cursor?" in DEC's private spelling. It has read ❌ since §67's
 sweep found it, with a reason recorded in that section's *Not done*:
@@ -8927,7 +8927,7 @@ a scanner that had simply stopped matching would pass a weaker version of.
   answered after the advance. For those four it makes no difference, and the ordering question between
   cmote's replies and the engine's within one chunk is still open where it was.
 
-## 83. The column that had become a document (v4.0.0)
+## §83 — The column that had become a document (v4.0.0)
 
 §8's matrix is 169 rows, and its Note column had quietly become the longest prose in the file: 7,876
 words, the longest single note 419 of them. A reader who wanted to know what `CSI ? 62 n` *is* had to
@@ -8990,7 +8990,7 @@ dies*.
   paragraphs are themselves summaries of `PLAN.md` sections — the same duplication one level up, left
   alone because this pass was about the column the user was reading.
 
-## 84. Reading the definitions back (v4.0.0)
+## §84 — Reading the definitions back (v4.0.0)
 
 §83 left one thing undone on purpose and said so: *"the definitions are unquoted. Each says what the
 sequence does and none cites the page it came from… a wrong definition reads like a right one, and
@@ -9063,7 +9063,7 @@ first to go looking for it deliberately.
 - **XTPUSHSGR is now a named gap and stays one.** It would cost a stack of the pen and a scanner, both
   of which cmote has the shape for, and no program has been named that sends it.
 
-## 85. The stack that was refused under another name (v4.0.0)
+## §85 — The stack that was refused under another name (v4.0.0)
 
 §84 found `CSI # p` / `# q` wearing the colour stack's name and the colour stack's argument. This
 section answers the sequence that was actually there.
@@ -9164,7 +9164,7 @@ which takes two attributes out where one was meant.
 - **`term/` now holds a tenth chunk-safe CSI state machine**, near-identical to the ninth. §82 noticed
   this and did not act; §85 has not either, and the case for factoring them is one row stronger.
 
-## 86. What a hard reset takes with it (v4.0.0)
+## §86 — What a hard reset takes with it (v4.0.0)
 
 §85 shipped the video-attribute stack and listed, under *Not done*: **"the stack is never cleared. Not
 by RIS, not by DECSTR, not by the alternate-screen swap… a program that pushed before a full reset and
@@ -9217,7 +9217,7 @@ reader knows it is reasoning.
   what a program sees, and the counter only shows through it after an overflow. A test that overflows,
   resets and then pops would pin it directly.
 
-## 87. The sweep reaches the OSC table, and stops (v4.0.0)
+## §87 — The sweep reaches the OSC table, and stops (v4.0.0)
 
 §84 read §83's definitions back against xterm's ctlseqs and left, explicitly: *"roughly 140 rows were
 not checked… the OSC table barely touched."* This is the next slice of that, and it produced two
@@ -9274,7 +9274,7 @@ five errors survived four sweeps.
   does; whose dialect that is, and what xterm means by `OSC 50`, is precisely what the truncated fetch
   could not say.
 
-## 88. The font on the cursor's code, and an answer §79 was owed (v4.0.0)
+## §88 — The font on the cursor's code, and an answer §79 was owed (v4.0.0)
 
 §87 stopped at a blocker: ctlseqs' OSC list is past where a fetch of the HTML build returns. The plain
 text build reaches further, and it settled the sweep's most useful question first.
@@ -9361,7 +9361,7 @@ the left/right margins, and the same answer for now.
   `99`, and the whole `iTerm 1337` namespace are other terminals' extensions, and §88 went to xterm.
 - **The SGR table is still unchecked.** Three sweeps have now gone past it.
 
-## 89. Two thirds of the OSC table is nobody's standard (v4.0.0)
+## §89 — Two thirds of the OSC table is nobody's standard (v4.0.0)
 
 §87 and §88 went to xterm and found that most of the OSC table is not xterm's: `OSC 7`, `9`, `9;4`,
 `9;9`, `133`, `777`, kitty's `21` and `99` and the whole `iTerm 1337` namespace are extensions one
@@ -9446,7 +9446,7 @@ fourth *Not done* ("nothing records which rows have been read back") made visibl
   table at all. They are the same refusal as `OSC 21`'s set half and `CSI # P`, and they have no row.
 - **The SGR table is still unchecked.** Four sweeps have gone past it.
 
-## 90. ConEmu's OSC 9 is five sequences, and cmote knew two (v4.0.0)
+## §90 — ConEmu's OSC 9 is five sequences, and cmote knew two (v4.0.0)
 
 §89 read ConEmu's own page and found `OSC 9` multiplexed five ways where this project had modelled
 three of them — two honoured and everything else swept into one refusal:
@@ -9517,7 +9517,7 @@ spelling is safe here and would not be if the chip's label could be replaced rat
 - **`9;3` is not cleared by RIS**, exactly as `OSC 1` is not (§69's note about the title's own
   survival). Consistent with the old spelling, which is the point, and still nobody's decision.
 
-## 91. The font is the user's (v4.0.0)
+## §91 — The font is the user's (v4.0.0)
 
 §88 found that xterm's `OSC 50` is **Set Font** and split the row: the `CursorShape=` payload cmote
 honours on that number is another terminal's convention, and the font half was left 🤷 — a refusal
@@ -9557,7 +9557,7 @@ permissive reading would let through a payload cmote does not understand.
 - **`allowFontOps` is a setting where cmote has a rule.** If a user ever wants a remote to pick the
   font — a plausible thing for one's own machine — this is a policy to revisit, not a law.
 
-## 92. A link is not its address (v4.0.0)
+## §92 — A link is not its address (v4.0.0)
 
 §88 read OSC 8's specification and found the one parameter it defines:
 
@@ -9636,7 +9636,7 @@ one link too many underlined, or one link underlined by half.
   never opened (§24), and now underlines whole when hovered — the affordance says "this is one link",
   not "this will open".
 
-## 93. The two replies that advertise nothing (v4.0.0)
+## §93 — The two replies that advertise nothing (v4.0.0)
 
 §82 refused all nine of the DEC-private status reports beside DECXCPR, and disclosed two of them
 under *Not done*:
@@ -9701,7 +9701,7 @@ order the questions were written.
   careless caller as "no pointing device at all". The protocols are different and the answer is
   correct; the possible misreading is xterm's too.
 
-## 94. DEC's own manual, at last (v4.0.0)
+## §94 — DEC's own manual, at last (v4.0.0)
 
 §84 read the definitions back against xterm and closed with: *"ECMA-48 and the VT420 manual were not
 read. The rows resting on DEC's definitions rather than xterm's — DECSCA, DECSED / DECSEL, the four
@@ -9774,7 +9774,7 @@ colour stacks reach the same nothing.
   fetched in this pass). The row no longer claims one, which is enough for it to be right, and not
   enough for it to be complete.
 
-## 95. OSC 133, sourced at one remove (v4.0.0)
+## §95 — OSC 133, sourced at one remove (v4.0.0)
 
 §89 closed with two sequences it could not source, and OSC 133 was the one that mattered most,
 because unlike OSC 777 it is a **feature cmote ships** — the per-tab status dot, jump-to-prompt and
@@ -9852,7 +9852,7 @@ answered.
   which this matrix and `term/notify.rs` both assert, has no citation and is contradicted by urxvt's
   own manual page.
 
-## 96. A second restatement, and the half of a rule nobody had written (v4.0.0)
+## §96 — A second restatement, and the half of a rule nobody had written (v4.0.0)
 
 §95 took Contour's write-up of OSC 133 and closed with the shape of what it lacked. The user then
 supplied a second one, `vtdn.dev/docs/osc/osc133/`, which is the better of the two and still not the
@@ -9935,7 +9935,7 @@ had never had to be defended.
   §78 and §82 already do, not a check anything enforces; the next silent read of a foreign dialect
   will be judged the same way this one was — by hand.
 
-## 97. The field that was a bug, and the two that were a rule (v4.0.0)
+## §97 — The field that was a bug, and the two that were a rule (v4.0.0)
 
 §95 and §96 left three OSC 133 rows sitting at ❌, and the user asked for each to be settled: support
 it or refuse it. Two settled together on a rule this project already had. The third turned out not to
@@ -10049,7 +10049,7 @@ and mis-bounds a command; no mark leaves both alone.
   project's own earlier guess that kitty and WezTerm emit it. That guess is now recorded as
   unsupported: kitty's page has no `L`, and WezTerm's documents no marker letters whatsoever.
 
-## 98. The catalogues nobody had read (v4.0.0)
+## §98 — The catalogues nobody had read (v4.0.0)
 
 §8 has been built against **one** catalogue since it existed, `vtdn.dev`, and every sweep since has
 re-derived its marks from the crates. Three more were read end to end for this one: contour's sequence
@@ -10188,7 +10188,7 @@ refusal and §6 is the whole of it.
 - **`OSC 777` is still folklore**, and `OSC 888` was taken from contour's index with no detail page —
   the same evidential footing as `OSC 30`, and it only reaches a 🤷 rather than shipped behaviour.
 
-## 99. One calculation, and the bit that could not be honoured (v4.0.0)
+## §99 — One calculation, and the bit that could not be honoured (v4.0.0)
 
 §94 added the XTCHECKSUM row (`CSI Ps # y` — "the bits of `Ps` modify the calculation of the checksum
 returned by DECRQCRA") and closed by leaving it open: *"Named now, so the next reader chooses rather
@@ -10242,7 +10242,7 @@ number is the same on both sides of the request.
   values"); the reading this row rests on lists five. It changes nothing — the answer is the same for
   any number of bits — but the row should not be read as a count.
 
-## 100. The page moves sideways (v4.0.0)
+## §100 — The page moves sideways (v4.0.0)
 
 §98 filed SL and SR (`CSI Ps SP @` and `CSI Ps SP A`) as a **gap**, and grouped them with DECBI /
 DECFI and DECIC / DECDC as *"one piece of absent machinery wearing six names"*. The machinery is
@@ -10334,7 +10334,7 @@ matched alongside the final byte and the absence of a private marker, which is �
   page is what every operation in this family acts on (§60 clamps the checksum to it for a reason),
   but no test would fail if a later hand widened this one.
 
-## 101. Giving the scrollback back (v4.0.0)
+## §101 — Giving the scrollback back (v4.0.0)
 
 `CSI Ps + T` — UNSCROLL. Scroll the page down, and fill the top from the **scrollback** instead of
 with blanks.
