@@ -11888,7 +11888,7 @@ They arrive as one number and they are not one problem. Sorted by what fixing th
 |---|---|---|
 | the five cast lints | ~224 | `as` replaced by a conversion that cannot silently lie |
 | `doc_markdown` | 59 | identifiers in doc comments wrapped in backticks |
-| `float_cmp` | 24 | `==` on `f32`/`f64` |
+| `float_cmp` | 41 | `==` on `f32`/`f64` |
 | `unused_async` | 14 | `async fn` with nothing to await |
 | `too_many_lines` | 11 | functions over 100 lines |
 | `match_same_arms` | 10 | arms with identical bodies |
@@ -11897,6 +11897,11 @@ They arrive as one number and they are not one problem. Sorted by what fixing th
 | `items_after_statements` | 8 | a `fn` or `const` declared mid-body |
 | `struct_excessive_bools` | 7 | three or more `bool` fields |
 | sixteen singles | 16 | one site each |
+
+Those are WARNINGS, not sites, and the difference matters for the first row: one `as` can raise
+truncation, sign loss and precision loss at once, so the 224 cast warnings are about a hundred
+casts. The table also leaves out the 59 a machine could apply unaided and the 52
+`unreadable_literal`, which are counted where they are fixed below.
 
 ### The sixteen singles, and why they are not all the same fix
 
@@ -11973,3 +11978,264 @@ added and clippy flagged it, so `doc-valid-idents` narrows the lint instead of s
 comes first in the list to KEEP clippy's built-in names rather than replace them.
 
 One word was neither: `UNguarded`, which was emphasis of mine and is now `**unguarded**`.
+
+### `unreadable_literal`: the grouping the lint wants is not the grouping the number has
+
+Fifty-two literals, and clippy's own suggestion would have made every one of them harder to read,
+because its grouping is four digits and these are not four-digit things:
+
+```
+unix mode bits   0o100644  ->  0o100_644     type | permissions
+hex colours      0x00ddff  ->  0x00_dd_ff    r | g | b
+```
+
+A mode is the file TYPE in the high digits and the permissions in the low three, so the separator
+goes where the halves meet — `0o040_755` is "directory, 755", which is how it is read aloud, where
+clippy's four would give `0o04_0755` and cut across both. A colour is three bytes, and grouping in
+fours puts green across two groups.
+
+Both groupings were checked against `inconsistent_digit_grouping` as well, because a non-uniform
+grouping trades one warning for another; two comments record why the separators sit where they do,
+so the next reader does not "fix" them back. Fifty-two warnings closed with the code MORE readable,
+which is the answer to the worry behind Q36: strictness only costs something when the lint is right
+and the code is wrong.
+
+### The casts: one boundary at a time, because the right answer differs at each
+
+Two hundred and twenty-four warnings, and the temptation is a single sweep of `try_from` with
+`unwrap_or_default`. That would have been wrong at most sites, because the question a cast answers
+is "what should happen if this does not fit", and the honest answer changes with the boundary. So
+they were done as four commits, one per boundary.
+
+**The engine's line numbers (32 sites), which cross in two directions.** cmote counts rows in
+`usize` because that is what `screen_lines()`, `history_size()` and `display_offset()` return, while
+the engine INDEXES rows with a signed `Line` where 0 is the top of the page and -1 is the newest
+scrolled-off row. Every walk over the grid crosses that, and every crossing was a bare cast.
+
+The two directions want opposite answers, so they get two helpers. INTO the engine,
+`term::as_line_number` **panics**: a page is at most `u16::MAX` rows because the pty size is a `u16`
+pair (§9) and the history is capped at `SCROLLBACK`, so the largest reachable value is about 75,000
+against an `i32` holding two billion — a failure would mean the engine had reported a geometry it
+cannot hold, and clamping that would only move the panic into the grid's own indexing with a worse
+message. OUT of the engine, `screen::as_dimension` **clamps**: everything it feeds is a measurement
+a person looks at, and a page of more than 65,535 rows can be neither drawn nor aimed at.
+
+`history_line` earns its own name rather than being a subtraction at each site. It is the one row
+index in the file that counts the opposite way from all the others — `history_line(0)` is `Line(-1)`
+— and `-(1 + back as i32)` written out twenty times is one typo from reading the wrong row.
+
+**The absolute document line (§40).** A position in the scrollback is numbered in `u64` from the
+oldest retained line so that it survives the scrolling which makes every engine-relative row number
+stale. Turning one into a viewport row means subtracting a number that can be LARGER, because a mark
+above the top of the window is exactly what the projection has to detect — and that subtraction was
+happening on `usize` operands cast to `i64` one at a time. `as_document_line` and `as_signed_line`
+saturate, with the bound argued rather than assumed: `i64::MAX` lines is nearly three centuries of
+output at one line per nanosecond, and a line pinned at that end sorts as "above everything", which
+is what the arithmetic would have concluded anyway.
+
+The way back down is the part worth stating. `osc133::project` and `search::visible` both turn a
+signed row into a `u16` viewport row and both already had the range check that proves it fits. The
+conversion now happens AFTER that check rather than beside it, so the check is what licenses it —
+where before, a bound that stopped holding would have drawn a highlight on a row wrapped round into
+the visible page instead of dropping it.
+
+**The remaining 41 int-to-int narrowings**, where the right fallback differs at nearly every site,
+which is the whole argument for doing this rather than sweeping it:
+
+- **Refuse**, where the function already answers "no": a sixel picture bigger than the caps
+  `canvas_size` enforces, a braille pattern outside its 256-point block, a search highlight past the
+  row range checked one line above.
+- **Clamp**, where the number is a measurement: an SFTP timestamp past 2106 pins at the newest
+  instant the protocol's 32-bit field can carry, a cursor colour channel at 255.
+- **Zero**, where a malformed value must not be half-read: russh reports a forwarded port as `u32`
+  because that is the wire field's width, so a value above `u16` is a malformed message and "no
+  port" is the honest reading — not the low half of a number the server never meant.
+- **Expect**, where the surrounding code is the proof: a match arm's own range pattern (`0..=255`),
+  a mask applied before the narrowing, a `size_of_val` of a 512-element stack buffer. Each message
+  names the reason rather than saying "cannot fail".
+
+And `cast_signed` / `cast_unsigned` where the reinterpretation IS the intent — the selection walks
+that step signed and clamp back, the picture row that is negative when scrolled past the top, the
+Win32 handle that doubles as a pointer-wide unsigned `WPARAM`. Same bits either way; the methods say
+so where `as` only implied it.
+
+### The float boundary, where the advice cannot be taken
+
+The last 31 casts are all integers becoming pixels or pixels becoming integers, and none of them is
+fixable the way the other 41 were. That was **checked rather than assumed**: std has no
+`TryFrom<f32> for usize` and no `From<u32> for f32`, and clippy flags even a provably bounded
+`px.clamp(0.0, 4096.0) as usize` for BOTH truncation and sign loss. The one exact spelling available
+is `f32::from(u16)`, and a `u16` ceiling is wrong here — an editor buffer can hold more than 65,535
+lines and clamping the gutter there would break a file this program can open.
+
+A lint whose advice cannot be taken anywhere in a crate is the case an `allow` exists for, and that
+is precisely why it is worth refusing. An `allow` would silence the boundary AND every future cast
+that has nothing to do with it. So instead the boundary gets **a place**: seven functions in `ui`
+(`pixels`, `signed_pixels`, `cells`, `cells_covering`, `cell_index`, `fraction`, `lines_scrolled`),
+one in `sixel` for a colour channel, and one `#[expect]` on `human::bytes`. Each carries the lint it
+answers and a reason. The lint stays enabled crate-wide, so a bare float cast written anywhere else
+is still a build error.
+
+The functions earn their keep beyond the conversion — the floor, the clamp and the negative case
+were repeated at thirty-one call sites and are now written once each — and **a test proved it**:
+
+```rust
+cells(f32::INFINITY, pitch)  ->  usize::MAX
+```
+
+Infinity FLOORS to infinity rather than to NaN, so the first version of the guard tested `is_nan()`
+and let it through, and `as usize` then saturated. An unmeasured `Length::Fill` would have handed a
+caller four billion billion rows to walk. Both `cells` and `cells_covering` test `is_finite` now.
+
+The remaining inexactness is stated where it bites rather than tolerated quietly: `f32` represents
+integers exactly up to 2^24 (16,777,216), and above that a row index rounds and its pixel top is
+wrong by less than the row is tall. The editor's own 8 MiB ceiling is about 8.4 million lines of one
+byte, so the bound is unreachable rather than merely large.
+
+### `float_cmp`: thirty-nine tests and two lines of production code, wanting opposite fixes
+
+The production pair was `App`'s cursor-follow asking `if offset == editor.scroll()` to decide whether
+a scroll was needed: `keep_visible` returned the caller's own `offset` back when the band was already
+visible, so the caller re-derived by equality what the callee already knew. It returns `Option<f32>`
+now — `None` for "do not move".
+
+**That change was wrong on the first attempt and the test caught it**, which is the part worth
+recording. `keep_visible` has a SECOND path to "no change": a band the window cannot contain — a cell
+in a pane dragged shorter than one row — where the clamp *computes* an offset that turns out to be
+the one already in force. So the old `==` was not merely comparing a value to itself, and dropping it
+lost a case. One comparison lives inside `keep_visible` now, on `to_bits`, because the question is
+not "are these numbers close" but "will the widget be handed a different `f32` than it holds" — a
+scroll offset is stored and rendered verbatim, so a bit-level test is the honest one, and integers
+say that where a bare `==` on floats invites doubt.
+
+The thirty-nine test sites are all screen coordinates, and several compared a measurement against the
+arithmetic that produced it (`1000.0 * MAX_PANE_FRACTION`). Those passed as `assert_eq!` because both
+sides are the same operations in the same order — luck, not a property. Reorder the multiplication and
+an equality that never had a reason to hold starts failing over a difference no screen can show. So
+there is one `assert_px!` at the crate root with `PIXEL_TOLERANCE` at a tenth of a pixel: four orders
+of magnitude above the arithmetic's noise and four below anything a user could see, declared before
+the `mod` list so all seven test modules see it by textual scope.
+
+Proved rather than assumed (§106): a site was temporarily made wrong by half a pixel and the macro
+failed with `8 px is not 8.5 px (to within 0.1 px)`. A tolerance macro that quietly passed everything
+would look exactly like a clean suite.
+
+### The mechanical middle, where four of forty-three were saying something
+
+`items_after_statements` (8), `match_same_arms` (10), `trivially_copy_pass_by_ref` (9),
+`needless_pass_by_value` (8), `unused_async` (14). Mostly compiler-checked moves. The exceptions:
+
+**Two serde predicates could not simply flip.** `targets::is_false(&bool)` and `forward::is_zero(&u16)`
+take a reference because `skip_serializing_if` expands to `predicate(&self.field)`, so clippy's advice
+would have broken serialization outright. They were also the same question asked of two types, which
+§109 says to merge — so both became one generic `store::is_default<T: Default + PartialEq>(&T)`. The
+reference is still serde's; a generic parameter has no size clippy can judge, so the lint does not
+fire and nothing is suppressed. Two functions deleted, one added.
+
+**One identical pair that reads as coincidence and is a decision.** `AcceptHostKey` and
+`ReplaceHostKey` both send `HostKeyChoice::Pin`. That is the design (§8) — `Pin` means "write this key
+to `known_hosts`", and whether it LEARNS a first-contact key or REPLACES a stale line is decided by the
+verdict the SSH side already holds. The GUI does not get to choose which. The merged arm says so; the
+two identical arms did not.
+
+**Fourteen `async fn`s awaited nothing**, all with the same body: clone the sender, `tokio::spawn`,
+return. The `async` was not load-bearing and it MISLED, because a reader seeing
+`fs::make_dir(&events, path).await` reasonably assumes the folder exists by the next line. It does
+not — the task is detached and the answer arrives later as an event.
+
+That one was checked rather than swept, because §103 makes `local/session.rs` and `ssh/client.rs` two
+dispatch tables deliberately written to read the same, and a lint that made one ragged would be worth
+refusing. The raggedness turned out to be real information: the SSH side awaits because most of its
+operations have a `Browse::Denied` arm — a refusal reported inline, before anything is spawned — and
+the local side has no permission layer to refuse it. That is now a stated rule: **an arm that awaits
+is an arm that can answer before the loop comes round again.**
+
+Three functions were nearly caught by the sweep and put back — `fs::list`, `fs::list_all` and
+`fs::report_zone` do await, and `cargo check` said so immediately. Recorded because the mechanical
+version of that commit was wrong and only the build caught it.
+
+### `struct_excessive_bools`: right once in seven
+
+The lint's premise is that three or more `bool` fields are usually one state written as several, and
+telling which was the work. It held for exactly one.
+
+`editor::Editor` carried `saving` and `close_after_save`, a pair that could express a state with no
+meaning — "close when the save lands" while no save is in flight — and that had to be cleared by hand
+on the failure path purely so a failed "Save & close" would not close the tab later. That is a state
+machine, so it is one now:
+
+```rust
+enum SaveFlight { Idle, Saving, SavingToClose }
+```
+
+The intent rides OUT of `mark_saved`, which returns whether the tab should close, because the
+two-call version had an order the caller could get wrong. `save_failed` drops the pending close along
+with the flight, and `take_close_after_save` is gone.
+
+The other six are attribute sets, where the advice would make the code worse. SGR attributes are
+independent **by definition** — bold italic strikeout text is one cell wearing three of them — and so
+are kitty's protocol bits and the file pane's view toggles. A bitset would replace named fields with
+positions, which is the opposite of what this codebase is for. Each takes an `#[expect]` whose reason
+says which of the two cases it is, so a future reader can disagree with the classification rather
+than with the silence.
+
+### `too_many_lines`: ten variant counts and one real duplication
+
+Eleven functions over 100 lines. Ten of them are dispatch — `update`'s 109 arms, `on_key`,
+`on_ssh_event`, the terminal view — where the length IS a variant count, and a cut through an
+alphabet is not a refactor. Those take `#[expect]`.
+
+The eleventh was genuine. `ssh::client::run` was 299 lines because twenty-odd arms were the same five
+lines of forwarding boilerplate. It is a `SshCommand` → `SessionMsg` table now, one line per command,
+with the single place that knows what "no session" means factored out:
+
+```rust
+async fn forward(session: Option<&SessionLink>, message: SessionMsg) {
+	if let Some(link) = session {
+		let _ = link.to_session.send(message).await;
+	}
+}
+```
+
+299 lines to 149, verified variant by variant that the same 32 commands produce the same messages. It
+keeps an `#[expect]` even so, because a 32-variant table is still over the limit — but now for the
+reason the other ten have.
+
+### Turning it on
+
+```toml
+[lints.clippy]
+all = "deny"
+pedantic = "deny"
+```
+
+That line landed in the same commit that cleared the last of the 561, which is the only order that
+works: turning it on first would have left every commit in between failing its own gate, and a gate
+that is expected to fail is a gate nobody reads.
+
+**Proved rather than assumed.** A throwaway `src/probe.rs` was added containing one `count as f32`
+and one unbackticked doc token, and a plain `cargo clippy` — not the gate's `-D warnings`, the
+ordinary build — rejected both. Then it was deleted. A lint configuration that silently did nothing
+would look exactly like a clean crate.
+
+Twenty-seven `#[expect]`s survive, and they are **three answers rather than twenty-seven**: eleven
+`too_many_lines` on dispatch tables, seven `struct_excessive_bools` on independent composable
+attributes, nine at the float boundary. The count is stated in `Cargo.toml` above the lint table
+because twenty-seven suppressions is a number a reader might reasonably object to, and the objection
+should be to the real number. (I first wrote "nine" there, having counted only the float ones, and
+corrected it before the commit.)
+
+### Not done
+
+- **The seven pre-existing suppressions** predate this section and were only partly resolved.
+  `cursor.rs`'s `#[expect]` survives with a reason it did not have. The three
+  `#[allow(clippy::too_many_arguments)]` in `local/copy.rs`, `ssh/download.rs` and `ssh/upload.rs`
+  each want a parameter struct rather than an edit; `ui/syntax.rs`'s `field_reassign_with_default` is
+  on a `#[non_exhaustive]` type, which is the case the lint cannot see; and `ssh/asuser.rs`'s
+  `async_fn_in_trait` is about a trait shape, not a line. AGENTS.md's "no `allow`" applies to all
+  five, so they are debts and not decisions.
+- **Two tautological assertions** in `panes.rs` restate the production formula, so they pin that the
+  clamp is applied and not what it computes. Replacing them with worked examples is a test-quality
+  change (§107), not a lint fix.
+- **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
+  section is evidence about one lint group and should not be read as a policy about all of them.
