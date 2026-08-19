@@ -203,6 +203,29 @@ fn history_line(back: usize) -> Line {
 	Line(-1 - as_line_number(back))
 }
 
+/// A row count as an absolute document line (§40, §111).
+///
+/// The document is numbered in `u64` from the oldest retained line, so that a position survives the
+/// scrolling that makes every engine-relative row number stale. Counts arriving from the engine are
+/// `usize`, and `usize` has no `From<usize> for u64` because a platform could in principle make it
+/// wider — so the conversion is spelled out once here, saturating, with the observation that a
+/// `usize` above `u64::MAX` would need a machine no version of this program will run on.
+pub(super) fn as_document_line(rows: usize) -> u64 {
+	u64::try_from(rows).unwrap_or(u64::MAX)
+}
+
+/// An absolute document line as a signed number, for arithmetic that can cross zero (§40, §111).
+///
+/// A mark's line minus the top of the viewport is NEGATIVE when the mark has scrolled off the top,
+/// which is the case the projection has to detect — so the subtraction has to happen in a signed
+/// domain and the operands have to get there first. Saturating rather than failing: `i64::MAX` lines
+/// is more output than a session can produce — at one line per nanosecond it is nearly three
+/// centuries — and a line pinned at that end sorts as "above everything", which is what the
+/// arithmetic would have concluded anyway.
+pub(super) fn as_signed_line(line: u64) -> i64 {
+	i64::try_from(line).unwrap_or(i64::MAX)
+}
+
 /// A scroll distance in lines, as the engine's `Scroll::Delta` takes it (§23).
 ///
 /// This one CLAMPS where `as_line_number` panics, and the difference is the direction of travel: a

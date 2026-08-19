@@ -221,12 +221,16 @@ impl Search {
 		self.matches[from..]
 			.iter()
 			.take_while(|found| found.line < bottom)
-			.map(|found| SearchHighlight {
-				// In range by the two bounds above, so the cast cannot wrap: `line - top` is below
-				// `screen_lines`, which is itself a `u16`.
-				row: (found.line - top) as u16,
-				start_col: found.start_col,
-				end_col: found.end_col,
+			.filter_map(|found| {
+				Some(SearchHighlight {
+					// In range by the two bounds above, so this cannot fail: `line - top` is below
+					// `screen_lines`, which is itself a `u16`. Spelled as a `try_from` so that a bound
+					// which stopped holding would drop the highlight rather than draw it on a row
+					// wrapped round into the visible page (§111).
+					row: u16::try_from(found.line - top).ok()?,
+					start_col: found.start_col,
+					end_col: found.end_col,
+				})
 			})
 			.collect()
 	}
@@ -255,7 +259,10 @@ mod tests {
 	fn row(line: u64, text: &str) -> SearchRow {
 		let mut row = SearchRow::new(line);
 		for (col, glyph) in text.chars().enumerate() {
-			row.push(glyph, col as u16);
+			row.push(
+				glyph,
+				u16::try_from(col).expect("a test fixture is a short line"),
+			);
 		}
 		row
 	}

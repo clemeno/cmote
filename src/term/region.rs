@@ -63,7 +63,7 @@ impl ScrollRegion {
 	pub fn full(rows: usize) -> Self {
 		Self {
 			start: 0,
-			end: rows as i32,
+			end: super::as_line_number(rows),
 		}
 	}
 
@@ -82,9 +82,11 @@ impl ScrollRegion {
 		if top >= bottom {
 			return;
 		}
-		let rows = rows as i32;
-		self.start = (top as i32 - 1).min(rows);
-		self.end = (bottom as i32).min(rows);
+		// The engine's own line domain, since these numbers are mirrored against its `Range<Line>`
+		// (§111) — and the region is one-based on the wire, hence the `- 1` on the top.
+		let rows = super::as_line_number(rows);
+		self.start = (super::as_line_number(top) - 1).min(rows);
+		self.end = super::as_line_number(bottom).min(rows);
 	}
 
 	/// Back to the whole page — RIS (`reset_state`) and every resize.
@@ -97,7 +99,7 @@ impl ScrollRegion {
 	/// The clamp is HERE and not in `set` on purpose: the stored numbers stay the engine's, and only
 	/// a caller that is about to index the grid gets a safe version of them.
 	pub fn first_row(self) -> usize {
-		self.start.max(0) as usize
+		usize::try_from(self.start.max(0)).unwrap_or(0)
 	}
 
 	/// Last row of the band, inclusive and clamped into the page.
@@ -105,7 +107,7 @@ impl ScrollRegion {
 	/// `end` is exclusive and never below 1 for a region the engine accepted, but a saturating
 	/// subtraction keeps a hand-built `ScrollRegion` from wrapping the index round.
 	pub fn last_row(self) -> usize {
-		(self.end - 1).max(0) as usize
+		usize::try_from((self.end - 1).max(0)).unwrap_or(0)
 	}
 }
 

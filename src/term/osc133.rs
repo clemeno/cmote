@@ -292,7 +292,7 @@ impl Prompts {
 	/// and `row` describe where the cursor sits at the mark — needed only by `PromptStart`, which
 	/// anchors a prompt line; the others just move the command-cycle state.
 	pub fn apply(&mut self, mark: Mark, history_size: usize, row: u16) {
-		let absolute = history_size as u64 + row as u64;
+		let absolute = super::as_document_line(history_size) + u64::from(row);
 		match mark {
 			Mark::PromptStart => {
 				self.state = CommandState::Prompt;
@@ -333,7 +333,7 @@ impl Prompts {
 	/// every prompt redraw. Unlike `record`, this touches neither the command state nor the pending
 	/// span: a bookmark says "here", and nothing about a command.
 	pub fn record_user_mark(&mut self, history_size: usize, row: u16) {
-		let absolute = history_size as u64 + row as u64;
+		let absolute = super::as_document_line(history_size) + u64::from(row);
 		if self.user_marks.last() == Some(&absolute) {
 			return;
 		}
@@ -347,7 +347,7 @@ impl Prompts {
 	/// (zsh redraws on each keystroke) fires `A` again at the same line, so a repeat of the last
 	/// recorded line is ignored rather than stacked. The store is a bounded ring (`MAX_MARKS`).
 	fn record(&mut self, history_size: usize, row: u16) {
-		let absolute = history_size as u64 + row as u64;
+		let absolute = super::as_document_line(history_size) + u64::from(row);
 		if self.marks.last() == Some(&absolute) {
 			return;
 		}
@@ -559,19 +559,24 @@ impl Prompts {
 		history_size: usize,
 		display_offset: usize,
 	) -> Option<usize> {
-		let top = history_size as i64 - display_offset as i64;
+		// Signed throughout, because a mark above the viewport's top gives a negative difference and
+		// that is the case the filters exist to tell apart (§111).
+		let history = super::as_signed_line(super::as_document_line(history_size));
+		let top = history - super::as_signed_line(super::as_document_line(display_offset));
 		let anywhere = self
 			.marks
 			.iter()
 			.chain(self.user_marks.iter())
-			.map(|&mark| mark as i64);
+			.map(|&mark| super::as_signed_line(mark));
 		let target = match direction {
 			// Strictly above the top so a repeated press keeps climbing rather than sticking.
 			Osc133Direction::Previous => anywhere.filter(|&mark| mark < top).max()?,
 			Osc133Direction::Next => anywhere.filter(|&mark| mark > top).min()?,
 		};
-		let offset = (history_size as i64 - target).clamp(0, history_size as i64);
-		Some(offset as usize)
+		// Clamped into `0..=history_size` on the line above, so the conversion back cannot fail — and
+		// this function already answers `None` when there is nowhere to jump, so it need not pretend.
+		let offset = (history - target).clamp(0, history);
+		usize::try_from(offset).ok()
 	}
 }
 
@@ -588,13 +593,17 @@ fn project(
 	display_offset: usize,
 	screen_lines: usize,
 ) -> Vec<u16> {
+	let top = super::as_signed_line(super::as_document_line(history_size))
+		- super::as_signed_line(super::as_document_line(display_offset));
+	let rows = super::as_signed_line(super::as_document_line(screen_lines));
 	marks
 		.iter()
 		.filter_map(|&absolute| {
-			let row = absolute as i64 - history_size as i64 + display_offset as i64;
-			(0..screen_lines as i64)
-				.contains(&row)
-				.then_some(row as u16)
+			// Signed, because a mark scrolled off the TOP lands below zero — which is precisely what
+			// the range check then drops. A `u16` row only exists once that check has passed, so the
+			// conversion is the last step rather than an assumption made before it (§111).
+			let row = super::as_signed_line(absolute) - top;
+			(0..rows).contains(&row).then(|| u16::try_from(row).ok())?
 		})
 		.collect()
 }
@@ -857,8 +866,8 @@ mod tests {
 		// history. From the live bottom (offset 0, top row is absolute 20) the previous prompt is
 		// 14 -> its offset is 20 - 14 = 6.
 		let mut prompts = Prompts::default();
-		for line in [2u64, 8, 14] {
-			prompts.apply(Mark::PromptStart, line as usize, 0);
+		for line in [2usize, 8, 14] {
+			prompts.apply(Mark::PromptStart, line, 0);
 		}
 		assert_eq!(prompts.jump(Osc133Direction::Previous, 20, 0), Some(6));
 		// From there (offset 6, top row is absolute 14) the next one up is 8 -> offset 12.
@@ -997,10 +1006,10 @@ mod tests {
 	/// Run one whole command cycle: a prompt on absolute line `at`, output from `at + 1`, finishing
 	/// on `end`. Written out here because the walk tests need several commands each and the marks
 	/// themselves are not what those tests are about.
-	fn run_command(prompts: &mut Prompts, at: u64, end: u64) {
-		prompts.apply(Mark::PromptStart, at as usize, 0);
-		prompts.apply(Mark::OutputStart, at as usize + 1, 0);
-		prompts.apply(Mark::CommandEnd(Some(0)), end as usize, 0);
+	fn run_command(prompts: &mut Prompts, at: usize, end: usize) {
+		prompts.apply(Mark::PromptStart, at, 0);
+		prompts.apply(Mark::OutputStart, at + 1, 0);
+		prompts.apply(Mark::CommandEnd(Some(0)), end, 0);
 	}
 
 	#[test]
