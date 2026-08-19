@@ -2462,7 +2462,7 @@ struct Arrival {
 /// changed which one wins, and no test could name a pair because there was nothing to name. This
 /// enum is that priority made into a value, so [`Tab::keyboard_claim`] can be asked and answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Claim {
+enum KeyboardClaim {
 	/// Home: the "remove this target?" confirmation (§14). Outranks the rename below it so a stray
 	/// Enter cannot open a connection behind the modal.
 	DeleteTarget,
@@ -5775,7 +5775,7 @@ impl Tab {
 	}
 
 	/// Who is holding the keyboard on this tab, if anyone (§10, §14, §17, §18, §27, §35) — see
-	/// [`Claim`], which is where the reasoning lives.
+	/// [`KeyboardClaim`], which is where the reasoning lives.
 	///
 	/// THE ORDER OF THESE TESTS IS THE PRIORITY, and that is the whole point of the function: it
 	/// used to be the order of seven `if` blocks in two different handlers, which is a rule nothing
@@ -5783,32 +5783,32 @@ impl Tab {
 	///
 	/// Pure, and it reads only what is already on the tab, so "who has the keyboard" can be asked
 	/// without a window and without pressing anything.
-	fn keyboard_claim(&self) -> Option<Claim> {
+	fn keyboard_claim(&self) -> Option<KeyboardClaim> {
 		match self.screen {
 			AppScreen::Home => {
 				if self.confirm_delete {
-					return Some(Claim::DeleteTarget);
+					return Some(KeyboardClaim::DeleteTarget);
 				}
 				if self.home_rename.is_some() {
-					return Some(Claim::TargetRename);
+					return Some(KeyboardClaim::TargetRename);
 				}
 				None
 			}
 			AppScreen::Terminal => {
 				if self.modal.is_some() {
-					return Some(Claim::Modal);
+					return Some(KeyboardClaim::Modal);
 				}
 				if self.transfers.holds_keyboard() {
-					return Some(Claim::Transfers);
+					return Some(KeyboardClaim::Transfers);
 				}
 				if self.panes.tree.editing().is_some() {
-					return Some(Claim::TreeRename);
+					return Some(KeyboardClaim::TreeRename);
 				}
 				if self.panes.pane.editing().is_some() {
-					return Some(Claim::PaneRename);
+					return Some(KeyboardClaim::PaneRename);
 				}
 				if self.search.is_some() {
-					return Some(Claim::Find);
+					return Some(KeyboardClaim::Find);
 				}
 				None
 			}
@@ -5821,16 +5821,16 @@ impl Tab {
 	/// Escape, given to whoever is holding the keyboard (§10, §14, §17, §18, §27, §35). Every
 	/// claimant can be backed out of, and none of them acts on being dismissed — which is what makes
 	/// one key safe for all seven.
-	fn dismiss(&mut self, claim: Claim) {
+	fn dismiss(&mut self, claim: KeyboardClaim) {
 		match claim {
-			Claim::DeleteTarget => self.confirm_delete = false,
-			Claim::TargetRename => self.home_rename = None,
-			Claim::Modal => self.modal = None,
-			Claim::Transfers => self.transfers.escape(),
-			Claim::TreeRename => self.panes.tree.cancel_rename(),
-			Claim::PaneRename => self.panes.pane.cancel_rename(),
+			KeyboardClaim::DeleteTarget => self.confirm_delete = false,
+			KeyboardClaim::TargetRename => self.home_rename = None,
+			KeyboardClaim::Modal => self.modal = None,
+			KeyboardClaim::Transfers => self.transfers.escape(),
+			KeyboardClaim::TreeRename => self.panes.tree.cancel_rename(),
+			KeyboardClaim::PaneRename => self.panes.pane.cancel_rename(),
 			// The current match stays selected when the bar closes, so it can still be copied.
-			Claim::Find => self.search = None,
+			KeyboardClaim::Find => self.search = None,
 		}
 	}
 
@@ -6031,11 +6031,11 @@ impl Tab {
 		}
 
 		// Whoever is holding the keyboard gets it, and gets it before anything on this screen may
-		// see the key (§10, §17, §18, §27, §35) — see `Claim`. Esc backs out of whichever it is;
+		// see the key (§10, §17, §18, §27, §35) — see `KeyboardClaim`. Esc backs out of whichever it is;
 		// everything else waits for the field or the button that is holding it.
 		let claim = self.keyboard_claim();
 		if let Some(claim) = claim
-			&& claim != Claim::Find
+			&& claim != KeyboardClaim::Find
 		{
 			if matches!(key, iced::keyboard::Key::Named(Named::Escape)) {
 				self.dismiss(claim);
@@ -6044,7 +6044,7 @@ impl Tab {
 		}
 
 		// Ctrl+Shift+F opens the scrollback find bar and focuses its field (§35). THE ONE EXCEPTION
-		// to the rule above, and the reason `Claim::Find` is ranked last and singled out here:
+		// to the rule above, and the reason `KeyboardClaim::Find` is ranked last and singled out here:
 		// pressing it while the bar is already up refocuses the field rather than being swallowed by
 		// the bar it opened. Every other claimant still outranks it — with a modal or a rename up,
 		// this key does nothing, which is the behaviour the old block order gave by sitting exactly
@@ -8843,25 +8843,25 @@ mod tests {
 
 		// The find bar is ranked last, so anything else opened over it takes precedence.
 		let _ = app.open_term_find();
-		assert_eq!(app.keyboard_claim(), Some(Claim::Find));
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::Find));
 
 		app.panes.tree.start_rename("/srv".to_owned());
 		assert_eq!(
 			app.keyboard_claim(),
-			Some(Claim::TreeRename),
+			Some(KeyboardClaim::TreeRename),
 			"a rename field outranks the find bar"
 		);
 
 		// A dialog outranks the rename, which is what stops a key reaching two fields at once.
 		let _ = app.begin_new_folder("/srv".to_owned());
-		assert_eq!(app.keyboard_claim(), Some(Claim::Modal));
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::Modal));
 
 		// And dismissing them gives the keyboard back in the reverse order, one at a time.
-		app.dismiss(Claim::Modal);
-		assert_eq!(app.keyboard_claim(), Some(Claim::TreeRename));
-		app.dismiss(Claim::TreeRename);
-		assert_eq!(app.keyboard_claim(), Some(Claim::Find));
-		app.dismiss(Claim::Find);
+		app.dismiss(KeyboardClaim::Modal);
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::TreeRename));
+		app.dismiss(KeyboardClaim::TreeRename);
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::Find));
+		app.dismiss(KeyboardClaim::Find);
 		assert_eq!(app.keyboard_claim(), None);
 	}
 
@@ -8877,12 +8877,12 @@ mod tests {
 			key: "one".to_owned(),
 			text: "one".to_owned(),
 		});
-		assert_eq!(app.keyboard_claim(), Some(Claim::TargetRename));
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::TargetRename));
 
 		// The delete confirmation outranks the rename: a stray Enter must not open a connection
 		// from behind the modal.
 		app.confirm_delete = true;
-		assert_eq!(app.keyboard_claim(), Some(Claim::DeleteTarget));
+		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::DeleteTarget));
 	}
 
 	/// A dialog owns the keyboard while it is up (§10, §18). Its own field types through the widget

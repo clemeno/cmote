@@ -41,7 +41,7 @@ struct Csi {
 /// What the engine's parser made of a chunk: what it dispatched, what it refused, and which control
 /// bytes it ran on the way.
 #[derive(Debug, Default)]
-struct Engine {
+struct EngineTrace {
 	/// Every CSI dispatched with `ignore` clear — the ones the engine's handler actually sees.
 	dispatched: Vec<Csi>,
 	/// How many arrived with `ignore` set, which is the parser saying "too many parameters or
@@ -52,7 +52,7 @@ struct Engine {
 	executed: Vec<u8>,
 }
 
-impl vte::Perform for Engine {
+impl vte::Perform for EngineTrace {
 	fn csi_dispatch(
 		&mut self,
 		params: &vte::Params,
@@ -77,14 +77,14 @@ impl vte::Perform for Engine {
 }
 
 /// Drive the real parser over `bytes` and report what it did.
-fn engine(bytes: &[u8]) -> Engine {
+fn engine(bytes: &[u8]) -> EngineTrace {
 	let mut parser = vte::Parser::new();
-	let mut seen = Engine::default();
+	let mut seen = EngineTrace::default();
 	parser.advance(&mut seen, bytes);
 	seen
 }
 
-impl Engine {
+impl EngineTrace {
 	/// Whether the parser dispatched a plain CSI — no marker, no intermediate — ending in `final_byte`,
 	/// and with `first` as its first parameter. That is the shape every scanner here shadows.
 	fn dispatched_plain(&self, final_byte: char, first: u16) -> bool {
@@ -102,7 +102,7 @@ impl Engine {
 /// Named types because the eleven scanners answer with eleven different verdicts, and the only question
 /// common to all of them is "did you act on this at all".
 #[cfg(test)]
-type Claim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
+type DifferentialClaim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
 
 /// The same, plus where in the sequence a stray byte is to be inserted.
 #[cfg(test)]
@@ -575,7 +575,7 @@ mod tests {
 		//
 		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
 		// all eleven can answer in common.
-		let scanners: [Claim; 10] = [
+		let scanners: [DifferentialClaim; 10] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -652,7 +652,7 @@ mod tests {
 		//
 		// Every scanner that buffers intermediates, each fed its own sequence with a parameter byte pushed in
 		// after the intermediate.
-		let cases: [Claim; 4] = [
+		let cases: [DifferentialClaim; 4] = [
 			("protect, DECSCA", b"\x1b[1\"2q", |bytes| {
 				!protect::Protect::default().feed(bytes).is_empty()
 			}),

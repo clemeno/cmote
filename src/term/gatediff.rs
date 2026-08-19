@@ -244,7 +244,7 @@ fn margin_free_streams() -> Vec<(&'static str, &'static [u8])> {
 /// Mode 69 on, with the band opened to the two edges of the page — margins that wall off nothing.
 ///
 /// `Margins::narrowed` is `enabled && (left > 0 || right + 1 < cols)`, so this is deliberately NOT
-/// narrowed and the gate is supposed to keep standing aside. It is the same rule `Region` has for a
+/// narrowed and the gate is supposed to keep standing aside. It is the same rule `ScrollRegion` has for a
 /// vertical band as tall as the page, and it is worth a sweep of its own because the tempting
 /// simplification — reading `narrowed()` as "is the mode set?" — would pass every margins test in
 /// `mod.rs` while quietly moving every unmargined program onto cmote's arithmetic.

@@ -316,7 +316,7 @@ impl Terminal {
 			paths: scp::Paths::default(),
 			graphics: graphics::Images::default(),
 			on_alternate: false,
-			region: region::Region::full(rows as usize),
+			region: region::ScrollRegion::full(rows as usize),
 			margins: margins::Margins::default(),
 		}
 	}
@@ -1954,7 +1954,7 @@ pub struct Terminal {
 	/// writes it is observable: the two sequence-driven writes arrive through the gate, and the two
 	/// resets are calls cmote itself makes. `term/region.rs` names all four and what would break the
 	/// mirror.
-	region: region::Region,
+	region: region::ScrollRegion,
 	/// The left and right margins, DECSLRM's half of the same object the region above is (§102).
 	/// Unlike the region this is not a mirror of anything — the engine has no margins, so cmote is
 	/// their only holder and the gate performs every operation they change.

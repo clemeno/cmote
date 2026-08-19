@@ -56,9 +56,13 @@ One half of the browser strip — the folder tree, or the files pane (§18, §19
 _Avoid_: panel
 
 **Area**:
-A place on screen a tab can be sent to: Main, Right, or Bottom. One cut is all there is, so
-the vocabulary is closed (§48).
-_Avoid_: region, zone, quadrant
+A place on screen a tab can be sent to: Main, Right, or Bottom — what a user can point at, which
+a `pane_grid` index cannot be. One cut is all there is, so the vocabulary is closed (§48).
+_Avoid_: zone, quadrant
+
+**Region**:
+One split region of the window: its own tab strip, whichever tab is on screen, and the state
+they share (§48). What a user points at is an **Area**; the region is what that resolves to.
 
 **Vault**:
 The age-sealed `secrets.age`, and the sole place any secret is stored (§12, §16).
@@ -94,9 +98,10 @@ The columns between the margins — what a bounded operation may move, and all i
 Margins enabled *and* not sitting at the page edges. A band spanning the whole page is not a
 band, so the gate steps aside and the engine keeps the operation (§102).
 
-**Region**:
-The rows a program walls off with DECSTBM. cmote mirrors the engine's own, because the engine
-does not expose it (§102).
+**Scroll region**:
+The rows a program walls off with DECSTBM — DEC's own name for them. cmote mirrors the engine's,
+because the engine does not expose it (§102).
+_Avoid_: region, unqualified — that is the window's (see **Region**)
 
 **Scanner**:
 A reader that watches the byte stream beside the engine for one family of sequences and

@@ -51,14 +51,14 @@
 /// the engine would answer if it could be asked. See the module header for why all four writers are
 /// reachable and what would have to change for that to stop being true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Region {
+pub struct ScrollRegion {
 	/// First row of the band, inclusive. May be negative — see the module header.
 	start: i32,
 	/// One past the last row of the band, matching the engine's `Range<Line>`.
 	end: i32,
 }
 
-impl Region {
+impl ScrollRegion {
 	/// The whole page: what the engine starts at, and what it returns to on a reset or a resize.
 	pub fn full(rows: usize) -> Self {
 		Self {
@@ -103,7 +103,7 @@ impl Region {
 	/// Last row of the band, inclusive and clamped into the page.
 	///
 	/// `end` is exclusive and never below 1 for a region the engine accepted, but a saturating
-	/// subtraction keeps a hand-built `Region` from wrapping the index round.
+	/// subtraction keeps a hand-built `ScrollRegion` from wrapping the index round.
 	pub fn last_row(&self) -> usize {
 		(self.end - 1).max(0) as usize
 	}
@@ -118,14 +118,14 @@ mod tests {
 
 	#[test]
 	fn a_fresh_region_is_the_whole_page() {
-		let region = Region::full(ROWS);
+		let region = ScrollRegion::full(ROWS);
 		assert_eq!((region.first_row(), region.last_row()), (0, ROWS - 1));
 	}
 
 	#[test]
 	fn a_scrolling_region_is_stored_as_the_engine_stores_it() {
 		// `CSI 5 ; 20 r` — one-based and inclusive on the wire, so rows 4..=19 zero-based.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(5, Some(20), ROWS);
 		assert_eq!(region.first_row(), 4);
 		assert_eq!(region.last_row(), 19);
@@ -135,7 +135,7 @@ mod tests {
 	#[test]
 	fn an_omitted_bottom_means_the_last_row() {
 		// `CSI 5 r` — the engine fills the bottom in from the page height.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(5, None, ROWS);
 		assert_eq!(region.first_row(), 4);
 		assert_eq!(region.last_row(), ROWS - 1);
@@ -145,7 +145,7 @@ mod tests {
 	fn a_backwards_region_is_rejected_and_changes_nothing() {
 		// The engine logs and returns, leaving the previous region in place. A mirror that instead
 		// took the request would think the wrong rows scroll for as long as the region lasted.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(5, Some(20), ROWS);
 		region.set(20, Some(5), ROWS);
 		assert_eq!(region.first_row(), 4);
@@ -156,7 +156,7 @@ mod tests {
 	fn a_region_with_equal_ends_is_rejected() {
 		// `top >= bottom` is the engine's test, so a one-row band written this way is refused rather
 		// than being read as a band of one.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(9, Some(9), ROWS);
 		assert_eq!((region.first_row(), region.last_row()), (0, ROWS - 1));
 	}
@@ -166,7 +166,7 @@ mod tests {
 		// `CSI 0 ; 24 r` puts the engine's start at Line(-1) — above the first row. Clamping it here
 		// would be tidier and would make the mirror wrong, so the clamp lives in `first_row` instead
 		// and the stored number stays the engine's.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(0, Some(10), ROWS);
 		assert_eq!(region.start, -1);
 		assert_eq!(region.first_row(), 0);
@@ -176,7 +176,7 @@ mod tests {
 	#[test]
 	fn a_bottom_past_the_page_is_clamped_to_it() {
 		// The engine takes the minimum with the page height on both ends.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(3, Some(999), ROWS);
 		assert_eq!(region.last_row(), ROWS - 1);
 	}
@@ -185,7 +185,7 @@ mod tests {
 	fn a_top_past_the_page_is_clamped_to_it() {
 		// Nonsense in, but the mirror still has to land where the engine lands rather than panicking
 		// or wrapping an index round.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(999, Some(1000), ROWS);
 		assert_eq!(region.first_row(), ROWS);
 		assert_eq!(region.last_row(), ROWS - 1);
@@ -193,7 +193,7 @@ mod tests {
 
 	#[test]
 	fn a_reset_puts_the_whole_page_back() {
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(5, Some(20), ROWS);
 		region.reset(ROWS);
 		assert_eq!((region.first_row(), region.last_row()), (0, ROWS - 1));
@@ -203,7 +203,7 @@ mod tests {
 	fn a_resize_to_a_taller_page_is_the_whole_of_the_new_one() {
 		// The engine assigns the full range on resize, so a region set before it does not survive —
 		// and the mirror must not survive either.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(5, Some(20), ROWS);
 		region.reset(50);
 		assert_eq!(region.first_row(), 0);
@@ -214,7 +214,7 @@ mod tests {
 	fn a_band_covering_the_page_exactly_still_reads_as_the_whole_page() {
 		// `CSI 1 ; 24 r` on a 24-row page is the same band as no region at all, and the operations
 		// the gate bounds should take the engine's path for it rather than cmote's.
-		let mut region = Region::full(ROWS);
+		let mut region = ScrollRegion::full(ROWS);
 		region.set(1, Some(ROWS), ROWS);
 		assert_eq!((region.first_row(), region.last_row()), (0, ROWS - 1));
 	}

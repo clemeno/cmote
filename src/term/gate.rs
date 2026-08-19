@@ -72,7 +72,7 @@ use alacritty_terminal::vte::ansi::{
 use unicode_width::UnicodeWidthChar;
 
 use super::margins::Margins;
-use super::region::Region;
+use super::region::ScrollRegion;
 use super::{Engine, ReplyBuffer};
 
 /// DECLRMM, the private mode that turns the left and right margins on (§102).
@@ -107,7 +107,7 @@ pub struct Gate<'a> {
 	/// The engine, which still does all the work this gate does not do itself.
 	term: &'a mut Engine,
 	/// cmote's mirror of the engine's private vertical scrolling region (`term/region.rs`).
-	region: &'a mut Region,
+	region: &'a mut ScrollRegion,
 	/// The left and right margins and the deferred wrap that comes with them (`term/margins.rs`).
 	margins: &'a mut Margins,
 	/// Where a reply goes. The engine writes its own answers through its event listener into this
@@ -120,7 +120,7 @@ impl<'a> Gate<'a> {
 	/// Borrow an engine and the state kept beside it for the length of one advance.
 	pub fn new(
 		term: &'a mut Engine,
-		region: &'a mut Region,
+		region: &'a mut ScrollRegion,
 		margins: &'a mut Margins,
 		replies: &'a Arc<Mutex<ReplyBuffer>>,
 	) -> Self {
@@ -450,7 +450,7 @@ impl Handler for Gate<'_> {
 	/// DECSTBM — mirrored on the way past, then performed by the engine as it always was (§102).
 	///
 	/// The mirror is updated FIRST and unconditionally, including for a request the engine will
-	/// reject: `Region::set` applies the engine's own `top >= bottom` test and leaves itself alone
+	/// reject: `ScrollRegion::set` applies the engine's own `top >= bottom` test and leaves itself alone
 	/// exactly where the engine leaves itself alone, so the two agree on malformed input as well as
 	/// on good input. Then the call goes through untouched, because the engine is still the only
 	/// thing that scrolls and it needs its own copy to do it with.
