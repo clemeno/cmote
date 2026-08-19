@@ -101,7 +101,7 @@ pub async fn upload(
 ) {
 	let events = events.clone();
 	tokio::spawn(async move {
-		let native = match native(&destination) {
+		let native = match path::native(&destination) {
 			Ok(native) => native,
 			Err(reason) => {
 				let _ = events.send(SshEvent::UploadFailed(reason)).await;
@@ -131,7 +131,7 @@ pub async fn download(
 ) {
 	let events = events.clone();
 	tokio::spawn(async move {
-		let native = match native(&source) {
+		let native = match path::native(&source) {
 			Ok(native) => native,
 			Err(reason) => {
 				let _ = events.send(SshEvent::DownloadFailed(reason)).await;
@@ -150,7 +150,7 @@ pub async fn download(
 pub async fn precheck(events: &mpsc::Sender<SshEvent>, dir: String, names: Vec<String>) {
 	let events = events.clone();
 	tokio::spawn(async move {
-		let native_dir = match native(&dir) {
+		let native_dir = match path::native(&dir) {
 			Ok(native) => native,
 			Err(reason) => {
 				let _ = events.send(SshEvent::UploadFailed(reason)).await;
@@ -179,7 +179,7 @@ pub async fn upload_tree(
 	let events = events.clone();
 	tokio::spawn(async move {
 		let mut answers = answers;
-		let outcome = match native(&destination) {
+		let outcome = match path::native(&destination) {
 			Ok(native) => tree(&source, &native, resume, &events, &mut answers, &cancel).await,
 			Err(reason) => Err(transfer::mark_refused(anyhow::anyhow!("{reason}"))),
 		};
@@ -205,7 +205,7 @@ pub async fn download_tree(
 	let events = events.clone();
 	tokio::spawn(async move {
 		let mut answers = answers;
-		let outcome = match native(&source) {
+		let outcome = match path::native(&source) {
 			Ok(native) => {
 				tree(
 					&native,
@@ -550,12 +550,6 @@ async fn size_of(source: &Path) -> Result<u64> {
 		.await
 		.with_context(|| format!("could not read {}", source.display()))?
 		.len())
-}
-
-/// The native path for a pane path, or the refusal this layer gives before touching the disk
-/// (`local::path`).
-fn native(pane: &str) -> Result<PathBuf, String> {
-	path::to_native(pane).ok_or_else(|| format!("{pane} is not a path on this machine."))
 }
 
 /// Turn one file copy's outcome into exactly one terminal event (§16, §17, §19).

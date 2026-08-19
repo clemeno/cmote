@@ -117,7 +117,7 @@ async fn look(
 		None => {
 			let mut found = None;
 			for (file, shell) in FALLBACKS {
-				if exists(backend, &join(&home, file)).await {
+				if exists(backend, &crate::explorer::join(&home, file)).await {
 					found = Some(shell);
 					break;
 				}
@@ -131,7 +131,7 @@ async fn look(
 	let Some(shell) = shell else {
 		return Ok((None, home, false));
 	};
-	let path = join(&home, shell.rc_file());
+	let path = crate::explorer::join(&home, shell.rc_file());
 	// A file that is not there yet is not installed — and is not an error either: installing simply
 	// creates it.
 	let installed = read_text(backend, &path)
@@ -233,11 +233,4 @@ async fn close(backend: AsuserFiles) {
 	if let AsuserFiles::Sftp(sftp) = backend {
 		let _ = sftp.close().await;
 	}
-}
-
-/// Join a directory and a relative name into a remote path. The explorer's `join` is for absolute
-/// remote paths and a config file may sit two levels down (`.config/fish/config.fish`), so this
-/// small local one keeps the separator rule in one place instead of formatting it at each call.
-fn join(dir: &str, name: &str) -> String {
-	format!("{}/{name}", dir.trim_end_matches('/'))
 }

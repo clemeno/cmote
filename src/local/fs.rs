@@ -130,8 +130,8 @@ pub async fn rename(events: &mpsc::Sender<SshEvent>, from: String, to: String) {
 
 /// The rename itself, split out so both paths are one expression and the guard cannot be skipped.
 async fn rename_now(from: &str, to: &str) -> Result<(), String> {
-	let source = native(from)?;
-	let destination = native(to)?;
+	let source = path::native(from)?;
+	let destination = path::native(to)?;
 	let taken = to.to_owned();
 	tokio::task::spawn_blocking(move || {
 		if destination.symlink_metadata().is_ok() {
@@ -165,7 +165,7 @@ pub async fn remove(events: &mpsc::Sender<SshEvent>, panes: Vec<String>) {
 async fn remove_now(panes: &[String]) -> Result<(), String> {
 	let mut targets = Vec::with_capacity(panes.len());
 	for pane in panes {
-		targets.push((pane.clone(), native(pane)?));
+		targets.push((pane.clone(), path::native(pane)?));
 	}
 	tokio::task::spawn_blocking(move || {
 		for (pane, target) in &targets {
@@ -510,15 +510,10 @@ where
 	T: Send + 'static,
 	F: FnOnce(&Path) -> Result<T, String> + Send + 'static,
 {
-	let native = native(pane)?;
+	let native = path::native(pane)?;
 	tokio::task::spawn_blocking(move || work(&native))
 		.await
 		.map_err(|_| joined())?
-}
-
-/// The native path for a pane path, or the one refusal this layer can give before touching the disk.
-fn native(pane: &str) -> Result<PathBuf, String> {
-	path::to_native(pane).ok_or_else(|| format!("{pane} is not a path on this machine."))
 }
 
 /// A pane path back out of a native one, for a message that names what it acted on. Falls back to the

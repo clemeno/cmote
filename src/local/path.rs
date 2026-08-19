@@ -146,6 +146,16 @@ pub fn drives() -> Vec<String> {
 	Vec::new()
 }
 
+/// [`to_native`] with the refusal already worded for a user (§103).
+///
+/// Lives here, beside the translation it wraps, because it was written twice — identically — in
+/// `local::fs` and `local::copy`, which is how a boundary comes to be crossed two ways. Every
+/// caller that must have a native path goes through this one, so the message a refusal shows and
+/// the check that produced it can never drift apart.
+pub fn native(pane: &str) -> Result<PathBuf, String> {
+	to_native(pane).ok_or_else(|| format!("{pane} is not a path on this machine."))
+}
+
 /// Whether this pane path is the virtual root — the one path with no native equivalent on Windows,
 /// and the one whose listing is the drive letters.
 pub fn is_virtual_root(pane: &str) -> bool {
