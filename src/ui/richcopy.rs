@@ -173,7 +173,7 @@ fn blend(fg: (u8, u8, u8), bg: (u8, u8, u8)) -> (u8, u8, u8) {
 	(mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
 }
 
-/// Format an RGB triple as a CSS hex_color colour (`#rrggbb`).
+/// Format an RGB triple as a CSS hex colour (`#rrggbb`).
 fn hex_color((r, g, b): (u8, u8, u8)) -> String {
 	format!("#{r:02x}{g:02x}{b:02x}")
 }

@@ -326,7 +326,7 @@ pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 // EVERYTHING FROM HERE TO THE WINDOWS SEAM IS WINDOWS' AND THE TESTS' (§80). The drawings exist
 // because Windows has no hand cursors and iced offers no seam to pass a picture through; every
 // other platform draws its own, so off Windows there is nobody to hand a decoded PNG to. The bundled
-// bytes, the hotspot, the `Drawing` they decode_png into and the resampler that fits them are therefore
+// bytes, the hotspot, the `Drawing` they decode into and the resampler that fits them are therefore
 // compiled for `windows` and for `test`, and for nothing else — `dead_code` is right about them on a
 // mac build, and CI's `-D warnings` over `x86_64-apple-darwin` is where that shows up.
 //
@@ -642,7 +642,7 @@ mod platform {
 	}
 
 	/// A drawing at the size asked for, or untouched when the answer is unusable or already right.
-	/// Split out so `install` reads as the three steps it is: decode_png, fit, build.
+	/// Split out so `install` reads as the three steps it is: decode, fit, build.
 	fn fitted(drawing: Drawing, width: i32, height: i32) -> Drawing {
 		let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
 			return drawing;

@@ -1,7 +1,7 @@
 // preview.rs — the picture a tab shows instead of a text buffer (PLAN §53).
 //
 // The pure half of the image preview: which files open as a picture rather than as text, and the
-// decode_image — format sniffing, the caps that stand between a remote's bytes and this process's
+// decode — format sniffing, the caps that stand between a remote's bytes and this process's
 // memory, and the refusal wording when a file is not something cmote can draw. The network read is
 // `ssh/edit.rs`'s (a preview and an editor pull a remote file the same way, so they share it) and
 // the drawing is `ui/preview.rs`'s, which is the same three-way split the editor and the panes use
@@ -52,7 +52,7 @@ pub fn opens_preview(path: &str) -> bool {
 }
 
 /// A decoded picture, before it becomes something the renderer can hold (§53). Pure data — width,
-/// height, the format it turned out to be, and the pixels — so the whole decode_image, caps and refusals
+/// height, the format it turned out to be, and the pixels — so the whole decode, caps and refusals
 /// included, is unit-testable without a GPU or a window.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
@@ -65,7 +65,7 @@ pub struct Decoded {
 	pub rgba: Vec<u8>,
 }
 
-/// The caps every decode_image runs under (§53). Built here rather than inlined so a test can hand
+/// The caps every decode runs under (§53). Built here rather than inlined so a test can hand
 /// `decode_within` a tighter set and drive the refusal path without forging a bomb.
 fn limits() -> image::Limits {
 	let mut limits = image::Limits::default();
@@ -81,7 +81,7 @@ pub fn decode_image(bytes: &[u8]) -> Result<Decoded, String> {
 	decode_within(bytes, limits())
 }
 
-/// `decode_image` with the caps passed in, so the refusal path is reachable from a test with a tiny
+/// `decode` with the caps passed in, so the refusal path is reachable from a test with a tiny
 /// picture instead of a real one (§53).
 fn decode_within(bytes: &[u8], limits: image::Limits) -> Result<Decoded, String> {
 	// The format comes from the LEADING BYTES, never from the file name. The name is a remote's to
@@ -116,10 +116,10 @@ fn decode_within(bytes: &[u8], limits: image::Limits) -> Result<Decoded, String>
 	})
 }
 
-/// The display name of a format cmote can actually decode_image, or `None` for one it only RECOGNISES
+/// The display name of a format cmote can actually decode, or `None` for one it only RECOGNISES
 /// (§53). The distinction is the point: `image` sniffs every format it knows of, but only the five
 /// codecs enabled in `Cargo.toml` are compiled in, and a decoder that is not compiled in is a
-/// parser that cannot be reached. Matching here rather than letting the decode_image fail turns an
+/// parser that cannot be reached. Matching here rather than letting the decode fail turns an
 /// internal "unsupported" error into a sentence that names what the file is.
 fn format_name(format: image::ImageFormat) -> Option<&'static str> {
 	match format {
@@ -222,7 +222,7 @@ impl Preview {
 mod tests {
 	use super::*;
 
-	/// A real picture of the given size, encoded in `format` — so the decode_image tests run over bytes a
+	/// A real picture of the given size, encoded in `format` — so the decode tests run over bytes a
 	/// decoder actually produced rather than a hand-forged header.
 	fn encoded(width: u32, height: u32, format: image::ImageFormat) -> Vec<u8> {
 		let picture = image::RgbaImage::from_pixel(width, height, image::Rgba([1, 2, 3, 255]));
@@ -244,14 +244,14 @@ mod tests {
 
 	#[test]
 	fn the_format_is_read_off_the_bytes_not_the_file_name() {
-		// `decode_image` takes no name at all, which is the point: these bytes would open identically
+		// `decode` takes no name at all, which is the point: these bytes would open identically
 		// whether the server called them `.jpg`, `.txt` or nothing.
 		let decoded = decode_image(&encoded(4, 4, image::ImageFormat::Jpeg)).expect("a JPEG opens");
 		assert_eq!(decoded.format, "JPEG");
 		assert_eq!((decoded.width, decoded.height), (4, 4));
 	}
 
-	/// `ponytail:` WebP is absent from this list because `image`'s WebP support is decode_image-only, so
+	/// `ponytail:` WebP is absent from this list because `image`'s WebP support is decode-only, so
 	/// the test cannot build its own fixture the way it does for the other four. It is covered by
 	/// the format table and by hand (README's walkthrough), not here.
 	#[test]
@@ -270,7 +270,7 @@ mod tests {
 	#[test]
 	fn a_format_cmote_has_no_decoder_for_is_named_in_the_refusal() {
 		// A TIFF magic number and nothing else: `image` recognises the format, but its codec is not
-		// compiled in, so the refusal must say so rather than fall through to a decode_image error.
+		// compiled in, so the refusal must say so rather than fall through to a decode error.
 		let reason = decode_image(b"II*\0\0\0\0\0junk").expect_err("TIFF is refused");
 		assert!(reason.contains("TIFF"), "names the format: {reason}");
 		assert!(reason.contains("PNG"), "and says what it can do: {reason}");

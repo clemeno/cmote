@@ -92,7 +92,7 @@ impl Encoding {
 /// file. A `None` is the caller's cue to refuse the file rather than show mojibake.
 ///
 /// Detection is BOM-first: a mark picks the UTF and is stripped from the text (it is metadata, not a
-/// character); with no mark the bytes are read as UTF-8-without-BOM. A file whose bytes do not decode_text
+/// character); with no mark the bytes are read as UTF-8-without-BOM. A file whose bytes do not decode
 /// cleanly under the chosen encoding is unsupported.
 pub fn decode_text(bytes: &[u8]) -> Option<(String, Encoding)> {
 	if bytes.starts_with(&BOM_UTF8) {
