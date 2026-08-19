@@ -4,7 +4,7 @@
 // support), the changed-line diff that drives the gutter marks, and the `Editor` state a tab
 // carries when it is editing a file rather than running a session. The network calls live in
 // `ssh/edit.rs` and the drawing in `ui/editor.rs`, so everything here is testable with no server —
-// the same three-way split the panels use (§18, §19).
+// the same three-way split the panes use (§18, §19).
 //
 // The encoding rule (the one the user set): keep a BOM if the file has one, let a BOM decide the
 // UTF, assume UTF-8-without-BOM when there is none, refuse what cannot be decoded, and on save

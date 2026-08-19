@@ -100,7 +100,7 @@ const WARNING_FG: Color = Color::from_rgb8(0xff, 0x5c, 0x5c);
 /// extension, a path's leaf folder — is usually the more worth-showing half.
 ///
 /// Shared by every place that shows a name or a path in a fixed number of lines: the file
-/// grid's cells (§19), the panel headers' current directory (§22) and the connect form's
+/// grid's cells (§19), the pane headers' current directory (§22) and the connect form's
 /// key file (§14). Each caller passes the char budget its own width and line count come to
 /// — this owns only the cut, not the "how many fit" estimate, so one rule keeps them all
 /// consistent.

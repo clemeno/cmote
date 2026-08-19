@@ -161,7 +161,7 @@ pub async fn remove(events: &mpsc::Sender<SshEvent>, panes: Vec<String>) {
 }
 
 /// Remove each target in turn, stopping at the first failure and naming it. A delete that half
-/// happened is worth being told about, and the panels re-list either way (§18).
+/// happened is worth being told about, and the panes re-list either way (§18).
 async fn remove_now(panes: &[String]) -> Result<(), String> {
 	let mut targets = Vec::with_capacity(panes.len());
 	for pane in panes {

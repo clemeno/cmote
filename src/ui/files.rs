@@ -233,11 +233,11 @@ pub fn panel(
 	.on_move(|point| Message::Files(FilesMessage::PointerMoved(point)))
 	// A press anywhere in the pane — a cell or the empty space beside one — is what
 	// gives it the keyboard (§20); one on the entry_grid's empty space also starts a band (§21).
-	.on_press(Message::Files(FilesMessage::PanelPressed))
-	.on_release(Message::Files(FilesMessage::PanelReleased))
+	.on_press(Message::Files(FilesMessage::PanePressed))
+	.on_release(Message::Files(FilesMessage::PaneReleased))
 	// A right-press on the empty space opens the pane's own menu (§17). A cell's own
 	// `mouse_area` catches a right-press over it first, so this only fires off the cells.
-	.on_right_press(Message::Files(FilesMessage::PanelRightPressed))
+	.on_right_press(Message::Files(FilesMessage::PaneRightPressed))
 	.into()
 }
 
@@ -951,7 +951,7 @@ pub fn drag_layer() -> Element<'static, Message> {
 pub fn band_drag_layer() -> Element<'static, Message> {
 	mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
 		.on_move(|point| Message::Files(FilesMessage::BandMoved(point)))
-		.on_release(Message::Files(FilesMessage::PanelReleased))
+		.on_release(Message::Files(FilesMessage::PaneReleased))
 		.into()
 }
 

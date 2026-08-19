@@ -31,7 +31,7 @@ use crate::ui::connect::AuthKind;
 /// One saved connection target — metadata only, no secret material (§12).
 /// `name` is a free display label (defaults to the endpoint, renamed by the user);
 /// the rest is exactly what the connect form needs to be pre-filled.
-// `Eq` is deliberately not derived: the panel sizes are `f32`, which is `PartialEq` but not
+// `Eq` is deliberately not derived: the pane sizes are `f32`, which is `PartialEq` but not
 // `Eq` (NaN). `PartialEq` is all the tests and the change-detection in `set_session` need.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Target {
@@ -71,9 +71,9 @@ pub struct Target {
 	/// Omitted from the JSON when `None`.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub files_path: Option<String>,
-	/// The explorer panel's width and the files pane's height when the session last ended
+	/// The explorer pane's width and the files pane's height when the session last ended
 	/// (§22), so the layout reopens as it was left. Absent until a session has closed;
-	/// omitted from the JSON when `None`, so the panels then take their built-in defaults.
+	/// omitted from the JSON when `None`, so the panes then take their built-in defaults.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub explorer_width: Option<f32>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -106,7 +106,7 @@ pub struct Target {
 }
 
 /// The slice of a target's state that one session updates and the next restores (§22): where
-/// the shell and files pane were, the `.*` filter, and the two panel sizes. A transfer
+/// the shell and files pane were, the `.*` filter, and the two pane sizes. A transfer
 /// struct, not stored directly — `Target` keeps these as flat fields (so the JSON stays flat
 /// and older files still load), and this is what `capture` fills, `restore` reads and
 /// `set_session` writes. Every field is optional and means "leave what is stored" when
@@ -128,7 +128,7 @@ pub struct SessionState {
 	pub sort_dir: Option<Option<SortDir>>,
 }
 
-/// Serde default for `show_hidden` — matches the panels' own default (shown), so a
+/// Serde default for `show_hidden` — matches the panes' own default (shown), so a
 /// `targets.json` written before this field existed keeps behaving as it did.
 fn shown_by_default() -> bool {
 	true
@@ -245,7 +245,7 @@ impl Targets {
 					show_hidden: shown_by_default(),
 					// A brand-new target has no session behind it yet, so there is nowhere to
 					// resume to — the first connect uses the fallbacks (root / login dir, and
-					// the panels' default sizes).
+					// the panes' default sizes).
 					terminal_path: None,
 					files_path: None,
 					explorer_width: None,

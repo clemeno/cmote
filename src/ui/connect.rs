@@ -50,7 +50,7 @@ const FOCUS_RING: Color = Color::from_rgb8(0x5a, 0x9c, 0xff);
 /// `KEY_PATH_CHAR` is deliberately PESSIMISTIC — fatter than the face truly is — so the char
 /// budget lands under what two lines of `KEY_PATH_WIDTH` really hold and the `…` trims the
 /// path with margin rather than letting it spill onto a third line, the same discipline the
-/// panel headers use.
+/// pane headers use.
 const KEY_PATH_WIDTH: f32 = 210.0;
 const KEY_PATH_CHAR: f32 = 8.0;
 const KEY_PATH_LINES: usize = 2;

@@ -534,17 +534,17 @@ pub enum SshEvent {
 	DirFailed { path: String, reason: String },
 	/// A folder was renamed (§18); the tree re-lists the parent and follows the new path.
 	RenameDone { from: String, to: String },
-	/// The rename did not happen, with the reason for the panel's notice line.
+	/// The rename did not happen, with the reason for the pane's notice line.
 	RenameFailed(String),
-	/// A new folder was created (§18); carries its full path so both panels re-list the parent
+	/// A new folder was created (§18); carries its full path so both panes re-list the parent
 	/// it appeared in and the row shows up in the right sort position.
 	MakeDirDone(String),
-	/// The folder was not created, with the reason for the panel's notice line.
+	/// The folder was not created, with the reason for the pane's notice line.
 	MakeDirFailed(String),
-	/// Remote entries were deleted (§18); carries the paths that were removed so both panels
+	/// Remote entries were deleted (§18); carries the paths that were removed so both panes
 	/// re-list the parents they vanished from — and step a pane out of a folder that is now gone.
 	DeleteDone(Vec<String>),
-	/// A delete did not happen (or only partly did), with the reason for the panel's notice line.
+	/// A delete did not happen (or only partly did), with the reason for the pane's notice line.
 	DeleteFailed(String),
 	/// A port forward is up (§27): its local listener bound, or the server accepted its remote
 	/// listen request. Carries the id so the GUI marks the right row live in the tunnels dialog,

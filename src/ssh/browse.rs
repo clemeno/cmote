@@ -1,4 +1,4 @@
-// ssh/browse.rs — read (and rename) remote folders for the explorer panel (PLAN §18, §46).
+// ssh/browse.rs — read (and rename) remote folders for the explorer pane (PLAN §18, §46).
 //
 // The tree needs one thing from the server: "what folders are inside this one?".
 // Two ways to ask, tried in that order:
@@ -331,7 +331,7 @@ async fn make_dir_sftp(sftp: Arc<RawSftpSession>, path: String, events: mpsc::Se
 
 /// The SFTP delete: remove each target in turn, walking a folder's whole subtree. A failure
 /// stops at the first one and names it — a delete that half-happened is worth being told about,
-/// and the panels re-list either way so what did go survives the message (§18).
+/// and the panes re-list either way so what did go survives the message (§18).
 async fn remove_sftp(
 	sftp: Arc<RawSftpSession>,
 	paths: Vec<String>,

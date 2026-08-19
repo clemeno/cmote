@@ -126,7 +126,7 @@ pub fn panel<'a>(
 	)
 	.on_move(|point| Message::Explorer(ExplorerMessage::PointerMoved(point)))
 	// A press anywhere in the panel gives it the keyboard (§20).
-	.on_press(Message::Explorer(ExplorerMessage::PanelPressed))
+	.on_press(Message::Explorer(ExplorerMessage::PanePressed))
 	.into()
 }
 

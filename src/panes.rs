@@ -1,4 +1,4 @@
-// panes.rs — the two file panels, and the things that are true of the PAIR (PLAN §18, §19, §22).
+// panes.rs — the two file panes, and the things that are true of the PAIR (PLAN §18, §19, §22).
 //
 // A session shows two views of the same remote filesystem: the folder TREE down the left (§18) and
 // the files PANE across the bottom (§19). Each has its own model, in `explorer` and `files`, and
@@ -7,8 +7,8 @@
 // But a good deal is true of the two TOGETHER, and that half had no owner. It lived in `app`, in
 // eighteen functions that reached into both models and sequenced them by hand, and one of those
 // functions said so in its own comment: "Done here rather than in a model because it spans both
-// panels." That is what this module is. It holds the pair, and it owns the operations that are
-// about the pair rather than about either panel:
+// panes." That is what this module is. It holds the pair, and it owns the operations that are
+// about the pair rather than about either pane:
 //
 //   * **Where the session IS.** Revealing a directory opens the tree down to it and points the pane
 //     at it — two models, one idea, and getting one without the other is the bug rather than a
@@ -17,15 +17,15 @@
 //     want listings.
 //   * **Deletion.** Entries vanishing must step the pane out of a folder that is gone BEFORE
 //     anything re-lists, then drop the subtrees from the tree, then re-list each parent.
-//   * **The remembered session** (§22): the `.*` filter, both panel sizes and the pane's sort are
+//   * **The remembered session** (§22): the `.*` filter, both pane sizes and the pane's sort are
 //     one snapshot, captured and restored as one.
 //   * **What the pane shows at all.** `files::rows` needs the tree's `show_hidden`, because the
-//     `.*` toggle is one setting for both panels — which is why the pane could never answer "what
+//     `.*` toggle is one setting for both panes — which is why the pane could never answer "what
 //     are my rows" on its own, and why nine call sites had to fetch the flag from the other model
 //     and hand it over.
 //
-// It does NOT try to own the per-panel operations. Both models stay public here, and a caller that
-// wants to scroll the tree scrolls the tree. Forwarding a hundred-odd single-panel methods through
+// It does NOT try to own the per-pane operations. Both models stay public here, and a caller that
+// wants to scroll the tree scrolls the tree. Forwarding a hundred-odd single-pane methods through
 // this struct would make it a wide, shallow thing that only re-types its two members' interfaces;
 // what earns a module is the pair's own rules, which is all that is below.
 //
@@ -38,14 +38,14 @@ use crate::explorer::{self, Explorer};
 use crate::files::{Entry, Files};
 use crate::targets::SessionState;
 
-/// The largest share of the window either panel may take, as a fraction. A splitter drag is clamped
+/// The largest share of the window either pane may take, as a fraction. A splitter drag is clamped
 /// to it and so is a restored size (§22), so a remembered layout from a bigger window cannot open a
-/// panel across most of a smaller one.
-pub const MAX_PANEL_FRACTION: f32 = 0.6;
+/// pane across most of a smaller one.
+pub const MAX_PANE_FRACTION: f32 = 0.6;
 
 /// What the session must ask the remote for after a pane operation (§18, §19).
 ///
-/// The panels decide WHAT they need; turning that into `SshCommand`s is the caller's, because only
+/// The panes decide WHAT they need; turning that into `SshCommand`s is the caller's, because only
 /// the caller has the channel. Empty is the common case and means "nothing to fetch".
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Fetches {
@@ -74,7 +74,7 @@ impl Fetches {
 	}
 }
 
-/// The two file panels of one session (§18, §19), and the rules that span them.
+/// The two file panes of one session (§18, §19), and the rules that span them.
 #[derive(Debug, Default)]
 pub struct Panes {
 	/// The folder tree down the left (§18).
@@ -85,7 +85,7 @@ pub struct Panes {
 
 impl Panes {
 	/// The entries the pane should show, filtered by the `.*` toggle — which lives on the TREE,
-	/// because it is one setting for both panels (§18, §19).
+	/// because it is one setting for both panes (§18, §19).
 	///
 	/// This is why the pane cannot answer the question alone, and why nine call sites used to read
 	/// the flag off the other model and pass it in. Asked here, the coupling is stated once.
@@ -93,12 +93,12 @@ impl Panes {
 		self.pane.rows(self.tree.show_hidden())
 	}
 
-	/// Whether hidden entries are shown, in both panels.
+	/// Whether hidden entries are shown, in both panes.
 	pub fn show_hidden(&self) -> bool {
 		self.tree.show_hidden()
 	}
 
-	/// Point BOTH panels at `cwd` (§19) — the tree opened down to it and selected, the pane
+	/// Point BOTH panes at `cwd` (§19) — the tree opened down to it and selected, the pane
 	/// browsed into it and marked as following the shell.
 	///
 	/// The Reveal button, and the shell-follow once a pinned resume has settled. One method rather
@@ -134,7 +134,7 @@ impl Panes {
 		}
 	}
 
-	/// Read both panels again from the remote, keeping WHERE they are and dropping WHAT was listed
+	/// Read both panes again from the remote, keeping WHERE they are and dropping WHAT was listed
 	/// (§46): the open shape and the selection survive, the children do not, because those were the
 	/// other account's view of them.
 	pub fn reread(&mut self) -> Fetches {
@@ -144,7 +144,7 @@ impl Panes {
 		}
 	}
 
-	/// Re-list `dir` in whichever panels are showing it (§18) — after a rename, a new folder, or a
+	/// Re-list `dir` in whichever panes are showing it (§18) — after a rename, a new folder, or a
 	/// deletion's parent. The pane is only asked when it is actually in that directory; the tree
 	/// only when it has that node open.
 	pub fn refresh_dir(&mut self, dir: &str) -> Fetches {
@@ -195,7 +195,7 @@ impl Panes {
 		fetches
 	}
 
-	/// Say the same thing in both panels (§18) — a rename, mkdir or delete that the server refused.
+	/// Say the same thing in both panes (§18) — a rename, mkdir or delete that the server refused.
 	/// One failure, one message, wherever the user is looking.
 	pub fn set_notice(&mut self, reason: String) {
 		self.tree.set_notice(reason.clone());
@@ -208,9 +208,9 @@ impl Panes {
 		self.pane.reset();
 	}
 
-	/// The pair's half of a session snapshot (§22): the `.*` filter, both panel sizes, and the
+	/// The pair's half of a session snapshot (§22): the `.*` filter, both pane sizes, and the
 	/// pane's directory and sort. `terminal_path` is the caller's to fill, because the shell's
-	/// directory is not the panels' business.
+	/// directory is not the panes' business.
 	pub fn capture(&self) -> SessionState {
 		SessionState {
 			terminal_path: None,
@@ -225,12 +225,12 @@ impl Panes {
 		}
 	}
 
-	/// Apply a remembered snapshot to both panels before the first listing (§22).
+	/// Apply a remembered snapshot to both panes before the first listing (§22).
 	///
 	/// The paths are NOT applied here: they are handed back to the caller, which drives the `cd`
 	/// and the reveal in the right order against a shell this module knows nothing about. Each size
 	/// is clamped to the same window fraction a splitter drag is, and applied only once the window
-	/// size is known, so a restore before the first resize event cannot pin a panel to its minimum.
+	/// size is known, so a restore before the first resize event cannot pin a pane to its minimum.
 	pub fn restore(&mut self, session: SessionState, window: iced::Size) -> Resume {
 		if let Some(show_hidden) = session.show_hidden {
 			self.tree.set_hidden(show_hidden);
@@ -243,14 +243,13 @@ impl Panes {
 		if let Some(width) = session.explorer_width
 			&& window.width > 1.0
 		{
-			self.tree
-				.set_width(width, window.width * MAX_PANEL_FRACTION);
+			self.tree.set_width(width, window.width * MAX_PANE_FRACTION);
 		}
 		if let Some(height) = session.files_height
 			&& window.height > 1.0
 		{
 			self.pane
-				.set_height(height, window.height * MAX_PANEL_FRACTION);
+				.set_height(height, window.height * MAX_PANE_FRACTION);
 		}
 		Resume {
 			terminal: session.terminal_path,
@@ -259,19 +258,17 @@ impl Panes {
 	}
 
 	/// Drag the TREE's splitter (§18): its width is measured from the right-hand edge of the
-	/// window, and it is clamped to [`MAX_PANEL_FRACTION`] of it.
+	/// window, and it is clamped to [`MAX_PANE_FRACTION`] of it.
 	pub fn drag_tree_splitter(&mut self, pointer_x: f32, window: iced::Size) {
 		self.tree
-			.set_width(window.width - pointer_x, window.width * MAX_PANEL_FRACTION);
+			.set_width(window.width - pointer_x, window.width * MAX_PANE_FRACTION);
 	}
 
 	/// Drag the PANE's splitter (§19) — the same rule on the other axis. The two used to be written
 	/// out separately, differing only in `width`/`x` against `height`/`y`.
 	pub fn drag_pane_splitter(&mut self, pointer_y: f32, window: iced::Size) {
-		self.pane.set_height(
-			window.height - pointer_y,
-			window.height * MAX_PANEL_FRACTION,
-		);
+		self.pane
+			.set_height(window.height - pointer_y, window.height * MAX_PANE_FRACTION);
 	}
 }
 
@@ -354,27 +351,27 @@ mod tests {
 		]);
 		// Two parents, not three: `/srv` is named twice and asked for once.
 		assert_eq!(fetches.dirs.len() + usize::from(fetches.files.is_some()), 0);
-		// Nothing is fetched at all here, in fact, because neither panel has those folders open —
+		// Nothing is fetched at all here, in fact, because neither pane has those folders open —
 		// which is the other half of the rule: a refresh is only asked for where something is
 		// actually showing it.
 	}
 
-	/// The `.*` toggle is ONE setting for both panels (§18, §19), which is why the pane cannot
+	/// The `.*` toggle is ONE setting for both panes (§18, §19), which is why the pane cannot
 	/// answer "what are my rows" without the tree.
 	#[test]
-	fn the_hidden_toggle_is_the_pairs_and_not_either_panels() {
+	fn the_hidden_toggle_is_the_pairs_and_not_either_panes() {
 		let mut panes = Panes::default();
 		let before = panes.show_hidden();
 		// Asked of the PAIR, and answered by the tree — the pane never holds this flag.
 		assert_eq!(before, panes.tree.show_hidden());
 
 		panes.tree.toggle_hidden();
-		assert_eq!(panes.show_hidden(), !before, "one toggle, both panels");
+		assert_eq!(panes.show_hidden(), !before, "one toggle, both panes");
 		// And the pane's rows follow it, without the caller fetching the flag and handing it over.
 		assert_eq!(panes.rows().len(), panes.pane.rows(!before).len());
 	}
 
-	/// Revealing points BOTH panels at the directory (§19) — never one without the other.
+	/// Revealing points BOTH panes at the directory (§19) — never one without the other.
 	#[test]
 	fn revealing_moves_the_tree_and_the_pane_together() {
 		let mut panes = Panes::default();
@@ -402,7 +399,7 @@ mod tests {
 		let _ = before.browse("/srv/data");
 
 		let snapshot = before.capture();
-		// The panels' half is filled; the shell's is the caller's to add.
+		// The panes' half is filled; the shell's is the caller's to add.
 		assert_eq!(snapshot.terminal_path, None);
 		assert_eq!(snapshot.files_path.as_deref(), Some("/srv/data"));
 
@@ -417,7 +414,7 @@ mod tests {
 		assert_eq!(after.pane.path(), None);
 	}
 
-	/// A remembered size from a larger window cannot open a panel across most of a smaller one
+	/// A remembered size from a larger window cannot open a pane across most of a smaller one
 	/// (§22) — the same clamp a splitter drag obeys.
 	#[test]
 	fn a_restored_size_is_clamped_like_a_drag() {
@@ -430,12 +427,12 @@ mod tests {
 		let window = iced::Size::new(1000.0, 800.0);
 		let _ = panes.restore(huge, window);
 
-		assert_eq!(panes.tree.width(), 1000.0 * MAX_PANEL_FRACTION);
-		assert_eq!(panes.pane.height(), 800.0 * MAX_PANEL_FRACTION);
+		assert_eq!(panes.tree.width(), 1000.0 * MAX_PANE_FRACTION);
+		assert_eq!(panes.pane.height(), 800.0 * MAX_PANE_FRACTION);
 	}
 
 	/// Before the window has been measured, a remembered size is not applied at all — otherwise a
-	/// restore racing the first resize event would clamp both panels to nothing (§22).
+	/// restore racing the first resize event would clamp both panes to nothing (§22).
 	#[test]
 	fn a_restore_before_the_window_is_known_changes_no_size() {
 		let mut panes = Panes::default();
@@ -453,9 +450,9 @@ mod tests {
 		assert_eq!(panes.pane.height(), height);
 	}
 
-	/// One refusal, one message, in both panels (§18).
+	/// One refusal, one message, in both panes (§18).
 	#[test]
-	fn a_refusal_is_said_in_both_panels() {
+	fn a_refusal_is_said_in_both_panes() {
 		let mut panes = Panes::default();
 		panes.set_notice("permission denied".to_owned());
 		assert_eq!(panes.tree.notice(), Some("permission denied"));

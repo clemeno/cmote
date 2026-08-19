@@ -490,7 +490,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		// program: unless such a program has asked for it — and Shift is not taking the mouse
 		// back, the xterm convention — a scroll moves cmote's own scrollback (§23). Handled
 		// before the report path below so it works at a bare shell prompt, where no mouse mode
-		// is on, and gated to the grid's own bounds so scrolling over a side panel is not us.
+		// is on, and gated to the grid's own bounds so scrolling over a side pane is not us.
 		if let mouse::Event::WheelScrolled { delta } = pointer {
 			let to_program = mode != MouseMode::None && !shift;
 			if !to_program {

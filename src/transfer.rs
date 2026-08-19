@@ -14,7 +14,7 @@
 //! know that a folder queue drains after a file queue or that a resume point goes stale the
 //! moment a fresh transfer starts.
 //!
-//! It reaches for nothing. No SSH channel, no dialog buffer, no panels — it returns [`Effects`]
+//! It reaches for nothing. No SSH channel, no dialog buffer, no panes — it returns [`Effects`]
 //! saying what it needs done, and `Tab::apply` does it. That is what makes every rule in here
 //! testable with no session, no window and no server.
 
@@ -187,7 +187,7 @@ pub enum Ended {
 /// What a nudge to the queue asks the rest of the app to do (§17).
 ///
 /// Returned rather than done, so the queue needs no reach into the SSH channel, the shared dialog
-/// buffer or the panels — and so a test can read what a rule decided without wiring any of them
+/// buffer or the panes — and so a test can read what a rule decided without wiring any of them
 /// up. `Tab::apply` is the one place that carries these out.
 #[derive(Debug, Default)]
 pub struct Effects {
@@ -945,7 +945,7 @@ impl Queue {
 			remote: dir.clone(),
 		});
 		self.notice = None;
-		// Remembered so completion re-lists this folder if a panel is on it (§29) — the same
+		// Remembered so completion re-lists this folder if a pane is on it (§29) — the same
 		// refresh a single-file upload gets. `close_batch` clears it at the end.
 		self.dest = dir.clone();
 		self.slot = Some(TransferProgress::default());
@@ -998,7 +998,7 @@ impl Queue {
 		let mut effects = self.pump();
 		if self.slot.is_none() && self.files.is_empty() {
 			self.notice = Some(upload_summary(self.files_done, self.trees_done, &path));
-			// Show what just landed: if a panel is on the folder we uploaded into, re-list it so
+			// Show what just landed: if a pane is on the folder we uploaded into, re-list it so
 			// the new file — or folder — appears without a manual Refresh (§29). Captured before
 			// `close_batch`, which clears the destination.
 			effects.refresh = Some(self.dest.clone());

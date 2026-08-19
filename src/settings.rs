@@ -1,7 +1,7 @@
 // settings.rs — the app-wide layout cmote remembers between runs (PLAN §31).
 //
 // Almost everything cmote persists is PER-TARGET (§14, §22): where the shell and the two
-// panels were for THAT server. What lives here instead is app-wide — a preference that is the
+// panes were for THAT server. What lives here instead is app-wide — a preference that is the
 // same whatever connection is on show. The window itself is one such: there is one OS window,
 // shown on the home screen before any target is chosen, so its size is an app-wide preference,
 // not a property of any one connection. The per-extension editor theme (§32) is another: "CME
@@ -38,7 +38,7 @@ pub const MIN_WINDOW: f32 = 480.0;
 const MAX_WINDOW: f32 = 4096.0;
 
 /// What survives a restart, app-wide: the OS window size (§31) and the per-extension editor theme
-/// (§32). The per-target panel sizes and resume paths live in `targets.json` (§22) instead, because
+/// (§32). The per-target pane sizes and resume paths live in `targets.json` (§22) instead, because
 /// they belong to a connection, not to the app. `#[serde(default)]` fills in anything an older or
 /// hand-edited file is missing, so adding a field here later can never invalidate an existing file.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

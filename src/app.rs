@@ -188,7 +188,7 @@ struct Region {
 }
 
 /// The application: the window's split regions and the state they share (§26, §48). Each `Region` is
-/// a strip of tabs; each `Tab` in one is a whole session (its own screen, terminal, panels and
+/// a strip of tabs; each `Tab` in one is a whole session (its own screen, terminal, panes and
 /// dialogs). `App` owns the tree of regions, which one holds the keyboard, the OS window's size, and
 /// the single target list and secret vault every tab's home screen and connect flow act on. Its
 /// `update`/`view`/`subscription` pick the region a message came from and delegate into it, route
@@ -2249,10 +2249,10 @@ enum Prompt {
 
 /// Which part of the terminal screen the keyboard is talking to (§20).
 ///
-/// The shell is not the only thing on this screen any more: two panels sit beside it, and
+/// The shell is not the only thing on this screen any more: two panes sit beside it, and
 /// both want the arrow keys. Rather than guess from the pointer, the window has one focus
 /// at a time — the terminal to begin with, a click moves it to whatever was clicked, and
-/// Ctrl+Tab cycles. While a panel holds it, no key reaches the shell: a panel that
+/// Ctrl+Tab cycles. While a pane holds it, no key reaches the shell: a pane that
 /// swallowed only the arrows would still leave Tab completing paths at a prompt the user
 /// is not looking at.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -2485,7 +2485,7 @@ enum KeyboardClaim {
 	Find,
 }
 
-/// One session's whole state — its screen, its connection, its terminal and panels, its
+/// One session's whole state — its screen, its connection, its terminal and panes, its
 /// dialogs (§6). This used to BE the app; with tabs (§26) the app owns a `Vec<Tab>` and each
 /// tab is one of these, fully independent: a tab can sit at the home list while another runs a
 /// shell. Everything here is per-tab EXCEPT the two `Rc<RefCell<…>>` fields, which are shared
@@ -2691,10 +2691,10 @@ pub struct Tab {
 	/// about this machine's disk and that server's, right now, and an offer to append to one after
 	/// a restart hours later trusts far more than the size comparison behind it can carry.
 	unfinished: Option<transfer::Unfinished>,
-	/// The two file panels — the folder tree beside the grid (§18) and the file pane under it
+	/// The two file panes — the folder tree beside the grid (§18) and the file pane under it
 	/// (§19) — as one thing, because a good deal about them is true of the PAIR (§22).
 	///
-	/// Each panel still owns what only concerns it: its visibility, its size, its expansion state,
+	/// Each pane still owns what only concerns it: its visibility, its size, its expansion state,
 	/// its selection, its menu. `panes` owns what neither can answer alone — where the session is,
 	/// what a deletion means, the remembered layout, and the `.*` toggle that filters both — and
 	/// hands back the listings to ask for rather than reaching for a channel it does not have.
@@ -2870,7 +2870,7 @@ struct Carry {
 /// subscription that costs a message per pointer move, and switching it on for every window would
 /// make an undivided one pay for a menu it opens once in a session. So this menu hangs from the
 /// STRIP instead: the region's own top-left, just under the bar the chip sits in. The tree's menu
-/// is anchored to its panel for the same reason (§18), it is always on screen, and it follows a
+/// is anchored to its pane for the same reason (§18), it is always on screen, and it follows a
 /// divider dragged while the menu is open, which a stored point would not.
 #[derive(Debug, Clone, Copy)]
 struct StripMenu {
@@ -3146,7 +3146,7 @@ pub enum Message {
 		local: Option<PathBuf>,
 	},
 	/// Something happened in the remote folder tree (§18). Nested rather than flattened
-	/// — the panel has a dozen interactions of its own, and burying them in this enum
+	/// — the pane has a dozen interactions of its own, and burying them in this enum
 	/// would drown the screens that only have two or three.
 	Explorer(ExplorerMessage),
 	/// A click that landed on a dialog card itself (not a button, not the backdrop).
@@ -3537,7 +3537,7 @@ impl Tab {
 				editor.perform(action);
 				// Keep the cursor on screen after the move (§32). The buffer no longer scrolls itself on
 				// EITHER axis (the gutter/horizontal trick), so both follows are driven here — the same
-				// keep-it-visible math the panels use for a selected cell (§20), now applied on both axes.
+				// keep-it-visible math the panes use for a selected cell (§20), now applied on both axes.
 				if let Some(task) = follow_editor_cursor_task(editor) {
 					return task;
 				}
@@ -4246,12 +4246,12 @@ impl Tab {
 		iced::Task::none()
 	}
 
-	/// Where the file panels open when this session remembers nowhere (§22, §103).
+	/// Where the file panes open when this session remembers nowhere (§22, §103).
 	///
 	/// A REMOTE session opens at `/`, because that is the top of the server and there is nothing better
 	/// to say about a machine cmote has just met. A LOCAL one can do better: the shell is standing in
 	/// the user's own folder from its first prompt, and opening the panes at the drive list would put
-	/// two clicks between the session and the first folder anyone wants. So the two panels start where
+	/// two clicks between the session and the first folder anyone wants. So the two panes start where
 	/// the shell already is.
 	fn default_files_root(&self) -> String {
 		if self.local.is_some() {
@@ -4522,7 +4522,7 @@ impl Tab {
 	/// something just landed in.
 	///
 	/// ONE place turns transfer effects into the rest of the app, which is what lets the queue
-	/// itself reach for nothing — no SSH channel, no dialog buffer, no panels — and therefore be
+	/// itself reach for nothing — no SSH channel, no dialog buffer, no panes — and therefore be
 	/// tested with none of them. A dead channel is already an error screen (`send_command` says
 	/// so), and with no session there is nowhere left to send what was queued, so the queue drops
 	/// it rather than firing at whatever this tab connects to next.
@@ -4709,8 +4709,8 @@ impl Tab {
 					// Everything this target remembers, in one read (§14, §22, §27) — see `Arrival`.
 					let arrival = self.adopt_target(target);
 					saved_forwards = arrival.forwards;
-					// Restore the remembered session before the panels list anything (§22): the
-					// `.*` filter and both panel sizes go on now, and the resume paths come back to
+					// Restore the remembered session before the panes list anything (§22): the
+					// `.*` filter and both pane sizes go on now, and the resume paths come back to
 					// drive the cd / pane / tree restore below.
 					if let Some(session) = arrival.session {
 						(resume_terminal, resume_files) = self.restore_session(session);
@@ -4758,7 +4758,7 @@ impl Tab {
 				// Resume where the last session left off (§22), falling back to the root for a
 				// first connection or a shell that never announced a cwd — the previous
 				// behaviour. The pane opens at its own remembered directory; the tree opens the
-				// chain down to it and selects it, so both panels start on the resume point.
+				// chain down to it and selects it, so both panes start on the resume point.
 				let files_start = resume_files.unwrap_or_else(|| self.default_files_root());
 				let needed = self.panes.tree.reveal_if_new(&files_start);
 				self.list_dirs(needed);
@@ -4853,13 +4853,13 @@ impl Tab {
 				}
 				// That chunk may have turned focus reporting on or off (§23); reconcile the
 				// remote to the shell's true focus, so a program enabling `?1004` while a side
-				// panel holds the keyboard is not left believing the shell is focused.
+				// pane holds the keyboard is not left believing the shell is focused.
 				self.report_focus();
 				if let Some(cwd) = cwd {
-					// While a reconnect is resuming (§22) BOTH panels are pinned to the
+					// While a reconnect is resuming (§22) BOTH panes are pinned to the
 					// directories the restore put them on: the shell's login-then-`cd`
 					// announcements must not drag either off until it has settled at the cwd we
-					// replayed. Once it has, seed both follow-guards — so neither panel jumps
+					// replayed. Once it has, seed both follow-guards — so neither pane jumps
 					// now but both *do* follow the next real `cd` — and stop pinning. Off the
 					// resume path they follow the shell as usual (§18, §19): only a real move
 					// re-lists.
@@ -4869,7 +4869,7 @@ impl Tab {
 					// so a resume walked it to the login directory and then on to the replayed
 					// one — opening each chain in turn and asking the server for a listing of
 					// every folder along both — to end up somewhere the pane had deliberately not
-					// gone. A session is meant to open with the two panels agreeing, and one of
+					// gone. A session is meant to open with the two panes agreeing, and one of
 					// them was leaving before the user ever saw it there.
 					match self.resume_cwd.as_deref() {
 						Some(target) if target == cwd.as_str() => {
@@ -4927,7 +4927,7 @@ impl Tab {
 			SshEvent::DirFailed { path, reason } => self.panes.tree.failed(&path, reason),
 			SshEvent::RenameDone { from, to } => {
 				// The entry moved: re-list its parent so the row reappears under the new
-				// name, in the right sort position. Both panels may be showing it (§19).
+				// name, in the right sort position. Both panes may be showing it (§19).
 				if let Some(parent) = self.panes.tree.renamed(&from, &to) {
 					self.send_command(SshCommand::ListDir(parent));
 				}
@@ -4939,7 +4939,7 @@ impl Tab {
 				self.panes.set_notice(reason);
 			}
 			SshEvent::MakeDirDone(path) => {
-				// The new folder appeared inside its parent: re-list the parent in both panels so
+				// The new folder appeared inside its parent: re-list the parent in both panes so
 				// it shows in the right sort position (§18). Take an owned parent to end the borrow.
 				if let Some(parent) = explorer::parent(&path).map(str::to_owned) {
 					self.refresh_remote_dir(&parent);
@@ -5967,7 +5967,7 @@ impl Tab {
 		}
 	}
 
-	/// Route a key press on the terminal screen (§20): to the focused panel, or — when the
+	/// Route a key press on the terminal screen (§20): to the focused pane, or — when the
 	/// shell has the focus, which is where every session starts — down the channel.
 	/// Non-input keys (bare modifiers, unmapped keys) encode to nothing and are
 	/// dropped. Keyboard events only reach here on the Terminal screen (the
@@ -6067,22 +6067,22 @@ impl Tab {
 			return iced::Task::none();
 		}
 
-		// Ctrl+Tab hands the keyboard on to the next panel, Ctrl+Shift+Tab to the previous
+		// Ctrl+Tab hands the keyboard on to the next pane, Ctrl+Shift+Tab to the previous
 		// one (§20). Taken before anything else on this screen: it is the way *out* of a
-		// panel that is swallowing keys, so nothing may shadow it.
+		// pane that is swallowing keys, so nothing may shadow it.
 		if modifiers.control() && matches!(key, iced::keyboard::Key::Named(Named::Tab)) {
 			self.cycle_focus(modifiers.shift());
 			return iced::Task::none();
 		}
 
-		// Typing takes the keyboard back to the shell (§50). A panel answers to the arrows, the
+		// Typing takes the keyboard back to the shell (§50). A pane answers to the arrows, the
 		// Page keys, Tab, Enter, F2, F5 and Esc — never to a plain character — so a letter
-		// arriving while a panel holds the ring is someone starting a command at the prompt they
+		// arriving while a pane holds the ring is someone starting a command at the prompt they
 		// are looking at, with the focus left on a pane they navigated a while ago. The old
-		// behaviour dropped that keystroke: the panel swallowed it, nothing happened, and the
+		// behaviour dropped that keystroke: the pane swallowed it, nothing happened, and the
 		// first letter of the command was silently eaten (or, worse, the first several, until the
 		// missing echo was noticed). Handing the focus over is what the user was asking for by
-		// typing at all. Taken before the panel dispatch below, so the key itself goes on to the
+		// typing at all. Taken before the pane dispatch below, so the key itself goes on to the
 		// shell rather than being spent on the switch.
 		if !matches!(self.focus, Focus::Terminal) && is_typing(&key, modifiers) {
 			self.set_focus(Focus::Terminal);
@@ -6090,20 +6090,20 @@ impl Tab {
 
 		// Ctrl+V is typing by another route, so it is answered from wherever the keyboard is (§50)
 		// — the same reading that makes the menu's own Paste take the focus back. It sits ABOVE the
-		// panel dispatch rather than in the copy/paste block below for exactly that reason: down
+		// pane dispatch rather than in the copy/paste block below for exactly that reason: down
 		// there it is only reached with the shell already focused, and a paste aimed at the shell
-		// while a panel held the ring would be dropped on the floor with no echo to say so. Neither
-		// panel claims Ctrl+V, so nothing is being taken from them.
+		// while a pane held the ring would be dropped on the floor with no echo to say so. Neither
+		// pane claims Ctrl+V, so nothing is being taken from them.
 		//
 		// Ctrl+C is NOT treated this way. It reads the terminal's own selection or, with none, is
-		// the interrupt for the remote — neither is text going in, and the panels have the better
+		// the interrupt for the remote — neither is text going in, and the panes have the better
 		// claim on a future "copy what is selected here".
 		if is_paste(physical_key, modifiers) {
 			self.on_terminal_command();
 			return self.on_paste();
 		}
 
-		// A focused panel keeps the key; only the shell's own focus reaches the channel.
+		// A focused pane keeps the key; only the shell's own focus reaches the channel.
 		match self.focus {
 			Focus::Tree => return self.on_tree_key(&key),
 			Focus::Files => return self.on_files_key(&key, modifiers),
@@ -6204,7 +6204,7 @@ impl Tab {
 		// Shift + PageUp / PageDown page through the shell's own scrollback, and Shift + Home /
 		// End jump to its ends, rather than reaching the remote (§23). Shift-guarded so the bare
 		// keys still send their CSI sequences to a full-screen program; reached only with the
-		// shell focused, since a focused panel has already claimed the arrows and their neighbours.
+		// shell focused, since a focused pane has already claimed the arrows and their neighbours.
 		if modifiers.shift()
 			&& let iced::keyboard::Key::Named(named) = &key
 			&& let Some(motion) = scroll_motion(named)
@@ -6260,7 +6260,7 @@ impl Tab {
 
 	/// Whether the remote shell is the keyboard's target right now (§9, §20). False while a modal
 	/// (the disconnect confirmation, a file-collision or upload question, an inline rename) is up or
-	/// a side panel holds the focus — in every such case a keystroke belongs to cmote's own UI, not
+	/// a side pane holds the focus — in every such case a keystroke belongs to cmote's own UI, not
 	/// the session. Used to decide whether a key *release* should reach the shell; a press is routed
 	/// by the fuller guard chain in `on_key`, which this mirrors.
 	fn shell_owns_keyboard(&self) -> bool {
@@ -6272,7 +6272,7 @@ impl Tab {
 	}
 
 	/// The focus ring (§20): shell, tree, files pane, and round again — skipping whichever
-	/// panels are hidden, since a stop you cannot see is a dead press of Ctrl+Tab. The
+	/// panes are hidden, since a stop you cannot see is a dead press of Ctrl+Tab. The
 	/// shell is always in the ring; it is the one thing always on this screen.
 	fn cycle_focus(&mut self, backwards: bool) {
 		let mut ring = vec![Focus::Terminal];
@@ -6300,7 +6300,7 @@ impl Tab {
 	/// command while the files pane held the focus used to leave the next keystroke — the Enter
 	/// that runs it — going to the pane. But the same reading covers the rest of the menu: a copy,
 	/// an upload into the shell's directory, a link followed out of its scrollback are all work on
-	/// the terminal, and none of them is a reason to keep the keyboard parked on a panel.
+	/// the terminal, and none of them is a reason to keep the keyboard parked on a pane.
 	///
 	/// Only an ITEM does this, not the right-press that opens the menu: opening it is a question
 	/// about what is under the pointer, and dismissing it (Esc, or a click on the dismiss layer)
@@ -6309,8 +6309,8 @@ impl Tab {
 		self.focus_pane(Focus::Terminal);
 	}
 
-	/// Give the keyboard to a panel because it was clicked (§20). Also closes the OTHER
-	/// panel's context menu — clicking into a panel is as much a click-away from the menu
+	/// Give the keyboard to a pane because it was clicked (§20). Also closes the OTHER
+	/// pane's context menu — clicking into a pane is as much a click-away from the menu
 	/// next door as clicking the grid is.
 	fn focus_pane(&mut self, focus: Focus) {
 		self.set_focus(focus);
@@ -6319,7 +6319,7 @@ impl Tab {
 
 	/// Move cmote's keyboard ring to `focus`, the single funnel for every internal focus move
 	/// (§20, §23). Routing them all through here means focus reporting sees each one: a switch
-	/// off the shell to a panel reads as the shell losing focus, and back as regaining it. Only
+	/// off the shell to a pane reads as the shell losing focus, and back as regaining it. Only
 	/// a live-session move belongs here — the lifecycle reset in `clear_grid_interaction` sets
 	/// the field straight, since a session opening or closing is not a focus event to report.
 	fn set_focus(&mut self, focus: Focus) {
@@ -6338,8 +6338,8 @@ impl Tab {
 	/// Tell the remote the shell gained (`CSI I`) or lost (`CSI O`) focus, when the state it
 	/// asked to hear about actually flips (focus reporting, DECSET 1004, §23). The shell counts
 	/// as focused only while the OS window is focused AND cmote's keyboard ring is on the
-	/// terminal — so alt-tabbing away and switching to a side panel both read as a focus-out,
-	/// per the reading that the remote, blind to cmote's panels, should hear about either.
+	/// terminal — so alt-tabbing away and switching to a side pane both read as a focus-out,
+	/// per the reading that the remote, blind to cmote's panes, should hear about either.
 	///
 	/// Silent unless a shell is live and the program turned reporting on. The last reported
 	/// state is kept so only transitions reach the wire — a steady state is never re-sent, and
@@ -6486,7 +6486,7 @@ impl Tab {
 				return self.on_files(FilesMessage::RenameStarted(path));
 			}
 			// F5 re-lists the directory on show, the same as the header ↻ button — the pane's
-			// twin of the tree's F5, each refreshing the panel that holds the keyboard.
+			// twin of the tree's F5, each refreshing the pane that holds the keyboard.
 			Named::F5 => return self.on_files(FilesMessage::Refresh),
 			Named::Escape => {
 				self.set_focus(Focus::Terminal);
@@ -7017,7 +7017,7 @@ impl Tab {
 		self.pending_remember = None;
 	}
 
-	/// Turn what the panels asked for into commands (§18, §19).
+	/// Turn what the panes asked for into commands (§18, §19).
 	///
 	/// The one place the pair's [`panes::Fetches`](crate::panes::Fetches) becomes network traffic.
 	/// `panes` decides WHAT is needed and can be tested doing it; this decides how to ask, which
@@ -7269,7 +7269,7 @@ impl Tab {
 		// session as well as out of one, and a copy's whole point is to be spent by the connect that
 		// is opening. It is taken by that connect, and what it is not spent on it is matched
 		// against, so nothing stale can be replayed into a later session.
-		// The panels' own size and visibility are user preferences, not session state,
+		// The panes' own size and visibility are user preferences, not session state,
 		// so `reset` deliberately leaves those alone.
 		self.panes.reset();
 		// A session's forwards die with it (§27): the worker drops its listeners when the session
@@ -7280,14 +7280,14 @@ impl Tab {
 	}
 
 	/// A snapshot of this session's per-target UI state (§22): where the shell and files pane
-	/// are, the `.*` filter, and the two panel sizes. One place names everything worth
+	/// are, the `.*` filter, and the two pane sizes. One place names everything worth
 	/// remembering — `persist_session` writes it, `restore_session` reads it back — so adding
 	/// another value is one field here (and one on `Target`). The shell cwd is `None` on a
 	/// server that announces none (§17); `set_session` treats a `None` as "leave it", so a
 	/// silent session never erases what an earlier one recorded.
 	fn capture_session(&self) -> crate::targets::SessionState {
 		crate::targets::SessionState {
-			// The panels' whole half of the snapshot, from the pair that owns it.
+			// The panes' whole half of the snapshot, from the pair that owns it.
 			terminal_path: self
 				.terminal
 				.as_ref()
@@ -7319,12 +7319,12 @@ impl Tab {
 		}
 	}
 
-	/// Apply a target's remembered session state to the panels before the first listing (§22):
-	/// the `.*` filter and the two panel sizes go straight onto the models, and the resume
+	/// Apply a target's remembered session state to the panes before the first listing (§22):
+	/// the `.*` filter and the two pane sizes go straight onto the models, and the resume
 	/// paths (shell, pane) are handed back for the caller to drive the `cd` / pane / tree
 	/// restore — coordination that belongs in `update`, not here. Each size is clamped to the
 	/// same window fraction a splitter drag is, and applied only once the window size is known,
-	/// so a restore before the first resize event cannot shrink a panel to its minimum.
+	/// so a restore before the first resize event cannot shrink a pane to its minimum.
 	fn restore_session(
 		&mut self,
 		session: crate::targets::SessionState,
@@ -7336,26 +7336,26 @@ impl Tab {
 	/// Handle one event from the remote folder tree (§18). The model decides what the
 	/// action means; this only relays the network side of it — the listings it asks for,
 	/// the `cd` it types into the shell, the clipboard writes — and refits the grid when
-	/// the panel's footprint changes.
+	/// the pane's footprint changes.
 	fn on_explorer(&mut self, message: ExplorerMessage) -> iced::Task<Message> {
 		match message {
 			ExplorerMessage::Toggled => {
 				self.panes.tree.toggle();
-				// A hidden panel cannot hold the keyboard: hand it back to the shell (§20).
+				// A hidden pane cannot hold the keyboard: hand it back to the shell (§20).
 				if !self.panes.tree.visible() && self.focus == Focus::Tree {
 					self.set_focus(Focus::Terminal);
 				}
-				// The panel's width just moved between it and the grid: reflow both the
+				// The pane's width just moved between it and the grid: reflow both the
 				// local emulator and the remote pty to the new column count.
 				self.refit_grid();
 			}
 			ExplorerMessage::HiddenToggled => {
 				self.panes.tree.toggle_hidden();
 				// Persist the flip now (§14, §22): the toggle folds into the same per-target
-				// snapshot as the paths and panel sizes, so it survives even a later hard exit.
+				// snapshot as the paths and pane sizes, so it survives even a later hard exit.
 				self.persist_session();
 			}
-			ExplorerMessage::PanelPressed => self.focus_pane(Focus::Tree),
+			ExplorerMessage::PanePressed => self.focus_pane(Focus::Tree),
 			ExplorerMessage::Scrolled(offset) => self.panes.tree.set_scroll(offset),
 			ExplorerMessage::RowClicked(path) => {
 				self.focus_pane(Focus::Tree);
@@ -7478,7 +7478,7 @@ impl Tab {
 			ExplorerMessage::SplitterGrabbed => self.panes.tree.set_dragging(true),
 			ExplorerMessage::SplitterDragged(pointer) => {
 				if self.panes.tree.dragging() {
-					// The splitter sits at the panel's left edge and the panel runs to the
+					// The splitter sits at the pane's left edge and the pane runs to the
 					// window's right edge, so the pointer's distance from that edge IS the
 					// width — no drag anchor to track. The clamp and the arithmetic are the
 					// pair's, so this arm and the pane's twin below no longer restate them
@@ -7558,11 +7558,11 @@ impl Tab {
 	/// * the pane shows that directory (`Files::show`, the deliberate move, not `follow`); and
 	/// * both follow-guards are seeded with the same path, so the next prompt's announcement is
 	///   correctly read as "still there, nothing to do" rather than as a move — and a real `cd`
-	///   after it still carries both panels along; and
+	///   after it still carries both panes along; and
 	/// * any reconnect resume still settling is ended, the same rule an explicit `move_shell_to`
-	///   follows and for the same reason (§22). The pin exists to hold the panels against the
+	///   follows and for the same reason (§22). The pin exists to hold the panes against the
 	///   shell's login-then-`cd` announcements until it settles; the user saying out loud where
-	///   the panels go outranks that, and leaving it armed would let it swallow the settle as
+	///   the panes go outranks that, and leaving it armed would let it swallow the settle as
 	///   "already there" and strand them at the login directory — the exact drift this button is
 	///   for, caused by pressing it.
 	///
@@ -7610,7 +7610,7 @@ impl Tab {
 				// local emulator and the remote pty to the new row count.
 				self.refit_grid();
 			}
-			FilesMessage::PanelPressed => {
+			FilesMessage::PanePressed => {
 				self.focus_pane(Focus::Files);
 				// A cell's own `mouse_area` swallows the press that lands on it, so one that
 				// reaches the pane missed them all. On the grid that starts a rubber band
@@ -7628,8 +7628,8 @@ impl Tab {
 					self.panes.pane.deselect();
 				}
 			}
-			FilesMessage::PanelReleased => self.panes.pane.end_band(),
-			FilesMessage::PanelRightPressed => {
+			FilesMessage::PaneReleased => self.panes.pane.end_band(),
+			FilesMessage::PaneRightPressed => {
 				// A right-press that reached the pane missed every cell, so it landed on the
 				// empty grid: open the pane's own menu there (§17). The keyboard follows too,
 				// as a left-press would.
@@ -7907,7 +7907,7 @@ impl Tab {
 		self.open_modal(Modal::Delete(paths), &body);
 	}
 
-	/// Delete the held entries (§18) — only reached from a confirmed prompt. The panels re-list
+	/// Delete the held entries (§18) — only reached from a confirmed prompt. The panes re-list
 	/// when the server reports it done (`on_deleted`), so nothing is dropped from the view on a
 	/// hopeful guess.
 	fn confirm_remote_delete(&mut self) {
@@ -7923,7 +7923,7 @@ impl Tab {
 		self.send_command(SshCommand::Delete(paths));
 	}
 
-	/// Re-list a remote directory in whichever panel is showing it (§18): the tree, if it knows
+	/// Re-list a remote directory in whichever pane is showing it (§18): the tree, if it knows
 	/// the folder, and the files pane, if that is the directory on show. The refresh a create or a
 	/// delete triggers, so a new row appears — or a gone one vanishes — in place.
 	fn refresh_remote_dir(&mut self, dir: &str) {
@@ -7933,14 +7933,14 @@ impl Tab {
 
 	/// Entries were deleted (§18): step the files pane out of any folder that is now gone, drop
 	/// the deleted subtrees from the tree, and re-list each parent they vanished from so the rows
-	/// update in place. Done here rather than in a model because it spans both panels and the
+	/// update in place. Done here rather than in a model because it spans both panes and the
 	/// pane's own idea of where it is.
 	fn on_deleted(&mut self, paths: Vec<String>) {
 		let fetches = self.panes.deleted(&paths);
 		self.send_fetches(fetches);
 	}
 
-	/// Reflow the terminal to the current window *and* panel footprint (§18). The panel
+	/// Reflow the terminal to the current window *and* pane footprint (§18). The pane
 	/// takes its width out of the grid, so showing, hiding or resizing it changes the
 	/// column count exactly as a window resize would — and goes through the same path.
 	fn refit_grid(&mut self) {
@@ -8269,15 +8269,15 @@ fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Osc13
 
 /// Whether this key press is plain TYPING — a character meant to appear at a prompt — rather
 /// than a shortcut or a navigation key (§50). This is what decides that a keystroke aimed at a
-/// focused panel was really meant for the shell.
+/// focused pane was really meant for the shell.
 ///
 /// Two conditions, and both are needed:
 ///   * a `Character` key, never a `Named` one. Enter, Tab, the arrows, F2, Esc, Backspace and
-///     Delete are all `Named`, and every one of them is a panel's own key (§20) — a rule written
+///     Delete are all `Named`, and every one of them is a pane's own key (§20) — a rule written
 ///     on the produced `text` instead would catch Enter (which carries `"\r"`) and take the
 ///     folder tree's "send the shell there" away from it;
 ///   * no Ctrl, Alt or Logo. Those make a combination, not a character: the files pane's Ctrl+A
-///     takes the whole listing (§21), and Ctrl+Tab is the way out of a panel at all.
+///     takes the whole listing (§21), and Ctrl+Tab is the way out of a pane at all.
 ///
 /// Shift is allowed through, since a capital letter is as much typing as a small one.
 ///
@@ -8487,7 +8487,7 @@ fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 }
 
 /// The scroll offset that brings the band `top..top + height` into a `view`-tall window
-/// currently scrolled to `offset` (§20) — shared by both panels, since "keep the thing
+/// currently scrolled to `offset` (§20) — shared by both panes, since "keep the thing
 /// the arrow keys just selected on screen" is the same question for a row and a cell.
 ///
 /// Already visible means *do not move*: a keyboard walk across a screenful of entries
@@ -8557,7 +8557,7 @@ fn follow_editor_cursor_task(editor: &mut crate::editor::Editor) -> Option<iced:
 	(moved_x || moved_y).then(|| scroll_editor_to(editor.scroll_x(), editor.scroll()))
 }
 
-/// The `scroll_to` task that moves the editor buffer to `(x, y)` (§32) — the operation the panels use
+/// The `scroll_to` task that moves the editor buffer to `(x, y)` (§32) — the operation the panes use
 /// to bring a selected cell on screen, here on both axes so a horizontal follow keeps the vertical
 /// offset and vice versa.
 fn scroll_editor_to(x: f32, y: f32) -> iced::Task<Message> {
@@ -8611,7 +8611,7 @@ mod tests {
 
 	/// A program that enabled focus reporting (`?1004`) hears `CSI I` / `CSI O` when the shell
 	/// gains or loses focus — from the window losing OS focus AND from the keyboard ring moving
-	/// off the shell to a side panel (§23) — and hears each edge only once.
+	/// off the shell to a side pane (§23) — and hears each edge only once.
 	#[test]
 	fn focus_reporting_answers_window_and_pane_changes() {
 		let (mut app, mut rx) = app_with_terminal(16);
@@ -8623,12 +8623,12 @@ mod tests {
 		app.on_window_focus(true);
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[I"[..]));
 
-		// The keyboard ring moving off the shell to a side panel is a focus-out to the remote,
-		// which knows nothing of cmote's panels.
+		// The keyboard ring moving off the shell to a side pane is a focus-out to the remote,
+		// which knows nothing of cmote's panes.
 		app.set_focus(Focus::Files);
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\x1b[O"[..]));
 
-		// Moving between two panels never restores the shell's focus, so nothing more is sent.
+		// Moving between two panes never restores the shell's focus, so nothing more is sent.
 		app.set_focus(Focus::Tree);
 		assert_eq!(next_input(&mut rx), None);
 
@@ -9462,11 +9462,11 @@ mod tests {
 		}
 	}
 
-	/// Typing while a side panel holds the keyboard hands it back to the shell, and the letter
+	/// Typing while a side pane holds the keyboard hands it back to the shell, and the letter
 	/// that did it goes down the channel rather than being spent on the switch (§50). Without
-	/// this the panel swallowed it and the first character of a command vanished.
+	/// this the pane swallowed it and the first character of a command vanished.
 	#[test]
-	fn typing_while_a_panel_has_the_keyboard_gives_it_to_the_shell() {
+	fn typing_while_a_pane_has_the_keyboard_gives_it_to_the_shell() {
 		let (mut app, mut rx) = app_with_terminal(16);
 		app.focus = Focus::Files;
 
@@ -9484,11 +9484,11 @@ mod tests {
 		);
 	}
 
-	/// A navigation key is the panel's own, so it keeps both the key and the keyboard (§20, §50).
+	/// A navigation key is the pane's own, so it keeps both the key and the keyboard (§20, §50).
 	/// This is the half of the rule that makes the other half safe: walking a tree with the arrows
 	/// must not read as typing at the prompt.
 	#[test]
-	fn an_arrow_while_a_panel_has_the_keyboard_stays_with_the_panel() {
+	fn an_arrow_while_a_pane_has_the_keyboard_stays_with_the_pane() {
 		let (mut app, mut rx) = app_with_terminal(16);
 		app.focus = Focus::Tree;
 
@@ -9520,10 +9520,10 @@ mod tests {
 	}
 
 	/// Ctrl+V is the menu's Paste off the keyboard, so it is answered from wherever the ring is
-	/// and takes it back with it (§50). It used to be dropped: the panel swallowed it and the
+	/// and takes it back with it (§50). It used to be dropped: the pane swallowed it and the
 	/// paste never happened, with nothing on screen to say why.
 	#[test]
-	fn ctrl_v_pastes_from_a_panel_and_takes_the_keyboard_back() {
+	fn ctrl_v_pastes_from_a_pane_and_takes_the_keyboard_back() {
 		let (mut app, _rx) = app_with_terminal(16);
 		app.focus = Focus::Files;
 
@@ -9537,9 +9537,9 @@ mod tests {
 	}
 
 	/// Ctrl+C is not treated that way (§50): it reads the terminal's own selection, or is the
-	/// interrupt for the remote — neither is text going in — so a panel holding the ring keeps it.
+	/// interrupt for the remote — neither is text going in — so a pane holding the ring keeps it.
 	#[test]
-	fn ctrl_c_does_not_take_the_keyboard_from_a_panel() {
+	fn ctrl_c_does_not_take_the_keyboard_from_a_pane() {
 		let (mut app, mut rx) = app_with_terminal(16);
 		app.focus = Focus::Files;
 
@@ -9963,8 +9963,8 @@ mod tests {
 	}
 
 	/// A command from the terminal's own surface — here Paste, off the grid's right-click menu —
-	/// puts the keyboard back on the shell (§50). Pasting a command while a panel held the focus
-	/// used to leave the Enter that runs it going to the panel.
+	/// puts the keyboard back on the shell (§50). Pasting a command while a pane held the focus
+	/// used to leave the Enter that runs it going to the pane.
 	#[test]
 	fn a_terminal_menu_command_takes_the_keyboard_back() {
 		let (mut app, _rx) = app_with_terminal(16);
@@ -11004,11 +11004,11 @@ mod tests {
 		);
 	}
 
-	/// The pin is for BOTH panels (§18, §22). The tree follows the shell on every announcement
+	/// The pin is for BOTH panes (§18, §22). The tree follows the shell on every announcement
 	/// exactly as the pane does, so the same login-then-`cd` sequence that would drag the pane off
 	/// the restored view drags the tree off it too — and more expensively, since revealing a
 	/// directory opens its whole chain and asks the server for a listing of every folder along it.
-	/// A resume must leave both panels on the resume point, and both free to follow the next real
+	/// A resume must leave both panes on the resume point, and both free to follow the next real
 	/// move.
 	#[test]
 	fn a_reconnect_pins_the_tree_as_well_as_the_pane() {
@@ -11036,12 +11036,12 @@ mod tests {
 
 		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
 
-		// Both panels open on the resume point: the pane at its remembered directory, the tree
+		// Both panes open on the resume point: the pane at its remembered directory, the tree
 		// with the chain down to it open and that folder selected.
 		let _ = app.on_ssh_event(SshEvent::Connected);
 		assert_eq!(app.panes.tree.selected(), Some("/etc"));
 
-		// The login prompt announces a directory the shell is about to leave. Neither panel may
+		// The login prompt announces a directory the shell is about to leave. Neither pane may
 		// be dragged onto it — the pane was always safe here, the tree was not.
 		let _ = app.on_ssh_event(announce("/home/u"));
 		assert_eq!(
@@ -11051,7 +11051,7 @@ mod tests {
 		);
 
 		// The replayed `cd` lands: the shell has settled and the pin lifts, but the restored
-		// view stands in both panels rather than being clobbered by the arrival.
+		// view stands in both panes rather than being clobbered by the arrival.
 		let _ = app.on_ssh_event(announce("/var/log"));
 		assert_eq!(
 			app.panes.tree.selected(),
@@ -11059,7 +11059,7 @@ mod tests {
 			"kept, not clobbered"
 		);
 
-		// A real move afterwards carries both panels, exactly as it always did.
+		// A real move afterwards carries both panes, exactly as it always did.
 		let _ = app.on_ssh_event(announce("/var/log/nginx"));
 		assert_eq!(
 			app.panes.tree.selected(),
@@ -11143,15 +11143,15 @@ mod tests {
 
 	/// Reveal is an explicit ask, so it ends the resume pin (§19, §22) — the same rule
 	/// `move_shell_to` already follows, for the same reason: once the user has said where the
-	/// panels go, the pin protecting the restored view has nothing left to protect.
+	/// panes go, the pin protecting the restored view has nothing left to protect.
 	///
 	/// Without that, pressing Reveal in the window between the login prompt and the replayed `cd`
-	/// landing left the panels stranded. They went to the login directory, the still-armed pin
-	/// swallowed the settle as "already there", and the shell then sat at a directory the panels
+	/// landing left the panes stranded. They went to the login directory, the still-armed pin
+	/// swallowed the settle as "already there", and the shell then sat at a directory the panes
 	/// had been explicitly asked to come to and had not — with no further announcement coming to
 	/// put it right, since a shell standing still announces no move.
 	#[test]
-	fn reveal_during_a_resume_ends_the_pin_rather_than_stranding_the_panels() {
+	fn reveal_during_a_resume_ends_the_pin_rather_than_stranding_the_panes() {
 		use crate::ui::connect::AuthKind;
 
 		let (tx, _rx) = mpsc::channel(64);
@@ -11184,12 +11184,12 @@ mod tests {
 			"still settling"
 		);
 
-		// The user asks for the panels to come to the shell, mid-resume.
+		// The user asks for the panes to come to the shell, mid-resume.
 		let _task = app.update(Message::RevealPressed);
-		assert_eq!(app.panes.pane.path(), Some("/home/u"), "the panels came");
+		assert_eq!(app.panes.pane.path(), Some("/home/u"), "the panes came");
 		assert_eq!(app.resume_cwd, None, "and the pin is spent");
 
-		// The replayed `cd` lands. It is a real move now, so both panels follow it — where
+		// The replayed `cd` lands. It is a real move now, so both panes follow it — where
 		// before, the leftover pin read it as "already there" and left them behind.
 		let _ = app.on_ssh_event(announce("/var/log"));
 		assert_eq!(app.panes.pane.path(), Some("/var/log"), "the pane kept up");
@@ -11209,7 +11209,7 @@ mod tests {
 		let (mut app, mut rx) = app_with_terminal(32);
 		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
 
-		// The shell says where it is, and both panels follow it there as usual.
+		// The shell says where it is, and both panes follow it there as usual.
 		let _ = app.on_ssh_event(announce("/var/log"));
 		assert_eq!(app.panes.pane.path(), Some("/var/log"));
 		assert_eq!(app.panes.tree.selected(), Some("/var/log"));
@@ -11245,7 +11245,7 @@ mod tests {
 	}
 
 	/// With no cwd announcement (§17: it takes OSC 7, which not every shell sends) Reveal has
-	/// nowhere to go, so it leaves both panels where they are rather than guessing at the root.
+	/// nowhere to go, so it leaves both panes where they are rather than guessing at the root.
 	/// The button dims in that case; this is what sits behind the dimming.
 	#[test]
 	fn reveal_does_nothing_when_the_shell_never_said_where_it_is() {

@@ -1,6 +1,6 @@
 // explorer.rs — the remote folder tree's model (PLAN §18).
 //
-// The panel beside the terminal shows the remote filesystem as a tree of folders.
+// The pane beside the terminal shows the remote filesystem as a tree of folders.
 // This module is the *model* only: which folders are known, which are open, what is
 // selected, and the path arithmetic the context menu needs. It touches neither the
 // network nor the widget tree — `ssh::browse` fetches listings and `ui::explorer`
@@ -14,41 +14,41 @@
 // `expand` / `reveal_if_new` therefore return the paths that still need fetching, and
 // the app turns each into one `SshCommand::ListDir`. A remote filesystem is far too
 // big to walk eagerly, and a bounded fetch is also what keeps a hostile or enormous
-// directory from stalling the panel.
+// directory from stalling the pane.
 
 use std::collections::BTreeMap;
 
 /// The tree's root. Every path in the model hangs off this one.
 pub const ROOT: &str = "/";
 
-/// The panel's starting width, the narrowest the splitter may drag it to, and the
-/// grab bar's own width (§18). `ui::terminal` subtracts the panel plus the bar from
+/// The pane's starting width, the narrowest the splitter may drag it to, and the
+/// grab bar's own width (§18). `ui::terminal` subtracts the pane plus the bar from
 /// the grid, so these three are the single source of truth for that arithmetic.
 pub const DEFAULT_WIDTH: f32 = 280.0;
 pub const MIN_WIDTH: f32 = 160.0;
 pub const SPLITTER_WIDTH: f32 = 6.0;
 
-/// Everything the explorer panel can ask the app to do (§18). Nested under
+/// Everything the explorer pane can ask the app to do (§18). Nested under
 /// `Message::Explorer` rather than flattened into `Message`, the way `SshEvent`
 /// already is — a dozen more top-level variants would bury the rest of the enum.
 #[derive(Debug, Clone)]
 pub enum ExplorerMessage {
-	/// Show or hide the whole panel (the status-bar button).
+	/// Show or hide the whole pane (the status-bar button).
 	Toggled,
-	/// Show or hide dot-prefixed folders (the panel header's toggle).
+	/// Show or hide dot-prefixed folders (the pane header's toggle).
 	HiddenToggled,
 	/// A row was left-clicked: select it and open/close it.
 	RowClicked(String),
 	/// A row was right-clicked: select it and open the context menu on it.
 	RowRightClicked(String),
-	/// The pointer moved over the panel; the payload is its panel-local position. Tracked
+	/// The pointer moved over the pane; the payload is its pane-local position. Tracked
 	/// because a right-press carries no coordinates of its own, and the menu is placed
 	/// under the cursor.
 	PointerMoved(iced::Point),
 	/// Dismiss the context menu without choosing an item.
 	MenuDismissed,
-	/// A press landed anywhere in the panel — give it the keyboard (§20).
-	PanelPressed,
+	/// A press landed anywhere in the pane — give it the keyboard (§20).
+	PanePressed,
 	/// The tree was scrolled; the payload is its absolute vertical offset. Tracked so
 	/// arrow-key navigation can tell whether the row it moved to is already on screen (§20).
 	Scrolled(f32),
@@ -91,7 +91,7 @@ pub enum ExplorerMessage {
 	/// view's path, the one this header names — verbatim. Carries no path of its own;
 	/// `app` reads it live, so the button and the header can never name different dirs.
 	CopyCurrentPath,
-	/// The splitter was pressed — begin resizing the panel.
+	/// The splitter was pressed — begin resizing the pane.
 	SplitterGrabbed,
 	/// The pointer moved while resizing; the payload is its window position.
 	SplitterDragged(iced::Point),
@@ -118,7 +118,7 @@ struct Node {
 }
 
 /// An open context menu: the folder it acts on, and where it is drawn (§18). The anchor
-/// is captured when the menu opens, NOT read live — otherwise the panel keeps reporting
+/// is captured when the menu opens, NOT read live — otherwise the pane keeps reporting
 /// pointer moves and the menu slides away from under the cursor before it can be clicked.
 #[derive(Debug, Clone)]
 pub struct ExplorerMenu {
@@ -159,7 +159,7 @@ pub struct Explorer {
 	nodes: BTreeMap<String, Node>,
 	selected: Option<String>,
 	menu: Option<ExplorerMenu>,
-	/// The last pointer position over the panel, in panel-local coordinates. Only read
+	/// The last pointer position over the pane, in pane-local coordinates. Only read
 	/// when a menu opens, which freezes it as that menu's anchor (§18).
 	pointer: iced::Point,
 	rename: Option<ExplorerRename>,
@@ -174,7 +174,7 @@ pub struct Explorer {
 impl Default for Explorer {
 	fn default() -> Self {
 		Self {
-			// The panel is the headline of this version, so it starts open; the initial
+			// The pane is the headline of this version, so it starts open; the initial
 			// window is sized to fit it *and* the intended grid (`ui::terminal`).
 			visible: true,
 			// Dot-prefixed folders are shown by default: on a server, `.ssh` / `.config`
@@ -196,7 +196,7 @@ impl Default for Explorer {
 }
 
 impl Explorer {
-	/// Whether the panel is showing.
+	/// Whether the pane is showing.
 	pub fn visible(&self) -> bool {
 		self.visible
 	}
@@ -206,7 +206,7 @@ impl Explorer {
 		self.show_hidden
 	}
 
-	/// The panel's current width in logical pixels (the tree area, without the splitter).
+	/// The pane's current width in logical pixels (the tree area, without the splitter).
 	pub fn width(&self) -> f32 {
 		self.width
 	}
@@ -303,7 +303,7 @@ impl Explorer {
 		self.notice.as_deref()
 	}
 
-	/// Show or hide the panel. Hiding gives its width back to the grid, so the caller
+	/// Show or hide the pane. Hiding gives its width back to the grid, so the caller
 	/// refits the terminal afterwards.
 	pub fn toggle(&mut self) {
 		self.visible = !self.visible;
@@ -323,7 +323,7 @@ impl Explorer {
 		self.show_hidden = show_hidden;
 	}
 
-	/// Resize the panel from a splitter drag, clamped between `MIN_WIDTH` and `max`
+	/// Resize the pane from a splitter drag, clamped between `MIN_WIDTH` and `max`
 	/// (the app passes a fraction of the window, so the grid can never be squeezed out).
 	pub fn set_width(&mut self, width: f32, max: f32) {
 		self.width = width.clamp(MIN_WIDTH, max.max(MIN_WIDTH));
@@ -340,7 +340,7 @@ impl Explorer {
 	}
 
 	/// Open the context menu on a folder, anchored where the pointer is right now. The
-	/// anchor is a snapshot: the panel goes on reporting moves while the menu is up, and
+	/// anchor is a snapshot: the pane goes on reporting moves while the menu is up, and
 	/// a menu that tracked them would walk out from under the cursor.
 	pub fn open_menu(&mut self, path: String) {
 		self.menu = Some(ExplorerMenu {
@@ -415,7 +415,7 @@ impl Explorer {
 	/// clean starting view after a deep dive. Like `collapse`, this discards nothing: the cached
 	/// listings stay, so a re-opened branch draws instantly while `expand` re-lists it in the
 	/// background. The root is left open because it is the tree's anchor — closing it would
-	/// collapse the panel to a single "/" row.
+	/// collapse the pane to a single "/" row.
 	pub fn collapse_all(&mut self) {
 		for (key, node) in self.nodes.iter_mut() {
 			if key.as_str() != ROOT {
@@ -457,7 +457,7 @@ impl Explorer {
 		self.notice = Some(reason);
 	}
 
-	/// Put a message on the panel's notice line.
+	/// Put a message on the pane's notice line.
 	pub fn set_notice(&mut self, notice: String) {
 		self.notice = Some(notice);
 	}
@@ -507,7 +507,7 @@ impl Explorer {
 
 	/// Seed the "has the shell moved" guard without opening or selecting anything (§22). The
 	/// tree's half of the reconnect pin, and the exact mirror of `Files::set_followed`: while a
-	/// resume is settling, the shell's login-then-`cd` announcements must not drag either panel
+	/// resume is settling, the shell's login-then-`cd` announcements must not drag either pane
 	/// off the directory the restore put it on — and the tree is the more expensive of the two to
 	/// drag, since revealing a directory opens its whole chain and asks the server for a listing
 	/// of every folder along it. Once the shell has settled, this marks its cwd as already seen,
@@ -643,7 +643,7 @@ impl Explorer {
 		self.expand(&parent, true)
 	}
 
-	/// The visible rows, top to bottom, as the panel draws them (§18): the root, then a
+	/// The visible rows, top to bottom, as the pane draws them (§18): the root, then a
 	/// depth-first walk of every open branch. Hidden folders are filtered here rather
 	/// than at fetch time, so flipping the toggle costs nothing.
 	pub fn rows(&self) -> Vec<ExplorerRow> {
@@ -719,7 +719,7 @@ pub fn parent(path: &str) -> Option<&str> {
 	}
 }
 
-/// Whether a listed name is the `.` self-link or the `..` parent link. Both panels drop
+/// Whether a listed name is the `.` self-link or the `..` parent link. Both panes drop
 /// these two at ingest and keep everything else — dot-prefixed, "hidden", whatever the
 /// server considers a system file — because the `.*` toggle (§18, §19) is what decides
 /// visibility, and these are not hidden entries: they are this folder and the one above
@@ -1155,7 +1155,7 @@ mod tests {
 		explorer.set_pointer(iced::Point::new(30.0, 60.0));
 		explorer.open_menu("/home".to_owned());
 
-		// The panel goes on reporting pointer moves while the menu is up. If the menu
+		// The pane goes on reporting pointer moves while the menu is up. If the menu
 		// followed them it would walk out from under the cursor on the way to an item.
 		explorer.set_pointer(iced::Point::new(200.0, 400.0));
 		let menu = explorer.menu().expect("the menu is open");
@@ -1196,13 +1196,13 @@ mod tests {
 	}
 
 	#[test]
-	fn a_hidden_panel_takes_no_room_from_the_grid() {
+	fn a_hidden_pane_takes_no_room_from_the_grid() {
 		let mut explorer = Explorer::default();
 		assert_eq!(explorer.reserved(), DEFAULT_WIDTH + SPLITTER_WIDTH);
 		explorer.toggle();
 		assert_eq!(explorer.reserved(), 0.0);
 
-		// The splitter can never squeeze the panel below its minimum, nor past the cap
+		// The splitter can never squeeze the pane below its minimum, nor past the cap
 		// the caller derives from the window.
 		explorer.set_width(10.0, 600.0);
 		assert_eq!(explorer.width(), MIN_WIDTH);

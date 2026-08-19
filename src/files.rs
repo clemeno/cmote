@@ -196,12 +196,12 @@ pub enum FilesMessage {
 	/// A press landed anywhere in the pane — give it the keyboard (§20). Sent by the
 	/// pane's own `mouse_area`, so an empty patch of grid focuses it just as a cell does.
 	/// A press on the grid's empty space also starts a rubber band (§21).
-	PanelPressed,
+	PanePressed,
 	/// The button came up: the rubber band, if one was being dragged, is finished (§21).
-	PanelReleased,
+	PaneReleased,
 	/// A right-press landed on the grid's empty space — not on any cell (§17). Opens the
 	/// empty-space menu, whose one item uploads local files into the directory on show.
-	PanelRightPressed,
+	PaneRightPressed,
 	/// The empty-space menu's "Upload… here" (§17): pick local files to send into the pane's
 	/// current directory. Carries no path — the pane's own is read when the press arrives.
 	PaneUploadHere,

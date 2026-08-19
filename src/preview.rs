@@ -4,7 +4,7 @@
 // decode_image — format sniffing, the caps that stand between a remote's bytes and this process's
 // memory, and the refusal wording when a file is not something cmote can draw. The network read is
 // `ssh/edit.rs`'s (a preview and an editor pull a remote file the same way, so they share it) and
-// the drawing is `ui/preview.rs`'s, which is the same three-way split the editor and the panels use
+// the drawing is `ui/preview.rs`'s, which is the same three-way split the editor and the panes use
 // (§18, §19, §32) — so every rule here is testable with no server and no window.
 //
 // THE SECURITY SHAPE, since this module is the one that runs a parser over bytes a server chose.
