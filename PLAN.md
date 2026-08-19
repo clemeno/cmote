@@ -9476,7 +9476,7 @@ eleven bytes a go. Nothing in cmote would honour it, and after §90 nothing can 
 leaves the window; a modal dialog leaves the window **and takes the focus**, carrying text the remote
 chose in a window wearing cmote's identity. §54's line covers it and now says so.
 
-Both are `Refused::Sleep` and `Refused::MessageBox`, named in the enum `notify.rs` already used to
+Both are `NotifyRefused::Sleep` and `NotifyRefused::MessageBox`, named in the enum `notify.rs` already used to
 say *which* refusal a payload was — the same reasoning §79 gave for that enum existing at all: a
 refusal that cannot say what it refused is one no test can audit.
 
@@ -9499,7 +9499,7 @@ spelling is safe here and would not be if the chip's label could be replaced rat
 
 ### What it cost
 
-- `term/notify.rs`: two enum variants, three lines of matching, `Spelling` renamed `Refused` for a
+- `term/notify.rs`: two enum variants, three lines of matching, `Spelling` renamed `NotifyRefused` for a
   name that covers what it now carries, and the header's map of the multiplex.
 - `term/icon.rs`: one alternative prefix and the quote trim, plus the header's argument for two doors.
 - Three new matrix rows, six new tests, two at the seam.

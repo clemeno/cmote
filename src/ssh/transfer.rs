@@ -125,7 +125,7 @@ pub(crate) enum FileAction {
 /// shared flag, deletes the partial it was writing, and stops. A real I/O failure is the third
 /// outcome, but it travels as the loop's `Err`, not here: a failure mid-flight keeps its partial so
 /// the transfer can be resumed, whereas a cancel throws it away, so the two must not be confused.
-/// A failure with no partial to keep is a fourth ending again — see [`Refused`].
+/// A failure with no partial to keep is a fourth ending again — see [`TransferRefused`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CopyOutcome {
 	Done,
@@ -147,9 +147,9 @@ pub(crate) enum CopyOutcome {
 /// reporting end reads it back with [`was_refused`] to end the transfer cleanly instead: the notice
 /// says what the server said, the batch behind it carries on, and no Resume appears.
 #[derive(Debug)]
-pub(crate) struct Refused(anyhow::Error);
+pub(crate) struct TransferRefused(anyhow::Error);
 
-impl std::fmt::Display for Refused {
+impl std::fmt::Display for TransferRefused {
 	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		// `{:#}` prints the whole chain on one line. Plain `{}` would print only the outermost
 		// context — "could not create /srv/data/notes.txt on the server" — which is the half that
@@ -158,21 +158,21 @@ impl std::fmt::Display for Refused {
 	}
 }
 
-impl std::error::Error for Refused {}
+impl std::error::Error for TransferRefused {}
 
-/// Mark a failure as the destination's refusal — see [`Refused`]. A function rather than a method
+/// Mark a failure as the destination's refusal — see [`TransferRefused`]. A function rather than a method
 /// so a call site reads `.map_err(transfer::refused)` on the very line that makes or opens the
 /// destination: past that line there IS somewhere for bytes to survive, so past that line a failure
 /// is resumable again.
 pub(crate) fn refused(error: anyhow::Error) -> anyhow::Error {
-	anyhow::Error::new(Refused(error))
+	anyhow::Error::new(TransferRefused(error))
 }
 
 /// Whether this failure was the destination's refusal. Walks the whole chain rather than testing
 /// only the outermost link, so a caller between the refusal and the report stays free to add its
 /// own context without hiding the class underneath it.
 pub(crate) fn was_refused(error: &anyhow::Error) -> bool {
-	error.chain().any(|link| link.is::<Refused>())
+	error.chain().any(|link| link.is::<TransferRefused>())
 }
 
 /// Where a copy should begin, given whether this is a resume and how big the destination already

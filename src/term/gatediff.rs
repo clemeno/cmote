@@ -379,7 +379,7 @@ fn band_operations() -> Vec<BandOp> {
 
 /// An operation the gate REFUSES because the cursor is outside the band, split so the refusal can be
 /// photographed on its own.
-struct Refused {
+struct GatediffRefused {
 	/// What is being refused, for the failure message.
 	name: &'static str,
 	/// Where the cursor goes first. Run before the photograph, since moving the cursor is allowed.
@@ -395,24 +395,24 @@ struct Refused {
 /// a refusal satisfies for free, and so does an operation that wrongly went ahead inside the band. Both
 /// `cursor_in_band` guards could be deleted with every test still green. Nothing is exempt from having to
 /// be able to fail, least of all a test of a guard.
-fn refused_operations() -> Vec<Refused> {
+fn refused_operations() -> Vec<GatediffRefused> {
 	vec![
-		Refused {
+		GatediffRefused {
 			name: "IL with the cursor left of the band",
 			park: b"\x1b[3;1H",
 			bytes: b"\x1b[2L",
 		},
-		Refused {
+		GatediffRefused {
 			name: "DL with the cursor past the right margin",
 			park: b"\x1b[3;9H",
 			bytes: b"\x1b[2M",
 		},
-		Refused {
+		GatediffRefused {
 			name: "ICH with the cursor left of the band",
 			park: b"\x1b[3;1H",
 			bytes: b"\x1b[3@",
 		},
-		Refused {
+		GatediffRefused {
 			name: "DCH with the cursor past the right margin",
 			park: b"\x1b[3;9H",
 			bytes: b"\x1b[2P",

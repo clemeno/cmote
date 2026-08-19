@@ -69,7 +69,7 @@
 /// already owns "which `OSC 9` sub-code is this?" and splitting that question across two files is
 /// how the two halves come to disagree (§90).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Refused {
+pub enum NotifyRefused {
 	/// `OSC 9 ; <text>` — ConEmu's, adopted by Windows Terminal. The likeliest of the three to
 	/// arrive here, because it is what a Windows-side script reaches for.
 	ConEmu,
@@ -132,7 +132,7 @@ pub enum Refused {
 ///
 /// The match is on the whole numeric field, never on a prefix of it: `99;` is kitty's but `990;`
 /// and `999;` are somebody else's, and a prefix test would have swallowed both.
-pub fn refused(payload: &[u8]) -> Option<Refused> {
+pub fn refused(payload: &[u8]) -> Option<NotifyRefused> {
 	if let Some(rest) = payload.strip_prefix(b"9;") {
 		// The THREE OSC 9 sub-codes cmote reads. None is a notification, and getting this wrong in
 		// the permissive direction would break three shipped features rather than leak one.
@@ -143,23 +143,23 @@ pub fn refused(payload: &[u8]) -> Option<Refused> {
 		// below, because until §90 they arrived here and were declined as NOTIFICATIONS — the right
 		// outcome reached through the wrong description, which is a refusal nobody can audit.
 		if rest.starts_with(b"1;") || rest == b"1" {
-			return Some(Refused::Sleep);
+			return Some(NotifyRefused::Sleep);
 		}
 		if rest.starts_with(b"2;") || rest == b"2" {
-			return Some(Refused::MessageBox);
+			return Some(NotifyRefused::MessageBox);
 		}
-		return Some(Refused::ConEmu);
+		return Some(NotifyRefused::ConEmu);
 	}
 	// urxvt's OSC 777 is itself a dispatcher — `777;<module>;…` — and only the `notify` module is
 	// this feature. A different module is not refused here because it is not this decision; it is
 	// unimplemented, which is a different row and a different mark.
 	if payload.starts_with(b"777;notify;") || payload == b"777;notify" {
-		return Some(Refused::Urxvt);
+		return Some(NotifyRefused::Urxvt);
 	}
 	// kitty's carries metadata in its first field, so everything after the number varies. The
 	// number is the whole of what identifies it.
 	if payload.starts_with(b"99;") || payload == b"99" {
-		return Some(Refused::Kitty);
+		return Some(NotifyRefused::Kitty);
 	}
 	// xterm's OSC 50 is the FONT (§88). The cursor-shape payload cmote honours on the same number is
 	// another terminal's, and is excluded first — the same shape of exclusion the OSC 9 sub-codes get
@@ -167,17 +167,17 @@ pub fn refused(payload: &[u8]) -> Option<Refused> {
 	if let Some(rest) = payload.strip_prefix(b"50;")
 		&& !rest.starts_with(b"CursorShape=")
 	{
-		return Some(Refused::Font);
+		return Some(NotifyRefused::Font);
 	}
 	// contour's `OSC 60` is the same decision at a larger size — every face at once (§98). The bare
 	// form is its query, and a query is refused with the set it would lead to.
 	if payload.starts_with(b"60;") || payload == b"60" {
-		return Some(Refused::Font);
+		return Some(NotifyRefused::Font);
 	}
 	// The Terminal Resume Protocol (§98). `88;` and not `8;` — OSC 8 is the hyperlink cmote ships —
 	// and not `888;`, which is contour's state dump and a different question with a different mark.
 	if payload.starts_with(b"88;") || payload == b"88" {
-		return Some(Refused::Resume);
+		return Some(NotifyRefused::Resume);
 	}
 	None
 }
@@ -189,14 +189,14 @@ mod tests {
 	#[test]
 	fn the_three_spellings_are_one_refusal() {
 		// The point of the module: one decision, recognised in whichever dialect it arrives in.
-		assert_eq!(refused(b"9;Build finished"), Some(Refused::ConEmu));
+		assert_eq!(refused(b"9;Build finished"), Some(NotifyRefused::ConEmu));
 		assert_eq!(
 			refused(b"777;notify;Build;finished in 4s"),
-			Some(Refused::Urxvt)
+			Some(NotifyRefused::Urxvt)
 		);
 		assert_eq!(
 			refused(b"99;i=1:d=0:p=title;Build finished"),
-			Some(Refused::Kitty)
+			Some(NotifyRefused::Kitty)
 		);
 	}
 
@@ -215,22 +215,25 @@ mod tests {
 	/// widening some other arm.
 	#[test]
 	fn the_sleep_and_the_message_box_are_refused_as_themselves() {
-		assert_eq!(refused(b"9;1;500"), Some(Refused::Sleep));
-		assert_eq!(refused(b"9;2;\"are you sure?\""), Some(Refused::MessageBox));
+		assert_eq!(refused(b"9;1;500"), Some(NotifyRefused::Sleep));
+		assert_eq!(
+			refused(b"9;2;\"are you sure?\""),
+			Some(NotifyRefused::MessageBox)
+		);
 		// Malformed, missing their argument — still theirs, and still refused.
-		assert_eq!(refused(b"9;1"), Some(Refused::Sleep));
-		assert_eq!(refused(b"9;2"), Some(Refused::MessageBox));
+		assert_eq!(refused(b"9;1"), Some(NotifyRefused::Sleep));
+		assert_eq!(refused(b"9;2"), Some(NotifyRefused::MessageBox));
 	}
 
 	/// And they are matched on the whole sub-code: `9;10;…` is not `9;1`, and reading it as one
 	/// would let a payload cmote does not understand wear a name it has a policy for.
 	#[test]
 	fn a_longer_sub_code_is_not_mistaken_for_a_shorter_one() {
-		assert_eq!(refused(b"9;10;500"), Some(Refused::ConEmu));
-		assert_eq!(refused(b"9;21;x"), Some(Refused::ConEmu));
+		assert_eq!(refused(b"9;10;500"), Some(NotifyRefused::ConEmu));
+		assert_eq!(refused(b"9;21;x"), Some(NotifyRefused::ConEmu));
 		assert_eq!(
 			refused(b"9;30;x"),
-			Some(Refused::ConEmu),
+			Some(NotifyRefused::ConEmu),
 			"not the tab text"
 		);
 	}
@@ -247,11 +250,15 @@ mod tests {
 	/// swallowed `CursorShape=` would break a shipped feature to tighten a policy that already holds.
 	#[test]
 	fn the_font_is_refused_and_the_cursor_shape_on_the_same_number_is_not() {
-		assert_eq!(refused(b"50;9x15bold"), Some(Refused::Font));
-		assert_eq!(refused(b"50;#+1"), Some(Refused::Font), "a font-menu index");
+		assert_eq!(refused(b"50;9x15bold"), Some(NotifyRefused::Font));
+		assert_eq!(
+			refused(b"50;#+1"),
+			Some(NotifyRefused::Font),
+			"a font-menu index"
+		);
 		assert_eq!(
 			refused(b"50;"),
-			Some(Refused::Font),
+			Some(NotifyRefused::Font),
 			"an empty payload is still xterm's font namespace, and refusing it is the conservative \
 			 reading — the permissive one would let a payload cmote does not understand through"
 		);
@@ -263,8 +270,15 @@ mod tests {
 	/// One argument, two numbers, so it carries the same variant rather than a second one.
 	#[test]
 	fn the_other_font_sequence_is_the_same_refusal() {
-		assert_eq!(refused(b"60;regular=IBM Plex Mono"), Some(Refused::Font));
-		assert_eq!(refused(b"60"), Some(Refused::Font), "its bare query form");
+		assert_eq!(
+			refused(b"60;regular=IBM Plex Mono"),
+			Some(NotifyRefused::Font)
+		);
+		assert_eq!(
+			refused(b"60"),
+			Some(NotifyRefused::Font),
+			"its bare query form"
+		);
 		assert_eq!(refused(b"600;x"), None, "not a prefix match");
 		assert_eq!(refused(b"6;x"), None, "nor read short");
 	}
@@ -275,15 +289,15 @@ mod tests {
 	fn a_relaunch_specification_is_refused_in_every_operation() {
 		assert_eq!(
 			refused(b"88;arm;cmd=c3No;args=aG9zdA==").expect("an arm is refused"),
-			Refused::Resume
+			NotifyRefused::Resume
 		);
-		assert_eq!(refused(b"88;clear"), Some(Refused::Resume));
+		assert_eq!(refused(b"88;clear"), Some(NotifyRefused::Resume));
 		assert_eq!(
 			refused(b"88;query"),
-			Some(Refused::Resume),
+			Some(NotifyRefused::Resume),
 			"answering 'supported' is what would bring the arm"
 		);
-		assert_eq!(refused(b"88"), Some(Refused::Resume));
+		assert_eq!(refused(b"88"), Some(NotifyRefused::Resume));
 		// The neighbours on either side, neither of which is this. OSC 8 is the hyperlink cmote
 		// ships; OSC 888 is contour's state dump, unimplemented rather than refused.
 		assert_eq!(refused(b"8;;https://example.invalid"), None);
@@ -318,7 +332,10 @@ mod tests {
 	fn only_the_urxvt_notify_module_is_this_decision() {
 		// OSC 777 is a dispatcher. Refusing the whole number would be claiming a decision about
 		// modules nobody here has looked at.
-		assert_eq!(refused(b"777;notify;title;body"), Some(Refused::Urxvt));
+		assert_eq!(
+			refused(b"777;notify;title;body"),
+			Some(NotifyRefused::Urxvt)
+		);
 		assert_eq!(refused(b"777;precmd"), None);
 		assert_eq!(refused(b"777;"), None);
 	}
@@ -327,9 +344,9 @@ mod tests {
 	fn a_notification_with_no_text_is_still_a_notification() {
 		// An empty body is a valid — and pointless — request in all three dialects. It is refused
 		// on what it ASKS for, not on whether it would have shown anything.
-		assert_eq!(refused(b"9;"), Some(Refused::ConEmu));
-		assert_eq!(refused(b"99;"), Some(Refused::Kitty));
-		assert_eq!(refused(b"99"), Some(Refused::Kitty));
-		assert_eq!(refused(b"777;notify"), Some(Refused::Urxvt));
+		assert_eq!(refused(b"9;"), Some(NotifyRefused::ConEmu));
+		assert_eq!(refused(b"99;"), Some(NotifyRefused::Kitty));
+		assert_eq!(refused(b"99"), Some(NotifyRefused::Kitty));
+		assert_eq!(refused(b"777;notify"), Some(NotifyRefused::Urxvt));
 	}
 }
