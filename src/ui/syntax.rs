@@ -309,48 +309,51 @@ impl Iterator for ScopeRangeIterator {
 fn cme_theme() -> Theme {
 	// (scope selector, RGB) straight from the theme's tokenColors. syntect scores these by
 	// specificity, so a more specific scope wins over a broader one regardless of order.
+	//
+	// Each colour is grouped per BYTE (§111) — `0x00_dd_ff` is r=00 g=dd b=ff, readable against the
+	// theme's own hex. Clippy's default grouping of four digits would put green across two groups.
 	let scopes: &[(&str, u32)] = &[
-		("comment", 0xaaaaaa),
-		("keyword", 0x00ddff),
-		("storage", 0x00ffdd),
-		("constant", 0x00ffff),
-		("number", 0x00ffff),
-		("variable", 0xffffff),
-		("entity", 0x00ddff),
-		("entity.name", 0x99ffff),
-		("entity.name.class", 0x44ffaa),
-		("entity.other.attribute-name", 0x00ddff),
-		("support", 0x00ffdd),
-		("invalid", 0x00ffff),
-		("string", 0xffffbb),
-		("string.quoted.double", 0xeeee00),
-		("string.quoted.single", 0x00ee55),
-		("string.quoted.double.json", 0xaaffff),
-		("string.template.ts", 0xffffaa),
-		("string.template.ts.html.tag", 0xffff00),
-		("meta.template.expression.ts", 0xff6600),
-		("meta.objectliteral", 0xffff00),
-		("meta.object-literal", 0xffff00),
-		("meta.block", 0xffffff),
-		("meta.parameters", 0xffffff),
-		("meta.brace", 0xffffff),
+		("comment", 0xaa_aa_aa),
+		("keyword", 0x00_dd_ff),
+		("storage", 0x00_ff_dd),
+		("constant", 0x00_ff_ff),
+		("number", 0x00_ff_ff),
+		("variable", 0xff_ff_ff),
+		("entity", 0x00_dd_ff),
+		("entity.name", 0x99_ff_ff),
+		("entity.name.class", 0x44_ff_aa),
+		("entity.other.attribute-name", 0x00_dd_ff),
+		("support", 0x00_ff_dd),
+		("invalid", 0x00_ff_ff),
+		("string", 0xff_ff_bb),
+		("string.quoted.double", 0xee_ee_00),
+		("string.quoted.single", 0x00_ee_55),
+		("string.quoted.double.json", 0xaa_ff_ff),
+		("string.template.ts", 0xff_ff_aa),
+		("string.template.ts.html.tag", 0xff_ff_00),
+		("meta.template.expression.ts", 0xff_66_00),
+		("meta.objectliteral", 0xff_ff_00),
+		("meta.object-literal", 0xff_ff_00),
+		("meta.block", 0xff_ff_ff),
+		("meta.parameters", 0xff_ff_ff),
+		("meta.brace", 0xff_ff_ff),
 		(
 			"meta.structure.dictionary.value.json string.quoted.double.json",
-			0xffffff,
+			0xff_ff_ff,
 		),
-		("markup.heading", 0x00ddff),
-		("markup.inserted", 0x00ff66),
-		("markup.deleted", 0x00ffff),
-		("markup.changed", 0xaaddff),
-		("markup.list", 0xffffff),
-		("markup.raw", 0x00eeff),
-		("markup.underline.link", 0x00ccff),
+		("markup.heading", 0x00_dd_ff),
+		("markup.inserted", 0x00_ff_66),
+		("markup.deleted", 0x00_ff_ff),
+		("markup.changed", 0xaa_dd_ff),
+		("markup.list", 0xff_ff_ff),
+		("markup.raw", 0x00_ee_ff),
+		("markup.underline.link", 0x00_cc_ff),
 	];
 
 	let mut theme = Theme::default();
 	theme.name = Some("CME".to_owned());
-	theme.settings.foreground = Some(syn_rgb(0xffffff));
-	theme.settings.background = Some(syn_rgb(0x1a2a30));
+	theme.settings.foreground = Some(syn_rgb(0xff_ff_ff));
+	theme.settings.background = Some(syn_rgb(0x1a_2a_30));
 	theme.scopes = scopes
 		.iter()
 		.map(|(scope, rgb)| theme_item(scope, *rgb))
@@ -390,8 +393,8 @@ mod tests {
 		// Arrange / Act
 		let theme = cme_theme();
 		// Assert — the ground colours are the editor.* values, and every tokenColors rule made it in.
-		assert_eq!(theme.settings.background, Some(syn_rgb(0x1a2a30)));
-		assert_eq!(theme.settings.foreground, Some(syn_rgb(0xffffff)));
+		assert_eq!(theme.settings.background, Some(syn_rgb(0x1a_2a_30)));
+		assert_eq!(theme.settings.foreground, Some(syn_rgb(0xff_ff_ff)));
 		assert_eq!(theme.scopes.len(), 32);
 	}
 

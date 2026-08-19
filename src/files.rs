@@ -1283,15 +1283,19 @@ pub fn parse_longname(longname: &str) -> Option<(String, String)> {
 /// this format has no column for.
 pub fn format_mode(bits: u32) -> String {
 	// The leading type letter, read off the high mode bits — the same letters `ls -l` prints.
-	let kind = match bits & 0o170000 {
-		0o040000 => 'd', // directory
-		0o120000 => 'l', // symlink
-		0o100000 => '-', // regular file
-		0o060000 => 'b', // block device
-		0o020000 => 'c', // character device
-		0o010000 => 'p', // fifo (named pipe)
-		0o140000 => 's', // socket
-		_ => '?',        // a type we do not name
+	//
+	// The separator sits after three digits on purpose (§111): a unix mode is the file TYPE in the
+	// high bits and the permissions in the low three, so `0o100_644` groups where the meaning
+	// divides. Clippy's own grouping would be four digits, cutting across both halves.
+	let kind = match bits & 0o170_000 {
+		0o040_000 => 'd', // directory
+		0o120_000 => 'l', // symlink
+		0o100_000 => '-', // regular file
+		0o060_000 => 'b', // block device
+		0o020_000 => 'c', // character device
+		0o010_000 => 'p', // fifo (named pipe)
+		0o140_000 => 's', // socket
+		_ => '?',         // a type we do not name
 	};
 	// The three rwx triads, each folding in the special bit that shares its execute column:
 	// set-user-id on owner, set-group-id on group, the sticky bit on other.
@@ -1945,19 +1949,19 @@ mod tests {
 	#[test]
 	fn a_mode_word_reads_the_way_ls_prints_it() {
 		// A regular file, rw-r--r--; a directory, rwxr-xr-x; a symlink, all bits set.
-		assert_eq!(format_mode(0o100644), "-rw-r--r--");
-		assert_eq!(format_mode(0o040755), "drwxr-xr-x");
-		assert_eq!(format_mode(0o120777), "lrwxrwxrwx");
+		assert_eq!(format_mode(0o100_644), "-rw-r--r--");
+		assert_eq!(format_mode(0o040_755), "drwxr-xr-x");
+		assert_eq!(format_mode(0o120_777), "lrwxrwxrwx");
 		// The special bits fold into the execute column: setuid/setgid as `s` over an
 		// execute bit, the sticky bit as `t` — `/tmp` and a setuid binary both here.
-		assert_eq!(format_mode(0o041777), "drwxrwxrwt");
-		assert_eq!(format_mode(0o104755), "-rwsr-xr-x");
+		assert_eq!(format_mode(0o041_777), "drwxrwxrwt");
+		assert_eq!(format_mode(0o104_755), "-rwsr-xr-x");
 		// And upper-case when the execute bit under them is NOT set — a setgid with no
 		// group-execute reads `S`, exactly as `ls -l` shows it.
-		assert_eq!(format_mode(0o102644), "-rw-r-Sr--");
+		assert_eq!(format_mode(0o102_644), "-rw-r-Sr--");
 		// A device and a fifo keep their own leading letter.
-		assert_eq!(format_mode(0o020666), "crw-rw-rw-");
-		assert_eq!(format_mode(0o010644), "prw-r--r--");
+		assert_eq!(format_mode(0o020_666), "crw-rw-rw-");
+		assert_eq!(format_mode(0o010_644), "prw-r--r--");
 	}
 
 	#[test]
