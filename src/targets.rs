@@ -429,11 +429,8 @@ impl Targets {
 	/// Write the targets to `path` as pretty JSON (readable, since it is a plain
 	/// config file). Creates the parent directory if needed.
 	pub fn save_to(&self, path: &Path) -> Result<()> {
-		if let Some(parent) = path.parent() {
-			std::fs::create_dir_all(parent).context("failed to create the data directory")?;
-		}
 		let json = serde_json::to_string_pretty(&self.items).context("failed to encode targets")?;
-		std::fs::write(path, json).context("failed to write the targets file")
+		crate::store::write_atomically(path, json.as_bytes())
 	}
 
 	/// Load from the resolved store location (§11). Convenience over `load_from`.

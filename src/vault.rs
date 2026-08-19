@@ -135,18 +135,12 @@ impl Vault {
 		})
 	}
 
-	/// Seal the current entries and write them, replacing the file atomically: the new blob is
-	/// written to a temp file beside the target and then renamed over it, so a crash mid-write
-	/// can never truncate the vault and lose every stored secret at once. The parent directory
-	/// is created if needed (the data dir normally exists, but a test path may not).
+	/// Seal the current entries and write them, replacing the file atomically (`store`): a crash
+	/// mid-write can never truncate the vault and lose every stored secret at once. This file's
+	/// pattern is now every store's — see §110 for why the other two needed it as badly.
 	fn persist(&self) -> Result<()> {
-		if let Some(parent) = self.path.parent() {
-			std::fs::create_dir_all(parent).context("failed to create the vault directory")?;
-		}
 		let sealed = seal(&self.passphrase, &self.entries, None)?;
-		let temp = self.path.with_extension("age.tmp");
-		std::fs::write(&temp, &sealed).context("failed to write the vault file")?;
-		std::fs::rename(&temp, &self.path).context("failed to replace the vault file")
+		crate::store::write_atomically(&self.path, &sealed)
 	}
 }
 

@@ -153,8 +153,8 @@ impl Settings {
 				return;
 			}
 		};
-		if let Err(error) = std::fs::write(dir.join(FILE), text) {
-			eprintln!("cmote: cannot write {FILE}: {error}");
+		if let Err(error) = crate::store::write_atomically(&dir.join(FILE), text.as_bytes()) {
+			eprintln!("cmote: cannot write {FILE}: {error:#}");
 		}
 	}
 

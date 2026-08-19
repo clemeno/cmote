@@ -32,6 +32,7 @@ mod preview; // the picture tab's model: which files are pictures, and the fence
 mod secret; // in-memory, zeroized, redacting wrapper for passwords/passphrases (§12)
 mod settings; // app-wide layout remembered between runs: the window size (§31)
 mod ssh; // SSH client, auth, host-key verification, key loading (§6-§8)
+mod store; // how the on-disk files are written: atomic replace, one backup (§110)
 mod targets; // saved connection targets, metadata only — no secrets (§14)
 mod taskbar; // mirror the active tab's command progress onto the Windows taskbar button (§54)
 mod term; // VT/ANSI terminal emulator wrapping the engine, behind a small surface (§9, §23)
