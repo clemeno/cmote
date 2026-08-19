@@ -188,14 +188,13 @@ impl Cancel {
 						self.params += 1;
 						self.slot += 1;
 					}
-					// A sub-parameter separator. DECSLRM has no sub-parameters, so this is some
-					// other sequence and the `s` it may end with is not ours to touch.
-					b':' => self.plain = false,
-					// A private marker. Legal only as the first parameter byte, and either way this
-					// is not DECSLRM.
-					0x3c..=0x3f => self.plain = false,
-					// An intermediate byte. DECSLRM has none.
-					0x20..=0x2f => self.plain = false,
+					// Three byte classes, one verdict: whatever this sequence is, it is not DECSLRM,
+					// so the `s` it may end with is not ours to touch.
+					//
+					//   `:`          a sub-parameter separator; DECSLRM has no sub-parameters
+					//   0x3c..=0x3f  a private marker, legal only as the first parameter byte
+					//   0x20..=0x2f  an intermediate byte; DECSLRM has none
+					b':' | 0x3c..=0x3f | 0x20..=0x2f => self.plain = false,
 					// The final byte ends the sequence, so this is where it is judged.
 					0x40..=0x7e => {
 						// More than two parameters is not DECSLRM either, and `slot` counts the

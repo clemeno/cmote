@@ -114,10 +114,10 @@ impl FormStop {
 	/// server drives every prompt, §7), so both are skipped too.
 	fn is_applicable(self, auth: AuthKind) -> bool {
 		match self {
-			FormStop::Credential => !auth.is_promptless(),
-			FormStop::Certificate => auth == AuthKind::Key,
-			FormStop::KeyPassphrase => auth == AuthKind::Key,
-			FormStop::Remember => !auth.is_promptless(),
+			// Grouped by the CONDITION rather than kept in Tab order, so each rule is written once
+			// and the two stops that share it are visibly the same case.
+			FormStop::Credential | FormStop::Remember => !auth.is_promptless(),
+			FormStop::Certificate | FormStop::KeyPassphrase => auth == AuthKind::Key,
 			_ => true,
 		}
 	}

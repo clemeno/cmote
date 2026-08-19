@@ -481,6 +481,8 @@ pub async fn send(
 /// Open the local destination at `offset`: appending to a partial for a resume, truncating for a
 /// fresh copy. The parent directory is made first, so a tree copy never fails for want of it.
 async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
+	use tokio::io::AsyncSeekExt as _;
+
 	if let Some(parent) = local.parent() {
 		let _ = tokio::fs::create_dir_all(parent).await;
 	}
@@ -498,7 +500,6 @@ async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 		.await
 		.context("could not open the local partial")
 		.map_err(transfer::mark_refused)?;
-	use tokio::io::AsyncSeekExt;
 	let mut file = file;
 	file.seek(std::io::SeekFrom::Start(offset))
 		.await

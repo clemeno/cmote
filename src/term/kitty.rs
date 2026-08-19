@@ -368,8 +368,11 @@ fn assemble(
 	let (keycode, final_byte) = match form {
 		Form::Letter { final_byte, .. } => (1, *final_byte),
 		Form::Tilde(number) => (u32::from(*number), b'~'),
-		Form::Special(codepoint) | Form::Text { codepoint } => (*codepoint, b'u'),
-		Form::Compat { codepoint, .. } => (*codepoint, b'u'),
+		// Every codepoint-carrying form reports the codepoint with a `u` final byte; what differs
+		// between them is how the codepoint was FOUND, which is settled by the time this runs.
+		Form::Special(codepoint) | Form::Text { codepoint } | Form::Compat { codepoint, .. } => {
+			(*codepoint, b'u')
+		}
 		// A fixed key never reaches assembly — `encode` returns its bytes directly.
 		Form::Fixed(_) => (0, b'u'),
 	};

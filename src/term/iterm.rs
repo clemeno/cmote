@@ -171,6 +171,8 @@ fn parse(payload: &[u8]) -> Option<Report> {
 /// is also why the three answers are named rather than nested `Option`s (§111) — here the difference
 /// between "we ignored this" and "the shell said empty" is a security property, not a nicety.
 fn parse_user_var(payload: &[u8]) -> Change<String> {
+	use base64::Engine as _;
+
 	let Some(rest) = payload.strip_prefix(b"1337;SetUserVar=") else {
 		return Change::Keep;
 	};
@@ -189,7 +191,6 @@ fn parse_user_var(payload: &[u8]) -> Change<String> {
 		return Change::Clear;
 	}
 
-	use base64::Engine as _;
 	let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
 		return Change::Keep;
 	};

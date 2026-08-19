@@ -555,13 +555,16 @@ where
 fn zone() -> TimeZone {
 	use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
 
+	// The two return codes this reads. Spelled out here because `windows_sys` does not export them
+	// with the `Time` functions, and they are the whole meaning of the returned id.
+	const TIME_ZONE_ID_INVALID: u32 = u32::MAX;
+	const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
+
 	// SAFETY: `GetTimeZoneInformation` fills a caller-owned struct of exactly this type and reads
 	// nothing else. A zeroed value is a valid one to hand it, and the returned id says whether it
 	// wrote anything worth reading.
 	let mut info: TIME_ZONE_INFORMATION = unsafe { std::mem::zeroed() };
 	let id = unsafe { GetTimeZoneInformation(&raw mut info) };
-	const TIME_ZONE_ID_INVALID: u32 = u32::MAX;
-	const TIME_ZONE_ID_DAYLIGHT: u32 = 2;
 	if id == TIME_ZONE_ID_INVALID {
 		// No zone to be had: the default renders as UTC, which is at least never wrong about the
 		// instant, only about the wall clock (§20).

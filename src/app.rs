@@ -3837,10 +3837,15 @@ impl Tab {
 			Message::ConnectPressed => return self.on_connect_pressed(),
 			Message::BackPressed => return self.go_to_form(),
 			Message::FormKey(event) => return self.on_form_key(event),
-			Message::AcceptHostKey => self.on_host_key_decision(HostKeyChoice::Pin),
+			// Two buttons, one command, and that is the design rather than a coincidence:
+			// `HostKeyChoice::Pin` means "write this key to `known_hosts`", and whether that LEARNS a
+			// first-contact key or REPLACES a stale line is decided by the verdict the SSH side is
+			// already holding (§8). The GUI does not get to choose which — it only says "pin it".
+			Message::AcceptHostKey | Message::ReplaceHostKey => {
+				self.on_host_key_decision(HostKeyChoice::Pin);
+			}
 			Message::RejectHostKey => self.on_host_key_decision(HostKeyChoice::Reject),
 			Message::TrustHostKeyOnce => self.on_host_key_decision(HostKeyChoice::TrustOnce),
-			Message::ReplaceHostKey => self.on_host_key_decision(HostKeyChoice::Pin),
 			// The prompts' own field edits (§7, §16). Each one goes to the open prompt or nowhere:
 			// with the prompt closed there is no buffer to type into, which is the point of the
 			// buffers living inside it.
@@ -4045,9 +4050,6 @@ impl Tab {
 				let effects = self.transfers.download_tree(remote, local);
 				return self.apply(effects);
 			}
-			// A click swallowed by a dialog card: nothing to do — capturing it is the
-			// whole point (it stops the click reaching the backdrop, §10).
-			Message::Ignored => {}
 			// Apply a selection/cursor action to the dialog body, but never an edit:
 			// that keeps the message read-only while still selectable and copyable (§10).
 			Message::DialogAction(action) => {
@@ -4119,7 +4121,11 @@ impl Tab {
 			// The raw pointer stream belongs to the window, not to anything inside a region: it
 			// exists to catch the press on a divider, which sits BETWEEN two regions (§48).
 			| Message::PointerMoved(_)
-			| Message::PointerPressed => {}
+			| Message::PointerPressed
+			// A click swallowed by a dialog card: nothing to do — capturing it is the whole point
+			// (it stops the click reaching the backdrop, §10). It sits with this group because the
+			// body is the same and there is only one way to write "nothing".
+			| Message::Ignored => {}
 			// Shell integration (§17).
 			Message::IntegrationPressed => self.open_integration_dialog(),
 			Message::IntegrationInstall => self.write_integration(true),
@@ -4884,11 +4890,6 @@ impl Tab {
 					}
 				}
 			}
-			// A credential question from an elevating shell (§45). Nothing can ask one while there is
-			// no way to START an elevation — the dialog that answered these was withdrawn with the
-			// rest of that UX — so this is ignored rather than answered. The arm stays because the
-			// SSH side that raises it stays: whatever replaces the dialog will want it back.
-			SshEvent::ElevatePrompt { .. } => {}
 			SshEvent::IdentityReady { identity } => return self.on_identity_ready(identity),
 			SshEvent::IdentityEnded { identity, reason } => {
 				return self.on_identity_ended(identity, reason);
@@ -4934,9 +4935,6 @@ impl Tab {
 					self.list_files(request);
 				}
 			}
-			SshEvent::RenameFailed(reason) => {
-				self.panes.set_notice(reason);
-			}
 			SshEvent::MakeDirDone(path) => {
 				// The new folder appeared inside its parent: re-list the parent in both panes so
 				// it shows in the right sort position (§18). Take an owned parent to end the borrow.
@@ -4944,13 +4942,13 @@ impl Tab {
 					self.refresh_remote_dir(&parent);
 				}
 			}
-			SshEvent::MakeDirFailed(reason) => {
-				self.panes.set_notice(reason);
-			}
 			SshEvent::DeleteDone(paths) => self.on_deleted(paths),
-			SshEvent::DeleteFailed(reason) => {
-				self.panes.set_notice(reason);
-			}
+			// A rename, a mkdir or a delete that failed. All three answer the same way and for the
+			// same reason: the server's own words go on the pane's notice line, and NOTHING is
+			// re-listed, because a failure changed nothing to re-read (§18, §19).
+			SshEvent::RenameFailed(reason)
+			| SshEvent::MakeDirFailed(reason)
+			| SshEvent::DeleteFailed(reason) => self.panes.set_notice(reason),
 			SshEvent::TransferConflict { name } => {
 				let effects = self.transfers.conflicted(&name);
 				return self.apply(effects);
@@ -5020,7 +5018,12 @@ impl Tab {
 			SshEvent::FileLoaded { .. }
 			| SshEvent::FileLoadFailed { .. }
 			| SshEvent::EditSaved { .. }
-			| SshEvent::EditSaveFailed { .. } => {}
+			| SshEvent::EditSaveFailed { .. }
+			// A credential question from an elevating shell (§45). Nothing can ask one while there is
+			// no way to START an elevation — the dialog that answered these was withdrawn with the
+			// rest of that UX — so this is ignored rather than answered. The pattern stays because the
+			// SSH side that raises it stays: whatever replaces the dialog will want it back.
+			| SshEvent::ElevatePrompt { .. } => {}
 		}
 		iced::Task::none()
 	}
@@ -6423,12 +6426,27 @@ impl Tab {
 	/// a whole row — the grid wraps at the window's width, so how many cells that is comes
 	/// from the same arithmetic the layout uses. Tab/Shift+Tab are next/previous, Enter
 	/// opens a folder, F2 renames, and Esc hands the keyboard back to the shell.
+	///
+	/// The movement keys fold into a `FilesNav` first, because a step is relative to the current
+	/// cell while an edge is an absolute end of the grid. Home and End MUST be absolute: a relative
+	/// jump reads the empty-selection default and would land on the wrong end when nothing is
+	/// selected yet (see `Files::jump_to_edge`).
 	fn on_files_key(
 		&mut self,
 		key: &iced::keyboard::Key,
 		modifiers: iced::keyboard::Modifiers,
 	) -> iced::Task<Message> {
 		use iced::keyboard::key::Named;
+
+		// What one movement key asks for. Declared here rather than mid-body: an item is in scope
+		// from the start of the block whatever line it is written on, so writing it where it is first
+		// used only makes the reader think its scope begins there (`items_after_statements`, §111).
+		enum FilesNav {
+			/// Relative to the current cell, in model-space cells.
+			Step(isize),
+			/// An absolute end of the grid — `true` for the last cell.
+			Edge(bool),
+		}
 
 		// Ctrl+A takes the whole listing (§21). Checked before the named-key gate below,
 		// since it is the pane's only shortcut on a character key.
@@ -6451,28 +6469,21 @@ impl Tab {
 		// Shift held on a movement key extends the selection instead of moving it (§21). Not on
 		// Tab: there, Shift already means "the other way".
 		let extend = modifiers.shift();
-		// A step is relative to the current cell; an edge is an absolute end of the grid. Home
-		// and End must be absolute — a relative jump reads the empty-selection default and would
-		// land on the wrong end when nothing is selected yet (see `Files::jump_to_edge`).
-		enum Nav {
-			Step(isize),
-			Edge(bool),
-		}
 		let (nav, extend) = match named {
-			Named::ArrowRight => (Nav::Step(1), extend),
-			Named::ArrowLeft => (Nav::Step(-1), extend),
-			Named::ArrowDown => (Nav::Step(columns), extend),
-			Named::ArrowUp => (Nav::Step(-columns), extend),
+			Named::ArrowRight => (FilesNav::Step(1), extend),
+			Named::ArrowLeft => (FilesNav::Step(-1), extend),
+			Named::ArrowDown => (FilesNav::Step(columns), extend),
+			Named::ArrowUp => (FilesNav::Step(-columns), extend),
 			// PageDown/PageUp are focus-gated to the pane, so they never fight the terminal's own
 			// scrollback on the same keys (`scroll_motion`) — that fires only while the terminal
 			// holds the keyboard.
-			Named::PageDown => (Nav::Step(page), extend),
-			Named::PageUp => (Nav::Step(-page), extend),
+			Named::PageDown => (FilesNav::Step(page), extend),
+			Named::PageUp => (FilesNav::Step(-page), extend),
 			// Home/End land on an absolute end, right even with nothing selected yet.
-			Named::Home => (Nav::Edge(false), extend),
-			Named::End => (Nav::Edge(true), extend),
-			Named::Tab if modifiers.shift() => (Nav::Step(-1), false),
-			Named::Tab => (Nav::Step(1), false),
+			Named::Home => (FilesNav::Edge(false), extend),
+			Named::End => (FilesNav::Edge(true), extend),
+			Named::Tab if modifiers.shift() => (FilesNav::Step(-1), false),
+			Named::Tab => (FilesNav::Step(1), false),
 			Named::Enter => {
 				let Some(path) = self.panes.pane.cursor().map(str::to_owned) else {
 					return iced::Task::none();
@@ -6499,8 +6510,8 @@ impl Tab {
 
 		let show_hidden = self.panes.show_hidden();
 		match nav {
-			Nav::Step(delta) => self.panes.pane.step(show_hidden, delta, extend),
-			Nav::Edge(to_last) => self.panes.pane.jump_to_edge(show_hidden, to_last, extend),
+			FilesNav::Step(delta) => self.panes.pane.step(show_hidden, delta, extend),
+			FilesNav::Edge(to_last) => self.panes.pane.jump_to_edge(show_hidden, to_last, extend),
 		}
 		self.resolve_selected_link();
 		// Only the keyboard scrolls: a click is already on a cell the user can see, and
@@ -8473,17 +8484,20 @@ fn pick_download_tree_target(remote: String) -> iced::Task<Message> {
 /// too; remembering a key passphrase means typing it on the form.
 fn extract_secret(auth: &bridge::AuthMethod) -> Option<Secret> {
 	let secret = match auth {
-		bridge::AuthMethod::Password(secret) => secret,
-		bridge::AuthMethod::Key {
+		// The two methods that carry a secret the form typed.
+		bridge::AuthMethod::Password(secret)
+		| bridge::AuthMethod::Key {
 			passphrase: Some(secret),
 			..
 		} => secret,
+		// A key with no form passphrase relies on the interactive prompt (§7), so there is nothing
+		// here to capture; and the promptless methods carry no secret at all — interactive answers
+		// every factor live, agent auth signs with a key the agent holds.
 		bridge::AuthMethod::Key {
 			passphrase: None, ..
-		} => return None,
-		// The promptless methods carry no secret to remember — interactive answers every factor
-		// live, and agent auth signs with a key the agent holds; neither has anything to store (§7).
-		bridge::AuthMethod::Interactive | bridge::AuthMethod::Agent => return None,
+		}
+		| bridge::AuthMethod::Interactive
+		| bridge::AuthMethod::Agent => return None,
 	};
 	if secret.expose().is_empty() {
 		None
@@ -8990,6 +9004,9 @@ mod tests {
 	/// `RejectHostKey` — the ✕, the backdrop, and now Esc — and only the two explicit buttons pin.
 	#[test]
 	fn a_changed_host_key_rejects_unless_the_user_says_otherwise() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
 		let (mut app, mut rx) = app_with_terminal(16);
 		let _ = app.on_ssh_event(SshEvent::HostKeyChanged {
 			stored: "SHA256:old".to_owned(),
@@ -9004,8 +9021,6 @@ mod tests {
 
 		// A key pressed in the frame the dialog appeared must not reach the form's ring underneath —
 		// Enter there would press Connect (§10).
-		use iced::keyboard::Modifiers;
-		use iced::keyboard::key::{Code, Named};
 		let _ = app.on_form_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
 		assert!(next_command(&mut rx).is_none());
 		assert!(matches!(app.prompt, Some(Prompt::HostKeyChanged)));
@@ -9594,6 +9609,10 @@ mod tests {
 	#[cfg(windows)]
 	#[tokio::test]
 	async fn a_real_local_shell_answers_ctrl_d_by_leaving() {
+		// The shell prints for a while as its profile runs; the press goes in once it has been quiet
+		// for this long, which is this test's definition of "at a prompt".
+		const SETTLED: std::time::Duration = std::time::Duration::from_millis(2500);
+
 		let Some(shell) = crate::local::shells::catalogue()
 			.iter()
 			.find(|shell| !shell.kind.quits_on_eof())
@@ -9610,9 +9629,6 @@ mod tests {
 		let (to_session, from_tab) = mpsc::channel::<crate::ssh::client::SessionMsg>(64);
 		let session = tokio::spawn(crate::local::session::run(shell, event_tx, from_tab));
 
-		// The shell prints for a while as its profile runs; the press goes in once it has been quiet for a
-		// moment, which is this test's definition of "at a prompt".
-		const SETTLED: std::time::Duration = std::time::Duration::from_millis(2500);
 		let mut pressed = false;
 		let mut typed = false;
 		let mut ended = false;
