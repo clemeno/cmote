@@ -32,7 +32,9 @@ use iced::{Color, Element, Font, Length, Padding, mouse};
 
 use crate::app::Message;
 use crate::explorer;
-use crate::files::{Category, Entry, Files, FilesMessage, FilesRename, Kind, SortDir, SortKey};
+use crate::files::{
+	Category, Entry, Files, FilesKind, FilesMessage, FilesRename, SortDir, SortKey,
+};
 use crate::ui::explorer::{
 	FG, HEADER_BG, MENU_INSET, MUTED_FG, NOTICE_FG, NOTICE_HEIGHT, PANEL_BG, SELECTED_BG,
 	SPLITTER_BG, SPLITTER_HOVER, TEXT_SIZE, focus_border, hidden_toggle,
@@ -671,15 +673,15 @@ fn entry_lines(files: &Files, entry: &Entry) -> Vec<String> {
 	// the grid middle-ellipsises a name too long for its two lines, this is what the entry
 	// is actually called.
 	let mut lines = vec![entry.name.clone()];
-	if entry.kind == Kind::Link {
+	if entry.kind == FilesKind::Link {
 		// The target costs a round trip, so it lands a moment after the rest (§20).
 		lines.push(format!("→ {}", files.link_target().unwrap_or("resolving…")));
 	}
 	lines.extend([
 		match entry.kind {
-			Kind::Dir => "Folder".to_owned(),
-			Kind::Link => "Symlink".to_owned(),
-			Kind::File => crate::files::mime(&entry.name).to_owned(),
+			FilesKind::Dir => "Folder".to_owned(),
+			FilesKind::Link => "Symlink".to_owned(),
+			FilesKind::File => crate::files::mime(&entry.name).to_owned(),
 		},
 		// Absent facts show as a dash rather than vanishing: the `ls` fallback knows none
 		// of them (§19), and a card that changed shape per entry would be harder to read.
@@ -704,11 +706,11 @@ fn summary(files: &Files, show_hidden: bool) -> Vec<String> {
 	let rows = files.selected_rows(show_hidden);
 	let folders = rows
 		.iter()
-		.filter(|(_, entry)| entry.kind == Kind::Dir)
+		.filter(|(_, entry)| entry.kind == FilesKind::Dir)
 		.count();
 	let total: u64 = rows
 		.iter()
-		.filter(|(_, entry)| entry.kind != Kind::Dir)
+		.filter(|(_, entry)| entry.kind != FilesKind::Dir)
 		.filter_map(|(_, entry)| entry.meta.size)
 		.sum();
 
@@ -842,7 +844,7 @@ fn meta_line(entry: &Entry, files: &Files) -> String {
 		|mtime| crate::files::format_mtime_short(mtime, files.zone()),
 	);
 	let access = access_line(entry);
-	if entry.kind == Kind::Dir {
+	if entry.kind == FilesKind::Dir {
 		return format!("{date} · {access}");
 	}
 	let size = entry
@@ -990,7 +992,7 @@ pub fn context_menu<'a>(
 	// Frozen when the menu opened, so it stays put while the pointer travels to an item.
 	let anchor = open.at;
 	let path = open.path.clone();
-	let is_dir = open.kind == Kind::Dir;
+	let is_dir = open.kind == FilesKind::Dir;
 	// A menu opened ON the selection acts on all of it (§21); one opened elsewhere has
 	// already collapsed the selection onto that single entry, so this reads false.
 	let many = files.selected_count() > 1 && files.is_selected(&path);

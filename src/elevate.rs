@@ -42,7 +42,7 @@ const MAX_LABEL: usize = 120;
 /// CALLER's own password (and is what a sudoers-managed machine expects), and `su`, which asks for
 /// the TARGET account's — the fallback where sudo is absent or the user is not in sudoers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Kind {
+pub enum ElevateKind {
 	/// `sudo -u <user> -i`: a login shell for `user`, authenticated with the caller's password.
 	#[default]
 	Sudo,
@@ -50,12 +50,12 @@ pub enum Kind {
 	Su,
 }
 
-impl Kind {
+impl ElevateKind {
 	/// The label shown beside the choice in the elevate dialog.
 	pub fn label(self) -> &'static str {
 		match self {
-			Kind::Sudo => "sudo",
-			Kind::Su => "su",
+			ElevateKind::Sudo => "sudo",
+			ElevateKind::Su => "su",
 		}
 	}
 
@@ -73,13 +73,13 @@ impl Kind {
 		match self {
 			// `-u` explicitly, even for root: it makes the command say who it is becoming, so the
 			// same string works for `root` and for a service account with no special-casing.
-			Kind::Sudo => format!(
+			ElevateKind::Sudo => format!(
 				"sudo -p {} -u {quoted} -i",
 				crate::explorer::shell_quote(MARKER)
 			),
 			// A bare `-` is what makes it a LOGIN shell (fresh environment, the account's own
 			// $HOME and $PATH), matching what `sudo -i` gives.
-			Kind::Su => format!("su - {quoted}"),
+			ElevateKind::Su => format!("su - {quoted}"),
 		}
 	}
 }
@@ -173,13 +173,13 @@ pub fn valid_program(path: &str) -> bool {
 /// `su` is offered for completeness only. It reads a password from a terminal and this channel
 /// deliberately has none (a pty would mangle the binary protocol), so it works for an account
 /// that needs no password and fails cleanly otherwise — see the NOT list in PLAN §46.
-pub fn program_command(kind: Kind, user: &str, program: &str, password: bool) -> String {
+pub fn program_command(kind: ElevateKind, user: &str, program: &str, password: bool) -> String {
 	let account = crate::explorer::shell_quote(user);
 	let path = crate::explorer::shell_quote(program);
 	match kind {
-		Kind::Sudo if password => format!("sudo -S -p '' -u {account} -- {path}"),
-		Kind::Sudo => format!("sudo -n -u {account} -- {path}"),
-		Kind::Su => format!("su - {account} -c {path}"),
+		ElevateKind::Sudo if password => format!("sudo -S -p '' -u {account} -- {path}"),
+		ElevateKind::Sudo => format!("sudo -n -u {account} -- {path}"),
+		ElevateKind::Su => format!("su - {account} -c {path}"),
 	}
 }
 
@@ -191,13 +191,15 @@ pub fn program_command(kind: Kind, user: &str, program: &str, password: bool) ->
 /// `program_command`, including the stdin rule: after sudo has taken its password line, the rest
 /// of the channel belongs to the snippet — which is what lets a file be written by piping its
 /// bytes into `cat`.
-pub fn shell_command(kind: Kind, user: &str, snippet: &str, password: bool) -> String {
+pub fn shell_command(kind: ElevateKind, user: &str, snippet: &str, password: bool) -> String {
 	let account = crate::explorer::shell_quote(user);
 	let script = crate::explorer::shell_quote(snippet);
 	match kind {
-		Kind::Sudo if password => format!("sudo -S -p '' -u {account} -- /bin/sh -c {script}"),
-		Kind::Sudo => format!("sudo -n -u {account} -- /bin/sh -c {script}"),
-		Kind::Su => format!("su - {account} -c {script}"),
+		ElevateKind::Sudo if password => {
+			format!("sudo -S -p '' -u {account} -- /bin/sh -c {script}")
+		}
+		ElevateKind::Sudo => format!("sudo -n -u {account} -- /bin/sh -c {script}"),
+		ElevateKind::Su => format!("su - {account} -c {script}"),
 	}
 }
 
@@ -724,7 +726,7 @@ mod tests {
 
 	#[test]
 	fn the_sudo_command_names_its_own_prompt_and_its_target() {
-		let command = Kind::Sudo.command("root");
+		let command = ElevateKind::Sudo.command("root");
 		assert!(
 			command.contains(MARKER),
 			"the prompt is cmote's to recognise"
@@ -735,7 +737,7 @@ mod tests {
 
 	#[test]
 	fn su_takes_a_dash_so_it_is_a_login_shell_too() {
-		assert_eq!(Kind::Su.command("postgres"), "su - 'postgres'");
+		assert_eq!(ElevateKind::Su.command("postgres"), "su - 'postgres'");
 	}
 
 	#[test]
@@ -817,7 +819,12 @@ mod tests {
 	fn a_file_channel_runs_the_program_itself_with_no_shell_around_it() {
 		// The whole point of the direct form: the only strings on this command line are a vetted
 		// account name and a vetted path, so there is no shell to quote for a second time.
-		let command = program_command(Kind::Sudo, "root", "/usr/lib/openssh/sftp-server", false);
+		let command = program_command(
+			ElevateKind::Sudo,
+			"root",
+			"/usr/lib/openssh/sftp-server",
+			false,
+		);
 		assert_eq!(
 			command,
 			"sudo -n -u 'root' -- '/usr/lib/openssh/sftp-server'"
@@ -829,8 +836,10 @@ mod tests {
 	fn a_password_is_read_from_stdin_only_when_the_caller_asks_for_it() {
 		// `-n` writes nothing to the channel, so nothing can be mistaken for the program's input;
 		// `-S` is the deliberate opposite, chosen only once sudo has refused for want of a password.
-		assert!(program_command(Kind::Sudo, "root", "/x/sftp-server", false).contains(" -n "));
-		let asked = program_command(Kind::Sudo, "root", "/x/sftp-server", true);
+		assert!(
+			program_command(ElevateKind::Sudo, "root", "/x/sftp-server", false).contains(" -n ")
+		);
+		let asked = program_command(ElevateKind::Sudo, "root", "/x/sftp-server", true);
 		assert!(asked.contains(" -S "), "reads the password from stdin");
 		assert!(asked.contains("-p ''"), "and prints no prompt of its own");
 		assert!(!asked.contains(" -n "), "the two flags are exclusive");
@@ -840,7 +849,7 @@ mod tests {
 	fn a_shell_snippet_reaches_the_other_account_as_one_argument() {
 		// A snippet IS shell text, so it is quoted whole: everything cmote composes into it stays
 		// data no matter what a path inside it contains.
-		let command = shell_command(Kind::Sudo, "root", "ls -1Ap -- '/etc'", false);
+		let command = shell_command(ElevateKind::Sudo, "root", "ls -1Ap -- '/etc'", false);
 		assert_eq!(
 			command,
 			"sudo -n -u 'root' -- /bin/sh -c 'ls -1Ap -- '\\''/etc'\\'''"

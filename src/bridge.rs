@@ -203,7 +203,7 @@ pub enum SshCommand {
 	/// `ElevateAnswer` and reported through `ElevatePrompt`.
 	Elevate {
 		identity: u64,
-		kind: crate::elevate::Kind,
+		kind: crate::elevate::ElevateKind,
 		user: String,
 	},
 	/// One answer to an `ElevatePrompt` (§45), written to that shell's channel followed by a

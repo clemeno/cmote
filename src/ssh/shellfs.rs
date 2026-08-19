@@ -52,7 +52,7 @@ use super::asuser::{Exec, Runner};
 use super::transfer::{self, CopyOutcome, FileAction, PlannedFile, Start, TreePlan};
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::explorer::{self, join, shell_quote};
-use crate::files::{self, Entry, Kind, Meta};
+use crate::files::{self, Entry, FilesKind, Meta};
 
 // A file read through a shell is bounded by the ceiling its CALLER passes, exactly as the SFTP path
 // is (§53) — there is no constant here on purpose. There was one, `MAX_READ = edit::MAX_SIZE`, and
@@ -91,18 +91,18 @@ pub async fn entries(runner: &impl Exec, path: &str) -> Result<Vec<Entry>> {
 		.map(|line| match line.strip_suffix('/') {
 			Some(name) => Entry {
 				name: name.to_owned(),
-				kind: Kind::Dir,
+				kind: FilesKind::Dir,
 				meta: Meta::default(),
 			},
 			None => match line.strip_suffix('@') {
 				Some(name) => Entry {
 					name: name.to_owned(),
-					kind: Kind::Link,
+					kind: FilesKind::Link,
 					meta: Meta::default(),
 				},
 				None => Entry {
 					name: line.trim_end_matches(['*', '|', '=']).to_owned(),
-					kind: Kind::File,
+					kind: FilesKind::File,
 					meta: Meta::default(),
 				},
 			},
@@ -819,16 +819,16 @@ mod backend_tests {
 		let entries = entries(&remote, "/srv").await.expect("the listing arrived");
 
 		assert_eq!(remote.only_command(), "ls -1AF -- '/srv'");
-		let seen: Vec<(&str, Kind)> = entries
+		let seen: Vec<(&str, FilesKind)> = entries
 			.iter()
 			.map(|entry| (entry.name.as_str(), entry.kind))
 			.collect();
 		// The executable's `*` is stripped and it is a plain file: the pane cares about folder,
 		// link or file, and nothing else `-F` marks is a fourth kind.
-		assert!(seen.contains(&("bin", Kind::Dir)));
-		assert!(seen.contains(&("link", Kind::Link)));
-		assert!(seen.contains(&("run", Kind::File)));
-		assert!(seen.contains(&("plain", Kind::File)));
+		assert!(seen.contains(&("bin", FilesKind::Dir)));
+		assert!(seen.contains(&("link", FilesKind::Link)));
+		assert!(seen.contains(&("run", FilesKind::File)));
+		assert!(seen.contains(&("plain", FilesKind::File)));
 	}
 
 	/// A NAME CARRYING A QUOTE reaches the remote as a name, not as commands (§18).

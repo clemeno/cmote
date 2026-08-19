@@ -348,7 +348,7 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let editor_element: Element<'a, Message> = if matches!(editor.theme, EditorTheme::Cme) {
 		editor_widget
 			.highlight_with::<crate::ui::syntax::Highlighter>(
-				crate::ui::syntax::Settings {
+				crate::ui::syntax::SyntaxSettings {
 					// Widen past the bare extension so a whole-name file (Makefile, .bashrc) or an
 					// extensionless shebang script highlights too (§32); the resolved grammar NAME is the
 					// identity, so a normal file's highlighter is not rebuilt when its first line is edited.

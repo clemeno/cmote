@@ -47,7 +47,7 @@ use russh_sftp::client::{RawSftpSession, SftpSession};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::bridge::LOGIN_IDENTITY;
-use crate::elevate::{self, Kind};
+use crate::elevate::{self, ElevateKind};
 use crate::secret::Secret;
 
 /// How much output one shell-backend command may produce. A listing, a `wc -c` or a `find` is
@@ -247,7 +247,7 @@ pub struct Runner {
 /// The account an elevated runner becomes.
 #[derive(Clone)]
 struct Account {
-	kind: Kind,
+	kind: ElevateKind,
 	user: String,
 	/// The password for this elevation, kept in memory for the connection (§45). `None` when the
 	/// user supplied none, and then sudo only ever runs non-interactively.
@@ -267,7 +267,12 @@ impl Runner {
 	}
 
 	/// The runner for another account on the same connection (§45, §46).
-	pub fn elevated(channels: Channels, kind: Kind, user: String, secret: Option<Secret>) -> Self {
+	pub fn elevated(
+		channels: Channels,
+		kind: ElevateKind,
+		user: String,
+		secret: Option<Secret>,
+	) -> Self {
 		Self {
 			channels,
 			account: Some(Account {
@@ -538,7 +543,7 @@ impl Accounts {
 	/// Note an account being elevated into (§45), so file operations can run as it. Called when the
 	/// elevation is asked for rather than when it succeeds: an identity that never opens is removed
 	/// again, and one that does is ready without a second message.
-	pub fn add(&mut self, identity: u64, kind: Kind, user: String) {
+	pub fn add(&mut self, identity: u64, kind: ElevateKind, user: String) {
 		let runner = Runner::elevated(self.login.channels.clone(), kind, user, None);
 		self.entries.insert(identity, AsuserEntry::new(runner));
 	}
@@ -830,7 +835,7 @@ fn handshake_failed(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::{
-		Accounts, AsuserEntry, Channels, Kind, LOGIN_IDENTITY, Output, Runner, Secret,
+		Accounts, AsuserEntry, Channels, ElevateKind, LOGIN_IDENTITY, Output, Runner, Secret,
 		wants_password,
 	};
 
@@ -841,7 +846,7 @@ mod tests {
 		let (channels, _requests) = Channels::new();
 		AsuserEntry::new(Runner::elevated(
 			channels,
-			Kind::Sudo,
+			ElevateKind::Sudo,
 			"root".to_owned(),
 			secret.map(|value| Secret::new(value.to_owned())),
 		))
@@ -874,7 +879,7 @@ mod tests {
 		// the panes empty anyway.
 		let (channels, _requests) = Channels::new();
 		let mut accounts = Accounts::new(channels);
-		accounts.add(7, Kind::Sudo, "root".to_owned());
+		accounts.add(7, ElevateKind::Sudo, "root".to_owned());
 		accounts.deny_second_factor(7);
 		let denied = accounts.entries[&7]
 			.denied

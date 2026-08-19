@@ -2135,23 +2135,23 @@ impl App {
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		let active = self.active();
 		match active.screen {
-			Screen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
+			AppScreen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			// The form's own focus ring (Tab / Shift+Tab / Enter / Space, §10) — but ONLY while
 			// nothing is being asked over it (§7, §8, §16). A prompt's fields type through the
 			// widget tree, so leaving the ring live would move the highlight around behind the
 			// dialog and let Enter press the Connect button under it. This is the one place that
-			// rule is stated; it used to be implicit in the six `Screen` variants that each had no
+			// rule is stated; it used to be implicit in the six `AppScreen` variants that each had no
 			// keyboard subscription of their own.
-			Screen::Connect if active.prompt.is_none() => {
+			AppScreen::Connect if active.prompt.is_none() => {
 				subs.push(iced::keyboard::listen().map(Message::FormKey));
 			}
-			Screen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			AppScreen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
 			// What a viewer listens for depends on what it is holding, so it is asked (§32, §53).
 			// The editor wants its shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W) while typing goes
 			// to the widget. A picture has nothing to type into, so it listens for one thing: the
 			// key that closes it — without which it would be the only tab in the app a keyboard
 			// cannot dismiss, which reads as a bug rather than as a design.
-			Screen::Viewer => match &active.viewer {
+			AppScreen::Viewer => match &active.viewer {
 				Some(Viewer::Editor(_)) => {
 					subs.push(iced::keyboard::listen().map(Message::EditorKey));
 				}
@@ -2160,7 +2160,7 @@ impl App {
 				}
 				None => {}
 			},
-			Screen::Connect | Screen::Connecting { .. } => {}
+			AppScreen::Connect | AppScreen::Connecting { .. } => {}
 		}
 
 		iced::Subscription::batch(subs)
@@ -2170,7 +2170,7 @@ impl App {
 /// Which screen the single window is currently showing. This is the small state
 /// machine from PLAN §10 — every transition happens in `update`.
 #[derive(Debug, Default)]
-pub enum Screen {
+pub enum AppScreen {
 	/// The home screen: the list of saved connection targets (§14). This is where we
 	/// start; picking a target pre-fills the connect form, "New connection" opens a
 	/// blank one.
@@ -2189,7 +2189,7 @@ pub enum Screen {
 	/// exactly while this screen shows.
 	///
 	/// One variant and not two, because the kind is not a property of the screen: every place that
-	/// branched on `Screen::Editor` vs `Screen::Preview` immediately went on to unwrap the matching
+	/// branched on `AppScreen::Editor` vs `AppScreen::Preview` immediately went on to unwrap the matching
 	/// field, so the screen's job was only ever to say WHETHER a viewer is open. Saying it twice
 	/// meant a `Tab` could be built claiming one kind while holding the other, and nothing rejected
 	/// it. The picture screen exists at all because a `.png` opened in a text editor can only ever
@@ -2199,10 +2199,10 @@ pub enum Screen {
 
 /// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
 ///
-/// These were six `Screen` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
+/// These were six `AppScreen` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
 /// `NeedPassphrase`, `Interactive`, `VaultUnlock`, `Error` — but they were never separate screens:
 /// every one of them renders `form_with_dialog(…)`, the connect form with a dialog over it. Calling
-/// them screens cost a real thing, which is that `Screen::Connect`'s keyboard subscription was the
+/// them screens cost a real thing, which is that `AppScreen::Connect`'s keyboard subscription was the
 /// only place the form's own Tab / Enter ring was live. Six variants that each had to remember to
 /// switch it off; one `Option` that says it once.
 ///
@@ -2496,7 +2496,7 @@ pub struct Tab {
 	/// tab's own SSH worker subscription and routes that session's events back to this tab.
 	id: u64,
 	/// Which screen is visible.
-	pub screen: Screen,
+	pub screen: AppScreen,
 	/// The saved connection targets shown on the home screen (§14, §26). A shared clone of the
 	/// ONE app-wide list (loaded from disk at startup, kept sorted, re-saved on any change): a
 	/// rename or delete in one tab's home screen is seen by every other, and there is a single
@@ -2549,8 +2549,8 @@ pub struct Tab {
 	terminal: Option<term::Terminal>,
 	/// What this tab is VIEWING, when it is showing a remote file rather than running a session
 	/// (§32, §53) — a text buffer or a picture, see [`Viewer`]. `Some` exactly while `screen` is
-	/// `Screen::Viewer`, and that is now one invariant rather than the two it used to be: this was a
-	/// pair of `Option` fields, `editor` and `preview`, each paired with a `Screen` variant of its
+	/// `AppScreen::Viewer`, and that is now one invariant rather than the two it used to be: this was a
+	/// pair of `Option` fields, `editor` and `preview`, each paired with a `AppScreen` variant of its
 	/// own, so four values had to agree about a thing that is one thing.
 	viewer: Option<Viewer>,
 	/// The question the connect flow is holding over the form, `None` when it is holding none
@@ -2559,7 +2559,7 @@ pub struct Tab {
 	/// resumes — so nothing is read from a field that might be left over from an earlier prompt.
 	///
 	/// While it is `Some` the form's own keyboard ring is off (see `subscription`): the prompt's
-	/// fields type through the widget tree, and Tab / Enter belong to them. As six `Screen`
+	/// fields type through the widget tree, and Tab / Enter belong to them. As six `AppScreen`
 	/// variants that was six places that each had to remember.
 	prompt: Option<Prompt>,
 	/// Whether a passphrase has already been submitted this connection. The SSH task
@@ -2586,7 +2586,7 @@ pub struct Tab {
 	/// It holds the KIND and not a `bool` because the kind is the thing worth knowing: it is what
 	/// `connection` was built from, and the next thing to want it (an icon on the tab chip, a per-shell
 	/// default directory) will want the kind rather than the fact.
-	local: Option<crate::local::shells::Kind>,
+	local: Option<crate::local::shells::ShellKind>,
 	/// A Ctrl+D sent to a local shell that may not act on it, and what has come back since (§104).
 	///
 	/// `Some` from the moment the byte goes out until the shell's answer has been weighed. The answer is
@@ -3377,7 +3377,7 @@ impl Tab {
 	) -> Self {
 		Self {
 			id,
-			screen: Screen::Viewer,
+			screen: AppScreen::Viewer,
 			viewer: Some(Viewer::Editor(crate::editor::Editor::loading(
 				session, identity, path, theme,
 			))),
@@ -3395,7 +3395,7 @@ impl Tab {
 	fn new_preview(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
 		Self {
 			id,
-			screen: Screen::Viewer,
+			screen: AppScreen::Viewer,
 			viewer: Some(Viewer::Picture(crate::preview::Preview::loading(
 				session, path,
 			))),
@@ -3441,7 +3441,7 @@ impl Tab {
 	/// user with several open can tell them apart.
 	fn strip_label(&self) -> String {
 		match &self.screen {
-			Screen::Terminal | Screen::Connecting { .. } => {
+			AppScreen::Terminal | AppScreen::Connecting { .. } => {
 				let endpoint = self
 					.connection
 					.clone()
@@ -3461,17 +3461,17 @@ impl Tab {
 					None => endpoint,
 				}
 			}
-			Screen::Home => "Home".to_owned(),
+			AppScreen::Home => "Home".to_owned(),
 			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
 			// only an editor can have (§32, §53). Both halves of that are the viewer's own.
-			Screen::Viewer => match &self.viewer {
+			AppScreen::Viewer => match &self.viewer {
 				Some(viewer) => viewer.label(),
 				None => "file".to_owned(),
 			},
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
 			// without being opened.
-			Screen::Connect => match self.prompt {
+			AppScreen::Connect => match self.prompt {
 				Some(Prompt::Failed) => "Error".to_owned(),
 				_ => "New connection".to_owned(),
 			},
@@ -3515,7 +3515,7 @@ impl Tab {
 	/// Whether this tab holds a live shell (§26). Closing one is confirmed like a Disconnect;
 	/// closing a tab still at the home list or the connect form just drops it.
 	fn is_live(&self) -> bool {
-		matches!(self.screen, Screen::Terminal)
+		matches!(self.screen, AppScreen::Terminal)
 	}
 
 	/// Whether this tab is an editor with unsaved edits (§32). Its "×" is confirmed like a live
@@ -4239,7 +4239,7 @@ impl Tab {
 		let endpoint = format!("{}@{}:{}", params.user, params.host, params.port);
 		if self.send_command(SshCommand::Connect(params)) {
 			self.connection = Some(endpoint);
-			self.screen = Screen::Connecting { status };
+			self.screen = AppScreen::Connecting { status };
 		} else {
 			// The command never left, so there is no attempt for either capture to belong to.
 			self.abandon_attempt();
@@ -4280,7 +4280,7 @@ impl Tab {
 		if self.send_command(SshCommand::ConnectLocal(shell)) {
 			self.connection = Some(endpoint);
 			self.local = Some(kind);
-			self.screen = Screen::Connecting { status };
+			self.screen = AppScreen::Connecting { status };
 		}
 		iced::Task::none()
 	}
@@ -4411,7 +4411,7 @@ impl Tab {
 		// The connect this prompt was blocking is abandoned with it, and the secret it captured
 		// goes too (§12, §16).
 		self.abandon_attempt();
-		self.screen = Screen::Connect;
+		self.screen = AppScreen::Connect;
 		iced::Task::none()
 	}
 
@@ -4435,7 +4435,7 @@ impl Tab {
 	/// over a connection that had already moved on.
 	fn authenticating(&mut self) {
 		self.prompt = None;
-		self.screen = Screen::Connecting {
+		self.screen = AppScreen::Connecting {
 			status: "authenticating…".to_owned(),
 		};
 	}
@@ -4613,7 +4613,7 @@ impl Tab {
 		// A failure is shown over the connect FORM, wherever it came from — a validation slip on
 		// the form, a dead worker channel, a session that dropped — so Back leaves the user
 		// somewhere they can retry from rather than on a dead terminal screen (§10).
-		self.screen = Screen::Connect;
+		self.screen = AppScreen::Connect;
 	}
 
 	/// Open a prompt over the connect form (§7, §8, §16), the mirror of `open_modal` on the
@@ -4639,7 +4639,7 @@ impl Tab {
 				}
 			}
 			SshEvent::Connecting => {
-				self.screen = Screen::Connecting {
+				self.screen = AppScreen::Connecting {
 					status: "connecting…".to_string(),
 				}
 			}
@@ -4649,7 +4649,7 @@ impl Tab {
 				// selected and copied for out-of-band comparison (§8, §10).
 				let body = format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY);
 				self.open_prompt(Prompt::HostKey, &body);
-				self.screen = Screen::Connect;
+				self.screen = AppScreen::Connect;
 			}
 			SshEvent::HostKeyChanged { stored, presented } => {
 				// Seed the selectable body with the warning plus BOTH fingerprints, each labelled
@@ -4660,7 +4660,7 @@ impl Tab {
 					ui::HOST_KEY_CHANGED_DIALOG_BODY
 				);
 				self.open_prompt(Prompt::HostKeyChanged, &body);
-				self.screen = Screen::Connect;
+				self.screen = AppScreen::Connect;
 			}
 			SshEvent::NeedPassphrase => {
 				// A fresh, empty buffer each time we ask — including a re-ask after a wrong
@@ -4669,7 +4669,7 @@ impl Tab {
 					Prompt::Passphrase(String::new()),
 					ui::PASSPHRASE_DIALOG_BODY,
 				);
-				self.screen = Screen::Connect;
+				self.screen = AppScreen::Connect;
 				// Focus the field so the user can type at once — the re-ask path
 				// lands here too, refocusing on every prompt (§7).
 				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
@@ -4699,7 +4699,7 @@ impl Tab {
 					},
 					&body,
 				);
-				self.screen = Screen::Connect;
+				self.screen = AppScreen::Connect;
 				return iced::widget::operation::focus(ui::interactive_field_id(0));
 			}
 			SshEvent::Connected => {
@@ -4730,7 +4730,7 @@ impl Tab {
 				// After the clear, never before: `clear_grid_interaction` empties the queue this
 				// puts the resume offer back into (§16).
 				self.adopt_unfinished();
-				self.screen = Screen::Terminal;
+				self.screen = AppScreen::Terminal;
 				// This shell is the session's first identity (§45): the account it authenticated as.
 				// It is the one that can never be elevated away or closed, and the one every other
 				// identity falls back to.
@@ -5499,7 +5499,7 @@ impl Tab {
 	/// aligned (§10). Used by the paths that keep the user on the form to retry
 	/// (error Back, passphrase cancel) — a full return to the list uses `go_home`.
 	fn go_to_form(&mut self) -> iced::Task<Message> {
-		self.screen = Screen::Connect;
+		self.screen = AppScreen::Connect;
 		// Nothing is being asked any more, which is what puts the form's own keyboard ring back on
 		// (§7): the ring and the prompt are never both live.
 		self.prompt = None;
@@ -5512,7 +5512,7 @@ impl Tab {
 	/// linger once we leave it (§12). The saved-target selection is kept so the list
 	/// re-opens on the last-used row.
 	fn go_home(&mut self) -> iced::Task<Message> {
-		self.screen = Screen::Home;
+		self.screen = AppScreen::Home;
 		// Whatever the connect flow was asking is abandoned with the connect itself, and the
 		// buffers it was holding go with it (§12).
 		self.prompt = None;
@@ -5613,7 +5613,7 @@ impl Tab {
 			} else {
 				// Vault locked: show the (now populated) form as the backdrop and prompt to
 				// unlock; the pre-fill resumes on success.
-				self.screen = Screen::Connect;
+				self.screen = AppScreen::Connect;
 				return Some(self.open_vault_modal(VaultPending::Prefill(key.to_owned())));
 			}
 		}
@@ -5785,7 +5785,7 @@ impl Tab {
 	/// without a window and without pressing anything.
 	fn keyboard_claim(&self) -> Option<Claim> {
 		match self.screen {
-			Screen::Home => {
+			AppScreen::Home => {
 				if self.confirm_delete {
 					return Some(Claim::DeleteTarget);
 				}
@@ -5794,7 +5794,7 @@ impl Tab {
 				}
 				None
 			}
-			Screen::Terminal => {
+			AppScreen::Terminal => {
 				if self.modal.is_some() {
 					return Some(Claim::Modal);
 				}
@@ -6553,7 +6553,7 @@ impl Tab {
 	/// all is the round-trip-per-entry cost the pane is built to avoid (§19).
 	fn resolve_selected_link(&mut self) {
 		if let Some(path) = self.panes.pane.cursor().map(str::to_owned)
-			&& self.panes.pane.kind_of(&path) == Some(files::Kind::Link)
+			&& self.panes.pane.kind_of(&path) == Some(files::FilesKind::Link)
 			&& self.panes.pane.link_target().is_none()
 		{
 			self.send_command(SshCommand::ReadLink(path));
@@ -7511,7 +7511,7 @@ impl Tab {
 	/// announcements could mark.
 	/// On a LOCAL session (§103) neither half of that line holds: the pane path is not a path on this
 	/// platform, and the four shells the Local bar offers disagree about both the spelling of a path and
-	/// the name of the command. So the shell composes its own (`local::shells::Kind::cd`), and a path
+	/// the name of the command. So the shell composes its own (`local::shells::ShellKind::cd`), and a path
 	/// that will not translate types nothing at all rather than a `cd` to somewhere invented.
 	fn move_shell_to(&mut self, path: &str) {
 		self.resume_cwd = None;
@@ -7707,7 +7707,7 @@ impl Tab {
 				// (§19). A FILE opens in a new editor tab (§32). The console is moved on purpose, by
 				// Sync or "Open in terminal", never as a side effect of either.
 				match self.panes.pane.kind_of(&path) {
-					Some(files::Kind::Dir) => self.browse_to(&path),
+					Some(files::FilesKind::Dir) => self.browse_to(&path),
 					Some(_) => return self.request_open(path),
 					None => {}
 				}
@@ -7834,7 +7834,7 @@ impl Tab {
 				// Folders are dropped rather than refused: a band that swept up a directory
 				// alongside nine files should still fetch the nine (§21).
 				let mut targets = self.action_targets(&path);
-				targets.retain(|path| self.panes.pane.kind_of(path) != Some(files::Kind::Dir));
+				targets.retain(|path| self.panes.pane.kind_of(path) != Some(files::FilesKind::Dir));
 				return match targets.len() {
 					0 => iced::Task::none(),
 					// One file keeps the save dialog, which asks its own overwrite question.
@@ -7971,7 +7971,7 @@ impl Tab {
 	/// carries the session and — as soon as the shell announces one — the remote working
 	/// directory, so the directory is visible without stealing room from the grid.
 	fn title(&self) -> String {
-		let connected = matches!(self.screen, Screen::Terminal);
+		let connected = matches!(self.screen, AppScreen::Terminal);
 		let (true, Some(endpoint)) = (connected, self.connection.as_deref()) else {
 			return "cmote".to_owned();
 		};
@@ -7998,7 +7998,7 @@ impl Tab {
 		match &self.screen {
 			// The shared target list is read through a short-lived borrow; `home::view` clones
 			// every name it needs, so nothing in the returned element outlives the borrow (§26).
-			Screen::Home => ui::home::view(
+			AppScreen::Home => ui::home::view(
 				self.targets.borrow().items(),
 				ui::home::View {
 					filter: &self.home_filter,
@@ -8017,7 +8017,7 @@ impl Tab {
 			// it, floating over the (dimmed) form rather than replacing it, so the page stays in
 			// view behind it (§10). The second argument to `form_with_dialog` is what a click on
 			// the BACKDROP does, and every one of them is the safe answer: reject, cancel, back.
-			Screen::Connect => match &self.prompt {
+			AppScreen::Connect => match &self.prompt {
 				None => ui::connect::view(&self.form, self.form_focus),
 				Some(Prompt::HostKey) => self.form_with_dialog(
 					ui::host_key_view(&self.dialog_body, card),
@@ -8052,8 +8052,8 @@ impl Tab {
 					Message::BackPressed,
 				),
 			},
-			Screen::Connecting { status } => text(status).into(),
-			Screen::Terminal => match &self.terminal {
+			AppScreen::Connecting { status } => text(status).into(),
+			AppScreen::Terminal => match &self.terminal {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
@@ -8103,7 +8103,7 @@ impl Tab {
 			// comes from `ui::editor`; the picture's toolbar and zoomable image come from
 			// `ui::preview`. Both borrow what they draw in place, so neither the buffer nor the
 			// decoded pixels are copied per frame.
-			Screen::Viewer => match &self.viewer {
+			AppScreen::Viewer => match &self.viewer {
 				Some(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
 				Some(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
 				None => text("opening…").into(),
@@ -8584,7 +8584,7 @@ mod tests {
 			// `Home` default for a long time and nothing minded, because `on_key` only ever ran on
 			// this screen in production and so never had to ask. `keyboard_claim` does ask, since
 			// which claimants exist at all is a property of the screen.
-			screen: Screen::Terminal,
+			screen: AppScreen::Terminal,
 			window_focused: true,
 			shell_focus_reported: true,
 			focus: Focus::Terminal,
@@ -8818,7 +8818,7 @@ mod tests {
 		use crate::integration::Shell;
 
 		let (mut app, _rx) = probed(Some(Shell::Bash), "/root/.bashrc", false);
-		app.screen = Screen::Terminal;
+		app.screen = AppScreen::Terminal;
 		let _ = app.on_ssh_event(SshEvent::IntegrationFailed(
 			"could not open /root/.bashrc: permission denied".to_owned(),
 		));
@@ -8828,7 +8828,7 @@ mod tests {
 		));
 		assert!(app.terminal.is_some(), "the shell is still there");
 		assert!(
-			matches!(app.screen, Screen::Terminal),
+			matches!(app.screen, AppScreen::Terminal),
 			"and still on screen"
 		);
 	}
@@ -8870,7 +8870,7 @@ mod tests {
 	#[test]
 	fn the_home_screen_has_claimants_of_its_own() {
 		let mut app = Tab::default();
-		assert!(matches!(app.screen, Screen::Home));
+		assert!(matches!(app.screen, AppScreen::Home));
 		assert_eq!(app.keyboard_claim(), None);
 
 		app.home_rename = Some(ui::home::RenameState {
@@ -8963,7 +8963,7 @@ mod tests {
 		let (mut app, mut rx) = app_with_terminal(16);
 		let _ = app.on_ssh_event(SshEvent::HostKey("SHA256:aaaa".to_owned()));
 		assert!(matches!(app.prompt, Some(Prompt::HostKey)));
-		assert!(matches!(app.screen, Screen::Connect));
+		assert!(matches!(app.screen, AppScreen::Connect));
 		assert!(
 			next_command(&mut rx).is_none(),
 			"asking is not answering: nothing goes back until the user chooses"
@@ -8975,7 +8975,7 @@ mod tests {
 			Some(SshCommand::HostKeyResponse(HostKeyChoice::Reject))
 		));
 		assert!(
-			!matches!(app.screen, Screen::Connecting { .. }),
+			!matches!(app.screen, AppScreen::Connecting { .. }),
 			"a refusal does not read as a connection in progress"
 		);
 	}
@@ -9011,7 +9011,7 @@ mod tests {
 			next_command(&mut rx),
 			Some(SshCommand::HostKeyResponse(HostKeyChoice::Pin))
 		));
-		assert!(matches!(app.screen, Screen::Connecting { .. }));
+		assert!(matches!(app.screen, AppScreen::Connecting { .. }));
 		assert!(app.prompt.is_none(), "the question is answered and gone");
 	}
 
@@ -9559,7 +9559,7 @@ mod tests {
 	}
 
 	// A local session on a shell that may ignore EOF, ready for a Ctrl+D (§104).
-	fn local_shell_tab(kind: crate::local::shells::Kind) -> (Tab, mpsc::Receiver<SshCommand>) {
+	fn local_shell_tab(kind: crate::local::shells::ShellKind) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut app, rx) = app_with_terminal(16);
 		app.connection = Some(format!("local — {}", kind.slug()));
 		app.local = Some(kind);
@@ -9673,7 +9673,7 @@ mod tests {
 			"and the shell left, which is what ends the session — no kill was involved"
 		);
 		assert!(
-			matches!(tab.screen, Screen::Home) && tab.connection.is_none(),
+			matches!(tab.screen, AppScreen::Home) && tab.connection.is_none(),
 			"the tab landed on the home screen, where a second Ctrl+D closes it (§30)"
 		);
 	}
@@ -9685,7 +9685,7 @@ mod tests {
 	/// `node` running at that prompt never got the EOF that would have quit it.
 	#[test]
 	fn ctrl_d_at_a_local_shell_reaches_the_shell_first() {
-		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+		let (mut app, mut rx) = local_shell_tab(crate::local::shells::ShellKind::Pwsh);
 
 		let _ = app.on_key(ctrl_d());
 
@@ -9716,7 +9716,7 @@ mod tests {
 	/// so could not have shown this.
 	#[test]
 	fn the_shell_echoing_the_byte_back_is_told_to_exit() {
-		let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+		let (mut app, mut rx) = local_shell_tab(crate::local::shells::ShellKind::Pwsh);
 		let _ = app.on_key(ctrl_d());
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
 
@@ -9758,7 +9758,7 @@ mod tests {
 			"the tab has forgotten it had a session"
 		);
 		assert!(
-			matches!(app.screen, Screen::Home),
+			matches!(app.screen, AppScreen::Home),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
 		);
 	}
@@ -9776,7 +9776,7 @@ mod tests {
 		// The second entry says whether the answer is long enough to exhaust the budget on its own.
 		let answers: [(&[u8], bool); 2] = [(b"\r\nPS C:\\Users\\cme> ", false), (&chatter, true)];
 		for (answer, spent) in answers {
-			let (mut app, mut rx) = local_shell_tab(crate::local::shells::Kind::Pwsh);
+			let (mut app, mut rx) = local_shell_tab(crate::local::shells::ShellKind::Pwsh);
 			let _ = app.on_key(ctrl_d());
 			assert_eq!(next_input(&mut rx).as_deref(), Some(&[0x04][..]));
 
@@ -9842,8 +9842,8 @@ mod tests {
 	#[test]
 	fn a_local_teardown_asks_the_shell_to_leave_and_a_remote_is_left_alone() {
 		let cases = [
-			(Some(crate::local::shells::Kind::Pwsh), false, true),
-			(Some(crate::local::shells::Kind::Pwsh), true, false),
+			(Some(crate::local::shells::ShellKind::Pwsh), false, true),
+			(Some(crate::local::shells::ShellKind::Pwsh), true, false),
 			(None, false, false),
 		];
 		for (local, alternate, asked) in cases {
@@ -9885,7 +9885,7 @@ mod tests {
 	/// ever being read as an answer to a key.
 	#[test]
 	fn ctrl_d_is_left_to_every_shell_that_answers_it() {
-		for local in [Some(crate::local::shells::Kind::GitBash), None] {
+		for local in [Some(crate::local::shells::ShellKind::GitBash), None] {
 			let (mut app, mut rx) = app_with_terminal(16);
 			app.connection = Some("root@web-01:22".to_owned());
 			app.local = local;
@@ -9931,7 +9931,7 @@ mod tests {
 		for (alternate, modifiers, why) in cases {
 			let (mut app, mut rx) = app_with_terminal(16);
 			app.connection = Some("local — pwsh".to_owned());
-			app.local = Some(crate::local::shells::Kind::Pwsh);
+			app.local = Some(crate::local::shells::ShellKind::Pwsh);
 			if alternate {
 				app.terminal
 					.as_mut()
@@ -10568,7 +10568,7 @@ mod tests {
 	// makes a switch possible at all.
 	fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut app, rx) = app_with_terminal(32);
-		app.screen = Screen::Terminal;
+		app.screen = AppScreen::Terminal;
 		app.identities = vec![Identity {
 			id: bridge::LOGIN_IDENTITY,
 			ready: true,
@@ -10866,7 +10866,7 @@ mod tests {
 		);
 		assert_eq!(app.identities.len(), 1);
 		assert!(
-			matches!(app.screen, Screen::Terminal),
+			matches!(app.screen, AppScreen::Terminal),
 			"the session is still up"
 		);
 	}
@@ -10972,7 +10972,7 @@ mod tests {
 		// Connect: the pane opens at its remembered directory, and the shell is set to resume
 		// at its own — so the pane is pinned to `/etc` until the shell reaches `/var/log`.
 		let _ = app.on_ssh_event(SshEvent::Connected);
-		assert!(matches!(app.screen, Screen::Terminal));
+		assert!(matches!(app.screen, AppScreen::Terminal));
 		assert_eq!(app.panes.pane.path(), Some("/etc"));
 		assert_eq!(app.resume_cwd.as_deref(), Some("/var/log"));
 
@@ -11278,7 +11278,7 @@ mod tests {
 				.into_iter()
 				.map(|name| files::Entry {
 					name: name.to_owned(),
-					kind: files::Kind::File,
+					kind: files::FilesKind::File,
 					meta: files::Meta::default(),
 				})
 				.collect(),
@@ -11384,7 +11384,7 @@ mod tests {
 		assert_eq!(strip(&app).len(), 2);
 		assert_eq!(on_screen(&app), 1, "the new tab is the active one");
 		assert_ne!(strip(&app)[0].id, strip(&app)[1].id, "ids are never reused");
-		assert!(matches!(strip(&app)[1].screen, Screen::Home));
+		assert!(matches!(strip(&app)[1].screen, AppScreen::Home));
 	}
 
 	#[test]
@@ -11900,7 +11900,7 @@ mod tests {
 			matches!(tab.viewer, Some(Viewer::Picture(_))),
 			"a picture opens a picture"
 		);
-		assert!(matches!(tab.screen, Screen::Viewer));
+		assert!(matches!(tab.screen, AppScreen::Viewer));
 
 		let notes = open_file(&mut app, session, "/srv/notes.txt");
 		let tab = app.tabs().find(|tab| tab.id == notes).expect("the tab");
@@ -11932,7 +11932,7 @@ mod tests {
 		assert_eq!(picture.path(), "/srv/shot.png");
 	}
 
-	/// The chip's label, which used to be two `Screen` arms each unwrapping its own field (§32,
+	/// The chip's label, which used to be two `AppScreen` arms each unwrapping its own field (§32,
 	/// §53).
 	#[test]
 	fn only_an_editor_can_wear_the_unsaved_dot() {
@@ -12296,7 +12296,7 @@ mod tests {
 		assert_ne!(app.focus, first, "the fresh region takes the keyboard");
 		// A fresh application layout: one tab, and it is sitting on the saved-target list.
 		assert_eq!(strip(&app).len(), 1);
-		assert!(matches!(strip(&app)[0].screen, Screen::Home));
+		assert!(matches!(strip(&app)[0].screen, AppScreen::Home));
 		// Tab ids stay app-wide, so the new region's tab cannot collide with the old region's (§26).
 		let ids: Vec<u64> = app.tabs().map(|tab| tab.id).collect();
 		assert_eq!(ids.len(), 2);
@@ -12726,8 +12726,8 @@ mod tests {
 		let (mut right, _right_rx) = app_with_terminal(4);
 		// `is_live` is "a shell is on screen", which is the terminal screen — the helper above builds
 		// the emulator and the channel but leaves the tab on its default screen.
-		left.screen = Screen::Terminal;
-		right.screen = Screen::Terminal;
+		left.screen = AppScreen::Terminal;
+		right.screen = AppScreen::Terminal;
 		let old = app.focus;
 		let _ = split(&mut app, ui::split::Way::Horizontal);
 		let fresh = app.focus;
@@ -12765,7 +12765,7 @@ mod tests {
 	fn live_tab(id: u64, endpoint: &str, cwd: &str) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut tab, rx) = app_with_terminal(32);
 		tab.id = id;
-		tab.screen = Screen::Terminal;
+		tab.screen = AppScreen::Terminal;
 		tab.connection = Some(endpoint.to_owned());
 		// One OSC 7 announcement, which is how a shell says where it is (§17).
 		let _ = tab.on_ssh_event(shell_output(
@@ -12983,7 +12983,7 @@ mod tests {
 			("h", "u")
 		);
 		assert!(
-			matches!(copy.screen, Screen::Connect),
+			matches!(copy.screen, AppScreen::Connect),
 			"the password was never remembered, so the copy stops at the form with everything else \
 			 already filled in rather than spending an attempt on an empty field"
 		);
@@ -13006,7 +13006,7 @@ mod tests {
 
 		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
 		assert!(
-			matches!(copy.screen, Screen::Connecting { .. }),
+			matches!(copy.screen, AppScreen::Connecting { .. }),
 			"dialed without asking anything"
 		);
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
@@ -13046,7 +13046,7 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 
 		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv".to_owned()));
-		assert!(matches!(copy.screen, Screen::Connect));
+		assert!(matches!(copy.screen, AppScreen::Connect));
 		assert_eq!(copy.form.host, "h");
 		assert!(rx.try_recv().is_err(), "nothing was dialed");
 		assert_eq!(
@@ -13073,7 +13073,7 @@ mod tests {
 		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
 		assert!(copy.pending_connect, "armed, waiting for a channel to use");
 		assert!(
-			matches!(copy.screen, Screen::Connect),
+			matches!(copy.screen, AppScreen::Connect),
 			"the pre-filled form is what shows in the meantime, and what is left behind if no \
 			 worker ever arrives"
 		);
@@ -13086,7 +13086,7 @@ mod tests {
 		let (tx, mut rx) = mpsc::channel(64);
 		let _ = copy.on_ssh_event(SshEvent::Ready(tx));
 		assert!(!copy.pending_connect, "spent");
-		assert!(matches!(copy.screen, Screen::Connecting { .. }));
+		assert!(matches!(copy.screen, AppScreen::Connecting { .. }));
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
 		assert_eq!(
 			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),

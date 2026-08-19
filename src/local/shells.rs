@@ -71,7 +71,7 @@ const CANCEL_LINE: u8 = 0x03;
 /// what tells `pwsh` from `powershell` on screen — the two are different programs with different
 /// syntax, and a status bar that called both "PowerShell" would be lying about which one is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub enum ShellKind {
 	/// PowerShell 7+ (`pwsh.exe`), the cross-platform one — installed separately, so often absent.
 	Pwsh,
 	/// Windows PowerShell 5.1 (`powershell.exe`), the one that ships with Windows.
@@ -86,7 +86,7 @@ pub enum Kind {
 	Bash,
 }
 
-impl Kind {
+impl ShellKind {
 	/// What the button says. Spelled the way the vendor spells it, so "Windows PowerShell" and
 	/// "PowerShell 7" read as the two distinct programs they are.
 	pub fn label(self) -> &'static str {
@@ -206,7 +206,7 @@ fn msys(path: &str) -> String {
 /// one shell needs any and the reason is specific to it (see [`git_bash`]).
 #[derive(Debug, Clone)]
 pub struct Shell {
-	pub kind: Kind,
+	pub kind: ShellKind,
 	pub program: PathBuf,
 	pub args: Vec<String>,
 }
@@ -214,7 +214,7 @@ pub struct Shell {
 impl Shell {
 	/// A shell with no arguments — the ordinary case: an interactive shell started with a pty needs
 	/// nothing told to it, because the pty is what makes it interactive.
-	fn plain(kind: Kind, program: PathBuf) -> Self {
+	fn plain(kind: ShellKind, program: PathBuf) -> Self {
 		Self {
 			kind,
 			program,
@@ -257,8 +257,8 @@ fn candidates() -> Vec<Option<Shell>> {
 #[cfg(target_os = "macos")]
 fn candidates() -> Vec<Option<Shell>> {
 	vec![
-		unix_shell(Kind::Zsh, "zsh"),
-		unix_shell(Kind::Bash, "bash"),
+		unix_shell(ShellKind::Zsh, "zsh"),
+		unix_shell(ShellKind::Bash, "bash"),
 		pwsh(),
 	]
 }
@@ -269,7 +269,7 @@ fn candidates() -> Vec<Option<Shell>> {
 fn pwsh() -> Option<Shell> {
 	let name = if cfg!(windows) { "pwsh.exe" } else { "pwsh" };
 	if let Some(found) = on_path(name) {
-		return Some(Shell::plain(Kind::Pwsh, found));
+		return Some(Shell::plain(ShellKind::Pwsh, found));
 	}
 	// The MSI's layout: `%ProgramFiles%\PowerShell\7\pwsh.exe`. The major version is in the path, so
 	// it is walked rather than guessed — 7 today, 8 tomorrow, and a machine can hold both.
@@ -287,7 +287,7 @@ fn pwsh() -> Option<Shell> {
 			.collect();
 		found.sort();
 		if let Some(newest) = found.pop() {
-			return Some(Shell::plain(Kind::Pwsh, newest));
+			return Some(Shell::plain(ShellKind::Pwsh, newest));
 		}
 	}
 	None
@@ -302,7 +302,7 @@ fn windows_powershell() -> Option<Shell> {
 	let program = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
 	program
 		.is_file()
-		.then(|| Shell::plain(Kind::PowerShell, program))
+		.then(|| Shell::plain(ShellKind::PowerShell, program))
 }
 
 /// `cmd.exe`. `%ComSpec%` is Windows' own answer to "what is the command interpreter", so it is
@@ -317,7 +317,7 @@ fn cmd() -> Option<Shell> {
 		.into_iter()
 		.chain(from_root)
 		.find(|candidate| candidate.is_file())?;
-	Some(Shell::plain(Kind::Cmd, program))
+	Some(Shell::plain(ShellKind::Cmd, program))
 }
 
 /// Git for Windows' bash — the MSYS2 one, never WSL's (see the module note).
@@ -337,7 +337,7 @@ fn cmd() -> Option<Shell> {
 fn git_bash() -> Option<Shell> {
 	let program = git_bash_path()?;
 	Some(Shell {
-		kind: Kind::GitBash,
+		kind: ShellKind::GitBash,
 		program,
 		args: vec!["--login".to_owned(), "-i".to_owned()],
 	})
@@ -459,7 +459,7 @@ fn wide(text: &str) -> Vec<u16> {
 /// A shell named on `PATH` (or at its usual `/bin` home), for the macOS entries where the name is
 /// not ambiguous.
 #[cfg(target_os = "macos")]
-fn unix_shell(kind: Kind, name: &str) -> Option<Shell> {
+fn unix_shell(kind: ShellKind, name: &str) -> Option<Shell> {
 	let fallback = PathBuf::from("/bin").join(name);
 	let program = on_path(name).or_else(|| fallback.is_file().then_some(fallback))?;
 	Some(Shell::plain(kind, program))
@@ -493,14 +493,17 @@ fn on_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use super::{Kind, Shell, catalogue, on_path, program_files};
+	use super::{Shell, ShellKind, catalogue, on_path, program_files};
 	use std::path::PathBuf;
 
 	#[test]
 	fn a_local_session_is_labelled_by_its_shell_and_never_shaped_like_an_endpoint() {
 		// Two local tabs are told apart by the shell, so the shell has to be in the label. And the
 		// label must not read as `user@host:port`: there is no machine on the other end of anything.
-		let shell = Shell::plain(Kind::Cmd, PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+		let shell = Shell::plain(
+			ShellKind::Cmd,
+			PathBuf::from(r"C:\Windows\System32\cmd.exe"),
+		);
 		assert_eq!(shell.endpoint(), "local — cmd");
 		assert!(!shell.endpoint().contains('@'));
 	}
@@ -509,8 +512,8 @@ mod tests {
 	fn the_two_powershells_are_never_given_the_same_name() {
 		// They are different programs with different syntax. A bar that called both "PowerShell"
 		// would leave the user unable to tell which one they had opened.
-		assert_ne!(Kind::Pwsh.label(), Kind::PowerShell.label());
-		assert_ne!(Kind::Pwsh.slug(), Kind::PowerShell.slug());
+		assert_ne!(ShellKind::Pwsh.label(), ShellKind::PowerShell.label());
+		assert_ne!(ShellKind::Pwsh.slug(), ShellKind::PowerShell.slug());
 	}
 
 	#[test]
@@ -520,7 +523,7 @@ mod tests {
 		// makes the others interactive.
 		for shell in catalogue() {
 			match shell.kind {
-				Kind::GitBash => assert_eq!(shell.args, vec!["--login", "-i"]),
+				ShellKind::GitBash => assert_eq!(shell.args, vec!["--login", "-i"]),
 				_ => assert!(
 					shell.args.is_empty(),
 					"{} needs no arguments",
@@ -553,19 +556,22 @@ mod tests {
 		// cmd needs `/d`: without it a `cd` to another drive moves the directory ON that drive and
 		// leaves the prompt where it was, which looks like nothing happened.
 		assert_eq!(
-			Kind::Cmd.cd(pane).as_deref(),
+			ShellKind::Cmd.cd(pane).as_deref(),
 			Some(r#"cd /d "C:\Users\cme""#)
 		);
 		// PowerShell gets `-LiteralPath`, so a folder with a bracket in its name is a name and not a
 		// wildcard that matches nothing.
-		for shell in [Kind::Pwsh, Kind::PowerShell] {
+		for shell in [ShellKind::Pwsh, ShellKind::PowerShell] {
 			assert_eq!(
 				shell.cd(pane).as_deref(),
 				Some(r"Set-Location -LiteralPath 'C:\Users\cme'")
 			);
 		}
 		// Git Bash is an MSYS shell, so the drive becomes a top-level directory.
-		assert_eq!(Kind::GitBash.cd(pane).as_deref(), Some("cd '/c/Users/cme'"));
+		assert_eq!(
+			ShellKind::GitBash.cd(pane).as_deref(),
+			Some("cd '/c/Users/cme'")
+		);
 	}
 
 	#[cfg(windows)]
@@ -590,7 +596,9 @@ mod tests {
 			return;
 		}
 		assert!(
-			catalogue().iter().any(|shell| shell.kind == Kind::GitBash),
+			catalogue()
+				.iter()
+				.any(|shell| shell.kind == ShellKind::GitBash),
 			"the install recorded at {} is offered on the bar",
 			root.display()
 		);
@@ -600,7 +608,7 @@ mod tests {
 	fn only_the_posix_shells_end_themselves_on_eof() {
 		// Which side of this split a shell falls on decides whether Ctrl+D is the shell's key or cmote's
 		// (§104), so it is written down per kind rather than inferred from a name at the call site.
-		for shell in [Kind::GitBash, Kind::Zsh, Kind::Bash] {
+		for shell in [ShellKind::GitBash, ShellKind::Zsh, ShellKind::Bash] {
 			assert!(
 				shell.quits_on_eof(),
 				"{} logs out on EOF, the way every POSIX shell does",
@@ -611,7 +619,7 @@ mod tests {
 		// watching, and none of them exited — each echoed the byte back as `^D` instead. Their EOF is
 		// Ctrl+Z, and even that means EOF only to a program reading a stream, never to the interpreter
 		// itself.
-		for shell in [Kind::Pwsh, Kind::PowerShell, Kind::Cmd] {
+		for shell in [ShellKind::Pwsh, ShellKind::PowerShell, ShellKind::Cmd] {
 			assert!(
 				!shell.quits_on_eof(),
 				"{} drops the byte, so cmote is the one that has to end the session",
@@ -625,7 +633,12 @@ mod tests {
 	fn a_path_with_nowhere_to_go_types_nothing() {
 		// The virtual root is not a directory, so there is no `cd` that reaches it. Typing one anyway
 		// would put a failing command in the user's own shell history.
-		for shell in [Kind::Cmd, Kind::Pwsh, Kind::PowerShell, Kind::GitBash] {
+		for shell in [
+			ShellKind::Cmd,
+			ShellKind::Pwsh,
+			ShellKind::PowerShell,
+			ShellKind::GitBash,
+		] {
 			assert_eq!(shell.cd("/").as_deref(), None, "{}", shell.label());
 			// And a path that is not on this machine at all is refused by the same translation.
 			assert_eq!(shell.cd("/etc").as_deref(), None, "{}", shell.label());

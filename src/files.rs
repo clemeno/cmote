@@ -40,7 +40,7 @@ pub const BATCH: usize = 1000;
 /// the cost this pane is built to avoid in a crowded directory (the tree, which sees
 /// far fewer entries, does resolve them — §18).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
+pub enum FilesKind {
 	Dir,
 	File,
 	Link,
@@ -53,7 +53,7 @@ pub enum Kind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
 	pub name: String,
-	pub kind: Kind,
+	pub kind: FilesKind,
 	pub meta: Meta,
 }
 
@@ -307,7 +307,7 @@ impl Band {
 #[derive(Debug, Clone)]
 pub struct FilesMenu {
 	pub path: String,
-	pub kind: Kind,
+	pub kind: FilesKind,
 	pub at: Point,
 }
 
@@ -862,7 +862,7 @@ impl Files {
 	/// Open the context menu on an entry, anchored where the pointer is right now. Closes any
 	/// empty-space menu first, so only one is ever up and the view's priority check is moot.
 	pub fn open_menu(&mut self, path: String) {
-		let kind = self.kind_of(&path).unwrap_or(Kind::File);
+		let kind = self.kind_of(&path).unwrap_or(FilesKind::File);
 		self.pane_menu = None;
 		// Only one surface is ever up, and the sort menu is one of them (§19).
 		self.sort_menu_open = false;
@@ -880,7 +880,7 @@ impl Files {
 	}
 
 	/// An entry's kind, by full path. `None` when it is not in the directory on show.
-	pub fn kind_of(&self, path: &str) -> Option<Kind> {
+	pub fn kind_of(&self, path: &str) -> Option<FilesKind> {
 		let name = crate::explorer::name(path);
 		self.entries
 			.iter()
@@ -1075,7 +1075,7 @@ impl Files {
 /// into batches, so the grid can simply append each batch as it lands.
 pub fn sort(entries: &mut [Entry]) {
 	entries.sort_by(|left, right| {
-		let folder_first = (left.kind != Kind::Dir).cmp(&(right.kind != Kind::Dir));
+		let folder_first = (left.kind != FilesKind::Dir).cmp(&(right.kind != FilesKind::Dir));
 		folder_first
 			.then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
 			// Two names differing only in case would otherwise compare equal, and an
@@ -1092,7 +1092,7 @@ fn compare_entries(left: &Entry, right: &Entry, key: SortKey, dir: SortDir) -> s
 	use std::cmp::Ordering;
 	// Folders ahead of the rest, settled BEFORE the direction so a descending sort cannot sink
 	// them below the files.
-	let folder_first = (left.kind != Kind::Dir).cmp(&(right.kind != Kind::Dir));
+	let folder_first = (left.kind != FilesKind::Dir).cmp(&(right.kind != FilesKind::Dir));
 	if folder_first != Ordering::Equal {
 		return folder_first;
 	}
@@ -1341,9 +1341,9 @@ fn extension(name: &str) -> Option<String> {
 /// by its lower-cased extension, falling back to the neutral file icon.
 pub fn category(entry: &Entry) -> Category {
 	match entry.kind {
-		Kind::Dir => return Category::Folder,
-		Kind::Link => return Category::Link,
-		Kind::File => {}
+		FilesKind::Dir => return Category::Folder,
+		FilesKind::Link => return Category::Link,
+		FilesKind::File => {}
 	}
 
 	let Some(extension) = extension(&entry.name) else {
@@ -1508,7 +1508,7 @@ const MIME: &[(&str, &str)] = &[
 mod tests {
 	use super::*;
 
-	fn entry(name: &str, kind: Kind) -> Entry {
+	fn entry(name: &str, kind: FilesKind) -> Entry {
 		Entry {
 			name: name.to_owned(),
 			kind,
@@ -1521,7 +1521,7 @@ mod tests {
 	fn sized(name: &str, size: u64, mtime: u32) -> Entry {
 		Entry {
 			name: name.to_owned(),
-			kind: Kind::File,
+			kind: FilesKind::File,
 			meta: Meta {
 				size: Some(size),
 				mtime: Some(mtime),
@@ -1584,11 +1584,11 @@ mod tests {
 		let mut files = Files::default();
 		let request = files.show("/home").expect("a new directory needs listing");
 
-		files.chunk(request, vec![entry("a", Kind::File)], false);
+		files.chunk(request, vec![entry("a", FilesKind::File)], false);
 		assert!(files.loading(), "more batches are still coming");
 		assert_eq!(files.count(), 1);
 
-		files.chunk(request, vec![entry("b", Kind::File)], true);
+		files.chunk(request, vec![entry("b", FilesKind::File)], true);
 		assert!(!files.loading());
 		assert_eq!(files.count(), 2);
 	}
@@ -1603,7 +1603,7 @@ mod tests {
 
 		// The old listing is still running on the server; its batches must not be mixed
 		// into the folder now on show.
-		files.chunk(stale, vec![entry("user", Kind::Dir)], true);
+		files.chunk(stale, vec![entry("user", FilesKind::Dir)], true);
 		assert_eq!(files.count(), 0);
 		assert!(files.loading(), "the /etc listing is still in flight");
 
@@ -1613,7 +1613,10 @@ mod tests {
 
 	#[test]
 	fn hidden_entries_are_filtered_by_the_shared_toggle() {
-		let (files, _) = pane(&[entry(".bashrc", Kind::File), entry("notes", Kind::File)]);
+		let (files, _) = pane(&[
+			entry(".bashrc", FilesKind::File),
+			entry("notes", FilesKind::File),
+		]);
 		assert_eq!(files.rows(true).len(), 2);
 		let shown = files.rows(false);
 		assert_eq!(shown.len(), 1);
@@ -1623,12 +1626,12 @@ mod tests {
 	#[test]
 	fn the_toggle_hides_nothing_but_dot_names_and_never_shows_the_dot_links() {
 		let (files, _) = pane(&[
-			entry(".", Kind::Dir),
-			entry("..", Kind::Dir),
-			entry(".hidden", Kind::File),
-			entry("...odd", Kind::File),
-			entry("normal", Kind::File),
-			entry("link", Kind::Link),
+			entry(".", FilesKind::Dir),
+			entry("..", FilesKind::Dir),
+			entry(".hidden", FilesKind::File),
+			entry("...odd", FilesKind::File),
+			entry("normal", FilesKind::File),
+			entry("link", FilesKind::Link),
 		]);
 		// Everything the server listed is here except the self and parent links.
 		let names: Vec<&str> = files
@@ -1663,11 +1666,11 @@ mod tests {
 	#[test]
 	fn the_arrow_keys_walk_the_grid_and_stop_at_both_ends() {
 		let (mut files, _) = pane(&[
-			entry("a", Kind::File),
-			entry("b", Kind::File),
-			entry("c", Kind::File),
-			entry("d", Kind::File),
-			entry("e", Kind::File),
+			entry("a", FilesKind::File),
+			entry("b", FilesKind::File),
+			entry("c", FilesKind::File),
+			entry("d", FilesKind::File),
+			entry("e", FilesKind::File),
 		]);
 		let selected = |files: &Files| files.cursor().unwrap_or("none").to_owned();
 
@@ -1687,7 +1690,10 @@ mod tests {
 		assert_eq!(files.selected_index(true), Some(0));
 
 		// A hidden name is not a step the keyboard can land on with the toggle off.
-		let (mut hidden, _) = pane(&[entry(".ssh", Kind::Dir), entry("notes", Kind::File)]);
+		let (mut hidden, _) = pane(&[
+			entry(".ssh", FilesKind::Dir),
+			entry("notes", FilesKind::File),
+		]);
 		hidden.step(false, 1, false);
 		assert_eq!(selected(&hidden), "/home/notes");
 		assert_eq!(hidden.selected_index(false), Some(0));
@@ -1703,11 +1709,11 @@ mod tests {
 	#[test]
 	fn home_and_end_land_on_the_absolute_ends() {
 		let (mut files, _) = pane(&[
-			entry("a", Kind::File),
-			entry("b", Kind::File),
-			entry("c", Kind::File),
-			entry("d", Kind::File),
-			entry("e", Kind::File),
+			entry("a", FilesKind::File),
+			entry("b", FilesKind::File),
+			entry("c", FilesKind::File),
+			entry("d", FilesKind::File),
+			entry("e", FilesKind::File),
 		]);
 
 		// End goes to the last row, Home back to the first.
@@ -1751,10 +1757,10 @@ mod tests {
 	#[test]
 	fn a_set_of_entries_can_be_built_by_range_by_toggle_and_by_band() {
 		let (mut files, _) = pane(&[
-			entry("a", Kind::File),
-			entry("b", Kind::File),
-			entry("c", Kind::File),
-			entry("d", Kind::File),
+			entry("a", FilesKind::File),
+			entry("b", FilesKind::File),
+			entry("c", FilesKind::File),
+			entry("d", FilesKind::File),
 		]);
 		let chosen = |files: &Files| {
 			files
@@ -1808,7 +1814,10 @@ mod tests {
 
 	#[test]
 	fn a_link_target_belongs_to_the_selection_that_asked_for_it() {
-		let (mut files, _) = pane(&[entry("latest", Kind::Link), entry("notes", Kind::File)]);
+		let (mut files, _) = pane(&[
+			entry("latest", FilesKind::Link),
+			entry("notes", FilesKind::File),
+		]);
 		files.select("/home/latest");
 		assert_eq!(files.link_target(), None, "not resolved yet");
 
@@ -1954,11 +1963,11 @@ mod tests {
 	#[test]
 	fn folders_sort_before_files_case_insensitively() {
 		let mut entries = vec![
-			entry("zebra", Kind::File),
-			entry("Apple", Kind::File),
-			entry("src", Kind::Dir),
-			entry("banana", Kind::File),
-			entry("Docs", Kind::Dir),
+			entry("zebra", FilesKind::File),
+			entry("Apple", FilesKind::File),
+			entry("src", FilesKind::Dir),
+			entry("banana", FilesKind::File),
+			entry("Docs", FilesKind::Dir),
 		];
 		sort(&mut entries);
 		let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
@@ -1967,7 +1976,7 @@ mod tests {
 
 	#[test]
 	fn a_rename_needs_a_real_new_name() {
-		let (mut files, _) = pane(&[entry("notes.txt", Kind::File)]);
+		let (mut files, _) = pane(&[entry("notes.txt", FilesKind::File)]);
 
 		for text in ["notes.txt", "  ", "sub/notes.txt"] {
 			files.start_rename("/home/notes.txt".to_owned());
@@ -1985,7 +1994,7 @@ mod tests {
 
 	#[test]
 	fn only_a_rename_in_the_open_directory_re_lists_it() {
-		let (mut files, request) = pane(&[entry("notes.txt", Kind::File)]);
+		let (mut files, request) = pane(&[entry("notes.txt", FilesKind::File)]);
 		// Renamed elsewhere (the tree can rename any folder): nothing to redraw here.
 		assert_eq!(files.renamed("/etc/hosts"), None);
 		// Renamed in view: the entry has to move to its new sort position, so re-list.
@@ -1995,18 +2004,18 @@ mod tests {
 	#[test]
 	fn icons_come_from_the_kind_then_the_extension() {
 		let cases = [
-			("src", Kind::Dir, Category::Folder),
-			("latest", Kind::Link, Category::Link),
-			("logo.PNG", Kind::File, Category::Image), // case-insensitive
-			("main.rs", Kind::File, Category::Code),
-			("backup.tar.gz", Kind::File, Category::Archive),
-			("report.pdf", Kind::File, Category::Document),
-			("song.flac", Kind::File, Category::Audio),
-			("clip.mkv", Kind::File, Category::Video),
-			("mystery.qqq", Kind::File, Category::Plain),
-			("README", Kind::File, Category::Plain),
+			("src", FilesKind::Dir, Category::Folder),
+			("latest", FilesKind::Link, Category::Link),
+			("logo.PNG", FilesKind::File, Category::Image), // case-insensitive
+			("main.rs", FilesKind::File, Category::Code),
+			("backup.tar.gz", FilesKind::File, Category::Archive),
+			("report.pdf", FilesKind::File, Category::Document),
+			("song.flac", FilesKind::File, Category::Audio),
+			("clip.mkv", FilesKind::File, Category::Video),
+			("mystery.qqq", FilesKind::File, Category::Plain),
+			("README", FilesKind::File, Category::Plain),
 			// A leading dot is not an extension: `.bashrc` is a name, not a "bashrc" file.
-			(".bashrc", Kind::File, Category::Plain),
+			(".bashrc", FilesKind::File, Category::Plain),
 		];
 		for (name, kind, expected) in cases {
 			assert_eq!(category(&entry(name, kind)), expected, "{name}");
@@ -2030,7 +2039,7 @@ mod tests {
 
 	#[test]
 	fn the_menu_anchor_is_frozen_when_it_opens() {
-		let (mut files, _) = pane(&[entry("src", Kind::Dir)]);
+		let (mut files, _) = pane(&[entry("src", FilesKind::Dir)]);
 		files.set_pointer(Point::new(40.0, 20.0));
 		files.open_menu("/home/src".to_owned());
 
@@ -2038,7 +2047,7 @@ mod tests {
 		let menu = files.menu().expect("the menu is open");
 		assert_eq!(menu.at, Point::new(40.0, 20.0));
 		// The kind travels with it: Download is meaningless on a directory.
-		assert_eq!(menu.kind, Kind::Dir);
+		assert_eq!(menu.kind, FilesKind::Dir);
 	}
 
 	#[test]
@@ -2059,7 +2068,7 @@ mod tests {
 		// The server task pre-sorts before batching, so with no sort chosen the pane must hand
 		// the entries back exactly as they landed — it adds no order of its own.
 		let (files, _) = pane(&[
-			entry("src", Kind::Dir),
+			entry("src", FilesKind::Dir),
 			sized("apple.txt", 10, 100),
 			sized("banana.txt", 20, 200),
 		]);
@@ -2069,7 +2078,7 @@ mod tests {
 
 	#[test]
 	fn picking_the_lit_key_again_clears_the_sort() {
-		let (mut files, _) = pane(&[entry("a", Kind::File)]);
+		let (mut files, _) = pane(&[entry("a", FilesKind::File)]);
 		files.pick_sort_key(SortKey::Size);
 		assert_eq!(files.sort_key(), Some(SortKey::Size));
 		// The menu has no "None" row: the lit key is the way back to the default order.
@@ -2085,9 +2094,9 @@ mod tests {
 	fn sorting_by_size_descending_keeps_folders_first() {
 		let (mut files, _) = pane(&[
 			sized("small.bin", 10, 100),
-			entry("zzz_dir", Kind::Dir),
+			entry("zzz_dir", FilesKind::Dir),
 			sized("big.bin", 900, 200),
-			entry("aaa_dir", Kind::Dir),
+			entry("aaa_dir", FilesKind::Dir),
 			sized("mid.bin", 400, 300),
 		]);
 		files.pick_sort_key(SortKey::Size);
@@ -2105,10 +2114,10 @@ mod tests {
 	#[test]
 	fn sorting_by_name_descending_reverses_within_each_group() {
 		let (mut files, _) = pane(&[
-			entry("alpha", Kind::Dir),
-			entry("beta", Kind::Dir),
-			entry("x.txt", Kind::File),
-			entry("y.txt", Kind::File),
+			entry("alpha", FilesKind::Dir),
+			entry("beta", FilesKind::Dir),
+			entry("x.txt", FilesKind::File),
+			entry("y.txt", FilesKind::File),
 		]);
 		files.pick_sort_key(SortKey::Name);
 		files.pick_sort_dir(SortDir::Descending);
@@ -2163,7 +2172,7 @@ mod tests {
 
 	#[test]
 	fn opening_the_sort_menu_shuts_a_context_menu_and_vice_versa() {
-		let (mut files, _) = pane(&[entry("src", Kind::Dir)]);
+		let (mut files, _) = pane(&[entry("src", FilesKind::Dir)]);
 		files.open_pane_menu();
 		assert!(files.pane_menu().is_some());
 

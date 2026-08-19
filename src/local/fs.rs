@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 
 use super::path;
 use crate::bridge::SshEvent;
-use crate::files::{self, Entry, Kind, Meta, TimeZone};
+use crate::files::{self, Entry, FilesKind, Meta, TimeZone};
 
 /// List the folders inside `pane`, for the explorer tree (§18) — the local twin of
 /// `ssh::browse::list`.
@@ -338,11 +338,11 @@ fn listing(directory: &Path) -> Result<Vec<std::fs::DirEntry>, String> {
 
 /// What kind of thing an entry is, as the pane classifies it (§19). Metadata that could not be read
 /// leaves it a plain file — the row still shows, with the name it has and nothing claimed about it.
-fn kind_of(meta: Option<&std::fs::Metadata>) -> Kind {
+fn kind_of(meta: Option<&std::fs::Metadata>) -> FilesKind {
 	match meta {
-		Some(meta) if meta.is_symlink() => Kind::Link,
-		Some(meta) if meta.is_dir() => Kind::Dir,
-		_ => Kind::File,
+		Some(meta) if meta.is_symlink() => FilesKind::Link,
+		Some(meta) if meta.is_dir() => FilesKind::Dir,
+		_ => FilesKind::File,
 	}
 }
 
@@ -420,7 +420,7 @@ fn group_of(_meta: &std::fs::Metadata) -> Option<String> {
 fn drive_entry(name: String) -> Entry {
 	Entry {
 		name,
-		kind: Kind::Dir,
+		kind: FilesKind::Dir,
 		meta: Meta::default(),
 	}
 }
@@ -588,8 +588,8 @@ fn zone() -> TimeZone {
 #[cfg(test)]
 mod tests {
 	use super::{
-		Kind, Meta, drive_entry, kind_of, meta_of, mtime_of, read_dirs, read_entries, remove_tree,
-		write_atomically, zone,
+		FilesKind, Meta, drive_entry, kind_of, meta_of, mtime_of, read_dirs, read_entries,
+		remove_tree, write_atomically, zone,
 	};
 	use std::path::Path;
 
@@ -624,7 +624,7 @@ mod tests {
 			.iter()
 			.find(|entry| entry.name == "a.txt")
 			.expect("the file is listed");
-		assert_eq!(file.kind, Kind::File);
+		assert_eq!(file.kind, FilesKind::File);
 		assert_eq!(file.meta.size, Some(5));
 		assert!(file.meta.mtime.is_some(), "a real file has a real mtime");
 	}
@@ -633,9 +633,9 @@ mod tests {
 	fn an_unreadable_entry_leaves_the_row_rather_than_the_listing_empty() {
 		// One name that will not stat must not empty a folder of a thousand good ones, and a row with
 		// nothing claimed about it is still the honest answer for that name.
-		assert_eq!(kind_of(None), Kind::File);
+		assert_eq!(kind_of(None), FilesKind::File);
 		let drive = drive_entry("C:".to_owned());
-		assert_eq!(drive.kind, Kind::Dir);
+		assert_eq!(drive.kind, FilesKind::Dir);
 		assert_eq!(drive.meta, Meta::default());
 	}
 

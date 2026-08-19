@@ -304,7 +304,7 @@ fn spawn_writer(mut writer: Box<dyn std::io::Write + Send>) -> mpsc::Sender<Vec<
 #[cfg(test)]
 mod tests {
 	use super::{Pty, READ_CHUNK, size};
-	use crate::local::shells::{Kind, Shell};
+	use crate::local::shells::{Shell, ShellKind};
 	use crate::term;
 	use std::path::PathBuf;
 
@@ -344,7 +344,7 @@ mod tests {
 				.map(PathBuf::from)
 				.filter(|path| path.is_file())?;
 			Some(Shell {
-				kind: Kind::Cmd,
+				kind: ShellKind::Cmd,
 				program,
 				args: vec!["/c".to_owned(), "echo".to_owned(), MARKER.to_owned()],
 			})
@@ -353,7 +353,7 @@ mod tests {
 		{
 			let program = PathBuf::from("/bin/sh");
 			program.is_file().then(|| Shell {
-				kind: Kind::Bash,
+				kind: ShellKind::Bash,
 				program,
 				args: vec!["-c".to_owned(), format!("echo {MARKER}")],
 			})

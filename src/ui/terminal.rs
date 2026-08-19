@@ -16,7 +16,7 @@ use crate::files::Files;
 use crate::term::Terminal;
 use crate::term::pointer;
 use crate::term::screen::Screen;
-use crate::transfer::{ClashChoice, Progress, Question, Queue};
+use crate::transfer::{ClashChoice, Question, Queue, TransferProgress};
 use crate::ui::selection::{ScreenSpot, Selection};
 
 /// Glyph size and line spacing. A fixed monospace metric — the whole grid shares
@@ -711,7 +711,7 @@ fn status_bar<'a>(
 /// progress bar with the byte count — then the last upload's outcome, and otherwise the
 /// session's `user@host:port`, which is what the bar shows all the rest of the time.
 fn center_zone<'a>(endpoint: &str, transfers: &'a Queue) -> Element<'a, Message> {
-	if let Some(Progress { sent, total }) = transfers.progress() {
+	if let Some(TransferProgress { sent, total }) = transfers.progress() {
 		// A total of zero has nothing to divide by. That is a download that has not yet
 		// heard the file's size (§19) — or a zero-byte file — so the bar stays empty and
 		// the label shows only what has actually moved.

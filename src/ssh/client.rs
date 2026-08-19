@@ -361,7 +361,7 @@ pub(crate) enum SessionMsg {
 	/// Open another shell on this connection, running `command` to become another account (§45).
 	Elevate {
 		identity: u64,
-		kind: crate::elevate::Kind,
+		kind: crate::elevate::ElevateKind,
 		user: String,
 	},
 	/// One answer to an elevating shell's question (§45), written to its channel.

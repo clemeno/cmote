@@ -60,7 +60,7 @@ const CONFLICT_BODY: &str = "A file with this name is already at the destination
 /// a [`Question`] now: one is a thing on the wire, the other is a thing on the screen, and a
 /// single type carrying both meant every reader had to say which it meant.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct Progress {
+pub struct TransferProgress {
 	pub sent: u64,
 	pub total: u64,
 }
@@ -260,7 +260,7 @@ pub struct Queue {
 	/// How far the transfer in the slot has got, `None` when nothing is on the wire. One state for
 	/// both directions — only one transfer runs at a time, and an upload's progress bar and a
 	/// download's read the same.
-	slot: Option<Progress>,
+	slot: Option<TransferProgress>,
 	/// The transfer running right now, remembered so a mid-flight failure can be resumed (§16),
 	/// and so `ended` knows which way it was going. Set at every start — a queued file, a folder
 	/// tree, or a resume itself — and cleared when it stops.
@@ -318,7 +318,7 @@ impl Queue {
 	}
 
 	/// How far the transfer on the wire has got, `None` when nothing is transferring (§17).
-	pub fn progress(&self) -> Option<Progress> {
+	pub fn progress(&self) -> Option<TransferProgress> {
 		self.slot
 	}
 
@@ -603,7 +603,7 @@ impl Queue {
 			local: local.clone(),
 		});
 		self.notice = None;
-		self.slot = Some(Progress::default());
+		self.slot = Some(TransferProgress::default());
 		Effects::send(SshCommand::DownloadTree {
 			remote,
 			local,
@@ -670,7 +670,7 @@ impl Queue {
 			},
 		};
 		self.notice = None;
-		self.slot = Some(Progress::default());
+		self.slot = Some(TransferProgress::default());
 		Effects::send(command)
 	}
 
@@ -765,7 +765,7 @@ impl Queue {
 	/// failure must not revive the bar.
 	pub fn progressed(&mut self, sent: u64, total: u64) {
 		if self.slot.is_some() {
-			self.slot = Some(Progress { sent, total });
+			self.slot = Some(TransferProgress { sent, total });
 		}
 	}
 
@@ -928,7 +928,7 @@ impl Queue {
 			local: local.clone(),
 			remote: remote.clone(),
 		});
-		self.slot = Some(Progress { sent: 0, total });
+		self.slot = Some(TransferProgress { sent: 0, total });
 		Effects::send(SshCommand::Upload {
 			local,
 			remote,
@@ -948,7 +948,7 @@ impl Queue {
 		// Remembered so completion re-lists this folder if a panel is on it (§29) — the same
 		// refresh a single-file upload gets. `close_batch` clears it at the end.
 		self.dest = dir.clone();
-		self.slot = Some(Progress::default());
+		self.slot = Some(TransferProgress::default());
 		Effects::send(SshCommand::UploadTree {
 			local,
 			remote: dir,
@@ -965,7 +965,7 @@ impl Queue {
 			local: local.clone(),
 		});
 		self.notice = None;
-		self.slot = Some(Progress::default());
+		self.slot = Some(TransferProgress::default());
 		Effects::send(SshCommand::Download {
 			remote,
 			local,
@@ -1499,7 +1499,7 @@ mod tests {
 		let queued = drop_of_both_kinds();
 		assert!(queued.busy(), "folders waiting their turn");
 		let running = Queue {
-			slot: Some(Progress::default()),
+			slot: Some(TransferProgress::default()),
 			..Queue::default()
 		};
 		assert!(running.busy(), "bytes on the wire");
@@ -1574,7 +1574,7 @@ mod tests {
 		queue.ask = Some(Ask::Conflict);
 		assert!(!queue.holds_keyboard());
 		queue.ask = None;
-		queue.slot = Some(Progress::default());
+		queue.slot = Some(TransferProgress::default());
 		assert!(queue.holds_keyboard());
 	}
 
@@ -1591,7 +1591,7 @@ mod tests {
 		assert_eq!(queue.picked_count(), 0, "the batch went with the question");
 
 		let mut queue = Queue {
-			slot: Some(Progress {
+			slot: Some(TransferProgress {
 				sent: 10,
 				total: 99,
 			}),
@@ -1600,7 +1600,7 @@ mod tests {
 		queue.escape();
 		assert_eq!(
 			queue.progress(),
-			Some(Progress {
+			Some(TransferProgress {
 				sent: 10,
 				total: 99
 			})

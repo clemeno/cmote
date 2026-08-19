@@ -54,7 +54,7 @@ static CME_THEME: LazyLock<Theme> = LazyLock::new(cme_theme);
 /// is always CME, so it is not part of the identity; a change of grammar — a Save As to a new type, or
 /// an edited shebang on an extensionless file — is what makes iced rebuild.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Settings {
+pub struct SyntaxSettings {
 	/// The resolved grammar's name (`SyntaxReference::name`), from `resolve_syntax`.
 	pub grammar: String,
 }
@@ -164,7 +164,7 @@ pub struct Highlighter {
 }
 
 impl highlighter::Highlighter for Highlighter {
-	type Settings = Settings;
+	type Settings = SyntaxSettings;
 	type Highlight = SyntaxHighlight;
 
 	type Iterator<'a> = Box<dyn Iterator<Item = (Range<usize>, Self::Highlight)> + 'a>;

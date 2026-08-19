@@ -36,7 +36,7 @@ use super::asuser::{Browse, Runner};
 use super::shellfs;
 use crate::bridge::SshEvent;
 use crate::explorer::join;
-use crate::files::{self, Entry, Kind, Meta};
+use crate::files::{self, Entry, FilesKind, Meta};
 
 /// List the folders inside `path` and report them as one `DirListed` (or one `DirFailed`),
 /// reading as whichever account `backend` belongs to (§46).
@@ -223,11 +223,11 @@ async fn read_entries(sftp: &RawSftpSession, path: &str) -> Result<Vec<Entry>> {
 /// an extra round trip.
 fn entry_of(file: File) -> Entry {
 	let kind = if file.attrs.is_dir() {
-		Kind::Dir
+		FilesKind::Dir
 	} else if file.attrs.is_symlink() {
-		Kind::Link
+		FilesKind::Link
 	} else {
-		Kind::File
+		FilesKind::File
 	};
 	// Names first, from the server's own `ls -l` line; the numeric ids are the fallback
 	// for a server that sends no longname (SFTP v3 carries no names in the attributes).
