@@ -418,7 +418,8 @@ fn registry_string(
 	// `ERROR_MORE_DATA` and is treated as "not found", which is the honest answer for a value cmote
 	// cannot read rather than a truncated path it would then try to run.
 	let mut buffer = [0u16; 512];
-	let mut bytes = std::mem::size_of_val(&buffer) as u32;
+	let mut bytes =
+		u32::try_from(std::mem::size_of_val(&buffer)).expect("a 512-element stack buffer");
 	// SAFETY: both names are NUL-terminated wide strings owned by this frame, so they outlive the call.
 	// The data pointer and `bytes` describe `buffer` exactly — `RegGetValueW` writes at most that many
 	// bytes and replaces `bytes` with what it actually wrote — and `RRF_RT_REG_SZ` makes it refuse any

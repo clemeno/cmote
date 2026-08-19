@@ -60,7 +60,7 @@
 use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::Column;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::vte::ansi::cursor_icon::CursorIcon;
@@ -167,7 +167,7 @@ impl<'a> Gate<'a> {
 
 	/// The cursor's row, in visible-page coordinates.
 	fn row(&self) -> usize {
-		self.term.grid().cursor.point.line.0.max(0) as usize
+		super::as_page_row(self.term.grid().cursor.point.line.0)
 	}
 
 	/// Put the cursor on a column, and cancel any deferred wrap.
@@ -188,7 +188,7 @@ impl<'a> Gate<'a> {
 	/// Put the cursor on a row of the visible page, leaving the column alone.
 	fn set_row(&mut self, row: usize) {
 		let row = row.min(self.rows().saturating_sub(1));
-		self.term.grid_mut().cursor.point.line = Line(row as i32);
+		self.term.grid_mut().cursor.point.line = super::page_line(row);
 	}
 
 	/// Whether the cursor is inside both bands — the test IL and DL apply before moving anything.
@@ -311,8 +311,8 @@ impl<'a> Gate<'a> {
 					destination - lines
 				};
 				for column in left..=right {
-					let cell = grid[Line(source as i32)][Column(column)].clone();
-					grid[Line(destination as i32)][Column(column)] = cell;
+					let cell = grid[super::page_line(source)][Column(column)].clone();
+					grid[super::page_line(destination)][Column(column)] = cell;
 				}
 			}
 		}
@@ -323,7 +323,7 @@ impl<'a> Gate<'a> {
 		};
 		for row in blanked {
 			for column in left..=right {
-				grid[Line(row as i32)][Column(column)] = background.into();
+				grid[super::page_line(row)][Column(column)] = background.into();
 			}
 		}
 		for row in top..=bottom {
@@ -345,7 +345,7 @@ impl<'a> Gate<'a> {
 		let room = right - cursor + 1;
 		let count = count.min(room);
 		let background = self.term.grid().cursor.template.bg;
-		let row = Line(self.row() as i32);
+		let row = super::page_line(self.row());
 		let grid = self.term.grid_mut();
 		if count < room {
 			let destinations: Vec<usize> = if insert {
@@ -387,7 +387,7 @@ impl<'a> Gate<'a> {
 		let (left, right) = (self.margins.left(), self.margins.right());
 		let cols = self.cols();
 		let background = self.term.grid().cursor.template.bg;
-		let line = Line(row as i32);
+		let line = super::page_line(row);
 		let grid = self.term.grid_mut();
 		// Inside the band at each edge, and outside it at each edge: a split pair leaves one orphan on
 		// each side, so both have to be looked at.

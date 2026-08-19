@@ -558,7 +558,7 @@ impl Images {
 fn cells(pixels: u16, cell: u16) -> u16 {
 	let cell = u32::from(cell.max(1));
 	let count = u32::from(pixels).div_ceil(cell);
-	count.clamp(1, u32::from(u16::MAX)) as u16
+	u16::try_from(count.clamp(1, u32::from(u16::MAX))).unwrap_or(u16::MAX)
 }
 
 /// The first of `params` as a number, with an omitted one reading as 0 — the engine's own

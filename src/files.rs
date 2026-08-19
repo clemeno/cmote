@@ -532,13 +532,16 @@ impl Files {
 		let Some(last) = rows.len().checked_sub(1) else {
 			return;
 		};
-		let last = last as isize;
+		// Signed for the walk, because a step off the top gives a negative index and the clamp below
+		// is what turns that back into "the first row". `cast_signed` / `cast_unsigned` rather than
+		// `as`: they are bit-for-bit the same reinterpretation, said out loud (§111).
+		let last = last.cast_signed();
 		let next = match self.selected_index(show_hidden) {
-			Some(index) => (index as isize).saturating_add(delta),
+			Some(index) => index.cast_signed().saturating_add(delta),
 			None if delta >= 0 => 0,
 			None => last,
 		};
-		let next = next.clamp(0, last) as usize;
+		let next = next.clamp(0, last).cast_unsigned();
 		if extend {
 			self.select_range(show_hidden, next);
 		} else {

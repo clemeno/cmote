@@ -1007,7 +1007,9 @@ fn braille(content: &str) -> Option<u8> {
 		return None;
 	}
 	let code = u32::from(first).checked_sub(0x2800)?;
-	(code < 0x100).then_some(code as u8)
+	// The braille block is 256 code points wide, so a pattern inside it fits a byte — and the
+	// `try_from` is the check rather than a separate comparison that has to agree with it.
+	u8::try_from(code).ok()
 }
 
 /// A plain rectangle fill: no border, no shadow, snapped to the pixel grid so adjacent
@@ -1107,7 +1109,7 @@ fn prompt_tick_rect(bounds: Rectangle, row: u16) -> Rectangle {
 fn image_bounds(placement: &Placement, origin: Point, top_line: u64) -> (Rectangle, Rectangle) {
 	// Signed, in i64: both lines are absolute document indices, so their difference is the row the
 	// picture's top edge sits at — which is negative for one scrolled past the top of the viewport.
-	let row = placement.line as i64 - top_line as i64;
+	let row = placement.line.cast_signed() - top_line.cast_signed();
 	let x = origin.x + f32::from(placement.col) * CELL_WIDTH;
 	let y = origin.y + row as f32 * CELL_HEIGHT;
 	let pixels = Rectangle {

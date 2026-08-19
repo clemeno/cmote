@@ -244,7 +244,7 @@ pub struct Screen<'a> {
 ///
 /// Generic over the input so the same rule covers the engine's `usize` counts and the `i32` line
 /// number a cursor point carries.
-fn as_dimension<T: TryInto<u16>>(count: T) -> u16 {
+pub(super) fn as_dimension<T: TryInto<u16>>(count: T) -> u16 {
 	count.try_into().unwrap_or(u16::MAX)
 }
 

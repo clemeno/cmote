@@ -90,8 +90,8 @@ fn photograph(engine: &Engine) -> Document {
 	let grid = engine.grid();
 	let history = grid.total_lines() - grid.screen_lines();
 	let cursor = grid.cursor.point;
-	let first = -(history as i32);
-	let last = grid.screen_lines() as i32;
+	let first = -super::as_line_number(history);
+	let last = super::as_line_number(grid.screen_lines());
 	let rows = (first..last)
 		.map(|line| {
 			(0..grid.columns())
@@ -291,7 +291,7 @@ fn banded_page() -> Terminal {
 	let mut terminal = Terminal::new(ROWS, COLS);
 	terminal.process(b"old one\r\nold two\r\nold three\r\n");
 	for row in 0..ROWS {
-		let letter = char::from(b'A' + row as u8);
+		let letter = char::from(b'A' + u8::try_from(row).expect("the test's own row count"));
 		let text: String = std::iter::repeat_n(letter, COLS as usize).collect();
 		terminal.process(format!("\x1b[{};1H{text}", row + 1).as_bytes());
 	}

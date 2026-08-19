@@ -324,7 +324,7 @@ mod tests {
 	fn a_band_spanning_the_whole_page_is_not_narrowed() {
 		// Set explicitly to the edges, which a program may well do to cancel a previous band without
 		// leaving the mode. Nothing is taken over from the engine in that state.
-		let margins = band(1, COLS as u16);
+		let margins = band(1, u16::try_from(COLS).expect("the test's own column count"));
 		assert!(margins.enabled());
 		assert!(!margins.narrowed(COLS));
 	}

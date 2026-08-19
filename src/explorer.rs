@@ -261,13 +261,14 @@ impl Explorer {
 		let Some(last) = rows.len().checked_sub(1) else {
 			return;
 		};
-		let last = last as isize;
+		// Signed for the walk, and clamped back: the same shape as the pane's `step` (§111).
+		let last = last.cast_signed();
 		let next = match self.selected_index() {
-			Some(index) => (index as isize).saturating_add(delta),
+			Some(index) => index.cast_signed().saturating_add(delta),
 			None if delta >= 0 => 0,
 			None => last,
 		};
-		self.selected = Some(rows[next.clamp(0, last) as usize].path.clone());
+		self.selected = Some(rows[next.clamp(0, last).cast_unsigned()].path.clone());
 	}
 
 	/// How far the tree is scrolled (§20).

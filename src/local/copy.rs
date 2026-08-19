@@ -660,7 +660,10 @@ mod tests {
 		let source = temp.path().join("from.bin");
 		let destination = temp.path().join("to.bin");
 		// Larger than one chunk, so the loop runs more than once and the tail is not lost.
-		let bytes: Vec<u8> = (0..(CHUNK + 1234)).map(|index| index as u8).collect();
+		// The pattern only has to be non-uniform, so the low byte of the index serves.
+		let bytes: Vec<u8> = (0..(CHUNK + 1234))
+			.map(|index| u8::try_from(index % 256).expect("a value below 256"))
+			.collect();
 		std::fs::write(&source, &bytes).unwrap();
 
 		let (outcome, _) = copy(&source, &destination, false).await;

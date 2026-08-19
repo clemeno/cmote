@@ -112,9 +112,12 @@ pub fn decode(payload: &[u8]) -> Option<Image> {
 	// Bounded above, so the multiplication cannot overflow a usize on either target.
 	let mut rgba = vec![0u8; width as usize * height as usize * 4];
 	paint(payload, &mut rgba, width, height);
+	// `canvas_size` has already refused anything past `MAX_WIDTH` / `MAX_HEIGHT`, both `u16`, so these
+	// fit — and answering `None` on the impossible path costs nothing, since a picture too big to hold
+	// is exactly what this function already returns `None` for.
 	Some(Image {
-		width: width as u16,
-		height: height as u16,
+		width: u16::try_from(width).ok()?,
+		height: u16::try_from(height).ok()?,
 		rgba,
 	})
 }
@@ -333,7 +336,10 @@ fn default_registers() -> [[u8; 3]; COLOR_REGISTERS] {
 /// (xterm allows more) folds onto the last one rather than being dropped: two of its colours then
 /// collide, which shows as a wrong shade — far less confusing than a hole where the pixels should be.
 fn register_index(register: u16) -> u8 {
-	register.min(COLOR_REGISTERS as u16 - 1) as u8
+	// Clamped to the last register, and `COLOR_REGISTERS` is 256, so the result is a byte by
+	// construction — the `min` is the bound and the `try_from` reads it back rather than assuming it.
+	let last = u16::try_from(COLOR_REGISTERS - 1).unwrap_or(u16::from(u8::MAX));
+	u8::try_from(register.min(last)).unwrap_or(u8::MAX)
 }
 
 /// The RGB a `#Pc;Pu;Px;Py;Pz` definition means. `Pu` 2 is RGB with each channel a PERCENTAGE
@@ -351,7 +357,8 @@ fn parse_color(coding: u16, [x, y, z]: [u16; 3]) -> [u8; 3] {
 /// One 0-100 percentage as a 0-255 channel, rounded rather than truncated so 50% is 128 and not
 /// 127. A value past 100 is clamped — the scale has no room above full intensity.
 fn percent(value: u16) -> u8 {
-	((u32::from(value.min(100)) * 255 + 50) / 100) as u8
+	// Clamped to 100 first, so the largest result is exactly 255 — the whole point of the clamp.
+	u8::try_from((u32::from(value.min(100)) * 255 + 50) / 100).unwrap_or(u8::MAX)
 }
 
 /// DEC's HLS as RGB: `hue` in degrees, `lightness` and `saturation` as percentages.

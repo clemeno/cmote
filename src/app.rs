@@ -6462,10 +6462,12 @@ impl Tab {
 			return iced::Task::none();
 		};
 
-		let columns = ui::files::columns(self.files_width()) as isize;
+		// Signed, because these become the deltas the pane's `step` walks by and a delta goes both
+		// ways. `cast_signed` says the reinterpretation out loud where `as isize` only implied it.
+		let columns = ui::files::columns(self.files_width()).cast_signed();
 		// A page is a screenful of rows (less one, for context), turned into a model-space delta
 		// by the column count — the same units `step` moves the arrows in.
-		let page = ui::files::page_rows(&self.panes.pane) as isize * columns;
+		let page = ui::files::page_rows(&self.panes.pane).cast_signed() * columns;
 		// Shift held on a movement key extends the selection instead of moving it (§21). Not on
 		// Tab: there, Shift already means "the other way".
 		let extend = modifiers.shift();

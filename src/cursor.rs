@@ -492,10 +492,14 @@ fn resampled(drawing: &Drawing, width: u32, height: u32) -> Drawing {
 			}
 			// Undone on the way out: the cursor wants straight alpha, and a patch that was entirely
 			// transparent has no colour to recover — it stays a clear pixel.
+			// Each channel was premultiplied by its own alpha and is now divided by the alpha total,
+			// so every result is back inside 0..=255 — `saturating` says that without a bound check
+			// that would have to be kept in step with the arithmetic above it (§111).
+			let channel = |value: u64| u8::try_from(value).unwrap_or(u8::MAX);
 			let (b, g, r) = blue.checked_div(alpha).map_or((0, 0, 0), |b| {
-				(b as u8, (green / alpha) as u8, (red / alpha) as u8)
+				(channel(b), channel(green / alpha), channel(red / alpha))
 			});
-			bgra.extend_from_slice(&[b, g, r, (alpha / count.max(1)) as u8]);
+			bgra.extend_from_slice(&[b, g, r, channel(alpha / count.max(1))]);
 		}
 	}
 	Drawing {
@@ -670,8 +674,11 @@ mod platform {
 		_id: usize,
 		_data: usize,
 	) -> LRESULT {
+		// The hit-test code is the LOW word of `lparam`, so the mask is the whole of the read and the
+		// width of what it is masked out of does not matter — `cast_unsigned` keeps the bits and
+		// `& 0xffff` discards everything the narrowing would have (§111).
 		if message == WM_SETCURSOR
-			&& (lparam as u32 & 0xffff) == HTCLIENT
+			&& u32::try_from(lparam.cast_unsigned() & 0xffff) == Ok(HTCLIENT)
 			&& let Some(cursor) = wanted()
 		{
 			// SAFETY: a handle this module created and never freed.
@@ -718,8 +725,11 @@ mod platform {
 				SendMessageW(
 					hwnd as HWND,
 					WM_SETCURSOR,
-					hwnd as WPARAM,
-					HTCLIENT as LPARAM,
+					// The window handle doubles as the WPARAM, which Win32 defines as pointer-wide
+					// and unsigned: `cast_unsigned` is the same bits, said out loud. The hit-test
+					// code is a small constant widened to a pointer-wide signed LPARAM.
+					hwnd.cast_unsigned(),
+					LPARAM::try_from(HTCLIENT).expect("HTCLIENT is a one-digit constant"),
 				);
 			}
 		}
@@ -738,11 +748,14 @@ mod platform {
 	/// the mask says "draw everything".
 	unsafe fn cursor_from(drawing: &Drawing, hotspot: (u32, u32)) -> *mut c_void {
 		let mut header: BITMAPV5HEADER = unsafe { std::mem::zeroed() };
-		header.bV5Size = size_of::<BITMAPV5HEADER>() as u32;
-		header.bV5Width = drawing.width as i32;
+		header.bV5Size = u32::try_from(size_of::<BITMAPV5HEADER>())
+			.expect("a Win32 struct is a few dozen bytes");
+		// `cast_signed` on the dimensions: a bundled 32x32 PNG, so the reinterpretation is exact, and
+		// naming it says the sign bit is understood rather than assumed away (§111).
+		header.bV5Width = drawing.width.cast_signed();
 		// Negative height means top-down: the first row of bytes is the top row of pixels, which is
 		// the order a PNG is read in. A positive height would draw every hand upside down.
-		header.bV5Height = -(drawing.height as i32);
+		header.bV5Height = -drawing.height.cast_signed();
 		header.bV5Planes = 1;
 		header.bV5BitCount = 32;
 		header.bV5Compression = BI_BITFIELDS;
@@ -770,8 +783,8 @@ mod platform {
 			ptr::copy_nonoverlapping(drawing.bgra.as_ptr(), bits.cast::<u8>(), drawing.bgra.len());
 
 			let mask = CreateBitmap(
-				drawing.width as i32,
-				drawing.height as i32,
+				drawing.width.cast_signed(),
+				drawing.height.cast_signed(),
 				1,
 				1,
 				ptr::null(),

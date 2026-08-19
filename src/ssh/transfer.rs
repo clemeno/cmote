@@ -217,7 +217,9 @@ pub(crate) fn resume_start(resume: bool, dest_size: Option<u64>, source_size: u6
 pub(crate) fn epoch_secs(time: SystemTime) -> Option<u32> {
 	time.duration_since(UNIX_EPOCH)
 		.ok()
-		.map(|elapsed| elapsed.as_secs().min(u32::MAX as u64) as u32)
+		// Clamped rather than refused: a timestamp past 2106 is beyond what the protocol's own
+		// 32-bit field can carry, so the newest representable instant is the honest answer.
+		.map(|elapsed| u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX))
 }
 
 /// Build the attributes an upload stamps onto the freshly written remote file (§17), setting only

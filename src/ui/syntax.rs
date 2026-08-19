@@ -377,10 +377,13 @@ fn theme_item(scope: &str, rgb: u32) -> ThemeItem {
 
 /// A `0xRRGGBB` literal as an opaque `syntect` colour (§32).
 fn syn_rgb(rgb: u32) -> SynColor {
+	// One byte per channel, masked before it is narrowed: the mask is what makes each `try_from`
+	// exact, so the conversion states the width instead of relying on the truncation to do it (§111).
+	let channel = |shift: u32| u8::try_from((rgb >> shift) & 0xff).expect("one masked byte");
 	SynColor {
-		r: (rgb >> 16) as u8,
-		g: (rgb >> 8) as u8,
-		b: rgb as u8,
+		r: channel(16),
+		g: channel(8),
+		b: channel(0),
 		a: 0xff,
 	}
 }

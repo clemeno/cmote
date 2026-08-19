@@ -133,9 +133,9 @@ pub fn drives() -> Vec<String> {
 	// and returns it by value. It cannot fail in a way that needs handling: a zero mask (which
 	// cannot happen on a running Windows) simply lists nothing.
 	let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
-	(0..26u32)
+	(0..26u8)
 		.filter(|bit| mask & (1 << bit) != 0)
-		.map(|bit| format!("{}:", (b'A' + bit as u8) as char))
+		.map(|bit| format!("{}:", char::from(b'A' + bit)))
 		.collect()
 }
 

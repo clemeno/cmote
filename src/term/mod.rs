@@ -203,6 +203,15 @@ fn history_line(back: usize) -> Line {
 	Line(-1 - as_line_number(back))
 }
 
+/// The engine's line number as a row of the active page — the inverse of `page_line` (§111).
+///
+/// Floored at the top of the page rather than reporting a scrollback row: every caller is about to
+/// index the visible page with it, and the engine's cursor is documented to stay on the live screen,
+/// so a negative here would be a defensive case rather than a real position.
+pub(super) fn as_page_row(line: i32) -> usize {
+	usize::try_from(line.max(0)).unwrap_or(0)
+}
+
 /// A row count as an absolute document line (§40, §111).
 ///
 /// The document is numbered in `u64` from the oldest retained line, so that a position survives the
@@ -593,7 +602,7 @@ impl Terminal {
 				query::Query::Graphics(request) => {
 					out.extend_from_slice(&query::graphics_reply(
 						&request,
-						sixel::COLOR_REGISTERS as u16,
+						screen::as_dimension(sixel::COLOR_REGISTERS),
 						(sixel::MAX_WIDTH, sixel::MAX_HEIGHT),
 					));
 				}
@@ -1018,7 +1027,7 @@ impl Terminal {
 		let point = grid.cursor.point;
 		// The cursor's line is counted from the top of the screen, and history sits at negative
 		// lines — but a cursor is never in history, so the clamp is only for the type.
-		let row = point.line.0.max(0) as usize;
+		let row = as_page_row(point.line.0);
 		let spans = protect::spans(
 			erase,
 			row,
@@ -1405,7 +1414,7 @@ impl Terminal {
 		let (top, bottom) = (self.region.first_row(), self.region.last_row());
 		let (row, column) = {
 			let cursor = self.term.grid().cursor.point;
-			(cursor.line.0.max(0) as usize, cursor.column.0)
+			(as_page_row(cursor.line.0), cursor.column.0)
 		};
 		if bottom < top || column < left || column > right || row < top || row > bottom {
 			return;
@@ -1781,11 +1790,9 @@ impl Terminal {
 		// Viewport row -> absolute line: absolute = row - display_offset + history_size. Done in
 		// i64 so a nonsensical row (offset deeper than row + history) yields no command rather than
 		// underflowing; an on-screen tick can never hit that.
-		let prompt = i64::from(row) + grid.history_size() as i64 - grid.display_offset() as i64;
-		if prompt < 0 {
-			return None;
-		}
-		let (start, end) = self.prompts.output_at_prompt(prompt as u64)?;
+		let prompt = i64::from(row) + as_signed_line(as_document_line(grid.history_size()))
+			- as_signed_line(as_document_line(grid.display_offset()));
+		let (start, end) = self.prompts.output_at_prompt(u64::try_from(prompt).ok()?)?;
 		Some(self.locate_output(start, end))
 	}
 
@@ -1801,15 +1808,15 @@ impl Terminal {
 	/// screenful that showed.
 	fn locate_output(&mut self, start: u64, end: u64) -> OutputSpan {
 		let grid = self.term.grid();
-		let history = grid.history_size() as i64;
-		let screen_lines = self.term.screen_lines() as i64;
+		let history = as_signed_line(as_document_line(grid.history_size()));
+		let screen_lines = as_signed_line(as_document_line(self.term.screen_lines()));
 		// Absolute line -> viewport row for a given display offset.
-		let to_row = |offset: i64, absolute: u64| absolute as i64 - history + offset;
+		let to_row = |offset: i64, absolute: u64| as_signed_line(absolute) - history + offset;
 
 		// Scroll the first output line to the top only when it is not already on screen.
-		let offset = grid.display_offset() as i64;
+		let offset = as_signed_line(as_document_line(grid.display_offset()));
 		if !(0..screen_lines).contains(&to_row(offset, start)) {
-			let target = (history - start as i64).clamp(0, history);
+			let target = (history - as_signed_line(start)).clamp(0, history);
 			let delta = target - offset;
 			if delta != 0 {
 				self.term.scroll_display(Scroll::Delta(scroll_delta(delta)));
@@ -1821,7 +1828,7 @@ impl Terminal {
 		OutputSpan {
 			start_line: start,
 			end_line: end.saturating_sub(1).max(start),
-			last_col: (self.term.columns() as u16).saturating_sub(1),
+			last_col: screen::as_dimension(self.term.columns()).saturating_sub(1),
 		}
 	}
 
@@ -1854,7 +1861,9 @@ impl Terminal {
 		// whole document is `-history ..= the last screen line`; absolute = history + line puts line
 		// 0 (the top of the active screen) at absolute `history_size`, as `osc133` records it.
 		for line in -history..screen_lines {
-			let mut row = search::SearchRow::new((history + line) as u64);
+			// `history + line` is at least 0 across the whole range, since `line` starts at
+			// `-history`, so this is the absolute document line the row sits on (§40).
+			let mut row = search::SearchRow::new(u64::try_from(history + line).unwrap_or(0));
 			for col in 0..columns {
 				let cell = &grid[Line(line)][Column(col)];
 				// A wide glyph's trailing half carries no glyph — skipping it (rather than pushing a
@@ -1862,7 +1871,7 @@ impl Terminal {
 				if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
 					continue;
 				}
-				row.push(cell.c, col as u16);
+				row.push(cell.c, screen::as_dimension(col));
 			}
 			row.trim_end();
 			out.extend(row.find(query));
@@ -1882,17 +1891,17 @@ impl Terminal {
 	/// lands as close to the middle as the document allows.
 	pub fn reveal_line(&mut self, absolute: u64) -> bool {
 		let grid = self.term.grid();
-		let history = grid.history_size() as i64;
-		let screen_lines = self.term.screen_lines() as i64;
+		let history = as_signed_line(as_document_line(grid.history_size()));
+		let screen_lines = as_signed_line(as_document_line(self.term.screen_lines()));
 		// Absolute line -> viewport row for a given display offset, the inverse of the mapping
 		// `Screen::cell` reads with (§23).
-		let to_row = |offset: i64| absolute as i64 - history + offset;
+		let to_row = |offset: i64| as_signed_line(absolute) - history + offset;
 
-		let offset = grid.display_offset() as i64;
+		let offset = as_signed_line(as_document_line(grid.display_offset()));
 		if !(0..screen_lines).contains(&to_row(offset)) {
 			// The offset that puts this line in the middle of the screen: the offset that would put
 			// it at the top (history - absolute) plus half a screen of extra climb.
-			let target = (history - absolute as i64 + screen_lines / 2).clamp(0, history);
+			let target = (history - as_signed_line(absolute) + screen_lines / 2).clamp(0, history);
 			let delta = target - offset;
 			if delta != 0 {
 				self.term.scroll_display(Scroll::Delta(scroll_delta(delta)));
@@ -1901,7 +1910,9 @@ impl Terminal {
 
 		// Map with the (possibly new) offset — the engine clamps a scroll, so this is the truth
 		// about where the line ended up rather than where we aimed it.
-		let row = to_row(self.term.grid().display_offset() as i64);
+		let row = to_row(as_signed_line(as_document_line(
+			self.term.grid().display_offset(),
+		)));
 		(0..screen_lines).contains(&row)
 	}
 }
@@ -2208,8 +2219,8 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 /// against a page that has since been resized smaller has nothing to be covered by.
 fn is_covered(screen: &screen::Screen<'_>, placement: &graphics::Placement) -> bool {
 	// The alternate page keeps no history and cannot be scrolled back, so the placement's absolute
-	// line IS its viewport row and the cast cannot lose anything: it was built from a `u16` row.
-	let top = placement.line as u16;
+	// line IS its viewport row and nothing can be lost: it was built from a `u16` row to begin with.
+	let top = screen::as_dimension(placement.line);
 	(top..top.saturating_add(placement.rows)).any(|row| {
 		(placement.col..placement.col.saturating_add(placement.cols)).any(|col| {
 			screen
@@ -2304,7 +2315,8 @@ fn sanitize_title(title: &str) -> String {
 /// cursor roles and 0-255 are reachable through OSC 10 / 11 / 12 / 4.
 fn report_color(index: usize) -> (u8, u8, u8) {
 	match index {
-		0..=255 => palette::xterm_256(index as u8),
+		// The arm's own range is the proof that this fits.
+		0..=255 => palette::xterm_256(u8::try_from(index).expect("0..=255 fits a u8")),
 		i if i == NamedColor::Background as usize => palette::DEFAULT_BG,
 		_ => palette::DEFAULT_FG,
 	}
@@ -4479,7 +4491,7 @@ mod tests {
 	fn banded_page(rows: u16, cols: u16, left: u16, right: u16) -> Terminal {
 		let mut terminal = Terminal::new(rows, cols);
 		for row in 0..rows {
-			let letter = char::from(b'A' + row as u8);
+			let letter = char::from(b'A' + u8::try_from(row).expect("the test's own row count"));
 			fill_row(&mut terminal, row, letter, cols);
 		}
 		set_margins(&mut terminal, left, right);

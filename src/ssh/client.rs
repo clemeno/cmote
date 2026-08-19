@@ -1010,7 +1010,10 @@ impl client::Handler for Handler {
 			&self.remote_forwards,
 			channel,
 			reply,
-			connected_port as u16,
+			// russh reports the port as a `u32` because that is the wire field's width; a TCP port is
+			// a `u16`, so anything above that is a malformed message and 0 — "no port" — is the
+			// honest reading of it rather than the low half of a number the server never meant.
+			u16::try_from(connected_port).unwrap_or(0),
 			self.events.clone(),
 		)
 		.await;
