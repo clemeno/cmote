@@ -1866,7 +1866,7 @@ pub struct Terminal {
 	/// cursor is on when the mark arrives.
 	prompts: osc133::Prompts,
 	/// Reads the honoured parts of iTerm2's OSC 1337 namespace (§55) — today, the explicit bookmarks
-	/// `SetMark` drops. Fed by the same split advance as the prompt marks and for the same reason: a
+	/// `SetMark` drops. Fed by the same interruption advance as the prompt marks and for the same reason: a
 	/// bookmark's whole meaning is the line it arrived on. Its own module is an ALLOW-LIST, which is
 	/// what keeps the dangerous keys of that namespace (a clipboard write, a theme repaint) out.
 	iterm: iterm::Iterm,
@@ -1886,7 +1886,7 @@ pub struct Terminal {
 	/// drag-and-resize vocabulary over the grid or claiming that cmote itself is busy.
 	pointer: pointer::Pointer,
 	/// Reads the selective-erase sequences the engine drops — DECSCA, DECSED and DECSEL (§56). Fed by
-	/// the split advance, but for the opposite reason to the marks above: each of its requests has to
+	/// the interruption advance, but for the opposite reason to the marks above: each of its requests has to
 	/// be applied with the engine advanced PAST the sequence, not up to it. Protection itself is not
 	/// held here at all — it rides the engine's pen and then each printed cell, so there is no map to
 	/// keep aligned with the grid.
@@ -1897,14 +1897,14 @@ pub struct Terminal {
 	/// advance so the offending final byte can be swapped for a CAN on its way past.
 	cancels: cancel::Cancel,
 	/// Reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA and
-	/// DECCRA (§58), then DECCARA, DECRARA and DECSACE (§59). Fed by the split advance for the same
+	/// DECCRA (§58), then DECCARA, DECRARA and DECSACE (§59). Fed by the interruption advance for the same
 	/// reason as the selective erase: each one is applied with the engine advanced PAST the sequence
 	/// it ignored. The module is the grammar and the geometry, and the cells are written below; the
 	/// one thing it does hold is DECSACE's extent, because only the scanner sees a mode and the
 	/// requests it governs in stream order.
 	rectangles: rect::Rectangles,
 	/// Finds DECST8C, the tab-stop reset `vte` parses and `alacritty_terminal` drops on the floor
-	/// (§74). Fed by the split advance like the erases above and for the same reason — the engine
+	/// (§74). Fed by the interruption advance like the erases above and for the same reason — the engine
 	/// has to be past the sequence it ignores before cmote answers it — and answered the way §72
 	/// answers the soft reset: by feeding the engine the same request written in TBC, HTS and CUF,
 	/// so the engine stays the only writer of its own tab table. Holds no state but the scan.
@@ -1916,7 +1916,7 @@ pub struct Terminal {
 	/// of `CSI ? Ps n` are refused by the same scanner, on an allow-list one value wide.
 	dsr: dsr::Dsr,
 	/// Finds XTPUSHSGR / XTPOPSGR, which `vte` has no arm for either — `csi_dispatch` never matches a
-	/// `#` intermediate at all (§84, §85). Fed by the split advance for DECXCPR's reason: the pen a push
+	/// `#` intermediate at all (§84, §85). Fed by the interruption advance for DECXCPR's reason: the pen a push
 	/// saves is the pen where the push was WRITTEN, not where the chunk ended.
 	sgr_stack: sgrstack::SgrStack,
 	/// The pens that stack has saved, innermost last, each with the mask of what its push named. Ten
@@ -1939,7 +1939,7 @@ pub struct Terminal {
 	/// whole reason this is buildable without becoming a second writer of the grid (§71, §73).
 	paths: scp::Paths,
 	/// Finds the inline sixel images the engine drops, decodes them and holds where each one sits
-	/// (§41). Fed by the same split advance as the prompt marks, and for the same reason: a picture
+	/// (§41). Fed by the same interruption advance as the prompt marks, and for the same reason: a picture
 	/// belongs at the cursor's line and column at the moment it arrived in the stream.
 	graphics: graphics::Images,
 	/// Whether the ALTERNATE screen was the one up last time this was looked at (§41). The engine
@@ -3902,7 +3902,7 @@ mod tests {
 		);
 	}
 
-	/// The reason this one is answered inside the split advance rather than after the chunk: a cursor
+	/// The reason this one is answered inside the interruption advance rather than after the chunk: a cursor
 	/// report is only true where the question sat. The query here is followed by ten more columns of
 	/// output in the SAME chunk, so an answer built at the end would report column 11 rather than 1.
 	#[test]
@@ -4045,7 +4045,7 @@ mod tests {
 		);
 	}
 
-	/// The pen is saved where the push SAT, which is why this is fed by the split advance. Both
+	/// The pen is saved where the push SAT, which is why this is fed by the interruption advance. Both
 	/// sequences and the change between them are in one write: an implementation that pushed after the
 	/// chunk would save the italic too and restore it here.
 	#[test]

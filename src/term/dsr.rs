@@ -81,7 +81,7 @@
 // queries and answers them once the chunk has been advanced, which is right for XTVERSION and DA3 —
 // constants — and wrong for a position: a chunk carrying `CSI ? 6 n` followed by more output would
 // report where the cursor ENDED UP, not where the question was asked. So this scanner reports offsets
-// and `term/mod.rs` answers inside its split loop, reading the cursor with the engine advanced exactly
+// and `term/mod.rs` answers inside its interruption loop, reading the cursor with the engine advanced exactly
 // to the sequence, and pushing the reply into the same buffer the engine's own replies land in
 // (§60's DECRQCRA does this already). A DSR and a DECXCPR asked for in one write therefore come back
 // in the order they were asked.
@@ -426,7 +426,7 @@ mod tests {
 		assert!(dsr.feed(b"\x1b").is_empty());
 		assert!(dsr.feed(b"[?").is_empty());
 		assert!(dsr.feed(b"6").is_empty());
-		// The offset is into THIS chunk, which is where the split advance uses it.
+		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(dsr.feed(b"n"), vec![(1, DsrRequest::CursorPosition)]);
 	}
 
@@ -452,7 +452,7 @@ mod tests {
 		assert!(scan(&bytes).is_empty());
 	}
 
-	/// Two in one chunk, both reported, in stream order — the split advance walks them in the order
+	/// Two in one chunk, both reported, in stream order — the interruption advance walks them in the order
 	/// they came, so each is answered from the cursor as it stood at its own sequence.
 	#[test]
 	fn two_requests_in_one_chunk_are_both_reported() {

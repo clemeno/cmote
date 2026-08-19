@@ -272,7 +272,7 @@ mod tests {
 		assert!(tabs.feed(b"\x1b").is_empty());
 		assert!(tabs.feed(b"[?").is_empty());
 		assert!(tabs.feed(b"5").is_empty());
-		// The offset is into THIS chunk, which is where the split advance uses it.
+		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(tabs.feed(b"W"), vec![1]);
 	}
 
@@ -296,7 +296,7 @@ mod tests {
 		assert!(scan(&bytes).is_empty());
 	}
 
-	/// Two in one chunk, both reported, in stream order — the split advance walks them in the order
+	/// Two in one chunk, both reported, in stream order — the interruption advance walks them in the order
 	/// they came.
 	#[test]
 	fn two_resets_in_one_chunk_are_both_reported() {

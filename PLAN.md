@@ -2247,7 +2247,7 @@ keyboard just landed on.
   **shell** focused — that is what a terminal is for — and `clear_grid_interaction` puts it
   back there whenever a session starts or ends.
 - **A click focuses what was clicked.** Each pane's own `mouse_area` reports a
-  `PanelPressed`, so an empty patch of pane focuses it just as a row or a cell does, and a
+  `PanePressed`, so an empty patch of pane focuses it just as a row or a cell does, and a
   press on the grid hands the keyboard back to the shell. In the files pane that press also
   **clears the selection** — a cell's own `mouse_area` swallows the press that lands on it,
   so one that reaches the pane missed every cell, which is the click-away every file
@@ -3335,21 +3335,27 @@ Same three-way split as the panes (§18, §19): a pure model (`editor.rs`), a pu
   command channel — `App` looks the parent up by id and sends through its `command_tx`. Close the
   parent session and its editors go **read-only-save**: the buffer stays open to read and copy, but
   Save is disabled with a note, because the pipe it would write through is gone.
-- **Edit events are correlated by an `editor_id`, not the session id.** The worker tags every
-  event with the *session* tab's id (§26), but a loaded/saved file belongs to the *editor* tab that
-  asked. So `EditLoad` / `EditSave` carry the editor tab's id and the matching
-  `EditLoaded` / `EditSaved` / `*Failed` echo it back; `App` routes those to the tab whose id
-  equals the `editor_id`, whichever session produced them. Two editors loading at once cannot cross
+- **Edit events are correlated by a `viewer_id`, not the session id.** The worker tags every
+  event with the *session* tab's id (§26), but a loaded/saved file belongs to the *viewer* tab that
+  asked. So `FileLoad` / `EditSave` carry that tab's id and the matching
+  `FileLoaded` / `EditSaved` / `*Failed` echo it back; `App` routes those to the tab whose id
+  equals the `viewer_id`, whichever session produced them. Two editors loading at once cannot cross
   their bytes.
+
+  The field is `viewer_id` rather than `editor_id` because §53 gave the picture tab the SAME load
+  path: one `FileLoad` serves both, carrying the asking tab's own size ceiling (`edit::MAX_SIZE`
+  versus `preview::MAX_SIZE`), and the bytes come back undecoded because what they decode into is
+  the viewer's business.
 
 ### Opening a file
 
 - **Two ways in, both from the files pane (§19).** A new **Edit…** item on the entry context menu
   (files only, disabled on a directory or a multiple selection), and a **double-click on a file** —
   which until now did nothing (double-click only browsed *into* a directory). Both emit
-  `FilesMessage::EditStarted(path)`, which the tab turns into an App-level `EditorOpen` carrying the
-  parent session id and the path; `App` creates the editor tab **right beside the session it came
-  from** (§38), makes it active, and sends `EditLoad` on the parent's channel.
+  `FilesMessage::OpenStarted(path)`, which the tab turns into an App-level `ViewerOpen` carrying the
+  parent session id and the path; `App` creates the viewer tab **right beside the session it came
+  from** (§38), makes it active, and sends `FileLoad` on the parent's channel. Both names lost their
+  `Edit` prefix in §53, when the picture tab started using the same route.
 - **A size ceiling.** The whole file is held in memory as one editable buffer, so a file over
   `edit::MAX_SIZE` (**8 MiB**) is refused before it is pulled — a text editor is not a way to open a
   disk image. The refusal is a message, not a crash.
@@ -6181,7 +6187,7 @@ the chip, after the endpoint label.
   draws over the other.
 - **The tick projection is one function.** `project` is shared by both lists deliberately — an
   arithmetic that drifted between them would put one kind of tick a row off the line it marks.
-- **A bookmark is grid-anchored, so it joins the split advance.** Its whole content is the line it
+- **A bookmark is grid-anchored, so it joins the interruption advance.** Its whole content is the line it
   arrived on, so `process` merges it into the same offset-ordered list as the prompt marks and the
   inline images (§34, §41) and applies it at its own point in the stream. A chunk carrying a prompt
   mark *and* a bookmark puts each on its own line, which is the case that list exists for.
@@ -6424,7 +6430,7 @@ is untouched and still works. A private marker or an intermediate rules the sequ
 
 The offsets are a third convention, and worth naming as such: a prompt mark reports where its sequence
 **starts** (§34), a selective erase reports the byte **one past** the end (§56), and a cancel reports
-**the final byte itself** — because that byte is the one being replaced. The split loop clamps
+**the final byte itself** — because that byte is the one being replaced. The interruption loop clamps
 `offset.max(start)` now, since a cancel is the first split that leaves `start` past its own offset.
 
 ### What it cost
@@ -6717,7 +6723,7 @@ things followed from putting it there, and all three were the point:
   rest, but for a second reason: it *reads*, so it must answer from the page as it stood where the
   question sat. A chunk carrying `AB`, the query, and then `ZZ` over the top reports the checksum of
   `AB`. A test pins that with the value the wrong answer would have had.
-- **The reply goes into the engine's own buffer**, pushed at the split point, so a DSR and a checksum
+- **The reply goes into the engine's own buffer**, pushed at the interruption point, so a DSR and a checksum
   asked for in one write come back in the order they were asked — no second reply path to keep in
   step with the first.
 - **Origin mode costs it the rectangle and not the reply.** The rest of the family is refused
@@ -8848,7 +8854,7 @@ been applied.
 ### What shipped
 
 `src/term/dsr.rs`, a scanner of the same shape as `term/tabs.rs`, and `term/mod.rs` answering it inside
-the split advance. Three decisions carry the section.
+the interruption advance. Three decisions carry the section.
 
 **The reply is xterm's, not DEC's.** Two parameters, one-based, no page. Cmote claims to be
 `xterm-256color` in `TERM`, in XTGETTCAP's `TN` and in the DA1 it amends; answering a question in a
@@ -8867,7 +8873,7 @@ CUD and CHA. Correcting it here would make cmote's answer to the DEC spelling di
 the ANSI one for the same cursor, which is worse than one shared divergence a row can name: a program
 that asked twice would get two different positions and have no way to tell which was the terminal's.
 
-**It is answered in the split advance, not in `term/query.rs`.** Every other query cmote answers itself
+**It is answered in the interruption advance, not in `term/query.rs`.** Every other query cmote answers itself
 is a constant — a version string, a unit id, the sixel decoder's limits — so `query.rs` may collect them
 and reply once the chunk has been applied. A cursor is not a constant. A chunk carrying `CSI ? 6 n`
 followed by ten more columns of output would, answered that way, report the eleventh column. So `dsr.rs`
@@ -9028,7 +9034,7 @@ time.
   status 0: an action no row in this document mentioned.
 - **Two attributions ctlseqs does not carry.** DECFRA's `Pch` range was credited to xterm ("as xterm
   allows") and DECSACE's stream extent to the terminal's power-on state. Both are true of cmote's code —
-  `rect.rs` enforces 32–126 / 160–255 and its `Extent` derives `#[default] Stream` — and neither is in
+  `rect.rs` enforces 32–126 / 160–255 and its `RectExtent` derives `#[default] Stream` — and neither is in
   the document they were credited to. The rows now say whose claim each is.
 
 ### What it says about the sweeps

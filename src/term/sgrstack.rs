@@ -465,7 +465,7 @@ mod tests {
 		assert!(stack.feed(b"\x1b").is_empty());
 		assert!(stack.feed(b"[1").is_empty());
 		assert!(stack.feed(b";4").is_empty());
-		// The offset is into THIS chunk, which is where the split advance uses it.
+		// The offset is into THIS chunk, which is where the interruption advance uses it.
 		assert_eq!(
 			stack.feed(b"#{"),
 			vec![(2, SgrStackRequest::Push(Mask::BOLD.with(Mask::UNDERLINE)))]
@@ -514,7 +514,7 @@ mod tests {
 		assert!(scan(b"\x1bD").is_empty(), "IND");
 	}
 
-	/// A push and its pop in one chunk, both reported, in stream order — the split advance walks them
+	/// A push and its pop in one chunk, both reported, in stream order — the interruption advance walks them
 	/// in the order they came, so the pen is read where the push sat and restored where the pop did.
 	#[test]
 	fn a_push_and_its_pop_in_one_chunk_are_both_reported() {

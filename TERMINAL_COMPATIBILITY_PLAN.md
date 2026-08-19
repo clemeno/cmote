@@ -395,7 +395,7 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
 - **DECXCPR** (`CSI ? 6 n`) → `CSI ? <row> ; <col> R`, the cursor's position in DEC's private spelling
   (§82). `vte`'s CSI table holds `('n', [])` and no `('n', [b'?'])`, so the whole DEC-private DSR family
   reached nothing. Answered **not** in `term/query.rs` but in `term/dsr.rs`, and reported through the
-  split advance, because a position is only true where the question sat: a version string and a unit id
+  interruption advance, because a position is only true where the question sat: a version string and a unit id
   can wait for the end of a chunk, a cursor cannot. The numbers are the engine's own
   `grid.cursor.point`, so this spelling and the ANSI one cannot come to disagree. **Only `Ps = 6` is
   answered** — the other nine values xterm defines describe the user's machine, and are refused; see §6.
@@ -2328,8 +2328,8 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   (a deliberate tightening over `tabs.rs`, DSR taking exactly one `Ps`). `cursor_reply(row, col)` is the
   pure formatter — `CSI ? row+1 ; col+1 R`, xterm's two-parameter form with no page — and the `+ 1` is
   the engine's own arithmetic from `device_status`, copied so the ANSI and DEC spellings of one question
-  cannot disagree, origin-mode divergence included. `term/mod.rs` answers inside the split loop
-  (`Interruption::CursorReport` → `report_cursor_position`), reading `screen().cursor_position()` with the engine
+  cannot disagree, origin-mode divergence included. `term/mod.rs` answers inside the interruption loop
+  (`Interruption::Dsr` → `report_cursor_position`), reading `screen().cursor_position()` with the engine
   advanced exactly to the sequence and pushing the bytes into the same `replies` buffer the engine writes
   into — the path `rect.rs`'s checksum already took, and the reason two questions in one write come back
   in the order they were asked.
@@ -2449,7 +2449,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   two harmless ones (`CursorShape`, `ReportCellSize`) — the module header carries their reasons, and
   the boundary tests live where the effect would have been: `term/screen.rs` for the shape that must
   survive, `term/mod.rs` for the reply that must not go out. `SetMark` is applied
-  through `Terminal::process`'s split advance into `osc133::Prompts::record_user_mark`, kept in a ring
+  through `Terminal::process`'s interruption advance into `osc133::Prompts::record_user_mark`, kept in a ring
   separate from the prompt marks — a bookmark has no command state, exit code or output span, so
   `output_at_prompt` must never resolve one — surfaced by `Terminal::user_mark_rows` and drawn as an
   amber gutter tick (`ui/grid.rs`), while `jump` chains both rings so Ctrl+Shift+Up/Down visits either.
@@ -2573,12 +2573,12 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   drops: **DECCARA** (`$ r`), **DECRARA** (`$ t`) and **DECSACE** (`* x`). `vte` matches `*` in no CSI
   arm at all and `$` only in the two DECRQM spellings, so all three fall through unhandled. DECSACE is
   a mode and is **absorbed by the scanner**, which is the one place that sees it and the requests it
-  governs in stream order; each attribute request therefore leaves carrying its own `Extent`, and
+  governs in stream order; each attribute request therefore leaves carrying its own `RectExtent`, and
   `term/mod.rs` never holds the mode. The extent is a parameter of `area` rather than something it
   reads, because it changes a *rule*, not a walk: a rectangle whose right corner is left of its left
   one is undrawable, while the same numbers as a stream are an ordinary run round the wrap. Selector
-  lists fold to a `Change { on, off, flip }` at parse time — later wins, as in an SGR — and
-  `Change::apply` is pure, so the whole table is tested without a terminal. `term/mod.rs` holds the
+  lists fold to an `AttributeChange { on, off, flip }` at parse time — later wins, as in an SGR — and
+  `AttributeChange::apply` is pure, so the whole table is tested without a terminal. `term/mod.rs` holds the
   one translation to engine names (`RECT_ATTRIBUTES`) and `attribute_rect` sets **named bits one at a
   time**; assigning `Flags` wholesale would silently drop cmote's DECSCA protection bit (§56), which a
   test pins by underlining a protected form and then selectively erasing it. **Blink has no engine
@@ -2597,7 +2597,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   unless it is the rectangle's first; the total is taken mod 2^16 and **negated**, which is why real
   text reports a number just under 0x10000 and is the detail most easily got backwards. The reply
   (`DCS Pid ! ~ XXXX ST`) goes into the **same buffer the engine's own replies use**, pushed at the
-  split point — so it answers from the page as it stood where the question sat, and orders correctly
+  interruption point — so it answers from the page as it stood where the question sat, and orders correctly
   against a DSR in the same write with no second reply path. Origin mode costs it the rectangle and not
   the reply: it answers `0000`, because a query dropped on the floor stalls the program (§33). Three
   divergences are stated rather than hidden: **blink** never lands (§59's hole), a **DEC-charset** cell
