@@ -41,9 +41,33 @@ const MAX_WINDOW: f32 = 4096.0;
 /// (§32). The per-target pane sizes and resume paths live in `targets.json` (§22) instead, because
 /// they belong to a connection, not to the app. `#[serde(default)]` fills in anything an older or
 /// hand-edited file is missing, so adding a field here later can never invalidate an existing file.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+	/// Which format this file is (§110). Version 1 is the UNVERSIONED object every cmote up to §110
+	/// wrote, which is why the serde default here is `"1"` and NOT `Default`: a file with no version
+	/// key is a version-1 file, while a `Settings` this build creates from nothing is current. Those
+	/// are two different answers to "what version is this", so the struct's `Default` is written out
+	/// by hand below rather than derived.
+	///
+	/// Without this, an older cmote reading a newer file would deserialize what it understands,
+	/// ignore the rest, and then write its own shape back — dropping whatever the newer build had
+	/// stored. The `#[serde(default)]` tolerance above protects a file from a MISSING field; nothing
+	/// protected it from an unknown one.
+	#[serde(default = "version_one")]
+	version: String,
+
+	/// Why this file was not read, when it was not (§110): it declares a version this build does not
+	/// know. Never serialized — it describes the file, not the settings. Set means `save` must do
+	/// nothing, because writing this shape over a newer one would drop what it holds.
+	#[serde(skip)]
+	refusal: Option<String>,
+
+	/// Whether what was loaded came from the unversioned shape, so the first save preserves the
+	/// original as `settings.json.bak` before replacing it (§110).
+	#[serde(skip)]
+	migrated: bool,
+
 	/// The OS window's logical size as `(width, height)`, or `None` on a first run — the app
 	/// then opens at its built-in default (a full-width terminal plus the browser strip). NOT
 	/// the window POSITION: a window restored onto a monitor that has since been unplugged is
@@ -60,6 +84,29 @@ pub struct Settings {
 	/// it in for an older file written before the field existed.
 	#[serde(default, skip_serializing_if = "HashMap::is_empty")]
 	pub editor_theme_by_ext: HashMap<String, EditorTheme>,
+}
+
+/// The format version this build writes (§110). A string, for the same reason `targets.json`'s is.
+const FORMAT: &str = "2";
+
+/// Serde's default for a missing `version` key: the unversioned shape this file used to have.
+fn version_one() -> String {
+	"1".to_owned()
+}
+
+impl Default for Settings {
+	/// Written out rather than derived, because `version` must default to the CURRENT format here
+	/// while defaulting to `"1"` when serde fills in a missing key. A derived `Default` would give
+	/// the empty string and this build would write `"version": ""`.
+	fn default() -> Self {
+		Self {
+			version: FORMAT.to_owned(),
+			refusal: None,
+			migrated: false,
+			window: None,
+			editor_theme_by_ext: HashMap::new(),
+		}
+	}
 }
 
 impl Settings {
@@ -146,6 +193,12 @@ impl Settings {
 				return;
 			}
 		};
+		if let Some(version) = &self.refusal {
+			eprintln!(
+				"cmote: not writing {FILE} — it is version {version} and this cmote is older"
+			);
+			return;
+		}
 		let text = match serde_json::to_string_pretty(self) {
 			Ok(text) => text,
 			Err(error) => {
@@ -153,7 +206,16 @@ impl Settings {
 				return;
 			}
 		};
-		if let Err(error) = crate::store::write_atomically(&dir.join(FILE), text.as_bytes()) {
+		let path = dir.join(FILE);
+		// Preserve the unversioned original before the first save that changes its shape, once
+		// (`store::back_up_once`) — the same rule `targets.json` follows (§110).
+		if self.migrated
+			&& let Err(error) = crate::store::back_up_once(&path)
+		{
+			eprintln!("cmote: cannot back up {FILE}: {error:#}");
+			return;
+		}
+		if let Err(error) = crate::store::write_atomically(&path, text.as_bytes()) {
 			eprintln!("cmote: cannot write {FILE}: {error:#}");
 		}
 	}
@@ -162,7 +224,27 @@ impl Settings {
 	/// bad file through" rule is testable without touching the filesystem.
 	fn from_json(text: &str) -> Self {
 		match serde_json::from_str::<Self>(text) {
-			Ok(settings) => settings.sanitized(),
+			Ok(settings) if settings.version == FORMAT => settings.sanitized(),
+			// The unversioned shape: read as before, and marked so the first save preserves it.
+			Ok(settings) if settings.version == version_one() => Self {
+				migrated: true,
+				..settings.sanitized()
+			},
+			// Any other version was written by a cmote newer than this one. Nothing is taken from
+			// it and nothing will be written over it. There is no user-facing surface for this the
+			// way there is for a refused `targets.json`, and it needs none: this file holds the
+			// window size and the editor themes, so a refusal costs a remembered window — while
+			// overwriting it would cost whatever the newer build keeps here (§110).
+			Ok(settings) => {
+				eprintln!(
+					"cmote: {FILE} is version {} — this cmote writes version {FORMAT}. Leaving it 					 alone; the window size will not be remembered this run.",
+					settings.version
+				);
+				Self {
+					refusal: Some(settings.version),
+					..Self::default()
+				}
+			}
 			Err(error) => {
 				eprintln!("cmote: ignoring an unreadable settings file: {error}");
 				Self::default()
@@ -219,9 +301,19 @@ mod tests {
 	}
 
 	#[test]
-	fn a_missing_file_reads_as_defaults() {
-		// `from_json` is the whole parse path; empty/blank JSON is a first run.
-		assert_eq!(Settings::from_json("{}"), Settings::default());
+	fn an_empty_object_reads_as_version_one_defaults() {
+		// `from_json` is the whole parse path. `{}` is what an older cmote wrote on a first run, so
+		// it carries no version key — which makes it a version-1 file with default values, not a
+		// current one (§110). The values match `default`; the format does not.
+		let settings = Settings::from_json("{}");
+		assert_eq!(settings.window, None);
+		assert!(settings.editor_theme_by_ext.is_empty());
+		assert_eq!(settings.version, "1");
+		assert!(
+			settings.migrated,
+			"a file with no version key is one to migrate"
+		);
+		assert!(settings.refusal.is_none());
 	}
 
 	#[test]
@@ -277,10 +369,41 @@ mod tests {
 	}
 
 	#[test]
-	fn a_first_run_serializes_to_an_empty_object() {
-		// `window` is skipped while `None`, so a first-run file is just `{}` — no null to trip
-		// an older reader, and the tidiest possible file.
+	fn a_first_run_serializes_to_its_version_and_nothing_else() {
+		// `window` and the theme map are both skipped while empty, so a first-run file carries only
+		// the one thing it must always say: which format it is (§110). It used to be `{}`, which is
+		// tidier and is exactly the problem — a file that does not say what it is cannot be told
+		// apart from a newer one.
 		let json = serde_json::to_string(&Settings::default()).unwrap();
-		assert_eq!(json, "{}");
+		assert_eq!(json, r#"{"version":"2"}"#);
+	}
+
+	#[test]
+	fn a_version_this_build_does_not_know_is_refused_and_not_written_back() {
+		// What a newer cmote might leave behind: a version key this build has never heard of, plus a
+		// setting it cannot see. Nothing is taken from it.
+		let newer = r#"{"version": "3", "window": [1234.0, 900.0], "theme": "solarized"}"#;
+		let settings = Settings::from_json(newer);
+		assert_eq!(settings.refusal.as_deref(), Some("3"));
+		assert_eq!(
+			settings.window, None,
+			"a refused file must not hand over even the values this build understands"
+		);
+		// `save` returns early on a refusal, so there is nothing to assert about the disk here —
+		// the guard is the first statement in it, and this is the state that trips it.
+		assert!(!settings.migrated, "a refusal is not a migration");
+	}
+
+	#[test]
+	fn a_current_file_is_read_as_current() {
+		let current = r#"{"version": "2", "window": [1000.0, 700.0]}"#;
+		let settings = Settings::from_json(current);
+		assert_eq!(settings.window, Some((1000.0, 700.0)));
+		assert_eq!(settings.version, "2");
+		assert!(
+			!settings.migrated,
+			"nothing to migrate, so nothing to back up"
+		);
+		assert!(settings.refusal.is_none());
 	}
 }
