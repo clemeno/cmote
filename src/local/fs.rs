@@ -29,7 +29,7 @@ use tokio::sync::mpsc;
 
 use super::path;
 use crate::bridge::SshEvent;
-use crate::files::{self, Entry, Kind, Meta, Zone};
+use crate::files::{self, Entry, Kind, Meta, TimeZone};
 
 /// List the folders inside `pane`, for the explorer tree (§18) — the local twin of
 /// `ssh::browse::list`.
@@ -548,7 +548,7 @@ where
 /// computed from a date: the OS has already decided which rule is in force right now, and that
 /// decision is the one the file times on screen were stamped under.
 #[cfg(windows)]
-fn zone() -> Zone {
+fn zone() -> TimeZone {
 	use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
 
 	// SAFETY: `GetTimeZoneInformation` fills a caller-owned struct of exactly this type and reads
@@ -561,7 +561,7 @@ fn zone() -> Zone {
 	if id == TIME_ZONE_ID_INVALID {
 		// No zone to be had: the default renders as UTC, which is at least never wrong about the
 		// instant, only about the wall clock (§20).
-		return Zone::default();
+		return TimeZone::default();
 	}
 	let bias = if id == TIME_ZONE_ID_DAYLIGHT {
 		info.Bias + info.DaylightBias
@@ -570,7 +570,7 @@ fn zone() -> Zone {
 		// say whether daylight time is in force has, by saying so, told us not to add an hour.
 		info.Bias + info.StandardBias
 	};
-	Zone {
+	TimeZone {
 		offset: -bias,
 		label: String::new(),
 	}
@@ -581,8 +581,8 @@ fn zone() -> Zone {
 /// clock, which is the same state a remote with no `date` leaves the pane in (§20) — but it is a
 /// visible gap on the machine the user is sitting at, and it is the thinner half of §103.
 #[cfg(target_os = "macos")]
-fn zone() -> Zone {
-	Zone::default()
+fn zone() -> TimeZone {
+	TimeZone::default()
 }
 
 #[cfg(test)]

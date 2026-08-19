@@ -524,7 +524,7 @@ pub enum SshEvent {
 	FilesFailed { request: u64, reason: String },
 	/// The remote machine's timezone (§20), from one `date` probe per session. Every mtime
 	/// in the pane is rendered against it, so it arrives once and applies to all of them.
-	Zone(crate::files::Zone),
+	Zone(crate::files::TimeZone),
 	/// Where a selected symlink points (§20). Carries the link's own path so an answer for
 	/// a link the selection has moved off is recognisable.
 	LinkTarget { path: String, target: String },

@@ -66,7 +66,7 @@ pub struct Entry {
 pub struct Meta {
 	pub size: Option<u64>,
 	/// Last modification, in seconds since the epoch — the same instant everywhere, so
-	/// it is the *display* that needs the server's timezone, not this (`Zone`).
+	/// it is the *display* that needs the server's timezone, not this (`TimeZone`).
 	pub mtime: Option<u32>,
 	/// The owner and group as the server names them, falling back to the numeric id when
 	/// it gave only that.
@@ -86,14 +86,14 @@ pub struct Meta {
 /// no `date`), this default renders as UTC, which is at least never wrong about the
 /// instant.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Zone {
+pub struct TimeZone {
 	/// Minutes east of UTC.
 	pub offset: i32,
 	/// What the server calls it ("CEST", "UTC"), empty when it would not say.
 	pub label: String,
 }
 
-impl Default for Zone {
+impl Default for TimeZone {
 	fn default() -> Self {
 		Self {
 			offset: 0,
@@ -366,7 +366,7 @@ pub struct Files {
 	/// How far the grid is scrolled, in pixels (§20).
 	scroll: f32,
 	/// The remote machine's timezone, as `date` reported it (§20).
-	zone: Zone,
+	zone: TimeZone,
 	/// Where the selected symlink points, once the server has been asked (§20). Keyed by
 	/// the link's own path, so an answer that arrives after the selection moved on is
 	/// recognisable as stale. Resolving a link costs a round trip, which is why it is
@@ -409,7 +409,7 @@ impl Default for Files {
 			rename: None,
 			notice: None,
 			scroll: 0.0,
-			zone: Zone::default(),
+			zone: TimeZone::default(),
 			link_target: None,
 			sort: None,
 			sort_dir: None,
@@ -616,12 +616,12 @@ impl Files {
 	}
 
 	/// The remote machine's timezone, used to render every mtime in the pane (§20).
-	pub fn zone(&self) -> &Zone {
+	pub fn zone(&self) -> &TimeZone {
 		&self.zone
 	}
 
 	/// The server answered the timezone probe.
-	pub fn set_zone(&mut self, zone: Zone) {
+	pub fn set_zone(&mut self, zone: TimeZone) {
 		self.zone = zone;
 	}
 
@@ -998,7 +998,7 @@ impl Files {
 		self.scroll = 0.0;
 		self.link_target = None;
 		// The next session is a different machine: its clock is not this one's (§20).
-		self.zone = Zone::default();
+		self.zone = TimeZone::default();
 		// Not `begin()`: bumping the request here too is what stops a batch from the
 		// previous session landing in the next one.
 		self.request += 1;
@@ -1134,7 +1134,7 @@ fn name_cmp(left: &Entry, right: &Entry) -> std::cmp::Ordering {
 /// dependency (or an OS call) to learn what "24/07" means to this user, and an ordering
 /// that is unambiguous everywhere costs neither. The zone tag is the server's own, so the
 /// reading matches what `ls -l` on that machine would show.
-pub fn format_mtime(epoch: u32, zone: &Zone) -> String {
+pub fn format_mtime(epoch: u32, zone: &TimeZone) -> String {
 	let (year, month, day, seconds) = local_parts(epoch, zone);
 	let stamp = format!(
 		"{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
@@ -1152,7 +1152,7 @@ pub fn format_mtime(epoch: u32, zone: &Zone) -> String {
 /// is noise. Naming the zone stays the details popup's job (§20), which calls `format_mtime`
 /// for the full, tagged reading. The `zone` is kept as a parameter because `local_parts` still
 /// needs the offset to do the shift; only the trailing tag goes.
-pub fn format_mtime_short(epoch: u32, zone: &Zone) -> String {
+pub fn format_mtime_short(epoch: u32, zone: &TimeZone) -> String {
 	let (year, month, day, seconds) = local_parts(epoch, zone);
 	format!(
 		"{year:04}-{month:02}-{day:02} {:02}:{:02}",
@@ -1164,7 +1164,7 @@ pub fn format_mtime_short(epoch: u32, zone: &Zone) -> String {
 /// Tag a formatted `stamp` with the server's zone (§20): its label, its `+HH:MM` offset, or
 /// both — and nothing at all for plain UTC with no label. Shared by the full and the short
 /// mtime formats so a time is tagged the same way wherever it is shown.
-fn with_zone(stamp: String, zone: &Zone) -> String {
+fn with_zone(stamp: String, zone: &TimeZone) -> String {
 	match (zone.label.is_empty(), zone.offset) {
 		(true, 0) => stamp,
 		(true, offset) => format!("{stamp} {}", format_offset(offset)),
@@ -1179,7 +1179,7 @@ fn with_zone(stamp: String, zone: &Zone) -> String {
 /// The epoch is UTC; shifting by the offset gives the server's wall clock, and
 /// `div_euclid`/`rem_euclid` keep that correct for the negative offsets west of Greenwich,
 /// where a plain division would round towards zero and land a day out.
-fn local_parts(epoch: u32, zone: &Zone) -> (i64, i64, i64, i64) {
+fn local_parts(epoch: u32, zone: &TimeZone) -> (i64, i64, i64, i64) {
 	let local = i64::from(epoch) + i64::from(zone.offset) * 60;
 	let (year, month, day) = civil_from_days(local.div_euclid(86_400));
 	(year, month, day, local.rem_euclid(86_400))
@@ -1218,7 +1218,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// Read `date +'%z %Z'` back off the server (§20): `+0200 CEST`. The label is optional —
 /// some shells answer with the offset alone — but an unparseable offset means we do not
 /// know the zone at all, and rendering times in a guessed one would be worse than UTC.
-pub fn parse_zone(output: &str) -> Option<Zone> {
+pub fn parse_zone(output: &str) -> Option<TimeZone> {
 	let mut fields = output.split_whitespace();
 	let offset = fields.next()?;
 	let label = fields.next().unwrap_or_default().to_owned();
@@ -1236,7 +1236,7 @@ pub fn parse_zone(output: &str) -> Option<Zone> {
 	}
 	let hours: i32 = digits[..2].parse().ok()?;
 	let minutes: i32 = digits[2..].parse().ok()?;
-	Some(Zone {
+	Some(TimeZone {
 		offset: sign * (hours * 60 + minutes),
 		label,
 	})
@@ -1822,10 +1822,10 @@ mod tests {
 
 	#[test]
 	fn an_mtime_reads_as_the_servers_own_wall_clock() {
-		let utc = Zone::default();
+		let utc = TimeZone::default();
 		assert_eq!(format_mtime(1_774_000_000, &utc), "2026-03-20 09:46:40 UTC");
 		// East of Greenwich the same instant is later in the day…
-		let paris = Zone {
+		let paris = TimeZone {
 			offset: 120,
 			label: "CEST".to_owned(),
 		};
@@ -1835,7 +1835,7 @@ mod tests {
 		);
 		// …and west of it, earlier — here far enough to be the previous day, which is
 		// what the euclidean division is for.
-		let honolulu = Zone {
+		let honolulu = TimeZone {
 			offset: -600,
 			label: "HST".to_owned(),
 		};
@@ -1853,9 +1853,9 @@ mod tests {
 		// The grid cell's compact form: same instant and same zone SHIFT as the full format —
 		// the clock is still the server's wall clock — but trimmed to the day and the minute,
 		// and with no zone tag. The seconds go and the `CEST (+02:00)` tag goes; the shift stays.
-		let utc = Zone::default();
+		let utc = TimeZone::default();
 		assert_eq!(format_mtime_short(1_774_000_000, &utc), "2026-03-20 09:46");
-		let paris = Zone {
+		let paris = TimeZone {
 			offset: 120,
 			label: "CEST".to_owned(),
 		};
@@ -1870,14 +1870,14 @@ mod tests {
 	fn the_zone_probe_reads_dates_own_answer() {
 		assert_eq!(
 			parse_zone("+0200 CEST\n"),
-			Some(Zone {
+			Some(TimeZone {
 				offset: 120,
 				label: "CEST".to_owned()
 			})
 		);
 		assert_eq!(
 			parse_zone("-0930 MART"),
-			Some(Zone {
+			Some(TimeZone {
 				offset: -570,
 				label: "MART".to_owned()
 			})
