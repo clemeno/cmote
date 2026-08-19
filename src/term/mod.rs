@@ -172,6 +172,48 @@ const UNIT_ID: &str = "00434D45";
 /// rather than mapping a viewport row straight to a grid line.
 const SCROLLBACK: usize = 10_000;
 
+/// A row count or page row index as the engine's signed line number (§111).
+///
+/// cmote counts rows in `usize` because that is what the engine's own `screen_lines()`,
+/// `history_size()` and `display_offset()` return; the engine INDEXES rows with a signed `Line`,
+/// where 0 is the top of the active page and -1 is the newest scrolled-off row. So every walk over the
+/// grid crosses this boundary, and it used to cross it with a bare `as i32` in twenty-odd places.
+///
+/// Out of range is a bug rather than a condition, which is why this panics rather than clamping. The
+/// numbers that reach here come from the engine's own geometry: a page is at most `u16::MAX` rows
+/// because the pty size is a `u16` pair (§9), and the history is capped at `SCROLLBACK`. The largest
+/// value possible is therefore about 75,000 against an `i32` that holds two billion, so a failure
+/// here would mean the engine had reported a geometry it cannot itself hold — and clamping that to
+/// `i32::MAX` would only move the panic into the grid's own indexing, with a worse message.
+fn as_line_number(rows: usize) -> i32 {
+	i32::try_from(rows).expect("a row count from the engine's own geometry fits in an i32")
+}
+
+/// The engine's `Line` for a row of the active page — 0 is the top of the screen.
+fn page_line(row: usize) -> Line {
+	Line(as_line_number(row))
+}
+
+/// The engine's `Line` for a scrolled-off row, counted back from the page: `back == 0` is the NEWEST
+/// row in the scrollback, which the engine calls `Line(-1)`.
+///
+/// Worth a name of its own because the off-by-one goes the other way from every other row index, and
+/// `-(1 + back as i32)` written out at each site is one typo away from reading the wrong row.
+fn history_line(back: usize) -> Line {
+	Line(-1 - as_line_number(back))
+}
+
+/// A scroll distance in lines, as the engine's `Scroll::Delta` takes it (§23).
+///
+/// This one CLAMPS where `as_line_number` panics, and the difference is the direction of travel: a
+/// row index that does not fit is a broken geometry, but a scroll distance that does not fit is
+/// merely further than the document goes, and the engine clamps a delta to the document anyway. So
+/// saturating here lands on exactly the same row the engine would have chosen.
+fn scroll_delta(lines: i64) -> i32 {
+	i32::try_from(lines.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+		.expect("clamped into an i32's range on the line above")
+}
+
 /// DECSTR, the soft reset, written in the sequences the engine itself handles (§72).
 ///
 /// `CSI ! p` reaches nothing in `vte`, so `Terminal::soft_reset` feeds the engine this instead: the
@@ -965,7 +1007,7 @@ impl Terminal {
 		let grid = self.term.grid_mut();
 		for (row, columns) in spans {
 			for column in columns {
-				let cell = &mut grid[Line(row as i32)][Column(column)];
+				let cell = &mut grid[page_line(row)][Column(column)];
 				if protect::is_protected(cell.flags.bits()) {
 					continue;
 				}
@@ -1120,7 +1162,7 @@ impl Terminal {
 		let mut checksum = rect::Checksum::default();
 		for row in bounds.rows() {
 			for column in bounds.columns() {
-				let cell = &grid[Line(row as i32)][Column(column)];
+				let cell = &grid[page_line(row)][Column(column)];
 				let mut value = u32::from(cell.c);
 				// Protection is not in `Flags` — it rides bit 15 (§56) — so it is read through the
 				// same helper the selective erase uses rather than by naming the bit twice.
@@ -1148,7 +1190,7 @@ impl Terminal {
 		let grid = self.term.grid_mut();
 		for row in bounds.rows() {
 			for column in bounds.columns() {
-				let cell = &mut grid[Line(row as i32)][Column(column)];
+				let cell = &mut grid[page_line(row)][Column(column)];
 				if selective && protect::is_protected(cell.flags.bits()) {
 					continue;
 				}
@@ -1169,7 +1211,7 @@ impl Terminal {
 		let grid = self.term.grid_mut();
 		for row in bounds.rows() {
 			for column in bounds.columns() {
-				grid[Line(row as i32)][Column(column)] = template.clone();
+				grid[page_line(row)][Column(column)] = template.clone();
 			}
 		}
 	}
@@ -1196,7 +1238,7 @@ impl Terminal {
 		let grid = self.term.grid_mut();
 		for row in bounds.rows() {
 			for column in bounds.columns_on(row, extent, cols) {
-				let flags = &mut grid[Line(row as i32)][Column(column)].flags;
+				let flags = &mut grid[page_line(row)][Column(column)].flags;
 				let mut before = 0u8;
 				for (attribute, flag) in RECT_ATTRIBUTES {
 					if flags.contains(flag) {
@@ -1234,7 +1276,7 @@ impl Terminal {
 				.flat_map(|row| {
 					source
 						.columns()
-						.map(move |column| grid[Line(row as i32)][Column(column)].clone())
+						.map(move |column| grid[page_line(row)][Column(column)].clone())
 				})
 				.collect()
 		};
@@ -1243,7 +1285,7 @@ impl Terminal {
 		for (index, cell) in cells.into_iter().enumerate() {
 			let row = to_row + index / width;
 			let column = to_col + index % width;
-			grid[Line(row as i32)][Column(column)] = cell;
+			grid[page_line(row)][Column(column)] = cell;
 		}
 	}
 
@@ -1281,7 +1323,7 @@ impl Terminal {
 		let background = self.term.grid().cursor.template.bg;
 		let grid = self.term.grid_mut();
 		for row in band.first_row()..=band.last_row() {
-			let line = Line(row as i32);
+			let line = page_line(row);
 			let source: Vec<Cell> = (0..cols)
 				.map(|column| grid[line][Column(column)].clone())
 				.collect();
@@ -1353,7 +1395,7 @@ impl Terminal {
 		let background = self.term.grid().cursor.template.bg;
 		let grid = self.term.grid_mut();
 		for row in top..=bottom {
-			let line = Line(row as i32);
+			let line = page_line(row);
 			if columns < room {
 				// Read out and write back through a buffer, for `copy_rect`'s reason: the source and
 				// destination overlap by definition, so choosing a walk direction and hoping the
@@ -1433,31 +1475,33 @@ impl Terminal {
 			// The page slides down, from the bottom up so a row is read before it is written over.
 			for destination in (lines..rows).rev() {
 				let source = destination - lines;
-				let row = std::mem::replace(&mut grid[Line(source as i32)], carry);
-				carry = std::mem::replace(&mut grid[Line(destination as i32)], row);
+				let row = std::mem::replace(&mut grid[page_line(source)], carry);
+				carry = std::mem::replace(&mut grid[page_line(destination)], row);
 			}
 			// The scrollback's newest rows come in above what was already on the page, newest
 			// lowest, so the restored text joins the text it used to sit above with no seam.
 			for taken in 0..from_history {
-				let source = -(1 + taken as i32);
-				let destination = (lines - 1 - taken) as i32;
-				let row = std::mem::replace(&mut grid[Line(source)], carry);
-				carry = std::mem::replace(&mut grid[Line(destination)], row);
+				let source = history_line(taken);
+				let destination = page_line(lines - 1 - taken);
+				let row = std::mem::replace(&mut grid[source], carry);
+				carry = std::mem::replace(&mut grid[destination], row);
 			}
 			// Whatever the scrollback could not fill is blanked in the pen's background, the same
 			// thing an erase writes — these rows are recycled and still hold their old text.
 			for row in 0..blanks {
 				for column in 0..cols {
-					grid[Line(row as i32)][Column(column)] = background.into();
+					grid[page_line(row)][Column(column)] = background.into();
 				}
 			}
 			// Close the gap the consumed rows left: the rest of the history walks up over them, and
 			// the placeholders end up at the oldest end, which is the end that can be dropped.
+			// `step` counts from 1 here, so each `history_line` argument is one less than the step —
+			// `history_line(0)` being `Line(-1)`, the newest scrolled-off row.
 			for step in 1..=(history - from_history) {
-				let source = -((step + from_history) as i32);
-				let destination = -(step as i32);
-				let row = std::mem::replace(&mut grid[Line(source)], carry);
-				carry = std::mem::replace(&mut grid[Line(destination)], row);
+				let source = history_line(step + from_history - 1);
+				let destination = history_line(step - 1);
+				let row = std::mem::replace(&mut grid[source], carry);
+				carry = std::mem::replace(&mut grid[destination], row);
 			}
 		}
 		if from_history > 0 {
@@ -1675,7 +1719,9 @@ impl Terminal {
 		let Some(target) = self.prompts.jump(direction, history, offset) else {
 			return false;
 		};
-		let delta = target as i32 - offset as i32;
+		// Both are viewport offsets in the same document, so the subtraction is done in the line-number
+		// domain rather than on two `usize`s — where `target < offset`, a scroll DOWN, would wrap.
+		let delta = as_line_number(target) - as_line_number(offset);
 		if delta != 0 {
 			self.term.scroll_display(Scroll::Delta(delta));
 		}
@@ -1743,7 +1789,7 @@ impl Terminal {
 			let target = (history - start as i64).clamp(0, history);
 			let delta = target - offset;
 			if delta != 0 {
-				self.term.scroll_display(Scroll::Delta(delta as i32));
+				self.term.scroll_display(Scroll::Delta(scroll_delta(delta)));
 			}
 		}
 
@@ -1777,8 +1823,8 @@ impl Terminal {
 			return Vec::new();
 		}
 		let grid = self.term.grid();
-		let history = grid.history_size() as i32;
-		let screen_lines = self.term.screen_lines() as i32;
+		let history = as_line_number(grid.history_size());
+		let screen_lines = as_line_number(self.term.screen_lines());
 		let columns = self.term.columns();
 		let mut out = Vec::new();
 		// The engine stores history on the NEGATIVE lines below the active screen's line 0, so the
@@ -1826,7 +1872,7 @@ impl Terminal {
 			let target = (history - absolute as i64 + screen_lines / 2).clamp(0, history);
 			let delta = target - offset;
 			if delta != 0 {
-				self.term.scroll_display(Scroll::Delta(delta as i32));
+				self.term.scroll_display(Scroll::Delta(scroll_delta(delta)));
 			}
 		}
 
@@ -2482,6 +2528,46 @@ impl std::fmt::Debug for Terminal {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The engine's line numbering, pinned (§111): 0 is the top of the page, and the scrollback runs
+	/// NEGATIVE from -1 downwards. `history_line`'s whole job is that off-by-one, since it is the one
+	/// row index in the file that counts the opposite way from the rest.
+	#[test]
+	fn a_page_row_and_a_scrollback_row_number_in_opposite_directions() {
+		assert_eq!(page_line(0), Line(0), "row 0 is the top of the page");
+		assert_eq!(page_line(23), Line(23));
+		assert_eq!(
+			history_line(0),
+			Line(-1),
+			"the newest scrolled-off row sits at -1, not 0"
+		);
+		assert_eq!(history_line(9_999), Line(-10_000), "a full SCROLLBACK back");
+		// The two never name the same row, which is what makes reading one for the other a visible bug
+		// rather than an off-screen one.
+		assert!(history_line(0) < page_line(0));
+	}
+
+	/// A scroll distance saturates rather than wrapping, because the engine clamps a delta to the
+	/// document anyway — so the clamped value lands on the same row the engine would have chosen.
+	#[test]
+	fn a_scroll_distance_saturates_at_the_ends_of_an_i32() {
+		assert_eq!(scroll_delta(0), 0);
+		assert_eq!(scroll_delta(-42), -42);
+		assert_eq!(scroll_delta(i64::MAX), i32::MAX);
+		assert_eq!(scroll_delta(i64::MIN), i32::MIN);
+		// The boundary itself, both sides: one past is where a plain `as` would have wrapped the sign.
+		assert_eq!(scroll_delta(i64::from(i32::MAX) + 1), i32::MAX);
+		assert_eq!(scroll_delta(i64::from(i32::MIN) - 1), i32::MIN);
+	}
+
+	/// The invariant `as_line_number` rests on, stated as a test: a row count that does not fit an
+	/// `i32` cannot come from a real geometry, so it is a bug and it is loud. Before §111 the same
+	/// value truncated silently and the engine indexed some other row.
+	#[test]
+	#[should_panic(expected = "fits in an i32")]
+	fn a_row_count_too_large_to_be_a_geometry_is_refused() {
+		let _ = as_line_number(usize::MAX);
+	}
 
 	// Read `len` cells of one row into a string, through the screen view.
 	fn read(terminal: &Terminal, row: u16, col: u16, len: u16) -> String {

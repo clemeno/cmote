@@ -233,6 +233,21 @@ pub struct Screen<'a> {
 	paths: &'a super::scp::Paths,
 }
 
+/// A count out of the engine, as cmote's own `u16` geometry (§111).
+///
+/// This is the opposite boundary from `term::as_line_number`, and it answers the opposite way: that
+/// one panics because a row index the engine cannot hold is a broken geometry, while this one CLAMPS,
+/// because everything it feeds is a measurement a person looks at. A page of more than 65,535 rows
+/// cannot be drawn, a scroll indicator for one cannot be aimed, and the pty size that decides the
+/// real answer is a `u16` pair to begin with (§9) — so `u16::MAX` is both unreachable and the right
+/// thing to show if it ever were reached.
+///
+/// Generic over the input so the same rule covers the engine's `usize` counts and the `i32` line
+/// number a cursor point carries.
+fn as_dimension<T: TryInto<u16>>(count: T) -> u16 {
+	count.try_into().unwrap_or(u16::MAX)
+}
+
 impl<'a> Screen<'a> {
 	/// Wrap the engine's terminal. Built by `Terminal::screen`; the engine type is the one
 	/// thing that changed when the emulator was swapped (§16, §23).
@@ -243,8 +258,8 @@ impl<'a> Screen<'a> {
 	/// The grid size as `(rows, cols)`.
 	pub fn size(&self) -> (u16, u16) {
 		(
-			self.engine.screen_lines() as u16,
-			self.engine.columns() as u16,
+			as_dimension(self.engine.screen_lines()),
+			as_dimension(self.engine.columns()),
 		)
 	}
 
@@ -254,7 +269,10 @@ impl<'a> Screen<'a> {
 	/// renderer works out so it can leave the cursor undrawn once it drops below the viewport (§23).
 	pub fn cursor_position(&self) -> (u16, u16) {
 		let point = self.engine.grid().cursor.point;
-		(point.line.0.max(0) as u16, point.column.0 as u16)
+		(
+			as_dimension(point.line.0.max(0)),
+			as_dimension(point.column.0),
+		)
 	}
 
 	/// How far the viewport is scrolled back into history, in lines — 0 at the live bottom, up
@@ -263,7 +281,7 @@ impl<'a> Screen<'a> {
 	/// the cursor sits on screen. cmote moves it through `Terminal::scroll`; the engine keeps it
 	/// stationary as new output arrives, so reading history is never yanked to the bottom by activity.
 	pub fn display_offset(&self) -> u16 {
-		self.engine.grid().display_offset() as u16
+		as_dimension(self.engine.grid().display_offset())
 	}
 
 	/// How many scrolled-off lines the engine is currently retaining — the depth the scroll
@@ -273,7 +291,7 @@ impl<'a> Screen<'a> {
 	/// 0 (the live bottom) up to this many lines, so `history_size + screen rows` is the whole
 	/// document the indicator maps the thumb onto.
 	pub fn history_size(&self) -> u16 {
-		self.engine.grid().history_size() as u16
+		as_dimension(self.engine.grid().history_size())
 	}
 
 	/// Whether the ALTERNATE screen is the one on show — the page a full-screen program (vim, tmux,
@@ -411,7 +429,7 @@ impl<'a> Screen<'a> {
 	/// same visible-viewport coordinates the renderer walks — this is the read the grid does for
 	/// every cell of every frame. `line_cell` is the same read addressed by document line instead.
 	pub fn cell(&self, row: u16, col: u16) -> Option<Cell> {
-		if row as usize >= self.engine.screen_lines() {
+		if usize::from(row) >= self.engine.screen_lines() {
 			return None;
 		}
 		self.line_cell(self.line_at(row), col)
@@ -423,11 +441,11 @@ impl<'a> Screen<'a> {
 	/// coordinates be copied WHOLE — including the part of it scrolled off the screen, the one thing
 	/// §34's select-command-output could not do.
 	pub fn line_cell(&self, line: u64, col: u16) -> Option<Cell> {
-		if col as usize >= self.engine.columns() {
+		if usize::from(col) >= self.engine.columns() {
 			return None;
 		}
 		let grid_line = self.grid_line(line)?;
-		let cell = &self.engine.grid()[grid_line][Column(col as usize)];
+		let cell = &self.engine.grid()[grid_line][Column(usize::from(col))];
 		Some(build_cell(cell))
 	}
 
@@ -466,12 +484,15 @@ impl<'a> Screen<'a> {
 		let history = i64::from(self.history_size());
 		// A line past `i64::MAX` is not a line the engine has either, so the same `None` serves.
 		let grid_line = i64::try_from(line).ok()? - history;
-		if grid_line < -history || grid_line >= self.engine.screen_lines() as i64 {
+		let screen_lines = i64::try_from(self.engine.screen_lines()).ok()?;
+		if grid_line < -history || grid_line >= screen_lines {
 			return None;
 		}
-		// Bounded by the check above, so the narrowing cast cannot wrap: both ends of the range are
-		// a grid dimension, and the engine's own line index is an `i32`.
-		Some(Line(grid_line as i32))
+		// Bounded by the check above, so this conversion cannot fail: both ends of the range are a grid
+		// dimension, and the engine's own line index is an `i32`. It is spelled as a `try_from` anyway,
+		// because the function already answers `None` for a line the engine does not hold and one more
+		// `None` on an impossible path costs nothing — where a narrowing cast would have wrapped.
+		Some(Line(i32::try_from(grid_line).ok()?))
 	}
 }
 
@@ -546,9 +567,15 @@ fn color(color: EngineColor) -> Color {
 		// slots, 259-266 the dim variants (mapped back onto the base ANSI slots since cmote
 		// draws no dim palette), and everything else (foreground / background / cursor and
 		// the bright/dim foreground roles) is the terminal default.
+		// The `expect`s cannot fire: each arm's own range pattern is the proof that the value fits,
+		// which is exactly what a bare `as u8` was relying on without saying so.
 		EngineColor::Named(named) => match named as usize {
-			index @ 0..=15 => Color::Indexed(index as u8),
-			index @ 259..=266 => Color::Indexed((index - 259) as u8),
+			index @ 0..=15 => {
+				Color::Indexed(u8::try_from(index).expect("0..=15 fits a u8, per this arm"))
+			}
+			index @ 259..=266 => {
+				Color::Indexed(u8::try_from(index - 259).expect("0..=7 fits a u8, per this arm"))
+			}
 			_ => Color::Default,
 		},
 	}
