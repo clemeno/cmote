@@ -11534,3 +11534,147 @@ enough once.
   the harness would be wrong to call that a defect. Which means it says nothing about those paths.
 - **The framer is still the review's top recommendation and still unbuilt.** §106 hoisted two rules out of
   the eleven scanners' duplicated grammar; nine of them still carry the machine itself.
+## §108 — One place a word is defined
+
+This project's paper trail had a gap nobody had named: 106 numbered sections explaining every
+decision, 95 file headers explaining every module, and **nowhere that simply said what a word
+means**. Ask "what is a band?" and the honest answer was "read §102". Ask "is a profile a
+target?" and there was no answer at all — the type is `Target`, the file was `profiles.rs`, the
+README says *profiles*, and the disk says `targets.json`.
+
+The starting proposal was to rename `PLAN.md` to `CONTEXT.md` and be done. That fails on a
+number: the glossary's whole value is being read at the START of a session, and 11,536 lines of
+prose is on the order of an entire useful context window. A rename would also break 14 by-name
+references across four files, three of them pure CRLF. So the two documents stay two documents,
+with different jobs.
+
+### What each document owns
+
+| file | owns |
+|---|---|
+| `CONTEXT.md` | the WORD. 35 terms, 141 lines, 4.8 KB — small on purpose, because it is read every session |
+| `PLAN.md` | the DECISION. Its `§NN` sections **are** this project's ADRs; there is no `docs/adr/` and there will not be one |
+| `TERMINAL_COMPATIBILITY_PLAN.md` | the terminal's coverage and the evidence for each claim |
+| `README.md` | the user |
+| `AGENTS.md` | how to work here — with `CLAUDE.md` a one-line pointer at it |
+
+A `CONTEXT.md` entry may cite a `§` for depth. It may never cite one for a definition: the
+definition is the entry. That rule is what stops the two files from drifting, because there is
+only ever one place to change.
+
+### The words that meant more than one thing
+
+Every clash in the crate turned out to run along the same fault line — the terminal's vocabulary
+against the window's:
+
+| was | is | why |
+|---|---|---|
+| `ui::selection::Cell` (a screen coordinate) + `Spot` (a document coordinate) | `ScreenSpot` + `DocSpot` | two coordinate spaces, and only one of them was called a spot. `term::screen::Cell` keeps *cell*: content is what a cell IS |
+| `term::rect::Area` | `Rect` | the module was already called `rect`; *area* belongs to the window (§48), where a user can point at one |
+| `term::mod::Split` | `Interruption` | its own doc says it is "one thing `process` has to do part-way through a chunk". Nothing to do with splitting a window |
+| `ui::terminal::Panels<'a>` | `PanesView` | **pane** is the noun; *panel* survived only in prose, and both docs swapped the two words mid-sentence |
+| `files::Zone` | `TimeZone` | it is a time zone. A reader assumes a screen region |
+| `ui::terminal::Session<'a>` | `UiTerminalSession` | it is an argument pair, not a session |
+| *profile* | **target** | 454 uses to 24, and the file on disk already said `targets.json`. `profiles.rs` becomes `targets.rs`; README and UI follow |
+| *files strip* / *browser strip* / *tab strip* | **browser strip**, **tab strip** | three names for two things, used interchangeably inside one file (`ui/terminal.rs:364` and `:369`) |
+
+Two words looked like synonyms and are not. `asuser.rs` says its accounts are "one entry per
+identity in §45's sense", but an **account** is a login on the remote and an **identity** is one
+shell running as it — `Accounts` caches SFTP capability per account, `Identity` is per shell and
+carries `LOGIN_IDENTITY`. Both are real, so both are defined, and the doc line that equated them
+is the thing that was wrong.
+
+### The rule, so the next name does not need a debate
+
+**One name means one thing crate-wide** — types, `pub` free functions, module-private free
+functions, tests included. Not methods, not enum variants, not trait-impl methods: iced requires
+`update` and `view`, and those names are not ours.
+
+When that rule fires, which of two names moves:
+
+> **A wrong name is corrected. A merely-duplicated name is prefixed with its module.**
+
+`Interruption` is what `term::mod::Split` IS, so it earns a new word. `Cell` in `gatediff` is not
+wrong, only duplicated, so it becomes `GatediffCell` and nobody has to have an opinion.
+
+The inventory is **43 duplicate definitions across 24 names** (267 type definitions, 224
+distinct). The two biggest clusters are both inside `term/`: **11 private `enum Scan`** and **6
+`pub Request`**, one of each per scanner. That is the duplicated grammar the framer was always
+meant to absorb — and they are being renamed now rather than after it, which means the framer may
+later delete a name this cleanup just chose. That cost was weighed and accepted: a rename that
+lands today is worth more than a name held hostage to a refactor that has been pending since
+§106.
+
+### The rules that lived nowhere
+
+`AGENTS.md` is the more useful half of this section. Until now the green gate, the CRLF files,
+`ponytail:`, "commit but never push", the build rules and — most importantly — **the security
+refusals** existed only in a session prompt. A fresh agent had none of them, which means the
+first thing it would do with `Osc52::Disabled` or `ALLOWED_SCHEMES` is help by completing them.
+Those are now written down as decisions, with the reason attached to each, because a refusal with
+no reason beside it reads exactly like an oversight.
+
+### The gate, in the repo instead of in a habit
+
+`Cargo.toml` now carries what CI has always run:
+
+```toml
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+```
+
+Which was proved rather than assumed: an `unused_thing` variable added to `main.rs` turns plain
+`cargo check` from a warning into `error: unused variable`, exit 101. A warning can no longer wait
+until commit time to matter.
+
+`clippy::pedantic` is NOT in that table yet, and the reason is the schedule rather than the
+principle. It reports **528 warnings** across 35 lints today:
+
+| lint family | count |
+|---|---|
+| the five `cast_*` lints — u16 ↔ usize ↔ f32 grid arithmetic | 231 |
+| `doc_markdown` | 59 |
+| `unreadable_literal` | 52 |
+| `float_cmp` | 46 |
+| 31 others (`unused_async`, `too_many_lines`, `match_same_arms`, …) | 140 |
+
+Turning it on before fixing them would leave every commit in between failing its own gate, which
+is how a team learns to ignore a gate. So it goes on in the same commit that clears the last
+warning. All 528 get **fixed**, not allowed: an `allow` hides a question instead of answering it,
+and the 231 casts are a real question about boundaries. A `deny` is the opposite and stays
+welcome — `#[deny(clippy::missing_trait_methods)]` in `gate.rs` is what makes a missing `Handler`
+method a build error, and §107 rests on it.
+
+### What follows, and where it will be recorded
+
+- **§109** — the renames, one commit per term, the gate green each time, the `CONTEXT.md` entry
+  landing in the same commit as the code it governs.
+- **§110** — the two JSON stores get a version. `targets.json` grows an envelope
+  (`{"version": "2", "targets": [ … ]}`, the version a STRING), the loader sniffs `[` for the
+  unversioned shape and calls it `"1"`, a file newer than the binary is refused for BOTH load and
+  save rather than silently overwritten, `<file>.bak` is written once before the first migrating
+  save, and the temp-then-rename write that `vault.rs` already does is factored out and used by
+  all three writers.
+- **§111** — the pedantic pass, ending with the line that turns it on.
+
+The documentation sweep runs after the renames, in one pass to the final names, and it is
+total — prose, code blocks, README, `docs/`, and the four hand-built SVGs, whose `<text>` labels
+carry the vocabulary at hand-placed coordinates and will need looking at. **One carve-out**:
+verbatim quotes of somebody else's words — alacritty's source, xterm's `ctlseqs`, DEC's manual —
+keep their spelling. A renamed quote is no longer evidence for the claim it supports, and the
+compat plan's Evidence section is how §106 and §107 justify themselves.
+
+### Not done
+
+- **The glossary is 35 terms, chosen by reading `term/` and the type list.** A word that only
+  ever appears in `ssh/` or `ui/` prose may be missing, and the way that surfaces is somebody
+  looking a word up and not finding it.
+- **The `§` numbering is still two styles** — `## 44. Title` for the older sections, `## §102 —
+  Title` for the newer. Both cite as `§NN`, so 4,314 citations are unaffected; the headings get
+  normalised before the renames start.
+- **`AGENTS.md` is prose, so nothing enforces it.** The gate and the lint table are enforced; "one
+  file header per module" and "no `allow`" are not, and a reader who skips the file is not stopped
+  by anything.

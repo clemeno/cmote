@@ -7,6 +7,21 @@ edition = "2024"
 # no license, and that includes our own.
 license = "MIT"
 
+# The green gate, declared in the repo instead of remembered (PLAN §108). `cargo clippy
+# --all-targets -- -D warnings` is what CI runs and what a commit has to pass, so saying it here
+# too means a plain `cargo build` already fails on the warning the gate would reject — the
+# difference between finding out in ten seconds and finding out at commit time.
+#
+# `clippy::pedantic` is deliberately NOT here yet. It reports 528 warnings today (231 of them
+# casts in the grid arithmetic), and it switches on in the same commit that clears the last of
+# them (§108). Turning it on first would leave every commit in between failing its own gate,
+# which teaches everyone to ignore the gate.
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+all = "deny"
+
 [dependencies]
 # The encrypted secret vault for opt-in credential persistence (PLAN §16). A saved
 # password / key passphrase is kept in `cmote-data/secrets.age`, encrypted with a master
