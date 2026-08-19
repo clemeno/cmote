@@ -7907,7 +7907,7 @@ knows the manual and not the reasoning.
 
 ### What it cost
 
-One enum variant (`protect::Request::SoftReset`), ~20 lines of code under ~60 lines of comment in
+One enum variant (`protect::ProtectRequest::SoftReset`), ~20 lines of code under ~60 lines of comment in
 `term/mod.rs`, and eleven tests. 1061 → 1072, green on `cargo check --all-targets` / `test` /
 `clippy -D warnings` / `fmt`.
 
@@ -9118,7 +9118,7 @@ Three details are cmote's own:
 - **The protection bit survives.** cmote borrows a spare bit of the engine's flag word for DECSCA (§56),
   and the `CSI 0 m` that opens a restore assigns that whole word. A stack of *video* attributes must not
   clear a cell-protection setting, so it is read across the restore and put back — the care
-  `protect::Request::Reassert` takes after an ordinary SGR, on the one path that does not go through the
+  `protect::ProtectRequest::Reassert` takes after an ordinary SGR, on the one path that does not go through the
   scanner.
 - **An overflowing push drops its own pop.** xterm's stack is ten deep and an eleventh push is dropped;
   cmote drops it too, and *counts* it, so the pop that matches it is dropped as well. Without the count
@@ -9673,7 +9673,7 @@ and not applied to these two for eleven sections.
 
 `term/dsr.rs`'s allow-list widens from one value to three and its `feed` reports **which** question
 each offset carried, so `term/mod.rs` answers a cursor position from the live cursor and the two
-locator questions from constants. `Interruption::CursorReport` becomes `Interruption::Dsr(dsr::Request)`.
+locator questions from constants. `Interruption::CursorReport` becomes `Interruption::Dsr(dsr::DsrRequest)`.
 
 The two negatives ride the split even though they are constants and could have waited for the end of
 the chunk like XTVERSION does. One route through one scanner is easier to keep right than two, and

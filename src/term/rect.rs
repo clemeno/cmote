@@ -293,7 +293,7 @@ impl Rect {
 /// One rectangular operation the stream asked for, to be applied once the engine has been advanced
 /// past the sequence that carried it (see `Rectangles::feed` on offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum RectRequest {
 	/// DECERA — blank the rectangle. Protection does not stop it.
 	Erase(Corners),
 	/// DECSERA — blank the rectangle, leaving the cells DECSCA protected (§56).
@@ -392,7 +392,7 @@ impl Rectangles {
 	/// DECSACE comes out of here as nothing at all: it selects a mode, and the mode is stamped onto
 	/// the attribute requests that follow it (§59). A chunk carrying only a DECSACE therefore still
 	/// reports no request, and `process` still makes a single advance.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, RectRequest)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -474,32 +474,32 @@ impl Rectangles {
 	///
 	/// Takes `&mut self` for one sequence only: DECSACE sets a mode instead of asking for work, so
 	/// it is recorded here and reported as nothing (§59).
-	fn classify(&mut self, final_byte: u8) -> Option<Request> {
+	fn classify(&mut self, final_byte: u8) -> Option<RectRequest> {
 		let numbers = self.numbers()?;
 		match (final_byte, self.marker, self.intermediates.as_slice()) {
 			// DECERA / DECSERA — the same four corners, differing only in whether protection holds.
-			(b'z', None, [b'$']) => Some(Request::Erase(corners(&numbers, 0))),
-			(b'{', None, [b'$']) => Some(Request::SelectiveErase(corners(&numbers, 0))),
+			(b'z', None, [b'$']) => Some(RectRequest::Erase(corners(&numbers, 0))),
+			(b'{', None, [b'$']) => Some(RectRequest::SelectiveErase(corners(&numbers, 0))),
 			// DECFRA — the character first, then the four corners.
 			(b'x', None, [b'$']) => {
 				let glyph = fill_char(number(&numbers, 0))?;
-				Some(Request::Fill(glyph, corners(&numbers, 1)))
+				Some(RectRequest::Fill(glyph, corners(&numbers, 1)))
 			}
 			// DECCRA — the source's four corners, its page (ignored), then the destination's top-left
 			// corner. The eighth parameter is the destination page, ignored for the same reason.
-			(b'v', None, [b'$']) => Some(Request::Copy {
+			(b'v', None, [b'$']) => Some(RectRequest::Copy {
 				source: corners(&numbers, 0),
 				top: number(&numbers, 5),
 				left: number(&numbers, 6),
 			}),
 			// DECCARA / DECRARA — the four corners, then a list of SGR-shaped selectors. Same
 			// shape, different verb: one sets and clears, the other flips.
-			(b'r', None, [b'$']) => Some(Request::Attributes {
+			(b'r', None, [b'$']) => Some(RectRequest::Attributes {
 				corners: corners(&numbers, 0),
 				extent: self.extent,
 				change: changes(selectors(&numbers)),
 			}),
-			(b't', None, [b'$']) => Some(Request::Attributes {
+			(b't', None, [b'$']) => Some(RectRequest::Attributes {
 				corners: corners(&numbers, 0),
 				extent: self.extent,
 				change: reversals(selectors(&numbers)),
@@ -509,7 +509,7 @@ impl Rectangles {
 			// which is what clamping a page number to the number of pages there are amounts to. That
 			// also settles the `Pp = 0` case DEC defines as "all of page memory" — with one page, the
 			// whole page is all of them, and omitted corners already mean the whole page.
-			(b'y', None, [b'*']) => Some(Request::Checksum {
+			(b'y', None, [b'*']) => Some(RectRequest::Checksum {
 				id: number(&numbers, 0),
 				corners: corners(&numbers, 2),
 			}),
@@ -523,11 +523,11 @@ impl Rectangles {
 			// An omitted or zero count is one column, as it is for ICH, CUU and every other
 			// `Ps`-counted movement — `vte`'s own `next_param_or(1)` reads a literal `0` that way too,
 			// so this agrees with how the engine would have read the same parameter.
-			(b'@', None, [b' ']) => Some(Request::Shift {
+			(b'@', None, [b' ']) => Some(RectRequest::Shift {
 				direction: Direction::Left,
 				columns: number(&numbers, 0).max(1),
 			}),
-			(b'A', None, [b' ']) => Some(Request::Shift {
+			(b'A', None, [b' ']) => Some(RectRequest::Shift {
 				direction: Direction::Right,
 				columns: number(&numbers, 0).max(1),
 			}),
@@ -535,18 +535,18 @@ impl Rectangles {
 			// "legal under ECMA 48 and previously unused" (§101). `CSI Ps T` with no intermediate is
 			// SD itself and belongs to the engine; the intermediate is the whole difference, as it is
 			// for SL and SR above.
-			(b'T', None, [b'+']) => Some(Request::Unscroll {
+			(b'T', None, [b'+']) => Some(RectRequest::Unscroll {
 				lines: number(&numbers, 0).max(1),
 			}),
 			// DECIC / DECDC — insert or delete columns, under an apostrophe intermediate `vte` has no
 			// arm for at all, so like the two above they reach nothing and are cmote's to read (§102).
 			// The near-miss rule again: `CSI Ps }` and `CSI Ps ~` without the intermediate are other
 			// sequences entirely, and the intermediate is the whole of what tells them apart.
-			(b'}', None, [b'\'']) => Some(Request::Columns {
+			(b'}', None, [b'\'']) => Some(RectRequest::Columns {
 				columns: number(&numbers, 0).max(1),
 				insert: true,
 			}),
-			(b'~', None, [b'\'']) => Some(Request::Columns {
+			(b'~', None, [b'\'']) => Some(RectRequest::Columns {
 				columns: number(&numbers, 0).max(1),
 				insert: false,
 			}),
@@ -890,7 +890,7 @@ mod tests {
 	use super::*;
 
 	/// Feed one byte slice to a fresh scanner and read what it asked for.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, RectRequest)> {
 		let mut rectangles = Rectangles::default();
 		rectangles.feed(bytes)
 	}
@@ -921,7 +921,7 @@ mod tests {
 		// `\x1b[2;3;5;7$z` is 11 bytes, so the offset is 11 — one PAST the final `z`.
 		assert_eq!(
 			scan(b"\x1b[2;3;5;7$z"),
-			vec![(11, Request::Erase(box_of(2, 3, 5, 7)))]
+			vec![(11, RectRequest::Erase(box_of(2, 3, 5, 7)))]
 		);
 	}
 
@@ -929,7 +929,7 @@ mod tests {
 	fn a_selective_erase_is_the_same_rectangle_by_another_verb() {
 		assert_eq!(
 			scan(b"\x1b[2;3;5;7${"),
-			vec![(11, Request::SelectiveErase(box_of(2, 3, 5, 7)))]
+			vec![(11, RectRequest::SelectiveErase(box_of(2, 3, 5, 7)))]
 		);
 	}
 
@@ -938,7 +938,7 @@ mod tests {
 		// Every corner defaults to its edge, which is how a program spells "all of it".
 		assert_eq!(
 			scan(b"\x1b[$z"),
-			vec![(4, Request::Erase(box_of(0, 0, 0, 0)))]
+			vec![(4, RectRequest::Erase(box_of(0, 0, 0, 0)))]
 		);
 	}
 
@@ -947,7 +947,7 @@ mod tests {
 		// 45 is `-`: rule a line across a box.
 		assert_eq!(
 			scan(b"\x1b[45;2;1;2;80$x"),
-			vec![(15, Request::Fill('-', box_of(2, 1, 2, 80)))]
+			vec![(15, RectRequest::Fill('-', box_of(2, 1, 2, 80)))]
 		);
 	}
 
@@ -956,7 +956,7 @@ mod tests {
 		// 176 is `°`. The high range is the other half of what xterm allows.
 		assert_eq!(
 			scan(b"\x1b[176;1;1;1;1$x"),
-			vec![(15, Request::Fill('°', box_of(1, 1, 1, 1)))]
+			vec![(15, RectRequest::Fill('°', box_of(1, 1, 1, 1)))]
 		);
 	}
 
@@ -979,7 +979,7 @@ mod tests {
 			scan(b"\x1b[2;1;10;40;1;1;1;1$v"),
 			vec![(
 				21,
-				Request::Copy {
+				RectRequest::Copy {
 					source: box_of(2, 1, 10, 40),
 					top: 1,
 					left: 1,
@@ -996,7 +996,7 @@ mod tests {
 			scan(b"\x1b[2;1;10;40$v"),
 			vec![(
 				13,
-				Request::Copy {
+				RectRequest::Copy {
 					source: box_of(2, 1, 10, 40),
 					top: 0,
 					left: 0,
@@ -1012,7 +1012,7 @@ mod tests {
 			scan(b"\x1b[1;1;5;5;1;4$r"),
 			vec![(
 				15,
-				Request::Attributes {
+				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
 					extent: Extent::Stream,
 					change: Change {
@@ -1031,7 +1031,7 @@ mod tests {
 			scan(b"\x1b[1;1;5;5;7$t"),
 			vec![(
 				13,
-				Request::Attributes {
+				RectRequest::Attributes {
 					corners: box_of(1, 1, 5, 5),
 					extent: Extent::Stream,
 					change: Change {
@@ -1128,7 +1128,7 @@ mod tests {
 	fn a_change_with_no_selectors_asks_for_nothing() {
 		// Well-formed, and a request to do nothing. `is_empty` lets the caller skip the walk.
 		let requests = scan(b"\x1b[1;1;5;5$r");
-		let [(_, Request::Attributes { change, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { change, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert!(change.is_empty());
@@ -1150,14 +1150,14 @@ mod tests {
 		let mut rectangles = Rectangles::default();
 		assert!(rectangles.feed(b"\x1b[2*x").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
-		let [(_, Request::Attributes { extent, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, Extent::Rectangle);
 		// And back: 0 and 1 both mean the stream.
 		assert!(rectangles.feed(b"\x1b[1*x").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
-		let [(_, Request::Attributes { extent, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, Extent::Stream);
@@ -1168,7 +1168,7 @@ mod tests {
 		let mut rectangles = Rectangles::default();
 		assert!(rectangles.feed(b"\x1b[2*x\x1b[9*x").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
-		let [(_, Request::Attributes { extent, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, Extent::Rectangle);
@@ -1181,13 +1181,13 @@ mod tests {
 		let mut rectangles = Rectangles::default();
 		assert!(rectangles.feed(b"\x1b[2*x\x1b[!p").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
-		let [(_, Request::Attributes { extent, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, Extent::Rectangle);
 		assert!(rectangles.feed(b"\x1bc").is_empty());
 		let requests = rectangles.feed(b"\x1b[1;1;5;5;1$r");
-		let [(_, Request::Attributes { extent, .. })] = requests[..] else {
+		let [(_, RectRequest::Attributes { extent, .. })] = requests[..] else {
 			panic!("expected one attribute request");
 		};
 		assert_eq!(extent, Extent::Stream);
@@ -1199,7 +1199,7 @@ mod tests {
 		// spaces out of every extent selection.
 		assert_eq!(
 			scan(b"\x1b[32;1;1;1;1$x"),
-			vec![(14, Request::Fill(' ', box_of(1, 1, 1, 1)))]
+			vec![(14, RectRequest::Fill(' ', box_of(1, 1, 1, 1)))]
 		);
 		assert!(scan(b"\x1b[2*x").is_empty());
 	}
@@ -1245,7 +1245,7 @@ mod tests {
 		// The offset counts from the start of the chunk that completed the sequence.
 		assert_eq!(
 			rectangles.feed(b";7$zmore"),
-			vec![(4, Request::Erase(box_of(2, 3, 5, 7)))]
+			vec![(4, RectRequest::Erase(box_of(2, 3, 5, 7)))]
 		);
 	}
 
@@ -1255,8 +1255,8 @@ mod tests {
 		assert_eq!(
 			requests,
 			vec![
-				(11, Request::Erase(box_of(1, 1, 2, 2))),
-				(25, Request::Fill('-', box_of(1, 1, 1, 9))),
+				(11, RectRequest::Erase(box_of(1, 1, 2, 2))),
+				(25, RectRequest::Fill('-', box_of(1, 1, 1, 9))),
 			]
 		);
 	}
@@ -1427,7 +1427,7 @@ mod tests {
 			scan(b"\x1b[42;1;2;3;4;5*y"),
 			vec![(
 				16,
-				Request::Checksum {
+				RectRequest::Checksum {
 					id: 42,
 					corners: box_of(2, 3, 4, 5),
 				}
@@ -1443,7 +1443,7 @@ mod tests {
 			scan(b"\x1b[1*y"),
 			vec![(
 				5,
-				Request::Checksum {
+				RectRequest::Checksum {
 					id: 1,
 					corners: box_of(0, 0, 0, 0),
 				}
@@ -1474,7 +1474,7 @@ mod tests {
 			scan(b"\x1b[3 @"),
 			vec![(
 				5,
-				Request::Shift {
+				RectRequest::Shift {
 					direction: Direction::Left,
 					columns: 3
 				}
@@ -1484,7 +1484,7 @@ mod tests {
 			scan(b"\x1b[3 A"),
 			vec![(
 				5,
-				Request::Shift {
+				RectRequest::Shift {
 					direction: Direction::Right,
 					columns: 3
 				}
@@ -1501,7 +1501,7 @@ mod tests {
 				scan(sequence),
 				vec![(
 					sequence.len(),
-					Request::Shift {
+					RectRequest::Shift {
 						direction: Direction::Left,
 						columns: 1
 					}
@@ -1519,7 +1519,7 @@ mod tests {
 			scan(b"\x1b[3'}"),
 			vec![(
 				5,
-				Request::Columns {
+				RectRequest::Columns {
 					columns: 3,
 					insert: true
 				}
@@ -1529,7 +1529,7 @@ mod tests {
 			scan(b"\x1b[2'~"),
 			vec![(
 				5,
-				Request::Columns {
+				RectRequest::Columns {
 					columns: 2,
 					insert: false
 				}
@@ -1540,7 +1540,7 @@ mod tests {
 			scan(b"\x1b['}"),
 			vec![(
 				4,
-				Request::Columns {
+				RectRequest::Columns {
 					columns: 1,
 					insert: true
 				}
@@ -1550,7 +1550,7 @@ mod tests {
 			scan(b"\x1b[0'~"),
 			vec![(
 				5,
-				Request::Columns {
+				RectRequest::Columns {
 					columns: 1,
 					insert: false
 				}
@@ -1565,9 +1565,18 @@ mod tests {
 	/// implements and which fills with BLANKS — the one behaviour this sequence exists to avoid.
 	#[test]
 	fn an_unscroll_reads_its_line_count_and_is_not_a_plain_scroll_down() {
-		assert_eq!(scan(b"\x1b[3+T"), vec![(5, Request::Unscroll { lines: 3 })]);
-		assert_eq!(scan(b"\x1b[+T"), vec![(4, Request::Unscroll { lines: 1 })]);
-		assert_eq!(scan(b"\x1b[0+T"), vec![(5, Request::Unscroll { lines: 1 })]);
+		assert_eq!(
+			scan(b"\x1b[3+T"),
+			vec![(5, RectRequest::Unscroll { lines: 3 })]
+		);
+		assert_eq!(
+			scan(b"\x1b[+T"),
+			vec![(4, RectRequest::Unscroll { lines: 1 })]
+		);
+		assert_eq!(
+			scan(b"\x1b[0+T"),
+			vec![(5, RectRequest::Unscroll { lines: 1 })]
+		);
 		assert!(scan(b"\x1b[3T").is_empty(), "SD is the engine's");
 		assert!(scan(b"\x1b[3 T").is_empty(), "a different intermediate");
 		assert!(scan(b"\x1b[?3+T").is_empty(), "a marker rules it out");

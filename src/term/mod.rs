@@ -689,17 +689,17 @@ impl Terminal {
 
 	/// Carry out one selective-erase request (§56), with the engine already advanced past the
 	/// sequence that carried it.
-	fn apply_protection(&mut self, request: protect::Request) {
+	fn apply_protection(&mut self, request: protect::ProtectRequest) {
 		match request {
-			protect::Request::Protect(on) => self.set_pen_protection(on),
+			protect::ProtectRequest::Protect(on) => self.set_pen_protection(on),
 			// The SGR just applied may have assigned the pen's whole flag word, so put the bit back.
 			// Idempotent, which is why the scanner is free to over-report (see `term/protect.rs`).
-			protect::Request::Reassert => self.set_pen_protection(true),
-			protect::Request::Erase(erase) => self.selective_erase(erase),
+			protect::ProtectRequest::Reassert => self.set_pen_protection(true),
+			protect::ProtectRequest::Erase(erase) => self.selective_erase(erase),
 			// DECSTR (§72). The borrowed protection bit goes first and on its own, so that clearing
 			// it does not depend on where the SGR sits inside the reset below — the two are separate
 			// mechanisms and only one of them is the engine's.
-			protect::Request::SoftReset => {
+			protect::ProtectRequest::SoftReset => {
 				self.set_pen_protection(false);
 				self.soft_reset();
 			}
@@ -779,7 +779,7 @@ impl Terminal {
 	/// written, so the one piece of code that knows where "home" is under origin mode stays the
 	/// gate's `goto`: the engine puts the row at the top of the scrolling region and the gate puts
 	/// the column at the left margin. §72's route, on a sequence cmote has just started to own.
-	fn set_margins(&mut self, request: cancel::Request) {
+	fn set_margins(&mut self, request: cancel::CancelRequest) {
 		let cols = self.term.grid().columns();
 		if self.margins.set(request.left, request.right, cols) {
 			self.advance(b"\x1b[H");
@@ -818,20 +818,20 @@ impl Terminal {
 	/// the question sat, exactly as DECRQCRA's checksum does (§60). So a program that writes `CSI 5 n`
 	/// and `CSI ? 6 n` in one breath gets the two answers back in the order it asked for them, with no
 	/// second reply path to keep in step.
-	fn answer_dsr(&self, request: dsr::Request) {
+	fn answer_dsr(&self, request: dsr::DsrRequest) {
 		let reply = match request {
-			dsr::Request::CursorPosition => {
+			dsr::DsrRequest::CursorPosition => {
 				let (row, col) = self.screen().cursor_position();
 				dsr::cursor_reply(row, col)
 			}
 			// The two honest negatives (§93). Constants, so unlike the cursor they would read the
 			// same answered after the chunk — they are answered here because they arrive through
 			// the same scanner, and one route is easier to keep right than two.
-			dsr::Request::LocatorStatus => dsr::NO_LOCATOR.to_vec(),
-			dsr::Request::LocatorType => dsr::NO_LOCATOR_TYPE.to_vec(),
+			dsr::DsrRequest::LocatorStatus => dsr::NO_LOCATOR.to_vec(),
+			dsr::DsrRequest::LocatorType => dsr::NO_LOCATOR_TYPE.to_vec(),
 			// Also a constant, and for a reason worth keeping in sight: cmote's colour scheme is
 			// fixed (§6), so "dark" cannot go stale between the question and the answer (§98).
-			dsr::Request::ColorScheme => dsr::DARK_SCHEME.to_vec(),
+			dsr::DsrRequest::ColorScheme => dsr::DARK_SCHEME.to_vec(),
 		};
 		self.replies
 			.lock()
@@ -852,11 +852,11 @@ impl Terminal {
 	/// The protection bit is read across the restore and put back. cmote borrows a spare bit of the
 	/// engine's flag word for DECSCA (§56), the `CSI 0 m` that opens a restore assigns that whole word,
 	/// and a stack of VIDEO attributes has no business clearing a cell-protection setting — the same
-	/// care `protect::Request::Reassert` takes after an ordinary SGR, on the one path that does not go
+	/// care `protect::ProtectRequest::Reassert` takes after an ordinary SGR, on the one path that does not go
 	/// through the scanner.
-	fn apply_sgr_stack(&mut self, request: sgrstack::Request) {
+	fn apply_sgr_stack(&mut self, request: sgrstack::SgrStackRequest) {
 		match request {
-			sgrstack::Request::Push(mask) => {
+			sgrstack::SgrStackRequest::Push(mask) => {
 				// A remote may not make cmote hold more than xterm's ten. The drop is counted so the
 				// pop that matches it is dropped too, keeping the levels below correctly paired.
 				if self.saved_pens.len() >= sgrstack::DEPTH {
@@ -869,11 +869,11 @@ impl Terminal {
 			// RIS. Everything back to power-on, and a power-on terminal has nothing pushed — the
 			// counter with it, or the first pops after a reset would be swallowed by an overflow
 			// that belonged to the session before it (§86).
-			sgrstack::Request::Reset => {
+			sgrstack::SgrStackRequest::Reset => {
 				self.saved_pens.clear();
 				self.dropped_pushes = 0;
 			}
-			sgrstack::Request::Pop => {
+			sgrstack::SgrStackRequest::Pop => {
 				if self.dropped_pushes > 0 {
 					self.dropped_pushes -= 1;
 					return;
@@ -901,16 +901,16 @@ impl Terminal {
 	/// Nothing is written to the grid. The path is a rule the renderer applies when it derives a frame
 	/// from the grid, which is what ECMA-48's data and presentation components mean, and what keeps the
 	/// engine the only writer of its own state (§71, §73).
-	fn select_character_path(&mut self, request: scp::Request) {
+	fn select_character_path(&mut self, request: scp::ScpRequest) {
 		match request {
-			scp::Request::Select(path) => {
+			scp::ScpRequest::Select(path) => {
 				let history = self.term.grid().history_size() as u64;
 				let (row, _) = self.screen().cursor_position();
 				self.paths.select(history + u64::from(row), path);
 			}
 			// RIS drops the history, which renumbers every line: a remembered index would then name
 			// different text. The engine performs the reset itself; forgetting is cmote's share.
-			scp::Request::Reset => self.paths.clear(),
+			scp::ScpRequest::Reset => self.paths.clear(),
 		}
 	}
 
@@ -987,7 +987,7 @@ impl Terminal {
 	/// (§57). Lifting this means cmote tracking DECSTBM itself, including the engine's own clamping
 	/// rules and every reset that widens the region back out — a second copy of state the engine
 	/// already owns, which is the shape §56 turned down.
-	fn apply_rectangle(&mut self, request: rect::Request) {
+	fn apply_rectangle(&mut self, request: rect::RectRequest) {
 		// Origin mode refuses every operation that ACTS, for the reason above. The one that ASKS is
 		// not let off it — it cannot place its rectangle either — but it is still let through, because
 		// a question dropped on the floor leaves the program that asked waiting on a terminal that has
@@ -1010,9 +1010,9 @@ impl Terminal {
 		if origin
 			&& !matches!(
 				request,
-				rect::Request::Checksum { .. }
-					| rect::Request::Shift { .. }
-					| rect::Request::Columns { .. }
+				rect::RectRequest::Checksum { .. }
+					| rect::RectRequest::Shift { .. }
+					| rect::RectRequest::Columns { .. }
 			) {
 			return;
 		}
@@ -1025,28 +1025,28 @@ impl Terminal {
 		// extent is a parameter of `from_corners` rather than a mode it reads: the call site is what says
 		// which family it belongs to.
 		match request {
-			rect::Request::Erase(corners) => {
+			rect::RectRequest::Erase(corners) => {
 				if let Some(bounds) =
 					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
 				{
 					self.erase_rect(bounds, false);
 				}
 			}
-			rect::Request::SelectiveErase(corners) => {
+			rect::RectRequest::SelectiveErase(corners) => {
 				if let Some(bounds) =
 					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
 				{
 					self.erase_rect(bounds, true);
 				}
 			}
-			rect::Request::Fill(glyph, corners) => {
+			rect::RectRequest::Fill(glyph, corners) => {
 				if let Some(bounds) =
 					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
 				{
 					self.fill_rect(glyph, bounds);
 				}
 			}
-			rect::Request::Attributes {
+			rect::RectRequest::Attributes {
 				corners,
 				extent,
 				change,
@@ -1058,7 +1058,7 @@ impl Terminal {
 					self.attribute_rect(bounds, extent, change, cols);
 				}
 			}
-			rect::Request::Copy { source, top, left } => {
+			rect::RectRequest::Copy { source, top, left } => {
 				let Some(source) = rect::from_corners(source, rect::Extent::Rectangle, rows, cols)
 				else {
 					return;
@@ -1069,16 +1069,16 @@ impl Terminal {
 					self.copy_rect(source, to_row, to_col);
 				}
 			}
-			rect::Request::Shift { direction, columns } => {
+			rect::RectRequest::Shift { direction, columns } => {
 				self.shift_columns(direction, usize::from(columns).min(cols));
 			}
-			rect::Request::Unscroll { lines } => {
+			rect::RectRequest::Unscroll { lines } => {
 				self.unscroll(usize::from(lines).min(rows));
 			}
-			rect::Request::Columns { columns, insert } => {
+			rect::RectRequest::Columns { columns, insert } => {
 				self.shift_band_columns(usize::from(columns), insert);
 			}
-			rect::Request::Checksum { id, corners } => {
+			rect::RectRequest::Checksum { id, corners } => {
 				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
 				// origin-mode refusal above — is answered with the checksum of nothing, which is
 				// what a real terminal reports for an empty area and is not a special case here:
@@ -1976,14 +1976,14 @@ enum Interruption {
 	/// belongs on, while `protect` reports offsets one past the sequence so its requests land on the
 	/// far side of it. Both work through the same loop because an interruption is an interruption — the difference is
 	/// only which side of the boundary the scanner asked for.
-	Protect(protect::Request),
+	Protect(protect::ProtectRequest),
 	/// A parametrised `CSI … s` — DECSLRM or SCOSC, depending on whether mode 69 is set (§57, §102).
 	/// The only interruption whose offset is the final byte ITSELF rather than one side of the sequence,
 	/// because with the mode on the loop replaces that byte with a CAN rather than feeding it.
-	Margins(cancel::Request),
+	Margins(cancel::CancelRequest),
 	/// A rectangular area operation (§58, §59) — erase, fill, copy or restyle a box of cells. Applied
 	/// on the far side of its sequence, as a selective erase is, and for the same reason.
-	Rect(rect::Request),
+	Rect(rect::RectRequest),
 	/// DECST8C, the tab stops put back every eight columns (§74). Carries nothing — the sequence has
 	/// one meaning and no parameters beyond the `5` that identifies it, so the offset is the whole
 	/// event. Applied on the far side of its sequence, as the two above are.
@@ -1993,13 +1993,13 @@ enum Interruption {
 	/// DECXCPR has to be here at all: the cursor it reports is the cursor with the engine advanced
 	/// exactly to the question. The two locator answers are constants and ride along because they
 	/// come out of the same scanner.
-	Dsr(dsr::Request),
+	Dsr(dsr::DsrRequest),
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
-	Path(scp::Request),
+	Path(scp::ScpRequest),
 	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
 	/// the only interruption whose effect is carried out by FEEDING the engine — a pop is spelled back as the
 	/// SGR that restores the pen, so the engine stays the only writer of its own template (§71, §73).
-	SgrStack(sgrstack::Request),
+	SgrStack(sgrstack::SgrStackRequest),
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -2014,13 +2014,13 @@ struct Scanned {
 	marks: Vec<(usize, osc133::Mark)>,
 	images: Vec<(usize, graphics::Event)>,
 	bookmarks: Vec<(usize, iterm::Report)>,
-	protections: Vec<(usize, protect::Request)>,
-	cancels: Vec<cancel::Request>,
-	rectangles: Vec<(usize, rect::Request)>,
+	protections: Vec<(usize, protect::ProtectRequest)>,
+	cancels: Vec<cancel::CancelRequest>,
+	rectangles: Vec<(usize, rect::RectRequest)>,
 	tab_resets: Vec<usize>,
-	cursor_requests: Vec<(usize, dsr::Request)>,
-	paths: Vec<(usize, scp::Request)>,
-	sgr_stack: Vec<(usize, sgrstack::Request)>,
+	cursor_requests: Vec<(usize, dsr::DsrRequest)>,
+	paths: Vec<(usize, scp::ScpRequest)>,
+	sgr_stack: Vec<(usize, sgrstack::SgrStackRequest)>,
 }
 
 impl Scanned {

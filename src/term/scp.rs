@@ -73,7 +73,7 @@ pub enum Path {
 /// Something the stream asked cmote to do about character paths, to be applied once the engine has
 /// been advanced PAST the sequence that carried it (see `Scp::feed` on offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum ScpRequest {
 	/// SCP — give the line the cursor is on this path.
 	Select(Path),
 	/// RIS (`ESC c`) — the engine rebuilds the whole terminal and drops the history with it, which
@@ -117,7 +117,7 @@ impl Scp {
 	/// "the line the cursor is on" — and the sequence moves nothing, so the cursor reads the same on
 	/// either side of it; one-past keeps the rule uniform across the scanners that report something
 	/// the engine ignored.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, ScpRequest)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -136,7 +136,7 @@ impl Scp {
 					// RIS. The engine rebuilds itself and drops the history, so every line this
 					// store remembers is about to mean a different line.
 					b'c' => {
-						requests.push((index + 1, Request::Reset));
+						requests.push((index + 1, ScpRequest::Reset));
 						self.state = ScpScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
@@ -172,7 +172,7 @@ impl Scp {
 					// The final byte ends the sequence, so this is where it is judged.
 					0x40..=0x7e => {
 						if let Some(path) = self.path(byte) {
-							requests.push((index + 1, Request::Select(path)));
+							requests.push((index + 1, ScpRequest::Select(path)));
 						}
 						self.state = ScpScan::Text;
 					}
@@ -311,7 +311,7 @@ mod tests {
 	use super::*;
 
 	/// ScpScan a whole chunk in one go.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, ScpRequest)> {
 		Scp::default().feed(bytes)
 	}
 
@@ -320,20 +320,20 @@ mod tests {
 	fn the_three_paths_are_recognised() {
 		assert_eq!(
 			scan(b"\x1b[2 k"),
-			vec![(5, Request::Select(Path::RightToLeft))]
+			vec![(5, ScpRequest::Select(Path::RightToLeft))]
 		);
 		assert_eq!(
 			scan(b"\x1b[1 k"),
-			vec![(5, Request::Select(Path::LeftToRight))]
+			vec![(5, ScpRequest::Select(Path::LeftToRight))]
 		);
 		// An omitted or explicit 0 is the implementation's default, which here is left to right.
 		assert_eq!(
 			scan(b"\x1b[0 k"),
-			vec![(5, Request::Select(Path::LeftToRight))]
+			vec![(5, ScpRequest::Select(Path::LeftToRight))]
 		);
 		assert_eq!(
 			scan(b"\x1b[ k"),
-			vec![(4, Request::Select(Path::LeftToRight))]
+			vec![(4, ScpRequest::Select(Path::LeftToRight))]
 		);
 	}
 
@@ -343,11 +343,11 @@ mod tests {
 	fn the_update_mode_that_would_rewrite_the_grid_is_refused() {
 		assert_eq!(
 			scan(b"\x1b[2;1 k"),
-			vec![(7, Request::Select(Path::RightToLeft))]
+			vec![(7, ScpRequest::Select(Path::RightToLeft))]
 		);
 		assert_eq!(
 			scan(b"\x1b[2;0 k"),
-			vec![(7, Request::Select(Path::RightToLeft))]
+			vec![(7, ScpRequest::Select(Path::RightToLeft))]
 		);
 		assert!(scan(b"\x1b[2;2 k").is_empty(), "presentation to data");
 	}
@@ -372,7 +372,7 @@ mod tests {
 	/// RIS empties the store, because it drops the history and so renumbers every line.
 	#[test]
 	fn a_full_reset_is_reported() {
-		assert_eq!(scan(b"\x1bc"), vec![(2, Request::Reset)]);
+		assert_eq!(scan(b"\x1bc"), vec![(2, ScpRequest::Reset)]);
 	}
 
 	/// Output arrives in chunks of whatever size the pty hands over, so the state machine has to
@@ -385,7 +385,7 @@ mod tests {
 		assert!(scp.feed(b" ").is_empty());
 		assert_eq!(
 			scp.feed(b"k"),
-			vec![(1, Request::Select(Path::RightToLeft))]
+			vec![(1, ScpRequest::Select(Path::RightToLeft))]
 		);
 	}
 

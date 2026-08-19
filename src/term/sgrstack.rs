@@ -146,7 +146,7 @@ impl Mask {
 
 /// What one recognised sequence asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum SgrStackRequest {
 	/// Save the named attributes of the pen as it stands. `Mask::ALL` when no parameters were given.
 	Push(Mask),
 	/// Restore the top of the stack. Nothing at all when the stack is empty.
@@ -199,7 +199,7 @@ impl SgrStack {
 	/// reset (§74) and DECXCPR (§82). A push must read the pen as it stood where the push was written,
 	/// and a pop must restore it there, so both are answered with the engine advanced exactly that far
 	/// and no further.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, SgrStackRequest)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -215,12 +215,12 @@ impl SgrStack {
 						self.intermediates.clear();
 						self.state = SgrStackScan::Csi;
 					}
-					// RIS, which empties the stack — see `Request::Reset` for why this one and not
+					// RIS, which empties the stack — see `SgrStackRequest::Reset` for why this one and not
 					// the soft reset. Read here rather than borrowed from `term/scp.rs`, which reads
 					// the same byte for its own store: each scanner reads the stream itself, so
 					// neither can come to depend on the other's idea of where a sequence sat.
 					b'c' => {
-						requests.push((index + 1, Request::Reset));
+						requests.push((index + 1, SgrStackRequest::Reset));
 						self.state = SgrStackScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
@@ -287,13 +287,13 @@ impl SgrStack {
 	/// `CSI 1 # }` is a sequence cmote does not understand, and half-understanding one is the reading
 	/// this project keeps finding at the bottom of its own mistakes (§82 tightened DECXCPR the same
 	/// way).
-	fn request(&self, final_byte: u8) -> Option<Request> {
+	fn request(&self, final_byte: u8) -> Option<SgrStackRequest> {
 		if self.marker.is_some() || self.intermediates.as_slice() != [HASH] {
 			return None;
 		}
 		match final_byte {
-			b'{' | b'p' => self.push_mask().map(Request::Push),
-			b'}' | b'q' => self.params.is_empty().then_some(Request::Pop),
+			b'{' | b'p' => self.push_mask().map(SgrStackRequest::Push),
+			b'}' | b'q' => self.params.is_empty().then_some(SgrStackRequest::Pop),
 			_ => None,
 		}
 	}
@@ -331,31 +331,43 @@ mod tests {
 	use super::*;
 
 	/// SgrStackScan a whole chunk in one go — the shape of every test below that is not about splitting.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, SgrStackRequest)> {
 		SgrStack::default().feed(bytes)
 	}
 
 	/// Both sequences, and the offset each reports: ONE PAST the final byte.
 	#[test]
 	fn a_push_and_a_pop_are_found_just_past_their_final_bytes() {
-		assert_eq!(scan(b"\x1b[#{"), vec![(4, Request::Push(Mask::ALL))]);
-		assert_eq!(scan(b"\x1b[#}"), vec![(4, Request::Pop)]);
-		assert_eq!(scan(b"ab\x1b[#{cd"), vec![(6, Request::Push(Mask::ALL))]);
+		assert_eq!(
+			scan(b"\x1b[#{"),
+			vec![(4, SgrStackRequest::Push(Mask::ALL))]
+		);
+		assert_eq!(scan(b"\x1b[#}"), vec![(4, SgrStackRequest::Pop)]);
+		assert_eq!(
+			scan(b"ab\x1b[#{cd"),
+			vec![(6, SgrStackRequest::Push(Mask::ALL))]
+		);
 	}
 
 	/// xterm's own aliases, which exist "to work around language limitations of C#" and are the
 	/// spelling the matrix carried under the wrong name until §84.
 	#[test]
 	fn the_lower_case_aliases_are_the_same_two_requests() {
-		assert_eq!(scan(b"\x1b[#p"), vec![(4, Request::Push(Mask::ALL))]);
-		assert_eq!(scan(b"\x1b[#q"), vec![(4, Request::Pop)]);
+		assert_eq!(
+			scan(b"\x1b[#p"),
+			vec![(4, SgrStackRequest::Push(Mask::ALL))]
+		);
+		assert_eq!(scan(b"\x1b[#q"), vec![(4, SgrStackRequest::Pop)]);
 	}
 
 	/// No parameters saves everything, which is what xterm says and what a program that pushes
 	/// without thinking about it expects.
 	#[test]
 	fn a_push_with_no_parameters_saves_every_attribute() {
-		assert_eq!(scan(b"\x1b[#{"), vec![(4, Request::Push(Mask::ALL))]);
+		assert_eq!(
+			scan(b"\x1b[#{"),
+			vec![(4, SgrStackRequest::Push(Mask::ALL))]
+		);
 		assert!(Mask::ALL.contains(Mask::BOLD));
 		assert!(Mask::ALL.contains(Mask::BACKGROUND));
 	}
@@ -384,7 +396,7 @@ mod tests {
 				"{:?} should be one push",
 				String::from_utf8_lossy(bytes)
 			);
-			assert_eq!(found[0].1, Request::Push(expected));
+			assert_eq!(found[0].1, SgrStackRequest::Push(expected));
 		}
 	}
 
@@ -396,7 +408,7 @@ mod tests {
 			scan(b"\x1b[1;4;31#{"),
 			vec![(
 				10,
-				Request::Push(Mask::BOLD.with(Mask::UNDERLINE).with(Mask::BACKGROUND))
+				SgrStackRequest::Push(Mask::BOLD.with(Mask::UNDERLINE).with(Mask::BACKGROUND))
 			)]
 		);
 	}
@@ -407,7 +419,7 @@ mod tests {
 	fn an_unknown_parameter_is_ignored_and_the_rest_still_applies() {
 		assert_eq!(
 			scan(b"\x1b[1;6;99#{"),
-			vec![(10, Request::Push(Mask::BOLD))]
+			vec![(10, SgrStackRequest::Push(Mask::BOLD))]
 		);
 	}
 
@@ -456,7 +468,7 @@ mod tests {
 		// The offset is into THIS chunk, which is where the split advance uses it.
 		assert_eq!(
 			stack.feed(b"#{"),
-			vec![(2, Request::Push(Mask::BOLD.with(Mask::UNDERLINE)))]
+			vec![(2, SgrStackRequest::Push(Mask::BOLD.with(Mask::UNDERLINE)))]
 		);
 	}
 
@@ -482,10 +494,13 @@ mod tests {
 	/// RIS is read here as well, because a hard reset must not leave a remote's pens standing (§86).
 	#[test]
 	fn a_hard_reset_is_reported_so_the_stack_can_be_emptied() {
-		assert_eq!(scan(b"\x1bc"), vec![(2, Request::Reset)]);
+		assert_eq!(scan(b"\x1bc"), vec![(2, SgrStackRequest::Reset)]);
 		assert_eq!(
 			scan(b"\x1b[#{\x1bc"),
-			vec![(4, Request::Push(Mask::ALL)), (6, Request::Reset)]
+			vec![
+				(4, SgrStackRequest::Push(Mask::ALL)),
+				(6, SgrStackRequest::Reset)
+			]
 		);
 	}
 
@@ -505,7 +520,10 @@ mod tests {
 	fn a_push_and_its_pop_in_one_chunk_are_both_reported() {
 		assert_eq!(
 			scan(b"\x1b[#{text\x1b[#}"),
-			vec![(4, Request::Push(Mask::ALL)), (12, Request::Pop)]
+			vec![
+				(4, SgrStackRequest::Push(Mask::ALL)),
+				(12, SgrStackRequest::Pop)
+			]
 		);
 	}
 }

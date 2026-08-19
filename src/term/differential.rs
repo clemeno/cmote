@@ -305,7 +305,7 @@ mod tests {
 		scanner.feed(b"\x1b[1\"q");
 		assert_eq!(
 			scanner.feed(bytes),
-			vec![(bytes.len(), protect::Request::Reassert)],
+			vec![(bytes.len(), protect::ProtectRequest::Reassert)],
 			"and cmote reasserts protection across it"
 		);
 	}
@@ -423,7 +423,7 @@ mod tests {
 			let mut scanner = protect::Protect::default();
 			scanner.feed(b"\x1b[1\"q");
 			let found = scanner.feed(&bytes);
-			let reasserted = matches!(found.as_slice(), [(_, protect::Request::Reassert)]);
+			let reasserted = matches!(found.as_slice(), [(_, protect::ProtectRequest::Reassert)]);
 			assert_eq!(
 				dispatched, reasserted,
 				"{name}: engine {dispatched}, cmote {reasserted}"

@@ -129,7 +129,7 @@ pub enum Erase {
 /// Something the stream asked cmote to do about protection, to be applied once the engine has been
 /// advanced PAST the sequence that carried it (see `Protect::feed` on offsets).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum ProtectRequest {
 	/// DECSCA moved the pen in or out of protecting what it writes. Also carries `false` for RIS
 	/// (`ESC c`), which rebuilds the pen outright and so clears protection with it — the same as a
 	/// real terminal. The engine performs RIS itself, so nothing but the borrowed bit is cmote's
@@ -188,7 +188,7 @@ impl Protect {
 	/// engine advanced PAST it. Re-asserting protection only makes sense once the SGR that wiped it
 	/// has landed, and a selective erase reads the cursor the erase itself never moves — but the
 	/// sequence still has to reach the engine first, since the engine is the thing that ignores it.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, ProtectRequest)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -207,7 +207,7 @@ impl Protect {
 					// RIS. A full reset rebuilds the pen from scratch, protection included.
 					b'c' => {
 						self.armed = false;
-						requests.push((index + 1, Request::Protect(false)));
+						requests.push((index + 1, ProtectRequest::Protect(false)));
 						self.state = ProtectScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
@@ -276,27 +276,27 @@ impl Protect {
 	/// near-miss spellings out: `CSI 2 J` is a plain erase (no marker), `CSI > 4 ; 2 m` is
 	/// XTMODKEYS rather than an SGR (marker `>`), and `CSI 1 SP q` is a cursor-style request rather
 	/// than a DECSCA (intermediate ` `, not `"`).
-	fn classify(&mut self, final_byte: u8) -> Option<Request> {
+	fn classify(&mut self, final_byte: u8) -> Option<ProtectRequest> {
 		match (final_byte, self.marker, self.intermediates.as_slice()) {
 			// DECSCA — `CSI Ps " q`. Ps 1 protects; 0 and 2 both stop protecting, and so does an
 			// omitted parameter, which means 0.
 			(b'q', None, [b'"']) => {
 				self.armed = self.first_param() == Some(1);
-				Some(Request::Protect(self.armed))
+				Some(ProtectRequest::Protect(self.armed))
 			}
 			// DECSTR soft reset — `CSI ! p`. Clears the pen the way RIS does, and much else besides
 			// (§72), all of it `term/mod.rs`'s work. The scanner's own share is disarming: whatever
 			// the reset does downstream, an SGR after it is no longer worth a split.
 			(b'p', None, [b'!']) => {
 				self.armed = false;
-				Some(Request::SoftReset)
+				Some(ProtectRequest::SoftReset)
 			}
 			// DECSED / DECSEL — the `?` spellings of erase, the two the engine drops.
-			(b'J', Some(b'?'), []) => self.extent().map(Erase::Display).map(Request::Erase),
-			(b'K', Some(b'?'), []) => self.extent().map(Erase::Line).map(Request::Erase),
+			(b'J', Some(b'?'), []) => self.extent().map(Erase::Display).map(ProtectRequest::Erase),
+			(b'K', Some(b'?'), []) => self.extent().map(Erase::Line).map(ProtectRequest::Erase),
 			// An SGR while the pen is armed. Reported so the protection bit can be put back on
 			// the far side of it, because SGR 0 assigns the flag word whole.
-			(b'm', None, []) if self.armed => Some(Request::Reassert),
+			(b'm', None, []) if self.armed => Some(ProtectRequest::Reassert),
 			_ => None,
 		}
 	}
@@ -384,13 +384,13 @@ mod tests {
 	use super::*;
 
 	/// Feed one byte slice to a fresh scanner and read what it asked for.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, ProtectRequest)> {
 		let mut protect = Protect::default();
 		protect.feed(bytes)
 	}
 
 	/// Feed a slice to a scanner already armed, which is the state that makes SGR interesting.
-	fn scan_armed(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan_armed(bytes: &[u8]) -> Vec<(usize, ProtectRequest)> {
 		let mut protect = Protect::default();
 		protect.feed(b"\x1b[1\"q");
 		protect.feed(bytes)
@@ -407,7 +407,7 @@ mod tests {
 		let long = b"\x1b[0;1;2;3;4;5;7;9;21;30;31;38;5;196m";
 		assert_eq!(
 			scan_armed(long),
-			vec![(long.len(), Request::Reassert)],
+			vec![(long.len(), ProtectRequest::Reassert)],
 			"the reassert is reported one past the SGR's final byte"
 		);
 	}
@@ -420,35 +420,41 @@ mod tests {
 	#[test]
 	fn decsca_one_arms_the_pen() {
 		// `\x1b[1"q` is 5 bytes, so the offset is 5 — one PAST the final `q`.
-		assert_eq!(scan(b"\x1b[1\"q"), vec![(5, Request::Protect(true))]);
+		assert_eq!(scan(b"\x1b[1\"q"), vec![(5, ProtectRequest::Protect(true))]);
 	}
 
 	#[test]
 	fn decsca_zero_and_two_both_stop_protecting() {
 		// DEC gives Ps 2 the same meaning as 0, and a program that writes either expects the
 		// following text to be erasable.
-		assert_eq!(scan(b"\x1b[0\"q"), vec![(5, Request::Protect(false))]);
-		assert_eq!(scan(b"\x1b[2\"q"), vec![(5, Request::Protect(false))]);
+		assert_eq!(
+			scan(b"\x1b[0\"q"),
+			vec![(5, ProtectRequest::Protect(false))]
+		);
+		assert_eq!(
+			scan(b"\x1b[2\"q"),
+			vec![(5, ProtectRequest::Protect(false))]
+		);
 	}
 
 	#[test]
 	fn decsca_with_no_parameter_stops_protecting() {
 		// An omitted parameter means 0, so the shortest spelling unprotects.
-		assert_eq!(scan(b"\x1b[\"q"), vec![(4, Request::Protect(false))]);
+		assert_eq!(scan(b"\x1b[\"q"), vec![(4, ProtectRequest::Protect(false))]);
 	}
 
 	#[test]
 	fn a_full_reset_stops_protecting() {
 		// RIS rebuilds the pen, so protection cannot outlive it. The engine performs the rest of
 		// RIS itself, which is why this one reports nothing but the bit.
-		assert_eq!(scan(b"\x1bc"), vec![(2, Request::Protect(false))]);
+		assert_eq!(scan(b"\x1bc"), vec![(2, ProtectRequest::Protect(false))]);
 	}
 
 	#[test]
 	fn a_soft_reset_is_reported_whole_rather_than_as_a_pen_change() {
 		// DECSTR clears protection too, but reporting it as `Protect(false)` would say the pen was
 		// all it touched — and the engine hears nothing else about it (§72).
-		assert_eq!(scan(b"\x1b[!p"), vec![(4, Request::SoftReset)]);
+		assert_eq!(scan(b"\x1b[!p"), vec![(4, ProtectRequest::SoftReset)]);
 	}
 
 	#[test]
@@ -475,7 +481,7 @@ mod tests {
 	#[test]
 	fn an_sgr_while_armed_asks_for_a_reassert() {
 		// SGR 0 assigns the whole flag word, so protection has to be put back after it.
-		assert_eq!(scan_armed(b"\x1b[0m"), vec![(4, Request::Reassert)]);
+		assert_eq!(scan_armed(b"\x1b[0m"), vec![(4, ProtectRequest::Reassert)]);
 	}
 
 	#[test]
@@ -483,7 +489,10 @@ mod tests {
 		// Deliberate over-reporting: re-asserting a bit that is still set is a no-op, and telling
 		// which SGR lists contain a reset means parsing colour specs, where a `0` can be a colour
 		// index rather than a reset. Over-report and stay correct.
-		assert_eq!(scan_armed(b"\x1b[38;5;0m"), vec![(9, Request::Reassert)]);
+		assert_eq!(
+			scan_armed(b"\x1b[38;5;0m"),
+			vec![(9, ProtectRequest::Reassert)]
+		);
 	}
 
 	#[test]
@@ -511,19 +520,19 @@ mod tests {
 	fn selective_erase_in_the_display_reads_all_three_extents() {
 		assert_eq!(
 			scan(b"\x1b[?J"),
-			vec![(4, Request::Erase(Erase::Display(Extent::ToEnd)))]
+			vec![(4, ProtectRequest::Erase(Erase::Display(Extent::ToEnd)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?0J"),
-			vec![(5, Request::Erase(Erase::Display(Extent::ToEnd)))]
+			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::ToEnd)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?1J"),
-			vec![(5, Request::Erase(Erase::Display(Extent::ToStart)))]
+			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::ToStart)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?2J"),
-			vec![(5, Request::Erase(Erase::Display(Extent::All)))]
+			vec![(5, ProtectRequest::Erase(Erase::Display(Extent::All)))]
 		);
 	}
 
@@ -531,15 +540,15 @@ mod tests {
 	fn selective_erase_in_the_line_reads_all_three_extents() {
 		assert_eq!(
 			scan(b"\x1b[?K"),
-			vec![(4, Request::Erase(Erase::Line(Extent::ToEnd)))]
+			vec![(4, ProtectRequest::Erase(Erase::Line(Extent::ToEnd)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?1K"),
-			vec![(5, Request::Erase(Erase::Line(Extent::ToStart)))]
+			vec![(5, ProtectRequest::Erase(Erase::Line(Extent::ToStart)))]
 		);
 		assert_eq!(
 			scan(b"\x1b[?2K"),
-			vec![(5, Request::Erase(Erase::Line(Extent::All)))]
+			vec![(5, ProtectRequest::Erase(Erase::Line(Extent::All)))]
 		);
 	}
 
@@ -572,7 +581,10 @@ mod tests {
 		assert!(protect.feed(b"label\x1b").is_empty());
 		assert!(protect.feed(b"[1").is_empty());
 		// The offset counts from the start of the chunk that completed the sequence.
-		assert_eq!(protect.feed(b"\"qmore"), vec![(2, Request::Protect(true))]);
+		assert_eq!(
+			protect.feed(b"\"qmore"),
+			vec![(2, ProtectRequest::Protect(true))]
+		);
 	}
 
 	#[test]
@@ -582,9 +594,9 @@ mod tests {
 		assert_eq!(
 			scan(b"\x1b[1\"qName:\x1b[0\"q\x1b[?2J"),
 			vec![
-				(5, Request::Protect(true)),
-				(15, Request::Protect(false)),
-				(20, Request::Erase(Erase::Display(Extent::All))),
+				(5, ProtectRequest::Protect(true)),
+				(15, ProtectRequest::Protect(false)),
+				(20, ProtectRequest::Erase(Erase::Display(Extent::All))),
 			]
 		);
 	}
@@ -601,7 +613,7 @@ mod tests {
 		let mut protect = Protect::default();
 		assert_eq!(
 			protect.feed(&params),
-			vec![(params.len(), Request::Protect(false))]
+			vec![(params.len(), ProtectRequest::Protect(false))]
 		);
 		assert!(!protect.armed);
 		assert!(
@@ -633,10 +645,13 @@ mod tests {
 		// sequence, so `CSI 0;` LF `1 m` is an SGR it applies — `Attr::Reset` and all — and a scanner that
 		// gave up on the sequence lost the protection bit across it. The DECSCA spelling is the same rule
 		// seen from cmote's own side.
-		assert_eq!(scan(b"\x1b[1\n\"q"), vec![(6, Request::Protect(true))]);
+		assert_eq!(
+			scan(b"\x1b[1\n\"q"),
+			vec![(6, ProtectRequest::Protect(true))]
+		);
 		assert_eq!(
 			scan_armed(b"\x1b[0;\n1m"),
-			vec![(7, Request::Reassert)],
+			vec![(7, ProtectRequest::Reassert)],
 			"the SGR is still reported, so the bit is still put back"
 		);
 	}
@@ -647,7 +662,10 @@ mod tests {
 		// sequence for. DEL is not one of them.
 		assert!(scan(b"\x1b[1\x18\"q").is_empty());
 		assert!(scan(b"\x1b[1\x1a\"q").is_empty());
-		assert_eq!(scan(b"\x1b[1\x7f\"q"), vec![(6, Request::Protect(true))]);
+		assert_eq!(
+			scan(b"\x1b[1\x7f\"q"),
+			vec![(6, ProtectRequest::Protect(true))]
+		);
 	}
 
 	#[test]

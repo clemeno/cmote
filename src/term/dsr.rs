@@ -112,7 +112,7 @@ const MAX_INTERMEDIATES: usize = 4;
 
 /// Which of the DEC-private status reports cmote answers (§82, §93).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Request {
+pub enum DsrRequest {
 	/// `CSI ? 6 n` — DECXCPR, where the cursor is. Answered from the live cursor, which is why this
 	/// whole module is split-fed.
 	CursorPosition,
@@ -160,7 +160,7 @@ impl Dsr {
 	/// of the boundary is not about the engine's behaviour — it is about the cursor being read once
 	/// the whole sequence is behind it, so that a request cannot report a position from the middle of
 	/// its own final byte.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Request)> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, DsrRequest)> {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -235,15 +235,15 @@ impl Dsr {
 	/// tightening over `term/tabs.rs`'s reading of DECST8C. DSR takes exactly one `Ps`, so `CSI ? 6 ; 1 n`
 	/// is a sequence cmote does not fully understand — and answering the part it recognises would be
 	/// the generous reading this project keeps finding at the bottom of its own mistakes.
-	fn request(&self, final_byte: u8) -> Option<Request> {
+	fn request(&self, final_byte: u8) -> Option<DsrRequest> {
 		if (final_byte, self.marker, self.intermediates.as_slice()) != (b'n', Some(b'?'), &[][..]) {
 			return None;
 		}
 		match self.only_param()? {
-			CURSOR_POSITION => Some(Request::CursorPosition),
-			LOCATOR_STATUS => Some(Request::LocatorStatus),
-			LOCATOR_TYPE => Some(Request::LocatorType),
-			COLOR_SCHEME => Some(Request::ColorScheme),
+			CURSOR_POSITION => Some(DsrRequest::CursorPosition),
+			LOCATOR_STATUS => Some(DsrRequest::LocatorStatus),
+			LOCATOR_TYPE => Some(DsrRequest::LocatorType),
+			COLOR_SCHEME => Some(DsrRequest::ColorScheme),
 			_ => None,
 		}
 	}
@@ -318,7 +318,7 @@ mod tests {
 	use super::*;
 
 	/// DsrScan a whole chunk in one go — the shape of every test below that is not about splitting.
-	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
+	fn scan(bytes: &[u8]) -> Vec<(usize, DsrRequest)> {
 		Dsr::default().feed(bytes)
 	}
 
@@ -353,7 +353,7 @@ mod tests {
 	/// the reply that says so. `1` is dark, which is what cmote's fixed scheme is.
 	#[test]
 	fn the_colour_scheme_question_is_answered_dark() {
-		assert_eq!(scan(b"\x1b[?996n"), vec![(7, Request::ColorScheme)]);
+		assert_eq!(scan(b"\x1b[?996n"), vec![(7, DsrRequest::ColorScheme)]);
 		assert_eq!(DARK_SCHEME, b"\x1b[?997;1n", "contour's `1` is dark");
 	}
 
@@ -372,8 +372,8 @@ mod tests {
 	/// what this pins is that the scanner tells them apart and that neither is mistaken for the other.
 	#[test]
 	fn the_locator_questions_get_their_honest_negatives() {
-		assert_eq!(scan(b"\x1b[?55n"), vec![(6, Request::LocatorStatus)]);
-		assert_eq!(scan(b"\x1b[?56n"), vec![(6, Request::LocatorType)]);
+		assert_eq!(scan(b"\x1b[?55n"), vec![(6, DsrRequest::LocatorStatus)]);
+		assert_eq!(scan(b"\x1b[?56n"), vec![(6, DsrRequest::LocatorType)]);
 		assert_eq!(NO_LOCATOR, b"\x1b[?53n", "xterm's 'no locator'");
 		assert_eq!(NO_LOCATOR_TYPE, b"\x1b[?57;0n", "and its 'cannot identify'");
 	}
@@ -427,7 +427,7 @@ mod tests {
 		assert!(dsr.feed(b"[?").is_empty());
 		assert!(dsr.feed(b"6").is_empty());
 		// The offset is into THIS chunk, which is where the split advance uses it.
-		assert_eq!(dsr.feed(b"n"), vec![(1, Request::CursorPosition)]);
+		assert_eq!(dsr.feed(b"n"), vec![(1, DsrRequest::CursorPosition)]);
 	}
 
 	/// A control byte inside a CSI abandons the sequence rather than extending it, so the `n` that

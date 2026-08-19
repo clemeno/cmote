@@ -84,7 +84,7 @@ const ESC: u8 = 0x1b;
 /// mode 69 set this is a margin request and the byte is cancelled, and without it the byte is a
 /// save-cursor and is let through (`term/margins.rs` argues why that is the right split).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Request {
+pub struct CancelRequest {
 	pub offset: usize,
 	pub left: Option<u16>,
 	pub right: Option<u16>,
@@ -148,7 +148,7 @@ impl Cancel {
 	/// of the sequence that a prompt mark reports (§34) and the byte one PAST it that a selective
 	/// erase reports (§56). It is the byte that may be replaced, so it is the byte named: the engine
 	/// is advanced up to it, fed a CAN instead of it, and resumed after it.
-	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Request> {
+	pub fn feed(&mut self, bytes: &[u8]) -> Vec<CancelRequest> {
 		let mut cancels = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
@@ -202,7 +202,7 @@ impl Cancel {
 						// separators seen rather than the numbers stored, so it is the test.
 						if byte == b's' && self.plain && self.params > 0 && self.slot < KEPT_PARAMS
 						{
-							cancels.push(Request {
+							cancels.push(CancelRequest {
 								offset: index,
 								left: self.numbers[0],
 								right: self.numbers[1],
