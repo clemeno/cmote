@@ -19,9 +19,9 @@
 	<!-- guards -->
 	<rect x="170" y="146" width="600" height="124" rx="6" fill="#332f1e" stroke="#c9a227"/>
 	<text x="470" y="170" text-anchor="middle" font-family="system-ui, sans-serif" font-size="14" fill="#e6c860">all five guards pass? (app.rs, on_key)</text>
-	<text x="190" y="194" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">self.local.is_some()                     — a local session, not a remote one</text>
-	<text x="190" y="214" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!kind.quits_on_eof()                     — pwsh / powershell / cmd only</text>
-	<text x="190" y="234" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!self.on_alternate_screen()               — no full-screen program</text>
+	<text x="190" y="194" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">self.local.is_some_and(|kind|<tspan x="420">— a local session, not a remote one</tspan></text>
+	<text x="206" y="214" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!kind.quits_on_eof())<tspan x="420">— pwsh / powershell / cmd only</tspan></text>
+	<text x="190" y="234" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">!self.on_alternate_screen()<tspan x="420">— no full-screen program</tspan></text>
 	<text x="190" y="254" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">ctrl only, no shift/alt/logo + Key::Character("d")</text>
 
 	<line x1="770" y1="190" x2="796" y2="190" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
@@ -52,19 +52,19 @@
 
 	<!-- accumulate -->
 	<rect x="230" y="530" width="460" height="52" rx="6" fill="#262b33" stroke="#4a5566"/>
-	<text x="460" y="551" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">SshEvent::Output { bytes } -&gt; judge_eof</text>
+	<text x="460" y="551" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#d7dbe0">SshEvent::Output { bytes, .. } -&gt; judge_eof</text>
 	<text x="460" y="571" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="12" fill="#8b95a5">heard.extend_from_slice(bytes)</text>
 	<line x1="470" y1="582" x2="470" y2="608" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
 
 	<!-- needle test -->
 	<rect x="290" y="610" width="360" height="52" rx="6" fill="#332f1e" stroke="#c9a227"/>
-	<text x="470" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="14" fill="#e6c860">heard contains "^D" ?</text>
+	<text x="470" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#e6c860">heard contains EOF_ECHO ("^D") ?</text>
 
 	<line x1="650" y1="636" x2="726" y2="636" stroke="#8b95a5" stroke-width="1.5" marker-end="url(#arrow)"/>
 	<text x="688" y="628" text-anchor="middle" font-family="system-ui, sans-serif" font-size="12" fill="#8b95a5">no</text>
 
 	<rect x="730" y="610" width="290" height="52" rx="6" fill="#332f1e" stroke="#c9a227"/>
-	<text x="875" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="14" fill="#e6c860">heard.len() &gt;= 64 ?</text>
+	<text x="875" y="642" text-anchor="middle" font-family="ui-monospace, Consolas, monospace" font-size="13" fill="#e6c860">heard.len() &gt;= EOF_ANSWER_CAP (64) ?</text>
 
 	<!-- loop back: no, wait for the next chunk -->
 	<polyline points="875,662 875,690 710,690 710,556 692,556" fill="none" stroke="#8b95a5" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow)"/>

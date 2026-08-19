@@ -42,10 +42,10 @@
 	<text x="100" y="342" font-family="system-ui, sans-serif" font-size="13" fill="#8b95a5">what disarms it, and what each one does</text>
 
 	<circle cx="106" cy="364" r="4" fill="#4caf7d"/>
-	<text x="120" y="369" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#8fdcae">"^D" in heard</tspan> — nothing consumed the byte: run the shell's own exit. The session ends because its shell did.</text>
+	<text x="120" y="369" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#8fdcae">EOF_ECHO ("^D") in heard</tspan> — nothing consumed the byte: run the shell's own exit. The session ends because its shell did.</text>
 
 	<circle cx="106" cy="392" r="4" fill="#5b8fd6"/>
-	<text x="120" y="397" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#9fb8dd">heard.len() &gt;= 64</tspan> — the budget is spent: a program answered the byte, so the session is left alone.</text>
+	<text x="120" y="397" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#9fb8dd">heard.len() &gt;= EOF_ANSWER_CAP (64)</tspan> — the budget is spent: a program answered the byte, so the session is left alone.</text>
 
 	<circle cx="106" cy="420" r="4" fill="#8b95a5"/>
 	<text x="120" y="425" font-family="system-ui, sans-serif" font-size="13" fill="#d7dbe0"><tspan font-family="ui-monospace, Consolas, monospace" fill="#c8ced6">forget_connection()</tspan> — the session ended: a probe left behind would weigh the NEXT session's first chunk.</text>

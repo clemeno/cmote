@@ -418,8 +418,8 @@ an SSH channel gives the far side a hangup it can act on. A local session has no
 
 | guard | why it is there |
 |---|---|
-| `self.local.is_some()` | a remote shell is a POSIX shell: it acts on EOF itself and this rule has nothing to add |
-| `!kind.quits_on_eof()` | Git Bash exits on the byte, so watching for an echo it will never send would only add a probe that always expires |
+| `self.local.is_some_and(\|kind\|` | a remote shell is a POSIX shell: it acts on EOF itself and this rule has nothing to add |
+| `!kind.quits_on_eof())` | Git Bash exits on the byte, so watching for an echo it will never send would only add a probe that always expires |
 | `!self.on_alternate_screen()` | belt and braces on top of the echo test: a pager scrolling answers with a screenful, not with `^D` — but a pager showing a *file* that contains the characters `^D` would otherwise answer for the shell. And a full-screen program asked for the whole screen |
 | `!modifiers.shift()` | Ctrl+Shift+D encodes to the same `0x04` and is left unwatched on purpose: the escape hatch for sending a bare EOF |
 | `!modifiers.alt()`, `!modifiers.logo()` | those are some other combination, and belong to the shell |
