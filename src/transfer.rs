@@ -795,7 +795,7 @@ impl Queue {
 				// Landed, so there is nothing to resume; the next item, if any, is remembered
 				// afresh by the pump.
 				self.resumable = None;
-				self.landed(was.as_ref(), path)
+				self.landed(was.as_ref(), &path)
 			}
 			// One item failing does not abandon the rest of the batch — the notice says what went
 			// wrong, and the queue moves on (§17, §21). A failure shows in the status bar rather
@@ -974,7 +974,7 @@ impl Queue {
 	/// Something landed (§17, §21). Which counter it belongs to, and what the closing notice says,
 	/// come from the direction it was going — a tree reports the same landing its files do, so
 	/// `was` is what tells them apart.
-	fn landed(&mut self, was: Option<&Resumable>, path: String) -> Effects {
+	fn landed(&mut self, was: Option<&Resumable>, path: &str) -> Effects {
 		if matches!(
 			was,
 			Some(Resumable::Download { .. } | Resumable::DownloadTree { .. })
@@ -995,7 +995,7 @@ impl Queue {
 		}
 		let mut effects = self.pump();
 		if self.slot.is_none() && self.files.is_empty() {
-			self.notice = Some(upload_summary(self.files_done, self.trees_done, &path));
+			self.notice = Some(upload_summary(self.files_done, self.trees_done, path));
 			// Show what just landed: if a pane is on the folder we uploaded into, re-list it so
 			// the new file — or folder — appears without a manual Refresh (§29). Captured before
 			// `close_batch`, which clears the destination.

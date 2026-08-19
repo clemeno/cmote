@@ -88,14 +88,8 @@ pub struct ForwardSpec {
 	#[serde(default, skip_serializing_if = "String::is_empty")]
 	pub target_host: String,
 	/// The target's port. Zero for Dynamic.
-	#[serde(default, skip_serializing_if = "is_zero")]
+	#[serde(default, skip_serializing_if = "crate::store::is_default")]
 	pub target_port: u16,
-}
-
-/// Serde skip predicate for a `u16` that defaults to zero (a Dynamic forward's target port):
-/// keeps it out of the written JSON so the file stays tidy.
-fn is_zero(port: &u16) -> bool {
-	*port == 0
 }
 
 impl ForwardSpec {

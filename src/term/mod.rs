@@ -200,6 +200,7 @@ pub(super) type Engine = Term<Replies>;
 /// `Scroll` type stays behind `term/`, the same way `screen` hides the rest of the engine. The
 /// wheel sends `Lines`, Shift+PageUp/PageDown send `PageUp`/`PageDown`, Shift+Home/End send
 /// `Top`/`Bottom`, and every keystroke sends `Bottom` to snap the view back to the live prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScrollMotion {
 	/// By a signed number of lines — positive scrolls up into history, negative back down.
 	Lines(i32),
@@ -220,6 +221,7 @@ pub enum ScrollMotion {
 /// These are absolute lines rather than viewport rows (as this was until §40), so an output taller
 /// than the screen is selected WHOLE: the copy path reads the document, not the visible grid. `start_line
 /// <= end_line` always, and revealing only decides what the user is looking at, never what is selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputSpan {
 	pub start_line: u64,
 	pub end_line: u64,

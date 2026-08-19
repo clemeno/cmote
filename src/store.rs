@@ -66,6 +66,18 @@ fn temp_beside(path: &Path) -> PathBuf {
 	with_suffix(path, ".tmp")
 }
 
+/// Whether a field still holds its default, for `#[serde(skip_serializing_if = …)]`.
+///
+/// One generic predicate rather than one per type: `targets.rs` had `is_false(&bool)` and
+/// `forward.rs` had `is_zero(&u16)`, which are the same question asked of two types (§109). Both keep
+/// a field at its default out of the written JSON, so the file stays tidy and an older reader sees
+/// exactly the shape it saw before the field existed.
+///
+/// The reference is serde's requirement, not a choice — the macro expands to `is_default(&self.field)`.
+pub fn is_default<T: Default + PartialEq>(value: &T) -> bool {
+	*value == T::default()
+}
+
 /// `path` with `suffix` appended to the whole file name, extension included.
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 	let mut name = path.file_name().map_or_else(OsString::new, OsString::from);

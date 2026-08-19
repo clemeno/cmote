@@ -146,7 +146,7 @@ pub fn encode(
 
 	match key {
 		// Named keys map to their fixed control byte or escape sequence.
-		Key::Named(named) => named_bytes(named, modifiers, modes.application_cursor),
+		Key::Named(named) => named_bytes(*named, modifiers, modes.application_cursor),
 
 		// A printable key: send its produced text. Alt acts as "meta", which the
 		// xterm convention encodes as an ESC prefix before the character.
@@ -286,7 +286,7 @@ fn application_keypad_bytes(physical: Physical) -> Option<Vec<u8>> {
 /// Ctrl/Shift/Alt held with the key, encoded the xterm way for the navigation and
 /// function keys (see `letter_key` / `tilde_key`); the cursor and Home/End keys also
 /// depend on `application_cursor` (DECCKM) for their *unmodified* form.
-fn named_bytes(named: &Named, modifiers: Modifiers, application_cursor: bool) -> Option<Vec<u8>> {
+fn named_bytes(named: Named, modifiers: Modifiers, application_cursor: bool) -> Option<Vec<u8>> {
 	let bytes = match named {
 		Named::Enter => b"\r".to_vec(),
 		Named::Tab => b"\t".to_vec(),

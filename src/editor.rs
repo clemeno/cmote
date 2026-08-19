@@ -571,8 +571,8 @@ impl Editor {
 
 	/// Fill the buffer once the decoded text and its encoding arrive (§32). The freshly loaded text
 	/// is the baseline, so nothing is marked changed and the editor is clean.
-	pub fn set_loaded(&mut self, text: String, encoding: Encoding) {
-		self.content = text_editor::Content::with_text(&text);
+	pub fn set_loaded(&mut self, text: &str, encoding: Encoding) {
+		self.content = text_editor::Content::with_text(text);
 		self.encoding = encoding;
 		self.original = lines_of(&self.content);
 		self.status = EditorStatus::Ready;

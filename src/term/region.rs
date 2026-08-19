@@ -96,7 +96,7 @@ impl ScrollRegion {
 	///
 	/// The clamp is HERE and not in `set` on purpose: the stored numbers stay the engine's, and only
 	/// a caller that is about to index the grid gets a safe version of them.
-	pub fn first_row(&self) -> usize {
+	pub fn first_row(self) -> usize {
 		self.start.max(0) as usize
 	}
 
@@ -104,7 +104,7 @@ impl ScrollRegion {
 	///
 	/// `end` is exclusive and never below 1 for a region the engine accepted, but a saturating
 	/// subtraction keeps a hand-built `ScrollRegion` from wrapping the index round.
-	pub fn last_row(&self) -> usize {
+	pub fn last_row(self) -> usize {
 		(self.end - 1).max(0) as usize
 	}
 }

@@ -958,7 +958,7 @@ impl App {
 				// Held until the tab is in the tree: the connect it starts can put a dialog on
 				// screen, and a dialog belonging to a tab that is not yet anywhere would be drawn
 				// nowhere.
-				opening = Some(tab.open_copy_of(key, cwd));
+				opening = Some(tab.open_copy_of(&key, cwd));
 				tab
 			}
 		};
@@ -1579,7 +1579,7 @@ impl App {
 		let mut tab = Tab::home(self.targets.clone(), self.vault.clone(), id, size);
 		tab.window_focused = focused;
 		tab.modifiers = modifiers;
-		let opening = tab.open_copy_of(endpoint, cwd);
+		let opening = tab.open_copy_of(&endpoint, cwd);
 		let Some(region) = self.regions.get_mut(dest) else {
 			return iced::Task::none();
 		};
@@ -3734,7 +3734,7 @@ impl Tab {
 		};
 		match event {
 			SshEvent::FileLoaded { bytes, .. } => match crate::editor::decode_text(&bytes) {
-				Some((text, encoding)) => editor.set_loaded(text, encoding),
+				Some((text, encoding)) => editor.set_loaded(&text, encoding),
 				None => editor.load_failed(
 					"This file is not text in a supported encoding (UTF-8 or UTF-16).".to_owned(),
 				),
@@ -4942,7 +4942,7 @@ impl Tab {
 					self.refresh_remote_dir(&parent);
 				}
 			}
-			SshEvent::DeleteDone(paths) => self.on_deleted(paths),
+			SshEvent::DeleteDone(paths) => self.on_deleted(&paths),
 			// A rename, a mkdir or a delete that failed. All three answer the same way and for the
 			// same reason: the server's own words go on the pane's notice line, and NOTHING is
 			// re-listed, because a failure changed nothing to re-read (§18, §19).
@@ -4970,7 +4970,7 @@ impl Tab {
 				installed,
 			} => self.on_integration_probed(shell, path, installed),
 			SshEvent::IntegrationWritten { path, installed } => {
-				self.on_integration_written(path, installed);
+				self.on_integration_written(&path, installed);
 			}
 			SshEvent::IntegrationFailed(reason) => self.on_integration_failed(&reason),
 			SshEvent::ForwardReady { id, assigned_port } => {
@@ -5313,11 +5313,11 @@ impl Tab {
 
 	/// The write landed (§17). The file now says what it says; the session in front of the user is
 	/// unaffected, because a shell reads its config at login and this one has already started.
-	fn on_integration_written(&mut self, path: String, installed: bool) {
+	fn on_integration_written(&mut self, path: &str, installed: bool) {
 		if !matches!(self.modal, Some(Modal::Integration(_))) {
 			return;
 		}
-		self.set_dialog_body(&ui::terminal::integration_done_body(&path, installed));
+		self.set_dialog_body(&ui::terminal::integration_done_body(path, installed));
 		self.modal = Some(Modal::Integration(Integration::Done));
 	}
 
@@ -5638,12 +5638,12 @@ impl Tab {
 	///   * something is still needed from the user (a password that was never remembered) — the
 	///     form opens with the rest already in it;
 	///   * nothing is — it dials at once, which is the common case and the point of the feature.
-	fn open_copy_of(&mut self, endpoint: String, cwd: Option<String>) -> iced::Task<Message> {
+	fn open_copy_of(&mut self, endpoint: &str, cwd: Option<String>) -> iced::Task<Message> {
 		self.carry_cwd = cwd.map(|cwd| Carry {
-			endpoint: endpoint.clone(),
+			endpoint: endpoint.to_owned(),
 			cwd,
 		});
-		if let Some(deferred) = self.seed_form(&endpoint) {
+		if let Some(deferred) = self.seed_form(endpoint) {
 			return deferred;
 		}
 		if self.ready_to_dial() {
@@ -6199,7 +6199,7 @@ impl Tab {
 		if modifiers.control()
 			&& modifiers.shift()
 			&& let iced::keyboard::Key::Named(named) = &key
-			&& let Some(direction) = prompt_jump(named)
+			&& let Some(direction) = prompt_jump(*named)
 			&& let Some(terminal) = self.terminal.as_mut()
 		{
 			terminal.jump_prompt(direction);
@@ -6212,7 +6212,7 @@ impl Tab {
 		// shell focused, since a focused pane has already claimed the arrows and their neighbours.
 		if modifiers.shift()
 			&& let iced::keyboard::Key::Named(named) = &key
-			&& let Some(motion) = scroll_motion(named)
+			&& let Some(motion) = scroll_motion(*named)
 			&& let Some(terminal) = self.terminal.as_mut()
 		{
 			terminal.scroll(motion);
@@ -7948,8 +7948,8 @@ impl Tab {
 	/// the deleted subtrees from the tree, and re-list each parent they vanished from so the rows
 	/// update in place. Done here rather than in a model because it spans both panes and the
 	/// pane's own idea of where it is.
-	fn on_deleted(&mut self, paths: Vec<String>) {
-		let fetches = self.panes.deleted(&paths);
+	fn on_deleted(&mut self, paths: &[String]) {
+		let fetches = self.panes.deleted(paths);
 		self.send_fetches(fetches);
 	}
 
@@ -8261,7 +8261,7 @@ fn divider_events() -> iced::Subscription<Message> {
 /// The scrollback motion a Shift+navigation key asks for, or `None` for a key that does not
 /// scroll (§23). PageUp/PageDown page through history, Home/End jump to the oldest retained
 /// line and back to the live bottom — the xterm shifted-navigation set the terminal owns.
-fn scroll_motion(named: &iced::keyboard::key::Named) -> Option<term::ScrollMotion> {
+fn scroll_motion(named: iced::keyboard::key::Named) -> Option<term::ScrollMotion> {
 	use iced::keyboard::key::Named;
 	match named {
 		Named::PageUp => Some(term::ScrollMotion::PageUp),
@@ -8275,7 +8275,7 @@ fn scroll_motion(named: &iced::keyboard::key::Named) -> Option<term::ScrollMotio
 /// The prompt-jump direction a Ctrl+Shift+arrow asks for, or `None` for any other key (§34). Up
 /// climbs to the previous prompt, Down returns toward the live one — the direction the arrow
 /// itself points through the scrollback.
-fn prompt_jump(named: &iced::keyboard::key::Named) -> Option<term::osc133::Osc133Direction> {
+fn prompt_jump(named: iced::keyboard::key::Named) -> Option<term::osc133::Osc133Direction> {
 	use iced::keyboard::key::Named;
 	match named {
 		Named::ArrowUp => Some(term::osc133::Osc133Direction::Previous),
@@ -10910,15 +10910,15 @@ mod tests {
 		use iced::keyboard::key::Named;
 
 		assert_eq!(
-			prompt_jump(&Named::ArrowUp),
+			prompt_jump(Named::ArrowUp),
 			Some(term::osc133::Osc133Direction::Previous)
 		);
 		assert_eq!(
-			prompt_jump(&Named::ArrowDown),
+			prompt_jump(Named::ArrowDown),
 			Some(term::osc133::Osc133Direction::Next)
 		);
-		assert_eq!(prompt_jump(&Named::ArrowLeft), None);
-		assert_eq!(prompt_jump(&Named::PageUp), None);
+		assert_eq!(prompt_jump(Named::ArrowLeft), None);
+		assert_eq!(prompt_jump(Named::PageUp), None);
 	}
 
 	/// Shift+PageUp scrolls cmote's own scrollback and sends nothing to the remote, while bare
@@ -13027,7 +13027,7 @@ mod tests {
 			.borrow_mut()
 			.upsert_on_connect("h", 22, "u", AuthKind::Agent, None, None);
 
-		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(
 			matches!(copy.screen, AppScreen::Connecting { .. }),
 			"dialed without asking anything"
@@ -13068,7 +13068,7 @@ mod tests {
 			.borrow_mut()
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 
-		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv".to_owned()));
+		let _ = copy.open_copy_of("u@h:22", Some("/srv".to_owned()));
 		assert!(matches!(copy.screen, AppScreen::Connect));
 		assert_eq!(copy.form.host, "h");
 		assert!(rx.try_recv().is_err(), "nothing was dialed");
@@ -13093,7 +13093,7 @@ mod tests {
 			.borrow_mut()
 			.upsert_on_connect("h", 22, "u", AuthKind::Agent, None, None);
 
-		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(copy.pending_connect, "armed, waiting for a channel to use");
 		assert!(
 			matches!(copy.screen, AppScreen::Connect),
@@ -13130,7 +13130,7 @@ mod tests {
 		copy.targets
 			.borrow_mut()
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
-		let _ = copy.open_copy_of("u@h:22".to_owned(), Some("/srv/www".to_owned()));
+		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 
 		// The copy stopped at the form, and the user typed a different machine into it. A path only
 		// means something on the host it came from, so this one goes unspent (§52).

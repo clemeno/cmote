@@ -171,10 +171,12 @@ mod tests {
 		file
 	}
 
-	// Assert we got a decoded key of the expected algorithm.
-	fn assert_key(loaded: Loaded, algorithm: Algorithm) {
+	// Assert we got a decoded key of the expected algorithm. Takes the `Loaded` by reference: it
+	// only reads the algorithm, and a caller that wants to assert something else about the same
+	// value afterwards can.
+	fn assert_key(loaded: &Loaded, algorithm: &Algorithm) {
 		match loaded {
-			Loaded::Key(key) => assert_eq!(key.algorithm(), algorithm),
+			Loaded::Key(key) => assert_eq!(&key.algorithm(), algorithm),
 			Loaded::NeedsPassphrase => panic!("expected a decoded key, got NeedsPassphrase"),
 		}
 	}
@@ -197,7 +199,7 @@ mod tests {
 	fn loads_unencrypted_ed25519_ppk_without_prompting() {
 		let file = temp_key(PPK_ED25519);
 		let loaded = load_private_key(file.path(), None).expect("valid unencrypted ppk");
-		assert_key(loaded, Algorithm::Ed25519);
+		assert_key(&loaded, &Algorithm::Ed25519);
 	}
 
 	#[test]
@@ -205,7 +207,7 @@ mod tests {
 		let file = temp_key(PPK_ED25519_ENC);
 		let secret = Secret::new(ENC_PASSPHRASE.to_string());
 		let loaded = load_private_key(file.path(), Some(&secret)).expect("valid encrypted ppk");
-		assert_key(loaded, Algorithm::Ed25519);
+		assert_key(&loaded, &Algorithm::Ed25519);
 	}
 
 	#[test]

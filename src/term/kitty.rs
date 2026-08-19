@@ -169,7 +169,7 @@ fn classify(key: &Key, application_cursor: bool) -> Option<Form> {
 		Key::Character(character) => Form::Text {
 			codepoint: character.chars().next()? as u32,
 		},
-		Key::Named(named) => named_form(named, application_cursor)?,
+		Key::Named(named) => named_form(*named, application_cursor)?,
 		Key::Unidentified => return None,
 	};
 	Some(form)
@@ -178,7 +178,7 @@ fn classify(key: &Key, application_cursor: bool) -> Option<Form> {
 /// The family of a named (non-character) key, or `None` for one we do not forward (a bare modifier,
 /// a key past our map). Mirrors the legacy `keymap::named_bytes` map, so a program sees the same
 /// keys — only dressed in the protocol's parameters.
-fn named_form(named: &Named, application_cursor: bool) -> Option<Form> {
+fn named_form(named: Named, application_cursor: bool) -> Option<Form> {
 	let form = match named {
 		Named::Enter => Form::Compat {
 			codepoint: 13,

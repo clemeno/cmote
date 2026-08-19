@@ -95,7 +95,7 @@ pub struct Target {
 	/// home list and the connect form know a secret can be pre-filled, while the secret itself
 	/// lives solely in `secrets.age`, never in this file (§12). Off by default; a `targets.json`
 	/// written before opt-in persistence existed loads with it false and behaves as before.
-	#[serde(default, skip_serializing_if = "is_false")]
+	#[serde(default, skip_serializing_if = "crate::store::is_default")]
 	pub remember_secret: bool,
 	/// The port forwards to re-establish on the next connection to this target (§27). Persisted
 	/// because a tunnel set (a database on a bastion, a SOCKS proxy) is part of "how I use this
@@ -134,13 +134,6 @@ pub struct SessionState {
 /// `targets.json` written before this field existed keeps behaving as it did.
 fn shown_by_default() -> bool {
 	true
-}
-
-/// Serde skip predicate for a `bool` that defaults to false: keeps a `false` flag out of the
-/// written JSON so the file stays tidy and an older reader is unaffected. `skip_serializing_if`
-/// passes a `&bool`, hence the reference.
-fn is_false(flag: &bool) -> bool {
-	!*flag
 }
 
 impl Target {
