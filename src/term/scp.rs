@@ -85,7 +85,7 @@ pub enum Request {
 /// Where the scanner is in the byte stream. Only the CSI shape matters here, plus the one `ESC c`
 /// that has to be noticed.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum ScpScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -99,7 +99,7 @@ enum Scan {
 /// each RIS, with the offset to apply it at.
 #[derive(Debug, Default)]
 pub struct Scp {
-	state: Scan,
+	state: ScpScan,
 	/// The private marker, if the sequence opened with one. SCP has none, so any marker rules it
 	/// out; kept apart from `params` so the digits parse the same either way.
 	marker: Option<u8>,
@@ -108,7 +108,7 @@ pub struct Scp {
 }
 
 impl Scp {
-	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
+	/// ScpScan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -121,29 +121,29 @@ impl Scp {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				ScpScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = ScpScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				ScpScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = ScpScan::Csi;
 					}
 					// RIS. The engine rebuilds itself and drops the history, so every line this
 					// store remembers is about to mean a different line.
 					b'c' => {
 						requests.push((index + 1, Request::Reset));
-						self.state = Scan::Text;
+						self.state = ScpScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = ScpScan::Text,
 				},
-				Scan::Csi => match byte {
+				ScpScan::Csi => match byte {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -152,13 +152,13 @@ impl Scp {
 							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
 							// carrying on would mean acting alone on a spelling nothing else in the world
 							// obeys (§106).
-							self.state = Scan::Text;
+							self.state = ScpScan::Text;
 						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
 						} else {
 							self.params.push(byte);
 							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
+								self.state = ScpScan::Text;
 							}
 						}
 					}
@@ -166,7 +166,7 @@ impl Scp {
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = ScpScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -174,10 +174,10 @@ impl Scp {
 						if let Some(path) = self.path(byte) {
 							requests.push((index + 1, Request::Select(path)));
 						}
-						self.state = Scan::Text;
+						self.state = ScpScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = ScpScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
 					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
@@ -185,7 +185,7 @@ impl Scp {
 					// which is how three defects reached a release.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = Scan::Text,
+					_ => self.state = ScpScan::Text,
 				},
 			}
 		}
@@ -310,7 +310,7 @@ pub fn flip(col: u16, cols: u16) -> u16 {
 mod tests {
 	use super::*;
 
-	/// Scan a whole chunk in one go.
+	/// ScpScan a whole chunk in one go.
 	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
 		Scp::default().feed(bytes)
 	}

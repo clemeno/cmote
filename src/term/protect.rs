@@ -151,7 +151,7 @@ pub enum Request {
 /// Where the scanner is in the byte stream. Only the CSI shape matters here, and a CSI is
 /// `ESC [` then parameter bytes, then intermediate bytes, then one final byte.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum ProtectScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -165,7 +165,7 @@ enum Scan {
 /// pen is protecting and reports the sequences the engine drops.
 #[derive(Debug, Default)]
 pub struct Protect {
-	state: Scan,
+	state: ProtectScan,
 	/// The private marker, if the sequence opened with one (`?` for DECSED and DECSEL). Kept apart
 	/// from `params` so the parameter digits parse the same whether a marker was there or not.
 	marker: Option<u8>,
@@ -178,7 +178,7 @@ pub struct Protect {
 }
 
 impl Protect {
-	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
+	/// ProtectScan a chunk of shell output, returning what to do and where. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -192,29 +192,29 @@ impl Protect {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				ProtectScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = ProtectScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				ProtectScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = ProtectScan::Csi;
 					}
 					// RIS. A full reset rebuilds the pen from scratch, protection included.
 					b'c' => {
 						self.armed = false;
 						requests.push((index + 1, Request::Protect(false)));
-						self.state = Scan::Text;
+						self.state = ProtectScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = ProtectScan::Text,
 				},
-				Scan::Csi => match byte {
+				ProtectScan::Csi => match byte {
 					// Parameter bytes: the digits and separators, plus the private markers
 					// (`< = > ?`, 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -223,7 +223,7 @@ impl Protect {
 							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
 							// carrying on would mean acting alone on a spelling nothing else in the world
 							// obeys (§106).
-							self.state = Scan::Text;
+							self.state = ProtectScan::Text;
 						} else if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
 						} else if byte >= 0x3c {
@@ -235,18 +235,18 @@ impl Protect {
 							// `CSI ? 1;2 ? J` classified as a selective erase, because `first_param` reads
 							// only the first field and the stray marker was hiding in the second. So cmote
 							// erased cells for a sequence nothing else in the world obeys (§106).
-							self.state = Scan::Text;
+							self.state = ProtectScan::Text;
 						} else if !self.params.push(byte) {
 							// More parameters than the engine reads, so it ignores the sequence and so
 							// do we.
-							self.state = Scan::Text;
+							self.state = ProtectScan::Text;
 						}
 					}
 					// Intermediate bytes — `"` makes DECSCA, `!` makes DECSTR.
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = ProtectScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -254,17 +254,17 @@ impl Protect {
 						if let Some(request) = self.classify(byte) {
 							requests.push((index + 1, request));
 						}
-						self.state = Scan::Text;
+						self.state = ProtectScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = ProtectScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads straight through
 					// and keeps the sequence across (§106, `csi::passes_through`). Abandoning it here cost
 					// the same thing the parameter cap did: `CSI 0;` LF `1 m` is an SGR the engine applies,
 					// `Attr::Reset` and all, so a scanner that gave up on it lost the protection bit.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB — the two bytes that do end a sequence, here and in the engine.
-					_ => self.state = Scan::Text,
+					_ => self.state = ProtectScan::Text,
 				},
 			}
 		}

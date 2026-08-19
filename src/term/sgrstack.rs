@@ -168,7 +168,7 @@ pub enum Request {
 
 /// Where the scanner is in the byte stream — the CSI shape and nothing else.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum SgrStackScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -182,7 +182,7 @@ enum Scan {
 /// request sat and what it asks for, for `term/mod.rs` to carry out against the live pen.
 #[derive(Debug, Default)]
 pub struct SgrStack {
-	state: Scan,
+	state: SgrStackScan,
 	/// The private marker, if the sequence opened with one. Neither of these carries one, so a marker
 	/// is collected only to rule the sequence out rather than ignore it.
 	marker: Option<u8>,
@@ -191,7 +191,7 @@ pub struct SgrStack {
 }
 
 impl SgrStack {
-	/// Scan a chunk of shell output, returning `(offset, request)` for each sequence found. Safe at
+	/// SgrStackScan a chunk of shell output, returning `(offset, request)` for each sequence found. Safe at
 	/// any chunk boundary — the state machine carries over between calls, so a sequence may be split
 	/// anywhere, even between the ESC and the `[`.
 	///
@@ -203,17 +203,17 @@ impl SgrStack {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				SgrStackScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = SgrStackScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				SgrStackScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = SgrStackScan::Csi;
 					}
 					// RIS, which empties the stack — see `Request::Reset` for why this one and not
 					// the soft reset. Read here rather than borrowed from `term/scp.rs`, which reads
@@ -221,13 +221,13 @@ impl SgrStack {
 					// neither can come to depend on the other's idea of where a sequence sat.
 					b'c' => {
 						requests.push((index + 1, Request::Reset));
-						self.state = Scan::Text;
+						self.state = SgrStackScan::Text;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = SgrStackScan::Text,
 				},
-				Scan::Csi => match byte {
+				SgrStackScan::Csi => match byte {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -236,13 +236,13 @@ impl SgrStack {
 							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
 							// carrying on would mean acting alone on a spelling nothing else in the world
 							// obeys (§106).
-							self.state = Scan::Text;
+							self.state = SgrStackScan::Text;
 						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
 						} else {
 							self.params.push(byte);
 							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
+								self.state = SgrStackScan::Text;
 							}
 						}
 					}
@@ -250,7 +250,7 @@ impl SgrStack {
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = SgrStackScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -258,10 +258,10 @@ impl SgrStack {
 						if let Some(request) = self.request(byte) {
 							requests.push((index + 1, request));
 						}
-						self.state = Scan::Text;
+						self.state = SgrStackScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = SgrStackScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
 					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
@@ -269,7 +269,7 @@ impl SgrStack {
 					// which is how three defects reached a release.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = Scan::Text,
+					_ => self.state = SgrStackScan::Text,
 				},
 			}
 		}
@@ -330,7 +330,7 @@ impl SgrStack {
 mod tests {
 	use super::*;
 
-	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
+	/// SgrStackScan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
 		SgrStack::default().feed(bytes)
 	}

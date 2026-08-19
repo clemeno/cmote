@@ -33,7 +33,7 @@ const BEL: u8 = 0x07;
 
 /// Where the framer is in the byte stream.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum OscScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -55,7 +55,7 @@ enum Scan {
 /// genuinely differ, because a cwd is a path and a prompt mark is a few bytes.
 #[derive(Debug, Default)]
 pub struct Framer<const CAP: usize> {
-	state: Scan,
+	state: OscScan,
 	payload: Vec<u8>,
 }
 
@@ -72,27 +72,27 @@ impl<const CAP: usize> Framer<CAP> {
 	pub fn feed(&mut self, bytes: &[u8], mut on_payload: impl FnMut(usize, &[u8])) {
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				OscScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = OscScan::Escape;
 					}
 				}
-				Scan::Escape => {
+				OscScan::Escape => {
 					self.payload.clear();
 					self.state = match byte {
-						b']' => Scan::Payload,
+						b']' => OscScan::Payload,
 						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => Scan::Escape,
-						_ => Scan::Text,
+						ESC => OscScan::Escape,
+						_ => OscScan::Text,
 					};
 				}
-				Scan::Payload => match byte {
+				OscScan::Payload => match byte {
 					// BEL ends the string; the offset is just past it.
 					BEL => {
 						on_payload(index + 1, &self.payload);
 						self.abandon();
 					}
-					ESC => self.state = Scan::PayloadEscape,
+					ESC => self.state = OscScan::PayloadEscape,
 					_ => {
 						self.payload.push(byte);
 						if self.payload.len() > CAP {
@@ -102,7 +102,7 @@ impl<const CAP: usize> Framer<CAP> {
 				},
 				// ESC `\` is the string terminator (ST); an ESC followed by anything else is a
 				// malformed sequence, so drop what we collected rather than guess.
-				Scan::PayloadEscape => {
+				OscScan::PayloadEscape => {
 					if byte == b'\\' {
 						on_payload(index + 1, &self.payload);
 						self.abandon();
@@ -116,7 +116,7 @@ impl<const CAP: usize> Framer<CAP> {
 
 	/// Reset to hunting for the next sequence, discarding the payload in flight.
 	fn abandon(&mut self) {
-		self.state = Scan::Text;
+		self.state = OscScan::Text;
 		self.payload.clear();
 	}
 }

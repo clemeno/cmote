@@ -98,7 +98,7 @@ const KEPT_PARAMS: usize = 2;
 /// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then
 /// intermediate bytes, then one final byte — only the final byte decides anything here.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum CancelScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -112,7 +112,7 @@ enum Scan {
 /// final byte the engine must not be allowed to dispatch.
 #[derive(Debug, Default)]
 pub struct Cancel {
-	state: Scan,
+	state: CancelScan,
 	/// How many parameter bytes the sequence in flight has carried. Non-zero is the whole test for
 	/// DECSLRM against SCOSC.
 	///
@@ -140,7 +140,7 @@ pub struct Cancel {
 }
 
 impl Cancel {
-	/// Scan a chunk of shell output, returning each DECSLRM it carried. Safe at any chunk boundary:
+	/// CancelScan a chunk of shell output, returning each DECSLRM it carried. Safe at any chunk boundary:
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -152,24 +152,24 @@ impl Cancel {
 		let mut cancels = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				CancelScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = CancelScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				CancelScan::Escape => match byte {
 					b'[' => {
 						self.params = 0;
 						self.plain = true;
 						self.numbers = [None; KEPT_PARAMS];
 						self.slot = 0;
-						self.state = Scan::Csi;
+						self.state = CancelScan::Csi;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = CancelScan::Text,
 				},
-				Scan::Csi => match byte {
+				CancelScan::Csi => match byte {
 					// A digit, folded into the parameter it belongs to. Saturating, so a run of
 					// nines cannot wrap the number round into something small and plausible — a
 					// margin past the page is clamped by the reader, but a wrapped one would be
@@ -208,10 +208,10 @@ impl Cancel {
 								right: self.numbers[1],
 							});
 						}
-						self.state = Scan::Text;
+						self.state = CancelScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = CancelScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH: it runs a C0 control where it sits, ignores DEL, and does nothing with a
 					// high byte — and in every one of those cases the sequence goes on (§106). So it goes
@@ -223,7 +223,7 @@ impl Cancel {
 					// ANSI state machine's own definition, and the engine's (`anywhere`: run it, then back
 					// to ground). CAN is also the byte cmote itself feeds in place of a refused final byte,
 					// which is the same fact read from the other side.
-					_ => self.state = Scan::Text,
+					_ => self.state = CancelScan::Text,
 				},
 			}
 		}

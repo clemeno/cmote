@@ -56,7 +56,7 @@ const MAX_INTERMEDIATES: usize = 4;
 /// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
 /// bytes, then intermediate bytes, then one final byte.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum TabsScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -70,7 +70,7 @@ enum Scan {
 /// reset sat, for `term/mod.rs` to carry out.
 #[derive(Debug, Default)]
 pub struct Tabs {
-	state: Scan,
+	state: TabsScan,
 	/// The private marker, if the sequence opened with one. DECST8C requires `?`, and keeping the
 	/// marker apart from `params` lets the digits parse the same either way.
 	marker: Option<u8>,
@@ -79,7 +79,7 @@ pub struct Tabs {
 }
 
 impl Tabs {
-	/// Scan a chunk of shell output, returning where each DECST8C sat. Safe at any chunk boundary —
+	/// TabsScan a chunk of shell output, returning where each DECST8C sat. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even
 	/// between the ESC and the `[`.
 	///
@@ -91,23 +91,23 @@ impl Tabs {
 		let mut resets = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				TabsScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = TabsScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				TabsScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = TabsScan::Csi;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = TabsScan::Text,
 				},
-				Scan::Csi => match byte {
+				TabsScan::Csi => match byte {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -116,7 +116,7 @@ impl Tabs {
 						} else {
 							self.params.push(byte);
 							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
+								self.state = TabsScan::Text;
 							}
 						}
 					}
@@ -124,7 +124,7 @@ impl Tabs {
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = TabsScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -132,10 +132,10 @@ impl Tabs {
 						if self.is_tab_reset(byte) {
 							resets.push(index + 1);
 						}
-						self.state = Scan::Text;
+						self.state = TabsScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = TabsScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
 					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
@@ -143,7 +143,7 @@ impl Tabs {
 					// which is how three defects reached a release.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = Scan::Text,
+					_ => self.state = TabsScan::Text,
 				},
 			}
 		}
@@ -222,7 +222,7 @@ pub fn every_eighth_column(columns: u16, col: u16) -> Vec<u8> {
 mod tests {
 	use super::*;
 
-	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
+	/// TabsScan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<usize> {
 		Tabs::default().feed(bytes)
 	}

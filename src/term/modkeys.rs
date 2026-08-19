@@ -82,7 +82,7 @@ enum Marker {
 /// (`ESC [ > … m` and `ESC [ ? … m`) are tracked; every other sequence resets straight back to
 /// `Text`.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum ModKeysScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -99,15 +99,15 @@ enum Scan {
 /// ignores everything else in the stream.
 #[derive(Debug, Default)]
 pub struct ModKeys {
-	state: Scan,
-	/// Which marker opened the run being collected. Only meaningful inside `Scan::Params`.
+	state: ModKeysScan,
+	/// Which marker opened the run being collected. Only meaningful inside `ModKeysScan::Params`.
 	marker: Marker,
 	params: Vec<u8>,
 	level: ModifyOtherKeys,
 }
 
 impl ModKeys {
-	/// Scan a chunk of shell output for a `modifyOtherKeys` change or a question about one, and
+	/// ModKeysScan a chunk of shell output for a `modifyOtherKeys` change or a question about one, and
 	/// return the reply bytes owed. Safe at any chunk boundary — the state machine carries over
 	/// between calls.
 	///
@@ -122,20 +122,20 @@ impl ModKeys {
 		let mut replies = Vec::new();
 		for &byte in bytes {
 			match self.state {
-				Scan::Text => {
+				ModKeysScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = ModKeysScan::Escape;
 					}
 				}
-				Scan::Escape => {
+				ModKeysScan::Escape => {
 					self.state = match byte {
-						b'[' => Scan::Bracket,
+						b'[' => ModKeysScan::Bracket,
 						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => Scan::Escape,
-						_ => Scan::Text,
+						ESC => ModKeysScan::Escape,
+						_ => ModKeysScan::Text,
 					};
 				}
-				Scan::Bracket => {
+				ModKeysScan::Bracket => {
 					self.state = match byte {
 						// The two markers this module answers to. `?` opens every DECSET and
 						// DECRST as well, which cost a few buffered digits and are then dropped
@@ -147,21 +147,21 @@ impl ModKeys {
 								Marker::Query
 							};
 							self.params.clear();
-							Scan::Params
+							ModKeysScan::Params
 						}
 						// A fresh ESC restarts the match; any other byte is some other CSI
 						// (an SGR colour, a cursor move) that we do not track.
-						ESC => Scan::Escape,
-						_ => Scan::Text,
+						ESC => ModKeysScan::Escape,
+						_ => ModKeysScan::Text,
 					};
 				}
-				Scan::Params => match byte {
+				ModKeysScan::Params => match byte {
 					b'0'..=b'9' | b';' => {
 						self.params.push(byte);
 						// A run longer than any real payload is malformed; drop the sequence
 						// rather than buffer it without bound.
 						if self.params.len() > MAX_PARAMS {
-							self.state = Scan::Text;
+							self.state = ModKeysScan::Text;
 						}
 					}
 					// `m` is the final byte of both XTMODKEYS and XTQMODKEYS — the marker read
@@ -171,12 +171,12 @@ impl ModKeys {
 							Marker::Set => self.apply(),
 							Marker::Query => replies.extend_from_slice(&self.report()),
 						}
-						self.state = Scan::Text;
+						self.state = ModKeysScan::Text;
 					}
 					// A new ESC starts another sequence; any other final byte (`h`, `l`, `c`, …)
 					// belongs to a private-CSI that is neither of ours, so we abandon this one.
-					ESC => self.state = Scan::Escape,
-					_ => self.state = Scan::Text,
+					ESC => self.state = ModKeysScan::Escape,
+					_ => self.state = ModKeysScan::Text,
 				},
 			}
 		}

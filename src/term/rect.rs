@@ -351,7 +351,7 @@ pub enum Request {
 /// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then intermediate
 /// bytes, then one final byte — and for this family the intermediate is what matters most.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum RectScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -366,7 +366,7 @@ enum Scan {
 /// mode among them (DECSACE) itself.
 #[derive(Debug, Default)]
 pub struct Rectangles {
-	state: Scan,
+	state: RectScan,
 	/// The private marker, if the sequence opened with one. None of these have one, so its only job
 	/// is to rule a near-miss out.
 	marker: Option<u8>,
@@ -377,7 +377,7 @@ pub struct Rectangles {
 }
 
 impl Rectangles {
-	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary — the
+	/// RectScan a chunk of shell output, returning what to do and where. Safe at any chunk boundary — the
 	/// state machine carries over between calls, so a sequence may be split anywhere, even between the
 	/// ESC and the `[`.
 	///
@@ -396,17 +396,17 @@ impl Rectangles {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				RectScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = RectScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				RectScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = RectScan::Csi;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
@@ -414,11 +414,11 @@ impl Rectangles {
 					// (§59). Nothing else here has state to clear.
 					b'c' => {
 						self.extent = Extent::default();
-						self.state = Scan::Text;
+						self.state = RectScan::Text;
 					}
-					_ => self.state = Scan::Text,
+					_ => self.state = RectScan::Text,
 				},
-				Scan::Csi => match byte {
+				RectScan::Csi => match byte {
 					// Parameter bytes: the digits and separators, plus the private markers
 					// (`< = > ?`, 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -427,13 +427,13 @@ impl Rectangles {
 							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
 							// carrying on would mean acting alone on a spelling nothing else in the world
 							// obeys (§106).
-							self.state = Scan::Text;
+							self.state = RectScan::Text;
 						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
 							self.marker = Some(byte);
 						} else {
 							self.params.push(byte);
 							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
+								self.state = RectScan::Text;
 							}
 						}
 					}
@@ -441,7 +441,7 @@ impl Rectangles {
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = RectScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -449,10 +449,10 @@ impl Rectangles {
 						if let Some(request) = self.classify(byte) {
 							requests.push((index + 1, request));
 						}
-						self.state = Scan::Text;
+						self.state = RectScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = RectScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
 					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
@@ -460,7 +460,7 @@ impl Rectangles {
 					// which is how three defects reached a release.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = Scan::Text,
+					_ => self.state = RectScan::Text,
 				},
 			}
 		}

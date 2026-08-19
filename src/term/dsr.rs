@@ -128,7 +128,7 @@ pub enum Request {
 /// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
 /// bytes, then intermediate bytes, then one final byte.
 #[derive(Debug, Default, PartialEq, Eq)]
-enum Scan {
+enum DsrScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -142,7 +142,7 @@ enum Scan {
 /// cursor-position request sat, for `term/mod.rs` to answer from the live cursor.
 #[derive(Debug, Default)]
 pub struct Dsr {
-	state: Scan,
+	state: DsrScan,
 	/// The private marker, if the sequence opened with one. DECXCPR requires `?`, and keeping the
 	/// marker apart from `params` lets the digits parse the same either way.
 	marker: Option<u8>,
@@ -151,7 +151,7 @@ pub struct Dsr {
 }
 
 impl Dsr {
-	/// Scan a chunk of shell output, returning where each DECXCPR sat. Safe at any chunk boundary —
+	/// DsrScan a chunk of shell output, returning where each DECXCPR sat. Safe at any chunk boundary —
 	/// the state machine carries over between calls, so a sequence may be split anywhere, even between
 	/// the ESC and the `[`.
 	///
@@ -164,23 +164,23 @@ impl Dsr {
 		let mut requests = Vec::new();
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
-				Scan::Text => {
+				DsrScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Escape;
+						self.state = DsrScan::Escape;
 					}
 				}
-				Scan::Escape => match byte {
+				DsrScan::Escape => match byte {
 					b'[' => {
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
-						self.state = Scan::Csi;
+						self.state = DsrScan::Csi;
 					}
 					// ESC ESC: still waiting for the sequence's real first byte.
 					ESC => {}
-					_ => self.state = Scan::Text,
+					_ => self.state = DsrScan::Text,
 				},
-				Scan::Csi => match byte {
+				DsrScan::Csi => match byte {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
@@ -189,7 +189,7 @@ impl Dsr {
 						} else {
 							self.params.push(byte);
 							if self.params.len() > MAX_PARAMS {
-								self.state = Scan::Text;
+								self.state = DsrScan::Text;
 							}
 						}
 					}
@@ -197,7 +197,7 @@ impl Dsr {
 					0x20..=0x2f => {
 						self.intermediates.push(byte);
 						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = Scan::Text;
+							self.state = DsrScan::Text;
 						}
 					}
 					// The final byte ends the sequence, so this is where it is judged.
@@ -205,10 +205,10 @@ impl Dsr {
 						if let Some(request) = self.request(byte) {
 							requests.push((index + 1, request));
 						}
-						self.state = Scan::Text;
+						self.state = DsrScan::Text;
 					}
 					// A fresh ESC restarts the match.
-					ESC => self.state = Scan::Escape,
+					ESC => self.state = DsrScan::Escape,
 					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
 					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
 					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
@@ -216,7 +216,7 @@ impl Dsr {
 					// which is how three defects reached a release.
 					byte if super::csi::passes_through(byte) => {}
 					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = Scan::Text,
+					_ => self.state = DsrScan::Text,
 				},
 			}
 		}
@@ -317,7 +317,7 @@ pub const DARK_SCHEME: &[u8] = b"\x1b[?997;1n";
 mod tests {
 	use super::*;
 
-	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
+	/// DsrScan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<(usize, Request)> {
 		Dsr::default().feed(bytes)
 	}

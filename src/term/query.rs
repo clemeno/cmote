@@ -104,7 +104,7 @@ pub enum Query {
 /// followed to its terminator all the same (`DcsIgnore`), so its arbitrary data — the one place a
 /// stream legitimately carries raw bytes — cannot masquerade as a fresh query.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Scan {
+enum QueryScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -142,57 +142,57 @@ enum Scan {
 /// query split over a chunk boundary is answered on the chunk that finishes it.
 #[derive(Debug, Default)]
 pub struct Queries {
-	state: Scan,
+	state: QueryScan,
 	params: Vec<u8>,
 	data: Vec<u8>,
 }
 
 impl Queries {
-	/// Scan a chunk of shell output and return the queries that completed in it (usually none).
+	/// QueryScan a chunk of shell output and return the queries that completed in it (usually none).
 	/// Safe at any chunk boundary — the state machine carries over between calls.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Query> {
 		let mut found = Vec::new();
 		for &byte in bytes {
 			match self.state {
-				Scan::Text => {
+				QueryScan::Text => {
 					if byte == ESC {
-						self.state = Scan::Esc;
+						self.state = QueryScan::Esc;
 					}
 				}
-				Scan::Esc => {
+				QueryScan::Esc => {
 					self.state = match byte {
-						b'[' => Scan::Csi,
-						b'P' => Scan::Dcs,
+						b'[' => QueryScan::Csi,
+						b'P' => QueryScan::Dcs,
 						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => Scan::Esc,
-						_ => Scan::Text,
+						ESC => QueryScan::Esc,
+						_ => QueryScan::Text,
 					};
 				}
-				Scan::Csi => {
+				QueryScan::Csi => {
 					self.state = match byte {
 						b'>' => {
 							self.params.clear();
-							Scan::CsiGt
+							QueryScan::CsiGt
 						}
 						b'=' => {
 							self.params.clear();
-							Scan::CsiEq
+							QueryScan::CsiEq
 						}
 						b'?' => {
 							self.params.clear();
-							Scan::CsiQuestion
+							QueryScan::CsiQuestion
 						}
-						ESC => Scan::Esc,
+						ESC => QueryScan::Esc,
 						// Any other CSI (an SGR colour, a cursor move, `ESC [ c` DA1) — not ours.
-						_ => Scan::Text,
+						_ => QueryScan::Text,
 					};
 				}
-				Scan::CsiGt => match byte {
+				QueryScan::CsiGt => match byte {
 					b'0'..=b'9' | b';' => {
 						self.params.push(byte);
 						// A run longer than any real payload is malformed; drop the sequence.
 						if self.params.len() > MAX_PARAMS {
-							self.state = Scan::Text;
+							self.state = QueryScan::Text;
 						}
 					}
 					b'q' => {
@@ -201,18 +201,18 @@ impl Queries {
 						if self.default_params() {
 							found.push(Query::Version);
 						}
-						self.state = Scan::Text;
+						self.state = QueryScan::Text;
 					}
-					ESC => self.state = Scan::Esc,
+					ESC => self.state = QueryScan::Esc,
 					// `m` (XTMODKEYS), `u` (kitty keyboard), `c` (DA2): handled by modkeys/engine.
-					_ => self.state = Scan::Text,
+					_ => self.state = QueryScan::Text,
 				},
-				Scan::CsiEq => match byte {
+				QueryScan::CsiEq => match byte {
 					b'0'..=b'9' | b';' => {
 						self.params.push(byte);
 						// Same bound as `CSI >`: a longer run is not a query we answer (§12).
 						if self.params.len() > MAX_PARAMS {
-							self.state = Scan::Text;
+							self.state = QueryScan::Text;
 						}
 					}
 					b'c' => {
@@ -223,19 +223,19 @@ impl Queries {
 						if self.default_params() {
 							found.push(Query::UnitId);
 						}
-						self.state = Scan::Text;
+						self.state = QueryScan::Text;
 					}
-					ESC => self.state = Scan::Esc,
+					ESC => self.state = QueryScan::Esc,
 					// Any other `CSI =` final byte is a private sequence cmote does not answer.
-					_ => self.state = Scan::Text,
+					_ => self.state = QueryScan::Text,
 				},
-				Scan::CsiQuestion => match byte {
+				QueryScan::CsiQuestion => match byte {
 					b'0'..=b'9' | b';' => {
 						self.params.push(byte);
 						// Same bound as the other private forms; a DECSET parameter list never
 						// approaches it (§12).
 						if self.params.len() > MAX_PARAMS {
-							self.state = Scan::Text;
+							self.state = QueryScan::Text;
 						}
 					}
 					b'S' => {
@@ -246,73 +246,73 @@ impl Queries {
 						if let Some(request) = graphics_request(&self.params) {
 							found.push(Query::Graphics(request));
 						}
-						self.state = Scan::Text;
+						self.state = QueryScan::Text;
 					}
-					ESC => self.state = Scan::Esc,
+					ESC => self.state = QueryScan::Esc,
 					// Every other `CSI ?` sequence — DECSET/DECRST (`h`/`l`), DECRQM (`$p`), the
 					// kitty keyboard query (`u`) — belongs to the engine.
-					_ => self.state = Scan::Text,
+					_ => self.state = QueryScan::Text,
 				},
-				Scan::Dcs => {
+				QueryScan::Dcs => {
 					self.state = match byte {
-						b'$' => Scan::DcsDollar,
-						b'+' => Scan::DcsPlus,
-						ESC => Scan::Esc,
+						b'$' => QueryScan::DcsDollar,
+						b'+' => QueryScan::DcsPlus,
+						ESC => QueryScan::Esc,
 						// Some other DCS (a sixel image, a reply): follow it to its terminator so
 						// its data cannot be mistaken for a query, but read nothing from it.
-						_ => Scan::DcsIgnore,
+						_ => QueryScan::DcsIgnore,
 					};
 				}
-				Scan::DcsDollar => {
+				QueryScan::DcsDollar => {
 					self.data.clear();
 					self.state = match byte {
-						b'q' => Scan::DcsData(DcsKind::Decrqss),
-						ESC => Scan::Esc,
-						_ => Scan::DcsIgnore,
+						b'q' => QueryScan::DcsData(DcsKind::Decrqss),
+						ESC => QueryScan::Esc,
+						_ => QueryScan::DcsIgnore,
 					};
 				}
-				Scan::DcsPlus => {
+				QueryScan::DcsPlus => {
 					self.data.clear();
 					self.state = match byte {
-						b'q' => Scan::DcsData(DcsKind::GetTcap),
-						ESC => Scan::Esc,
-						_ => Scan::DcsIgnore,
+						b'q' => QueryScan::DcsData(DcsKind::GetTcap),
+						ESC => QueryScan::Esc,
+						_ => QueryScan::DcsIgnore,
 					};
 				}
-				Scan::DcsData(kind) => match byte {
+				QueryScan::DcsData(kind) => match byte {
 					// `ESC \` is the canonical string terminator; watch for its ESC.
-					ESC => self.state = Scan::DcsDataEsc(kind),
+					ESC => self.state = QueryScan::DcsDataEsc(kind),
 					// BEL is the alternate terminator some programs use.
 					BEL => {
 						self.complete_dcs(kind, &mut found);
-						self.state = Scan::Text;
+						self.state = QueryScan::Text;
 					}
 					_ => {
 						self.data.push(byte);
 						// Past any real selector or name list: abandon rather than buffer on.
 						if self.data.len() > MAX_DATA {
-							self.state = Scan::DcsIgnore;
+							self.state = QueryScan::DcsIgnore;
 						}
 					}
 				},
-				Scan::DcsDataEsc(kind) => match byte {
+				QueryScan::DcsDataEsc(kind) => match byte {
 					b'\\' => {
 						self.complete_dcs(kind, &mut found);
-						self.state = Scan::Text;
+						self.state = QueryScan::Text;
 					}
-					ESC => self.state = Scan::DcsDataEsc(kind),
+					ESC => self.state = QueryScan::DcsDataEsc(kind),
 					// A stray ESC that did not form `ESC \`: abandon this DCS.
-					_ => self.state = Scan::Text,
+					_ => self.state = QueryScan::Text,
 				},
-				Scan::DcsIgnore => match byte {
-					ESC => self.state = Scan::DcsIgnoreEsc,
-					BEL => self.state = Scan::Text,
+				QueryScan::DcsIgnore => match byte {
+					ESC => self.state = QueryScan::DcsIgnoreEsc,
+					BEL => self.state = QueryScan::Text,
 					_ => {}
 				},
-				Scan::DcsIgnoreEsc => match byte {
-					b'\\' => self.state = Scan::Text,
-					ESC => self.state = Scan::DcsIgnoreEsc,
-					_ => self.state = Scan::Text,
+				QueryScan::DcsIgnoreEsc => match byte {
+					b'\\' => self.state = QueryScan::Text,
+					ESC => self.state = QueryScan::DcsIgnoreEsc,
+					_ => self.state = QueryScan::Text,
 				},
 			}
 		}

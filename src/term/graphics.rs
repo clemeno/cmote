@@ -211,7 +211,7 @@ impl Store {
 /// its final byte (a `q` opens a sixel; anything else is some other DCS to be followed silently) and
 /// a `CSI <digits> J` erase — and every other sequence resets straight back to `Text`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Scan {
+enum GraphicsScan {
 	/// Ordinary output; waiting for an ESC.
 	#[default]
 	Text,
@@ -237,7 +237,7 @@ enum Scan {
 /// so a picture split over any number of chunks is decoded on the chunk that finishes it.
 #[derive(Debug)]
 pub struct Images {
-	state: Scan,
+	state: GraphicsScan,
 	params: Params,
 	payload: Vec<u8>,
 	/// Whether the payload being read has already outgrown `MAX_PAYLOAD`. Kept as a flag rather than
@@ -264,7 +264,7 @@ pub struct Images {
 impl Default for Images {
 	fn default() -> Self {
 		Self {
-			state: Scan::default(),
+			state: GraphicsScan::default(),
 			params: Params::default(),
 			payload: Vec::new(),
 			overflowed: false,
@@ -278,7 +278,7 @@ impl Default for Images {
 }
 
 impl Images {
-	/// Scan a chunk of shell output. Each returned event carries the offset the engine should be
+	/// GraphicsScan a chunk of shell output. Each returned event carries the offset the engine should be
 	/// advanced to before it is acted on — past its own bytes for a picture, before them for an erase,
 	/// for the reasons on `Event` — so the caller advances, acts, and carries on: the split-advance
 	/// `osc133` established (§34).
@@ -293,32 +293,32 @@ impl Images {
 			let past = index + 1;
 			let began = self.sequence_start.unwrap_or(0);
 			match self.state {
-				Scan::Text => {
+				GraphicsScan::Text => {
 					if byte == ESC {
 						self.begin(index);
 					}
 				}
-				Scan::Esc => match byte {
+				GraphicsScan::Esc => match byte {
 					b'[' => {
 						self.params.clear();
-						self.state = Scan::Csi;
+						self.state = GraphicsScan::Csi;
 					}
 					b'P' => {
 						self.params.clear();
-						self.state = Scan::Dcs;
+						self.state = GraphicsScan::Dcs;
 					}
 					// RIS: the terminal is reset, so nothing that was drawn survives it.
 					b'c' => {
 						found.push((began, Event::Reset));
-						self.state = Scan::Text;
+						self.state = GraphicsScan::Text;
 					}
 					ESC => self.begin(index),
-					_ => self.state = Scan::Text,
+					_ => self.state = GraphicsScan::Text,
 				},
-				Scan::Csi => match byte {
+				GraphicsScan::Csi => match byte {
 					b'0'..=b'9' | b';' => {
 						if !self.params.push(byte) {
-							self.state = Scan::Text;
+							self.state = GraphicsScan::Text;
 						}
 					}
 					b'J' => {
@@ -336,7 +336,7 @@ impl Images {
 							3 => found.push((began, Event::ClearScrollback)),
 							_ => {}
 						}
-						self.state = Scan::Text;
+						self.state = GraphicsScan::Text;
 					}
 					ESC => self.begin(index),
 					// A byte the engine reads straight through, keeping the sequence across it (§106,
@@ -346,14 +346,14 @@ impl Images {
 					byte if super::csi::passes_through(byte) => {}
 					// Any other CSI: a colour, a cursor move, a private mode, or one of the two bytes that
 					// really cancel a sequence. Not ours.
-					_ => self.state = Scan::Text,
+					_ => self.state = GraphicsScan::Text,
 				},
-				Scan::Dcs => match byte {
+				GraphicsScan::Dcs => match byte {
 					// A sixel's parameters are `P1;P2;P3`; they change no pixel (see `sixel::decode`)
 					// so they are collected only to be stepped over.
 					b'0'..=b'9' | b';' => {
 						if !self.params.push(byte) {
-							self.state = Scan::Other;
+							self.state = GraphicsScan::Other;
 						}
 					}
 					// The final byte. `q` with no intermediate is sixel; a DECRQSS (`$q`) or an
@@ -362,13 +362,13 @@ impl Images {
 					b'q' => {
 						self.payload.clear();
 						self.overflowed = false;
-						self.state = Scan::Payload;
+						self.state = GraphicsScan::Payload;
 					}
 					ESC => self.begin(index),
-					_ => self.state = Scan::Other,
+					_ => self.state = GraphicsScan::Other,
 				},
-				Scan::Payload => match byte {
-					ESC => self.state = Scan::PayloadEsc,
+				GraphicsScan::Payload => match byte {
+					ESC => self.state = GraphicsScan::PayloadEsc,
 					BEL | ST => {
 						self.complete(past, &mut found);
 					}
@@ -382,23 +382,23 @@ impl Images {
 						}
 					}
 				},
-				Scan::PayloadEsc => match byte {
+				GraphicsScan::PayloadEsc => match byte {
 					b'\\' => self.complete(past, &mut found),
 					// `ESC ESC` inside a payload: still waiting for the terminator's `\`.
-					ESC => self.state = Scan::PayloadEsc,
+					ESC => self.state = GraphicsScan::PayloadEsc,
 					// A stray ESC that formed no terminator: the picture is malformed, so it is
 					// abandoned rather than guessed at.
-					_ => self.state = Scan::Text,
+					_ => self.state = GraphicsScan::Text,
 				},
-				Scan::Other => match byte {
-					ESC => self.state = Scan::OtherEsc,
-					BEL | ST => self.state = Scan::Text,
+				GraphicsScan::Other => match byte {
+					ESC => self.state = GraphicsScan::OtherEsc,
+					BEL | ST => self.state = GraphicsScan::Text,
 					_ => {}
 				},
-				Scan::OtherEsc => match byte {
-					b'\\' => self.state = Scan::Text,
-					ESC => self.state = Scan::OtherEsc,
-					_ => self.state = Scan::Text,
+				GraphicsScan::OtherEsc => match byte {
+					b'\\' => self.state = GraphicsScan::Text,
+					ESC => self.state = GraphicsScan::OtherEsc,
+					_ => self.state = GraphicsScan::Text,
 				},
 			}
 		}
@@ -409,14 +409,14 @@ impl Images {
 	/// an erase event is reported at, so the engine can be advanced to just before its bytes.
 	fn begin(&mut self, index: usize) {
 		self.sequence_start = Some(index);
-		self.state = Scan::Esc;
+		self.state = GraphicsScan::Esc;
 	}
 
 	/// Finish the payload being read: decode it, and hand the picture on if there was one. An
 	/// oversized, empty or undecodable payload produces no event at all — the caller then reserves
 	/// no cells either, so a picture cmote cannot draw leaves the screen exactly as it was.
 	fn complete(&mut self, past: usize, found: &mut Vec<(usize, Event)>) {
-		self.state = Scan::Text;
+		self.state = GraphicsScan::Text;
 		let payload = std::mem::take(&mut self.payload);
 		if self.overflowed {
 			return;
