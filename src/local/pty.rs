@@ -38,7 +38,7 @@ use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use tokio::sync::mpsc;
 
-use super::shells::Shell;
+use super::shells::LocalShell;
 use crate::term;
 
 /// How many bytes one read off the pty may return. A terminal flood arrives in whatever sizes the
@@ -102,7 +102,7 @@ impl Pty {
 	/// one (`term::DEFAULT_COLS` / `DEFAULT_ROWS`) — the single source of truth is `term`, so the
 	/// shell's idea of the window and cmote's agree from the first byte. The GUI refits both a moment
 	/// later, once it knows the real window size.
-	pub fn open(shell: &Shell) -> Result<(Self, Stream)> {
+	pub fn open(shell: &LocalShell) -> Result<(Self, Stream)> {
 		let pair = native_pty_system()
 			.openpty(size(term::DEFAULT_COLS, term::DEFAULT_ROWS))
 			.context("could not open a pseudo-terminal")?;
@@ -304,7 +304,7 @@ fn spawn_writer(mut writer: Box<dyn std::io::Write + Send>) -> mpsc::Sender<Vec<
 #[cfg(test)]
 mod tests {
 	use super::{Pty, READ_CHUNK, size};
-	use crate::local::shells::{Shell, ShellKind};
+	use crate::local::shells::{LocalShell, ShellKind};
 	use crate::term;
 	use std::path::PathBuf;
 
@@ -337,13 +337,13 @@ mod tests {
 	/// Deliberately NOT one of `catalogue`'s entries: those are interactive shells that never exit, so
 	/// they could not test the EOF that ends a session. This runs one command and stops, which is what
 	/// makes both halves — the output arriving and the channel closing — observable in one test.
-	fn echoing_shell() -> Option<Shell> {
+	fn echoing_shell() -> Option<LocalShell> {
 		#[cfg(windows)]
 		{
 			let program = std::env::var_os("ComSpec")
 				.map(PathBuf::from)
 				.filter(|path| path.is_file())?;
-			Some(Shell {
+			Some(LocalShell {
 				kind: ShellKind::Cmd,
 				program,
 				args: vec!["/c".to_owned(), "echo".to_owned(), MARKER.to_owned()],
@@ -352,7 +352,7 @@ mod tests {
 		#[cfg(target_os = "macos")]
 		{
 			let program = PathBuf::from("/bin/sh");
-			program.is_file().then(|| Shell {
+			program.is_file().then(|| LocalShell {
 				kind: ShellKind::Bash,
 				program,
 				args: vec!["-c".to_owned(), format!("echo {MARKER}")],

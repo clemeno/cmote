@@ -205,13 +205,13 @@ fn msys(path: &str) -> String {
 /// The arguments are part of the entry rather than derived from the kind at spawn time, because only
 /// one shell needs any and the reason is specific to it (see [`git_bash`]).
 #[derive(Debug, Clone)]
-pub struct Shell {
+pub struct LocalShell {
 	pub kind: ShellKind,
 	pub program: PathBuf,
 	pub args: Vec<String>,
 }
 
-impl Shell {
+impl LocalShell {
 	/// A shell with no arguments — the ordinary case: an interactive shell started with a pty needs
 	/// nothing told to it, because the pty is what makes it interactive.
 	fn plain(kind: ShellKind, program: PathBuf) -> Self {
@@ -241,21 +241,21 @@ impl Shell {
 /// the home screen is redrawn on every frame, and a search that touched the disk each time would put
 /// a dozen `is_file` probes into the paint loop. A shell installed while cmote is running therefore
 /// needs a restart to appear, which is a price worth naming and not worth paying per frame.
-pub fn catalogue() -> &'static [Shell] {
-	static FOUND: std::sync::OnceLock<Vec<Shell>> = std::sync::OnceLock::new();
+pub fn catalogue() -> &'static [LocalShell] {
+	static FOUND: std::sync::OnceLock<Vec<LocalShell>> = std::sync::OnceLock::new();
 	FOUND.get_or_init(|| candidates().into_iter().flatten().collect())
 }
 
 /// The Windows candidates, each `Some` only if its program is really there.
 #[cfg(windows)]
-fn candidates() -> Vec<Option<Shell>> {
+fn candidates() -> Vec<Option<LocalShell>> {
 	vec![pwsh(), windows_powershell(), cmd(), git_bash()]
 }
 
 /// The macOS candidates. `pwsh` is offered here too — PowerShell 7 is cross-platform, and someone
 /// who installed it on a Mac means to use it.
 #[cfg(target_os = "macos")]
-fn candidates() -> Vec<Option<Shell>> {
+fn candidates() -> Vec<Option<LocalShell>> {
 	vec![
 		unix_shell(ShellKind::Zsh, "zsh"),
 		unix_shell(ShellKind::Bash, "bash"),
@@ -266,10 +266,10 @@ fn candidates() -> Vec<Option<Shell>> {
 /// PowerShell 7 (`pwsh`). Installed separately from Windows, and by several routes — the MSI, the
 /// Store, `winget`, a portable unzip on `PATH` — so `PATH` is tried first and the MSI's own
 /// directories after it.
-fn pwsh() -> Option<Shell> {
+fn pwsh() -> Option<LocalShell> {
 	let name = if cfg!(windows) { "pwsh.exe" } else { "pwsh" };
 	if let Some(found) = on_path(name) {
-		return Some(Shell::plain(ShellKind::Pwsh, found));
+		return Some(LocalShell::plain(ShellKind::Pwsh, found));
 	}
 	// The MSI's layout: `%ProgramFiles%\PowerShell\7\pwsh.exe`. The major version is in the path, so
 	// it is walked rather than guessed — 7 today, 8 tomorrow, and a machine can hold both.
@@ -287,7 +287,7 @@ fn pwsh() -> Option<Shell> {
 			.collect();
 		found.sort();
 		if let Some(newest) = found.pop() {
-			return Some(Shell::plain(ShellKind::Pwsh, newest));
+			return Some(LocalShell::plain(ShellKind::Pwsh, newest));
 		}
 	}
 	None
@@ -297,18 +297,18 @@ fn pwsh() -> Option<Shell> {
 /// rather than searched for — and `%SystemRoot%` rather than a hard-coded `C:\Windows`, because the
 /// drive and the folder are both installer choices.
 #[cfg(windows)]
-fn windows_powershell() -> Option<Shell> {
+fn windows_powershell() -> Option<LocalShell> {
 	let root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
 	let program = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
 	program
 		.is_file()
-		.then(|| Shell::plain(ShellKind::PowerShell, program))
+		.then(|| LocalShell::plain(ShellKind::PowerShell, program))
 }
 
 /// `cmd.exe`. `%ComSpec%` is Windows' own answer to "what is the command interpreter", so it is
 /// asked first and `%SystemRoot%` is the fallback for the rare environment that unsets it.
 #[cfg(windows)]
-fn cmd() -> Option<Shell> {
+fn cmd() -> Option<LocalShell> {
 	let from_env = std::env::var_os("ComSpec").map(PathBuf::from);
 	let from_root = std::env::var_os("SystemRoot")
 		.map(PathBuf::from)
@@ -317,7 +317,7 @@ fn cmd() -> Option<Shell> {
 		.into_iter()
 		.chain(from_root)
 		.find(|candidate| candidate.is_file())?;
-	Some(Shell::plain(ShellKind::Cmd, program))
+	Some(LocalShell::plain(ShellKind::Cmd, program))
 }
 
 /// Git for Windows' bash — the MSYS2 one, never WSL's (see the module note).
@@ -334,9 +334,9 @@ fn cmd() -> Option<Shell> {
 /// startup files never run, so `PATH` has no Unix tools on it and the shell is a bash that cannot
 /// find `ls` — a shell that starts and is useless is worse than no button.
 #[cfg(windows)]
-fn git_bash() -> Option<Shell> {
+fn git_bash() -> Option<LocalShell> {
 	let program = git_bash_path()?;
-	Some(Shell {
+	Some(LocalShell {
 		kind: ShellKind::GitBash,
 		program,
 		args: vec!["--login".to_owned(), "-i".to_owned()],
@@ -459,10 +459,10 @@ fn wide(text: &str) -> Vec<u16> {
 /// A shell named on `PATH` (or at its usual `/bin` home), for the macOS entries where the name is
 /// not ambiguous.
 #[cfg(target_os = "macos")]
-fn unix_shell(kind: ShellKind, name: &str) -> Option<Shell> {
+fn unix_shell(kind: ShellKind, name: &str) -> Option<LocalShell> {
 	let fallback = PathBuf::from("/bin").join(name);
 	let program = on_path(name).or_else(|| fallback.is_file().then_some(fallback))?;
-	Some(Shell::plain(kind, program))
+	Some(LocalShell::plain(kind, program))
 }
 
 /// The `Program Files` directories to look in: the 64-bit one and the 32-bit one, in that order.
@@ -493,14 +493,14 @@ fn on_path(name: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use super::{Shell, ShellKind, catalogue, on_path, program_files};
+	use super::{LocalShell, ShellKind, catalogue, on_path, program_files};
 	use std::path::PathBuf;
 
 	#[test]
 	fn a_local_session_is_labelled_by_its_shell_and_never_shaped_like_an_endpoint() {
 		// Two local tabs are told apart by the shell, so the shell has to be in the label. And the
 		// label must not read as `user@host:port`: there is no machine on the other end of anything.
-		let shell = Shell::plain(
+		let shell = LocalShell::plain(
 			ShellKind::Cmd,
 			PathBuf::from(r"C:\Windows\System32\cmd.exe"),
 		);

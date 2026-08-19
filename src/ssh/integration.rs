@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::bridge::SshEvent;
 use crate::explorer::shell_quote;
-use crate::integration::{self, Shell};
+use crate::integration::{self, IntegrationShell};
 use crate::ssh::asuser::AsuserFiles;
 use crate::ssh::{edit, shellfs};
 
@@ -31,7 +31,10 @@ const PASSWD: &str = "/etc/passwd";
 /// is not in the file). A file that EXISTS is decent evidence of the shell that reads it; zsh
 /// comes first because a machine with a `.zshrc` almost certainly uses zsh, while a `.bashrc` is
 /// left behind on accounts that never open bash.
-const FALLBACKS: [(&str, Shell); 2] = [(".zshrc", Shell::Zsh), (".bashrc", Shell::Bash)];
+const FALLBACKS: [(&str, IntegrationShell); 2] = [
+	(".zshrc", IntegrationShell::Zsh),
+	(".bashrc", IntegrationShell::Bash),
+];
 
 /// Look at the login account's shell config and report what could be done to it (§17). Reads only:
 /// the dialog shows the block and the file, and nothing is written until the user says so.
@@ -65,7 +68,7 @@ pub async fn write(
 	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	path: String,
-	shell: Shell,
+	shell: IntegrationShell,
 	install: bool,
 ) {
 	let events = events.clone();
@@ -94,14 +97,17 @@ pub async fn write(
 /// already there. The shell is `None` when nothing could establish it — a shell cmote has no block
 /// for, or an account it cannot find — and the path then still names the file that WOULD be
 /// written, so the dialog can say what it was looking at.
-async fn look(backend: &AsuserFiles, user: &str) -> Result<(Option<Shell>, String, bool)> {
+async fn look(
+	backend: &AsuserFiles,
+	user: &str,
+) -> Result<(Option<IntegrationShell>, String, bool)> {
 	let home = home(backend).await?;
 
 	// The authoritative answer first: what `/etc/passwd` says this account logs into. A remote that
 	// will not let us read it (or does not have it) is not an error — it is one source that could
 	// not answer, so the fallback below gets its turn.
 	let named = read_text(backend, PASSWD).await.ok().and_then(|passwd| {
-		integration::login_shell(&passwd, user).and_then(Shell::from_login_shell)
+		integration::login_shell(&passwd, user).and_then(IntegrationShell::from_login_shell)
 	});
 
 	// Failing that, the config files themselves are the evidence: a file that exists is read by the
@@ -137,7 +143,12 @@ async fn look(backend: &AsuserFiles, user: &str) -> Result<(Option<Shell>, Strin
 /// Read the file, apply the edit, write it back — the whole of an install or a removal. A file
 /// that is already in the asked-for state is reported as an error rather than rewritten
 /// needlessly, so the dialog never claims to have changed something it did not.
-async fn edit_file(backend: &AsuserFiles, path: &str, shell: Shell, install: bool) -> Result<()> {
+async fn edit_file(
+	backend: &AsuserFiles,
+	path: &str,
+	shell: IntegrationShell,
+	install: bool,
+) -> Result<()> {
 	// A missing file is empty, not a failure: installing into an account with no `.bashrc` yet
 	// creates one, which is what the shell would read if it existed.
 	let existing = read_text(backend, path).await.unwrap_or_default();

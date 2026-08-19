@@ -234,7 +234,7 @@ pub fn grid<'a>(
 /// event, not on the mouse ones), which button the remote program believes is down, and
 /// the last cell a move was reported for, so dragging inside one cell stays quiet.
 #[derive(Debug, Default)]
-struct State {
+struct GridState {
 	modifiers: Modifiers,
 	held: Option<report::Button>,
 	last: Option<ScreenSpot>,
@@ -270,11 +270,11 @@ impl Grid<'_> {
 
 impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 	fn tag(&self) -> tree::Tag {
-		tree::Tag::of::<State>()
+		tree::Tag::of::<GridState>()
 	}
 
 	fn state(&self) -> tree::State {
-		tree::State::new(State::default())
+		tree::State::new(GridState::default())
 	}
 
 	fn size(&self) -> Size<Length> {
@@ -300,7 +300,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		cursor: mouse::Cursor,
 		viewport: &Rectangle,
 	) {
-		let state = tree.state.downcast_ref::<State>();
+		let state = tree.state.downcast_ref::<GridState>();
 		let bounds = layout.bounds();
 		let Some(visible) = bounds.intersection(viewport) else {
 			return;
@@ -475,7 +475,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		shell: &mut Shell<'_, Message>,
 		_viewport: &Rectangle,
 	) {
-		let state = tree.state.downcast_mut::<State>();
+		let state = tree.state.downcast_mut::<GridState>();
 		if let iced::Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) = event {
 			state.modifiers = *modifiers;
 		}

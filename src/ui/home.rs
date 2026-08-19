@@ -96,7 +96,7 @@ pub struct View<'a> {
 	/// because the catalogue is searched once per run and kept (`local::shells::catalogue`) — a search
 	/// per frame would put a dozen filesystem probes in the paint loop. Empty on a machine where none
 	/// was found, and then no bar is drawn at all.
-	pub shells: &'static [crate::local::shells::Shell],
+	pub shells: &'static [crate::local::shells::LocalShell],
 }
 
 /// Render the home screen. `targets` are already in display order (`profiles` keeps
@@ -217,7 +217,7 @@ fn confirm_delete_panel(
 /// The buttons are the catalogue in its own order, and the catalogue holds only what is really
 /// installed — so a button on screen can always be pressed. Nothing is shown disabled: a greyed
 /// "Git Bash" on a machine without Git teaches the user nothing they can act on.
-fn local_bar(shells: &'static [crate::local::shells::Shell]) -> Element<'static, Message> {
+fn local_bar(shells: &'static [crate::local::shells::LocalShell]) -> Element<'static, Message> {
 	let mut bar = row![
 		text("Local")
 			.size(12)

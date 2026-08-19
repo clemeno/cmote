@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 
 use super::pty::Pty;
-use super::shells::Shell;
+use super::shells::LocalShell;
 use super::{copy, fs};
 use crate::bridge::{ConflictChoice, SshEvent};
 use crate::ssh::client::SessionMsg;
@@ -70,7 +70,7 @@ const _: () = assert!(GOODBYE.as_millis() * 2 <= crate::app::QUIT_DRAIN_TIMEOUT.
 /// has: `Error` when the shell could not be started at all, `Disconnected` for every other ending —
 /// the user typed `exit`, the program died, or Disconnect was confirmed.
 pub async fn run(
-	shell: Shell,
+	shell: LocalShell,
 	events: mpsc::Sender<SshEvent>,
 	mut commands: mpsc::Receiver<SessionMsg>,
 ) {
@@ -238,7 +238,7 @@ pub async fn run(
 					| Some(SessionMsg::WriteIntegration { .. }) => {
 						let _ = events
 							.send(SshEvent::IntegrationFailed(
-								"Shell integration writes a cwd announcer into a REMOTE shell's config. \
+								"LocalShell integration writes a cwd announcer into a REMOTE shell's config. \
 								 cmote does not edit your own profile on this machine."
 									.to_owned(),
 							))

@@ -36,14 +36,14 @@ pub const END: &str = "# <<< cmote shell integration <<<";
 /// block to write into it. Only the families cmote can actually help are named: `Fish` is here to be
 /// RECOGNISED and left alone, since it announces its directory itself and has nothing to install.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Shell {
+pub enum IntegrationShell {
 	Bash,
 	Zsh,
 	/// fish 3.1 and later emit OSC 7 from their own prompt, so there is nothing for cmote to add.
 	Fish,
 }
 
-impl Shell {
+impl IntegrationShell {
 	/// Read a shell family out of a login-shell path — `/bin/bash`, `/usr/bin/zsh`. Unknown shells
 	/// (`/sbin/nologin`, `ksh`, a plain `sh`) answer `None`, which the caller turns into "we could
 	/// not tell", never into a guess: writing a bash block into a ksh rc file would break the login.
@@ -161,11 +161,11 @@ add-zsh-hook preexec __cmote_preexec"#;
 /// what the dialog shows the user before anything is written. `None` for a shell with nothing to
 /// install, so "there is no block" and "here is the block" are distinguishable at the type level
 /// rather than by an empty string.
-pub fn block(shell: Shell) -> Option<String> {
+pub fn block(shell: IntegrationShell) -> Option<String> {
 	let body = match shell {
-		Shell::Bash => BASH_BLOCK,
-		Shell::Zsh => ZSH_BLOCK,
-		Shell::Fish => return None,
+		IntegrationShell::Bash => BASH_BLOCK,
+		IntegrationShell::Zsh => ZSH_BLOCK,
+		IntegrationShell::Fish => return None,
 	};
 	Some(format!("{BEGIN}\n{body}\n{END}\n"))
 }
@@ -178,7 +178,7 @@ pub fn block(shell: Shell) -> Option<String> {
 /// block reads `$PROMPT_COMMAND` to prepend itself to whatever is already set, so it has to run
 /// after the lines that set it. A missing final newline is added first, so a file that did not end
 /// in one does not get the marker welded onto its last line.
-pub fn install(existing: &str, shell: Shell) -> Option<String> {
+pub fn install(existing: &str, shell: IntegrationShell) -> Option<String> {
 	if existing.contains(BEGIN) {
 		return None;
 	}
@@ -258,30 +258,36 @@ mod tests {
 
 	#[test]
 	fn a_login_shell_path_names_its_family() {
-		assert_eq!(Shell::from_login_shell("/bin/bash"), Some(Shell::Bash));
-		assert_eq!(Shell::from_login_shell("/usr/bin/zsh"), Some(Shell::Zsh));
 		assert_eq!(
-			Shell::from_login_shell("/usr/local/bin/fish"),
-			Some(Shell::Fish)
+			IntegrationShell::from_login_shell("/bin/bash"),
+			Some(IntegrationShell::Bash)
+		);
+		assert_eq!(
+			IntegrationShell::from_login_shell("/usr/bin/zsh"),
+			Some(IntegrationShell::Zsh)
+		);
+		assert_eq!(
+			IntegrationShell::from_login_shell("/usr/local/bin/fish"),
+			Some(IntegrationShell::Fish)
 		);
 		// A shell cmote has no block for is unknown, NOT a bash guess: writing bash syntax into
 		// another shell's config is how a login gets broken.
-		assert_eq!(Shell::from_login_shell("/bin/ksh"), None);
-		assert_eq!(Shell::from_login_shell("/sbin/nologin"), None);
+		assert_eq!(IntegrationShell::from_login_shell("/bin/ksh"), None);
+		assert_eq!(IntegrationShell::from_login_shell("/sbin/nologin"), None);
 	}
 
 	#[test]
 	fn fish_has_nothing_to_install() {
 		// fish announces its own directory, so cmote offers nothing rather than editing a config
 		// to no purpose.
-		assert!(!Shell::Fish.installable());
-		assert_eq!(block(Shell::Fish), None);
-		assert_eq!(install("", Shell::Fish), None);
+		assert!(!IntegrationShell::Fish.installable());
+		assert_eq!(block(IntegrationShell::Fish), None);
+		assert_eq!(install("", IntegrationShell::Fish), None);
 	}
 
 	#[test]
 	fn the_block_is_appended_whole_with_both_markers() {
-		let out = install("export PATH=$PATH:/opt/bin\n", Shell::Bash).unwrap();
+		let out = install("export PATH=$PATH:/opt/bin\n", IntegrationShell::Bash).unwrap();
 		assert!(
 			out.starts_with("export PATH=$PATH:/opt/bin\n"),
 			"the file is kept"
@@ -299,7 +305,7 @@ mod tests {
 		// A rc file whose last line has no newline is common enough, and appending straight onto it
 		// would turn that line into `alias ll='ls -l'# >>> cmote ...` — a comment marker in the
 		// middle of a live command.
-		let out = install("alias ll='ls -l'", Shell::Bash).unwrap();
+		let out = install("alias ll='ls -l'", IntegrationShell::Bash).unwrap();
 		assert!(
 			out.contains("alias ll='ls -l'\n"),
 			"the last line is closed off"
@@ -314,9 +320,9 @@ mod tests {
 	fn installing_twice_does_nothing() {
 		// The marker is the whole bookkeeping: a second install would announce the directory twice
 		// on every prompt, and there is no state anywhere else that would notice.
-		let once = install("# rc\n", Shell::Bash).unwrap();
+		let once = install("# rc\n", IntegrationShell::Bash).unwrap();
 		assert!(installed(&once));
-		assert_eq!(install(&once, Shell::Bash), None);
+		assert_eq!(install(&once, IntegrationShell::Bash), None);
 	}
 
 	#[test]
@@ -324,14 +330,14 @@ mod tests {
 		// The round trip is the promise the dialog makes: it can be removed. Anything left behind —
 		// a blank line, a stray marker — would break that on the second cycle.
 		let before = "# rc\nexport EDITOR=vi\n";
-		let after = install(before, Shell::Zsh).unwrap();
+		let after = install(before, IntegrationShell::Zsh).unwrap();
 		assert_eq!(remove(&after).as_deref(), Some(before));
 	}
 
 	#[test]
 	fn removing_keeps_what_was_written_after_the_block() {
 		// A user who added their own lines below cmote's block keeps them.
-		let installed = install("# rc\n", Shell::Bash).unwrap();
+		let installed = install("# rc\n", IntegrationShell::Bash).unwrap();
 		let with_tail = format!("{installed}export LANG=C.UTF-8\n");
 		let out = remove(&with_tail).unwrap();
 		assert_eq!(out, "# rc\nexport LANG=C.UTF-8\n");
@@ -379,7 +385,7 @@ mod tests {
 		// The block is only worth writing if `term::cwd` and `term::osc133` can read what it emits,
 		// and those two read `ESC ] 7 ;` and `ESC ] 133 ;`. Written as a test because the block is a
 		// string literal: nothing else would notice a typo in an escape until a real server did.
-		for shell in [Shell::Bash, Shell::Zsh] {
+		for shell in [IntegrationShell::Bash, IntegrationShell::Zsh] {
 			let block = block(shell).unwrap();
 			assert!(
 				block.contains(r"\033]7;file://"),

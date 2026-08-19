@@ -160,7 +160,7 @@ pub enum SshCommand {
 	/// of a connection's parameters — there is no host, no port and no account to be. What the two DO
 	/// share is everything after this point: the session task, whichever kind it is, answers the same
 	/// `SshCommand`s in the same `SshEvent`s, which is why nothing else in the command list is doubled.
-	ConnectLocal(crate::local::shells::Shell),
+	ConnectLocal(crate::local::shells::LocalShell),
 	/// The user's answer to a host-key prompt (§8): reject, trust just this session, or pin the
 	/// key. Answers both the first-contact (`HostKey`) and the mismatch (`HostKeyChanged`) prompts
 	/// — the SSH task reads the choice against whichever verdict it is waiting on (§8).
@@ -332,7 +332,7 @@ pub enum SshCommand {
 	/// `IntegrationFailed`.
 	WriteIntegration {
 		path: String,
-		shell: crate::integration::Shell,
+		shell: crate::integration::IntegrationShell,
 		install: bool,
 	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19). Routed to
@@ -485,7 +485,7 @@ pub enum SshEvent {
 	/// nothing. `path` is the config file that would be written, and `installed` whether cmote's
 	/// block is already in it, which is what makes the dialog offer Remove instead of Install.
 	IntegrationProbed {
-		shell: Option<crate::integration::Shell>,
+		shell: Option<crate::integration::IntegrationShell>,
 		path: String,
 		installed: bool,
 	},

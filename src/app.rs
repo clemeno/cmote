@@ -2795,7 +2795,7 @@ pub enum Integration {
 	/// which announces its own directory — in both cases there is nothing to offer, and the body
 	/// says why. `installed` decides whether the one action is Install or Remove.
 	Found {
-		shell: Option<crate::integration::Shell>,
+		shell: Option<crate::integration::IntegrationShell>,
 		path: String,
 		installed: bool,
 	},
@@ -2886,12 +2886,12 @@ pub enum Message {
 	/// Open a blank connect form for a brand-new connection.
 	HomeNewPressed,
 	/// A button on the home screen's Local bar was pressed (§103): open a session on THIS machine
-	/// running that shell. It carries the whole `Shell` — the program cmote resolved and the arguments
+	/// running that shell. It carries the whole `IntegrationShell` — the program cmote resolved and the arguments
 	/// it wants — rather than an index into the catalogue, so nothing re-searches the disk on the press
 	/// and a stale index can never open the wrong program.
 	///
 	/// There is no form and no `Connecting` question to answer: the next event is `Connected`.
-	HomeLocalPressed(crate::local::shells::Shell),
+	HomeLocalPressed(crate::local::shells::LocalShell),
 	/// A target row was left-clicked — select it (payload: its endpoint key).
 	HomeTargetClicked(String),
 	/// A target row was right-clicked — select it and open the context menu.
@@ -3275,7 +3275,7 @@ pub enum Message {
 	/// hold the process open. Carries no payload — `update` reads the drain's own age.
 	QuitTick,
 	// --- shell integration (§17): teaching a silent remote shell to announce its directory ---
-	/// The terminal's context-menu "Shell integration…" — open the dialog and ask the server what
+	/// The terminal's context-menu "IntegrationShell integration…" — open the dialog and ask the server what
 	/// its login shell's config looks like.
 	IntegrationPressed,
 	/// Write the block into the file the probe found. The path and shell are read from the open
@@ -4120,7 +4120,7 @@ impl Tab {
 			// exists to catch the press on a divider, which sits BETWEEN two regions (§48).
 			| Message::PointerMoved(_)
 			| Message::PointerPressed => {}
-			// Shell integration (§17).
+			// IntegrationShell integration (§17).
 			Message::IntegrationPressed => self.open_integration_dialog(),
 			Message::IntegrationInstall => self.write_integration(true),
 			Message::IntegrationRemove => self.write_integration(false),
@@ -4272,7 +4272,7 @@ impl Tab {
 	/// What it does share with `dial` is the shape: send the command, and move to `Connecting` only if
 	/// it left. The status is a full sentence rather than "connecting to …:22" because nothing is being
 	/// connected to; it is on screen for a frame or two, until `Connected` arrives.
-	fn dial_local(&mut self, shell: crate::local::shells::Shell) -> iced::Task<Message> {
+	fn dial_local(&mut self, shell: crate::local::shells::LocalShell) -> iced::Task<Message> {
 		self.abandon_attempt();
 		let status = format!("starting {}…", shell.kind.label());
 		let endpoint = shell.endpoint();
@@ -5293,7 +5293,7 @@ impl Tab {
 	/// re-opening the dialog on their behalf would be the app talking over them.
 	fn on_integration_probed(
 		&mut self,
-		shell: Option<crate::integration::Shell>,
+		shell: Option<crate::integration::IntegrationShell>,
 		path: String,
 		installed: bool,
 	) {
@@ -8695,7 +8695,7 @@ mod tests {
 	// the probe out, the server's reply in. Every test below starts here, because nothing about
 	// the dialog can be exercised until the server has said what it found.
 	fn probed(
-		shell: Option<crate::integration::Shell>,
+		shell: Option<crate::integration::IntegrationShell>,
 		path: &str,
 		installed: bool,
 	) -> (Tab, mpsc::Receiver<SshCommand>) {
@@ -8733,9 +8733,9 @@ mod tests {
 	/// before their config file is touched.
 	#[test]
 	fn a_silent_bash_is_shown_the_block_before_anything_is_written() {
-		use crate::integration::Shell;
+		use crate::integration::IntegrationShell;
 
-		let (mut app, mut rx) = probed(Some(Shell::Bash), "/root/.bashrc", false);
+		let (mut app, mut rx) = probed(Some(IntegrationShell::Bash), "/root/.bashrc", false);
 		assert!(matches!(
 			app.modal,
 			Some(Modal::Integration(Integration::Found { .. }))
@@ -8747,7 +8747,7 @@ mod tests {
 		assert!(matches!(
 			next_command(&mut rx),
 			Some(SshCommand::WriteIntegration { path, shell, install })
-				if path == "/root/.bashrc" && shell == Shell::Bash && install
+				if path == "/root/.bashrc" && shell == IntegrationShell::Bash && install
 		));
 		assert!(matches!(
 			app.modal,
@@ -8760,9 +8760,9 @@ mod tests {
 	/// removal cannot drift apart.
 	#[test]
 	fn a_file_that_already_has_the_block_is_offered_its_removal() {
-		use crate::integration::Shell;
+		use crate::integration::IntegrationShell;
 
-		let (mut app, mut rx) = probed(Some(Shell::Zsh), "/home/cme/.zshrc", true);
+		let (mut app, mut rx) = probed(Some(IntegrationShell::Zsh), "/home/cme/.zshrc", true);
 		let _ = app.update(Message::IntegrationRemove);
 		assert!(matches!(
 			next_command(&mut rx),
@@ -8777,9 +8777,9 @@ mod tests {
 	/// this pins that a message arriving anyway still sends nothing.
 	#[test]
 	fn a_shell_cmote_has_no_block_for_is_never_written_to() {
-		use crate::integration::Shell;
+		use crate::integration::IntegrationShell;
 
-		for shell in [None, Some(Shell::Fish)] {
+		for shell in [None, Some(IntegrationShell::Fish)] {
 			let (mut app, mut rx) = probed(shell, "/home/cme/.config/fish/config.fish", false);
 			let _ = app.update(Message::IntegrationInstall);
 			assert!(
@@ -8794,7 +8794,7 @@ mod tests {
 	/// moved on to the shell.
 	#[test]
 	fn an_answer_for_a_closed_dialog_is_dropped() {
-		use crate::integration::Shell;
+		use crate::integration::IntegrationShell;
 
 		let (mut app, mut rx) = app_with_terminal(16);
 		app.connection = Some("root@sybille-rec:22".to_owned());
@@ -8803,7 +8803,7 @@ mod tests {
 		let _ = app.update(Message::IntegrationClosed);
 
 		let _ = app.on_ssh_event(SshEvent::IntegrationProbed {
-			shell: Some(Shell::Bash),
+			shell: Some(IntegrationShell::Bash),
 			path: "/root/.bashrc".to_owned(),
 			installed: false,
 		});
@@ -8815,9 +8815,9 @@ mod tests {
 	/// screen it is drawn on.
 	#[test]
 	fn a_refused_errand_leaves_the_session_alone() {
-		use crate::integration::Shell;
+		use crate::integration::IntegrationShell;
 
-		let (mut app, _rx) = probed(Some(Shell::Bash), "/root/.bashrc", false);
+		let (mut app, _rx) = probed(Some(IntegrationShell::Bash), "/root/.bashrc", false);
 		app.screen = AppScreen::Terminal;
 		let _ = app.on_ssh_event(SshEvent::IntegrationFailed(
 			"could not open /root/.bashrc: permission denied".to_owned(),

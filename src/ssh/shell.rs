@@ -49,7 +49,7 @@ pub struct ShellMsg {
 }
 
 /// Where a shell is in its life (§45).
-enum State {
+enum ShellState {
 	/// The elevation program is still talking: its output is a conversation to answer, not terminal
 	/// output to draw. The conversation itself — what has been said, what has been asked, and which
 	/// answer may be kept — is `elevate::Handshake`, which holds no channel and is therefore
@@ -77,14 +77,14 @@ pub enum After {
 }
 
 /// One shell: the writing half of its channel, and what it is currently doing.
-struct Shell {
+struct SshShell {
 	write: ChannelWriteHalf<client::Msg>,
-	state: State,
+	state: ShellState,
 }
 
 /// Every shell on one connection (§45), and which one typing belongs to.
 pub struct Shells {
-	shells: HashMap<u64, Shell>,
+	shells: HashMap<u64, SshShell>,
 	/// The identity the GUI has on screen, told to us by `SelectIdentity`. `Input` goes here and
 	/// nowhere else — a keystroke must never be broadcast, or one line typed at a root prompt
 	/// would also run in the login shell.
@@ -110,13 +110,13 @@ impl Shells {
 		};
 		// The login shell is `Live` from the start: it was opened by `request_shell` after the SSH
 		// authentication succeeded, so there is no conversation to hold with it.
-		shells.adopt(LOGIN_IDENTITY, login, State::Live);
+		shells.adopt(LOGIN_IDENTITY, login, ShellState::Live);
 		(shells, from_shells)
 	}
 
 	/// Split `channel`, keep its writing half under `identity`, and move its reading half into a
 	/// task that forwards everything it says down the shared channel.
-	fn adopt(&mut self, identity: u64, channel: Channel<client::Msg>, state: State) {
+	fn adopt(&mut self, identity: u64, channel: Channel<client::Msg>, state: ShellState) {
 		let (mut read, write) = channel.split();
 		let to_loop = self.to_loop.clone();
 		tokio::spawn(async move {
@@ -136,7 +136,7 @@ impl Shells {
 				})
 				.await;
 		});
-		self.shells.insert(identity, Shell { write, state });
+		self.shells.insert(identity, SshShell { write, state });
 	}
 
 	/// Open another shell on this connection running `command`, to become another account (§45).
@@ -204,7 +204,7 @@ impl Shells {
 		self.adopt(
 			identity,
 			channel,
-			State::Elevating(elevate::Handshake::default()),
+			ShellState::Elevating(elevate::Handshake::default()),
 		);
 		Ok(())
 	}
@@ -232,9 +232,9 @@ impl Shells {
 					let reason = match shell.state {
 						// It died mid-conversation: the last thing it said is why, and those are
 						// the remote's own words about its own policy.
-						State::Elevating(handshake) => Some(handshake.death_reason()),
+						ShellState::Elevating(handshake) => Some(handshake.death_reason()),
 						// It had become a shell and that shell exited — an ordinary `exit`.
-						State::Live => None,
+						ShellState::Live => None,
 					};
 					let _ = events
 						.send(SshEvent::IdentityEnded { identity, reason })
@@ -261,13 +261,13 @@ impl Shells {
 		};
 		match &mut shell.state {
 			// A live shell's bytes are terminal output, tagged so the GUI feeds the right grid.
-			State::Live => {
+			ShellState::Live => {
 				let _ = events.send(SshEvent::Output { identity, bytes }).await;
 				After::Nothing
 			}
 			// An elevating shell's bytes are a conversation. What they MEAN is `Handshake`'s to
 			// decide; what is left here is carrying the answer to the channel and to the GUI.
-			State::Elevating(handshake) => match handshake.on_bytes(&bytes) {
+			ShellState::Elevating(handshake) => match handshake.on_bytes(&bytes) {
 				elevate::Step::Nothing => After::Nothing,
 				elevate::Step::Ask { label, refusal } => {
 					let _ = events
@@ -280,7 +280,7 @@ impl Shells {
 					After::Nothing
 				}
 				elevate::Step::Live { flush, factors } => {
-					shell.state = State::Live;
+					shell.state = ShellState::Live;
 					// READY FIRST, then the bytes. The GUI builds this identity's emulator when it
 					// hears `IdentityReady` (§45), and output for an identity that has none yet is
 					// dropped — so sending the flush first lost exactly the two things it exists to
@@ -314,7 +314,7 @@ impl Shells {
 		let Some(shell) = self.shells.get_mut(&identity) else {
 			return false;
 		};
-		let State::Elevating(handshake) = &mut shell.state else {
+		let ShellState::Elevating(handshake) = &mut shell.state else {
 			return false;
 		};
 		let Some(was_password) = handshake.answered() else {
@@ -332,7 +332,7 @@ impl Shells {
 	/// keystroke arriving in the middle of one would be read as part of the answer.
 	pub async fn input(&self, bytes: Vec<u8>) {
 		if let Some(shell) = self.shells.get(&self.selected)
-			&& matches!(shell.state, State::Live)
+			&& matches!(shell.state, ShellState::Live)
 		{
 			let _ = shell.write.data_bytes(bytes).await;
 		}
@@ -346,7 +346,7 @@ impl Shells {
 	/// credential conversation, and it has no emulator to have asked anything.
 	pub async fn reply(&self, identity: u64, bytes: Vec<u8>) {
 		if let Some(shell) = self.shells.get(&identity)
-			&& matches!(shell.state, State::Live)
+			&& matches!(shell.state, ShellState::Live)
 		{
 			let _ = shell.write.data_bytes(bytes).await;
 		}

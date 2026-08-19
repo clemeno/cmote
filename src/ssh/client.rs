@@ -431,7 +431,7 @@ pub(crate) enum SessionMsg {
 	/// Put the cwd announcer into that config file, or cut it back out (§17).
 	WriteIntegration {
 		path: String,
-		shell: crate::integration::Shell,
+		shell: crate::integration::IntegrationShell,
 		install: bool,
 	},
 	/// The user's answer to a recursive transfer's file-collision prompt (§17, §19), forwarded
@@ -485,7 +485,10 @@ impl SessionLink {
 	/// The one-shot is `None`, and that is the whole difference visible from here: there is no host
 	/// key to gate, so there is no decision to deliver. `send_decision` on such a link is already a
 	/// no-op by construction, so nothing above has to check which kind it is holding.
-	fn start_local(shell: crate::local::shells::Shell, events: mpsc::Sender<SshEvent>) -> Self {
+	fn start_local(
+		shell: crate::local::shells::LocalShell,
+		events: mpsc::Sender<SshEvent>,
+	) -> Self {
 		let (to_session_tx, to_session_rx) = mpsc::channel::<SessionMsg>(256);
 		tokio::spawn(crate::local::session::run(shell, events, to_session_rx));
 		Self {

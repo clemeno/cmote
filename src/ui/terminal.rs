@@ -80,7 +80,7 @@ pub const INTEGRATION_WRITING_BODY: &str = "Writing…";
 /// ask for that is to put the exact text in front of them. The body is selectable and copyable
 /// (§10), so it doubles as the answer for anyone who would rather paste it in by hand.
 pub fn integration_found_body(
-	shell: Option<crate::integration::Shell>,
+	shell: Option<crate::integration::IntegrationShell>,
 	path: &str,
 	installed: bool,
 ) -> String {
