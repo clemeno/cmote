@@ -361,7 +361,7 @@ pub fn view<'a>(
 	// pane, so the grid is always `Fill` here and reserves width for nothing.
 	let body: Element<'a, Message> = interactive_grid.into();
 
-	// Whether the folder tree is actually on screen: it lives inside the files strip now, so
+	// Whether the folder tree is actually on screen: it lives inside the browser strip now, so
 	// it is only ever drawn beside a visible files pane (§18). Hiding the pane takes the tree
 	// with it — the strip is one region.
 	let tree_shown = files.visible() && explorer.visible();
@@ -1236,10 +1236,10 @@ fn grid_interaction(shape: pointer::Shape) -> Option<iced::mouse::Interaction> {
 }
 
 /// The (rows, cols) grid that fits `area` logical pixels, laid out exactly as
-/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the files strip
+/// `view` draws it: the status bar takes `STATUS_BAR_HEIGHT` off the top and the browser strip
 /// and its splitter take `reserved_height` off the height (§19) — zero when the pane is hidden
 /// — then the grid's own padding is subtracted on both axes. The terminal is full width now
-/// (§18): the folder tree moved down into the files strip, so nothing reserves horizontal room
+/// (§18): the folder tree moved down into the browser strip, so nothing reserves horizontal room
 /// any more. Rounds down so the last cell is never clipped, and clamps to at least 1×1 so the
 /// emulator always has a valid size. The app calls this on a window resize — and on a pane
 /// resize — to reflow both the local emulator and the remote pty (§9).
@@ -1257,7 +1257,7 @@ pub fn grid_size(area: Size, reserved_height: f32) -> (u16, u16) {
 
 /// The window (logical) size whose content fits exactly a `cols`×`rows` grid — the
 /// inverse of `grid_size`, built from the same metrics so the two never drift. Adds the
-/// grid padding on both axes, the status-bar height and the space the files strip reserves
+/// grid padding on both axes, the status-bar height and the space the browser strip reserves
 /// at the bottom (§19), plus half a cell of slack so float rounding in `grid_size` cannot come
 /// back a row/column short. The terminal spans the full width now (§18), so only the height
 /// carries a reserve. `run` uses it to open the window sized for a chosen terminal size *and*
@@ -1309,7 +1309,7 @@ mod tests {
 	fn window_size_fits_the_requested_grid() {
 		// A window opened via `window_size` must reflow back to exactly that grid, so the
 		// initial window is big enough for the intended cell count (§11) — with and without the
-		// files strip reserved under it (§19).
+		// browser strip reserved under it (§19).
 		assert_eq!(grid_size(window_size(160, 40, 0.0), 0.0), (40, 160));
 		let tall = crate::files::DEFAULT_HEIGHT + crate::files::SPLITTER_HEIGHT;
 		assert_eq!(grid_size(window_size(160, 40, tall), tall), (40, 160));

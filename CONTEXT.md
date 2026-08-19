@@ -53,7 +53,11 @@ _Avoid_: files strip
 
 **Pane**:
 One half of the browser strip — the folder tree, or the files pane (§18, §19).
-_Avoid_: panel
+_Avoid_: panel, which is a different thing here — see **Panel**
+
+**Panel**:
+A floating surface drawn over everything else: a context menu's card of items, or a dialog's.
+Never one of the browser panes, and never the terminal grid. `PANEL_BG` is its dark fill.
 
 **Area**:
 A place on screen a tab can be sent to: Main, Right, or Bottom — what a user can point at, which

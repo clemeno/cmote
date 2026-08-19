@@ -12,7 +12,7 @@ remote filesystem beside it, a grid of the current directory's files under it (k
 navigable, with a details popup and rubber-band multi-selection), the remote working
 directory in the title bar, and file transfer both ways. Full-screen programs — btop,
 vim, htop, midnight commander — draw properly and take the mouse. Reconnect to a saved
-target and the shell and both panels come back to the directories you left them in. Open
+target and the shell and both panes come back to the directories you left them in. Open
 as many sessions as you like in **tabs** — each fully independent, all in one window — and
 **split** that window to watch two of them at once. Tunnel ports through the connection — local,
 remote or a SOCKS proxy — and they come back on reconnect.
@@ -173,8 +173,8 @@ references below (§n) point into it.
   not spoken (§41).
 - **The remote is told when focus changes** — a program that turns on focus reporting (`?1004`,
   as tmux and vim do) hears `CSI I` / `CSI O` as the window gains or loses focus, so it can
-  undim or pause a spinner. Moving cmote's keyboard to a side panel counts as the shell losing
-  focus too, since the remote knows nothing of cmote's own panels (§23).
+  undim or pause a spinner. Moving cmote's keyboard to a side pane counts as the shell losing
+  focus too, since the remote knows nothing of cmote's own panes (§23).
 - **Scroll back over what left the screen** — cmote keeps 10 000 lines of history. The **wheel**
   scrolls it (whenever no full-screen program has claimed the wheel), **Shift+PageUp/PageDown**
   page through it and **Shift+Home/End** jump to the top and back to the live bottom; typing (or
@@ -229,7 +229,7 @@ references below (§n) point into it.
   **↻ refresh button** and a **collapse-all button** beside it. The refresh button (and **F5**
   while the tree has focus) re-lists **every open folder** at once, so the tree catches up in one
   press after you move or make a folder from the shell; collapse-all closes every branch back to
-  the top level. Drag the splitter to resize the panel — the terminal reflows to match — or hide it
+  the top level. Drag the splitter to resize the pane — the terminal reflows to match — or hide it
   with the status bar's **Folders** button; the `.*` checkbox in its header hides dot-folders
   (§18, §22). The splitter shows a **↔ resize cursor** and **lights up** while you hover or drag it,
   so it reads as grabbable (§31).
@@ -271,13 +271,13 @@ references below (§n) point into it.
   shows a **↕ resize cursor** and lights up on hover or drag, the same feedback the tree's does (§31).
 - **The window reopens at the size you left it.** cmote remembers the window's width and height
   across restarts in a small `settings.json` beside the saved targets, so it comes back the size
-  you last made it (the panel sizes are remembered separately, per target, above). The terminal
+  you last made it (the pane sizes are remembered separately, per target, above). The terminal
   area is whatever is left — the window height minus the files pane and its handle — so the pty
   always matches what you see (§31).
 - **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
   folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
   else and leave the shell where it is, so you can look inside a directory without disturbing
-  what is running. The shell moves only on a `cd` it can see: one you type, either panel's
+  what is running. The shell moves only on a `cd` it can see: one you type, either pane's
   **Open in terminal**, or the status bar's **Sync**, which brings the shell (and with it the
   tree and the title) to the folder the pane is showing. Sync is disabled when the two already
   agree (§19).
@@ -287,25 +287,25 @@ references below (§n) point into it.
   safe while a full-screen program is running, and it is the only way back when the shell has not
   moved — a shell sitting at the same prompt announces the same directory, which is not a move for
   the pane to follow. Disabled when the shell has never said where it is, when the bottom strip is
-  hidden, or when both panels are already there (§19).
-- **Keyboard focus across the three panels** — the shell, the folder tree and the files
+  hidden, or when both panes are already there (§19).
+- **Keyboard focus across the three panes** — the shell, the folder tree and the files
   pane each take the keyboard. A session starts at the shell; a click focuses whatever was
-  clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panels are
-  skipped), and the focused panel wears a ring so it is never a guess. In a panel the
+  clicked, **Ctrl+Tab** cycles forward and **Ctrl+Shift+Tab** back (hidden panes are
+  skipped), and the focused pane wears a ring so it is never a guess. In a pane the
   **arrow keys** walk the rows (in the grid, left/right move one cell and up/down a whole
   row), **PageUp/PageDown** jump a screenful at a time and **Home/End** leap to the first and
   last entry, **Tab / Shift+Tab** step next/previous, **Enter** opens, **F2** renames and **Esc**
   hands the keyboard back to the shell. **Shift** held on an arrow, a Page key or Home/End
   extends the selection instead of moving it. A keyboard-moved selection scrolls itself into
   view, only at the edges (§20).
-- **The keyboard follows what you act on** — no panel answers to a plain character, so **typing
-  while a panel holds the keyboard hands it back to the shell**, and the letter you typed goes to
+- **The keyboard follows what you act on** — no pane answers to a plain character, so **typing
+  while a pane holds the keyboard hands it back to the shell**, and the letter you typed goes to
   the prompt instead of vanishing. Anything under **Ctrl / Alt** stays a shortcut (the files pane
-  keeps Ctrl+A), and the arrows, Tab, Enter, F2 and Esc stay the panel's. The same goes for the
+  keeps Ctrl+A), and the arrows, Tab, Enter, F2 and Esc stay the pane's. The same goes for the
   terminal's own commands: choosing **Copy selection / Paste / Upload… / Open link / Copy link**
   from its right-click menu (or the Copy / Paste buttons in the status bar) puts the keyboard back
   on the shell — so the Enter that runs a pasted command reaches it. **Ctrl+V** is that same Paste
-  off the keyboard and behaves the same, from whichever panel has the ring. Merely opening the
+  off the keyboard and behaves the same, from whichever pane has the ring. Merely opening the
   menu, or dismissing it, changes nothing; **Ctrl+C** stays where it is, since copying is not text
   going into the shell (§50).
 - **A details popup beside the selection** — the entry's **full name** (the grid's label is
@@ -421,7 +421,7 @@ references below (§n) point into it.
   seconds, so a copy is never a silent no-op you have to test by pasting (§10).
 - **Resuming where you left off** — a saved target remembers, per target, the **shell's
   directory**, the **files pane's directory**, the `.*` toggle, the **files-pane sort** (key and
-  direction) and both **panel sizes**. On
+  direction) and both **pane sizes**. On
   the next connection the pane reopens there, the tree reveals the chain down to it, and the
   shell is put back with a visible `cd`. The snapshot is written at every teardown — a clean
   Disconnect, a remote hangup, an error — and a value this session never learned never erases
@@ -434,16 +434,16 @@ references below (§n) point into it.
 
 ## Gestures and shortcuts
 
-Everything the mouse and the keyboard do, by panel. The **focused** panel is the one that
+Everything the mouse and the keyboard do, by pane. The **focused** pane is the one that
 gets a keystroke; a click focuses what it lands on, and the ring shows where the keyboard is.
 
 **Anywhere in the window**
 
 | Gesture | What it does |
 |---|---|
-| **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous panel — shell, folder tree, files pane (hidden panels are skipped) |
-| Click a panel | Focus it |
-| Type a letter while a panel has the keyboard | Hand it back to the shell and send that letter to the prompt — no panel answers to plain characters (Ctrl / Alt combinations stay the panel's) |
+| **Ctrl+Tab** / **Ctrl+Shift+Tab** | Move the keyboard to the next / previous pane — shell, folder tree, files pane (hidden panes are skipped) |
+| Click a pane | Focus it |
+| Type a letter while a pane has the keyboard | Hand it back to the shell and send that letter to the prompt — no pane answers to plain characters (Ctrl / Alt combinations stay the pane's) |
 | Pick an item off the terminal's right-click menu | Do it, and put the keyboard back on the shell (opening or dismissing the menu does not) |
 | **Ctrl+V** from anywhere | Paste into the shell and put the keyboard back on it — the menu's Paste off the keyboard |
 | Hover anything grabbable — a **tab**, a **dialog header** | The pointer becomes an **open hand** (or the system **move** cursor, where no hand has been drawn — see the license note); press and it **closes** until you let go, so the thing says it can be picked up and says when you have it. It lets go the moment the thing does — a tab sent to another area, a dialog closed with its ✕ — it never appears over a chip behind a modal, and the buttons **on** a handle keep their own cursor: over a tab's **×** or a dialog's **✕** you get the usual click pointer, since a press there closes rather than picks up. cmote draws both hands itself; Windows has neither. Splitters keep their **↔ / ↕** arrows: they resize rather than move, and the arrow says which way |
@@ -636,7 +636,7 @@ collide (GitHub allows only one release per tag).
 
 cmote writes up to four files — `known_hosts` (pinned host keys), `targets.json` (saved
 connection targets plus where each session left off: the two directories, the `.*` toggle
-and the panel sizes — **no secrets**), `settings.json` (the app-wide window size, remembered
+and the pane sizes — **no secrets**), `settings.json` (the app-wide window size, remembered
 across restarts — §31), and, only once you opt in to remembering a secret,
 `secrets.age` (the encrypted credential vault, §16 — a master-passphrase-sealed `age` blob,
 the sole place any secret is stored). All live in the same directory, resolved at
@@ -724,12 +724,12 @@ wrapping and the injection-terminator scrub), the remote-cwd scanner (OSC 7 and
 OSC 9;9, split across chunks, percent-escapes, Windows paths, oversized payloads), and
 the folder tree's model (row flattening and indentation, the hidden-folder filter,
 subtree collapse, `cd` reveal and its no-op on a repeat, rename validation and the
-post-rename refresh, relative-path arithmetic, shell quoting, and the panel's width
+post-rename refresh, relative-path arithmetic, shell quoting, and the pane's width
 clamps), and the files pane's model (batch accumulation and the dropping of batches for a
 directory already left, the cwd-follow rule that a repeated announcement is not a move,
 the folders-first sort, icon categories from kind and extension, rename validation, and
 the pane's height clamps). The keyboard and selection work adds: the arrow walk across both
-panels (clamping at both ends, skipping hidden entries, and not panicking on an empty
+panes (clamping at both ends, skipping hidden entries, and not panicking on an empty
 directory), the keep-it-visible scroll rule (including an item taller than its viewport),
 MIME types from extensions and their `application/octet-stream` fallback, mtime rendering in
 a server timezone (the epoch, a leap day and both sides of Greenwich), the `date +'%z %Z'`
@@ -945,7 +945,7 @@ title should now carry the directory, **Sync**/**Reveal** should come out of the
   button lit. Clearing the sort before disconnecting reopens in the default order. (A target you
   never sorted, and a `targets.json` from before this existed, reopen unsorted.)
 
-**8. Remote folder tree.** The panel on the right should list `/` on connect. Then:
+**8. Remote folder tree.** The pane on the right should list `/` on connect. Then:
 
 - Click folders to expand and collapse them; a slow directory shows `·` until its listing
   arrives. Expand a few levels, collapse the top one, re-open it — it shows exactly one clean
@@ -956,7 +956,7 @@ title should now carry the directory, **Sync**/**Reveal** should come out of the
 - `cd /etc/ssh` in the shell → the tree opens `/` → `/etc` → `/etc/ssh` on its own and
   highlights it. `cd` back and forth: the tree only ever expands, never closes what you
   opened.
-- Toggle the `.*` checkbox in the panel header → dot-folders (`.ssh`, `.config`) disappear and
+- Toggle the `.*` checkbox in the pane header → dot-folders (`.ssh`, `.config`) disappear and
   reappear with no round trip.
 - Right-click a folder: **Open in terminal** should run a quoted `cd` in the shell (make a
   folder with a space and a quote in its name — `mkdir "/tmp/it's here"` — and confirm the
@@ -978,8 +978,8 @@ title should now carry the directory, **Sync**/**Reveal** should come out of the
   tree snaps back to the root's own children, and re-opening any branch draws its cached rows
   instantly (then re-lists in the background to catch any change).
 - Drag the splitter left and right: the grid reflows (`tput cols` should follow) and the
-  panel stops at its minimum and at 60% of the window. The **Folders** button hides the
-  panel and gives its columns back to the grid.
+  pane stops at its minimum and at 60% of the window. The **Folders** button hides the
+  pane and gives its columns back to the grid.
 - Against a server with the sftp subsystem disabled (`Subsystem sftp` commented out in
   `sshd_config`), the tree should still list folders — the `ls` fallback (§18).
 
@@ -1040,7 +1040,7 @@ then follow the shell. Then:
   rows back to the terminal.
 
 **10. Keyboard focus and the details popup.** Press **Ctrl+Tab** repeatedly: the focus ring
-should go shell → tree → files pane → shell. Hide one panel with its status-bar button and
+should go shell → tree → files pane → shell. Hide one pane with its status-bar button and
 cycle again — the hidden stop is skipped. Then, in the files pane:
 
 - Walk with the **arrows**: left/right move one cell, up/down a whole row, and both ends
@@ -1058,10 +1058,10 @@ cycle again — the hidden stop is skipped. Then, in the files pane:
 - **Type while the pane (or the tree) has the ring**: `whoami` → the ring jumps to the shell on
   the `w` and the whole word lands at the prompt, `w` included. Then **Ctrl+A** with the pane
   focused again → it still selects the whole listing rather than typing an `a` (§50).
-- With a panel focused, right-click the terminal and pick **Paste** (put something on the
+- With a pane focused, right-click the terminal and pick **Paste** (put something on the
   clipboard first) → the text lands at the prompt and the ring is back on the shell, so **Enter**
-  runs it. **Ctrl+V** with the panel focused should do exactly the same. Right-click and press
-  **Esc** instead → the menu closes and the panel keeps the keyboard.
+  runs it. **Ctrl+V** with the pane focused should do exactly the same. Right-click and press
+  **Esc** instead → the menu closes and the pane keeps the keyboard.
 
 **11. Selecting many entries.** In a directory with a dozen or so entries:
 
@@ -1152,11 +1152,11 @@ the **pane** at a different directory (`/tmp` via the tree), toggle `.*` on, and
 splitters to unusual sizes. Then **Disconnect** and reconnect to the same target from the
 home screen. Expect: the shell replays a visible `cd /etc/ssh`, the pane reopens on `/tmp`
 (and does **not** get dragged to `/etc/ssh` by the shell's first announcement), the tree has
-revealed the chain down to it, `.*` is still on, and both panels are the size you left them.
+revealed the chain down to it, `.*` is still on, and both panes are the size you left them.
 Kill the connection the hard way too (`docker stop cmote-sshd`, or `pkill sshd` on the
 remote) and reconnect — the snapshot should survive a hangup, not just a clean disconnect.
 Finally, connect to a target saved by an older build (or delete the session fields from
-`targets.json` by hand): it should open at the login directory with default panels, no error.
+`targets.json` by hand): it should open at the login directory with default panes, no error.
 
 **15. Tabs.** Connect a session, then click **"+"** on the strip: a new **Home** tab opens and
 takes over the window while the first shell keeps running behind it. Connect a second target,

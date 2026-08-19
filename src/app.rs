@@ -132,7 +132,7 @@ pub fn run() -> iced::Result {
 		.font(ICON_FONT)
 		// Open at the size the last run left the window (§31), or — on a first run, or after a
 		// settings file that could not be trusted — wide enough for a full-width 180-column
-		// terminal and tall enough to also show the files strip under it (§18, §19). The tree
+		// terminal and tall enough to also show the browser strip under it (§18, §19). The tree
 		// shares that strip rather than sitting beside the grid, so the fallback reserves height
 		// only, and it is derived from the grid metrics so it stays in step with `grid_size`.
 		.window(iced::window::Settings {

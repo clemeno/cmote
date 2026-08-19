@@ -25,7 +25,7 @@ band, Ctrl/Shift click or Ctrl+A select many entries at once for a batch copy or
 download, §21; **v2.2.0** turns upload into a multi-file, folder-destination batch reachable
 from four surfaces with one collision question, §17, lays the grid's cells out as rows
 carrying each entry's size and date, §19, confirms every copy with a self-dismissing toast,
-§10, and remembers per target where the shell and both panels were so a reconnect resumes
+§10, and remembers per target where the shell and both panes were so a reconnect resumes
 there, §22; **v2.3.0** makes full-screen programs work — the cursor-move spellings the parser
 lacked are rewritten on the way in, §9, the grid became one widget that draws every cell at
 an exact pixel and every glyph the bundled font lacks itself, §11, the mouse is forwarded to
@@ -61,7 +61,7 @@ the engine drops, answered beside it (§33, §36); a **tab strip the user orders
 their session and drag to rearrange (§38), and a close that **returns you where you were** (§37);
 and a **filter box over the saved-target list** — a fragment while you type, a whole-row glob the
 moment a `*` or `?` appears (§49); a keyboard that **follows what you act on**, so typing while
-a side panel holds it, or choosing an item off the grid's menu, hands it back to the shell (§50);
+a side pane holds it, or choosing an item off the grid's menu, hands it back to the shell (§50);
 and the **open and closed hand** over everything you can pick up — a tab chip, a dialog header —
 drawn by cmote because Windows has neither cursor (§51); and a **chip's own right-click menu** that
 sends a tab to another area of the window — moving it there, or opening a second copy of the session
@@ -256,7 +256,7 @@ cmote/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
     │   ├── connect.rs     the connection form (host/port/user/auth/key)
     │   ├── dialog.rs      shared modal-dialog chrome: header (title + ✕, the drag handle and its hand cursor) / body / footer, and `Card` — where a floating dialog sits and how a header drag moves it, once for every dialog in the app (§10, §26, §51)
-    │   ├── explorer.rs    the folder-tree panel, its splitter and its context menu (§18)
+    │   ├── explorer.rs    the folder-tree pane, its splitter and its context menu (§18)
     │   ├── files.rs       the file icon grid, its splitter and its context menu (§19)
     │   ├── forward.rs     the port-forwards manager dialog: active-tunnel rows + the add form (§27)
     │   ├── grid.rs        the terminal screen as ONE custom widget: cell-exact quads + text, drawn braille and box corners, mouse reports, search-match washes (§11, §39)
@@ -723,15 +723,15 @@ screen is one or the other.
   items (§18) and the files pane's (§19) — share one chrome, the way the dialogs share `ui::dialog`. They had drifted
   into three looks (raised buttons, flat themed buttons, transparent ones; three paddings,
   three widths, three copies of the click-away layer), so the definition now lives in one
-  place: a dark rounded panel of a fixed width (set by the longest item any of them
+  place: a dark rounded pane of a fixed width (set by the longest item any of them
   carries), full-width items that highlight on hover, a **dimmed** label for a disabled
   item (a transparent button gives no other signal — the folder tree's "Copy relative
   path" is disabled without a cwd), and one `dismiss_layer` taking the caller's cancel
   message. Positioning stays per-screen, because the three anchor differently: the
-  pointer, a row index, the panel's right edge.
+  pointer, a row index, the pane's right edge.
   - The home screen's menu is the one place this **deliberately overrides** that screen's
     "take every colour from the theme" rule (§14). The rule exists to stop a surface that
-    themes its background but not its foreground; this panel sets *both*, so it stays
+    themes its background but not its foreground; this pane sets *both*, so it stays
     readable in light and dark alike — and one menu that looks the same everywhere beats
     one that changes identity per screen.
 - **Dialogs** (`ui::dialog`, done): the disconnect confirmation, the host-key prompt, the
@@ -815,7 +815,7 @@ screen is one or the other.
     to `dialog` — it never learns that a drag needs an anchor. The ✕ button captures its own
     press, so closing never starts a drag.
 - **The copy toast** (`ui::snackbar`, v2.2): `iced::clipboard::write` is silent, and by v2.2
-  a dozen surfaces write to the clipboard — both panel headers, the details card, four
+  a dozen surfaces write to the clipboard — both pane headers, the details card, four
   context menus. A copy that quietly did nothing looked exactly like a copy that worked, so
   every one of them now goes through `App::copy_to_clipboard`, which writes the text *and*
   raises one small card at the bottom-centre of the window: "Copied to clipboard." One
@@ -827,11 +827,11 @@ screen is one or the other.
     clock by construction.
   - **It never takes a click.** The card is a plain `container` in a `stack` layer over the
     page, bottom-aligned with a margin, with no `mouse_area` under it — so it floats over the
-    panels without swallowing a press aimed at what it covers, and it needs no dismiss button
+    panes without swallowing a press aimed at what it covers, and it needs no dismiss button
     to get out of the way.
 - **Terminal** (`Screen::Terminal`, done): a fixed-height status bar in three
   equal-width zones — **Copy / Paste** on the left, the live session's `user@host:port`
-  centered, and on the right the panel toggles, a **Tunnels** button (§27, its label
+  centered, and on the right the pane toggles, a **Tunnels** button (§27, its label
   carrying the live forward count) and **Disconnect**; the terminal grid fills the rest, and
   keyboard focus goes there. Tunnels opens the port-forwards manager (`ui::forward`, a modal in
   the shared chrome, §27). Disconnect opens a
@@ -1116,7 +1116,7 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
 
 - **What persists — metadata only, never secrets in this file (§12).** A target records
   `name`, `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path` and — when the target
-  presents one — the OpenSSH `cert_path` (§7), the panels' `show_hidden` preference, and a
+  presents one — the OpenSSH `cert_path` (§7), the panes' `show_hidden` preference, and a
   `remember_secret` flag. A certificate is public data like the key *path*, so it rides here;
   no password and no key passphrase is ever written to `targets.json`. This keeps the §12 "the safest secret is the one never
   persisted" guarantee for this file **and** keeps it fully portable — a `targets.json` copied
@@ -1237,7 +1237,7 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
     that ends an attempt without opening a session: a dial that never left, `SshEvent::Error`,
     `Disconnected`, a cancelled credential prompt, a cancelled vault prompt, and going Home.
 - **Multiple sessions / tabs** — *done (v3.0)*. Fully independent tabs (§26): each tab is a whole
-  session state machine — its own screen (home / connect / a live shell), terminal, panels and
+  session state machine — its own screen (home / connect / a live shell), terminal, panes and
   dialogs — so one can browse the home list while another runs a shell. `App` owns a `Vec<Tab>`
   and the active index; the ONE target list and secret vault are shared (`Rc<RefCell<…>>`) so a
   rename or an unlock in any tab is seen by all. Per-tab SSH workers via
@@ -1458,7 +1458,7 @@ Rocky/CentOS/Amazon box, which is most fleets — the cwd is never known, so the
 directory, Sync and Reveal are permanently dimmed, the upload dialog asks for a path, and §22's
 reconnect resume has no `terminal_path` to remember. Nothing announces that this is a *missing
 shell hook* rather than a broken feature. That is what turned up in use: `targets.json` had
-`files_path`, the panel sizes and the sort for every saved target, and `terminal_path` for exactly
+`files_path`, the pane sizes and the sort for every saved target, and `terminal_path` for exactly
 one — an old entry from before the typed hook was removed.
 
 The fix does not reverse the rule. cmote still types nothing. It offers to write the announcer into
@@ -1559,7 +1559,7 @@ the **shell's own config file**, over SFTP, once, from a dialog — the same thi
   resume point and the last notice. Every field is private, so a caller says what the USER DID and
   never has to know that a folder queue drains after a file queue, or that a resume point goes stale
   the moment a fresh transfer starts.
-  - It reaches for nothing — no SSH channel, no dialog buffer, no panels. Each call returns
+  - It reaches for nothing — no SSH channel, no dialog buffer, no panes. Each call returns
     `transfer::Effects` (commands to send, a dialog body to seed, a folder to re-list, whether the
     destination field takes the keyboard) and `Tab::apply` carries it out. That is what makes every
     rule in here testable with no session, no window and no server.
@@ -1806,7 +1806,7 @@ paths, what collapsing does, which folders a `cd` reveals) unit-testable with no
   that is *already* open; `reveal_if_new`'s ancestors that are already open are left untouched,
   so following the shell does not re-list the whole chain on every `cd`.
 - **Hidden folders are a filter, not a fetch.** Listings always include dot-prefixed
-  entries; the panel's `.*` checkbox only decides whether the rows are drawn, so
+  entries; the pane's `.*` checkbox only decides whether the rows are drawn, so
   flipping it is free. They are shown by default — on a server, `.ssh` / `.config` are
   usually the reason the tree was opened.
 
@@ -1852,7 +1852,7 @@ announced path carries one.
   but not all, and a folder quietly replaced cannot be undone, so `try_exists` gates it and
   a server that will not answer is treated as a failure rather than as "the path is free".
 
-### The panel (`ui/explorer.rs`)
+### The pane (`ui/explorer.rs`)
 
 - **Layout.** A fixed-width column at the right end of the bottom browser strip — to the
   right of the files pane (§19), not beside the terminal any more — with a draggable
@@ -1883,13 +1883,13 @@ announced path carries one.
   button) that re-lists **every open folder** in one press via `Explorer::refresh_open`, so all
   the expanded content comes current without the user working out which folders a move touched;
   and **F5** while the tree holds the keyboard, mapped to that same whole-tree refresh. The pane
-  below wears the twin button and its own F5 (§19), so each panel refreshes the one that has
+  below wears the twin button and its own F5 (§19), so each pane refreshes the one that has
   focus. A closed or already-loading branch is skipped — nothing changes under rows you cannot
   see, and a fetch in flight will bring the fresh listing itself. Beside ↻ sits a **collapse-all
   button** (`unfold_less`, `Explorer::collapse_all`): it closes every branch back to the root's own
   children — the clean top-level view after a deep dive — while leaving the cached listings in
   place, so a re-opened branch draws instantly (though opening re-lists it in the background, as
-  above). The root itself stays open; closing it would shrink the panel to a single `/` row.
+  above). The root itself stays open; closing it would shrink the pane to a single `/` row.
 - **Relative paths walk both ways.** `relative` emits `..` for every level the two paths do
   not share, so the result is usable from the shell's current directory even when the
   folder sits on another branch (`/home/user` → `/var/log` gives `../../var/log`).
@@ -1915,7 +1915,7 @@ announced path carries one.
   driven from `ssh/browse.rs` on the shared listing session: an SFTP `mkdir`, and a delete that
   **walks a folder's subtree** (files unlinked, then directories removed deepest-first, symlinks
   unlinked never followed), with an `mkdir` / `rm -rf` exec fallback for a server with no sftp
-  subsystem. On success both panels re-list the affected parent, and a files pane sitting inside a
+  subsystem. On success both panes re-list the affected parent, and a files pane sitting inside a
   deleted folder steps up to the nearest surviving one.
 - **Recursive transfers (v3.0).** *Upload folder…* sends a picked local folder tree-and-all into
   the menu's folder; the files pane's own *Download folder…* is the mirror. See §17 for the
@@ -1923,18 +1923,18 @@ announced path carries one.
 - **Failures are a notice line**, under the tree, not the error screen: a directory the
   user may not read must not tear down a working shell (the same call as an upload
   failure, §17). The path is the user's own, so naming it is what makes it actionable.
-- **Fixed colours, like the grid.** Every surface in the panel sets background *and*
+- **Fixed colours, like the grid.** Every surface in the pane sets background *and*
   foreground together, so contrast does not depend on the system light/dark preference —
   the trap §14 documents.
-- **The menu opens under the cursor.** A right-press carries no coordinates, so the panel
+- **The menu opens under the cursor.** A right-press carries no coordinates, so the pane
   is wrapped in a `mouse_area` that tracks the pointer — the same trick the terminal grid
   uses (§10). A child `mouse_area` only captures *presses*, so the rows' own click
   handlers do not swallow the moves. The anchor is **frozen into the open menu** rather
-  than read live: the panel keeps reporting moves while the menu is up (the dismiss layer
+  than read live: the pane keeps reporting moves while the menu is up (the dismiss layer
   above it handles no moves, so they fall straight through), and a menu that tracked them
   would slide out from under the cursor before an item could be reached. The menu is laid
   out right-aligned with a
-  padding of `panel width − pointer.x − menu width`: since the panel's right edge is the
+  padding of `pane width − pointer.x − menu width`: since the pane's right edge is the
   window's right edge, that puts the menu's left edge under the cursor, and clamping the
   padding at a minimum slides a menu opened near the edge back inside the window instead
   of letting it hang off. Placing from the pointer rather than from a row index (what the
@@ -1957,7 +1957,7 @@ answers "what is actually in here". Same three-way split — a pure model
 The tree and the pane are two models, but a good deal is true of **both at once**, and that half
 had no home: it lived in `app`, in eighteen methods that reached into the two models and sequenced
 them by hand — one of which said so in its own comment, *"Done here rather than in a model because
-it spans both panels."* `panes::Panes` holds the pair and owns exactly the operations that are about
+it spans both panes."* `panes::Panes` holds the pair and owns exactly the operations that are about
 the pair: revealing a directory (tree opened down to it AND pane pointed at it — one without the
 other is a bug, not a halfway state), following the shell, re-reading for another account (§46), the
 remembered layout (§22), and what a deletion means.
@@ -1967,15 +1967,15 @@ folder that is gone **before** anything re-lists, or the first refresh asks the 
 directory that has just been removed. That sequence is now one method with a test, instead of a
 comment.
 
-Two things it deliberately does **not** do. It does not forward the panels' own methods — both
+Two things it deliberately does **not** do. It does not forward the panes' own methods — both
 models stay public, and a caller that wants to scroll the tree scrolls the tree; re-typing a hundred
-single-panel methods would make it wide and shallow and would earn nothing. And it does not touch a
+single-pane methods would make it wide and shallow and would earn nothing. And it does not touch a
 channel: operations that need the network return `Fetches` — the listings to ask for — and the
 caller turns those into commands. That is `transfer::Queue`'s shape (§16), for the same reason, and
 it is what lets every rule above be answered in a test with no window and no server.
 
 The `.*` toggle is the clearest case of a coupling that had nowhere to live. It is **one setting for
-both panels**, and it is held by the tree — so `files::rows` cannot answer "what should I show"
+both panes**, and it is held by the tree — so `files::rows` cannot answer "what should I show"
 without it, and nine call sites used to fetch the flag off the other model and hand it over.
 `panes.rows()` states that once. There are now zero expressions in `app` that touch both models.
 
@@ -2031,7 +2031,7 @@ for a window resize.
   land beside the button rather than up near the window's top). The ticked-row and separator chrome
   is shared: `menu::check_item` and `menu::separator` join `menu::item` so the sort menu reads as
   one of the family. **The sort is remembered per target** (§22): both halves fold into the same
-  session snapshot as the `.*` filter and the panel sizes, so the grid reopens in the order a
+  session snapshot as the `.*` filter and the pane sizes, so the grid reopens in the order a
   target was last left in.
 - **Symlinks keep their own kind.** Resolving one costs a round trip *per link*, and a
   crowded directory is exactly where that adds up — so a link gets the link icon and is
@@ -2090,7 +2090,7 @@ for a window resize.
   running. This is the change from the first cut, where a double-click also `cd`'d the
   shell: the two directions were coupled and the console kept getting dragged around.
 - **The console moves only on a `cd` it can see** (`App::move_shell_to`): one you type, the
-  **Sync** button, either panel's **"Open in terminal"**, the tree's Enter, or the replay a
+  **Sync** button, either pane's **"Open in terminal"**, the tree's Enter, or the replay a
   reconnect does (§22). Every one of those is a deliberate act, never a side effect of
   browsing.
 - The catch the two sources create: the shell re-announces its directory at *every prompt*,
@@ -2099,7 +2099,7 @@ for a window resize.
   followed — a repeat is not a move — while `Files::show` (a browse) is unconditional. Last
   one wins: browse and the pane moves; move the console and the pane follows the `cd`.
 - **The tree carries the same guard, and the two must agree** (`Explorer::reveal_if_new`
-  against its own `revealed`, `Files::follow` against `followed`). Two panels, one question —
+  against its own `revealed`, `Files::follow` against `followed`). Two panes, one question —
   "has the shell actually moved?" — answered in two places, which is two chances to disagree.
   They did, on the reconnect path: see §22's pin, which held the pane and not the tree.
 
@@ -2107,28 +2107,28 @@ for a window resize.
 
 An architecture review proposed lifting the shell/tree/pane coordination — `on_sync`,
 `on_reveal`, `browse_to`, `refresh_remote_dir`, the resume pin and the shell-follow — into one
-`remote::Location` owning "where the panels point relative to the shell". It was explored and
+`remote::Location` owning "where the panes point relative to the shell". It was explored and
 rejected. Recorded so a later review does not re-suggest it.
 
 - **It would have to own `Explorer` and `Files`, which are used everywhere for reasons that
-  have nothing to do with location.** Scroll offset, panel width and reserved space, visibility,
+  have nothing to do with location.** Scroll offset, pane width and reserved space, visibility,
   hidden-file mode, the context menus, the inline rename, the selection and the rubber band —
-  around a hundred call sites in `app.rs`, against the eight that are about *where the panels
+  around a hundred call sites in `app.rs`, against the eight that are about *where the panes
   point*. Owning them means an `explorer()` / `explorer_mut()` pair carrying ninety per cent of
   the traffic straight through: a module whose interface is as wide as what it hides, which is
   the definition of shallow.
 - **Not owning them is worse.** The alternative is free functions taking `&mut Explorer`,
   `&mut Files` and a path — three or four arguments to move two lines of state, with the
   invariants still living in the caller.
-- **The peers are already the deep modules.** `explorer.rs` and `files.rs` each own a panel and
+- **The peers are already the deep modules.** `explorer.rs` and `files.rs` each own a pane and
   hand back listing requests; `transfer.rs` works because the state it owns is *only* used by
   transfers. A third layer mediating two widely-used peers is not a deepening, it is a wrapper.
-- **What is genuinely shared is one field**, `App::resume_cwd`, and merging the two panels'
-  follow-guards behind it would move state *out* of the panel modules and *into* `app.rs` — the
+- **What is genuinely shared is one field**, `App::resume_cwd`, and merging the two panes'
+  follow-guards behind it would move state *out* of the pane modules and *into* `app.rs` — the
   wrong direction, since `app.rs` is the file the review flagged for being 11k lines.
 
 The exploration was not wasted: it found the pin covering only half of what it was for, and
-Reveal stranding the panels when pressed against it. Both are fixed below.
+Reveal stranding the panes when pressed against it. Both are fixed below.
 - **The "Sync" button brings the console to the pane.** Since browsing no longer moves the
   shell, the pane and the console drift apart on purpose; Sync is the manual way to close
   that gap, typing a quoted `cd` (via `move_shell_to`) so the shell — and with it the tree
@@ -2154,17 +2154,17 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
     away from a cwd that never changed — the guarded call would decline exactly when asked.
   - **It seeds both follow-guards** with the same path — the pane's through `Files::set_followed`,
     the tree's inside `Explorer::reveal` itself — so the next prompt reads as "still there" rather
-    than as a move, and a real `cd` after it still carries both panels.
+    than as a move, and a real `cd` after it still carries both panes.
   - **It ends a reconnect resume still settling** (`resume_cwd = None`, §22), the rule
-    `move_shell_to` already follows and for the same reason: the pin holds the panels against the
-    shell's login announcements, and the user saying out loud where the panels go outranks that.
-    Left armed, the pin swallowed the settle as "already there" and stranded the panels at the
+    `move_shell_to` already follows and for the same reason: the pin holds the panes against the
+    shell's login announcements, and the user saying out loud where the panes go outranks that.
+    Left armed, the pin swallowed the settle as "already there" and stranded the panes at the
     login directory with no further announcement coming to put it right — the exact drift this
     button exists to close, caused by pressing it. Nothing is spent when there is no announced cwd,
     since there is then no ask to outrank.
   - **Disabled when there is nothing to do:** no announced cwd (§17 — it takes OSC 7), the strip
     hidden (the tree goes with the pane, so a press would change nothing anyone can see), or both
-    panels already there. "Both" is three terms rather than Sync's one: the pane can be on the cwd
+    panes already there. "Both" is three terms rather than Sync's one: the pane can be on the cwd
     while the tree is not, which is what a collapsed branch under an unmoved selection leaves —
     `selected_index` is `None` for a row inside a collapsed branch, and that is what says the
     folder is on screen rather than merely remembered.
@@ -2181,7 +2181,7 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
   document / audio / video / plain, from one small extension table. An unknown type gets
   the neutral file icon rather than a wrong one, and the table is a one-line change to
   extend. A leading dot is not an extension: `.bashrc` is a name.
-- Colours are per category and fixed, like everything else in these panels (§18).
+- Colours are per category and fixed, like everything else in these panes (§18).
 
 ### Actions
 
@@ -2195,7 +2195,7 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
 - **Rename** reuses the tree's rules and the same `RenameDir` command — SFTP's rename does
   not care whether it is moving a directory — with the same guards: no blank name, no `/`
   (that would be a move, not a rename), and a destination that already exists is refused
-  rather than replaced. Both panels react to `RenameDone`.
+  rather than replaced. Both panes react to `RenameDone`.
 - **Download** is the mirror of the upload (§17): its own sftp channel, its own spawned
   task, progress in the status bar through the shared `TransferProgress`. The destination
   comes from the native **save dialog**, which is also what asks about replacing a local
@@ -2206,7 +2206,7 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
 - **The menu opens upwards.** Same frozen-anchor construction as the tree's (§18), but
   bottom-aligned: this pane is at the bottom of the window, so a menu dropping downwards
   would fall off it. `pane height − pointer.y` puts the menu's bottom under the cursor, and
-  the left edge is **clamped against the pane's width** (v2.2) — the panel is a fixed
+  the left edge is **clamped against the pane's width** (v2.2) — the pane is a fixed
   `menu::WIDTH`, so once the anchor would push its right edge past the pane, it is pinned
   `MENU_INSET` in from that edge instead of spilling off. The pane's width is the window less
   the tree's column when one is shown (§18); the tree's menu already did the same trick, and
@@ -2222,10 +2222,10 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
 - **A header ↻ button, matching the tree's (v3.0).** The same shared `refresh_button` sits in
   this header too, beside the `.*` toggle, and re-lists the directory on show (`FilesMessage::Refresh`
   — the menu item's twin). **F5** does the same while the pane holds the keyboard. So refresh is
-  reachable the same way in both panels — menu, header button, F5 — and each key/button acts on
-  the panel that has focus.
+  reachable the same way in both panes — menu, header button, F5 — and each key/button acts on
+  the pane that has focus.
 - **The `.*` toggle is the tree's.** One flag (`Explorer::show_hidden`) filters both
-  panels, and each header carries a checkbox that shows and flips it — so hiding dot-files
+  panes, and each header carries a checkbox that shows and flips it — so hiding dot-files
   hides them everywhere, and the pane still has the control when the tree is collapsed.
   Toggled on, it hides *nothing*: every name the server reported is shown, dot-prefixed or
   not, whatever attribute the far side considers hidden or system. The two exceptions are
@@ -2237,7 +2237,7 @@ Reveal stranding the panels when pressed against it. Both are fixed below.
 
 ## §20 — Keyboard focus and entry details (v2.1)
 
-Two panels now sit beside the shell, and both want the arrow keys. This section is the
+Two panes now sit beside the shell, and both want the arrow keys. This section is the
 answer to "who gets the keystroke", plus what the files pane shows about the entry the
 keyboard just landed on.
 
@@ -2246,23 +2246,23 @@ keyboard just landed on.
 - **Three stops: shell, tree, files pane** (`app::Focus`). A session opens with the
   **shell** focused — that is what a terminal is for — and `clear_grid_interaction` puts it
   back there whenever a session starts or ends.
-- **A click focuses what was clicked.** Each panel's own `mouse_area` reports a
-  `PanelPressed`, so an empty patch of panel focuses it just as a row or a cell does, and a
+- **A click focuses what was clicked.** Each pane's own `mouse_area` reports a
+  `PanelPressed`, so an empty patch of pane focuses it just as a row or a cell does, and a
   press on the grid hands the keyboard back to the shell. In the files pane that press also
   **clears the selection** — a cell's own `mouse_area` swallows the press that lands on it,
   so one that reaches the pane missed every cell, which is the click-away every file
   manager deselects on.
-- **Ctrl+Tab cycles**, Ctrl+Shift+Tab the other way, skipping panels that are hidden — a
+- **Ctrl+Tab cycles**, Ctrl+Shift+Tab the other way, skipping panes that are hidden — a
   stop you cannot see is a dead press. It is read *before* anything else on the terminal
-  screen, because it is the way out of a panel that is swallowing keys.
-- **A focused panel keeps every key it could mean**, not just the ones it uses. A panel that
+  screen, because it is the way out of a pane that is swallowing keys.
+- **A focused pane keeps every key it could mean**, not just the ones it uses. A pane that
   swallowed only the arrows would leave Tab completing paths at a prompt the user is not
-  looking at. **Esc** hands the keyboard back to the shell from either panel — and so does
-  **plain typing**, which no panel answers to and the shell always does (§50).
-- The focused panel wears a one-pixel ring (`ui::explorer::focus_border`, shared by both),
-  which is the only thing that tells the two panels apart at a glance.
+  looking at. **Esc** hands the keyboard back to the shell from either pane — and so does
+  **plain typing**, which no pane answers to and the shell always does (§50).
+- The focused pane wears a one-pixel ring (`ui::explorer::focus_border`, shared by both),
+  which is the only thing that tells the two panes apart at a glance.
 
-### Walking the panels
+### Walking the panes
 
 - **Files pane:** Left/Right step one cell, Up/Down a whole row, **PageUp/PageDown** a
   screenful of rows (a page is a viewport's worth less one, so a row of context carries
@@ -2286,7 +2286,7 @@ keyboard just landed on.
   **F2** renames.
 - **The selection is scrolled back into view**, and only by the keyboard: a click is
   already on something visible, and scrolling under the cursor would move what was just
-  aimed at. Both panels report their scroll offset (`Scrolled`) and share one rule,
+  aimed at. Both panes report their scroll offset (`Scrolled`) and share one rule,
   `app::keep_visible` — already visible means *do not move*, so a walk across a screenful
   scrolls at the edges rather than re-centring on every press.
 
@@ -2422,20 +2422,20 @@ does when an action has nine targets instead of one.
 ## §22 — Resuming where you left off (v2.2)
 
 A reconnect to a saved target used to drop you at the shell's login directory with both
-panels at the root. This section remembers where the last session was — the shell and the
+panes at the root. This section remembers where the last session was — the shell and the
 files pane, each on its own — and puts you back there, and gives the folder tree a path
-header so both panels name the same place.
+header so both panes name the same place.
 
 ### One snapshot, remembered per target
 
 - **`SessionState` is the one place that names what persists per target** (§14): the two
-  paths (`terminal_path`, `files_path`), the `.*` filter, and the two panel sizes
+  paths (`terminal_path`, `files_path`), the `.*` filter, and the two pane sizes
   (`explorer_width`, `files_height`). It is a transfer struct; `Target` keeps the fields flat
   (so the JSON stays flat and a pre-v2.2 `targets.json` loads unchanged), all optional and
   omitted when absent. Target metadata, never a secret — §12 is untouched. Adding another
   remembered value is one field on `SessionState` and `Target`, one line each in capture /
   restore / `set_session`.
-- **The panel sizes stay per target; the WINDOW size does not.** The tree width and pane
+- **The pane sizes stay per target; the WINDOW size does not.** The tree width and pane
   height belong to a connection — one server's files want a tall pane, another a wide tree —
   so they ride here. The OS window is a different thing: there is one of it, shown on the home
   screen before any target exists, so its size is an app-wide preference kept in `settings.json`
@@ -2449,11 +2449,11 @@ header so both panels name the same place.
   "leave it": a shell that announced no cwd this session (§17) must not erase a resume point
   an earlier session recorded.
 - **Not the shell's `Cwd` scanner.** The terminal path is *sourced* from `term::cwd::Cwd`
-  (the OSC scanner, §17), but the pane path and panel sizes are GUI state the app owns — they
+  (the OSC scanner, §17), but the pane path and pane sizes are GUI state the app owns — they
   never appear in the byte stream, so the scanner stays a scanner and the snapshot lives with
   the target.
 - **So the shell resume only exists on a shell that announces.** Everything else here works on
-  any remote — the pane path, the panel sizes, the `.*` filter and the sort are the GUI's own
+  any remote — the pane path, the pane sizes, the `.*` filter and the sort are the GUI's own
   state — but `terminal_path` can only ever be what the shell said. On a plain bash it is
   therefore always `None`, forever, and the rule above quietly keeps whatever was there. That
   reads as a broken feature rather than a missing shell hook, which is what §17's shell-integration
@@ -2463,24 +2463,24 @@ header so both panels name the same place.
 ### Putting you back
 
 - **`App::restore_session` applies the snapshot before the first listing**: the `.*` filter
-  and the two panel sizes go straight onto the panels (a size clamped to the same window
+  and the two pane sizes go straight onto the panes (a size clamped to the same window
   fraction a splitter drag is, and only once the window size is known), and the two resume
   paths come back for the caller to drive the rest.
 - **The pane reopens at `files_path`** (root as the fallback) and the tree reveals the
-  chain down to it, so both panels start on the resume point.
+  chain down to it, so both panes start on the resume point.
 - **The shell is resumed with a `cd`** typed in exactly as the tree's "Open in terminal"
   does (§18) — quoted, POSIX-assumed, visible in the scrollback. Nothing to replay leaves
   the shell at its login directory, the previous behaviour.
-- **Both panels are pinned while the shell settles.** The shell announces its login directory
+- **Both panes are pinned while the shell settles.** The shell announces its login directory
   *before* the replayed `cd` runs, so without a guard that announcement would drag them off a
   divergent `files_path`. `App::resume_cwd` holds the cwd we are waiting for: until the shell
-  reaches it, `SshEvent::Output` moves neither panel; once it does, both follow-guards are seeded
+  reaches it, `SshEvent::Output` moves neither pane; once it does, both follow-guards are seeded
   (so they stay put now but follow the next real `cd`) and the pin lifts. An explicit move by the
   user — Sync, "Open in terminal", Reveal — lifts it early.
 - **The tree used to sit outside the pin, and that was the bug.** It followed every announcement
   while the pane was held, so a resume walked it to the login directory and then on to the
   replayed one, opening each chain in turn and asking the server for a listing of every folder
-  along both — to land somewhere the pane had deliberately not gone. The two panels are meant to
+  along both — to land somewhere the pane had deliberately not gone. The two panes are meant to
   open a session agreeing on the resume point, and one of them was leaving before the user saw it
   there. `Explorer::set_revealed` is the tree's half of the seed, the exact mirror of
   `Files::set_followed`, and the reveal now happens *inside* the not-pinned arm rather than in
@@ -2488,10 +2488,10 @@ header so both panels name the same place.
 
 ### The folder tree shows the path too
 
-- **The tree panel's header now shows the current directory**, the same `Files::path` the
+- **The tree pane's header now shows the current directory**, the same `Files::path` the
   files pane shows — the two views are synchronised, even though the tree's selection can
   sit elsewhere.
-- **It wraps across up to two lines**, because the panel is narrow and a deep path would
+- **It wraps across up to two lines**, because the pane is narrow and a deep path would
   otherwise overflow. A path too long for those two lines is middle-ellipsised (`…`) to fit,
   the same cut the file grid's names use (`crate::ui::elide_middle`) — so both the start of
   the path and its leaf folder survive, and the header can no longer grow without bound and
@@ -2638,7 +2638,7 @@ leak that would spread the swap across the GUI. So the work is staged:
   sending to the host, so `term::screen` exposes `focus_reporting()` and `app` watches iced's
   window `Focused` / `Unfocused` events. What counts as focus is cmote's call: the shell is
   focused only while the OS window is **and** the keyboard ring is on the terminal, so a switch to
-  a side panel reads as a focus-out too — the remote is blind to cmote's panels, so it should hear
+  a side pane reads as a focus-out too — the remote is blind to cmote's panes, so it should hear
   about either. Every internal focus move funnels through one `set_focus`, and only a real change
   from the last reported state reaches the wire (a steady state is never re-sent); the state is
   reconciled after each output chunk, so a program toggling `?1004` mid-session is never stranded.
@@ -3257,7 +3257,7 @@ four **local** shells do not — see §104.
 
 ## §31 — App-wide window size, and pane-handle feedback (v4.0.0)
 
-Two small layout niceties. cmote already remembered the panel sizes per target (§22); it did
+Two small layout niceties. cmote already remembered the pane sizes per target (§22); it did
 not remember the WINDOW, so every launch opened at the built-in default however the user last
 sized it. And the two resize handles were bare bars — no cursor, no answer to the pointer — so
 that they were grabbable at all was something you learned by trying. This section fixes both.
@@ -3301,8 +3301,8 @@ that they were grabbable at all was something you learned by trying. This sectio
   same cursor, so the arrow does not flicker back to the default when the pointer leaves the thin
   bar mid-drag.
 - **The bar lights while it is the active handle** — hovered *or* being dragged
-  (`splitter_active` = `dragging || splitter_hovered`, on both panel models). Resting it is the
-  panel grey `SPLITTER_BG`; active it is the brighter `SPLITTER_HOVER`, shared by both handles so
+  (`splitter_active` = `dragging || splitter_hovered`, on both pane models). Resting it is the
+  pane grey `SPLITTER_BG`; active it is the brighter `SPLITTER_HOVER`, shared by both handles so
   they feel identical. Hover is fed back by the bar's own `mouse_area` `on_enter`/`on_exit`
   (`SplitterEntered`/`SplitterExited`), which touch only the highlight — no relayout, so no grid
   refit. This is the hand-rolled equivalent of what a `pane_grid` splitter gives for free; cmote's
@@ -3320,7 +3320,7 @@ about unsaved changes first. It is deliberately small: no syntax highlighting, n
 split panes. It is for the "just fix this line in the config" job that otherwise means launching
 `vi` in the shell.
 
-Same three-way split as the panels (§18, §19): a pure model (`editor.rs`), a pure view
+Same three-way split as the panes (§18, §19): a pure model (`editor.rs`), a pure view
 (`ui/editor.rs`), and the network calls (`ssh/edit.rs`) — so the rules that carry the weight
 (encoding, line-ending, the changed-line diff) are unit-testable with no server.
 
@@ -3488,7 +3488,7 @@ UTF-8 without one; refuse what cannot be opened; on save, persist exactly as ope
 - **The cursor stays on screen, on both axes.** The vertical scroll lives on the buffer's scrollable
   (the gutter trick defeats the widget's own vertical scroll) — so a plain arrow-down past the foot of
   the view used to wait on a wheel nudge. Now the buffer's scrollable reports its offset and visible
-  size (`on_scroll`, first frame included), and after any cursor move `App` runs the panels' own
+  size (`on_scroll`, first frame included), and after any cursor move `App` runs the panes' own
   `keep_visible` over the cursor line — `cursor().position.line` × the fixed `LINE_HEIGHT` — and issues
   a `scroll_to` on the buffer's id. The same follow serves a Find jump, so a match off-screen is
   scrolled onto it.
@@ -5379,10 +5379,10 @@ caught up. This section handles those two.
 
 ### Typing at a prompt means the prompt
 
-The panels answer to the arrows, the Page keys, Home/End, Tab, Enter, F2, F5 and Esc. Not one of them
-answers to a plain character — there is no type-ahead in either panel — so a letter arriving while a panel
-holds the keyboard could only ever have been meant for the shell. It was dropped: the panel swallowed
-everything (§20's "a focused panel keeps every key"), nothing happened on screen, and the first character of
+The panes answer to the arrows, the Page keys, Home/End, Tab, Enter, F2, F5 and Esc. Not one of them
+answers to a plain character — there is no type-ahead in either pane — so a letter arriving while a pane
+holds the keyboard could only ever have been meant for the shell. It was dropped: the pane swallowed
+everything (§20's "a focused pane keeps every key"), nothing happened on screen, and the first character of
 a command disappeared. Usually several, because nothing about a swallowed keystroke says it was swallowed —
 the user finds out when the echo they expected is missing and has to work out how much of what they typed
 survived.
@@ -5394,18 +5394,18 @@ spent on the switch.
 What counts as typing is `is_typing`, and it is deliberately narrow — two conditions, both required:
 
 - **A `Character` key, never a `Named` one.** Enter, Tab, the arrows, F2, Esc, Backspace and Delete are all
-  `Named`, and every one is a panel's own key. Writing the rule on the *produced text* instead — the obvious
+  `Named`, and every one is a pane's own key. Writing the rule on the *produced text* instead — the obvious
   alternative, since winit hands one to most keys — would catch Enter, which carries `"\r"`, and take the
   tree's "send the shell there" away from it.
 - **No Ctrl, Alt or Logo.** Those make a combination, not a character: the files pane's Ctrl+A takes the
-  whole listing (§21), and Ctrl+Tab is the way out of a panel at all. Shift is let through, since a capital
+  whole listing (§21), and Ctrl+Tab is the way out of a pane at all. Shift is let through, since a capital
   is as much typing as a small letter.
 
 `ponytail:` on Windows AltGr arrives as Ctrl+Alt, so an AltGr character — `@` on an AZERTY layout — reads as
 a combination and does not on its own hand the keyboard over. The letters around it do, which is the case
 that matters: a command starts with a word.
 
-The rule is one-way. Typing in the shell never moves the focus *to* a panel, because a panel has nothing to
+The rule is one-way. Typing in the shell never moves the focus *to* a pane, because a pane has nothing to
 type into (its rename fields are modal and take the keyboard whole, §18, §19).
 
 ### A command from the terminal's surface means the terminal
@@ -5418,18 +5418,18 @@ the text at the prompt and left the *next* keystroke — the Enter that runs it 
 `on_terminal_command` now puts the ring back on the shell for every item of that menu. Paste is the sharp
 case, but the reading covers the rest: a copy of the scrollback, an upload into the shell's own directory, a
 link followed out of its output are all work on the terminal, and none is a reason to keep the keyboard
-parked on a panel.
+parked on a pane.
 
 **Ctrl+V is that same command off the keyboard**, so it is answered the same way — from wherever the ring
 is, and it brings the ring with it. That means it moved *above* the focus dispatch in `on_key`: left in the
 copy/paste block below it, it was only ever reached with the shell already focused, so a paste asked for
-while a panel held the keyboard was dropped on the floor with no echo to say why. Neither panel claims
+while a pane held the keyboard was dropped on the floor with no echo to say why. Neither pane claims
 Ctrl+V, so nothing is taken from them. Ctrl+Shift+V is the same shortcut and pastes the same plain text
 (`is_paste` covers both, matched on the physical key so it holds on AZERTY and Dvorak).
 
 **Ctrl+C is deliberately not treated that way.** It reads the terminal's own selection, or — with nothing
 selected — is the interrupt for the remote. Neither is text going *in*, which is what this whole section is
-about; and of every unclaimed shortcut, "copy what is selected here" is the one a panel has the best claim
+about; and of every unclaimed shortcut, "copy what is selected here" is the one a pane has the best claim
 on the day it wants it.
 
 **An item does this; the right-press that opens the menu does not.** Opening the menu is a question about
@@ -5445,16 +5445,16 @@ for a click on the grid. Reporting the ring rather than the OS window is what ma
 
 - **No other shortcut reaches across the focus.** Ctrl+V does, because it is text going into the shell;
   every other unclaimed combination still lands wherever the ring is and does nothing there. Widening that
-  would be deciding, in advance, that the panels will never want those keys.
-- **No focus move for the panels' own context menus.** A menu item on the tree or the files pane acts on
-  that panel, and the panel already had the keyboard when it was right-clicked; there is nothing to take
+  would be deciding, in advance, that the panes will never want those keys.
+- **No focus move for the panes' own context menus.** A menu item on the tree or the files pane acts on
+  that pane, and the pane already had the keyboard when it was right-clicked; there is nothing to take
   back.
 - **The right-press does not focus the grid**, per above.
 - **Typing does not move the focus away from the shell**, since there is nowhere it would go.
-- **No type-ahead in the panels.** Letters could plausibly jump to the entry that starts with them — the
+- **No type-ahead in the panes.** Letters could plausibly jump to the entry that starts with them — the
   file-manager habit — but that is exactly the key this section gives to the shell, and the shell has the
   better claim: a terminal is a thing you type at. If type-ahead is ever wanted it needs its own way in (a
-  panel-local search field), not a quiet reversal of this rule.
+  pane-local search field), not a quiet reversal of this rule.
 
 ---
 
@@ -5545,7 +5545,7 @@ Three details that are not decoration:
   is 64 and the drawing is used as drawn, which is the point of drawing it large. It is asked
   **for the window's own DPI** (`GetSystemMetricsForDpi` + `GetDpiForWindow`), because iced runs
   per-monitor-DPI-aware and plain `GetSystemMetrics` answers for the DPI the session logged in at —
-  on a 200% panel beside a 100% primary that would make the hands half the size of every other
+  on a 200% pane beside a 100% primary that would make the hands half the size of every other
   cursor on the screen. The resampler averages **weighted by alpha**: a transparent pixel still
   carries a colour, usually black, and averaging it in unweighted rings every soft edge with a dark
   halo. Read once at start-up (`ponytail:` moving the window to a differently-scaled monitor keeps
@@ -5727,7 +5727,7 @@ the grey is itself the explanation. Three rules dim a row:
 `take_tab` is `remove_tab` with the ending taken out: the same strip bookkeeping (the activation
 order, which tab comes forward, the window geometry handed to it) with the `Tab` handed back instead
 of dropped. A close is now that plus the drop; a move is that plus a push. **The session never
-notices** — its channel, emulator, scrollback, panels and forwards travel with the struct, because a
+notices** — its channel, emulator, scrollback, panes and forwards travel with the struct, because a
 tab has always owned all of it (§26) and nothing about a session was ever indexed by region.
 
 The moved tab arrives **on screen** in its new strip and takes the keyboard with it (§50). The user
@@ -5771,7 +5771,7 @@ dials again** — it is "open this connection a second time", not "clone this ta
   at a stranger's shell. It is taken by the first `Connected` either way, and used only if that
   session is the one it was made for.
 - **The files pane is not carried.** It opens at its own remembered directory and is pinned there
-  until the shell settles, exactly as on a reconnect (§22) — the two panels drift apart on purpose,
+  until the shell settles, exactly as on a reconnect (§22) — the two panes drift apart on purpose,
   and Sync and Reveal (§19) are the deliberate ways to bring them back together.
 - **A copy made into its own strip lands beside its original**; sent to the other region there is no
   "beside", so it goes on the end. Either way it opens on screen, since a connection dialing is
@@ -5786,7 +5786,7 @@ subscription in cmote that costs a message per pointer move, and switching it on
 would make an undivided one pay for a menu it opens once in a session.
 
 So it hangs from the **region's own top-left corner, just under the bar**; the tree's menu is
-anchored to its panel for the same reason (§18). It is always on screen, it needs no stored point,
+anchored to its pane for the same reason (§18). It is always on screen, it needs no stored point,
 and it follows a divider dragged while it is open, which a remembered pointer position would not. It
 is drawn over the **whole window** rather than inside its region: a menu offering to send a tab
 across a seam should not be clipped by that seam.
@@ -5845,7 +5845,7 @@ no hook for a widget leaving the tree.
 - `ui/split.rs` — `Area` (`Main` / `Right` / `Bottom`), `Area::way` (the cut that would make it,
   `None` for main), and `areas` (which region each one currently is, read off the rectangles).
 - `ui/tabs.rs` — `on_right_press` on the chip, and `context_menu`: the rows, their labels, and the
-  clamp that keeps the panel inside the window's right edge. It draws `Destination`s and works
+  clamp that keeps the pane inside the window's right edge. It draws `Destination`s and works
   nothing out — availability depends on the region tree, which a strip cannot see.
 - `cursor.rs` — the hover became a named claim with `drawn` / `frame_begin` / `frame_end` /
   `covered`; `ui/tabs.rs` and `ui/dialog.rs` each gained the one line that says "still here", and
@@ -5871,7 +5871,7 @@ no hook for a widget leaving the tree.
 - **The copy authenticates as the login account.** An elevated shell (§45) lives on the connection it
   was raised on; a fresh connection starts where every connection starts, and the copy can be
   elevated again by the same route the original was.
-- **The copy does not inherit the original's forwards, find bar, selection or panel sizes.** Those
+- **The copy does not inherit the original's forwards, find bar, selection or pane sizes.** Those
   belong to a session or to the target's remembered state (§22, §27), and the copy gets the target's
   the same way any other connect to it would. Only the directory is carried, because only the
   directory is the thing the user was looking at.
@@ -6026,7 +6026,7 @@ account the pane happened to be showing.
   double-click shows it.
 - **`ponytail:` transparency shows a flat mid-grey, not a checkerboard.** The convention is
   unambiguous and needs a tiled custom widget; one tone that loses to neither light nor dark artwork
-  buys most of the clarity for none of the work. Deliberately not the panels' near-black, which
+  buys most of the clarity for none of the work. Deliberately not the panes' near-black, which
   would swallow exactly the dark artwork transparency is most often used for.
 - **No animation.** An animated GIF shows its first frame. Playing one means a frame clock, a decode
   loop and a pause control — a media player, not a preview.
@@ -11572,7 +11572,7 @@ against the window's:
 | `ui::selection::Cell` (a screen coordinate) + `Spot` (a document coordinate) | `ScreenSpot` + `DocSpot` | two coordinate spaces, and only one of them was called a spot. `term::screen::Cell` keeps *cell*: content is what a cell IS |
 | `term::rect::Area` | `Rect` | the module was already called `rect`; *area* belongs to the window (§48), where a user can point at one |
 | `term::mod::Split` | `Interruption` | its own doc says it is "one thing `process` has to do part-way through a chunk". Nothing to do with splitting a window |
-| `ui::terminal::Panels<'a>` | `PanesView` | **pane** is the noun; *panel* survived only in prose, and both docs swapped the two words mid-sentence |
+| `ui::terminal::Panes<'a>` | `PanesView` | **pane** is the noun; *pane* survived only in prose, and both docs swapped the two words mid-sentence |
 | `files::Zone` | `TimeZone` | it is a time zone. A reader assumes a screen region |
 | `ui::terminal::Session<'a>` | `UiTerminalSession` | it is an argument pair, not a session |
 | *profile* | **target** | 454 uses to 24, and the file on disk already said `targets.json`. `profiles.rs` becomes `targets.rs`; README and UI follow |
