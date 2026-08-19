@@ -612,7 +612,7 @@ short, and since §41 nothing left in it is high value:
     field, so the pending-wrap flag can be read and set from outside — the piece assumed to be sealed
     inside `Term::input`.
   - **§58 already built the hard primitive.** Scrolling a column band by a row IS a rectangular copy
-    plus an erase, and `copy_area` / `erase_area` exist.
+    plus an erase, and `copy_rect` / `erase_rect` exist.
 
   What it would take: about twelve of `Handler`'s 71 methods overridden (`input`, `carriage_return`,
   `linefeed`, `insert_blank_lines`, `delete_lines`, `insert_blank`, `delete_chars`, `goto`, `goto_col`,
@@ -2564,8 +2564,8 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   cursor, so the split is only about ordering against the text in the chunk. `numbers()` refuses the
   whole sequence on any unparseable parameter (§54's rule) — a misread corner erases the wrong cells —
   and `fill_char` is an allow-list of 32–126 / 160–255. `term/mod.rs` writes the cells in four methods:
-  `erase_area` (the pen's background, protection honoured only for DECSERA), `fill_area` (the pen
-  cloned with a new glyph), `copy_area` (source read out whole first, because the overlapping case is
+  `erase_rect` (the pen's background, protection honoured only for DECSERA), `fill_rect` (the pen
+  cloned with a new glyph), `copy_rect` (source read out whole first, because the overlapping case is
   the point of DECCRA) and `apply_rectangle`, which **refuses every one of them while `TermMode::ORIGIN`
   is set** — a `ponytail:` limit, since DECOM makes the corners region-relative and the engine's
   `scroll_region` has no accessor.
@@ -2579,7 +2579,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   one is undrawable, while the same numbers as a stream are an ordinary run round the wrap. Selector
   lists fold to a `Change { on, off, flip }` at parse time — later wins, as in an SGR — and
   `Change::apply` is pure, so the whole table is tested without a terminal. `term/mod.rs` holds the
-  one translation to engine names (`RECT_ATTRIBUTES`) and `attribute_area` sets **named bits one at a
+  one translation to engine names (`RECT_ATTRIBUTES`) and `attribute_rect` sets **named bits one at a
   time**; assigning `Flags` wholesale would silently drop cmote's DECSCA protection bit (§56), which a
   test pins by underlining a protected form and then selectively erasing it. **Blink has no engine
   flag** — `Flags` names inverse, bold, italic, dim, hidden, strikeout, five underline styles and the

@@ -70,7 +70,7 @@ pub mod pointer; // reads the mouse pointer shape a remote asks for, OSC 22 — 
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
-mod rect; // reads the VT420 rectangular area operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
+mod rect; // reads the VT420 rectangular bounds operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
 mod region; // mirrors the engine's private vertical scrolling region, so cmote can read back what DECSTBM set (§102)
 pub mod scp; // reads SCP, the direction a line's characters are laid down in (§76)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
@@ -1020,22 +1020,28 @@ impl Terminal {
 		};
 		// The four content operations are always the box, and so is the checksum. DECSACE picks
 		// between the box and the wrapped run for the attribute pair alone (§59), which is why the
-		// extent is a parameter of `area` rather than a mode it reads: the call site is what says
+		// extent is a parameter of `from_corners` rather than a mode it reads: the call site is what says
 		// which family it belongs to.
 		match request {
 			rect::Request::Erase(corners) => {
-				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
-					self.erase_area(area, false);
+				if let Some(bounds) =
+					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+				{
+					self.erase_rect(bounds, false);
 				}
 			}
 			rect::Request::SelectiveErase(corners) => {
-				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
-					self.erase_area(area, true);
+				if let Some(bounds) =
+					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+				{
+					self.erase_rect(bounds, true);
 				}
 			}
 			rect::Request::Fill(glyph, corners) => {
-				if let Some(area) = rect::area(corners, rect::Extent::Rectangle, rows, cols) {
-					self.fill_area(glyph, area);
+				if let Some(bounds) =
+					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
+				{
+					self.fill_rect(glyph, bounds);
 				}
 			}
 			rect::Request::Attributes {
@@ -1046,18 +1052,19 @@ impl Terminal {
 				if change.is_empty() {
 					return;
 				}
-				if let Some(area) = rect::area(corners, extent, rows, cols) {
-					self.attribute_area(area, extent, change, cols);
+				if let Some(bounds) = rect::from_corners(corners, extent, rows, cols) {
+					self.attribute_rect(bounds, extent, change, cols);
 				}
 			}
 			rect::Request::Copy { source, top, left } => {
-				let Some(source) = rect::area(source, rect::Extent::Rectangle, rows, cols) else {
+				let Some(source) = rect::from_corners(source, rect::Extent::Rectangle, rows, cols)
+				else {
 					return;
 				};
 				if let Some((source, to_row, to_col)) =
 					rect::copy_extent(source, top, left, rows, cols)
 				{
-					self.copy_area(source, to_row, to_col);
+					self.copy_rect(source, to_row, to_col);
 				}
 			}
 			rect::Request::Shift { direction, columns } => {
@@ -1074,12 +1081,12 @@ impl Terminal {
 				// origin-mode refusal above — is answered with the checksum of nothing, which is
 				// what a real terminal reports for an empty area and is not a special case here:
 				// `Checksum::default().finish()` is 0 because no cell was ever weighed.
-				let area = if origin {
+				let bounds = if origin {
 					None
 				} else {
-					rect::area(corners, rect::Extent::Rectangle, rows, cols)
+					rect::from_corners(corners, rect::Extent::Rectangle, rows, cols)
 				};
-				let checksum = area.map_or(0, |area| self.checksum_area(area));
+				let checksum = bounds.map_or(0, |bounds| self.checksum_rect(bounds));
 				// Into the same buffer the engine's own replies land in, at the point in the stream
 				// the question sat — so a DSR and a checksum asked for in one write come back in the
 				// order they were asked, without a second reply path to keep in step.
@@ -1103,11 +1110,11 @@ impl Terminal {
 	///
 	/// The rectangle, not the extent: DECSACE selects a shape for the attribute pair alone, and
 	/// xterm's own checksum walks `left..=right` on every row regardless of it.
-	fn checksum_area(&self, area: rect::Area) -> u16 {
+	fn checksum_rect(&self, bounds: rect::Rect) -> u16 {
 		let grid = self.term.grid();
 		let mut checksum = rect::Checksum::default();
-		for row in area.rows() {
-			for column in area.columns() {
+		for row in bounds.rows() {
+			for column in bounds.columns() {
 				let cell = &grid[Line(row as i32)][Column(column)];
 				let mut value = u32::from(cell.c);
 				// Protection is not in `Flags` — it rides bit 15 (§56) — so it is read through the
@@ -1131,11 +1138,11 @@ impl Terminal {
 	/// What lands in each cell is what the engine's own erase writes: the pen's background colour and
 	/// no glyph, so an erased cell is blank rather than merely overwritten — flags included, which is
 	/// what lets a cell erased here be protected again later (§56).
-	fn erase_area(&mut self, area: rect::Area, selective: bool) {
+	fn erase_rect(&mut self, bounds: rect::Rect, selective: bool) {
 		let background = self.term.grid().cursor.template.bg;
 		let grid = self.term.grid_mut();
-		for row in area.rows() {
-			for column in area.columns() {
+		for row in bounds.rows() {
+			for column in bounds.columns() {
 				let cell = &mut grid[Line(row as i32)][Column(column)];
 				if selective && protect::is_protected(cell.flags.bits()) {
 					continue;
@@ -1151,12 +1158,12 @@ impl Terminal {
 	/// have had at that moment — which is what DECFRA is defined to do, and what makes it worth
 	/// having over a rectangle of spaces. Protection rides along with the rest of the pen, so a fill
 	/// inside a DECSCA run is protected exactly as typed text would be.
-	fn fill_area(&mut self, glyph: char, area: rect::Area) {
+	fn fill_rect(&mut self, glyph: char, bounds: rect::Rect) {
 		let mut template = self.term.grid().cursor.template.clone();
 		template.c = glyph;
 		let grid = self.term.grid_mut();
-		for row in area.rows() {
-			for column in area.columns() {
+		for row in bounds.rows() {
+			for column in bounds.columns() {
 				grid[Line(row as i32)][Column(column)] = template.clone();
 			}
 		}
@@ -1174,16 +1181,16 @@ impl Terminal {
 	///
 	/// Protection is otherwise ignored here, unlike in the erases: DECSCA marks a cell unerasable,
 	/// and changing how it looks does not erase it.
-	fn attribute_area(
+	fn attribute_rect(
 		&mut self,
-		area: rect::Area,
+		bounds: rect::Rect,
 		extent: rect::Extent,
 		change: rect::Change,
 		cols: usize,
 	) {
 		let grid = self.term.grid_mut();
-		for row in area.rows() {
-			for column in area.columns_on(row, extent, cols) {
+		for row in bounds.rows() {
+			for column in bounds.columns_on(row, extent, cols) {
 				let flags = &mut grid[Line(row as i32)][Column(column)].flags;
 				let mut before = 0u8;
 				for (attribute, flag) in RECT_ATTRIBUTES {
@@ -1214,7 +1221,7 @@ impl Terminal {
 	/// Whole cells move, so the glyph's colours, its attributes, its OSC 8 link and its DECSCA
 	/// protection all travel with it. That is right on its own terms: protection makes a cell
 	/// unerasable, not immovable (§56).
-	fn copy_area(&mut self, source: rect::Area, to_row: usize, to_col: usize) {
+	fn copy_rect(&mut self, source: rect::Rect, to_row: usize, to_col: usize) {
 		let cells: Vec<Cell> = {
 			let grid = self.term.grid();
 			source
@@ -1237,7 +1244,7 @@ impl Terminal {
 
 	/// Shift every row of the visible page sideways — SL and SR (§100).
 	///
-	/// Each row is read out whole before any of it is written, for DECCRA's reason (`copy_area`): the
+	/// Each row is read out whole before any of it is written, for DECCRA's reason (`copy_rect`): the
 	/// source and destination overlap by definition here, so the copy is done through a buffer rather
 	/// than by choosing a direction to walk in and hoping the arithmetic holds.
 	///
@@ -1343,7 +1350,7 @@ impl Terminal {
 		for row in top..=bottom {
 			let line = Line(row as i32);
 			if columns < room {
-				// Read out and write back through a buffer, for `copy_area`'s reason: the source and
+				// Read out and write back through a buffer, for `copy_rect`'s reason: the source and
 				// destination overlap by definition, so choosing a walk direction and hoping the
 				// arithmetic holds is the version of this that goes wrong quietly.
 				let source: Vec<Cell> = (left..=right)

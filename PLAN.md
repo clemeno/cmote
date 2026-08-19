@@ -6602,7 +6602,7 @@ DECRARA gets the shorter table — `0 1 4 5 7` and no off-forms — because "off
 verb that flips, and reading `24` as an underline toggle would flip an attribute on a request that
 plainly said "off".
 
-The rule that matters most is at the other end. `attribute_area` sets **named bits one at a time**
+The rule that matters most is at the other end. `attribute_rect` sets **named bits one at a time**
 and never assigns the flag word. Assigning it would be the obvious way to write "all attributes off",
 and it would silently unprotect a form the moment a program underlined it — cmote's DECSCA protection
 rides bit 15 of that same word (§56). A test pins it: underline a protected label, then selectively
@@ -10268,7 +10268,7 @@ across a coloured screen leaves a strip in that colour instead of a hole in the 
 
 **Each row is read out whole before it is written.** Source and destination overlap by definition
 here, so the copy goes through a buffer rather than through a walk direction chosen to make the
-arithmetic come out — `copy_area`'s argument, which is DECCRA's own.
+arithmetic come out — `copy_rect`'s argument, which is DECCRA's own.
 
 **The cursor does not move.** SL and SR shift the data *under* it. That is ECMA-48's behaviour, and it
 is also why this is written as a direct grid write instead of as a translation into per-row DCH and

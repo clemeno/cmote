@@ -125,7 +125,7 @@
 // clipboard readback crosses the only one that matters.
 //
 // Two properties keep it on that side, and both are enforced rather than assumed. The rectangle
-// resolves against the VISIBLE PAGE, so the scrollback is out of reach — `area` clamps to the page,
+// resolves against the VISIBLE PAGE, so the scrollback is out of reach — `from_corners` clamps to the page,
 // and there is no spelling of a corner that reaches a retired line. And the answer is a function of
 // grid cells and nothing else: not the window size, not the title, not the working directory, not the
 // clock, nothing about cmote or the machine it runs on. It repeats what the remote already said, and
@@ -149,7 +149,7 @@ const MAX_INTERMEDIATES: usize = 4;
 /// an omitted parameter means — standing for "the edge of the page".
 ///
 /// Kept unresolved on purpose. Turning these into cells needs the page size, which is the engine's to
-/// know, so the scanner reports what the program asked for and `area` below resolves it.
+/// know, so the scanner reports what the program asked for and `from_corners` below resolves it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Corners {
 	pub top: u16,
@@ -174,7 +174,7 @@ pub enum Direction {
 /// Which shape DECCARA and DECRARA act on — the whole content of DECSACE (§59).
 ///
 /// The distinction only exists for those two. The four content operations of §58 are always the
-/// rectangle, whatever this is set to, which is why `area` below takes it as an argument rather than
+/// rectangle, whatever this is set to, which is why `from_corners` below takes it as an argument rather than
 /// reading it from anywhere: the call site says which family it belongs to.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Extent {
@@ -239,14 +239,14 @@ impl Change {
 /// A resolved rectangle of cells: 0-based, inclusive on all four sides, and known to be inside the
 /// page it was resolved against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Area {
+pub struct Rect {
 	pub top: usize,
 	pub left: usize,
 	pub bottom: usize,
 	pub right: usize,
 }
 
-impl Area {
+impl Rect {
 	/// The rows this rectangle covers, top to bottom.
 	pub fn rows(&self) -> RangeInclusive<usize> {
 		self.top..=self.bottom
@@ -695,7 +695,7 @@ fn fill_char(code: u16) -> Option<char> {
 /// with the same numbers is ordinary — `CSI 1;70;5;10;4$r` underlines from row 1 column 70, round
 /// the wrap, to row 5 column 10 — so left and right are only compared when the run is confined to a
 /// single row. Top below bottom is a crossing under either.
-pub fn area(corners: Corners, extent: Extent, rows: usize, cols: usize) -> Option<Area> {
+pub fn from_corners(corners: Corners, extent: Extent, rows: usize, cols: usize) -> Option<Rect> {
 	if rows == 0 || cols == 0 {
 		return None;
 	}
@@ -723,7 +723,7 @@ pub fn area(corners: Corners, extent: Extent, rows: usize, cols: usize) -> Optio
 	if columns_cross {
 		return None;
 	}
-	Some(Area {
+	Some(Rect {
 		top: top - 1,
 		left: left - 1,
 		bottom: bottom - 1,
@@ -739,12 +739,12 @@ pub fn area(corners: Corners, extent: Extent, rows: usize, cols: usize) -> Optio
 /// and the only reading that makes `CSI 2;1;24;80;1;1;1;1 $ v` (scroll a page up one row) work at all.
 /// `None` when the corner itself is off the page.
 pub fn copy_extent(
-	source: Area,
+	source: Rect,
 	top: u16,
 	left: u16,
 	rows: usize,
 	cols: usize,
-) -> Option<(Area, usize, usize)> {
+) -> Option<(Rect, usize, usize)> {
 	if rows == 0 || cols == 0 {
 		return None;
 	}
@@ -756,7 +756,7 @@ pub fn copy_extent(
 	}
 	let height = source.height().min(rows - to_row);
 	let width = source.width().min(cols - to_col);
-	let trimmed = Area {
+	let trimmed = Rect {
 		top: source.top,
 		left: source.left,
 		bottom: source.top + height - 1,
@@ -907,13 +907,13 @@ mod tests {
 
 	/// Resolve corners as a rectangle — the extent all four §58 operations use, and DECSACE's
 	/// second choice for the two of §59.
-	fn boxed(corners: Corners, rows: usize, cols: usize) -> Option<Area> {
-		area(corners, Extent::Rectangle, rows, cols)
+	fn boxed(corners: Corners, rows: usize, cols: usize) -> Option<Rect> {
+		from_corners(corners, Extent::Rectangle, rows, cols)
 	}
 
 	/// Resolve corners as a wrapped run — DECSACE's default, and so the one an unarmed program gets.
-	fn streamed(corners: Corners, rows: usize, cols: usize) -> Option<Area> {
-		area(corners, Extent::Stream, rows, cols)
+	fn streamed(corners: Corners, rows: usize, cols: usize) -> Option<Rect> {
+		from_corners(corners, Extent::Stream, rows, cols)
 	}
 
 	#[test]
@@ -1289,7 +1289,7 @@ mod tests {
 	fn corners_resolve_to_zero_based_cells() {
 		assert_eq!(
 			boxed(box_of(2, 3, 5, 7), 24, 80),
-			Some(Area {
+			Some(Rect {
 				top: 1,
 				left: 2,
 				bottom: 4,
@@ -1302,7 +1302,7 @@ mod tests {
 	fn omitted_corners_reach_the_edges_of_the_page() {
 		assert_eq!(
 			boxed(box_of(0, 0, 0, 0), 24, 80),
-			Some(Area {
+			Some(Rect {
 				top: 0,
 				left: 0,
 				bottom: 23,
@@ -1316,7 +1316,7 @@ mod tests {
 		// A program sized for a bigger screen gets the part of its rectangle that exists.
 		assert_eq!(
 			boxed(box_of(1, 1, 999, 999), 24, 80),
-			Some(Area {
+			Some(Rect {
 				top: 0,
 				left: 0,
 				bottom: 23,
@@ -1370,7 +1370,7 @@ mod tests {
 	fn a_single_cell_is_a_rectangle() {
 		assert_eq!(
 			boxed(box_of(3, 4, 3, 4), 24, 80),
-			Some(Area {
+			Some(Rect {
 				top: 2,
 				left: 3,
 				bottom: 2,
