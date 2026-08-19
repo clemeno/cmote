@@ -80,6 +80,129 @@ pub fn interactive_field_id(index: usize) -> String {
 	format!("interactive-{index}")
 }
 
+// --- the layout boundary: integers on one side, `f32` pixels on the other (§111) ---
+//
+// iced measures everything in `f32`, and cmote counts everything in `usize`: rows, columns,
+// characters, entries. So every layout expression crosses between them, twice — a count multiplied
+// by a pitch to get pixels, and a pixel measurement divided by a pitch to get back to an index.
+//
+// There is no way to write either conversion without `as`, and this was checked rather than assumed:
+// std has no `TryFrom<f32> for usize` and no `From<u32> for f32`, and clippy flags even a provably
+// bounded `px.clamp(0.0, 4096.0) as usize` for both truncation and sign loss. `f32::from(u16)` is the
+// one exact spelling available, and a `u16` ceiling is wrong here — an editor buffer can hold more
+// than 65,535 lines, and clamping the gutter at that would break a file this program can open.
+//
+// So the boundary is crossed HERE, in these seven functions, and nowhere else. Each carries an
+// `#[expect]` naming the lint it answers, which is not the same thing as an `allow`: the lint stays
+// enabled for the whole crate, so a bare float cast written anywhere else is still a build error, and
+// `expect` fails the build if the lint ever stops firing here — the suppression cannot outlive its
+// reason. What the functions buy beyond the conversion is the arithmetic: the floor, the clamp and the
+// negative case were repeated at thirty-one call sites and are now written once each.
+//
+// The limits are real and stated where they bite. `f32` represents integers exactly up to 2^24
+// (16,777,216); above that a row index rounds, and its pixel top is wrong by less than the row is
+// tall. That is above every count this program can reach — the editor's own 8 MiB ceiling is about
+// 8.4 million lines of one byte — so the inexactness is unreachable rather than tolerated.
+
+/// `count` rows, columns or characters, each `pitch` pixels, as pixels.
+#[expect(
+	clippy::cast_precision_loss,
+	reason = "std offers no exact usize-to-f32; exact below 2^24, above every count reachable here"
+)]
+pub fn pixels(count: usize, pitch: f32) -> f32 {
+	count as f32 * pitch
+}
+
+/// The same for a row offset that may be NEGATIVE — a picture whose top edge has scrolled above the
+/// viewport still has to be placed, at a negative `y`, so that its visible part lands correctly (§41).
+#[expect(
+	clippy::cast_precision_loss,
+	reason = "std offers no exact i64-to-f32; a row offset is bounded by the document, far below 2^24"
+)]
+pub fn signed_pixels(rows: i64, pitch: f32) -> f32 {
+	rows as f32 * pitch
+}
+
+/// How many whole `pitch`-sized units fit inside `pixels` — a measurement turned back into a count.
+///
+/// Negative and NaN both answer 0, which is what every caller wants: a viewport scrolled to a
+/// negative offset, or measured before its first layout, has no rows to show rather than a wrapped
+/// number of them.
+#[expect(
+	clippy::cast_possible_truncation,
+	clippy::cast_sign_loss,
+	reason = "std offers no TryFrom<f32>; floored and floored at zero on the line above"
+)]
+pub fn cells(pixels: f32, pitch: f32) -> usize {
+	if pitch <= 0.0 {
+		return 0;
+	}
+	let count = (pixels / pitch).floor();
+	// `is_finite` rather than `!is_nan`: an INFINITE measurement floors to infinity, which is
+	// positive, and `as usize` then saturates at `usize::MAX` — an unmeasured `Length::Fill` would
+	// hand a caller four billion billion rows to walk. A test found this; the first version of the
+	// guard only refused NaN.
+	if !count.is_finite() || count <= 0.0 {
+		return 0;
+	}
+	count as usize
+}
+
+/// The same, rounded UP: how many units it takes to COVER `pixels`. What a viewport asks when it
+/// needs the partly-visible row at its bottom edge drawn as well.
+#[expect(
+	clippy::cast_possible_truncation,
+	clippy::cast_sign_loss,
+	reason = "std offers no TryFrom<f32>; rounded up and floored at zero on the line above"
+)]
+pub fn cells_covering(pixels: f32, pitch: f32) -> usize {
+	if pitch <= 0.0 {
+		return 0;
+	}
+	let count = (pixels / pitch).ceil();
+	// Finite, for the same reason as `cells` above.
+	if !count.is_finite() || count <= 0.0 {
+		return 0;
+	}
+	count as usize
+}
+
+/// `cells`, as the terminal's own `u16` geometry (§9) — clamped, since a grid wider than 65,535
+/// columns can be neither drawn nor asked for.
+pub fn cell_index(pixels: f32, pitch: f32) -> u16 {
+	u16::try_from(cells(pixels, pitch)).unwrap_or(u16::MAX)
+}
+
+/// `part` of `whole` as a fraction in `0.0..=1.0`, for a progress bar (§17). A zero whole is 0.0
+/// rather than a NaN, because "nothing to do" draws as an empty bar and not as a hole.
+#[expect(
+	clippy::cast_precision_loss,
+	reason = "std offers no exact u64-to-f32; a byte count above 2^24 loses precision far below one \
+	          pixel of a progress bar"
+)]
+pub fn fraction(part: u64, whole: u64) -> f32 {
+	if whole == 0 {
+		return 0.0;
+	}
+	part.min(whole) as f32 / whole as f32
+}
+
+/// A wheel movement in whole lines (§23), rounded to the nearest rather than truncated so that a
+/// small flick still moves one line instead of none.
+#[expect(
+	clippy::cast_possible_truncation,
+	reason = "std offers no TryFrom<f32>; clamped into an i32's range on the line above"
+)]
+pub fn lines_scrolled(amount: f32) -> i32 {
+	if amount.is_nan() {
+		return 0;
+	}
+	let lines = amount
+		.round()
+		.clamp(f32::from(i16::MIN), f32::from(i16::MAX));
+	lines as i32
+}
+
 /// The colour of the "wrong passphrase" hint (§7). A muted red that reads clearly on
 /// the default light theme. This is about a *local* key-file passphrase, not remote
 /// auth, so it is not a credential oracle (§12) — the key is decrypted and MAC-checked
@@ -396,5 +519,97 @@ mod tests {
 		// through a glyph would have panicked building it).
 		assert!(shown.contains('…'));
 		assert_eq!(shown.chars().count(), 8);
+	}
+}
+
+#[cfg(test)]
+mod layout_boundary_tests {
+	use super::{
+		cell_index, cells, cells_covering, fraction, lines_scrolled, pixels, signed_pixels,
+	};
+
+	/// The two directions round-trip for every count a layout can reach (§111).
+	#[test]
+	fn a_count_survives_the_trip_to_pixels_and_back() {
+		for count in [0usize, 1, 2, 39, 100, 4096, 65_535, 1_000_000] {
+			assert_eq!(cells(pixels(count, 20.0), 20.0), count, "at {count}");
+		}
+	}
+
+	/// The floor and the ceiling differ by exactly one partial row, which is the whole reason both
+	/// exist: a viewport wants the partly-visible row at its bottom edge drawn.
+	#[test]
+	fn covering_a_partial_row_takes_one_more_than_fits_in_it() {
+		assert_eq!(cells(50.0, 20.0), 2, "two whole rows fit in 50px");
+		assert_eq!(
+			cells_covering(50.0, 20.0),
+			3,
+			"three are needed to cover it"
+		);
+		// An exact multiple is the one case where they agree.
+		assert_eq!(cells(40.0, 20.0), 2);
+		assert_eq!(cells_covering(40.0, 20.0), 2);
+	}
+
+	/// Nothing measurable answers zero rather than a wrapped count. Before §111 each of these was a
+	/// bare `as usize` on a float, where a negative became an enormous index.
+	#[test]
+	fn a_measurement_that_is_not_a_measurement_answers_zero() {
+		assert_eq!(cells(-100.0, 20.0), 0, "scrolled to a negative offset");
+		assert_eq!(cells(f32::NAN, 20.0), 0, "measured before the first layout");
+		assert_eq!(
+			cells(100.0, 0.0),
+			0,
+			"a pitch of nothing divides into nothing"
+		);
+		// Infinity is the one that actually bit: it floors to infinity rather than to NaN, so the
+		// first version of the guard let it through and `as usize` saturated at `usize::MAX`.
+		assert_eq!(cells(f32::INFINITY, 20.0), 0, "no finite row count");
+		assert_eq!(cells_covering(f32::INFINITY, 20.0), 0);
+		assert_eq!(cells_covering(-1.0, 20.0), 0);
+		assert_eq!(cell_index(-1.0, 20.0), 0);
+	}
+
+	/// A negative row is a real position, not an error: a picture whose top has scrolled above the
+	/// viewport is placed at a negative `y` so its visible part still lands correctly (§41).
+	#[test]
+	fn a_row_above_the_viewport_keeps_its_sign() {
+		assert!((signed_pixels(-3, 20.0) - -60.0).abs() < f32::EPSILON);
+		assert!((signed_pixels(0, 20.0)).abs() < f32::EPSILON);
+		assert!((signed_pixels(3, 20.0) - 60.0).abs() < f32::EPSILON);
+	}
+
+	/// The grid's own geometry clamps rather than wrapping, since a grid past `u16` cannot be drawn.
+	#[test]
+	fn a_cell_index_clamps_at_the_grids_own_ceiling() {
+		assert_eq!(cell_index(0.0, 10.0), 0);
+		assert_eq!(cell_index(95.0, 10.0), 9);
+		assert_eq!(cell_index(f32::MAX, 1.0), u16::MAX);
+	}
+
+	/// A progress fraction stays inside `0.0..=1.0` whatever it is handed, including the zero whole
+	/// that would otherwise be a NaN painted as a hole in the bar.
+	#[test]
+	fn a_progress_fraction_is_bounded_at_both_ends() {
+		assert!((fraction(0, 100) - 0.0).abs() < f32::EPSILON);
+		assert!((fraction(50, 100) - 0.5).abs() < f32::EPSILON);
+		assert!((fraction(100, 100) - 1.0).abs() < f32::EPSILON);
+		assert!(
+			(fraction(200, 100) - 1.0).abs() < f32::EPSILON,
+			"more sent than expected still reads as full"
+		);
+		assert!((fraction(5, 0) - 0.0).abs() < f32::EPSILON, "nothing to do");
+	}
+
+	/// A wheel flick rounds to the nearest line, so the smallest real movement still scrolls.
+	#[test]
+	fn a_wheel_flick_rounds_rather_than_vanishing() {
+		assert_eq!(lines_scrolled(0.6), 1);
+		assert_eq!(lines_scrolled(-0.6), -1);
+		assert_eq!(lines_scrolled(0.4), 0, "less than half a line is no line");
+		assert_eq!(lines_scrolled(f32::NAN), 0);
+		// Clamped, so a nonsensical delta cannot wrap into a scroll the other way.
+		assert_eq!(lines_scrolled(f32::MAX), i32::from(i16::MAX));
+		assert_eq!(lines_scrolled(f32::MIN), i32::from(i16::MIN));
 	}
 }

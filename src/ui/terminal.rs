@@ -715,7 +715,7 @@ fn center_zone<'a>(endpoint: &str, transfers: &'a Queue) -> Element<'a, Message>
 			(0.0, crate::human::bytes(sent))
 		} else {
 			(
-				sent as f32 / total as f32,
+				super::fraction(sent, total),
 				format!(
 					"{} / {}",
 					crate::human::bytes(sent),
@@ -1180,9 +1180,8 @@ fn transfer_conflict_panel<'a>(
 pub fn cell_at(point: Point, rows: u16, cols: u16) -> ScreenSpot {
 	let x = (point.x - GRID_PADDING).max(0.0);
 	let y = (point.y - GRID_PADDING).max(0.0);
-	// `as u16` truncates toward zero; x/y are non-negative, so this floors.
-	let col = (x / CELL_WIDTH) as u16;
-	let row = (y / CELL_HEIGHT) as u16;
+	let col = super::cell_index(x, CELL_WIDTH);
+	let row = super::cell_index(y, CELL_HEIGHT);
 	ScreenSpot {
 		row: row.min(rows.saturating_sub(1)),
 		col: col.min(cols.saturating_sub(1)),
@@ -1246,12 +1245,8 @@ fn grid_interaction(shape: pointer::Shape) -> Option<iced::mouse::Interaction> {
 pub fn grid_size(area: Size, reserved_height: f32) -> (u16, u16) {
 	let usable_width = area.width - 2.0 * GRID_PADDING;
 	let usable_height = area.height - STATUS_BAR_HEIGHT - reserved_height - 2.0 * GRID_PADDING;
-	let cols = (usable_width / CELL_WIDTH)
-		.floor()
-		.clamp(1.0, f32::from(u16::MAX)) as u16;
-	let rows = (usable_height / CELL_HEIGHT)
-		.floor()
-		.clamp(1.0, f32::from(u16::MAX)) as u16;
+	let cols = super::cell_index(usable_width, CELL_WIDTH).max(1);
+	let rows = super::cell_index(usable_height, CELL_HEIGHT).max(1);
 	(rows, cols)
 }
 

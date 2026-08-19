@@ -17,6 +17,14 @@
 ///
 /// Binary throughout, and labelled binary. `KB` would be a lie about arithmetic that divides by
 /// 1024, and the two spellings side by side in one program are worse than either alone.
+/// The `#[expect]` covers the one conversion this module makes (§111). std has no exact
+/// `u64`-to-`f64`, and above 2^53 a byte count starts rounding — which is nine petabytes, where the
+/// answer is printed to one decimal place in pebibytes and the rounding is invisible by a factor of
+/// billions. Below the terabyte, where every real number here lives, the conversion is exact.
+#[expect(
+	clippy::cast_precision_loss,
+	reason = "std offers no exact u64-to-f64; exact below 2^53, and rounded to one decimal above it"
+)]
 pub fn bytes(count: u64) -> String {
 	const KIB: f64 = 1024.0;
 	let value = count as f64;

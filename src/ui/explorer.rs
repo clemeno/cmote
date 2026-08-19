@@ -177,8 +177,10 @@ fn path_per_line(width: f32) -> f32 {
 /// still `Shrink`, so a short path shrinks it back to one line.
 pub fn header_height(path: Option<&str>, width: f32) -> f32 {
 	let per_line = path_per_line(width);
-	let chars = path.map_or(0, |path| path.chars().count()) as f32;
-	let lines = (chars / per_line).ceil().clamp(1.0, PATH_LINES as f32);
+	let chars = super::pixels(path.map_or(0, |path| path.chars().count()), 1.0);
+	let lines = (chars / per_line)
+		.ceil()
+		.clamp(1.0, super::pixels(PATH_LINES, 1.0));
 	2.0 * HEADER_PAD_V + lines * PATH_LINE_HEIGHT
 }
 
@@ -218,7 +220,7 @@ fn header(explorer: &Explorer, path: Option<&str>) -> Element<'static, Message> 
 	let has_path = path.is_some();
 	// Trimmed to two lines' worth of glyphs so a deep path stays legible in this narrow column
 	// without pushing the tree off the bottom (§22); the copy button holds the whole path.
-	let per_line = path_per_line(explorer.width()) as usize;
+	let per_line = super::cells(path_per_line(explorer.width()), 1.0);
 	let path = crate::ui::elide_middle(path.unwrap_or("no directory yet"), per_line * PATH_LINES);
 	container(
 		row![

@@ -112,7 +112,7 @@ impl SyntaxHighlight {
 	fn color(&self) -> Option<Color> {
 		self.0
 			.foreground
-			.map(|color| Color::from_rgba8(color.r, color.g, color.b, color.a as f32 / 255.0))
+			.map(|color| Color::from_rgba8(color.r, color.g, color.b, f32::from(color.a) / 255.0))
 	}
 
 	/// The span's font, for a bold / italic scope (§32). The CME token set is colour-only, so this is

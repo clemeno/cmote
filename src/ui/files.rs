@@ -296,8 +296,8 @@ pub fn band_hits(rect: iced::Rectangle, columns: usize, count: usize, scroll: f3
 	let top = rect.y - HEADER_HEIGHT + scroll;
 	let bottom = top + rect.height;
 	let pitch = CELL_HEIGHT + CELL_SPACING;
-	let first = ((top - CELL_SPACING) / pitch).floor().max(0.0) as usize;
-	let last = ((bottom - CELL_SPACING) / pitch).floor().max(0.0) as usize;
+	let first = super::cells(top - CELL_SPACING, pitch);
+	let last = super::cells(bottom - CELL_SPACING, pitch);
 
 	let mut hits = Vec::new();
 	for row in first..=last {
@@ -306,7 +306,7 @@ pub fn band_hits(rect: iced::Rectangle, columns: usize, count: usize, scroll: f3
 			if index >= count {
 				return hits;
 			}
-			let x = CELL_SPACING + column as f32 * (CELL_WIDTH + CELL_SPACING);
+			let x = CELL_SPACING + super::pixels(column, CELL_WIDTH + CELL_SPACING);
 			let y = row_top(row);
 			// Touching counts, the way every file manager's band works: a cell is in as soon
 			// as the rectangle overlaps it at all.
@@ -328,12 +328,12 @@ pub fn band_hits(rect: iced::Rectangle, columns: usize, count: usize, scroll: f3
 /// which row and column the selection landed on. At least one, however narrow the window.
 pub fn columns(width: f32) -> usize {
 	let usable = width - 2.0 * CELL_SPACING + CELL_SPACING;
-	((usable / (CELL_WIDTH + CELL_SPACING)) as usize).max(1)
+	super::cells(usable, CELL_WIDTH + CELL_SPACING).max(1)
 }
 
 /// The top edge of grid row `row`, in the scrollable's own coordinates (§20).
 pub fn row_top(row: usize) -> f32 {
-	CELL_SPACING + row as f32 * (CELL_HEIGHT + CELL_SPACING)
+	CELL_SPACING + super::pixels(row, CELL_HEIGHT + CELL_SPACING)
 }
 
 /// How tall the scrollable part of the pane is (§20) — the pane minus its header and,
@@ -356,7 +356,7 @@ pub fn grid_height(files: &Files) -> f32 {
 /// the column count to get the model-space delta it hands `Files::step`.
 pub fn page_rows(files: &Files) -> usize {
 	let pitch = CELL_HEIGHT + CELL_SPACING;
-	let visible = (grid_height(files) / pitch).floor() as usize;
+	let visible = super::cells(grid_height(files), pitch);
 	visible.saturating_sub(1).max(1)
 }
 
@@ -367,9 +367,7 @@ fn header(files: &Files, show_hidden: bool, width: f32) -> Element<'_, Message> 
 	// Trimmed to one line's worth of glyphs so a deep path never overflows the toolbar (§22);
 	// the copy button beside it puts the whole path on the clipboard, and the tree header
 	// names the same location across two lines.
-	let per_line = ((width - HEADER_CONTROLS_WIDTH) / HEADER_CHAR)
-		.floor()
-		.max(1.0) as usize;
+	let per_line = super::cells(width - HEADER_CONTROLS_WIDTH, HEADER_CHAR).max(1);
 	let path = crate::ui::elide_middle(files.path().unwrap_or("no directory yet"), per_line);
 	let status = if files.loading() {
 		format!("{} so far…", files.count())
@@ -603,7 +601,7 @@ fn details(files: &Files, show_hidden: bool, width: f32) -> Option<Element<'_, M
 	// ponytail: an estimate, not a measurement — a line of all `W`s can still clip. Ask
 	// iced's text shaper for the real extent if that ever shows.
 	let rows: usize = lines.iter().map(|line| wrapped_rows(line)).sum();
-	let height = rows as f32 * POPUP_LINE + 2.0 * POPUP_PADDING;
+	let height = super::pixels(rows, POPUP_LINE) + 2.0 * POPUP_PADDING;
 
 	// One press copies the whole card. The text is joined here, from the same lines drawn
 	// below, so the model never has to rebuild what the view already has (§20).
@@ -642,7 +640,7 @@ fn details(files: &Files, show_hidden: bool, width: f32) -> Option<Element<'_, M
 		});
 
 	let columns = columns(width);
-	let cell_x = CELL_SPACING + (index % columns) as f32 * (CELL_WIDTH + CELL_SPACING);
+	let cell_x = CELL_SPACING + super::pixels(index % columns, CELL_WIDTH + CELL_SPACING);
 	let cell_y = HEADER_HEIGHT + row_top(index / columns) - files.scroll();
 	let right_of = cell_x + CELL_WIDTH + POPUP_GAP;
 	let left = if right_of + POPUP_WIDTH + MENU_INSET <= width {
@@ -731,7 +729,7 @@ fn summary(files: &Files, show_hidden: bool) -> Vec<String> {
 /// an empty line still occupies its own. `POPUP_CHAR` is the average advance of the
 /// interface face at the popup's text size, measured off the glyphs a path is made of.
 fn wrapped_rows(line: &str) -> usize {
-	let per_row = ((POPUP_WIDTH - 2.0 * POPUP_PADDING) / POPUP_CHAR) as usize;
+	let per_row = super::cells(POPUP_WIDTH - 2.0 * POPUP_PADDING, POPUP_CHAR);
 	line.chars().count().div_ceil(per_row.max(1)).max(1)
 }
 
@@ -830,7 +828,7 @@ fn cell<'a>(
 /// The actual cut lives in `crate::ui::elide_middle` — this only owns the cell's "how many
 /// fit" estimate, the same split of concerns the pane headers and the connect form use.
 fn label_budget() -> usize {
-	let per_line = (LABEL_WIDTH / LABEL_CHAR).floor().max(1.0) as usize;
+	let per_line = super::cells(LABEL_WIDTH, LABEL_CHAR).max(1);
 	per_line * LABEL_LINES
 }
 

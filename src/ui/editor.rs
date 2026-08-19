@@ -58,7 +58,7 @@ pub const BUFFER_SCROLL_ID: &str = "editor-buffer";
 /// tall (the editor is laid out at `Wrapping::None`), so a line's top is just its index times the
 /// pitch. `App`'s cursor-follow feeds this to `keep_visible`.
 pub fn line_top(line: usize) -> f32 {
-	line as f32 * LINE_HEIGHT
+	super::pixels(line, LINE_HEIGHT)
 }
 
 /// Fira Mono's fixed advance at `FONT_SIZE` — 0.6 em, the exact monospace pitch the terminal grid also
@@ -74,13 +74,13 @@ const TEXT_PAD_X: f32 = 8.0;
 /// `text_editor` is laid out at so it never scrolls itself horizontally. Both paddings plus one extra
 /// advance of slack, so the cursor sitting just past the last glyph of the longest line is reachable.
 pub fn content_width(cols: usize) -> f32 {
-	cols as f32 * CHAR_ADVANCE + TEXT_PAD_X * 2.0 + CHAR_ADVANCE
+	super::pixels(cols, CHAR_ADVANCE) + TEXT_PAD_X * 2.0 + CHAR_ADVANCE
 }
 
 /// The X offset of a display column's left edge within the buffer widget (§32) — the horizontal
 /// counterpart of `line_top`. `App`'s horizontal cursor-follow feeds this to `keep_visible`.
 pub fn col_x(col: usize) -> f32 {
-	col as f32 * CHAR_ADVANCE + TEXT_PAD_X
+	super::pixels(col, CHAR_ADVANCE) + TEXT_PAD_X
 }
 
 /// The toolbar's fixed height.
@@ -428,8 +428,8 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 /// widgets whatever the file's length, and its total height is `count × LINE_HEIGHT`, matching the
 /// gutter and the text exactly so the band lands on its line by construction.
 fn line_band<'a>(count: usize, line: usize, color: Color) -> Element<'a, Message> {
-	let above = line as f32 * LINE_HEIGHT;
-	let below = count.saturating_sub(line + 1) as f32 * LINE_HEIGHT;
+	let above = super::pixels(line, LINE_HEIGHT);
+	let below = super::pixels(count.saturating_sub(line + 1), LINE_HEIGHT);
 	// The band itself carries a fill, so it keeps its own styled container; the plain pads above and
 	// below share the gutter's spacer helper.
 	let band = container(text(""))
@@ -566,7 +566,7 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let match_line = editor.find_match_line();
 	// The width is sized to the LARGEST number (the last line), not the visible ones, so the column
 	// never jitters as different-length numbers scroll through.
-	let width = (count.to_string().len() as f32) * DIGIT_WIDTH + BAR_WIDTH + GUTTER_PAD * 2.0;
+	let width = super::pixels(count.to_string().len(), DIGIT_WIDTH) + BAR_WIDTH + GUTTER_PAD * 2.0;
 	let mark = p.changed;
 	let muted = p.muted;
 	// `match_text` / `match_wash` rather than `match_fg` / `match_bg`: two names one letter apart, for
@@ -577,7 +577,7 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	let (first, last) = visible_lines(editor.scroll(), editor.view_height(), count);
 	let mut rows: Vec<Element<'a, Message>> = Vec::with_capacity(last - first + 2);
 	// The lines above the window, collapsed to one spacer so their height is kept without their widgets.
-	rows.push(fixed_spacer(first as f32 * LINE_HEIGHT));
+	rows.push(fixed_spacer(super::pixels(first, LINE_HEIGHT)));
 	for index in first..last {
 		let is_changed = changed.get(index).copied().unwrap_or(false);
 		let is_match = Some(index) == match_line;
@@ -628,7 +628,7 @@ fn gutter<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	}
 	// The lines below the window, likewise collapsed — the two spacers plus the drawn rows sum to
 	// exactly `count × LINE_HEIGHT`, so the column matches the buffer's height and the find-line band.
-	rows.push(fixed_spacer((count - last) as f32 * LINE_HEIGHT));
+	rows.push(fixed_spacer(super::pixels(count - last, LINE_HEIGHT)));
 
 	// Pin the full-height column up by the reported offset so line `first_visible` sits at the top of
 	// the gutter, then clip it to the viewport (§32). `pin` clips its child to its own bounds already;
@@ -658,8 +658,8 @@ fn visible_lines(offset: f32, view_height: f32, count: usize) -> (usize, usize) 
 	if view_height <= 0.0 {
 		return (0, count);
 	}
-	let first_visible = (offset.max(0.0) / LINE_HEIGHT).floor() as usize;
-	let rows_shown = (view_height / LINE_HEIGHT).ceil() as usize;
+	let first_visible = super::cells(offset.max(0.0), LINE_HEIGHT);
+	let rows_shown = super::cells_covering(view_height, LINE_HEIGHT);
 	let first = first_visible.saturating_sub(GUTTER_OVERSCAN);
 	let last = (first_visible + rows_shown + GUTTER_OVERSCAN + 1).min(count);
 	// Guard the pathological case where the offset overshoots the content (the scrollable clamps it,

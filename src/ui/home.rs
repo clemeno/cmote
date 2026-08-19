@@ -417,7 +417,7 @@ fn context_menu(index: usize, no_local_bar: bool) -> Element<'static, Message> {
 	} else {
 		LIST_TOP + LOCAL_BAR_HEIGHT
 	};
-	let top = list_top + (index as f32) * ROW_HEIGHT + ROW_HEIGHT;
+	let top = list_top + super::pixels(index, ROW_HEIGHT) + ROW_HEIGHT;
 	container(panel)
 		.width(Length::Fill)
 		.height(Length::Fill)

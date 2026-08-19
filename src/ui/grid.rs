@@ -1040,8 +1040,8 @@ fn press_button(button: mouse::Button) -> Option<report::Button> {
 /// purely horizontal scroll moves nothing and yields `None`, so no message is published.
 fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
 	let lines = match delta {
-		mouse::ScrollDelta::Lines { y, .. } => (y * WHEEL_LINES).round() as i32,
-		mouse::ScrollDelta::Pixels { y, .. } => (y / CELL_HEIGHT).round() as i32,
+		mouse::ScrollDelta::Lines { y, .. } => super::lines_scrolled(y * WHEEL_LINES),
+		mouse::ScrollDelta::Pixels { y, .. } => super::lines_scrolled(y / CELL_HEIGHT),
 	};
 	(lines != 0).then_some(lines)
 }
@@ -1111,7 +1111,7 @@ fn image_bounds(placement: &Placement, origin: Point, top_line: u64) -> (Rectang
 	// picture's top edge sits at — which is negative for one scrolled past the top of the viewport.
 	let row = placement.line.cast_signed() - top_line.cast_signed();
 	let x = origin.x + f32::from(placement.col) * CELL_WIDTH;
-	let y = origin.y + row as f32 * CELL_HEIGHT;
+	let y = origin.y + super::signed_pixels(row, CELL_HEIGHT);
 	let pixels = Rectangle {
 		x,
 		y,

@@ -538,7 +538,7 @@ fn key_file_row(path: Option<&Path>, focused: bool) -> Element<'static, Message>
 	// whole path is still what `validate` reads, this only keeps the Browse button on the row.
 	let label = match path {
 		Some(path) => {
-			let per_line = (KEY_PATH_WIDTH / KEY_PATH_CHAR).floor().max(1.0) as usize;
+			let per_line = crate::ui::cells(KEY_PATH_WIDTH, KEY_PATH_CHAR).max(1);
 			crate::ui::elide_middle(&path.display().to_string(), per_line * KEY_PATH_LINES)
 		}
 		None => "No key file selected".to_string(),
@@ -571,7 +571,7 @@ fn cert_file_row(path: Option<&Path>, focused: bool) -> Element<'static, Message
 	// whole path is still what `validate` reads. A missing certificate reads as the plain default.
 	let label = match path {
 		Some(path) => {
-			let per_line = (KEY_PATH_WIDTH / KEY_PATH_CHAR).floor().max(1.0) as usize;
+			let per_line = crate::ui::cells(KEY_PATH_WIDTH, KEY_PATH_CHAR).max(1);
 			crate::ui::elide_middle(&path.display().to_string(), per_line * KEY_PATH_LINES)
 		}
 		None => "No certificate (optional)".to_string(),

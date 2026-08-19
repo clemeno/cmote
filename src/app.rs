@@ -6622,7 +6622,7 @@ impl Tab {
 				self.panes.pane.path(),
 				self.panes.tree.width(),
 			),
-			index as f32 * ui::explorer::ROW_HEIGHT,
+			ui::pixels(index, ui::explorer::ROW_HEIGHT),
 			ui::explorer::ROW_HEIGHT,
 		)
 		.unwrap_or(current);
@@ -8165,8 +8165,8 @@ impl Tab {
 fn new_emulator() -> term::Terminal {
 	let mut terminal = term::Terminal::new(term::DEFAULT_ROWS, term::DEFAULT_COLS);
 	terminal.set_cell_pixels(
-		ui::terminal::CELL_WIDTH.round() as u16,
-		ui::terminal::CELL_HEIGHT.round() as u16,
+		ui::cell_index(ui::terminal::CELL_WIDTH.round(), 1.0),
+		ui::cell_index(ui::terminal::CELL_HEIGHT.round(), 1.0),
 	);
 	terminal
 }

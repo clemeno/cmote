@@ -373,7 +373,7 @@ fn hls(hue: u16, lightness: u16, saturation: u16) -> [u8; 3] {
 	let saturation = f32::from(saturation.min(100)) / 100.0;
 	// Grey needs no hue at all, and this also keeps the channel maths off a zero-width range.
 	if saturation == 0.0 {
-		let grey = (lightness * 255.0).round() as u8;
+		let grey = to_byte(lightness);
 		return [grey, grey, grey];
 	}
 	let max = if lightness < 0.5 {
@@ -406,7 +406,26 @@ fn channel(min: f32, max: f32, turn: f32) -> u8 {
 	} else {
 		min
 	};
-	(value.clamp(0.0, 1.0) * 255.0).round() as u8
+	to_byte(value)
+}
+
+/// One `0.0..=1.0` intensity as a `0..=255` byte, rounded rather than truncated so that a half
+/// lands on 128 and not 127 (§111).
+///
+/// The `#[expect]` is the same boundary `ui`'s layout helpers cross, for the same reason: std has no
+/// `TryFrom<f32> for u8`, so a float can only reach an integer through `as`. The clamp is what makes
+/// it exact — every value entering the narrowing is already inside `0.0..=255.0` — and keeping the one
+/// conversion here means a colour channel computed anywhere in this module goes through it.
+#[expect(
+	clippy::cast_possible_truncation,
+	clippy::cast_sign_loss,
+	reason = "std offers no TryFrom<f32>; clamped into 0..=255 and rounded on the line above"
+)]
+fn to_byte(intensity: f32) -> u8 {
+	if intensity.is_nan() {
+		return 0;
+	}
+	(intensity.clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// The six pixel bits a printable byte carries, or `None` when it is not a sixel character at all.
