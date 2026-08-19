@@ -11740,7 +11740,7 @@ The vault never had this problem. It has always sealed its blob into a temp file
 and renamed it over the top, because for `secrets.age` a truncated write means losing every stored
 secret at once, and that was obvious enough to handle when it was written (§16).
 
-So the vault's own pattern is now `src/store.rs`, and all three writers use it. Two details are worth
+So the vault's own pattern is now `src/store.rs`, and every writer uses it. Two details are worth
 stating because both are easy to get wrong:
 
 - **The temp file goes in the target's own directory.** A rename is only atomic within one
@@ -11749,6 +11749,32 @@ stating because both are easy to get wrong:
 - **`<name>.tmp` appends to the whole file name.** `with_extension` REPLACES it, so `secrets.age`
   would become `secrets.tmp` and `targets.json` would become `targets.tmp` — two stores, one temp
   path. There is a test whose only job is to pin that.
+
+### The fourth writer, found afterwards
+
+The first pass counted three writers. There are four: `hostkey::remove_line` reads `known_hosts`,
+drops one entry and writes the rest back — the same read-all-then-`std::fs::write` shape, in the file
+that holds the whole MITM defence (§8). It was missed because it lives in `ssh/`, away from the other
+stores, and because it is not a serialiser: nothing about it looks like saving settings.
+
+It is also the worst of the four, for a reason the other three do not share. A truncated
+`targets.json` at least reads as empty and shows an empty list. A truncated `known_hosts` reads
+*fine* — it is a line-per-entry text file, and a short one is a valid short one. The hosts whose lines
+went missing simply verify as `Unknown`, which is the **first-contact prompt** rather than the refusal
+their pinned key had earned. And the host most likely to lose its line is the one the rewrite was in
+the middle of replacing: precisely the host that just presented a changed key. A crash there converts
+"this key changed, refuse" into "new host, trust it?" — asked of a user who is already reaching for
+yes.
+
+That is the general lesson worth keeping: **a store that fails loudly when truncated is safer than one
+that stays readable.** The three JSON files announce their own damage. `known_hosts` cannot, so it
+depends entirely on never being damaged.
+
+The editor's own save (`local::fs::save_atomically`) keeps a SEPARATE implementation on purpose, and a
+separate name (§109). It writes a file the user is looking at, in a directory the user browses, so it
+hides its temp behind a dotted name, deletes it if the rename fails, conjures up no parent directory
+beside their file, and fails with a sentence for a dialog rather than an `anyhow` chain. Same
+technique, different obligations.
 
 ### The version that was not there
 

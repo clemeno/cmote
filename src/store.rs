@@ -1,18 +1,25 @@
 // store.rs — how cmote's on-disk files are written (PLAN §110).
 //
-// Three files are written while the app runs: `targets.json` (§14), `settings.json` (§31) and the
-// sealed `secrets.age` (§16). Only the vault was written SAFELY. It seals its blob into a temp file
-// beside the real one and renames it over the top, so a crash halfway through cannot leave a
-// half-written vault — which for that file would mean losing every stored secret at once.
+// Four files are written while the app runs: `targets.json` (§14), `settings.json` (§31), the sealed
+// `secrets.age` (§16) and `known_hosts` (§8). Only the vault was written SAFELY. It seals its blob
+// into a temp file beside the real one and renames it over the top, so a crash halfway through
+// cannot leave a half-written vault — which for that file would mean losing every stored secret at
+// once.
 //
-// The other two used a plain `std::fs::write`, which truncates the file and then fills it. A crash,
-// a full disk or a killed process between those two steps leaves a truncated file, and a truncated
-// JSON file does not parse — so `Targets::load_from` would treat it as empty and the next save would
-// write that emptiness back. The user's saved targets would be gone with no error anywhere.
+// The other three used a plain `std::fs::write`, which truncates the file and then fills it. A
+// crash, a full disk or a killed process between those two steps leaves a truncated file, and a
+// truncated JSON file does not parse — so `Targets::load_from` would treat it as empty and the next
+// save would write that emptiness back. The user's saved targets would be gone with no error
+// anywhere. A truncated `known_hosts` is quieter and worse: the hosts it forgot verify as `Unknown`,
+// which is the first-contact prompt rather than the refusal their pinned key would have earned.
 //
-// So the vault's own pattern moves here and all three writers use it. `rename` over an existing path
+// So the vault's own pattern moves here and all four writers use it. `rename` over an existing path
 // is atomic on both targets: on unix by POSIX, and on Windows because `std::fs::rename` maps to
 // `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`.
+//
+// The editor's file-save path keeps its OWN atomic write (`local::fs::save_atomically`): it writes
+// files the user browses, so it hides its temp behind a dotted name and deletes it if the rename
+// fails, rather than working inside cmote's own data directory the way these four do.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

@@ -254,7 +254,7 @@ pub async fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String,
 pub async fn save(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, bytes: Vec<u8>) {
 	let events = events.clone();
 	spawn(async move {
-		let event = match blocking(&pane, move |native| write_atomically(native, &bytes)).await {
+		let event = match blocking(&pane, move |native| save_atomically(native, &bytes)).await {
 			Ok(()) => SshEvent::EditSaved {
 				viewer_id,
 				path: pane,
@@ -271,7 +271,14 @@ pub async fn save(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String,
 /// only replaces atomically within one filesystem — across volumes it degrades to a copy, which is
 /// exactly the truncation window this exists to close. Its name carries cmote's own marker so a leak
 /// (a crash between the write and the rename) is identifiable rather than mysterious.
-fn write_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
+///
+/// Deliberately not `store::write_atomically`, and named apart from it (§109): that one writes
+/// cmote's own stores inside its data directory, where a plain `.tmp` sibling bothers nobody and a
+/// missing parent should be created. This one writes a file the USER is looking at in a directory
+/// the USER browses, so the temp is hidden, no directory is conjured up beside their file, the
+/// failure is a sentence for a dialog rather than an `anyhow` chain, and a failed rename cleans up
+/// after itself instead of leaving litter in their folder.
+fn save_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
 	let name = target
 		.file_name()
 		.ok_or_else(|| "That path names no file.".to_owned())?;
@@ -586,7 +593,7 @@ fn zone() -> TimeZone {
 mod tests {
 	use super::{
 		FilesKind, Meta, drive_entry, kind_of, meta_of, mtime_of, read_dirs, read_entries,
-		remove_tree, write_atomically, zone,
+		remove_tree, save_atomically, zone,
 	};
 	use std::path::Path;
 
@@ -660,7 +667,7 @@ mod tests {
 		let root = tempfile::tempdir().expect("a temp dir");
 		let target = root.path().join("notes.txt");
 		std::fs::write(&target, b"before").expect("the original");
-		write_atomically(&target, b"after").expect("writes");
+		save_atomically(&target, b"after").expect("writes");
 		assert_eq!(std::fs::read(&target).expect("reads"), b"after");
 		let leftovers: Vec<String> = std::fs::read_dir(root.path())
 			.expect("lists")
@@ -675,7 +682,7 @@ mod tests {
 	fn a_save_refuses_a_path_that_names_no_file() {
 		// A root has no file name to build a temp sibling beside, so it is refused rather than written
 		// somewhere improvised.
-		let error = write_atomically(Path::new("/"), b"x").expect_err("refuses");
+		let error = save_atomically(Path::new("/"), b"x").expect_err("refuses");
 		assert!(error.contains("names no file"), "{error}");
 	}
 

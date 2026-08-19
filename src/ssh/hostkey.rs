@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use russh::keys::{HashAlg, PublicKey};
 
-use crate::paths;
+use crate::{paths, store};
 
 /// The outcome of checking a server key against the `known_hosts` store. This is
 /// the whole TOFU decision surface (§8).
@@ -98,6 +98,13 @@ pub fn replace(host: &str, port: u16, pubkey: &PublicKey, path: &Path, line: usi
 /// behind `replace`: drop the stale entry before the new key is learned. `lines()` strips the
 /// terminator, so the kept lines are re-joined with `\n` and the file is newline-ended — the
 /// OpenSSH format is one entry per line, each newline-terminated.
+///
+/// The rewrite goes through `store::write_atomically` (§110), and this file is the one where that
+/// matters most. A plain `write` truncates before it fills, so a crash in that window leaves a
+/// SHORT `known_hosts` — and a `known_hosts` missing entries does not fail loudly: every host it
+/// forgot verifies as `Unknown`, which is the first-contact prompt. The attacked host whose key
+/// this call was in the middle of replacing would be exactly the one to lose its pin, turning a
+/// refusal into a "trust this new key?" the user is already primed to accept.
 fn remove_line(path: &Path, line: usize) -> Result<()> {
 	let text = std::fs::read_to_string(path).context("failed to read known_hosts")?;
 	let index = line
@@ -113,7 +120,7 @@ fn remove_line(path: &Path, line: usize) -> Result<()> {
 	if !rebuilt.is_empty() {
 		rebuilt.push('\n');
 	}
-	std::fs::write(path, rebuilt).context("failed to rewrite known_hosts")
+	store::write_atomically(path, rebuilt.as_bytes()).context("failed to rewrite known_hosts")
 }
 
 /// Resolve the portable `known_hosts` path (§11): the shared data directory
@@ -243,6 +250,35 @@ mod tests {
 		assert_eq!(
 			verify("other.example", 22, &key(KEY_B), &path).unwrap(),
 			HostKeyVerdict::Known
+		);
+	}
+
+	#[test]
+	fn the_rewrite_leaves_no_temp_file_beside_known_hosts() {
+		// Arrange: the replace path rewrites the file through `store::write_atomically`, so the
+		// bytes land in a sibling temp first. That sibling must be renamed away — a `known_hosts`
+		// with a stray `known_hosts.tmp` beside it holding one host's key is a confusing artefact
+		// in the directory that holds the whole trust store.
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("known_hosts");
+		std::fs::write(
+			&path,
+			format!("other.example ssh-ed25519 {KEY_B}\nexample.com ssh-ed25519 {KEY_A}\n"),
+		)
+		.unwrap();
+
+		// Act
+		replace("example.com", 22, &key(KEY_B), &path, 2).unwrap();
+
+		// Assert: exactly one file in the directory, and it is the store itself.
+		let left: Vec<String> = std::fs::read_dir(dir.path())
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+			.collect();
+		assert_eq!(
+			left,
+			vec!["known_hosts".to_owned()],
+			"left behind: {left:?}"
 		);
 	}
 

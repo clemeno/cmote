@@ -648,7 +648,8 @@ home screen says so instead of showing an empty list. That matters for a portabl
 `cmote-data/` on a stick is the normal way one version of cmote meets another. Upgrading the other
 way is automatic: an older store is read as before, and the first save keeps the original beside it as
 `targets.json.bak` — once, so it stays the original. Every store is written by replacing the file
-atomically, so a crash mid-save can no longer truncate one.
+atomically, so a crash mid-save can no longer truncate one — `known_hosts` included, where a lost line
+would silently downgrade a refused key change into a first-contact prompt.
 
 1. **Portable mode (preferred):** `cmote-data/` beside the binary, when that directory
    is writable. This keeps the data travelling with the app — on macOS the binary lives
