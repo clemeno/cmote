@@ -575,7 +575,7 @@ impl Accounts {
 	pub fn deny_second_factor(&mut self, identity: u64) {
 		if let Some(entry) = self.entries.get_mut(&identity) {
 			entry.denied = Some(
-				"Logging in as this account needed a second factor. AsuserFiles cannot be read as it: a \
+				"Logging in as this account needed a second factor. Files cannot be read as it: a \
 				 file channel can repeat a password to sudo, but it cannot ask for a code."
 					.to_owned(),
 			);

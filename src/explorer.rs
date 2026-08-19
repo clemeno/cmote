@@ -52,7 +52,7 @@ pub enum ExplorerMessage {
 	/// The tree was scrolled; the payload is its absolute vertical offset. Tracked so
 	/// arrow-key navigation can tell whether the row it moved to is already on screen (§20).
 	Scrolled(f32),
-	/// ExplorerMenu "Refresh" (one folder): re-list this folder's *contents*, and re-list its *parent* so
+	/// Menu "Refresh" (one folder): re-list this folder's *contents*, and re-list its *parent* so
 	/// its own name and existence are checked too — a rename or deletion made from the shell shows
 	/// up in the parent's listing, not the folder's. So a right-click Refresh answers "is it still
 	/// there, under this name, holding these children?" in one go. Named "Refresh", not "Expand",
@@ -66,24 +66,24 @@ pub enum ExplorerMessage {
 	/// the clean top-level view after exploring deep. A single folder still collapses by clicking
 	/// its open row or pressing ←; only the menu item is gone.
 	CollapseAll,
-	/// ExplorerMenu "Open in terminal": send a `cd` for this folder to the shell.
+	/// Menu "Open in terminal": send a `cd` for this folder to the shell.
 	Cd(String),
-	/// ExplorerMenu "Upload…": pick local files to send into this folder (§17). Carries the folder's
+	/// Menu "Upload…": pick local files to send into this folder (§17). Carries the folder's
 	/// path, so the files land in the one that was right-clicked, not wherever the shell sits.
 	UploadHere(String),
-	/// ExplorerMenu "Upload folder…": pick a local folder to send, tree and all, into this one (§17).
+	/// Menu "Upload folder…": pick a local folder to send, tree and all, into this one (§17).
 	UploadFolderHere(String),
-	/// ExplorerMenu "New folder…": open the dialog to create a subfolder inside this one (§18).
+	/// Menu "New folder…": open the dialog to create a subfolder inside this one (§18).
 	NewFolderHere(String),
-	/// ExplorerMenu "Delete…": open the confirmation to remove this folder and everything inside it (§18).
+	/// Menu "Delete…": open the confirmation to remove this folder and everything inside it (§18).
 	DeleteStarted(String),
-	/// ExplorerMenu "ExplorerRename": turn the row into an edit field.
+	/// Menu "Rename": turn the row into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
 	RenameEdited(String),
 	/// The inline rename was submitted (Enter) — ask the server to do it.
 	RenameCommitted,
-	/// ExplorerMenu "Copy name" / "Copy relative path" / "Copy full path".
+	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),

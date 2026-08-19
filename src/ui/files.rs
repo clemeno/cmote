@@ -1047,7 +1047,7 @@ pub fn context_menu<'a>(
 			(is_dir && !many).then(|| Message::Files(FilesMessage::DownloadFolder(path.clone()))),
 		),
 		menu::item(
-			"FilesRename…".to_owned(),
+			"Rename…".to_owned(),
 			(!many).then(|| Message::Files(FilesMessage::RenameStarted(path.clone()))),
 		),
 		// Remove the selection — one entry or many, folders and their contents included (§18).

@@ -238,7 +238,7 @@ pub async fn run(
 		}) => {
 								let _ = events
 									.send(SshEvent::IntegrationFailed(
-										"LocalShell integration writes a cwd announcer into a REMOTE shell's config. \
+										"Shell integration writes a cwd announcer into a REMOTE shell's config. \
 										 cmote does not edit your own profile on this machine."
 											.to_owned(),
 									))

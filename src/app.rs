@@ -3275,7 +3275,7 @@ pub enum Message {
 	/// hold the process open. Carries no payload — `update` reads the drain's own age.
 	QuitTick,
 	// --- shell integration (§17): teaching a silent remote shell to announce its directory ---
-	/// The terminal's context-menu "IntegrationShell integration…" — open the dialog and ask the server what
+	/// The terminal's context-menu "Shell integration…" — open the dialog and ask the server what
 	/// its login shell's config looks like.
 	IntegrationPressed,
 	/// Write the block into the file the probe found. The path and shell are read from the open
@@ -4120,7 +4120,7 @@ impl Tab {
 			// exists to catch the press on a divider, which sits BETWEEN two regions (§48).
 			| Message::PointerMoved(_)
 			| Message::PointerPressed => {}
-			// IntegrationShell integration (§17).
+			// Shell integration (§17).
 			Message::IntegrationPressed => self.open_integration_dialog(),
 			Message::IntegrationInstall => self.write_integration(true),
 			Message::IntegrationRemove => self.write_integration(false),

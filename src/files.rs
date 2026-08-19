@@ -183,7 +183,7 @@ pub enum FilesMessage {
 	/// An entry was double-clicked (or Enter pressed): browse the PANE into it, if it is a
 	/// directory. This no longer moves the console — that is Sync or "Open in terminal" (§19).
 	EntryOpened(String),
-	/// FilesMenu "Open in terminal": move the console into this directory (§19). Split off from
+	/// Menu "Open in terminal": move the console into this directory (§19). Split off from
 	/// `EntryOpened` so a double-click browses the pane while this deliberately moves the
 	/// console — the two used to be one action.
 	OpenInTerminal(String),
@@ -212,9 +212,9 @@ pub enum FilesMessage {
 	/// The empty-space menu's "New folder…" (§18): open the dialog to create a folder in the
 	/// pane's current directory.
 	NewFolderHere,
-	/// FilesMenu "Delete…": open the confirmation to remove the selection — one entry or many (§18).
+	/// Menu "Delete…": open the confirmation to remove the selection — one entry or many (§18).
 	DeleteStarted(String),
-	/// FilesMenu "Download folder…": recreate this remote directory's whole tree on this machine (§19).
+	/// Menu "Download folder…": recreate this remote directory's whole tree on this machine (§19).
 	/// Offered only for a lone directory; a file uses `Download`, a mixed selection its files.
 	DownloadFolder(String),
 	/// The pointer moved while a band is being dragged, reported by the full-window capture
@@ -242,7 +242,7 @@ pub enum FilesMessage {
 	SortDirPicked(SortDir),
 	/// Re-list the directory on show — the refresh for a folder changed from the shell.
 	Refresh,
-	/// FilesMenu "Copy name" / "Copy relative path" / "Copy full path".
+	/// Menu "Copy name" / "Copy relative path" / "Copy full path".
 	CopyName(String),
 	CopyRelative(String),
 	CopyPath(String),
@@ -254,13 +254,13 @@ pub enum FilesMessage {
 	/// card shows — onto the clipboard. Carries the already-joined text, built in the view
 	/// from the same lines it draws, so the model side does not recompute it.
 	CopyDetails(String),
-	/// FilesMenu "FilesRename": turn the cell's label into an edit field.
+	/// Menu "Rename": turn the cell's label into an edit field.
 	RenameStarted(String),
 	/// The inline rename field changed.
 	RenameEdited(String),
 	/// The inline rename was submitted (Enter) — ask the server to do it.
 	RenameCommitted,
-	/// FilesMenu "Download": pick a local destination, then pull the file.
+	/// Menu "Download": pick a local destination, then pull the file.
 	Download(String),
 	/// The menu's open item, or a double-click on a file: open it in a new viewer tab — the text
 	/// editor, or a picture preview if it is an image (§32, §53). A directory has nothing to open
