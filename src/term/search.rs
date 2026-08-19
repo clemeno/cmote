@@ -6,7 +6,7 @@
 // geometry of one grid row flattened for searching, the match list, and which match is current.
 //
 // It knows nothing about the engine, the widgets or the clipboard. `Terminal::find` builds a
-// `Row` per grid line and collects the hits; `app` holds a `Search` while the bar is open, and
+// `SearchRow` per grid line and collects the hits; `app` holds a `Search` while the bar is open, and
 // turns the current match into an ordinary text selection so the existing highlight and Copy
 // paths serve it unchanged (the same tactic §34's select-command-output uses).
 //
@@ -30,19 +30,19 @@
 /// (§35). Inclusive because that is what a selection's head wants — `end_col` is the last cell of
 /// the match, not one past it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Match {
+pub struct SearchMatch {
 	pub line: u64,
 	pub start_col: u16,
 	pub end_col: u16,
 }
 
 /// One match placed on the screen as it is scrolled RIGHT NOW (§39): the viewport row it occupies
-/// (row 0 is the top visible line) and the inclusive column span it covers. A `Match` is stored in
+/// (row 0 is the top visible line) and the inclusive column span it covers. A `SearchMatch` is stored in
 /// document coordinates so it survives new output; this is that coordinate resolved against the
 /// viewport for one frame, which is the only form a renderer can paint — and it is deliberately a
 /// separate type, so an absolute line and a screen row can never be passed for one another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Highlight {
+pub struct SearchHighlight {
 	pub row: u16,
 	pub start_col: u16,
 	pub end_col: u16,
@@ -55,7 +55,7 @@ pub struct Highlight {
 ///
 /// The text is stored ASCII-lowered, since that is the only form searched (see `find`), and every
 /// glyph is lowered as it arrives.
-pub struct Row {
+pub struct SearchRow {
 	/// The absolute line this row is, stamped onto every match it yields.
 	line: u64,
 	/// The row's glyphs, ASCII-lowered, one after another with no padding between cells.
@@ -64,7 +64,7 @@ pub struct Row {
 	cols: Vec<u16>,
 }
 
-impl Row {
+impl SearchRow {
 	/// An empty row for absolute line `line`.
 	pub fn new(line: u64) -> Self {
 		Self {
@@ -98,7 +98,7 @@ impl Row {
 	/// `A`-`Z` and so preserves every byte offset, exactly the rule the editor's find follows
 	/// (§32), so a non-ASCII case pair like `é`/`É` stays distinct. Matches do not overlap: each
 	/// search resumes past the last hit. An empty query matches nothing.
-	pub fn find(&self, query: &str) -> Vec<Match> {
+	pub fn find(&self, query: &str) -> Vec<SearchMatch> {
 		let mut out = Vec::new();
 		if query.is_empty() {
 			return out;
@@ -116,7 +116,7 @@ impl Row {
 			if let (Some(&start_col), Some(&end_col)) =
 				(self.cols.get(start), self.cols.get(end - 1))
 			{
-				out.push(Match {
+				out.push(SearchMatch {
 					line: self.line,
 					start_col,
 					end_col,
@@ -137,7 +137,7 @@ pub struct Search {
 	/// The text being searched for. Empty means no matches and an idle bar.
 	pub query: String,
 	/// Every match, in document order — oldest line first, left to right within a line.
-	matches: Vec<Match>,
+	matches: Vec<SearchMatch>,
 	/// Which match is current: the one revealed and selected. Zero and meaningless when
 	/// `matches` is empty.
 	current: usize,
@@ -148,7 +148,7 @@ impl Search {
 	/// last in document order. A terminal search almost always means "where did that last
 	/// happen", and the newest hit is also the one nearest the live prompt the user is looking at,
 	/// so it is the cheapest one to show.
-	pub fn set_matches(&mut self, matches: Vec<Match>) {
+	pub fn set_matches(&mut self, matches: Vec<SearchMatch>) {
 		self.current = matches.len().saturating_sub(1);
 		self.matches = matches;
 	}
@@ -158,7 +158,7 @@ impl Search {
 	/// identity (same line, same columns) wherever it survived the re-scan; when it did not (its
 	/// line scrolled past the retained history, or a resize reflowed it away) the newest match is
 	/// the fallback, the same place a new query lands.
-	pub fn refresh(&mut self, matches: Vec<Match>) {
+	pub fn refresh(&mut self, matches: Vec<SearchMatch>) {
 		let previous = self.current();
 		self.current = match previous.and_then(|found| matches.iter().position(|m| *m == found)) {
 			Some(index) => index,
@@ -170,7 +170,7 @@ impl Search {
 	/// Step to the neighbouring match and return it (§35). `newer` walks toward the live prompt
 	/// (down the screen), `!newer` back into history (up). Both wrap, so stepping past either end
 	/// continues from the other rather than dead-ending. `None` only when there are no matches.
-	pub fn step(&mut self, newer: bool) -> Option<Match> {
+	pub fn step(&mut self, newer: bool) -> Option<SearchMatch> {
 		let count = self.matches.len();
 		if count == 0 {
 			return None;
@@ -186,7 +186,7 @@ impl Search {
 	}
 
 	/// The current match, or `None` when the query has none.
-	pub fn current(&self) -> Option<Match> {
+	pub fn current(&self) -> Option<SearchMatch> {
 		self.matches.get(self.current).copied()
 	}
 
@@ -212,7 +212,7 @@ impl Search {
 		history_size: u16,
 		display_offset: u16,
 		screen_lines: u16,
-	) -> Vec<Highlight> {
+	) -> Vec<SearchHighlight> {
 		// The absolute line showing at viewport row 0: the top of the live screen, less however far
 		// the viewport has climbed back into the retained history.
 		let top = u64::from(history_size.saturating_sub(display_offset));
@@ -221,7 +221,7 @@ impl Search {
 		self.matches[from..]
 			.iter()
 			.take_while(|found| found.line < bottom)
-			.map(|found| Highlight {
+			.map(|found| SearchHighlight {
 				// In range by the two bounds above, so the cast cannot wrap: `line - top` is below
 				// `screen_lines`, which is itself a `u16`.
 				row: (found.line - top) as u16,
@@ -252,8 +252,8 @@ mod tests {
 
 	// A row of plain ASCII on absolute line `line`, one glyph per consecutive column — the
 	// ordinary case, before any wide glyph or padding enters it.
-	fn row(line: u64, text: &str) -> Row {
-		let mut row = Row::new(line);
+	fn row(line: u64, text: &str) -> SearchRow {
+		let mut row = SearchRow::new(line);
 		for (col, glyph) in text.chars().enumerate() {
 			row.push(glyph, col as u16);
 		}
@@ -267,12 +267,12 @@ mod tests {
 		assert_eq!(
 			row.find("error"),
 			vec![
-				Match {
+				SearchMatch {
 					line: 7,
 					start_col: 0,
 					end_col: 4
 				},
-				Match {
+				SearchMatch {
 					line: 7,
 					start_col: 10,
 					end_col: 14
@@ -301,13 +301,13 @@ mod tests {
 		// 世 occupies columns 1-2, and its trailing cell holds no glyph — so the caller pushes
 		// nothing for column 2. The byte -> column map is what keeps "b" at column 3 rather than
 		// sliding to 2, which a plain "index == column" assumption would do.
-		let mut row = Row::new(3);
+		let mut row = SearchRow::new(3);
 		row.push('a', 0);
 		row.push('世', 1);
 		row.push('b', 3);
 		assert_eq!(
 			row.find("b"),
-			vec![Match {
+			vec![SearchMatch {
 				line: 3,
 				start_col: 3,
 				end_col: 3
@@ -316,7 +316,7 @@ mod tests {
 		// And a search that lands ON the wide glyph reports its lead column, once.
 		assert_eq!(
 			row.find("世"),
-			vec![Match {
+			vec![SearchMatch {
 				line: 3,
 				start_col: 1,
 				end_col: 1
@@ -335,7 +335,7 @@ mod tests {
 		interior.trim_end();
 		assert_eq!(
 			interior.find(" "),
-			vec![Match {
+			vec![SearchMatch {
 				line: 0,
 				start_col: 1,
 				end_col: 1
@@ -344,19 +344,19 @@ mod tests {
 	}
 
 	// Three matches on ascending lines, the shape every `Search` test starts from.
-	fn three() -> Vec<Match> {
+	fn three() -> Vec<SearchMatch> {
 		vec![
-			Match {
+			SearchMatch {
 				line: 1,
 				start_col: 0,
 				end_col: 2,
 			},
-			Match {
+			SearchMatch {
 				line: 5,
 				start_col: 4,
 				end_col: 6,
 			},
-			Match {
+			SearchMatch {
 				line: 9,
 				start_col: 0,
 				end_col: 2,
@@ -404,7 +404,7 @@ mod tests {
 
 		// Act: new output added a fourth match at the end; the earlier three are unchanged.
 		let mut grown = three();
-		grown.push(Match {
+		grown.push(SearchMatch {
 			line: 12,
 			start_col: 0,
 			end_col: 2,
@@ -443,7 +443,7 @@ mod tests {
 		// the viewport and are simply not there — the renderer is never asked to paint off screen.
 		assert_eq!(
 			search.visible(6, 0, 4),
-			vec![Highlight {
+			vec![SearchHighlight {
 				row: 3,
 				start_col: 0,
 				end_col: 2
@@ -461,7 +461,7 @@ mod tests {
 		search.set_matches(three());
 		assert_eq!(
 			search.visible(6, 5, 4),
-			vec![Highlight {
+			vec![SearchHighlight {
 				row: 0,
 				start_col: 0,
 				end_col: 2
@@ -470,7 +470,7 @@ mod tests {
 		// A viewport somewhere in the middle catches the middle hit, at the row its line sits on.
 		assert_eq!(
 			search.visible(6, 2, 4),
-			vec![Highlight {
+			vec![SearchHighlight {
 				row: 1,
 				start_col: 4,
 				end_col: 6

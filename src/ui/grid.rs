@@ -34,7 +34,7 @@ use crate::term::scp;
 use crate::term::screen::{
 	Cell, Color as CellColor, CursorShape, Link, MouseMode, Screen, UnderlineStyle,
 };
-use crate::term::search::Highlight;
+use crate::term::search::SearchHighlight;
 use crate::ui::selection::{ScreenSpot, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_under};
 use iced::advanced::Renderer as _;
@@ -202,7 +202,7 @@ pub struct Grid<'a> {
 	/// hit shows and not only the current one. Owned and computed fresh each frame for the same
 	/// reason as `prompts`: it is a resolution of absolute document lines against wherever the
 	/// viewport happens to be parked, which changes with every scroll.
-	matches: Vec<Highlight>,
+	matches: Vec<SearchHighlight>,
 	/// The inline images the session is holding (§41), each anchored to an absolute document line.
 	/// Borrowed, not owned: the pixels belong to the emulator for the whole session, and a frame only
 	/// needs to know where they go.
@@ -217,7 +217,7 @@ pub fn grid<'a>(
 	selection: Option<&'a Selection>,
 	prompts: Vec<u16>,
 	user_marks: Vec<u16>,
-	matches: Vec<Highlight>,
+	matches: Vec<SearchHighlight>,
 	images: &'a [Placement],
 ) -> Grid<'a> {
 	Grid {
@@ -1209,7 +1209,7 @@ struct Marks<'a> {
 /// screenful of text matches hundreds of times, so `cells × matches` per frame would stall the very
 /// keystroke it is meant to serve. This is `cells + matches` instead. An empty list allocates
 /// nothing at all and every lookup then misses, which is the shut-bar case — the common one.
-fn match_mask(matches: &[Highlight], rows: u16, cols: u16) -> Vec<bool> {
+fn match_mask(matches: &[SearchHighlight], rows: u16, cols: u16) -> Vec<bool> {
 	if matches.is_empty() {
 		return Vec::new();
 	}
@@ -1805,12 +1805,12 @@ mod tests {
 		let mut terminal = Terminal::new(1, 5);
 		terminal.process(b"ab ab");
 		let hits = [
-			Highlight {
+			SearchHighlight {
 				row: 0,
 				start_col: 0,
 				end_col: 1,
 			},
-			Highlight {
+			SearchHighlight {
 				row: 0,
 				start_col: 3,
 				end_col: 4,
@@ -1846,12 +1846,12 @@ mod tests {
 		// this frame) is dropped, and one whose span runs past the last column is clipped — never
 		// wrapped onto the row below, which is what an unclamped row-major write would do.
 		let hits = [
-			Highlight {
+			SearchHighlight {
 				row: 5,
 				start_col: 0,
 				end_col: 1,
 			},
-			Highlight {
+			SearchHighlight {
 				row: 0,
 				start_col: 2,
 				end_col: 9,

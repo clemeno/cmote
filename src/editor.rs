@@ -275,7 +275,7 @@ fn lcs_kept(original: &[String], current: &[String]) -> Vec<bool> {
 /// not character offsets, because iced places the cursor and the selection by BYTE index within a
 /// line (`Position::column` is a byte index) — so a match found here can be selected verbatim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Match {
+struct EditorMatch {
 	line: usize,
 	byte_start: usize,
 	byte_end: usize,
@@ -286,7 +286,7 @@ struct Match {
 /// and so preserves every byte offset — the offsets found in the lowered copy are valid in the
 /// original. (A non-ASCII case pair like `é`/`É` therefore stays distinct; a narrow, predictable
 /// rule, the same spirit as the encoding set.) An empty query matches nothing.
-fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
+fn find_matches(lines: &[String], query: &str) -> Vec<EditorMatch> {
 	let mut out = Vec::new();
 	if query.is_empty() {
 		return out;
@@ -300,7 +300,7 @@ fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
 		while let Some(rel) = hay[from..].find(&needle) {
 			let byte_start = from + rel;
 			let byte_end = byte_start + needle.len();
-			out.push(Match {
+			out.push(EditorMatch {
 				line,
 				byte_start,
 				byte_end,
@@ -316,7 +316,7 @@ fn find_matches(lines: &[String], query: &str) -> Vec<Match> {
 /// as later ones are replaced; iterating the (document-ordered) matches in reverse gives exactly that
 /// order. Used by Replace All — the matches it is handed are the ones the bar found, so what is
 /// replaced is exactly what was highlighted.
-fn apply_replacements(lines: &[String], matches: &[Match], replacement: &str) -> Vec<String> {
+fn apply_replacements(lines: &[String], matches: &[EditorMatch], replacement: &str) -> Vec<String> {
 	let mut out = lines.to_vec();
 	for m in matches.iter().rev() {
 		out[m.line].replace_range(m.byte_start..m.byte_end, replacement);
@@ -337,7 +337,7 @@ pub struct Find {
 	/// Whether the replace row is shown (its toggle, or Ctrl+H).
 	pub replace_open: bool,
 	/// Every match in the buffer, in document order (§32).
-	matches: Vec<Match>,
+	matches: Vec<EditorMatch>,
 	/// Which match is current — the one highlighted and stepped from. Zero and meaningless when
 	/// `matches` is empty.
 	current: usize,
@@ -369,7 +369,7 @@ impl Find {
 /// live buffer; `Failed` when the file is too big, binary, or an unsupported encoding — the view
 /// then shows the reason in place of the buffer, never mojibake.
 #[derive(Debug, Clone)]
-pub enum Status {
+pub enum EditorStatus {
 	Loading,
 	Ready,
 	Failed(String),
@@ -493,10 +493,10 @@ pub struct Editor {
 	/// diff and the dirty flag compare against.
 	original: Vec<String>,
 	/// Loading / Ready / Failed (§32).
-	pub status: Status,
+	pub status: EditorStatus,
 	/// A save is in flight: the toolbar disables Save so a second cannot race the first.
 	pub saving: bool,
-	/// A transient message shown in the toolbar (a save failure). Distinct from `Status::Failed`,
+	/// A transient message shown in the toolbar (a save failure). Distinct from `EditorStatus::Failed`,
 	/// which replaces the whole buffer — a save error must not throw away the edits it failed to
 	/// persist, so it rides here and leaves the buffer editable.
 	pub notice: Option<String>,
@@ -551,7 +551,7 @@ impl Editor {
 			encoding: Encoding::UTF8_NO_BOM,
 			content: text_editor::Content::new(),
 			original: Vec::new(),
-			status: Status::Loading,
+			status: EditorStatus::Loading,
 			saving: false,
 			notice: None,
 			save_as: None,
@@ -575,14 +575,14 @@ impl Editor {
 		self.content = text_editor::Content::with_text(&text);
 		self.encoding = encoding;
 		self.original = lines_of(&self.content);
-		self.status = Status::Ready;
+		self.status = EditorStatus::Ready;
 		self.notice = None;
 		self.recompute();
 	}
 
 	/// The load failed (too big, unreadable, unsupported): show the reason in place of the buffer.
 	pub fn load_failed(&mut self, reason: String) {
-		self.status = Status::Failed(reason);
+		self.status = EditorStatus::Failed(reason);
 	}
 
 	/// Apply one editor action to the buffer (§32). An editing action refreshes the changed-line
@@ -865,8 +865,8 @@ impl Editor {
 	}
 
 	/// Select a match's span in the buffer so it highlights, cursor at its end (§32). iced selects by
-	/// byte position within a line, which is exactly what `Match` carries.
-	fn select_match(&mut self, m: Match) {
+	/// byte position within a line, which is exactly what `EditorMatch` carries.
+	fn select_match(&mut self, m: EditorMatch) {
 		self.content.move_to(text_editor::Cursor {
 			position: text_editor::Position {
 				line: m.line,
@@ -882,7 +882,11 @@ impl Editor {
 	/// Begin a Save, if one is warranted (§32): dirty, not already saving, and a channel to save
 	/// through. Returns whether the caller should flush the bytes to the network.
 	pub fn begin_save(&mut self) -> bool {
-		if !self.dirty || self.saving || self.parent_gone || !matches!(self.status, Status::Ready) {
+		if !self.dirty
+			|| self.saving
+			|| self.parent_gone
+			|| !matches!(self.status, EditorStatus::Ready)
+		{
 			return false;
 		}
 		self.saving = true;
@@ -908,7 +912,7 @@ impl Editor {
 
 	/// Open the Save As prompt, pre-filled with the current path (§32).
 	pub fn begin_save_as(&mut self) {
-		if self.parent_gone || !matches!(self.status, Status::Ready) {
+		if self.parent_gone || !matches!(self.status, EditorStatus::Ready) {
 			return;
 		}
 		self.save_as = Some(self.path.clone());
@@ -1202,17 +1206,17 @@ mod tests {
 		assert_eq!(
 			hits,
 			vec![
-				Match {
+				EditorMatch {
 					line: 0,
 					byte_start: 0,
 					byte_end: 2
 				},
-				Match {
+				EditorMatch {
 					line: 0,
 					byte_start: 13,
 					byte_end: 15
 				},
-				Match {
+				EditorMatch {
 					line: 2,
 					byte_start: 2,
 					byte_end: 4

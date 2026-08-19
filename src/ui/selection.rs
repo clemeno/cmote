@@ -323,7 +323,7 @@ impl Selection {
 	/// HTML copy (`ui::richcopy`), so the two can never disagree on which cells a selection
 	/// covers. It hands back owned cells (they are cheap and short-lived for a copy), keeping
 	/// this module free of any clipboard or HTML concern.
-	pub fn selected_rows(&self, screen: Screen<'_>) -> Vec<Row> {
+	pub fn selected_rows(&self, screen: Screen<'_>) -> Vec<SelectionRow> {
 		if self.is_empty() {
 			return Vec::new();
 		}
@@ -331,7 +331,7 @@ impl Selection {
 		let (_, cols) = screen.size();
 		let last_col = cols.saturating_sub(1);
 
-		let mut rows: Vec<Row> = Vec::new();
+		let mut rows: Vec<SelectionRow> = Vec::new();
 		for line in start.line..=end.line {
 			// A line the session no longer holds — the selection reached back past the scrollback cap,
 			// or a reflow moved the ground under it — contributes NOTHING, not an empty row: pasting
@@ -370,7 +370,7 @@ impl Selection {
 					cells.pop();
 				}
 			}
-			rows.push(Row { cells, wrapped });
+			rows.push(SelectionRow { cells, wrapped });
 		}
 		rows
 	}
@@ -409,7 +409,7 @@ impl Selection {
 /// between this row and the one after it — `extract` and the HTML copy (`ui::richcopy`) both read it,
 /// so the two can never disagree about where the pasted text breaks.
 #[derive(Debug, Clone)]
-pub struct Row {
+pub struct SelectionRow {
 	pub cells: Vec<Cell>,
 	pub wrapped: bool,
 }

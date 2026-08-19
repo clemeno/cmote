@@ -104,9 +104,9 @@ fn by_first_line(first_line: &str) -> Option<&'static SyntaxReference> {
 /// One highlighted span's style (§32): a `syntect` style modifier (a foreground colour, maybe a font
 /// style). Wrapping it lets `to_format` turn it into what iced paints, exactly as iced's own does.
 #[derive(Debug)]
-pub struct Highlight(StyleModifier);
+pub struct SyntaxHighlight(StyleModifier);
 
-impl Highlight {
+impl SyntaxHighlight {
 	/// The span's colour, or `None` to keep the buffer's plain colour — the CME theme leaves many
 	/// scopes uncoloured, and those must not be forced to a colour (§32).
 	fn color(&self) -> Option<Color> {
@@ -165,7 +165,7 @@ pub struct Highlighter {
 
 impl highlighter::Highlighter for Highlighter {
 	type Settings = Settings;
-	type Highlight = Highlight;
+	type Highlight = SyntaxHighlight;
 
 	type Iterator<'a> = Box<dyn Iterator<Item = (Range<usize>, Self::Highlight)> + 'a>;
 
@@ -238,7 +238,7 @@ fn scope_iterator<'a>(
 	line: &str,
 	stack: &'a mut ScopeStack,
 	highlighter: &'a highlighting::Highlighter<'static>,
-) -> impl Iterator<Item = (Range<usize>, Highlight)> + 'a {
+) -> impl Iterator<Item = (Range<usize>, SyntaxHighlight)> + 'a {
 	ScopeRangeIterator {
 		ops,
 		line_length: line.len(),
@@ -252,7 +252,7 @@ fn scope_iterator<'a>(
 		} else {
 			Some((
 				range,
-				Highlight(highlighter.style_mod_for_stack(&stack.scopes)),
+				SyntaxHighlight(highlighter.style_mod_for_stack(&stack.scopes)),
 			))
 		}
 	})

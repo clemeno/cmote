@@ -16,7 +16,7 @@ use iced::widget::{button, column, container, image, row, text};
 use iced::{Border, Color, ContentFit, Element, Length, Padding};
 
 use crate::app::Message;
-use crate::preview::{Picture, Preview, Status};
+use crate::preview::{Picture, Preview, PreviewStatus};
 use crate::ui::explorer::{FG, HEADER_BG, MUTED_FG, NOTICE_FG, PANEL_BG};
 
 /// The ground a picture is drawn on. Deliberately a MID grey rather than the panels' near-black:
@@ -47,11 +47,11 @@ const INITIAL_FIT: ContentFit = ContentFit::ScaleDown;
 /// The whole picture screen (§53): the toolbar, then whichever of the three states the tab is in.
 pub fn view(preview: &Preview, tab_id: u64) -> Element<'_, Message> {
 	let body: Element<'_, Message> = match &preview.status {
-		Status::Loading => centered(text("Loading…").size(15).color(MUTED_FG).into()),
-		Status::Failed(reason) => failed_body(reason, tab_id),
+		PreviewStatus::Loading => centered(text("Loading…").size(15).color(MUTED_FG).into()),
+		PreviewStatus::Failed(reason) => failed_body(reason, tab_id),
 		// `Ready` without a picture cannot happen — `set_loaded` writes both in one move — but the
 		// view refuses to assume it: a missing picture reads as still loading rather than panicking.
-		Status::Ready => match &preview.picture {
+		PreviewStatus::Ready => match &preview.picture {
 			Some(picture) => picture_body(picture),
 			None => centered(text("Loading…").size(15).color(MUTED_FG).into()),
 		},

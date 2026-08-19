@@ -1762,7 +1762,7 @@ impl Terminal {
 	///
 	/// A row is flattened one glyph per cell, skipping a wide glyph's trailing cell (it holds no
 	/// glyph of its own) and trimming the width-padding at the end, then searched ASCII
-	/// case-insensitively by `search::Row` — the pure half of this, tested without an engine. The
+	/// case-insensitively by `search::SearchRow` — the pure half of this, tested without an engine. The
 	/// scan is a full walk of the grid, so it costs `history + rows` × `columns` cell reads; that is
 	/// a few million at the SCROLLBACK cap, cheap enough to redo on each keystroke in the find bar
 	/// and far simpler than maintaining an index that every scroll and reflow could invalidate.
@@ -1770,7 +1770,7 @@ impl Terminal {
 	/// `ponytail:` matches are found within one grid ROW, so a hit that straddles the wrap of a
 	/// long logical line is not found (the two halves are separate rows), and a cell's combining
 	/// marks are not searched — only its base glyph. An empty query finds nothing.
-	pub fn find(&self, query: &str) -> Vec<search::Match> {
+	pub fn find(&self, query: &str) -> Vec<search::SearchMatch> {
 		if query.is_empty() {
 			return Vec::new();
 		}
@@ -1783,7 +1783,7 @@ impl Terminal {
 		// whole document is `-history ..= the last screen line`; absolute = history + line puts line
 		// 0 (the top of the active screen) at absolute `history_size`, as `osc133` records it.
 		for line in -history..screen_lines {
-			let mut row = search::Row::new((history + line) as u64);
+			let mut row = search::SearchRow::new((history + line) as u64);
 			for col in 0..columns {
 				let cell = &grid[Line(line)][Column(col)];
 				// A wide glyph's trailing half carries no glyph — skipping it (rather than pushing a
@@ -3269,12 +3269,12 @@ mod tests {
 		assert_eq!(
 			hits,
 			vec![
-				search::Match {
+				search::SearchMatch {
 					line: 0,
 					start_col: 0,
 					end_col: 4
 				},
-				search::Match {
+				search::SearchMatch {
 					line: 4,
 					start_col: 0,
 					end_col: 4

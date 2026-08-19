@@ -37,7 +37,7 @@ use iced::widget::{
 use iced::{Background, Border, Color, Element, Font, Length, Padding};
 
 use crate::app::Message;
-use crate::editor::{Editor, EditorMessage, EditorTheme, Status};
+use crate::editor::{Editor, EditorMessage, EditorStatus, EditorTheme};
 use crate::ui::explorer::{FG, HEADER_BG, MUTED_FG, NOTICE_FG, PANEL_BG, SELECTED_BG};
 
 /// The editor's monospace face — the terminal's bundled Fira Mono, so code lines up the same way it
@@ -181,9 +181,9 @@ fn palette(theme: EditorTheme) -> Palette {
 pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 	let p = palette(editor.theme);
 	let body: Element<'_, Message> = match &editor.status {
-		Status::Loading => centered(text("Loading…").size(15).color(p.muted).into()),
-		Status::Failed(reason) => failed_body(reason, tab_id, &p),
-		Status::Ready => buffer_body(editor, &p),
+		EditorStatus::Loading => centered(text("Loading…").size(15).color(p.muted).into()),
+		EditorStatus::Failed(reason) => failed_body(reason, tab_id, &p),
+		EditorStatus::Ready => buffer_body(editor, &p),
 	};
 
 	let screen = column![toolbar(editor, tab_id, &p), body]
@@ -207,7 +207,7 @@ pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 /// The toolbar: the path (with a dirty dot when unsaved), the encoding and line ending, any notice,
 /// the theme select, and the Save / Save As / Close buttons (§32).
 fn toolbar<'a>(editor: &'a Editor, tab_id: u64, p: &Palette) -> Element<'a, Message> {
-	let ready = matches!(editor.status, Status::Ready);
+	let ready = matches!(editor.status, EditorStatus::Ready);
 	let dirty = editor.is_dirty();
 	let dot = if dirty { "• " } else { "" };
 	let title = text(format!("{dot}{}", editor.path)).size(13).color(p.fg);

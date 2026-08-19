@@ -18,7 +18,7 @@ use iced::widget::{checkbox, column, container, mouse_area, row, scrollable, tex
 use iced::{Border, Color, Element, Length, Padding, mouse};
 
 use crate::app::Message;
-use crate::explorer::{Explorer, ExplorerMessage, Rename, Row};
+use crate::explorer::{Explorer, ExplorerMessage, ExplorerRow, Rename};
 use crate::ui::menu;
 
 /// The widget id of the inline rename field, so `app` can focus it the instant the
@@ -284,7 +284,7 @@ fn tree(explorer: &Explorer) -> Element<'_, Message> {
 /// whole row is clickable — a left click selects and opens/closes it, a right click
 /// opens the menu on it. A row being renamed shows its edit field instead.
 fn row_view<'a>(
-	row: Row,
+	row: ExplorerRow,
 	selected: Option<&str>,
 	editing: Option<&'a Rename>,
 ) -> Element<'a, Message> {

@@ -84,7 +84,7 @@ const STATUS_FAILED: Color = Color::from_rgb8(0xe0, 0x6c, 0x6c);
 /// tab with no live shell, or a shell that announces no integration, carries `None` — so most
 /// chips show no dot at all and the strip stays quiet until a command actually runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
+pub enum TabStatus {
 	/// A command is executing right now.
 	Running,
 	/// The last command finished and exited 0.
@@ -93,13 +93,13 @@ pub enum Status {
 	Failed,
 }
 
-impl Status {
+impl TabStatus {
 	/// The dot's colour for this status.
 	fn color(self) -> Color {
 		match self {
-			Status::Running => STATUS_RUNNING,
-			Status::Ok => STATUS_OK,
-			Status::Failed => STATUS_FAILED,
+			TabStatus::Running => STATUS_RUNNING,
+			TabStatus::Ok => STATUS_OK,
+			TabStatus::Failed => STATUS_FAILED,
 		}
 	}
 }
@@ -141,7 +141,7 @@ pub struct Chip {
 	pub id: u64,
 	pub label: String,
 	pub active: bool,
-	pub status: Option<Status>,
+	pub status: Option<TabStatus>,
 	pub progress: crate::term::progress::Progress,
 	/// The branch the remote announced (§55), if it announced one. Already sanitised and capped by
 	/// `term::iterm` — this file draws it and does not police it, but note that it IS remote-chosen

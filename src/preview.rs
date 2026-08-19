@@ -144,7 +144,7 @@ fn unsupported_name(format: image::ImageFormat) -> String {
 /// Where a preview tab is in its lifecycle (§53) — the same three states the editor has, for the
 /// same reason: the view shows a spinner, a picture, or a sentence, and never a half of one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Status {
+pub enum PreviewStatus {
 	Loading,
 	Ready,
 	Failed(String),
@@ -180,7 +180,7 @@ pub struct Preview {
 	/// The remote path being shown. Never re-pointed: there is no Save As on a preview.
 	pub path: String,
 	/// Loading / Ready / Failed (§53).
-	pub status: Status,
+	pub status: PreviewStatus,
 	/// The decoded picture, `Some` exactly while `status` is `Ready`.
 	pub picture: Option<Picture>,
 }
@@ -191,7 +191,7 @@ impl Preview {
 		Self {
 			session,
 			path,
-			status: Status::Loading,
+			status: PreviewStatus::Loading,
 			picture: None,
 		}
 	}
@@ -206,7 +206,7 @@ impl Preview {
 			bytes,
 			handle: Handle::from_rgba(decoded.width, decoded.height, decoded.rgba),
 		});
-		self.status = Status::Ready;
+		self.status = PreviewStatus::Ready;
 	}
 
 	/// The read failed, or the bytes were not a picture cmote can draw (§53): show the reason in
@@ -214,7 +214,7 @@ impl Preview {
 	/// a stale image under a fresh error.
 	pub fn load_failed(&mut self, reason: String) {
 		self.picture = None;
-		self.status = Status::Failed(reason);
+		self.status = PreviewStatus::Failed(reason);
 	}
 }
 
@@ -340,11 +340,11 @@ mod tests {
 			},
 			99,
 		);
-		assert_eq!(preview.status, Status::Ready);
+		assert_eq!(preview.status, PreviewStatus::Ready);
 		assert_eq!(preview.picture.as_ref().map(|p| p.bytes), Some(99));
 
 		preview.load_failed("gone".to_owned());
-		assert_eq!(preview.status, Status::Failed("gone".to_owned()));
+		assert_eq!(preview.status, PreviewStatus::Failed("gone".to_owned()));
 		assert!(
 			preview.picture.is_none(),
 			"no stale picture under a fresh error"

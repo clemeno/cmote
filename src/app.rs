@@ -2404,7 +2404,7 @@ impl Viewer {
 		match self {
 			Self::Editor(editor) => editor.mark_parent_gone(),
 			Self::Picture(picture) => {
-				if matches!(picture.status, crate::preview::Status::Loading) {
+				if matches!(picture.status, crate::preview::PreviewStatus::Loading) {
 					picture.load_failed(
 						"The session this file was opened from closed before it finished loading."
 							.to_owned(),
@@ -3482,15 +3482,15 @@ impl Tab {
 	/// A running command wins over any past result; otherwise the last exit code decides ok vs
 	/// failed. `None` when the tab runs no shell, or when the shell has announced no integration
 	/// (no command has finished and none is running) — so the chip shows no dot at all.
-	fn prompt_status(&self) -> Option<ui::tabs::Status> {
+	fn prompt_status(&self) -> Option<ui::tabs::TabStatus> {
 		let terminal = self.terminal.as_ref()?;
 		match terminal.command_state() {
-			term::osc133::CommandState::Running => Some(ui::tabs::Status::Running),
+			term::osc133::CommandState::Running => Some(ui::tabs::TabStatus::Running),
 			// At a prompt or idle: the last command's exit code is what the dot reports, if one has
 			// finished. A shell that never emits the `D` mark leaves this `None`.
 			_ => match terminal.last_exit()? {
-				0 => Some(ui::tabs::Status::Ok),
-				_ => Some(ui::tabs::Status::Failed),
+				0 => Some(ui::tabs::TabStatus::Ok),
+				_ => Some(ui::tabs::TabStatus::Failed),
 			},
 		}
 	}
@@ -7116,7 +7116,7 @@ impl Tab {
 	/// absolute lines a match does, so nothing is converted here at all. A match whose line has
 	/// scrolled past the retained history cannot be shown, and leaves the view and the selection as
 	/// they were.
-	fn reveal_match(&mut self, found: Option<term::search::Match>) {
+	fn reveal_match(&mut self, found: Option<term::search::SearchMatch>) {
 		let (Some(found), Some(terminal)) = (found, self.terminal.as_mut()) else {
 			return;
 		};
@@ -11995,7 +11995,7 @@ mod tests {
 		}
 
 		let preview = preview_of(&app, id);
-		assert_eq!(preview.status, crate::preview::Status::Ready);
+		assert_eq!(preview.status, crate::preview::PreviewStatus::Ready);
 		let picture = preview.picture.as_ref().expect("a decoded picture");
 		assert_eq!((picture.width, picture.height), (5, 3));
 		assert_eq!(picture.format, "PNG", "the bytes, not the extension");
@@ -12015,7 +12015,10 @@ mod tests {
 			});
 		}
 		let preview = preview_of(&app, id);
-		assert!(matches!(preview.status, crate::preview::Status::Failed(_)));
+		assert!(matches!(
+			preview.status,
+			crate::preview::PreviewStatus::Failed(_)
+		));
 		assert!(preview.picture.is_none());
 	}
 
@@ -12032,7 +12035,7 @@ mod tests {
 		}
 		assert_eq!(
 			preview_of(&app, id).status,
-			crate::preview::Status::Failed("permission denied".to_owned())
+			crate::preview::PreviewStatus::Failed("permission denied".to_owned())
 		);
 	}
 
@@ -12042,10 +12045,13 @@ mod tests {
 	fn a_preview_still_loading_when_its_session_ends_is_told_so() {
 		let (mut app, session, _rx) = app_with_session();
 		let id = open_file(&mut app, session, "/srv/shot.png");
-		assert_eq!(preview_of(&app, id).status, crate::preview::Status::Loading);
+		assert_eq!(
+			preview_of(&app, id).status,
+			crate::preview::PreviewStatus::Loading
+		);
 
 		app.orphan_viewers(session);
-		let crate::preview::Status::Failed(reason) = &preview_of(&app, id).status else {
+		let crate::preview::PreviewStatus::Failed(reason) = &preview_of(&app, id).status else {
 			panic!("the load can never arrive now, so it is failed");
 		};
 		assert!(reason.contains("closed"), "and it says why: {reason}");
@@ -12066,7 +12072,10 @@ mod tests {
 		}
 
 		app.orphan_viewers(session);
-		assert_eq!(preview_of(&app, id).status, crate::preview::Status::Ready);
+		assert_eq!(
+			preview_of(&app, id).status,
+			crate::preview::PreviewStatus::Ready
+		);
 		assert!(preview_of(&app, id).picture.is_some(), "still on screen");
 	}
 

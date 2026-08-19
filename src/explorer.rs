@@ -137,7 +137,7 @@ pub struct Rename {
 /// One visible line of the tree, as `ui::explorer` draws it. Produced by `rows`,
 /// which flattens the open branches in display order.
 #[derive(Debug, Clone)]
-pub struct Row {
+pub struct ExplorerRow {
 	pub path: String,
 	pub name: String,
 	pub depth: u16,
@@ -646,17 +646,17 @@ impl Explorer {
 	/// The visible rows, top to bottom, as the panel draws them (§18): the root, then a
 	/// depth-first walk of every open branch. Hidden folders are filtered here rather
 	/// than at fetch time, so flipping the toggle costs nothing.
-	pub fn rows(&self) -> Vec<Row> {
+	pub fn rows(&self) -> Vec<ExplorerRow> {
 		let mut rows = Vec::new();
 		self.push_rows(ROOT, ROOT, 0, &mut rows);
 		rows
 	}
 
 	/// One row plus, when it is open, its children — the recursive half of `rows`.
-	fn push_rows(&self, path: &str, name: &str, depth: u16, rows: &mut Vec<Row>) {
+	fn push_rows(&self, path: &str, name: &str, depth: u16, rows: &mut Vec<ExplorerRow>) {
 		let node = self.nodes.get(path);
 		let open = node.is_some_and(|node| node.open);
-		rows.push(Row {
+		rows.push(ExplorerRow {
 			path: path.to_owned(),
 			name: name.to_owned(),
 			depth,
