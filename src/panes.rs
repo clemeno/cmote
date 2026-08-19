@@ -36,7 +36,7 @@
 
 use crate::explorer::{self, Explorer};
 use crate::files::{Entry, Files};
-use crate::profiles::SessionState;
+use crate::targets::SessionState;
 
 /// The largest share of the window either panel may take, as a fraction. A splitter drag is clamped
 /// to it and so is a restored size (§22), so a remembered layout from a bigger window cannot open a

@@ -1,9 +1,9 @@
 // paths.rs — where cmote's on-disk data lives (PLAN §11, §14).
 //
 // cmote writes two files: `known_hosts` (the TOFU host-key store, §8) and
-// `targets.json` (the saved connection profiles, §14). Both want the SAME
+// `targets.json` (the saved connection targets, §14). Both want the SAME
 // directory, resolved the SAME way, so the resolution lives here once rather than
-// being duplicated per file. `hostkey` and `profiles` each just join their file
+// being duplicated per file. `hostkey` and `targets` each just join their file
 // name onto `data_dir()`.
 //
 // The rule (§11): prefer a `cmote-data/` folder beside the executable — that keeps

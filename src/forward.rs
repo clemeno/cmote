@@ -14,7 +14,7 @@
 // fields parse into a spec, and how a spec reads back as a label. It is pure and has no
 // async, no sockets, no russh — so it is easy to test and can be shared by everything that
 // touches a forward: the bridge vocabulary (§4), the saved target (persisted with the
-// profile, §14/§22), the app's UI state, and the network layer that actually runs it
+// target, §14/§22), the app's UI state, and the network layer that actually runs it
 // (`ssh::forward`). Splitting the pure part out mirrors how `files` (the model) is kept
 // apart from `ssh::browse` (the network).
 

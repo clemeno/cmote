@@ -1,10 +1,10 @@
-// profiles.rs — the saved connection targets (PLAN §14, v1.3).
+// targets.rs — the saved connection targets (PLAN §14, v1.3).
 //
 // The home screen lists targets the user has connected to before, so a return
 // visit is one click instead of re-typing host / port / user / auth. What we
 // persist is deliberately narrow:
 //
-//   PROFILE METADATA ONLY — name, host, port, user, auth kind, key-file path.
+//   TARGET METADATA ONLY — name, host, port, user, auth kind, key-file path.
 //   NEVER a secret. No password, no key passphrase (§12). The user still enters
 //   the secret at connect time; only the "how to reach it" part is remembered.
 //
@@ -28,7 +28,7 @@ use crate::files::{SortDir, SortKey};
 use crate::forward::ForwardSpec;
 use crate::ui::connect::AuthKind;
 
-/// One saved connection target — profile metadata only, no secret material (§12).
+/// One saved connection target — metadata only, no secret material (§12).
 /// `name` is a free display label (defaults to the endpoint, renamed by the user);
 /// the rest is exactly what the connect form needs to be pre-filled.
 // `Eq` is deliberately not derived: the panel sizes are `f32`, which is `PartialEq` but not
@@ -438,7 +438,7 @@ impl Targets {
 
 	/// Load from the resolved store location (§11). Convenience over `load_from`.
 	pub fn load() -> Self {
-		match profiles_path() {
+		match targets_path() {
 			Ok(path) => Self::load_from(&path),
 			Err(error) => {
 				eprintln!("could not resolve the targets path: {error:#}");
@@ -449,12 +449,12 @@ impl Targets {
 
 	/// Save to the resolved store location (§11). Convenience over `save_to`.
 	pub fn save(&self) -> Result<()> {
-		self.save_to(&profiles_path()?)
+		self.save_to(&targets_path()?)
 	}
 }
 
 /// The path of the saved-targets file: `targets.json` in the shared data directory.
-fn profiles_path() -> Result<PathBuf> {
+fn targets_path() -> Result<PathBuf> {
 	Ok(crate::paths::data_dir()?.join("targets.json"))
 }
 

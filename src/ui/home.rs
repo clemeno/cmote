@@ -1,7 +1,7 @@
 // ui/home.rs — the home screen: a list of saved connection targets (PLAN §14).
 //
 // This is the landing screen (§10 state machine). It lists the saved targets
-// (`profiles::Target`) sorted alphabetically by name, and lets the user:
+// (`targets::Target`) sorted alphabetically by name, and lets the user:
 //   * narrow the list — the filter box above it keeps only the rows matching what is typed
 //     (§49): a fragment while there is no wildcard in it, a whole-row glob once `*` or `?`
 //     appears. Everything below the filter works off the rows it left, not off the whole list;
@@ -26,7 +26,7 @@ use iced::widget::{
 use iced::{Border, Element, Length, Padding, Theme};
 
 use crate::app::Message;
-use crate::profiles::Target;
+use crate::targets::Target;
 use crate::ui::{dialog, menu};
 
 /// The widget id of the inline rename field, so `app` can focus it the instant a
@@ -41,7 +41,7 @@ pub const FILTER_INPUT_ID: &str = "home-filter";
 /// The body copy for the delete confirmation (§14). `app` appends the target being
 /// deleted (its name and endpoint) and seeds the whole thing into the dialog buffer, so
 /// the user confirms against the row they actually picked.
-pub const DELETE_DIALOG_BODY: &str = "Removes this target from the saved list. Nothing on the server changes and its host key stays trusted — only the saved profile is forgotten. This cannot be undone.";
+pub const DELETE_DIALOG_BODY: &str = "Removes this target from the saved list. Nothing on the server changes and its host key stays trusted — only the saved target is forgotten. This cannot be undone.";
 
 // This screen has no hard-coded colours on purpose. The app sets no theme, so iced
 // follows the system light/dark preference — a fixed light palette here put dark-mode's
@@ -99,7 +99,7 @@ pub struct View<'a> {
 	pub shells: &'static [crate::local::shells::LocalShell],
 }
 
-/// Render the home screen. `targets` are already in display order (`profiles` keeps
+/// Render the home screen. `targets` are already in display order (`targets` keeps
 /// them sorted); `state` is everything else on the screen (see `View`).
 pub fn view<'a>(
 	// `targets` has its OWN lifetime, not `'a`: every row clones the names it shows (see

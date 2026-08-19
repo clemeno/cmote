@@ -12,7 +12,7 @@ security) and marks every deliberate shortcut with a `ponytail:` note so "simple
 reads as intent, not ignorance.
 
 Status: **shipping — v4.0.0** (v1 feature set complete; v1.3 adds saved connection
-targets on a home screen — profiles only, no secrets — plus an optional
+targets on a home screen — metadata only, no secrets — plus an optional
 key-passphrase field, §14; v1.3.1 fixes numpad number keys sending navigation
 instead of their digits, §9; v1.3.2 makes the home screen follow the system
 light/dark theme so the target list stays readable, §14; v1.4.0 tracks the remote
@@ -91,7 +91,7 @@ This document is the reference to build against.
 | Terminal | **Full VT emulator** — `alacritty_terminal` maintains the screen grid and answers the host's status/identity queries itself (§9, §23); the grid is drawn by one custom iced widget, cell-exact (§9). *(v3.0 replaced the original `vt100`, whose small subset was the compatibility ceiling — §23.)* |
 | Key formats | OpenSSH / PEM native via `russh::keys`; **PuTTY `.ppk` via `ssh-key`'s `from_ppk`** (already in the russh tree, `ppk` feature) |
 | Host key | **TOFU** (trust-on-first-use) against a portable `known_hosts`; explicit user accept; a mismatch opens a loud override dialog — reject / trust once / replace — never auto-trusted (§8, §28) |
-| Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *profiles* (no secret) are saved so the home screen can list targets (§14) |
+| Credentials | Secrets **session-only** — held in memory, `zeroize`d on drop, never written to disk (§12). Connection *targets* (no secret) are saved so the home screen can list targets (§14) |
 | Auth order | The chosen method first (`publickey` / `password` / `keyboard-interactive` / `agent`), then chain into `keyboard-interactive` while the server still offers it — 2FA / OTP and challenge-response (§7); driven by what the server accepts |
 | File picker | `rfd` — native open-file dialog for the key file (Win32 on Windows, `NSOpenPanel` on macOS) |
 | Errors | `anyhow` at the app boundary; typed `thiserror` enums deferred until a real API needs them |
@@ -139,7 +139,7 @@ Each decision below is a thing to learn from, not just a dependency.
   limits — not a guess about them — are what block you.
 - **Session-only *secrets*** — the safest secret is the one never persisted. Passwords
   and decrypted keys live only for the session and are wiped with `zeroize`. As of v1.3
-  connection *profiles* (host / port / user / auth kind / key path — no secret) ARE
+  connection *targets* (host / port / user / auth kind / key path — no secret) ARE
   saved so the home screen can list targets (§14); persisting the secrets themselves,
   encrypted at rest, stays a deliberate later feature (§16), not a v1 gap.
 
@@ -158,7 +158,7 @@ Each decision below is a thing to learn from, not just a dependency.
 | `.ppk` support | (in `ssh-key`) | read PuTTY `.ppk` → `PrivateKey` | **No separate crate.** `ssh-key 0.7.0-rc.11` (pinned by russh, `ppk` feature on) provides `PrivateKey::from_ppk` — see §7 |
 | `zeroize` | 1.9 | wipe secrets from memory on drop | `Zeroizing<String>` for passwords/passphrases |
 | `rfd` | 0.17.2 | native file-open dialog | portable; used to pick the key file (0.17, not 0.15) |
-| `serde` / `serde_json` | 1.0 | serialize `targets.json` — saved profiles + the per-target session snapshot (§14, §22) | `derive` on the profile structs; a corrupt store is logged and treated as empty, never a crash |
+| `serde` / `serde_json` | 1.0 | serialize `targets.json` — saved targets + the per-target session snapshot (§14, §22) | `derive` on the target structs; a corrupt store is logged and treated as empty, never a crash |
 | `open` | 5 | launch an OSC 8 hyperlink in the OS browser (§24) | pure Rust, no C toolchain; hands the URI to PowerShell `Start-Process` as data (an env var), never a shell command line — the `cmd /C start` inject path is behind an off-by-default `insecure` feature we do not enable. cmote still gates the scheme to http/https/mailto first (`link`) |
 | `portable-pty` | 0.9 | a pseudo-terminal on THIS machine, for the local shells the home screen's Local bar opens (§103) | wezterm's crate. ConPTY on Windows, `forkpty` on macOS, one API — and §2 says both, so hand-rolling meant two backends of a thing whose traps are all in the lifecycle. Pure Rust, no C toolchain. Two costs paid knowingly: it brings **`winapi`**, a second Windows-bindings crate beside `windows-sys` (the taskbar note in §54 declared a COM vtable by hand to avoid exactly that), and its `serial2` / `winreg` dependencies are **not optional** in 0.9, so a serial-port pty cmote never opens is dead weight in the binary. It also has a real bug cmote works around: `WinChildKiller::kill` inverts its success test, returning `Err(last_os_error())` when `TerminateProcess` succeeded — so `local::pty::close` drops the result and says why |
 | `anyhow` | 1.0 | app-level error handling (`Result<_, anyhow::Error>`) | context-rich errors, `?` everywhere |
@@ -250,7 +250,7 @@ cmote/
     ├── panes.rs          the tree and the file pane as one pair, and only what spans them: reveal/follow, re-read, what a deletion means, the remembered layout, the shared `.*` toggle — returning the listings to ask for rather than sending them (§18, §19, §22)
     ├── paths.rs          data-dir resolution: `cmote-data/` beside the exe if writable, else `%LOCALAPPDATA%\cmote` / `~/Library/Application Support/cmote` (§11)
     ├── preview.rs        the picture tab's model: which files open as a picture, and the fenced decode — sniff by magic bytes, cap the dimensions and the allocation, name the format in every refusal (§53)
-    ├── profiles.rs       load/save `targets.json`: saved connection profiles + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
+    ├── targets.rs        load/save `targets.json`: saved connection targets + the per-target session snapshot; corrupt file → treated as empty (§14, §22)
     ├── secret.rs         the session-secret wrapper (`Secret` over `zeroize`): passwords / passphrases held in memory, wiped on drop, never logged (§12)
     ├── ui/
     │   ├── mod.rs         view helpers, incl. the shared `elide_middle` path/name cut (§22); host-key / passphrase / error dialogs (§8, §7, §6)
@@ -1114,7 +1114,7 @@ unsigned by decision (§16), so nothing here is waiting on a signing step either
 The home screen (`ui/home.rs`) is the landing screen: a list of previously used
 connection **targets**, so reconnecting is a click instead of re-typing the form.
 
-- **What persists — profiles only, never secrets in this file (§12).** A target records
+- **What persists — metadata only, never secrets in this file (§12).** A target records
   `name`, `host`, `port`, `user`, `auth_kind`, (for key auth) `key_path` and — when the target
   presents one — the OpenSSH `cert_path` (§7), the panels' `show_hidden` preference, and a
   `remember_secret` flag. A certificate is public data like the key *path*, so it rides here;
@@ -1124,7 +1124,7 @@ connection **targets**, so reconnecting is a click instead of re-typing the form
   was remembered. *(Opt-in, PORTABLE encrypted-at-rest secret persistence now exists — a
   master-passphrase `age` vault, `secrets.age`, separate from this file; see §16. The
   `remember_secret` flag here is only the hint that such a secret can be pre-filled.)*
-- **Store** (`profiles.rs`): `targets.json` in the shared data directory
+- **Store** (`targets.rs`): `targets.json` in the shared data directory
   (`paths::data_dir`, the same portable-or-fallback resolution `known_hosts` uses, §11),
   serialized with `serde` / `serde_json`. A missing file means "no targets yet"; a
   corrupt file is logged and treated as empty — a broken store never blocks connecting.
@@ -1212,7 +1212,7 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
 ## §16 — Deferred (with upgrade paths)
 
 - **Credential persistence (secrets at rest)** — *done (v3.0), as a PORTABLE opt-in.* Saved
-  profiles carried metadata only (§14); a password / key passphrase is now optionally kept too,
+  targets carried metadata only (§14); a password / key passphrase is now optionally kept too,
   in a separate encrypted vault. The obvious store — Windows DPAPI / macOS Keychain, or an OS
   keyring — is machine-bound and would NOT travel with `cmote-data/`, against the portable-USB
   identity (§11). So instead the vault is one file, `secrets.age`, encrypted with the **`age`**
@@ -2432,7 +2432,7 @@ header so both panels name the same place.
   paths (`terminal_path`, `files_path`), the `.*` filter, and the two panel sizes
   (`explorer_width`, `files_height`). It is a transfer struct; `Target` keeps the fields flat
   (so the JSON stays flat and a pre-v2.2 `targets.json` loads unchanged), all optional and
-  omitted when absent. Profile metadata, never a secret — §12 is untouched. Adding another
+  omitted when absent. Target metadata, never a secret — §12 is untouched. Adding another
   remembered value is one field on `SessionState` and `Target`, one line each in capture /
   restore / `set_session`.
 - **The panel sizes stay per target; the WINDOW size does not.** The tree width and pane
@@ -2820,7 +2820,7 @@ The whole single-session state — everything `App` used to be — moved wholesa
 struct, keeping its `update` / `view` / `title` and every helper unchanged. A new, thin **`App`**
 owns a `Vec<Tab>`, the active index, and the two things that must be **shared**, not duplicated:
 
-- the saved-target list (`profiles::Targets`) — one file on disk; a rename or delete in one tab's
+- the saved-target list (`targets::Targets`) — one file on disk; a rename or delete in one tab's
   home screen must show in every other;
 - the unlocked secret vault (`vault::Vault`) — one master passphrase; unlocking it in any tab
   unlocks it for all.
@@ -4778,7 +4778,7 @@ answer was the first factor's, and `Accounts::set_secret` still keeps it for `su
 (§46). The rules below are why they are shaped the way they are, and the next attempt inherits them.*
 
 The sudo password is kept for the connection's life in a `Secret` (redacted in `Debug`, wiped on drop)
-and dropped when the session ends — never to the vault, never to a profile: a sudo password is usually
+and dropped when the session ends — never to the vault, never to a target: a sudo password is usually
 the account's own login password, and persisting it would turn a session-lifetime secret into one at
 rest (§12). A second elevation that asks for the same password is answered from it with no dialog. A
 one-time code is asked for every single time, which is what "one-time" means.
@@ -4843,7 +4843,7 @@ notice amber — nothing is wrong.
   (`tty_tickets`), and each shell has its own pty, so the cached password saves the typing but not the
   second factor. This is what will make §46 ask for a code again.
 - **No way in at all, for now.** The right-click item and the status bar's button were the two, and both
-  are withdrawn — see the status note at the top. A per-profile "elevate on connect" was §47, which is
+  are withdrawn — see the status note at the top. A per-target "elevate on connect" was §47, which is
   part of what the rethink covers.
 - **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
@@ -5007,7 +5007,7 @@ opening an sftp session — uses `exec_inline`, which borrows the loop's own han
   trip per open folder. Correct and simple; a per-account listing cache is the obvious optimisation if it
   is ever felt.
 - **Still no auto-elevate on connect, and no vault-stored sudo password.** Both are §47, which is where
-  the profile format changes.
+  the target format changes.
 
 ## §48 — Splitting the window (v4.0.0)
 
@@ -11539,8 +11539,8 @@ enough once.
 This project's paper trail had a gap nobody had named: 106 numbered sections explaining every
 decision, 95 file headers explaining every module, and **nowhere that simply said what a word
 means**. Ask "what is a band?" and the honest answer was "read §102". Ask "is a profile a
-target?" and there was no answer at all — the type is `Target`, the file was `profiles.rs`, the
-README says *profiles*, and the disk says `targets.json`.
+target?" and there was no answer at all — the type was `Target`, the file `profiles.rs`, the
+README said *profiles*, and the disk `targets.json`.
 
 The starting proposal was to rename `PLAN.md` to `CONTEXT.md` and be done. That fails on a
 number: the glossary's whole value is being read at the START of a session, and 11,536 lines of

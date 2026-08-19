@@ -1,7 +1,7 @@
 // vault.rs — the opt-in encrypted credential vault (PLAN §16).
 //
 // §12 makes a strong promise: the safest secret is the one never persisted, and by
-// default cmote keeps it — `profiles.rs` stores connection *metadata* only, never a
+// default cmote keeps it — `targets.rs` stores connection *metadata* only, never a
 // password or a key passphrase. This module is the deliberate, opt-in relaxation of
 // that promise the user asked for: when — and only when — the user ticks "Remember" on
 // the connect form, the secret for that endpoint is kept here so a return visit does not
@@ -27,7 +27,7 @@
 //     `Zeroizing` for the brief moment it exists.
 //
 // The plaintext inside the blob is a flat JSON map `{ "user@host:port": "<secret>" }` — one
-// entry per saved target, keyed by the same endpoint string `profiles.rs` uses as a target's
+// entry per saved target, keyed by the same endpoint string `targets.rs` uses as a target's
 // identity, so the two line up without a second key scheme. `targets.json` records only a
 // `remember_secret` flag (metadata, never ciphertext); the secret itself lives here alone.
 
@@ -151,7 +151,7 @@ impl Vault {
 }
 
 /// The resolved vault path: `secrets.age` in the shared data directory (§11), the same
-/// directory `profiles.rs` and `hostkey.rs` use.
+/// directory `targets.rs` and `hostkey.rs` use.
 fn vault_path() -> Result<PathBuf> {
 	Ok(crate::paths::data_dir()?.join(VAULT_FILE))
 }

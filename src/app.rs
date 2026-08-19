@@ -212,7 +212,7 @@ struct App {
 	/// names exactly one tab however the window is split (§48).
 	next_id: u64,
 	/// The one app-wide saved-target list, shared into every tab (§14) — one file on disk.
-	targets: Rc<RefCell<crate::profiles::Targets>>,
+	targets: Rc<RefCell<crate::targets::Targets>>,
 	/// The one app-wide secret vault, shared into every tab (§16) — unlocking it anywhere unlocks
 	/// it everywhere.
 	vault: Rc<RefCell<Option<crate::vault::Vault>>>,
@@ -415,7 +415,7 @@ impl App {
 	/// shared target list, start with one region holding one home tab, and fetch the window size
 	/// right away so a dialog opened before the first resize is still centred (§10, §26, §48).
 	fn new() -> (Self, iced::Task<Message>) {
-		let targets = Rc::new(RefCell::new(crate::profiles::Targets::load()));
+		let targets = Rc::new(RefCell::new(crate::targets::Targets::load()));
 		let vault = Rc::new(RefCell::new(None));
 		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
 		// One region, undivided — which is the whole window until the user asks for a split (§48).
@@ -2430,7 +2430,7 @@ impl Viewer {
 
 /// Everything a target remembers, read out of the shared list in ONE borrow (§14, §22, §27).
 ///
-/// A connection arriving is the most consequential moment in the app: it is where a saved profile,
+/// A connection arriving is the most consequential moment in the app: it is where a saved target,
 /// a remembered layout, a saved set of forwards and a possibly-stored secret all meet a live shell.
 /// All four used to be read inline in the `Connected` arm, in three separate borrow scopes of the
 /// shared target cell, arranged in a fixed order — with two comments whose entire subject was that
@@ -2444,7 +2444,7 @@ struct Arrival {
 	/// The target's key in the saved list — what pre-selects its row for a return to the home list.
 	key: String,
 	/// The session this endpoint was last left in (§22), if it has been connected to before.
-	session: Option<crate::profiles::SessionState>,
+	session: Option<crate::targets::SessionState>,
 	/// The port forwards saved against it (§27), to be re-established once the shell is up.
 	forwards: Vec<crate::forward::ForwardSpec>,
 }
@@ -2500,8 +2500,8 @@ pub struct Tab {
 	/// The saved connection targets shown on the home screen (§14, §26). A shared clone of the
 	/// ONE app-wide list (loaded from disk at startup, kept sorted, re-saved on any change): a
 	/// rename or delete in one tab's home screen is seen by every other, and there is a single
-	/// file on disk. Profiles only — never any secret material (§12).
-	targets: Rc<RefCell<crate::profiles::Targets>>,
+	/// file on disk. Targets only — never any secret material (§12).
+	targets: Rc<RefCell<crate::targets::Targets>>,
 	/// What is typed in the home screen's filter box (§49); empty means the whole list is on
 	/// show. Per tab, like the selection below it: two regions of a split window are two places
 	/// to be looking for two different machines, and one filter shared between them would move
@@ -2519,10 +2519,10 @@ pub struct Tab {
 	confirm_delete: bool,
 	/// The in-progress inline rename on the home screen, if any (§14).
 	home_rename: Option<ui::home::RenameState>,
-	/// The profile (no secret) captured when a connect is dialed, saved to `targets`
+	/// The target (no secret) captured when a connect is dialed, saved to `targets`
 	/// once the session actually opens (§14). `None` between attempts so a failed or
 	/// abandoned connect never persists a target.
-	pending_target: Option<crate::profiles::Target>,
+	pending_target: Option<crate::targets::Target>,
 	/// The connect form's field contents. Lives here so it survives navigating
 	/// to an error screen and back without losing what the user typed.
 	pub form: ui::connect::ConnectForm,
@@ -3345,7 +3345,7 @@ impl Tab {
 	/// first resize is still centred (§10). `App::new` builds the first one; the "+" strip button
 	/// builds each later one.
 	fn home(
-		targets: Rc<RefCell<crate::profiles::Targets>>,
+		targets: Rc<RefCell<crate::targets::Targets>>,
 		vault: Rc<RefCell<Option<crate::vault::Vault>>>,
 		id: u64,
 		window_size: iced::Size,
@@ -4174,8 +4174,7 @@ impl Tab {
 		// endpoint, with nothing ticked and no connection to it (§12, §16).
 		self.pending_remember = if self.form.remember {
 			extract_secret(&params.auth).map(|secret| {
-				let endpoint =
-					crate::profiles::endpoint_of(&params.user, &params.host, params.port);
+				let endpoint = crate::targets::endpoint_of(&params.user, &params.host, params.port);
 				(endpoint, secret)
 			})
 		} else {
@@ -4192,14 +4191,14 @@ impl Tab {
 
 	/// Send a validated `Connect` to the SSH task and move to the connecting screen (§10). Split
 	/// from `on_connect_pressed` so the deferred-vault path can resume straight here once the
-	/// master passphrase is entered (§16). Records the profile (no secret) to save if the
+	/// master passphrase is entered (§16). Records the target (no secret) to save if the
 	/// session opens (§14).
 	fn dial(&mut self, params: bridge::ConnectParams) -> iced::Task<Message> {
 		// Fresh attempt: no passphrase has been tried yet, so any upcoming prompt is
 		// a first ask (no "incorrect" hint) until the user submits one (§7).
 		self.passphrase_failed = false;
 
-		// Capture the profile (no secret) to save if this connect succeeds (§14). The
+		// Capture the target (no secret) to save if this connect succeeds (§14). The
 		// key path and certificate are only meaningful for key auth; the name here is a
 		// placeholder — `upsert_on_connect` keeps an existing target's custom name.
 		let (key_path, cert_path) = if self.form.auth_kind == ui::connect::AuthKind::Key {
@@ -4207,8 +4206,8 @@ impl Tab {
 		} else {
 			(None, None)
 		};
-		self.pending_target = Some(crate::profiles::Target {
-			name: crate::profiles::endpoint_of(&params.user, &params.host, params.port),
+		self.pending_target = Some(crate::targets::Target {
+			name: crate::targets::endpoint_of(&params.user, &params.host, params.port),
 			host: params.host.clone(),
 			port: params.port,
 			user: params.user.clone(),
@@ -4264,7 +4263,7 @@ impl Tab {
 
 	/// Open a session on THIS machine (§103) — the home screen's Local bar.
 	///
-	/// The twin of [`dial`], and shorter for everything it does not have to do. There is no profile to
+	/// The twin of [`dial`], and shorter for everything it does not have to do. There is no target to
 	/// capture (a local shell is not a target: no host, no account, nothing to remember), no secret to
 	/// store, and no passphrase state to reset — so `abandon_attempt` runs to drop anything a previous,
 	/// abandoned connect attempt left behind rather than to prepare for this one.
@@ -4288,7 +4287,7 @@ impl Tab {
 	/// This connection attempt is over without opening a session (§14, §16): drop the two things
 	/// it was carrying on the promise that it would.
 	///
-	/// The profile is only a profile, but the SECRET matters. It is captured when Connect is
+	/// The target is only a target, but the SECRET matters. It is captured when Connect is
 	/// pressed with Remember ticked and stored only when the session opens, so anything that ends
 	/// the attempt in between has to drop it — otherwise a later successful connect finds it still
 	/// there and stores it, under the endpoint it was captured for rather than the one that just
@@ -5520,7 +5519,7 @@ impl Tab {
 		self.home_rename = None;
 		self.confirm_delete = false;
 		// Leaving for the list abandons any connect in flight, so what it was carrying goes with
-		// it — the unsaved profile and, above all, the secret it captured (§12, §14, §16).
+		// it — the unsaved target and, above all, the secret it captured (§12, §14, §16).
 		self.abandon_attempt();
 		self.form.password.clear();
 		self.form.passphrase.clear();
@@ -6961,7 +6960,7 @@ impl Tab {
 	}
 
 	/// The session is real: persist the target it was made for and read back everything it
-	/// remembers (§14, §22, §27). Profiles only — no secret goes in here.
+	/// remembers (§14, §22, §27). Targets only — no secret goes in here.
 	///
 	/// `upsert_on_connect` adds the endpoint, or refreshes a known one while keeping its custom
 	/// name, and hands back its key. It leaves a known endpoint's saved state alone, so the session
@@ -6969,7 +6968,7 @@ impl Tab {
 	/// ONE borrow, as owned values. That is the whole point of the function: the caller then acts on
 	/// what it was given with nothing borrowed, instead of interleaving three short borrows with the
 	/// `&mut self` calls that want the same cell (§26).
-	fn adopt_target(&mut self, target: crate::profiles::Target) -> Arrival {
+	fn adopt_target(&mut self, target: crate::targets::Target) -> Arrival {
 		let key = self.targets.borrow_mut().upsert_on_connect(
 			&target.host,
 			target.port,
@@ -6981,7 +6980,7 @@ impl Tab {
 		let targets = self.targets.borrow();
 		let saved = targets.find(&key);
 		Arrival {
-			session: saved.map(crate::profiles::Target::session),
+			session: saved.map(crate::targets::Target::session),
 			forwards: saved
 				.map(|target| target.forwards.clone())
 				.unwrap_or_default(),
@@ -7286,8 +7285,8 @@ impl Tab {
 	/// another value is one field here (and one on `Target`). The shell cwd is `None` on a
 	/// server that announces none (§17); `set_session` treats a `None` as "leave it", so a
 	/// silent session never erases what an earlier one recorded.
-	fn capture_session(&self) -> crate::profiles::SessionState {
-		crate::profiles::SessionState {
+	fn capture_session(&self) -> crate::targets::SessionState {
+		crate::targets::SessionState {
 			// The panels' whole half of the snapshot, from the pair that owns it.
 			terminal_path: self
 				.terminal
@@ -7328,7 +7327,7 @@ impl Tab {
 	/// so a restore before the first resize event cannot shrink a panel to its minimum.
 	fn restore_session(
 		&mut self,
-		session: crate::profiles::SessionState,
+		session: crate::targets::SessionState,
 	) -> (Option<String>, Option<String>) {
 		let resume = self.panes.restore(session, self.window_size);
 		(resume.terminal, resume.pane)
@@ -8914,14 +8913,14 @@ mod tests {
 	fn a_failed_attempt_leaves_no_secret_for_a_later_connect_to_store() {
 		let (mut app, _rx) = app_with_terminal(16);
 		app.pending_remember = Some(("u@a:22".to_owned(), Secret::new("hunter2".to_owned())));
-		// A dial's own capture: the profile it would save if the session opened (§14).
+		// A dial's own capture: the target it would save if the session opened (§14).
 		app.form.host = "a".to_owned();
 		app.form.port = "22".to_owned();
 		app.form.user = "u".to_owned();
 		app.form.auth_kind = AuthKind::Password;
 		app.form.password = "hunter2".to_owned();
 		let _ = app.dial(app.form.validate().expect("a valid form"));
-		assert!(app.pending_target.is_some(), "the dial captured a profile");
+		assert!(app.pending_target.is_some(), "the dial captured a target");
 
 		let _ = app.on_ssh_event(SshEvent::Error("authentication failed".to_owned()));
 
@@ -9299,9 +9298,9 @@ mod tests {
 	/// A pending target as `dial` builds one (§14): auth and endpoint only. Everything else is a
 	/// placeholder there too — the STORED target's remembered session, forwards and flag are what
 	/// `adopt_target` reads back, and `upsert_on_connect` leaves those alone.
-	fn pending_target(host: &str, user: &str) -> crate::profiles::Target {
-		crate::profiles::Target {
-			name: crate::profiles::endpoint_of(user, host, 22),
+	fn pending_target(host: &str, user: &str) -> crate::targets::Target {
+		crate::targets::Target {
+			name: crate::targets::endpoint_of(user, host, 22),
 			host: host.to_owned(),
 			port: 22,
 			user: user.to_owned(),
@@ -9335,10 +9334,10 @@ mod tests {
 			let mut targets = tab.targets.borrow_mut();
 			targets.set_session(
 				endpoint,
-				crate::profiles::SessionState {
+				crate::targets::SessionState {
 					files_path: Some("/srv/data".to_owned()),
 					show_hidden: Some(true),
-					..crate::profiles::SessionState::default()
+					..crate::targets::SessionState::default()
 				},
 			);
 			targets.set_forwards(
@@ -9371,7 +9370,7 @@ mod tests {
 		let arrival = tab.adopt_target(pending_target("new-host", "cme"));
 
 		assert_eq!(arrival.key, "cme@new-host:22");
-		// It IS saved now — a real connect persists the profile (§14) — it just has no history.
+		// It IS saved now — a real connect persists the target (§14) — it just has no history.
 		assert!(arrival.forwards.is_empty());
 		assert!(
 			arrival
@@ -10957,10 +10956,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::profiles::SessionState {
+			crate::targets::SessionState {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::profiles::SessionState::default()
+				..crate::targets::SessionState::default()
 			},
 		);
 		app.connection = Some("u@h:22".to_owned());
@@ -11026,10 +11025,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::profiles::SessionState {
+			crate::targets::SessionState {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::profiles::SessionState::default()
+				..crate::targets::SessionState::default()
 			},
 		);
 		app.connection = Some("u@h:22".to_owned());
@@ -11166,10 +11165,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::profiles::SessionState {
+			crate::targets::SessionState {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::profiles::SessionState::default()
+				..crate::targets::SessionState::default()
 			},
 		);
 		app.connection = Some("u@h:22".to_owned());
@@ -11325,7 +11324,7 @@ mod tests {
 	// tab-strip bookkeeping (§26) is exercised without an iced runtime or the disk. The `Task`s these
 	// calls return are dropped — only the tab list and active index are under test.
 	fn tab_app() -> App {
-		let targets = Rc::new(RefCell::new(crate::profiles::Targets::default()));
+		let targets = Rc::new(RefCell::new(crate::targets::Targets::default()));
 		let vault = Rc::new(RefCell::new(None));
 		let first = Tab::home(targets.clone(), vault.clone(), 0, iced::Size::default());
 		// The order starts on the tab already on screen — id 0, the home tab built above (§37).

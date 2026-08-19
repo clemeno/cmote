@@ -83,7 +83,7 @@ references below (§n) point into it.
   the set is **remembered per target** and re-established when you reconnect. Binds to loopback by
   default. Addresses take a hostname, an IPv4, or a **bracketed IPv6** literal (`[::1]:8080`).
 - **Home screen of saved targets** — every successful connection is remembered as a
-  named target and listed alphabetically. Profiles only by default: **no passwords or
+  named target and listed alphabetically. Metadata only by default: **no passwords or
   passphrases in `targets.json`** (only host / port / user / auth method / key and certificate
   path) — a
   secret is stored only if you opt in to the encrypted vault (below). Click a
@@ -425,9 +425,9 @@ references below (§n) point into it.
   the next connection the pane reopens there, the tree reveals the chain down to it, and the
   shell is put back with a visible `cd`. The snapshot is written at every teardown — a clean
   Disconnect, a remote hangup, an error — and a value this session never learned never erases
-  the one already saved. Profile metadata only: still **no secrets on disk** (§22).
+  the one already saved. Target metadata only: still **no secrets on disk** (§22).
 - **Secrets** — passwords and key passphrases are held in memory and `zeroize`d on drop, and
-  by default never written to disk (§12); only non-secret connection *profiles* are persisted,
+  by default never written to disk (§12); only non-secret connection *targets* are persisted,
   for the home list (§14). The one exception is the **opt-in** encrypted vault (§16): tick
   "Remember" and the secret is kept in `secrets.age`, sealed with a master passphrase you
   choose — portable across machines, and off unless you ask for it.
@@ -635,7 +635,7 @@ collide (GitHub allows only one release per tag).
 ## Data and portability
 
 cmote writes up to four files — `known_hosts` (pinned host keys), `targets.json` (saved
-connection profiles plus where each session left off: the two directories, the `.*` toggle
+connection targets plus where each session left off: the two directories, the `.*` toggle
 and the panel sizes — **no secrets**), `settings.json` (the app-wide window size, remembered
 across restarts — §31), and, only once you opt in to remembering a secret,
 `secrets.age` (the encrypted credential vault, §16 — a master-passphrase-sealed `age` blob,
@@ -653,7 +653,7 @@ To reset trust for a host, delete the offending line (or the whole file) from
 the prompt (or delete its entry from `targets.json`) — deleting a target also forgets its
 vault secret when the vault is unlocked. To forget every remembered secret at once, delete
 `secrets.age`; a forgotten master passphrase is unrecoverable, so this is also the only way
-back in if you lose it (you keep the profiles, just re-enter the secrets).
+back in if you lose it (you keep the targets, just re-enter the secrets).
 
 ## Testing
 
