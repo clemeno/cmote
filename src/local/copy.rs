@@ -181,7 +181,7 @@ pub async fn upload_tree(
 		let mut answers = answers;
 		let outcome = match native(&destination) {
 			Ok(native) => tree(&source, &native, resume, &events, &mut answers, &cancel).await,
-			Err(reason) => Err(transfer::refused(anyhow::anyhow!("{reason}"))),
+			Err(reason) => Err(transfer::mark_refused(anyhow::anyhow!("{reason}"))),
 		};
 		// The pane path is what is reported, not the native one: the folder tree is about to re-list
 		// what it names, and it can only do that in its own dialect.
@@ -217,7 +217,7 @@ pub async fn download_tree(
 				)
 				.await
 			}
-			Err(reason) => Err(transfer::refused(anyhow::anyhow!("{reason}"))),
+			Err(reason) => Err(transfer::mark_refused(anyhow::anyhow!("{reason}"))),
 		};
 		let landed = outcome.as_ref().ok().and_then(|done| {
 			done.as_ref()
@@ -283,7 +283,7 @@ async fn stream(
 	// nothing first. Checked by resolving both sides, so a link, a `.` on the way or a different
 	// spelling of the same path is still caught.
 	if same_file(source, destination).await {
-		return Err(transfer::refused(anyhow::anyhow!(
+		return Err(transfer::mark_refused(anyhow::anyhow!(
 			"the source and the destination are the same file"
 		)));
 	}
@@ -370,7 +370,7 @@ async fn open_at(destination: &Path, offset: u64) -> Result<tokio::fs::File> {
 		return tokio::fs::File::create(destination)
 			.await
 			.with_context(|| format!("could not create {}", destination.display()))
-			.map_err(transfer::refused);
+			.map_err(transfer::mark_refused);
 	}
 	let mut file = tokio::fs::OpenOptions::new()
 		.write(true)
@@ -379,7 +379,7 @@ async fn open_at(destination: &Path, offset: u64) -> Result<tokio::fs::File> {
 		.open(destination)
 		.await
 		.with_context(|| format!("could not open {} to resume", destination.display()))
-		.map_err(transfer::refused)?;
+		.map_err(transfer::mark_refused)?;
 	file.seek(std::io::SeekFrom::Start(offset))
 		.await
 		.with_context(|| {
@@ -517,7 +517,7 @@ async fn ensure_dir(path: &Path) -> Result<()> {
 	tokio::fs::create_dir_all(path)
 		.await
 		.with_context(|| format!("could not create {}", path.display()))
-		.map_err(transfer::refused)
+		.map_err(transfer::mark_refused)
 }
 
 /// The first free `name-1.ext`, `name-2.ext`… in `dir`, as a pane path — the "keep both" destination

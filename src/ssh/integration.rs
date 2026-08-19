@@ -101,7 +101,7 @@ async fn look(
 	backend: &AsuserFiles,
 	user: &str,
 ) -> Result<(Option<IntegrationShell>, String, bool)> {
-	let home = home(backend).await?;
+	let home = remote_home(backend).await?;
 
 	// The authoritative answer first: what `/etc/passwd` says this account logs into. A remote that
 	// will not let us read it (or does not have it) is not an error — it is one source that could
@@ -153,7 +153,7 @@ async fn edit_file(
 	// creates one, which is what the shell would read if it existed.
 	let existing = read_text(backend, path).await.unwrap_or_default();
 	let edited = if install {
-		integration::install(&existing, shell)
+		integration::install_snippet(&existing, shell)
 			.with_context(|| format!("{path} already has cmote's block"))?
 	} else {
 		integration::remove(&existing).with_context(|| format!("cmote's block is not in {path}"))?
@@ -166,7 +166,7 @@ async fn edit_file(
 /// SFTP answers by resolving `.`, which for a freshly opened session IS the home directory: the
 /// server starts every sftp session there. The shell backend asks the shell for `$HOME` instead,
 /// which is the same answer by the other road.
-async fn home(backend: &AsuserFiles) -> Result<String> {
+async fn remote_home(backend: &AsuserFiles) -> Result<String> {
 	match backend {
 		AsuserFiles::Sftp(sftp) => sftp
 			.canonicalize(".".to_owned())

@@ -377,7 +377,7 @@ async fn open_remote_at(sftp: &SftpSession, remote: &str, offset: u64) -> Result
 			// A destination that was never created holds no bytes to continue from, and asking a
 			// second time would be refused the same way — so this failure is final, not resumable
 			// (§16). The commonest case by far: uploading into a folder this account cannot write.
-			.map_err(transfer::refused);
+			.map_err(transfer::mark_refused);
 	}
 	let mut file = sftp
 		.open_with_flags(remote.to_owned(), OpenFlags::WRITE | OpenFlags::CREATE)
@@ -385,7 +385,7 @@ async fn open_remote_at(sftp: &SftpSession, remote: &str, offset: u64) -> Result
 		.with_context(|| format!("could not open {remote} on the server to resume"))
 		// The partial is there, but out of reach: a further Resume would ask for exactly this and
 		// be refused exactly the same, so there is nothing to offer.
-		.map_err(transfer::refused)?;
+		.map_err(transfer::mark_refused)?;
 	file.seek(SeekFrom::Start(offset))
 		.await
 		.with_context(|| format!("could not seek {remote} to the resume point"))?;
@@ -792,7 +792,7 @@ async fn ensure_remote_dir(sftp: &SftpSession, path: &str) -> Result<()> {
 		.with_context(|| format!("could not create {path} on the server"))
 		// Every directory is made before any file goes into one, so a refusal here means the tree
 		// has not copied a byte — nothing to resume, and the same `mkdir` would be refused again.
-		.map_err(transfer::refused)
+		.map_err(transfer::mark_refused)
 }
 
 /// Walk a local directory tree into the plan both transfer directions share (§17). Iterative,

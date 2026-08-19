@@ -178,7 +178,7 @@ pub fn block(shell: IntegrationShell) -> Option<String> {
 /// block reads `$PROMPT_COMMAND` to prepend itself to whatever is already set, so it has to run
 /// after the lines that set it. A missing final newline is added first, so a file that did not end
 /// in one does not get the marker welded onto its last line.
-pub fn install(existing: &str, shell: IntegrationShell) -> Option<String> {
+pub fn install_snippet(existing: &str, shell: IntegrationShell) -> Option<String> {
 	if existing.contains(BEGIN) {
 		return None;
 	}
@@ -282,12 +282,12 @@ mod tests {
 		// to no purpose.
 		assert!(!IntegrationShell::Fish.installable());
 		assert_eq!(block(IntegrationShell::Fish), None);
-		assert_eq!(install("", IntegrationShell::Fish), None);
+		assert_eq!(install_snippet("", IntegrationShell::Fish), None);
 	}
 
 	#[test]
 	fn the_block_is_appended_whole_with_both_markers() {
-		let out = install("export PATH=$PATH:/opt/bin\n", IntegrationShell::Bash).unwrap();
+		let out = install_snippet("export PATH=$PATH:/opt/bin\n", IntegrationShell::Bash).unwrap();
 		assert!(
 			out.starts_with("export PATH=$PATH:/opt/bin\n"),
 			"the file is kept"
@@ -305,7 +305,7 @@ mod tests {
 		// A rc file whose last line has no newline is common enough, and appending straight onto it
 		// would turn that line into `alias ll='ls -l'# >>> cmote ...` — a comment marker in the
 		// middle of a live command.
-		let out = install("alias ll='ls -l'", IntegrationShell::Bash).unwrap();
+		let out = install_snippet("alias ll='ls -l'", IntegrationShell::Bash).unwrap();
 		assert!(
 			out.contains("alias ll='ls -l'\n"),
 			"the last line is closed off"
@@ -320,9 +320,9 @@ mod tests {
 	fn installing_twice_does_nothing() {
 		// The marker is the whole bookkeeping: a second install would announce the directory twice
 		// on every prompt, and there is no state anywhere else that would notice.
-		let once = install("# rc\n", IntegrationShell::Bash).unwrap();
+		let once = install_snippet("# rc\n", IntegrationShell::Bash).unwrap();
 		assert!(installed(&once));
-		assert_eq!(install(&once, IntegrationShell::Bash), None);
+		assert_eq!(install_snippet(&once, IntegrationShell::Bash), None);
 	}
 
 	#[test]
@@ -330,14 +330,14 @@ mod tests {
 		// The round trip is the promise the dialog makes: it can be removed. Anything left behind —
 		// a blank line, a stray marker — would break that on the second cycle.
 		let before = "# rc\nexport EDITOR=vi\n";
-		let after = install(before, IntegrationShell::Zsh).unwrap();
+		let after = install_snippet(before, IntegrationShell::Zsh).unwrap();
 		assert_eq!(remove(&after).as_deref(), Some(before));
 	}
 
 	#[test]
 	fn removing_keeps_what_was_written_after_the_block() {
 		// A user who added their own lines below cmote's block keeps them.
-		let installed = install("# rc\n", IntegrationShell::Bash).unwrap();
+		let installed = install_snippet("# rc\n", IntegrationShell::Bash).unwrap();
 		let with_tail = format!("{installed}export LANG=C.UTF-8\n");
 		let out = remove(&with_tail).unwrap();
 		assert_eq!(out, "# rc\nexport LANG=C.UTF-8\n");

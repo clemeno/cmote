@@ -165,7 +165,7 @@ pub async fn make_dirs(runner: &impl Exec, path: &str) -> Result<()> {
 		// Every directory is made before any file is copied into one, so a refusal here means the
 		// transfer has not written a byte: a clean failure, not something to offer a Resume for
 		// (§16). The `mkdir` would be refused the same way next time.
-		.map_err(transfer::refused)
+		.map_err(transfer::mark_refused)
 }
 
 /// Rename, refusing an occupied destination (§18) — again as one command, for the same reason.
@@ -490,14 +490,14 @@ async fn open_local(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 			.context("could not create the local file")
 			// Same classing as the SFTP backend's `open_local_at`: a destination that was never
 			// created has no partial, so the failure is final rather than resumable (§16).
-			.map_err(transfer::refused);
+			.map_err(transfer::mark_refused);
 	}
 	let file = tokio::fs::OpenOptions::new()
 		.write(true)
 		.open(local)
 		.await
 		.context("could not open the local partial")
-		.map_err(transfer::refused)?;
+		.map_err(transfer::mark_refused)?;
 	use tokio::io::AsyncSeekExt;
 	let mut file = file;
 	file.seek(std::io::SeekFrom::Start(offset))
@@ -532,7 +532,7 @@ pub async fn walk(runner: &impl Exec, root: &str) -> Result<TreePlan> {
 		.await?;
 	// `find` lists a parent before its children, which is the order the plan promises.
 	for line in dirs.lines().filter(|line| !line.is_empty()) {
-		if let Some(rel) = relative(root, line) {
+		if let Some(rel) = relative_parts(root, line) {
 			plan.dirs.push(rel);
 		}
 	}
@@ -554,7 +554,7 @@ pub async fn walk(runner: &impl Exec, root: &str) -> Result<TreePlan> {
 		if path == "total" {
 			continue;
 		}
-		if let Some(rel) = relative(root, path) {
+		if let Some(rel) = relative_parts(root, path) {
 			plan.files.push(PlannedFile {
 				rel,
 				size,
@@ -586,7 +586,7 @@ fn split_wc(line: &str) -> Option<(u64, &str)> {
 
 /// A remote path's components relative to `root`, or `None` when it is not inside it. The root
 /// itself is the empty list, which is what a plan calls its own top.
-fn relative(root: &str, path: &str) -> Option<Vec<String>> {
+fn relative_parts(root: &str, path: &str) -> Option<Vec<String>> {
 	let root = root.trim_end_matches('/');
 	let rest = path.strip_prefix(root)?;
 	Some(
@@ -631,7 +631,7 @@ pub async fn fetch_tree(
 		tokio::fs::create_dir_all(&dir)
 			.await
 			.with_context(|| format!("could not create {}", dir.display()))
-			.map_err(transfer::refused)?;
+			.map_err(transfer::mark_refused)?;
 	}
 	for file in &plan.files {
 		if cancel.load(Ordering::Relaxed) {
@@ -925,7 +925,7 @@ mod backend_tests {
 
 #[cfg(test)]
 mod tests {
-	use super::{relative, split_remote, split_wc};
+	use super::{relative_parts, split_remote, split_wc};
 
 	#[test]
 	fn a_wc_line_splits_into_a_size_and_a_path_that_may_hold_spaces() {
@@ -942,14 +942,14 @@ mod tests {
 	#[test]
 	fn a_walked_path_is_read_as_components_under_the_root() {
 		assert_eq!(
-			relative("/srv/app", "/srv/app/logs/today.log"),
+			relative_parts("/srv/app", "/srv/app/logs/today.log"),
 			Some(vec!["logs".to_owned(), "today.log".to_owned()])
 		);
 		// The root itself is the empty list — a plan's own top.
-		assert_eq!(relative("/srv/app", "/srv/app"), Some(Vec::new()));
-		assert_eq!(relative("/srv/app/", "/srv/app"), Some(Vec::new()));
+		assert_eq!(relative_parts("/srv/app", "/srv/app"), Some(Vec::new()));
+		assert_eq!(relative_parts("/srv/app/", "/srv/app"), Some(Vec::new()));
 		// Anything outside the root is not part of the tree.
-		assert_eq!(relative("/srv/app", "/etc/passwd"), None);
+		assert_eq!(relative_parts("/srv/app", "/etc/passwd"), None);
 	}
 
 	#[test]

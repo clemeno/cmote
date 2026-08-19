@@ -247,7 +247,7 @@ async fn open_local_at(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 			// A local file that could not be created — a folder this account cannot write into, a
 			// read-only volume — holds nothing to continue from, and the same create would be
 			// refused again: final, not resumable (§16).
-			.map_err(transfer::refused);
+			.map_err(transfer::mark_refused);
 	}
 	let mut file = tokio::fs::OpenOptions::new()
 		.write(true)
@@ -259,7 +259,7 @@ async fn open_local_at(local: &Path, offset: u64) -> Result<tokio::fs::File> {
 		.await
 		.with_context(|| format!("could not open {} to resume", local.display()))
 		// The partial is on disk but unreachable, so a further Resume would be refused identically.
-		.map_err(transfer::refused)?;
+		.map_err(transfer::mark_refused)?;
 	file.seek(SeekFrom::Start(offset))
 		.await
 		.with_context(|| format!("could not seek {} to the resume point", local.display()))?;
@@ -512,13 +512,13 @@ async fn receive_tree(
 	tokio::fs::create_dir_all(&local_target)
 		.await
 		.with_context(|| format!("could not create {}", local_target.display()))
-		.map_err(transfer::refused)?;
+		.map_err(transfer::mark_refused)?;
 	for rel in &plan.dirs {
 		let dir = transfer::local_join(&local_target, rel);
 		tokio::fs::create_dir_all(&dir)
 			.await
 			.with_context(|| format!("could not create {}", dir.display()))
-			.map_err(transfer::refused)?;
+			.map_err(transfer::mark_refused)?;
 	}
 
 	let mut ticker = Ticker::default();

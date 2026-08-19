@@ -651,7 +651,7 @@ impl Terminal {
 		// separate fields rather than through `self.screen()`, which would borrow all of `self`.
 		let screen = screen::Screen::new(&self.term, &self.paths);
 		self.graphics
-			.retire_covered_alternate(|placement| covered(&screen, placement));
+			.retire_covered_alternate(|placement| is_covered(&screen, placement));
 	}
 
 	/// Claim a `rows`×`cols` box of cells for an image just placed at the cursor (§41), leaving the
@@ -2135,7 +2135,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 ///
 /// A row off the bottom of the page reads as no cell at all, which is right — a picture reserved
 /// against a page that has since been resized smaller has nothing to be covered by.
-fn covered(screen: &screen::Screen<'_>, placement: &graphics::Placement) -> bool {
+fn is_covered(screen: &screen::Screen<'_>, placement: &graphics::Placement) -> bool {
 	// The alternate page keeps no history and cannot be scrolled back, so the placement's absolute
 	// line IS its viewport row and the cast cannot lose anything: it was built from a `u16` row.
 	let top = placement.line as u16;

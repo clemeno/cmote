@@ -1390,7 +1390,7 @@ fn cell_style(
 	let mut bg = to_iced_color(cell.bgcolor(), DEFAULT_BG);
 	// Faint is a property of the ink, so fade it toward the background before any swap.
 	if cell.dim() {
-		fg = blend(bg, fg, DIM_STRENGTH);
+		fg = lerp(bg, fg, DIM_STRENGTH);
 	}
 	// The underline's explicit colour (SGR 58), resolved now so it tracks the ink; the
 	// fallback to the foreground is applied after the swap, below, so it follows inverse too.
@@ -1442,7 +1442,7 @@ fn cell_style(
 
 /// Blend `from` toward `to` by `t` (0 keeps `from`, 1 reaches `to`), one channel at a time.
 /// Used to fade a faint cell's foreground toward its background.
-fn blend(from: Color, to: Color, t: f32) -> Color {
+fn lerp(from: Color, to: Color, t: f32) -> Color {
 	Color::from_rgba(
 		from.r + (to.r - from.r) * t,
 		from.g + (to.g - from.g) * t,

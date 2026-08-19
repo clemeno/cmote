@@ -161,10 +161,10 @@ impl std::fmt::Display for TransferRefused {
 impl std::error::Error for TransferRefused {}
 
 /// Mark a failure as the destination's refusal — see [`TransferRefused`]. A function rather than a method
-/// so a call site reads `.map_err(transfer::refused)` on the very line that makes or opens the
+/// so a call site reads `.map_err(transfer::mark_refused)` on the very line that makes or opens the
 /// destination: past that line there IS somewhere for bytes to survive, so past that line a failure
 /// is resumable again.
-pub(crate) fn refused(error: anyhow::Error) -> anyhow::Error {
+pub(crate) fn mark_refused(error: anyhow::Error) -> anyhow::Error {
 	anyhow::Error::new(TransferRefused(error))
 }
 
@@ -487,7 +487,8 @@ mod tests {
 
 	#[test]
 	fn a_refused_destination_is_recognised_as_one() {
-		let error = super::refused(anyhow::anyhow!("could not create /srv/data on the server"));
+		let error =
+			super::mark_refused(anyhow::anyhow!("could not create /srv/data on the server"));
 		assert!(super::was_refused(&error));
 	}
 
@@ -497,7 +498,7 @@ mod tests {
 		// frames higher, and every frame in between may add its own context. The class must ride
 		// under all of it — a refusal that a `.context()` could hide would be a Resume button back.
 		use anyhow::Context;
-		let error = Err::<(), _>(super::refused(anyhow::anyhow!("permission denied")))
+		let error = Err::<(), _>(super::mark_refused(anyhow::anyhow!("permission denied")))
 			.context("could not upload notes.txt")
 			.unwrap_err();
 		assert!(super::was_refused(&error));
@@ -512,7 +513,7 @@ mod tests {
 		let inner = Err::<(), _>(anyhow::anyhow!("permission denied"))
 			.context("could not create /srv/data/notes.txt on the server")
 			.unwrap_err();
-		let error = super::refused(inner);
+		let error = super::mark_refused(inner);
 		assert_eq!(
 			error.to_string(),
 			"could not create /srv/data/notes.txt on the server: permission denied"

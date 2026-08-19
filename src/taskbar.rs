@@ -37,9 +37,9 @@
 // dependency would only exist to avoid storing one integer twice.
 
 /// Take the window the progress will be shown on, at boot. A no-op off Windows.
-pub fn install(hwnd: isize) {
+pub fn attach(hwnd: isize) {
 	#[cfg(windows)]
-	platform::install(hwnd);
+	platform::attach(hwnd);
 	#[cfg(not(windows))]
 	let _ = hwnd;
 }
@@ -131,7 +131,7 @@ mod platform {
 	static WINDOW: OnceLock<isize> = OnceLock::new();
 
 	/// Remember the window. Called from the boot task, on the thread that owns it.
-	pub fn install(hwnd: isize) {
+	pub fn attach(hwnd: isize) {
 		if hwnd != 0 {
 			let _ = WINDOW.set(hwnd);
 		}
@@ -271,7 +271,7 @@ mod platform {
 		fn a_window_that_was_never_given_is_not_remembered() {
 			// A null HWND means iced gave us no Win32 handle; storing it would leave every later call
 			// addressing window 0.
-			install(0);
+			attach(0);
 			assert_eq!(WINDOW.get(), None);
 		}
 	}

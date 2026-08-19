@@ -1689,7 +1689,7 @@ A running transfer can be **stopped** (the status bar's ✕) and, after a mid-fl
   the `create`, before a byte exists on the far side — so there is no partial, and a Resume would run
   that very same refused create again. The few places that make or open a destination (both
   backends, both directions: the file `create`/open, the tree's `mkdir`) mark their failure with
-  `transfer::refused`, an error wrapper the reporting end reads back with `transfer::was_refused`.
+  `transfer::mark_refused`, an error wrapper the reporting end reads back with `transfer::was_refused`.
   A marked failure reports as a plain `*Failed` — the server's own reason in the status bar, the
   queue behind it moving on, no Resume — and the mark rides under any context added on the way up,
   so it cannot be lost between the refusal and the report. Everything past the line that opened the

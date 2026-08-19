@@ -127,7 +127,7 @@ impl Vault {
 	fn unlock_at(path: &Path, passphrase: String) -> Result<Self> {
 		let passphrase = SecretString::from(passphrase);
 		let ciphertext = std::fs::read(path).context("failed to read the vault file")?;
-		let entries = open(&passphrase, &ciphertext)?;
+		let entries = unseal(&passphrase, &ciphertext)?;
 		Ok(Self {
 			passphrase,
 			entries,
@@ -185,7 +185,7 @@ fn seal(
 /// decrypted JSON is held in `Zeroizing` and each value is MOVED into a `Secret` (not copied),
 /// so no plaintext copy of a secret outlives this function. Any failure — wrong passphrase, a
 /// truncated or corrupt blob, malformed JSON — comes back as an error; the caller re-asks.
-fn open(passphrase: &SecretString, ciphertext: &[u8]) -> Result<BTreeMap<String, Secret>> {
+fn unseal(passphrase: &SecretString, ciphertext: &[u8]) -> Result<BTreeMap<String, Secret>> {
 	let identity = age::scrypt::Identity::new(passphrase.clone());
 	let plaintext =
 		Zeroizing::new(age::decrypt(&identity, ciphertext).context("failed to decrypt the vault")?);
@@ -222,7 +222,7 @@ mod tests {
 
 		// Act
 		let blob = seal(&pass, &entries, TEST_WORK_FACTOR).expect("seal");
-		let back = open(&pass, &blob).expect("open");
+		let back = unseal(&pass, &blob).expect("open");
 
 		// Assert: same endpoints, same secrets.
 		assert_eq!(back.len(), 2);
@@ -238,13 +238,13 @@ mod tests {
 		let blob = seal(&right, &entries_of(&[("u@h:22", "pw")]), TEST_WORK_FACTOR).expect("seal");
 
 		// Act / Assert: the wrong passphrase cannot decrypt — no oracle, just an error (§12).
-		assert!(open(&wrong, &blob).is_err());
+		assert!(unseal(&wrong, &blob).is_err());
 	}
 
 	#[test]
 	fn a_corrupt_blob_is_an_error_not_a_panic() {
 		let pass = SecretString::from("whatever".to_string());
-		assert!(open(&pass, b"this is not an age file").is_err());
+		assert!(unseal(&pass, b"this is not an age file").is_err());
 	}
 
 	#[test]

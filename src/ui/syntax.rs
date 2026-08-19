@@ -353,14 +353,14 @@ fn cme_theme() -> Theme {
 	theme.settings.background = Some(syn_rgb(0x1a2a30));
 	theme.scopes = scopes
 		.iter()
-		.map(|(scope, rgb)| item(scope, *rgb))
+		.map(|(scope, rgb)| theme_item(scope, *rgb))
 		.collect();
 	theme
 }
 
 /// One theme rule: a scope selector coloured with an opaque RGB (§32). An unparsable selector falls
 /// back to matching nothing, so a typo cannot panic — it just does not colour.
-fn item(scope: &str, rgb: u32) -> ThemeItem {
+fn theme_item(scope: &str, rgb: u32) -> ThemeItem {
 	ThemeItem {
 		scope: ScopeSelectors::from_str(scope).unwrap_or_default(),
 		style: StyleModifier {

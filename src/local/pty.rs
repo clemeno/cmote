@@ -104,7 +104,7 @@ impl Pty {
 	/// later, once it knows the real window size.
 	pub fn open(shell: &LocalShell) -> Result<(Self, Stream)> {
 		let pair = native_pty_system()
-			.openpty(size(term::DEFAULT_COLS, term::DEFAULT_ROWS))
+			.openpty(pty_size(term::DEFAULT_COLS, term::DEFAULT_ROWS))
 			.context("could not open a pseudo-terminal")?;
 
 		let mut command = CommandBuilder::new(&shell.program);
@@ -180,7 +180,7 @@ impl Pty {
 	/// The mirror of `SshCommand::Resize` (§9): the GUI is the single source of the grid size and both
 	/// backends are told the same numbers.
 	pub fn resize(&self, cols: u16, rows: u16) {
-		if let Err(error) = self.master.resize(size(cols, rows)) {
+		if let Err(error) = self.master.resize(pty_size(cols, rows)) {
 			// Not fatal and not worth a dialog: the shell keeps running at the size it had, and the
 			// next resize will try again. Logged so a pty that refuses every resize is findable.
 			eprintln!("could not resize the local pty: {error:#}");
@@ -208,7 +208,7 @@ impl Pty {
 /// The pty size in the crate's own shape. The pixel fields are zero, which is what says "no opinion":
 /// they exist for programs that ask a terminal for its pixel dimensions, and cmote's grid is measured
 /// in cells (§11) — a made-up pixel size would be worse than none.
-fn size(cols: u16, rows: u16) -> PtySize {
+fn pty_size(cols: u16, rows: u16) -> PtySize {
 	PtySize {
 		rows,
 		cols,
@@ -303,7 +303,7 @@ fn spawn_writer(mut writer: Box<dyn std::io::Write + Send>) -> mpsc::Sender<Vec<
 
 #[cfg(test)]
 mod tests {
-	use super::{Pty, READ_CHUNK, size};
+	use super::{Pty, READ_CHUNK, pty_size};
 	use crate::local::shells::{LocalShell, ShellKind};
 	use crate::term;
 	use std::path::PathBuf;
@@ -312,7 +312,7 @@ mod tests {
 	fn the_pty_opens_at_the_emulators_own_grid_size() {
 		// The same rule the SSH path follows (§9): `term` owns the size, both backends are told it, so
 		// the shell's idea of the window and cmote's can never start out disagreeing.
-		let opened = size(term::DEFAULT_COLS, term::DEFAULT_ROWS);
+		let opened = pty_size(term::DEFAULT_COLS, term::DEFAULT_ROWS);
 		assert_eq!(opened.cols, term::DEFAULT_COLS);
 		assert_eq!(opened.rows, term::DEFAULT_ROWS);
 		// No made-up pixel dimensions: zero is how a terminal says it has no opinion, and cmote

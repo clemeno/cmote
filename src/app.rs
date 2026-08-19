@@ -6721,10 +6721,10 @@ impl Tab {
 
 	/// Open an OSC 8 hyperlink (§24), or note it when its scheme is refused. Web and mail
 	/// links open in the OS's default browser; anything else is blocked with a toast, since
-	/// the URI is the remote's to choose (`link::open` is the policy). Shared by Ctrl+click
+	/// the URI is the remote's to choose (`link::open_uri` is the policy). Shared by Ctrl+click
 	/// and the context menu's "Open link".
 	fn follow_link(&mut self, uri: &str) {
-		if !link::open(uri) {
+		if !link::open_uri(uri) {
 			self.snackbar = Some(Snackbar {
 				message: "Link blocked — cmote opens only http, https and mailto.".to_owned(),
 				shown_at: std::time::Instant::now(),
@@ -8177,7 +8177,7 @@ fn install_hand_cursors() -> iced::Task<Message> {
 				};
 				if let RawWindowHandle::Win32(win32) = handle.as_raw() {
 					crate::cursor::install(win32.hwnd.get());
-					crate::taskbar::install(win32.hwnd.get());
+					crate::taskbar::attach(win32.hwnd.get());
 				}
 			})
 		})

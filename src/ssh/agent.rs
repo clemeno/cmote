@@ -46,7 +46,7 @@ const OPENSSH_AGENT_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
 /// factor), or `Outcome::Failure` when keys were offered but the server took none (the caller
 /// collapses that into one generic error). It errors out only when there is nothing to try at
 /// all: no agent answered, or an agent answered but held no usable key.
-pub(crate) async fn authenticate(
+pub(crate) async fn try_agent(
 	session: &mut client::Handle<Handler>,
 	user: &str,
 ) -> Result<Outcome> {

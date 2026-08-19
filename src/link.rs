@@ -38,7 +38,7 @@ pub fn is_allowed(uri: &str) -> bool {
 /// waiting for the browser, so the UI thread never stalls, and a rare launch failure (no
 /// browser registered, say) is swallowed — there is nothing useful to do about it and it is
 /// not worth a modal.
-pub fn open(uri: &str) -> bool {
+pub fn open_uri(uri: &str) -> bool {
 	if !is_allowed(uri) {
 		return false;
 	}

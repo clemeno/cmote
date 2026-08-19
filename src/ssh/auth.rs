@@ -134,7 +134,7 @@ pub(crate) async fn authenticate(
 		// signs each challenge itself, so there is no secret to prompt for and no key file to
 		// load — cmote never sees the private key. A success may still chain into a second
 		// factor below, exactly like the key path.
-		AuthMethod::Agent => agent::authenticate(session, params.user.as_str()).await?,
+		AuthMethod::Agent => agent::try_agent(session, params.user.as_str()).await?,
 	};
 
 	// Then follow the server into keyboard-interactive for as long as it keeps offering the
