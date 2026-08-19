@@ -12372,12 +12372,18 @@ corrected it before the commit.)
 ### Not done
 
 - **The seven pre-existing suppressions** predate this section and were only partly resolved.
-  `cursor.rs`'s `#[expect]` survives with a reason it did not have. The three
-  `#[allow(clippy::too_many_arguments)]` in `local/copy.rs`, `ssh/download.rs` and `ssh/upload.rs`
-  each want a parameter struct rather than an edit; `ui/syntax.rs`'s `field_reassign_with_default` is
-  on a `#[non_exhaustive]` type, which is the case the lint cannot see; and `ssh/asuser.rs`'s
-  `async_fn_in_trait` is about a trait shape, not a line. AGENTS.md's "no `allow`" applies to all
-  five, so they are debts and not decisions.
+  `cursor.rs`'s `#[expect]` survives with a reason it did not have; the other **six are still
+  `#[allow]`** and AGENTS.md's rule applies to every one of them, so they are debts and not
+  decisions:
+
+  | file | lint | what it would take |
+  |---|---|---|
+  | `local/copy.rs` | `too_many_arguments` | a parameter struct, not an edit |
+  | `ssh/download.rs` | `too_many_arguments` | the same |
+  | `ssh/upload.rs` | `too_many_arguments` | the same |
+  | `ui/syntax.rs` | `field_reassign_with_default` | the type is `#[non_exhaustive]`, which is the case the lint cannot see |
+  | `ssh/asuser.rs` | `async_fn_in_trait` | a trait shape, not a line |
+  | `elevate.rs` | `dead_code` | either a caller or a deletion — the only one of the six that is a question about the code rather than about the lint |
 - **Two tautological assertions** in `panes.rs` restate the production formula, so they pin that the
   clamp is applied and not what it computes. Replacing them with worked examples is a test-quality
   change (§107), not a lint fix.
