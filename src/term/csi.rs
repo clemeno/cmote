@@ -1,12 +1,27 @@
 // term/csi.rs — the facts every CSI scanner has to agree with the engine about.
 //
 // Eleven modules in this directory scan CSI sequences beside the stream, each for its own reason, and
-// each currently carries its own copy of the grammar. That duplication is a known debt with a plan
-// attached — §106's architecture review put it first, as "give the CSI family the floor OSC already
-// has": `osc::Framer` proved the shape works for the OSC family, and one `csi::Framer` is meant to move
-// in here and leave the scanners with only the part that is theirs — deciding what a sequence MEANS.
+// every one of them used to carry its own copy of the grammar. §106's architecture review put that
+// duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all eleven
+// read [`Framer`] now and keep only the part that is theirs — deciding what a sequence MEANS.
 //
-// This module starts with the part that could not wait for it. A scanner's LIMITS are not a private
+// What that bought was not the line count. Defects came out of the migrations, one at a time, because
+// the shared grammar had to take the STRICTEST rule of its callers rather than the laxest — two rules
+// only `scp` and `protect` had enforced by hand became everyone's, and then the rest fell out of
+// asking what the engine really does:
+//
+//   * FOUR bounds named `MAX_PARAMS` that counted parameter BYTES rather than parameters, and
+//     abandoned a sequence the engine saturates and acts on (`sgrstack` and `rect` at 64, `modkeys`
+//     and `query` at 16);
+//   * a `Params` that could not tell a written zero from an omitted parameter;
+//   * `CSI 2 : 3 J`, which wipes the screen — and which `graphics` did not claim, so every picture
+//     stayed on it;
+//   * two scanners deaf to the sequence after a control string, one of them losing a RIS;
+//   * two scanners with no state for an intermediate byte or for a byte the engine reads through.
+//
+// Every one is recorded where it was fixed and in PLAN §111.
+//
+// This module started with the part that could not wait for it. A scanner's LIMITS are not a private
 // choice: cmote and the engine read the same bytes, and wherever the two disagree about whether a
 // sequence is well formed, one of them acts and the other does not. Two of those disagreements were
 // live defects, both fixed by the numbers below (§57 read a padded DECSLRM as a save-cursor; §56 lost
@@ -59,10 +74,10 @@ pub fn passes_through(byte: u8) -> bool {
 
 /// The parameter run of the CSI or DCS sequence a scanner is in the middle of reading.
 ///
-/// Two scanners hold one of these today (§56's selective erase and §41's pictures), which is what makes
-/// this a seam rather than a hypothetical one: the rule below was wrong in the same way in both of them
-/// and had to be fixed in one place. The other nine scanners still carry their own copy of it, and this
-/// is where they land when the framer arrives.
+/// [`Framer`] holds one, and so does `graphics` for the sixel parameters its own DCS machine reads —
+/// the two uses that make this a seam rather than a hypothetical one. It was a seam before the framer
+/// existed, too: the rule below was wrong in the same way in the two scanners that had hand-rolled it,
+/// and had to be fixed in one place.
 ///
 /// What it keeps is the run's BYTES, so a caller can still read the run the way it always did — as
 /// `1`, `?2`, `38;5;196` — rather than being handed numbers it did not ask for. Parsing stays with the
@@ -374,10 +389,10 @@ enum CsiScan {
 
 /// Cuts CSI sequences out of shell output, once, for every scanner that reads them.
 ///
-/// This is `osc::Framer`'s counterpart, and it exists for the same reason: nine modules in this
+/// This is `osc::Framer`'s counterpart, and it exists for the same reason: eleven modules in this
 /// directory each need to sniff a CSI the engine also reads, each cares about a DIFFERENT sequence,
 /// and every one of them first had to solve the same problem — find where a CSI starts and ends in a
-/// stream that arrives in arbitrary chunks. That was 62 to 82 lines apiece of identical grammar, and
+/// stream that arrives in arbitrary chunks. That was 62 to 162 lines apiece of identical grammar, and
 /// the module-specific part of it is a handful of lines (§106, §111).
 ///
 /// Safe at any chunk boundary: the state carries over between `feed` calls, so a sequence may be split

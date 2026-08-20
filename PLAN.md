@@ -12461,16 +12461,20 @@ unfalsifiable: `EOF_ECHO` was changed to `b"^X"` so the rule could never fire, a
 to EXIT rather than for a prompt, so it makes no timing guess at all, which is the distinction: a test
 may wait for an event it will certainly get, and must not wait for one it is only hoping for.
 
-### The CSI framer, nine scanners in
+### The CSI framer, all eleven scanners in
 
-`csi::Framer` is §106's top recommendation, built here. Ten modules under `term/` each scanned CSI
-sequences beside the engine, and each carried its own copy of the grammar — 62 to 82 lines apiece of
-"find where a CSI starts and ends in a stream that arrives in arbitrary chunks", with the
-module-specific part of it a handful of lines. Nine are migrated. `feed` loops so far: `tabs` 62→9,
+`csi::Framer` is §106's top recommendation, built here. **Eleven** modules under `term/` each scanned
+CSI sequences beside the engine, and each carried its own copy of the grammar — 62 to 162 lines apiece
+of "find where a CSI starts and ends in a stream that arrives in arbitrary chunks", with the
+module-specific part of it a handful of lines. All eleven are migrated. `feed` loops: `tabs` 62→9,
 `dsr` 62→8, `scp` 74→19, `protect` 82→27, `sgrstack` 76→21, `modkeys` 62→24, `rect` 74→25,
-`cancel` 80→9.
+`cancel` 80→9, `graphics` and `query` 162→11 for the CSI half, both keeping their DCS machine.
 
-**The payout ran upward, not downward.** The worry with sharing a grammar between ten readers is that
+The count was ten for most of the section, and eleven is the corrected figure: `query` was missed
+because it is the one that scans CSI *and* DCS from a single machine, so it did not look like a member
+of the family until its CSI half came out.
+
+**The payout ran upward, not downward.** The worry with sharing a grammar between eleven readers is that
 the shared code settles on the laxest behaviour of its callers. The opposite happened, because each
 migration was one commit and the strictest existing rule won every time:
 
@@ -12486,15 +12490,18 @@ migration was one commit and the strictest existing rule won every time:
 - `first_param` lost its "unreadable" case entirely. With a marker refused mid-parameters, a
   parameter run is digits and separators only, so it returns `u16` rather than `Option<u16>`.
 
-**Three defects were found BY migrating**, which is the argument for one scanner per commit:
+**Defects were found BY migrating**, which is the argument for one scanner per commit rather than one
+sweep. Three came out of the nine straightforward ones, and the two that also read DCS produced four
+more (below):
 
 1. `Params` dropped leading zeros so thoroughly that an all-zero field rendered as nothing, making
    `CSI # 1 ; 0 {` identical to `CSI # 1 ; {`. Invisible to the four scanners migrated first (each
    reads an omitted parameter as 0) and breaking for `sgrstack`, which treats an empty field as
    malformed on purpose. `Params::finish` writes the zero back.
-2. Three bounds named `MAX_PARAMS` counted parameter BYTES, not parameters — 64 in `sgrstack` and
-   `rect`, 16 in `modkeys` — and all three ABANDONED the sequence over a long digit run, where the
-   engine saturates the number and acts. That is §106's defect shape three more times.
+2. **Four** bounds named `MAX_PARAMS` counted parameter BYTES, not parameters — 64 in `sgrstack` and
+   `rect`, 16 in `modkeys` and `query` — and all four ABANDONED the sequence over a long digit run,
+   where the engine saturates the number and acts. That is §106's defect shape four more times, and
+   not one of the four was the engine's number in the engine's unit.
 3. `sgrstack` and `modkeys` both crossed onto the framer reading a `:` as another `;`. The
    hand-rolled walks they replaced had dropped those sequences by ACCIDENT — the colon made a field
    unreadable as a number — and taking the accident for the whole of the reason was a widening
@@ -12518,24 +12525,38 @@ reset CHANGES WHAT THE OTHER SEQUENCES READ — DECSACE's extent is stamped onto
 after it — so a second pass would read the whole chunk against whichever extent the chunk ended with.
 `feed` cuts the chunk into runs at each RIS and feeds them in turn, rebasing each run's offsets.
 
-### `query`, the tenth, and the live divergence in it
+### The two that scan CSI *and* DCS, and the blocker that was not one
 
-`query` is the one CSI scanner not migrated and the one not in the differential sweep, and those two
-facts are related. It still carries §106's divergence, measured rather than assumed:
+`query` and `graphics` were the last two, and the awkward ones: each reads CSI and DCS from a single
+machine, so only the CSI half could move. Both now do, and both keep their own DCS machine — the line
+`osc.rs` drew when `graphics` kept its own OSC framing.
 
-| fed to `Queries::feed` | answered |
-|---|---|
-| `` CSI > 0 q `` | `Version` |
-| `` CSI > `` + 16 zeros + `` q `` | `Version` |
-| `` CSI > `` + 17 zeros + `` q `` | nothing |
-| `` CSI > 0 `` LF `` q `` | nothing |
+`query` was also the one scanner missing from the differential sweep, and those two facts were
+related: it disagreed with the parser over shapes the sweep walks by the hundred, so it could not join
+until the framer fixed that. Measured before, rather than assumed:
 
-Both empty rows are sequences `vte` frames and dispatches. The harm is small and one-directional —
-cmote fails to ANSWER a query rather than acting on one alone, so a program asking XTVERSION with a
-stray control byte in it waits out its timeout — but it is the same class, and its `MAX_PARAMS = 16`
-is a fourth byte-counting bound that abandons where the engine saturates.
+| fed to `Queries::feed` | answered, before | after |
+|---|---|---|
+| `` CSI > 0 q `` | `Version` | `Version` |
+| `` CSI > `` + 16 zeros + `` q `` | `Version` | `Version` |
+| `` CSI > `` + 17 zeros + `` q `` | nothing | `Version` |
+| `` CSI > 0 `` LF `` q `` | nothing | `Version` |
 
-**The design question that was blocking it does not exist.** The paragraph here used to say that
+Both empty rows were sequences `vte` frames and dispatches. The harm was small and one-directional —
+cmote failed to ANSWER a query rather than acting on one alone, so a program asking XTVERSION with a
+stray control byte in it waited out its timeout — but it was the same class, and its `MAX_PARAMS = 16`
+was the fourth byte-counting bound.
+
+**`query` needed one thing no other scanner did: the ORDER of its results.** Its answers become reply
+bytes sent back to the remote, and a program that asks two questions matches the answers by position.
+Two unordered passes put every CSI answer after every DCS one, so `DCS $ q m ST` before `CSI > q`
+would have come back reversed. Each half collects with the offset it completed at and the two merge on
+it; the offsets are then dropped, since no caller wants them. `graphics` needed the same merge for a
+different reason — a picture is reported PAST its terminator and an erase BEFORE its first byte, so
+`img2sixel; clear` gives both events the same offset, and a stable sort with the strings scanned first
+is what keeps the draw before the erase.
+
+**The design question that was blocking both does not exist.** The paragraph here used to say that
 splitting `query`'s CSI half onto a DCS-unaware framer would let a payload containing `ESC [ > c`
 frame as a real query, and that gating the callback on "not currently inside a DCS" was the question
 to settle. That was wrong, and measuring it is what said so.
@@ -12566,7 +12587,17 @@ And one that was **duplicated-grammar drift in its plainest form**: single-byte 
 control string, `graphics` has had a `const ST` for its sixel payloads all along, and `query` never
 learned it — so a DECRQSS ended that way went unanswered while a picture ended that way drew fine.
 One of a pair of scanners knowing a rule its twin does not is the whole argument for the framer,
-restated in the family the framer has not reached yet.
+restated in the half of the family the framer does not cover.
+
+And one found by migrating `graphics`, which is **the same byte answered the opposite way**. `CSI 2:3 J`
+erases the screen: the engine HAS an arm for ED, and `next_param_or(0)` reads the first sub-parameter
+of the first parameter. `graphics`' hand-rolled loop abandoned the sequence on the colon, so the text
+went and every picture stayed on a screen that had just been wiped. Which makes its policy on a
+sub-parameter the reverse of `rect`'s, and both right: `rect` reads DECERA, which the engine frames and
+drops, so cmote is the only actor and refusing an undefined spelling costs nothing — while a rectangle
+built from a misread corner erases cells nobody named. That is exactly why `Csi::sub_parameters`
+reports the FACT and leaves the policy to each scanner, and
+`a_sub_parameter_is_read_or_refused_by_who_the_engine_leaves_it_to` pins both halves side by side.
 
 Three measurements changed my mind rather than confirming it, which is the reason to measure at all:
 
@@ -12583,16 +12614,18 @@ tell a clean terminator from an interrupted one — `unhook` fires either way �
 cmote treats a string that named no terminator as malformed and replies nothing, which is §54's rule
 and §60's: an invented answer is worse than a missing one.
 
-So both migrations are mechanical after all, and the remaining `MAX_PARAMS = 16` in `query` is the
-fourth byte-counting bound to go.
+With that settled, both migrations were mechanical, and the differential sweep now covers all eleven
+scanners over 6720 shapes — `c` and `S` joined the shape space with `query`, being DA3 and
+XTSMGRAPHICS, since a sweep that never spelled them could not have caught it acting on one alone.
 
 ### Not done
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
-- **`query` and `graphics` are not on the framer.** Their three DCS divergences are fixed and the
-  design question that looked like a blocker turned out not to be one, so what is left is mechanical:
-  `query`'s CSI half (three private-marker states and a fourth byte-counting `MAX_PARAMS`) and
-  `graphics`' `Csi` state. Both keep their own DCS machine, which is the line `osc.rs` already drew.
+- **The framer frames CSI only, and that is a decision.** `query` and `graphics` keep their own DCS
+  machine rather than a second family moving into `csi.rs`, which would put a policy parameter in that
+  interface fitting neither caller — the line `osc.rs` already drew. The cost is that the DCS grammar
+  is still spelled twice, and §111 found three defects in exactly that gap (two ESC, one ST). A
+  `dcs::Framer` for the two of them is the obvious next move and is not made here.
 - **The load stress is manual, not in CI**, and that is a decision rather than an omission. It lives
   in `AGENTS.md` beside the prove-it rule, in §13's category: a check that depends on the machine.
   GitHub's runners are two to four cores and already noisy, so a stress job would be the most likely
