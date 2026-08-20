@@ -499,19 +499,21 @@ mod tests {
 
 	#[test]
 	fn the_scanners_with_no_engine_arm_read_through_a_stray_byte_too() {
-		// The other five CSI scanners, and the reason this test is here rather than in each of them: the rule
-		// they are being held to is the ENGINE's (`csi::passes_through`), and the only thing that makes it
-		// their business is that they shadow the same byte stream.
+		// The seven CSI scanners whose sequences the engine has no live arm for, and the reason this test is
+		// here rather than in each of them: the rule they are being held to is the ENGINE's
+		// (`csi::passes_through`), and the only thing that makes it their business is that they shadow the
+		// same byte stream. (The other three — `cancel`, `protect`, `graphics` — watch sequences the engine
+		// really acts on, so they are compared against it directly in the tests above.)
 		//
 		// The engine has no live arm behind any of these seven sequences, so there is nothing to compare a
 		// verdict against — `vte` frames them and `ansi.rs` drops them. What can still be asserted is
 		// SELF-CONSISTENCY, and it is worth exactly as much: a stray byte the engine reads through must not
 		// change what cmote makes of a sequence, or the two will disagree the moment a version bump fills one
-		// of those empty handler bodies. Five of the six gave up on the line feed before this test existed.
+		// of those empty handler bodies. Five of the seven gave up on the line feed before this test existed.
 		//
-		// `modkeys` is the sixth, and it was added when §111 moved that scanner onto the shared grammar: it
-		// was left out of the first five because it did not obey the rule at all, and a test asserting what a
-		// module does wrong is not a test. The framer is what made the claim true.
+		// `modkeys` and `query` were the last two in, added as §111 moved each of them onto the shared
+		// grammar: both were left out at first because neither obeyed the rule at all, and a test asserting
+		// what a module does wrong is not a test. The framer is what made the claim true.
 		let interrupted = |sequence: &[u8], at: usize| {
 			let mut bytes = sequence.to_vec();
 			bytes.insert(at, b'\n');

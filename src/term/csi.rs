@@ -88,7 +88,7 @@ pub fn passes_through(byte: u8) -> bool {
 ///
 /// What it keeps is the run's BYTES, so a caller can still read the run the way it always did — as
 /// `1`, `?2`, `38;5;196` — rather than being handed numbers it did not ask for. Parsing stays with the
-/// caller, because the nine disagree about what an omitted parameter means (0, 1, "not ours",
+/// caller, because the ten disagree about what an omitted parameter means (0, 1, "not ours",
 /// "everything") and a shared parser would need every one of those as an option.
 #[derive(Debug, Default)]
 pub struct Params {

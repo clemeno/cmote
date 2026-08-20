@@ -11351,9 +11351,9 @@ the code under test look wrong.
   one-directional question: does any scanner act on bytes the parser threw away? The converse is fine (the
   parser frames plenty cmote ignores); this direction means cmote is the only terminal in the world obeying
   a spelling. See "the sweep that could not fail" above.
-- **Chunk-safety is swept for three scanners and claimed by eleven.** Every variant is fed one byte at a
+- **Chunk-safety is swept for three scanners and claimed by ten.** Every variant is fed one byte at a
   time as well, and the verdict has to hold — the property §104's Ctrl+D rule broke, on a two-read answer
-  it settled after the first read. The other eight scanners make the same claim in their own docs with
+  it settled after the first read. The other seven scanners make the same claim in their own docs with
   only their own hand-written boundary test behind it.
 - ~~It compares the PARSER, not the engine.~~ **Answered in §107**, which compares the handler by running a
   second engine with no gate in front of it. The gap as it stood: `vte::Parser` says what would be
