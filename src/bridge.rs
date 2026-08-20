@@ -428,7 +428,15 @@ pub enum SshEvent {
 	},
 	/// An elevated shell is through its conversation and is now a live terminal (§45): its output
 	/// is ordinary output from here on, and typing may be routed to it.
-	IdentityReady { identity: u64 },
+	///
+	/// `factors` is how many DISTINCT things the program asked for on the way (§45). One number,
+	/// two decisions, and they are the same rule read twice: the FILE side may follow this account
+	/// only when it is 1, because a file channel can replay a password to `sudo -S` but can neither
+	/// ask for a second factor nor reuse a spent one (§46) — and for exactly that reason, only when
+	/// it is 1 may the answer be kept in the vault for a hands-free reconnect (§47). A question put
+	/// again after a refusal is the same factor over again, so a corrected password still counts as
+	/// one; `elevate::Handshake` is where that distinction lives.
+	IdentityReady { identity: u64, factors: u32 },
 	/// An elevated shell has gone (§45). `reason` is `Some` when it never opened or died on a
 	/// failure — the last thing the program said, which is the remote's own words about its own
 	/// policy ("not in the sudoers file", "3 incorrect password attempts") — and `None` when it

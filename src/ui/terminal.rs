@@ -225,6 +225,10 @@ pub struct PanesView<'a> {
 pub struct UiTerminalSession<'a> {
 	pub endpoint: &'a str,
 	pub local: bool,
+	/// The account whose terminal is on screen, when it is not the one the session logged in as
+	/// (§47). `None` for the login account, whose name the centred endpoint already carries — so the
+	/// bar names an account exactly when naming it says something new.
+	pub account: Option<&'a str>,
 }
 
 /// What every overlay on this screen needs (§10): whether the Disconnect confirmation is
@@ -233,7 +237,13 @@ pub struct UiTerminalSession<'a> {
 /// added to this screen would otherwise widen `view`'s signature again. The scrollback
 /// find bar rides along for that second reason: it is not a modal, but it is an overlay
 /// over the grid, and it would otherwise be `view`'s eighth argument.
-#[derive(Debug, Clone, Copy)]
+///
+/// NOT `Copy` since §47, and the reason is worth a line: the accounts it carries are BUILT for the
+/// frame — a name per identity, with the one on screen marked — rather than borrowed from a field
+/// somewhere, because keeping a second copy of that list on the tab would be a second thing to keep
+/// true. So they ride here owned, and the struct is moved into `view` exactly once, which is what it
+/// was already doing.
+#[derive(Debug, Clone)]
 pub struct Modals<'a> {
 	/// Which dialog is open over this screen, `None` when none is (§10). ONE field, because one
 	/// dialog: they share the body buffer below and the card beside it, which only works because
@@ -242,6 +252,11 @@ pub struct Modals<'a> {
 	/// The session's port forwards (§27) — the rows the manager lists when it is the open modal.
 	/// Session state rather than the dialog's, so it outlives any number of opens and closes.
 	pub forwards: &'a [crate::forward::ForwardEntry],
+	/// The session's accounts (§47) — the rows the accounts dialog lists. Owned rather than borrowed,
+	/// unlike the forwards above: an account row is derived (a name per identity, the one on screen
+	/// marked) rather than stored, and deriving it per frame is cheaper than keeping a copy of it
+	/// somewhere true.
+	pub accounts: Vec<crate::ui::elevate::AccountRow>,
 	/// The scrollback find bar's state while it is open, `None` when closed (§35). Floats over the
 	/// grid rather than pushing it down, so opening it never reflows the remote pty.
 	pub search: Option<&'a crate::term::search::Search>,
@@ -280,6 +295,7 @@ pub fn view<'a>(
 	let Modals {
 		open: modal,
 		forwards,
+		accounts,
 		search,
 		body: dialog_body,
 		card,
@@ -507,6 +523,14 @@ pub fn view<'a>(
 			layers.push(crate::ui::dialog::backdrop(Message::ForwardsClosed));
 			layers.push(crate::ui::forward::panel(forwards, form, card));
 		}
+		// The accounts dialog (§47): the session's accounts, and the elevation being asked for or
+		// answered. Dismissing it cancels nothing already sent — an elevation goes on with its
+		// conversation — but a question that was outstanding then goes unanswered, which the SSH side
+		// reads as an abandoned elevation (§45).
+		Some(crate::app::Modal::Elevate(form)) => {
+			layers.push(crate::ui::dialog::backdrop(Message::ElevateClosed));
+			layers.push(crate::ui::elevate::panel(accounts, form, card));
+		}
 		// Setting the remote's shell up to announce its directory (§17). Dismissing writes
 		// nothing — only the explicit Install / Remove button sends anything — so the ✕ and the
 		// backdrop are safe at every stage, including while a probe is still out.
@@ -644,6 +668,18 @@ fn status_bar<'a>(
 		};
 		button(text(label).size(STATUS_BAR_TEXT)).on_press(Message::ForwardsPressed)
 	});
+	// The accounts dialog (§47): the one way to become another account, to switch between the ones
+	// this session has, and to close one. Its label names the account on screen once there is more
+	// than one — the information §45's read-only label was removed for duplicating, except that this
+	// does not duplicate it: the centred endpoint says who the session AUTHENTICATED as.
+	//
+	// Absent on a local session (§103) for the same reason Tunnels is: becoming another account is a
+	// program run on a CONNECTION, and there is none. A local shell's own `sudo` still works by
+	// typing it, which is what any terminal offers.
+	let accounts = (!session.local).then(|| {
+		button(text(crate::ui::elevate::account_label(session.account)).size(STATUS_BAR_TEXT))
+			.on_press(Message::AccountPressed)
+	});
 	let disconnect =
 		button(text("Disconnect").size(STATUS_BAR_TEXT)).on_press(Message::DisconnectPressed);
 
@@ -684,6 +720,9 @@ fn status_bar<'a>(
 		.align_y(iced::alignment::Vertical::Center);
 	if let Some(tunnels) = tunnels {
 		group = group.push(tunnels);
+	}
+	if let Some(accounts) = accounts {
+		group = group.push(accounts);
 	}
 	let right = container(group.push(disconnect))
 		.width(Length::Fill)

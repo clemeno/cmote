@@ -4637,7 +4637,13 @@ is on screen.
 
 What it deliberately does not do is pretend the file panes came along. They did not — see the NOT list.
 
-> **STATUS: the UX is withdrawn; the machinery stays.** There is no way to START an elevation from the
+> **STATUS: the UX was withdrawn and §47 replaced it.** Read what follows as the record of the
+> withdrawal, which is still worth having — the machinery it describes is what §47 was able to build
+> on, and the reasons the first UX was pulled are the reasons the second one is shaped as it is. The
+> way in is now ONE control (the status bar's Account button) and one dialog, not the four the
+> paragraphs below list; see §47.
+>
+> **The withdrawal, as it stood.** There was no way to START an elevation from the
 > app any more — the "Log in as…" button, the context-menu item, the elevate dialog and the account
 > switcher are all gone, and with them the app-side state they fed (`ElevateDialog`, the `Elevate*`
 > messages, `IdentityChoice`, the cached sudo password). The approach is being reconsidered after §46
@@ -4848,12 +4854,13 @@ notice amber — nothing is wrong.
 - **Two sudos means two authentications.** sudo's credential cache is per-tty by default
   (`tty_tickets`), and each shell has its own pty, so the cached password saves the typing but not the
   second factor. This is what will make §46 ask for a code again.
-- **No way in at all, for now.** The right-click item and the status bar's button were the two, and both
-  are withdrawn — see the status note at the top. A per-target "elevate on connect" was §47, which is
-  part of what the rethink covers.
+- ~~**No way in at all, for now.**~~ The right-click item and the status bar's button were the two and
+  both were withdrawn. **§47 put one back** — the status bar's Account button, and one dialog rather
+  than the four controls this section had — and with it the per-target "elevate on connect" this entry
+  was waiting for.
 - **An identity is not a tab.** It shares the connection, the tab strip stays one chip per session
   (§26), and the MRU (§37) knows nothing about accounts. Closing an elevated shell is `exit` at its own
-  prompt, or cancelling the dialog that opened it.
+  prompt, or its ✕ in the accounts dialog (§47).
 
 ## §46 — The file panes follow the account you switched to (v4.0.0)
 
@@ -5012,8 +5019,163 @@ opening an sftp session — uses `exec_inline`, which borrows the loop's own han
 - **Nothing is cached across a switch.** Going to root and back re-lists both panes each time, one round
   trip per open folder. Correct and simple; a per-account listing cache is the obvious optimisation if it
   is ever felt.
-- **Still no auto-elevate on connect, and no vault-stored sudo password.** Both are §47, which is where
-  the target format changes.
+- ~~**Still no auto-elevate on connect, and no vault-stored sudo password.**~~ **Both are §47**, which
+  is where the target format changed: `Target::elevate` remembers the account, the program and whether
+  to do it on connect, and the password — opt-in — goes in the vault under a second key shape.
+
+## §47 — The way back in to another account (v4.0.0)
+
+§45 gave a session a SET of shells, one per account, and then its UX was withdrawn: the "Log in as…"
+button, the context-menu item, the elevate dialog and the account switcher all went, leaving the
+machinery compiled, tested and unreachable. §46 was what pulled them — it met a two-factor server the
+terminal handled and the file side could not — and the note it left said the shape of the dialog was
+"entangled with assumptions that may not survive the rethink". This is the rethink, and the answer is
+smaller than what it replaces: **one control and one dialog**.
+
+Four things were decided before any of it was built, and they are worth recording as decisions rather
+than as consequences of the code:
+
+- **One way in.** The status bar's **Account** button, and nothing else. §45 spread the same job over
+  four controls, so there were four things to keep in step and four places to look for the one that
+  was missing. A right-click entry on the home screen was considered and rejected: the home screen is
+  where a connection is chosen, not where a session is steered.
+- **Configured in two places, because they are two different moments.** The dialog has a "do this on
+  every connection to this target" checkbox — the decision made while looking at the machine — and the
+  connect form has the same three fields, for the decision made before there is a session at all.
+- **The account on screen is named on the button**, not on a label beside it. §45 had a read-only
+  label and it was removed for duplicating the centred endpoint. This does not duplicate it: the
+  endpoint names the account the session AUTHENTICATED as, and after an elevation that is no longer
+  who is typing.
+- **A sudo password may be kept, opt-in, in the vault.** This is a deliberate relaxation of a rule
+  §12 and §45 both wrote down — that a sudo password lives in RAM and nowhere else — and it is
+  written plainly here because a relaxation nobody records is a rule nobody kept.
+
+### One dialog that lists, asks and answers
+
+`ui/elevate.rs` is three things in the order a user meets them, and putting them in one card is what
+retires §45's four controls:
+
+1. **The accounts this session has**, each named, the one on screen marked with a dot, and every
+   elevated one carrying a ✕. Switching is a click on the name of the thing switched to; the one
+   showing is plain text rather than a dead button. The login account has no ✕ — ending it is what
+   Disconnect does, and a second way to end a session is a way to end one by accident.
+2. **Who to become**: `sudo` or `su`, an account, and the two checkboxes.
+3. **The credential conversation.** sudo's questions arrive one at a time as `ElevatePrompt` and the
+   dialog puts the remote's OWN wording to the user, with its words about the previous answer above
+   it when there were any — which is the only thing that tells "wrong password, try again" from "now
+   the second factor", since sudo dresses every prompt in its stack in cmote's `-p` text (§45).
+
+The stage is a state (`Asking` / `Answering` / `Waiting`) rather than a pair of booleans, because
+while a question is outstanding the dialog must show that question and nothing else: with two flags
+there was a reachable arrangement where a "Log in as…" button sat over an elevation already running.
+Pressing Account while a question is up shows the question rather than a blank form, which is one
+`is_answering` test at the top of the opener and would otherwise have thrown an answer away.
+
+### What is stored where, and why the two halves are not the same question
+
+| | where it lives | when it is written |
+|---|---|---|
+| the account, the program, "on every connection" | `targets.json`, as `Target::elevate` | when the elevation is ASKED for |
+| the password | `secrets.age`, keyed `sudo:<account>@<endpoint>` | when the elevation SUCCEEDED, and only then |
+
+The preference is written on the way out because it says what the NEXT connection should try, and a
+refused attempt is still what the user asked for. The password is the opposite: a wrong one must
+never be stored, so it is held in a `PendingElevation` — a `Secret`, zeroized on drop — from the
+moment it is sent until the elevation resolves, and then either stored or dropped. That is the same
+rule §16 keeps for the connect secret, one layer up.
+
+**The vault needed a second key shape, not a second file.** It has held one since §16 — the endpoint —
+and a prefix keeps the two apart for good: an endpoint is `{user}@{host}:{port}`, so one can only
+begin `sudo:` if a login name does, and a login name with a colon in it would already have broken the
+endpoint scheme that is a target's identity. Keyed by BOTH endpoint and account, because they are
+different secrets: `sudo` asks for the caller's password and `su` for the target account's, and one
+target may be used to become more than one account. §110 argued the rest: the vault has no format
+version and a second key shape needs none, since an older cmote reads the extra entries as endpoints
+it has no target for — which is exactly what it already does with an entry whose target was deleted.
+
+### The rule that says when a password may be kept at all
+
+**A one-time code must never be kept as a password**, and the number that settles it already existed.
+`elevate::Handshake` counts DISTINCT factors — a question re-put after a refusal is the same factor
+over again, so a corrected password still counts as one — and §46 already read that number to decide
+whether the FILE side may follow an account: one factor means a password a file channel can replay to
+`sudo -S`, more means a second factor it can neither ask for nor reuse.
+
+§47 reads the same number for the same reason one layer up, so `SshEvent::IdentityReady` carries it
+now. One number, two decisions, one rule. Two factors means nothing is stored — and the target's flag
+is set to what the vault ACTUALLY holds afterwards, so the dialog never opens promising a hands-free
+elevation that cannot happen.
+
+### The account is vetted at three boundaries, and one of them is a file
+
+`elevate::valid_user` is the check that keeps anything but a plain login name out of the command line
+`ElevateKind::command` composes — the one place cmote builds a remote command from something the user
+typed (§12). It is applied:
+
+- in the dialog, on submit, where a refused name is reported under the form and nothing is sent;
+- on the connect form, where `ConnectForm::elevation` returns `None` rather than passing a name on;
+- **on the way OUT of `targets.json`** (`Elevation::usable`), because that file is one the user is
+  invited to edit (§22). An account a hand-edit put there is remote input as far as this check is
+  concerned, and one it refuses is a stored preference cmote declines to act on — not an error to
+  report, since nobody asked for anything.
+
+That third boundary is why the function survived §45's withdrawal. It was kept with a
+`cfg_attr(not(test), expect(dead_code, …))` and a note saying the next implementation would need
+exactly it; being an `expect` rather than an `allow`, it became a build error the moment a real caller
+appeared, which is how it got deleted at the right time (§111).
+
+### The connect form's half
+
+Three fields, and the first is the gate: **Become** (an account, blank by default), then — only once
+it names somebody — **With** (`sudo` / `su`) and **Become it on connect**. Blank is not "stay put":
+it says nothing, so connecting from a form that never mentioned an elevation does not erase what a
+target remembers. Clearing the field, and the dialog's own checkbox, are the two ways to change it.
+
+The form's Tab ring already skipped controls that are not on screen (a passphrase field belongs to key
+auth), and it decided that from the auth method alone. Two things decide it now, so the five
+signatures that took an `AuthKind` take a `FormShape` — the method, and whether an elevation is being
+asked for — which is one struct rather than the next argument.
+
+### Files
+
+- `src/ui/elevate.rs`, new — the dialog: the account rows, the form, the question, and the status
+  bar's button label. Three tests of its own.
+- `src/targets.rs` — `Target::elevate`, the `Elevation` type, `set_elevation`,
+  `set_elevation_remembered`, `Elevation::usable`. Three tests.
+- `src/vault.rs` — `elevation_key`, the prefix and the argument for it, and a test-only constructor
+  with scrypt turned down so the app's tests can use a real vault rather than a stand-in.
+- `src/ui/connect.rs` — the three fields, `FormShape`, four new focus stops, two tests.
+- `src/app.rs` — `Modal::Elevate`, eleven messages, `PendingElevation`, and the flow: open, submit,
+  prompt, answer, settle. Eight tests.
+- `src/bridge.rs`, `src/ssh/shell.rs` — `IdentityReady` carries `factors`.
+- `src/elevate.rs` — `ElevateKind` is serialized with a saved target; `valid_user`'s dead-code
+  escape is gone.
+- 1,486 tests green, clippy `-D warnings` clean, `cargo fmt --check` clean.
+
+### Not done
+
+- **The elevation is not offered on a local session** (§103), the same absence Tunnels has and for the
+  same reason: becoming another account is a program run on a CONNECTION, and there is none. A local
+  shell's own `sudo` still works by being typed, which is what any terminal offers.
+- **One target remembers ONE account.** "Do this on every connection to this target" cannot mean two,
+  and a second elevation from the dialog replaces what the first remembered. A target used as two
+  accounts in turn is possible — the dialog opens on whichever was last saved and the other is a
+  re-type — but not remembered as a pair.
+- **A stored connect password is not reused for `sudo`**, even though for `sudo` it is by definition
+  the same secret — the caller's own. Reusing it would send a password stored for SSH to a program
+  that was never named when it was stored, which is a purpose boundary this section is not willing to
+  cross silently. The cost is that a user who wants a hands-free `sudo` ticks a second box and types
+  the same password once.
+- **A locked vault is not unlocked FOR an elevation.** If the master passphrase has not been given
+  this session, the stored password is simply not offered and the question is put to the user. An
+  elevation is not the moment to interrupt with a second, unrelated question.
+- **The dialog reports a failure; it does not diagnose one.** What it shows is the remote's own words
+  ("not in the sudoers file", "3 incorrect password attempts"), which is the right answer for a
+  policy cmote does not know — and nothing is said about which of `sudo` and `su` might have worked
+  instead.
+- **The file panes still cannot follow a two-factor account** (§46's own Not done). §47 changes
+  nothing there: it is the same rule about the same number, and a file channel still cannot ask for a
+  code.
 
 ## §48 — Splitting the window (v4.0.0)
 

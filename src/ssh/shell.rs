@@ -289,7 +289,9 @@ impl Shells {
 					// dropped — so sending the flush first lost exactly the two things it exists to
 					// carry: the account's greeting and its first prompt. That is what left a freshly
 					// elevated terminal empty but for a caret.
-					let _ = events.send(SshEvent::IdentityReady { identity }).await;
+					let _ = events
+						.send(SshEvent::IdentityReady { identity, factors })
+						.await;
 					let _ = events
 						.send(SshEvent::Output {
 							identity,

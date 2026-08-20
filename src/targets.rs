@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::change::Change;
+use crate::elevate::ElevateKind;
 use crate::files::{SortDir, SortKey};
 use crate::forward::ForwardSpec;
 use crate::ui::connect::AuthKind;
@@ -104,6 +105,53 @@ pub struct Target {
 	/// older `targets.json` loads with no forwards and behaves exactly as before.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub forwards: Vec<ForwardSpec>,
+	/// Which account this target's sessions become, and whether they do it by themselves (§47).
+	/// `None` — the default, and what every `targets.json` written before §47 loads as — means the
+	/// session stays the account it logged in as until the user asks for another.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub elevate: Option<Elevation>,
+}
+
+/// What a target's sessions become after logging in, and how (§47).
+///
+/// A saved elevation is "how I use this server" in the same sense the forwards and the resume paths
+/// are: on `rec.michoacan` the work is done as root and the login account is a doorway. So it rides
+/// in `targets.json` beside them — and, like them, it is METADATA ONLY. The `account` is a login
+/// name and the `kind` is a program name; neither is a secret. The password, if the user opts into
+/// keeping one at all, lives in the sealed vault and nowhere else (§12, §16).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Elevation {
+	/// Which program does it — `sudo`, which asks for the caller's own password, or `su`, which
+	/// asks for the target account's (§45).
+	pub kind: ElevateKind,
+	/// The account to become. Checked by `elevate::valid_user` before it can reach a command line,
+	/// and checked again on the way OUT of this file: a `targets.json` edited by hand is remote
+	/// input as far as that check is concerned (§12).
+	pub account: String,
+	/// Whether to start the elevation as soon as the session's shell is live, rather than waiting
+	/// for the user to ask. Off by default, so a target can remember an account without the
+	/// session acting on it — which is what the elevate dialog's own field is for.
+	#[serde(default, skip_serializing_if = "crate::store::is_default")]
+	pub on_connect: bool,
+	/// Whether a password for this elevation is in the vault (§16). The same shape as
+	/// `remember_secret` above and for the same reason: the flag is the hint the form and the
+	/// dialog read, so neither promises a hands-free elevation the vault cannot deliver, while the
+	/// secret itself lives only in `secrets.age`.
+	#[serde(default, skip_serializing_if = "crate::store::is_default")]
+	pub remember_password: bool,
+}
+
+impl Elevation {
+	/// Whether this elevation is one cmote will act on, which is not the same as one that parsed.
+	///
+	/// `targets.json` is a file the user is invited to edit (§22), so an account read back out of it
+	/// gets the same check as one typed into the dialog — `elevate::valid_user`, the rule that keeps
+	/// anything but a plain login name out of the command line `ElevateKind::command` composes. An
+	/// account this refuses is not an error to report: it is a stored preference cmote declines to
+	/// act on, and the session stays the account it logged in as.
+	pub fn usable(&self) -> bool {
+		crate::elevate::valid_user(&self.account)
+	}
 }
 
 /// The slice of a target's state that one session updates and the next restores (§22): where
@@ -357,6 +405,9 @@ impl Targets {
 					// No forwards until the user adds some on a live session (§27); an existing
 					// endpoint's saved forwards are left untouched by the auth-only branch above.
 					forwards: Vec::new(),
+					// And no elevation: a brand-new target stays the account it logs in as until the
+					// user says otherwise, on the form or in the dialog (§47).
+					elevate: None,
 				});
 			}
 		}
@@ -393,6 +444,68 @@ impl Targets {
 			return false;
 		}
 		target.forwards = forwards;
+		true
+	}
+
+	/// Remember what this target's sessions should become (§47), returning whether anything changed.
+	///
+	/// The password flag is deliberately NOT a parameter: it follows what the vault actually holds
+	/// and is set by `set_elevation_remembered` below, so a caller recording a preference cannot
+	/// promise a stored password by accident. An existing elevation for a DIFFERENT account is
+	/// replaced — one target remembers one account, which is the whole of what "on every connection
+	/// to this target" can mean.
+	pub fn set_elevation(
+		&mut self,
+		endpoint: &str,
+		account: &str,
+		kind: ElevateKind,
+		on_connect: bool,
+	) -> bool {
+		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
+			return false;
+		};
+		// The flag is carried over only for the SAME account: a password stored for `root` says
+		// nothing about `deploy`, and the vault key says so too (`vault::elevation_key`).
+		let remember_password = target
+			.elevate
+			.as_ref()
+			.is_some_and(|saved| saved.account == account && saved.remember_password);
+		let wanted = Elevation {
+			kind,
+			account: account.to_owned(),
+			on_connect,
+			remember_password,
+		};
+		if target.elevate.as_ref() == Some(&wanted) {
+			return false;
+		}
+		target.elevate = Some(wanted);
+		true
+	}
+
+	/// Set (or clear) the "a password is stored for this elevation" flag (§47), returning whether it
+	/// changed.
+	///
+	/// The same shape as `set_remembered` for the connect secret, and the same reason: the vault is
+	/// the source of truth and this is only the hint the dialog reads, so it never opens promising a
+	/// hands-free elevation the vault cannot deliver. A target with no stored elevation, or one
+	/// stored for another account, is a no-op — the flag belongs to the account the password was for.
+	pub fn set_elevation_remembered(
+		&mut self,
+		endpoint: &str,
+		account: &str,
+		remembered: bool,
+	) -> bool {
+		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
+			return false;
+		};
+		let Some(saved) = target.elevate.as_mut() else {
+			return false;
+		};
+		if saved.account != account || saved.remember_password == remembered {
+			return false;
+		}
+		saved.remember_password = remembered;
 		true
 	}
 
@@ -552,6 +665,99 @@ fn targets_path() -> Result<PathBuf> {
 mod tests {
 	use super::*;
 
+	/// What a target remembers about becoming another account (§47), and the two rules that keep the
+	/// password flag honest: it is not a parameter of the preference, and it belongs to the ACCOUNT
+	/// the password was for.
+	#[test]
+	fn a_saved_elevation_keeps_its_password_flag_only_for_the_same_account() {
+		let mut targets = Targets::default();
+		targets.upsert_on_connect("rec", 22, "cme", AuthKind::Password, None, None);
+
+		// Recording the preference cannot promise a stored password.
+		assert!(targets.set_elevation("cme@rec:22", "root", ElevateKind::Sudo, true));
+		let saved = targets.find("cme@rec:22").unwrap().elevate.clone().unwrap();
+		assert_eq!(saved.account, "root");
+		assert!(saved.on_connect);
+		assert!(!saved.remember_password);
+
+		// The vault settles the flag afterwards.
+		assert!(targets.set_elevation_remembered("cme@rec:22", "root", true));
+		assert!(
+			targets
+				.find("cme@rec:22")
+				.unwrap()
+				.elevate
+				.as_ref()
+				.unwrap()
+				.remember_password
+		);
+
+		// Re-recording the SAME account keeps it — turning "on every connection" off is not a
+		// statement about the password.
+		assert!(targets.set_elevation("cme@rec:22", "root", ElevateKind::Sudo, false));
+		assert!(
+			targets
+				.find("cme@rec:22")
+				.unwrap()
+				.elevate
+				.as_ref()
+				.unwrap()
+				.remember_password
+		);
+
+		// Recording ANOTHER account drops it: a password stored for `root` says nothing about
+		// `deploy`, and the vault key says so too.
+		assert!(targets.set_elevation("cme@rec:22", "deploy", ElevateKind::Su, true));
+		let saved = targets.find("cme@rec:22").unwrap().elevate.clone().unwrap();
+		assert_eq!(saved.account, "deploy");
+		assert_eq!(saved.kind, ElevateKind::Su);
+		assert!(!saved.remember_password);
+
+		// And the flag for an account this target no longer remembers is nobody's to set.
+		assert!(!targets.set_elevation_remembered("cme@rec:22", "root", true));
+	}
+
+	/// An account read back out of `targets.json` gets the same check as one typed into the dialog
+	/// (§12, §47): the file is one the user is invited to edit, so it is remote input to the check
+	/// that keeps anything but a login name out of a command line.
+	#[test]
+	fn a_stored_account_is_vetted_on_the_way_out_as_well_as_in() {
+		let usable = |account: &str| {
+			Elevation {
+				kind: ElevateKind::Sudo,
+				account: account.to_owned(),
+				on_connect: true,
+				remember_password: false,
+			}
+			.usable()
+		};
+		assert!(usable("root"));
+		assert!(usable("deploy-2"));
+		assert!(!usable("root; id"));
+		assert!(!usable("-froot"));
+		assert!(!usable(""));
+	}
+
+	/// A `targets.json` written before §47 loads with no elevation and behaves as it did, and one
+	/// written with the default preference stays out of the file entirely.
+	#[test]
+	fn an_older_store_loads_with_no_elevation_and_a_tidy_one_stays_tidy() {
+		let text = r#"{"version":"2","targets":[{"name":"rec","host":"rec","port":22,"user":"cme","auth_kind":"password"}]}"#;
+		let loaded = Targets::parse(text, Path::new("targets.json"));
+		assert_eq!(loaded.items().len(), 1);
+		assert!(loaded.items()[0].elevate.is_none());
+
+		// The `sudo` / `su` words are the ones the user picked, spelled as they are in the dialog.
+		let mut targets = loaded;
+		targets.set_elevation("cme@rec:22", "root", ElevateKind::Sudo, true);
+		let json = serde_json::to_string(&targets.items()[0]).expect("serialize");
+		assert!(json.contains(r#""kind":"sudo""#), "{json}");
+		assert!(json.contains(r#""account":"root""#), "{json}");
+		assert!(json.contains(r#""on_connect":true"#), "{json}");
+		// The password flag is false, so it is not in the file at all.
+		assert!(!json.contains("remember_password"), "{json}");
+	}
+
 	// A password target with the given name/endpoint parts.
 	fn pw_target(name: &str, user: &str, host: &str, port: u16) -> Target {
 		Target {
@@ -571,6 +777,7 @@ mod tests {
 			sort_dir: None,
 			remember_secret: false,
 			forwards: Vec::new(),
+			elevate: None,
 		}
 	}
 

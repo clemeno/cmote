@@ -7,6 +7,7 @@
 pub mod connect; // the connection form
 pub mod dialog; // shared modal-dialog chrome (header / body / footer)
 pub mod editor; // the in-tab text editor: toolbar, line-number gutter, changed marks (§32)
+pub mod elevate; // the "Log in as…" dialog: the session's accounts, and becoming another (§47)
 pub mod explorer; // the remote folder tree beside the terminal (§18)
 pub mod files; // the remote file grid under the terminal (§19)
 pub mod forward; // the port-forwards management dialog (§27)

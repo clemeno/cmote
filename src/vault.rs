@@ -45,6 +45,30 @@ use crate::secret::Secret;
 /// file is encrypted, not editable.
 const VAULT_FILE: &str = "secrets.age";
 
+/// What marks a key as an ELEVATION's password rather than a target's own credential (§47).
+///
+/// The map has held one shape of key since §16 — the endpoint, `user@host:port` — and §47 needs a
+/// second: the password for becoming another account on a target. A prefix is enough to keep the two
+/// apart for good, and this is why: every endpoint key is built by `targets::endpoint_of`, which is
+/// `{user}@{host}:{port}`, so an endpoint can only begin `sudo:` if a LOGIN NAME begins `sudo:` —
+/// and a login name containing a colon would already have broken the endpoint scheme that is the
+/// store's own identity for a target. So the namespaces cannot collide.
+///
+/// Prefixing rather than versioning the file is also the cheaper answer, and §110 argued it: the
+/// vault has no format version, and a second KEY SHAPE inside the same map needs none. An older
+/// cmote opening this vault reads the elevation entries as endpoints it has no target for, which is
+/// exactly what it already does with an entry whose target was deleted — it ignores them.
+const ELEVATION_PREFIX: &str = "sudo:";
+
+/// The vault key for the password of an elevation to `account` on `endpoint` (§47).
+///
+/// Keyed by BOTH, because they are two different secrets: `sudo` asks for the caller's password on
+/// this machine and `su` for the target account's, and one target may be used to become more than
+/// one account. Keying by endpoint alone would hand the wrong password to the second one.
+pub fn elevation_key(endpoint: &str, account: &str) -> String {
+	format!("{ELEVATION_PREFIX}{account}@{endpoint}")
+}
+
 /// The unlocked vault: the master passphrase (held for the session so repeated stores need no
 /// re-prompt) and the decrypted endpoint→secret map. Created empty (`create`) the first time a
 /// user opts in, or decrypted from disk (`unlock`) on a later launch. Every mutation re-seals
@@ -62,6 +86,11 @@ pub struct Vault {
 	/// Where the sealed blob is written. Resolved once (the data dir) so every `persist` hits
 	/// the same file; injectable in tests via `create_at` / `unlock_at`.
 	path: PathBuf,
+	/// scrypt's work factor for the seals this vault writes. `None` in production, which takes
+	/// `age`'s own default — auto-targeted at about a second on this machine, which is right for a
+	/// once-per-session unlock and wrong for a test suite that stores a secret in a dozen of them.
+	/// A test sets it low; nothing else ever does (§16, §47).
+	work_factor: Option<u8>,
 }
 
 impl Vault {
@@ -120,6 +149,24 @@ impl Vault {
 			passphrase: SecretString::from(passphrase),
 			entries: BTreeMap::new(),
 			path,
+			work_factor: None,
+		}
+	}
+
+	/// An empty vault at a temp path with scrypt turned down, for the tests in OTHER modules that
+	/// need a real one to store into and read back (§47's elevation passwords).
+	///
+	/// A real vault rather than a stand-in, because what those tests are about is whether the app
+	/// stored a secret at all — and a stand-in would answer that question about itself. The work
+	/// factor is the only concession: at `age`'s default each store costs about a second, which is
+	/// the right price once per session and the wrong one a dozen times in a test suite.
+	#[cfg(test)]
+	pub fn for_tests(directory: &Path) -> Self {
+		Self {
+			passphrase: SecretString::from("test-master".to_owned()),
+			entries: BTreeMap::new(),
+			path: directory.join(VAULT_FILE),
+			work_factor: Some(10),
 		}
 	}
 
@@ -132,6 +179,7 @@ impl Vault {
 			passphrase,
 			entries,
 			path: path.to_owned(),
+			work_factor: None,
 		})
 	}
 
@@ -139,7 +187,7 @@ impl Vault {
 	/// mid-write can never truncate the vault and lose every stored secret at once. This file's
 	/// pattern is now every store's — see §110 for why the other two needed it as badly.
 	fn persist(&self) -> Result<()> {
-		let sealed = seal(&self.passphrase, &self.entries, None)?;
+		let sealed = seal(&self.passphrase, &self.entries, self.work_factor)?;
 		crate::store::write_atomically(&self.path, &sealed)
 	}
 }
@@ -257,6 +305,24 @@ mod tests {
 				.any(|window| window == b"TOPSECRET"),
 			"plaintext secret leaked into the ciphertext"
 		);
+	}
+
+	/// The elevation keys cannot collide with the endpoint keys the vault has held since §16, and
+	/// they are keyed by BOTH endpoint and account — one target may be used to become more than one
+	/// account, and `sudo` and `su` ask for different passwords (§47).
+	#[test]
+	fn an_elevation_key_cannot_be_mistaken_for_an_endpoint() {
+		let endpoint = crate::targets::endpoint_of("cme", "rec", 22);
+		assert_eq!(endpoint, "cme@rec:22");
+		let root = elevation_key(&endpoint, "root");
+		let deploy = elevation_key(&endpoint, "deploy");
+		assert_ne!(root, deploy, "two accounts, two secrets");
+		assert_ne!(root, endpoint, "and neither is the target's own credential");
+		// The argument the prefix rests on, written as a test: an endpoint is `{user}@{host}:{port}`,
+		// so it can only begin `sudo:` if a login name does — and a login name with a colon in it
+		// would already have broken the endpoint scheme itself.
+		assert!(root.starts_with(ELEVATION_PREFIX));
+		assert!(!endpoint.starts_with(ELEVATION_PREFIX));
 	}
 
 	#[test]

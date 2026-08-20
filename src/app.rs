@@ -2273,15 +2273,20 @@ pub enum Focus {
 /// not a second connection and not a second tab — it is one more shell on the one session, with its
 /// own view of the machine parked beside it.
 ///
-/// It holds no account NAME. It used to, for the status bar's label and the switcher's entries, and
-/// both are gone (§45's UX was withdrawn, and the label with it — the bar's centred endpoint already
-/// says who the session is). A name nothing reads is a name nothing keeps true, so the elevation
-/// this list is waiting for will add it back beside whatever displays it.
+/// The account NAME came back in §47, which is what this doc used to predict: it was removed with
+/// §45's UX because the status bar's read-only label duplicated the centred endpoint, and it returns
+/// because the accounts dialog lists these by name and the bar's button names the one on screen —
+/// and neither of those is the endpoint. The endpoint says who the session AUTHENTICATED as; after
+/// an elevation that is no longer who is typing.
 #[derive(Debug, Default)]
 struct Identity {
 	/// The number the SSH task knows this shell by. `bridge::LOGIN_IDENTITY` for the account the
 	/// session authenticated as; counted up from 1 for each elevation.
 	id: u64,
+	/// The account this shell runs as, for the dialog's list and the status bar's button (§47).
+	/// `None` for the login identity, whose name is the `user@` half of the session's endpoint and
+	/// is already on screen — so it is read from there rather than stored twice.
+	account: Option<String>,
 	/// Whether its shell is through its credential conversation and live. A shell still elevating
 	/// is in the list (so a failure has something to report against) but cannot be switched to.
 	ready: bool,
@@ -2747,6 +2752,9 @@ pub struct Tab {
 	/// on `Connected`, cleared if the connect never leaves. Persisting only on success means a
 	/// wrong password is never saved.
 	pending_remember: Option<(String, Secret)>,
+	/// The elevation in flight (§47), or `None` when none is. See [`PendingElevation`] for why the
+	/// answer to a credential question lives here rather than in the dialog or in the vault.
+	pending_elevation: Option<PendingElevation>,
 	/// This session's port forwards (§27), each an entry with its runtime id, spec and status.
 	/// Populated on connect from the target's saved set and by the tunnels dialog; the ids key a
 	/// forward to its `ForwardReady` / `ForwardFailed` event and to the `RemoveForward` command.
@@ -2779,6 +2787,9 @@ pub enum Modal {
 	/// The port-forwards manager (§27) and its add form. The session's forwards themselves are
 	/// NOT here — they outlive any number of opens and closes of this dialog.
 	Forwards(ui::forward::ForwardForm),
+	/// The accounts dialog (§47) and the elevation being asked for or answered. The session's
+	/// accounts themselves are not here either — they are on the tab, and outlive the dialog.
+	Elevate(ui::elevate::ElevateForm),
 	/// Setting the remote's shell up to announce its working directory (§17), and how far that has
 	/// got. Everything the dialog SAYS is in the shared body buffer, as every other dialog's text
 	/// is; this carries only what the buttons need to act on.
@@ -2808,6 +2819,35 @@ pub enum Integration {
 	/// The errand finished, one way or the other. The body holds what happened — the file that was
 	/// written, or the server's own reason for refusing — so the only thing left to do is close.
 	Done,
+}
+
+/// An elevation that has been asked for and has not yet succeeded or failed (§47).
+///
+/// It exists for one reason: to decide, once the answer is known good, whether it may be kept. The
+/// dialog cannot hold this — it is dismissible, and an elevation started from a saved preference has
+/// no dialog behind it at all — and the vault must not hold it yet, because a password that turns out
+/// to be wrong must never be stored.
+///
+/// SECURITY. `answer` is the one place cmote holds a credential between sending it and learning
+/// whether it worked. It is a `Secret`, so it is redacted in `Debug` and zeroized when this is
+/// dropped, and it is dropped the moment the elevation resolves either way (§12).
+#[derive(Debug)]
+struct PendingElevation {
+	/// The identity the elevation is opening.
+	identity: u64,
+	/// The account being become, which is half of the vault key (`vault::elevation_key`).
+	account: String,
+	/// Whether the user asked for the password to be remembered. `false` means the answer below is
+	/// dropped on success rather than stored, and any password the vault already held for this
+	/// account is forgotten — unticking the box is how a stored one is removed.
+	remember: bool,
+	/// Whether this elevation was started from the target's stored preference rather than from the
+	/// dialog. It decides what a FAILURE does: a hands-free attempt that was refused must put the
+	/// dialog up, or the session sits at the login account with nothing said.
+	automatic: bool,
+	/// The last answer given, held only until the elevation resolves. `None` before the first
+	/// question and after the answer has been stored or dropped.
+	answer: Option<Secret>,
 }
 
 /// What a successful vault unlock should resume (§16). The master-passphrase prompt can
@@ -2978,6 +3018,15 @@ pub enum Message {
 	/// The connect form's "Remember" checkbox was toggled (mouse click or Enter/Space on the
 	/// Remember stop). Carries no state — `update` flips the flag.
 	RememberToggled,
+	// --- the connect form's elevation fields (§47) ---
+	/// The "Become" field changed — the account this target's sessions should become. Named apart
+	/// from the accounts dialog's `ElevateAccountEdited` because they edit different things: this one
+	/// a preference on the form, that one an elevation being asked for right now.
+	FormElevateAccountChanged(String),
+	/// The form's program radios (`sudo` / `su`).
+	FormElevateKindChanged(crate::elevate::ElevateKind),
+	/// The form's "Become it on connect" toggle. Carries no state, like `RememberToggled` beside it.
+	FormElevateOnConnectToggled,
 	/// The vault prompt's master-passphrase field changed.
 	VaultInputChanged(String),
 	/// The vault prompt's confirm field changed (create mode only).
@@ -3307,6 +3356,36 @@ pub enum Message {
 	ForwardAddPressed,
 	/// A forward's row ✕ — tear that forward down (payload: its runtime id).
 	ForwardRemove(u64),
+	// --- accounts (§45, §47): the "Log in as…" dialog opened from the status bar ---
+	/// The status bar's Account button — open the accounts dialog. This is the ONLY way in, which is
+	/// the point: §45 spread the job over four controls and the rethink kept one (§47).
+	AccountPressed,
+	/// The dialog was dismissed (Close / ✕ / backdrop). Nothing in flight is cancelled — an
+	/// elevation already sent goes on with its conversation — but a question that was outstanding
+	/// goes unanswered, which the SSH side reads as an elevation that was abandoned (§45).
+	ElevateClosed,
+	/// The form's program selector changed (`sudo` / `su`).
+	ElevateKindPicked(crate::elevate::ElevateKind),
+	/// The account field changed.
+	ElevateAccountEdited(String),
+	/// "Do this on every connection to this target" was toggled — the stored preference (§14).
+	ElevateOnConnectToggled(bool),
+	/// "Remember the password" was toggled — the vault opt-in, and a deliberate relaxation of the
+	/// rule that a sudo password lives in RAM only (§12, §16).
+	ElevateRememberToggled(bool),
+	/// The form's "Log in as…" button (or Enter in the account field) — vet the account and send the
+	/// elevation.
+	ElevateSubmitted,
+	/// The answer field changed. Carried as a plain `String` because that is what a `text_input`
+	/// gives; it becomes a `Secret` the moment it is sent, and the field is cleared with it.
+	ElevateAnswerEdited(String),
+	/// The answer's Send button (or Enter in the field) — write it to the elevating shell.
+	ElevateAnswerSubmitted,
+	/// An account's name in the dialog was clicked — put that identity's terminal on screen (§45).
+	IdentitySelected(u64),
+	/// An account's ✕ — end that elevated shell (§45). The login identity has no ✕: ending it is
+	/// what Disconnect does.
+	IdentityClosed(u64),
 	// --- the in-tab viewers (§32, §53): a tab can show a remote file, not only run a session ---
 	/// Open a remote file in a new VIEWER tab (payload: the parent session's id and the path).
 	/// Raised by the files pane's open item or a file double-click; `App` creates the tab — a text
@@ -3875,6 +3954,14 @@ impl Tab {
 			}
 			Message::InteractiveSubmitted => return self.on_interactive_submitted(),
 			Message::RememberToggled => self.form.remember = !self.form.remember,
+			// The form's elevation fields (§47). Blanking the account is what withdraws the whole
+			// preference, so nothing else has to be cleared with it — `ConnectForm::elevation` reads
+			// the field as the gate.
+			Message::FormElevateAccountChanged(value) => self.form.elevate_account = value,
+			Message::FormElevateKindChanged(kind) => self.form.elevate_kind = kind,
+			Message::FormElevateOnConnectToggled => {
+				self.form.elevate_on_connect = !self.form.elevate_on_connect;
+			}
 			Message::VaultInputChanged(value) => {
 				if let Some(Prompt::Vault { input, .. }) = &mut self.prompt {
 					*input = value;
@@ -4036,7 +4123,9 @@ impl Tab {
 			| Message::DeleteCancelled
 			| Message::DisconnectCancelled
 			| Message::IntegrationClosed
-			| Message::ForwardsClosed => self.modal = None,
+			| Message::ForwardsClosed
+			// Dismissing the accounts dialog cancels nothing already sent (§47).
+			| Message::ElevateClosed => self.modal = None,
 			Message::DeleteConfirmed => self.confirm_remote_delete(),
 			Message::TransferConflictResolved(choice) => {
 				let effects = self.transfers.answer_conflict(choice);
@@ -4160,6 +4249,44 @@ impl Tab {
 			}
 			Message::ForwardAddPressed => self.add_forward(),
 			Message::ForwardRemove(id) => self.remove_forward(id),
+			// Accounts (§45, §47). The dialog is the only way in and the only way between.
+			Message::AccountPressed => return self.open_accounts_dialog(),
+
+			// Any edit clears the last complaint under the form, the same rule the add form above
+			// keeps: a stale error must not sit under a field the user has since fixed.
+			Message::ElevateKindPicked(kind) => {
+				if let Some(form) = self.elevate_form_mut() {
+					form.kind = kind;
+					form.error = None;
+				}
+			}
+			Message::ElevateAccountEdited(value) => {
+				if let Some(form) = self.elevate_form_mut() {
+					form.account = value;
+					form.error = None;
+				}
+			}
+			Message::ElevateOnConnectToggled(on) => {
+				if let Some(form) = self.elevate_form_mut() {
+					form.on_connect = on;
+				}
+			}
+			Message::ElevateRememberToggled(on) => {
+				if let Some(form) = self.elevate_form_mut() {
+					form.remember = on;
+				}
+			}
+			Message::ElevateSubmitted => return self.submit_elevation(),
+			Message::ElevateAnswerEdited(value) => {
+				if let Some(form) = self.elevate_form_mut()
+					&& let ui::elevate::Stage::Answering { answer, .. } = &mut form.stage
+				{
+					*answer = value;
+				}
+			}
+			Message::ElevateAnswerSubmitted => return self.send_elevate_answer(),
+			Message::IdentitySelected(id) => return self.switch_identity(id),
+			Message::IdentityClosed(id) => return self.close_identity(id),
 		}
 		iced::Task::none()
 	}
@@ -4242,6 +4369,9 @@ impl Tab {
 			sort_dir: None,
 			remember_secret: false,
 			forwards: Vec::new(),
+			// And a placeholder elevation for the same reason: what the form asked for is applied to
+			// the STORED target after the connect succeeds (§47).
+			elevate: None,
 		});
 
 		let status = format!("connecting to {}:{}…", params.host, params.port);
@@ -4750,11 +4880,17 @@ impl Tab {
 				// identity falls back to.
 				self.identities = vec![Identity {
 					id: bridge::LOGIN_IDENTITY,
+					// The login account's name is the endpoint's own `user@`, so it is not stored
+					// again here (§47).
+					account: None,
 					ready: true,
 					work: Workspace::default(),
 				}];
 				self.identity = bridge::LOGIN_IDENTITY;
 				self.next_identity = 1;
+				// And, if this target remembers one, the elevation it remembers (§47). Here because
+				// this is the first moment a program can be run on the connection at all.
+				self.elevate_on_connect();
 
 				// A duplicate opens where the tab it was copied from is standing (§52), which
 				// outranks whatever this target remembers: the user pointed at a shell, not at a
@@ -4900,7 +5036,9 @@ impl Tab {
 					}
 				}
 			}
-			SshEvent::IdentityReady { identity } => return self.on_identity_ready(identity),
+			SshEvent::IdentityReady { identity, factors } => {
+				return self.on_identity_ready(identity, factors);
+			}
 			SshEvent::IdentityEnded { identity, reason } => {
 				return self.on_identity_ended(identity, reason);
 			}
@@ -5028,12 +5166,15 @@ impl Tab {
 			SshEvent::FileLoaded { .. }
 			| SshEvent::FileLoadFailed { .. }
 			| SshEvent::EditSaved { .. }
-			| SshEvent::EditSaveFailed { .. }
-			// A credential question from an elevating shell (§45). Nothing can ask one while there is
-			// no way to START an elevation — the dialog that answered these was withdrawn with the
-			// rest of that UX — so this is ignored rather than answered. The pattern stays because the
-			// SSH side that raises it stays: whatever replaces the dialog will want it back.
-			| SshEvent::ElevatePrompt { .. } => {}
+			| SshEvent::EditSaveFailed { .. } => {}
+			// A credential question from an elevating shell (§45), answered again since §47: into the
+			// dialog if it is open, and into a dialog opened for it if it is not — which is what a
+			// hands-free elevation from a stored preference looks like.
+			SshEvent::ElevatePrompt {
+				identity,
+				label,
+				refusal,
+			} => return self.on_elevate_prompt(identity, label, refusal),
 		}
 		iced::Task::none()
 	}
@@ -5428,6 +5569,354 @@ impl Tab {
 		self.persist_forwards();
 	}
 
+	/// Open the accounts dialog (§47) — the one way in.
+	///
+	/// The form opens from the target's SAVED elevation when it has one, so a return visit sees what
+	/// the next connection will do and turning it off is one click rather than a re-type. With
+	/// nothing saved it opens blank on `sudo`, which is what a sudoers-managed machine expects.
+	fn open_accounts_dialog(&mut self) -> iced::Task<Message> {
+		// A question already outstanding is not to be thrown away by re-opening: pressing Account
+		// while sudo is asking must show that question, not a blank form over an elevation that is
+		// still waiting for an answer (§47).
+		if self
+			.elevate_form_mut()
+			.is_some_and(|form| form.is_answering())
+		{
+			return iced::widget::operation::focus(ui::elevate::ANSWER_INPUT_ID);
+		}
+		let saved = self
+			.connection
+			.as_deref()
+			.and_then(|endpoint| self.targets.borrow().find(endpoint).cloned())
+			.and_then(|target| target.elevate);
+		let form = saved.as_ref().map_or_else(
+			ui::elevate::ElevateForm::default,
+			ui::elevate::ElevateForm::from_saved,
+		);
+		// The dialog draws its own list and form; the shared body buffer has nothing to say for it,
+		// and is seeded empty so no previous dialog's message lingers behind it.
+		self.open_modal(Modal::Elevate(form), "");
+		iced::widget::operation::focus(ui::elevate::ACCOUNT_INPUT_ID)
+	}
+
+	/// The elevation form of the open accounts dialog, or `None` when that is not what is open (§47).
+	fn elevate_form_mut(&mut self) -> Option<&mut ui::elevate::ElevateForm> {
+		match &mut self.modal {
+			Some(Modal::Elevate(form)) => Some(form),
+			_ => None,
+		}
+	}
+
+	/// The rows the accounts dialog lists (§47): every identity this session has, named, with the
+	/// one on screen marked and every elevated one closable.
+	///
+	/// The login identity's name comes from the session's endpoint rather than from the identity —
+	/// see [`Identity`] for why it is not stored twice.
+	fn account_rows(&self) -> Vec<ui::elevate::AccountRow> {
+		let login = self.login_account();
+		self.identities
+			.iter()
+			.map(|identity| ui::elevate::AccountRow {
+				identity: identity.id,
+				label: match &identity.account {
+					Some(account) => account.clone(),
+					None => login.clone(),
+				},
+				selected: identity.id == self.identity,
+				closable: identity.id != bridge::LOGIN_IDENTITY,
+			})
+			.collect()
+	}
+
+	/// The account the session authenticated as, read off its endpoint (§47). `user@host:port` up to
+	/// the `@`, falling back to a plain word when there is no session — which the dialog cannot be
+	/// open without, so the fallback is for the type rather than for the screen.
+	fn login_account(&self) -> String {
+		self.connection
+			.as_deref()
+			.and_then(|endpoint| endpoint.split('@').next())
+			.unwrap_or("login")
+			.to_owned()
+	}
+
+	/// The account whose terminal is on screen, for the status bar's button (§47). `None` for the
+	/// login identity, which the bar's centred endpoint already names.
+	fn showing_account(&self) -> Option<&str> {
+		self.identities
+			.iter()
+			.find(|identity| identity.id == self.identity)
+			.and_then(|identity| identity.account.as_deref())
+	}
+
+	/// Send the elevation the dialog is asking for (§47).
+	///
+	/// The account is vetted here and nowhere later: `elevate::valid_user` is the rule that keeps
+	/// anything but a plain login name out of the command line `ElevateKind::command` composes, and
+	/// this is the boundary the user's own text crosses (§12). A refused name is reported under the
+	/// form and nothing is sent.
+	fn submit_elevation(&mut self) -> iced::Task<Message> {
+		let Some(form) = self.elevate_form_mut() else {
+			return iced::Task::none();
+		};
+		// A conversation already running must not be restarted by a second press.
+		if !matches!(form.stage, ui::elevate::Stage::Asking) {
+			return iced::Task::none();
+		}
+		let account = form.account.trim().to_owned();
+		if account.is_empty() {
+			form.error = Some("Which account?".to_owned());
+			return iced::Task::none();
+		}
+		if !crate::elevate::valid_user(&account) {
+			form.error = Some(
+				"An account is a plain login name — letters, digits, and `_ - .` (§12).".to_owned(),
+			);
+			return iced::Task::none();
+		}
+		let (kind, on_connect, remember) = (form.kind, form.on_connect, form.remember);
+		form.error = None;
+		self.start_elevation(&account, kind, remember, false);
+		// The preference is stored on the way OUT, not on success: it says what the next connection
+		// should try, and a refused attempt is still what the user asked for. The password is the
+		// other way round — see `settle_elevation_secret` (§47).
+		self.persist_elevation(&account, kind, on_connect);
+		iced::Task::none()
+	}
+
+	/// Ask the session to become `account`, and record what has to be known when it resolves (§47).
+	///
+	/// `automatic` says whether this came from the target's stored preference rather than from the
+	/// dialog, which is what decides how a FAILURE is reported: a hands-free attempt has no dialog
+	/// behind it, so a refusal has to put one up.
+	fn start_elevation(
+		&mut self,
+		account: &str,
+		kind: crate::elevate::ElevateKind,
+		remember: bool,
+		automatic: bool,
+	) {
+		let identity = self.next_identity;
+		if !self.send_command(SshCommand::Elevate {
+			identity,
+			kind,
+			user: account.to_owned(),
+		}) {
+			return;
+		}
+		self.next_identity += 1;
+		// Listed straight away, and NOT ready: a shell still elevating cannot be switched to, but it
+		// has to be in the list for a failure to be reported against (§45).
+		self.identities.push(Identity {
+			id: identity,
+			account: Some(account.to_owned()),
+			ready: false,
+			work: Workspace::default(),
+		});
+		self.pending_elevation = Some(PendingElevation {
+			identity,
+			account: account.to_owned(),
+			remember,
+			automatic,
+			answer: None,
+		});
+		if let Some(form) = self.elevate_form_mut() {
+			form.stage = ui::elevate::Stage::Waiting { identity };
+		}
+	}
+
+	/// Write the answer the dialog is holding to the elevating shell (§47).
+	///
+	/// The typed text becomes a `Secret` here — the last point it is an ordinary `String` — and a
+	/// COPY of it is kept in `pending_elevation` until the elevation resolves, which is the only way
+	/// a password can be stored after being proved good rather than before (§12, §16).
+	fn send_elevate_answer(&mut self) -> iced::Task<Message> {
+		let Some(form) = self.elevate_form_mut() else {
+			return iced::Task::none();
+		};
+		let ui::elevate::Stage::Answering {
+			identity, answer, ..
+		} = &mut form.stage
+		else {
+			return iced::Task::none();
+		};
+		let identity = *identity;
+		// Taken, not cloned: the field is cleared as the answer leaves it, so the plaintext is not
+		// left sitting in a widget behind the dialog.
+		let secret = Secret::new(std::mem::take(answer));
+		form.stage = ui::elevate::Stage::Waiting { identity };
+		if let Some(pending) = self.pending_elevation.as_mut()
+			&& pending.identity == identity
+		{
+			pending.answer = Some(secret.clone());
+		}
+		self.send_command(SshCommand::ElevateAnswer { identity, secret });
+		iced::Task::none()
+	}
+
+	/// A credential question arrived from an elevating shell (§45, §47).
+	///
+	/// Two things can be true when one lands. If the dialog is open, the question goes into it. If it
+	/// is NOT — which is what an elevation started from the target's stored preference looks like —
+	/// the dialog is opened to ask it, because a question nobody is shown is an elevation that hangs.
+	///
+	/// A password the vault holds is tried FIRST, and only for the first question: `refusal.is_some()`
+	/// means the stored one was just rejected, and a question after the first may be a second factor,
+	/// which a stored password must never be offered as (§45).
+	fn on_elevate_prompt(
+		&mut self,
+		identity: u64,
+		label: String,
+		refusal: Option<String>,
+	) -> iced::Task<Message> {
+		// A question for an elevation that is not the one in flight is stale — its shell has since
+		// ended — and answering it would put a password on a channel nobody is watching.
+		if self
+			.pending_elevation
+			.as_ref()
+			.is_none_or(|pending| pending.identity != identity)
+		{
+			return iced::Task::none();
+		}
+		if refusal.is_none()
+			&& let Some(secret) = self.stored_elevation_secret(identity)
+		{
+			if let Some(pending) = self.pending_elevation.as_mut() {
+				pending.answer = Some(secret.clone());
+			}
+			self.send_command(SshCommand::ElevateAnswer { identity, secret });
+			return iced::Task::none();
+		}
+		let mut task = iced::Task::none();
+		if self.elevate_form_mut().is_none() {
+			task = self.open_accounts_dialog();
+		}
+		if let Some(form) = self.elevate_form_mut() {
+			form.stage = ui::elevate::Stage::Answering {
+				identity,
+				label,
+				refusal,
+				answer: String::new(),
+			};
+		}
+		// The answer field, not the account field: the dialog is a prompt now, and nothing else on
+		// it is worth typing into.
+		iced::Task::batch([
+			task,
+			iced::widget::operation::focus(ui::elevate::ANSWER_INPUT_ID),
+		])
+	}
+
+	/// The password the vault holds for the elevation in flight, if the user asked for one to be
+	/// kept and the vault is open (§47).
+	///
+	/// Offered ONCE per elevation, because a refusal comes back as a question with a `refusal`
+	/// attached and `on_elevate_prompt` will not answer one of those from the vault. A locked vault
+	/// yields nothing rather than prompting for the master passphrase — an elevation is not the
+	/// moment to interrupt with a second question.
+	fn stored_elevation_secret(&self, identity: u64) -> Option<Secret> {
+		let pending = self.pending_elevation.as_ref()?;
+		if pending.identity != identity || !pending.remember {
+			return None;
+		}
+		let endpoint = self.connection.as_deref()?;
+		let key = crate::vault::elevation_key(endpoint, &pending.account);
+		self.vault.borrow().as_ref()?.get(&key).cloned()
+	}
+
+	/// Store or forget the password of an elevation that has just resolved (§47).
+	///
+	/// The rule is §45's, applied one layer up: `factors` is how many DISTINCT things were asked
+	/// for, and only when it is 1 is the answer a PASSWORD. More than one means a second factor was
+	/// involved, and a one-time code kept as a password would be replayed to a machine that has
+	/// already spent it. A question re-put after a refusal is the same factor over again, so a
+	/// corrected password still counts as one.
+	///
+	/// Unticking "Remember the password" is how a stored one is removed, which is why the `false`
+	/// branch forgets rather than doing nothing.
+	fn settle_elevation_secret(&mut self, factors: u32) {
+		let Some(pending) = self.pending_elevation.take() else {
+			return;
+		};
+		let Some(endpoint) = self.connection.clone() else {
+			return;
+		};
+		let key = crate::vault::elevation_key(&endpoint, &pending.account);
+		let mut stored = false;
+		if let Some(vault) = self.vault.borrow_mut().as_mut() {
+			if pending.remember && factors == 1 {
+				if let Some(secret) = pending.answer {
+					match vault.store(&key, secret) {
+						Ok(()) => stored = true,
+						Err(error) => eprintln!("could not save the vault: {error:#}"),
+					}
+				}
+			} else if let Err(error) = vault.forget(&key) {
+				eprintln!("could not update the vault: {error:#}");
+			}
+		}
+		// The flag follows what the vault ACTUALLY holds, so the dialog never opens promising a
+		// hands-free elevation that cannot happen — §16's own rule for the connect secret.
+		// Non-overlapping borrows of the shared target cell (see `commit_rename`).
+		let moved =
+			self.targets
+				.borrow_mut()
+				.set_elevation_remembered(&endpoint, &pending.account, stored);
+		if moved && let Err(error) = self.targets.borrow().save() {
+			eprintln!("could not save targets: {error:#}");
+		}
+	}
+
+	/// Remember (or update) what this target's sessions should become (§47).
+	///
+	/// The password flag is not touched here: it follows what the vault actually holds, which is
+	/// `settle_elevation_secret`'s business.
+	fn persist_elevation(
+		&mut self,
+		account: &str,
+		kind: crate::elevate::ElevateKind,
+		on_connect: bool,
+	) {
+		let Some(endpoint) = self.connection.clone() else {
+			return;
+		};
+		let moved = self
+			.targets
+			.borrow_mut()
+			.set_elevation(&endpoint, account, kind, on_connect);
+		if moved && let Err(error) = self.targets.borrow().save() {
+			eprintln!("could not save targets: {error:#}");
+		}
+	}
+
+	/// End one elevated shell (§45): EOF on its channel, which ends its login shell and with it the
+	/// elevation. The list entry goes when the session says the shell has ended, not here — a shell
+	/// that refuses to die must not vanish from the dialog while it is still running.
+	fn close_identity(&mut self, identity: u64) -> iced::Task<Message> {
+		if identity != bridge::LOGIN_IDENTITY {
+			self.send_command(SshCommand::CloseIdentity(identity));
+		}
+		iced::Task::none()
+	}
+
+	/// Start the elevation this target remembers, if it remembers one (§47).
+	///
+	/// Called once the login shell is live, which is the earliest moment a program can be run on the
+	/// connection. Three things stop it: no stored elevation, one whose account this build declines
+	/// to act on (`Elevation::usable` — `targets.json` is a file the user is invited to edit), and
+	/// one that says only "remember this account" rather than "do it every time".
+	fn elevate_on_connect(&mut self) {
+		let saved = self
+			.connection
+			.as_deref()
+			.and_then(|endpoint| self.targets.borrow().find(endpoint).cloned())
+			.and_then(|target| target.elevate);
+		let Some(saved) = saved else { return };
+		if !saved.on_connect || !saved.usable() {
+			return;
+		}
+		self.start_elevation(&saved.account, saved.kind, saved.remember_password, true);
+	}
+
 	/// Start a set of forwards a reconnect restored (§27): each gets a fresh id, is queued as
 	/// `Starting`, and is asked for down the channel. No persistence here — the set came FROM the
 	/// stored target, so it is already saved.
@@ -5581,7 +6070,7 @@ impl Tab {
 	fn seed_form(&mut self, key: &str) -> Option<iced::Task<Message>> {
 		// Copy out the fields before touching `self.form`, so the borrow of `self.targets` ends
 		// first (assigning the form mutably borrows `self`).
-		let (host, port, user, auth_kind, key_path, cert_path, remember) =
+		let (host, port, user, auth_kind, key_path, cert_path, remember, elevate) =
 			self.targets.borrow().find(key).map(|target| {
 				(
 					target.host.clone(),
@@ -5591,6 +6080,7 @@ impl Tab {
 					target.key_path.clone(),
 					target.cert_path.clone(),
 					target.remember_secret,
+					target.elevate.clone(),
 				)
 			})?;
 		self.form = ui::connect::ConnectForm {
@@ -5605,6 +6095,16 @@ impl Tab {
 			// A remembered target opens with the box already ticked (§16); untick to stop
 			// remembering it, which forgets the stored secret on the next connect.
 			remember,
+			// And with whatever it remembers about becoming another account (§47), so a return
+			// visit sees what the next session will do and can change it before connecting.
+			elevate_account: elevate
+				.as_ref()
+				.map(|saved| saved.account.clone())
+				.unwrap_or_default(),
+			elevate_kind: elevate
+				.as_ref()
+				.map_or(crate::elevate::ElevateKind::default(), |saved| saved.kind),
+			elevate_on_connect: elevate.is_some_and(|saved| saved.on_connect),
 		};
 
 		if remember {
@@ -5919,7 +6419,7 @@ impl Tab {
 	fn apply_form_focus(&self) -> iced::Task<Message> {
 		let id = self
 			.form_focus
-			.input_id(self.form.auth_kind)
+			.input_id(self.form.shape())
 			.unwrap_or(ui::connect::NO_FOCUS_ID);
 		iced::widget::operation::focus(id)
 	}
@@ -5949,16 +6449,16 @@ impl Tab {
 
 		match key {
 			iced::keyboard::Key::Named(Named::Tab) => {
-				let auth = self.form.auth_kind;
+				let shape = self.form.shape();
 				self.form_focus = if modifiers.shift() {
-					self.form_focus.previous(auth)
+					self.form_focus.previous(shape)
 				} else {
-					self.form_focus.next(auth)
+					self.form_focus.next(shape)
 				};
 				self.apply_form_focus()
 			}
 			iced::keyboard::Key::Named(named @ (Named::Enter | Named::Space)) => {
-				if self.form_focus.input_id(self.form.auth_kind).is_some() {
+				if self.form_focus.input_id(self.form.shape()).is_some() {
 					// A text stop: Enter submits the form (the field has no submit of its
 					// own), Space types a space and is left to the field.
 					if named == Named::Enter {
@@ -5966,7 +6466,7 @@ impl Tab {
 					} else {
 						iced::Task::none()
 					}
-				} else if let Some(message) = self.form_focus.activation(self.form.auth_kind) {
+				} else if let Some(message) = self.form_focus.activation(self.form.shape()) {
 					// A radio/button stop turns the key into its own activation message.
 					iced::Task::done(message)
 				} else {
@@ -7012,6 +7512,20 @@ impl Tab {
 			target.key_path,
 			target.cert_path,
 		);
+		// What the FORM asked this target to become (§47), applied before anything reads the target
+		// back: `elevate_on_connect` runs when the shell opens, and it reads the stored preference.
+		// A blank field says nothing rather than "stay put", so a target's remembered account is not
+		// erased by connecting from a form that never mentioned it — the dialog's own field, and
+		// clearing the form's, are the two ways to change it.
+		if let Some((account, kind, on_connect)) = self.form.elevation() {
+			let moved = self
+				.targets
+				.borrow_mut()
+				.set_elevation(&key, &account, kind, on_connect);
+			if moved && let Err(error) = self.targets.borrow().save() {
+				eprintln!("could not save targets: {error:#}");
+			}
+		}
 		let targets = self.targets.borrow();
 		let saved = targets.find(&key);
 		Arrival {
@@ -7083,7 +7597,22 @@ impl Tab {
 
 	/// An elevated shell is through its conversation (§45): it now has a terminal of its own, so
 	/// give it one, close the dialog and put it on screen.
-	fn on_identity_ready(&mut self, identity: u64) -> iced::Task<Message> {
+	fn on_identity_ready(&mut self, identity: u64, factors: u32) -> iced::Task<Message> {
+		// The elevation resolved, so the answer it was holding is either stored or dropped (§47).
+		// Before the early return below: an identity the list has lost is exactly the case where a
+		// held credential must not be left in memory.
+		if self
+			.pending_elevation
+			.as_ref()
+			.is_some_and(|pending| pending.identity == identity)
+		{
+			self.settle_elevation_secret(factors);
+			// The dialog was the thing asking; with the account up and running there is nothing left
+			// on it to answer, so it closes rather than sitting over the new terminal.
+			if matches!(self.modal, Some(Modal::Elevate(_))) {
+				self.modal = None;
+			}
+		}
 		let Some(entry) = self
 			.identities
 			.iter_mut()
@@ -7119,8 +7648,32 @@ impl Tab {
 		let Some(reason) = reason else {
 			return task; // an ordinary `exit` at an elevated prompt
 		};
-		// A toast says why, without stealing the keyboard (§10). It used to go into the elevate
-		// dialog when that attempt's dialog was still up; there is no dialog now.
+		// The elevation that failed was holding an answer; it goes now, stored nowhere (§47). The
+		// factor count is irrelevant — nothing is kept from an elevation that did not happen — and
+		// `settle_elevation_secret` is called with a count that cannot store, so the "unticked means
+		// forget" half still runs.
+		let automatic = self
+			.pending_elevation
+			.as_ref()
+			.filter(|pending| pending.identity == identity)
+			.map(|pending| pending.automatic);
+		if automatic.is_some() {
+			self.settle_elevation_secret(u32::MAX);
+		}
+		// Where the reason goes depends on who asked. With the dialog open it goes under the form,
+		// beside the account that was refused, and the form goes back to asking so the name can be
+		// corrected. A hands-free attempt from the target's stored preference has no dialog behind
+		// it, so one is opened to carry the news — otherwise the session simply stays at the login
+		// account with nothing said (§47).
+		if automatic == Some(true) && self.elevate_form_mut().is_none() {
+			task = iced::Task::batch([task, self.open_accounts_dialog()]);
+		}
+		if let Some(form) = self.elevate_form_mut() {
+			form.stage = ui::elevate::Stage::Asking;
+			form.error = Some(reason);
+			return task;
+		}
+		// Nothing open to say it in: a toast says why without stealing the keyboard (§10).
 		self.toast(reason);
 		task
 	}
@@ -8106,12 +8659,15 @@ impl Tab {
 						ui::terminal::UiTerminalSession {
 							endpoint: self.connection.as_deref().unwrap_or(""),
 							local: self.local.is_some(),
+							account: self.showing_account(),
 						},
 						self.selection.as_ref(),
 						self.menu,
 						ui::terminal::Modals {
 							open: self.modal.as_ref(),
 							forwards: &self.forwards,
+							// Built for the frame rather than kept on the tab: see `Modals`.
+							accounts: self.account_rows(),
 							search: self.search.as_ref(),
 							body: &self.dialog_body,
 							card,
@@ -9370,6 +9926,7 @@ mod tests {
 			sort_dir: None,
 			remember_secret: false,
 			forwards: Vec::new(),
+			elevate: None,
 		}
 	}
 
@@ -10645,6 +11202,7 @@ mod tests {
 		app.screen = AppScreen::Terminal;
 		app.identities = vec![Identity {
 			id: bridge::LOGIN_IDENTITY,
+			account: None,
 			ready: true,
 			work: Workspace::default(),
 		}];
@@ -10662,6 +11220,7 @@ mod tests {
 		app.next_identity += 1;
 		app.identities.push(Identity {
 			id,
+			account: Some("root".to_owned()),
 			ready: false,
 			work: Workspace::default(),
 		});
@@ -10669,8 +11228,492 @@ mod tests {
 			identity: u64::MAX, // a stray event for nothing, to prove it disturbs nothing
 			reason: None,
 		});
-		let _task = app.on_ssh_event(SshEvent::IdentityReady { identity: id });
+		let _task = app.on_ssh_event(SshEvent::IdentityReady {
+			identity: id,
+			factors: 1,
+		});
 		id
+	}
+
+	// --- §47: the accounts dialog, the stored preference, and the remembered password ---
+
+	// A tab with a login shell up and a saved target behind it, which is what every §47 test needs:
+	// the preference and the password flag live on the TARGET, so a session with no target to write
+	// to would exercise half of each path.
+	fn app_with_saved_target() -> (Tab, mpsc::Receiver<SshCommand>) {
+		let (mut app, rx) = app_with_login_identity();
+		app.connection = Some("cme@rec:22".to_owned());
+		app.targets.borrow_mut().upsert_on_connect(
+			"rec",
+			22,
+			"cme",
+			AuthKind::Password,
+			None,
+			None,
+		);
+		(app, rx)
+	}
+
+	// What the target remembers about becoming another account, or `None`.
+	fn saved_elevation(app: &Tab) -> Option<crate::targets::Elevation> {
+		app.targets
+			.borrow()
+			.find("cme@rec:22")
+			.and_then(|target| target.elevate.clone())
+	}
+
+	// Ask for an elevation the way the user does: open the dialog, type the account, tick what is
+	// wanted, submit. Driving it through `update` is what pins the wiring — an edit reaching a closed
+	// dialog would silently do nothing and these tests would catch it.
+	fn ask_to_become(app: &mut Tab, account: &str, on_connect: bool, remember: bool) {
+		if app.elevate_form_mut().is_none() {
+			let _focus = app.update(Message::AccountPressed);
+		}
+		let _ = app.update(Message::ElevateAccountEdited(account.to_owned()));
+		if on_connect {
+			let _ = app.update(Message::ElevateOnConnectToggled(true));
+		}
+		if remember {
+			let _ = app.update(Message::ElevateRememberToggled(true));
+		}
+		let _ = app.update(Message::ElevateSubmitted);
+	}
+
+	/// The whole of the ordinary path (§47): ask to become root, answer the question sudo asks, and
+	/// end up with root's terminal on screen — with what was asked for remembered on the target.
+	#[test]
+	fn becoming_another_account_asks_answers_and_lands() {
+		let (mut app, mut rx) = app_with_saved_target();
+
+		ask_to_become(&mut app, "root", true, false);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate {
+				identity,
+				kind,
+				user,
+			}) => {
+				assert_eq!(kind, crate::elevate::ElevateKind::Sudo);
+				assert_eq!(user, "root");
+				identity
+			}
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		// Listed at once and not ready: a shell still elevating cannot be switched to, but a failure
+		// has to have something to be reported against (§45).
+		assert!(
+			app.identities
+				.iter()
+				.any(|entry| entry.id == identity && !entry.ready),
+			"the elevating identity is listed"
+		);
+		// The preference is stored on the way out, not on success: it says what the NEXT connection
+		// should try, and a refused attempt is still what the user asked for.
+		let saved = saved_elevation(&app).expect("the target remembers the account");
+		assert_eq!(saved.account, "root");
+		assert!(saved.on_connect);
+		assert!(!saved.remember_password, "nothing was asked to be kept");
+
+		// sudo asks, in its own words, and the dialog puts exactly that question.
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: None,
+		});
+		match &app.elevate_form_mut().expect("the dialog is open").stage {
+			ui::elevate::Stage::Answering { label, refusal, .. } => {
+				assert_eq!(label, crate::elevate::MARKER);
+				assert!(refusal.is_none());
+			}
+			other => panic!("expected a question, got {other:?}"),
+		}
+
+		// The answer goes down the wire as a `Secret`, and the field it was typed into is cleared.
+		let _ = app.update(Message::ElevateAnswerEdited("hunter2".to_owned()));
+		let _ = app.update(Message::ElevateAnswerSubmitted);
+		match next_command(&mut rx) {
+			Some(SshCommand::ElevateAnswer {
+				identity: to,
+				secret,
+			}) => {
+				assert_eq!(to, identity);
+				assert_eq!(secret.expose(), "hunter2");
+			}
+			other => panic!("expected an answer, got {other:?}"),
+		}
+
+		// The shell comes up, root's terminal is put on screen, and the dialog closes — there is
+		// nothing left on it to answer.
+		let _task = app.on_ssh_event(SshEvent::IdentityReady {
+			identity,
+			factors: 1,
+		});
+		assert_eq!(app.identity, identity, "root's terminal is on screen");
+		assert!(app.modal.is_none(), "the dialog is done asking");
+		assert_eq!(app.showing_account(), Some("root"), "and the bar names it");
+	}
+
+	/// An account name is vetted at the field, not quoted and hoped for (§12, §47): the one place
+	/// cmote composes a remote command line from something the user typed.
+	#[test]
+	fn an_account_that_is_not_a_login_name_is_refused_at_the_field() {
+		let (mut app, mut rx) = app_with_saved_target();
+
+		for attempt in ["root; rm -rf /", "-froot", "", "ro ot", "root$(id)"] {
+			ask_to_become(&mut app, attempt, false, false);
+			assert!(
+				next_command(&mut rx).is_none(),
+				"{attempt:?} must not reach the wire"
+			);
+			let form = app.elevate_form_mut().expect("the dialog stays open");
+			assert!(
+				form.error.is_some(),
+				"{attempt:?} is reported under the form"
+			);
+			assert!(
+				matches!(form.stage, ui::elevate::Stage::Asking),
+				"{attempt:?} leaves the form asking"
+			);
+		}
+		assert!(saved_elevation(&app).is_none(), "and nothing is remembered");
+	}
+
+	/// A password is stored only when the elevation SUCCEEDED and only when one factor was asked for
+	/// (§45, §47). This is the ordinary case: one question, one answer, kept.
+	#[test]
+	fn a_password_that_worked_is_kept_when_it_was_asked_for() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let dir = tempfile::tempdir().expect("a temp dir for the vault");
+		*app.vault.borrow_mut() = Some(crate::vault::Vault::for_tests(dir.path()));
+
+		ask_to_become(&mut app, "root", false, true);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, .. }) => identity,
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: None,
+		});
+		let _ = app.update(Message::ElevateAnswerEdited("hunter2".to_owned()));
+		let _ = app.update(Message::ElevateAnswerSubmitted);
+		let _drain = next_command(&mut rx);
+		let _task = app.on_ssh_event(SshEvent::IdentityReady {
+			identity,
+			factors: 1,
+		});
+
+		let key = crate::vault::elevation_key("cme@rec:22", "root");
+		assert_eq!(
+			app.vault
+				.borrow()
+				.as_ref()
+				.and_then(|vault| vault.get(&key))
+				.map(|secret| secret.expose().to_owned()),
+			Some("hunter2".to_owned()),
+			"the password that worked is in the vault"
+		);
+		assert!(
+			saved_elevation(&app).expect("remembered").remember_password,
+			"and the target says so, so the dialog can promise it"
+		);
+	}
+
+	/// SECURITY (§45, §47): an account that took TWO factors has nothing kept. The second question
+	/// may have been a one-time code, and a code stored as a password would be replayed to a machine
+	/// that has already spent it — which is the same rule that stops the FILE side following such an
+	/// account (§46), read off the same number.
+	#[test]
+	fn an_account_that_took_two_factors_has_nothing_kept() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let dir = tempfile::tempdir().expect("a temp dir for the vault");
+		*app.vault.borrow_mut() = Some(crate::vault::Vault::for_tests(dir.path()));
+
+		ask_to_become(&mut app, "root", false, true);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, .. }) => identity,
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		// The password, then a second factor — both under cmote's own marker, which is exactly why
+		// the wording cannot be what tells them apart.
+		for _ in 0..2 {
+			let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+				identity,
+				label: crate::elevate::MARKER.to_owned(),
+				refusal: None,
+			});
+			let _ = app.update(Message::ElevateAnswerEdited("123456".to_owned()));
+			let _ = app.update(Message::ElevateAnswerSubmitted);
+			let _drain = next_command(&mut rx);
+		}
+		let _task = app.on_ssh_event(SshEvent::IdentityReady {
+			identity,
+			factors: 2,
+		});
+
+		let key = crate::vault::elevation_key("cme@rec:22", "root");
+		assert!(
+			app.vault
+				.borrow()
+				.as_ref()
+				.and_then(|vault| vault.get(&key))
+				.is_none(),
+			"two factors, so nothing is kept"
+		);
+		assert!(
+			!saved_elevation(&app).expect("remembered").remember_password,
+			"and the flag says nothing is stored, so nothing promises otherwise"
+		);
+	}
+
+	/// A refused elevation keeps nothing either (§47), and the reason goes under the form so the
+	/// account can be corrected where it was typed.
+	#[test]
+	fn a_refused_elevation_reports_where_it_was_asked_and_keeps_nothing() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let dir = tempfile::tempdir().expect("a temp dir for the vault");
+		*app.vault.borrow_mut() = Some(crate::vault::Vault::for_tests(dir.path()));
+
+		ask_to_become(&mut app, "root", false, true);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, .. }) => identity,
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: None,
+		});
+		let _ = app.update(Message::ElevateAnswerEdited("wrong".to_owned()));
+		let _ = app.update(Message::ElevateAnswerSubmitted);
+		let _drain = next_command(&mut rx);
+		let _task = app.on_ssh_event(SshEvent::IdentityEnded {
+			identity,
+			reason: Some("3 incorrect password attempts".to_owned()),
+		});
+
+		let form = app.elevate_form_mut().expect("the dialog is still open");
+		assert_eq!(
+			form.error.as_deref(),
+			Some("3 incorrect password attempts"),
+			"the remote's own words, under the form"
+		);
+		assert!(
+			matches!(form.stage, ui::elevate::Stage::Asking),
+			"and the form is asking again, so the account can be corrected"
+		);
+		let key = crate::vault::elevation_key("cme@rec:22", "root");
+		assert!(
+			app.vault
+				.borrow()
+				.as_ref()
+				.and_then(|vault| vault.get(&key))
+				.is_none(),
+			"a password that was refused is never stored"
+		);
+	}
+
+	/// A target that remembers an elevation acts on it as soon as the shell is live (§47), and the
+	/// stored password answers the first question without a dialog.
+	#[test]
+	fn a_remembered_elevation_runs_itself_on_connect() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let dir = tempfile::tempdir().expect("a temp dir for the vault");
+		let mut vault = crate::vault::Vault::for_tests(dir.path());
+		vault
+			.store(
+				&crate::vault::elevation_key("cme@rec:22", "root"),
+				Secret::new("hunter2".to_owned()),
+			)
+			.expect("the test vault stores");
+		*app.vault.borrow_mut() = Some(vault);
+		app.targets.borrow_mut().set_elevation(
+			"cme@rec:22",
+			"root",
+			crate::elevate::ElevateKind::Sudo,
+			true,
+		);
+		app.targets
+			.borrow_mut()
+			.set_elevation_remembered("cme@rec:22", "root", true);
+
+		app.elevate_on_connect();
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, user, .. }) => {
+				assert_eq!(user, "root");
+				identity
+			}
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		// No dialog: nobody asked for one, and the stored password answers the question by itself.
+		assert!(app.modal.is_none(), "nothing was put in the user's way");
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: None,
+		});
+		match next_command(&mut rx) {
+			Some(SshCommand::ElevateAnswer { secret, .. }) => {
+				assert_eq!(secret.expose(), "hunter2", "answered from the vault");
+			}
+			other => panic!("expected an answer, got {other:?}"),
+		}
+		assert!(app.modal.is_none(), "and still nothing in the way");
+	}
+
+	/// A stored password that the remote REFUSES puts the question to the user rather than trying it
+	/// again (§47): a refusal arrives as the same question with the program's words attached, and a
+	/// stored password is offered once.
+	#[test]
+	fn a_refused_stored_password_puts_the_question_to_the_user() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let dir = tempfile::tempdir().expect("a temp dir for the vault");
+		let mut vault = crate::vault::Vault::for_tests(dir.path());
+		vault
+			.store(
+				&crate::vault::elevation_key("cme@rec:22", "root"),
+				Secret::new("stale".to_owned()),
+			)
+			.expect("the test vault stores");
+		*app.vault.borrow_mut() = Some(vault);
+
+		ask_to_become(&mut app, "root", false, true);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, .. }) => identity,
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: None,
+		});
+		assert!(
+			matches!(
+				next_command(&mut rx),
+				Some(SshCommand::ElevateAnswer { .. })
+			),
+			"the stored password is tried first"
+		);
+		// Refused: the same question comes back with the program's words about the last answer.
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: crate::elevate::MARKER.to_owned(),
+			refusal: Some("Sorry, try again.".to_owned()),
+		});
+		assert!(
+			next_command(&mut rx).is_none(),
+			"the stored password is not tried twice"
+		);
+		match &app.elevate_form_mut().expect("the dialog is open").stage {
+			ui::elevate::Stage::Answering { refusal, .. } => {
+				assert_eq!(refusal.as_deref(), Some("Sorry, try again."));
+			}
+			other => panic!("expected the question to be put, got {other:?}"),
+		}
+	}
+
+	/// A hand-edited `targets.json` is remote input as far as the account check is concerned (§12,
+	/// §47): an elevation whose account is not a plain login name is a stored preference cmote
+	/// declines to act on, not an error to report.
+	#[test]
+	fn a_stored_elevation_with_an_impossible_account_is_not_acted_on() {
+		let (mut app, mut rx) = app_with_saved_target();
+		// Written past the dialog's own check, which is what editing the file by hand does: the
+		// setter stores what it is given, and the READ is where the account is vetted.
+		app.targets.borrow_mut().set_elevation(
+			"cme@rec:22",
+			"root; id",
+			crate::elevate::ElevateKind::Sudo,
+			true,
+		);
+
+		app.elevate_on_connect();
+		assert!(
+			next_command(&mut rx).is_none(),
+			"nothing composed from it reaches the wire"
+		);
+		assert!(app.modal.is_none(), "and nothing is put in the way");
+	}
+
+	/// Switching between the accounts a session has, and closing one, are where the dialog puts them
+	/// — beside the account they act on (§45, §47). The login account has no ✕: ending it is what
+	/// Disconnect does.
+	#[test]
+	fn the_dialog_lists_every_account_and_only_elevated_ones_close() {
+		let (mut app, mut rx) = app_with_saved_target();
+		let root = elevate_to(&mut app);
+
+		let rows = app.account_rows();
+		assert_eq!(rows.len(), 2, "the login account and root");
+		let login = rows
+			.iter()
+			.find(|row| row.identity == bridge::LOGIN_IDENTITY)
+			.expect("the login account is listed");
+		assert_eq!(login.label, "cme", "named from the session's endpoint");
+		assert!(!login.closable, "ending it is what Disconnect does");
+		let elevated = rows
+			.iter()
+			.find(|row| row.identity == root)
+			.expect("root is listed");
+		assert_eq!(elevated.label, "root");
+		assert!(elevated.closable);
+		assert!(elevated.selected, "and it is the one on screen");
+
+		// Switching back to the login account, by clicking its name.
+		let _task = app.update(Message::IdentitySelected(bridge::LOGIN_IDENTITY));
+		assert_eq!(app.identity, bridge::LOGIN_IDENTITY);
+		assert_eq!(app.showing_account(), None, "so the bar stops naming one");
+
+		// And closing root: EOF on its channel. Drained rather than taken one at a time, because a
+		// switch sends the file panes' re-listing ahead of it (§46).
+		let _task = app.update(Message::IdentityClosed(root));
+		let mut closed = Vec::new();
+		while let Some(command) = next_command(&mut rx) {
+			if let SshCommand::CloseIdentity(id) = command {
+				closed.push(id);
+			}
+		}
+		assert_eq!(closed, vec![root], "the close goes down the wire");
+		// The list entry stays until the session says the shell has ended — a shell that refuses to
+		// die must not vanish from the dialog.
+		assert!(app.identities.iter().any(|entry| entry.id == root));
+		// The login identity is not closable this way, whatever asks.
+		let _task = app.update(Message::IdentityClosed(bridge::LOGIN_IDENTITY));
+		let mut after = Vec::new();
+		while let Some(command) = next_command(&mut rx) {
+			if let SshCommand::CloseIdentity(id) = command {
+				after.push(id);
+			}
+		}
+		assert!(after.is_empty(), "the login shell is Disconnect's to end");
+	}
+
+	/// Pressing Account while sudo is asking shows the question, not a blank form over an elevation
+	/// that is still waiting for an answer (§47).
+	#[test]
+	fn re_opening_the_dialog_does_not_throw_away_an_outstanding_question() {
+		let (mut app, mut rx) = app_with_saved_target();
+		ask_to_become(&mut app, "root", false, false);
+		let identity = match next_command(&mut rx) {
+			Some(SshCommand::Elevate { identity, .. }) => identity,
+			other => panic!("expected an elevation, got {other:?}"),
+		};
+		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			identity,
+			label: "Verification code:".to_owned(),
+			refusal: None,
+		});
+
+		let _focus = app.update(Message::AccountPressed);
+		match &app.elevate_form_mut().expect("still open").stage {
+			ui::elevate::Stage::Answering { label, .. } => {
+				assert_eq!(
+					label, "Verification code:",
+					"the question survives the press"
+				);
+			}
+			other => panic!("expected the question, got {other:?}"),
+		}
 	}
 
 	/// Switching accounts moves the FILE panes too (§46), and reads them again as the account now
@@ -10902,6 +11945,7 @@ mod tests {
 		app.next_identity += 1;
 		app.identities.push(Identity {
 			id: root,
+			account: Some("root".to_owned()),
 			ready: false,
 			work: Workspace::default(),
 		});
@@ -10911,7 +11955,10 @@ mod tests {
 			identity: root,
 			bytes: b"root@rec:~# ".to_vec(),
 		});
-		let _task = app.on_ssh_event(SshEvent::IdentityReady { identity: root });
+		let _task = app.on_ssh_event(SshEvent::IdentityReady {
+			identity: root,
+			factors: 1,
+		});
 		assert_eq!(app.identity, root, "and it is brought forward");
 		assert!(
 			!app.terminal

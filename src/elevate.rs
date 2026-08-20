@@ -22,6 +22,8 @@
 // a question asked again is not the same event as an answer refused, and only the program's own
 // words in between tell them apart.
 
+use serde::{Deserialize, Serialize};
+
 /// The text cmote makes `sudo` use for its password prompt, via `-p`. A prompt is otherwise the
 /// remote's own wording — localized, `[sudo] password for cme:`, `Password:`, whatever sudoers
 /// says — and matching all of those is guesswork. Naming the prompt ourselves turns the one
@@ -41,7 +43,13 @@ const MAX_LABEL: usize = 120;
 /// How a user becomes another user on the remote. Two shapes cover it: `sudo`, which asks for the
 /// CALLER's own password (and is what a sudoers-managed machine expects), and `su`, which asks for
 /// the TARGET account's — the fallback where sudo is absent or the user is not in sudoers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Serialized with a saved target since §47, which is why the two variants name themselves in the
+/// JSON (`"sudo"` / `"su"`) rather than taking serde's default capitalisation: `targets.json` is
+/// meant to be read and edited by hand (§22), and the words in it should be the words the user
+/// picked in the dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ElevateKind {
 	/// `sudo -u <user> -i`: a login shell for `user`, authenticated with the caller's password.
 	#[default]
@@ -210,21 +218,16 @@ pub fn shell_command(kind: ElevateKind, user: &str, snippet: &str, password: boo
 /// refused at the field rather than quoted and hoped for — that field feeds a command that runs on
 /// a remote machine as another user, which is exactly the boundary to validate at, not near.
 ///
-/// Nothing calls it while there is no UI that types an account name — the elevate dialog was
-/// withdrawn pending a different approach — and it is deliberately kept rather than deleted. It is a
-/// security boundary with its own tests, and whatever replaces that dialog will need exactly this
-/// check before it composes a command. Deleting it would invite the next implementation to quote and
-/// hope.
+/// TWO callers, and both are boundaries the same text crosses (§47): the account typed into the
+/// accounts dialog, and the account read back out of `targets.json` — a file the user is invited to
+/// edit, so a stored preference is checked on the way out as well as on the way in
+/// (`targets::Elevation::usable`).
 ///
-/// `cfg_attr(not(test), expect(..))` rather than a bare `expect`, because the tests below DO call it:
-/// under `cargo test` the item is used, the lint does not fire, and an unconditional `expect` would
-/// then fail the build as an unfulfilled expectation. So the escape is scoped to the configuration
-/// that actually needs it — and being an `expect` rather than an `allow`, it turns into a build
-/// error the moment a real caller appears, which is the reminder to delete this note (§111).
-#[cfg_attr(
-	not(test),
-	expect(dead_code, reason = "kept for §47's account field; see the doc above")
-)]
+/// It spent §45 to §47 with no caller at all, kept rather than deleted because whatever replaced the
+/// withdrawn dialog would need exactly this check before composing a command. The
+/// `cfg_attr(not(test), expect(dead_code, …))` that held it there is gone — an `expect` rather than
+/// an `allow` was chosen precisely so it would become a build error the moment a real caller
+/// appeared, and that is how this note got written (§111).
 pub fn valid_user(user: &str) -> bool {
 	!user.is_empty()
 		&& !user.starts_with('-')

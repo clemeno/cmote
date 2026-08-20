@@ -34,6 +34,13 @@ into (§45, §46).
 One shell running as an account, known to the SSH task by number. An account can have several;
 each is a channel of its own (§45).
 
+**Elevation**:
+Becoming another account on a session that is already logged in — a program (`sudo`, `su`) run on
+the connection, not a second authentication (§45). Also what a target REMEMBERS about doing it since
+§47: the account, the program, whether to do it on connect, and whether its password is in the vault.
+_Avoid_: privilege escalation — the account elevated into need not have more privilege than the one
+that logged in
+
 **Shell**:
 The remote program a session talks to on one channel.
 

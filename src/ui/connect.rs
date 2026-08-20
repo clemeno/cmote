@@ -30,6 +30,10 @@ pub const PASSWORD_INPUT_ID: &str = "connect-password";
 /// `ui::PASSPHRASE_INPUT_ID`, which is the *interactive* prompt's field — this one
 /// lives on the form and only pre-seeds the passphrase.
 pub const KEY_PASSPHRASE_INPUT_ID: &str = "connect-key-passphrase";
+/// The account to become once logged in (§47). Empty means "stay the account that logs in", which
+/// is what makes this one field the gate: the program choice and the on-connect toggle appear, and
+/// join the Tab ring, only once it names somebody.
+pub const ELEVATE_ACCOUNT_INPUT_ID: &str = "connect-elevate-account";
 
 /// An id that matches no widget on purpose: focusing it unfocuses every input (iced's
 /// focus operation unfocuses all non-matching focusables). `app` uses it when the
@@ -54,6 +58,20 @@ const FOCUS_RING: Color = Color::from_rgb8(0x5a, 0x9c, 0xff);
 const KEY_PATH_WIDTH: f32 = 210.0;
 const KEY_PATH_CHAR: f32 = 8.0;
 const KEY_PATH_LINES: usize = 2;
+
+/// What the form's SHAPE is, for the stops that exist only sometimes (§14, §47).
+///
+/// The ring skips a control that is not on screen, and two things decide which of them are: the auth
+/// method — a passphrase field belongs to key auth — and whether an elevation is being asked for at
+/// all, since the program choice and the on-connect toggle appear once an account is named. One
+/// `Copy` struct rather than two arguments, so the next conditional control does not widen five
+/// signatures again.
+#[derive(Debug, Clone, Copy)]
+pub struct FormShape {
+	pub auth: AuthKind,
+	/// Whether the elevation fields are on screen — true exactly when the account field is not blank.
+	pub elevating: bool,
+}
 
 /// The connect form's keyboard-focus stops, in Tab order (§10). iced can only focus
 /// text inputs, so the radios and Connect button are navigated by this bespoke ring:
@@ -87,13 +105,21 @@ pub enum FormStop {
 	/// The "Remember" checkbox (§16). A toggle, not a text field, so — like the radios — it
 	/// wears the focus ring and is flipped by Enter/Space rather than taking native focus.
 	Remember,
+	/// The account to become once logged in (§47). Always reachable: it is the gate the three stops
+	/// below hang off, so it must be typeable before they exist.
+	ElevateAccount,
+	/// The two program radios and the "on every connection" toggle (§47). Reachable only while the
+	/// account field names somebody — there is nothing for them to be about otherwise.
+	ElevateSudo,
+	ElevateSu,
+	ElevateOnConnect,
 	Connect,
 }
 
 impl FormStop {
 	/// The stops in Tab order; `next`/`previous` cycle through it, skipping any that
 	/// do not apply to the current auth method.
-	const ORDER: [FormStop; 12] = [
+	const ORDER: [FormStop; 16] = [
 		FormStop::Host,
 		FormStop::Port,
 		FormStop::User,
@@ -105,6 +131,10 @@ impl FormStop {
 		FormStop::Certificate,
 		FormStop::KeyPassphrase,
 		FormStop::Remember,
+		FormStop::ElevateAccount,
+		FormStop::ElevateSudo,
+		FormStop::ElevateSu,
+		FormStop::ElevateOnConnect,
 		FormStop::Connect,
 	];
 
@@ -112,33 +142,36 @@ impl FormStop {
 	/// controls that are not on screen: the key-passphrase field exists only under key auth,
 	/// and under INTERACTIVE auth there is no credential control and no "remember" toggle (the
 	/// server drives every prompt, §7), so both are skipped too.
-	fn is_applicable(self, auth: AuthKind) -> bool {
+	fn is_applicable(self, shape: FormShape) -> bool {
 		match self {
 			// Grouped by the CONDITION rather than kept in Tab order, so each rule is written once
-			// and the two stops that share it are visibly the same case.
-			FormStop::Credential | FormStop::Remember => !auth.is_promptless(),
-			FormStop::Certificate | FormStop::KeyPassphrase => auth == AuthKind::Key,
+			// and the stops that share it are visibly the same case.
+			FormStop::Credential | FormStop::Remember => !shape.auth.is_promptless(),
+			FormStop::Certificate | FormStop::KeyPassphrase => shape.auth == AuthKind::Key,
+			FormStop::ElevateSudo | FormStop::ElevateSu | FormStop::ElevateOnConnect => {
+				shape.elevating
+			}
 			_ => true,
 		}
 	}
 
 	/// The next applicable stop in Tab order, wrapping around at the end.
-	pub fn next(self, auth: AuthKind) -> Self {
+	pub fn next(self, shape: FormShape) -> Self {
 		let mut stop = self;
 		loop {
 			stop = Self::ORDER[(stop.index() + 1) % Self::ORDER.len()];
-			if stop.is_applicable(auth) {
+			if stop.is_applicable(shape) {
 				return stop;
 			}
 		}
 	}
 
 	/// The previous applicable stop in Tab order, wrapping around at the start.
-	pub fn previous(self, auth: AuthKind) -> Self {
+	pub fn previous(self, shape: FormShape) -> Self {
 		let mut stop = self;
 		loop {
 			stop = Self::ORDER[(stop.index() + Self::ORDER.len() - 1) % Self::ORDER.len()];
-			if stop.is_applicable(auth) {
+			if stop.is_applicable(shape) {
 				return stop;
 			}
 		}
@@ -155,28 +188,38 @@ impl FormStop {
 	/// The text-input id to focus natively at this stop, or `None` when the stop is a
 	/// radio or button (which iced cannot focus). Under key auth the `Credential` stop is
 	/// the Browse button, so it has no input id; the `KeyPassphrase` stop is a text field.
-	pub fn input_id(self, auth: AuthKind) -> Option<&'static str> {
+	pub fn input_id(self, shape: FormShape) -> Option<&'static str> {
 		match self {
 			FormStop::Host => Some(HOST_INPUT_ID),
 			FormStop::Port => Some(PORT_INPUT_ID),
 			FormStop::User => Some(USER_INPUT_ID),
-			FormStop::Credential if auth == AuthKind::Password => Some(PASSWORD_INPUT_ID),
-			FormStop::KeyPassphrase if auth == AuthKind::Key => Some(KEY_PASSPHRASE_INPUT_ID),
+			FormStop::Credential if shape.auth == AuthKind::Password => Some(PASSWORD_INPUT_ID),
+			FormStop::KeyPassphrase if shape.auth == AuthKind::Key => Some(KEY_PASSPHRASE_INPUT_ID),
+			FormStop::ElevateAccount => Some(ELEVATE_ACCOUNT_INPUT_ID),
 			_ => None,
 		}
 	}
 
 	/// The message Enter/Space should dispatch when this stop is a radio or button.
 	/// Text-input stops return `None` — there those keys type or submit in the field.
-	pub fn activation(self, auth: AuthKind) -> Option<Message> {
+	pub fn activation(self, shape: FormShape) -> Option<Message> {
 		match self {
 			FormStop::AuthPassword => Some(Message::AuthKindChanged(AuthKind::Password)),
 			FormStop::AuthKey => Some(Message::AuthKindChanged(AuthKind::Key)),
 			FormStop::AuthInteractive => Some(Message::AuthKindChanged(AuthKind::Interactive)),
 			FormStop::AuthAgent => Some(Message::AuthKindChanged(AuthKind::Agent)),
-			FormStop::Credential if auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
+			FormStop::Credential if shape.auth == AuthKind::Key => Some(Message::BrowseKeyPressed),
 			FormStop::Certificate => Some(Message::BrowseCertPressed),
 			FormStop::Remember => Some(Message::RememberToggled),
+			// The elevation controls (§47): two program radios and a toggle, all activated by
+			// Enter/Space like the auth radios above.
+			FormStop::ElevateSudo => Some(Message::FormElevateKindChanged(
+				crate::elevate::ElevateKind::Sudo,
+			)),
+			FormStop::ElevateSu => Some(Message::FormElevateKindChanged(
+				crate::elevate::ElevateKind::Su,
+			)),
+			FormStop::ElevateOnConnect => Some(Message::FormElevateOnConnectToggled),
 			FormStop::Connect => Some(Message::ConnectPressed),
 			_ => None,
 		}
@@ -248,9 +291,45 @@ pub struct ConnectForm {
 	/// never stored. When a saved-secret target is opened, this starts ticked and the masked
 	/// field is pre-filled from the vault.
 	pub remember: bool,
+	/// The account this target's sessions should become once logged in (§47). Blank — the default
+	/// — means they stay the account that logged in, and blank is also what hides the two controls
+	/// below: there is nothing for a program choice to be about until somebody is named.
+	///
+	/// Vetted by `elevate::valid_user` where it is APPLIED rather than on each keystroke, the same
+	/// arrangement the dialog uses: a name is half-typed for most of its life.
+	pub elevate_account: String,
+	/// Which program does it, `sudo` (the default) or `su` (§45).
+	pub elevate_kind: crate::elevate::ElevateKind,
+	/// Whether the session should start that elevation by itself. Off means the target remembers
+	/// the account and waits to be asked, which is what the dialog's own field is for (§47).
+	pub elevate_on_connect: bool,
 }
 
 impl ConnectForm {
+	/// What shape this form is, for the focus ring (§14, §47). The one place "is the elevation on
+	/// screen" is decided, so the ring and the view cannot disagree about it.
+	pub fn shape(&self) -> FormShape {
+		FormShape {
+			auth: self.auth_kind,
+			elevating: !self.elevate_account.trim().is_empty(),
+		}
+	}
+
+	/// What this form asks a target to remember about becoming another account (§47), or `None` when
+	/// it names nobody — or names something that is not a login name, which is refused here rather
+	/// than quoted and hoped for (§12).
+	pub fn elevation(&self) -> Option<(String, crate::elevate::ElevateKind, bool)> {
+		let account = self.elevate_account.trim();
+		if account.is_empty() || !crate::elevate::valid_user(account) {
+			return None;
+		}
+		Some((
+			account.to_owned(),
+			self.elevate_kind,
+			self.elevate_on_connect,
+		))
+	}
+
 	/// Validate the raw fields and produce typed connection parameters, or a
 	/// human-readable reason it is not ready. Cheap checks first, fail fast.
 	pub fn validate(&self) -> Result<ConnectParams, String> {
@@ -378,12 +457,63 @@ pub fn view(form: &ConnectForm, focus: FormStop) -> Element<'_, Message> {
 		));
 	}
 
+	// What this target's sessions should become once logged in (§47). Always offered, because
+	// deciding it before the first connection is the point — but the two controls that qualify it
+	// appear only once an account is named, so a form nobody elevates on looks exactly as it did.
+	content = content.push(labeled_input(
+		"Become",
+		"root (optional)",
+		&form.elevate_account,
+		ELEVATE_ACCOUNT_INPUT_ID,
+		Message::FormElevateAccountChanged,
+	));
+	if form.shape().elevating {
+		content = content.push(elevate_program(form.elevate_kind, focus));
+		content = content.push(focus_ring(
+			checkbox(form.elevate_on_connect)
+				.label("Become it on connect")
+				.on_toggle(|_checked| Message::FormElevateOnConnectToggled),
+			focus == FormStop::ElevateOnConnect,
+		));
+	}
+
 	content
 		.push(focus_ring(
 			button("Connect").on_press(Message::ConnectPressed),
 			focus == FormStop::Connect,
 		))
 		.into()
+}
+
+/// The two radios that choose which program does the elevation (§45, §47), laid out like the auth
+/// selector above so the form has one way of choosing between named alternatives.
+fn elevate_program(
+	selected: crate::elevate::ElevateKind,
+	focus: FormStop,
+) -> Element<'static, Message> {
+	let radio_stop = |label: &'static str, value: crate::elevate::ElevateKind, stop: FormStop| {
+		focus_ring(
+			radio(
+				label,
+				value,
+				Some(selected),
+				Message::FormElevateKindChanged,
+			),
+			focus == stop,
+		)
+	};
+	row![
+		text("With").width(90),
+		radio_stop(
+			"sudo",
+			crate::elevate::ElevateKind::Sudo,
+			FormStop::ElevateSudo
+		),
+		radio_stop("su", crate::elevate::ElevateKind::Su, FormStop::ElevateSu),
+	]
+	.spacing(10)
+	.align_y(iced::alignment::Vertical::Center)
+	.into()
 }
 
 /// Wrap `content` in a highlight ring when `focused` — a bordered container that marks
@@ -686,15 +816,91 @@ mod tests {
 		assert!(matches!(params.auth, AuthMethod::Agent));
 	}
 
+	/// The "Become" field is the gate (§47): blank, the form is exactly the form it was, and the
+	/// three stops that qualify an elevation are out of the Tab ring.
+	#[test]
+	fn the_elevation_stops_appear_only_once_an_account_is_named() {
+		let mut form = ConnectForm::default();
+		assert!(!form.shape().elevating);
+		for stop in [
+			FormStop::ElevateSudo,
+			FormStop::ElevateSu,
+			FormStop::ElevateOnConnect,
+		] {
+			assert!(
+				!stop.is_applicable(form.shape()),
+				"{stop:?} with no account"
+			);
+		}
+		// The account field itself is always reachable — it is the gate, so it has to be typeable
+		// before the rest exists.
+		assert!(FormStop::ElevateAccount.is_applicable(form.shape()));
+		// Tab from Remember therefore lands on it and then goes straight to Connect.
+		assert_eq!(
+			FormStop::Remember.next(form.shape()),
+			FormStop::ElevateAccount
+		);
+		assert_eq!(
+			FormStop::ElevateAccount.next(form.shape()),
+			FormStop::Connect
+		);
+
+		form.elevate_account = "root".to_owned();
+		assert!(form.shape().elevating);
+		assert_eq!(
+			FormStop::ElevateAccount.next(form.shape()),
+			FormStop::ElevateSudo
+		);
+		assert_eq!(
+			FormStop::ElevateOnConnect.next(form.shape()),
+			FormStop::Connect
+		);
+		// Whitespace is not an account: the field is trimmed before it decides anything.
+		form.elevate_account = "   ".to_owned();
+		assert!(!form.shape().elevating);
+	}
+
+	/// What the form asks a target to remember (§47), including the account it refuses: this field
+	/// feeds a command that runs on a remote machine as another user, so it is vetted where it is
+	/// applied rather than quoted and hoped for (§12).
+	#[test]
+	fn the_form_refuses_an_account_that_is_not_a_login_name() {
+		let mut form = ConnectForm {
+			elevate_account: "root".to_owned(),
+			elevate_kind: crate::elevate::ElevateKind::Su,
+			elevate_on_connect: true,
+			..ConnectForm::default()
+		};
+		assert_eq!(
+			form.elevation(),
+			Some(("root".to_owned(), crate::elevate::ElevateKind::Su, true))
+		);
+		// Trimmed, like every other field this form validates.
+		form.elevate_account = "  root  ".to_owned();
+		assert_eq!(
+			form.elevation().map(|(account, _, _)| account),
+			Some("root".to_owned())
+		);
+		// And refused outright when it is not a login name — the same check the dialog makes.
+		for attempt in ["", "   ", "root; id", "-froot", "ro ot"] {
+			form.elevate_account = attempt.to_owned();
+			assert!(form.elevation().is_none(), "{attempt:?}");
+		}
+	}
+
 	#[test]
 	fn a_promptless_method_hides_the_credential_and_remember_stops() {
 		// Both promptless methods (interactive, agent) drop the credential control, the optional
 		// key-passphrase field and the "Remember" toggle from the Tab ring, since none of those
 		// apply when the form captures no secret (§7).
 		for auth in [AuthKind::Interactive, AuthKind::Agent] {
-			assert!(!FormStop::Credential.is_applicable(auth));
-			assert!(!FormStop::KeyPassphrase.is_applicable(auth));
-			assert!(!FormStop::Remember.is_applicable(auth));
+			let shape = FormShape {
+				auth,
+				elevating: false,
+			};
+			assert!(!FormStop::Credential.is_applicable(shape));
+			assert!(!FormStop::KeyPassphrase.is_applicable(shape));
+			assert!(!FormStop::Remember.is_applicable(shape));
 		}
 	}
 
@@ -758,9 +964,13 @@ mod tests {
 	fn the_certificate_stop_is_reachable_only_under_key_auth() {
 		// The certificate Browse button is a Tab stop only when key auth is selected; every
 		// other method (which shows no key file) skips it, like the passphrase field.
-		assert!(FormStop::Certificate.is_applicable(AuthKind::Key));
+		let shape = |auth| FormShape {
+			auth,
+			elevating: false,
+		};
+		assert!(FormStop::Certificate.is_applicable(shape(AuthKind::Key)));
 		for auth in [AuthKind::Password, AuthKind::Interactive, AuthKind::Agent] {
-			assert!(!FormStop::Certificate.is_applicable(auth));
+			assert!(!FormStop::Certificate.is_applicable(shape(auth)));
 		}
 	}
 
