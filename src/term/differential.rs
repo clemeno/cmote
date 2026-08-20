@@ -68,6 +68,9 @@ struct EngineTrace {
 	unhooked: usize,
 	/// Every escape sequence dispatched with `ignore` clear: `ESC c`, `ESC ( B`, a stray ST.
 	escapes: EscapeTrace,
+	/// Every OSC string dispatched, as its parameters rejoined on `;` — which is the shape
+	/// `osc::Framer` hands its callers, so the two can be compared directly (§111).
+	oscs: Vec<Vec<u8>>,
 }
 
 impl vte::Perform for EngineTrace {
@@ -118,6 +121,10 @@ impl vte::Perform for EngineTrace {
 			return;
 		}
 		self.escapes.push((intermediates.to_vec(), byte));
+	}
+
+	fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+		self.oscs.push(params.join(&b';'));
 	}
 }
 
@@ -1201,6 +1208,109 @@ mod tests {
 			matches!(found.as_slice(), [(_, graphics::GraphicsEvent::Reset)]),
 			"a reset interrupting a payload, found {found:?}"
 		);
+	}
+
+	/// Every OSC payload `osc::Framer` completed in a chunk, in the same shape the trace records.
+	fn framed_oscs(bytes: &[u8]) -> Vec<Vec<u8>> {
+		let mut seen = Vec::new();
+		super::super::osc::Framer::<4096>::default().feed(bytes, |_, payload| {
+			seen.push(payload.to_vec());
+		});
+		seen
+	}
+
+	#[test]
+	fn an_osc_is_read_by_both_and_carries_the_same_payload() {
+		// The THIRD framer through the same door, and it had the same two ESC defects `dcs::Framer`
+		// was built to end (§111). Both are here as agreements now, plus the payload rule that is the
+		// engine's and was nobody's here: a C0 inside an OSC is DROPPED rather than passed to the
+		// handler (`lib.rs:349`), so a cwd with one in it used to reach `cwd::parse` as a different
+		// string on cmote's side than on the engine's.
+		let cases: [(&str, &[u8]); 6] = [
+			("plain", b"\x1b]7;file:///tmp\x07"),
+			("ST-terminated", b"\x1b]7;file:///tmp\x1b\\"),
+			// A byte the engine reads through between the ESC and the `]`.
+			(
+				"read-through before the bracket",
+				b"\x1b\n]7;file:///tmp\x07",
+			),
+			("DEL before the bracket", b"\x1b\x7f]7;file:///tmp\x07"),
+			// A C0 inside the payload, which the engine drops on the way in.
+			(
+				"a control byte in the payload",
+				b"\x1b]7;file:\x01///tmp\x07",
+			),
+			// And one after the ESC of the terminator, which the engine reads through.
+			(
+				"a control byte before the ST",
+				b"\x1b]7;file:///tmp\x1b\x00\\",
+			),
+		];
+
+		for (what, bytes) in cases {
+			let engine = engine(bytes);
+			assert_eq!(
+				engine.oscs,
+				framed_oscs(bytes),
+				"{what}: the engine dispatched {:?}",
+				engine.oscs
+			);
+			// And the scanner on top of the framer really does act on it, which is what the agreement
+			// is for.
+			let mut cwd = super::super::cwd::Cwd::default();
+			cwd.feed(bytes);
+			assert_eq!(cwd.path(), Some("/tmp"), "{what}: and `cwd` reads it");
+		}
+	}
+
+	#[test]
+	fn a_cancelled_osc_is_dropped_here_and_dispatched_there() {
+		// The one place this framer is deliberately STRICTER than the engine, asserted as it behaves so
+		// that a change to it is a decision rather than a surprise. CAN and SUB make the engine's parser
+		// dispatch what it had (`osc_end` then `execute`, `lib.rs:355-359`); cmote abandons the payload,
+		// because a string that named no terminator is not answered (§54).
+		//
+		// Safe to be stricter here and nowhere else: the engine has no handler behind any OSC cmote
+		// reads, so there is no second actor to fall out of step with. What it replaces was not stricter
+		// but WRONG — the cancel went into the payload and the framer kept waiting, so a later BEL
+		// handed `cwd` a cancelled path with everything after it glued on (§111).
+		for cancel in [0x18_u8, 0x1a] {
+			let bytes = [0x1b, b']', b'7', b';', b'/', b'a', cancel, b'/', b'b', 0x07];
+			assert_eq!(
+				engine(&bytes).oscs,
+				vec![b"7;/a".to_vec()],
+				"{cancel:#04x}: the engine dispatches the part before the cancel"
+			);
+			assert!(
+				framed_oscs(&bytes).is_empty(),
+				"{cancel:#04x}: cmote dispatches nothing at all"
+			);
+			// The part that matters either way: neither side reads `/a/b`, which is the string the old
+			// framer would have handed on.
+			let mut cwd = super::super::cwd::Cwd::default();
+			cwd.feed(&bytes);
+			assert_eq!(cwd.path(), None, "{cancel:#04x}: and no path is taken");
+		}
+
+		// The same strictness one door along, and the case that matters most: an ESC ends the first
+		// string and OPENS the second. The engine dispatches BOTH — it cannot tell an interrupted
+		// string from a finished one — and cmote drops the interrupted one. What must NOT happen, and
+		// did before §111, is losing the string that followed: the framer went back to ordinary text
+		// and read the second one's bytes as printable characters, so the cwd never arrived at all.
+		let bytes = b"\x1b]0;title\x1b]7;file:///tmp\x07";
+		assert_eq!(
+			engine(bytes).oscs,
+			vec![b"0;title".to_vec(), b"7;file:///tmp".to_vec()],
+			"the engine dispatches the interrupted string too"
+		);
+		assert_eq!(
+			framed_oscs(bytes),
+			vec![b"7;file:///tmp".to_vec()],
+			"cmote drops the interrupted one and reads the one that terminated"
+		);
+		let mut cwd = super::super::cwd::Cwd::default();
+		cwd.feed(bytes);
+		assert_eq!(cwd.path(), Some("/tmp"));
 	}
 
 	#[test]

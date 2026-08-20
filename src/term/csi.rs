@@ -417,9 +417,11 @@ enum CsiScan {
 /// Safe at any chunk boundary: the state carries over between `feed` calls, so a sequence may be split
 /// anywhere — between the ESC and the `[`, inside the parameters, or before the final byte.
 ///
-/// **It frames CSI only.** `query` and `graphics` also read DCS, and they keep their own machine for
-/// that, which is the line `osc.rs` already drew when `graphics` kept its own OSC framing: merging a
-/// second family in would put a policy parameter in this interface that fits neither caller.
+/// **It frames CSI only.** The control strings are [`super::dcs::Framer`]'s and the OSC strings are
+/// `osc::Framer`'s — three framers, one per family, because what a family's introducer and terminator
+/// look like is the only thing each of them knows. They share what is genuinely shared: [`Params`],
+/// [`MAX_INTERMEDIATES`], [`passes_through`] and [`Span`], and one differential harness holding all
+/// three to the engine's own parser. What is still spelled three times is the ESC door itself (§111).
 #[derive(Debug, Default)]
 pub struct Framer {
 	state: CsiScan,

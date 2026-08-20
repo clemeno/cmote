@@ -20,12 +20,18 @@
 // already drifted between them. It lives here now, and the scanners above it are left with only the
 // part that is actually theirs: deciding what a finished payload MEANS.
 //
-// `graphics` deliberately still carries its own. It reads a 16 MB binary payload rather than a short
-// text one, and on overflow it must keep scanning to the real terminator while remembering that the
-// payload is spoiled — where the scanners here simply abandon an overlong payload and hunt for the
-// next sequence. Sharing that difference would mean a cap-and-overflow policy parameter that fits
-// neither caller well, so the two policies stay apart (the deletion test: merging them would move
-// complexity into this module's interface, not concentrate it).
+// This module used to say `graphics` could not share it, because that scanner reads a 16 MB binary
+// payload and had to keep scanning past an overflow while this one abandons it — a cap-and-overflow
+// policy parameter fitting neither caller. §111 measured that and it was not a difference at all: the
+// only byte that can interrupt a control string is an ESC, and an ESC ends it for the engine too, so
+// "keep following to the terminator" and "abandon and hunt for the next ESC" are the same machine. What
+// remained was the cap itself, which is a const parameter here. `graphics` now reads `dcs::Framer`.
+//
+// ONE DOOR, THREE FRAMERS. This one, `csi::Framer` and `dcs::Framer` each open on the same ESC and each
+// has to obey the same rules about it. §111 found the same two defects in all three — a byte the engine
+// reads through between the ESC and the introducer, and an ESC that ends one string while opening the
+// next sequence — and fixed them in all three, with `differential.rs` holding each one to the engine's
+// own parser. The remaining duplication is the ESC door itself, which PLAN §111 names.
 
 /// The escape and bell bytes that frame an OSC sequence.
 const ESC: u8 = 0x1b;
@@ -77,15 +83,22 @@ impl<const CAP: usize> Framer<CAP> {
 						self.state = OscScan::Escape;
 					}
 				}
-				OscScan::Escape => {
-					self.payload.clear();
-					self.state = match byte {
-						b']' => OscScan::Payload,
-						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => OscScan::Escape,
-						_ => OscScan::Text,
-					};
-				}
+				OscScan::Escape => match byte {
+					b']' => {
+						self.payload.clear();
+						self.state = OscScan::Payload;
+					}
+					// ESC ESC: still waiting for the sequence's real first byte.
+					ESC => {}
+					// A byte the engine reads through while it waits for that first byte: it executes a
+					// C0 and STAYS in its escape state (`lib.rs:341`), and ignores DEL and everything
+					// past `0x7f` (`:381-383`). So `ESC` LF `] 7 ; /tmp BEL` really is an OSC, and
+					// dropping to text here read the `]` as a printable character and lost it — for all
+					// four scanners built on this framer at once (§111).
+					byte if super::csi::passes_through(byte) => {}
+					// CAN and SUB drop the escape back to GROUND, where a `]` starts nothing.
+					_ => self.state = OscScan::Text,
+				},
 				OscScan::Payload => match byte {
 					// BEL ends the string; the offset is just past it.
 					BEL => {
@@ -93,6 +106,19 @@ impl<const CAP: usize> Framer<CAP> {
 						self.abandon();
 					}
 					ESC => self.state = OscScan::PayloadEscape,
+					// CAN and SUB. The engine ends the string here — and DISPATCHES what it had
+					// (`osc_end` then `execute`, `lib.rs:355-359`) — where cmote abandons it. That is
+					// deliberately the stricter side of the engine and it is safe to be: the engine has
+					// no handler behind any OSC cmote reads, so nobody acts on one twice. What it fixes
+					// is worse than what it refuses — this used to read the cancel INTO the payload and
+					// go on waiting, so a later BEL dispatched a cwd with a cancelled path and
+					// everything after it glued on (§111).
+					0x18 | 0x1a => self.abandon(),
+					// The C0s the engine DROPS rather than passing to its handler (`lib.rs:349`): a
+					// payload it never sees is not part of the string. DEL and the high bytes are not in
+					// this list, because an OSC keeps those — which is the opposite of what a DCS does
+					// with them, and is why the two framers spell their payload rules separately.
+					0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {}
 					_ => {
 						self.payload.push(byte);
 						if self.payload.len() > CAP {
@@ -100,16 +126,28 @@ impl<const CAP: usize> Framer<CAP> {
 						}
 					}
 				},
-				// ESC `\` is the string terminator (ST); an ESC followed by anything else is a
-				// malformed sequence, so drop what we collected rather than guess.
-				OscScan::PayloadEscape => {
-					if byte == b'\\' {
+				OscScan::PayloadEscape => match byte {
+					// ESC `\` is the string terminator (ST).
+					b'\\' => {
 						on_payload(index + 1, &self.payload);
 						self.abandon();
-					} else {
-						self.abandon();
 					}
-				}
+					// **ESC does two jobs at once**: it ends this string AND opens the next sequence
+					// (§111). What is dropped is the interrupted payload — a string that named no
+					// terminator is not answered, §54's rule — and what must NOT be dropped is the
+					// sequence that follows, which is what this arm and the two below are for. Another
+					// OSC starting here used to be lost entirely: the framer went back to ordinary text
+					// and read its payload as printable characters.
+					b']' => {
+						self.payload.clear();
+						self.state = OscScan::Payload;
+					}
+					// ESC ESC, and the bytes the engine reads through between an ESC and the `\`: the
+					// terminator may still arrive, so the payload stays in hand.
+					ESC => {}
+					byte if super::csi::passes_through(byte) => {}
+					_ => self.abandon(),
+				},
 			}
 		}
 	}

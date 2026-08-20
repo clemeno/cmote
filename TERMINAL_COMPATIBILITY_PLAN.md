@@ -2473,9 +2473,19 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   cap as a const parameter, so each scanner keeps deriving `Default` and keeps its own limit named in
   its own module (`cwd` 4096, `osc133` 512, `progress` 128, `icon` 512); past the cap the payload is
   abandoned and framing resumes (§12). This replaced three copies of the same machine that had already
-  drifted. **`graphics.rs` deliberately keeps its own**: a 16 MB binary payload whose overflow must keep
-  scanning to the real terminator while flagging the payload spoiled, which is a different policy, not
-  a different number.
+  drifted. It used to say `graphics.rs` could not share it — a 16 MB binary payload whose overflow must
+  keep scanning to the real terminator, "a different policy, not a different number" — and §111
+  measured that: it is not a different policy either, because the only byte that can interrupt a
+  control string is an ESC and an ESC ends it for the engine too, so following an overlong payload to
+  its terminator and abandoning it on the spot are the same machine. `graphics` reads `dcs::Framer` now.
+  **Four rules here are the engine's and three of them were nobody's** until §111: a byte the engine
+  reads through between the ESC and the `]` keeps the sequence; an ESC ends this string and OPENS the
+  next one (a second OSC starting inside the first used to be lost entirely); CAN and SUB end the
+  string, where this framer read them into the payload and went on waiting, so a later BEL handed a
+  caller a cancelled path with everything after it glued on; and the C0s the engine DROPS on the way
+  in (`lib.rs:349`) are not part of the payload. On the cancel cmote is deliberately the stricter side —
+  the engine dispatches what it had, cmote abandons it — which is safe here and nowhere else, because
+  the engine has no handler behind any OSC cmote reads.
   Since §69 it also holds **`sanitize(text, max_chars)`**, the strip-and-cap every scanner needs before
   remote-chosen text is drawn in cmote's own chrome — control characters filtered, length capped in
   `chars` so a multi-byte name cannot be cut mid-codepoint. Moved here from `iterm.rs` when `icon.rs`
