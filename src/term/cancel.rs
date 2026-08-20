@@ -71,9 +71,6 @@
 /// header for why this and not one of the alternatives).
 pub const CANCEL: u8 = 0x18;
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// One DECSLRM found in the stream (§57, §102).
 ///
 /// The offset is the position of the final byte ITSELF, and the two numbers are what the sequence
@@ -90,53 +87,21 @@ pub struct CancelRequest {
 	pub right: Option<u16>,
 }
 
-/// The most parameters this scanner will keep. DECSLRM has two and everything past them is somebody
-/// else's sequence — kept as a named number rather than a literal `2` because the loop below reads
-/// better when the bound has the reason attached.
+/// The most parameters DECSLRM carries. Everything past them is somebody else's sequence — kept as a
+/// named number rather than a literal `2` because the test below reads better when the bound has the
+/// reason attached.
 const KEPT_PARAMS: usize = 2;
-
-/// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then
-/// intermediate bytes, then one final byte — only the final byte decides anything here.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum CancelScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`.
-	Escape,
-	/// Inside `ESC [ …`, waiting for the final byte that says what this was.
-	Csi,
-}
 
 /// The misparse scanner (§57). Feed it every byte of shell output; it reports the offset of each
 /// final byte the engine must not be allowed to dispatch.
+///
+/// One field, because the CSI grammar is [`csi::Framer`]'s (§111) and the shape test is the whole of
+/// what this module decides. It kept the most hand-rolled state of the ten before the move — a
+/// parameter counter, a slot index, two half-read numbers and a `plain` flag — and every one of them
+/// was a re-derivation of something the framer now reports.
 #[derive(Debug, Default)]
 pub struct Cancel {
-	state: CancelScan,
-	/// How many parameter bytes the sequence in flight has carried. Non-zero is the whole test for
-	/// DECSLRM against SCOSC.
-	///
-	/// Deliberately UNBOUNDED, unlike the buffered scanners beside it, and that is a correctness point
-	/// rather than an oversight. There is nothing here to grow — two `u16`s, a slot index and this
-	/// counter, whatever length of digit run arrives — so §12's rule about unbounded remote input has
-	/// nothing to bite on. A cap would buy no memory and would cost agreement with the engine, which
-	/// counts PARAMETERS rather than parameter bytes and saturates a long digit run instead of
-	/// abandoning it. Abandoning here means the final byte is never judged, so the engine goes on to
-	/// read a padded DECSLRM as a save-cursor: the margins silently not set, and a cursor the program
-	/// never asked to save overwritten. What bounds this sequence is the shape test below — a third
-	/// parameter rules it out — not the number of bytes spent on the first two.
-	params: usize,
-	/// Whether the sequence is still the plain `CSI <parameters> <final>` shape. A private marker
-	/// (`< = > ?`) or an intermediate (0x20–0x2f) makes it a different sequence altogether —
-	/// `CSI ? s` is XTSAVE, which the engine drops harmlessly — so neither is DECSLRM.
-	plain: bool,
-	/// The two numbers DECSLRM carries, as far as they have been read. `None` is an omitted parameter
-	/// and `Some(0)` one written as an explicit zero — kept apart here because it is the READER that
-	/// decides the two mean the same thing (§102, `term/margins.rs`).
-	numbers: [Option<u16>; KEPT_PARAMS],
-	/// Which of the two the digits are landing in. Past the end the digits are dropped: a sequence
-	/// with three parameters is not DECSLRM, but its final byte still has to be judged.
-	slot: usize,
+	framer: super::csi::Framer,
 }
 
 impl Cancel {
@@ -150,84 +115,53 @@ impl Cancel {
 	/// is advanced up to it, fed a CAN instead of it, and resumed after it.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<CancelRequest> {
 		let mut cancels = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				CancelScan::Text => {
-					if byte == ESC {
-						self.state = CancelScan::Escape;
-					}
-				}
-				CancelScan::Escape => match byte {
-					b'[' => {
-						self.params = 0;
-						self.plain = true;
-						self.numbers = [None; KEPT_PARAMS];
-						self.slot = 0;
-						self.state = CancelScan::Csi;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = CancelScan::Text,
-				},
-				CancelScan::Csi => match byte {
-					// A digit, folded into the parameter it belongs to. Saturating, so a run of
-					// nines cannot wrap the number round into something small and plausible — a
-					// margin past the page is clamped by the reader, but a wrapped one would be
-					// obeyed.
-					b'0'..=b'9' => {
-						self.params += 1;
-						if let Some(number) = self.numbers.get_mut(self.slot) {
-							let digit = u16::from(byte - b'0');
-							*number =
-								Some(number.unwrap_or(0).saturating_mul(10).saturating_add(digit));
-						}
-					}
-					// The separator between parameters. Counted past the two that are kept, because it
-					// is the count that rules a third-parameter sequence out.
-					b';' => {
-						self.params += 1;
-						self.slot += 1;
-					}
-					// Three byte classes, one verdict: whatever this sequence is, it is not DECSLRM,
-					// so the `s` it may end with is not ours to touch.
-					//
-					//   `:`          a sub-parameter separator; DECSLRM has no sub-parameters
-					//   0x3c..=0x3f  a private marker, legal only as the first parameter byte
-					//   0x20..=0x2f  an intermediate byte; DECSLRM has none
-					b':' | 0x3c..=0x3f | 0x20..=0x2f => self.plain = false,
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						// More than two parameters is not DECSLRM either, and `slot` counts the
-						// separators seen rather than the numbers stored, so it is the test.
-						if byte == b's' && self.plain && self.params > 0 && self.slot < KEPT_PARAMS
-						{
-							cancels.push(CancelRequest {
-								offset: index,
-								left: self.numbers[0],
-								right: self.numbers[1],
-							});
-						}
-						self.state = CancelScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = CancelScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH: it runs a C0 control where it sits, ignores DEL, and does nothing with a
-					// high byte — and in every one of those cases the sequence goes on (§106). So it goes
-					// on here too. Abandoning was §57's harm by a second route: `CSI 5;` LF `70 s` is a
-					// margin request the engine dispatches as a save-cursor, and this scanner was the
-					// thing that would have stopped it.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really do cancel a sequence in flight — the
-					// ANSI state machine's own definition, and the engine's (`anywhere`: run it, then back
-					// to ground). CAN is also the byte cmote itself feeds in place of a refused final byte,
-					// which is the same fact read from the other side.
-					_ => self.state = CancelScan::Text,
-				},
+		self.framer.feed(bytes, |offset, csi| {
+			if let Some(request) = margins(offset, csi) {
+				cancels.push(request);
 			}
-		}
+		});
 		cancels
 	}
+}
+
+/// The DECSLRM a finished sequence is, or `None` when its final byte is not one to refuse.
+///
+/// Four things rule it out, and the first three are the near-miss rule §56 wrote down: a private
+/// marker makes it XTSAVE (`CSI ? Pm s`, which the engine drops harmlessly), an intermediate makes it
+/// some other sequence entirely, and a sub-parameter is a spelling DECSLRM does not have. The fourth
+/// is the count — one or two parameters, no more and no fewer. None at all is the bare `CSI s`, every
+/// save-cursor in the wild, and three is somebody else's sequence ending in `s`.
+///
+/// **What is NOT a reason to give up is length.** This module used to say that in a note on a
+/// deliberately unbounded counter, and the framer is where the argument belongs now: a long digit run
+/// is CLAMPED and the sequence lives, because the engine saturates the number and dispatches anyway.
+/// Abandoning would mean the final byte was never judged, and then the engine reads a padded DECSLRM
+/// as a save-cursor — the margins silently not set AND a cursor the program never asked to save
+/// overwritten, which is §57's harm exactly. A separator run past the engine's array is different:
+/// there the engine drops the sequence too, so abandoning is agreement, and it also fails the count
+/// test twice over.
+fn margins(offset: usize, csi: &super::csi::Csi<'_>) -> Option<CancelRequest> {
+	if csi.final_byte() != b's'
+		|| csi.marker().is_some()
+		|| !csi.intermediates().is_empty()
+		|| csi.sub_parameters()
+	{
+		return None;
+	}
+	if !(1..=KEPT_PARAMS).contains(&csi.param_count()) {
+		return None;
+	}
+	Some(CancelRequest {
+		// The framer names the byte one PAST the final one, which is what the eight scanners that FEED
+		// the engine need. This is the one that REPLACES a byte, so it names the final byte itself —
+		// the third convention the doc above describes, derived from the framer's rather than tracked.
+		offset: offset - 1,
+		// `None` is an omitted parameter and `Some(0)` an explicit zero, kept apart because it is the
+		// READER that decides the two mean the same thing (§102, `term/margins.rs`). That distinction
+		// is `Params::finish`'s doing (§111) — before it, a written zero rendered as nothing at all.
+		left: csi.param(0),
+		right: csi.param(1),
+	})
 }
 
 #[cfg(test)]
@@ -397,6 +331,29 @@ mod tests {
 		params.extend(std::iter::repeat_n(b'9', 500));
 		params.push(b's');
 		assert_eq!(numbers(&params), (Some(u16::MAX), None));
+	}
+
+	/// The count test at its exact edge, which the shared grammar makes checkable: two parameters is
+	/// DECSLRM and three is not, and the sequence in between is the one a hand-rolled slot index used
+	/// to get right by counting separators instead of parameters (§111).
+	#[test]
+	fn the_count_test_holds_at_its_own_edge() {
+		assert_eq!(scan(b"\x1b[1;80s"), vec![6], "two is DECSLRM");
+		assert!(scan(b"\x1b[1;80;3s").is_empty(), "three is not");
+		// An EMPTY parameter still counts as one, so a trailing separator makes a third.
+		assert_eq!(numbers(b"\x1b[1;s"), (Some(1), None), "two, one omitted");
+		assert!(scan(b"\x1b[1;;s").is_empty(), "three, two omitted");
+	}
+
+	/// The clamp and the engine's saturation land on the same number, which is the whole argument for
+	/// clamping a digit run rather than capping it (§111). Five digits already reach past a `u16`, so
+	/// every input the two could disagree about is one they both answer `u16::MAX` for.
+	#[test]
+	fn the_digit_clamp_and_the_engines_saturation_agree() {
+		assert_eq!(numbers(b"\x1b[99999;5s"), (Some(u16::MAX), Some(5)));
+		assert_eq!(numbers(b"\x1b[999999;5s"), (Some(u16::MAX), Some(5)));
+		// And below the clamp nothing is lost, however the number was padded.
+		assert_eq!(numbers(b"\x1b[00000000012345;5s"), (Some(12345), Some(5)));
 	}
 
 	#[test]
