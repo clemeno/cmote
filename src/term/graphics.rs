@@ -298,23 +298,7 @@ impl Images {
 						self.begin(index);
 					}
 				}
-				GraphicsScan::Esc => match byte {
-					b'[' => {
-						self.params.clear();
-						self.state = GraphicsScan::Csi;
-					}
-					b'P' => {
-						self.params.clear();
-						self.state = GraphicsScan::Dcs;
-					}
-					// RIS: the terminal is reset, so nothing that was drawn survives it.
-					b'c' => {
-						found.push((began, GraphicsEvent::Reset));
-						self.state = GraphicsScan::Text;
-					}
-					ESC => self.begin(index),
-					_ => self.state = GraphicsScan::Text,
-				},
+				GraphicsScan::Esc => self.after_escape(byte, index, &mut found),
 				GraphicsScan::Csi => match byte {
 					b'0'..=b'9' | b';' => {
 						if !self.params.push(byte) {
@@ -384,11 +368,15 @@ impl Images {
 				},
 				GraphicsScan::PayloadEsc => match byte {
 					b'\\' => self.complete(past, &mut found),
-					// `ESC ESC` inside a payload: still waiting for the terminator's `\`.
+					// `ESC ESC` inside a payload: still waiting for the terminator's `\`. The engine
+					// keeps the payload it had across the pair too (§111, measured).
 					ESC => self.state = GraphicsScan::PayloadEsc,
 					// A stray ESC that formed no terminator: the picture is malformed, so it is
-					// abandoned rather than guessed at.
-					_ => self.state = GraphicsScan::Text,
+					// abandoned rather than guessed at — but the ESC still OPENED whatever follows it
+					// (see `resume_after_escape`), and dropping to ordinary text here threw that away.
+					// RIS is what made it matter: `ESC c` arriving mid-payload left every picture
+					// standing on a screen the reset had just wiped.
+					_ => self.resume_after_escape(byte, index, &mut found),
 				},
 				GraphicsScan::Other => match byte {
 					ESC => self.state = GraphicsScan::OtherEsc,
@@ -398,7 +386,7 @@ impl Images {
 				GraphicsScan::OtherEsc => match byte {
 					b'\\' => self.state = GraphicsScan::Text,
 					ESC => self.state = GraphicsScan::OtherEsc,
-					_ => self.state = GraphicsScan::Text,
+					_ => self.resume_after_escape(byte, index, &mut found),
 				},
 			}
 		}
@@ -410,6 +398,52 @@ impl Images {
 	fn begin(&mut self, index: usize) {
 		self.sequence_start = Some(index);
 		self.state = GraphicsScan::Esc;
+	}
+
+	/// Read `byte` as the one that FOLLOWS an ESC, whichever state that ESC arrived in.
+	///
+	/// `index` is where `byte` sits; `self.sequence_start` is where its ESC did, and is where an event
+	/// gets reported from. Taking it from the field rather than as an argument is what keeps the two
+	/// entry points from disagreeing about the offset.
+	fn after_escape(&mut self, byte: u8, index: usize, found: &mut Vec<(usize, GraphicsEvent)>) {
+		match byte {
+			b'[' => {
+				self.params.clear();
+				self.state = GraphicsScan::Csi;
+			}
+			b'P' => {
+				self.params.clear();
+				self.state = GraphicsScan::Dcs;
+			}
+			// RIS: the terminal is reset, so nothing that was drawn survives it.
+			b'c' => {
+				found.push((self.sequence_start.unwrap_or(0), GraphicsEvent::Reset));
+				self.state = GraphicsScan::Text;
+			}
+			ESC => self.begin(index),
+			_ => self.state = GraphicsScan::Text,
+		}
+	}
+
+	/// The same, for an ESC that ENDED a control string rather than opening one out of ordinary text.
+	///
+	/// ESC does both jobs at once in the ANSI state machine, and the engine obeys that: a DCS
+	/// interrupted by an ESC unhooks, and the sequence that ESC introduced is dispatched normally. So
+	/// the string is abandoned — a malformed picture is never guessed at — and the reading carries on
+	/// into the sequence the ESC opened instead of falling back to ordinary text.
+	///
+	/// The ESC sat one byte back, which is the whole reason this is a second entry point:
+	/// `sequence_start` has to move off the abandoned string and onto it. `checked_sub` returning
+	/// `None` means that byte was in the PREVIOUS chunk, which is exactly what a `None` records
+	/// everywhere else here.
+	fn resume_after_escape(
+		&mut self,
+		byte: u8,
+		index: usize,
+		found: &mut Vec<(usize, GraphicsEvent)>,
+	) {
+		self.sequence_start = index.checked_sub(1);
+		self.after_escape(byte, index, found);
 	}
 
 	/// Finish the payload being read: decode it, and hand the picture on if there was one. An
@@ -675,6 +709,29 @@ mod tests {
 		));
 		assert!(scan(b"\x1b[0J").is_empty());
 		assert!(scan(b"\x1b[K").is_empty());
+		// And the same three arriving INSIDE a control string, which is where they used to be lost
+		// (§111). An ESC ends the string for the engine and opens the sequence that follows it, so a
+		// reset written mid-picture really does reset — and a scanner that dropped to ordinary text
+		// there left every picture standing on a screen that had just been wiped.
+		//
+		// The offsets are the ESC's own position, counted from the front of the chunk: the erases are
+		// reported BEFORE their bytes, so an abandoned payload must not leave the offset pointing at
+		// the picture it gave up on.
+		let sixel = b"\x1bPq#0;2;0;0;0#0~~";
+		assert!(matches!(
+			scan(b"\x1bPq#0;2;0;0;0#0~~\x1bc").as_slice(),
+			[(at, GraphicsEvent::Reset)] if *at == sixel.len()
+		));
+		assert!(matches!(
+			scan(b"\x1bPq~~\x1b[2J").as_slice(),
+			[(5, GraphicsEvent::ClearScreen)]
+		));
+		// An UNRECOGNISED control string too — a DECRQSS reply, say, which this module follows to its
+		// terminator without reading a byte of it.
+		assert!(matches!(
+			scan(b"\x1bP$qm\x1bc").as_slice(),
+			[(5, GraphicsEvent::Reset)]
+		));
 		// A shell's `clear` sends both erases, which between them clear everything.
 		assert_eq!(scan(b"\x1b[3J\x1b[H\x1b[2J").len(), 2);
 	}
