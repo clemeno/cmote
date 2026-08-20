@@ -108,6 +108,25 @@ type DifferentialClaim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
 #[cfg(test)]
 type ClaimAt = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
 
+/// The bytes the engine reads through without ending the sequence, each with a name for the failure
+/// message. Deliberately one of each KIND rather than all 30-odd values: NUL and LF are C0s it
+/// executes, US is the top of that range, DEL is the one it ignores, and the two high bytes are the
+/// `anywhere` fall-through — including `0x9c`, which is ST as a single byte and the most plausible one
+/// to arrive by accident.
+///
+/// One list for the whole module, because the rule holds in more than one state: `vte` reads these
+/// through inside a CSI, between the ESC and the byte that says which sequence it is, and inside a
+/// DCS's introducer. Three states, one set of bytes (§111).
+#[cfg(test)]
+const READ_THROUGH: [(u8, &str); 6] = [
+	(0x00, "NUL"),
+	(b'\n', "LF"),
+	(0x1f, "US"),
+	(0x7f, "DEL"),
+	(0x80, "high"),
+	(0x9c, "ST8"),
+];
+
 /// Every spelling of one sequence that leaves the ENGINE's reading of it unchanged (§106).
 ///
 /// The six hand-written tests below confirm the four defects are fixed. This is the part that goes
@@ -125,20 +144,6 @@ type ClaimAt = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
 /// The point of generating rather than listing is that neither of those defects was found by thinking of
 /// a case. Both were found afterwards, by asking what else was in the same family.
 fn variants(params: &[u8], final_byte: u8) -> Vec<(String, Vec<u8>)> {
-	/// The bytes the engine reads through without ending the sequence, each with a name for the failure
-	/// message. Deliberately one of each KIND rather than all 30-odd values: NUL and LF are C0s it
-	/// executes, US is the top of that range, DEL is the one it ignores, and the two high bytes are the
-	/// `anywhere` fall-through — including `0x9c`, which is ST as a single byte and the most plausible one
-	/// to arrive by accident.
-	const READ_THROUGH: [(u8, &str); 6] = [
-		(0x00, "NUL"),
-		(b'\n', "LF"),
-		(0x1f, "US"),
-		(0x7f, "DEL"),
-		(0x80, "high"),
-		(0x9c, "ST8"),
-	];
-
 	let sequence = |params: &[u8]| {
 		let mut bytes = vec![0x1b, b'['];
 		bytes.extend_from_slice(params);
@@ -366,6 +371,48 @@ mod tests {
 		let found = Cancel::default().feed(bytes);
 		assert_eq!(found.len(), 1, "and cmote judges it now");
 		assert_eq!((found[0].left, found[0].right), (Some(5), Some(70)));
+	}
+
+	#[test]
+	fn a_byte_the_engine_reads_through_between_the_escape_and_the_bracket() {
+		// The same rule one state EARLIER, and the framer obeyed it only in the later one. `vte`'s escape
+		// state executes a C0 and STAYS THERE (`lib.rs:341`), ignores DEL and every byte past 0x7f
+		// (`:381-383`), and holds its ground across `ESC ESC` — so `ESC` LF `[ 2 J` erases the screen. The
+		// framer dropped to ordinary text on that line feed and then read the `[` as a printable
+		// character, which loses the whole sequence for all ten scanners at once.
+		//
+		// Found by reading the escape state while designing `dcs::Framer`, which has to obey the same rule
+		// two doors down (§111).
+		for (byte, name) in READ_THROUGH {
+			let bytes = [0x1b, byte, b'[', b'2', b'J'];
+			assert!(
+				engine(&bytes).dispatched_plain('J', 2),
+				"{name}: the engine dispatches the erase"
+			);
+			let found = graphics::Images::default().feed(&bytes);
+			assert!(
+				matches!(
+					found.as_slice(),
+					[(_, graphics::GraphicsEvent::ClearScreen)]
+				),
+				"{name}: and cmote claims it too, found {found:?}"
+			);
+		}
+
+		// The other half of the rule, and the reason "read through" cannot be softened to "keep going
+		// whatever arrives": CAN and SUB drop the escape back to GROUND, where a `[` is a printable
+		// character and not the start of anything. Neither side reads an erase here.
+		for cancel_byte in [0x18_u8, 0x1a] {
+			let bytes = [0x1b, cancel_byte, b'[', b'2', b'J'];
+			assert!(
+				engine(&bytes).dispatched.is_empty(),
+				"a cancelled escape leaves the bracket as text, so the engine dispatches nothing"
+			);
+			assert!(
+				graphics::Images::default().feed(&bytes).is_empty(),
+				"and cmote must not claim it either"
+			);
+		}
 	}
 
 	#[test]

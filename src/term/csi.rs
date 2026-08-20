@@ -419,6 +419,9 @@ pub struct Framer {
 	/// Where in THIS chunk the ESC that opened the sequence being read sat, for [`Span::start`].
 	/// `None` once the sequence has run over a chunk boundary — its bytes then begin at the front of
 	/// the chunk that finishes it, which is offset 0.
+	///
+	/// Written when the ESC arrives, not when the `[` does, because the two are not always adjacent: the
+	/// engine reads a C0, a DEL or a high byte between them and keeps the sequence.
 	start: Option<usize>,
 }
 
@@ -434,21 +437,30 @@ impl Framer {
 			match self.state {
 				CsiScan::Text => {
 					if byte == ESC {
+						// Where the sequence begins, recorded as the ESC arrives rather than worked back
+						// from the `[`: the two are not always one byte apart (see the arm below).
+						self.start = Some(index);
 						self.state = CsiScan::Escape;
 					}
 				}
 				CsiScan::Escape => match byte {
 					b'[' => {
-						// The ESC sat one byte back, unless that byte was in the previous chunk — which
-						// is exactly what a `None` records.
-						self.start = index.checked_sub(1);
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
 						self.state = CsiScan::Csi;
 					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
+					// ESC ESC: still waiting for the sequence's real first byte, and it is the LATEST ESC
+					// that opens whatever follows.
+					ESC => self.start = Some(index),
+					// The read-through rule, one state earlier than the arm below — and the framer obeyed
+					// it only there. `vte`'s escape state executes a C0 and STAYS in that state
+					// (`lib.rs:341`), ignores DEL and every byte past `0x7f` (`:381-383`), so `ESC` LF
+					// `[ 2 J` erases the screen. Dropping to ordinary text here read the `[` as a
+					// printable character and lost the sequence for all ten scanners at once (§111).
+					byte if passes_through(byte) => {}
+					// CAN and SUB drop the escape back to GROUND, where a `[` starts nothing at all — so
+					// unlike the arm below, this really is the end of any reading.
 					_ => self.state = CsiScan::Text,
 				},
 				CsiScan::Csi => match byte {
