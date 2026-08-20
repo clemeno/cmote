@@ -29,7 +29,26 @@ cargo fmt --check
 
 CI (`.github/workflows/ci.yml`) runs the same three that apply to it, plus `cargo deny` and
 `cargo audit` for the dependency tree, and repeats clippy and the tests for
-`x86_64-apple-darwin`. A commit that fails the gate locally fails it there too.
+`x86_64-apple-darwin`.
+
+**The gate is one target wide, and that is its blind spot.** It runs for the host, so it lints
+only the `cfg` the host selects. Every `#[cfg(target_os = "macos")]` and `#[cfg(not(windows))]`
+item in the tree is invisible to it — an import used only by a Windows twin, a cfg-paired
+function whose macOS arm always answers `Some`, a `#[expect]` that goes unfulfilled over there.
+The macOS `cfg` is linted in exactly one place: CI. So the implication runs one way only — a
+commit that fails the gate fails CI, but a commit that PASSES the gate can still be red on
+`x86_64-apple-darwin`, and nothing local will say so.
+
+Two consequences, both learned the hard way in §113:
+
+* **Read the macOS job.** It is the ONLY reader of half the `cfg` in this repo, so its result is
+  not a formality — it is the only evidence that exists. In §113 it had been red since §103 and
+  stayed red for 118 commits across several pushes, because a green local gate was being read as
+  "the commit is fine" and the one job that disagreed was never opened.
+* **A change that touches a `cfg` pair is not verified locally, and cannot be.** Cross-checking
+  is impossible on this machine — `ring`'s build script runs `cc` for the target and there is no
+  darwin C toolchain here, so `rustup target add x86_64-apple-darwin` gets you a `std` and then
+  fails in `cc-rs`. The only check available is reading the sibling arm, then watching CI.
 
 ## Building
 

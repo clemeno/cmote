@@ -12202,6 +12202,10 @@ as the refusal itself instead of being left for later.
 
 `clippy::pedantic` was 561 warnings when this section opened. Not one of them gets an `allow`.
 
+> Read with §113. Those 561 were the warnings for ONE target — the host — and turning `pedantic` on
+> raised five more on `x86_64-apple-darwin` that nothing local could see. They are `#[expect]`, not
+> `allow`, so the rule below still holds; the scope of "not one of them" does not.
+
 That was Q42's decision and it is worth restating as a rule, because it is the whole shape of the
 section: **an `allow` is a lint switched off for an item; a fix is a lint that keeps working.** The two
 look equally green in CI and they are not the same. A file with `#[allow(clippy::cast_possible_truncation)]`
@@ -13009,3 +13013,99 @@ parameter naming another would be answered with the only one there is, which is 
   is the same position the other nine act-alone scanners are in (§106). The self-consistency sweeps
   cover the CSI one by construction, since it goes through the shared grammar.
 
+
+## §113 — The half of the tree the gate never reads
+
+The macOS CI job was red. Not newly red: red since §103, for **118 commits and several pushes**, while
+the local gate ran green every time and every commit went out believing it.
+
+That is the section. The nine compile errors underneath it are small and mechanical, and they are not
+what is worth recording. What is worth recording is that **the gate is one target wide**, so half the
+`cfg` in this tree has exactly one reader — CI — and that reader had been saying so, in the open, for
+four days.
+
+### Two classes, two different ages
+
+The nine errors are two unrelated breakages that had piled up on each other:
+
+- **Four unused imports**, since §103 (`82f3af9`, 2026-08-17) — the commit that introduced
+  `local/path.rs` and `local/shells.rs` with their `cfg` pairs. `Component` is used only by the
+  Windows `to_posix`; `Path` only by the Windows `git_bash_path`; the test module's `to_posix`, `Path`
+  and `PathBuf` only by `#[cfg(windows)]` tests. Each is a plain `unused_imports`, an error under
+  `warnings = "deny"` — and one that can only be seen from the other target.
+- **Five `clippy::unnecessary_wraps`**, since §111 (`0396af9`) turned `pedantic` on. `grab_interaction`,
+  `mode_of`, `owner_of`, `group_of`, `source_mode` — each the macOS arm of a `cfg` pair whose Windows
+  twin answers `None`.
+
+The ages matter because they say the same thing twice: neither was introduced carelessly, and neither
+was catchable by anything a developer runs. §103 and §111 both ended on a green gate.
+
+### The `Option` belongs to the signature, not to the arm
+
+The five pedantic errors are clippy being right about what it can see and wrong about the code. On
+macOS `mode_of` really does always answer `Some` — but the `Option` is the shape the two arms SHARE,
+and a Windows row genuinely has no mode, owner or group to show. Clippy lints one `cfg` at a time, so
+it never sees the twin returning `None`.
+
+There is no restructuring that removes the wrapper honestly. Folding the pair into one function with a
+`cfg` inside the body does not help — the lint reads the compiled body, which is still always `Some`.
+Turning the lint off in `Cargo.toml` would trade a real lint everywhere for five sites. So these are
+the first suppressions in the tree, and they are `#[expect]` rather than `#[allow]` for the reason §111
+gave when it deleted the last one: an `expect` that stops being needed becomes an error. The day one of
+these arms gains a failing `Metadata` call, clippy says the expectation went unfulfilled.
+
+§111's title — "Pedantic, without a single `allow`" — survives literally, and it should be read with
+this section beside it: pedantic was turned on, and verified on one of the two shipped targets.
+
+### One thing measured before writing it
+
+An `#[expect(clippy::…)]` is compiled by plain `rustc` too, and the macOS job's SECOND step is
+`cargo test`, which does not run clippy. If rustc reported the expectation as unfulfilled, every
+`#[expect]` added here would break the tests it was meant to leave alone. Measured on a spot where the
+lint cannot fire — the always-`None` Windows `mode_of`:
+
+| | unfulfilled `clippy::` expectation |
+|---|---|
+| `cargo check` / `cargo test` (rustc) | silent, exit 0 — `warnings = "deny"` never sees it |
+| `cargo clippy` | `error: this lint expectation is unfulfilled` |
+
+So the attribute is inert where clippy is not running and enforced where it is, which is what makes it
+safe on the native test step. This is the sort of thing that reads as obvious after the fact and
+decides the design before it.
+
+### The gate's blind spot, written down where the gate is
+
+`AGENTS.md` claimed "a commit that fails the gate locally fails it there too" — true, and the wrong
+direction. The implication runs one way only, and the converse is what everyone actually relies on.
+It now says what the gate cannot see, and the two rules that follow: **read the macOS job**, and treat
+any change touching a `cfg` pair as unverified until it has.
+
+A local cross-check was attempted first and is not available: `rustup target add x86_64-apple-darwin`
+installs a `std`, and then `ring`'s build script runs `cc` for the target and there is no darwin C
+toolchain on this machine — no `clang`, no `zig`, nothing that ships an SDK. So the nine fixes here are
+argued from the compiler's own diagnostics and from reading each sibling arm. **They are not verified
+by a run.** That is the honest status of this commit, and CI is what closes it.
+
+### Files
+
+- `src/local/path.rs` — `Component` moved into the Windows `to_posix`; the test module's Windows-only
+  imports gated.
+- `src/local/shells.rs` — `Path` dropped from the module imports and spelled out at its one use.
+- `src/local/fs.rs` — three `#[expect]`s and the note above the trio that says why once.
+- `src/cursor.rs`, `src/ssh/upload.rs` — one `#[expect]` each.
+- `AGENTS.md` — the green gate's blind spot, and the two rules.
+
+### Not done
+
+- **The macOS half of `local::path` has almost no test of its own.** Every `/C:` test is
+  `#[cfg(windows)]`, which is right — drive letters are not paths over there — but it leaves
+  `to_posix`'s macOS arm untested and `to_native`'s covered by two assertions borrowed from shared
+  tests. This is the local file layer's one-directional security boundary, so that is a real gap and
+  not a tidy one. It is not closed here because a test written for a platform that cannot be run
+  locally is a guess, and this section is already shipping nine of those.
+- **Nothing prevents the next `cfg`-pair drift.** The blind spot is documented, not removed. Removing
+  it needs either a darwin toolchain that can run `cc` (an SDK on this machine) or a CI job that fails
+  loudly enough to be read — and the second one already existed.
+- **The `cfg` pairs were not audited beyond the nine.** Nine is what the compiler named; the tree has
+  around sixty `cfg` attributes, and the ones whose macOS arm happens to lint clean today are clean by
+  luck, not by check.
