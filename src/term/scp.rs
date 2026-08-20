@@ -44,15 +44,6 @@ use std::collections::BTreeSet;
 /// The escape byte that leads every CSI sequence.
 const ESC: u8 = 0x1b;
 
-/// The longest parameter run buffered inside one sequence. SCP's is two small numbers; a longer run
-/// is malformed, and refusing to grow past this keeps a hostile stream from ballooning our memory
-/// (§12).
-const MAX_PARAMS: usize = 32;
-
-/// The most intermediate bytes buffered. SCP has exactly one, the space; the cap is for the same
-/// reason as `MAX_PARAMS`.
-const MAX_INTERMEDIATES: usize = 4;
-
 /// How many lines may carry a remembered path at once. A bounded ring like the prompt marks' (§34),
 /// and for the same reason: a remote decides how many of these arrive, so the store cannot be
 /// allowed to grow with the session. Eviction takes the LOWEST line number, which is the one
@@ -82,29 +73,20 @@ pub enum ScpRequest {
 	Reset,
 }
 
-/// Where the scanner is in the byte stream. Only the CSI shape matters here, plus the one `ESC c`
-/// that has to be noticed.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum ScpScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`; `ESC c` is a full reset all on its own.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The character-path scanner (§76). Feed it every byte of shell output; it reports each SCP and
 /// each RIS, with the offset to apply it at.
 #[derive(Debug, Default)]
 pub struct Scp {
-	state: ScpScan,
-	/// The private marker, if the sequence opened with one. SCP has none, so any marker rules it
-	/// out; kept apart from `params` so the digits parse the same either way.
-	marker: Option<u8>,
-	params: Vec<u8>,
-	intermediates: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111).
+	framer: super::csi::Framer,
+	/// Whether the previous byte was an ESC — the whole of the second state machine this module
+	/// needs, because RIS (`ESC c`) is not a CSI and the framer deliberately frames only those.
+	///
+	/// Independent of the framer rather than woven into it, and safe because both are pure functions
+	/// of the same byte stream. It agrees with the engine on the cases that look ambiguous: an ESC
+	/// inside a CSI restarts the escape in `vte` too, so `ESC [ 1 ESC c` really is a RIS, and
+	/// `ESC ESC c` re-arms and then fires, which is what the engine does with it.
+	after_escape: bool,
 }
 
 impl Scp {
@@ -118,128 +100,59 @@ impl Scp {
 	/// either side of it; one-past keeps the rule uniform across the scanners that report something
 	/// the engine ignored.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, ScpRequest)> {
+		// Two families in one stream, so they are collected apart and merged by offset. Order is not
+		// cosmetic here: a RIS invalidates every line the store remembers, so a Select that arrived
+		// before one must be applied before it (§76).
 		let mut requests = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				ScpScan::Text => {
-					if byte == ESC {
-						self.state = ScpScan::Escape;
-					}
-				}
-				ScpScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = ScpScan::Csi;
-					}
-					// RIS. The engine rebuilds itself and drops the history, so every line this
-					// store remembers is about to mean a different line.
-					b'c' => {
-						requests.push((index + 1, ScpRequest::Reset));
-						self.state = ScpScan::Text;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = ScpScan::Text,
-				},
-				ScpScan::Csi => match byte {
-					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
-					// 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if !self.intermediates.is_empty() {
-							// A parameter byte after an intermediate. The engine refuses the whole sequence
-							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
-							// carrying on would mean acting alone on a spelling nothing else in the world
-							// obeys (§106).
-							self.state = ScpScan::Text;
-						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = ScpScan::Text;
-							}
-						}
-					}
-					// Intermediate bytes — the space is SCP's.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = ScpScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if let Some(path) = self.path(byte) {
-							requests.push((index + 1, ScpRequest::Select(path)));
-						}
-						self.state = ScpScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = ScpScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
-					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
-					// would mean cmote and the engine disagreeing about what this byte stream even was,
-					// which is how three defects reached a release.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = ScpScan::Text,
-				},
+		self.framer.feed(bytes, |offset, csi| {
+			if let Some(path) = path(csi) {
+				requests.push((offset, ScpRequest::Select(path)));
 			}
+		});
+		for (index, &byte) in bytes.iter().enumerate() {
+			if self.after_escape && byte == b'c' {
+				// RIS. The engine rebuilds itself and drops the history, so every line this store
+				// remembers is about to mean a different line.
+				requests.push((index + 1, ScpRequest::Reset));
+			}
+			self.after_escape = byte == ESC;
 		}
+		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}
+}
 
-	/// The path this sequence selects, or `None` when it is not an SCP cmote acts on.
-	///
-	/// Matching on final byte, marker and intermediates together is the near-miss rule §56 wrote
-	/// down: `CSI Ps k` with no intermediate is something else entirely, and a private marker makes
-	/// it a private sequence rather than this one.
-	///
-	/// Two values are refused rather than guessed at. A `Ps1` DEC never defined leaves the line
-	/// alone, which is what `vte` does with its own out-of-range parameters. And `Ps2 = 2`,
-	/// "presentation to data", asks cmote to write the drawing back into the grid — engine state
-	/// cmote does not write (§71, §73), and the only copy of what the host actually sent.
-	fn path(&self, final_byte: u8) -> Option<Path> {
-		if !matches!(
-			(final_byte, self.marker, self.intermediates.as_slice()),
-			(b'k', None, [b' '])
-		) {
-			return None;
-		}
-		let path = match self.param(0)? {
-			0 | 1 => Path::LeftToRight,
-			2 => Path::RightToLeft,
-			_ => return None,
-		};
-		match self.param(1)? {
-			// Implementation-dependent, and data to presentation. Both describe what cmote does
-			// every frame regardless: the drawing is derived from the grid.
-			0 | 1 => Some(path),
-			_ => None,
-		}
+/// The path a finished sequence selects, or `None` when it is not an SCP cmote acts on.
+///
+/// Matching on final byte, marker and intermediates together is the near-miss rule §56 wrote
+/// down: `CSI Ps k` with no intermediate is something else entirely, and a private marker makes
+/// it a private sequence rather than this one.
+///
+/// Two values are refused rather than guessed at. A `Ps1` DEC never defined leaves the line
+/// alone, which is what `vte` does with its own out-of-range parameters. And `Ps2 = 2`,
+/// "presentation to data", asks cmote to write the drawing back into the grid — engine state
+/// cmote does not write (§71, §73), and the only copy of what the host actually sent.
+///
+/// Both parameters read an omitted one as 0 — what `vte` does with both of SCP's, and 0 is a value
+/// each of them defines. That default sits here rather than in the framer, at the site that knows
+/// what SCP means by an absent parameter (§111).
+fn path(csi: &super::csi::Csi<'_>) -> Option<Path> {
+	if !matches!(
+		(csi.final_byte(), csi.marker(), csi.intermediates()),
+		(b'k', None, [b' '])
+	) {
+		return None;
 	}
-
-	/// Parameter `index` as a number, treating an omitted one as 0 — which is what `vte` does with
-	/// both of SCP's, and 0 is a value each of them defines. `None` when the digits are unparseable,
-	/// which leaves the sequence unclassified rather than guessing at it (§54's rule: malformed
-	/// remote input is a no-op, never a reset).
-	fn param(&self, index: usize) -> Option<u16> {
-		let digits = self.params.split(|&byte| byte == b';').nth(index);
-		let Some(digits) = digits else {
-			return Some(0);
-		};
-		if digits.is_empty() {
-			return Some(0);
-		}
-		let mut value: u16 = 0;
-		for &byte in digits {
-			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-			value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
-		}
-		Some(value)
+	let path = match csi.param(0).unwrap_or(0) {
+		0 | 1 => Path::LeftToRight,
+		2 => Path::RightToLeft,
+		_ => return None,
+	};
+	match csi.param(1).unwrap_or(0) {
+		// Implementation-dependent, and data to presentation. Both describe what cmote does
+		// every frame regardless: the drawing is derived from the grid.
+		0 | 1 => Some(path),
+		_ => None,
 	}
 }
 
@@ -399,13 +312,22 @@ mod tests {
 		assert!(scan(b"\x1b[2\x18 k").is_empty());
 	}
 
-	/// A hostile stream must not be able to make the scanner buffer without bound.
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two
+	/// bounds answer differently on purpose, now that the grammar is shared (§111).
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		let mut bytes = b"\x1b[".to_vec();
-		bytes.extend(std::iter::repeat_n(b'2', MAX_PARAMS + 10));
-		bytes.extend_from_slice(b" k");
-		assert!(scan(&bytes).is_empty());
+	fn the_two_parameter_bounds_answer_differently() {
+		// Past the engine's parameter array: the engine ignores the whole sequence, so this does too.
+		let mut many = b"\x1b[".to_vec();
+		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
+		many.extend_from_slice(b" k");
+		assert!(scan(&many).is_empty());
+
+		// A runaway DIGIT run is clamped and the sequence lives, because the engine saturates rather
+		// than giving up. The clamped `Ps1` is simply not a path SCP defines.
+		let mut digits = b"\x1b[".to_vec();
+		digits.extend(std::iter::repeat_n(b'2', 500));
+		digits.extend_from_slice(b" k");
+		assert!(scan(&digits).is_empty());
 	}
 
 	/// The store: an exception list over a left-to-right default, and setting a line back to

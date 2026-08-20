@@ -301,8 +301,31 @@ impl Framer {
 					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
 					// 0x3c–0x3f) which are only legal as the very first one.
 					0x30..=0x3f => {
-						if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
+						if !self.intermediates.is_empty() {
+							// A parameter byte AFTER an intermediate. The engine refuses the whole
+							// sequence for this — `vte`'s CSI-intermediate state goes straight to
+							// `CsiIgnore` — so carrying on would mean acting alone on a spelling
+							// nothing else in the world obeys (§106).
+							//
+							// Only `scp` enforced this before the framer arrived; the other eight would
+							// have read `CSI 1 ! 2 k` as a sequence the engine had already thrown away.
+							// Settling it here is the point of having one grammar (§111).
+							self.state = CsiScan::Text;
+						} else if byte >= 0x3c {
+							// A private marker (`< = > ?`). Legal ONLY as the very first parameter byte;
+							// after that `vte` drops the whole sequence (`lib.rs:249`), so the framer
+							// does too rather than folding the byte into the digits.
+							//
+							// Which is what keeps a parameter run to digits and separators, and so keeps
+							// `param` from ever having to report "unreadable". Letting the byte through
+							// was a real defect for the two hops it existed: `scp` used to reject
+							// `CSI 1 ? SP k` BECAUSE the `?` made its digits unparseable, and the
+							// differential sweep caught the moment that accident stopped covering it.
+							if self.params.started() || self.marker.is_some() {
+								self.state = CsiScan::Text;
+							} else {
+								self.marker = Some(byte);
+							}
 						} else if !self.params.push(byte) {
 							// More parameters than the engine's array holds, so the engine ignores the
 							// whole sequence. Giving up here is what makes the two agree.
@@ -457,11 +480,17 @@ mod tests {
 	}
 
 	#[test]
-	fn a_private_marker_is_only_a_marker_as_the_first_parameter_byte() {
-		// `CSI ? 5 W` opens with one. `CSI 5 ? W` does not — the `?` arrives after a digit, so it is a
-		// parameter byte, and a scanner testing for the marker must not see one.
+	fn a_private_marker_after_the_parameters_abandons_the_sequence() {
+		// `CSI ? 5 W` opens with one and frames. `CSI 5 ? W` is not "a marker read as a digit" — `vte`
+		// DROPS the whole sequence (`lib.rs:249`), so the framer must as well.
+		//
+		// This test asserted the opposite when it was written, and the differential sweep is what said
+		// otherwise: `scp` had been rejecting `CSI 1 ? SP k` only because the stray `?` made its digits
+		// unparseable, so folding the byte into the run turned an accident into a sequence cmote acted
+		// on and the engine had thrown away (§111).
 		assert_eq!(framed(&[b"\x1b[?5W"])[0].1, Some(b'?'));
-		assert_eq!(framed(&[b"\x1b[5?W"])[0].1, None);
+		assert!(framed(&[b"\x1b[5?W"]).is_empty());
+		assert!(framed(&[b"\x1b[??W"]).is_empty(), "two markers is not one");
 	}
 
 	#[test]
@@ -488,6 +517,15 @@ mod tests {
 		// A scanner that answered `None` here would be giving up on a sequence the engine acts on,
 		// which is the shape of §56's and §57's defects.
 		assert_eq!(framed(&[b"\x1b[99999W"])[0].3, Some(u16::MAX));
+	}
+
+	#[test]
+	fn a_parameter_after_an_intermediate_abandons_the_sequence() {
+		// `vte`'s CSI-intermediate state goes straight to `CsiIgnore`, so the engine has already
+		// thrown this sequence away; a scanner that read it would be acting alone (§106).
+		assert!(framed(&[b"\x1b[1 2k"]).is_empty());
+		// The legal order still frames: parameters, then intermediates, then the final byte.
+		assert_eq!(framed(&[b"\x1b[1 k"]).len(), 1);
 	}
 
 	#[test]
