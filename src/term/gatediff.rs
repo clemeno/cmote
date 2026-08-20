@@ -28,11 +28,24 @@
 // WHAT THIS DOES NOT ASK. cmote acts alone on purpose in a great many places — selective erase (§56),
 // rectangular areas (§58), pictures (§41), the soft reset's long spelling (§72) — and `Terminal::process`
 // also SYNTHESISES sequences of its own. A stream carrying any of those would differ from a bare engine
-// by design, and this harness would be wrong to call that a defect. So the corpus below is deliberately
-// narrow: scrolling, cursor motion and plain text, the sequences the gate claims to forward. The gated
-// side does run the other fifteen scanners on its way through `Terminal::process`, so a divergence is
-// reported as the gate's when it could in principle be a scanner's — the corpus is chosen to keep that
-// theoretical.
+// by design, and this harness would be wrong to call that a defect. So the oracle corpora are
+// deliberately narrow: scrolling, cursor motion and plain text, the sequences the gate claims to forward.
+// The gated side does run the other fifteen scanners on its way through `Terminal::process`, so a
+// divergence is reported as the gate's when it could in principle be a scanner's — the corpus is chosen
+// to keep that theoretical.
+//
+// Those paths are not left untested, though, which is §107's third Not done answered: they are compared
+// CMOTE AGAINST CMOTE, once with margins never mentioned and once behind a band as wide as the page.
+// Both runs make the same scanners do the same work, so the scanners cancel out and what is left of any
+// difference is the gate's own `narrowed()` decision (`act_alone_streams`).
+//
+// THREE CORPORA, AND ONLY ONE OF THEM WAS WRITTEN BY HAND. §107 shipped fifteen streams chosen by
+// reading the gate for what it forwards, and wrote down what that could not cover: an arm nobody thought
+// of. `generated_streams` is the answer — every hand-written gate arm, at eight arrivals, under four
+// scrolling regions — and `gate_arms` is checked against `gate.rs`'s own source, so an arm added there
+// without a stream here is a failing test rather than a silent hole. It earns its keep: deleting
+// `insert_blank`'s `!narrowed()` guard leaves the hand-picked corpus entirely green and fails 24 of the
+// generated streams, because ICH was never in the fifteen (§111).
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
@@ -420,9 +433,345 @@ fn refused_operations() -> Vec<GatediffRefused> {
 	]
 }
 
+/// One `Handler` method the gate re-implements by hand, paired with a stream that reaches it — or with
+/// an EMPTY slice when the parser never dispatches it at all.
+///
+/// The hand-written arms are the whole risk this module exists for: the ones the `forward!` macro writes
+/// cannot be wrong about anything, while each of these is a second implementation of a method the engine
+/// already has. The name is spelled exactly as it is in `gate.rs`, which is what lets
+/// [`hand_written_arms`] check the list against the source and fail when an arm is added without one.
+type GateArm = (&'static str, &'static [u8]);
+
+/// Every arm of the gate's `Handler` impl, with the sequence that reaches it (§107, §111).
+///
+/// This is the list the generated sweep walks, and its completeness is CHECKED rather than trusted: a
+/// new arm in `gate.rs` that nobody adds here fails `every_gate_arm_is_in_the_sweep`. That was §107's
+/// own Not done — "the `!narrowed()` guard is checked, not enforced; a new arm added without it fails
+/// these tests only if a stream in the corpus reaches it" — and this is the half of it that can be
+/// enforced without a second parser.
+///
+/// Two families of sequence are deliberately absent from the BYTES, though their arms are here:
+/// anything cmote answers by synthesising sequences of its own (DECSTR's long spelling §72, DECST8C
+/// §74, XTPOPSGR §85) and anything a scanner acts on alone (§56, §58, §41). Those differ from a bare
+/// engine by design, so they belong to `an_act_alone_path_is_the_same_with_and_without_the_gate_narrowed`
+/// below, which compares cmote against cmote instead.
+fn gate_arms() -> Vec<GateArm> {
+	vec![
+		("set_scrolling_region", b"\x1b[2;5r"),
+		("reset_state", b"\x1bc"),
+		("input", b"XY"),
+		("goto", b"\x1b[2;3H"),
+		("goto_line", b"\x1b[4d"),
+		("goto_col", b"\x1b[7G"),
+		("insert_blank", b"\x1b[3@"),
+		("delete_chars", b"\x1b[3P"),
+		("move_forward", b"\x1b[4C"),
+		("move_backward", b"\x1b[4D"),
+		("move_down_and_cr", b"\x1b[2E"),
+		("move_up_and_cr", b"\x1b[2F"),
+		("put_tab", b"\t\t"),
+		("backspace", b"\x08\x08"),
+		("carriage_return", b"\r"),
+		("linefeed", b"\n\n"),
+		// The parser expands `ESC E` into `linefeed()` then `carriage_return()`
+		// (`vte-0.15.0/src/ansi.rs:1802-1805`) and nothing in either crate dispatches `newline` outside
+		// alacritty's own tests, so no stream can reach this arm. It exists because
+		// `#[deny(clippy::missing_trait_methods)]` requires every method to be written out.
+		("newline", b""),
+		("reverse_index", b"\x1bM"),
+		("scroll_up", b"\x1b[2S"),
+		("scroll_down", b"\x1b[2T"),
+		("insert_blank_lines", b"\x1b[2L"),
+		("delete_lines", b"\x1b[2M"),
+		// `ESC 7` and `ESC 8` rather than `CSI s` / `CSI u`: with mode 69 set, `CSI s` is DECSLRM and
+		// `term/cancel.rs` feeds the engine a CAN in place of its final byte (§57), which is cmote acting
+		// alone and would diverge from the oracle by design. The restore SAVES first, so the stream is
+		// self-contained — a bare restore behind the full-width band would have the two sides restoring
+		// different slots, since the band request itself is a save-cursor to the bare engine.
+		("save_cursor_position", b"\x1b7"),
+		("restore_cursor_position", b"\x1b7\x1b8"),
+		("set_private_mode", b"\x1b[?69h"),
+		("unset_private_mode", b"\x1b[?69l"),
+		("report_private_mode", b"\x1b[?69$p"),
+	]
+}
+
+/// The names of the methods `gate.rs` implements BY HAND, read out of the source.
+///
+/// Reading the source is unusual and it is the point: the alternative is a list in this file that
+/// somebody keeps up to date, which is exactly the arrangement §107 wrote down as not good enough. The
+/// slice runs from the `impl Handler` line to the `forward!` invocation, so the generated arms are
+/// excluded — they cannot be wrong in the way a hand-written one can.
+fn hand_written_arms() -> Vec<String> {
+	const SOURCE: &str = include_str!("gate.rs");
+	const OPENS: &str = "impl Handler for Gate<'_> {";
+	const CLOSES: &str = "\n\tforward! {";
+
+	let start = SOURCE
+		.find(OPENS)
+		.expect("gate.rs still implements Handler for Gate");
+	let body = &SOURCE[start..];
+	let end = body
+		.find(CLOSES)
+		.expect("gate.rs still hands the rest to the forward! macro");
+	body[..end]
+		.lines()
+		.filter_map(|line| line.strip_prefix("\tfn "))
+		.filter_map(|rest| rest.split('(').next())
+		.map(str::to_owned)
+		.collect()
+}
+
+/// Every stream the generated sweep runs, each one margin-free in the sense the pass-through property
+/// needs: `Margins::narrowed` is false throughout, so every arm reached is meant to forward.
+///
+/// The generator §107 asked for, and the axes are the ones that make the code look wrong rather than the
+/// ones that are easy to vary. Each stream is a filled history and a filled page (so an operation moves
+/// KNOWN text — shuffling blank cells around is indistinguishable from doing nothing), then a scrolling
+/// region, then a cursor position, then one operation.
+fn generated_streams() -> Vec<(String, Vec<u8>)> {
+	/// Where the cursor is parked before the operation, one-based as a program writes it. The edges are
+	/// where an off-by-one in the gate's own arithmetic shows up, so all four corners are here along
+	/// with a position in the middle.
+	const POSITIONS: [(u16, u16); 5] = [(1, 1), (1, COLS), (ROWS, 1), (ROWS, COLS), (3, 5)];
+
+	/// The rows a stream reaches the last column of by WRITING to it, rather than by asking to be put
+	/// there — which leaves a wrap OWED, the state cmote keeps its own flag for because the engine
+	/// fires its own at the screen edge instead of at the right margin.
+	///
+	/// This axis is here because a mutation got past the sweep without it: deleting `backspace`'s
+	/// `!narrowed()` guard changed nothing on any stream, since every one of them arrived at its
+	/// position by CUP, which clears the pending wrap. Cursor motion is not the only way to arrive
+	/// somewhere, and the difference between the two ways is exactly what one gate arm exists for
+	/// (§107, §111).
+	const WRAPPED_ROWS: [u16; 3] = [1, 3, ROWS];
+
+	/// What every stream ends with: one glyph, to make the operation's leftover state visible. A cursor
+	/// one column out or a wrap still owed is not in the document until something has to be drawn.
+	const TAIL: &[u8] = b"Z";
+
+	let regions: [(&str, Vec<u8>); 4] = [
+		("no region", Vec::new()),
+		("a region inside the page", b"\x1b[2;5r".to_vec()),
+		// The one the engine stores with its top above the first row, mirrored rather than clamped.
+		("a region whose top is zero", b"\x1b[0;3r".to_vec()),
+		(
+			"a region as tall as the page",
+			format!("\x1b[1;{ROWS}r").into_bytes(),
+		),
+	];
+
+	// The page every generated stream starts from: three lines pushed into the history, then each
+	// visible row filled with its own letter. Built once and reused, since it is the same prefix every
+	// time.
+	let mut page = b"old one\r\nold two\r\nold three\r\n".to_vec();
+	for row in 0..ROWS {
+		let letter = char::from(b'A' + u8::try_from(row).expect("the test's own row count"));
+		let text: String = std::iter::repeat_n(letter, COLS as usize).collect();
+		page.extend_from_slice(format!("\x1b[{};1H{text}", row + 1).as_bytes());
+	}
+
+	// How the cursor gets where it is before the operation runs. Both kinds land somewhere known; only
+	// the second leaves a wrap owed.
+	let mut arrivals: Vec<(String, Vec<u8>)> = POSITIONS
+		.iter()
+		.map(|&(row, col)| {
+			(
+				format!("parked at {row};{col}"),
+				format!("\x1b[{row};{col}H").into_bytes(),
+			)
+		})
+		.collect();
+	for row in WRAPPED_ROWS {
+		let filled: String = std::iter::repeat_n('w', COLS as usize).collect();
+		arrivals.push((
+			format!("written to the end of row {row}, wrap owed"),
+			format!("\x1b[{row};1H{filled}").into_bytes(),
+		));
+	}
+
+	let mut out = Vec::new();
+	for (method, operation) in gate_arms() {
+		if operation.is_empty() {
+			continue;
+		}
+		for (region_name, region) in &regions {
+			for (arrival_name, arrival) in &arrivals {
+				let mut bytes = page.clone();
+				bytes.extend_from_slice(region);
+				bytes.extend_from_slice(arrival);
+				bytes.extend_from_slice(operation);
+				// A glyph AFTER the operation, so that state the operation left behind but did not
+				// display becomes something the comparison can see. Without it the sweep missed a real
+				// mutation: deleting `backspace`'s `!narrowed()` guard leaves the pending wrap owed
+				// where the engine's own backspace clears it, and nothing shows until the next
+				// character has to decide which cell it goes in (§107, §111).
+				bytes.extend_from_slice(TAIL);
+				out.push((
+					format!("{method}, {arrival_name}, with {region_name}"),
+					bytes,
+				));
+			}
+		}
+	}
+	out
+}
+
+/// The streams whose whole point is that cmote does NOT match a bare engine: a scanner acts beside it,
+/// or `Terminal::process` synthesises sequences of its own.
+///
+/// §107's third Not done — "`Terminal::process` is compared, so cmote's synthesised sequences are out of
+/// scope … which means it says nothing about those paths". They can still be held to something, and it
+/// is the property that matters here: whether the GATE changes what happens on them. Comparing cmote
+/// with cmote — once with no margins mentioned, once behind a band as wide as the page — cancels every
+/// scanner out, because both runs make the same scanner do the same thing. What is left of the
+/// difference is the gate's own `narrowed()` decision, which must be "stand aside" in both.
+fn act_alone_streams() -> Vec<(&'static str, &'static [u8])> {
+	vec![
+		(
+			"a selective erase, which the engine drops and `protect` performs (§56)",
+			b"\x1b[1\"qabc\x1b[\"qdef\x1b[2;1H\x1b[?1J",
+		),
+		(
+			"a rectangular erase, which is `rect`'s alone (§58)",
+			b"\x1b[3;1Hfilled\x1b[1;2;3;5$z",
+		),
+		(
+			"a rectangular fill and a change of attributes over an area (§58, §59)",
+			b"\x1b[2*x\x1b[65;1;1;3;4$x\x1b[1;1;3;4;7$r",
+		),
+		(
+			"a sixel picture, whose cells `Terminal::process` reserves itself (§41)",
+			b"\x1bPq#0;2;100;0;0~\x1b\\tail",
+		),
+		(
+			"a soft reset, whose long spelling cmote synthesises (§72)",
+			b"\x1b[2;5r\x1b[3;3Hxy\x1b[!p",
+		),
+		(
+			"a tab-stop rebuild, which cmote spells out for the engine (§74)",
+			b"\t\ta\x1b[?5W\tb",
+		),
+		(
+			"an SGR push and pop, where the restored pen is synthesised (§85)",
+			b"\x1b[31m\x1b[#{\x1b[32mgreen\x1b[#}red",
+		),
+		(
+			"a hard reset, which clears state on both sides of the gate (§102)",
+			b"\x1b[2;5r\x1b[3;3Hxy\x1bcafter",
+		),
+	]
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn every_gate_arm_is_in_the_sweep() {
+		// §107's Not done, closed as far as it can be without a second parser: the coverage list is
+		// checked against `gate.rs` itself, so an arm added there without a stream here is a failing
+		// test rather than a silent hole. Both directions are checked — a listed arm that no longer
+		// exists is just as wrong, because it would leave the sweep quietly testing nothing.
+		let mut implemented = hand_written_arms();
+		let mut covered: Vec<String> = gate_arms()
+			.iter()
+			.map(|&(method, _)| method.to_owned())
+			.collect();
+		implemented.sort();
+		covered.sort();
+		assert_eq!(
+			implemented, covered,
+			"the gate's hand-written arms and the sweep's list have parted company"
+		);
+		// And the list is not trivially empty, which is the way a source-reading check fails quietly.
+		assert!(
+			implemented.len() > 20,
+			"only {} arms found in gate.rs — has the impl been renamed?",
+			implemented.len()
+		);
+	}
+
+	#[test]
+	fn with_no_margins_the_gate_is_the_engine_for_every_arm() {
+		// The generated sweep §107 asked for: every hand-written gate arm, at five cursor positions,
+		// under four scrolling regions, against the second engine. Where the hand-picked corpus below
+		// asks "do the streams I thought of still work", this asks "is there an arm nobody thought of",
+		// which is the question that found §106's four defects.
+		let streams = generated_streams();
+		assert_eq!(
+			streams.len(),
+			26 * 4 * 8,
+			"26 reachable arms x 4 regions x 8 arrivals (5 parked, 3 with a wrap owed)"
+		);
+		let mut disagreed = Vec::new();
+		for (name, stream) in &streams {
+			if let Some(divergence) = difference(&gated(stream), &ungated(stream)) {
+				disagreed.push(format!("  {name}: {divergence}"));
+			}
+		}
+		assert!(
+			disagreed.is_empty(),
+			"the gate parted company with the engine on {} of {} generated streams:\n{}",
+			disagreed.len(),
+			streams.len(),
+			disagreed.join("\n")
+		);
+	}
+
+	#[test]
+	fn a_full_width_band_leaves_every_arm_with_the_engine() {
+		// The generated sweep behind a band as wide as the page — mode 69 SET, margins at the page
+		// edges — which is the combination that catches the tempting simplification: reading
+		// `narrowed()` as "is the mode set?" instead of "does the band exclude a column?". The
+		// hand-picked corpus catches that too, and §107 measured that it does so on only five of its
+		// fifteen streams; this asks it of every gate arm at every position.
+		let prefix = full_width_margins();
+		let streams = generated_streams();
+		let mut disagreed = Vec::new();
+		for (name, stream) in &streams {
+			let stream = [prefix.as_slice(), stream].concat();
+			if let Some(divergence) = difference(&gated(&stream), &ungated(&stream)) {
+				disagreed.push(format!("  {name}: {divergence}"));
+			}
+		}
+		assert!(
+			disagreed.is_empty(),
+			"a band as wide as the page moved {} of {} generated streams onto cmote's arithmetic:\n{}",
+			disagreed.len(),
+			streams.len(),
+			disagreed.join("\n")
+		);
+	}
+
+	#[test]
+	fn an_act_alone_path_is_the_same_with_and_without_the_gate_narrowed() {
+		// The third of §107's gaps. These streams cannot be compared against a bare engine — cmote acts
+		// alone on every one of them, on purpose — so they are compared against CMOTE, run twice: once
+		// with margins never mentioned and once behind a band as wide as the page. Both runs make the
+		// same scanners do the same work, so the scanners cancel and what is left is the gate's own
+		// decision about whether it is narrowed. `Margins::narrowed` is false in both, so the two
+		// documents have to be identical.
+		//
+		// What this catches that nothing else does: a gate arm that keys off "is the mode set?" rather
+		// than "is the band narrower than the page?" on one of the paths the oracle sweeps cannot reach.
+		let mut disagreed = Vec::new();
+		for (name, stream) in act_alone_streams() {
+			let plain = gated(stream);
+			let behind_margins = gated(&[&full_width_margins(), stream].concat());
+			if let Some(divergence) = difference(&plain, &behind_margins) {
+				disagreed.push(format!(
+					"  {name}: {divergence} (plain against full-width band)"
+				));
+			}
+		}
+		assert!(
+			disagreed.is_empty(),
+			"a full-width band changed {} of the paths cmote acts alone on:\n{}",
+			disagreed.len(),
+			disagreed.join("\n")
+		);
+	}
 
 	#[test]
 	fn with_no_margins_the_gate_is_the_engine() {
