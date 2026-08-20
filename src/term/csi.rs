@@ -80,6 +80,14 @@ pub struct Params {
 	/// a dropped leading zero would leave true — and a caller that reads emptiness as "no parameters
 	/// yet" would then take the next byte for a private marker on a sequence that already had one.
 	started: bool,
+	/// Whether the parameter being written now has had any byte at all, kept or dropped.
+	///
+	/// The same distinction as `started`, one field down, and it is what keeps `0` from reading as an
+	/// OMITTED parameter. Dropping leading zeros leaves an all-zero field with nothing written, so
+	/// `CSI # 1 ; 0 {` and `CSI # 1 ; {` would render identically — and a scanner that treats an
+	/// empty field as malformed (§99's SGR stack does, deliberately) would then drop a sequence that
+	/// named zero perfectly well. [`close_field`] writes the zero back.
+	field_started: bool,
 }
 
 impl Params {
@@ -89,6 +97,7 @@ impl Params {
 		self.fields = 0;
 		self.digits = 0;
 		self.started = false;
+		self.field_started = false;
 	}
 
 	/// Fold one parameter byte in, and say whether the sequence is still one the engine would read.
@@ -104,23 +113,51 @@ impl Params {
 	pub fn push(&mut self, byte: u8) -> bool {
 		self.started = true;
 		if byte == b';' || byte == b':' {
+			self.close_field();
 			self.fields += 1;
 			self.digits = 0;
+			self.field_started = false;
 			if self.fields >= MAX_PARAMS {
 				return false;
 			}
 			self.bytes.push(byte);
 		} else if byte == b'0' && self.digits == 0 {
 			// A leading zero. Nothing to keep: the value is the same without it, and the engine's fold
-			// over it is the identity.
+			// over it is the identity. `close_field` puts one back if the whole field was zeros, so
+			// that a written 0 does not end up indistinguishable from a parameter nobody wrote.
+			self.field_started = true;
 		} else if self.digits < MAX_DIGITS {
 			self.digits += 1;
+			self.field_started = true;
 			self.bytes.push(byte);
+		} else {
+			// Past the clamp: the digit is dropped, but the field has still been written to.
+			self.field_started = true;
 		}
 		true
 	}
 
-	/// The run as the sequence wrote it, minus the bytes that could not change what it means.
+	/// Finish the run, so the LAST field gets the same treatment every earlier one got at its
+	/// separator. The framer calls this before handing the sequence to a scanner; reading `bytes`
+	/// without it would see `CSI 0 J`'s parameter as absent rather than as zero.
+	pub fn finish(&mut self) {
+		self.close_field();
+	}
+
+	/// Give the field being written a `0` if it was written to but kept no digits — an all-zero run.
+	///
+	/// Idempotent, because `finish` may follow a separator that already closed the field: the flag is
+	/// cleared as the zero goes in.
+	fn close_field(&mut self) {
+		if self.field_started && self.digits == 0 {
+			self.bytes.push(b'0');
+			self.digits = 1;
+		}
+		self.field_started = false;
+	}
+
+	/// The run as the sequence wrote it, minus the bytes that could not change what it means — so a
+	/// canonical decimal rendering of the same numbers, `;` and `:` separators intact.
 	pub fn bytes(&self) -> &[u8] {
 		&self.bytes
 	}
@@ -341,6 +378,9 @@ impl Framer {
 					}
 					// The final byte ends the sequence, so this is where the scanner is asked.
 					0x40..=0x7e => {
+						// Close the last parameter first: it never met a separator, so this is where an
+						// all-zero one gets its digit back.
+						self.params.finish();
 						on_csi(
 							index + 1,
 							&Csi {
@@ -371,10 +411,19 @@ impl Framer {
 mod tests {
 	use super::*;
 
-	/// Feed a whole parameter run and read back what was kept, plus whether it survived.
+	/// Feed a whole parameter run and read back what was kept, plus whether it survived. Mid-run, so
+	/// the last field is still open — which is what a scanner would see if it read the run early.
 	fn run(bytes: &[u8]) -> (String, bool) {
 		let mut params = Params::default();
 		let alive = bytes.iter().all(|&byte| params.push(byte));
+		(String::from_utf8_lossy(params.bytes()).into_owned(), alive)
+	}
+
+	/// The same, finished the way the framer finishes one before handing it to a scanner.
+	fn run_closed(bytes: &[u8]) -> (String, bool) {
+		let mut params = Params::default();
+		let alive = bytes.iter().all(|&byte| params.push(byte));
+		params.finish();
 		(String::from_utf8_lossy(params.bytes()).into_owned(), alive)
 	}
 
@@ -383,8 +432,21 @@ mod tests {
 		// The bug this module was written for: `CSI 0000000000000002 J` is an erase to the engine, and a
 		// clamp that spent its budget on the zeros read it as 0 and said nothing.
 		assert_eq!(run(b"000000000000000002"), ("2".to_owned(), true));
-		assert_eq!(run(b"0"), (String::new(), true));
-		assert_eq!(run(b"0;0"), (";".to_owned(), true));
+	}
+
+	#[test]
+	fn an_all_zero_field_keeps_one_zero_so_it_is_not_an_omitted_parameter() {
+		// The distinction §111 restored. Dropping every leading zero left `0` rendering as nothing at
+		// all, so a written zero and an omitted parameter came out identical — and a scanner that reads
+		// an empty field as malformed (§99's SGR stack) would drop a sequence that named zero perfectly
+		// well. The run is a canonical rendering of the same numbers now.
+		assert_eq!(run_closed(b"0"), ("0".to_owned(), true));
+		assert_eq!(run_closed(b"000"), ("0".to_owned(), true));
+		assert_eq!(run_closed(b"0;0"), ("0;0".to_owned(), true));
+		assert_eq!(run_closed(b"1;0;2"), ("1;0;2".to_owned(), true));
+		// An omitted parameter is still omitted: nothing was written, so nothing is rendered.
+		assert_eq!(run_closed(b";"), (";".to_owned(), true));
+		assert_eq!(run_closed(b"1;"), ("1;".to_owned(), true));
 	}
 
 	#[test]
