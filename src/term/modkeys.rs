@@ -15,9 +15,9 @@
 //
 // `alacritty_terminal` does not interpret this private-CSI (it is an input-encoding hint, not
 // a screen operation), so — exactly like the cwd announcement (`cwd.rs`) — cmote scans the
-// stream for it here and hands the level to the key encoder (`keymap::encode`). The scanner is
-// a small state machine rather than a match over a buffer, because output arrives in arbitrary
-// chunks: the sequence can be split anywhere, even between the ESC and the `[`.
+// stream for it here and hands the level to the key encoder (`keymap::encode`). Finding the
+// sequence in a stream that arrives in arbitrary chunks is `csi::Framer`'s job (§111); what is
+// left here is the marker, the resource number and the level.
 //
 // THE QUESTION, AND WHY IT LIVES HERE (§61). A program may also ASK which level is in force:
 //
@@ -42,18 +42,10 @@
 // times over: an invented number is worse than a missing one. In practice the six are not asked;
 // resource 4 is the one editors probe.
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// The XTMODKEYS resource number for `modifyOtherKeys`. The same `CSI > Pp ; Pv m` shape also
 /// carries resources 0/1/2 (modifyKeyboard / modifyCursorKeys / modifyFunctionKeys), which cmote
 /// does not act on, so the resource is checked before the value is applied.
 const MODIFY_OTHER_KEYS: u16 = 4;
-
-/// The longest parameter run we will buffer inside one sequence. The real payload is tiny
-/// (`4;2`); a longer one is malformed, and refusing to grow the buffer past this keeps a hostile
-/// stream from ballooning our memory (§12).
-const MAX_PARAMS: usize = 16;
 
 /// How aggressively the remote asked us to report modified "other" keys (§9). `Off` is the
 /// default and the state a well-behaved program restores on exit; `Level1` fills only the gaps
@@ -67,42 +59,14 @@ pub enum ModifyOtherKeys {
 	Level2,
 }
 
-/// Which of the two private markers opened the sequence being collected — the whole difference
-/// between an order and a question (§61).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum Marker {
-	/// `CSI > …` — XTMODKEYS, which SETS a resource.
-	#[default]
-	Set,
-	/// `CSI ? …` — XTQMODKEYS, which asks what one is.
-	Query,
-}
-
-/// Where the scanner is in the byte stream. Only the two private-CSI shapes
-/// (`ESC [ > … m` and `ESC [ ? … m`) are tracked; every other sequence resets straight back to
-/// `Text`.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum ModKeysScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC; a CSI starts if the next byte is `[`.
-	Escape,
-	/// Saw `ESC [`; the sequence is one we care about only if the next byte is a `>` or `?`.
-	Bracket,
-	/// Inside `ESC [ > …` or `ESC [ ? …`, collecting the parameter digits until the final byte.
-	Params,
-}
-
 /// The `modifyOtherKeys` tracker (§9) and answerer (§61). Feed it every byte of shell output; it
 /// keeps the level the remote last selected, reports the bytes owed to any question about it, and
 /// ignores everything else in the stream.
 #[derive(Debug, Default)]
 pub struct ModKeys {
-	state: ModKeysScan,
-	/// Which marker opened the run being collected. Only meaningful inside `ModKeysScan::Params`.
-	marker: Marker,
-	params: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111). What is left in this module is which
+	/// marker opened the sequence — the whole difference between an order and a question (§61).
+	framer: super::csi::Framer,
 	level: ModifyOtherKeys,
 }
 
@@ -119,67 +83,31 @@ impl ModKeys {
 	/// Empty for the overwhelmingly common chunk that carries neither, so ordinary output allocates
 	/// nothing.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+		// Destructured so the closure below can hold `level` while `framer` is borrowed for the
+		// scan — two disjoint fields, which reads plainer than relying on the borrow checker to
+		// see that.
+		let Self { framer, level } = self;
 		let mut replies = Vec::new();
-		for &byte in bytes {
-			match self.state {
-				ModKeysScan::Text => {
-					if byte == ESC {
-						self.state = ModKeysScan::Escape;
-					}
-				}
-				ModKeysScan::Escape => {
-					self.state = match byte {
-						b'[' => ModKeysScan::Bracket,
-						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => ModKeysScan::Escape,
-						_ => ModKeysScan::Text,
-					};
-				}
-				ModKeysScan::Bracket => {
-					self.state = match byte {
-						// The two markers this module answers to. `?` opens every DECSET and
-						// DECRST as well, which cost a few buffered digits and are then dropped
-						// on their `h` / `l` final byte — the same toll `>` already paid.
-						b'>' | b'?' => {
-							self.marker = if byte == b'>' {
-								Marker::Set
-							} else {
-								Marker::Query
-							};
-							self.params.clear();
-							ModKeysScan::Params
-						}
-						// A fresh ESC restarts the match; any other byte is some other CSI
-						// (an SGR colour, a cursor move) that we do not track.
-						ESC => ModKeysScan::Escape,
-						_ => ModKeysScan::Text,
-					};
-				}
-				ModKeysScan::Params => match byte {
-					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						// A run longer than any real payload is malformed; drop the sequence
-						// rather than buffer it without bound.
-						if self.params.len() > MAX_PARAMS {
-							self.state = ModKeysScan::Text;
-						}
-					}
-					// `m` is the final byte of both XTMODKEYS and XTQMODKEYS — the marker read
-					// back at the start of the run is what says which of them this was.
-					b'm' => {
-						match self.marker {
-							Marker::Set => self.apply(),
-							Marker::Query => replies.extend_from_slice(&self.report()),
-						}
-						self.state = ModKeysScan::Text;
-					}
-					// A new ESC starts another sequence; any other final byte (`h`, `l`, `c`, …)
-					// belongs to a private-CSI that is neither of ours, so we abandon this one.
-					ESC => self.state = ModKeysScan::Escape,
-					_ => self.state = ModKeysScan::Text,
-				},
+		framer.feed(bytes, |_, csi| {
+			// `m` is the final byte of both XTMODKEYS and XTQMODKEYS, and neither carries an
+			// intermediate — `CSI > 4 SP m` is some other sequence on the same marker, which is the
+			// near-miss rule §56 wrote down. The offset is not wanted at all: nothing here is fed
+			// back to the engine, so there is no advance to line up against.
+			if csi.final_byte() != b'm' || !csi.intermediates().is_empty() {
+				return;
 			}
-		}
+			match csi.marker() {
+				// XTMODKEYS, which SETS a resource.
+				Some(b'>') => apply(csi, level),
+				// XTQMODKEYS, which asks what one is. `?` opens every DECSET and DECRST as well —
+				// the common case by a wide margin — and those end on `h` or `l`, so they never
+				// reach here.
+				Some(b'?') => replies.extend_from_slice(&report(csi, *level)),
+				// No marker at all is an SGR (`CSI 0 m`), and `<` or `=` is a private sequence that
+				// is not this one.
+				_ => {}
+			}
+		});
 		replies
 	}
 
@@ -187,64 +115,53 @@ impl ModKeys {
 	pub fn level(&self) -> ModifyOtherKeys {
 		self.level
 	}
-
-	/// Parse the collected `> Pp ; Pv` parameters and set the level if they name resource 4.
-	/// `CSI > 4 m` (no value) and `CSI > 4 ; 0 m` both mean off; `1` and `2` select the levels;
-	/// any larger value is clamped to level 2, matching xterm. A sequence for another resource
-	/// (0/1/2) leaves the level untouched.
-	fn apply(&mut self) {
-		let mut parts = self.params.split(|&byte| byte == b';');
-		if parts.next().and_then(parse_u16) != Some(MODIFY_OTHER_KEYS) {
-			return;
-		}
-		self.level = match parts.next().and_then(parse_u16) {
-			Some(1) => ModifyOtherKeys::Level1,
-			Some(value) if value >= 2 => ModifyOtherKeys::Level2,
-			// 0, an unparseable value, or no value at all: back to the default.
-			_ => ModifyOtherKeys::Off,
-		};
-	}
-
-	/// The bytes owed to a `CSI ? Pp m`, or nothing when the question was not about resource 4
-	/// (§61).
-	///
-	/// The answer is spelled as the SET form, `CSI > 4 ; Pv m`, which is xterm's own choice and a
-	/// good one: what comes back is exactly the sequence that would put the terminal into the
-	/// state it is in, so a program can pocket the reply and write it back on the way out without
-	/// understanding a byte of it.
-	///
-	/// A question naming any other resource, or naming none — the parameter defaults to 0, which is
-	/// `modifyKeyboard` — goes unanswered. cmote has one of these resources and inventing the other
-	/// six would be a number a program could act on and cmote would not honour. `CSI ? 4 ; 1 m` is
-	/// refused for a different reason: XTQMODKEYS takes one parameter, so a second one means the
-	/// sequence was not the one it looks like, and §54's rule is that malformed input is a no-op
-	/// rather than a guess.
-	fn report(&self) -> Vec<u8> {
-		let mut parts = self.params.split(|&byte| byte == b';');
-		if parts.next().and_then(parse_u16) != Some(MODIFY_OTHER_KEYS) || parts.next().is_some() {
-			return Vec::new();
-		}
-		let value = match self.level {
-			ModifyOtherKeys::Off => 0,
-			ModifyOtherKeys::Level1 => 1,
-			ModifyOtherKeys::Level2 => 2,
-		};
-		format!("\x1b[>{MODIFY_OTHER_KEYS};{value}m").into_bytes()
-	}
 }
 
-/// A run of ASCII digits as a `u16`, or `None` when the run is empty or not all digits. Kept
-/// small on purpose — a resource or level far past `u16` is meaningless here.
-fn parse_u16(bytes: &[u8]) -> Option<u16> {
-	if bytes.is_empty() {
-		return None;
+/// Read a `CSI > Pp ; Pv m` and set the level if it names resource 4.
+///
+/// `CSI > 4 m` (no value) and `CSI > 4 ; 0 m` both mean off; `1` and `2` select the levels; any
+/// larger value is clamped to level 2, matching xterm. A sequence for another resource (0/1/2)
+/// leaves the level untouched.
+///
+/// The resource is compared against `Some(4)`, so an OMITTED one does not match — `CSI > ; 2 m`
+/// names no resource and changes nothing, which is the same answer the hand-rolled parse gave by
+/// refusing an empty field (§111).
+fn apply(csi: &super::csi::Csi<'_>, level: &mut ModifyOtherKeys) {
+	if csi.param(0) != Some(MODIFY_OTHER_KEYS) {
+		return;
 	}
-	let mut value: u16 = 0;
-	for &byte in bytes {
-		let digit = byte.checked_sub(b'0').filter(|d| *d < 10)?;
-		value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
+	*level = match csi.param(1) {
+		Some(1) => ModifyOtherKeys::Level1,
+		Some(value) if value >= 2 => ModifyOtherKeys::Level2,
+		// 0, an omitted value, or no value at all: back to the default.
+		_ => ModifyOtherKeys::Off,
+	};
+}
+
+/// The bytes owed to a `CSI ? Pp m`, or nothing when the question was not about resource 4 (§61).
+///
+/// The answer is spelled as the SET form, `CSI > 4 ; Pv m`, which is xterm's own choice and a
+/// good one: what comes back is exactly the sequence that would put the terminal into the
+/// state it is in, so a program can pocket the reply and write it back on the way out without
+/// understanding a byte of it.
+///
+/// A question naming any other resource, or naming none — the parameter defaults to 0, which is
+/// `modifyKeyboard` — goes unanswered. cmote has one of these resources and inventing the other
+/// six would be a number a program could act on and cmote would not honour. `CSI ? 4 ; 1 m` is
+/// refused for a different reason: XTQMODKEYS takes one parameter, so a second one means the
+/// sequence was not the one it looks like, and §54's rule is that malformed input is a no-op
+/// rather than a guess. `param_count` is what asks that, because an empty second parameter is
+/// still a second parameter — `CSI ? 4 ; m` is not this sequence either.
+fn report(csi: &super::csi::Csi<'_>, level: ModifyOtherKeys) -> Vec<u8> {
+	if csi.param(0) != Some(MODIFY_OTHER_KEYS) || csi.param_count() != 1 {
+		return Vec::new();
 	}
-	Some(value)
+	let value = match level {
+		ModifyOtherKeys::Off => 0,
+		ModifyOtherKeys::Level1 => 1,
+		ModifyOtherKeys::Level2 => 2,
+	};
+	format!("\x1b[>{MODIFY_OTHER_KEYS};{value}m").into_bytes()
 }
 
 #[cfg(test)]
@@ -386,5 +303,89 @@ mod tests {
 	fn ordinary_output_owes_nothing() {
 		// The common chunk must allocate nothing and say nothing.
 		assert!(ask(b"\x1b[31mred\x1b[0m\x1b[2J\x1b[1;1Hhello").is_empty());
+	}
+
+	/// A byte the engine reads STRAIGHT THROUGH must not change what this module makes of a
+	/// sequence — the §106 rule, which this scanner did not obey until the grammar was shared.
+	///
+	/// It is the last of the eleven to get it. The engine has no live arm behind either of these
+	/// sequences, so there is nothing acting alone today; what the rule buys is that a version bump
+	/// filling that empty handler body cannot make the two disagree (§111).
+	#[test]
+	fn a_byte_the_engine_reads_through_does_not_abandon_the_sequence() {
+		assert_eq!(track(b"\x1b[>4;\n2m"), ModifyOtherKeys::Level2);
+		assert_eq!(ask(b"\x1b[?\x7f4m"), b"\x1b[>4;0m".to_vec());
+		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
+		assert_eq!(track(b"\x1b[>4;\x182m"), ModifyOtherKeys::Off);
+		assert!(ask(b"\x1b[?4\x1am").is_empty());
+	}
+
+	/// An intermediate byte makes it some other sequence on the same marker — the near-miss rule
+	/// §56 wrote down, which this scanner used to get by accident: its old machine had no state for
+	/// an intermediate and abandoned the sequence on one.
+	#[test]
+	fn an_intermediate_byte_rules_both_out() {
+		assert_eq!(track(b"\x1b[>4;2 m"), ModifyOtherKeys::Off);
+		assert!(ask(b"\x1b[?4 m").is_empty());
+	}
+
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two
+	/// bounds answer differently on purpose (§111).
+	///
+	/// This module's own bound counted BYTES and abandoned the sequence over a long digit run, which
+	/// is the §106 defect shape: the engine saturates the number and carries on. It clamps now.
+	#[test]
+	fn the_two_parameter_bounds_answer_differently() {
+		// More parameters than the engine's array holds: the engine ignores the whole sequence, so
+		// the scanner does too. The run is `4;2;2;…`, so if it were framed the level would move.
+		let list = |fields: usize| {
+			let params = std::iter::once("4")
+				.chain(std::iter::repeat_n("2", fields - 1))
+				.collect::<Vec<_>>()
+				.join(";");
+			format!("\x1b[>{params}m").into_bytes()
+		};
+		let bound = super::super::csi::MAX_PARAMS;
+		assert_eq!(
+			track(&list(bound)),
+			ModifyOtherKeys::Level2,
+			"thirty-two parameters still fit"
+		);
+		assert_eq!(
+			track(&list(bound + 1)),
+			ModifyOtherKeys::Off,
+			"thirty-three do not"
+		);
+
+		// A runaway DIGIT run is clamped instead, and the sequence LIVES. The clamped resource is
+		// not 4, so the level is left alone — but by not being ours rather than by being abandoned.
+		let mut digits = b"\x1b[>".to_vec();
+		digits.extend(std::iter::repeat_n(b'4', 500));
+		digits.extend_from_slice(b";2m");
+		assert_eq!(track(&digits), ModifyOtherKeys::Off);
+	}
+
+	/// A sub-parameter reads as another parameter, which is how the engine's parser budgets those
+	/// bytes. Before the shared grammar the `:` abandoned the sequence (§111).
+	#[test]
+	fn a_sub_parameter_reads_as_another_parameter() {
+		assert_eq!(track(b"\x1b[>4:2m"), ModifyOtherKeys::Level2);
+		// And so the question refuses it, because XTQMODKEYS takes exactly one parameter.
+		assert!(ask(b"\x1b[?4:1m").is_empty());
+	}
+
+	/// An empty second parameter is still a second parameter, so the question is not this one.
+	#[test]
+	fn a_trailing_separator_is_a_second_parameter() {
+		assert!(ask(b"\x1b[?4;m").is_empty());
+		assert_eq!(ask(b"\x1b[?4m"), b"\x1b[>4;0m".to_vec(), "one is ours");
+	}
+
+	/// Leading zeros do not change what a parameter means, which is what the engine's own saturating
+	/// fold makes of them (§111).
+	#[test]
+	fn leading_zeros_still_name_resource_four() {
+		assert_eq!(track(b"\x1b[>0004;0002m"), ModifyOtherKeys::Level2);
+		assert_eq!(ask(b"\x1b[?004m"), b"\x1b[>4;0m".to_vec());
 	}
 }

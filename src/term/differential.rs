@@ -501,20 +501,32 @@ mod tests {
 		// they are being held to is the ENGINE's (`csi::passes_through`), and the only thing that makes it
 		// their business is that they shadow the same byte stream.
 		//
-		// The engine has no live arm behind any of these five sequences, so there is nothing to compare a
+		// The engine has no live arm behind any of these six sequences, so there is nothing to compare a
 		// verdict against — `vte` frames them and `ansi.rs` drops them. What can still be asserted is
 		// SELF-CONSISTENCY, and it is worth exactly as much: a stray byte the engine reads through must not
 		// change what cmote makes of a sequence, or the two will disagree the moment a version bump fills one
-		// of those empty handler bodies. All five gave up on the line feed before this test existed.
+		// of those empty handler bodies. Five of the six gave up on the line feed before this test existed.
+		//
+		// `modkeys` is the sixth, and it was added when §111 moved that scanner onto the shared grammar: it
+		// was left out of the first five because it did not obey the rule at all, and a test asserting what a
+		// module does wrong is not a test. The framer is what made the claim true.
 		let interrupted = |sequence: &[u8], at: usize| {
 			let mut bytes = sequence.to_vec();
 			bytes.insert(at, b'\n');
 			bytes
 		};
 
-		let claims: [ClaimAt; 5] = [
+		let claims: [ClaimAt; 6] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
+			}),
+			// The QUERY form, because it is the half of this module that answers with bytes — the
+			// SET form's verdict is a level rather than a reply, which does not fit the one question
+			// all of these can be asked in common.
+			("modkeys, XTQMODKEYS", b"\x1b[?4m", 3, |bytes| {
+				!super::super::modkeys::ModKeys::default()
+					.feed(bytes)
+					.is_empty()
 			}),
 			("tabs, DECST8C", b"\x1b[?5W", 3, |bytes| {
 				!super::super::tabs::Tabs::default().feed(bytes).is_empty()
