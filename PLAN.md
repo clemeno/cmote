@@ -11527,17 +11527,27 @@ enough once.
 
 ### Not done
 
-- **The corpus is hand-picked, not generated.** §106 ends with a 5760-shape generator; this has 15 streams
-  and 12 operations, chosen by reading the gate for what it forwards. A generator over sequences × cursor
-  positions × band placements would be the same idea, and the shape sweep's lesson says the axis to add is
-  the one that makes the code look wrong.
-- **The `!narrowed()` guard is checked, not enforced.** A new arm added without it fails these tests only
-  if a stream in the corpus reaches it. `#[deny(clippy::missing_trait_methods)]` makes a MISSING method a
-  build error; nothing makes a *wrongly implemented* one anything but a test away from silence.
-- **`Terminal::process` is compared, so cmote's synthesised sequences are out of scope.** The corpus is
-  deliberately narrow — scrolling, cursor motion, plain text. A stream carrying selective erase (§56),
-  rectangular areas (§58), pictures (§41) or a soft reset (§72) differs from a bare engine *by design*, and
-  the harness would be wrong to call that a defect. Which means it says nothing about those paths.
+- ~~**The corpus is hand-picked, not generated.**~~ It was 15 streams and 12 operations, chosen by
+  reading the gate for what it forwards, against §106's shape generator one layer down. **Generated in
+  §111**: every hand-written gate arm × eight arrivals × four scrolling regions, 832 streams, run
+  against the second engine both plainly and behind a full-width band. It paid at once — deleting
+  `insert_blank`'s `!narrowed()` guard leaves the hand-picked corpus entirely green and fails 24 of the
+  generated streams, because ICH was never in the fifteen — and the shape sweep's lesson held twice
+  over: the two axes that matter are the ones a mutation got past the sweep without, which were **how
+  the cursor arrives** (parked by CUP, which clears the pending wrap, versus written to the end of a
+  row, which does not) and **a glyph after the operation**, since state an operation leaves behind is
+  not in the document until something has to be drawn.
+- ~~**The `!narrowed()` guard is checked, not enforced.**~~ **Enforced in §111**, as far as it can be
+  without a second parser: the sweep's coverage list is compared against `gate.rs`'s own source —
+  the slice from `impl Handler` to the `forward!` invocation, so the generated arms are excluded — in
+  both directions. An arm added to the gate without a stream fails a test, and so does a listed arm
+  that no longer exists, which would otherwise leave the sweep quietly testing nothing.
+- ~~**`Terminal::process` is compared, so cmote's synthesised sequences are out of scope.**~~ True, and
+  §111 found what they CAN be held to: not the oracle, but cmote against cmote — once with margins
+  never mentioned, once behind a band as wide as the page. Both runs make the same scanners do the same
+  work, so the scanners cancel out and what is left of any difference is the gate's own `narrowed()`
+  decision. Eight streams: selective erase, rectangular erase, fill and attribute change, a picture, a
+  soft reset, a tab-stop rebuild, an SGR push and pop, and a hard reset.
 - ~~**The framer is still the review's top recommendation and still unbuilt.**~~ §106 hoisted two rules
   out of the ten scanners' duplicated grammar and left the machine itself in each of them. **Built in
   §111**, and all ten are migrated — which is where the defects that duplication was hiding came out.

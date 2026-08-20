@@ -2700,9 +2700,12 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   intermediates × parameters × final byte × the ORDER of those parts. The sweeps found the last two
   defects, one of them only after an axis was added: the shape generator emitted the parts in the legal
   order alone, so it passed against the very guard it was written for until a malformed interleaving
-  was generated too. §111 grew it to **seventeen** tests and 6720 shapes as the ten scanners migrated,
-  and four of them are about ESC and ST: an ESC that terminates no control string still OPENS the next
-  sequence for `vte`, which is why a payload cannot smuggle a CSI past a DCS-unaware framer. What it
+  was generated too. §111 grew it to **twenty-five** tests as the ten scanners
+  migrated: 6720 CSI shapes, a second 180-shape sweep over the DCS introducer, a payload compared
+  byte-for-byte against what the engine's own handler was given, and the ESC and ST rules that were
+  wrong in all three framers — an ESC that terminates no control string still OPENS the next sequence
+  for `vte`, which is why a payload cannot smuggle a CSI past a DCS-unaware framer, and why a second
+  OSC starting inside the first has to arrive. What it
   does NOT cover: it compares the parser rather than the handler, which is
   the gap `term/gatediff.rs` below now fills; and `MAX_INTERMEDIATES` is 4 here — one place since §111,
   `csi::MAX_INTERMEDIATES` — against the engine's 2, which both sides refuse but by different routes.
@@ -2724,9 +2727,20 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   forwards, so with no margins the gate must be a **pass-through** — checked by building a SECOND
   engine with the same config and no gate in front of it, feeding both the same stream, and comparing
   the whole document: every cell's character, attribute bits and both colours, the cursor, and the
-  scrollback depth. Fifteen margin-free streams, then the same fifteen again behind a full-width
-  `CSI ? 69 h` `CSI 1 ; 10 s`, because a band at the page edges is not a band. The oracle is
-  **measured**, not transcribed, which is what separates it from `term/region.rs`'s tests. The
+  scrollback depth. Fifteen hand-picked margin-free streams, then the same fifteen again behind a
+  full-width `CSI ? 69 h` `CSI 1 ; 10 s`, because a band at the page edges is not a band. The oracle is
+  **measured**, not transcribed, which is what separates it from `term/region.rs`'s tests.
+  Since §111 those fifteen are joined by a **generated** corpus — every hand-written gate arm x eight
+  arrivals x four scrolling regions, 832 streams, run both ways — and by a check that reads `gate.rs`'s
+  own source so an arm added there without a stream here fails a test. The generator is not decoration:
+  deleting `insert_blank`'s `!narrowed()` guard leaves all fifteen hand-picked streams green and fails
+  24 generated ones, because ICH was never among the fifteen. Two of its axes exist because a mutation
+  got past it without them — how the cursor ARRIVES (parked by CUP, which clears the pending wrap,
+  versus written to the end of a row) and a glyph AFTER the operation, since state an operation leaves
+  behind is not in the document until something has to be drawn. The paths cmote acts alone on (§56,
+  §58, §41, §72, §74, §85) cannot go to the oracle at all, and are compared cmote-against-cmote instead,
+  plain against a full-width band: the scanners then cancel out and what is left is the gate's own
+  `narrowed()` decision. The
   margins-ON rows have no oracle — the engine has no left margin to ask — so those two properties are
   a reading of xterm's definition and are labelled as such where they are declared: a band operation
   moves only the columns between the margins and leaves the cursor inside them (ten operations that act,
