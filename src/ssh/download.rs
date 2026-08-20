@@ -529,6 +529,13 @@ async fn receive_tree(
 		})
 		.await;
 
+	let mut run = transfer::CopyRun {
+		resume,
+		total,
+		events,
+		ticker: &mut ticker,
+		cancel,
+	};
 	for file in &plan.files {
 		let dest = transfer::local_join(&local_target, &file.rel);
 		let leaf = file.rel.last().map_or("", String::as_str);
@@ -545,7 +552,7 @@ async fn receive_tree(
 				}
 				FileAction::Skip => {
 					// Counted as handled so the bar still reaches the end (§19).
-					let sent = ticker.settle(file.size);
+					let sent = run.ticker.settle(file.size);
 					let _ = events
 						.send(SshEvent::TransferProgress { sent, total })
 						.await;
@@ -559,18 +566,7 @@ async fn receive_tree(
 		let remote = transfer::remote_join(remote_root, &file.rel);
 		// A cancel mid-file drops that file's partial and stops the whole tree (§16); files already
 		// fully pulled stay.
-		if receive_file(
-			sftp,
-			&remote,
-			&dest,
-			resume,
-			file.size,
-			events,
-			&mut ticker,
-			total,
-			cancel,
-		)
-		.await? == CopyOutcome::Cancelled
+		if receive_file(sftp, &remote, &dest, file.size, &mut run).await? == CopyOutcome::Cancelled
 		{
 			return Ok(None);
 		}
@@ -581,7 +577,7 @@ async fn receive_tree(
 
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: ticker.moved(),
+			sent: run.ticker.moved(),
 			total,
 		})
 		.await;
@@ -598,30 +594,30 @@ async fn receive_tree(
 /// emitting a progress event every `PROGRESS_STEP` (§19). The twin of the upload's `send_file`, in
 /// the other direction — including the resume size-compare and the cancel poll with its delete of
 /// the partial (§16), and including the ticker that carries the running total from one file to the
-/// next in place of the pair of `&mut u64` counters this used to take.
-#[allow(clippy::too_many_arguments)]
+/// next in place of the pair of `&mut u64` counters this used to take, and the [`transfer::CopyRun`]
+/// that carries the rest of the run's state (§111).
 async fn receive_file(
 	sftp: &SftpSession,
 	remote: &str,
 	local: &Path,
-	resume: bool,
 	size: u64,
-	events: &mpsc::Sender<SshEvent>,
-	ticker: &mut Ticker,
-	total: u64,
-	cancel: &Arc<AtomicBool>,
+	run: &mut transfer::CopyRun<'_>,
 ) -> Result<CopyOutcome> {
-	let dest_size = if resume {
+	let dest_size = if run.resume {
 		tokio::fs::metadata(local).await.ok().map(|meta| meta.len())
 	} else {
 		None
 	};
-	let offset = match resume_start(resume, dest_size, size) {
+	let offset = match resume_start(run.resume, dest_size, size) {
 		// Already fully here from before the interruption: count its bytes and move on.
 		Start::Skip => {
-			let sent = ticker.settle(size);
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+			let sent = run.ticker.settle(size);
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 			return Ok(CopyOutcome::Done);
 		}
@@ -639,13 +635,13 @@ async fn receive_file(
 			.with_context(|| format!("could not seek {remote} to the resume point"))?;
 		// The bytes already on disk count towards the running total straight away, so the bar
 		// reflects the resumed progress rather than dropping back.
-		ticker.settle(offset);
+		run.ticker.settle(offset);
 	}
 	let mut destination = open_local_at(local, offset).await?;
 
 	let mut buffer = vec![0u8; CHUNK];
 	loop {
-		if cancel.load(Ordering::Relaxed) {
+		if run.cancel.load(Ordering::Relaxed) {
 			drop(destination);
 			let _ = tokio::fs::remove_file(local).await;
 			return Ok(CopyOutcome::Cancelled);
@@ -658,9 +654,13 @@ async fn receive_file(
 			.write_all(&buffer[..read])
 			.await
 			.context("write failed")?;
-		if let Some(sent) = ticker.advance(read as u64) {
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+		if let Some(sent) = run.ticker.advance(read as u64) {
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 		}
 	}

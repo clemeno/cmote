@@ -38,6 +38,7 @@
 // opens its channel from the handle the loop is holding.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -211,18 +212,25 @@ async fn exec_inline(
 /// server. That refusal still stands, unchanged. This trait sits entirely on the other side of it —
 /// the commands whose whole content is a string and a reply.
 ///
-/// `async fn` in a trait, so it is not `dyn`-compatible; every caller is generic (`&impl Exec`) and
-/// dispatches statically, which is what the callers wanted anyway.
-#[allow(async_fn_in_trait)]
+/// Not `dyn`-compatible, and not meant to be: every caller is generic (`&impl Exec`) and dispatches
+/// statically, which is what the callers wanted anyway.
+///
+/// The two methods are spelled as `-> impl Future<..> + Send` rather than as `async fn`, and the
+/// difference is the `Send`. An `async fn` in a trait leaves the returned future's auto traits
+/// unnameable, so a caller cannot require one — which is what `async_fn_in_trait` warns about, and
+/// it matters here because these futures are awaited inside `tokio::spawn`ed work. Writing the
+/// bound states the contract instead of suppressing the warning about its absence, and it is
+/// checked: an implementation whose future is not `Send` does not compile. An impl may still write
+/// `async fn`, and both of them do.
 pub trait Exec {
 	/// A snippet's output, or an error carrying the remote's own reason. The shape most callers
 	/// want: a listing either arrives or explains itself.
-	async fn stdout(&self, snippet: &str) -> Result<String>;
+	fn stdout(&self, snippet: &str) -> impl Future<Output = Result<String>> + Send;
 
 	/// Whether the snippet ran cleanly — for a question only ever asked as a yes or no. A failure
 	/// to even run it is `false`, not an error: the question was about the remote's state, and
 	/// "could not ask" is not "yes".
-	async fn succeeds(&self, snippet: &str) -> bool;
+	fn succeeds(&self, snippet: &str) -> impl Future<Output = bool> + Send;
 }
 
 impl Exec for Runner {

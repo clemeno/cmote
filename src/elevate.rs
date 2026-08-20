@@ -210,12 +210,21 @@ pub fn shell_command(kind: ElevateKind, user: &str, snippet: &str, password: boo
 /// refused at the field rather than quoted and hoped for — that field feeds a command that runs on
 /// a remote machine as another user, which is exactly the boundary to validate at, not near.
 ///
-/// `allow(dead_code)`: nothing calls it while there is no UI that types an account name — the
-/// elevate dialog was withdrawn pending a different approach — and this is deliberately kept rather
-/// than deleted. It is a security boundary with its own tests, and whatever replaces that dialog
-/// will need exactly this check before it composes a command. Deleting it would invite the next
-/// implementation to quote and hope.
-#[allow(dead_code)]
+/// Nothing calls it while there is no UI that types an account name — the elevate dialog was
+/// withdrawn pending a different approach — and it is deliberately kept rather than deleted. It is a
+/// security boundary with its own tests, and whatever replaces that dialog will need exactly this
+/// check before it composes a command. Deleting it would invite the next implementation to quote and
+/// hope.
+///
+/// `cfg_attr(not(test), expect(..))` rather than a bare `expect`, because the tests below DO call it:
+/// under `cargo test` the item is used, the lint does not fire, and an unconditional `expect` would
+/// then fail the build as an unfulfilled expectation. So the escape is scoped to the configuration
+/// that actually needs it — and being an `expect` rather than an `allow`, it turns into a build
+/// error the moment a real caller appears, which is the reminder to delete this note (§111).
+#[cfg_attr(
+	not(test),
+	expect(dead_code, reason = "kept for §47's account field; see the doc above")
+)]
 pub fn valid_user(user: &str) -> bool {
 	!user.is_empty()
 		&& !user.starts_with('-')

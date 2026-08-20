@@ -752,7 +752,10 @@ fn free_local(path: &Path) -> std::path::PathBuf {
 #[derive(Default)]
 struct Script {
 	/// What the caller asked to run, in order.
-	ran: std::cell::RefCell<Vec<String>>,
+	///
+	/// A `Mutex` rather than a `RefCell` because `Exec`'s futures are `Send` and a `&RefCell` is
+	/// not — the bound on the trait is what forces the choice, which is the bound doing its job.
+	ran: std::sync::Mutex<Vec<String>>,
 	/// What to answer with. `None` means the command failed.
 	reply: Option<String>,
 }
@@ -762,7 +765,7 @@ impl Script {
 	/// A remote that answers every command with `reply`.
 	fn saying(reply: &str) -> Self {
 		Self {
-			ran: std::cell::RefCell::new(Vec::new()),
+			ran: std::sync::Mutex::new(Vec::new()),
 			reply: Some(reply.to_owned()),
 		}
 	}
@@ -772,10 +775,25 @@ impl Script {
 		Self::default()
 	}
 
+	/// Note one command as having been run.
+	///
+	/// Its own function so the guard is a temporary that drops at the end of the statement, never
+	/// held across an `.await` — a live `MutexGuard` is what would cost `Exec`'s futures their
+	/// `Send`, and the compiler would say so.
+	fn record(&self, snippet: &str) {
+		self.ran
+			.lock()
+			.expect("no test panics while holding this lock")
+			.push(snippet.to_owned());
+	}
+
 	/// The one command that was run. Panics if there was not exactly one, which is itself part of
 	/// what these tests check: a listing is one round trip, not several.
 	fn only_command(&self) -> String {
-		let ran = self.ran.borrow();
+		let ran = self
+			.ran
+			.lock()
+			.expect("no test panics while holding this lock");
 		assert_eq!(ran.len(), 1, "expected exactly one command: {ran:?}");
 		ran[0].clone()
 	}
@@ -784,7 +802,7 @@ impl Script {
 #[cfg(test)]
 impl Exec for Script {
 	async fn stdout(&self, snippet: &str) -> Result<String> {
-		self.ran.borrow_mut().push(snippet.to_owned());
+		self.record(snippet);
 		match &self.reply {
 			Some(reply) => Ok(reply.clone()),
 			None => bail!("the remote refused"),
@@ -792,7 +810,7 @@ impl Exec for Script {
 	}
 
 	async fn succeeds(&self, snippet: &str) -> bool {
-		self.ran.borrow_mut().push(snippet.to_owned());
+		self.record(snippet);
 		self.reply.is_some()
 	}
 }

@@ -242,42 +242,33 @@ async fn one_file(
 ) -> Result<CopyOutcome> {
 	let mut ticker = Ticker::default();
 	let total = size_of(source).await?;
-	let outcome = stream(
-		source,
-		destination,
+	let mut run = transfer::CopyRun {
 		resume,
 		total,
 		events,
-		&mut ticker,
-		total,
+		ticker: &mut ticker,
 		cancel,
-	)
-	.await?;
+	};
+	let outcome = stream(source, destination, total, &mut run).await?;
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: ticker.moved(),
+			sent: run.ticker.moved(),
 			total,
 		})
 		.await;
 	Ok(outcome)
 }
 
-/// Copy one file's bytes, folding them into a `ticker` that may be running across a whole tree.
+/// Copy one file's bytes, folding them into a run that may be moving a whole tree.
 ///
-/// `size` is this file's own length and `total` the figure the progress bar is measured against —
-/// the same number for a single file, the tree's sum for a tree. Both are passed because a resume
-/// needs the file's size to know whether the destination is already complete, and the events need the
-/// total to mean anything.
-#[allow(clippy::too_many_arguments)]
+/// `size` is this file's own length and is separate from the run because it is the one thing that
+/// changes per file: a resume needs it to know whether the destination is already complete, while
+/// `run.total` is what the progress bar is measured against.
 async fn stream(
 	source: &Path,
 	destination: &Path,
-	resume: bool,
 	size: u64,
-	events: &mpsc::Sender<SshEvent>,
-	ticker: &mut Ticker,
-	total: u64,
-	cancel: &Arc<AtomicBool>,
+	run: &mut transfer::CopyRun<'_>,
 ) -> Result<CopyOutcome> {
 	// The refusal that has no network equivalent: reading and writing one file at once truncates it to
 	// nothing first. Checked by resolving both sides, so a link, a `.` on the way or a different
@@ -288,7 +279,7 @@ async fn stream(
 		)));
 	}
 
-	let existing = if resume {
+	let existing = if run.resume {
 		tokio::fs::metadata(destination)
 			.await
 			.ok()
@@ -296,13 +287,17 @@ async fn stream(
 	} else {
 		None
 	};
-	let offset = match resume_start(resume, existing, size) {
+	let offset = match resume_start(run.resume, existing, size) {
 		// Already fully there from before the interruption: count its bytes so the bar still reaches
 		// the end, and move on without opening anything.
 		Start::Skip => {
-			let sent = ticker.settle(size);
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+			let sent = run.ticker.settle(size);
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 			return Ok(CopyOutcome::Done);
 		}
@@ -323,9 +318,13 @@ async fn stream(
 		// `PROGRESS_STEP` has moved, so a resume of the last few bytes of a file would send its first
 		// progress event at the end — and until then the bar would read zero, which says the transfer
 		// is starting again from nothing. The SFTP path emits here for the same reason.
-		let sent = ticker.settle(offset);
-		let _ = events
-			.send(SshEvent::TransferProgress { sent, total })
+		let sent = run.ticker.settle(offset);
+		let _ = run
+			.events
+			.send(SshEvent::TransferProgress {
+				sent,
+				total: run.total,
+			})
 			.await;
 	}
 
@@ -333,7 +332,7 @@ async fn stream(
 	loop {
 		// Checked before each read, so a cancel is honoured before any further byte is written and the
 		// partial can be dropped cleanly (§16).
-		if cancel.load(Ordering::Relaxed) {
+		if run.cancel.load(Ordering::Relaxed) {
 			drop(writer);
 			let _ = tokio::fs::remove_file(destination).await;
 			return Ok(CopyOutcome::Cancelled);
@@ -346,9 +345,13 @@ async fn stream(
 			.write_all(&buffer[..read])
 			.await
 			.context("write failed")?;
-		if let Some(sent) = ticker.advance(read as u64) {
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+		if let Some(sent) = run.ticker.advance(read as u64) {
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 		}
 	}
@@ -448,6 +451,13 @@ async fn tree(
 		})
 		.await;
 
+	let mut run = transfer::CopyRun {
+		resume,
+		total,
+		events,
+		ticker: &mut ticker,
+		cancel,
+	};
 	for file in &plan.files {
 		let planned = transfer::local_join(&root, &file.rel);
 		let leaf = file.rel.last().map_or("", String::as_str);
@@ -462,7 +472,7 @@ async fn tree(
 				}
 				FileAction::Skip => {
 					// Count the skipped bytes as handled so the bar still reaches the end.
-					let sent = ticker.settle(file.size);
+					let sent = run.ticker.settle(file.size);
 					let _ = events
 						.send(SshEvent::TransferProgress { sent, total })
 						.await;
@@ -476,25 +486,14 @@ async fn tree(
 		let from = transfer::local_join(source, &file.rel);
 		// A cancel mid-file drops that file's partial and stops the whole tree (§16); the files
 		// already fully copied stay, mirroring a single-file cancel keeping nothing but its own.
-		if stream(
-			&from,
-			&target,
-			resume,
-			file.size,
-			events,
-			&mut ticker,
-			total,
-			cancel,
-		)
-		.await? == CopyOutcome::Cancelled
-		{
+		if stream(&from, &target, file.size, &mut run).await? == CopyOutcome::Cancelled {
 			return Ok(None);
 		}
 	}
 
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: ticker.moved(),
+			sent: run.ticker.moved(),
 			total,
 		})
 		.await;
@@ -621,7 +620,7 @@ async fn report_tree(
 mod tests {
 	use super::{CHUNK, CopyDirection, free_leaf, same_file, stream};
 	use crate::bridge::SshEvent;
-	use crate::ssh::transfer::{CopyOutcome, Ticker};
+	use crate::ssh::transfer::{self, CopyOutcome, Ticker};
 	use std::sync::Arc;
 	use std::sync::atomic::AtomicBool;
 	use tokio::sync::mpsc;
@@ -635,17 +634,15 @@ mod tests {
 		let (tx, mut rx) = mpsc::channel::<SshEvent>(64);
 		let size = source.metadata().map_or(0, |meta| meta.len());
 		let mut ticker = Ticker::default();
-		let outcome = stream(
-			source,
-			destination,
+		let cancel = Arc::new(AtomicBool::new(false));
+		let mut run = transfer::CopyRun {
 			resume,
-			size,
-			&tx,
-			&mut ticker,
-			size,
-			&Arc::new(AtomicBool::new(false)),
-		)
-		.await;
+			total: size,
+			events: &tx,
+			ticker: &mut ticker,
+			cancel: &cancel,
+		};
+		let outcome = stream(source, destination, size, &mut run).await;
 		drop(tx);
 		let mut events = Vec::new();
 		while let Ok(event) = rx.try_recv() {
@@ -759,18 +756,15 @@ mod tests {
 		let (tx, _rx) = mpsc::channel::<SshEvent>(64);
 		let cancel = Arc::new(AtomicBool::new(true));
 		let mut ticker = Ticker::default();
+		let mut run = transfer::CopyRun {
+			resume: false,
+			total: CHUNK as u64 * 2,
+			events: &tx,
+			ticker: &mut ticker,
+			cancel: &cancel,
+		};
 
-		let outcome = stream(
-			&source,
-			&destination,
-			false,
-			CHUNK as u64 * 2,
-			&tx,
-			&mut ticker,
-			CHUNK as u64 * 2,
-			&cancel,
-		)
-		.await;
+		let outcome = stream(&source, &destination, CHUNK as u64 * 2, &mut run).await;
 
 		assert_eq!(outcome.unwrap(), CopyOutcome::Cancelled);
 		assert!(!destination.exists(), "the partial went with the cancel");

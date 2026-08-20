@@ -302,11 +302,6 @@ impl Iterator for ScopeRangeIterator {
 /// `tokenColors` (the exact hexes the user's *Themer My Color Set Dark* uses). The default foreground
 /// / background match `editor.foreground` / `editor.background`; each entry maps a TextMate scope to
 /// its foreground. A scope not listed here yields no modifier, so its token keeps the plain colour.
-//
-// `Theme` is `#[non_exhaustive]`, so it cannot be built with a struct literal — it is defaulted and
-// the fields we own are set after. The reassign-after-default lint has no better shape here, hence the
-// allow on the whole function.
-#[allow(clippy::field_reassign_with_default)]
 fn cme_theme() -> Theme {
 	// (scope selector, RGB) straight from the theme's tokenColors. syntect scores these by
 	// specificity, so a more specific scope wins over a broader one regardless of order.
@@ -351,14 +346,33 @@ fn cme_theme() -> Theme {
 		("markup.underline.link", 0x00_cc_ff),
 	];
 
+	assembled(
+		"CME",
+		0xff_ff_ff,
+		0x1a_2a_30,
+		scopes
+			.iter()
+			.map(|(scope, rgb)| theme_item(scope, *rgb))
+			.collect(),
+	)
+}
+
+/// Put a `syntect::Theme` together from the four parts cmote chooses: a name, the two ground
+/// colours, and the scope rules.
+///
+/// Its own function for one reason — it is where the `#[expect]` below has to go, and on its own it
+/// covers four assignments instead of the sixty-line scope table above them (§111).
+#[expect(
+	clippy::field_reassign_with_default,
+	reason = "`syntect::Theme` is `#[non_exhaustive]`, so no struct literal is available to another \
+	          crate — not even `..Default::default()` — and default-then-assign is the only shape left"
+)]
+fn assembled(name: &str, foreground: u32, background: u32, scopes: Vec<ThemeItem>) -> Theme {
 	let mut theme = Theme::default();
-	theme.name = Some("CME".to_owned());
-	theme.settings.foreground = Some(syn_rgb(0xff_ff_ff));
-	theme.settings.background = Some(syn_rgb(0x1a_2a_30));
-	theme.scopes = scopes
-		.iter()
-		.map(|(scope, rgb)| theme_item(scope, *rgb))
-		.collect();
+	theme.name = Some(name.to_owned());
+	theme.settings.foreground = Some(syn_rgb(foreground));
+	theme.settings.background = Some(syn_rgb(background));
+	theme.scopes = scopes;
 	theme
 }
 

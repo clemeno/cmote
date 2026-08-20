@@ -636,6 +636,13 @@ async fn send_tree(
 		})
 		.await;
 
+	let mut run = transfer::CopyRun {
+		resume,
+		total,
+		events,
+		ticker: &mut ticker,
+		cancel,
+	};
 	for file in &plan.files {
 		let dest = transfer::remote_join(&remote_target, &file.rel);
 		let leaf = file.rel.last().map_or("", String::as_str);
@@ -652,7 +659,7 @@ async fn send_tree(
 				}
 				FileAction::Skip => {
 					// Count the skipped bytes as handled so the bar still reaches the end.
-					let sent = ticker.settle(file.size);
+					let sent = run.ticker.settle(file.size);
 					let _ = events
 						.send(SshEvent::TransferProgress { sent, total })
 						.await;
@@ -666,19 +673,7 @@ async fn send_tree(
 		let local = transfer::local_join(local_root, &file.rel);
 		// A cancel mid-file drops that file's partial and stops the whole tree (§16): the files
 		// already fully copied stay, mirroring how a single-file cancel keeps nothing but its own.
-		if send_file(
-			sftp,
-			&local,
-			&dest,
-			resume,
-			file.size,
-			events,
-			&mut ticker,
-			total,
-			cancel,
-		)
-		.await? == CopyOutcome::Cancelled
-		{
+		if send_file(sftp, &local, &dest, file.size, &mut run).await? == CopyOutcome::Cancelled {
 			return Ok(None);
 		}
 		// The file is fully across: stamp it with the metadata the walk captured off the source
@@ -688,7 +683,7 @@ async fn send_tree(
 
 	let _ = events
 		.send(SshEvent::TransferProgress {
-			sent: ticker.moved(),
+			sent: run.ticker.moved(),
 			total,
 		})
 		.await;
@@ -708,20 +703,17 @@ async fn send_tree(
 /// `&mut u64` counters this used to thread through by hand. On a resume it size-compares the
 /// destination (§16): a file already fully there is skipped (its bytes still counted, so the bar
 /// reaches the end), and a partial is appended from where it stopped; between chunks it polls
-/// `cancel`, dropping the partial and reporting `Cancelled` if it is set.
-#[allow(clippy::too_many_arguments)]
+/// `run.cancel`, dropping the partial and reporting `Cancelled` if it is set. The rest of the run's
+/// state travels in the [`transfer::CopyRun`] for the same reason the counters became a ticker
+/// (§111).
 async fn send_file(
 	sftp: &SftpSession,
 	local: &Path,
 	remote: &str,
-	resume: bool,
 	size: u64,
-	events: &mpsc::Sender<SshEvent>,
-	ticker: &mut Ticker,
-	total: u64,
-	cancel: &Arc<AtomicBool>,
+	run: &mut transfer::CopyRun<'_>,
 ) -> Result<CopyOutcome> {
-	let dest_size = if resume {
+	let dest_size = if run.resume {
 		sftp.metadata(remote.to_owned())
 			.await
 			.ok()
@@ -729,12 +721,16 @@ async fn send_file(
 	} else {
 		None
 	};
-	let offset = match resume_start(resume, dest_size, size) {
+	let offset = match resume_start(run.resume, dest_size, size) {
 		// Already fully there from before the interruption: count its bytes and move on.
 		Start::Skip => {
-			let sent = ticker.settle(size);
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+			let sent = run.ticker.settle(size);
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 			return Ok(CopyOutcome::Done);
 		}
@@ -752,12 +748,12 @@ async fn send_file(
 			.context("could not seek the local file to the resume point")?;
 		// The bytes already on the server count towards the running total straight away, so the
 		// bar reflects the resumed progress rather than dropping back.
-		ticker.settle(offset);
+		run.ticker.settle(offset);
 	}
 
 	let mut buffer = vec![0u8; CHUNK];
 	loop {
-		if cancel.load(Ordering::Relaxed) {
+		if run.cancel.load(Ordering::Relaxed) {
 			drop(destination);
 			let _ = sftp.remove_file(remote.to_owned()).await;
 			return Ok(CopyOutcome::Cancelled);
@@ -770,9 +766,13 @@ async fn send_file(
 			.write_all(&buffer[..read])
 			.await
 			.context("write failed")?;
-		if let Some(sent) = ticker.advance(read as u64) {
-			let _ = events
-				.send(SshEvent::TransferProgress { sent, total })
+		if let Some(sent) = run.ticker.advance(read as u64) {
+			let _ = run
+				.events
+				.send(SshEvent::TransferProgress {
+					sent,
+					total: run.total,
+				})
 				.await;
 		}
 	}

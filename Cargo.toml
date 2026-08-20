@@ -17,14 +17,18 @@ license = "MIT"
 # have left every commit in between failing its own gate, and a gate that is expected to fail is a
 # gate nobody reads.
 #
-# Not one of the 561 was answered with a suppression at file or crate scope. Where a lint's advice
-# could not be taken, the escape is an `#[expect]` with a `reason` on the smallest item that needs
-# one, so the lint stays live everywhere else and `expect` fails the build if it ever stops firing
-# there. There are 27, and they are three answers rather than twenty-seven (§111):
+# Not one of the 561 was answered with a suppression at file or crate scope, and there is now no
+# `#[allow]` anywhere in `src/` at all. Where a lint's advice cannot be taken, the escape is an
+# `#[expect]` with a `reason` on the smallest item that needs one, so the lint stays live everywhere
+# else and `expect` FAILS the build if it ever stops firing there. There are 29, and they are five
+# answers rather than twenty-nine (§111):
 #
-#   11  too_many_lines            dispatch tables and event loops, whose length is a variant count
-#    7  struct_excessive_bools    independent composable attributes: SGR flags, protocol bits
-#    9  the three float lints     the layout boundary, where std offers no exact conversion
+#   11  too_many_lines               dispatch tables and event loops, whose length is a variant count
+#    7  struct_excessive_bools       independent composable attributes: SGR flags, protocol bits
+#    9  the three float lints        the layout boundary, where std offers no exact conversion
+#    1  field_reassign_with_default  `syntect::Theme` is `#[non_exhaustive]`, so no struct literal
+#    1  dead_code                    a security check kept for §47, `cfg_attr`'d to non-test builds
+#                                    because the tests DO call it
 #
 # The nine float ones are eight functions in `ui`/`sixel`/`human` plus one that predates §111 in
 # `cursor`. `clippy.toml` carries the two configurations, which are the lint being told what this

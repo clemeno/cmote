@@ -352,6 +352,36 @@ impl Ticker {
 	}
 }
 
+/// Everything one file's copy needs that is not the file itself (§16, §17, §19): the state that is
+/// the same for every file in one copy run.
+///
+/// This is the second half of the change [`Ticker`] describes. Folding the two `&mut u64` counters
+/// into a ticker left the three per-file copy functions — `local::copy::stream`,
+/// `ssh::download::receive_file` and `ssh::upload::send_file` — taking the SAME six-argument tail
+/// after their own two ends, so each of them sat one over clippy's argument limit and each carried
+/// an `#[allow(clippy::too_many_arguments)]` saying so. Six arguments repeated verbatim in three
+/// places is a type asking to exist, and the limit was the lint noticing (§111).
+///
+/// Every field is constant for the whole run, which is why this is a run and not a file: the file's
+/// own `size` stays an argument, because it is the one thing that changes per call.
+pub(crate) struct CopyRun<'a> {
+	/// Whether a destination that is already partly there is APPENDED to rather than restarted
+	/// (§16). One answer for the whole run: it comes from the conflict card, or from the resume the
+	/// user asked for.
+	pub(crate) resume: bool,
+	/// The figure the progress bar is measured against — this file's own length for a single file,
+	/// the tree's sum for a tree. Without it the events cannot mean anything, since a per-file total
+	/// would restart the bar at every file.
+	pub(crate) total: u64,
+	/// Where progress, refusals and conflicts are reported.
+	pub(crate) events: &'a mpsc::Sender<SshEvent>,
+	/// The running byte count, carried from one file to the next rather than restarted (§19).
+	pub(crate) ticker: &'a mut Ticker,
+	/// Set when the user cancels. Polled between chunks, so a cancel drops the partial and stops the
+	/// run rather than waiting for the current file to finish (§16).
+	pub(crate) cancel: &'a std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Build a remote path from the tree's destination root and a relative component list (§17,
 /// §19), joining POSIX-style the way every remote path does. Shared so the two directions build
 /// the same string from the same parts.

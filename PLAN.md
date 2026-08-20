@@ -12369,21 +12369,64 @@ because twenty-seven suppressions is a number a reader might reasonably object t
 should be to the real number. (I first wrote "nine" there, having counted only the float ones, and
 corrected it before the commit.)
 
+### The last six `allow`s, which predated this section
+
+Seven suppressions were in the crate before §111 opened; `cursor.rs`'s was already an `#[expect]` and
+gained a reason, leaving six `#[allow]`s that AGENTS.md's rule applies to just as much as to the 561.
+**Four turned out to be avoidable outright, and the other two were narrowed and re-spelled.** There is
+now no `#[allow]` anywhere in `src/`.
+
+**Three `too_many_arguments` were one data clump wearing three hats.** `local::copy::stream`,
+`ssh::download::receive_file` and `ssh::upload::send_file` each took their own two ends and then the
+SAME six-argument tail — `resume, size, events, ticker, total, cancel` — written out verbatim in
+three files. Six arguments repeated identically three times is a type asking to exist, and the
+argument limit was the lint noticing. They now take a `transfer::CopyRun`, which holds the five that
+are constant for a whole run; the file's own `size` stays an argument because it is the one thing that
+changes per call. This is the second half of the change [`Ticker`] already describes — the two `&mut
+u64` counters became a ticker, and now the tail around it becomes a run — so the fix was one the file
+had already argued for.
+
+**`async_fn_in_trait` was avoidable, and taking it seriously improved the trait.** The lint's point is
+that an `async fn` in a trait leaves the returned future's auto traits unnameable, so a caller cannot
+require `Send` — which matters for `asuser::Exec`, whose futures are awaited inside spawned work. The
+answer is to write what the sugar hides:
+
+```rust
+fn stdout(&self, snippet: &str) -> impl Future<Output = Result<String>> + Send;
+```
+
+That states the contract instead of suppressing the warning about its absence, and it is **checked**:
+an implementation whose future is not `Send` no longer compiles. The test double proved it
+immediately — `Script` recorded its commands in a `RefCell`, and `&RefCell` is not `Send`, so it had
+to become a `Mutex`. That is not a cost of the change, it is the bound doing its job on the first
+thing it touched. (The guard is taken in its own small `record` method so it cannot be held across an
+`.await`, which is the other way a future loses `Send`.)
+
+**`field_reassign_with_default` genuinely cannot be fixed, so it was narrowed.**
+`syntect::Theme` is `#[non_exhaustive]`, which means no struct literal is available to another crate
+— not even `..Default::default()` — so default-then-assign is the only shape the language leaves.
+The `allow` sat on the whole of `cme_theme`, most of which is a sixty-line table of scope colours it
+had nothing to say about. The four assignments moved into their own `assembled` function, so the
+`#[expect]` now covers four lines instead of sixty.
+
+**`dead_code` turned out not to accept an `#[expect]` at all, which is worth recording.**
+`elevate::valid_user` is a security check with its own tests, kept rather than deleted because
+whatever replaces the withdrawn elevate dialog will need exactly it before composing a command (§47).
+The obvious conversion fails:
+
+```
+error: this lint expectation is unfulfilled
+    = note: `-D unfulfilled-lint-expectations` implied by `-D warnings`
+```
+
+The tests DO call it, so under `cargo test` the item is used, `dead_code` never fires, and the
+expectation goes unfulfilled — which `-D warnings` turns into a build error. Tried rather than
+assumed, and the shape that works is `#[cfg_attr(not(test), expect(dead_code, reason = …))]`: the
+escape is scoped to the configuration that actually needs it. Both `cargo clippy` and `cargo clippy
+--all-targets` are clean, and being an `expect` it still becomes a build error the day a real caller
+appears — which is exactly when the note should be deleted.
+
 ### Not done
-
-- **The seven pre-existing suppressions** predate this section and were only partly resolved.
-  `cursor.rs`'s `#[expect]` survives with a reason it did not have; the other **six are still
-  `#[allow]`** and AGENTS.md's rule applies to every one of them, so they are debts and not
-  decisions:
-
-  | file | lint | what it would take |
-  |---|---|---|
-  | `local/copy.rs` | `too_many_arguments` | a parameter struct, not an edit |
-  | `ssh/download.rs` | `too_many_arguments` | the same |
-  | `ssh/upload.rs` | `too_many_arguments` | the same |
-  | `ui/syntax.rs` | `field_reassign_with_default` | the type is `#[non_exhaustive]`, which is the case the lint cannot see |
-  | `ssh/asuser.rs` | `async_fn_in_trait` | a trait shape, not a line |
-  | `elevate.rs` | `dead_code` | either a caller or a deletion — the only one of the six that is a question about the code rather than about the lint |
 - **Two tautological assertions** in `panes.rs` restate the production formula, so they pin that the
   clamp is applied and not what it computes. Replacing them with worked examples is a test-quality
   change (§107), not a lint fix.

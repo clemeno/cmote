@@ -77,6 +77,13 @@ A tunnel a target carries and re-establishes on reconnect (§27).
 **Time zone**:
 The zone an mtime is rendered in — the server's own, because the files being listed are its.
 
+**Copy run**:
+One copy from its first file to its last, whichever direction it goes (§16, §17, §19). The state
+that is the same for every file in it — the resume answer, the total the bar is measured against,
+the event channel, the ticker, the cancel flag — is `transfer::CopyRun`; a file's own size is not,
+so it stays an argument.
+_Avoid_: *transfer* for this, which is the whole feature rather than one run of it.
+
 ### Terminal internals
 
 **Engine**:
