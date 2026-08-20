@@ -132,6 +132,199 @@ impl Params {
 	}
 }
 
+/// The most intermediate bytes a scanner will buffer.
+///
+/// A real CSI carries at most one or two (`"` for DECSCA, `!` for DECSTR), and refusing to grow past
+/// this keeps a hostile stream out of our memory (§12). Deliberately LOOSER than the engine's own two
+/// (`vte`'s `MAX_INTERMEDIATES`, which counts the private marker against it as well), and unlike
+/// [`MAX_PARAMS`] this bound cannot be observed from outside: a scanner classifies on the
+/// intermediates it knows, so a sequence carrying three of them goes unclassified here and is dropped
+/// there — both sides ignore it, by different routes.
+///
+/// Six modules spelled this number for themselves before the framer arrived, all at 4, and
+/// `protect.rs` said in writing that it belonged here (§106, §111).
+pub const MAX_INTERMEDIATES: usize = 4;
+
+/// The escape byte that opens every sequence the framer is looking for.
+const ESC: u8 = 0x1b;
+
+/// One finished CSI sequence, handed to a scanner to judge.
+///
+/// The four parts a CSI has, and no more: `ESC [`, an optional private marker, a parameter run,
+/// intermediate bytes, one final byte. A scanner reads what it needs and ignores the rest — which is
+/// the whole point of the split, because deciding what a sequence MEANS is the only part that differs
+/// between the nine of them.
+///
+/// Borrowed rather than owned, and passed to a callback rather than collected: a scanner keeps at most
+/// a byte offset out of each sequence, so allocating one of these per sequence would be a `Vec` built
+/// and dropped on the hot path for every `CSI ? 1049 h` the engine owns.
+///
+/// The accessors arrive WITH the scanners that need them, one migration at a time (§111) — `sgrstack`
+/// walks every parameter rather than indexing one, so it will want the raw run as bytes, and that
+/// method lands in the commit that gives it a caller. A helper with no caller is a build error here,
+/// which is the `[lints]` rule doing exactly what it is for.
+#[derive(Debug, Clone, Copy)]
+pub struct Csi<'a> {
+	marker: Option<u8>,
+	params: &'a Params,
+	intermediates: &'a [u8],
+	final_byte: u8,
+}
+
+impl Csi<'_> {
+	/// The private marker the sequence opened with — `<`, `=`, `>` or `?` — if it had one.
+	pub fn marker(&self) -> Option<u8> {
+		self.marker
+	}
+
+	/// The byte that ended the sequence, in `0x40..=0x7e`. What a scanner matches on first.
+	pub fn final_byte(&self) -> u8 {
+		self.final_byte
+	}
+
+	/// The intermediate bytes, in the order they arrived. Empty for most sequences.
+	pub fn intermediates(&self) -> &[u8] {
+		self.intermediates
+	}
+
+	/// Parameter `index` as a number, or `None` when it is absent or unreadable.
+	///
+	/// **It does not supply a default, and that is deliberate.** `Params`' own note used to say a
+	/// shared parser could not work because the nine scanners disagree about what an omitted parameter
+	/// means — 0 for DECST8C, 1 for a cursor move, "not ours" for a sequence that requires the
+	/// parameter. That objection is about a parser that BAKES IN a default; this one reports absence
+	/// and leaves the choice where it was, so `param(0).unwrap_or(0)` and `param(0).unwrap_or(1)` are
+	/// both still the caller's to write, and the eight hand-rolled `split(b';')` walks go away (§111).
+	///
+	/// Saturating, because the engine saturates (`vte` folds with `saturating_mul`): a run of five
+	/// nines is 65,535 to both sides. Every scanner that rolled this by hand used `checked_mul`
+	/// instead and answered `None`, which is a scanner giving up on a sequence the engine acts on —
+	/// the exact shape of §56's and §57's defects.
+	pub fn param(&self, index: usize) -> Option<u16> {
+		let field = self
+			.params
+			.bytes()
+			.split(|&byte| byte == b';' || byte == b':')
+			.nth(index)?;
+		if field.is_empty() {
+			return None;
+		}
+		let mut value: u16 = 0;
+		for &byte in field {
+			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
+			value = value.saturating_mul(10).saturating_add(u16::from(digit));
+		}
+		Some(value)
+	}
+}
+
+/// Where the framer is in the byte stream.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum CsiScan {
+	/// Ordinary output; waiting for an ESC.
+	#[default]
+	Text,
+	/// Saw ESC. A CSI starts if the next byte is `[`, and nothing else here is of interest.
+	Escape,
+	/// Inside `ESC [ …`, collecting the sequence until its final byte.
+	Csi,
+}
+
+/// Cuts CSI sequences out of shell output, once, for every scanner that reads them.
+///
+/// This is `osc::Framer`'s counterpart, and it exists for the same reason: nine modules in this
+/// directory each need to sniff a CSI the engine also reads, each cares about a DIFFERENT sequence,
+/// and every one of them first had to solve the same problem — find where a CSI starts and ends in a
+/// stream that arrives in arbitrary chunks. That was 62 to 82 lines apiece of identical grammar, and
+/// the module-specific part of it is a handful of lines (§106, §111).
+///
+/// Safe at any chunk boundary: the state carries over between `feed` calls, so a sequence may be split
+/// anywhere — between the ESC and the `[`, inside the parameters, or before the final byte.
+///
+/// **It frames CSI only.** `query` and `graphics` also read DCS, and they keep their own machine for
+/// that, which is the line `osc.rs` already drew when `graphics` kept its own OSC framing: merging a
+/// second family in would put a policy parameter in this interface that fits neither caller.
+#[derive(Debug, Default)]
+pub struct Framer {
+	state: CsiScan,
+	marker: Option<u8>,
+	params: Params,
+	intermediates: Vec<u8>,
+}
+
+impl Framer {
+	/// Feed a chunk of shell output, calling `on_csi` once per CSI sequence that COMPLETES in it.
+	///
+	/// The `usize` is the offset in THIS `bytes` slice one past the sequence's final byte — what a
+	/// caller needs to advance the engine past a sequence before acting on it, which every scanner
+	/// here does and for the reason `tabs` states: a fed walk that lands in front of the sequence
+	/// leaves the engine to parse its tail.
+	pub fn feed(&mut self, bytes: &[u8], mut on_csi: impl FnMut(usize, &Csi<'_>)) {
+		for (index, &byte) in bytes.iter().enumerate() {
+			match self.state {
+				CsiScan::Text => {
+					if byte == ESC {
+						self.state = CsiScan::Escape;
+					}
+				}
+				CsiScan::Escape => match byte {
+					b'[' => {
+						self.marker = None;
+						self.params.clear();
+						self.intermediates.clear();
+						self.state = CsiScan::Csi;
+					}
+					// ESC ESC: still waiting for the sequence's real first byte.
+					ESC => {}
+					_ => self.state = CsiScan::Text,
+				},
+				CsiScan::Csi => match byte {
+					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
+					// 0x3c–0x3f) which are only legal as the very first one.
+					0x30..=0x3f => {
+						if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
+							self.marker = Some(byte);
+						} else if !self.params.push(byte) {
+							// More parameters than the engine's array holds, so the engine ignores the
+							// whole sequence. Giving up here is what makes the two agree.
+							self.state = CsiScan::Text;
+						}
+					}
+					// Intermediate bytes.
+					0x20..=0x2f => {
+						self.intermediates.push(byte);
+						if self.intermediates.len() > MAX_INTERMEDIATES {
+							self.state = CsiScan::Text;
+						}
+					}
+					// The final byte ends the sequence, so this is where the scanner is asked.
+					0x40..=0x7e => {
+						on_csi(
+							index + 1,
+							&Csi {
+								marker: self.marker,
+								params: &self.params,
+								intermediates: &self.intermediates,
+								final_byte: byte,
+							},
+						);
+						self.state = CsiScan::Text;
+					}
+					// A fresh ESC restarts the match.
+					ESC => self.state = CsiScan::Escape,
+					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
+					// THROUGH, keeping the sequence in every case (§106). Abandoning it here would mean
+					// cmote and the engine disagreeing about what this byte stream even was, which is
+					// how three defects reached a release.
+					byte if passes_through(byte) => {}
+					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
+					_ => self.state = CsiScan::Text,
+				},
+			}
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -193,6 +386,97 @@ mod tests {
 			u16::MAX.to_string().len() <= MAX_DIGITS,
 			"a clamped run must be able to reach the value the engine saturates at"
 		);
+	}
+
+	/// Every sequence a framer finds in `chunks`, as `(offset, marker, final byte, first parameter)`.
+	/// Fed chunk by chunk through ONE framer, so a split sequence is scanned the way the stream
+	/// delivers it.
+	fn framed(chunks: &[&[u8]]) -> Vec<(usize, Option<u8>, u8, Option<u16>)> {
+		let mut framer = Framer::default();
+		let mut found = Vec::new();
+		for chunk in chunks {
+			framer.feed(chunk, |offset, csi| {
+				found.push((offset, csi.marker(), csi.final_byte(), csi.param(0)));
+			});
+		}
+		found
+	}
+
+	#[test]
+	fn a_sequence_is_reported_one_past_its_final_byte() {
+		// The offset every scanner here relies on: the engine has to be advanced past the sequence
+		// before cmote acts on it, so the offset names the byte AFTER the final one.
+		assert_eq!(framed(&[b"\x1b[?5W"]), vec![(5, Some(b'?'), b'W', Some(5))]);
+		assert_eq!(framed(&[b"ab\x1b[3J"]), vec![(6, None, b'J', Some(3))]);
+	}
+
+	#[test]
+	fn a_sequence_split_anywhere_completes_on_the_chunk_that_ends_it() {
+		// Split between the ESC and the `[`, mid-parameter, and just before the final byte. In every
+		// case the offset is measured in the chunk that carried the terminator.
+		assert_eq!(
+			framed(&[b"\x1b", b"[?5W"]),
+			vec![(4, Some(b'?'), b'W', Some(5))]
+		);
+		assert_eq!(
+			framed(&[b"\x1b[?", b"5W"]),
+			vec![(2, Some(b'?'), b'W', Some(5))]
+		);
+		assert_eq!(
+			framed(&[b"\x1b[?5", b"W"]),
+			vec![(1, Some(b'?'), b'W', Some(5))]
+		);
+	}
+
+	#[test]
+	fn two_sequences_in_one_chunk_are_both_reported_in_order() {
+		let found = framed(&[b"\x1b[?5W\x1b[2J"]);
+		assert_eq!(found.len(), 2);
+		assert_eq!(found[0].0, 5);
+		// Four bytes, not five: `ESC [ 2 J` carries no marker, so it ends at 9.
+		assert_eq!(found[1], (9, None, b'J', Some(2)));
+	}
+
+	#[test]
+	fn a_private_marker_is_only_a_marker_as_the_first_parameter_byte() {
+		// `CSI ? 5 W` opens with one. `CSI 5 ? W` does not — the `?` arrives after a digit, so it is a
+		// parameter byte, and a scanner testing for the marker must not see one.
+		assert_eq!(framed(&[b"\x1b[?5W"])[0].1, Some(b'?'));
+		assert_eq!(framed(&[b"\x1b[5?W"])[0].1, None);
+	}
+
+	#[test]
+	fn a_pass_through_byte_keeps_the_sequence_and_can_or_sub_ends_it() {
+		// The rule `passes_through` exists for, at the framer this time: the engine reads a
+		// mid-sequence control byte through and keeps the sequence, so the framer must too, or the two
+		// disagree about what the same bytes were (§106).
+		assert_eq!(framed(&[b"\x1b[?5\x07W"]).len(), 1, "BEL is read through");
+		assert!(framed(&[b"\x1b[?5\x18W"]).is_empty(), "CAN cancels");
+		assert!(framed(&[b"\x1b[?5\x1aW"]).is_empty(), "SUB cancels");
+	}
+
+	#[test]
+	fn an_omitted_parameter_is_none_so_the_caller_picks_its_own_default() {
+		// The whole reason `param` does not supply a default: DECST8C reads an absent parameter as 0
+		// and a cursor move reads it as 1, and only the scanner knows which it is.
+		assert_eq!(framed(&[b"\x1b[?W"])[0].3, None);
+		assert_eq!(framed(&[b"\x1b[;5W"])[0].3, None, "an empty first field");
+	}
+
+	#[test]
+	fn a_parameter_past_a_u16_saturates_rather_than_vanishing() {
+		// Five digits can express more than a `u16` holds, and the engine folds with `saturating_mul`.
+		// A scanner that answered `None` here would be giving up on a sequence the engine acts on,
+		// which is the shape of §56's and §57's defects.
+		assert_eq!(framed(&[b"\x1b[99999W"])[0].3, Some(u16::MAX));
+	}
+
+	#[test]
+	fn too_many_intermediates_abandon_the_sequence() {
+		let mut bytes = b"\x1b[".to_vec();
+		bytes.extend(std::iter::repeat_n(b'!', MAX_INTERMEDIATES + 1));
+		bytes.push(b'W');
+		assert!(framed(&[&bytes]).is_empty());
 	}
 
 	#[test]

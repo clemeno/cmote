@@ -41,41 +41,14 @@
 /// column 5 has to land on 0 rather than run off the page. So the walk sets one there too.
 pub const INTERVAL: u16 = 8;
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
-/// The longest parameter run buffered inside one sequence. DECST8C's is a single digit; anything
-/// longer is malformed, and refusing to grow past this keeps a hostile stream from ballooning our
-/// memory (§12).
-const MAX_PARAMS: usize = 32;
-
-/// The most intermediate bytes buffered. DECST8C has none at all — they are collected only so that a
-/// near miss carrying one is rejected rather than mistaken for it.
-const MAX_INTERMEDIATES: usize = 4;
-
-/// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
-/// bytes, then intermediate bytes, then one final byte.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum TabsScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`, and nothing else here is of interest.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The DECST8C scanner (§74). Feed it every byte of shell output; it reports where each tab-stop
 /// reset sat, for `term/mod.rs` to carry out.
+///
+/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is the one question that is this
+/// module's own — whether a finished sequence is DECST8C.
 #[derive(Debug, Default)]
 pub struct Tabs {
-	state: TabsScan,
-	/// The private marker, if the sequence opened with one. DECST8C requires `?`, and keeping the
-	/// marker apart from `params` lets the digits parse the same either way.
-	marker: Option<u8>,
-	params: Vec<u8>,
-	intermediates: Vec<u8>,
+	framer: super::csi::Framer,
 }
 
 impl Tabs {
@@ -89,99 +62,29 @@ impl Tabs {
 	/// would then parse the tail of a sequence cmote had already answered.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<usize> {
 		let mut resets = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				TabsScan::Text => {
-					if byte == ESC {
-						self.state = TabsScan::Escape;
-					}
-				}
-				TabsScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = TabsScan::Csi;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = TabsScan::Text,
-				},
-				TabsScan::Csi => match byte {
-					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
-					// 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = TabsScan::Text;
-							}
-						}
-					}
-					// Intermediate bytes. DECST8C has none, so any of these rules it out.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = TabsScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if self.is_tab_reset(byte) {
-							resets.push(index + 1);
-						}
-						self.state = TabsScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = TabsScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
-					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
-					// would mean cmote and the engine disagreeing about what this byte stream even was,
-					// which is how three defects reached a release.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = TabsScan::Text,
-				},
+		self.framer.feed(bytes, |offset, csi| {
+			if is_tab_reset(csi) {
+				resets.push(offset);
 			}
-		}
+		});
 		resets
 	}
+}
 
-	/// Whether the sequence just completed is DECST8C — `CSI ? 5 W`, the marker and the parameter
-	/// both required.
-	///
-	/// Read straight off `vte`'s own arm (`('W', [b'?']) if next_param_or(0) == 5`), deliberately, so
-	/// that cmote and the engine agree on what the bytes are even though only one of them acts. The
-	/// near misses this keeps out: `CSI 5 W` with no marker is CTC, a different sequence entirely;
-	/// `CSI ? W` and `CSI ? 2 W` are DECST8C's own final byte carrying a value DEC never defined for
-	/// it, and an undefined value is a no-op rather than a guess (§54).
-	fn is_tab_reset(&self, final_byte: u8) -> bool {
-		(final_byte, self.marker, self.intermediates.as_slice()) == (b'W', Some(b'?'), &[][..])
-			&& self.first_param() == Some(5)
-	}
-
-	/// The first parameter as a number, treating an omitted one as 0 — which is what `vte` does, and
-	/// 0 is not 5, so an empty `CSI ? W` matches nothing. `None` when the digits are unparseable,
-	/// which leaves the sequence unclassified rather than guessing at it.
-	fn first_param(&self) -> Option<u16> {
-		let digits = self
-			.params
-			.split(|&byte| byte == b';')
-			.next()
-			.unwrap_or_default();
-		if digits.is_empty() {
-			return Some(0);
-		}
-		let mut value: u16 = 0;
-		for &byte in digits {
-			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-			value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
-		}
-		Some(value)
-	}
+/// Whether a finished sequence is DECST8C — `CSI ? 5 W`, the marker and the parameter both required.
+///
+/// Read straight off `vte`'s own arm (`('W', [b'?']) if next_param_or(0) == 5`), deliberately, so that
+/// cmote and the engine agree on what the bytes are even though only one of them acts. The near misses
+/// this keeps out: `CSI 5 W` with no marker is CTC, a different sequence entirely; `CSI ? W` and
+/// `CSI ? 2 W` are DECST8C's own final byte carrying a value DEC never defined for it, and an
+/// undefined value is a no-op rather than a guess (§54).
+///
+/// The omitted parameter is 0 — `vte`'s `next_param_or(0)` — and 0 is not 5, so a bare `CSI ? W`
+/// matches nothing. That default lives here, at the one site that knows what DECST8C means by an
+/// absent parameter, rather than in the framer (§111).
+fn is_tab_reset(csi: &super::csi::Csi<'_>) -> bool {
+	(csi.final_byte(), csi.marker(), csi.intermediates()) == (b'W', Some(b'?'), &[][..])
+		&& csi.param(0).unwrap_or(0) == 5
 }
 
 /// DECST8C written in the sequences the engine itself handles, for `term/mod.rs` to feed it (§74).
@@ -287,13 +190,31 @@ mod tests {
 		assert!(scan(b"\x1b[?5\x18W").is_empty());
 	}
 
-	/// A hostile stream must not be able to make the scanner buffer without bound.
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
+	/// answer differently on purpose, which is what this pins now that the grammar is shared (§111).
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		let mut bytes = b"\x1b[?".to_vec();
-		bytes.extend(std::iter::repeat_n(b'5', MAX_PARAMS + 10));
-		bytes.push(b'W');
-		assert!(scan(&bytes).is_empty());
+	fn the_two_parameter_bounds_answer_differently() {
+		// More parameters than the engine's array holds: the engine ignores the whole sequence, so the
+		// scanner abandons it too. Both sides ignoring the same bytes is agreement.
+		let mut many = b"\x1b[?".to_vec();
+		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
+		many.push(b'W');
+		assert!(scan(&many).is_empty());
+
+		// A runaway DIGIT run is clamped instead, and the sequence lives — because the engine
+		// saturates the number rather than giving up on the sequence. It is simply not DECST8C, since
+		// the clamped value is not 5.
+		let mut digits = b"\x1b[?".to_vec();
+		digits.extend(std::iter::repeat_n(b'5', 500));
+		digits.push(b'W');
+		assert!(scan(&digits).is_empty());
+	}
+
+	/// Leading zeros do not change what a parameter means, so `CSI ? 000005 W` is DECST8C — which is
+	/// what the engine's own saturating fold makes of it (§111).
+	#[test]
+	fn leading_zeros_still_read_as_a_tab_reset() {
+		assert_eq!(scan(b"\x1b[?000000000000000005W"), vec![22]);
 	}
 
 	/// Two in one chunk, both reported, in stream order — the interruption advance walks them in the order
