@@ -58,9 +58,6 @@
 
 use std::ops::Range;
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 // The parameter run, bounded the way the engine bounds one (§106).
 //
 // This scanner used to cap the parameter BYTES at 32 and abandon the sequence past them, which is where
@@ -145,8 +142,10 @@ pub struct Protect {
 	/// this module found by hand — a parameter byte after an intermediate, and a private marker after
 	/// the parameters — live in there now, so every scanner obeys what only this one used to.
 	framer: super::csi::Framer,
-	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
-	after_escape: bool,
+	/// The escape-sequence grammar, for the RIS (`ESC c`) that is not a CSI (§111). Its payload cap is
+	/// zero: this scanner reads no control string, so not one byte of a remote's picture is buffered on
+	/// its account.
+	escapes: super::dcs::Framer<0>,
 	/// Whether DECSCA has the pen protecting right now. The scanner keeps this because it is what
 	/// decides whether an SGR is worth reporting — the common case, an unarmed stream, reports
 	/// nothing at all and so costs `process` no splits.
@@ -169,7 +168,7 @@ impl Protect {
 		// two disjoint fields, which reads plainer than relying on the borrow checker to see that.
 		let Self {
 			framer,
-			after_escape,
+			escapes,
 			armed,
 		} = self;
 		let mut requests = Vec::new();
@@ -181,13 +180,15 @@ impl Protect {
 		// RIS, the one sequence here that is not a CSI. A full reset rebuilds the pen from scratch,
 		// protection included, so it both disarms and reports. Collected apart and merged by offset,
 		// because the order matters: an SGR reassert before a reset must be applied before it.
-		for (index, &byte) in bytes.iter().enumerate() {
-			if *after_escape && byte == b'c' {
+		escapes.feed(bytes, |span, control| {
+			if let super::dcs::Control::Escape(escape) = control
+				&& escape.final_byte() == b'c'
+				&& escape.intermediates().is_empty()
+			{
 				*armed = false;
-				requests.push((index + 1, ProtectRequest::Protect(false)));
+				requests.push((span.past(), ProtectRequest::Protect(false)));
 			}
-			*after_escape = byte == ESC;
-		}
+		});
 		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}

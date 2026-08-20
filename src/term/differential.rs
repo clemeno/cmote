@@ -1137,6 +1137,40 @@ mod tests {
 		// so a scanner that misses one keeps state a reset threw away. Four scanners watched for this
 		// with "was the previous byte an ESC", which is wrong for every byte the escape state reads
 		// through (§111).
+		// All five scanners that read a RIS, because until §111 four of them read it with a bool and one
+		// with a state machine, and every one of the four missed these.
+		let readers: [DifferentialClaim; 5] = [
+			("graphics", b"", |bytes| {
+				graphics::Images::default()
+					.feed(bytes)
+					.iter()
+					.any(|(_, event)| matches!(event, graphics::GraphicsEvent::Reset))
+			}),
+			("protect", b"", |bytes| {
+				!protect::Protect::default().feed(bytes).is_empty()
+			}),
+			("scp", b"", |bytes| {
+				!super::super::scp::Scp::default().feed(bytes).is_empty()
+			}),
+			("sgrstack", b"", |bytes| {
+				!super::super::sgrstack::SgrStack::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			// `rect` reports a RIS as nothing at all — it CUTS the chunk there, because DECSACE is reset
+			// and that extent is stamped onto the requests that FOLLOW (§59). So the observable is the
+			// extent a later DECCARA carries: `CSI 2 * x` selects rectangle-extent, the RIS puts it back
+			// to stream-extent, and only a scanner that saw the reset stamps the request after it with
+			// `Stream`.
+			("rect", b"", |bytes| {
+				let mut scanner = super::super::rect::Rectangles::default();
+				scanner.feed(b"\x1b[2*x");
+				let mut whole = bytes.to_vec();
+				whole.extend_from_slice(b"\x1b[2;3;5;7;1$r");
+				format!("{:?}", scanner.feed(&whole)).contains("Stream")
+			}),
+		];
+
 		for (byte, name) in READ_THROUGH {
 			let bytes = [0x1b, byte, b'c'];
 			assert_eq!(
@@ -1144,10 +1178,17 @@ mod tests {
 				vec![(Vec::new(), b'c')],
 				"{name}: the engine dispatches the reset"
 			);
-			let found = graphics::Images::default().feed(&bytes);
+			for (who, _, sees) in readers {
+				assert!(sees(&bytes), "{who} misses the reset with {name} in it");
+			}
+		}
+
+		// And the plain spelling still reads, so the test cannot pass by claiming everything.
+		for (who, _, sees) in readers {
+			assert!(sees(b"\x1bc"), "{who} misses a plain reset");
 			assert!(
-				matches!(found.as_slice(), [(_, graphics::GraphicsEvent::Reset)]),
-				"{name}: and cmote sees it, found {found:?}"
+				!sees(b"\x1b(c"),
+				"{who} reads a charset designation as a reset"
 			);
 		}
 

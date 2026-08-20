@@ -133,9 +133,6 @@
 
 use std::ops::RangeInclusive;
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// The four corners as the sequence spelled them: 1-based and inclusive, with 0 — which is also what
 /// an omitted parameter means — standing for "the edge of the page".
 ///
@@ -350,8 +347,9 @@ pub struct Rectangles {
 	/// The CSI grammar, shared with the other scanners (§111). For this family the intermediate is
 	/// what matters most, and telling the seven apart on it is all that is left here.
 	framer: super::csi::Framer,
-	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
-	after_escape: bool,
+	/// The escape-sequence grammar, for the RIS (`ESC c`) that is not a CSI (§111). The cap is zero:
+	/// this scanner reads no control string, so no payload is buffered on its account.
+	escapes: super::dcs::Framer<0>,
 	/// The extent DECSACE last selected, stamped onto each attribute request as it goes out (§59).
 	extent: RectExtent,
 }
@@ -380,19 +378,31 @@ impl Rectangles {
 		// chunk or to none of them. The chunk is cut into runs at each RIS instead, and each run fed
 		// in turn — which is what "in the order the stream put them" has to mean when one of the two
 		// families changes how the other reads (§59, §111).
+		//
+		// So the resets are found FIRST, by the shared escape grammar, and the cut points are where each
+		// one ends. That grammar is what makes the cut right: a hand-rolled "was the previous byte an
+		// ESC" test — which is what this module used, and three others with it — misses `ESC` LF `c`,
+		// where the engine executes the line feed, stays in its escape state and then resets (§111).
+		let mut resets = Vec::new();
+		self.escapes.feed(bytes, |span, control| {
+			if let super::dcs::Control::Escape(escape) = control
+				&& escape.final_byte() == b'c'
+				&& escape.intermediates().is_empty()
+			{
+				resets.push(span.past());
+			}
+		});
+
 		let mut requests = Vec::new();
 		let mut start = 0;
-		for (index, &byte) in bytes.iter().enumerate() {
-			if self.after_escape && byte == b'c' {
-				// Up to and INCLUDING the RIS, so the framer sees every byte exactly once and in
-				// order — its own state carries across the cut like it carries across a chunk.
-				self.scan(&bytes[start..=index], start, &mut requests);
-				// RIS resets everything a terminal holds, and DECSACE is one of those things (§59).
-				// Nothing else here has state to clear.
-				self.extent = RectExtent::default();
-				start = index + 1;
-			}
-			self.after_escape = byte == ESC;
+		for past in resets {
+			// Up to and INCLUDING the RIS, so the framer sees every byte exactly once and in order —
+			// its own state carries across the cut like it carries across a chunk.
+			self.scan(&bytes[start..past], start, &mut requests);
+			// RIS resets everything a terminal holds, and DECSACE is one of those things (§59).
+			// Nothing else here has state to clear.
+			self.extent = RectExtent::default();
+			start = past;
 		}
 		self.scan(&bytes[start..], start, &mut requests);
 		requests

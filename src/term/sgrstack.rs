@@ -50,9 +50,6 @@
 // is one level out, so a program that nests deeply gets its outer attributes restored at an inner
 // level and no error anywhere. Counting keeps the nesting aligned at the price of one `usize`.
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// The intermediate byte both sequences carry, and the whole of what separates them from their
 /// neighbours: `CSI ! p` is DECSTR, `CSI $ p` is DECRQM, `CSI SP q` is DECSCUSR.
 const HASH: u8 = b'#';
@@ -165,12 +162,14 @@ pub struct SgrStack {
 	/// parameter list and the two spellings of each half — the only part of the reading that is nobody
 	/// else's.
 	framer: super::csi::Framer,
-	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
+	/// The escape-sequence grammar, for the RIS (`ESC c`) that is not a CSI (§111).
 	///
-	/// Read here rather than borrowed from `term/scp.rs`, which reads the same byte for its own store:
-	/// each scanner reads the stream itself, so neither can come to depend on the other's idea of where
-	/// a sequence sat.
-	after_escape: bool,
+	/// Held here rather than borrowed from `term/scp.rs`, which reads the same sequence for its own
+	/// store: each scanner reads the stream itself, so neither can come to depend on the other's idea of
+	/// where a sequence sat. What IS shared is the grammar, which is the part that was getting the
+	/// reading wrong in four places at once. The cap is zero — no control string is read here, so no
+	/// payload is buffered.
+	escapes: super::dcs::Framer<0>,
 }
 
 impl SgrStack {
@@ -193,13 +192,15 @@ impl SgrStack {
 			}
 		});
 		// RIS, the one sequence here that is not a CSI — see `SgrStackRequest::Reset` for why this one
-		// and not the soft reset.
-		for (index, &byte) in bytes.iter().enumerate() {
-			if self.after_escape && byte == b'c' {
-				requests.push((index + 1, SgrStackRequest::Reset));
+		// and not the soft reset. Both parts are tested, because `ESC ( c` resets nothing.
+		self.escapes.feed(bytes, |span, control| {
+			if let super::dcs::Control::Escape(escape) = control
+				&& escape.final_byte() == b'c'
+				&& escape.intermediates().is_empty()
+			{
+				requests.push((span.past(), SgrStackRequest::Reset));
 			}
-			self.after_escape = byte == ESC;
-		}
+		});
 		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}

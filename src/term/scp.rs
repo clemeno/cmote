@@ -41,9 +41,6 @@
 
 use std::collections::BTreeSet;
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// How many lines may carry a remembered path at once. A bounded ring like the prompt marks' (§34),
 /// and for the same reason: a remote decides how many of these arrive, so the store cannot be
 /// allowed to grow with the session. Eviction takes the LOWEST line number, which is the one
@@ -79,14 +76,13 @@ pub enum ScpRequest {
 pub struct Scp {
 	/// The CSI grammar, shared with the other scanners (§111).
 	framer: super::csi::Framer,
-	/// Whether the previous byte was an ESC — the whole of the second state machine this module
-	/// needs, because RIS (`ESC c`) is not a CSI and the framer deliberately frames only those.
-	///
-	/// Independent of the framer rather than woven into it, and safe because both are pure functions
-	/// of the same byte stream. It agrees with the engine on the cases that look ambiguous: an ESC
-	/// inside a CSI restarts the escape in `vte` too, so `ESC [ 1 ESC c` really is a RIS, and
-	/// `ESC ESC c` re-arms and then fires, which is what the engine does with it.
-	after_escape: bool,
+	/// The escape-sequence grammar, for the RIS (`ESC c`) that is not a CSI — also shared, and also
+	/// §111's. It replaced a single `after_escape` bool, which had looked like the whole of the machine
+	/// this needed: it agreed with the engine on the ambiguous-looking cases (`ESC [ 1 ESC c` is a RIS
+	/// to `vte` too, and `ESC ESC c` re-arms and fires) and disagreed on the one nobody had asked
+	/// about — `ESC` LF `c`, where the engine executes the line feed, stays in its escape state and
+	/// then resets. The cap is zero: this scanner reads no control string, so no payload is buffered.
+	escapes: super::dcs::Framer<0>,
 }
 
 impl Scp {
@@ -109,14 +105,17 @@ impl Scp {
 				requests.push((span.past(), ScpRequest::Select(path)));
 			}
 		});
-		for (index, &byte) in bytes.iter().enumerate() {
-			if self.after_escape && byte == b'c' {
-				// RIS. The engine rebuilds itself and drops the history, so every line this store
-				// remembers is about to mean a different line.
-				requests.push((index + 1, ScpRequest::Reset));
+		self.escapes.feed(bytes, |span, control| {
+			// RIS. The engine rebuilds itself and drops the history, so every line this store
+			// remembers is about to mean a different line. Both parts of the sequence are tested,
+			// because `ESC ( c` designates a character set and resets nothing.
+			if let super::dcs::Control::Escape(escape) = control
+				&& escape.final_byte() == b'c'
+				&& escape.intermediates().is_empty()
+			{
+				requests.push((span.past(), ScpRequest::Reset));
 			}
-			self.after_escape = byte == ESC;
-		}
+		});
 		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}
