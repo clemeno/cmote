@@ -68,17 +68,6 @@ const ESC: u8 = 0x1b;
 // with room to spare — was dropped here while the engine applied it, so the `Attr::Reset` inside it took
 // the borrowed protection bit and nothing put the bit back. Protection was silently lost on the one
 // sequence this scanner exists to watch for.
-use super::csi::Params;
-
-/// The most intermediate bytes we will buffer. A real CSI has at most one or two (`"` for DECSCA,
-/// `!` for DECSTR), and refusing to grow past this keeps a hostile stream out of our memory (§12).
-///
-/// Still a local number, and still LOOSER than the engine's two (`vte`'s `MAX_INTERMEDIATES`, which
-/// counts the private marker against it as well). Unlike the parameter bound this one cannot be
-/// observed: the classifier below matches on the intermediates it knows, so a sequence carrying three
-/// of them falls through to `None` here and is dropped there — both sides ignore it, by different
-/// routes. It belongs with the rest of the grammar in `term/csi.rs` when the framer arrives (§106).
-const MAX_INTERMEDIATES: usize = 4;
 
 /// The bit cmote borrows inside the engine's 16-bit per-cell flag word to mean "DECSCA-protected".
 ///
@@ -148,29 +137,16 @@ pub enum ProtectRequest {
 	Erase(Erase),
 }
 
-/// Where the scanner is in the byte stream. Only the CSI shape matters here, and a CSI is
-/// `ESC [` then parameter bytes, then intermediate bytes, then one final byte.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum ProtectScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`; `ESC c` is a full reset all on its own.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The selective-erase scanner (§56). Feed it every byte of shell output; it tracks whether the
 /// pen is protecting and reports the sequences the engine drops.
 #[derive(Debug, Default)]
 pub struct Protect {
-	state: ProtectScan,
-	/// The private marker, if the sequence opened with one (`?` for DECSED and DECSEL). Kept apart
-	/// from `params` so the parameter digits parse the same whether a marker was there or not.
-	marker: Option<u8>,
-	params: Params,
-	intermediates: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111). Both of the engine-agreement rules
+	/// this module found by hand — a parameter byte after an intermediate, and a private marker after
+	/// the parameters — live in there now, so every scanner obeys what only this one used to.
+	framer: super::csi::Framer,
+	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
+	after_escape: bool,
 	/// Whether DECSCA has the pen protecting right now. The scanner keeps this because it is what
 	/// decides whether an SGR is worth reporting — the common case, an unarmed stream, reports
 	/// nothing at all and so costs `process` no splits.
@@ -189,155 +165,88 @@ impl Protect {
 	/// has landed, and a selective erase reads the cursor the erase itself never moves — but the
 	/// sequence still has to reach the engine first, since the engine is the thing that ignores it.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, ProtectRequest)> {
+		// Destructured so the closure below can hold `armed` while `framer` is borrowed for the scan —
+		// two disjoint fields, which reads plainer than relying on the borrow checker to see that.
+		let Self {
+			framer,
+			after_escape,
+			armed,
+		} = self;
 		let mut requests = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				ProtectScan::Text => {
-					if byte == ESC {
-						self.state = ProtectScan::Escape;
-					}
-				}
-				ProtectScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = ProtectScan::Csi;
-					}
-					// RIS. A full reset rebuilds the pen from scratch, protection included.
-					b'c' => {
-						self.armed = false;
-						requests.push((index + 1, ProtectRequest::Protect(false)));
-						self.state = ProtectScan::Text;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = ProtectScan::Text,
-				},
-				ProtectScan::Csi => match byte {
-					// Parameter bytes: the digits and separators, plus the private markers
-					// (`< = > ?`, 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if !self.intermediates.is_empty() {
-							// A parameter byte after an intermediate. The engine refuses the whole sequence
-							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
-							// carrying on would mean acting alone on a spelling nothing else in the world
-							// obeys (§106).
-							self.state = ProtectScan::Text;
-						} else if !self.params.started() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else if byte >= 0x3c {
-							// A private marker after the parameters have started. Legal only as the very
-							// first parameter byte, and the engine drops the whole sequence when one arrives
-							// later (`vte`'s CSI-param state, `lib.rs:249`, straight to `CsiIgnore`).
-							//
-							// Found by the shape sweep, and the worst of the three shapes it caught here:
-							// `CSI ? 1;2 ? J` classified as a selective erase, because `first_param` reads
-							// only the first field and the stray marker was hiding in the second. So cmote
-							// erased cells for a sequence nothing else in the world obeys (§106).
-							self.state = ProtectScan::Text;
-						} else if !self.params.push(byte) {
-							// More parameters than the engine reads, so it ignores the sequence and so
-							// do we.
-							self.state = ProtectScan::Text;
-						}
-					}
-					// Intermediate bytes — `"` makes DECSCA, `!` makes DECSTR.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = ProtectScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if let Some(request) = self.classify(byte) {
-							requests.push((index + 1, request));
-						}
-						self.state = ProtectScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = ProtectScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads straight through
-					// and keeps the sequence across (§106, `csi::passes_through`). Abandoning it here cost
-					// the same thing the parameter cap did: `CSI 0;` LF `1 m` is an SGR the engine applies,
-					// `Attr::Reset` and all, so a scanner that gave up on it lost the protection bit.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB — the two bytes that do end a sequence, here and in the engine.
-					_ => self.state = ProtectScan::Text,
-				},
+		framer.feed(bytes, |offset, csi| {
+			if let Some(request) = classify(csi, armed) {
+				requests.push((offset, request));
 			}
+		});
+		// RIS, the one sequence here that is not a CSI. A full reset rebuilds the pen from scratch,
+		// protection included, so it both disarms and reports. Collected apart and merged by offset,
+		// because the order matters: an SGR reassert before a reset must be applied before it.
+		for (index, &byte) in bytes.iter().enumerate() {
+			if *after_escape && byte == b'c' {
+				*armed = false;
+				requests.push((index + 1, ProtectRequest::Protect(false)));
+			}
+			*after_escape = byte == ESC;
 		}
+		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}
+}
 
-	/// Decide what the sequence just completed means, and update the armed state if it was a DECSCA.
-	/// Matching on all three of final byte, marker and intermediates together is what keeps the
-	/// near-miss spellings out: `CSI 2 J` is a plain erase (no marker), `CSI > 4 ; 2 m` is
-	/// XTMODKEYS rather than an SGR (marker `>`), and `CSI 1 SP q` is a cursor-style request rather
-	/// than a DECSCA (intermediate ` `, not `"`).
-	fn classify(&mut self, final_byte: u8) -> Option<ProtectRequest> {
-		match (final_byte, self.marker, self.intermediates.as_slice()) {
-			// DECSCA — `CSI Ps " q`. Ps 1 protects; 0 and 2 both stop protecting, and so does an
-			// omitted parameter, which means 0.
-			(b'q', None, [b'"']) => {
-				self.armed = self.first_param() == Some(1);
-				Some(ProtectRequest::Protect(self.armed))
-			}
-			// DECSTR soft reset — `CSI ! p`. Clears the pen the way RIS does, and much else besides
-			// (§72), all of it `term/mod.rs`'s work. The scanner's own share is disarming: whatever
-			// the reset does downstream, an SGR after it is no longer worth a split.
-			(b'p', None, [b'!']) => {
-				self.armed = false;
-				Some(ProtectRequest::SoftReset)
-			}
-			// DECSED / DECSEL — the `?` spellings of erase, the two the engine drops.
-			(b'J', Some(b'?'), []) => self.extent().map(Erase::Display).map(ProtectRequest::Erase),
-			(b'K', Some(b'?'), []) => self.extent().map(Erase::Line).map(ProtectRequest::Erase),
-			// An SGR while the pen is armed. Reported so the protection bit can be put back on
-			// the far side of it, because SGR 0 assigns the flag word whole.
-			(b'm', None, []) if self.armed => Some(ProtectRequest::Reassert),
-			_ => None,
+/// Decide what the sequence just completed means, and update `armed` if it was a DECSCA.
+/// Matching on all three of final byte, marker and intermediates together is what keeps the
+/// near-miss spellings out: `CSI 2 J` is a plain erase (no marker), `CSI > 4 ; 2 m` is
+/// XTMODKEYS rather than an SGR (marker `>`), and `CSI 1 SP q` is a cursor-style request rather
+/// than a DECSCA (intermediate ` `, not `"`).
+fn classify(csi: &super::csi::Csi<'_>, armed: &mut bool) -> Option<ProtectRequest> {
+	match (csi.final_byte(), csi.marker(), csi.intermediates()) {
+		// DECSCA — `CSI Ps " q`. Ps 1 protects; 0 and 2 both stop protecting, and so does an
+		// omitted parameter, which means 0.
+		(b'q', None, [b'"']) => {
+			*armed = first_param(csi) == 1;
+			Some(ProtectRequest::Protect(*armed))
 		}
+		// DECSTR soft reset — `CSI ! p`. Clears the pen the way RIS does, and much else besides
+		// (§72), all of it `term/mod.rs`'s work. The scanner's own share is disarming: whatever
+		// the reset does downstream, an SGR after it is no longer worth a split.
+		(b'p', None, [b'!']) => {
+			*armed = false;
+			Some(ProtectRequest::SoftReset)
+		}
+		// DECSED / DECSEL — the `?` spellings of erase, the two the engine drops.
+		(b'J', Some(b'?'), []) => extent(csi).map(Erase::Display).map(ProtectRequest::Erase),
+		(b'K', Some(b'?'), []) => extent(csi).map(Erase::Line).map(ProtectRequest::Erase),
+		// An SGR while the pen is armed. Reported so the protection bit can be put back on
+		// the far side of it, because SGR 0 assigns the flag word whole.
+		(b'm', None, []) if *armed => Some(ProtectRequest::Reassert),
+		_ => None,
 	}
+}
 
-	/// The first parameter as a number, treating an omitted one as 0 — which is what all three of
-	/// DECSCA, DECSED and DECSEL default to. `None` only when the digits are unparseable, which
-	/// leaves the sequence unclassified rather than guessing at it (§54's rule: malformed remote
-	/// input is a no-op, never a reset).
-	fn first_param(&self) -> Option<u16> {
-		let digits = self
-			.params
-			.bytes()
-			.split(|&byte| byte == b';')
-			.next()
-			.unwrap_or_default();
-		if digits.is_empty() {
-			return Some(0);
-		}
-		let mut value: u16 = 0;
-		for &byte in digits {
-			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-			// Saturating on OVERFLOW, `None` only on a byte that is not a digit at all. The engine
-			// saturates too (`vte` folds each digit in with `saturating_mul`), so a number past `u16`
-			// reads the same on both sides; refusing to classify it here would have meant cmote ignoring
-			// a sequence the engine acted on, which is §106's whole subject. A non-digit is different —
-			// it says this field is not a number, and guessing at one would be §54's forbidden reset.
-			value = value.saturating_mul(10).saturating_add(u16::from(digit));
-		}
-		Some(value)
-	}
+/// The first parameter as a number, treating an omitted one as 0 — which is what all three of
+/// DECSCA, DECSED and DECSEL default to.
+///
+/// No "unreadable" case to report any more: the framer refuses a private marker after the
+/// parameters rather than folding it into the digits, so a parameter run is digits and separators
+/// only (§111). This module found that rule by hand — `CSI ? 1;2 ? J` used to classify as a
+/// selective erase, because the stray marker hid in a field this function never read — and it is
+/// the framer's now.
+///
+/// Saturating past a `u16`, because the engine saturates too (`vte` folds each digit in with
+/// `saturating_mul`), so a number past the type reads the same on both sides.
+fn first_param(csi: &super::csi::Csi<'_>) -> u16 {
+	csi.param(0).unwrap_or(0)
+}
 
-	/// How far this erase reaches. `None` for anything else, including `Ps = 3`: plain `CSI 3 J`
-	/// drops the scrollback, and there is no selective version of that — protection is a property
-	/// of cells on the screen, and history is not erased a cell at a time.
-	fn extent(&self) -> Option<ProtectExtent> {
-		match self.first_param()? {
-			0 => Some(ProtectExtent::ToEnd),
-			1 => Some(ProtectExtent::ToStart),
-			2 => Some(ProtectExtent::All),
-			_ => None,
-		}
+/// How far this erase reaches. `None` for anything else, including `Ps = 3`: plain `CSI 3 J`
+/// drops the scrollback, and there is no selective version of that — protection is a property
+/// of cells on the screen, and history is not erased a cell at a time.
+fn extent(csi: &super::csi::Csi<'_>) -> Option<ProtectExtent> {
+	match first_param(csi) {
+		0 => Some(ProtectExtent::ToEnd),
+		1 => Some(ProtectExtent::ToStart),
+		2 => Some(ProtectExtent::All),
+		_ => None,
 	}
 }
 
@@ -631,11 +540,10 @@ mod tests {
 			vec![(params.len(), ProtectRequest::Protect(false))]
 		);
 		assert!(!protect.armed);
-		assert!(
-			protect.params.bytes().len()
-				<= super::super::csi::MAX_PARAMS * super::super::csi::MAX_DIGITS,
-			"five hundred digits cost us five"
-		);
+		// What the run COST is no longer this module's to see — the buffer belongs to the framer, and
+		// `csi`'s own `a_runaway_digit_run_is_clamped_and_the_sequence_survives` asserts the five-digit
+		// bound there. Reaching through a private field to re-check it here would be testing the same
+		// fact at the wrong seam (§111).
 	}
 
 	#[test]
