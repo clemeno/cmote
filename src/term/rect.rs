@@ -136,15 +136,6 @@ use std::ops::RangeInclusive;
 /// The escape byte that leads every CSI sequence.
 const ESC: u8 = 0x1b;
 
-/// The longest parameter run we will buffer inside one sequence. DECCRA is the big one at eight
-/// parameters — `1;1;24;80;1;1;1;1` is 17 bytes — so this is generous headroom rather than a limit
-/// anything real will meet, and refusing to grow past it keeps a hostile stream from ballooning our
-/// memory (§12).
-const MAX_PARAMS: usize = 64;
-
-/// The most intermediate bytes we will buffer. These sequences have exactly one (`$`).
-const MAX_INTERMEDIATES: usize = 4;
-
 /// The four corners as the sequence spelled them: 1-based and inclusive, with 0 — which is also what
 /// an omitted parameter means — standing for "the edge of the page".
 ///
@@ -351,30 +342,16 @@ pub enum RectRequest {
 	Checksum { id: u16, corners: Corners },
 }
 
-/// Where the scanner is in the byte stream. A CSI is `ESC [`, then parameter bytes, then intermediate
-/// bytes, then one final byte — and for this family the intermediate is what matters most.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum RectScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`; `ESC c` is a full reset all on its own.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The rectangular-operations scanner (§58, §59, §60). Feed it every byte of shell output; it
 /// reports the seven sequences the engine drops, in the order the stream put them, and holds the one
 /// mode among them (DECSACE) itself.
 #[derive(Debug, Default)]
 pub struct Rectangles {
-	state: RectScan,
-	/// The private marker, if the sequence opened with one. None of these have one, so its only job
-	/// is to rule a near-miss out.
-	marker: Option<u8>,
-	params: Vec<u8>,
-	intermediates: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111). For this family the intermediate is
+	/// what matters most, and telling the seven apart on it is all that is left here.
+	framer: super::csi::Framer,
+	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
+	after_escape: bool,
 	/// The extent DECSACE last selected, stamped onto each attribute request as it goes out (§59).
 	extent: RectExtent,
 }
@@ -396,219 +373,182 @@ impl Rectangles {
 	/// the attribute requests that follow it (§59). A chunk carrying only a DECSACE therefore still
 	/// reports no request, and `process` still makes a single advance.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, RectRequest)> {
+		// RIS resets DECSACE, and that mode is stamped onto every attribute request that FOLLOWS it,
+		// so the reset has to land between the sequences either side of it. The other scanners that
+		// read RIS collect it in a second pass and merge by offset (`scp`, `protect`, `sgrstack`);
+		// that cannot work here, because a second pass would apply the reset to every request in the
+		// chunk or to none of them. The chunk is cut into runs at each RIS instead, and each run fed
+		// in turn — which is what "in the order the stream put them" has to mean when one of the two
+		// families changes how the other reads (§59, §111).
 		let mut requests = Vec::new();
+		let mut start = 0;
 		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				RectScan::Text => {
-					if byte == ESC {
-						self.state = RectScan::Escape;
-					}
-				}
-				RectScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = RectScan::Csi;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					// RIS resets everything a terminal holds, and DECSACE is one of those things
-					// (§59). Nothing else here has state to clear.
-					b'c' => {
-						self.extent = RectExtent::default();
-						self.state = RectScan::Text;
-					}
-					_ => self.state = RectScan::Text,
-				},
-				RectScan::Csi => match byte {
-					// Parameter bytes: the digits and separators, plus the private markers
-					// (`< = > ?`, 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if !self.intermediates.is_empty() {
-							// A parameter byte after an intermediate. The engine refuses the whole sequence
-							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
-							// carrying on would mean acting alone on a spelling nothing else in the world
-							// obeys (§106).
-							self.state = RectScan::Text;
-						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = RectScan::Text;
-							}
-						}
-					}
-					// Intermediate bytes — `$` is the one that makes this family.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = RectScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if let Some(request) = self.classify(byte) {
-							requests.push((index + 1, request));
-						}
-						self.state = RectScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = RectScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
-					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
-					// would mean cmote and the engine disagreeing about what this byte stream even was,
-					// which is how three defects reached a release.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = RectScan::Text,
-				},
+			if self.after_escape && byte == b'c' {
+				// Up to and INCLUDING the RIS, so the framer sees every byte exactly once and in
+				// order — its own state carries across the cut like it carries across a chunk.
+				self.scan(&bytes[start..=index], start, &mut requests);
+				// RIS resets everything a terminal holds, and DECSACE is one of those things (§59).
+				// Nothing else here has state to clear.
+				self.extent = RectExtent::default();
+				start = index + 1;
 			}
+			self.after_escape = byte == ESC;
 		}
+		self.scan(&bytes[start..], start, &mut requests);
 		requests
 	}
 
-	/// Decide what the sequence just completed means. All three of final byte, marker and
-	/// intermediates are matched together, which is what keeps the neighbours out: `CSI Ps $ p` is
-	/// DECRQM and belongs to the engine, `CSI Ps t` with no intermediate is a window operation, and
-	/// `CSI Pch;… $ x` is DECFRA where `CSI Ps * x` is DECSACE — one intermediate byte apart.
-	///
-	/// Takes `&mut self` for one sequence only: DECSACE sets a mode instead of asking for work, so
-	/// it is recorded here and reported as nothing (§59).
-	fn classify(&mut self, final_byte: u8) -> Option<RectRequest> {
-		let numbers = self.numbers()?;
-		match (final_byte, self.marker, self.intermediates.as_slice()) {
-			// DECERA / DECSERA — the same four corners, differing only in whether protection holds.
-			(b'z', None, [b'$']) => Some(RectRequest::Erase(corners(&numbers, 0))),
-			(b'{', None, [b'$']) => Some(RectRequest::SelectiveErase(corners(&numbers, 0))),
-			// DECFRA — the character first, then the four corners.
-			(b'x', None, [b'$']) => {
-				let glyph = fill_char(number(&numbers, 0))?;
-				Some(RectRequest::Fill(glyph, corners(&numbers, 1)))
+	/// Frame one run of the chunk and classify what it holds. `base` is where the run starts in the
+	/// chunk, so the offsets reported are into the chunk the caller passed rather than into the run.
+	fn scan(&mut self, bytes: &[u8], base: usize, requests: &mut Vec<(usize, RectRequest)>) {
+		// Destructured so the closure can hold `extent` while `framer` is borrowed for the scan.
+		let Self { framer, extent, .. } = self;
+		framer.feed(bytes, |offset, csi| {
+			if let Some(request) = classify(csi, extent) {
+				requests.push((base + offset, request));
 			}
-			// DECCRA — the source's four corners, its page (ignored), then the destination's top-left
-			// corner. The eighth parameter is the destination page, ignored for the same reason.
-			(b'v', None, [b'$']) => Some(RectRequest::Copy {
-				source: corners(&numbers, 0),
-				top: number(&numbers, 5),
-				left: number(&numbers, 6),
-			}),
-			// DECCARA / DECRARA — the four corners, then a list of SGR-shaped selectors. Same
-			// shape, different verb: one sets and clears, the other flips.
-			(b'r', None, [b'$']) => Some(RectRequest::Attributes {
-				corners: corners(&numbers, 0),
-				extent: self.extent,
-				change: changes(selectors(&numbers)),
-			}),
-			(b't', None, [b'$']) => Some(RectRequest::Attributes {
-				corners: corners(&numbers, 0),
-				extent: self.extent,
-				change: reversals(selectors(&numbers)),
-			}),
-			// DECRQCRA — the id and the page come FIRST, so the corners start at parameter 2 (§60).
-			// The page is ignored, as DECCRA's two are and for the same reason: cmote has one page,
-			// which is what clamping a page number to the number of pages there are amounts to. That
-			// also settles the `Pp = 0` case DEC defines as "all of page memory" — with one page, the
-			// whole page is all of them, and omitted corners already mean the whole page.
-			(b'y', None, [b'*']) => Some(RectRequest::Checksum {
-				id: number(&numbers, 0),
-				corners: corners(&numbers, 2),
-			}),
-			// SL / SR — one parameter, and the SPACE intermediate is the whole of what tells them
-			// from their neighbours (§100). `CSI Ps @` with no intermediate is ICH, which inserts
-			// blanks at the cursor, and `CSI Ps A` is CUU, which moves the cursor up: two sequences
-			// the engine implements and every program uses, one byte away from these. Matching the
-			// intermediate alongside the final byte is what keeps them apart, the same near-miss rule
-			// §56 wrote down.
-			//
-			// An omitted or zero count is one column, as it is for ICH, CUU and every other
-			// `Ps`-counted movement — `vte`'s own `next_param_or(1)` reads a literal `0` that way too,
-			// so this agrees with how the engine would have read the same parameter.
-			(b'@', None, [b' ']) => Some(RectRequest::Shift {
-				direction: RectDirection::Left,
-				columns: number(&numbers, 0).max(1),
-			}),
-			(b'A', None, [b' ']) => Some(RectRequest::Shift {
-				direction: RectDirection::Right,
-				columns: number(&numbers, 0).max(1),
-			}),
-			// UNSCROLL — SD's final byte under a `+` intermediate, which kitty chose because it is
-			// "legal under ECMA 48 and previously unused" (§101). `CSI Ps T` with no intermediate is
-			// SD itself and belongs to the engine; the intermediate is the whole difference, as it is
-			// for SL and SR above.
-			(b'T', None, [b'+']) => Some(RectRequest::Unscroll {
-				lines: number(&numbers, 0).max(1),
-			}),
-			// DECIC / DECDC — insert or delete columns, under an apostrophe intermediate `vte` has no
-			// arm for at all, so like the two above they reach nothing and are cmote's to read (§102).
-			// The near-miss rule again: `CSI Ps }` and `CSI Ps ~` without the intermediate are other
-			// sequences entirely, and the intermediate is the whole of what tells them apart.
-			(b'}', None, [b'\'']) => Some(RectRequest::Columns {
-				columns: number(&numbers, 0).max(1),
-				insert: true,
-			}),
-			(b'~', None, [b'\'']) => Some(RectRequest::Columns {
-				columns: number(&numbers, 0).max(1),
-				insert: false,
-			}),
-			// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
-			// mean anything; a fourth leaves the extent where it was, rather than guessing at a
-			// shape the program did not name (§54's rule, and §58's).
-			(b'x', None, [b'*']) => {
-				match number(&numbers, 0) {
-					0 | 1 => self.extent = RectExtent::Stream,
-					2 => self.extent = RectExtent::Rectangle,
-					_ => {}
-				}
-				None
-			}
-			_ => None,
-		}
-	}
-
-	/// Every parameter as a number, with an omitted one reading as 0 — which is what all of these
-	/// spell "the default" as. `None` when any of them is unparseable, which drops the whole sequence
-	/// rather than acting on half of it (§54's rule: malformed remote input is a no-op, never a
-	/// guess). A rectangle built from a misread corner would erase the wrong cells.
-	fn numbers(&self) -> Option<Vec<u16>> {
-		self.params
-			.split(|&byte| byte == b';')
-			.map(|digits| {
-				let mut value: u16 = 0;
-				for &byte in digits {
-					let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-					value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
-				}
-				Some(value)
-			})
-			.collect()
+		});
 	}
 }
 
-/// One parameter by position, or 0 when the sequence stopped short of it — the same thing an omitted
-/// parameter means, so a program may leave any tail off.
-fn number(numbers: &[u16], index: usize) -> u16 {
-	numbers.get(index).copied().unwrap_or(0)
+/// Decide what a finished sequence means. All three of final byte, marker and intermediates are
+/// matched together, which is what keeps the neighbours out: `CSI Ps $ p` is DECRQM and belongs to
+/// the engine, `CSI Ps t` with no intermediate is a window operation, and `CSI Pch;… $ x` is DECFRA
+/// where `CSI Ps * x` is DECSACE — one intermediate byte apart.
+///
+/// Takes `extent` by mutable reference for one sequence only: DECSACE sets a mode instead of asking
+/// for work, so it is recorded here and reported as nothing (§59).
+fn classify(csi: &super::csi::Csi<'_>, extent: &mut RectExtent) -> Option<RectRequest> {
+	// Every sequence below spells its parameters with `;`, so a sub-parameter means this was not one
+	// of them (`Csi::sub_parameters`). It is the strictest of the eleven refusals of that byte and the
+	// reason the rule was written down: a rectangle built from a misread corner erases cells the
+	// program never named, so `CSI 2 : 3 ; 5 ; 7 $ z` must not become an erase of rows 2 to 5.
+	if csi.sub_parameters() {
+		return None;
+	}
+	match (csi.final_byte(), csi.marker(), csi.intermediates()) {
+		// DECERA / DECSERA — the same four corners, differing only in whether protection holds.
+		(b'z', None, [b'$']) => Some(RectRequest::Erase(corners(csi, 0))),
+		(b'{', None, [b'$']) => Some(RectRequest::SelectiveErase(corners(csi, 0))),
+		// DECFRA — the character first, then the four corners.
+		(b'x', None, [b'$']) => {
+			let glyph = fill_char(number(csi, 0))?;
+			Some(RectRequest::Fill(glyph, corners(csi, 1)))
+		}
+		// DECCRA — the source's four corners, its page (ignored), then the destination's top-left
+		// corner. The eighth parameter is the destination page, ignored for the same reason.
+		(b'v', None, [b'$']) => Some(RectRequest::Copy {
+			source: corners(csi, 0),
+			top: number(csi, 5),
+			left: number(csi, 6),
+		}),
+		// DECCARA / DECRARA — the four corners, then a list of SGR-shaped selectors. Same
+		// shape, different verb: one sets and clears, the other flips.
+		(b'r', None, [b'$']) => Some(RectRequest::Attributes {
+			corners: corners(csi, 0),
+			extent: *extent,
+			change: changes(selectors(csi)),
+		}),
+		(b't', None, [b'$']) => Some(RectRequest::Attributes {
+			corners: corners(csi, 0),
+			extent: *extent,
+			change: reversals(selectors(csi)),
+		}),
+		// DECRQCRA — the id and the page come FIRST, so the corners start at parameter 2 (§60).
+		// The page is ignored, as DECCRA's two are and for the same reason: cmote has one page,
+		// which is what clamping a page number to the number of pages there are amounts to. That
+		// also settles the `Pp = 0` case DEC defines as "all of page memory" — with one page, the
+		// whole page is all of them, and omitted corners already mean the whole page.
+		(b'y', None, [b'*']) => Some(RectRequest::Checksum {
+			id: number(csi, 0),
+			corners: corners(csi, 2),
+		}),
+		// SL / SR — one parameter, and the SPACE intermediate is the whole of what tells them
+		// from their neighbours (§100). `CSI Ps @` with no intermediate is ICH, which inserts
+		// blanks at the cursor, and `CSI Ps A` is CUU, which moves the cursor up: two sequences
+		// the engine implements and every program uses, one byte away from these. Matching the
+		// intermediate alongside the final byte is what keeps them apart, the same near-miss rule
+		// §56 wrote down.
+		//
+		// An omitted or zero count is one column, as it is for ICH, CUU and every other
+		// `Ps`-counted movement — `vte`'s own `next_param_or(1)` reads a literal `0` that way too,
+		// so this agrees with how the engine would have read the same parameter.
+		(b'@', None, [b' ']) => Some(RectRequest::Shift {
+			direction: RectDirection::Left,
+			columns: number(csi, 0).max(1),
+		}),
+		(b'A', None, [b' ']) => Some(RectRequest::Shift {
+			direction: RectDirection::Right,
+			columns: number(csi, 0).max(1),
+		}),
+		// UNSCROLL — SD's final byte under a `+` intermediate, which kitty chose because it is
+		// "legal under ECMA 48 and previously unused" (§101). `CSI Ps T` with no intermediate is
+		// SD itself and belongs to the engine; the intermediate is the whole difference, as it is
+		// for SL and SR above.
+		(b'T', None, [b'+']) => Some(RectRequest::Unscroll {
+			lines: number(csi, 0).max(1),
+		}),
+		// DECIC / DECDC — insert or delete columns, under an apostrophe intermediate `vte` has no
+		// arm for at all, so like the two above they reach nothing and are cmote's to read (§102).
+		// The near-miss rule again: `CSI Ps }` and `CSI Ps ~` without the intermediate are other
+		// sequences entirely, and the intermediate is the whole of what tells them apart.
+		(b'}', None, [b'\'']) => Some(RectRequest::Columns {
+			columns: number(csi, 0).max(1),
+			insert: true,
+		}),
+		(b'~', None, [b'\'']) => Some(RectRequest::Columns {
+			columns: number(csi, 0).max(1),
+			insert: false,
+		}),
+		// DECSACE — a mode, absorbed rather than reported (§59). Only the three defined values
+		// mean anything; a fourth leaves the extent where it was, rather than guessing at a
+		// shape the program did not name (§54's rule, and §58's).
+		(b'x', None, [b'*']) => {
+			match number(csi, 0) {
+				0 | 1 => *extent = RectExtent::Stream,
+				2 => *extent = RectExtent::Rectangle,
+				_ => {}
+			}
+			None
+		}
+		_ => None,
+	}
+}
+
+/// One parameter by position, or 0 when the sequence stopped short of it or left it empty — the same
+/// thing an omitted parameter means, so a program may leave any tail off.
+///
+/// There is no "unreadable" case left to report. Every sequence here used to be dropped whole if any
+/// field would not parse, which was §54's rule (malformed remote input is a no-op, never a guess) and
+/// still is — the framer just enforces it earlier and better: a parameter run is digits and separators
+/// only, a private marker among them abandons the sequence, and a sub-parameter is refused above.
+///
+/// What DID change is a number too big for the type. `CSI 99999;1;1;1 $ z` used to be dropped, because
+/// the fold used `checked_mul`; it saturates now, as the engine does. Nothing is erased either way —
+/// `from_corners` refuses a top past the page — but the reading is the engine's rather than a
+/// scanner giving up on a sequence that was never malformed to begin with (§106, §111).
+fn number(csi: &super::csi::Csi<'_>, index: usize) -> u16 {
+	csi.param(index).unwrap_or(0)
 }
 
 /// Four consecutive parameters read as corners, starting at `first`.
-fn corners(numbers: &[u16], first: usize) -> Corners {
+fn corners(csi: &super::csi::Csi<'_>, first: usize) -> Corners {
 	Corners {
-		top: number(numbers, first),
-		left: number(numbers, first + 1),
-		bottom: number(numbers, first + 2),
-		right: number(numbers, first + 3),
+		top: number(csi, first),
+		left: number(csi, first + 1),
+		bottom: number(csi, first + 2),
+		right: number(csi, first + 3),
 	}
 }
 
 /// The attribute selectors of a DECCARA or DECRARA — everything after the four corners (§59).
 ///
 /// Empty when the program named a rectangle and no attributes, which is a well-formed request to do
-/// nothing and is treated as one.
-fn selectors(numbers: &[u16]) -> &[u16] {
-	numbers.get(4..).unwrap_or(&[])
+/// nothing and is treated as one. An iterator rather than a slice because there is no longer a `Vec`
+/// of parsed numbers to take a tail of: the framer keeps the run, and each selector is read from it
+/// where the fold needs it.
+fn selectors(csi: &super::csi::Csi<'_>) -> impl Iterator<Item = u16> {
+	(4..csi.param_count()).map(|index| number(csi, index))
 }
 
 /// Fold a DECCARA's selectors into one change.
@@ -622,9 +562,9 @@ fn selectors(numbers: &[u16]) -> &[u16] {
 /// cells were meant, while `3` (italic, which DEC never gave DECCARA) is a perfectly clear request
 /// for an attribute this sequence cannot name. Ignoring the one it cannot do and honouring the rest
 /// is what an SGR does with an unknown attribute.
-fn changes(selectors: &[u16]) -> AttributeChange {
+fn changes(selectors: impl Iterator<Item = u16>) -> AttributeChange {
 	let mut change = AttributeChange::default();
-	for &selector in selectors {
+	for selector in selectors {
 		let (attribute, turn_on) = match selector {
 			0 => (ALL_ATTRIBUTES, false),
 			1 => (BOLD, true),
@@ -658,9 +598,9 @@ fn changes(selectors: &[u16]) -> AttributeChange {
 /// Repeats cancel — `1;1` flips bold twice and leaves it — because the selectors are applied in
 /// order, the same rule DECCARA follows. Neither reading is written down by DEC, and "apply each in
 /// turn" is the one that matches its sibling.
-fn reversals(selectors: &[u16]) -> AttributeChange {
+fn reversals(selectors: impl Iterator<Item = u16>) -> AttributeChange {
 	let mut change = AttributeChange::default();
-	for &selector in selectors {
+	for selector in selectors {
 		let attribute = match selector {
 			0 => ALL_ATTRIBUTES,
 			1 => BOLD,
@@ -1057,7 +997,7 @@ mod tests {
 		// The SGR rule: `1;22` is bold OFF, and `22;1` is bold on. Folded at parse time, so the walk
 		// over the cells costs the same however long the list was.
 		assert_eq!(
-			changes(&[1, 22]),
+			changes([1, 22].into_iter()),
 			AttributeChange {
 				on: 0,
 				off: BOLD,
@@ -1065,7 +1005,7 @@ mod tests {
 			}
 		);
 		assert_eq!(
-			changes(&[22, 1]),
+			changes([22, 1].into_iter()),
 			AttributeChange {
 				on: BOLD,
 				off: 0,
@@ -1079,7 +1019,7 @@ mod tests {
 		// And only those four — never a colour, and never the flag word wholesale, which would take
 		// cmote's protection bit with it (§56).
 		assert_eq!(
-			changes(&[0]),
+			changes([0].into_iter()),
 			AttributeChange {
 				on: 0,
 				off: ALL_ATTRIBUTES,
@@ -1087,7 +1027,7 @@ mod tests {
 			}
 		);
 		assert_eq!(
-			reversals(&[0]),
+			reversals([0].into_iter()),
 			AttributeChange {
 				on: 0,
 				off: 0,
@@ -1102,28 +1042,28 @@ mod tests {
 		// thing an SGR does with an attribute it does not know, and unlike a malformed NUMBER, which
 		// drops the sequence because it leaves the cells themselves in doubt.
 		assert_eq!(
-			changes(&[3, 4, 38]),
+			changes([3, 4, 38].into_iter()),
 			AttributeChange {
 				on: UNDERLINE,
 				off: 0,
 				flip: 0
 			}
 		);
-		assert!(changes(&[3]).is_empty());
+		assert!(changes([3].into_iter()).is_empty());
 	}
 
 	#[test]
 	fn a_reversal_has_no_off_forms() {
 		// DEC gives DECRARA 0, 1, 4, 5 and 7 only. Reading `24` as an underline toggle would flip an
 		// attribute on a request that plainly said "off".
-		assert!(reversals(&[22, 24, 25, 27]).is_empty());
+		assert!(reversals([22, 24, 25, 27].into_iter()).is_empty());
 	}
 
 	#[test]
 	fn repeated_reversals_cancel() {
-		assert!(reversals(&[1, 1]).is_empty());
+		assert!(reversals([1, 1].into_iter()).is_empty());
 		assert_eq!(
-			reversals(&[0, 1]),
+			reversals([0, 1].into_iter()),
 			AttributeChange {
 				on: 0,
 				off: 0,
@@ -1144,10 +1084,13 @@ mod tests {
 
 	#[test]
 	fn a_change_folds_to_the_new_attributes() {
-		assert_eq!(changes(&[1, 4]).apply(REVERSE), BOLD | UNDERLINE | REVERSE);
-		assert_eq!(changes(&[0]).apply(ALL_ATTRIBUTES), 0);
-		assert_eq!(reversals(&[1]).apply(BOLD | REVERSE), REVERSE);
-		assert_eq!(reversals(&[1]).apply(REVERSE), BOLD | REVERSE);
+		assert_eq!(
+			changes([1, 4].into_iter()).apply(REVERSE),
+			BOLD | UNDERLINE | REVERSE
+		);
+		assert_eq!(changes([0].into_iter()).apply(ALL_ATTRIBUTES), 0);
+		assert_eq!(reversals([1].into_iter()).apply(BOLD | REVERSE), REVERSE);
+		assert_eq!(reversals([1].into_iter()).apply(REVERSE), BOLD | REVERSE);
 		// The empty change is the identity, which is what makes skipping it safe.
 		assert_eq!(AttributeChange::default().apply(BOLD), BOLD);
 	}
@@ -1201,6 +1144,37 @@ mod tests {
 		assert_eq!(extent, RectExtent::Stream);
 	}
 
+	/// A reset in the MIDDLE of a chunk resets the extent for the sequences after it and not for the
+	/// ones before it — the reason `feed` cuts the chunk into runs at each RIS rather than collecting
+	/// them in a second pass and merging by offset the way `scp` and `protect` do (§111).
+	///
+	/// A second pass would read every request in the chunk against the extent the chunk ENDED with,
+	/// which for this input would stamp `Stream` on both — a mode the program had selected and not yet
+	/// reset when it asked for the first one.
+	#[test]
+	fn a_reset_inside_a_chunk_divides_the_sequences_around_it() {
+		let requests = Rectangles::default().feed(b"\x1b[2*x\x1b[1;1;5;5;1$r\x1bc\x1b[1;1;5;5;1$r");
+		let [
+			(_, RectRequest::Attributes { extent: before, .. }),
+			(_, RectRequest::Attributes { extent: after, .. }),
+		] = requests[..]
+		else {
+			panic!("expected two attribute requests, got {requests:?}");
+		};
+		assert_eq!(before, RectExtent::Rectangle, "the mode was still in force");
+		assert_eq!(after, RectExtent::Stream, "and the reset put it back");
+	}
+
+	/// The offsets survive the cut: a sequence after a mid-chunk reset is still reported at its place
+	/// in the WHOLE chunk, not at its place in the run the reset started.
+	#[test]
+	fn an_offset_after_a_reset_still_counts_from_the_start_of_the_chunk() {
+		assert_eq!(
+			Rectangles::default().feed(b"\x1bc\x1b[2;3;5;7$z"),
+			vec![(13, RectRequest::Erase(box_of(2, 3, 5, 7)))]
+		);
+	}
+
 	#[test]
 	fn a_fill_and_an_extent_are_one_intermediate_apart() {
 		// `$ x` is DECFRA and `* x` is DECSACE. Matching the final byte alone would make a fill of
@@ -1237,12 +1211,23 @@ mod tests {
 		assert!(scan(b"\x1b[?2;3;5;7$z").is_empty());
 	}
 
+	/// A rectangle built from a misread corner erases the wrong cells, so a spelling none of these
+	/// sequences defines is a no-op rather than a guess — and `:` opens a sub-parameter, which none of
+	/// them takes (`Csi::sub_parameters`).
+	///
+	/// This is the strictest of the family's refusals of that byte, and the reason the rule was
+	/// written down: `sgrstack` and `modkeys` had both started reading a `:` as another `;` on their
+	/// way onto the framer, and following them here would have made this an erase of rows 2 to 5.
 	#[test]
-	fn a_malformed_parameter_drops_the_whole_sequence() {
-		// A rectangle built from a misread corner erases the wrong cells, so a number that will not
-		// parse is a no-op rather than a guess. `:` opens a sub-parameter, which none of these take.
+	fn a_sub_parameter_is_not_one_of_these_sequences() {
 		assert!(scan(b"\x1b[2:3;5;7$z").is_empty());
-		assert!(scan(b"\x1b[99999;1;1;1$z").is_empty());
+		assert!(scan(b"\x1b[2;3;5;7:1$z").is_empty(), "anywhere in the run");
+		assert!(scan(b"\x1b[1;1;5;5;1:4$r").is_empty(), "or among selectors");
+		// The `;` spelling of the same four corners IS the erase, so this is about the separator.
+		assert_eq!(
+			scan(b"\x1b[2;3;5;7$z"),
+			vec![(11, RectRequest::Erase(box_of(2, 3, 5, 7)))]
+		);
 	}
 
 	#[test]
@@ -1269,12 +1254,37 @@ mod tests {
 		);
 	}
 
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
+	/// answer differently on purpose, which is what this pins now that the grammar is shared (§111).
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		let mut params = vec![b'\x1b', b'['];
-		params.extend(std::iter::repeat_n(b'1', MAX_PARAMS + 10));
-		params.extend_from_slice(b"$z");
-		assert!(scan(&params).is_empty());
+	fn the_two_parameter_bounds_answer_differently() {
+		// More parameters than the engine's array holds: the engine ignores the whole sequence, so the
+		// scanner abandons it too. Every field is a `1`, so if it were framed at all it would be an
+		// erase of the single cell at row 1 column 1 — abandonment is the only thing that empties this.
+		let list = |fields: usize| {
+			let params = vec!["1"; fields].join(";");
+			format!("\x1b[{params}$z").into_bytes()
+		};
+		let bound = super::super::csi::MAX_PARAMS;
+		assert_eq!(
+			scan(&list(bound)),
+			vec![(bound * 2 + 3, RectRequest::Erase(box_of(1, 1, 1, 1)))],
+			"thirty-two parameters still fit"
+		);
+		assert!(scan(&list(bound + 1)).is_empty(), "thirty-three do not");
+
+		// A runaway DIGIT run is clamped instead, and the sequence LIVES — the engine saturates the
+		// number rather than giving up on it. What comes out is a corner past any page, which
+		// `from_corners` refuses, so nothing is erased by a different route.
+		let mut digits = b"\x1b[".to_vec();
+		digits.extend(std::iter::repeat_n(b'1', 500));
+		digits.extend_from_slice(b";1;1;1$z");
+		let requests = scan(&digits);
+		let [(_, RectRequest::Erase(corners))] = requests[..] else {
+			panic!("expected one erase");
+		};
+		assert_eq!(corners.top, 11111, "five significant digits, and no more");
+		assert_eq!(from_corners(corners, RectExtent::Stream, 24, 80), None);
 	}
 
 	#[test]
