@@ -11538,8 +11538,10 @@ enough once.
   deliberately narrow — scrolling, cursor motion, plain text. A stream carrying selective erase (§56),
   rectangular areas (§58), pictures (§41) or a soft reset (§72) differs from a bare engine *by design*, and
   the harness would be wrong to call that a defect. Which means it says nothing about those paths.
-- **The framer is still the review's top recommendation and still unbuilt.** §106 hoisted two rules out of
-  the eleven scanners' duplicated grammar; nine of them still carry the machine itself.
+- ~~**The framer is still the review's top recommendation and still unbuilt.**~~ §106 hoisted two rules
+  out of the ten scanners' duplicated grammar and left the machine itself in each of them. **Built in
+  §111**, and all ten are migrated — which is where the defects that duplication was hiding came out.
+
 ## §108 — One place a word is defined
 
 This project's paper trail had a gap nobody had named: 106 numbered sections explaining every
@@ -12461,20 +12463,26 @@ unfalsifiable: `EOF_ECHO` was changed to `b"^X"` so the rule could never fire, a
 to EXIT rather than for a prompt, so it makes no timing guess at all, which is the distinction: a test
 may wait for an event it will certainly get, and must not wait for one it is only hoping for.
 
-### The CSI framer, all eleven scanners in
+### The CSI framer, all ten scanners in
 
-`csi::Framer` is §106's top recommendation, built here. **Eleven** modules under `term/` each scanned
+`csi::Framer` is §106's top recommendation, built here. **Ten** modules under `term/` each scanned
 CSI sequences beside the engine, and each carried its own copy of the grammar — 62 to 162 lines apiece
 of "find where a CSI starts and ends in a stream that arrives in arbitrary chunks", with the
-module-specific part of it a handful of lines. All eleven are migrated. `feed` loops: `tabs` 62→9,
+module-specific part of it a handful of lines. All ten are migrated. `feed` loops: `tabs` 62→9,
 `dsr` 62→8, `scp` 74→19, `protect` 82→27, `sgrstack` 76→21, `modkeys` 62→24, `rect` 74→25,
 `cancel` 80→9, `graphics` and `query` 162→11 for the CSI half, both keeping their DCS machine.
 
-The count was ten for most of the section, and eleven is the corrected figure: `query` was missed
-because it is the one that scans CSI *and* DCS from a single machine, so it did not look like a member
-of the family until its CSI half came out.
+**The count was got wrong twice in this section's own prose, in both directions**, and it is worth the
+paragraph because both errors were written from memory rather than measured. It read *nine* while the
+migration was running, missing `query` — the one scanner that reads CSI *and* DCS from a single
+machine, so it did not look like a member of the family until its CSI half came out. Then the
+correction overshot to *eleven*, counting a module that is not a scanner at all: `differential` holds a
+framer because it is the test harness that drives one. (The same off-by-one is in that harness's own
+sweep, where the scanner table has eleven rows for ten scanners — `protect` is listed twice because its
+verdict depends on whether the pen is armed.) The check that settles it is one line: `framer:
+super::csi::Framer` appears once per scanner, and nothing else in `term/` holds one. Ten.
 
-**The payout ran upward, not downward.** The worry with sharing a grammar between eleven readers is that
+**The payout ran upward, not downward.** The worry with sharing a grammar between ten readers is that
 the shared code settles on the laxest behaviour of its callers. The opposite happened, because each
 migration was one commit and the strictest existing rule won every time:
 
@@ -12491,7 +12499,7 @@ migration was one commit and the strictest existing rule won every time:
   parameter run is digits and separators only, so it returns `u16` rather than `Option<u16>`.
 
 **Defects were found BY migrating**, which is the argument for one scanner per commit rather than one
-sweep. Three came out of the nine straightforward ones, and the two that also read DCS produced four
+sweep. Three came out of the eight straightforward ones, and the two that also read DCS produced four
 more (below):
 
 1. `Params` dropped leading zeros so thoroughly that an all-zero field rendered as nothing, making
@@ -12579,7 +12587,7 @@ Two live defects fell out of asking, and both are fixed:
   to ordinary text, so the sequence that ESC had opened was never seen. Fed five shapes of control
   string, the engine dispatched an XTVERSION in every one and cmote answered none. The quietest kind
   of divergence there is — no screen corruption, no acting alone, just a program waiting out its
-  timeout — which is why it survived eleven sections.
+  timeout — which is why it survived from §33, where the scanner was written, to §111.
 - **`graphics` had the same gap, where it costs more**, because the sequence dropped can be RIS: a
   hard reset arriving mid-payload left every picture standing on a screen it had just wiped.
 
@@ -12614,7 +12622,7 @@ tell a clean terminator from an interrupted one — `unhook` fires either way �
 cmote treats a string that named no terminator as malformed and replies nothing, which is §54's rule
 and §60's: an invented answer is worse than a missing one.
 
-With that settled, both migrations were mechanical, and the differential sweep now covers all eleven
+With that settled, both migrations were mechanical, and the differential sweep now covers all ten
 scanners over 6720 shapes — `c` and `S` joined the shape space with `query`, being DA3 and
 XTSMGRAPHICS, since a sweep that never spelled them could not have caught it acting on one alone.
 

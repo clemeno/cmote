@@ -2635,8 +2635,10 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   where it sits and carries on, so `CSI 5;` LF `70 s` is a margin request there — and this scanner,
   the thing that would have stopped it reaching save-cursor, had stopped reading. Only CAN and SUB
   cancel a sequence, which is the same fact as cmote feeding CAN in place of a refused final byte.
-- **`term/csi.rs`** — the facts every CSI scanner has to agree with the ENGINE about (§106), and the
-  first stone of the shared CSI framer that `osc.rs` is the template for. A scanner's limits are not a
+- **`term/csi.rs`** — the facts every CSI scanner has to agree with the ENGINE about (§106), and since
+  §111 the shared CSI framer itself, which `osc.rs` was the template for: **all ten** scanners under
+  `term/` read `csi::Framer` and keep only the part that is theirs, deciding what a sequence MEANS. A
+  scanner's limits are not a
   private choice: cmote and the engine read the same bytes, so wherever the two disagree about whether a
   sequence is well formed, one acts and the other does not — and two of those disagreements were live
   defects. `MAX_PARAMS` 32 is `vte`'s own (`params.rs:5`, the `is_full` test at `:49-51`, `ignoring` set
@@ -2646,10 +2648,13 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   the run is CLAMPED rather than capped: digits past five SIGNIFICANT ones are dropped and the sequence
   lives, which is the engine's saturated answer (five digits already reach past `u16::MAX`) while
   bounding what a hostile stream can make cmote hold to under 200 bytes. Leading zeros cost nothing;
-  counting them was the first attempt and read `CSI 000…002 J` as 0. `Params` holds the run for the two
-  scanners that buffer one, and keeps `started` apart from `bytes.is_empty()` because a dropped leading
+  counting them was the first attempt and read `CSI 000…002 J` as 0. `Params` holds the run for every
+  scanner now, and keeps `started` apart from `bytes.is_empty()` because a dropped leading
   zero would leave the latter true — and a caller reads that as "a private marker is still legal here",
-  which would make `CSI 0?J`, a sequence the engine drops outright, classify as a selective erase.
+  which would make `CSI 0?J`, a sequence the engine drops outright, classify as a selective erase. It
+  also reports a **sub-parameter** (`Csi::sub_parameters`) rather than acting on one, because the
+  policy points two ways: `graphics` must READ `CSI 2:3 J`, which the engine erases on, and `rect` must
+  REFUSE `CSI 2:3;5;7$z`, which the engine does nothing with (§111).
 - **`term/differential.rs`** — test-only, and the answer to how §106's defects were found (§106). Three of
   them came from reading `vte`'s source by hand and noticing that a constant counted the wrong thing,
   which neither scales nor survives a version bump. This module drives the **actual parser the engine is
@@ -2664,9 +2669,12 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   intermediates × parameters × final byte × the ORDER of those parts. The sweeps found the last two
   defects, one of them only after an axis was added: the shape generator emitted the parts in the legal
   order alone, so it passed against the very guard it was written for until a malformed interleaving
-  was generated too. What it does NOT cover: it compares the parser rather than the handler, which is
-  the gap `term/gatediff.rs` below now fills; and `MAX_INTERMEDIATES` is still 4 in six scanners
-  against the engine's 2, which both sides refuse but by different routes.
+  was generated too. §111 grew it to **seventeen** tests and 6720 shapes as the ten scanners migrated,
+  and four of them are about ESC and ST: an ESC that terminates no control string still OPENS the next
+  sequence for `vte`, which is why a payload cannot smuggle a CSI past a DCS-unaware framer. What it
+  does NOT cover: it compares the parser rather than the handler, which is
+  the gap `term/gatediff.rs` below now fills; and `MAX_INTERMEDIATES` is 4 here — one place since §111,
+  `csi::MAX_INTERMEDIATES` — against the engine's 2, which both sides refuse but by different routes.
 - **`term/gate.rs`** — the one place cmote sits **between** the parser and the engine (§102), and the
   odd one out in this whole list: every other module here reads the byte stream a second time and acts
   beside the engine, which is why none of them can break what the engine does. This one implements

@@ -420,9 +420,10 @@ impl Rectangles {
 /// for work, so it is recorded here and reported as nothing (§59).
 fn classify(csi: &super::csi::Csi<'_>, extent: &mut RectExtent) -> Option<RectRequest> {
 	// Every sequence below spells its parameters with `;`, so a sub-parameter means this was not one
-	// of them (`Csi::sub_parameters`). It is the strictest of the eleven refusals of that byte and the
-	// reason the rule was written down: a rectangle built from a misread corner erases cells the
-	// program never named, so `CSI 2 : 3 ; 5 ; 7 $ z` must not become an erase of rows 2 to 5.
+	// of them (`Csi::sub_parameters`). Five of the ten scanners refuse a sub-parameter, and this is the
+	// strictest of the five — the reason the rule was written down: a rectangle built from a misread
+	// corner erases cells the program never named, so `CSI 2 : 3 ; 5 ; 7 $ z` must not become an erase
+	// of rows 2 to 5.
 	if csi.sub_parameters() {
 		return None;
 	}

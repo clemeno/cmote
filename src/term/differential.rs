@@ -99,7 +99,7 @@ impl EngineTrace {
 /// One scanner's claim on one sequence: what to call it in a failure message, the bytes themselves, and
 /// how to ask that scanner whether it claimed them.
 ///
-/// Named types because the eleven scanners answer with eleven different verdicts, and the only question
+/// Named types because the ten scanners answer with ten different verdicts, and the only question
 /// common to all of them is "did you act on this at all".
 #[cfg(test)]
 type DifferentialClaim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
@@ -593,7 +593,8 @@ mod tests {
 		// without anyone thinking of the case.
 		//
 		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
-		// all eleven can answer in common.
+		// all ten can answer in common. ELEVEN entries for ten scanners: `protect` is listed twice
+		// because its verdict depends on whether the pen is armed, and both states have to be swept.
 		let scanners: [DifferentialClaim; 11] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
@@ -633,7 +634,7 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
-			// The eleventh, and the last to join this sweep — it could not before §111, because its own
+			// The last to join this sweep — it could not before §111, because its own
 			// machine had no state for an intermediate or for a byte the engine reads through, so it
 			// disagreed with the parser over shapes this walks by the hundred.
 			("query", b"", |bytes| {
@@ -698,7 +699,8 @@ mod tests {
 		// `query` did only the first, in two of its states, and this harness is what found it: every
 		// case below had the engine dispatching an XTVERSION that cmote answered with nothing, so the
 		// program that asked waited out its timeout. Not a screen divergence and not cmote acting
-		// alone — the quietest kind there is, which is why nobody noticed it for eleven sections.
+		// alone — the quietest kind there is, which is why nobody noticed: the scanner was written in
+		// §33 and this was found in §111.
 		for (what, bytes) in control_strings() {
 			let dispatched = engine(bytes)
 				.dispatched

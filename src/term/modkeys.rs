@@ -309,7 +309,7 @@ mod tests {
 	/// A byte the engine reads STRAIGHT THROUGH must not change what this module makes of a
 	/// sequence — the §106 rule, which this scanner did not obey until the grammar was shared.
 	///
-	/// It is the last of the eleven to get it. The engine has no live arm behind either of these
+	/// It is the last of the ten to get it. The engine has no live arm behind either of these
 	/// sequences, so there is nothing acting alone today; what the rule buys is that a version bump
 	/// filling that empty handler body cannot make the two disagree (§111).
 	#[test]

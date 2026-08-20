@@ -1,9 +1,16 @@
 // term/csi.rs — the facts every CSI scanner has to agree with the engine about.
 //
-// Eleven modules in this directory scan CSI sequences beside the stream, each for its own reason, and
+// TEN modules in this directory scan CSI sequences beside the stream, each for its own reason, and
 // every one of them used to carry its own copy of the grammar. §106's architecture review put that
-// duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all eleven
+// duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all ten
 // read [`Framer`] now and keep only the part that is theirs — deciding what a sequence MEANS.
+//
+// The ten, in the order they migrated: `tabs`, `dsr`, `scp`, `protect`, `sgrstack`, `modkeys`, `rect`,
+// `cancel`, `graphics`, `query`. The number is worth spelling out because it was got wrong twice in
+// §111's own prose — nine while the migration ran, then "eleven" once it was over, which counted
+// `differential` as a scanner when it is the test harness that drives them. Both counts were written
+// from memory. The check that settles it is `framer: super::csi::Framer` — one per scanner, and
+// nothing else in this directory holds one.
 //
 // What that bought was not the line count. Defects came out of the migrations, one at a time, because
 // the shared grammar had to take the STRICTEST rule of its callers rather than the laxest — two rules
@@ -228,7 +235,7 @@ const ESC: u8 = 0x1b;
 /// The four parts a CSI has, and no more: `ESC [`, an optional private marker, a parameter run,
 /// intermediate bytes, one final byte. A scanner reads what it needs and ignores the rest — which is
 /// the whole point of the split, because deciding what a sequence MEANS is the only part that differs
-/// between the nine of them.
+/// between the ten of them.
 ///
 /// Borrowed rather than owned, and passed to a callback rather than collected: a scanner keeps at most
 /// a byte offset out of each sequence, so allocating one of these per sequence would be a `Vec` built
@@ -272,7 +279,7 @@ impl Csi<'_> {
 	/// Whether the parameter run carries a SUB-PARAMETER — at least one `:` where a `;` was expected.
 	///
 	/// A scanner here refuses a sequence that has one, unless the sequence it reads is defined to take
-	/// them. **None of the eleven is**, as of §111: DECERA takes four corners, XTPUSHSGR a list of
+	/// them. **None of the ten is**, as of §111: DECERA takes four corners, XTPUSHSGR a list of
 	/// codes, XTMODKEYS a resource and a value, and DEC and xterm spell every one of those with `;`.
 	/// `protect` watches SGR — the one family that really does use `:`, for `38:2:r:g:b` — but it
 	/// reports every SGR alike while the pen is armed and never reads a parameter, so a colour written
@@ -297,11 +304,13 @@ impl Csi<'_> {
 	/// Parameter `index` as a number, or `None` when it is absent or unreadable.
 	///
 	/// **It does not supply a default, and that is deliberate.** `Params`' own note used to say a
-	/// shared parser could not work because the nine scanners disagree about what an omitted parameter
+	/// shared parser could not work because the ten scanners disagree about what an omitted parameter
 	/// means — 0 for DECST8C, 1 for a cursor move, "not ours" for a sequence that requires the
 	/// parameter. That objection is about a parser that BAKES IN a default; this one reports absence
 	/// and leaves the choice where it was, so `param(0).unwrap_or(0)` and `param(0).unwrap_or(1)` are
-	/// both still the caller's to write, and the eight hand-rolled `split(b';')` walks go away (§111).
+	/// both still the caller's to write, and eight hand-rolled `split` walks over `b';'` go away —
+	/// every scanner but `cancel`, which counted separators, and `dsr`, which matched whole runs
+	/// against an allow-list (§111).
 	///
 	/// Saturating, because the engine saturates (`vte` folds with `saturating_mul`): a run of five
 	/// nines is 65,535 to both sides. Every scanner that rolled this by hand used `checked_mul`
@@ -389,7 +398,7 @@ enum CsiScan {
 
 /// Cuts CSI sequences out of shell output, once, for every scanner that reads them.
 ///
-/// This is `osc::Framer`'s counterpart, and it exists for the same reason: eleven modules in this
+/// This is `osc::Framer`'s counterpart, and it exists for the same reason: ten modules in this
 /// directory each need to sniff a CSI the engine also reads, each cares about a DIFFERENT sequence,
 /// and every one of them first had to solve the same problem — find where a CSI starts and ends in a
 /// stream that arrives in arbitrary chunks. That was 62 to 162 lines apiece of identical grammar, and
