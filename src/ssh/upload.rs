@@ -403,6 +403,12 @@ fn source_stamp(meta: &std::fs::Metadata) -> (Option<u32>, Option<u32>, Option<u
 
 /// The source file's Unix permission bits, on a Unix host that has them.
 #[cfg(unix)]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "the `Option` is the shared signature: the `not(unix)` twin below answers `None`, and \
+	          `source_stamp` passes whichever answer straight into the SFTP stamp. Clippy lints one \
+	          `cfg` at a time, so it cannot see the sibling."
+)]
 fn source_mode(meta: &std::fs::Metadata) -> Option<u32> {
 	use std::os::unix::fs::MetadataExt;
 	Some(meta.mode() & 0o7777)

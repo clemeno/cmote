@@ -22,7 +22,7 @@
 // bar can then only offer what exists, and the task never has to search — it is handed a program and
 // an argument list and spawns exactly that.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// What every shell cmote can start understands as "leave now" (§104).
 ///
@@ -358,8 +358,10 @@ fn git_bash_path() -> Option<PathBuf> {
 	// A Git that is on `PATH` but installed elsewhere: `<root>\cmd\git.exe`, so the root is two
 	// levels up. This is the only place `PATH` takes part, and it takes part by naming `git`, never
 	// `bash` — so WSL's launcher can never be what is found.
+	// `Path` is spelled out rather than imported: its one use in the file is here, inside a
+	// Windows-only function, so a module-scope import would be unused on macOS (§113).
 	if let Some(git) = on_path("git.exe")
-		&& let Some(root) = git.parent().and_then(Path::parent)
+		&& let Some(root) = git.parent().and_then(std::path::Path::parent)
 	{
 		roots.push(root.to_path_buf());
 	}

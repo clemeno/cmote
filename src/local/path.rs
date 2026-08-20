@@ -32,7 +32,7 @@
 //   * a first component that is not a drive — `/etc` is not a place on Windows, and answering as if
 //     it were would put the panes somewhere they cannot be.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 /// The native path for a pane path, or `None` when there is not one.
 ///
@@ -86,6 +86,10 @@ pub fn to_native(pane: &str) -> Option<PathBuf> {
 /// has no place in the `/C:` scheme, and a relative path has no place in the panes at all.
 #[cfg(windows)]
 pub fn to_posix(native: &Path) -> Option<String> {
+	// Imported here, not at module scope: `Component` names the pieces of a WINDOWS path and this is
+	// the only function that takes one apart, so at module scope it would be unused on macOS (§113).
+	use std::path::Component;
+
 	let mut components = native.components();
 	// A drive-rooted absolute path is a `Prefix` (the `C:`) followed by a `RootDir` (the `\`).
 	// Anything else — a UNC prefix, a relative path, a drive with no root — is refused.
@@ -213,7 +217,13 @@ pub(super) fn native_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use super::{home, is_plain_component, is_virtual_root, to_native, to_posix};
+	use super::{home, is_plain_component, is_virtual_root, to_native};
+	// The `/C:` scheme's own tests only run where drive letters are paths, so they are
+	// `#[cfg(windows)]` and what only they use is imported only there (§113). The gap that leaves is
+	// real and recorded there too: the macOS half of `to_posix` has no test of its own.
+	#[cfg(windows)]
+	use super::to_posix;
+	#[cfg(windows)]
 	use std::path::{Path, PathBuf};
 
 	#[cfg(windows)]

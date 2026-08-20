@@ -313,6 +313,12 @@ pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 
 /// The same, on a platform whose toolkit already has the two hands.
 #[cfg(not(windows))]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "the `Option` is the shared signature, not this arm's own: the Windows twin above \
+	          answers `None` once its hand cursors are installed, and both call sites match on it. \
+	          Clippy lints one `cfg` at a time, so it cannot see the sibling."
+)]
 pub fn grab_interaction(dragging: bool) -> Option<iced::mouse::Interaction> {
 	Some(if dragging {
 		iced::mouse::Interaction::Grabbing

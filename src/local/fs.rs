@@ -387,8 +387,20 @@ fn mtime_of(meta: &std::fs::Metadata) -> Option<u32> {
 	Some(u32::try_from(since_epoch).unwrap_or(u32::MAX))
 }
 
+// The three below are cfg PAIRS: a macOS arm that always has an answer, and a Windows arm that never
+// does. The `Option` therefore belongs to the SIGNATURE the two share and not to either arm — a row
+// on Windows genuinely has no mode, owner or group to show, and `Entry` holds all three as `Option`
+// for that reason. Clippy lints one `cfg` at a time, so on macOS it sees only the always-`Some` arm
+// and reads the wrapper as pointless. Each macOS arm therefore carries an `#[expect]` rather than an
+// `#[allow]`: the day one of them gains a `None` path — a `Metadata` call that can fail — the
+// expectation goes unfulfilled and clippy says so, instead of a suppression sitting there quietly.
+
 /// The unix permission word, `ls -l` style. macOS only: see the module note.
 #[cfg(target_os = "macos")]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "the `Option` is the shared signature; the Windows twin below answers `None`"
+)]
 fn mode_of(meta: &std::fs::Metadata) -> Option<String> {
 	use std::os::unix::fs::MetadataExt;
 	Some(files::format_mode(meta.mode()))
@@ -404,6 +416,10 @@ fn mode_of(_meta: &std::fs::Metadata) -> Option<String> {
 /// is a lookup per entry, and the pane's remote path falls back to numeric ids for exactly the same
 /// reason when a server sends no names.
 #[cfg(target_os = "macos")]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "the `Option` is the shared signature; the Windows twin below answers `None`"
+)]
 fn owner_of(meta: &std::fs::Metadata) -> Option<String> {
 	use std::os::unix::fs::MetadataExt;
 	Some(meta.uid().to_string())
@@ -415,6 +431,10 @@ fn owner_of(_meta: &std::fs::Metadata) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+#[expect(
+	clippy::unnecessary_wraps,
+	reason = "the `Option` is the shared signature; the Windows twin below answers `None`"
+)]
 fn group_of(meta: &std::fs::Metadata) -> Option<String> {
 	use std::os::unix::fs::MetadataExt;
 	Some(meta.gid().to_string())
