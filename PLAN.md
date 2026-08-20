@@ -12626,14 +12626,96 @@ With that settled, both migrations were mechanical, and the differential sweep n
 scanners over 6720 shapes — `c` and `S` joined the shape space with `query`, being DA3 and
 XTSMGRAPHICS, since a sweep that never spelled them could not have caught it acting on one alone.
 
+### The second door, and the rule that was wrong in three framers at once
+
+The entry above this one used to say the framer frames CSI only, that `query` and `graphics` would keep
+their own DCS machines, and that a `dcs::Framer` was the obvious next move. It is made now, and the
+reason to record it here rather than start a new section is that it found the same defect a third time
+in the module §111 had been holding up as the template.
+
+**`dcs::Framer` is the other door: `ESC`, and everything through it that is not a CSI.** A DCS control
+string, and the two-part escape sequences — of which RIS is the only one anything in cmote acts on. The
+grammar was spelled SIX times: two full DCS machines (`query`, `graphics`) and four copies of
+
+```rust
+if self.after_escape && byte == b'c' { … }      // protect, scp, sgrstack, rect
+self.after_escape = byte == ESC;
+```
+
+The introducer turned out to be the CSI grammar over again — marker, parameters, intermediates, one
+final byte, and the same two refusals — so `csi::Params`, `csi::MAX_INTERMEDIATES`,
+`csi::passes_through` and `csi::Span` are shared rather than restated. Reading `vte`'s state table
+instead of remembering it produced four rules nothing in cmote obeyed:
+
+1. **CAN and SUB end a control string** (`lib.rs:320-324`). Both DCS machines read those bytes into the
+   payload and went on waiting, so a later ST completed a string the engine had thrown away hundreds of
+   bytes back — `query` answering a cancelled question, `graphics` decoding a payload with a foreign
+   sixel spliced into it.
+2. **DEL and the high bytes are DISCARDED from a payload, not kept** (`:330`, `:335`). A scanner
+   comparing a payload against a known selector has to see what the handler saw.
+3. **A byte the engine reads through in the INTRODUCER keeps the string** — §106's rule in the third of
+   the three states that has it.
+4. **`ESC` then a C0, a DEL or a high byte stays in the escape state** (`:341`, `:381-383`), so
+   `ESC` LF `c` is a hard reset. This is the one that mattered most, and it is where the section stopped
+   being about DCS: **`csi::Framer` had it wrong too**, dropping to ordinary text on that line feed and
+   then reading the `[` as a printable character — losing `CSI 2 J` for all ten scanners at once, on a
+   sequence the engine really performs. And all four hand-rolled RIS watchers had it wrong, each keeping
+   state a reset had thrown away: an armed pen, a store, a stack, a DECSACE extent stamped onto every
+   request after the reset. Three bytes from a remote and cmote's idea of the terminal parts company
+   with the engine's.
+
+**Then the same rule again, in `osc.rs`.** Going to fix the DCS door meant reading the OSC one beside
+it, and it had the same two ESC defects plus two of its own: a byte read through between the `ESC` and
+the `]` (so `ESC` LF `] 7 ; … BEL` was an OSC cmote never saw), an ESC that ends one string while
+opening the next (a second OSC starting inside the first was lost entirely, so the cwd never arrived),
+CAN and SUB read into the payload rather than ending the string (`ESC ] 7 ; /a CAN /b BEL` became the
+path `/a/b`, a directory nobody named), and the C0s the engine drops kept in the payload. Four
+scanners sit on that framer.
+
+Two design findings, both the opposite of what the entry above had predicted:
+
+- **An abandoned string needs no state at all.** Both DCS machines had a "follow this one silently to
+  its terminator" mode, and `query`'s doc explained it as stopping a payload masquerading as a query.
+  It cannot masquerade: an ESC is the only byte that can interrupt a control string, and an ESC ends it
+  for the engine too. Hunting for the next ESC is everything that mode did. The same argument retires
+  `osc.rs`'s stated reason for keeping `graphics` out — "a different policy, not a different number" —
+  because following an overlong payload to its end and abandoning it on the spot are the same machine.
+  What was genuinely different was the cap, and a cap is a const parameter.
+- **Framing the escape sequences is not scope creep, it is the only way to be right.** A watcher that
+  tests "was the previous byte an ESC" cannot tell `ESC` LF `c` (a reset) from `ESC ( c` (a charset
+  designation) in either direction. `Control::Escape` reports the intermediates and the final byte, and
+  every caller tests both.
+
+`query` came out of it with no state machine at all — two framers and two tables — and `graphics` lost
+seven states, its parameter buffer, its payload, its overflow flag and its sequence-start field. All
+their tests passed unchanged. `rect` is the one that is not a merge: RIS resets DECSACE and that extent
+is stamped onto the requests that FOLLOW, so it collects the reset offsets first and cuts the chunk at
+each of them.
+
+Proved rather than asserted, which is the part that took the longest: the harness grew `hook`, `put`,
+`unhook`, `esc_dispatch` and `osc_dispatch`, a 180-shape sweep over the DCS introducer, a payload
+compared byte-for-byte against what the engine was given, and a RIS test driving all five readers over
+each of the six read-through bytes. Disabling the framer's read-through arm fails three tests; the OSC
+pair fails against the old framer. The one deliberate divergence — cmote abandoning a cancelled OSC
+where the engine dispatches it — is pinned from both sides rather than left implied.
+
 ### Not done
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
-- **The framer frames CSI only, and that is a decision.** `query` and `graphics` keep their own DCS
-  machine rather than a second family moving into `csi.rs`, which would put a policy parameter in that
-  interface fitting neither caller — the line `osc.rs` already drew. The cost is that the DCS grammar
-  is still spelled twice, and §111 found three defects in exactly that gap (two ESC, one ST). A
-  `dcs::Framer` for the two of them is the obvious next move and is not made here.
+- **The ESC door is still spelled three times.** `csi::Framer`, `osc::Framer` and `dcs::Framer` each
+  open on an ESC and each must obey the same rules about what may sit between it and the introducer,
+  and about an ESC that ends a string. They do now, and `differential.rs` holds all three to the
+  engine's parser — but nothing STRUCTURALLY stops the fourth one from drifting again, which is exactly
+  the position the DCS grammar was in when this section started. Merging them would mean one machine
+  that dispatches by family, which is a small `vte` and would want its own section to justify; the
+  three-framer split earns its keep while what differs is the introducer and the terminator. The cheap
+  half of the fix is already there: the four things that are genuinely common (`Params`,
+  `MAX_INTERMEDIATES`, `passes_through`, `Span`) live in one place.
+- **`osc::Framer` is stricter than the engine on a cancelled string, and `dcs::Framer` on an
+  interrupted one.** Both are the safe direction and both are tested as divergences, but they are
+  divergences: the engine dispatches what it had and cmote drops it. Safe only because the engine has
+  no handler behind any OSC or DCS cmote reads, so no second actor can fall out of step — an engine
+  version that grew one would make this a defect, and the tests naming it are how that gets noticed.
 - **The load stress is manual, not in CI**, and that is a decision rather than an omission. It lives
   in `AGENTS.md` beside the prove-it rule, in §13's category: a check that depends on the machine.
   GitHub's runners are two to four cores and already noisy, so a stress job would be the most likely
