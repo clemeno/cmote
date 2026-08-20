@@ -747,6 +747,47 @@ mod tests {
 	}
 
 	#[test]
+	fn a_sub_parameter_is_read_or_refused_by_who_the_engine_leaves_it_to() {
+		// The two right answers to the same byte, and why `Csi::sub_parameters` reports the FACT and
+		// leaves the policy to each scanner (§111).
+		//
+		// ED is a sequence the engine implements. `next_param_or(0)` reads the first sub-parameter of
+		// the first parameter, so `CSI 2:3 J` really does wipe the screen — and `graphics` has to take
+		// the pictures with it or they stand on a screen whose text has gone. It did not, until the
+		// shared grammar arrived.
+		for (spelling, bytes) in [("screen", &b"\x1b[2:3J"[..]), ("scrollback", b"\x1b[3:1J")] {
+			let first = if spelling == "screen" { 2 } else { 3 };
+			assert!(
+				engine(bytes).dispatched_plain('J', first),
+				"{spelling}: the engine erases on the colon spelling"
+			);
+			assert!(
+				!graphics::Images::default().feed(bytes).is_empty(),
+				"{spelling}: so cmote takes the pictures with it"
+			);
+		}
+
+		// DECERA is a sequence the engine has NO arm for — `vte` frames it and `ansi.rs` drops it — so
+		// cmote is the only actor and refusing a spelling DEC never defined costs nothing. `rect` reads
+		// four corners out of it, and a rectangle built from a misread corner erases cells the program
+		// never named.
+		let corners = b"\x1b[2:3;5;7$z";
+		assert!(
+			engine(corners)
+				.dispatched
+				.iter()
+				.any(|csi| csi.final_byte == 'z'),
+			"the engine frames it, and has nothing to do with it"
+		);
+		assert!(
+			super::super::rect::Rectangles::default()
+				.feed(corners)
+				.is_empty(),
+			"so cmote refuses the spelling rather than guessing at the corners"
+		);
+	}
+
+	#[test]
 	fn a_parameter_after_an_intermediate_is_refused_by_both() {
 		// The last of the grammar divergences, and it leans the other way from the control bytes: the parser
 		// refuses a parameter byte once an intermediate has arrived (`lib.rs:232`, straight to `CsiIgnore`,

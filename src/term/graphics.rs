@@ -217,8 +217,6 @@ enum GraphicsScan {
 	Text,
 	/// Saw ESC: a CSI starts on `[`, a DCS on `P`, and a lone `c` is RIS.
 	Esc,
-	/// Inside `ESC [ …`, collecting digits in case this is an erase-display.
-	Csi,
 	/// Inside `ESC P <params>`, waiting for the final byte that says which DCS this is.
 	Dcs,
 	/// Inside a sixel payload, accumulating it.
@@ -238,6 +236,16 @@ enum GraphicsScan {
 #[derive(Debug)]
 pub struct Images {
 	state: GraphicsScan,
+	/// The CSI grammar, shared with the other scanners (§111) — the erases only. The DCS half stays in
+	/// `state` beside it, which is the line `osc.rs` already drew when this module kept its own OSC
+	/// framing: the framer reads CSI and nothing else.
+	///
+	/// Running the two over the same bytes is SAFER than the single fused machine it replaces, not
+	/// riskier, and the reason is measured in `differential.rs`: an ESC ends a control string for the
+	/// engine as well as opening the next sequence, so there is no payload the engine reads as data and
+	/// a framer reads as a sequence. The framer's ESC handling is unconditional, and being conditional
+	/// is exactly what the fused machine got wrong.
+	framer: super::csi::Framer,
 	params: Params,
 	payload: Vec<u8>,
 	/// Whether the payload being read has already outgrown `MAX_PAYLOAD`. Kept as a flag rather than
@@ -265,6 +273,7 @@ impl Default for Images {
 	fn default() -> Self {
 		Self {
 			state: GraphicsScan::default(),
+			framer: super::csi::Framer::default(),
 			params: Params::default(),
 			payload: Vec::new(),
 			overflowed: false,
@@ -284,6 +293,23 @@ impl Images {
 	/// `osc133` established (§34).
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, GraphicsEvent)> {
 		let mut found = Vec::new();
+		// The DCS half FIRST, then the erases, and the order is not cosmetic. A picture is reported PAST
+		// its terminator and an erase BEFORE its first byte, so `DCS … ST` immediately followed by
+		// `CSI 2 J` — which is what `img2sixel; clear` sends — gives both events the SAME offset. The
+		// sort below is stable, so whichever pass ran first wins the tie, and the stream order is draw
+		// then erase: the picture has to go.
+		self.scan_strings(bytes, &mut found);
+		self.framer.feed(bytes, |span, csi| {
+			if let Some(event) = erase(csi) {
+				found.push((span.start(), event));
+			}
+		});
+		found.sort_by_key(|&(offset, _)| offset);
+		found
+	}
+
+	/// The control-string half: sixel payloads, and the RIS that throws every picture away.
+	fn scan_strings(&mut self, bytes: &[u8], found: &mut Vec<(usize, GraphicsEvent)>) {
 		// Any sequence still open from the last chunk began before this one did.
 		self.sequence_start = None;
 		for (index, &byte) in bytes.iter().enumerate() {
@@ -291,47 +317,13 @@ impl Images {
 			// or at the byte the sequence started on (the beginning of the chunk when it started in an
 			// earlier one).
 			let past = index + 1;
-			let began = self.sequence_start.unwrap_or(0);
 			match self.state {
 				GraphicsScan::Text => {
 					if byte == ESC {
 						self.begin(index);
 					}
 				}
-				GraphicsScan::Esc => self.after_escape(byte, index, &mut found),
-				GraphicsScan::Csi => match byte {
-					b'0'..=b'9' | b';' => {
-						if !self.params.push(byte) {
-							self.state = GraphicsScan::Text;
-						}
-					}
-					b'J' => {
-						// `CSI 2 J` erases the screen and `CSI 3 J` the scrollback; `CSI J` and
-						// `CSI 0/1 J` erase only part of one line's worth, which no image spans, so
-						// they are left alone.
-						//
-						// Read as a NUMBER, the way the engine reads it: ED's parameter arrives there
-						// through `next_param_or(0)`, so `CSI 002 J` is 2 and `CSI 2;5 J` is 2 with a
-						// second parameter the engine ignores. Comparing the parameter bytes to `b"2"`
-						// agreed with that on the one spelling everything sends and on no other, and the
-						// cost of the disagreement was pictures left on a screen whose text had gone.
-						match first_param(self.params.bytes()) {
-							2 => found.push((began, GraphicsEvent::ClearScreen)),
-							3 => found.push((began, GraphicsEvent::ClearScrollback)),
-							_ => {}
-						}
-						self.state = GraphicsScan::Text;
-					}
-					ESC => self.begin(index),
-					// A byte the engine reads straight through, keeping the sequence across it (§106,
-					// `csi::passes_through`). `CSI 0` LF `2 J` erases the screen as far as the engine is
-					// concerned — the line feed runs, the parameter goes on accumulating — so giving up on
-					// it here left the pictures behind, exactly as the old parameter cap did.
-					byte if super::csi::passes_through(byte) => {}
-					// Any other CSI: a colour, a cursor move, a private mode, or one of the two bytes that
-					// really cancel a sequence. Not ours.
-					_ => self.state = GraphicsScan::Text,
-				},
+				GraphicsScan::Esc => self.after_escape(byte, index, found),
 				GraphicsScan::Dcs => match byte {
 					// A sixel's parameters are `P1;P2;P3`; they change no pixel (see `sixel::decode`)
 					// so they are collected only to be stepped over.
@@ -354,7 +346,7 @@ impl Images {
 				GraphicsScan::Payload => match byte {
 					ESC => self.state = GraphicsScan::PayloadEsc,
 					BEL | ST => {
-						self.complete(past, &mut found);
+						self.complete(past, found);
 					}
 					_ => {
 						// Past the cap: stop accumulating but keep following the DCS, so the rest of
@@ -367,7 +359,7 @@ impl Images {
 					}
 				},
 				GraphicsScan::PayloadEsc => match byte {
-					b'\\' => self.complete(past, &mut found),
+					b'\\' => self.complete(past, found),
 					// `ESC ESC` inside a payload: still waiting for the terminator's `\`. The engine
 					// keeps the payload it had across the pair too (§111, measured).
 					ESC => self.state = GraphicsScan::PayloadEsc,
@@ -376,7 +368,7 @@ impl Images {
 					// (see `resume_after_escape`), and dropping to ordinary text here threw that away.
 					// RIS is what made it matter: `ESC c` arriving mid-payload left every picture
 					// standing on a screen the reset had just wiped.
-					_ => self.resume_after_escape(byte, index, &mut found),
+					_ => self.resume_after_escape(byte, index, found),
 				},
 				GraphicsScan::Other => match byte {
 					ESC => self.state = GraphicsScan::OtherEsc,
@@ -386,11 +378,10 @@ impl Images {
 				GraphicsScan::OtherEsc => match byte {
 					b'\\' => self.state = GraphicsScan::Text,
 					ESC => self.state = GraphicsScan::OtherEsc,
-					_ => self.resume_after_escape(byte, index, &mut found),
+					_ => self.resume_after_escape(byte, index, found),
 				},
 			}
 		}
-		found
 	}
 
 	/// Start reading an escape sequence at `index`, remembering where it began — that offset is what
@@ -407,10 +398,10 @@ impl Images {
 	/// entry points from disagreeing about the offset.
 	fn after_escape(&mut self, byte: u8, index: usize, found: &mut Vec<(usize, GraphicsEvent)>) {
 		match byte {
-			b'[' => {
-				self.params.clear();
-				self.state = GraphicsScan::Csi;
-			}
+			// A CSI, which this machine no longer reads: the framer beside it frames the erases (§111).
+			// Dropping to ordinary text is safe because a CSI's own bytes hold no ESC, so the only thing
+			// this half is waiting for — the next ESC — cannot arrive before the sequence has ended.
+			b'[' => self.state = GraphicsScan::Text,
 			b'P' => {
 				self.params.clear();
 				self.state = GraphicsScan::Dcs;
@@ -595,24 +586,33 @@ fn cells(pixels: u16, cell: u16) -> u16 {
 	u16::try_from(count.clamp(1, u32::from(u16::MAX))).unwrap_or(u16::MAX)
 }
 
-/// The first of `params` as a number, with an omitted one reading as 0 — the engine's own
-/// `next_param_or(0)`, spelled here so an erase means the same thing on both sides of `process`.
+/// Which pictures a finished CSI takes with it, or `None` when it takes none.
 ///
-/// Saturating rather than checked, and for the same reason as everywhere else in this module: a
-/// parameter past `u16` is a parameter nobody can act on, and clamping it keeps a long digit run from
-/// wrapping round into a small plausible number like 2. Parameters here are only ever digits and
-/// semicolons (the scanner pushes nothing else), so there is no unparseable case to report.
-fn first_param(params: &[u8]) -> u16 {
-	params
-		.split(|&byte| byte == b';')
-		.next()
-		.unwrap_or_default()
-		.iter()
-		.fold(0u16, |value, &byte| {
-			value
-				.saturating_mul(10)
-				.saturating_add(u16::from(byte.wrapping_sub(b'0')))
-		})
+/// `CSI 2 J` erases the screen and `CSI 3 J` the scrollback; `CSI J` and `CSI 0/1 J` erase part of one
+/// line's worth, which no image spans, so they are left alone. The marker and the intermediates are
+/// tested too — `CSI ? 2 J` is the selective erase `term/protect.rs` reads, and protection is a
+/// property of text rather than of pictures.
+///
+/// **A sub-parameter is READ here, not refused, and that is the opposite of what `term/rect.rs` does
+/// with one.** The two are right for the same reason: `Csi::sub_parameters` reports the fact and the
+/// policy belongs to the scanner. `rect` reads DECERA, which the engine has no arm for, so cmote is
+/// the only actor and refusing a spelling DEC never defined costs nothing. ED is the other way round —
+/// the engine DOES erase, `next_param_or(0)` reads the first sub-parameter of the first parameter, and
+/// `differential.rs` measures it: `CSI 2:3 J` wipes the screen. A scanner that refused that spelling
+/// would leave every picture standing on a screen whose text had gone, which is §106's defect shape
+/// and was live here until §111.
+fn erase(csi: &super::csi::Csi<'_>) -> Option<GraphicsEvent> {
+	if csi.marker().is_some() || !csi.intermediates().is_empty() || csi.final_byte() != b'J' {
+		return None;
+	}
+	// The engine's own `next_param_or(0)`, so an erase means the same thing on both sides of `process`.
+	// Saturating, which `Csi::param` already is: a parameter past `u16` is one nobody can act on, and
+	// clamping keeps a long digit run from wrapping round into a small plausible number like 2.
+	match csi.param(0).unwrap_or(0) {
+		2 => Some(GraphicsEvent::ClearScreen),
+		3 => Some(GraphicsEvent::ClearScrollback),
+		_ => None,
+	}
 }
 
 #[cfg(test)]
@@ -732,6 +732,46 @@ mod tests {
 			scan(b"\x1bP$qm\x1bc").as_slice(),
 			[(5, GraphicsEvent::Reset)]
 		));
+		// A SUB-PARAMETER is read rather than refused, which is the opposite of what `term/rect.rs`
+		// does with one and right for the opposite reason: the engine has an arm for ED and none for
+		// DECERA, so `CSI 2:3 J` really does wipe the screen (`differential.rs` measures it) and a
+		// scanner that refused the spelling would leave every picture standing on it. Live here until
+		// the shared grammar arrived (§111).
+		assert!(matches!(
+			scan(b"\x1b[2:3J").as_slice(),
+			[(0, GraphicsEvent::ClearScreen)]
+		));
+		assert!(matches!(
+			scan(b"\x1b[3:1J").as_slice(),
+			[(0, GraphicsEvent::ClearScrollback)]
+		));
+		// A selective erase is `term/protect.rs`'s, and protection is a property of text rather than of
+		// pictures — so the marker rules it out here.
+		assert!(scan(b"\x1b[?2J").is_empty());
+	}
+
+	/// A picture is reported PAST its terminator and an erase BEFORE its first byte, so a `clear` right
+	/// after an image gives both events the SAME offset — and the order they come out in decides
+	/// whether the picture survives (§111).
+	///
+	/// This is what the two passes in `feed` are ordered for: the control strings are scanned first and
+	/// the sort is stable, so at a tie the draw comes before the erase, which is the order the stream
+	/// put them in. `img2sixel; clear` sends exactly these bytes.
+	#[test]
+	fn a_picture_and_the_erase_that_follows_it_come_out_in_stream_order() {
+		let bytes = b"\x1bPq#0;2;100;0;0#0~-~\x1b\\\x1b[2J";
+		let found = scan(bytes);
+		let [
+			(drawn, GraphicsEvent::Image(_)),
+			(erased, GraphicsEvent::ClearScreen),
+		] = found.as_slice()
+		else {
+			panic!("expected a picture then an erase, got {found:?}");
+		};
+		assert_eq!(
+			drawn, erased,
+			"the terminator's far side and the erase's near side are one byte"
+		);
 		// A shell's `clear` sends both erases, which between them clear everything.
 		assert_eq!(scan(b"\x1b[3J\x1b[H\x1b[2J").len(), 2);
 	}

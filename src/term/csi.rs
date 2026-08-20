@@ -320,6 +320,7 @@ impl Csi<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
 	past: usize,
+	start: Option<usize>,
 }
 
 impl Span {
@@ -341,6 +342,21 @@ impl Span {
 	pub fn final_byte_at(self) -> usize {
 		// A CSI is `ESC [` and at least a final byte, so `past` is never 0 and this cannot wrap.
 		self.past - 1
+	}
+
+	/// The ESC that OPENED the sequence — or 0 when it opened in an earlier chunk.
+	///
+	/// What a scanner wants when it has to act BEFORE the sequence reaches the engine at all, which is
+	/// `graphics` alone and is the opposite of what the other nine need. Which pictures an erase takes
+	/// is decided by where the screen ends and the scrollback begins, and the engine answers that
+	/// differently the instant it applies the erase — `CSI 3 J` drops the very history the question is
+	/// about, so asking afterwards is asking a terminal that no longer remembers (§41).
+	///
+	/// Zero for a sequence that began in an earlier chunk, because its bytes then start at the front of
+	/// this one. That is not an approximation: everything before the sequence really has been fed
+	/// already, which is exactly what the caller is about to advance past.
+	pub fn start(self) -> usize {
+		self.start.unwrap_or(0)
 	}
 }
 
@@ -376,6 +392,10 @@ pub struct Framer {
 	marker: Option<u8>,
 	params: Params,
 	intermediates: Vec<u8>,
+	/// Where in THIS chunk the ESC that opened the sequence being read sat, for [`Span::start`].
+	/// `None` once the sequence has run over a chunk boundary — its bytes then begin at the front of
+	/// the chunk that finishes it, which is offset 0.
+	start: Option<usize>,
 }
 
 impl Framer {
@@ -384,6 +404,8 @@ impl Framer {
 	/// The [`Span`] says where in THIS `bytes` slice the sequence sat, and the caller picks which point
 	/// of it it means — see that type for why there is more than one.
 	pub fn feed(&mut self, bytes: &[u8], mut on_csi: impl FnMut(Span, &Csi<'_>)) {
+		// Any sequence still open from the last chunk began before this one did.
+		self.start = None;
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
 				CsiScan::Text => {
@@ -393,6 +415,9 @@ impl Framer {
 				}
 				CsiScan::Escape => match byte {
 					b'[' => {
+						// The ESC sat one byte back, unless that byte was in the previous chunk — which
+						// is exactly what a `None` records.
+						self.start = index.checked_sub(1);
 						self.marker = None;
 						self.params.clear();
 						self.intermediates.clear();
@@ -450,7 +475,10 @@ impl Framer {
 						// all-zero one gets its digit back.
 						self.params.finish();
 						on_csi(
-							Span { past: index + 1 },
+							Span {
+								past: index + 1,
+								start: self.start,
+							},
 							&Csi {
 								marker: self.marker,
 								params: &self.params,
