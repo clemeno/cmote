@@ -86,9 +86,6 @@
 // (§60's DECRQCRA does this already). A DSR and a DECXCPR asked for in one write therefore come back
 // in the order they were asked.
 
-/// The escape byte that leads every CSI sequence.
-const ESC: u8 = 0x1b;
-
 /// DECXCPR, the cursor position — the parameter this module was built for (§82).
 const CURSOR_POSITION: u16 = 6;
 
@@ -100,15 +97,6 @@ const LOCATOR_TYPE: u16 = 56;
 
 /// "Is the colour scheme dark or light?" (§98). Answered from a constant, cmote's scheme being fixed.
 const COLOR_SCHEME: u16 = 996;
-
-/// The longest parameter run buffered inside one sequence. DECXCPR's is a single digit; anything
-/// longer is malformed, and refusing to grow past this keeps a hostile stream from ballooning our
-/// memory (§12).
-const MAX_PARAMS: usize = 32;
-
-/// The most intermediate bytes buffered. DECXCPR has none at all — they are collected only so that a
-/// near miss carrying one is rejected rather than mistaken for it.
-const MAX_INTERMEDIATES: usize = 4;
 
 /// Which of the DEC-private status reports cmote answers (§82, §93).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,29 +113,13 @@ pub enum DsrRequest {
 	ColorScheme,
 }
 
-/// Where the scanner is in the byte stream. Only the CSI shape matters here: `ESC [`, then parameter
-/// bytes, then intermediate bytes, then one final byte.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum DsrScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`, and nothing else here is of interest.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The DEC-private DSR scanner (§82). Feed it every byte of shell output; it reports where each
 /// cursor-position request sat, for `term/mod.rs` to answer from the live cursor.
+///
+/// The CSI grammar is [`csi::Framer`]'s (§111); what is left here is the allow-list below.
 #[derive(Debug, Default)]
 pub struct Dsr {
-	state: DsrScan,
-	/// The private marker, if the sequence opened with one. DECXCPR requires `?`, and keeping the
-	/// marker apart from `params` lets the digits parse the same either way.
-	marker: Option<u8>,
-	params: Vec<u8>,
-	intermediates: Vec<u8>,
+	framer: super::csi::Framer,
 }
 
 impl Dsr {
@@ -162,106 +134,45 @@ impl Dsr {
 	/// its own final byte.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, DsrRequest)> {
 		let mut requests = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				DsrScan::Text => {
-					if byte == ESC {
-						self.state = DsrScan::Escape;
-					}
-				}
-				DsrScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = DsrScan::Csi;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = DsrScan::Text,
-				},
-				DsrScan::Csi => match byte {
-					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
-					// 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = DsrScan::Text;
-							}
-						}
-					}
-					// Intermediate bytes. DECXCPR has none, so any of these rules it out.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = DsrScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if let Some(request) = self.request(byte) {
-							requests.push((index + 1, request));
-						}
-						self.state = DsrScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = DsrScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
-					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
-					// would mean cmote and the engine disagreeing about what this byte stream even was,
-					// which is how three defects reached a release.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = DsrScan::Text,
-				},
+		self.framer.feed(bytes, |offset, csi| {
+			if let Some(request) = request(csi) {
+				requests.push((offset, request));
 			}
-		}
+		});
 		requests
 	}
+}
 
-	/// Which of the three questions cmote answers this is, or `None` for the rest of the family.
-	///
-	/// `CSI ? Ps n` requires the marker and one parameter. The near misses this keeps out: `CSI 6 n`
-	/// without the marker is the ANSI spelling, which is the ENGINE's and is answered there (answering
-	/// it here as well would give the program two replies to one question); `CSI > 6 n` carries a
-	/// marker DEC never defined for this final byte; and every other `Ps` is the allow-list doing its
-	/// job.
-	///
-	/// A second parameter rules the sequence out rather than being ignored, which is a deliberate
-	/// tightening over `term/tabs.rs`'s reading of DECST8C. DSR takes exactly one `Ps`, so `CSI ? 6 ; 1 n`
-	/// is a sequence cmote does not fully understand — and answering the part it recognises would be
-	/// the generous reading this project keeps finding at the bottom of its own mistakes.
-	fn request(&self, final_byte: u8) -> Option<DsrRequest> {
-		if (final_byte, self.marker, self.intermediates.as_slice()) != (b'n', Some(b'?'), &[][..]) {
-			return None;
-		}
-		match self.only_param()? {
-			CURSOR_POSITION => Some(DsrRequest::CursorPosition),
-			LOCATOR_STATUS => Some(DsrRequest::LocatorStatus),
-			LOCATOR_TYPE => Some(DsrRequest::LocatorType),
-			COLOR_SCHEME => Some(DsrRequest::ColorScheme),
-			_ => None,
-		}
+/// Which of the three questions cmote answers this is, or `None` for the rest of the family.
+///
+/// `CSI ? Ps n` requires the marker and one parameter. The near misses this keeps out: `CSI 6 n`
+/// without the marker is the ANSI spelling, which is the ENGINE's and is answered there (answering
+/// it here as well would give the program two replies to one question); `CSI > 6 n` carries a
+/// marker DEC never defined for this final byte; and every other `Ps` is the allow-list doing its
+/// job.
+///
+/// A second parameter rules the sequence out rather than being ignored, which is a deliberate
+/// tightening over `term/tabs.rs`'s reading of DECST8C. DSR takes exactly one `Ps`, so `CSI ? 6 ; 1 n`
+/// is a sequence cmote does not fully understand — and answering the part it recognises would be
+/// the generous reading this project keeps finding at the bottom of its own mistakes.
+///
+/// `param_count() != 1` is what enforces that, and it is not the same test as "there is no second
+/// parameter": `CSI ? 6 ; n` carries a second one that is EMPTY, which is still two, and reading it
+/// as absent would accept the sequence (§111). An absent or unreadable `Ps` also lands here as
+/// "not ours" — an omitted one is 0 to `vte`, and 0 is not a request cmote answers.
+fn request(csi: &super::csi::Csi<'_>) -> Option<DsrRequest> {
+	if (csi.final_byte(), csi.marker(), csi.intermediates()) != (b'n', Some(b'?'), &[][..]) {
+		return None;
 	}
-
-	/// The sole parameter as a number. `None` when there is more than one, when the digits are
-	/// unparseable, or when there are none at all — an omitted `Ps` is 0 to `vte`, and 0 is not a
-	/// request cmote answers, so treating "absent" as "not ours" and "unreadable" as "not ours" costs
-	/// nothing and keeps one shape of answer for both.
-	fn only_param(&self) -> Option<u16> {
-		if self.params.is_empty() || self.params.contains(&b';') {
-			return None;
-		}
-		let mut value: u16 = 0;
-		for &byte in &self.params {
-			let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-			value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
-		}
-		Some(value)
+	if csi.param_count() != 1 {
+		return None;
+	}
+	match csi.param(0)? {
+		CURSOR_POSITION => Some(DsrRequest::CursorPosition),
+		LOCATOR_STATUS => Some(DsrRequest::LocatorStatus),
+		LOCATOR_TYPE => Some(DsrRequest::LocatorType),
+		COLOR_SCHEME => Some(DsrRequest::ColorScheme),
+		_ => None,
 	}
 }
 
@@ -443,13 +354,31 @@ mod tests {
 		assert!(scan(b"\x1b[?6\x18n").is_empty());
 	}
 
-	/// A hostile stream must not be able to make the scanner buffer without bound.
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
+	/// answer differently on purpose, now that the grammar is shared (§111).
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		let mut bytes = b"\x1b[?".to_vec();
-		bytes.extend(std::iter::repeat_n(b'6', MAX_PARAMS + 10));
-		bytes.push(b'n');
-		assert!(scan(&bytes).is_empty());
+	fn the_two_parameter_bounds_answer_differently() {
+		// Past the engine's parameter array: the engine ignores the whole sequence, so this does too.
+		let mut many = b"\x1b[?".to_vec();
+		many.extend(std::iter::repeat_n(b';', super::super::csi::MAX_PARAMS + 1));
+		many.push(b'n');
+		assert!(scan(&many).is_empty());
+
+		// A runaway DIGIT run is clamped and the sequence lives, because the engine saturates rather
+		// than giving up. It is simply not one of the four `Ps` cmote answers.
+		let mut digits = b"\x1b[?".to_vec();
+		digits.extend(std::iter::repeat_n(b'6', 500));
+		digits.push(b'n');
+		assert!(scan(&digits).is_empty());
+	}
+
+	/// An empty second parameter is still a second parameter, so `CSI ? 6 ; n` is not a DSR cmote
+	/// answers — the distinction `param_count` exists to keep (§111).
+	#[test]
+	fn a_trailing_separator_is_a_second_parameter() {
+		assert!(scan(b"\x1b[?6;n").is_empty());
+		assert!(scan(b"\x1b[?6;1n").is_empty());
+		assert_eq!(scan(b"\x1b[?6n").len(), 1, "one parameter, and it is ours");
 	}
 
 	/// Two in one chunk, both reported, in stream order — the interruption advance walks them in the order

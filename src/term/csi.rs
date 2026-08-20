@@ -130,6 +130,19 @@ impl Params {
 	pub fn started(&self) -> bool {
 		self.started
 	}
+
+	/// How many parameters the run carries, counting an EMPTY one.
+	///
+	/// `6` is one, `6;1` is two, and `6;` is also two — the second is present and omitted, which is
+	/// not the same as absent. That distinction is the whole reason this is not `param(1).is_none()`:
+	/// a scanner that takes exactly one `Ps` (§82's DSR) must reject `CSI ? 6 ; n`, and reading the
+	/// second field as "not there" would accept it.
+	///
+	/// Zero when nothing arrived at all, including when every byte was a dropped leading zero — so
+	/// `started` rather than `bytes.is_empty()` decides it.
+	pub fn count(&self) -> usize {
+		if self.started { self.fields + 1 } else { 0 }
+	}
 }
 
 /// The most intermediate bytes a scanner will buffer.
@@ -185,6 +198,12 @@ impl Csi<'_> {
 	/// The intermediate bytes, in the order they arrived. Empty for most sequences.
 	pub fn intermediates(&self) -> &[u8] {
 		self.intermediates
+	}
+
+	/// How many parameters the sequence carries — see [`Params::count`] for why an empty one still
+	/// counts. What a scanner uses to insist on exactly as many as its sequence defines.
+	pub fn param_count(&self) -> usize {
+		self.params.count()
 	}
 
 	/// Parameter `index` as a number, or `None` when it is absent or unreadable.
