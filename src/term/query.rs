@@ -36,7 +36,22 @@
 const ESC: u8 = 0x1b;
 
 /// The bell, an alternate string terminator some programs use in place of the canonical `ESC \`.
+///
+/// Leniency rather than agreement, and it is worth saying which: `vte` does NOT end a DCS on BEL —
+/// measured, in `differential.rs` — it reads the byte into the payload and keeps going. cmote accepts
+/// it because real emitters send it, and the only thing that turns on it is whether cmote answers a
+/// question about ITSELF one byte earlier than the engine would have stopped reading. Nothing on the
+/// screen depends on it.
 const BEL: u8 = 0x07;
+
+/// ST, the string terminator as a single byte — the C1 form of `ESC \`.
+///
+/// The engine ends a control string on this (`differential.rs` measures that too), and
+/// `term/graphics.rs` has had the same constant for its sixel payloads all along. This module did
+/// not, which is duplicated-grammar drift in its plainest form: one of a pair of control-string
+/// scanners learned a rule and its twin never did, so a DECRQSS ended this way went unanswered while
+/// a picture ended this way drew fine.
+const ST: u8 = 0x9c;
 
 /// The longest parameter run we buffer inside a `CSI >` or `CSI =` sequence. XTVERSION and DA3
 /// carry none (or a lone `0`); a longer run is some other private query, and refusing to grow past
@@ -137,6 +152,33 @@ enum QueryScan {
 	DcsIgnoreEsc,
 }
 
+/// Where an ESC leads, wherever it arrived from.
+///
+/// **ESC does two jobs at once**, and that is the whole reason this is a function rather than one arm
+/// of the loop: it ENDS whatever control string is open AND it OPENS the next sequence. `vte` does
+/// both — a DCS interrupted by an ESC unhooks, and the sequence that ESC introduced is dispatched
+/// normally — so a scanner that did only the first went deaf for exactly the sequence that followed.
+///
+/// This module did, in two states, and the differential harness measured it rather than anyone
+/// noticing: fed `DCS z z z` `CSI > 0 q` `ST`, the engine dispatched the XTVERSION and cmote answered
+/// nothing at all. The cost was a program's query going unanswered until its timeout ran out, for any
+/// control string that ended some way other than `ESC \` — a truncated one, or one interrupted by the
+/// next sequence.
+///
+/// What does NOT change is that the abandoned string goes unanswered. The engine cannot tell a clean
+/// terminator from an interrupted one (`unhook` is called either way), so it would answer; cmote
+/// treats a control string that named no terminator as malformed and replies nothing, which is §54's
+/// rule and the safe direction — an invented answer is worse than a missing one (§60).
+fn after_escape(byte: u8) -> QueryScan {
+	match byte {
+		b'[' => QueryScan::Csi,
+		b'P' => QueryScan::Dcs,
+		// ESC ESC: still waiting for the sequence's real first byte.
+		ESC => QueryScan::Esc,
+		_ => QueryScan::Text,
+	}
+}
+
 /// The query sniffer (§33). Feed it every byte of shell output; it returns any identity queries
 /// that completed in the chunk and ignores everything else. Carries its state across calls, so a
 /// query split over a chunk boundary is answered on the chunk that finishes it.
@@ -163,15 +205,7 @@ impl Queries {
 						self.state = QueryScan::Esc;
 					}
 				}
-				QueryScan::Esc => {
-					self.state = match byte {
-						b'[' => QueryScan::Csi,
-						b'P' => QueryScan::Dcs,
-						// ESC ESC: still waiting for the sequence's real first byte.
-						ESC => QueryScan::Esc,
-						_ => QueryScan::Text,
-					};
-				}
+				QueryScan::Esc => self.state = after_escape(byte),
 				QueryScan::Csi => {
 					self.state = match byte {
 						b'>' => {
@@ -286,8 +320,9 @@ impl Queries {
 				QueryScan::DcsData(kind) => match byte {
 					// `ESC \` is the canonical string terminator; watch for its ESC.
 					ESC => self.state = QueryScan::DcsDataEsc(kind),
-					// BEL is the alternate terminator some programs use.
-					BEL => {
+					// ST as a single byte is the C1 form of `ESC \`, and BEL the alternate terminator
+					// some programs use — see both constants for which of the two the engine agrees on.
+					ST | BEL => {
 						self.complete_dcs(kind, &mut found);
 						self.state = QueryScan::Text;
 					}
@@ -305,18 +340,19 @@ impl Queries {
 						self.state = QueryScan::Text;
 					}
 					ESC => self.state = QueryScan::DcsDataEsc(kind),
-					// A stray ESC that did not form `ESC \`: abandon this DCS.
-					_ => self.state = QueryScan::Text,
+					// A stray ESC that did not form `ESC \`: abandon this DCS, unanswered — but the ESC
+					// still OPENED whatever follows it (see `after_escape`).
+					_ => self.state = after_escape(byte),
 				},
 				QueryScan::DcsIgnore => match byte {
 					ESC => self.state = QueryScan::DcsIgnoreEsc,
-					BEL => self.state = QueryScan::Text,
+					ST | BEL => self.state = QueryScan::Text,
 					_ => {}
 				},
 				QueryScan::DcsIgnoreEsc => match byte {
 					b'\\' => self.state = QueryScan::Text,
 					ESC => self.state = QueryScan::DcsIgnoreEsc,
-					_ => self.state = QueryScan::Text,
+					_ => self.state = after_escape(byte),
 				},
 			}
 		}

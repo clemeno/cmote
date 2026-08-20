@@ -653,6 +653,99 @@ mod tests {
 		);
 	}
 
+	/// The bytes of a control string, in the four shapes that end one — used by both tests below, so
+	/// the engine's rule and cmote's agreement with it are measured over the same inputs.
+	///
+	/// Each holds a complete XTVERSION (`CSI > 0 q`) that a program would expect answered, sitting
+	/// either inside what looks like a payload or just after one.
+	fn control_strings() -> [(&'static str, &'static [u8]); 5] {
+		[
+			// A recognised DCS (DECRQSS) whose payload opens with the query.
+			("recognised, query inside", b"\x1bP$q\x1b[>0q\x1b\x5c"),
+			// An unrecognised one, which this module's own doc calls the place a stream legitimately
+			// carries arbitrary bytes.
+			("unrecognised, query inside", b"\x1bPzzz\x1b[>0q\x1b\x5c"),
+			// Cleanly terminated, then the query — the case that already worked.
+			("terminated, query after", b"\x1bP$qm\x1b\x5c\x1b[>0q"),
+			// Ended by ST as a single byte (0x9c) rather than `ESC \`.
+			("single-byte ST, query after", b"\x1bP$qm\x9c\x1b[>0q"),
+			// Never terminated at all.
+			("unterminated, query inside", b"\x1bP$q\x1b[>0q"),
+		]
+	}
+
+	#[test]
+	fn an_escape_that_is_no_terminator_still_opens_the_next_sequence() {
+		// ESC does two jobs at once in the ANSI state machine: it ENDS whatever control string is open
+		// and it OPENS the next sequence. `vte` does both, so a query written after a control string —
+		// or in place of its payload — reaches the dispatch either way.
+		//
+		// `query` did only the first, in two of its states, and this harness is what found it: every
+		// case below had the engine dispatching an XTVERSION that cmote answered with nothing, so the
+		// program that asked waited out its timeout. Not a screen divergence and not cmote acting
+		// alone — the quietest kind there is, which is why nobody noticed it for eleven sections.
+		for (what, bytes) in control_strings() {
+			let dispatched = engine(bytes)
+				.dispatched
+				.iter()
+				.any(|csi| csi.final_byte == 'q' && csi.intermediates == *b">");
+			assert!(dispatched, "{what}: the engine dispatched the query");
+			let answered = super::super::query::Queries::default()
+				.feed(bytes)
+				.contains(&super::super::query::Query::Version);
+			assert!(answered, "{what}: and cmote answers it");
+		}
+	}
+
+	#[test]
+	fn a_control_string_ends_on_a_single_byte_st_for_both() {
+		// ST's C1 form, 0x9c. The engine ends a control string on it and reads the payload it had;
+		// `term/graphics.rs` has always known that and `term/query.rs` did not, so a DECRQSS spelled
+		// this way went unanswered while a picture spelled this way drew (§111).
+		//
+		// The query AFTER the string was already reachable once a stray ESC stopped being a dead end —
+		// what this pins is the string's own payload, which is the part 0x9c decides.
+		let bytes = b"\x1bP$qm\x9c";
+		let engine = engine(bytes);
+		assert_eq!(engine.dispatched.len(), 0, "a DCS is not a CSI");
+		assert!(
+			super::super::query::Queries::default()
+				.feed(bytes)
+				.contains(&super::super::query::Query::Decrqss(
+					super::super::query::Decrqss::Sgr
+				)),
+			"the SGR request is answered, so the payload ended at the ST"
+		);
+	}
+
+	#[test]
+	fn a_framer_cannot_be_fooled_by_a_control_string() {
+		// The property that lets `query` and `graphics` keep their own DCS machine while their CSI half
+		// moves onto the shared framer (§111) — and the correction of a worry that had it backwards.
+		//
+		// The worry was that a DCS payload could smuggle `ESC [ > c` past a framer that knows nothing
+		// about DCS, and so answer a query out of bytes that were only ever data. It cannot, and the
+		// reason is the rule above: the only way into a CSI is `ESC [`, and an ESC inside a control
+		// string ends that string FOR THE ENGINE TOO. So there is no such thing as a payload the engine
+		// reads as data and a framer reads as a sequence — wherever the framer claims one, the engine
+		// dispatched it.
+		//
+		// Which makes the framer STRICTER than the fused machine it replaces, not laxer: its ESC
+		// handling is unconditional, and being unconditional is exactly what `query` got wrong.
+		for (what, bytes) in control_strings() {
+			let mut framed = Vec::new();
+			super::super::csi::Framer::default().feed(bytes, |_, csi| {
+				framed.push(csi.final_byte());
+			});
+			let dispatched: Vec<u8> = engine(bytes)
+				.dispatched
+				.iter()
+				.map(|csi| u8::try_from(csi.final_byte).expect("an ASCII final byte"))
+				.collect();
+			assert_eq!(framed, dispatched, "{what}");
+		}
+	}
+
 	#[test]
 	fn a_parameter_after_an_intermediate_is_refused_by_both() {
 		// The last of the grammar divergences, and it leans the other way from the control bytes: the parser
