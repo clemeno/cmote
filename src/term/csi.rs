@@ -334,13 +334,17 @@ impl Csi<'_> {
 	}
 }
 
-/// Where one CSI sequence sat in the chunk that completed it.
+/// Where one sequence sat in the chunk that completed it.
 ///
 /// The scanners here want DIFFERENT points out of the same sequence, and each one's choice is a real
 /// decision about correctness rather than a convention picked for tidiness. Before this type they all
 /// took one bare `usize` and derived what they needed from it — `offset` here, `offset - 1` there —
 /// with the reasoning spread across eight doc comments. The three points have names now, and each
 /// scanner says which it means at the site that uses it.
+///
+/// Shared with [`super::dcs::Framer`] rather than spelled twice: the three conventions are the same
+/// three whichever grammar found the sequence, and a second copy of this type would be a second place
+/// to explain them (§111).
 #[derive(Debug, Clone, Copy)]
 pub struct Span {
 	past: usize,
@@ -348,6 +352,12 @@ pub struct Span {
 }
 
 impl Span {
+	/// Build one. `past` is the byte after the sequence's last; `start` is where its ESC sat in this
+	/// chunk, or `None` when that ESC arrived in an earlier one.
+	pub(super) fn new(past: usize, start: Option<usize>) -> Self {
+		Self { past, start }
+	}
+
 	/// The byte AFTER the final byte.
 	///
 	/// What a scanner wants when it has to feed the engine PAST the sequence before acting on it —
@@ -511,10 +521,7 @@ impl Framer {
 						// all-zero one gets its digit back.
 						self.params.finish();
 						on_csi(
-							Span {
-								past: index + 1,
-								start: self.start,
-							},
+							Span::new(index + 1, self.start),
 							&Csi {
 								marker: self.marker,
 								params: &self.params,

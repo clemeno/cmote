@@ -9,8 +9,10 @@
 // the engine ignores and cmote scans out of the same bytes — so images need no engine fork either.
 // They need three things this module owns:
 //
-//   1. FIND the picture. A byte-at-a-time scanner, because output arrives in arbitrary chunks and a
-//      megabyte of sixel is certain to be split across several.
+//   1. FIND the picture. Two shared framers do the byte-at-a-time part, because output arrives in
+//      arbitrary chunks and a megabyte of sixel is certain to be split across several: `dcs::Framer`
+//      cuts out the sixel strings and the RIS that throws every picture away, `csi::Framer` the erases
+//      (§111). What is left here is deciding what each one MEANS for the store.
 //   2. ANCHOR it. A placement is an ABSOLUTE document line plus a column (§40) — the same
 //      scrollback-stable coordinate the prompt marks, the search hits and the selection use — so
 //      scrolling moves the picture with its text and no image ever needs repositioning.
@@ -40,26 +42,10 @@ use iced::advanced::image::Handle;
 
 use super::sixel;
 
-/// The escape byte that leads a CSI (`ESC [`) and a DCS (`ESC P`), and the bell some emitters use
-/// as a string terminator in place of the canonical `ESC \`.
-const ESC: u8 = 0x1b;
-const BEL: u8 = 0x07;
-
-/// The 8-bit string terminator, `ST` as a single C1 byte. No sixel payload can contain it — every
-/// byte of a payload is printable ASCII — so accepting it costs nothing and reads the emitters that
-/// send it.
-const ST: u8 = 0x9c;
-
-// The parameter run, bounded the way the engine bounds one (§106). This used to be a sixteen-BYTE cap
-// that abandoned the sequence, which was wrong on the CSI side: a padded `CSI 0000000000000002 J` erases
-// the screen as far as the engine is concerned, and giving up on it here left the pictures on a screen
-// whose text had gone. The DCS side never parses its parameters at all, so the bound costs it nothing.
-use super::csi::Params;
-
 /// The most payload bytes buffered for one image. A screen-sized photograph is a megabyte or two of
 /// sixel; 16 MiB leaves generous room for a big one while capping what a single DCS can make cmote
-/// hold. Past it the image is abandoned — the scanner keeps following the DCS to its terminator, so
-/// the rest of the payload still cannot be mistaken for commands, but nothing is decoded.
+/// hold (§12). Past it the picture is abandoned and nothing is decoded — `dcs::Framer`'s cap, since
+/// §111, along with every other rule about where a control string begins and ends.
 const MAX_PAYLOAD: usize = 16 * 1024 * 1024;
 
 /// How many images the session keeps, and how many bytes of decoded pixels they may add up to.
@@ -207,54 +193,22 @@ impl Store {
 	}
 }
 
-/// Where the scanner sits in the byte stream. Only two shapes are tracked in detail — a DCS up to
-/// its final byte (a `q` opens a sixel; anything else is some other DCS to be followed silently) and
-/// a `CSI <digits> J` erase — and every other sequence resets straight back to `Text`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum GraphicsScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC: a CSI starts on `[`, a DCS on `P`, and a lone `c` is RIS.
-	Esc,
-	/// Inside `ESC P <params>`, waiting for the final byte that says which DCS this is.
-	Dcs,
-	/// Inside a sixel payload, accumulating it.
-	Payload,
-	/// Saw ESC inside a payload; a `\` terminates the image.
-	PayloadEsc,
-	/// Following some OTHER DCS (a DECRQSS request, an XTGETTCAP reply) to its terminator,
-	/// accumulating nothing — so its arbitrary data cannot be mistaken for a picture.
-	Other,
-	/// Saw ESC inside another DCS; a `\` ends it.
-	OtherEsc,
-}
-
 /// The image scanner and the placements it has produced. Feed it every byte of shell output; it
 /// returns the events that completed in the chunk (usually none) and keeps its state across calls,
 /// so a picture split over any number of chunks is decoded on the chunk that finishes it.
 #[derive(Debug)]
 pub struct Images {
-	state: GraphicsScan,
-	/// The CSI grammar, shared with the other scanners (§111) — the erases only. The DCS half stays in
-	/// `state` beside it, which is the line `osc.rs` already drew when this module kept its own OSC
-	/// framing: the framer reads CSI and nothing else.
+	/// The CSI grammar, shared with every other scanner (§111) — the erases only.
 	///
-	/// Running the two over the same bytes is SAFER than the single fused machine it replaces, not
+	/// Running two framers over the same bytes is SAFER than the single fused machine they replace, not
 	/// riskier, and the reason is measured in `differential.rs`: an ESC ends a control string for the
 	/// engine as well as opening the next sequence, so there is no payload the engine reads as data and
-	/// a framer reads as a sequence. The framer's ESC handling is unconditional, and being conditional
+	/// a framer reads as a sequence. Both framers' ESC handling is unconditional, and being conditional
 	/// is exactly what the fused machine got wrong.
 	framer: super::csi::Framer,
-	params: Params,
-	payload: Vec<u8>,
-	/// Whether the payload being read has already outgrown `MAX_PAYLOAD`. Kept as a flag rather than
-	/// by abandoning the state, so the DCS is still followed to its terminator.
-	overflowed: bool,
-	/// Where in THIS chunk the escape sequence being read began, for the events that have to be acted
-	/// on before their own bytes reach the engine (see `GraphicsEvent`). `None` once a sequence has run over a
-	/// chunk boundary: its bytes then start at the very beginning of this chunk, which is offset 0.
-	sequence_start: Option<usize>,
+	/// The control-string grammar, shared with `query` (§111) — the sixel payloads, and the RIS that
+	/// throws every picture away. Bounded at [`MAX_PAYLOAD`].
+	strings: super::dcs::Framer<MAX_PAYLOAD>,
 	/// The PRIMARY screen's pictures, anchored to absolute document lines (§40) and living as long as
 	/// the text they sit beside — which is to say until the scrollback evicts them or the session is
 	/// reset.
@@ -272,12 +226,8 @@ pub struct Images {
 impl Default for Images {
 	fn default() -> Self {
 		Self {
-			state: GraphicsScan::default(),
 			framer: super::csi::Framer::default(),
-			params: Params::default(),
-			payload: Vec::new(),
-			overflowed: false,
-			sequence_start: None,
+			strings: super::dcs::Framer::default(),
 			primary: Store::default(),
 			alternate: Store::default(),
 			cell_width: FALLBACK_CELL_WIDTH,
@@ -298,7 +248,21 @@ impl Images {
 		// `CSI 2 J` — which is what `img2sixel; clear` sends — gives both events the SAME offset. The
 		// sort below is stable, so whichever pass ran first wins the tie, and the stream order is draw
 		// then erase: the picture has to go.
-		self.scan_strings(bytes, &mut found);
+		self.strings.feed(bytes, |span, control| match control {
+			// A sixel picture. An empty or undecodable payload produces no event at all — the caller then
+			// reserves no cells either, so a picture cmote cannot draw leaves the screen as it was. An
+			// oversized one never arrives: the framer's cap drops it (§12).
+			super::dcs::Control::String(dcs) if is_sixel(dcs) => {
+				if let Some(image) = sixel::decode(dcs.payload()) {
+					found.push((span.past(), GraphicsEvent::Image(image)));
+				}
+			}
+			// RIS, reported at its own ESC because a reset is acted on before its bytes reach the engine.
+			super::dcs::Control::Escape(escape) if is_reset(escape) => {
+				found.push((span.start(), GraphicsEvent::Reset));
+			}
+			_ => {}
+		});
 		self.framer.feed(bytes, |span, csi| {
 			if let Some(event) = erase(csi) {
 				found.push((span.start(), event));
@@ -306,149 +270,6 @@ impl Images {
 		});
 		found.sort_by_key(|&(offset, _)| offset);
 		found
-	}
-
-	/// The control-string half: sixel payloads, and the RIS that throws every picture away.
-	fn scan_strings(&mut self, bytes: &[u8], found: &mut Vec<(usize, GraphicsEvent)>) {
-		// Any sequence still open from the last chunk began before this one did.
-		self.sequence_start = None;
-		for (index, &byte) in bytes.iter().enumerate() {
-			// The two offsets an event can be reported at: past the byte that finished the sequence,
-			// or at the byte the sequence started on (the beginning of the chunk when it started in an
-			// earlier one).
-			let past = index + 1;
-			match self.state {
-				GraphicsScan::Text => {
-					if byte == ESC {
-						self.begin(index);
-					}
-				}
-				GraphicsScan::Esc => self.after_escape(byte, index, found),
-				GraphicsScan::Dcs => match byte {
-					// A sixel's parameters are `P1;P2;P3`; they change no pixel (see `sixel::decode`)
-					// so they are collected only to be stepped over.
-					b'0'..=b'9' | b';' => {
-						if !self.params.push(byte) {
-							self.state = GraphicsScan::Other;
-						}
-					}
-					// The final byte. `q` with no intermediate is sixel; a DECRQSS (`$q`) or an
-					// XTGETTCAP (`+q`) reaches here with its intermediate already read as a
-					// non-parameter, so it lands in `Other` below.
-					b'q' => {
-						self.payload.clear();
-						self.overflowed = false;
-						self.state = GraphicsScan::Payload;
-					}
-					ESC => self.begin(index),
-					_ => self.state = GraphicsScan::Other,
-				},
-				GraphicsScan::Payload => match byte {
-					ESC => self.state = GraphicsScan::PayloadEsc,
-					BEL | ST => {
-						self.complete(past, found);
-					}
-					_ => {
-						// Past the cap: stop accumulating but keep following the DCS, so the rest of
-						// the payload still cannot be read as commands (§12).
-						if self.payload.len() < MAX_PAYLOAD {
-							self.payload.push(byte);
-						} else {
-							self.overflowed = true;
-						}
-					}
-				},
-				GraphicsScan::PayloadEsc => match byte {
-					b'\\' => self.complete(past, found),
-					// `ESC ESC` inside a payload: still waiting for the terminator's `\`. The engine
-					// keeps the payload it had across the pair too (§111, measured).
-					ESC => self.state = GraphicsScan::PayloadEsc,
-					// A stray ESC that formed no terminator: the picture is malformed, so it is
-					// abandoned rather than guessed at — but the ESC still OPENED whatever follows it
-					// (see `resume_after_escape`), and dropping to ordinary text here threw that away.
-					// RIS is what made it matter: `ESC c` arriving mid-payload left every picture
-					// standing on a screen the reset had just wiped.
-					_ => self.resume_after_escape(byte, index, found),
-				},
-				GraphicsScan::Other => match byte {
-					ESC => self.state = GraphicsScan::OtherEsc,
-					BEL | ST => self.state = GraphicsScan::Text,
-					_ => {}
-				},
-				GraphicsScan::OtherEsc => match byte {
-					b'\\' => self.state = GraphicsScan::Text,
-					ESC => self.state = GraphicsScan::OtherEsc,
-					_ => self.resume_after_escape(byte, index, found),
-				},
-			}
-		}
-	}
-
-	/// Start reading an escape sequence at `index`, remembering where it began — that offset is what
-	/// an erase event is reported at, so the engine can be advanced to just before its bytes.
-	fn begin(&mut self, index: usize) {
-		self.sequence_start = Some(index);
-		self.state = GraphicsScan::Esc;
-	}
-
-	/// Read `byte` as the one that FOLLOWS an ESC, whichever state that ESC arrived in.
-	///
-	/// `index` is where `byte` sits; `self.sequence_start` is where its ESC did, and is where an event
-	/// gets reported from. Taking it from the field rather than as an argument is what keeps the two
-	/// entry points from disagreeing about the offset.
-	fn after_escape(&mut self, byte: u8, index: usize, found: &mut Vec<(usize, GraphicsEvent)>) {
-		match byte {
-			// A CSI, which this machine no longer reads: the framer beside it frames the erases (§111).
-			// Dropping to ordinary text is safe because a CSI's own bytes hold no ESC, so the only thing
-			// this half is waiting for — the next ESC — cannot arrive before the sequence has ended.
-			b'[' => self.state = GraphicsScan::Text,
-			b'P' => {
-				self.params.clear();
-				self.state = GraphicsScan::Dcs;
-			}
-			// RIS: the terminal is reset, so nothing that was drawn survives it.
-			b'c' => {
-				found.push((self.sequence_start.unwrap_or(0), GraphicsEvent::Reset));
-				self.state = GraphicsScan::Text;
-			}
-			ESC => self.begin(index),
-			_ => self.state = GraphicsScan::Text,
-		}
-	}
-
-	/// The same, for an ESC that ENDED a control string rather than opening one out of ordinary text.
-	///
-	/// ESC does both jobs at once in the ANSI state machine, and the engine obeys that: a DCS
-	/// interrupted by an ESC unhooks, and the sequence that ESC introduced is dispatched normally. So
-	/// the string is abandoned — a malformed picture is never guessed at — and the reading carries on
-	/// into the sequence the ESC opened instead of falling back to ordinary text.
-	///
-	/// The ESC sat one byte back, which is the whole reason this is a second entry point:
-	/// `sequence_start` has to move off the abandoned string and onto it. `checked_sub` returning
-	/// `None` means that byte was in the PREVIOUS chunk, which is exactly what a `None` records
-	/// everywhere else here.
-	fn resume_after_escape(
-		&mut self,
-		byte: u8,
-		index: usize,
-		found: &mut Vec<(usize, GraphicsEvent)>,
-	) {
-		self.sequence_start = index.checked_sub(1);
-		self.after_escape(byte, index, found);
-	}
-
-	/// Finish the payload being read: decode it, and hand the picture on if there was one. An
-	/// oversized, empty or undecodable payload produces no event at all — the caller then reserves
-	/// no cells either, so a picture cmote cannot draw leaves the screen exactly as it was.
-	fn complete(&mut self, past: usize, found: &mut Vec<(usize, GraphicsEvent)>) {
-		self.state = GraphicsScan::Text;
-		let payload = std::mem::take(&mut self.payload);
-		if self.overflowed {
-			return;
-		}
-		if let Some(image) = sixel::decode(&payload) {
-			found.push((past, GraphicsEvent::Image(image)));
-		}
 	}
 
 	/// Tell the store how big one cell is in pixels, so a picture's size can be turned into the rows
@@ -613,6 +434,28 @@ fn erase(csi: &super::csi::Csi<'_>) -> Option<GraphicsEvent> {
 		3 => Some(GraphicsEvent::ClearScrollback),
 		_ => None,
 	}
+}
+
+/// Whether a finished control string is a sixel image.
+///
+/// `q` is the final byte, and what separates a picture from the two DCS queries `term/query.rs`
+/// answers is that a sixel has NO intermediate — DECRQSS is `$ q` and XTGETTCAP is `+ q`, on the same
+/// final byte (§41). A private marker rules it out for the same reason: `DCS ? q` is some other
+/// sequence nobody here defines.
+///
+/// A sixel's parameters (`P1;P2;P3` — aspect ratio, background handling, horizontal grid) change no
+/// pixel cmote draws, so they are not read; see `sixel::decode` for why.
+fn is_sixel(dcs: &super::dcs::Dcs<'_>) -> bool {
+	dcs.final_byte() == b'q' && dcs.intermediates().is_empty() && dcs.marker().is_none()
+}
+
+/// Whether a finished escape sequence is RIS, the hard reset that takes every picture with it.
+///
+/// Both parts have to be tested: `ESC c` resets the terminal, and `ESC ( c` designates a character set
+/// and resets nothing at all. Four scanners in this directory used to watch for this with a
+/// "was the previous byte an ESC" flag, which cannot tell those two apart in either direction (§111).
+fn is_reset(escape: &super::dcs::Escape<'_>) -> bool {
+	escape.final_byte() == b'c' && escape.intermediates().is_empty()
 }
 
 #[cfg(test)]

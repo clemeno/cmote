@@ -2301,13 +2301,15 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   program has since written a glyph into, and `reserve_cells` steps its rows with **CUD** instead of LF,
   because a page with no history must never be scrolled by cmote's own bookkeeping.
 - **`term/query.rs`** — the identity-query scanner (§33, §36), the same out-of-band tactic as `cwd` /
-  `modkeys`: a chunk-safe byte state machine (`Queries::feed`) recognising **XTVERSION** (`CSI > q`),
-  **DA3** (`CSI = c`), **DECRQSS** (`DCS $ q <sel> ST`; `m` → `Sgr`, every other selector
-  `Unsupported`) and **XTGETTCAP** (`DCS + q <hex>[;…] ST`). Both private-CSI queries answer only in
-  their default parameter form — the shared `default_params` predicate (empty or all zeros), since a
-  non-zero param on the same final byte is a different private sequence. An unrecognised DCS is
-  followed to its terminator (`DcsIgnore`) so sixel data cannot masquerade as a query, and
-  `MAX_PARAMS` / `MAX_DATA` bound a hostile stream (§12). Reply builders `version_reply` /
+  `modkeys`: since §111 it holds no state machine of its own at all, only the two shared framers
+  (`csi::Framer`, `dcs::Framer`) and the tables that say which question a finished sequence asked —
+  **XTVERSION** (`CSI > q`), **DA3** (`CSI = c`), **DECRQSS** (`DCS $ q <sel> ST`; `m` → `Sgr`, every
+  other selector `Unsupported`) and **XTGETTCAP** (`DCS + q <hex>[;…] ST`). Both private-CSI queries
+  answer only in their default parameter form — the shared `default_params` predicate (absent, or a
+  single zero), since a non-zero param on the same final byte is a different private sequence; both DCS
+  queries insist on no parameters at all. Sixel data cannot masquerade as a query because an ESC is the
+  only thing that can interrupt a control string and an ESC ends it for the engine too (§111, measured),
+  and `MAX_DATA` bounds what a hostile stream can make this scanner hold (§12). Reply builders `version_reply` /
   `da3_reply` / `decrqss_sgr_reply` / `decrqss_unsupported_reply` / `gettcap_reply`;
   `known_capability` states only `TN=xterm-256color` and `Co`/`colors=256`. `term/mod.rs` holds the
   two identity constants — `VERSION` (`cmote(<crate version>)`) and `UNIT_ID` (`00434D45`, a
@@ -2363,16 +2365,17 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   (an image past them is refused **whole**, never clipped), `COLOR_REGISTERS` 256 (a higher index
   clamps), saturating parameters, and per-pixel bounds checks so a lying raster attribute can only lose
   pixels. Unit-tested per command, per colour space and per cap.
-- **`term/graphics.rs`** — the image scanner and store (§41). `Images::feed` is the same chunk-safe byte
-  machine as `cwd`/`osc133`, recognising a sixel DCS (`ESC P <params> q … ST`, with BEL and 8-bit ST
-  accepted, and any other DCS followed silently so a DECRQSS payload cannot be read as a picture) plus
-  `CSI 2 J` / `CSI 3 J` / RIS. Its two event kinds report **opposite** offsets on purpose: a picture past
+- **`term/graphics.rs`** — the image scanner and store (§41). `Images::feed` holds no state machine of
+  its own since §111: `dcs::Framer` cuts out the sixel strings (`ESC P <params> q … ST`, with BEL and
+  8-bit ST accepted) and the RIS, `csi::Framer` the `CSI 2 J` / `CSI 3 J` erases, and what is left here
+  is `is_sixel` / `is_reset` / `erase` deciding what each one means. Its two event kinds report
+  **opposite** offsets on purpose: a picture past
   its DCS (the cursor is only right once everything before it has been drawn), an erase *before* its
   sequence (`CSI 3 J` drops the engine's history, so which placements it takes must be decided first).
   `Placement` carries the absolute `line`, `col`, the reserved `rows`/`cols`, the pixel `width`/`height`
   and an **iced image handle** — minted once at decode so the renderer's texture cache keys off a stable
-  id instead of re-uploading every frame. Caps: `MAX_PAYLOAD` 16 MiB per picture (past it the DCS is
-  still followed, nothing decoded), `MAX_IMAGES` 64 and `MAX_TOTAL_BYTES` 64 MiB, evicted oldest-first;
+  id instead of re-uploading every frame. Caps: `MAX_PAYLOAD` 16 MiB per picture (past it the string is
+  abandoned and nothing decoded), `MAX_IMAGES` 64 and `MAX_TOTAL_BYTES` 64 MiB, evicted oldest-first;
   `clear_screen` / `clear_scrollback` split on the first visible line, `clear` takes everything.
   The erase's parameter is read as a **number** since §106, with the engine's own `next_param_or(0)`
   default: it used to be compared byte-for-byte against `b"2"` and `b"3"`, which agreed with the engine
@@ -2655,6 +2658,24 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   also reports a **sub-parameter** (`Csi::sub_parameters`) rather than acting on one, because the
   policy points two ways: `graphics` must READ `CSI 2:3 J`, which the engine erases on, and `rect` must
   REFUSE `CSI 2:3;5;7$z`, which the engine does nothing with (§111).
+- **`term/dcs.rs`** — the same job for the OTHER door: `ESC`, and everything through it that is not a
+  CSI (§111). One grammar for the DCS control strings (`query`'s DECRQSS and XTGETTCAP, `graphics`'
+  sixel payloads) and for the two-part escape sequences, of which **RIS is the only one anything in
+  cmote acts on**. It replaces six hand-rolled copies: two full DCS machines and four
+  `after_escape && byte == b'c'` watchers, and every one of the four was wrong about `ESC` LF `c`, a
+  reset the engine really performs. The introducer is the CSI grammar over again — marker, params,
+  intermediates, final byte, with the same two refusals — so `csi::Params`, `csi::MAX_INTERMEDIATES`,
+  `csi::passes_through` and `csi::Span` are all shared rather than restated. What is NOT shared is a
+  policy: the payload cap is a const parameter (`osc::Framer`'s pattern), 256 for a selector and 16 MiB
+  for a photograph, and a cap of 0 is the escapes-only framer the RIS watchers want. Three rules
+  measured off `vte`'s own state table and none of them previously obeyed: **CAN and SUB end a string**
+  (both old machines read them into the payload and went on waiting), **DEL and the high bytes are
+  discarded rather than kept** in the payload, and a byte the engine reads through in the INTRODUCER
+  keeps the string. BEL is accepted as a terminator, which is the one deliberate leniency — the engine
+  reads it as a payload byte. What it does NOT frame: CSI, OSC and the SOS / PM / APC strings, each
+  dropped back to ordinary text rather than followed, which is safe because an ESC is the only thing
+  that can interrupt a control string and an ESC ends it for the engine too — the same fact that lets an
+  abandoned string need no state at all.
 - **`term/differential.rs`** — test-only, and the answer to how §106's defects were found (§106). Three of
   them came from reading `vte`'s source by hand and noticing that a constant counted the wrong thing,
   which neither scales nor survives a version bump. This module drives the **actual parser the engine is

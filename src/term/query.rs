@@ -30,44 +30,15 @@
 // reply from the live pen, because only that one needs to read the grid's current attributes.
 //
 // Any sequence can be split anywhere, even between the ESC and the `[`/`P`, because output arrives in
-// arbitrary chunks. The CSI half of that is `csi::Framer`'s (§111); what is left here is a
-// byte-at-a-time machine for the two DCS forms, and the marker-and-final-byte table that says which of
-// the three private CSI queries a finished sequence was.
-
-/// The escape byte that leads every CSI (`ESC [`) and DCS (`ESC P`) sequence.
-const ESC: u8 = 0x1b;
-
-/// The bell, an alternate string terminator some programs use in place of the canonical `ESC \`.
-///
-/// Leniency rather than agreement, and it is worth saying which: `vte` does NOT end a DCS on BEL —
-/// measured, in `differential.rs` — it reads the byte into the payload and keeps going. cmote accepts
-/// it because real emitters send it, and the only thing that turns on it is whether cmote answers a
-/// question about ITSELF one byte earlier than the engine would have stopped reading. Nothing on the
-/// screen depends on it.
-const BEL: u8 = 0x07;
-
-/// ST, the string terminator as a single byte — the C1 form of `ESC \`.
-///
-/// The engine ends a control string on this (`differential.rs` measures that too), and
-/// `term/graphics.rs` has had the same constant for its sixel payloads all along. This module did
-/// not, which is duplicated-grammar drift in its plainest form: one of a pair of control-string
-/// scanners learned a rule and its twin never did, so a DECRQSS ended this way went unanswered while
-/// a picture ended this way drew fine.
-const ST: u8 = 0x9c;
+// arbitrary chunks. Neither half of that framing is this module's any more: `csi::Framer` cuts out the
+// three private CSI forms and `dcs::Framer` the two control strings (§111). What is left here is the
+// only part that was ever query-specific — the marker, intermediate and final-byte tables that say
+// which question a finished sequence asked, and how to answer it.
 
 /// The longest data string we buffer inside a recognised DCS. A DECRQSS selector is one or two
 /// bytes and an XTGETTCAP name list is short; anything longer is malformed or a different DCS
-/// (a sixel image), so the scanner abandons it rather than accumulate without bound (§12).
+/// (a sixel image), so the framer abandons it rather than accumulate without bound (§12).
 const MAX_DATA: usize = 256;
-
-/// Which DCS query a `DCS … q` introduces, decided by the intermediate byte before the `q`
-/// (`$` for DECRQSS, `+` for XTGETTCAP). Carried in the scanner state so the data string that
-/// follows is dispatched to the right reader on the terminator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DcsKind {
-	Decrqss,
-	GetTcap,
-}
 
 /// A DECRQSS request, reduced to what cmote can answer (§33). `Sgr` is the one setting cmote reads
 /// back truthfully — the pen the grid actually paints with; every other setting (cursor shape,
@@ -110,77 +81,19 @@ pub enum Query {
 	Graphics(Graphics),
 }
 
-/// Where the CONTROL-STRING half of the scanner sits in the byte stream. The CSI half is the framer's
-/// (§111), so nothing here tracks a `[` — a recognised `DCS $ q` / `DCS + q` is followed to its
-/// terminator and every other sequence resets straight back to `Text`.
-///
-/// An unrecognised DCS is followed to its terminator all the same (`DcsIgnore`) rather than dropped,
-/// so its arbitrary data — the one place a stream legitimately carries raw bytes — cannot masquerade
-/// as a fresh query. That is about THIS half only: a CSI inside a payload is not a masquerade at all,
-/// because an ESC ends the string for the engine too, which `differential.rs` measures.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-enum QueryScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC; a CSI starts on `[`, a DCS on `P`.
-	Esc,
-	/// Saw `ESC P`; a DCS we answer starts on the `$` or `+` intermediate.
-	Dcs,
-	/// Saw `ESC P $`; a DECRQSS request if the next byte is the `q` final.
-	DcsDollar,
-	/// Saw `ESC P +`; an XTGETTCAP request if the next byte is the `q` final.
-	DcsPlus,
-	/// Inside a recognised DCS's data string, collecting until the terminator.
-	DcsData(DcsKind),
-	/// Saw ESC inside a recognised DCS's data; a `\` completes it (`ESC \` is the terminator).
-	DcsDataEsc(DcsKind),
-	/// Following an unrecognised DCS to its terminator, accumulating nothing.
-	DcsIgnore,
-	/// Saw ESC inside an unrecognised DCS; a `\` ends it.
-	DcsIgnoreEsc,
-}
-
-/// Where an ESC leads, wherever it arrived from.
-///
-/// **ESC does two jobs at once**, and that is the whole reason this is a function rather than one arm
-/// of the loop: it ENDS whatever control string is open AND it OPENS the next sequence. `vte` does
-/// both — a DCS interrupted by an ESC unhooks, and the sequence that ESC introduced is dispatched
-/// normally — so a scanner that did only the first went deaf for exactly the sequence that followed.
-///
-/// This module did, in two states, and the differential harness measured it rather than anyone
-/// noticing: fed `DCS z z z` `CSI > 0 q` `ST`, the engine dispatched the XTVERSION and cmote answered
-/// nothing at all. The cost was a program's query going unanswered until its timeout ran out, for any
-/// control string that ended some way other than `ESC \` — a truncated one, or one interrupted by the
-/// next sequence.
-///
-/// What does NOT change is that the abandoned string goes unanswered. The engine cannot tell a clean
-/// terminator from an interrupted one (`unhook` is called either way), so it would answer; cmote
-/// treats a control string that named no terminator as malformed and replies nothing, which is §54's
-/// rule and the safe direction — an invented answer is worse than a missing one (§60).
-fn after_escape(byte: u8) -> QueryScan {
-	match byte {
-		// A CSI, which this machine no longer reads: the framer beside it frames the three private
-		// forms cmote answers (§111). Ordinary text is safe to fall back to, because a CSI's own bytes
-		// hold no ESC — so the only thing this half waits for cannot arrive before the sequence ends.
-		b'[' => QueryScan::Text,
-		b'P' => QueryScan::Dcs,
-		// ESC ESC: still waiting for the sequence's real first byte.
-		ESC => QueryScan::Esc,
-		_ => QueryScan::Text,
-	}
-}
-
 /// The query sniffer (§33). Feed it every byte of shell output; it returns any identity queries
 /// that completed in the chunk and ignores everything else. Carries its state across calls, so a
 /// query split over a chunk boundary is answered on the chunk that finishes it.
+///
+/// Two framers and no state of its own, which is what §111 left this module as: one grammar for the
+/// three private CSI forms, one for the two control strings, and a table apiece for what they mean.
 #[derive(Debug, Default)]
 pub struct Queries {
-	state: QueryScan,
 	/// The CSI grammar, shared with the other scanners (§111) — the three private forms cmote answers.
-	/// The DCS half stays in `state` beside it, which is the line `osc.rs` drew and `graphics` follows.
 	framer: super::csi::Framer,
-	data: Vec<u8>,
+	/// The control-string grammar, shared with `graphics` (§111). Bounded at [`MAX_DATA`], which is
+	/// where a sixel payload arriving on this scanner gets dropped rather than buffered.
+	strings: super::dcs::Framer<MAX_DATA>,
 }
 
 impl Queries {
@@ -195,8 +108,16 @@ impl Queries {
 	/// to the engine.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Query> {
 		let mut found = Vec::new();
-		self.scan_strings(bytes, &mut found);
-		self.framer.feed(bytes, |span, csi| {
+		// Destructured so both framers can be borrowed in turn while the closures hold `found`.
+		let Self { framer, strings } = self;
+		strings.feed(bytes, |span, control| {
+			if let super::dcs::Control::String(dcs) = control
+				&& let Some(query) = asked_string(dcs)
+			{
+				found.push((span.past(), query));
+			}
+		});
+		framer.feed(bytes, |span, csi| {
 			if let Some(query) = asked(csi) {
 				found.push((span.past(), query));
 			}
@@ -204,112 +125,36 @@ impl Queries {
 		found.sort_by_key(|&(offset, _)| offset);
 		found.into_iter().map(|(_, query)| query).collect()
 	}
+}
 
-	/// The DCS half: DECRQSS and XTGETTCAP, and following every other control string to its terminator
-	/// so that its arbitrary data cannot be read as a query.
-	fn scan_strings(&mut self, bytes: &[u8], found: &mut Vec<(usize, Query)>) {
-		for (index, &byte) in bytes.iter().enumerate() {
-			// Past the byte that finished the string, matching what `Span::past` reports for a CSI, so
-			// the two passes can be merged on one scale.
-			let past = index + 1;
-			match self.state {
-				QueryScan::Text => {
-					if byte == ESC {
-						self.state = QueryScan::Esc;
-					}
-				}
-				QueryScan::Esc => self.state = after_escape(byte),
-				QueryScan::Dcs => {
-					self.state = match byte {
-						b'$' => QueryScan::DcsDollar,
-						b'+' => QueryScan::DcsPlus,
-						ESC => QueryScan::Esc,
-						// Some other DCS (a sixel image, a reply): follow it to its terminator so
-						// its data cannot be mistaken for a query, but read nothing from it.
-						_ => QueryScan::DcsIgnore,
-					};
-				}
-				QueryScan::DcsDollar => {
-					self.data.clear();
-					self.state = match byte {
-						b'q' => QueryScan::DcsData(DcsKind::Decrqss),
-						ESC => QueryScan::Esc,
-						_ => QueryScan::DcsIgnore,
-					};
-				}
-				QueryScan::DcsPlus => {
-					self.data.clear();
-					self.state = match byte {
-						b'q' => QueryScan::DcsData(DcsKind::GetTcap),
-						ESC => QueryScan::Esc,
-						_ => QueryScan::DcsIgnore,
-					};
-				}
-				QueryScan::DcsData(kind) => match byte {
-					// `ESC \` is the canonical string terminator; watch for its ESC.
-					ESC => self.state = QueryScan::DcsDataEsc(kind),
-					// ST as a single byte is the C1 form of `ESC \`, and BEL the alternate terminator
-					// some programs use — see both constants for which of the two the engine agrees on.
-					ST | BEL => {
-						self.complete_dcs(kind, past, found);
-						self.state = QueryScan::Text;
-					}
-					_ => {
-						self.data.push(byte);
-						// Past any real selector or name list: abandon rather than buffer on.
-						if self.data.len() > MAX_DATA {
-							self.state = QueryScan::DcsIgnore;
-						}
-					}
-				},
-				QueryScan::DcsDataEsc(kind) => match byte {
-					b'\\' => {
-						self.complete_dcs(kind, past, found);
-						self.state = QueryScan::Text;
-					}
-					ESC => self.state = QueryScan::DcsDataEsc(kind),
-					// A stray ESC that did not form `ESC \`: abandon this DCS, unanswered — but the ESC
-					// still OPENED whatever follows it (see `after_escape`).
-					_ => self.state = after_escape(byte),
-				},
-				QueryScan::DcsIgnore => match byte {
-					ESC => self.state = QueryScan::DcsIgnoreEsc,
-					ST | BEL => self.state = QueryScan::Text,
-					_ => {}
-				},
-				QueryScan::DcsIgnoreEsc => match byte {
-					b'\\' => self.state = QueryScan::Text,
-					ESC => self.state = QueryScan::DcsIgnoreEsc,
-					_ => self.state = after_escape(byte),
-				},
-			}
-		}
+/// Which query a finished control string is, or `None` when it is not one cmote answers.
+///
+/// The two DCS forms, told apart by their intermediate byte — `$` for DECRQSS, `+` for XTGETTCAP —
+/// which is all that separates them from a sixel image, since all three end in `q` (§41).
+///
+/// Both are defined with NO parameters and no private marker, so a string carrying either is some
+/// other sequence on the same spelling and goes unanswered. `param_count` is what says so, and it
+/// counts an empty parameter: `DCS ; $ q` names two of them, not none.
+fn asked_string(dcs: &super::dcs::Dcs<'_>) -> Option<Query> {
+	if dcs.final_byte() != b'q' || dcs.marker().is_some() || dcs.param_count() != 0 {
+		return None;
 	}
-
-	/// Turn a finished DCS's data string into a `Query`. DECRQSS reads only the SGR setting from
-	/// real state; XTGETTCAP hands its (possibly several) hex-encoded capability names on whole.
-	fn complete_dcs(&mut self, kind: DcsKind, past: usize, found: &mut Vec<(usize, Query)>) {
-		match kind {
-			DcsKind::Decrqss => {
-				// `m` is the SGR selector, the one setting cmote reports truthfully; anything else
-				// is answered unsupported (an honest `ps=0`).
-				let request = if self.data == b"m" {
-					Decrqss::Sgr
-				} else {
-					Decrqss::Unsupported
-				};
-				found.push((past, Query::Decrqss(request)));
-			}
-			DcsKind::GetTcap => {
-				// The names are `;`-separated hex; keep them raw for `known_capability` to decode.
-				let names = self
-					.data
-					.split(|&b| b == b';')
-					.map(<[u8]>::to_vec)
-					.collect();
-				found.push((past, Query::Capabilities(names)));
-			}
-		}
+	match dcs.intermediates() {
+		// DECRQSS. `m` is the SGR selector, the one setting cmote reports truthfully; anything else is
+		// answered unsupported (an honest `ps=0`).
+		[b'$'] => Some(Query::Decrqss(if dcs.payload() == b"m" {
+			Decrqss::Sgr
+		} else {
+			Decrqss::Unsupported
+		})),
+		// XTGETTCAP. The names are `;`-separated hex; keep them raw for `known_capability` to decode.
+		[b'+'] => Some(Query::Capabilities(
+			dcs.payload()
+				.split(|&byte| byte == b';')
+				.map(<[u8]>::to_vec)
+				.collect(),
+		)),
+		_ => None,
 	}
 }
 
@@ -621,7 +466,7 @@ mod tests {
 	#[test]
 	fn a_padded_request_is_still_the_default_one() {
 		let padded = |marker: u8, final_byte: u8, zeros: usize| {
-			let mut bytes = vec![ESC, b'[', marker];
+			let mut bytes = vec![0x1b, b'[', marker];
 			bytes.extend(std::iter::repeat_n(b'0', zeros));
 			bytes.push(final_byte);
 			bytes

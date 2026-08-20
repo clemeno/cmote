@@ -38,6 +38,14 @@ struct Csi {
 	final_byte: char,
 }
 
+/// One control string the parser hooked, in the shape its `hook` receives it.
+#[derive(Debug, PartialEq, Eq)]
+struct Hook {
+	/// The intermediates, which for this parser includes the private marker.
+	intermediates: Vec<u8>,
+	final_byte: char,
+}
+
 /// What the engine's parser made of a chunk: what it dispatched, what it refused, and which control
 /// bytes it ran on the way.
 #[derive(Debug, Default)]
@@ -50,6 +58,16 @@ struct EngineTrace {
 	/// Control bytes executed, including any that arrived INSIDE a sequence — which this parser runs
 	/// without abandoning the sequence around them.
 	executed: Vec<u8>,
+	/// Every control string the parser hooked with `ignore` clear (§111).
+	hooked: Vec<Hook>,
+	/// The payload bytes it was GIVEN — which is not every byte between the final byte and the
+	/// terminator: DEL and the high bytes are discarded on the way (`lib.rs:330`, `:335`).
+	put: Vec<u8>,
+	/// How many strings it unhooked. One per string that ENDED, however it ended — the parser cannot
+	/// tell a clean terminator from an interrupted one, and cmote deliberately can (§54, §60).
+	unhooked: usize,
+	/// Every escape sequence dispatched with `ignore` clear: `ESC c`, `ESC ( B`, a stray ST.
+	escapes: EscapeTrace,
 }
 
 impl vte::Perform for EngineTrace {
@@ -73,6 +91,33 @@ impl vte::Perform for EngineTrace {
 
 	fn execute(&mut self, byte: u8) {
 		self.executed.push(byte);
+	}
+
+	fn hook(&mut self, _params: &vte::Params, intermediates: &[u8], ignore: bool, action: char) {
+		if ignore {
+			self.ignored += 1;
+			return;
+		}
+		self.hooked.push(Hook {
+			intermediates: intermediates.to_vec(),
+			final_byte: action,
+		});
+	}
+
+	fn put(&mut self, byte: u8) {
+		self.put.push(byte);
+	}
+
+	fn unhook(&mut self) {
+		self.unhooked += 1;
+	}
+
+	fn esc_dispatch(&mut self, intermediates: &[u8], ignore: bool, byte: u8) {
+		if ignore {
+			self.ignored += 1;
+			return;
+		}
+		self.escapes.push((intermediates.to_vec(), byte));
 	}
 }
 
@@ -107,6 +152,15 @@ type DifferentialClaim = (&'static str, &'static [u8], fn(&[u8]) -> bool);
 /// The same, plus where in the sequence a stray byte is to be inserted.
 #[cfg(test)]
 type ClaimAt = (&'static str, &'static [u8], usize, fn(&[u8]) -> bool);
+
+/// Every escape sequence one side saw, as its intermediates and its final byte (§111).
+#[cfg(test)]
+type EscapeTrace = Vec<(Vec<u8>, u8)>;
+
+/// What one side made of the control strings in a chunk: the introducers it reported, the payload it
+/// kept, and the escape sequences it saw beside them.
+#[cfg(test)]
+type StringTrace = (Vec<Hook>, Vec<u8>, EscapeTrace);
 
 /// The bytes the engine reads through without ending the sequence, each with a name for the failure
 /// message. Deliberately one of each KIND rather than all 30-odd values: NUL and LF are C0s it
@@ -893,5 +947,230 @@ mod tests {
 				"{what}: and cmote no longer acts on it alone"
 			);
 		}
+	}
+
+	/// What `dcs::Framer` made of a chunk, in the same terms the trace above records: the introducers it
+	/// reported, the payload it kept, and the escape sequences it saw (§111).
+	fn framed_strings(bytes: &[u8]) -> StringTrace {
+		let (mut hooked, mut put, mut escapes) = (Vec::new(), Vec::new(), Vec::new());
+		super::super::dcs::Framer::<4096>::default().feed(bytes, |_, control| match control {
+			super::super::dcs::Control::String(dcs) => {
+				// The engine counts the private marker among the intermediates, so this side has to put
+				// it back to compare like with like.
+				let mut intermediates = Vec::new();
+				intermediates.extend(dcs.marker());
+				intermediates.extend_from_slice(dcs.intermediates());
+				hooked.push(Hook {
+					intermediates,
+					final_byte: char::from(dcs.final_byte()),
+				});
+				put.extend_from_slice(dcs.payload());
+			}
+			super::super::dcs::Control::Escape(escape) => {
+				escapes.push((escape.intermediates().to_vec(), escape.final_byte()));
+			}
+		});
+		(hooked, put, escapes)
+	}
+
+	/// Every shape of DCS introducer worth walking, in the same spirit as [`shapes`] one door along.
+	///
+	/// The final bytes are `q` — every string cmote reads ends in one, and all three of them do — plus
+	/// `|` and `r`, which are the finals of the REPLIES cmote sends (`DCS > | id ST`, `DCS 1 $ r … ST`),
+	/// so a reply looping back through a scanner is covered too.
+	#[cfg(test)]
+	fn string_shapes() -> Vec<(String, Vec<u8>)> {
+		const MARKERS: [Option<u8>; 3] = [None, Some(b'?'), Some(b'>')];
+		const INTERMEDIATES: [&[u8]; 5] = [b"", b"$", b"+", b" ", b"$#"];
+		const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
+		const FINALS: &[u8] = b"q|r";
+
+		let mut out = Vec::new();
+		for marker in MARKERS {
+			for intermediates in INTERMEDIATES {
+				for params in PARAMS {
+					for &final_byte in FINALS {
+						let mut bytes = vec![0x1b, b'P'];
+						bytes.extend(marker);
+						bytes.extend_from_slice(params);
+						bytes.extend_from_slice(intermediates);
+						bytes.push(final_byte);
+						bytes.extend_from_slice(b"m\x1b\\");
+						out.push((
+							format!(
+								"{}{}{}{}",
+								marker.map_or(String::new(), |marker| (marker as char).to_string()),
+								String::from_utf8_lossy(params),
+								String::from_utf8_lossy(intermediates),
+								char::from(final_byte)
+							),
+							bytes,
+						));
+					}
+				}
+			}
+		}
+		out
+	}
+
+	#[test]
+	fn a_string_is_hooked_by_both_or_by_neither() {
+		// The sweep for the second framer, and the same question as the CSI one: not "does this case
+		// work" but "does cmote read this string exactly when the engine hooks it". Both refusals the
+		// engine's DCS states have — a parameter byte after an intermediate, a private marker after the
+		// parameters started — are in here, and so is the marker-BEFORE-parameters spelling that is
+		// legal (§111).
+		let shapes = string_shapes();
+		assert_eq!(
+			shapes.len(),
+			180,
+			"3 markers x 5 intermediates x 4 params x 3 finals"
+		);
+		for (shape, bytes) in shapes {
+			let engine = engine(&bytes);
+			let (hooked, _, _) = framed_strings(&bytes);
+			if engine.hooked.is_empty() {
+				// The engine threw the string away. What must hold then is not that the framer stayed
+				// silent — it is LOOSER than the engine about one thing, `MAX_INTERMEDIATES`, which is 4
+				// here against the 2 the engine counts the private marker into — but that no SCANNER
+				// acts. Neither of the two claims a string with three intermediates: `query` insists on
+				// exactly `$` or `+` and `graphics` on none at all, so both sides ignore it by different
+				// routes, which is the same arrangement `csi::MAX_INTERMEDIATES` documents.
+				assert!(
+					super::super::query::Queries::default()
+						.feed(&bytes)
+						.is_empty(),
+					"{shape}: the engine ignored it, so `query` must not answer"
+				);
+				assert!(
+					graphics::Images::default().feed(&bytes).is_empty(),
+					"{shape}: nor may `graphics` draw it"
+				);
+			} else {
+				assert_eq!(
+					engine.hooked, hooked,
+					"{shape}: the engine hooked {:?}, cmote read {hooked:?}",
+					engine.hooked
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn the_payload_cmote_keeps_is_the_payload_the_engine_was_given() {
+		// Not every byte between the final byte and the terminator reaches the engine's handler: DEL and
+		// the high bytes are discarded on the way in (`lib.rs:330`, `:335`). A scanner comparing a
+		// payload against a known selector — `query` does, for the DECRQSS `m` — has to see exactly what
+		// the engine would have seen, or the two answer differently about the same string.
+		//
+		// BEL is left out of these payloads deliberately: the engine reads one as a payload byte and
+		// cmote ends the string on it, which is the one leniency here and is stated on `dcs::BEL`.
+		for payload in [
+			&b"m"[..],
+			b"m\x7f",
+			b"m\x80\xff",
+			b"\x01\x02m",
+			b"#0;2;0;0;0~~",
+			b"",
+		] {
+			let mut bytes = b"\x1bP$q".to_vec();
+			bytes.extend_from_slice(payload);
+			bytes.extend_from_slice(b"\x1b\\");
+			let engine = engine(&bytes);
+			let (_, put, _) = framed_strings(&bytes);
+			assert_eq!(
+				engine.put, put,
+				"payload {payload:?}: the engine was given {:?}",
+				engine.put
+			);
+			assert_eq!(engine.unhooked, 1, "payload {payload:?}: one string ended");
+		}
+	}
+
+	#[test]
+	fn a_cancel_ends_a_string_for_both() {
+		// CAN and SUB unhook the string and drop the parser to ground (`lib.rs:320-324`), so the ST that
+		// follows terminates nothing. Both of the machines `dcs::Framer` replaces read these two straight
+		// into the payload and went on waiting — so a later terminator completed a string the engine had
+		// thrown away, and `query` would have answered a question that was cancelled (§111).
+		// The two sides report a string at DIFFERENT moments, which is worth stating because it decides
+		// what this test can compare. The engine hooks at the introducer's final byte and unhooks
+		// whenever the string ends, cleanly or not; cmote reports a string only once it is COMPLETE,
+		// because only then does it know whether the string named a terminator (§54). So a cancelled
+		// string is a hook and an unhook there, and nothing at all here — and nothing is what both sides
+		// ACT on, which is the agreement that matters.
+		for cancel in [0x18_u8, 0x1a] {
+			let bytes = [0x1b, b'P', b'$', b'q', b'm', cancel, 0x1b, b'\\'];
+			let engine = engine(&bytes);
+			assert_eq!(
+				engine.unhooked, 1,
+				"{cancel:#04x}: the engine unhooked at the cancel"
+			);
+			assert_eq!(
+				engine.escapes,
+				vec![(Vec::new(), b'\\')],
+				"{cancel:#04x}: and read the ST after it as an escape sequence of its own"
+			);
+			let (hooked, _, escapes) = framed_strings(&bytes);
+			assert!(
+				hooked.is_empty(),
+				"{cancel:#04x}: cmote completed no string, so it answers nothing"
+			);
+			assert_eq!(
+				escapes,
+				vec![(Vec::new(), b'\\')],
+				"{cancel:#04x}: and reads the same stray ST the engine did"
+			);
+			// The scanner that would have answered, asked directly: a cancelled DECRQSS gets no reply.
+			assert!(
+				super::super::query::Queries::default()
+					.feed(&bytes)
+					.is_empty(),
+				"{cancel:#04x}: and `query` stays silent"
+			);
+		}
+	}
+
+	#[test]
+	fn a_reset_the_engine_performs_is_one_cmote_sees() {
+		// RIS is the one escape sequence anything in cmote acts on, and the engine really performs it —
+		// so a scanner that misses one keeps state a reset threw away. Four scanners watched for this
+		// with "was the previous byte an ESC", which is wrong for every byte the escape state reads
+		// through (§111).
+		for (byte, name) in READ_THROUGH {
+			let bytes = [0x1b, byte, b'c'];
+			assert_eq!(
+				engine(&bytes).escapes,
+				vec![(Vec::new(), b'c')],
+				"{name}: the engine dispatches the reset"
+			);
+			let found = graphics::Images::default().feed(&bytes);
+			assert!(
+				matches!(found.as_slice(), [(_, graphics::GraphicsEvent::Reset)]),
+				"{name}: and cmote sees it, found {found:?}"
+			);
+		}
+
+		// Inside a sixel payload, where §111 found the defect: the ESC ends the picture AND opens the
+		// reset, and the picture must not survive it.
+		let bytes = b"\x1bPq#0;2;0;0;0~~\x1bc";
+		assert_eq!(engine(bytes).escapes, vec![(Vec::new(), b'c')]);
+		let found = graphics::Images::default().feed(bytes);
+		assert!(
+			matches!(found.as_slice(), [(_, graphics::GraphicsEvent::Reset)]),
+			"a reset interrupting a payload, found {found:?}"
+		);
+	}
+
+	#[test]
+	fn a_charset_designation_is_not_a_reset_for_either() {
+		// `ESC ( c` shares RIS's final byte and resets nothing — the engine dispatches it with the `(`
+		// among its intermediates, which is why `Escape` reports both parts and `graphics` tests both.
+		let bytes = b"\x1b(c";
+		assert_eq!(engine(bytes).escapes, vec![(vec![b'('], b'c')]);
+		assert!(
+			graphics::Images::default().feed(bytes).is_empty(),
+			"and cmote does not read it as a reset"
+		);
 	}
 }

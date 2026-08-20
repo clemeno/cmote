@@ -49,6 +49,7 @@
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
+mod dcs; // frames the DCS control strings and escape sequences out of the stream, once, for the scanners that read them (§111)
 #[cfg(test)]
 mod differential; // drives the engine's own parser beside cmote's scanners and compares them (§106)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
