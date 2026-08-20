@@ -14,7 +14,7 @@
 // already taken, wearing a different costume:
 //
 //   Copy=<base64>              writes the system clipboard. That is OSC 52 write, which is REFUSED
-//                              (TERMINAL_COMPATIBILITY_PLAN §6). A remote must not poison the local
+//                              (TERMINAL_COMPATIBILITY_PLAN part 6). A remote must not poison the local
 //                              clipboard, and it must not get to do it through a second door.
 //   SetProfile / SetColors /   repaint the theme. That is the fixed-scheme refusal (§6). The colour
 //   SetBackgroundImageFile     scheme is chrome the USER chose. `SetBackgroundImageFile` is worse

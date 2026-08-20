@@ -6075,7 +6075,7 @@ make every chip resize the moment a command started, and the whole strip would t
   announcement cmote has read since §17, `9;4` is this, and a bare `9;<text>` is a desktop
   notification which stays **refused**. The line is not the OSC number, it is whether the effect
   escapes the tab: progress cannot leave the chip it belongs to, a notification lands on the user's
-  desktop and outlives the session. Recorded in TERMINAL_COMPATIBILITY_PLAN §6, along with the two
+  desktop and outlives the session. Recorded in TERMINAL_COMPATIBILITY_PLAN part 6, along with the two
   other spellings of the same refusal (`OSC 777`, `kitty 99`).
 - **A malformed report is a no-op, never a reset.** Every byte here is chosen by the remote, so an
   unknown `st`, a non-numeric field, an `st=1` carrying no share, and a number too big for a `u32`
@@ -6108,7 +6108,7 @@ make every chip resize the moment a command started, and the whole strip would t
 ### Deliberately not
 
 - **No desktop notifications, in any of their four spellings** — see above and
-  TERMINAL_COMPATIBILITY_PLAN §6. This is a decision, not a deferral.
+  TERMINAL_COMPATIBILITY_PLAN part 6. This is a decision, not a deferral.
 - **No progress in the status bar.** That bar already shows the file transfer queue's progress
   (§16, §17), and two unrelated progress bars in one strip is how a user learns to read neither.
 - **No history of readings, and no rate or ETA.** The remote reports a share; inventing a
@@ -6138,7 +6138,7 @@ costume**, and a generic implementation would have quietly reopened both:
 
 | key | what it actually is |
 |---|---|
-| `Copy=<base64>` | a system-clipboard write — **OSC 52 write**, refused (TERMINAL_COMPATIBILITY_PLAN §6) |
+| `Copy=<base64>` | a system-clipboard write — **OSC 52 write**, refused (TERMINAL_COMPATIBILITY_PLAN part 6) |
 | `SetProfile=` / `SetColors=` | a theme repaint — the **fixed-scheme** refusal (§6) |
 | `SetBackgroundImageFile=` | both of the above, plus a remote naming a file for cmote to **decode** (§41) |
 
@@ -6453,7 +6453,7 @@ next to "scan it out", "borrow a bit", and "accept the engine's limit" — is **
   lines. What it is *not* is safe to keep: every method of that trait has a default empty body, so a
   forwarding gap, today's or a future version's, compiles cleanly and silently drops a sequence — the
   §57 hazard again, minus the `const` assertion that made §57's catchable. Nothing outside a
-  conformance suite emits DECSLRM. Costed in TERMINAL_COMPATIBILITY_PLAN §5.
+  conformance suite emits DECSLRM. Costed in TERMINAL_COMPATIBILITY_PLAN part 5.
 - **No other misparse is known.** This module has one member because the audit found one. The near
   neighbours were checked and are clean: `CSI ? Pm r` (XTRESTORE) and `CSI ? Pm s` (XTSAVE) both carry
   a marker the engine has no arm for, and DECSTBM's `r` is the vertical region the engine really
@@ -6757,7 +6757,7 @@ the query fails the one that exists to catch it.
 
 ### The audit that followed
 
-With the last CSI row closed, the OSC and CSI tables of `TERMINAL_COMPATIBILITY_PLAN.md` §8 were swept
+With the last CSI row closed, the OSC and CSI tables of `TERMINAL_COMPATIBILITY_PLAN.md` part 8 were swept
 against `vte-0.15.0`'s dispatch arms and `alacritty_terminal-0.26.0`'s `Handler` impl — the question
 being *which trait methods are left at their empty default*, which is the only reading that catches a
 sequence the engine parses and then silently drops. Six rows disagreed with the code, and the doc now
@@ -7119,7 +7119,7 @@ with no reader is a store with no purpose.
 ### What it cost
 
 Two tests (~30 lines with their comments), plus corrected rows and paragraphs across
-`TERMINAL_COMPATIBILITY_PLAN.md` §6, §7, §8's legend, the two rows themselves — now four — the closing
+`TERMINAL_COMPATIBILITY_PLAN.md` parts 6 and 7, part 8's legend, the two rows themselves — now four — the closing
 audit prose, the header state paragraph and the Evidence appendix. 1041 tests. **No behaviour changed and
 no answer changed**: the two partial rows became a ✅ and a 🛑 apiece because that is what they had been all
 along. The rows just stopped claiming more than they knew, and the cheapest refusal in the project stopped
@@ -10456,7 +10456,7 @@ one end renumbered and the other not would select from a prompt to a line that n
 (mode 69) ❌ → ✅, DECIC / DECDC ❌ → ✅, and SL / SR keep their ✅ while losing the refusal they had
 carried since §100.
 
-**The verdict this reverses was refused twice, and on one sentence.** TERMINAL_COMPATIBILITY_PLAN §5
+**The verdict this reverses was refused twice, and on one sentence.** TERMINAL_COMPATIBILITY_PLAN part 5
 costed the build in detail and turned it down both times, always at the same paragraph: every
 `Handler` method has a default empty body, so a method left unforwarded — or one a future
 `alacritty_terminal` adds — compiles cleanly and silently drops a sequence, and *"§57's could be
@@ -11728,9 +11728,14 @@ compat plan's Evidence section is how §106 and §107 justify themselves.
 - **The glossary is 35 terms, chosen by reading `term/` and the type list.** A word that only
   ever appears in `ssh/` or `ui/` prose may be missing, and the way that surfaces is somebody
   looking a word up and not finding it.
-- **The `§` numbering is still two styles** — `## 44. Title` for the older sections, `## §102 —
-  Title` for the newer. Both cite as `§NN`, so 4,314 citations are unaffected; the headings get
-  normalised before the renames start.
+- ~~**The `§` numbering is still two styles**~~ — `## 44. Title` for the older sections, `## §102 —
+  Title` for the newer. **Done**, and every one of PLAN's 110 headings is `## §NN — Title` now. §111
+  went looking for the leftovers and found something worse next door: the compatibility plan numbered
+  its own nine chapters `## 6. Title` and cited them as `§6`, in the same range as PLAN's own §1–§8 —
+  so a reader following `§6` from that document landed on the connection-and-authentication flow
+  rather than on the refusals it meant, and one sentence there used `§1` for itself and `§25` for
+  PLAN. Its chapters are **parts** now, 154 citations rewritten, with the convention stated where the
+  document opens. PLAN's side already spelled the file name out when it crossed over.
 - **`AGENTS.md` is prose, so nothing enforces it.** The gate and the lint table are enforced; "one
   file header per module" and "no `allow`" are not, and a reader who skips the file is not stopped
   by anything.

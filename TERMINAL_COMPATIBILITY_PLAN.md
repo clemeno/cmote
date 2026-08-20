@@ -5,6 +5,13 @@ documented remote-terminal-application UX**, and what each remaining gap would c
 entry is a sequence specified in an official or widely-adopted source — nothing here is
 speculative.
 
+**How this document cites itself.** Its own nine chapters are **parts** — `part 0` to `part 8` — and
+every `§NN` is a section of [`PLAN.md`](PLAN.md). They used to be numbered the same way, and for the
+low numbers that was not a style difference but an ambiguity: a reader following `§6` from here landed
+on PLAN's connection-and-authentication flow rather than on the refusals, and one sentence in part 2
+managed to use `§1` for this document and `§25` for PLAN's. §111 renamed them. PLAN's side of the
+convention was already unambiguous — it writes the file name out when it means a part of this one.
+
 **Rewritten 2026-07-29, after the §23 engine swap.** The baseline is now
 **`alacritty_terminal` 0.26** — a full VT implementation — replacing the old **`vt100`
 0.16.2** subset. The previous edition of this document was written against `vt100` and framed
@@ -13,18 +20,18 @@ subset that could neither parse nor represent most of the spec. **That ceiling i
 remains is a much smaller, concrete set of genuine gaps, grouped below by where the work lives.
 
 **State as of §42.** Every *engine-independent* item this document ever listed is now either shipped
-or refused with its reason recorded: input (§2), query→reply (§3) and the rendering/attribute layer
-(§4) are closed. §6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
+or refused with its reason recorded: input (part 2), query→reply (part 3) and the rendering/attribute layer
+(part 4) are closed. Part 6 holds what cmote refuses on purpose. §36 also *corrected* this document: blink was
 listed as cmote's policy choice when in fact the engine drops the attribute entirely — and **§60's audit
-corrected it again**, reopening §3 by one row (`CSI ? 4 m`, a query nothing answered) and fixing five
-more rows in §8 that had drifted from the crates; **§61 then closed that row**, so §3 stands again.
+corrected it again**, reopening part 3 by one row (`CSI ? 4 m`, a query nothing answered) and fixing five
+more rows in part 8 that had drifted from the crates; **§61 then closed that row**, so part 3 stands again.
 **§62 corrected two more in the same direction** — `CSI 1–10 t` and ENQ answerback were credited to
-cmote as refusals nothing in cmote performs — while splitting §8's refusals into **🛑** (cmote's code
+cmote as refusals nothing in cmote performs — while splitting part 8's refusals into **🛑** (cmote's code
 refuses it) and **🤷** (nothing does; it dies upstream). **§63 then took the one item that split turned
 up as work**: OSC 52's refusal moved from an inherited crate default plus a catch-all to a stated
 `osc52: Osc52::Disabled`, with a test on the field. No row changed status; the mechanism behind two of
 them did.
-**§64 ran the same check over the colour rows** — the last partial rows in §8's OSC table — and found one
+**§64 ran the same check over the colour rows** — the last partial rows in part 8's OSC table — and found one
 mark covering two opposite answers and one cost that does not exist: `OSC 4` and `OSC 10 / 11 / 12`
 answer a query fully and refuse a set, and the note charged the refused set with a full-screen repaint
 that never happens, since `mark_fully_damaged` sets a bool nothing in cmote reads. Both rows now name
@@ -33,7 +40,7 @@ each of them a query answered in full and a set refused on purpose. Each is now 
 **§65 then audited every remaining partial row against the crates**, split seven more the same way,
 re-marked `BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote
 never drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight
-bytes (mode 2026, and §7). **§66 split the last two and retired the partial class**: every row in §8 now states
+bytes (mode 2026, and part 7). **§66 split the last two and retired the partial class**: every row in part 8 now states
 one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
 gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
 **§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
@@ -42,12 +49,12 @@ leaning on the reader found one supported sequence with no row at all (`1005`, U
 unsupported spelling with none (`CSI ? 6 n`, shipped in §82), one row carrying two different reports (DSR, now `5n` and
 `6n`), and seven rows whose extent had been left to the reader. **§68 then split the last rows that stated
 two answers in one** — `OSC 0`, `OSC 8`, DECSCUSR, XTSMGRAPHICS, DECKPAM, charset designation and the
-XTMODKEYS query — so §8 now holds one answer and one mechanism per row, with no exceptions left over.
+XTMODKEYS query — so part 8 now holds one answer and one mechanism per row, with no exceptions left over.
 **§69 then cashed one of those splits in, which is the first time this sequence of audits produced a
 feature rather than a correction.** `OSC 1` (icon name) had been half of a single ❌ row; alone, it was
 answerable, and the answer was that cmote has a tab strip to put it on and two shells on one host that
 today look identical. It is now scanned by cmote itself and drawn on the chip after the endpoint
-(`term/icon.rs`). Its other half went the other way: the icon half of `OSC 0` is refused, and §6 records
+(`term/icon.rs`). Its other half went the other way: the icon half of `OSC 0` is refused, and part 6 records
 why. One ❌ row became one ✅ and one 🛑.
 **§70 then found the reverse — a row whose *reason* had expired without anyone noticing.** `iTerm 1337
 File` carried ❌ because inline images "need an image-format decoder": true when it was written, and untrue
@@ -78,13 +85,13 @@ asking.** DECSLRM — left/right margins — read `❌ **safely**`, a mark with 
 which is the partial mark §66 retired wearing a coat. Both halves of the row were re-derived: the
 *capability* stays unbuilt, because unlike a soft reset it has no shorthand to translate into and the
 delegating `Handler` wrapper that would build it makes cmote a second writer of engine state; and the
-*traffic* claim §5 rested on — "essentially nothing emits DECSLRM" — was wrong, `xterm-256color`
+*traffic* claim part 5 rested on — "essentially nothing emits DECSLRM" — was wrong, `xterm-256color`
 declaring `mgc`, `smglp`, `smglr` and `smgrp`, though none of them from an init or reset string, which is
 the difference from §72. What did move is the mark. ❌ is defined here as a sequence that *could still
 land*, and since §57 this one cannot: `term/cancel.rs` cancels the final byte in flight, twenty-two tests
 pin it, and the legend names §57 itself as the reason the 🛑 / 🤷 split exists in the column. So the row
 is **🛑**, the capability's ❌ moves to the row that actually carries it (mode 69, DECLRMM), and the 🛑
-legend widens to say that a refusal cmote performs may be taken on §5's price as well as §6's policy.
+legend widens to say that a refusal cmote performs may be taken on part 5's price as well as part 6's policy.
 **§74 asked the same question one row further down the same table and got the third possible answer:
 build it.** DECST8C (`CSI ? 5 W` — clear every tab stop, then set one every eight columns) read ❌
 because `vte` parses it and `alacritty_terminal` leaves `Handler::set_tabs` at the trait's empty default.
@@ -107,7 +114,7 @@ translate into. Put to §74's it answers no again: nothing in cmote refuses it a
 repair, so a 🛑 would mean writing refusal code for a sequence that already dies in `vte`'s empty
 `set_scp`. What is left is the mark the legend describes word for word — **🤷**, a decision with nothing
 behind it, dying in a defaulted `Handler` method — and the work the row produced is the decision itself,
-which §6 had never stated. Four consecutive rows, four different answers: §72 translate, §73 refuse, §74
+which part 6 had never stated. Four consecutive rows, four different answers: §72 translate, §73 refuse, §74
 translate again, §75 shrug, on the record.
 **§76 overturned §75 in the very next section, and landed on a mark neither had offered.**
 Asked to build SCP rather than to classify it, the re-derivation found what both readings had walked
@@ -186,34 +193,34 @@ code. The exclusion runs both ways, too: the two OSC 9 sub-codes cmote *does* ho
 never quietly take a shipped feature with it. **🤷 8 → 6, 🛑 28 → 30**, with the row count unmoved.
 **§39 touched this
 surface without moving a row** — the find bar's match washes are a local highlight, not a sequence
-answered; see the note in §4. **§40 likewise moves no row**: it changed the *coordinate space* the
+answered; see the note in part 4. **§40 likewise moves no row**: it changed the *coordinate space* the
 selection and the copy path work in (viewport rows → absolute document lines), which is a cmote-side
-refactor of reads the engine already served; see the note in §4 and the `term/screen.rs` evidence.
+refactor of reads the engine already served; see the note in part 4 and the `term/screen.rs` evidence.
 
 **§41 is the first change in a long while that DOES move rows — and it corrects this document's biggest
-standing claim.** §5 and §7 said the last item of real UX value, graphics, needed *both* an engine fork
+standing claim.** Part 5 and part 7 said the last item of real UX value, graphics, needed *both* an engine fork
 and a renderer compositor. The compositor half was true. The fork half was not: the engine's DCS hooks
 are no-op debug logs, so a sixel payload is already followed to its terminator and dropped, and the
 sequence can be scanned out of the same byte stream that reaches the engine — the tactic §17, §9, §33 and
 §34 all use. So **cmote now draws sixel images** (`term/sixel.rs`, `term/graphics.rs`, PLAN §41), answers
 **XTSMGRAPHICS**, and amends the engine's own **DA1** reply to advertise attribute 4. The rows that moved
-are listed in §5 and §8; kitty graphics, iTerm2 OSC 1337 and ReGIS did not move, and the reason changed
+are listed in part 5 and part 8; kitty graphics, iTerm2 OSC 1337 and ReGIS did not move, and the reason changed
 from "the engine cannot" to "their payloads are PNG/JPEG, which is a decoder dependency and an attack
-surface" (§5). **Half of that second reason expired in §53 and the rows were corrected in §70**: the
+surface" (part 5). **Half of that second reason expired in §53 and the rows were corrected in §70**: the
 decoder is in the tree, so iTerm2's `File=` is now a 🛑 cmote's own code performs, and kitty keeps its ❌
 for the protocol rather than the parser.
 
 **§42 moves no row back the other way, but it does fix a defect on this surface.** Word and line
 selection (PLAN §42) is local UX, yet it needed the engine's line-wrap flag — and reading it exposed
 that cmote's **copy across a wrapped line was inserting a newline** where every other terminal unwraps.
-See the note at the end of §4 and the `term/screen.rs` evidence for `line_wrapped`.
+See the note at the end of part 4 and the `term/screen.rs` evidence for `line_wrapped`.
 
 **Update trigger.** This document tracks only the *terminal* surface — `src/term/` and
 `src/ui/grid.rs`. Update it when, and only when, a change touches those: a query newly answered, a
 mode newly honoured, a sequence newly rendered, or an engine bump that moves the ceiling. Editor,
 files-pane, and window-chrome work does **not** belong here. When terminal work does land, the edit
-is two places: the gap list in §2–§5 (or §6, if the answer is a deliberate refusal — a decision is
-also an edit) and the matching row in the §8 matrix.
+is two places: the gap list in parts 2–5 (or part 6, if the answer is a deliberate refusal — a decision is
+also an edit) and the matching row in the part 8 matrix.
 
 Sources cited by tag:
 
@@ -229,7 +236,7 @@ File:line evidence for the audited claims is collected in the [Evidence](#eviden
 
 ---
 
-## 0. The new baseline
+## Part 0 — The new baseline
 
 `alacritty_terminal` 0.26 parses and represents the full VT set cmote cares about, and —
 unlike `vt100` — **generates host replies itself** (through `Event::PtyWrite`), so the
@@ -254,7 +261,7 @@ Effort is now just *where the work lives*, not a hard wall:
 
 ---
 
-## 1. Baseline — what already works
+## Part 1 — Baseline: what already works
 
 So the gaps read against a known floor. As of v3.0 (§23) cmote:
 
@@ -322,9 +329,9 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
 
 ---
 
-## 2. Input — closed (all `[keymap]`, engine-independent)
+## Part 2 — Input — closed (all `[keymap]`, engine-independent)
 
-`modifyOtherKeys` (§1), the **kitty keyboard protocol** (§25) and now **DECKPAM** (§36) are all
+`modifyOtherKeys` (part 1), the **kitty keyboard protocol** (§25) and now **DECKPAM** (§36) are all
 **done**. Nothing in the input class is open.
 
 Kitty shipped by flipping the engine's `kitty_keyboard` config flag on — so the engine tracks the
@@ -345,7 +352,7 @@ DECKPAM, so the `ESC O B`-style bytes a program expects are what DECCKM alone al
 
 ---
 
-## 3. Query → reply — closed again (`[reply]`)
+## Part 3 — Query → reply — closed again (`[reply]`)
 
 This section read **closed** from §36 until §60's audit found it was not: `CSI ? 4 m` (XTQMODKEYS,
 "what modifyOtherKeys level are you at?") is dispatched by `vte` to `report_modify_other_keys`, left at
@@ -398,7 +405,7 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   interruption advance, because a position is only true where the question sat: a version string and a unit id
   can wait for the end of a chunk, a cursor cannot. The numbers are the engine's own
   `grid.cursor.point`, so this spelling and the ANSI one cannot come to disagree. **Only `Ps = 6` is
-  answered** — the other nine values xterm defines describe the user's machine, and are refused; see §6.
+  answered** — the other nine values xterm defines describe the user's machine, and are refused; see part 6.
 
 - **The locator's two negatives** (`CSI ? 55 n` / `? 56 n`) → `CSI ? 53 n` "no locator" and
   `CSI ? 57 ; 0 n` "cannot identify" (§93). The two members of that same DEC-private family that are
@@ -406,7 +413,7 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
 
 - **The colour scheme** (`CSI ? 996 n`) → `CSI ? 997 ; 1 n`, dark (§98). The newest reply here and the
   only one whose sequence is nobody's standard: contour's, adopted by ghostty, kitty and GNOME's vte,
-  and asked by neovim, helix, zellij and tmux. Answered from a **constant** — the scheme is fixed (§6)
+  and asked by neovim, helix, zellij and tmux. Answered from a **constant** — the scheme is fixed (part 6)
   and `palette::DEFAULT_BG` is `#1e1e1e` — with a test that fails if the background ever stops being
   dark, so the constant cannot outlive its own premise. It narrows the rule §96 wrote for dialects: a
   reply must not name the program or the machine, and "my background is dark" names neither. It is not
@@ -429,11 +436,11 @@ ranger's previewer read at startup. Since §41 cmote rewrites that reply on its 
 input) or suppressing the engine's (that would mean cutting bytes out of an inbound stream mid-sequence).
 
 The one remaining reply-class sequence, **answerback (ENQ `0x05`)**, is refused as policy rather than
-carried as a gap — see §6. XTQMODKEYS was the opposite while it lasted: not refused, just missed.
+carried as a gap — see part 6. XTQMODKEYS was the opposite while it lasted: not refused, just missed.
 
 ---
 
-## 4. Rendering / attributes — closed at this layer
+## Part 4 — Rendering / attributes — closed at this layer
 
 **OSC 8 hyperlinks are now done** (§24), **including the Ctrl-hover underline** (v4.0.0) — the seam
 surfaces the per-cell URI (`Cell::hyperlink`), Ctrl+click and a context-menu Open/Copy follow it,
@@ -445,7 +452,7 @@ this table listed **blink (SGR 5/6)** as `[policy]` — "the engine stores the b
 by choice". That was wrong, and re-checking it was part of §36: `vte` parses SGR 5/6 into
 `Attr::BlinkSlow` / `BlinkFast`, but `alacritty_terminal` 0.26's `terminal_attribute` has **no arm
 for either**, and its cell `Flags` carry **no blink bit at all** — the attribute is dropped before
-cmote can see it. The row moved to §5 as an `[engine-limit]`. (cmote's no-animation-timer policy is
+cmote can see it. The row moved to part 5 as an `[engine-limit]`. (cmote's no-animation-timer policy is
 still true and still applies to the *cursor*, whose blink the engine does track.)
 
 **OSC 133 shell-integration is now done** (§34) — the stream scanner this row once anticipated
@@ -461,7 +468,7 @@ walking *older* commands from the keybind (a prompt-tick click already reaches a
 on-screen matches are washed per cell (`ui/grid.rs::match_mask`, a row-major mask built once per frame
 and read in `cell_style` between the inverse/cursor swap and the selection fill). It is recorded here
 only because it touches this document's surface — `src/term/` and `ui/grid.rs` — and to be explicit
-that **no row of §2–§6 or the §8 matrix moves**: no host request produces it, no attribute is newly
+that **no row of parts 2–6 or the part 8 matrix moves**: no host request produces it, no attribute is newly
 honoured, and nothing about what a remote program can ask for changed. A local highlight over cells the
 program already painted is cmote's own UX, like the selection it sits under.
 
@@ -469,7 +476,7 @@ program already painted is cmote's own UX, like the selection it sits under.
 selection's endpoints are now absolute line indices instead of viewport rows, so the grid resolves the
 row it is drawing into the line that row shows (`Marks::top_line` + `Screen::line_at`) and the copy path
 reads lines straight out of the retained history (`Screen::line_cell`) rather than only the visible
-grid. The engine is read in one more way and driven in none: **no row of §2–§6 or the §8 matrix moves**.
+grid. The engine is read in one more way and driven in none: **no row of parts 2–6 or the part 8 matrix moves**.
 It is recorded here because the mapping now lives on this document's surface (`term/screen.rs`) and is
 the one place a viewport row and a document line meet — the same coordinate the OSC 133 marks (§34) and
 the search matches (§35, §39) are already stored in.
@@ -477,7 +484,7 @@ the search matches (§35, §39) are already stored in.
 **§41 adds a THIRD layer to the grid, and this one does answer a sequence.** Inline sixel images
 (`term/sixel.rs`, `term/graphics.rs`, `ui/grid.rs`) are the first drawing cmote does on a remote
 program's instruction that the engine has no representation for at all — so unlike §39 and §40, rows
-move: the sixel DCS, XTSMGRAPHICS, DECSDM and DA1's attribute 4 (§3, §5, §8). Three things make it fit
+move: the sixel DCS, XTSMGRAPHICS, DECSDM and DA1's attribute 4 (part 3, part 5, part 8). Three things make it fit
 the layer rather than sit beside it:
 
 - **The picture's cells are real cells.** `term::mod` reserves them by feeding the engine ECH + LF, so
@@ -497,7 +504,7 @@ the layer rather than sit beside it:
 **§42 reads one more engine flag and answers no sequence.** Word (double-click) and line (triple-click)
 selection is local UX in the §39/§40 family — nothing a remote can ask for — but it appears here because
 it put a new reader on the seam: `Screen::line_wrapped(line)`, the engine's `WRAPLINE` flag, which says
-whether a document line is continued by the next. **No row of §2–§6 or the §8 matrix moves.** Worth
+whether a document line is continued by the next. **No row of parts 2–6 or the part 8 matrix moves.** Worth
 recording anyway, because reading that flag corrected a real defect on this surface: a copy across a
 wrapped line used to paste a **newline into the middle of a logical line** (a long path, a long command),
 where every other terminal unwraps. `Selection::extract` and the HTML copy now join a wrapped row to the
@@ -525,7 +532,7 @@ attributes having no business clearing a cell-protection setting.
 
 ---
 
-## 5. The new engine's own ceiling (`[engine-limit]`)
+## Part 5 — The new engine's own ceiling (`[engine-limit]`)
 
 `alacritty_terminal` 0.26 does not parse or represent these, so they would need an engine
 fork/upgrade or a scanner bolted on beside it. This is the whole of the remaining hard ceiling —
@@ -561,12 +568,12 @@ short, and since §41 nothing left in it is high value:
 - **iTerm2 inline images (`OSC 1337 File=`)** — 🛑 since §70, and no longer in this section on cost.
   `image` has been a direct dependency since §53, so the decoder this bullet once charged for is already
   in the tree; what stops the sequence is `term/iterm.rs`, by allow-list and by payload cap. The decision
-  it carries out is §6's, and it is about consent rather than parsers: a REMOTE must not get one run on
+  it carries out is part 6's, and it is about consent rather than parsers: a REMOTE must not get one run on
   bytes it pushed into the terminal stream unasked, which is a different question from a file the user
   pointed at and asked to open. `[vendor]`.
 - **Blink** (SGR 5/6) — `vte` parses it (`Attr::BlinkSlow` / `BlinkFast`), but the engine's
   `terminal_attribute` has no arm for either and its cell `Flags` hold no blink bit, so the attribute
-  never reaches the grid (§36, moved here from §4). Showing it would take a per-cell scanner beside
+  never reaches the grid (§36, moved here from part 4). Showing it would take a per-cell scanner beside
   the engine (as `modkeys` is) *plus* the repaint timer cmote deliberately does not run. `[ECMA-48]`,
   low value.
 - **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
@@ -668,7 +675,7 @@ short, and since §41 nothing left in it is high value:
   What **§57** changed is the cost of *refusing* it. DECSLRM shares its final byte with save-cursor,
   and `vte`'s arm for that byte ignores its parameters, so the refusal was not free: `CSI 5;70 s`
   *saved the cursor*, overwriting a value the program meant to restore from later. cmote now cancels
-  that byte in flight, so the request does nothing at all — the `s` row in §8, which §73 re-marked 🛑 so
+  that byte in flight, so the request does nothing at all — the `s` row in part 8, which §73 re-marked 🛑 so
   the column says who performs that, PLAN §57 and §73, and `term/cancel.rs`.
 
   *[§102 on the traffic paragraph, which is the part that came out best. It is still true that no
@@ -716,11 +723,11 @@ short, and since §41 nothing left in it is high value:
   the engine goes on being the only writer of its own tab table. This is the second row moved by asking
   whether a missing sequence has a **translation** rather than a price — the same question §73 put to
   margins and got "no shorthand" back from. It also turned up an engine defect in the cursor movements
-  the walk had to choose between; see the `A / B / C / D` and `G` rows in §8. See PLAN §74.
+  the walk had to choose between; see the `A / B / C / D` and `G` rows in part 8. See PLAN §74.
 - **~~The mouse pointer shape~~ (`OSC 22`) — SHIPPED in §77, and it was never this section's item.** It
   had the engine-limit signature — `vte` parses the sequence in full and hands it to
   `set_mouse_cursor_icon`, a `Handler` method left at the trait's empty default — but it was filed as a
-  §6 policy, so this section never had to justify it. Both readings were arguing a **cost cmote does not
+  Part 6 policy, so this section never had to justify it. Both readings were arguing a **cost cmote does not
   pay**: a pointer shape is window-wide only if a terminal drives the window, and cmote's grid is an iced
   `mouse_area` whose `interaction` stops at that widget's edge. Third row in a row moved by the scanner
   route, and the first where what had to be checked was not a sequence's semantics but a *sibling
@@ -733,12 +740,12 @@ short, and since §41 nothing left in it is high value:
 
 ---
 
-## 6. Deliberately excluded (🛑 / 🤷 in §8 — policy, not gap)
+## Part 6 — Deliberately excluded (🛑 / 🤷 in part 8 — policy, not gap)
 
-Every refused row in §8 is one of these — and **since §102 that sentence is true again without an
+Every refused row in part 8 is one of these — and **since §102 that sentence is true again without an
 exception attached to it.** DECSLRM was the odd one out for twenty-nine sections: marked *refused by
 cmote's own code*, because `term/cancel.rs` stopped the sequence dead, but the decision behind it a
-*price* recorded in §5 rather than a policy recorded here. It is *supported* now, so the only thing
+*price* recorded in part 5 rather than a policy recorded here. It is *supported* now, so the only thing
 left in this section is policy. The
 distinction the exception taught is worth keeping even though its example is gone: **the mark records
 who performs a refusal, the section it points at records why it was taken** — and a refusal filed
@@ -761,7 +768,7 @@ test (`the_engine_is_told_to_refuse_the_remote_clipboard`) fails if the field go
 The **bell** is dropped for the same "no remote-driven side effects" reason. Answering an OSC 52 read
 query would be an injection vector and stays out.
 
-That bell is the **🛑** in §8, and §65 had to correct its mark to say so: it had been a partial reading
+That bell is the **🛑** in part 8, and §65 had to correct its mark to say so: it had been a partial reading
 "accepted, silent", as though nothing had decided anything. Something did. `vte` dispatches `BEL` and
 `alacritty_terminal` implements it — `bell()` is `self.event_proxy.send_event(Event::Bell)` — so the
 event genuinely arrives and cmote's catch-all drops it. It is the last refusal in this document standing
@@ -786,9 +793,9 @@ before asserting the icon name did not, so a future change that stopped parsing 
 rather than quietly resemble the same refusal.
 
 **A blinking cursor** is refused on price rather than on principle, and it is cmote's own refusal
-(§8's `12 (the blink)`). A remote's `CSI ? 12 h` is tracked by the engine and reported back by DECRQM,
+(part 8's `12 (the blink)`). A remote's `CSI ? 12 h` is tracked by the engine and reported back by DECRQM,
 but nothing draws it: `term/screen.rs`'s `CursorShape` deliberately carries no blink and cmote runs no
-animation timer, so the cursor is always steady — the same call §4 makes for SGR blink and DECSCUSR's
+animation timer, so the cursor is always steady — the same call part 4 makes for SGR blink and DECSCUSR's
 blinking shapes. The cost is admitted: a program that blinks the cursor to draw the eye gets a steady
 one, and DECRQM will tell it the mode is set, which is true of the mode and not of the screen.
 
@@ -985,7 +992,7 @@ and at the boundary, by tests that name all nine.
 
 **Remote-set mouse pointer shape** — `OSC 22` is **half shipped and half refused** since §77, and the
 half that ships is the part this entry used to say was impossible. What survives here is only the
-refusal; the sequence's own row in §8 carries the rest.
+refusal; the sequence's own row in part 8 carries the rest.
 
 This entry argued the refusal on three grounds and **two of them were wrong about cmote rather than
 about the sequence**, which is worth leaving on the record rather than quietly deleting:
@@ -1026,7 +1033,7 @@ into the shell's input as if the user had. That is a remote-driven side effect o
 in exchange for legacy identification nobody asks for; the DA / DECRQM / XTVERSION / DA3 answers cover
 every probe a modern program makes.
 
-The refusal is a **🤷** rather than a **🛑** in §8, and precisely because it is: `vte`'s `execute`
+The refusal is a **🤷** rather than a **🛑** in part 8, and precisely because it is: `vte`'s `execute`
 matches HT / BS / CR / LF / VT / FF / BEL / SUB / SI / SO and drops `0x05` to a `debug!`, and cmote's
 own scanner has no arm for it either. Answerback is refused by never having been written, which is a
 decision this section stands behind and no code enforces.
@@ -1072,7 +1079,7 @@ terminal is better off never having been in. `term/notify.rs` names it, and a bo
 
 **Implicit bidi — the Unicode Bidirectional Algorithm** — refused, and this entry is what is left of a
 larger one. §75 put the whole of SCP here and §76 took most of it back out: the **character path** is
-shipped, per line, and the row in §8 is ✅. What stays refused is the other half of ECMA-48's bidi model,
+shipped, per line, and the row in part 8 is ✅. What stays refused is the other half of ECMA-48's bidi model,
 and the distinction is worth keeping because the two are usually said in one breath.
 
 ECMA-48 pairs SCP with **BDSM**, bidirectional support mode (`CSI 8 h` / `8 l`), and its default is
@@ -1089,7 +1096,7 @@ mirror is one involution (`scp::flip`) shared by the renderer and the pointer, w
 on a mirrored line provably land on the character that was drawn there. A UBA-derived mapping is a
 per-line table that both sides would have to agree on, and it would have to be rebuilt on every write to
 that line, then threaded through the find bar's match spans, the Ctrl-hover link runs and the selection's
-own arithmetic. `[ECMA-48]`, and deliberately not priced the way margins are in §5: the work is not in the
+own arithmetic. `[ECMA-48]`, and deliberately not priced the way margins are in part 5: the work is not in the
 sequence, so a line count would be a fiction.
 
 Note what this costs a program, because it is not nothing and is not much. A host that wants right-to-left
@@ -1100,21 +1107,21 @@ it then asks for is now honoured instead of dropped.
 And note who does the declining: nobody has to. `vte`'s `NamedMode` names only `Insert = 4` and
 `LineFeedNewLine = 20`, so BDSM arrives as `Mode::Unknown(8)` and reaches nothing. cmote is in explicit
 mode and cannot be asked out of it, which is consistent rather than lucky — this is the **🤷** shape, one
-paragraph after the OSC 22 entry above, except that it has no row of its own in §8 because no sequence
+paragraph after the OSC 22 entry above, except that it has no row of its own in part 8 because no sequence
 carries it that cmote answers.
 
 One parameter of SCP itself is refused too, and that one **is** cmote's own code: `Ps2 = 2`,
 "presentation to data", asks the terminal to write the drawing back into the grid. That is the engine's
 state and the only copy of what the host sent, so `term/scp.rs` drops the whole sequence rather than
-taking the path and ignoring the update mode. It has its own row in §8 and its own 🛑.
+taking the path and ignoring the update mode. It has its own row in part 8 and its own 🛑.
 
 ---
 
-## 7. Recommendation
+## Part 7 — Recommendation
 
-**There is no A-sized item left.** Input (§2), query→reply (§3) and the rendering/attribute layer
-(§4) are all closed; what remains is the engine's own ceiling (§5) and the two sequences cmote refuses
-on purpose (§6). §60's audit briefly reopened §3 — `CSI ? 4 m` went unanswered — and §61 closed it in a
+**There is no A-sized item left.** Input (part 2), query→reply (part 3) and the rendering/attribute layer
+(part 4) are all closed; what remains is the engine's own ceiling (part 5) and the two sequences cmote refuses
+on purpose (part 6). §60's audit briefly reopened part 3 — `CSI ? 4 m` went unanswered — and §61 closed it in a
 scanner arm and a two-parameter reply, which is what a gap found by reading a trait impl rather than by
 hitting it tends to cost. §36 closed the last four items — DA3 and DECKPAM by writing them, answerback and
 blink by deciding them (and, for blink, by correcting a wrong claim in this document: the engine drops
@@ -1127,7 +1134,7 @@ logs, so a sixel picture never reaches the grid and can be scanned out beside th
 sequence it ignores. cmote now decodes sixel in-house, anchors each picture to an absolute document line
 (§40), reserves the cells it covers by feeding the engine ECH + LF, and composites it in the grid widget
 — plus the two answers that make programs *offer* pictures at all: **XTSMGRAPHICS**, and attribute 4
-added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows are in §5 and §8.
+added to the engine's own **DA1** reply. Details in PLAN §41; the moved rows are in part 5 and part 8.
 
 **§65 swept the partial rows and turned up one item of real work.** Auditing all ten the way §60 taught —
 `vte`'s dispatch arms first, then which `Handler` methods the engine leaves at their empty default —
@@ -1137,7 +1144,7 @@ update in its own `Processor` and bounds a stuck one with a 150 ms timeout, but 
 application's to drive (`sync_timeout()` then `stop_sync()`), and cmote drives neither. A remote that
 sends `CSI ? 2026 h` and then stops writing holds the visible screen at its pre-BSU state until it sends
 the closing `l` or pushes 2 MiB. Nothing leaks and the session is unharmed — a stuck picture, not a stuck
-client — but it is a remote-triggered effect on cmote's own window, which is the thing §6 spends its
+client — but it is a remote-triggered effect on cmote's own window, which is the thing part 6 spends its
 length refusing. The fix is small and has a shape already in the codebase: an `iced::window::frames()`
 subscription while an update is pending, the way `SnackbarTick` and `QuitTick` are driven, calling
 `stop_sync` once the instant passes. Not taken in §65, which was an audit.
@@ -1172,7 +1179,7 @@ DECSLRM, which has had a row of its own since §57, so the note points at it. De
 mark is what the split is worth — three turned out to be refusals cmote performs, four gaps nobody had
 named.
 
-What is left in §5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
+What is left in part 5 (blink, double-height lines, left/right margins, rectangular ops, synchronized output,
 and kitty graphics — iTerm2's inline images left for the 🛑 column in §70) is legacy, rare, invisible in
 practice, or a whole protocol's worth of work — **no item of real UX value remains anywhere in this
 document.**
@@ -1203,15 +1210,15 @@ wired that table into `report_color`. The first of those is a real guarantee; th
 pattern exactly, a correct outcome nothing asserts. Two tests now set a colour and prove the answer does
 not move, and each asserts the engine *did* record the set first, so neither can pass because the set was
 silently dropped on the way in. The same pass deleted a cost this document had invented for the refusal
-(see §6): the full-screen repaint a colour set was said to cost does not happen, because cmote never
+(see part 6): the full-screen repaint a colour set was said to cost does not happen, because cmote never
 reads the engine's damage flags. Nothing shipped and **no answer changed** — the two partial rows became a
 ✅ and a 🛑 apiece because that is what they always were, and the rows just stopped
 claiming more than they knew.
 
 The **DECKPAM** subset shipped as a seam getter (`Screen::application_keypad`) plus one guarded branch
 in `keymap::encode` — the numpad keys with no NumLock meaning to lose, and explicitly *not* the digits
-(§2, §36). **DA3** shipped as a `CSI =` state in the same scanner that answers XTVERSION, with a
-constant unit id chosen so the reply cannot fingerprint the machine (§3, §36).
+(part 2, §36). **DA3** shipped as a `CSI =` state in the same scanner that answers XTVERSION, with a
+constant unit id chosen so the reply cannot fingerprint the machine (part 3, §36).
 The **kitty keyboard protocol** (was #1) shipped as `term::kitty` + a `keymap::encode` branch,
 the inverse of the modifyOtherKeys split: the engine already implements the whole control plane
 (push / pop / set / query, stack, alternate-screen swap), gated behind its `kitty_keyboard`
@@ -1227,7 +1234,7 @@ repaints the app already emits on a hover move or a modifier change, so it needs
 `term::modkeys` + a `keymap::encode` branch: the stream is scanned for `CSI > 4 ; p m`, and a
 Ctrl/Alt main-keyboard combo is reported as `CSI 27;mod;code~` (level 2 for every combo, level 1
 for the gap combos only) — kept for the programs that speak it rather than kitty. **OSC 133
-shell-integration** (§4's old low-pri row) shipped as `term::osc133`: the stream is scanned for the
+shell-integration** (part 4's old low-pri row) shipped as `term::osc133`: the stream is scanned for the
 A/B/C/D marks, prompts and command output ranges stored as absolute line indices so they ride the
 scrollback, and the result drives a per-tab command-status dot, Ctrl+Shift+Up/Down jump-to-prompt,
 and select-command-output (Ctrl+Shift+O or a prompt-tick click turns the C→D range into a text
@@ -1268,12 +1275,12 @@ one decision, so they now sit in one place (`term/notify.rs`) under one mark, an
 `OSC 9;4` progress reporting shipped (`term/progress.rs`) — a per-tab bar on the chip and the taskbar
 button mirroring the active tab. The same pass wrote down the stance the notification rows had been
 missing: `OSC 9;<text>`, `OSC 777` and `kitty 99` are one feature in three spellings and are **refused**
-(§6), because a notification escapes the tab and lands on the desktop; `kitty 21` is refused for the
+(part 6), because a notification escapes the tab and lands on the desktop; `kitty 21` is refused for the
 reason 4 / 10 / 11 / 12 already were, a fixed scheme. Those rows now read as choices rather than as
 work not yet done, which is the difference between a gap and a policy. **§78 later found that the
 `kitty 21` half of that sentence was doing two rows' work with one row's argument** — 4 / 10 / 11 / 12
 are *split*, query answered and set refused, and OSC 21 carries both halves in one sequence — so the
-query half got a reason of its own. Same mark, different sentence; see §6 and PLAN §78.
+query half got a reason of its own. Same mark, different sentence; see part 6 and PLAN §78.
 
 **`OSC 22` was then decided too, which empties the OSC column: every row is now shipped or refused with
 its reason written down, and none is merely outstanding.** The mouse-pointer shape looked at first like
@@ -1289,17 +1296,17 @@ crate, and it was **false**: `none` is not in the vocabulary — `cursor_icon::C
 variant and its `from_str` no `"none"` arm, so the hazard cannot be spelled. What was left underneath was
 the refusal that had never been separated out: the shapes that speak with cmote's own voice. The row is
 now ✅ for the five that describe the text under the pointer and 🛑 for the rest, and the cost the entry
-had admitted — no I-beam over text — is paid back. See §6 and §77.
+had admitted — no I-beam over text — is paid back. See part 6 and §77.
 
 ---
 
-## 8. Feature support matrix (vs the published catalogues)
+## Part 8 — Feature support matrix (vs the published catalogues)
 
 A per-sequence audit against the escape-sequence catalogues published at
 [vtdn.dev](https://vtdn.dev), [contour](https://contour-terminal.org/vt-sequence/) and
 [otty](https://docs.otty.sh/vt/) — the first alone until §98, which added the other two and found
 thirty-four sequences this table had never named — so support is legible one line at a time rather
-than only as the "still-missing" lens of §2–§6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
+than only as the "still-missing" lens of parts 2–6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
 (`term/`, `ui/grid.rs`) — not from memory.
 
@@ -1317,7 +1324,7 @@ one place to look for it.
 **The Note column defines the feature and nothing else** (§83). A note says what the sequence, attribute
 or mode *is* — the parameters it takes, the reply it draws, the extent cmote honours — briefly and
 exactly, and then points at what argues the row: the section number, and the module where cmote's own
-code sits. The argument itself lives in §2–§7 and in `PLAN.md`'s numbered sections, which is where it was
+code sits. The argument itself lives in parts 2–7 and in `PLAN.md`'s numbered sections, which is where it was
 written first. The notes had grown into second copies of it, several of them hundreds of words long, and
 a table that has to be read a paragraph at a time is not a table — it is a document filed in a grid. The
 pointer is what makes the trade checkable: every fact a note used to carry is still recorded where the
@@ -1337,7 +1344,7 @@ footnote:
 - **❌** is a *gap* — a sequence that could still land, and several since have.
 - **🛑** is a *decision* **cmote enforces**: a scanner allow-list, an event dropped in the listener, a
   renderer that never reads the value, a final byte cancelled in flight. The mark says *who performs the
-  refusal*, not why it was taken — nearly all of them are §6's, on policy, and one is §5's, on price
+  refusal*, not why it was taken — nearly all of them are part 6's, on policy, and one is part 5's, on price
   (DECSLRM, §73). Since §83 the row names the feature and points at the section that argues the refusal
   rather than re-arguing it, and at the module the refusing code sits in. The refusal itself never
   becomes work, and it is usually pinned by a test that section names, so it cannot regress unnoticed.
@@ -1391,35 +1398,35 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 0 (the icon half) | Icon name | 🛑 | the icon-name half of that one sequence — the same string the title half already carries (§69, `term/icon.rs`) |
 | 1 | Icon name | ✅ | `OSC 1 ; text` sets the icon name alone; drawn on the tab chip after the endpoint, control characters stripped, capped at 24 characters, empty clears (§69, `term/icon.rs`) |
 | 2 | Window title | ✅ | `OSC 2 ; text` sets the window title alone; control characters stripped (anti-spoof) |
-| 3 | X11 window property | 🤷 | `OSC 3 ; prop=value ST` sets a property on the terminal's X11 window, for another X client to read. There is no X server under this one — cmote is a Windows program — so the sequence names a thing that cannot exist here, and the refusal is of the *shape* rather than the effect: a remote does not get to write metadata the machine's other programs read (§6, §98) |
+| 3 | X11 window property | 🤷 | `OSC 3 ; prop=value ST` sets a property on the terminal's X11 window, for another X client to read. There is no X server under this one — cmote is a Windows program — so the sequence names a thing that cannot exist here, and the refusal is of the *shape* rather than the effect: a remote does not get to write metadata the machine's other programs read (part 6, §98) |
 | 4 (query) | Palette entry query | ✅ | `OSC 4 ; index ; ? ST` asks for a palette slot, in `index ; spec` pairs so one sequence may ask about several; each is answered as an `rgb:` triplet from the scheme `ui/grid.rs` paints (§64, §87, `report_color`) |
-| 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (§6, §64) |
-| 5 / 105 / 106 | Special colours — set / reset / enable | 🤷 | `OSC 5 ; <slot> ; <spec> ST` tints an SGR ATTRIBUTE rather than a palette entry — slot `0` bold text, `1` underline, `2` blink, `3` reverse video, `4` italic — with `105` resetting them and `106` enabling or disabling one. The fixed scheme reaches further than the palette: a remote colouring "all bold text" is choosing what the user's screen looks like by another door (§6, §98) |
+| 4 (set) | Palette entry set | 🛑 | `OSC 4 ; index ; spec ST` writes one palette slot — the theme the user chose (part 6, §64) |
+| 5 / 105 / 106 | Special colours — set / reset / enable | 🤷 | `OSC 5 ; <slot> ; <spec> ST` tints an SGR ATTRIBUTE rather than a palette entry — slot `0` bold text, `1` underline, `2` blink, `3` reverse video, `4` italic — with `105` resetting them and `106` enabling or disabling one. The fixed scheme reaches further than the palette: a remote colouring "all bold text" is choosing what the user's screen looks like by another door (part 6, §98) |
 | 7 | Working directory | ✅ | `OSC 7 ; file://HOSTNAME/CURRENT/DIR ST` announces the shell's working directory — macOS Terminal's sequence originally, and the one a new tab inherits its directory from (§17, §89, `term/cwd.rs`) |
 | 8 (http / https / mailto) | Hyperlinks | ✅ | `OSC 8 ; params ; uri ST` opens a hyperlink over the cells that follow and `OSC 8 ; ; ST` closes it; underlined under Ctrl-hover, followed on Ctrl-click or from the right-click menu (§24, `link.rs`). `params` is a `:`-separated `key=value` list of which the spec defines exactly one key, `id`, tying a link's separated runs together: "character cells that have the same target URI and the same nonempty id are always underlined together on mouseover". The Ctrl-hover underline covers **every cell carrying that same link**, wherever it sits — the identity being the URI *and* the id, so a link the program split into runs lights up whole and one address written twice stays two links (§88, §92) |
 | 8 (any other scheme) | Hyperlinks | 🛑 | the same sequence carrying any other URI scheme — a scheme decides which local program the OS launches, so the link is drawn and never opened (§24, `ALLOWED_SCHEMES`). The spec leaves this open on purpose: "It's up to the terminal emulator to decide what schemes it supports" (§88) |
-| 9 | Desktop notification | 🛑 | `OSC 9 ; text` raises a desktop notification, which leaves the window and lands on the desktop (§6, §54, §79, `term/notify.rs`) |
-| 9;1 | Sleep the terminal (ConEmu) | 🛑 | `OSC 9 ; 1 ; ms ST` asks the terminal to stop for that many milliseconds. Refused by name since §90, and it is the one refusal in this document that is not about something leaving the tab: it is a remote spending the **user's own time**, holding the window still in front of the person at the keyboard for as long as it likes. Pinned by `the_sleep_and_the_message_box_are_refused_as_themselves` and at the boundary by `a_remotes_sleep_and_message_box_get_nothing` (§6, §89, §90, `term/notify.rs`) |
-| 9;2 | GUI message box (ConEmu) | 🛑 | `OSC 9 ; 2 ; "txt" ST` raises a modal dialog carrying the remote's text. The notification refusal's own argument, one step further: a notification leaves the window, a dialog leaves the window **and takes the focus**, wearing cmote's identity while it does (§6, §54, §89, §90, `term/notify.rs`) |
+| 9 | Desktop notification | 🛑 | `OSC 9 ; text` raises a desktop notification, which leaves the window and lands on the desktop (part 6, §54, §79, `term/notify.rs`) |
+| 9;1 | Sleep the terminal (ConEmu) | 🛑 | `OSC 9 ; 1 ; ms ST` asks the terminal to stop for that many milliseconds. Refused by name since §90, and it is the one refusal in this document that is not about something leaving the tab: it is a remote spending the **user's own time**, holding the window still in front of the person at the keyboard for as long as it likes. Pinned by `the_sleep_and_the_message_box_are_refused_as_themselves` and at the boundary by `a_remotes_sleep_and_message_box_get_nothing` (part 6, §89, §90, `term/notify.rs`) |
+| 9;2 | GUI message box (ConEmu) | 🛑 | `OSC 9 ; 2 ; "txt" ST` raises a modal dialog carrying the remote's text. The notification refusal's own argument, one step further: a notification leaves the window, a dialog leaves the window **and takes the focus**, wearing cmote's identity while it does (part 6, §54, §89, §90, `term/notify.rs`) |
 | 9;3 | Tab text (ConEmu) | ✅ | `OSC 9 ; 3 ; "txt" ST` names the tab — ConEmu's spelling of what `OSC 1` does, quoted in its own documentation and read through the same module, so there is one writer of the chip name and two doors to it (§71's test for a second spelling). Capped, sanitised and appended after the endpoint exactly as `OSC 1` is, so the new spelling buys a remote no more of the chip than it had; an empty name clears it (§69, §89, §90, `term/icon.rs`) |
 | 9;4 | Progress reporting | ✅ | `OSC 9 ; 4 ; st ; pr ST` reports task progress on what ConEmu drives as the Windows taskbar: `0` removes it, `1` sets it to `pr` (0–100), `2` is an error state, `3` indeterminate, `4` paused. All five, drawn per tab and mirrored on the taskbar button (§54, §89, `term/progress.rs`) |
 | 9;9 | Working directory (ConEmu) | ✅ | `OSC 9 ; 9 ; "cwd" ST` — ConEmu's working-directory spelling, a bare native Windows path, quoted in ConEmu's own documentation of it. Read beside OSC 7 and iTerm's `CurrentDir` in one scanner (§17, §89, `term/cwd.rs`) |
 | 10 / 11 / 12 (query) | Default fg / bg / cursor colour query | ✅ | `OSC 10/11/12 ; ? ST` ask for the default foreground, background and cursor colours; a list walks UP from the code it starts at, so `OSC 10 ; ? ; ?` asks for the foreground and then the background. Answered from the scheme the grid paints, the cursor reporting the foreground since it is drawn by inverting the cell (§64, §87) |
-| 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (§6, §64) |
-| 13 / 14 / 113 / 114 | Mouse pointer colours | 🤷 | the pointer's own foreground and background, and their resets — the ink of the cursor the user moves with their hand. `vte` reaches only as far as `12`, so these never arrive; the scheme argument covers them and one more besides, that the pointer belongs to the desktop rather than to the tab (§6, §98) |
+| 10 / 11 / 12 (set) | Default fg / bg / cursor colour set | 🛑 | the same three codes carrying a colour spec — the fixed scheme again (part 6, §64) |
+| 13 / 14 / 113 / 114 | Mouse pointer colours | 🤷 | the pointer's own foreground and background, and their resets — the ink of the cursor the user moves with their hand. `vte` reaches only as far as `12`, so these never arrive; the scheme argument covers them and one more besides, that the pointer belongs to the desktop rather than to the tab (part 6, §98) |
 | 15 / 16 / 18 / 115 / 116 / 118 | Tektronix colours | 🤷 | foreground, cursor and background of the **Tektronix 4014 window** xterm can open beside its own, and their resets. There is no Tek emulation here and no plan for one, so the codes name a window that does not exist (§98) |
-| 17 / 19 / 117 / 119 | Selection colours | 🤷 | the highlight's background and foreground, and their resets. The selection is drawn by `ui/grid.rs` over cmote's own colours and is the one surface the **user** operates directly — a remote that could set both halves could make a selection invisible, which is the UX-stability argument rather than the scheme one (§6, §98) |
+| 17 / 19 / 117 / 119 | Selection colours | 🤷 | the highlight's background and foreground, and their resets. The selection is drawn by `ui/grid.rs` over cmote's own colours and is the one surface the **user** operates directly — a remote that could set both halves could make a selection invisible, which is the UX-stability argument rather than the scheme one (part 6, §98) |
 | 22 (`default` / `text` / `pointer` / `crosshair` / `cell`) | Mouse pointer shape | ✅ | `OSC 22 ; name` sets the mouse pointer shape over the grid; these five describe the content under the pointer, apply only while the pointer is inside the grid, and are cleared on both directions of the alternate-screen swap (§77, `term/pointer.rs`) |
 | 22 (any other shape) | Mouse pointer shape | 🛑 | the same sequence naming any other CSS shape — the resize and grab shapes are cmote's own vocabulary, and `wait`, `progress`, `not-allowed` and `no-drop` make a claim about the client (§77, `term/pointer.rs`). One divergence from xterm, which on a name it does not know "uses the resource's default `xterm` shape": a refused name here leaves the pointer **as it was** rather than resetting it, so a remote cannot clear a shape it is not allowed to set (§88) |
 | 30 | Tab name | ✅ | `OSC 30 ; name` — contour's `SETTABNAME`, the **third** spelling of the chip label beside `OSC 1` and ConEmu's `OSC 9;3`, read through the same module so there is one writer and three doors to it (§71's test). Capped at 24 characters, control characters stripped, appended after the endpoint and never in place of it, an empty name clearing it — a remote gains no more of the chip than the two older spellings already gave. Matched on the whole number, so `OSC 3` and kitty's `OSC 30001` are not it. **The thinnest-sourced row in this table**: one line of contour's sequence index, its detail page unreachable, and acted on anyway because being wrong costs a tab chip (§89, §98, `term/icon.rs`) |
 | 50 (`CursorShape=`) | Cursor shape | ✅ | `OSC 50 ; CursorShape=0/1/2` sets the cursor to block, bar or underline — a third spelling of DECSCUSR's shape, with no blink to carry. **Not xterm's `OSC 50`**, which is the row below: this payload is another terminal's convention that `vte` happens to parse on the same code (§71, §88) |
-| 50 (a font) | Set the font | 🛑 | xterm's own `OSC 50`: "Set Font to `Pt`", by name or by an index into its font menu (`#` for absolute, `#+` / `#-` relative). The font is chrome the **user** chose — the argument the fixed colour scheme rests on (§6), and the one xterm itself gates behind an `allowFontOps` resource that defaults to off. Refused by name in `term/notify.rs` since §91, the `CursorShape=` payload on the same number excluded first so the refusal and that feature cannot disagree; `vte` drops it to `unhandled` as well (§88, §91) |
-| 60 | Set every font face | 🛑 | `OSC 60 ; <faces>` — contour's `SETFONTALL`, which gets or sets every face, style and size at once. `OSC 50`'s refusal at a larger size and refused in the same place, by name, with no `CursorShape=` exception to carve out because this number carries one meaning (§6, §91, §98, `term/notify.rs`) |
-| 52 (write) | Clipboard write | 🛑 | `OSC 52 ; c ; <base64>` writes the local clipboard (§6, §63) |
-| 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (§6, §63) |
-| 88 | Terminal Resume Protocol | 🛑 | `OSC 88 ; <op> [ ; key=value ]… ST`, a **proposal** (v1, otty's): a program declares how it should be **relaunched** if the terminal restarts — `arm` stores a base64 `cmd`, `args` and `cwd`, `clear` withdraws it, `query` asks whether the terminal supports it. The one refusal in this document where the remote's payload would become a **local process**, at a moment nobody is watching; the query is refused with the rest, because "supported" is the advertisement that brings the arm (§6, §12, §98, `term/notify.rs`) |
-| 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (§6, §87) |
-| 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (§6) |
+| 50 (a font) | Set the font | 🛑 | xterm's own `OSC 50`: "Set Font to `Pt`", by name or by an index into its font menu (`#` for absolute, `#+` / `#-` relative). The font is chrome the **user** chose — the argument the fixed colour scheme rests on (part 6), and the one xterm itself gates behind an `allowFontOps` resource that defaults to off. Refused by name in `term/notify.rs` since §91, the `CursorShape=` payload on the same number excluded first so the refusal and that feature cannot disagree; `vte` drops it to `unhandled` as well (§88, §91) |
+| 60 | Set every font face | 🛑 | `OSC 60 ; <faces>` — contour's `SETFONTALL`, which gets or sets every face, style and size at once. `OSC 50`'s refusal at a larger size and refused in the same place, by name, with no `CursorShape=` exception to carve out because this number carries one meaning (part 6, §91, §98, `term/notify.rs`) |
+| 52 (write) | Clipboard write | 🛑 | `OSC 52 ; c ; <base64>` writes the local clipboard (part 6, §63) |
+| 52 (read) | Clipboard read | 🛑 | `OSC 52 ; c ; ?` reads the local clipboard back to the remote (part 6, §63) |
+| 88 | Terminal Resume Protocol | 🛑 | `OSC 88 ; <op> [ ; key=value ]… ST`, a **proposal** (v1, otty's): a program declares how it should be **relaunched** if the terminal restarts — `arm` stores a base64 `cmd`, `args` and `cwd`, `clear` withdraws it, `query` asks whether the terminal supports it. The one refusal in this document where the remote's payload would become a **local process**, at a moment nobody is watching; the query is refused with the rest, because "supported" is the advertisement that brings the arm (part 6, §12, §98, `term/notify.rs`) |
+| 104 | Reset palette entry | 🛑 | `OSC 104 ; index` puts one palette slot back to its power-on colour, several indices in one sequence, and **`OSC 104` bare resets all 256** — the reset side of the fixed scheme (part 6, §87) |
+| 110 / 111 / 112 | Reset fg / bg / cursor colour | 🛑 | reset the default foreground, background and cursor colours — the same fixed scheme (part 6) |
 | 133 | Shell integration (semantic prompts) | ✅ | `OSC 133 ; A/B/C/D`, BEL- or ST-terminated, marks where the prompt, the command and its output begin and end; drives the per-tab status dot, jump-to-prompt and select-command-output, exit code from the optional field after `D` — optional in the grammar, `"D", [ ";", exitcode ]`, with the bare form a documented spelling rather than a tolerated malformation. Trailing `key=value` fields are ignored; the three named ones have their own rows below (§34, §95, §96, `term/osc133.rs`) |
 | 133 `A ; click_events=1` | Mouse clicks in the prompt area | 🛑 | the field on the prompt-start mark that asks the terminal to "enable mouse click reporting for the prompt area" — input reporting switched on by a payload whose declared job is saying where the prompt sits, around the modes that gate it (§10), after which a click inside the prompt would behave unlike one a line above. This scanner cannot reach a mouse mode; a test states the refusal rather than leaving it incidental (§95, `term/osc133.rs`) |
 | 133 `A ; k=s` | Secondary prompt (PS2) | ✅ | the field marking a **continuation** prompt — kitty's shell integration prepends it to zsh's `PS2`, once per line of a command still being typed, and `PS1` carries no `k=` at all. Read in order to **suppress** the mark: a continuation prompt is not a new prompt, and treating it as one both litters the gutter with ticks and files the finished command against its last continuation line instead of its prompt. An unknown `k=` value stays a prompt start, since losing an anchor is worse than gaining one (§97, `term/osc133.rs`) |
@@ -1427,23 +1434,23 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 133 `A ; cl=m` | Multi-line prompt hint | 🛑 | VS Code's field on the prompt-start mark, saying the prompt runs over several lines. Refused on the same ground as the command line: the prompt's extent is the grid between `A` and `B`, which cmote already records, so the hint restates a fact it can read. Nothing would change if it were honoured — a jump anchors on the `A` line, the prompt's first, hint or no hint (§71, §97, `term/osc133.rs`) |
 | 133 (any other phase letter) | Further prompt phases | ❌ | the letter space past `A`/`B`/`C`/`D`. `N`, `P` and `L` are all emitted somewhere and the reachable accounts **disagree about what they mean**: Konsole is documented as tracking the prompt as "A/N/P", a zsh write-up uses `133;P;k=i` for `PS1` and `133;P;k=s` for `PS2`, and a Ghostty fork uses `133;P` for a prompt *redraw* that must not open a new block. Not a decision — a letter cannot be supported or refused until it means one thing. An unrecognised one yields no mark rather than the nearest guess, because a wrong mark moves a prompt jump or mis-bounds a command's output where no mark leaves both alone (§96, §97, `term/osc133.rs`) |
 | 888 | Dump internal state | 🤷 | contour's `DUMPSTATE`, which writes the emulator's internal state to its debug stream. A remote deciding when the terminal logs itself, and what into; the log is the developer's tool and not a channel a host gets to drive (§98) |
-| Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value ; … ST` names colours instead of numbering them — `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`, `visual_bell`, `transparent_background_color1`–`7`, and `0`–`255` for the palette. `key=?` queries, a **bare key with no `=`** resets, any number of pairs at a time. Refused as a **dialect** cmote never claims: `TERM`, XTVERSION and XTGETTCAP's `TN` all say xterm. §78's second reason expired — it held that answering the keys cmote lacks means inventing a colour, and the protocol's own answer for an undefined one is an **empty value** (§6, §78, §89) |
-| Kitty 30001 / 30101 | Colour stack — push / pop | 🤷 | the save and restore half of kitty's colour protocol, pushing the whole palette onto a stack and popping it back. Named in §89's reading of that page and given no row until now; refused as the same **dialect** the row above is, and over a palette that is never read either way (§6, §78, §89, §98) |
-| Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body ST` — a desktop notification whose metadata is a `:`-separated `key=value` list: `p` the payload type, `i` an identifier for updating a notification already shown, `d` a done flag, `e` base64, `f` the application name, `u` the urgency (`0` low, `1` normal, `2` critical) and `n` an icon name. Refused for the one reason the plain spellings are: **a notification leaves the window** (§6, §54, §79, §89, `term/notify.rs`) |
-| iTerm 1337 File | Inline images | 🛑 | `OSC 1337 ; File=<args>:<base64>` draws an inline image from a base64 payload (§6, §70, `term/iterm.rs`) |
+| Kitty 21 | Colour by semantic name | 🤷 | `OSC 21 ; key=value ; … ST` names colours instead of numbering them — `foreground`, `background`, `selection_foreground`, `selection_background`, `cursor`, `cursor_text`, `visual_bell`, `transparent_background_color1`–`7`, and `0`–`255` for the palette. `key=?` queries, a **bare key with no `=`** resets, any number of pairs at a time. Refused as a **dialect** cmote never claims: `TERM`, XTVERSION and XTGETTCAP's `TN` all say xterm. §78's second reason expired — it held that answering the keys cmote lacks means inventing a colour, and the protocol's own answer for an undefined one is an **empty value** (part 6, §78, §89) |
+| Kitty 30001 / 30101 | Colour stack — push / pop | 🤷 | the save and restore half of kitty's colour protocol, pushing the whole palette onto a stack and popping it back. Named in §89's reading of that page and given no row until now; refused as the same **dialect** the row above is, and over a palette that is never read either way (part 6, §78, §89, §98) |
+| Kitty 99 | Rich notifications | 🛑 | `OSC 99 ; metadata ; body ST` — a desktop notification whose metadata is a `:`-separated `key=value` list: `p` the payload type, `i` an identifier for updating a notification already shown, `d` a done flag, `e` base64, `f` the application name, `u` the urgency (`0` low, `1` normal, `2` critical) and `n` an icon name. Refused for the one reason the plain spellings are: **a notification leaves the window** (part 6, §54, §79, §89, `term/notify.rs`) |
+| iTerm 1337 File | Inline images | 🛑 | `OSC 1337 ; File=<args>:<base64>` draws an inline image from a base64 payload (part 6, §70, `term/iterm.rs`) |
 | iTerm 1337 `SetMark` | Explicit bookmark on a line | ✅ | `OSC 1337 ; SetMark` bookmarks the cursor's line; amber gutter tick, walked with Ctrl+Shift+Up/Down, and able to mark mid-output where §34's prompt-derived marks cannot (§55, `term/iterm.rs`) |
 | iTerm 1337 `CurrentDir` | Working directory | ✅ | `OSC 1337 ; CurrentDir=<path>` — iTerm's working-directory spelling, the third one (§55, `term/cwd.rs`) |
 | iTerm 1337 `SetUserVar=gitBranch` | Per-session variable | ✅ | `OSC 1337 ; SetUserVar=<name>=<base64>` sets a per-session variable; the one honoured name is drawn as a pill beside the endpoint, UTF-8 checked, control characters stripped, capped at 32 characters (§55, `term/iterm.rs`) |
 | iTerm 1337 `SetUserVar` (any other name) | Per-session variable | 🛑 | the same key under any other variable name — with no title template there is no reader for a second one (§55, `term/iterm.rs`) |
-| iTerm 1337 `Copy` | Clipboard write | 🛑 | `OSC 1337 ; Copy=:<base64>` writes the local clipboard — OSC 52's write by another name (§6, §55) |
-| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | `SetProfile=<name>` switches the whole iTerm profile and `SetColors=<key>=<value>` sets one colour by role — `fg`, `bg`, `bold`, `link` — as RGB, RRGGBB or a preset name. The fixed scheme in another costume (§6, §55, §89) |
-| iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | `SetBackgroundImageFile=<base64>` names a local image file to draw behind the grid, an empty value removing it (§6, §41, §55, §89) |
-| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | `StealFocus` brings the window to the foreground; `RequestAttention=<yes\|once\|no\|fireworks>` flashes it for attention, for as long as the value says. Effects that leave the tab (§6, §54, §55, §89) |
+| iTerm 1337 `Copy` | Clipboard write | 🛑 | `OSC 1337 ; Copy=:<base64>` writes the local clipboard — OSC 52's write by another name (part 6, §55) |
+| iTerm 1337 `SetProfile` / `SetColors` | Theme repaint | 🛑 | `SetProfile=<name>` switches the whole iTerm profile and `SetColors=<key>=<value>` sets one colour by role — `fg`, `bg`, `bold`, `link` — as RGB, RRGGBB or a preset name. The fixed scheme in another costume (part 6, §55, §89) |
+| iTerm 1337 `SetBackgroundImageFile` | Background image | 🛑 | `SetBackgroundImageFile=<base64>` names a local image file to draw behind the grid, an empty value removing it (part 6, §41, §55, §89) |
+| iTerm 1337 `StealFocus` / `RequestAttention` | Raise / flash the window | 🛑 | `StealFocus` brings the window to the foreground; `RequestAttention=<yes\|once\|no\|fireworks>` flashes it for attention, for as long as the value says. Effects that leave the tab (part 6, §54, §55, §89) |
 | iTerm 1337 `ClearScrollback` | Drop the scrollback | 🛑 | drops the scrollback; `CSI 3 J` is the sanctioned spelling (§55) |
-| iTerm 1337 `CursorShape` | Cursor shape | 🛑 | `OSC 1337 ; CursorShape=0/1/2` — a fourth spelling of the one cursor-shape field, and the only one that would reach it from outside the engine (§6, §71, `term/iterm.rs`) |
-| iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | `OSC 1337 ; ReportCellSize` asks for the cell's height and width, and a scale factor beside them; what asks it is sizing an inline image (§6, §71, §89, `term/iterm.rs`) |
+| iTerm 1337 `CursorShape` | Cursor shape | 🛑 | `OSC 1337 ; CursorShape=0/1/2` — a fourth spelling of the one cursor-shape field, and the only one that would reach it from outside the engine (part 6, §71, `term/iterm.rs`) |
+| iTerm 1337 `ReportCellSize` | Cell size — query | 🛑 | `OSC 1337 ; ReportCellSize` asks for the cell's height and width, and a scale factor beside them; what asks it is sizing an inline image (part 6, §71, §89, `term/iterm.rs`) |
 | iTerm 1337 (every other key) | — | 🛑 | the rest of iTerm's `OSC 1337` namespace, which `term/iterm.rs` meets as an allow-list (§55) |
-| 777 (`notify`) | urxvt notification | 🛑 | `OSC 777 ; notify ; title ; body` — the same refusal in urxvt's spelling. OSC 777 is a **dispatcher** (`777;<module>;…`) and only the `notify` module is this feature; another module is unimplemented rather than declined, a different question with a different mark. The attribution is folklore, not a citation: urxvt's own manual page documents no OSC 777 at all (§6, §54, §79, §89, `term/notify.rs`) |
+| 777 (`notify`) | urxvt notification | 🛑 | `OSC 777 ; notify ; title ; body` — the same refusal in urxvt's spelling. OSC 777 is a **dispatcher** (`777;<module>;…`) and only the `notify` module is this feature; another module is unimplemented rather than declined, a different question with a different mark. The attribution is folklore, not a citation: urxvt's own manual page documents no OSC 777 at all (part 6, §54, §79, §89, `term/notify.rs`) |
 
 ### CSI — cursor movement & editing
 
@@ -1469,7 +1476,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps SP @ / Ps SP A | Scroll left / right (SL / SR) | ✅ | ECMA-48's horizontal twins of SU / SD — xterm writes them "shift left / right `Ps` column(s)". Every row of the **visible page** moves sideways, the edge the content left goes blank in the pen's background, and the cursor does not move: the data slides under it. Whole cells travel, so colours, attributes, the OSC 8 link and DECSCA protection come along, as they do under DECCRA. An omitted or `0` count is one column and a count past the width blanks the page. A wide glyph with only one half left on the page is blanked rather than drawn as a dangling lead or continuation. **Bounded by the scrolling region** since §102: a shift is a scrolling operation, so a status line parked outside the band stays where it is while the band slides under it. That bound is what §100 wanted and could not have — the region is private inside the engine, so the shift was REFUSED under origin mode instead, DECOM standing in as evidence that a region existed. The proxy was both too much (a program with origin mode and no region got nothing) and too little (a region set without origin mode was shifted straight through); the mirror retired it (§58, §100, §102, `term/rect.rs`, `term/region.rs`) |
 | Ps + T | Scroll down, filling from scrollback (UNSCROLL) | ✅ | **kitty's**, not contour's — contour's own definition credits it (`"Scroll Down with Scrollback Fill (kitty unscroll)"`), which §98 recorded the wrong way round. SD with the top filled from the **scrollback** instead of with blanks, for the shell that prints completions under the cursor and scrolls the user's text away: plain SD would blank exactly what this exists to restore. The lines are **moved**, not copied — a copy would leave the same text in the scrollback and on the page, once per completion, for the life of the session. `Ps` defaults to 1 and clamps to the page; the rows pushed off the bottom are discarded; the cursor does not move. Where the scrollback cannot fill the request the remainder is blank, which is kitty's own rule and what makes the **alternate screen** correct with no special case — that page keeps no history. The one operation here that changes how many lines the document has, so every absolute anchor cmote holds — prompt marks, bookmarks, command spans, picture anchors, right-to-left flags — is renumbered with it (§101, `term/rect.rs`) |
 | r (DECSTBM) | Scrolling region (top / bottom) | ✅ | sets the scrolling region's top and bottom lines and homes the cursor; every operation that scrolls honours it. The horizontal twin is DECSLRM below |
-| s (DECSLRM) | Left / right margins | ✅ | sets the left and right margins, the horizontal half of DECSTBM — and everything that follows is a consequence rather than a separate feature: a line breaks at the **right margin** and goes on at the **left** one, a carriage return goes to the left margin, ICH and DCH stop at the margins, and every scroll (SU, SD, IL, DL, IND, RI) moves only the band of columns between them while the rest of the page stands. Under **origin mode** the columns a program names are counted from the left margin, the relationship DECOM already had with the region's rows. **The mode is the whole rule**: this byte is DECSLRM only while `? 69` below is set and is a save-cursor otherwise, which is how a real terminal reads it and what §57 could not do — it cancelled every parametrised `s` on the parameter count alone, because the engine refused the mode that settles it. A row pushed out of a narrowed band is **discarded, never scrollbacked**: the history holds whole lines and that row is a slice of one. Built on the `Handler` gate §5 costed and refused twice (§57, §73, §102, `term/margins.rs`, `term/gate.rs`, `term/gatediff.rs`) |
+| s (DECSLRM) | Left / right margins | ✅ | sets the left and right margins, the horizontal half of DECSTBM — and everything that follows is a consequence rather than a separate feature: a line breaks at the **right margin** and goes on at the **left** one, a carriage return goes to the left margin, ICH and DCH stop at the margins, and every scroll (SU, SD, IL, DL, IND, RI) moves only the band of columns between them while the rest of the page stands. Under **origin mode** the columns a program names are counted from the left margin, the relationship DECOM already had with the region's rows. **The mode is the whole rule**: this byte is DECSLRM only while `? 69` below is set and is a save-cursor otherwise, which is how a real terminal reads it and what §57 could not do — it cancelled every parametrised `s` on the parameter count alone, because the engine refused the mode that settles it. A row pushed out of a narrowed band is **discarded, never scrollbacked**: the history holds whole lines and that row is a slice of one. Built on the `Handler` gate part 5 costed and refused twice (§57, §73, §102, `term/margins.rs`, `term/gate.rs`, `term/gatediff.rs`) |
 | g | Clear tab stop (TBC) | ✅ | TBC clears the tab stop under the cursor (`0`) or all of them (`3`) — the two DEC defined for a one-page terminal (§67) |
 | ? 5 W | Tab stops every 8 columns (DECST8C) | ✅ | DECST8C puts tab stops back every eight columns; performed by walking the page with CR and CUF and setting each stop with HTS, so the engine's table stays its own (§74, `term/tabs.rs`) |
 | Ps ; Ps SP k | Select character path (SCP) — data to presentation | ✅ | SCP picks the character path for the line under the cursor — `Ps1` `2` is right to left — and `Ps2 = 1` says the presentation is derived from the data, so the row is mirrored as it is drawn while the grid, scrollback, search, selection and copy stay in data order. Pictures are placed by column and not mirrored (§76, `term/scp.rs`) |
@@ -1488,26 +1495,26 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 5n | Device status report | ✅ | DSR 5 asks whether the terminal is healthy; answered `CSI 0 n`, ok |
 | 6n | Cursor position report | ✅ | DSR 6 (CPR) asks where the cursor is; answered `CSI <row> ; <col> R`, one-based, from the live cursor |
 | ? 6 n | Extended cursor position (DECXCPR) | ✅ | DECXCPR, the DEC-private spelling of the same question; answered `CSI ? <row> ; <col> R`, one-based and with **no page parameter**, which is xterm's form and the reply cmote sends. Answered where the question sits in the stream, from the cursor the ANSI spelling reports — so both report the absolute row, ignoring origin mode (§74, §82, `term/dsr.rs`) |
-| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (§6, §36, §82, `term/dsr.rs`, §84) |
+| ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (part 6, §36, §82, `term/dsr.rs`, §84) |
 | ? 55 / 56 n | Locator status / type | ✅ | ask whether a DEC locator is present and what type it is. Answered with xterm's own negatives — `CSI ? 53 n` "no locator" and `CSI ? 57 ; 0 n` "cannot identify" — which is the whole extent: the DEC locator protocol itself is not implemented and has no row. They are the two members of the family that are answered rather than refused, because they **advertise nothing**: a reply that states an absence is the one a terminal without the equipment can make truthfully, and silence would leave the sender waiting out a timeout to learn the same thing (§82, §84, §93, `term/dsr.rs`) |
-| ? 996 n | Colour scheme — dark or light | ✅ | asks whether the terminal's scheme is dark or light; answered `CSI ? 997 ; 1 n`, dark, from a constant — cmote's scheme is fixed (§6) and its background is `#1e1e1e`. **The one reply cmote sends in a sequence xterm does not define**, which narrows §96's half-rule rather than excepting it: a reply must not name the program or the machine (§36), and this names neither. Nor is it a new disclosure — `OSC 11 ; ?` is xterm's own spelling of the same fact and cmote answers it, so this is one writer with two doors (§71). Implemented by contour, ghostty, kitty and GNOME's vte; asked by neovim, helix, zellij and tmux, each of which paints for a guessed background when nobody answers (§93, §98, `term/dsr.rs`) |
+| ? 996 n | Colour scheme — dark or light | ✅ | asks whether the terminal's scheme is dark or light; answered `CSI ? 997 ; 1 n`, dark, from a constant — cmote's scheme is fixed (part 6) and its background is `#1e1e1e`. **The one reply cmote sends in a sequence xterm does not define**, which narrows §96's half-rule rather than excepting it: a reply must not name the program or the machine (§36), and this names neither. Nor is it a new disclosure — `OSC 11 ; ?` is xterm's own spelling of the same fact and cmote answers it, so this is one writer with two doors (§71). Implemented by contour, ghostty, kitty and GNOME's vte; asked by neovim, helix, zellij and tmux, each of which paints for a guessed background when nobody answers (§93, §98, `term/dsr.rs`) |
 | ' z / ' { / ' \| (DECELR / DECSLE / DECRQLP) | DEC locator protocol | ❌ | DECELR enables locator reports, DECSLE picks which events fire one, DECRQLP asks for the pointer's position — DEC's own mouse protocol, whose two *status* questions cmote answers with the honest negative above and whose body §93 left with no row at all. A **gap** and not a refusal: cmote reports mouse events already, in xterm's spelling (modes 1000–1006), and nothing has asked for DEC's (§93, §98) |
-| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (§6, §82, §84) |
-| ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (§6, §82, §84) |
+| ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (part 6, §82, §84) |
+| ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (part 6, §82, §84) |
 | c / > c | Primary / secondary DA | ✅ | DA1 and DA2 — what the terminal is and what firmware it claims; cmote amends the engine's DA1 with attribute **4**, sixels (§41, `term/query.rs`) |
 | = c | Tertiary DA | ✅ | DA3 asks for the terminal's unit id; answered with the constant `00434D45` and never a machine-derived one (§36, `term/query.rs`) |
 | ? Pi ; 1 / 2 / 4 S | Graphics attributes — read / reset (XTSMGRAPHICS) | ✅ | `CSI ? Pi ; Pa ; Pv S` asks about a graphics limit: `Pi` is the item — colour registers (`1`) or sixel geometry (`2`) — and `Pa` the action, `1` read, `2` reset, `4` read the maximum. All three answer `status 0` with the decoder's real limit, a reset landing on that same fixed number; ReGIS (`Pi = 3`) is answered unknown item (§41, `term/query.rs`, §84) |
 | ? Pi ; 3 ; Pv S | Graphics attributes — set | 🛑 | the set action of the same sequence, `Pa = 3`, asking to move a limit to `Pv`; answered `status 3`, failure, with the value unchanged (§41, `term/query.rs`, §84) |
 | Ps $ p / ? Ps $ p | Request mode (DECRQM) | ✅ | DECRQM asks whether a mode is set; answered `CSI Ps ; Pm $ y` in the ANSI spelling as well as the private one, `Pm` being `0` not recognised, `1` set, `2` reset, `3` permanently set, `4` permanently reset (§60, §94) |
-| # P / # Q / # R | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack, pop them back, and — the third, added in §98 — report how many are on it, answered `CSI Pn # Q`. Over a palette that is never read, so the depth to report is always the depth of a stack nothing pushes to (§6, §84, §98) |
+| # P / # Q / # R | Colour palette stack (XTPUSHCOLORS / XTPOPCOLORS / XTREPORTCOLORS) | 🤷 | save the dynamic and ANSI-palette colours onto a stack, pop them back, and — the third, added in §98 — report how many are on it, answered `CSI Pn # Q`. Over a palette that is never read, so the depth to report is always the depth of a stack nothing pushes to (part 6, §84, §98) |
 | ? Pm s / ? Pm r (XTSAVE / XTRESTORE) | Save / restore private modes | ❌ | `CSI ? Pm s` remembers the current setting of each named DEC-private mode and `CSI ? Pm r` puts them back — xterm's, and the pair `term/cancel.rs` already tests it does *not* mistake for DECSLRM. A **gap** with a named risk: a program that saves `? 25`, hides the cursor and restores gets no restore, so the cursor stays hidden after it exits — a stuck state of exactly the shape §72's soft reset exists to prevent. Implementing it means reading and writing arbitrary private modes, which the engine's seam does not expose (§57, §98) |
-| > Ps ; Pn b (SBQUERY) | Query semantic command blocks | 🤷 | contour's: with DEC mode 2034 set, the terminal returns **the command line, the prompt, the output and the exit code** of recent blocks as JSON in a `DCS > 1 b … ST`, keyed by a four-word token it hands out when the mode is enabled. cmote records exactly this (§34) and would be the rare terminal that could answer — which is why it is worth stating that it will not. It is a **reply** in a dialect cmote does not claim (§78, §96), and it hands a host the output of commands it did not run. That contour gates its own feature behind a token is the vendor agreeing about the danger, not disposing of it (§6, §12, §98) |
-| > Pl ; Pr t (XTCAPTURE) | Report the screen buffer | 🤷 | contour's buffer capture: `Pl` picks logical or visual lines, `Pr` how many, and the terminal sends them back as UTF-8 text in a run of `PM 314 ; … ST` strings. The line §60 drew for DECRQCRA is exactly this one — the checksum is allowed because it is clamped to the **visible page**, and a capture's whole purpose is to reach past it into the scrollback, which in an SSH client can hold the output of a session that ended before this one began (§6, §12, §60, §98) |
-| > Ps s (XTSHIFTESCAPE) | Who gets shift-click | 🤷 | xterm's: lets the application ask for shift-modified mouse events instead of the terminal keeping them. Shift is the user's override — the way to select text while a program holds the mouse — and a remote does not get to take it (§6, §10, §98) |
+| > Ps ; Pn b (SBQUERY) | Query semantic command blocks | 🤷 | contour's: with DEC mode 2034 set, the terminal returns **the command line, the prompt, the output and the exit code** of recent blocks as JSON in a `DCS > 1 b … ST`, keyed by a four-word token it hands out when the mode is enabled. cmote records exactly this (§34) and would be the rare terminal that could answer — which is why it is worth stating that it will not. It is a **reply** in a dialect cmote does not claim (§78, §96), and it hands a host the output of commands it did not run. That contour gates its own feature behind a token is the vendor agreeing about the danger, not disposing of it (part 6, §12, §98) |
+| > Pl ; Pr t (XTCAPTURE) | Report the screen buffer | 🤷 | contour's buffer capture: `Pl` picks logical or visual lines, `Pr` how many, and the terminal sends them back as UTF-8 text in a run of `PM 314 ; … ST` strings. The line §60 drew for DECRQCRA is exactly this one — the checksum is allowed because it is clamped to the **visible page**, and a capture's whole purpose is to reach past it into the scrollback, which in an SSH client can hold the output of a session that ended before this one began (part 6, §12, §60, §98) |
+| > Ps s (XTSHIFTESCAPE) | Who gets shift-click | 🤷 | xterm's: lets the application ask for shift-modified mouse events instead of the terminal keeping them. Shift is the user's override — the way to select text while a program holds the mouse — and a remote does not get to take it (part 6, §10, §98) |
 | > Ps M (SETMARK) | Bookmark the cursor's line | ❌ | contour's CSI spelling of what iTerm's `OSC 1337 ; SetMark` does, which cmote ships (§55). A **gap** and a cheap one — one writer, one more door — left open because a scanner is real work and nothing but contour's own integration emits it (§71, §98) |
-| Ps , ~ (DECPS) | Play a sound | 🤷 | DEC's tone generator — "controls the sound frequency or notes", the parameters unread here beyond that. BEL's refusal with a keyboard attached: sound leaves the tab, and where the bell is one ring this is a remote holding the speaker for as long as its parameters say (§6, §63, §98) |
-| Ps * z (DECINVM) | Invoke a macro | 🤷 | runs a macro previously defined by `DCS … ! z` (DECDMAC) — a stored sequence a remote plays back by number. cmote refuses to report a macro store (DECMSR, DECCKSR) and has none; nothing that arrives over the wire becomes a stored program here (§6, §82, §98) |
-| Ps $ \| / Ps * \| (DECSCPP / DECSNLS) | Columns / lines per page | 🤷 | set the page to 80 or 132 columns, or to a given number of lines — DECCOLM's argument in two more spellings, and a remote resizing the window the user sized (§6, §65, §98) |
+| Ps , ~ (DECPS) | Play a sound | 🤷 | DEC's tone generator — "controls the sound frequency or notes", the parameters unread here beyond that. BEL's refusal with a keyboard attached: sound leaves the tab, and where the bell is one ring this is a remote holding the speaker for as long as its parameters say (part 6, §63, §98) |
+| Ps * z (DECINVM) | Invoke a macro | 🤷 | runs a macro previously defined by `DCS … ! z` (DECDMAC) — a stored sequence a remote plays back by number. cmote refuses to report a macro store (DECMSR, DECCKSR) and has none; nothing that arrives over the wire becomes a stored program here (part 6, §82, §98) |
+| Ps $ \| / Ps * \| (DECSCPP / DECSNLS) | Columns / lines per page | 🤷 | set the page to 80 or 132 columns, or to a given number of lines — DECCOLM's argument in two more spellings, and a remote resizing the window the user sized (part 6, §65, §98) |
 | Ps $ } / Ps $ ~ (DECSASD / DECSSDT) | Status display | 🤷 | split a status line off the page (`$ ~` picks its type) and direct output into it (`$ }`). A second writable surface with its own cursor, which is neither in the engine nor in cmote's grid model; DECSTR's published list names DECSASD, and §72 sends nothing for it for this reason (§72, §94, §98) |
 | Ps U / Ps V / Ps SP P / Ps SP Q / Ps SP R | Page positioning (NP / PP / PPA / PPR / PPB) | 🤷 | move to the next page, the previous one, or an absolute / relative / backward page. cmote is a **one-page** terminal — DECRQCRA's page parameter is ignored for the same reason (§60) — so there is nowhere to go. The intermediates are as ECMA-48 defines them; the index this row came from omits them, and ECMA-48 itself is still unread here (§98) |
 | Ps p (DECSSCLS) | Scroll speed | 🤷 | "set scroll speed", in contour's index; what its values mean was not read. cmote scrolls in one step and runs no animation timer — the same absence that keeps the cursor from blinking — so there is no speed here to set (§65, §98) |
@@ -1525,8 +1532,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC H | Set tab stop | ✅ | HTS sets a tab stop at the cursor's column — the sequence §74's tab-stop reset is built out of |
 | ESC 7 / ESC 8 | Save / restore cursor | ✅ | DECSC / DECRC save and restore the cursor with its pen, charsets and origin mode |
 | ESC c (RIS) | Full reset | ✅ | the hard reset: every setting back to power-on, the screen cleared |
-| ESC = / ESC > | Keypad application / numeric | ✅ | DECKPAM / DECKPNM put the numeric keypad in application or numeric mode; tracked on the seam and encoded for the keys with no NumLock meaning to lose — Enter and `* + , - / =` (§2, §36) |
-| ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (§2, §36, `term/keymap.rs`) |
+| ESC = / ESC > | Keypad application / numeric | ✅ | DECKPAM / DECKPNM put the numeric keypad in application or numeric mode; tracked on the seam and encoded for the keys with no NumLock meaning to lose — Enter and `* + , - / =` (part 2, §36) |
+| ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (part 2, §36, `term/keymap.rs`) |
 | ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ❌ | the horizontal twins of RI and IND: at the left or right margin they scroll the page sideways by one column instead of moving the cursor. A **gap with nothing left standing in its way**: §100 built the sideways scroll (`shift_columns`) and §102 built the margins the condition is written against, so both halves of the sentence above now exist as code. What it needs is the `Handler` arm — and `vte` dispatches `ESC 6` and `ESC 9` to nothing at all, so it needs a scanner, not a gate method (§98, §100, §102) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | fills the screen with `E` and homes the cursor — the alignment test |
 | ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. G2 and G3 can be designated and nothing here can invoke them |
@@ -1534,7 +1541,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC N / ESC O | Single shift G2 / G3 | ❌ | SS2 / SS3 invoke G2 or G3 for the next character only |
 | SI / SO (LS0 / LS1) | Locking shift G0 / G1 | ✅ | LS0 and LS1 lock G0 or G1 into GL — the two spellings anything in practice uses |
 | LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ | the other locking shifts, which lock G1–G3 into GL or GR. With SS2 / SS3 missing too, G2 and G3 can be designated and never invoked (§65) |
-| ESC #3–6 | Double-height / width lines | ❌ | DECDHL, DECDWL and DECSWL — a line drawn double height (top and bottom halves), double width, or back to single (§5) |
+| ESC #3–6 | Double-height / width lines | ❌ | DECDHL, DECDWL and DECSWL — a line drawn double height (top and bottom halves), double width, or back to single (part 5) |
 | ESC SP F / G | 7 / 8-bit control output | ❌ | S7C1T / S8C1T choose whether the terminal's own replies use 7-bit or 8-bit C1 controls |
 | ESC % G | UTF-8 charset | ✅ | selects UTF-8 as the encoding — supported in the sense that the parser decodes UTF-8 always, the sequence itself reaching nothing, which is equally why `ESC % @` back to ISO-8859-1 has nowhere to go (§67) |
 
@@ -1550,8 +1557,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | the reply half of DA3 — the terminal's unit id, a constant `00434D45` (§36, `term/query.rs`) |
 | DCS … q | Sixel graphics | ✅ | sixel graphics, a bitmap written six pixels at a time; decoded in-house and composited over the grid, anchored to an absolute document line and reserving its cells, with its own page on the alternate screen (§41, `term/sixel.rs`, `term/graphics.rs`) |
 | DCS tmux; … | tmux passthrough | ❌ | tmux's passthrough, which wraps a sequence meant for the terminal beyond tmux |
-| DCS … ! z / DCS … { / DCS … \| | Define macro / download charset / user-defined keys (DECDMAC / DECDLD / DECUDK) | 🤷 | the three sequences that let a host leave something **behind** in the terminal: a macro to be replayed by number (DECINVM's partner), a downloaded soft character set, and new meanings for the function keys. Each turns a remote's payload into terminal state that outlives the command that sent it, and the keyboard's meanings are the user's (§6, §36, §98) |
-| DCS $ p (STP) | Set terminal profile | 🤷 | contour's: replace the terminal's whole configuration profile by name. iTerm's `SetProfile` in DEC's envelope, and the fixed scheme's argument covers it whole (§6, §55, §98) |
+| DCS … ! z / DCS … { / DCS … \| | Define macro / download charset / user-defined keys (DECDMAC / DECDLD / DECUDK) | 🤷 | the three sequences that let a host leave something **behind** in the terminal: a macro to be replayed by number (DECINVM's partner), a downloaded soft character set, and new meanings for the function keys. Each turns a remote's payload into terminal state that outlives the command that sent it, and the keyboard's meanings are the user's (part 6, §36, §98) |
+| DCS $ p (STP) | Set terminal profile | 🤷 | contour's: replace the terminal's whole configuration profile by name. iTerm's `SetProfile` in DEC's envelope, and the fixed scheme's argument covers it whole (part 6, §55, §98) |
 | DCS … ! g (GIP) | Good Image Protocol | ❌ | contour's image protocol — upload, render, release, oneshot and query, in a DCS envelope. A **gap** on the same footing as kitty's graphics protocol: the decoder is no longer the price (§70), the protocol's own bookkeeping is (§41, §98) |
 
 ### SGR — text styling
@@ -1562,7 +1569,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 2 | Dim / faint | ✅ | faded toward the background |
 | 3 | Italic | ✅ | the italic face, from the bundled IBM Plex Mono family |
 | 4 | Underline | ✅ | a single line under the text |
-| 5 / 6 | Slow / rapid blink | ❌ | the text flashes, slowly or fast; the engine carries no cell flag for it (§5, §36) |
+| 5 / 6 | Slow / rapid blink | ❌ | the text flashes, slowly or fast; the engine carries no cell flag for it (part 5, §36) |
 | 7 | Reverse video | ✅ | swaps the cell's foreground and background |
 | 8 | Hidden / conceal | ✅ | the text is not drawn; a copy still yields it |
 | 9 | Strikethrough | ✅ | a line through the text |
@@ -1580,7 +1587,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 |---|---|---|---|
 | 1 | Application cursor keys | ✅ | DECCKM — the arrow keys send `SS3 A`–`SS3 D` in place of `CSI A`–`CSI D` |
 | 3 (side effects) | DECCOLM's clear | ✅ | DECCOLM's other half: the scrolling region is reset and the screen cleared — what the sequence is actually used for |
-| 3 (column resize) | 132 / 80 columns | 🤷 | DECCOLM proper, which switches the page between 132 and 80 columns (§6, §65) |
+| 3 (column resize) | 132 / 80 columns | 🤷 | DECCOLM proper, which switches the page between 132 and 80 columns (part 6, §65) |
 | 5 (DECSCNM) | Global reverse video | ❌ | reverse video over the whole screen at once |
 | 6 | Origin mode | ✅ | DECOM — row 1 becomes the scrolling region's top and the cursor cannot leave the region |
 | 7 | Auto-wrap | ✅ | DECAWM — a glyph printed in the last column wraps to the next line instead of overwriting |
@@ -1588,7 +1595,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | the same mode as something drawn; cmote runs no animation timer, so the cursor is steady whatever DECRQM reports (§65) |
 | 25 | Show / hide cursor | ✅ | DECTCEM — whether the cursor is drawn at all |
 | 45 | Reverse wrap | ❌ | reverse wrap — a backspace in column 1 moves to the end of the line above |
-| 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (§5, §73, §102, `term/margins.rs`, `term/gatediff.rs`) |
+| 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (part 5, §73, §102, `term/margins.rs`, `term/gatediff.rs`) |
 | 80 (behaviour) | Sixel scrolling | ✅ | what sixel scrolling mode governs: cmote always scrolls, the modern default and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | DECSDM as a mode — setting it asks a sixel not to scroll the page (§65) |
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | mouse reporting: presses and releases, the same plus drag, or all motion. Left, middle, right and the vertical wheel are encoded; the extra buttons and the horizontal wheel are not (`term/mouse.rs`) |
@@ -1600,7 +1607,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 1049 | Alternate screen | ✅ | the alternate screen: the cursor is saved and a cleared page swapped in. No scrollback there, by design |
 | 2004 | Bracketed paste | ✅ | bracketed paste — a paste arrives wrapped in `CSI 200~` and `CSI 201~`, with an injection scrub |
 | 2026 (batching) | Synchronized output | ✅ | synchronized output: BSU holds the visible screen still and ESU flushes the buffered stream inside one advance, so a frame is atomic (§65) |
-| 2026 (abort timeout) | Synchronized output | ❌ | the 150 ms bound on a stuck update, which the application must drive; a remote that sends BSU and goes quiet holds the screen until ESU or 2 MiB (§65, §7) |
+| 2026 (abort timeout) | Synchronized output | ❌ | the 150 ms bound on a stuck update, which the application must drive; a remote that sends BSU and goes quiet holds the screen until ESU or 2 MiB (§65, part 7) |
 | 2027 | Grapheme clustering | ❌ | grapheme clustering — a cluster occupies one cell rather than each code point taking its own |
 | 2031 | Colour-scheme reporting | ❌ | the **unsolicited** half of dark/light reporting: with it set the terminal sends `CSI ? 997 ; 1 n` / `; 2 n` every time its scheme changes. Not in the engine's mode list, so DECRQM answers `0`, not recognised — the truth rather than a shortfall, cmote's scheme having no way to change. A program told `0` polls instead, and the question it polls with is answered (the `? 996 n` row) (§98) |
 | 2034 | Semantic block reporting | 🤷 | arms contour's semantic-block query and mints the token that authenticates it. Refused with the query itself — a mode whose only effect is to enable a refused reply has nothing else left to do (§98) |
@@ -1614,11 +1621,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Feature | Status | Note |
 |---|---|---|
 | Sixel images | ✅ | the DCS `q` bitmap format, decoded and composited by cmote itself with no engine work (§41) |
-| Kitty graphics protocol / unicode placeholders / animation | ❌ | kitty's image protocol — an APC string carrying chunked transmission, image ids, placements, deletions, unicode placeholders and animation; `f=24`/`f=32` payloads are raw RGB and need no decoder at all (§5, §41, §70) |
-| ReGIS | ❌ | DEC's vector graphics language, drawn by an interpreted command stream (§5) |
+| Kitty graphics protocol / unicode placeholders / animation | ❌ | kitty's image protocol — an APC string carrying chunked transmission, image ids, placements, deletions, unicode placeholders and animation; `f=24`/`f=32` payloads are raw RGB and need no decoder at all (part 5, §41, §70) |
+| ReGIS | ❌ | DEC's vector graphics language, drawn by an interpreted command stream (part 5) |
 | iTerm2 inline images (OSC 1337) | 🛑 | the OSC-framed inline image, on a framer cmote already runs; the OSC table's `iTerm 1337 File` row carries it (§70) |
 | Graphics capability report | ✅ | XTSMGRAPHICS' read — 256 colour registers, 4096×4096 and 4 Mpx, the decoder's real limits. The set action has its own row in the CSI table (§41, `term/query.rs`) |
-| Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | `CSI 1–10 t` lets a remote iconify, move, resize, raise, maximize or fullscreen the window cmote owns (§6) |
+| Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | `CSI 1–10 t` lets a remote iconify, move, resize, raise, maximize or fullscreen the window cmote owns (part 6) |
 | Window / position / state reports (CSI 11 / 13 t) | ❌ | ask whether the window is iconified and where it sits on the desktop |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the text area's size, asked in pixels and in characters |
 | Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels, whose reply is `CSI 6 ; height ; width t` — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71, §84) |
@@ -1627,8 +1634,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
 | **xterm modifyOtherKeys** — query (`CSI ? 4 m`), resource 4 | ✅ | asks resource 4 back; answered `CSI > 4 ; Pv m`, the **set** form, so a program can write the reply straight back, and answered where the question sits in the stream (§61) |
 | **xterm modifyOtherKeys** — query, the other six resources | ❌ | XTMODKEYS carries seven resources and cmote tracks one; a query for any of the rest draws silence, the reply being an XTMODKEYS control with no way to say 'not mine' (§61, §68) |
-| ENQ answerback | 🤷 | a lone `0x05` asks the terminal to type a configured string back into the shell (§6, §36) |
-| BEL | 🛑 | `0x07` rings the bell — a sound, or a visual flash of the window (§6, §63) |
+| ENQ answerback | 🤷 | a lone `0x05` asks the terminal to type a configured string back into the shell (part 6, §36) |
+| BEL | 🛑 | `0x07` rings the bell — a sound, or a visual flash of the window (part 6, §63) |
 | BS / HT / LF / CR | ✅ | backspace, tab to the next stop, linefeed, and carriage return |
 | SO / SI | ✅ | the charset shift — SO locks G1 into GL and SI locks G0 back |
 
@@ -1675,16 +1682,16 @@ already written as code, since §100 built the sideways scroll and §102 built t
 is stated against. The family was named as one piece of machinery in §98 and turned out to be exactly
 that: each section that built part of it made the next part smaller.
 
-What made the margins movable was not new machinery but a corrected sentence. §5 had costed the
+What made the margins movable was not new machinery but a corrected sentence. Part 5 had costed the
 delegating-`Handler` build twice and refused it both times because such a wrapper "degrades silently
 on an engine bump" and that could not be caught at build time — which stopped being true, and had
-probably stopped being true before either refusal was written. The head of §5's bullet carries the
+probably stopped being true before either refusal was written. The head of part 5's bullet carries the
 correction and the lesson: **this document re-derives its facts every sweep and had been carrying its
 prices forward unexamined.** §98 found the same failure in the marks; a price quoted three times is no
 better evidence than a row nobody re-read.
 
-Whatever is left of that list is still catalogued with its cost in §5 — which read as the *only*
-section with anything open in it until §60's audit put one row back into §3.
+Whatever is left of that list is still catalogued with its cost in part 5 — which read as the *only*
+section with anything open in it until §60's audit put one row back into part 3.
 
 §56 is worth reading as a method rather than a feature. Every earlier addition worked by scanning a
 sequence out of the stream and keeping the answer BESIDE the grid — a cwd, an exit code, a picture's
@@ -1716,10 +1723,10 @@ forward the rest. Two things need it and nothing else can give them:
 - **Pre-empting a decision.** Margins change what PRINTING does, and there is no repairing that
   afterwards: by the time the glyph is on the grid it is at the wrong columns.
 
-The reason this was refused for seven sections is at the head of §5's margins bullet, and it comes
+The reason this was refused for seven sections is at the head of part 5's margins bullet, and it comes
 down to one sentence about the tooling that had stopped being true. What makes it a *route* rather
 than a one-off is the guard: `#[deny(clippy::missing_trait_methods)]` turns a forgotten forward — or
-one a version bump introduces — into a build error, which is the property §5 said was unavailable.
+one a version bump introduces — into a build error, which is the property part 5 said was unavailable.
 The distinction that keeps it inside §71's rule is that a gate is not a second author: it pre-empts a
 decision and delegates, and the engine still writes every cell it wrote before.
 
@@ -1742,7 +1749,7 @@ makes of it. Worth noting what that says about the fourth route: a refusal built
 available is still a refusal built on evidence, and it stops being right the moment better evidence
 turns up. The 🛑 that §73 was right to award is now a ✅, on the same code.
 
-§60 closed the last row of §8's CSI table and then swept the two tables above it against the crate
+§60 closed the last row of part 8's CSI table and then swept the two tables above it against the crate
 sources, which turned up six rows the code and the doc disagreed about — and only one of them a gap.
 Three sequences **worked and were not written down**: OSC 50 (a third spelling of the cursor shape,
 arriving free through the same engine field DECSCUSR writes), OSC 9;9 (the Windows cwd spelling, of
@@ -1813,7 +1820,7 @@ already exists, which is precisely what a mark meaning "partial, and that is fin
 for four sections. The matrix now has four marks and one rule: **one row, one answer, one mechanism.** The
 value of that is not tidiness — it is that every row is now a claim narrow enough to be wrong, and
 therefore checkable. Six ✅ rows still carry a "but only…" clause and by the same rule are two rows each;
-§7 names them, and they are honest as written, which is the difference.
+Part 7 names them, and they are honest as written, which is the difference.
 
 **§67 then went after the last mark that could be read generously.** ✅ had meant "full", which put the
 burden on a row to be complete and on a reader to notice when it was not — and a reader who supplies the
@@ -1862,7 +1869,7 @@ Audited file:line anchors behind the claims above, for later re-checking.
   from its ctlseqs: "`Ps = 6` ⇒ Report Cursor Position (DECXCPR). The response \[row;column\] is
   returned as `CSI ? r ; c R` (assumes the default page, i.e., "1")" — **no page parameter**, which is
   the fact that expired §67's reason for refusing the row. The same entry lists the nine other values
-  (`15`, `25`, `26`, `55`, `56`, `62`, `63`, `75`, `85`) cmote refuses in §6.
+  (`15`, `25`, `26`, `55`, `56`, `62`, `63`, `75`, `85`) cmote refuses in part 6.
 - **Kitty keyboard**: fully implemented but **guarded on `config.kitty_keyboard`** — every
   handler (`push_keyboard_mode` `term/mod.rs:1288`, `pop_keyboard_modes` `:1308`,
   `report_keyboard_mode` `:1275`, `set_keyboard_mode` `:1029`) early-returns when the flag is off.
@@ -1877,7 +1884,7 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **No blink at all**: `vte-0.15.0/src/ansi.rs:1844-1845` parses SGR 5/6 into `Attr::BlinkSlow` /
   `BlinkFast`, but `terminal_attribute` (`term/mod.rs:1885-1926`) has **no arm for either** and
   `term/cell.rs` `Flags` declare **no blink bit**, so the attribute is dropped before the grid. This
-  corrects an earlier claim in §4 that the engine stored it (§36).
+  corrects an earlier claim in part 4 that the engine stored it (§36).
 - **XTWINOPS size reports**: `text_area_size_pixels` (`term/mod.rs:2259`) and
   `text_area_size_chars` (`term/mod.rs:2268`).
 - **OSC 8 hyperlinks**: stored per cell — `Cell::set_hyperlink` (`term/cell.rs:202`) and read
@@ -1894,7 +1901,7 @@ Audited file:line anchors behind the claims above, for later re-checking.
   the state that decides where a line breaks — is reachable from outside `Term::input` (77 lines,
   `term/mod.rs:1060`). The catch is in the same place: `Handler` declares **71 methods and every one
   has a default empty body** (`ansi.rs:495`), so a forwarding gap — today's or a future version's — is
-  a silent no-op rather than a compile error. That is the hazard §5 prices the feature against, and
+  a silent no-op rather than a compile error. That is the hazard part 5 prices the feature against, and
   unlike §57's borrowed flag bit it cannot be turned into a build failure. *[§102: the last clause is
   the sentence that was wrong — `#[deny(clippy::missing_trait_methods)]` turns exactly that gap into a
   build failure, and the row shipped on it. Everything before the clause was right, which is why the
@@ -1948,7 +1955,7 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **`clippy::missing_trait_methods` exists and fires** (clippy 0.1.97, rustc 1.97.1 — read for §102).
   Run across cmote it reports 117 sites; denied on the gate's `impl` it turns a forgotten forward into
   `error: missing trait method provided by default: <name>`. Verified by deleting `bell()` from the
-  forwarding list and watching the build fail, not assumed. This is the fact that reversed §5's
+  forwarding list and watching the build fail, not assumed. This is the fact that reversed part 5's
   refusal of the margins build.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
@@ -1993,7 +2000,7 @@ Audited file:line anchors behind the claims above, for later re-checking.
   truncated OSC and then leave the rest of the runaway payload to be **printed to the screen** as
   ground text — a megabyte of garbage in place of a memory cost. Discarding the bytes instead means
   filtering the stream on its way in, which §41 refuses for its own reasons. The remaining honest fix
-  is a wrapper around the parser, which is the same price §5 puts on the margins. Recorded, priced, not
+  is a wrapper around the parser, which is the same price part 5 puts on the margins. Recorded, priced, not
   taken. *[§102 paid that price for the margins and this row does **not** come with it. The gate wraps
   the `Handler`, which sits DOWNSTREAM of the payload: the OSC string accumulates inside
   `vte::Parser` and the gate first hears about it at `osc_dispatch`, with the megabyte already
@@ -2211,7 +2218,7 @@ This is that gap closed, one vendor at a time — and two of them could not be c
 
 ### The sequence catalogues (read for §98)
 
-§8 was built against one catalogue, `vtdn.dev`. Three more were read end to end for §98 — contour's
+Part 8 was built against one catalogue, `vtdn.dev`. Three more were read end to end for §98 — contour's
 sequence index, its extension pages, and otty's OSC and CSI trees — and between them they named
 **thirty-odd sequences this table had never mentioned**. That is the finding: the gap was not in what
 the marks said but in which rows existed, and a catalogue only shows you the rows you already have.
@@ -2504,7 +2511,7 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   chip back when its command ends. Surfaced by `Terminal::icon_name` (a borrow, not a clone — the scanner
   is a plain field with no lock in front of it) and drawn by `App::Tab::strip_label` **after** the
   endpoint, the §55 rule the branch pill carries. `vte` has no OSC 1 arm at all, so this scanner is the
-  only thing in the stack that ever sees the sequence. It also performs §6's refusal of the icon half of
+  only thing in the stack that ever sees the sequence. It also performs part 6's refusal of the icon half of
   `OSC 0` by not matching `0;`. Parse-only, no engine, no widgets — fully unit-tested, and the two
   refusal tests were pinned by making `parse` accept `0;` and watching exactly those fail.
 - **`term/progress.rs`** — the command-progress scanner (OSC 9;4, §54). `Reports::feed` runs on the

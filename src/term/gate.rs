@@ -25,7 +25,7 @@
 //
 // WHY THIS WAS REFUSED FOR SEVEN SECTIONS, AND WHAT CHANGED
 //
-// TERMINAL_COMPATIBILITY_PLAN §5 costed this build twice and turned it down both times, on one
+// TERMINAL_COMPATIBILITY_PLAN part 5 costed this build twice and turned it down both times, on one
 // argument: **every method of `Handler` has a default empty body**, so a method the gate forgets to
 // forward — or one a future `alacritty_terminal` ADDS — compiles cleanly and silently drops a
 // sequence. §5 called that "the same class of hazard as §57's borrowed flag bit, except §57's could

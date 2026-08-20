@@ -14,7 +14,7 @@
 // Note which OSC number this is. OSC 9 is multiplexed: `9;9` is the Windows cwd announcement cmote
 // already reads (`term::cwd`, §17), `9;4` is this, and a BARE `9;<text>` is a desktop notification.
 // cmote reads the first two and refuses the third, on purpose — see the refusal recorded in
-// TERMINAL_COMPATIBILITY_PLAN §6 and §8. The distinction is not fussiness: a notification LEAVES the
+// TERMINAL_COMPATIBILITY_PLAN parts 6 and 8. The distinction is not fussiness: a notification LEAVES the
 // window and lands on the user's desktop, so a remote that lied would be spamming the machine;
 // progress cannot leave the tab it belongs to. That is the whole reason one is safe and the other is
 // not, and it is why implementing 9;4 does not reopen 9.
