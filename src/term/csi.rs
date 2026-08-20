@@ -209,10 +209,11 @@ const ESC: u8 = 0x1b;
 /// a byte offset out of each sequence, so allocating one of these per sequence would be a `Vec` built
 /// and dropped on the hot path for every `CSI ? 1049 h` the engine owns.
 ///
-/// The accessors arrive WITH the scanners that need them, one migration at a time (§111) — `sgrstack`
-/// walks every parameter rather than indexing one, so it will want the raw run as bytes, and that
-/// method lands in the commit that gives it a caller. A helper with no caller is a build error here,
-/// which is the `[lints]` rule doing exactly what it is for.
+/// The accessors arrive WITH the scanners that need them, one migration at a time (§111). A helper
+/// with no caller is a build error here, which is the `[lints]` rule doing exactly what it is for —
+/// and it has already paid: this note used to predict that `sgrstack` would need the raw parameter run
+/// as bytes, because it walks every parameter rather than indexing one. It does not. `param_count`
+/// with `param` covers the walk, and the run stayed private.
 #[derive(Debug, Clone, Copy)]
 pub struct Csi<'a> {
 	marker: Option<u8>,

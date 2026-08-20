@@ -60,15 +60,6 @@ const HASH: u8 = b'#';
 /// How deep the stack goes, quoted from xterm above.
 pub const DEPTH: usize = 10;
 
-/// The longest parameter run buffered inside one sequence. The complete list xterm defines is
-/// `1;2;3;4;5;7;8;9;21;30;31`, 25 bytes; anything past this is malformed, and refusing to grow keeps a
-/// hostile stream from ballooning our memory (§12).
-const MAX_PARAMS: usize = 64;
-
-/// The most intermediate bytes buffered. These sequences carry exactly one, so this exists only to
-/// bound the buffer while a near miss is being ruled out.
-const MAX_INTERMEDIATES: usize = 4;
-
 /// Which video attributes a push saves — xterm's parameter list, one bit each.
 ///
 /// Kept as cmote's own bitset rather than a list of raw numbers so the wire's vocabulary is turned
@@ -124,8 +115,8 @@ impl Mask {
 	/// terminal has no attribute for.
 	///
 	/// An unrecognised value is IGNORED and the rest of the list still applies, which is how an SGR
-	/// behaves and the rule §59 already wrote down for DECCARA's selector list. A malformed *number*
-	/// is a different thing and drops the whole sequence — see `request`.
+	/// behaves and the rule §59 already wrote down for DECCARA's selector list. An OMITTED parameter is
+	/// a different thing and drops the whole sequence — see [`push_mask`].
 	fn from_code(code: u16) -> Option<Mask> {
 		match code {
 			1 => Some(Mask::BOLD),
@@ -166,28 +157,20 @@ pub enum SgrStackRequest {
 	Reset,
 }
 
-/// Where the scanner is in the byte stream — the CSI shape and nothing else.
-#[derive(Debug, Default, PartialEq, Eq)]
-enum SgrStackScan {
-	/// Ordinary output; waiting for an ESC.
-	#[default]
-	Text,
-	/// Saw ESC. A CSI starts if the next byte is `[`.
-	Escape,
-	/// Inside `ESC [ …`, collecting the sequence until its final byte.
-	Csi,
-}
-
 /// The XTPUSHSGR / XTPOPSGR scanner (§85). Feed it every byte of shell output; it reports where each
 /// request sat and what it asks for, for `term/mod.rs` to carry out against the live pen.
 #[derive(Debug, Default)]
 pub struct SgrStack {
-	state: SgrStackScan,
-	/// The private marker, if the sequence opened with one. Neither of these carries one, so a marker
-	/// is collected only to rule the sequence out rather than ignore it.
-	marker: Option<u8>,
-	params: Vec<u8>,
-	intermediates: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111). What is left in this module is xterm's
+	/// parameter list and the two spellings of each half — the only part of the reading that is nobody
+	/// else's.
+	framer: super::csi::Framer,
+	/// Whether the previous byte was an ESC, for RIS (`ESC c`) — not a CSI, so not the framer's.
+	///
+	/// Read here rather than borrowed from `term/scp.rs`, which reads the same byte for its own store:
+	/// each scanner reads the stream itself, so neither can come to depend on the other's idea of where
+	/// a sequence sat.
+	after_escape: bool,
 }
 
 impl SgrStack {
@@ -200,130 +183,86 @@ impl SgrStack {
 	/// and a pop must restore it there, so both are answered with the engine advanced exactly that far
 	/// and no further.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, SgrStackRequest)> {
+		// Two families in one stream, so they are collected apart and merged by offset. Order is not
+		// cosmetic: a reset empties the stack, so a push that arrived before one has to be applied
+		// before it, or the stack would be left holding a pen from before the reset (§86).
 		let mut requests = Vec::new();
-		for (index, &byte) in bytes.iter().enumerate() {
-			match self.state {
-				SgrStackScan::Text => {
-					if byte == ESC {
-						self.state = SgrStackScan::Escape;
-					}
-				}
-				SgrStackScan::Escape => match byte {
-					b'[' => {
-						self.marker = None;
-						self.params.clear();
-						self.intermediates.clear();
-						self.state = SgrStackScan::Csi;
-					}
-					// RIS, which empties the stack — see `SgrStackRequest::Reset` for why this one and not
-					// the soft reset. Read here rather than borrowed from `term/scp.rs`, which reads
-					// the same byte for its own store: each scanner reads the stream itself, so
-					// neither can come to depend on the other's idea of where a sequence sat.
-					b'c' => {
-						requests.push((index + 1, SgrStackRequest::Reset));
-						self.state = SgrStackScan::Text;
-					}
-					// ESC ESC: still waiting for the sequence's real first byte.
-					ESC => {}
-					_ => self.state = SgrStackScan::Text,
-				},
-				SgrStackScan::Csi => match byte {
-					// Parameter bytes: digits and separators, plus the private markers (`< = > ?`,
-					// 0x3c–0x3f) which are only legal as the very first one.
-					0x30..=0x3f => {
-						if !self.intermediates.is_empty() {
-							// A parameter byte after an intermediate. The engine refuses the whole sequence
-							// for this (`vte`'s CSI-intermediate state goes straight to `CsiIgnore`), so
-							// carrying on would mean acting alone on a spelling nothing else in the world
-							// obeys (§106).
-							self.state = SgrStackScan::Text;
-						} else if self.params.is_empty() && self.marker.is_none() && byte >= 0x3c {
-							self.marker = Some(byte);
-						} else {
-							self.params.push(byte);
-							if self.params.len() > MAX_PARAMS {
-								self.state = SgrStackScan::Text;
-							}
-						}
-					}
-					// Intermediate bytes. Exactly one `#` is wanted; the buffer is bounded anyway.
-					0x20..=0x2f => {
-						self.intermediates.push(byte);
-						if self.intermediates.len() > MAX_INTERMEDIATES {
-							self.state = SgrStackScan::Text;
-						}
-					}
-					// The final byte ends the sequence, so this is where it is judged.
-					0x40..=0x7e => {
-						if let Some(request) = self.request(byte) {
-							requests.push((index + 1, request));
-						}
-						self.state = SgrStackScan::Text;
-					}
-					// A fresh ESC restarts the match.
-					ESC => self.state = SgrStackScan::Escape,
-					// A byte the grammar above does not claim, but which the engine reads STRAIGHT
-					// THROUGH — it runs a mid-sequence C0 where it sits, ignores DEL, and does nothing
-					// with a high byte, keeping the sequence in every case (§106). Abandoning it here
-					// would mean cmote and the engine disagreeing about what this byte stream even was,
-					// which is how three defects reached a release.
-					byte if super::csi::passes_through(byte) => {}
-					// CAN and SUB, the only two bytes that really cancel a sequence in flight.
-					_ => self.state = SgrStackScan::Text,
-				},
+		self.framer.feed(bytes, |offset, csi| {
+			if let Some(found) = request(csi) {
+				requests.push((offset, found));
 			}
+		});
+		// RIS, the one sequence here that is not a CSI — see `SgrStackRequest::Reset` for why this one
+		// and not the soft reset.
+		for (index, &byte) in bytes.iter().enumerate() {
+			if self.after_escape && byte == b'c' {
+				requests.push((index + 1, SgrStackRequest::Reset));
+			}
+			self.after_escape = byte == ESC;
 		}
+		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}
+}
 
-	/// What the sequence just completed asks for, or `None` when it is not one of ours.
-	///
-	/// All three of final byte, marker and intermediates are tested, which is the near-miss rule §56
-	/// wrote down and §82 kept: `CSI ! p` is DECSTR, `CSI $ p` and `CSI ? $ p` are DECRQM, `CSI SP q`
-	/// is DECSCUSR, and `CSI p` bare is nothing at all. Only the `#` intermediate, with no private
-	/// marker, is this pair.
-	///
-	/// A pop with parameters is refused rather than read generously. XTPOPSGR takes none, so
-	/// `CSI 1 # }` is a sequence cmote does not understand, and half-understanding one is the reading
-	/// this project keeps finding at the bottom of its own mistakes (§82 tightened DECXCPR the same
-	/// way).
-	fn request(&self, final_byte: u8) -> Option<SgrStackRequest> {
-		if self.marker.is_some() || self.intermediates.as_slice() != [HASH] {
-			return None;
-		}
-		match final_byte {
-			b'{' | b'p' => self.push_mask().map(SgrStackRequest::Push),
-			b'}' | b'q' => self.params.is_empty().then_some(SgrStackRequest::Pop),
-			_ => None,
+/// What a finished sequence asks for, or `None` when it is not one of ours.
+///
+/// All three of final byte, marker and intermediates are tested, which is the near-miss rule §56
+/// wrote down and §82 kept: `CSI ! p` is DECSTR, `CSI $ p` and `CSI ? $ p` are DECRQM, `CSI SP q`
+/// is DECSCUSR, and `CSI p` bare is nothing at all. Only the `#` intermediate, with no private
+/// marker, is this pair.
+///
+/// A pop with parameters is refused rather than read generously. XTPOPSGR takes none, so
+/// `CSI 1 # }` is a sequence cmote does not understand, and half-understanding one is the reading
+/// this project keeps finding at the bottom of its own mistakes (§82 tightened DECXCPR the same
+/// way). The count, not the run's emptiness, is what asks that question: `CSI 0 # q` carries a
+/// parameter that happens to be zero, and `CSI ; # q` carries two that are both omitted.
+fn request(csi: &super::csi::Csi<'_>) -> Option<SgrStackRequest> {
+	if !matches!((csi.marker(), csi.intermediates()), (None, [HASH])) {
+		return None;
+	}
+	match csi.final_byte() {
+		b'{' | b'p' => push_mask(csi).map(SgrStackRequest::Push),
+		b'}' | b'q' => (csi.param_count() == 0).then_some(SgrStackRequest::Pop),
+		_ => None,
+	}
+}
+
+/// The attributes a push names. No parameters at all is every attribute, as xterm has it.
+///
+/// `None` — the whole sequence dropped — when a parameter is present but EMPTY. An unknown number is
+/// ignored and the rest of the list still applies (`Mask::from_code`); an omitted one means the
+/// parameters were not what this scanner thinks they were, and acting on the part it recognised would
+/// be guessing at the rest.
+///
+/// Two readings changed when the grammar moved into the framer (§111), and both were accidents of the
+/// hand-rolled walk this replaced rather than rules the module had written down:
+///
+///   * A number past a `u16` — `CSI 99999 # {` — used to drop the sequence, because the walk folded
+///     with `checked_mul` and answered `None`. It saturates now, as the engine does, so what comes out
+///     is an UNKNOWN code and the rest of the list still applies. That is what the rule above always
+///     said should happen to a number this terminal has no attribute for.
+///   * A sub-parameter — `CSI 1 : 3 # {` — used to drop it too, but only because the `:` made the
+///     field unreadable as a number. It reads as two codes now, which is how the engine's own parser
+///     groups those bytes. No source read so far says what xterm makes of a sub-parameter here, so
+///     this follows the parser rather than a guess — and the same shape of accident was all that
+///     covered `term/scp.rs` until §111 found it there.
+fn push_mask(csi: &super::csi::Csi<'_>) -> Option<Mask> {
+	if csi.param_count() == 0 {
+		return Some(Mask::ALL);
+	}
+	let mut mask = Mask::NONE;
+	for index in 0..csi.param_count() {
+		// `None` here is an EMPTY field, and nothing else: the framer keeps a parameter run to digits
+		// and separators, so there is no longer such a thing as an unreadable one. A written `0` is a
+		// code — an unknown one — and telling it from a parameter nobody wrote is what §111 restored to
+		// `Params` for this scanner's sake.
+		let code = csi.param(index)?;
+		if let Some(attribute) = Mask::from_code(code) {
+			mask = mask.with(attribute);
 		}
 	}
-
-	/// The attributes a push names. No parameters at all is every attribute, as xterm has it.
-	///
-	/// `None` — the whole sequence dropped — when a field is empty or unreadable as a number. An
-	/// unknown NUMBER is ignored and the rest of the list still applies (`Mask::from_code`); an
-	/// unreadable one means the parameters were not what this scanner thinks they were, and acting on
-	/// the part it recognised would be guessing at the rest.
-	fn push_mask(&self) -> Option<Mask> {
-		if self.params.is_empty() {
-			return Some(Mask::ALL);
-		}
-		let mut mask = Mask::NONE;
-		for field in self.params.split(|&byte| byte == b';') {
-			if field.is_empty() {
-				return None;
-			}
-			let mut value: u16 = 0;
-			for &byte in field {
-				let digit = byte.checked_sub(b'0').filter(|digit| *digit < 10)?;
-				value = value.checked_mul(10)?.checked_add(u16::from(digit))?;
-			}
-			if let Some(attribute) = Mask::from_code(value) {
-				mask = mask.with(attribute);
-			}
-		}
-		Some(mask)
-	}
+	Some(mask)
 }
 
 #[cfg(test)]
@@ -333,6 +272,14 @@ mod tests {
 	/// Scan a whole chunk in one go — the shape of every test below that is not about splitting.
 	fn scan(bytes: &[u8]) -> Vec<(usize, SgrStackRequest)> {
 		SgrStack::default().feed(bytes)
+	}
+
+	/// A push carrying `fields` parameters, every one of them bold — so a sequence that survives the
+	/// grammar reports `Push(BOLD)` and one that does not reports nothing, which makes the bound the
+	/// only thing a test built on this can be measuring.
+	fn a_list_of(fields: usize) -> Vec<u8> {
+		let params = vec!["1"; fields].join(";");
+		format!("\x1b[{params}#{{").into_bytes()
 	}
 
 	/// Both sequences, and the offset each reports: ONE PAST the final byte.
@@ -423,12 +370,45 @@ mod tests {
 		);
 	}
 
-	/// A field that is not a number at all means the parameters were not what this scanner thinks,
-	/// so the sequence is dropped rather than half-read.
+	/// A parameter nobody wrote means the parameters were not what this scanner thinks, so the sequence
+	/// is dropped rather than half-read — and a written zero is not that.
 	#[test]
-	fn a_malformed_parameter_drops_the_whole_sequence() {
+	fn an_omitted_parameter_drops_the_whole_sequence_and_a_written_zero_does_not() {
 		assert!(scan(b"\x1b[1;;4#{").is_empty(), "an empty field is not a 0");
 		assert!(scan(b"\x1b[;#{").is_empty());
+		// `0` is a code xterm never defined, so it is IGNORED and the rest of the list applies. The two
+		// came out identical until §111 gave `Params` its all-zero field back, and this scanner is the
+		// only one in the directory that can tell the difference.
+		assert_eq!(
+			scan(b"\x1b[1;0#{"),
+			vec![(7, SgrStackRequest::Push(Mask::BOLD))]
+		);
+		assert_eq!(
+			scan(b"\x1b[0#{"),
+			vec![(5, SgrStackRequest::Push(Mask::NONE))],
+			"a lone zero is a push that saves nothing, not a dropped sequence"
+		);
+	}
+
+	/// A sub-parameter reads as another code in the list, which is how the engine's own parser groups
+	/// those bytes. Before the shared grammar the `:` dropped the sequence — by making the field
+	/// unreadable as a number, not by any rule this module had written down (§111).
+	#[test]
+	fn a_sub_parameter_reads_as_another_code_in_the_list() {
+		assert_eq!(
+			scan(b"\x1b[1:3#{"),
+			vec![(7, SgrStackRequest::Push(Mask::BOLD.with(Mask::ITALIC)))]
+		);
+	}
+
+	/// A number too big for a parameter is an UNKNOWN code, not a malformed one: the engine saturates
+	/// rather than giving up, so what comes out is simply a value xterm never defined (§111).
+	#[test]
+	fn a_number_past_a_u16_is_an_unknown_code_rather_than_a_malformed_one() {
+		assert_eq!(
+			scan(b"\x1b[1;99999#{"),
+			vec![(11, SgrStackRequest::Push(Mask::BOLD))]
+		);
 	}
 
 	/// XTPOPSGR takes no parameters, so one carrying any is a sequence cmote does not understand.
@@ -482,13 +462,35 @@ mod tests {
 		assert!(scan(b"\x1b[1\x18#{").is_empty());
 	}
 
-	/// A hostile stream must not be able to make the scanner buffer without bound.
+	/// A hostile stream must not be able to make the scanner buffer without bound — and the two bounds
+	/// answer differently on purpose, which is what this pins now that the grammar is shared (§111).
 	#[test]
-	fn a_runaway_parameter_run_is_abandoned() {
-		let mut bytes = b"\x1b[".to_vec();
-		bytes.extend(std::iter::repeat_n(b'1', MAX_PARAMS + 10));
-		bytes.extend_from_slice(b"#{");
-		assert!(scan(&bytes).is_empty());
+	fn the_two_parameter_bounds_answer_differently() {
+		// More parameters than the engine's array holds: the engine ignores the whole sequence, so the
+		// scanner abandons it too. Both sides ignoring the same bytes is agreement. Every field is a `1`
+		// rather than empty, so abandonment is the only thing that can make the result empty.
+		let bound = super::super::csi::MAX_PARAMS;
+		let fits = a_list_of(bound);
+		assert_eq!(
+			scan(&fits),
+			vec![(fits.len(), SgrStackRequest::Push(Mask::BOLD))],
+			"thirty-two parameters still fit"
+		);
+		assert!(
+			scan(&a_list_of(bound + 1)).is_empty(),
+			"thirty-three do not"
+		);
+
+		// A runaway DIGIT run is clamped instead, and the sequence LIVES — because the engine saturates
+		// the number rather than giving up on it. What the clamp leaves is a code xterm never defined,
+		// which is ignored, so the push saves nothing and the pop that matches it restores nothing.
+		let mut digits = b"\x1b[".to_vec();
+		digits.extend(std::iter::repeat_n(b'1', 500));
+		digits.extend_from_slice(b"#{");
+		assert_eq!(
+			scan(&digits),
+			vec![(digits.len(), SgrStackRequest::Push(Mask::NONE))]
+		);
 	}
 
 	/// RIS is read here as well, because a hard reset must not leave a remote's pens standing (§86).
