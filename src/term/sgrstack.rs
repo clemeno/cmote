@@ -218,7 +218,9 @@ impl SgrStack {
 /// way). The count, not the run's emptiness, is what asks that question: `CSI 0 # q` carries a
 /// parameter that happens to be zero, and `CSI ; # q` carries two that are both omitted.
 fn request(csi: &super::csi::Csi<'_>) -> Option<SgrStackRequest> {
-	if !matches!((csi.marker(), csi.intermediates()), (None, [HASH])) {
+	// XTPUSHSGR takes a `;`-separated list of codes and XTPOPSGR takes nothing, so a `:` anywhere in
+	// the run means these were not the sequences they look like (`Csi::sub_parameters`).
+	if csi.sub_parameters() || !matches!((csi.marker(), csi.intermediates()), (None, [HASH])) {
 		return None;
 	}
 	match csi.final_byte() {
@@ -235,18 +237,15 @@ fn request(csi: &super::csi::Csi<'_>) -> Option<SgrStackRequest> {
 /// parameters were not what this scanner thinks they were, and acting on the part it recognised would
 /// be guessing at the rest.
 ///
-/// Two readings changed when the grammar moved into the framer (§111), and both were accidents of the
-/// hand-rolled walk this replaced rather than rules the module had written down:
-///
-///   * A number past a `u16` — `CSI 99999 # {` — used to drop the sequence, because the walk folded
-///     with `checked_mul` and answered `None`. It saturates now, as the engine does, so what comes out
-///     is an UNKNOWN code and the rest of the list still applies. That is what the rule above always
-///     said should happen to a number this terminal has no attribute for.
-///   * A sub-parameter — `CSI 1 : 3 # {` — used to drop it too, but only because the `:` made the
-///     field unreadable as a number. It reads as two codes now, which is how the engine's own parser
-///     groups those bytes. No source read so far says what xterm makes of a sub-parameter here, so
-///     this follows the parser rather than a guess — and the same shape of accident was all that
-///     covered `term/scp.rs` until §111 found it there.
+/// One reading changed when the grammar moved into the framer (§111), and it was an accident of the
+/// hand-rolled walk this replaced rather than a rule the module had written down. A number past a
+/// `u16` — `CSI 99999 # {` — used to drop the sequence, because the walk folded with `checked_mul` and
+/// answered `None`. It saturates now, as the engine does, so what comes out is an UNKNOWN code and the
+/// rest of the list still applies. That is what the rule above always said should happen to a number
+/// this terminal has no attribute for.
+/// A sub-parameter is refused before this is reached, in `request` — see `Csi::sub_parameters`. That
+/// is the same verdict the hand-rolled walk gave `CSI 1 : 3 # {`, though it gave it by accident: the
+/// `:` made the field unreadable as a number rather than the spelling being ruled out.
 fn push_mask(csi: &super::csi::Csi<'_>) -> Option<Mask> {
 	if csi.param_count() == 0 {
 		return Some(Mask::ALL);
@@ -390,13 +389,20 @@ mod tests {
 		);
 	}
 
-	/// A sub-parameter reads as another code in the list, which is how the engine's own parser groups
-	/// those bytes. Before the shared grammar the `:` dropped the sequence — by making the field
-	/// unreadable as a number, not by any rule this module had written down (§111).
+	/// XTPUSHSGR's `Pm` is a `;`-separated list of codes, so a `:` means this was not that sequence —
+	/// the near-miss rule §56 wrote down, applied to the separator (`Csi::sub_parameters`).
 	#[test]
-	fn a_sub_parameter_reads_as_another_code_in_the_list() {
+	fn a_sub_parameter_is_not_this_sequence() {
+		assert!(scan(b"\x1b[1:3#{").is_empty());
+		assert!(scan(b"\x1b[1;2:3#{").is_empty(), "anywhere in the run");
+		assert!(
+			scan(b"\x1b[4:1#}").is_empty(),
+			"and the pop takes none at all"
+		);
+		// The `;` spelling of the same two codes is the sequence, so the test is about the separator
+		// and not about the codes.
 		assert_eq!(
-			scan(b"\x1b[1:3#{"),
+			scan(b"\x1b[1;3#{"),
 			vec![(7, SgrStackRequest::Push(Mask::BOLD.with(Mask::ITALIC)))]
 		);
 	}

@@ -88,6 +88,9 @@ pub struct Params {
 	/// empty field as malformed (§99's SGR stack does, deliberately) would then drop a sequence that
 	/// named zero perfectly well. [`close_field`] writes the zero back.
 	field_started: bool,
+	/// Whether any separator in the run was a `:` rather than a `;` — see [`Csi::sub_parameters`] for
+	/// what a scanner does about it.
+	subs: bool,
 }
 
 impl Params {
@@ -98,6 +101,7 @@ impl Params {
 		self.digits = 0;
 		self.started = false;
 		self.field_started = false;
+		self.subs = false;
 	}
 
 	/// Fold one parameter byte in, and say whether the sequence is still one the engine would read.
@@ -113,6 +117,7 @@ impl Params {
 	pub fn push(&mut self, byte: u8) -> bool {
 		self.started = true;
 		if byte == b';' || byte == b':' {
+			self.subs |= byte == b':';
 			self.close_field();
 			self.fields += 1;
 			self.digits = 0;
@@ -180,6 +185,11 @@ impl Params {
 	pub fn count(&self) -> usize {
 		if self.started { self.fields + 1 } else { 0 }
 	}
+
+	/// Whether any separator in the run was a `:`.
+	pub fn has_subs(&self) -> bool {
+		self.subs
+	}
 }
 
 /// The most intermediate bytes a scanner will buffer.
@@ -242,6 +252,31 @@ impl Csi<'_> {
 	/// counts. What a scanner uses to insist on exactly as many as its sequence defines.
 	pub fn param_count(&self) -> usize {
 		self.params.count()
+	}
+
+	/// Whether the parameter run carries a SUB-PARAMETER — at least one `:` where a `;` was expected.
+	///
+	/// A scanner here refuses a sequence that has one, unless the sequence it reads is defined to take
+	/// them. **None of the eleven is**, as of §111: DECERA takes four corners, XTPUSHSGR a list of
+	/// codes, XTMODKEYS a resource and a value, and DEC and xterm spell every one of those with `;`.
+	/// `protect` watches SGR — the one family that really does use `:`, for `38:2:r:g:b` — but it
+	/// reports every SGR alike while the pen is armed and never reads a parameter, so a colour written
+	/// with colons reaches it as an SGR like any other.
+	///
+	/// The framer does NOT abandon these, and the split is the point. Sub-parameters are legal in the
+	/// engine's grammar and `vte` dispatches them, so refusing one there would be cmote putting its own
+	/// policy in the module whose whole job is to agree with the engine — and it would throw the bytes
+	/// away for whichever scanner one day wants them. Reporting the fact here leaves the choice at the
+	/// site that knows what its own sequence defines, which is the near-miss rule §56 wrote down,
+	/// applied to the separator.
+	///
+	/// **It is the fact, not the policy.** The three scanners this reaches are unanimous today, and
+	/// pushing the refusal up here would look like a rule and read like an accident the moment a fourth
+	/// one disagrees. That is not hypothetical: `sgrstack` and `modkeys` both crossed onto the framer
+	/// reading a `:` as another `;` — a widening nobody asked for, and one that would have let
+	/// `CSI 2 : 3 ; 5 ; 7 $ z` erase a rectangle the program never named once `rect` followed.
+	pub fn sub_parameters(&self) -> bool {
+		self.params.has_subs()
 	}
 
 	/// Parameter `index` as a number, or `None` when it is absent or unreadable.

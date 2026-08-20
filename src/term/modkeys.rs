@@ -91,9 +91,10 @@ impl ModKeys {
 		framer.feed(bytes, |_, csi| {
 			// `m` is the final byte of both XTMODKEYS and XTQMODKEYS, and neither carries an
 			// intermediate — `CSI > 4 SP m` is some other sequence on the same marker, which is the
-			// near-miss rule §56 wrote down. The offset is not wanted at all: nothing here is fed
-			// back to the engine, so there is no advance to line up against.
-			if csi.final_byte() != b'm' || !csi.intermediates().is_empty() {
+			// near-miss rule §56 wrote down. Both spell their parameters with `;`, so a `:` is that
+			// same rule applied to the separator (`Csi::sub_parameters`). The offset is not wanted at
+			// all: nothing here is fed back to the engine, so there is no advance to line up against.
+			if csi.final_byte() != b'm' || !csi.intermediates().is_empty() || csi.sub_parameters() {
 				return;
 			}
 			match csi.marker() {
@@ -365,13 +366,14 @@ mod tests {
 		assert_eq!(track(&digits), ModifyOtherKeys::Off);
 	}
 
-	/// A sub-parameter reads as another parameter, which is how the engine's parser budgets those
-	/// bytes. Before the shared grammar the `:` abandoned the sequence (§111).
+	/// XTMODKEYS spells `Pp ; Pv` with a semicolon, so a `:` means this was not that sequence — the
+	/// near-miss rule §56 wrote down, applied to the separator (`Csi::sub_parameters`).
 	#[test]
-	fn a_sub_parameter_reads_as_another_parameter() {
-		assert_eq!(track(b"\x1b[>4:2m"), ModifyOtherKeys::Level2);
-		// And so the question refuses it, because XTQMODKEYS takes exactly one parameter.
+	fn a_sub_parameter_is_not_this_sequence() {
+		assert_eq!(track(b"\x1b[>4:2m"), ModifyOtherKeys::Off);
 		assert!(ask(b"\x1b[?4:1m").is_empty());
+		// The `;` spelling of the same two numbers IS the sequence, so this is about the separator.
+		assert_eq!(track(b"\x1b[>4;2m"), ModifyOtherKeys::Level2);
 	}
 
 	/// An empty second parameter is still a second parameter, so the question is not this one.
