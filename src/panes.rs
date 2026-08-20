@@ -432,8 +432,13 @@ mod tests {
 		let window = iced::Size::new(1000.0, 800.0);
 		let _ = panes.restore(huge, window);
 
-		assert_px!(panes.tree.width(), 1000.0 * MAX_PANE_FRACTION);
-		assert_px!(panes.pane.height(), 800.0 * MAX_PANE_FRACTION);
+		// 1000 * 0.6 and 800 * 0.6, worked out here rather than recomputed from
+		// `MAX_PANE_FRACTION` (§107). As the formula this assertion was the production line
+		// written twice: it held for any fraction, so it pinned that the clamp is APPLIED and
+		// never what it computes — and 0.6 is a judgement about how much of a window one pane may
+		// eat, which is exactly the kind of number a test should stop from drifting unnoticed.
+		assert_px!(panes.tree.width(), 600.0);
+		assert_px!(panes.pane.height(), 480.0);
 	}
 
 	/// Before the window has been measured, a remembered size is not applied at all — otherwise a

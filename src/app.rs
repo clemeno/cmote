@@ -11730,11 +11730,16 @@ mod tests {
 		let shrunk = iced::Size::new(500.0, 400.0);
 		let _ = app.update(Message::WindowResized(shrunk));
 
-		let mut expected = app.overlay;
-		expected.reflow(shrunk);
-		assert_eq!(app.overlay, expected, "already pulled back into the window");
-		assert!(app.overlay.pos().x <= (500.0 - ui::dialog::DIALOG_WIDTH).max(0.0) + f32::EPSILON);
-		assert!(app.overlay.pos().y <= 400.0 - ui::dialog::DIALOG_DRAG_MIN_VISIBLE + f32::EPSILON);
+		// Where the card actually is, not where a bound says it may be (§107). This used to build its
+		// own `expected` by calling `reflow` — the function under test — on the value already
+		// produced, and then compare the two: an assertion that `reflow` agrees with itself. With
+		// the two bounds below it, the test could not tell a correct pull-back from any other
+		// position inside the window.
+		//
+		// 500 - 460 = 40 and 400 - 44 = 356, the same two numbers `dialog`'s own shrink test pins,
+		// which is the point: the App is expected to hand the card the SAME clamp, not its own.
+		assert_px!(app.overlay.pos().x, 40.0);
+		assert_px!(app.overlay.pos().y, 356.0);
 	}
 
 	#[test]
