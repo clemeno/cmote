@@ -12461,9 +12461,93 @@ unfalsifiable: `EOF_ECHO` was changed to `b"^X"` so the rule could never fire, a
 to EXIT rather than for a prompt, so it makes no timing guess at all, which is the distinction: a test
 may wait for an event it will certainly get, and must not wait for one it is only hoping for.
 
+### The CSI framer, nine scanners in
+
+`csi::Framer` is §106's top recommendation, built here. Ten modules under `term/` each scanned CSI
+sequences beside the engine, and each carried its own copy of the grammar — 62 to 82 lines apiece of
+"find where a CSI starts and ends in a stream that arrives in arbitrary chunks", with the
+module-specific part of it a handful of lines. Nine are migrated. `feed` loops so far: `tabs` 62→9,
+`dsr` 62→8, `scp` 74→19, `protect` 82→27, `sgrstack` 76→21, `modkeys` 62→24, `rect` 74→25,
+`cancel` 80→9.
+
+**The payout ran upward, not downward.** The worry with sharing a grammar between ten readers is that
+the shared code settles on the laxest behaviour of its callers. The opposite happened, because each
+migration was one commit and the strictest existing rule won every time:
+
+- `scp` alone refused a parameter byte after an intermediate. `protect` alone refused that AND a
+  private marker after the parameters, each with a note naming the defect that found it — the worst
+  being `CSI ? 1;2 ? J` classified as a selective erase, because `first_param` read only the first
+  field and the stray marker hid in the second. Both rules are the framer's now, so the other eight
+  scanners obey what one or two of them used to.
+- `modkeys` had no state for an intermediate byte and none for a byte the engine reads straight
+  through. It was the last of the ten still carrying §106's divergence, and the reason the
+  differential sweep's read-through list had five entries: a test asserting what a module does wrong
+  is not a test.
+- `first_param` lost its "unreadable" case entirely. With a marker refused mid-parameters, a
+  parameter run is digits and separators only, so it returns `u16` rather than `Option<u16>`.
+
+**Three defects were found BY migrating**, which is the argument for one scanner per commit:
+
+1. `Params` dropped leading zeros so thoroughly that an all-zero field rendered as nothing, making
+   `CSI # 1 ; 0 {` identical to `CSI # 1 ; {`. Invisible to the four scanners migrated first (each
+   reads an omitted parameter as 0) and breaking for `sgrstack`, which treats an empty field as
+   malformed on purpose. `Params::finish` writes the zero back.
+2. Three bounds named `MAX_PARAMS` counted parameter BYTES, not parameters — 64 in `sgrstack` and
+   `rect`, 16 in `modkeys` — and all three ABANDONED the sequence over a long digit run, where the
+   engine saturates the number and acts. That is §106's defect shape three more times.
+3. `sgrstack` and `modkeys` both crossed onto the framer reading a `:` as another `;`. The
+   hand-rolled walks they replaced had dropped those sequences by ACCIDENT — the colon made a field
+   unreadable as a number — and taking the accident for the whole of the reason was a widening
+   nobody asked for. Caught before `rect` followed it, where `CSI 2 : 3 ; 5 ; 7 $ z` would have
+   erased a rectangle the program never named. `Csi::sub_parameters` reports the fact; each scanner
+   applies its own policy, and the framer does not abandon these, because sub-parameters are legal in
+   the engine's grammar and refusing one there would be cmote's policy inside the module whose only
+   job is to agree.
+
+**The migration order did work that no ordering document could have.** `cancel` was written down as
+the hardest of the ten and turned out to need nothing invented for it: `Params::finish` (from
+`sgrstack`) gave it `Some(0)` versus `None`, `Csi::sub_parameters` (from `rect`) gave it the colon
+refusal, and the final byte's own offset is `offset - 1`. Its `feed` went 80 lines to 9, its struct
+five fields to one, and **not one of its 32 tests changed** — the strongest evidence so far that the
+framer reproduces the family's behaviour rather than approximating it. Had `cancel` gone first, all
+three would have had to be invented at once.
+
+`rect` needed the one structural departure. The other three RIS-reading scanners collect `ESC c` in a
+second pass and merge by offset, because for them a reset is another request in the list. For `rect` a
+reset CHANGES WHAT THE OTHER SEQUENCES READ — DECSACE's extent is stamped onto every attribute request
+after it — so a second pass would read the whole chunk against whichever extent the chunk ended with.
+`feed` cuts the chunk into runs at each RIS and feeds them in turn, rebasing each run's offsets.
+
+### `query`, the tenth, and the live divergence in it
+
+`query` is the one CSI scanner not migrated and the one not in the differential sweep, and those two
+facts are related. It still carries §106's divergence, measured rather than assumed:
+
+| fed to `Queries::feed` | answered |
+|---|---|
+| `` CSI > 0 q `` | `Version` |
+| `` CSI > `` + 16 zeros + `` q `` | `Version` |
+| `` CSI > `` + 17 zeros + `` q `` | nothing |
+| `` CSI > 0 `` LF `` q `` | nothing |
+
+Both empty rows are sequences `vte` frames and dispatches. The harm is small and one-directional —
+cmote fails to ANSWER a query rather than acting on one alone, so a program asking XTVERSION with a
+stray control byte in it waits out its timeout — but it is the same class, and its `MAX_PARAMS = 16`
+is a fourth byte-counting bound that abandons where the engine saturates.
+
+It is left for a section of its own because its migration has a real design question in it, not a
+mechanical one. `query` scans CSI *and* DCS from one 13-state machine, and the DCS data string is the
+one place a stream legitimately carries arbitrary bytes — the module says so in writing, which is why
+an unrecognised DCS is followed to its terminator rather than dropped. Splitting the CSI half onto a
+framer that knows nothing about DCS would let a payload containing `ESC [ > c` frame as a real query
+unless the callback is gated on "not currently inside a DCS". That gate is the design question, and
+`graphics` (OSC + CSI + Sixel DCS) has the same one.
+
 ### Not done
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
+- **`query` and `graphics` are not on the framer**, and `query`'s divergence above is live. See the
+  section just above for why they were separated from the other eight rather than rushed.
 - **The load stress is manual, not in CI**, and that is a decision rather than an omission. It lives
   in `AGENTS.md` beside the prove-it rule, in §13's category: a check that depends on the machine.
   GitHub's runners are two to four cores and already noisy, so a stress job would be the most likely
