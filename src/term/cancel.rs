@@ -115,8 +115,8 @@ impl Cancel {
 	/// is advanced up to it, fed a CAN instead of it, and resumed after it.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<CancelRequest> {
 		let mut cancels = Vec::new();
-		self.framer.feed(bytes, |offset, csi| {
-			if let Some(request) = margins(offset, csi) {
+		self.framer.feed(bytes, |span, csi| {
+			if let Some(request) = margins(span, csi) {
 				cancels.push(request);
 			}
 		});
@@ -140,7 +140,7 @@ impl Cancel {
 /// overwritten, which is §57's harm exactly. A separator run past the engine's array is different:
 /// there the engine drops the sequence too, so abandoning is agreement, and it also fails the count
 /// test twice over.
-fn margins(offset: usize, csi: &super::csi::Csi<'_>) -> Option<CancelRequest> {
+fn margins(span: super::csi::Span, csi: &super::csi::Csi<'_>) -> Option<CancelRequest> {
 	if csi.final_byte() != b's'
 		|| csi.marker().is_some()
 		|| !csi.intermediates().is_empty()
@@ -152,10 +152,10 @@ fn margins(offset: usize, csi: &super::csi::Csi<'_>) -> Option<CancelRequest> {
 		return None;
 	}
 	Some(CancelRequest {
-		// The framer names the byte one PAST the final one, which is what the eight scanners that FEED
-		// the engine need. This is the one that REPLACES a byte, so it names the final byte itself —
-		// the third convention the doc above describes, derived from the framer's rather than tracked.
-		offset: offset - 1,
+		// The one scanner here that REPLACES a byte rather than reading around it, so it is the one
+		// that asks the span for the final byte itself — see `csi::Span` for the three points and
+		// which scanners want which.
+		offset: span.final_byte_at(),
 		// `None` is an omitted parameter and `Some(0)` an explicit zero, kept apart because it is the
 		// READER that decides the two mean the same thing (§102, `term/margins.rs`). That distinction
 		// is `Params::finish`'s doing (§111) — before it, a written zero rendered as nothing at all.

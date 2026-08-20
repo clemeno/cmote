@@ -173,9 +173,9 @@ impl Protect {
 			armed,
 		} = self;
 		let mut requests = Vec::new();
-		framer.feed(bytes, |offset, csi| {
+		framer.feed(bytes, |span, csi| {
 			if let Some(request) = classify(csi, armed) {
-				requests.push((offset, request));
+				requests.push((span.past(), request));
 			}
 		});
 		// RIS, the one sequence here that is not a CSI. A full reset rebuilds the pen from scratch,

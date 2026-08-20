@@ -104,9 +104,9 @@ impl Scp {
 		// cosmetic here: a RIS invalidates every line the store remembers, so a Select that arrived
 		// before one must be applied before it (§76).
 		let mut requests = Vec::new();
-		self.framer.feed(bytes, |offset, csi| {
+		self.framer.feed(bytes, |span, csi| {
 			if let Some(path) = path(csi) {
-				requests.push((offset, ScpRequest::Select(path)));
+				requests.push((span.past(), ScpRequest::Select(path)));
 			}
 		});
 		for (index, &byte) in bytes.iter().enumerate() {

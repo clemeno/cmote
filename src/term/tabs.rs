@@ -62,9 +62,9 @@ impl Tabs {
 	/// would then parse the tail of a sequence cmote had already answered.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<usize> {
 		let mut resets = Vec::new();
-		self.framer.feed(bytes, |offset, csi| {
+		self.framer.feed(bytes, |span, csi| {
 			if is_tab_reset(csi) {
-				resets.push(offset);
+				resets.push(span.past());
 			}
 		});
 		resets

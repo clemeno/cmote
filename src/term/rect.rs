@@ -403,9 +403,9 @@ impl Rectangles {
 	fn scan(&mut self, bytes: &[u8], base: usize, requests: &mut Vec<(usize, RectRequest)>) {
 		// Destructured so the closure can hold `extent` while `framer` is borrowed for the scan.
 		let Self { framer, extent, .. } = self;
-		framer.feed(bytes, |offset, csi| {
+		framer.feed(bytes, |span, csi| {
 			if let Some(request) = classify(csi, extent) {
-				requests.push((base + offset, request));
+				requests.push((base + span.past(), request));
 			}
 		});
 	}

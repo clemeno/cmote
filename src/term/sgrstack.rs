@@ -187,9 +187,9 @@ impl SgrStack {
 		// cosmetic: a reset empties the stack, so a push that arrived before one has to be applied
 		// before it, or the stack would be left holding a pen from before the reset (§86).
 		let mut requests = Vec::new();
-		self.framer.feed(bytes, |offset, csi| {
+		self.framer.feed(bytes, |span, csi| {
 			if let Some(found) = request(csi) {
-				requests.push((offset, found));
+				requests.push((span.past(), found));
 			}
 		});
 		// RIS, the one sequence here that is not a CSI — see `SgrStackRequest::Reset` for why this one

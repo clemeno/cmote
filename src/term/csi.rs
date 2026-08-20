@@ -310,6 +310,40 @@ impl Csi<'_> {
 	}
 }
 
+/// Where one CSI sequence sat in the chunk that completed it.
+///
+/// The scanners here want DIFFERENT points out of the same sequence, and each one's choice is a real
+/// decision about correctness rather than a convention picked for tidiness. Before this type they all
+/// took one bare `usize` and derived what they needed from it — `offset` here, `offset - 1` there —
+/// with the reasoning spread across eight doc comments. The three points have names now, and each
+/// scanner says which it means at the site that uses it.
+#[derive(Debug, Clone, Copy)]
+pub struct Span {
+	past: usize,
+}
+
+impl Span {
+	/// The byte AFTER the final byte.
+	///
+	/// What a scanner wants when it has to feed the engine PAST the sequence before acting on it —
+	/// eight of the ten, because the engine ignores the sequence and cmote answers it, and an advance
+	/// that stopped short would leave the engine to parse the tail of a sequence cmote had already
+	/// answered.
+	pub fn past(self) -> usize {
+		self.past
+	}
+
+	/// The final byte itself.
+	///
+	/// What a scanner wants when it REPLACES that byte rather than reading around it — `cancel` alone,
+	/// which feeds the engine a CAN in place of a final byte it refuses to let it dispatch (§57). The
+	/// engine is advanced up to this byte, fed the CAN instead of it, and resumed after it.
+	pub fn final_byte_at(self) -> usize {
+		// A CSI is `ESC [` and at least a final byte, so `past` is never 0 and this cannot wrap.
+		self.past - 1
+	}
+}
+
 /// Where the framer is in the byte stream.
 #[derive(Debug, Default, PartialEq, Eq)]
 enum CsiScan {
@@ -347,11 +381,9 @@ pub struct Framer {
 impl Framer {
 	/// Feed a chunk of shell output, calling `on_csi` once per CSI sequence that COMPLETES in it.
 	///
-	/// The `usize` is the offset in THIS `bytes` slice one past the sequence's final byte — what a
-	/// caller needs to advance the engine past a sequence before acting on it, which every scanner
-	/// here does and for the reason `tabs` states: a fed walk that lands in front of the sequence
-	/// leaves the engine to parse its tail.
-	pub fn feed(&mut self, bytes: &[u8], mut on_csi: impl FnMut(usize, &Csi<'_>)) {
+	/// The [`Span`] says where in THIS `bytes` slice the sequence sat, and the caller picks which point
+	/// of it it means — see that type for why there is more than one.
+	pub fn feed(&mut self, bytes: &[u8], mut on_csi: impl FnMut(Span, &Csi<'_>)) {
 		for (index, &byte) in bytes.iter().enumerate() {
 			match self.state {
 				CsiScan::Text => {
@@ -418,7 +450,7 @@ impl Framer {
 						// all-zero one gets its digit back.
 						self.params.finish();
 						on_csi(
-							index + 1,
+							Span { past: index + 1 },
 							&Csi {
 								marker: self.marker,
 								params: &self.params,
@@ -535,8 +567,8 @@ mod tests {
 		let mut framer = Framer::default();
 		let mut found = Vec::new();
 		for chunk in chunks {
-			framer.feed(chunk, |offset, csi| {
-				found.push((offset, csi.marker(), csi.final_byte(), csi.param(0)));
+			framer.feed(chunk, |span, csi| {
+				found.push((span.past(), csi.marker(), csi.final_byte(), csi.param(0)));
 			});
 		}
 		found

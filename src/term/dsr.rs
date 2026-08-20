@@ -134,9 +134,9 @@ impl Dsr {
 	/// its own final byte.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, DsrRequest)> {
 		let mut requests = Vec::new();
-		self.framer.feed(bytes, |offset, csi| {
+		self.framer.feed(bytes, |span, csi| {
 			if let Some(request) = request(csi) {
-				requests.push((offset, request));
+				requests.push((span.past(), request));
 			}
 		});
 		requests
