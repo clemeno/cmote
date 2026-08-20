@@ -314,6 +314,16 @@ pub enum RectRequest {
 		direction: RectDirection,
 		columns: u16,
 	},
+	/// DECBI and DECFI — move the cursor one column back or forward, and at the margin scroll the
+	/// band sideways instead (§112).
+	///
+	/// The horizontal twins of RI and IND, and the only members of this family that are ESCAPE
+	/// sequences rather than CSI ones. `forward` is DECFI (`ESC 9`); `false` is DECBI (`ESC 6`).
+	///
+	/// They carry no parameter at all — one column, always — so unlike everything else here there is
+	/// nothing to default or clamp. What decides which of their two behaviours happens is where the
+	/// cursor is, which only the applier knows.
+	Index { forward: bool },
 	/// UNSCROLL — scroll the page down `lines` lines and fill the top from the SCROLLBACK rather than
 	/// with blanks (§101). kitty's, and the only operation in this module that changes how many lines
 	/// the document has.
@@ -383,17 +393,29 @@ impl Rectangles {
 		// one ends. That grammar is what makes the cut right: a hand-rolled "was the previous byte an
 		// ESC" test — which is what this module used, and three others with it — misses `ESC` LF `c`,
 		// where the engine executes the line feed, stays in its escape state and then resets (§111).
+		//
+		// The same pass reads DECBI and DECFI, the two members of this family that are escape
+		// sequences (§112). They cost one arm each here because the grammar was already being framed
+		// for the reset — which is the argument §111 made for framing escapes at all.
 		let mut resets = Vec::new();
+		let mut indexes = Vec::new();
 		self.escapes.feed(bytes, |span, control| {
 			if let super::dcs::Control::Escape(escape) = control
-				&& escape.final_byte() == b'c'
 				&& escape.intermediates().is_empty()
 			{
-				resets.push(span.past());
+				match escape.final_byte() {
+					b'c' => resets.push(span.past()),
+					// `ESC 6` and `ESC 7` are one byte apart, and `ESC 7` is DECSC — the save-cursor
+					// the engine implements. The intermediates test above is what keeps `ESC ( 6`
+					// (a charset designation) out of this, the same near-miss rule §56 wrote down.
+					b'6' => indexes.push((span.past(), RectRequest::Index { forward: false })),
+					b'9' => indexes.push((span.past(), RectRequest::Index { forward: true })),
+					_ => {}
+				}
 			}
 		});
 
-		let mut requests = Vec::new();
+		let mut requests = indexes;
 		let mut start = 0;
 		for past in resets {
 			// Up to and INCLUDING the RIS, so the framer sees every byte exactly once and in order —
@@ -405,6 +427,10 @@ impl Rectangles {
 			start = past;
 		}
 		self.scan(&bytes[start..], start, &mut requests);
+		// One sort, because the two families were collected in two passes: the indexes came out of the
+		// escape pass above and the rest out of the segmented CSI scans, and a program that writes
+		// `ESC 9` between two rectangle operations means it to happen between them.
+		requests.sort_by_key(|&(offset, _)| offset);
 		requests
 	}
 

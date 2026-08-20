@@ -1156,6 +1156,7 @@ impl Terminal {
 			rect::RectRequest::Columns { columns, insert } => {
 				self.shift_band_columns(usize::from(columns), insert);
 			}
+			rect::RectRequest::Index { forward } => self.index_column(forward),
 			rect::RectRequest::Checksum { id, corners } => {
 				// A rectangle that holds no cells — crossed corners, a corner off the page, or the
 				// origin-mode refusal above — is answered with the checksum of nothing, which is
@@ -1394,6 +1395,34 @@ impl Terminal {
 		}
 	}
 
+	/// DECBI and DECFI — one column back or forward, and at the margin the band moves instead (§112).
+	///
+	/// DEC's own words: DECBI "moves the cursor backward one column. If the cursor is at the left
+	/// margin, all screen data within the margins moves one column to the right"; DECFI is the mirror
+	/// at the right margin. So each is two operations chosen by where the cursor is, and the choice is
+	/// here because the applier is what knows the margins.
+	///
+	/// The cursor move is asked of the ENGINE, in its own spelling, rather than written into the grid
+	/// (§71): CUB and CUF are sequences the engine implements and the gate already bounds by the
+	/// margins, so feeding one keeps cmote from becoming a second writer of the cursor for the sake of
+	/// two bytes. The scroll half has no engine arm and is cmote's, which is `shift_band_columns_at` —
+	/// the same band arithmetic DECIC and DECDC use, at the LEFT margin rather than at the cursor.
+	fn index_column(&mut self, forward: bool) {
+		let cols = self.term.grid().columns();
+		let (left, right) = self.margins.band(cols);
+		let column = self.term.grid().cursor.point.column.0;
+		match (forward, column) {
+			// At the margin: the data slides under the cursor, and the column pushed past the far
+			// margin is gone. DECFI's is a DELETE at the left margin rather than at the cursor —
+			// the content moves left, so the hole opens at the right and the loss is on the left.
+			(false, column) if column == left => self.shift_band_columns_at(left, 1, true),
+			(true, column) if column == right => self.shift_band_columns_at(left, 1, false),
+			// Anywhere else: an ordinary cursor move, in the engine's own spelling.
+			(false, _) => self.advance(b"\x1b[D"),
+			(true, _) => self.advance(b"\x1b[C"),
+		}
+	}
+
 	/// Insert or delete whole COLUMNS at the cursor — DECIC and DECDC (§102).
 	///
 	/// The vertical twins of IL and DL: where those open or close a row across the band's columns,
@@ -1410,13 +1439,20 @@ impl Terminal {
 	/// xterm's test and the same one IL and DL apply: there is no column to open from out there, and
 	/// guessing one would move text the program had walled off.
 	fn shift_band_columns(&mut self, columns: usize, insert: bool) {
+		let column = self.term.grid().cursor.point.column.0;
+		self.shift_band_columns_at(column, columns, insert);
+	}
+
+	/// The same, at a named column rather than at the cursor's (§112).
+	///
+	/// DECIC and DECDC act at the cursor; DECFI acts at the LEFT MARGIN while the cursor sits at the
+	/// right one. Splitting the column out is all that difference is, so the band arithmetic — and the
+	/// buffered read-back that keeps an overlapping move honest — is written once.
+	fn shift_band_columns_at(&mut self, column: usize, columns: usize, insert: bool) {
 		let cols = self.term.grid().columns();
 		let (left, right) = self.margins.band(cols);
 		let (top, bottom) = (self.region.first_row(), self.region.last_row());
-		let (row, column) = {
-			let cursor = self.term.grid().cursor.point;
-			(as_page_row(cursor.line.0), cursor.column.0)
-		};
+		let row = as_page_row(self.term.grid().cursor.point.line.0);
 		if bottom < top || column < left || column > right || row < top || row > bottom {
 			return;
 		}
@@ -4765,6 +4801,118 @@ mod tests {
 			terminal.screen().history_size() > 0,
 			"a full-width scroll still reaches the history"
 		);
+	}
+
+	/// DECBI and DECFI are the horizontal twins of RI and IND (§112): one column back or forward, and
+	/// at the margin the band slides sideways under the cursor instead.
+	///
+	/// They are the only members of the horizontal-scroll family that are ESCAPE sequences, which is
+	/// what left them unbuilt until §111 gave every scanner in the directory a framer that reports
+	/// escape sequences as well as strings — before that, reading `ESC 6` meant a state machine of its
+	/// own for two bytes.
+	#[test]
+	fn a_forward_index_moves_the_cursor_until_it_reaches_the_margin() {
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(b"\x1b[1;1HABCDEFGH\x1b[1;3H");
+		// Not at the right margin: an ordinary cursor move, and the page is untouched.
+		terminal.process(b"\x1b9");
+		assert_eq!(terminal.screen().cursor_position(), (0, 3));
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH", "nothing moved");
+
+		// At the right margin — the page edge, with no margins set — the data slides LEFT under the
+		// cursor: the column past the left margin is lost and the right one comes up blank.
+		terminal.process(b"\x1b[1;8H\x1b9");
+		assert_eq!(
+			terminal.screen().cursor_position(),
+			(0, 7),
+			"the cursor stayed on the margin"
+		);
+		assert_eq!(read(&terminal, 0, 0, 8), "BCDEFGH", "A fell off the left");
+	}
+
+	/// DECBI is the mirror: back one column, and at the LEFT margin the data slides right.
+	#[test]
+	fn a_back_index_moves_the_cursor_until_it_reaches_the_left_margin() {
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(b"\x1b[1;1HABCDEFGH\x1b[1;3H");
+		terminal.process(b"\x1b6");
+		assert_eq!(terminal.screen().cursor_position(), (0, 1));
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH");
+
+		terminal.process(b"\x1b[1;1H\x1b6");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+		assert_eq!(
+			read(&terminal, 0, 1, 7),
+			"ABCDEFG",
+			"the row moved right and H fell off"
+		);
+	}
+
+	/// The margin they mean is the LEFT/RIGHT margin, not the page edge (§102): with a band set, both
+	/// halves of each sequence happen inside it and the columns outside stand still.
+	#[test]
+	fn an_index_at_a_margin_moves_the_band_and_nothing_outside_it() {
+		// Columns 4 to 7 on the wire, so the band is columns 3 to 6 counting from zero.
+		let mut forward = Terminal::new(1, 8);
+		forward.process(b"\x1b[1;1HABCDEFGH");
+		set_margins(&mut forward, 4, 7);
+		// Parked ON the right margin (column 7 on the wire), which is where DECFI scrolls.
+		forward.process(b"\x1b[1;7H\x1b9");
+		assert_eq!(
+			read(&forward, 0, 0, 8),
+			"ABCEFGH",
+			"D fell off the left margin; A B C and H never moved"
+		);
+		assert_eq!(forward.screen().cursor_position(), (0, 6));
+
+		let mut back = Terminal::new(1, 8);
+		back.process(b"\x1b[1;1HABCDEFGH");
+		set_margins(&mut back, 4, 7);
+		back.process(b"\x1b[1;4H\x1b6");
+		assert_eq!(
+			read(&back, 0, 0, 3),
+			"ABC",
+			"the columns left of the band stood still"
+		);
+		assert_eq!(
+			read(&back, 0, 4, 4),
+			"DEFH",
+			"and G fell off the right margin"
+		);
+		assert_eq!(back.screen().cursor_position(), (0, 3));
+	}
+
+	/// Every row of the scrolling region moves, and no row outside it does — the same wall DECIC and
+	/// DECDC are held to, since a sideways scroll is a scrolling operation (§102).
+	#[test]
+	fn an_index_takes_every_row_of_the_region_and_no_other() {
+		let mut terminal = Terminal::new(4, 8);
+		for row in 1..=4 {
+			terminal.process(format!("\x1b[{row};1HABCDEFGH").as_bytes());
+		}
+		// Rows 2 to 3 on the wire, so rows 1 and 2 counting from zero.
+		terminal.process(b"\x1b[2;3r\x1b[2;8H\x1b9");
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH", "row 0 is outside");
+		assert_eq!(read(&terminal, 1, 0, 8), "BCDEFGH", "row 1 slid");
+		assert_eq!(read(&terminal, 2, 0, 8), "BCDEFGH", "row 2 slid");
+		assert_eq!(read(&terminal, 3, 0, 8), "ABCDEFGH", "row 3 is outside");
+	}
+
+	/// A near miss that must not be read as either of them: `ESC 7` is DECSC, the save-cursor the
+	/// engine implements, one byte from `ESC 6` — and `ESC ( 6` designates a character set. The
+	/// intermediates test is what keeps the second one out (§56's near-miss rule).
+	#[test]
+	fn the_sequences_one_byte_from_an_index_are_not_indexes() {
+		let mut terminal = Terminal::new(1, 8);
+		terminal.process(b"\x1b[1;1HABCDEFGH\x1b[1;1H");
+		// DECSC / DECRC: the cursor is saved and restored, and nothing slides.
+		terminal.process(b"\x1b7\x1b[1;5H\x1b8");
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+		// A charset designation whose final byte is an index's.
+		terminal.process(b"\x1b(6");
+		assert_eq!(read(&terminal, 0, 0, 8), "ABCDEFGH");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
 	}
 
 	/// DECIC and DECDC open and close a whole COLUMN across every row — the vertical twins of IL and

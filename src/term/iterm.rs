@@ -1,4 +1,12 @@
-// term/iterm.rs — read the parts of iTerm2's OSC 1337 namespace cmote honours (PLAN §55).
+// term/iterm.rs — read the parts of iTerm2's OSC 1337 namespace cmote honours (PLAN §55), and the
+// bookmark's other spelling (§112).
+//
+// TWO SPELLINGS, ONE MEANING. Since §112 this module also reads contour's `CSI > Ps M` (SETMARK),
+// which is the same instruction as `OSC 1337 ; SetMark` in a CSI's clothing. It lives here rather than
+// in a module of its own because what a mark MEANS is already here — `Report::Mark`, and the one
+// caller that turns it into a tick in cmote's gutter — and a second module for one final byte would
+// put one concept in two places, which is what §108 is about. The cost is that a file named for
+// iTerm2 holds a sequence contour defined; the alternative was worse.
 //
 // OSC 1337 is not one sequence. It is iTerm2's private namespace, a `key=value` grab-bag sharing one
 // OSC number:
@@ -108,6 +116,11 @@ pub enum Report {
 #[derive(Debug, Default)]
 pub struct Iterm {
 	framer: super::osc::Framer<MAX_PAYLOAD>,
+	/// The CSI grammar, shared with every other scanner in this directory (§111), for the one CSI
+	/// spelling of a mark (§112). It was the absence of this that left `CSI > Ps M` unbuilt: the
+	/// compatibility plan called it "a gap and a cheap one … left open because a scanner is real
+	/// work", and a scanner stopped being real work when the grammar became one line.
+	marks: super::csi::Framer,
 	/// The branch the shell last announced (§55), already decoded and sanitised. `None` when nothing
 	/// has announced one, and set back to `None` when the shell announces an EMPTY value — which is how
 	/// leaving a repository is reported, and so has to clear the pill rather than leave a stale branch
@@ -124,8 +137,13 @@ impl Iterm {
 	/// between §34's marks and §17's cwd.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<(usize, Report)> {
 		let mut reports = Vec::new();
-		let branch = &mut self.branch;
-		self.framer.feed(bytes, |offset, payload| {
+		// Destructured so both framers can be borrowed in turn while the closures hold `reports`.
+		let Self {
+			framer,
+			marks,
+			branch,
+		} = self;
+		framer.feed(bytes, |offset, payload| {
 			if let Some(report) = parse(payload) {
 				reports.push((offset, report));
 				return;
@@ -135,6 +153,15 @@ impl Iterm {
 			// all and must leave what we hold alone.
 			parse_user_var(payload).fold_into(branch);
 		});
+		// The CSI spelling, out of the shared grammar (§112). Collected in a second pass and merged by
+		// offset below, because a mark's meaning is WHERE it sits: a program that writes one of each
+		// means them in the order it wrote them.
+		marks.feed(bytes, |span, csi| {
+			if is_set_mark(csi) {
+				reports.push((span.past(), Report::Mark));
+			}
+		});
+		reports.sort_by_key(|&(offset, _)| offset);
 		reports
 	}
 
@@ -143,6 +170,25 @@ impl Iterm {
 	pub fn branch(&self) -> Option<&str> {
 		self.branch.as_deref()
 	}
+}
+
+/// Whether a finished CSI is SETMARK — contour's `CSI > Ps M` (§112).
+///
+/// All three parts are matched together, which is the near-miss rule §56 wrote down and matters here
+/// more than usual: `CSI Ps M` with NO marker is DL, delete lines, which the engine implements and
+/// every full-screen program uses. One byte apart, and reading a DL as a bookmark would leave a tick
+/// in the gutter every time a program deleted a line.
+///
+/// `Ps` is not read. contour defines it as the mark's kind and cmote has one kind — a tick in its own
+/// gutter — so a parameter naming another would be answered with the only one there is; that is the
+/// same reading `SetMark`, which carries no parameter at all, already gets. A sub-parameter IS
+/// refused: nothing defines one here, the engine has no arm behind this spelling, and cmote is
+/// therefore the only actor (`Csi::sub_parameters`, §111).
+fn is_set_mark(csi: &super::csi::Csi<'_>) -> bool {
+	csi.final_byte() == b'M'
+		&& csi.marker() == Some(b'>')
+		&& csi.intermediates().is_empty()
+		&& !csi.sub_parameters()
 }
 
 /// Read one OSC payload as a 1337 report, or `None` when it is not one we honour — which covers
@@ -214,6 +260,53 @@ mod tests {
 	fn scan(bytes: &[u8]) -> Vec<(usize, Report)> {
 		let mut iterm = Iterm::default();
 		iterm.feed(bytes)
+	}
+
+	/// SETMARK, contour's CSI spelling of the same instruction (§112) — read, and read at the offset it
+	/// sat at, because a mark's whole meaning is WHERE it is.
+	#[test]
+	fn the_csi_spelling_of_a_mark_is_read_too() {
+		// `ESC [ > M` is four bytes, so the offset just past it is 4; with a parameter, five.
+		assert_eq!(scan(b"\x1b[>M"), vec![(4, Report::Mark)]);
+		assert_eq!(
+			scan(b"\x1b[>1M"),
+			vec![(5, Report::Mark)],
+			"the kind is not read, only honoured"
+		);
+	}
+
+	/// The near miss that matters: `CSI Ps M` with no private marker is DL, delete lines — a sequence
+	/// the engine implements and every full-screen program uses, one byte from this one. A tick in the
+	/// gutter every time a program deleted a line is what matching all three parts prevents (§56).
+	#[test]
+	fn a_delete_lines_is_not_a_mark() {
+		assert!(scan(b"\x1b[M").is_empty(), "DL with no parameter");
+		assert!(scan(b"\x1b[2M").is_empty(), "and with one");
+		assert!(
+			scan(b"\x1b[?M").is_empty(),
+			"another private marker is another sequence"
+		);
+		assert!(
+			scan(b"\x1b[> M").is_empty(),
+			"and an intermediate makes it something else"
+		);
+		assert!(
+			scan(b"\x1b[>1:2M").is_empty(),
+			"a sub-parameter is a spelling nothing here defines (§111)"
+		);
+	}
+
+	/// Both spellings in one chunk come back in the order the stream put them, which is what the merge
+	/// in `feed` is for: two passes would otherwise put every CSI mark after every OSC one.
+	#[test]
+	fn the_two_spellings_come_back_in_stream_order() {
+		let found = scan(b"\x1b[>M\x1b]1337;SetMark\x07\x1b[>M");
+		let offsets: Vec<usize> = found.iter().map(|(offset, _)| *offset).collect();
+		assert_eq!(found.len(), 3, "{found:?}");
+		assert!(
+			offsets.windows(2).all(|pair| pair[0] < pair[1]),
+			"in stream order: {offsets:?}"
+		);
 	}
 
 	#[test]

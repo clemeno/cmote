@@ -10406,6 +10406,12 @@ number is the same on both sides of the request.
   understated by that sentence**: restoring an arbitrary private mode means holding a copy of the
   engine's mode state, which makes cmote a second source for it (§71) — the rule that has decided more
   rows in this document than any other, and the reason this is not the cheap row it looks like.
+  **Four of the eight have since been built** — SL / SR in §100, UNSCROLL in §101, DECIC / DECDC in
+  §102, and SETMARK with DECBI / DECFI in §112 (DECBI / DECFI were not on this list; they were the
+  ESC table's own entry in the same family). What is left is the locator trio, XTSAVE / XTRESTORE and
+  the two reports, and only the first of those is still "unbuilt" in this entry's sense: the two
+  reports are blocked on a reply format nobody has read, which §112's Not done states, and
+  XTSAVE / XTRESTORE on the §71 rule above.
 - **Bit 5 was not checked.** Newer xterm documents a sixth bit ("do not ignore double-width cell
   values"); the reading this row rests on lists five. It changes nothing — the answer is the same for
   any number of bits — but the row should not be read as a count.
@@ -12899,3 +12905,107 @@ where the engine dispatches it — is pinned from both sides rather than left im
   thing in CI to fail for the weather — and a job that fails randomly is one people learn to ignore,
   which costs more than it catches. The price is that the next test betting on a timing window gets
   found the way this one was: by somebody noticing.
+
+## §112 — Two rows the framers made cheap
+
+§99 listed eight ❌ rows in the CSI table and called them "unbuilt features, not open questions". Four
+had since been built by the sections that grew the machinery they needed (§100, §101, §102). This
+section builds two more, and the reason to record it is not the sequences — they are small — but WHY
+they were small: both had been costed as "needs a scanner", and §111 had just made a scanner one line.
+
+That is the whole shape of this section. Neither row was reconsidered on its merits. What changed was
+the price, and the price changed as a side effect of work that was about something else.
+
+### DECBI / DECFI — the last two names of a six-name family
+
+`ESC 6` and `ESC 9` are the horizontal twins of RI and IND: one column back or forward, and AT the
+margin the band slides sideways under the cursor instead. DEC's own words for the first — "moves the
+cursor backward one column. If the cursor is at the left margin, all screen data within the margins
+moves one column to the right" — and DECFI is the mirror at the right margin.
+
+§98 named this family as **one piece of absent machinery wearing six names**: SL / SR, DECBI / DECFI,
+DECIC / DECDC. §100 built the sideways scroll and moved two. §102 built the margins and moved two more.
+That left DECBI / DECFI as a gap whose definition was already entirely written as code — and it stayed
+a gap for two more sections, because what was missing was neither half of the definition. It was a way
+to READ two escape sequences. `vte` dispatches `ESC 6` and `ESC 9` to nothing at all (`ansi.rs`, they
+fall to its `unhandled!` arm), so there was no `Handler` arm to implement: it needed a scanner, and a
+scanner for two bytes meant a state machine of its own with a chunk boundary to get right.
+
+§111's `dcs::Framer` reports escape sequences as well as control strings, and `rect.rs` was already
+using one — for the RIS that resets DECSACE. So the cost here was **two match arms** in a callback that
+already existed:
+
+```rust
+b'6' => indexes.push((span.past(), RectRequest::Index { forward: false })),
+b'9' => indexes.push((span.past(), RectRequest::Index { forward: true })),
+```
+
+The applier is where the two behaviours are chosen, because the applier is what knows the margins. Two
+details are worth stating:
+
+- **The cursor half is asked of the ENGINE**, in its own spelling — CUB and CUF, fed through the gate,
+  which already bounds them by the margins. cmote writing the cursor directly for the sake of two
+  bytes would make it a second writer of the one piece of state §71 is most careful about, and the
+  engine's own sequence does the same job with the same bounds.
+- **DECFI's scroll is a delete at the LEFT margin**, not at the cursor. The content moves left, so the
+  hole opens at the right and the loss is on the left — while the cursor sits on the right margin. That
+  is one column argument away from what DECIC and DECDC do, so `shift_band_columns` gained an `_at`
+  form and the band arithmetic stayed written once.
+
+Six tests, and the one that earns its place is the near miss: **`ESC 7` is DECSC**, the save-cursor the
+engine implements, one byte from `ESC 6` — and `ESC ( 6` designates a character set. The intermediates
+test is what keeps the second one out, which is §56's rule in a family §56 never touched.
+
+### SETMARK — a second door to one instruction
+
+`CSI > Ps M` is contour's spelling of what `OSC 1337 ; SetMark` does, and cmote has shipped that since
+§55. So this row was never about a feature; it was about a spelling. The compat plan had it as "a gap
+and a cheap one — one writer, one more door — left open because a scanner is real work and nothing but
+contour's own integration emits it".
+
+A scanner stopped being real work in §111. It lands in `term/iterm.rs`, beside the meaning rather than
+in a module of its own: `Report::Mark` and its one consumer are already there, and a second module for
+one final byte would put one concept in two places — which is what §108 is about. The cost is a file
+named for iTerm2 holding a sequence contour defined, and the header says so.
+
+**The near miss here is dangerous rather than merely possible.** `CSI Ps M` with no private marker is
+**DL**, delete lines — a sequence the engine implements and every full-screen program uses. Reading one
+as a bookmark would leave a tick in cmote's gutter every time a program deleted a line, which is not a
+subtle failure and would not have been caught by a test of the sequence itself. All three parts are
+matched together (§56), and `a_delete_lines_is_not_a_mark` pins it from the other side.
+
+`Ps` is contour's mark KIND and is not read. cmote has one kind — a tick in its own gutter — so a
+parameter naming another would be answered with the only one there is, which is exactly the reading
+`SetMark` already gets by carrying no parameter at all.
+
+### Files
+
+- `src/term/rect.rs` — `RectRequest::Index`, two arms in the escape pass, and the sort that merges the
+  two families by offset.
+- `src/term/mod.rs` — `index_column`, and `shift_band_columns_at` split out of `shift_band_columns`.
+  Six tests.
+- `src/term/iterm.rs` — a `csi::Framer`, `is_set_mark`, the merge, and three tests.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — two rows to ✅, and the horizontal-family paragraph closed.
+- 1,494 tests green.
+
+### Not done
+
+- **DECRQDE and DECRQPSR stay gaps, and the blocker is a document, not the state.** Both describe state
+  cmote holds — the displayed extent is arithmetic on numbers `CSI 18 t` already reports, DECCIR is the
+  cursor DECXCPR reads, DECTABSR is `term/tabs.rs`'s own table. What is missing is the exact shape of
+  the replies: DECRPDE's parameter list and whether DECRQPSR's `DCS … $ u ST` envelope has an "I do not
+  report that" form the way DECRQSS's does. Writing a reply in a format nobody has read is the thing
+  §60 refused for the checksum and §54 for the progress: **an invented answer is worse than a missing
+  one**, because a program acts on it. They are cheap the day DEC's manual is read for them.
+- **XTSAVE / XTRESTORE is not a scanner problem** and this section changes nothing about it. Restoring
+  an arbitrary private mode means holding a copy of the engine's mode state, which makes cmote a second
+  source for it — §71's rule, and the reason the row's own note calls the cost understated.
+- **The DEC locator trio is still a gap nothing asks for.** cmote reports mouse events in xterm's
+  spelling (modes 1000–1006), which is what programs emit; the two locator *status* questions are
+  already answered with the honest negative (§82). What is absent is DEC's own protocol, and a
+  protocol nothing sends is the one kind of gap that stays cheap by staying open.
+- **Neither sequence has a differential test.** `ESC 6` / `ESC 9` and `CSI > Ps M` are cmote's alone —
+  the engine dispatches all three to nothing — so there is no second verdict to compare against, which
+  is the same position the other nine act-alone scanners are in (§106). The self-consistency sweeps
+  cover the CSI one by construction, since it goes through the shared grammar.
+
