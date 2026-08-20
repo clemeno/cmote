@@ -12535,19 +12535,64 @@ cmote fails to ANSWER a query rather than acting on one alone, so a program aski
 stray control byte in it waits out its timeout — but it is the same class, and its `MAX_PARAMS = 16`
 is a fourth byte-counting bound that abandons where the engine saturates.
 
-It is left for a section of its own because its migration has a real design question in it, not a
-mechanical one. `query` scans CSI *and* DCS from one 13-state machine, and the DCS data string is the
-one place a stream legitimately carries arbitrary bytes — the module says so in writing, which is why
-an unrecognised DCS is followed to its terminator rather than dropped. Splitting the CSI half onto a
-framer that knows nothing about DCS would let a payload containing `ESC [ > c` frame as a real query
-unless the callback is gated on "not currently inside a DCS". That gate is the design question, and
-`graphics` (OSC + CSI + Sixel DCS) has the same one.
+**The design question that was blocking it does not exist.** The paragraph here used to say that
+splitting `query`'s CSI half onto a DCS-unaware framer would let a payload containing `ESC [ > c`
+frame as a real query, and that gating the callback on "not currently inside a DCS" was the question
+to settle. That was wrong, and measuring it is what said so.
+
+**ESC does two jobs at once.** In the ANSI state machine it ENDS whatever control string is open and
+it OPENS the next sequence, and `vte` does both — a DCS interrupted by an ESC unhooks, and the
+sequence that ESC introduced is dispatched normally. So there is no such thing as a payload the
+engine reads as data and a framer reads as a sequence: the only way into a CSI is `ESC [`, and that
+ESC has already ended the string for the engine too. `a_framer_cannot_be_fooled_by_a_control_string`
+pins it over five shapes of control string, and the framer's claims equal the engine's dispatches in
+every one.
+
+Which stands the worry on its head. The framer's ESC handling is UNCONDITIONAL, and being
+unconditional is exactly what the fused machine got wrong — so the framer is stricter than what it
+replaces, not laxer.
+
+Two live defects fell out of asking, and both are fixed:
+
+- **`query` did only the first of ESC's two jobs**, in two of its states: a stray ESC dropped it back
+  to ordinary text, so the sequence that ESC had opened was never seen. Fed five shapes of control
+  string, the engine dispatched an XTVERSION in every one and cmote answered none. The quietest kind
+  of divergence there is — no screen corruption, no acting alone, just a program waiting out its
+  timeout — which is why it survived eleven sections.
+- **`graphics` had the same gap, where it costs more**, because the sequence dropped can be RIS: a
+  hard reset arriving mid-payload left every picture standing on a screen it had just wiped.
+
+And one that was **duplicated-grammar drift in its plainest form**: single-byte ST (0x9c) ends a
+control string, `graphics` has had a `const ST` for its sixel payloads all along, and `query` never
+learned it — so a DECRQSS ended that way went unanswered while a picture ended that way drew fine.
+One of a pair of scanners knowing a rule its twin does not is the whole argument for the framer,
+restated in the family the framer has not reached yet.
+
+Three measurements changed my mind rather than confirming it, which is the reason to measure at all:
+
+1. `DCS $ q m ESC ESC \` — queued as a third fix. The engine keeps the payload and dispatches
+   nothing, which is what the code already did. Left alone.
+2. **BEL is not a DCS terminator for the engine.** It reads the byte into the payload and carries on.
+   cmote accepts BEL because real emitters send it; the note on the constant now says that is
+   leniency rather than agreement, and that nothing on the screen turns on it.
+3. `graphics` clears its payload when a sixel starts, so an abandoned payload cannot leak into the
+   next picture. Checked before "fixing" it.
+
+What deliberately did NOT change: an abandoned control string still goes unanswered. The engine cannot
+tell a clean terminator from an interrupted one — `unhook` fires either way — so it would answer.
+cmote treats a string that named no terminator as malformed and replies nothing, which is §54's rule
+and §60's: an invented answer is worse than a missing one.
+
+So both migrations are mechanical after all, and the remaining `MAX_PARAMS = 16` in `query` is the
+fourth byte-counting bound to go.
 
 ### Not done
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
-- **`query` and `graphics` are not on the framer**, and `query`'s divergence above is live. See the
-  section just above for why they were separated from the other eight rather than rushed.
+- **`query` and `graphics` are not on the framer.** Their three DCS divergences are fixed and the
+  design question that looked like a blocker turned out not to be one, so what is left is mechanical:
+  `query`'s CSI half (three private-marker states and a fourth byte-counting `MAX_PARAMS`) and
+  `graphics`' `Csi` state. Both keep their own DCS machine, which is the line `osc.rs` already drew.
 - **The load stress is manual, not in CI**, and that is a decision rather than an omission. It lives
   in `AGENTS.md` beside the prove-it rule, in §13's category: a check that depends on the machine.
   GitHub's runners are two to four cores and already noisy, so a stress job would be the most likely
