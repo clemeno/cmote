@@ -29,8 +29,10 @@
 // reply. The scanner only PARSES here (it holds no engine state); `term::mod` fills a DECRQSS SGR
 // reply from the live pen, because only that one needs to read the grid's current attributes.
 //
-// The scanner is a byte-at-a-time state machine, not a match over a buffer, because output arrives
-// in arbitrary chunks: any sequence can be split anywhere, even between the ESC and the `[`/`P`.
+// Any sequence can be split anywhere, even between the ESC and the `[`/`P`, because output arrives in
+// arbitrary chunks. The CSI half of that is `csi::Framer`'s (§111); what is left here is a
+// byte-at-a-time machine for the two DCS forms, and the marker-and-final-byte table that says which of
+// the three private CSI queries a finished sequence was.
 
 /// The escape byte that leads every CSI (`ESC [`) and DCS (`ESC P`) sequence.
 const ESC: u8 = 0x1b;
@@ -52,11 +54,6 @@ const BEL: u8 = 0x07;
 /// scanners learned a rule and its twin never did, so a DECRQSS ended this way went unanswered while
 /// a picture ended this way drew fine.
 const ST: u8 = 0x9c;
-
-/// The longest parameter run we buffer inside a `CSI >` or `CSI =` sequence. XTVERSION and DA3
-/// carry none (or a lone `0`); a longer run is some other private query, and refusing to grow past
-/// this keeps a hostile stream from ballooning our memory (§12).
-const MAX_PARAMS: usize = 16;
 
 /// The longest data string we buffer inside a recognised DCS. A DECRQSS selector is one or two
 /// bytes and an XTGETTCAP name list is short; anything longer is malformed or a different DCS
@@ -113,11 +110,14 @@ pub enum Query {
 	Graphics(Graphics),
 }
 
-/// Where the scanner sits in the byte stream. Only the shapes cmote answers are tracked in
-/// detail — `CSI >` and `CSI =` up to their final byte, and a recognised `DCS $ q` / `DCS + q` up
-/// to its terminator; every other sequence resets straight back to `Text`. An unrecognised DCS is
-/// followed to its terminator all the same (`DcsIgnore`), so its arbitrary data — the one place a
-/// stream legitimately carries raw bytes — cannot masquerade as a fresh query.
+/// Where the CONTROL-STRING half of the scanner sits in the byte stream. The CSI half is the framer's
+/// (§111), so nothing here tracks a `[` — a recognised `DCS $ q` / `DCS + q` is followed to its
+/// terminator and every other sequence resets straight back to `Text`.
+///
+/// An unrecognised DCS is followed to its terminator all the same (`DcsIgnore`) rather than dropped,
+/// so its arbitrary data — the one place a stream legitimately carries raw bytes — cannot masquerade
+/// as a fresh query. That is about THIS half only: a CSI inside a payload is not a masquerade at all,
+/// because an ESC ends the string for the engine too, which `differential.rs` measures.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum QueryScan {
 	/// Ordinary output; waiting for an ESC.
@@ -125,17 +125,6 @@ enum QueryScan {
 	Text,
 	/// Saw ESC; a CSI starts on `[`, a DCS on `P`.
 	Esc,
-	/// Saw `ESC [`; the sequence is one we care about only if the next byte is the `>` or `=`
-	/// private marker.
-	Csi,
-	/// Inside `ESC [ > …`, collecting parameter digits until the final byte.
-	CsiGt,
-	/// Inside `ESC [ = …`, collecting parameter digits until the final byte (DA3, §36).
-	CsiEq,
-	/// Inside `ESC [ ? …`, collecting parameter digits until the final byte (XTSMGRAPHICS, §41).
-	/// Every DECSET/DECRST (`CSI ? 1049 h`) passes through here too and leaves on its own final
-	/// byte, unread — the engine owns those.
-	CsiQuestion,
 	/// Saw `ESC P`; a DCS we answer starts on the `$` or `+` intermediate.
 	Dcs,
 	/// Saw `ESC P $`; a DECRQSS request if the next byte is the `q` final.
@@ -171,7 +160,10 @@ enum QueryScan {
 /// rule and the safe direction — an invented answer is worse than a missing one (§60).
 fn after_escape(byte: u8) -> QueryScan {
 	match byte {
-		b'[' => QueryScan::Csi,
+		// A CSI, which this machine no longer reads: the framer beside it frames the three private
+		// forms cmote answers (§111). Ordinary text is safe to fall back to, because a CSI's own bytes
+		// hold no ESC — so the only thing this half waits for cannot arrive before the sequence ends.
+		b'[' => QueryScan::Text,
 		b'P' => QueryScan::Dcs,
 		// ESC ESC: still waiting for the sequence's real first byte.
 		ESC => QueryScan::Esc,
@@ -185,20 +177,41 @@ fn after_escape(byte: u8) -> QueryScan {
 #[derive(Debug, Default)]
 pub struct Queries {
 	state: QueryScan,
-	params: Vec<u8>,
+	/// The CSI grammar, shared with the other scanners (§111) — the three private forms cmote answers.
+	/// The DCS half stays in `state` beside it, which is the line `osc.rs` drew and `graphics` follows.
+	framer: super::csi::Framer,
 	data: Vec<u8>,
 }
 
 impl Queries {
 	/// Scan a chunk of shell output and return the queries that completed in it (usually none).
 	/// Safe at any chunk boundary — the state machine carries over between calls.
-	#[expect(
-		clippy::too_many_lines,
-		reason = "one arm per answered query (§36): a table of sequences, not nested logic"
-	)]
+	///
+	/// **In stream order**, which matters here more than anywhere else in the directory: these turn
+	/// into REPLY BYTES sent back to the remote, and a program that asked two questions matches the
+	/// answers to them by position. Two passes over the chunk would otherwise put every CSI answer
+	/// after every DCS one, so each is collected with the offset it completed at and the two are merged
+	/// on it. The offsets are then dropped — no caller wants them, and none of these events is fed back
+	/// to the engine.
 	pub fn feed(&mut self, bytes: &[u8]) -> Vec<Query> {
 		let mut found = Vec::new();
-		for &byte in bytes {
+		self.scan_strings(bytes, &mut found);
+		self.framer.feed(bytes, |span, csi| {
+			if let Some(query) = asked(csi) {
+				found.push((span.past(), query));
+			}
+		});
+		found.sort_by_key(|&(offset, _)| offset);
+		found.into_iter().map(|(_, query)| query).collect()
+	}
+
+	/// The DCS half: DECRQSS and XTGETTCAP, and following every other control string to its terminator
+	/// so that its arbitrary data cannot be read as a query.
+	fn scan_strings(&mut self, bytes: &[u8], found: &mut Vec<(usize, Query)>) {
+		for (index, &byte) in bytes.iter().enumerate() {
+			// Past the byte that finished the string, matching what `Span::past` reports for a CSI, so
+			// the two passes can be merged on one scale.
+			let past = index + 1;
 			match self.state {
 				QueryScan::Text => {
 					if byte == ESC {
@@ -206,91 +219,6 @@ impl Queries {
 					}
 				}
 				QueryScan::Esc => self.state = after_escape(byte),
-				QueryScan::Csi => {
-					self.state = match byte {
-						b'>' => {
-							self.params.clear();
-							QueryScan::CsiGt
-						}
-						b'=' => {
-							self.params.clear();
-							QueryScan::CsiEq
-						}
-						b'?' => {
-							self.params.clear();
-							QueryScan::CsiQuestion
-						}
-						ESC => QueryScan::Esc,
-						// Any other CSI (an SGR colour, a cursor move, `ESC [ c` DA1) — not ours.
-						_ => QueryScan::Text,
-					};
-				}
-				QueryScan::CsiGt => match byte {
-					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						// A run longer than any real payload is malformed; drop the sequence.
-						if self.params.len() > MAX_PARAMS {
-							self.state = QueryScan::Text;
-						}
-					}
-					b'q' => {
-						// XTVERSION is `CSI > q`, or `CSI > 0 q`. A non-zero parameter marks some
-						// other private query (a DA2 variant), so only the empty/zero form answers.
-						if self.default_params() {
-							found.push(Query::Version);
-						}
-						self.state = QueryScan::Text;
-					}
-					ESC => self.state = QueryScan::Esc,
-					// `m` (XTMODKEYS), `u` (kitty keyboard), `c` (DA2): handled by modkeys/engine.
-					_ => self.state = QueryScan::Text,
-				},
-				QueryScan::CsiEq => match byte {
-					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						// Same bound as `CSI >`: a longer run is not a query we answer (§12).
-						if self.params.len() > MAX_PARAMS {
-							self.state = QueryScan::Text;
-						}
-					}
-					b'c' => {
-						// DA3 is `CSI = c`, or `CSI = 0 c` — the tertiary device-attributes request
-						// (§36). The engine's `identify_terminal` handles the no-intermediate (DA1)
-						// and `>` (DA2) forms and drops this one, so it falls to cmote. As with DA1
-						// and DA2, only the empty/zero parameter form is the request.
-						if self.default_params() {
-							found.push(Query::UnitId);
-						}
-						self.state = QueryScan::Text;
-					}
-					ESC => self.state = QueryScan::Esc,
-					// Any other `CSI =` final byte is a private sequence cmote does not answer.
-					_ => self.state = QueryScan::Text,
-				},
-				QueryScan::CsiQuestion => match byte {
-					b'0'..=b'9' | b';' => {
-						self.params.push(byte);
-						// Same bound as the other private forms; a DECSET parameter list never
-						// approaches it (§12).
-						if self.params.len() > MAX_PARAMS {
-							self.state = QueryScan::Text;
-						}
-					}
-					b'S' => {
-						// XTSMGRAPHICS (§41). The engine has no arm for the `?` form of `CSI S` — its
-						// only `S` is SU, scroll-up, with no intermediate — so the whole request falls
-						// to cmote. A request naming neither an item nor an action is malformed and
-						// left unanswered rather than guessed at.
-						if let Some(request) = graphics_request(&self.params) {
-							found.push(Query::Graphics(request));
-						}
-						self.state = QueryScan::Text;
-					}
-					ESC => self.state = QueryScan::Esc,
-					// Every other `CSI ?` sequence — DECSET/DECRST (`h`/`l`), DECRQM (`$p`), the
-					// kitty keyboard query (`u`) — belongs to the engine.
-					_ => self.state = QueryScan::Text,
-				},
 				QueryScan::Dcs => {
 					self.state = match byte {
 						b'$' => QueryScan::DcsDollar,
@@ -323,7 +251,7 @@ impl Queries {
 					// ST as a single byte is the C1 form of `ESC \`, and BEL the alternate terminator
 					// some programs use — see both constants for which of the two the engine agrees on.
 					ST | BEL => {
-						self.complete_dcs(kind, &mut found);
+						self.complete_dcs(kind, past, found);
 						self.state = QueryScan::Text;
 					}
 					_ => {
@@ -336,7 +264,7 @@ impl Queries {
 				},
 				QueryScan::DcsDataEsc(kind) => match byte {
 					b'\\' => {
-						self.complete_dcs(kind, &mut found);
+						self.complete_dcs(kind, past, found);
 						self.state = QueryScan::Text;
 					}
 					ESC => self.state = QueryScan::DcsDataEsc(kind),
@@ -356,20 +284,11 @@ impl Queries {
 				},
 			}
 		}
-		found
-	}
-
-	/// Whether the parameter run collected so far is the *default* one — empty, or nothing but
-	/// zeros. Both private queries cmote answers (XTVERSION `CSI > q`, DA3 `CSI = c`) are defined
-	/// only in that form; a non-zero parameter on the same final byte is a different private
-	/// sequence, so the scanner stays silent rather than answer a question it was not asked.
-	fn default_params(&self) -> bool {
-		self.params.is_empty() || self.params.iter().all(|&byte| byte == b'0')
 	}
 
 	/// Turn a finished DCS's data string into a `Query`. DECRQSS reads only the SGR setting from
 	/// real state; XTGETTCAP hands its (possibly several) hex-encoded capability names on whole.
-	fn complete_dcs(&mut self, kind: DcsKind, found: &mut Vec<Query>) {
+	fn complete_dcs(&mut self, kind: DcsKind, past: usize, found: &mut Vec<(usize, Query)>) {
 		match kind {
 			DcsKind::Decrqss => {
 				// `m` is the SGR selector, the one setting cmote reports truthfully; anything else
@@ -379,7 +298,7 @@ impl Queries {
 				} else {
 					Decrqss::Unsupported
 				};
-				found.push(Query::Decrqss(request));
+				found.push((past, Query::Decrqss(request)));
 			}
 			DcsKind::GetTcap => {
 				// The names are `;`-separated hex; keep them raw for `known_capability` to decode.
@@ -388,7 +307,7 @@ impl Queries {
 					.split(|&b| b == b';')
 					.map(<[u8]>::to_vec)
 					.collect();
-				found.push(Query::Capabilities(names));
+				found.push((past, Query::Capabilities(names)));
 			}
 		}
 	}
@@ -398,25 +317,57 @@ impl Queries {
 /// the item and the action; anything after them belongs to a *set*, which cmote refuses, so it is
 /// not read. `None` when either is missing or unparseable — an unanswered malformed request is
 /// better than an answer about something the program did not ask for.
-fn graphics_request(params: &[u8]) -> Option<Graphics> {
-	let mut fields = params.split(|&byte| byte == b';');
-	let item = number(fields.next()?)?;
-	let action = number(fields.next()?)?;
+fn graphics_request(csi: &super::csi::Csi<'_>) -> Option<Graphics> {
+	// Both required and neither defaulted: a request naming no item or no action is malformed, and
+	// `param` reports an omitted one as `None` for exactly this (§111). The trailing `Pv` values a
+	// SET would carry are not read, for the reason on `Graphics`.
+	let item = csi.param(0)?;
+	let action = csi.param(1)?;
 	Some(Graphics { item, action })
 }
 
-/// One decimal parameter as a number, or `None` when it is empty or too long to be one. Saturating
-/// digits, so a remote's overlong run clamps instead of wrapping into a small plausible value (§12).
-fn number(field: &[u8]) -> Option<u16> {
-	if field.is_empty() {
+/// Which query a finished CSI is, or `None` when it is not one cmote answers.
+///
+/// The three private forms, told apart by their marker and final byte together — which is the
+/// near-miss rule §56 wrote down, and it has to be all three parts here because each of these final
+/// bytes carries other sequences under a different marker. `CSI c` is DA1 and `CSI > c` is DA2, both
+/// the engine's; `CSI ? 1049 h` is a private mode; `CSI S` is scroll-up.
+///
+/// No intermediate belongs to any of them, and a sub-parameter is a spelling none of them defines —
+/// the same policy `sgrstack` and `modkeys` take, and for the same reason: the engine has no arm
+/// behind any of these three, so cmote is the only actor and refusing an undefined spelling costs
+/// nothing (`Csi::sub_parameters`).
+fn asked(csi: &super::csi::Csi<'_>) -> Option<Query> {
+	if !csi.intermediates().is_empty() || csi.sub_parameters() {
 		return None;
 	}
-	let mut value = 0u16;
-	for &byte in field {
-		let digit = byte.checked_sub(b'0').filter(|digit| *digit <= 9)?;
-		value = value.saturating_mul(10).saturating_add(u16::from(digit));
+	match (csi.marker(), csi.final_byte()) {
+		// XTVERSION. Only the empty or zero form is the request; a non-zero parameter on this final
+		// byte marks some other private query.
+		(Some(b'>'), b'q') => default_params(csi).then_some(Query::Version),
+		// DA3, the tertiary device attributes (§36). The engine's `identify_terminal` covers the
+		// no-marker (DA1) and `>` (DA2) forms and drops this one, so it falls to cmote — and as with
+		// those two, only the empty or zero form is the request.
+		(Some(b'='), b'c') => default_params(csi).then_some(Query::UnitId),
+		// XTSMGRAPHICS (§41). The engine has no arm for the `?` form of `CSI S` — its only `S` is SU,
+		// scroll-up, with no marker at all — so the whole request falls to cmote.
+		(Some(b'?'), b'S') => graphics_request(csi).map(Query::Graphics),
+		_ => None,
 	}
-	Some(value)
+}
+
+/// Whether the parameter run is the *default* one — absent, or a single zero.
+///
+/// Both private queries that use it (XTVERSION `CSI > q`, DA3 `CSI = c`) are defined only in that
+/// form, so a non-zero parameter on the same final byte is a different private sequence and the
+/// scanner stays silent rather than answer a question it was not asked.
+///
+/// A second parameter disqualifies it even when both are zero, which is what `param_count` is for:
+/// `CSI > 0 ; 0 q` names two, and neither query takes two. The hand-rolled test this replaces said the
+/// same thing by accident — it required every BYTE of the run to be `0`, and a `;` is not — so the
+/// count says it on purpose now (§111).
+fn default_params(csi: &super::csi::Csi<'_>) -> bool {
+	csi.param_count() == 0 || (csi.param_count() == 1 && csi.param(0) == Some(0))
 }
 
 /// The XTSMGRAPHICS reply: `CSI ? Pi ; Ps ; Pv S`, where `Ps` is the status — 0 success, 1 an item
@@ -636,6 +587,94 @@ mod tests {
 	/// Feed one byte slice to a fresh scanner and return the queries it found.
 	fn scan(bytes: &[u8]) -> Vec<Query> {
 		Queries::default().feed(bytes)
+	}
+
+	/// The queries come back IN STREAM ORDER across both halves, which is what the offset merge in
+	/// `feed` exists for and the one thing two unordered passes would have broken (§111).
+	///
+	/// It matters here and nowhere else in the directory: these become reply bytes sent to the remote,
+	/// and a program that asks two questions matches the answers to them by position. Two passes put
+	/// every CSI answer after every DCS one, which would have swapped the first case below.
+	#[test]
+	fn the_answers_come_back_in_the_order_the_questions_were_asked() {
+		assert_eq!(
+			scan(b"\x1b[>q\x1bP$qm\x1b\\"),
+			vec![Query::Version, Query::Decrqss(Decrqss::Sgr)],
+			"a CSI question before a DCS one"
+		);
+		assert_eq!(
+			scan(b"\x1bP$qm\x1b\\\x1b[>q"),
+			vec![Query::Decrqss(Decrqss::Sgr), Query::Version],
+			"and the other way round"
+		);
+		// Three, alternating, so the merge is doing more than putting one list before the other.
+		assert_eq!(
+			scan(b"\x1b[>q\x1bP$qm\x1b\\\x1b[=c"),
+			vec![Query::Version, Query::Decrqss(Decrqss::Sgr), Query::UnitId]
+		);
+	}
+
+	/// A padded parameter run is still the default one. This was the divergence §111 measured: the
+	/// module's own `MAX_PARAMS` counted BYTES and abandoned the sequence past sixteen of them, so a
+	/// program padding its XTVERSION got no answer from cmote and a dispatched sequence from the
+	/// engine. The framer clamps the digits instead and the sequence lives.
+	#[test]
+	fn a_padded_request_is_still_the_default_one() {
+		let padded = |marker: u8, final_byte: u8, zeros: usize| {
+			let mut bytes = vec![ESC, b'[', marker];
+			bytes.extend(std::iter::repeat_n(b'0', zeros));
+			bytes.push(final_byte);
+			bytes
+		};
+		assert_eq!(scan(&padded(b'>', b'q', 16)), vec![Query::Version]);
+		assert_eq!(scan(&padded(b'>', b'q', 17)), vec![Query::Version]);
+		assert_eq!(scan(&padded(b'>', b'q', 500)), vec![Query::Version]);
+		assert_eq!(scan(&padded(b'=', b'c', 500)), vec![Query::UnitId]);
+	}
+
+	/// A SECOND parameter disqualifies the default form even when both are zero — neither query takes
+	/// two. The hand-rolled test this replaces said so by accident, requiring every byte of the run to
+	/// be `0` when a `;` is not; `param_count` says it on purpose (§111).
+	#[test]
+	fn a_second_parameter_is_not_the_default_form() {
+		assert!(scan(b"\x1b[>0;0q").is_empty());
+		assert!(scan(b"\x1b[>;q").is_empty());
+		assert!(scan(b"\x1b[=0;0c").is_empty());
+	}
+
+	/// A sub-parameter is a spelling none of the three defines, and the engine has no arm behind any of
+	/// them — so cmote is the only actor and refusing costs nothing (`Csi::sub_parameters`).
+	#[test]
+	fn a_sub_parameter_is_none_of_these_queries() {
+		assert!(scan(b"\x1b[>0:0q").is_empty());
+		assert!(scan(b"\x1b[?1:2S").is_empty());
+		// The `;` spelling of the graphics request IS one, so this is about the separator.
+		assert_eq!(
+			scan(b"\x1b[?1;2S"),
+			vec![Query::Graphics(Graphics { item: 1, action: 2 })]
+		);
+	}
+
+	/// An intermediate byte makes it some other sequence on the same marker and final byte — the
+	/// near-miss rule §56 wrote down, which this scanner used to get by accident: its old machine had
+	/// no state for an intermediate at all and abandoned the sequence on one.
+	#[test]
+	fn an_intermediate_byte_rules_all_three_out() {
+		assert!(scan(b"\x1b[> q").is_empty());
+		assert!(scan(b"\x1b[= c").is_empty());
+		assert!(scan(b"\x1b[?1;2 S").is_empty());
+		assert!(scan(b"\x1b[?4$p").is_empty(), "DECRQM, the engine's");
+	}
+
+	/// A byte the engine reads STRAIGHT THROUGH must not change what this module makes of a sequence —
+	/// the §106 rule, which `query` was the last CSI scanner not to obey (§111).
+	#[test]
+	fn a_byte_the_engine_reads_through_does_not_abandon_the_query() {
+		assert_eq!(scan(b"\x1b[>0\nq"), vec![Query::Version]);
+		assert_eq!(scan(b"\x1b[=\x7fc"), vec![Query::UnitId]);
+		// CAN and SUB are the only two bytes that really cancel a sequence in flight.
+		assert!(scan(b"\x1b[>0\x18q").is_empty());
+		assert!(scan(b"\x1b[=\x1ac").is_empty());
 	}
 
 	#[test]

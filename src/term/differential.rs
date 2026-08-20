@@ -192,8 +192,10 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// through, and the one this sweep is here to keep honest.
 	const INTERMEDIATES: [&[u8]; 8] = [b"", b" ", b"\"", b"#", b"$", b"!", b" \"", b"\"$#"];
 	const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
-	/// Every final byte any scanner in this directory watches for.
-	const FINALS: &[u8] = b"smqpJKWk{}zn";
+	/// Every final byte any scanner in this directory watches for. `c` and `S` joined when `query` did
+	/// (§111): they are DA3 and XTSMGRAPHICS, two of the three private CSI forms it answers, and a
+	/// sweep that never spelled them could not have caught it acting on one alone.
+	const FINALS: &[u8] = b"smqpJKWk{}zncS";
 
 	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
 	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
@@ -501,7 +503,7 @@ mod tests {
 		// they are being held to is the ENGINE's (`csi::passes_through`), and the only thing that makes it
 		// their business is that they shadow the same byte stream.
 		//
-		// The engine has no live arm behind any of these six sequences, so there is nothing to compare a
+		// The engine has no live arm behind any of these seven sequences, so there is nothing to compare a
 		// verdict against — `vte` frames them and `ansi.rs` drops them. What can still be asserted is
 		// SELF-CONSISTENCY, and it is worth exactly as much: a stray byte the engine reads through must not
 		// change what cmote makes of a sequence, or the two will disagree the moment a version bump fills one
@@ -516,7 +518,7 @@ mod tests {
 			bytes
 		};
 
-		let claims: [ClaimAt; 6] = [
+		let claims: [ClaimAt; 7] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
 			}),
@@ -533,6 +535,11 @@ mod tests {
 			}),
 			("scp, SCP", b"\x1b[2 k", 3, |bytes| {
 				!super::super::scp::Scp::default().feed(bytes).is_empty()
+			}),
+			("query, XTVERSION", b"\x1b[>0q", 3, |bytes| {
+				!super::super::query::Queries::default()
+					.feed(bytes)
+					.is_empty()
 			}),
 			("sgrstack, XTPUSHSGR", b"\x1b[#{", 2, |bytes| {
 				!super::super::sgrstack::SgrStack::default()
@@ -587,7 +594,7 @@ mod tests {
 		//
 		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
 		// all eleven can answer in common.
-		let scanners: [DifferentialClaim; 10] = [
+		let scanners: [DifferentialClaim; 11] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -626,13 +633,21 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// The eleventh, and the last to join this sweep — it could not before §111, because its own
+			// machine had no state for an intermediate or for a byte the engine reads through, so it
+			// disagreed with the parser over shapes this walks by the hundred.
+			("query", b"", |bytes| {
+				!super::super::query::Queries::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		let shapes = shapes();
 		assert_eq!(
 			shapes.len(),
-			5760,
-			"5 markers x 8 intermediates x 4 params x 12 finals x 3 orders"
+			6720,
+			"5 markers x 8 intermediates x 4 params x 14 finals x 3 orders"
 		);
 		// Collected rather than asserted case by case: the first failure is never the whole story, and an
 		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".
