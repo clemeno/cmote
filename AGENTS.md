@@ -91,6 +91,26 @@ been shown to pass. Break the code on purpose, watch the test fail, record what 
 restore. A test that cannot fail still reports its area as covered, which is worse than no test
 (§106, §107).
 
+**The load stress, and when to reach for it.** A test that waits for something it only *hopes* will
+arrive passes on an idle machine and fails on a busy one, so repeating the suite proves nothing —
+thirty green runs and a 100% failure rate can be the same test on the same commit. Put the machine
+under load instead:
+
+```
+for j in $(seq 8); do ( timeout 120 bash -c 'while :; do :; done' & ) ; done
+cargo test <name>
+```
+
+Manual on purpose, the same category as §13's live-server tests: it depends on the machine, and a CI
+job that fails for the weather is a job people learn to ignore. Reach for it whenever a test infers
+a state from a *delay* — "it has been quiet for N ms, so the shell must be at a prompt". That one
+inference made `a_real_local_shell_answers_ctrl_d_by_leaving` fail 17 times out of 17 (§111), while
+the whole suite ran green thirty times in a row beside it.
+
+The distinction worth keeping: a test may wait for an event it will **certainly** get — `local::pty`'s
+real-child test waits for an exit and is fine under the same load — and must not wait for one it is
+merely expecting.
+
 ## Commits
 
 Conventional prefix (`feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`), and cite the `§`

@@ -12464,5 +12464,9 @@ may wait for an event it will certainly get, and must not wait for one it is onl
 ### Not done
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
-- **The load stress is not in CI.** Nothing runs the suite under contention, so the next test that
-  bets on a timing window will be found the same way this one was — by someone noticing.
+- **The load stress is manual, not in CI**, and that is a decision rather than an omission. It lives
+  in `AGENTS.md` beside the prove-it rule, in §13's category: a check that depends on the machine.
+  GitHub's runners are two to four cores and already noisy, so a stress job would be the most likely
+  thing in CI to fail for the weather — and a job that fails randomly is one people learn to ignore,
+  which costs more than it catches. The price is that the next test betting on a timing window gets
+  found the way this one was: by somebody noticing.
