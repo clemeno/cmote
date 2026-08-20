@@ -12426,9 +12426,43 @@ escape is scoped to the configuration that actually needs it. Both `cargo clippy
 --all-targets` are clean, and being an `expect` it still becomes a build error the day a real caller
 appears — which is exactly when the note should be deleted.
 
+### The flake, which was not a flake but a coin toss
+
+The suite had a test that failed sometimes and nobody had pinned down. It is
+`app::tests::a_real_local_shell_answers_ctrl_d_by_leaving` — §104's one test against a REAL `pwsh` on
+a real pty — and the way it was found is worth more than the fix.
+
+Thirty runs of the whole suite on an idle machine were **all green**, which is what makes this kind of
+test so easy to leave alone. Repeating the suite is the wrong instrument: the failure is not random,
+it is *load-dependent*. Running that one test with eight busy cores beside it failed **17 times out of
+17** — not a flake at all, but a coin toss whose odds change with the machine.
+
+The test had to guess when the shell was at a prompt, and its guess was **2.5 seconds of silence**.
+That is not a prompt signal. A shell running its profile goes quiet mid-startup, and on a loaded
+machine those gaps stretch past the threshold — so the press landed before the shell was reading
+input and the byte was simply lost. Every failure was `pressed` true and `typed` false: cmote pressed,
+nothing came back.
+
+**The first fix was wrong, and the load loop said so.** Requiring output before counting the silence
+("quiet with nothing printed yet is a slow start") is a real improvement and it fixed nothing: 6 of 6
+still failed, because a gap *between* two bursts of profile output looks exactly like a prompt too.
+Worth recording because the hypothesis was confirmed by the symptom and still wrong about the cause.
+
+What works is to stop betting on the guess: press on **every** settle rather than once. An unanswered
+Ctrl+D is precisely the case §104 is built to survive, so re-pressing costs nothing, and the claim
+under test was never "the first guess at where the prompt is happens to be right" — it is that a press
+at a prompt is echoed and answered. 0 failures in 6 under the load that gave 17 out of 17.
+
+Then the check that mattered, because a retry loop is exactly the shape that can make a test
+unfalsifiable: `EOF_ECHO` was changed to `b"^X"` so the rule could never fire, and the test failed
+(§106). It still tests what it says it does.
+
+`local::pty`'s real-child test was stressed the same way and is fine — 5 of 5. It waits for the child
+to EXIT rather than for a prompt, so it makes no timing guess at all, which is the distinction: a test
+may wait for an event it will certainly get, and must not wait for one it is only hoping for.
+
 ### Not done
-- **Two tautological assertions** in `panes.rs` restate the production formula, so they pin that the
-  clamp is applied and not what it computes. Replacing them with worked examples is a test-quality
-  change (§107), not a lint fix.
 - **`pedantic` is not `nursery` or `restriction`.** Nothing here argues those should follow; this
   section is evidence about one lint group and should not be read as a policy about all of them.
+- **The load stress is not in CI.** Nothing runs the suite under contention, so the next test that
+  bets on a timing window will be found the same way this one was — by someone noticing.

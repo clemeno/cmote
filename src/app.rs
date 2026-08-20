@@ -9643,7 +9643,14 @@ mod tests {
 	#[tokio::test]
 	async fn a_real_local_shell_answers_ctrl_d_by_leaving() {
 		// The shell prints for a while as its profile runs; the press goes in once it has been quiet
-		// for this long, which is this test's definition of "at a prompt".
+		// for this long AND has printed something, which together are this test's definition of "at a
+		// prompt".
+		//
+		// The "has printed something" half is not decoration. Quiet before the first byte is a shell
+		// that has not started yet, and it looks exactly like quiet at a prompt — so on a loaded
+		// machine this test used to press Ctrl+D at a shell with no prompt to echo it at, and then
+		// fail on `typed` thirty seconds later. It reproduced 17 times out of 17 with eight busy
+		// cores beside it, and the whole failure was one missing precondition.
 		const SETTLED: std::time::Duration = std::time::Duration::from_millis(2500);
 
 		let Some(shell) = crate::local::shells::catalogue()
@@ -9665,6 +9672,8 @@ mod tests {
 		let mut pressed = false;
 		let mut typed = false;
 		let mut ended = false;
+		// Whether the shell has printed anything at all yet. See `SETTLED`.
+		let mut heard = false;
 		let _ = tokio::time::timeout(std::time::Duration::from_secs(30), async {
 			loop {
 				tokio::select! {
@@ -9672,6 +9681,7 @@ mod tests {
 					event = events.recv() => {
 						let Some(event) = event else { break };
 						let done = matches!(event, SshEvent::Disconnected);
+						heard |= matches!(event, SshEvent::Output { .. });
 						let _ = tab.on_ssh_event(event);
 						if done { ended = true; break }
 					}
@@ -9695,7 +9705,17 @@ mod tests {
 						}
 					}
 					() = tokio::time::sleep(SETTLED) => {
-						if pressed { continue }
+						// Silence with nothing printed yet is a slow start, not a prompt.
+						if !heard || typed { continue }
+						// Pressed on EVERY settle, not once. Quiet is the only prompt signal available
+						// here, and it is not a reliable one: on a loaded machine a gap in the
+						// profile's own output looks exactly like a prompt, so a lone press can land
+						// before the shell reads input and simply be lost — which is what made this
+						// test fail 17 times out of 17 beside eight busy cores. Re-pressing costs
+						// nothing, because an unanswered Ctrl+D is precisely the case §104 is built to
+						// survive, and the claim under test is that a press AT a prompt is echoed and
+						// answered — not that the first guess at where the prompt is happens to be
+						// right.
 						pressed = true;
 						let _ = tab.on_key(ctrl_d());
 					}
