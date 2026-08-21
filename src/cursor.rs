@@ -98,6 +98,19 @@ pub enum Hand {
 /// per region, and no tab id can collide with this one.
 pub const HEADER: u64 = u64::MAX;
 
+/// The name the terminal's scrollbar thumb goes by (§119) — the third grabbable surface, after the
+/// tab chip and the dialog header, and the first that is not a widget of its own: it is quads the
+/// grid paints inside its own bounds (§116), so it has no `mouse_area` to raise an enter or an exit
+/// and `ui::grid` works both out from the pointer itself.
+///
+/// One name for every region's bar, unlike a chip, which is named by a tab id. A split window has a
+/// grid per region (§48) and therefore a bar per region, and they all answer to this. That is safe
+/// only because `ui::grid` keeps a per-widget `on_bar` flag and speaks only on a CHANGE: a grid that
+/// never had the hand never says it lost it, so the ordering trap §52 fixed for chips — the enter of
+/// one arriving before the exit of the last — cannot arise here. Naming them apart would need the
+/// grid to know its own region, which it has no other reason to.
+pub const SCROLLBAR: u64 = u64::MAX - 1;
+
 /// Whether a handle currently has the pointer, and — in `CLAIM` — which.
 ///
 /// Two flags rather than an `Option<u64>` because both are read from the `WM_SETCURSOR` handler,

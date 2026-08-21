@@ -3085,6 +3085,12 @@ pub enum Message {
 	/// Raised for the press, every move under it and nothing else, so a drag that runs off an end
 	/// simply repeats the offset it clamped to.
 	TerminalScrollTo(u16),
+	/// The scrollbar was pressed / let go (§119). Carries nothing: the offset travels in
+	/// `TerminalScrollTo` above and these two say only that a drag began or ended, which is what
+	/// closes and opens the hand. The pair a tab chip spells `TabSelected`/`TabDropped` and a dialog
+	/// header spells `DialogGrabbed`/`DialogReleased`; this is the same pair for the third handle.
+	ScrollbarGrabbed,
+	ScrollbarReleased,
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
 	// --- scrollback find bar (§35) ---
@@ -4008,6 +4014,11 @@ impl Tab {
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
 			Message::TerminalScrollTo(offset) => self.on_terminal_scroll_to(offset),
+			// The thumb was picked up or put down (§119). The hand closes for the whole drag and
+			// opens again on release, wherever the pointer has got to meanwhile — the same two lines
+			// a dialog header's grab and release run, for the same reason (§51).
+			Message::ScrollbarGrabbed => crate::cursor::set_dragging(true),
+			Message::ScrollbarReleased => crate::cursor::set_dragging(false),
 			Message::CopyPressed => {
 				self.on_terminal_command();
 				return self.on_copy_rich();
@@ -12791,6 +12802,102 @@ mod tests {
 		// pointer cannot leave a hand behind.
 		let _ = app.update(Message::TabDragCancelled);
 		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
+		crate::cursor::forget();
+	}
+
+	/// The scrollbar is the third grabbable surface and drives the same one hand (§119, §51): open
+	/// over the bar, closed for the whole drag, open again on release, gone when the pointer leaves.
+	///
+	/// The frame assertion in the middle is the one that matters, and it is why the `drawn` call lives
+	/// in `ui::terminal`'s view rather than in the grid's paint. `frame_begin` / `frame_end` bracket
+	/// `App::view` — the tree being BUILT — while `Widget::draw` runs later, during rendering. A
+	/// re-assertion from the paint lands after the frame it belongs to has been judged, so `frame_end`
+	/// finds nothing seen and revokes the claim: the hand would appear on the enter and flicker off on
+	/// the very next frame. This test fails on exactly that.
+	#[test]
+	fn the_scroll_handle_wears_the_same_hand_as_a_chip_and_a_header() {
+		let _held = crate::cursor::TEST_LOCK
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
+		crate::cursor::forget();
+
+		// A tab with a live terminal that has history, so a bar is drawn at all.
+		let (mut session, _rx) = app_with_terminal(16);
+		with_history(&mut session);
+		let mut app = tab_app();
+		let id = session.id;
+		let region = strip_mut(&mut app);
+		region.tabs.clear();
+		region.tabs.push(session);
+		region.active = 0;
+		app.next_id = id + 1;
+
+		let _ = app.update(Message::GrabEntered(crate::cursor::SCROLLBAR));
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+
+		// A frame with the bar still in it: it re-asserts, so it keeps the hand.
+		let _ = app.view();
+		assert_eq!(
+			crate::cursor::hand(),
+			crate::cursor::Hand::Open,
+			"the bar said it is still on screen, so the hand survives the frame"
+		);
+
+		let _ = app.update(Message::ScrollbarGrabbed);
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed, "held");
+		// And it stays closed across a frame — a drag outlives the frame it started on.
+		let _ = app.view();
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Closed);
+
+		let _ = app.update(Message::ScrollbarReleased);
+		assert_eq!(
+			crate::cursor::hand(),
+			crate::cursor::Hand::Open,
+			"let go, and the pointer is still on the bar"
+		);
+		let _ = app.update(Message::GrabExited(crate::cursor::SCROLLBAR));
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::None);
+		crate::cursor::forget();
+	}
+
+	/// A bar that stops being drawn lets go of the hand, the same rule a vanishing chip obeys (§52,
+	/// §119) — and the bar really can vanish under the pointer: a program taking the alternate screen
+	/// keeps no history, so `vim` starting is a bar disappearing. Nothing raises an exit for chrome
+	/// that merely stopped being painted, so the frame is the only thing that knows.
+	#[test]
+	fn a_scroll_handle_that_vanishes_under_the_pointer_lets_go_of_the_hand() {
+		let _held = crate::cursor::TEST_LOCK
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner);
+		crate::cursor::forget();
+
+		let (mut session, _rx) = app_with_terminal(16);
+		with_history(&mut session);
+		let mut app = tab_app();
+		let id = session.id;
+		let region = strip_mut(&mut app);
+		region.tabs.clear();
+		region.tabs.push(session);
+		region.active = 0;
+		app.next_id = id + 1;
+
+		let _ = app.update(Message::GrabEntered(crate::cursor::SCROLLBAR));
+		let _ = app.view();
+		assert_eq!(crate::cursor::hand(), crate::cursor::Hand::Open);
+
+		// The alternate screen: no history over there, so no bar (§23).
+		strip_mut(&mut app)
+			.active_mut()
+			.terminal
+			.as_mut()
+			.expect("the session's terminal")
+			.process(b"\x1b[?1049h");
+		let _ = app.view();
+		assert_eq!(
+			crate::cursor::hand(),
+			crate::cursor::Hand::None,
+			"no history means no bar, so it cannot still be under the pointer"
+		);
 		crate::cursor::forget();
 	}
 

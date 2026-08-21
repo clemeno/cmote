@@ -248,6 +248,13 @@ struct GridState {
 	/// the pointer's own y and treating it as the thumb's top would snap the thumb's top to the pointer
 	/// the instant it moved, jumping the view by up to a thumb's height before the drag even began.
 	scroll_grip: Option<f32>,
+	/// Whether this grid last believed the pointer was on its scrollbar (§119), so the enter and the
+	/// exit are raised on the CHANGE and not on every mouse move.
+	///
+	/// Per widget instance, which is what makes one `cursor::SCROLLBAR` name safe for every region's
+	/// bar at once: a split window's other grid also sees this move, but with `on_bar` already false
+	/// it says nothing, so it cannot take back a hand its neighbour has just been given.
+	on_bar: bool,
 }
 
 impl Grid<'_> {
@@ -289,6 +296,46 @@ impl Grid<'_> {
 	/// A full-screen program does not have to be special-cased here. The alternate screen retains no
 	/// history, so `history_size()` is 0, so there is no thumb, so nothing is claimed and a click in
 	/// `vim`'s right-hand column reaches `vim` exactly as it did before.
+	/// Whether the bar is under `cursor` right now — the grab zone, not the painted thumb, so the
+	/// answer matches what a press would actually do (§116). `false` with no history, since then
+	/// there is no bar at all.
+	fn on_scrollbar(&self, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
+		let (rows, _) = self.screen.size();
+		self.screen.history_size() > 0
+			&& cursor
+				.position()
+				.is_some_and(|position| scrollbar_track(bounds, rows).contains(position))
+	}
+
+	/// Raise the hand's enter and exit for the bar (§119), on the change only.
+	///
+	/// The other two grabbable surfaces get these from their own `mouse_area`'s `on_enter` / `on_exit`
+	/// (§51, §52). The bar has no widget of its own — it is quads inside this one (§116) — so there is
+	/// nothing to hang those on, and the grid works the answer out from the pointer instead. Which is
+	/// the better source anyway: one place computes one boolean, so the enter and the exit cannot
+	/// arrive in the wrong order the way two widgets' events can.
+	///
+	/// Not captured. A move that changes the hand is still a move the layers above want — the pane's
+	/// own hover tracking, and the selection drag — and this only reports.
+	fn track_hand(
+		&self,
+		state: &mut GridState,
+		bounds: Rectangle,
+		cursor: mouse::Cursor,
+		shell: &mut Shell<'_, Message>,
+	) {
+		let on_bar = self.on_scrollbar(bounds, cursor);
+		if on_bar == state.on_bar {
+			return;
+		}
+		state.on_bar = on_bar;
+		shell.publish(if on_bar {
+			Message::GrabEntered(crate::cursor::SCROLLBAR)
+		} else {
+			Message::GrabExited(crate::cursor::SCROLLBAR)
+		});
+	}
+
 	fn scroll_drag(
 		&self,
 		state: &mut GridState,
@@ -322,6 +369,9 @@ impl Grid<'_> {
 					thumb.height / 2.0
 				};
 				state.scroll_grip = Some(grip);
+				// The hand closes for the whole drag (§119, §51), before the offset goes out — so a
+				// frame that paints the move already has the closed hand on it.
+				shell.publish(Message::ScrollbarGrabbed);
 				shell.publish(Message::TerminalScrollTo(scrollbar_offset(
 					bounds,
 					rows,
@@ -357,6 +407,9 @@ impl Grid<'_> {
 				if state.scroll_grip.take().is_none() {
 					return false;
 				}
+				// Let go: the hand opens again if the pointer is still on the bar, and the frame's
+				// own `drawn` call decides that — not this line (§119).
+				shell.publish(Message::ScrollbarReleased);
 				shell.capture_event();
 				true
 			}
@@ -565,6 +618,36 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		}
 	}
 
+	/// The cursor over the grid: the two hands over the scrollbar, and nothing to say anywhere else
+	/// (§119).
+	///
+	/// `Interaction::None` off the bar rather than a shape of our own, because that is what the grid
+	/// has always answered — the text cursor over cells is `mouse_area`'s doing in `ui::terminal`, and
+	/// a remote's OSC 22 shape (§77) is set there too. This only speaks for the padding gutter.
+	///
+	/// WHO draws the hand depends on the platform (§51), and that whole question is
+	/// `grab_interaction`'s: on Windows there are no hand cursors, so it answers `None` precisely so
+	/// iced is asked for nothing and `cursor`'s own `WM_SETCURSOR` seam paints them from the claim the
+	/// enter/exit above maintain. Everywhere else the toolkit has both hands and is simply asked.
+	///
+	/// Dragging is read from this widget's own state and not from `cursor`'s global, so the shape is
+	/// right for the bar being dragged rather than for whatever was last picked up anywhere.
+	fn mouse_interaction(
+		&self,
+		tree: &Tree,
+		layout: Layout<'_>,
+		cursor: mouse::Cursor,
+		_viewport: &Rectangle,
+		_renderer: &iced::Renderer,
+	) -> mouse::Interaction {
+		let state = tree.state.downcast_ref::<GridState>();
+		let dragging = state.scroll_grip.is_some();
+		if !dragging && !self.on_scrollbar(layout.bounds(), cursor) {
+			return mouse::Interaction::None;
+		}
+		crate::cursor::grab_interaction(dragging).unwrap_or(mouse::Interaction::None)
+	}
+
 	fn update(
 		&mut self,
 		tree: &mut Tree,
@@ -606,6 +689,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				return;
 			}
 		}
+
+		// The hand over the bar (§119), before anything that might return: it is a report about where
+		// the pointer IS, so it has to be right even on the events below that get consumed.
+		self.track_hand(state, layout.bounds(), cursor, shell);
 
 		// The scrollbar, which is grabbable (§116). Tried before everything below it: a press in the
 		// right padding gutter is the bar's, whether or not a program has asked for the mouse, and it

@@ -13383,6 +13383,11 @@ gives — both are `usize` offsets, and a scroll DOWN would wrap.
 
 ### No hand cursor, deliberately
 
+> **Reversed by §119, on the user's instruction.** The argument below was put to them and they asked
+> for the hand anyway, which settles it: the bar wears it now. The reasoning is left standing rather
+> than deleted, because it is still the reason cmote does not do this by default and the next person to
+> wonder should see that it was a decision either way.
+
 `cursor.rs` says every grabbable surface should wear the §51 hand, "the point of a shared affordance is
 that the user learns it once", and lists two — the tab chip and the dialog header. The scrollbar is now
 a third draggable thing and does NOT wear it, because the rule is about affordance and not about
@@ -13575,3 +13580,90 @@ surface owns it.
 - **The dialogs and the forward table were not audited for scrollables.** Four is what `grep` found
   today; a `scrollable` added later gets iced's default unless whoever adds it knows about this module.
   Nothing enforces that, and a lint for it would be a lint about one project's taste.
+
+## §119 — The third hand
+
+§116 argued the scrollbar should not wear the §51 hand: the tab chip and the dialog header are objects
+you pick up and put somewhere else, which is what CSS's `grab` means, and a scrollbar is a slider that
+goes nowhere. That argument was put to the user and they asked for the hand anyway. Their call, so the
+bar wears it, and §116's paragraph now says it was reversed rather than pretending it was never made.
+
+So the scrollbar joins the tab chip and the dialog header, and the affordance is learned once again.
+
+### The first handle that is not a widget
+
+Both existing handles are `mouse_area`-wrapped widgets, so they get the claim protocol for free:
+`.on_enter(GrabEntered(id))`, `.on_exit(GrabExited(id))`, and `cursor::drawn(id)` from their own view
+code. The bar has none of that — it is quads the grid paints inside its own bounds (§116), with no
+widget and therefore no enter and no exit to hang on.
+
+`ui::grid` works both out from the pointer instead, which is the better source anyway: one place
+computes one boolean, so the enter and the exit cannot arrive in the wrong order the way two widgets'
+events can — the ordering trap §52 had to fix for chips does not arise. `GridState::on_bar` remembers
+the last answer so the messages go out on the CHANGE, not on every mouse move, and the existing
+`Message::GrabEntered` / `GrabExited` are reused rather than a third pair invented.
+
+Being per-widget rather than global is also what makes ONE `cursor::SCROLLBAR` name safe for every
+region's bar at once. A split window has a grid per region (§48) and so a bar per region; they all
+answer to the same name, and the other grid, seeing the same pointer move with `on_bar` already false,
+says nothing — so it cannot take back a hand its neighbour has just been given. Naming them apart
+would need the grid to know its own region, which it has no other reason to.
+
+### The phase bug this nearly shipped with
+
+The re-assertion — "this handle is still on screen", the thing that makes a vanished handle let go —
+was written into `Grid::draw`, next to the quad it is about. It reads as the obvious home for it and it
+is wrong, because `cursor::frame_begin` and `frame_end` bracket **`App::view`**: the tree being BUILT.
+`Widget::draw` runs later, during rendering. A `drawn` call from the paint therefore lands after the
+frame it belongs to has already been judged, so `frame_end` finds nothing seen and revokes the claim —
+a hand that appears on the enter and flickers straight back off on the next frame.
+
+It moved to `ui::terminal`'s view, which is the phase the other two handles say it in. Caught by
+reading where `frame_begin` was called rather than by seeing it happen, and then pinned: the test
+asserts the hand SURVIVES a frame, and putting the call back in the paint's phase fails it with
+`left: None, right: Open`.
+
+The condition is exactly `scrollbar_thumb`'s own — `history_size() > 0` — which covers the alternate
+screen for free. A full-screen program keeps no history, so `vim` starting is a bar disappearing under
+the pointer, and it takes its hand with it without anything having to notice that is what happened.
+There is a test on that too, because it is the one way this handle can vanish.
+
+### Who draws it
+
+Unchanged from §51 and not this section's business: `grab_interaction` answers `None` on Windows —
+which has no hand cursors at all — precisely so iced is asked for nothing and `cursor`'s own
+`WM_SETCURSOR` seam paints the two bitmaps itself; everywhere else the toolkit has both hands and is
+simply asked. The new part is only WHERE the question is asked from: `Grid` now implements
+`Widget::mouse_interaction`, answering `Interaction::None` anywhere but the bar, since the text cursor
+over cells and a remote's OSC 22 shape (§77) are both `mouse_area`'s business one layer up.
+
+Dragging is read from the widget's own `scroll_grip` rather than from `cursor`'s global `DRAGGING`, so
+the shape is right for the bar under the pointer rather than for whatever was last picked up anywhere
+in the window.
+
+### Files
+
+- `src/cursor.rs` — `SCROLLBAR`, and why one name serves every region.
+- `src/ui/grid.rs` — `on_scrollbar`, `track_hand`, `GridState::on_bar`, `mouse_interaction`, and the
+  grab/release messages in `scroll_drag`.
+- `src/ui/terminal.rs` — the `drawn` re-assertion, in the view phase, with the reason it is not in the
+  paint.
+- `src/app.rs` — `ScrollbarGrabbed` / `ScrollbarReleased` and their two `set_dragging` lines.
+- `PLAN.md` §116 — its no-hand paragraph marked reversed.
+
+### Not done
+
+- **The panes' scrollbars get no hand**, so §118's one-look-per-window does not extend to one CURSOR
+  per window. `iced_widget::scrollable::mouse_interaction` returns `Interaction::None` over its own
+  bar and offers no hook to change that: it knows whether the pointer is over the scroller
+  (`is_mouse_over`) and simply does not expose it. Giving a pane's bar the hand would mean
+  reimplementing `scrollable`, which is a great deal of widget for a cursor. So the terminal's bar
+  wears the hand and the panes' bars do not — a real inconsistency, and the honest reason is that one
+  is ours and the others are iced's.
+- **A remote's OSC 22 pointer shape still wins over the bar.** `mouse_area` sits above the grid, so a
+  program that has set a shape (§77) keeps it over the padding gutter too. Narrow — it needs a program
+  that sets a non-default pointer AND the pointer moved onto the bar — and closing it would mean
+  teaching `ui::terminal` the bar's geometry, which is coupling bought for very little.
+- **Not verified by a run.** The claim lifecycle is tested through `App::view`, including the frame
+  that would have flickered, but no test draws a cursor. Whether the right bitmap appears on Windows
+  and the toolkit's own hands appear elsewhere is §13's manual category.

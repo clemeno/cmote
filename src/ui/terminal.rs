@@ -315,6 +315,25 @@ pub fn view<'a>(
 			)
 		})
 		.unwrap_or_default();
+
+	// The scrollbar is a grabbable surface (§119), so like a tab chip and a dialog header it has to
+	// say it is still on screen with every frame it is drawn into, or the hand it is holding is let go
+	// when the frame ends (§52).
+	//
+	// Said HERE rather than in `grid`'s own paint, and the reason is the phase. `cursor::frame_begin`
+	// and `frame_end` bracket `App::view` — the tree being BUILT — while `Widget::draw` runs later,
+	// during rendering. A `drawn` call from the paint therefore lands after the frame it belongs to
+	// has already been judged, so `frame_end` would find nothing seen and revoke the claim on the very
+	// next frame: a hand that appeared on the enter and flickered straight back off.
+	//
+	// The condition is exactly `scrollbar_thumb`'s own: it draws nothing, and so there is nothing to
+	// grab, only when no line has scrolled off yet. Which covers the alternate screen for free — a
+	// full-screen program keeps no history — so a bar that goes when `vim` starts takes its hand with
+	// it without anything having to notice that is what happened.
+	if screen.history_size() > 0 {
+		crate::cursor::drawn(crate::cursor::SCROLLBAR);
+	}
+
 	let grid = crate::ui::grid::grid(
 		screen,
 		selection,
