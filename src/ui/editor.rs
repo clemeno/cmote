@@ -402,6 +402,13 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 				view_height: viewport.bounds().height,
 			})
 		});
+	// And the terminal's own hand over both bars (§120) — the cursor half of one shared component,
+	// and the only place the horizontal one is reachable at all.
+	let scroller = crate::ui::scrollbar::grabbable(
+		scroller,
+		crate::ui::scrollbar::Axes::BOTH,
+		crate::cursor::SCROLLBAR_EDITOR,
+	);
 	let text_pane: Element<'a, Message> = container(scroller)
 		.width(Length::Fill)
 		.height(Length::Fill)

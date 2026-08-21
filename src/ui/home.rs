@@ -319,12 +319,17 @@ fn target_list<'a>(
 		}
 	});
 
-	scrollable(column(rows).spacing(2))
+	let bar = scrollable(column(rows).spacing(2))
 		// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
 		.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
 		.style(crate::ui::scrollbar::style)
-		.height(Length::Fill)
-		.into()
+		.height(Length::Fill);
+	// And the terminal's own hand over it (§120) — the cursor half of one shared component.
+	crate::ui::scrollbar::grabbable(
+		bar,
+		crate::ui::scrollbar::Axes::VERTICAL,
+		crate::cursor::SCROLLBAR_HOME,
+	)
 }
 
 /// One target row: the name (filling the width) with the endpoint in muted grey after

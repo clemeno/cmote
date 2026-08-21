@@ -111,6 +111,21 @@ pub const HEADER: u64 = u64::MAX;
 /// grid to know its own region, which it has no other reason to.
 pub const SCROLLBAR: u64 = u64::MAX - 1;
 
+/// The names the four `scrollable` bars go by (§120) — the folder tree (§18), the files pane (§19),
+/// the home screen's list (§14) and the editor's buffer (§32).
+///
+/// **One name per bar, and that is not tidiness.** They shared `SCROLLBAR` with the terminal for
+/// exactly one commit, and a test caught what that costs: every bar re-asserts itself each frame
+/// (`drawn`), so under one name ANY bar on screen vouches for the claim, and the terminal's bar
+/// vanishing — a program taking the alternate screen — no longer let go of the hand, because the tree
+/// pane's quite different bar was still saying "still here". A claim is about the thing under the
+/// pointer, so the thing under the pointer has to be the one that answers for it. This is §52's rule
+/// arriving a second time, by the same route: a count, or a shared name, cannot tell two handles apart.
+pub const SCROLLBAR_TREE: u64 = u64::MAX - 2;
+pub const SCROLLBAR_FILES: u64 = u64::MAX - 3;
+pub const SCROLLBAR_HOME: u64 = u64::MAX - 4;
+pub const SCROLLBAR_EDITOR: u64 = u64::MAX - 5;
+
 /// Whether a handle currently has the pointer, and — in `CLAIM` — which.
 ///
 /// Two flags rather than an `Option<u64>` because both are read from the `WM_SETCURSOR` handler,

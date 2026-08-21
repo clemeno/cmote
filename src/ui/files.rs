@@ -553,7 +553,7 @@ fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 		.into_iter()
 		.map(|entry| cell(entry, directory, files, editing));
 
-	scrollable(
+	let bar = scrollable(
 		container(
 			row(cells)
 				.spacing(CELL_SPACING)
@@ -571,8 +571,13 @@ fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 	.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
 	.style(crate::ui::scrollbar::style)
 	.width(Length::Fill)
-	.height(Length::Fill)
-	.into()
+	.height(Length::Fill);
+	// And the terminal's own hand over it (§120) — the cursor half of one shared component.
+	crate::ui::scrollbar::grabbable(
+		bar,
+		crate::ui::scrollbar::Axes::VERTICAL,
+		crate::cursor::SCROLLBAR_FILES,
+	)
 }
 
 /// The details popup for the selection (§20): for one entry, its full name, where it points

@@ -13653,13 +13653,13 @@ in the window.
 
 ### Not done
 
-- **The panes' scrollbars get no hand**, so §118's one-look-per-window does not extend to one CURSOR
-  per window. `iced_widget::scrollable::mouse_interaction` returns `Interaction::None` over its own
-  bar and offers no hook to change that: it knows whether the pointer is over the scroller
-  (`is_mouse_over`) and simply does not expose it. Giving a pane's bar the hand would mean
-  reimplementing `scrollable`, which is a great deal of widget for a cursor. So the terminal's bar
-  wears the hand and the panes' bars do not — a real inconsistency, and the honest reason is that one
-  is ours and the others are iced's.
+- ~~**The panes' scrollbars get no hand.**~~ **Done in §120, and the reason given here was too
+  strong.** It said giving them the hand "would mean reimplementing `scrollable`". It does not: it
+  means DECORATING it — a widget that forwards every method to the scrollable and overrides
+  `mouse_interaction`, which is what `mouse_area` already does for a different purpose. The true
+  finding was smaller: iced computes whether the pointer is over its own bar and does not expose it,
+  so the lane arithmetic has to be mirrored. Worth reading as a caution about the word "reimplement"
+  doing work that "I have not looked hard enough" should have done.
 - **A remote's OSC 22 pointer shape still wins over the bar.** `mouse_area` sits above the grid, so a
   program that has set a shape (§77) keeps it over the padding gutter too. Narrow — it needs a program
   that sets a non-default pointer AND the pointer moved onto the bar — and closing it would mean
@@ -13667,3 +13667,88 @@ in the window.
 - **Not verified by a run.** The claim lifecycle is tested through `App::view`, including the frame
   that would have flickered, but no test draws a cursor. Whether the right bitmap appears on Windows
   and the toolkit's own hands appear elsewhere is §13's manual category.
+
+## §120 — The hand on every bar
+
+§119 put the §51 hand on the terminal's scrollbar and left the four `scrollable` bars without one,
+recording the reason as: giving them the hand would mean reimplementing `scrollable`. The user pointed
+out the obvious consequence — §118 made the bar a shared component, so the cursor is part of what is
+shared or the component is only half shared — and they were right, including about the reason. It was
+too strong.
+
+**It does not need a reimplementation, it needs a decorator.** A widget that holds the scrollable as
+its one child, forwards every `Widget` method to it untouched, and overrides `mouse_interaction`. That
+is not an exotic shape: `iced_widget::mouse_area` is exactly it, for a different purpose, and was the
+template. The honest finding underneath §119's claim was much smaller — iced computes whether the
+pointer is over its own bar (`Scrollbars::is_mouse_over`) and does not expose the answer, so the lane
+arithmetic has to be mirrored rather than asked for.
+
+Worth recording as a caution: "that would mean reimplementing X" is the kind of sentence that ends an
+investigation, and this one ended it about forty lines of reading too early.
+
+### Mirroring iced's lanes, including its asymmetry
+
+`lanes()` reproduces `Scrollbars::new`'s geometry, and it has to be the same rectangle to the pixel:
+iced grabs on `total_bounds`, so a hand over a strip that does nothing — or no hand over a strip that
+works — are both worse than no hand at all. It is pure, which is what lets a test hold onto the part
+that can silently drift when iced is upgraded.
+
+Two things fell out of writing the test rather than the code:
+
+* **The lanes shrink by DIFFERENT amounts.** The vertical one shortens by the horizontal bar's
+  `width + margin`; the horizontal one narrows by the vertical lane's full `width + 2 * margin`. That
+  is iced's own asymmetry and is reproduced rather than tidied.
+* **So the two lanes OVERLAP by one pixel in the corner.** The first version of the test asserted they
+  keep clear of each other, which sounded right and is false — the vertical lane subtracts 5 where the
+  lane below it is 6 tall. The test now pins the overlap instead. It is harmless here because the hit
+  test is a union: a pixel belonging to both still answers "a bar", which is the only question asked.
+
+### One name per bar, which a test had to teach twice
+
+The wrapper first published the claim under the same `cursor::SCROLLBAR` the terminal uses, and
+§119's own test caught what that costs within minutes. Every handle re-asserts itself each frame
+(`drawn`), so under ONE name any bar on screen vouches for the claim — and the terminal's bar
+vanishing, which is what happens when a program takes the alternate screen, stopped letting go of the
+hand, because the tree pane's entirely different bar was still saying "still here".
+
+So there are five names: `SCROLLBAR` for the terminal's own and `SCROLLBAR_TREE` / `_FILES` / `_HOME`
+/ `_EDITOR` for the others. This is §52's rule arriving a second time by the same route — a count, or
+a shared name, cannot tell two handles apart — and the second arrival was cheaper only because §52 had
+already paid for the test that catches it.
+
+### Where the re-assertion lives, and what it still cannot know
+
+`grabbable()` calls `cursor::drawn(handle)` itself, and that is deliberate: the function runs during
+`App::view`, which is the phase `frame_begin` / `frame_end` bracket. §119 learned the hard way that the
+same call from a `Widget::draw` lands after its frame has been judged. Putting it in the constructor
+means one place rather than four to remember, in the right phase by construction.
+
+It asserts unconditionally, where `ui::terminal` can ask `history_size() > 0` first. This function
+cannot ask the equivalent, because whether the content overflows is a LAYOUT fact and layout has not
+run when the view is being built. So a pane whose list shrinks to fit while the pointer sits perfectly
+still on its bar keeps the hand until the pointer moves. Harmless — `drawn` does nothing unless that
+handle already holds the claim, and only a real lane hit ever grants it — and the same shape of
+under-claim `covered()` documents in §52, erring the other way for one stationary frame.
+
+### Files
+
+- `src/ui/scrollbar.rs` — `Axes`, `lanes`, `HandState`, `Grabbable`, `grabbable`, and four tests.
+- `src/cursor.rs` — the four `SCROLLBAR_*` names and why they are four.
+- `src/ui/explorer.rs`, `src/ui/files.rs`, `src/ui/home.rs`, `src/ui/editor.rs` — each wraps its
+  scrollable and passes its own name.
+- `PLAN.md` §119 — its "no hand for the panes" item marked done, with the over-strong reason called
+  out.
+
+### Not done
+
+- **Not verified by a run.** Five surfaces now change cursor. The lane arithmetic and the claim
+  lifecycle are tested, and the two things that were actually wrong on the way here — the shared name
+  and the corner overlap — were both caught by tests rather than by reading. But no test draws a
+  cursor, so whether the hand appears over the right six pixels of four panes is §13's manual
+  category.
+- **`lanes()` can drift from iced silently on an upgrade.** It mirrors private arithmetic; nothing
+  makes iced tell us it changed. The mitigation is that it is pure and pinned to explicit numbers, so
+  a drift shows up as a failing test rather than as a cursor that is subtly wrong — but only if the
+  numbers are re-read against the new version when the dependency moves.
+- **Still no hover or drag feedback on the bars themselves** (§118), and `MIN_THUMB` still reaches only
+  the terminal. Both unchanged and both deliberate.

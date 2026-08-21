@@ -267,7 +267,7 @@ fn tree_view(explorer: &Explorer) -> Element<'_, Message> {
 		.into_iter()
 		.map(|row| row_view(row, selected, editing));
 
-	scrollable(column(rows).spacing(0))
+	let bar = scrollable(column(rows).spacing(0))
 		.id(TREE_ID)
 		// Reported so keyboard navigation knows which rows are already on screen (§20).
 		.on_scroll(|viewport| {
@@ -277,8 +277,14 @@ fn tree_view(explorer: &Explorer) -> Element<'_, Message> {
 		.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
 		.style(crate::ui::scrollbar::style)
 		.width(Length::Fill)
-		.height(Length::Fill)
-		.into()
+		.height(Length::Fill);
+	// And the terminal's own hand over it (§120). The look was shared in §118; the cursor is the other
+	// half of the two bars being one component.
+	crate::ui::scrollbar::grabbable(
+		bar,
+		crate::ui::scrollbar::Axes::VERTICAL,
+		crate::cursor::SCROLLBAR_TREE,
+	)
 }
 
 /// One folder row: an indent for its depth, a disclosure marker, then its name. The

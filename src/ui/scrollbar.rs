@@ -27,7 +27,9 @@
 // this module can close.
 
 use iced::widget::scrollable;
-use iced::{Border, Color, Theme};
+use iced::{Border, Color, Rectangle, Theme, mouse};
+
+use crate::app::Message;
 
 /// How wide the bar is drawn. Thin on purpose: it is a position report first and a control second, so
 /// it should not read as furniture down the edge of every pane.
@@ -98,9 +100,327 @@ pub fn style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
 	}
 }
 
+/// Which axes a `scrollable` was given a bar on, so the hit test below knows which lanes can exist
+/// (§120). Named fields rather than two `bool` arguments for the reason `CellMarks` gives: at a call
+/// site `grabbable(inner, true, false)` is one transposition from a wrong answer and the compiler has
+/// nothing to say about it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Axes {
+	pub vertical: bool,
+	pub horizontal: bool,
+}
+
+impl Axes {
+	/// A `Direction::Vertical` scrollable — the three panes.
+	pub const VERTICAL: Self = Self {
+		vertical: true,
+		horizontal: false,
+	};
+	/// A `Direction::Both` scrollable — the editor's buffer (§32).
+	pub const BOTH: Self = Self {
+		vertical: true,
+		horizontal: true,
+	};
+}
+
+/// The rectangles a `scrollable`'s bars occupy — vertical, then horizontal — for a widget of
+/// `bounds` whose content laid out to `content` (§120). `None` for an axis with no bar: either it was
+/// never asked for, or the content fits and iced draws nothing.
+///
+/// **This mirrors `iced_widget::scrollable`'s own arithmetic and has to.** It is the lane iced itself
+/// grabs on (`Scrollbar::is_mouse_over` tests `total_bounds`), so the hand must appear over exactly
+/// the pixels that would start a drag — a hand over a strip that does nothing, or no hand over one
+/// that works, are both worse than no hand at all. The two asymmetries below are iced's and are
+/// reproduced deliberately rather than tidied: the vertical lane shortens by the horizontal bar's
+/// `width + margin`, while the horizontal lane narrows by the vertical lane's FULL
+/// `width + 2 * margin`.
+///
+/// Pure, so the part that can silently drift from iced is the part a test can hold onto.
+pub fn lanes(
+	bounds: Rectangle,
+	content: Rectangle,
+	axes: Axes,
+) -> (Option<Rectangle>, Option<Rectangle>) {
+	let lane = WIDTH + 2.0 * INSET;
+	let show_y = axes.vertical && content.height > bounds.height;
+	let show_x = axes.horizontal && content.width > bounds.width;
+
+	let vertical = show_y.then(|| Rectangle {
+		x: bounds.x + bounds.width - lane,
+		y: bounds.y,
+		width: lane,
+		height: (bounds.height - if show_x { WIDTH + INSET } else { 0.0 }).max(0.0),
+	});
+	let horizontal = show_x.then(|| Rectangle {
+		x: bounds.x,
+		y: bounds.y + bounds.height - lane,
+		width: (bounds.width - if show_y { lane } else { 0.0 }).max(0.0),
+		height: lane,
+	});
+	(vertical, horizontal)
+}
+
+/// What the wrapper remembers between events (§120): whether the pointer was last on a bar, so the
+/// hand's enter and exit go out on the CHANGE, and whether a drag is in flight, so the hand stays
+/// closed for the whole of it.
+///
+/// `dragging` is tracked here rather than read from the `scrollable` because iced does not tell:
+/// `State::scrollers_grabbed` is private. Tracking it is exact anyway — iced starts a drag on a press
+/// inside the same lane this widget tests, so the two agree by construction.
+#[derive(Debug, Default)]
+struct HandState {
+	on_bar: bool,
+	dragging: bool,
+}
+
+/// A `scrollable` wearing the §51 hand over its bars (§120).
+///
+/// A decorator and not a fork. `iced_widget::scrollable` computes whether the pointer is over its own
+/// bar and then answers `Interaction::None` regardless, with no hook to say otherwise — so the choice
+/// was to reimplement the widget or to wrap it. This wraps: every `Widget` method forwards to the
+/// scrollable untouched, `mouse_interaction` answers the hand over a lane, and `update` maintains the
+/// claim `cursor` paints from on Windows. Nothing is captured, so the scrollable still sees every
+/// event it saw before.
+pub struct Grabbable<'a> {
+	content: iced::Element<'a, Message>,
+	axes: Axes,
+	/// Which bar this is — a `cursor::SCROLLBAR_*`. One name per bar, for the reason `cursor` gives
+	/// where they are defined: under a shared name any bar on screen keeps every other bar's claim
+	/// alive, and the terminal's bar vanishing stopped letting go of the hand.
+	handle: u64,
+}
+
+/// Wrap `inner` — a `scrollable` styled with `bar()` and `style()` — so its bars wear the hand
+/// (§120), and assert to `cursor` that a bar of ours is on screen this frame.
+///
+/// The `drawn` call lives here rather than at the four call sites for two reasons. It is one place
+/// instead of four to remember, and — the part that matters — this function runs during `App::view`,
+/// which is the phase `cursor::frame_begin` / `frame_end` bracket. §119 learned that the hard way: the
+/// same call from a `Widget::draw` lands after the frame it belongs to has been judged, and the hand
+/// flickers off on the next one.
+///
+/// It asserts unconditionally, where the terminal's own call can ask `history_size() > 0` first. This
+/// function cannot ask the equivalent — whether the content overflows is a LAYOUT fact and layout has
+/// not run yet — so a pane whose list shrank to fit while the pointer sat still on its bar keeps the
+/// hand until the pointer moves. Harmless in the ordinary case (`drawn` does nothing unless this
+/// handle already holds the claim, and only a real lane hit ever gives it that), and the same
+/// under-claim `covered()` documents in §52: a missing hand is a smaller lie than a hand over
+/// something that cannot be dragged, and this errs the other way for one stationary frame.
+pub fn grabbable<'a>(
+	inner: impl Into<iced::Element<'a, Message>>,
+	axes: Axes,
+	handle: u64,
+) -> iced::Element<'a, Message> {
+	crate::cursor::drawn(handle);
+	iced::Element::new(Grabbable {
+		content: inner.into(),
+		axes,
+		handle,
+	})
+}
+
+impl Grabbable<'_> {
+	/// Whether `cursor` is over either of this scrollable's bars.
+	fn on_bar(&self, layout: iced::advanced::Layout<'_>, cursor: mouse::Cursor) -> bool {
+		let Some(position) = cursor.position() else {
+			return false;
+		};
+		// The scrollable's own layout node is this widget's node — `layout` below forwards rather than
+		// wrapping — so its first child is the CONTENT, exactly as iced reads it internally.
+		let Some(content) = layout.children().next() else {
+			return false;
+		};
+		let (vertical, horizontal) = lanes(layout.bounds(), content.bounds(), self.axes);
+		[vertical, horizontal]
+			.into_iter()
+			.flatten()
+			.any(|lane| lane.contains(position))
+	}
+}
+
+impl iced::advanced::Widget<Message, iced::Theme, iced::Renderer> for Grabbable<'_> {
+	fn tag(&self) -> iced::advanced::widget::tree::Tag {
+		iced::advanced::widget::tree::Tag::of::<HandState>()
+	}
+
+	fn state(&self) -> iced::advanced::widget::tree::State {
+		iced::advanced::widget::tree::State::new(HandState::default())
+	}
+
+	fn children(&self) -> Vec<iced::advanced::widget::Tree> {
+		vec![iced::advanced::widget::Tree::new(&self.content)]
+	}
+
+	fn diff(&self, tree: &mut iced::advanced::widget::Tree) {
+		tree.diff_children(std::slice::from_ref(&self.content));
+	}
+
+	fn size(&self) -> iced::Size<iced::Length> {
+		self.content.as_widget().size()
+	}
+
+	fn layout(
+		&mut self,
+		tree: &mut iced::advanced::widget::Tree,
+		renderer: &iced::Renderer,
+		limits: &iced::advanced::layout::Limits,
+	) -> iced::advanced::layout::Node {
+		// The child's node verbatim, which is what keeps `on_bar`'s reading of it honest: this widget
+		// adds no box of its own, so `layout` in every method here IS the scrollable's.
+		self.content
+			.as_widget_mut()
+			.layout(&mut tree.children[0], renderer, limits)
+	}
+
+	fn operate(
+		&mut self,
+		tree: &mut iced::advanced::widget::Tree,
+		layout: iced::advanced::Layout<'_>,
+		renderer: &iced::Renderer,
+		operation: &mut dyn iced::advanced::widget::Operation,
+	) {
+		self.content
+			.as_widget_mut()
+			.operate(&mut tree.children[0], layout, renderer, operation);
+	}
+
+	fn update(
+		&mut self,
+		tree: &mut iced::advanced::widget::Tree,
+		event: &iced::Event,
+		layout: iced::advanced::Layout<'_>,
+		cursor: mouse::Cursor,
+		renderer: &iced::Renderer,
+		clipboard: &mut dyn iced::advanced::Clipboard,
+		shell: &mut iced::advanced::Shell<'_, Message>,
+		viewport: &Rectangle,
+	) {
+		// The scrollable first and unconditionally: it owns the scrolling, and nothing here may change
+		// whether it hears an event.
+		self.content.as_widget_mut().update(
+			&mut tree.children[0],
+			event,
+			layout,
+			cursor,
+			renderer,
+			clipboard,
+			shell,
+			viewport,
+		);
+
+		let iced::Event::Mouse(pointer) = event else {
+			return;
+		};
+		let state = tree.state.downcast_mut::<HandState>();
+		let on_bar = self.on_bar(layout, cursor);
+
+		// The drag, so the hand stays closed for the whole of it. A press elsewhere is not ours, and a
+		// release is answered only if we saw the press — otherwise letting go of a tab over a pane
+		// would open the hand on this widget's behalf.
+		match pointer {
+			mouse::Event::ButtonPressed(mouse::Button::Left) if on_bar => {
+				state.dragging = true;
+				shell.publish(Message::ScrollbarGrabbed);
+			}
+			mouse::Event::ButtonReleased(mouse::Button::Left) if state.dragging => {
+				state.dragging = false;
+				shell.publish(Message::ScrollbarReleased);
+			}
+			_ => {}
+		}
+
+		// And the hover, on the change only — the same shape `ui::grid` uses for the terminal's bar,
+		// and the same reason one `cursor::SCROLLBAR` name serves every bar in the window: a widget
+		// that never had the hand never says it lost it (§119).
+		if on_bar != state.on_bar {
+			state.on_bar = on_bar;
+			shell.publish(if on_bar {
+				Message::GrabEntered(self.handle)
+			} else {
+				Message::GrabExited(self.handle)
+			});
+		}
+	}
+
+	/// The hand over a bar, and whatever the scrollable said anywhere else.
+	///
+	/// WHO draws it is `grab_interaction`'s business and not this file's (§51): `None` on Windows so
+	/// iced is asked for nothing and `cursor`'s `WM_SETCURSOR` seam paints the bitmaps, the real
+	/// interaction everywhere else.
+	fn mouse_interaction(
+		&self,
+		tree: &iced::advanced::widget::Tree,
+		layout: iced::advanced::Layout<'_>,
+		cursor: mouse::Cursor,
+		viewport: &Rectangle,
+		renderer: &iced::Renderer,
+	) -> mouse::Interaction {
+		let inner = self.content.as_widget().mouse_interaction(
+			&tree.children[0],
+			layout,
+			cursor,
+			viewport,
+			renderer,
+		);
+		let state = tree.state.downcast_ref::<HandState>();
+		if !state.dragging && !self.on_bar(layout, cursor) {
+			return inner;
+		}
+		crate::cursor::grab_interaction(state.dragging).unwrap_or(inner)
+	}
+
+	fn draw(
+		&self,
+		tree: &iced::advanced::widget::Tree,
+		renderer: &mut iced::Renderer,
+		theme: &iced::Theme,
+		style: &iced::advanced::renderer::Style,
+		layout: iced::advanced::Layout<'_>,
+		cursor: mouse::Cursor,
+		viewport: &Rectangle,
+	) {
+		self.content.as_widget().draw(
+			&tree.children[0],
+			renderer,
+			theme,
+			style,
+			layout,
+			cursor,
+			viewport,
+		);
+	}
+
+	fn overlay<'b>(
+		&'b mut self,
+		tree: &'b mut iced::advanced::widget::Tree,
+		layout: iced::advanced::Layout<'b>,
+		renderer: &iced::Renderer,
+		viewport: &Rectangle,
+		translation: iced::Vector,
+	) -> Option<iced::advanced::overlay::Element<'b, Message, iced::Theme, iced::Renderer>> {
+		self.content.as_widget_mut().overlay(
+			&mut tree.children[0],
+			layout,
+			renderer,
+			viewport,
+			translation,
+		)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Float comparison for a geometry test, the same helper `ui::grid`'s thumb tests use: these are
+	/// pixel arithmetic, so an exact `==` is both what clippy's `float_cmp` objects to and the wrong
+	/// question to ask.
+	fn close(left: f32, right: f32, what: &str) {
+		assert!(
+			(left - right).abs() < 0.01,
+			"{what}: expected {right}, got {left}"
+		);
+	}
 
 	/// The lane a pane's bar occupies is the same width as the terminal's padding gutter, which is
 	/// what makes the two bars sit at the same distance from their surface's edge (§118). iced sizes
@@ -113,6 +433,127 @@ mod tests {
 			"the lane is {} and the terminal's gutter is {}",
 			WIDTH + 2.0 * INSET,
 			crate::ui::terminal::GRID_PADDING
+		);
+	}
+
+	/// A viewport its content fits inside has no bars, so there is nothing to wear a hand over
+	/// (§120). The hand must not appear over a 6px strip that does nothing.
+	#[test]
+	fn content_that_fits_has_no_lanes() {
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		// Exactly the same size counts as fitting: iced's test is a strict `>`.
+		let fits = bounds;
+		assert_eq!(lanes(bounds, fits, Axes::BOTH), (None, None));
+		let taller = Rectangle {
+			height: 4000.0,
+			..bounds
+		};
+		// Overflowing DOWN with only a horizontal bar asked for is still no bar at all.
+		assert_eq!(
+			lanes(
+				bounds,
+				taller,
+				Axes {
+					vertical: false,
+					horizontal: true
+				}
+			),
+			(None, None)
+		);
+	}
+
+	/// The lane is at the surface's edge, `WIDTH + 2 * INSET` across, and spans the whole of the
+	/// other axis when it is the only bar (§120). These are `iced_widget::scrollable`'s own
+	/// `total_bounds` numbers, mirrored — it is the rectangle iced grabs on, so the hand has to cover
+	/// exactly it.
+	#[test]
+	fn one_lane_hugs_its_edge_and_spans_the_surface() {
+		let bounds = Rectangle {
+			x: 17.0,
+			y: 9.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let lane = WIDTH + 2.0 * INSET;
+		let (vertical, horizontal) = lanes(
+			bounds,
+			Rectangle {
+				height: 4000.0,
+				..bounds
+			},
+			Axes::VERTICAL,
+		);
+		assert_eq!(horizontal, None, "no horizontal bar was asked for");
+		let vertical = vertical.expect("the content overflows downwards");
+		close(vertical.width, lane, "the lane is WIDTH + 2 * INSET across");
+		close(
+			vertical.x,
+			bounds.x + bounds.width - lane,
+			"hugging the right edge",
+		);
+		close(vertical.y, bounds.y, "starting at the top");
+		close(
+			vertical.height,
+			bounds.height,
+			"no horizontal bar below it, so it runs the full height",
+		);
+	}
+
+	/// With bars on both axes each lane gets out of the other's way — and by DIFFERENT amounts,
+	/// which is iced's own asymmetry and reproduced rather than tidied (§120): the vertical lane
+	/// shortens by the horizontal bar's `width + margin`, while the horizontal lane narrows by the
+	/// vertical lane's full `width + 2 * margin`. Only the editor's buffer is `Both`, so this is the
+	/// one place it shows.
+	#[test]
+	fn two_lanes_shrink_by_iceds_own_asymmetric_amounts() {
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let lane = WIDTH + 2.0 * INSET;
+		let (vertical, horizontal) = lanes(
+			bounds,
+			Rectangle {
+				width: 4000.0,
+				height: 4000.0,
+				..bounds
+			},
+			Axes::BOTH,
+		);
+		let vertical = vertical.expect("overflows downwards");
+		let horizontal = horizontal.expect("overflows sideways");
+		close(
+			vertical.height,
+			bounds.height - (WIDTH + INSET),
+			"shortened by the horizontal bar's width + margin",
+		);
+		close(
+			horizontal.width,
+			bounds.width - lane,
+			"narrowed by the vertical lane's whole width",
+		);
+		// The horizontal lane really is clear of the vertical one, because it subtracted the whole
+		// lane width.
+		close(
+			horizontal.x + horizontal.width,
+			vertical.x,
+			"the horizontal lane stops where the vertical one starts",
+		);
+		// The vertical lane, however, OVERLAPS the horizontal one by exactly `INSET` — it subtracted
+		// 5 where the lane below it is 6 tall. That is iced's own arithmetic and this test pins it
+		// rather than wishing it away. It is harmless here: the hit test is a union of the two, so a
+		// pixel that belongs to both still answers "a bar", which is the only question being asked.
+		close(
+			vertical.y + vertical.height - horizontal.y,
+			INSET,
+			"iced's asymmetry, mirrored: a one-pixel overlap in the corner",
 		);
 	}
 
