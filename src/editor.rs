@@ -397,9 +397,14 @@ impl Find {
 /// Where an editor tab is in its lifecycle (§32). `Loading` until the bytes arrive; `Ready` with a
 /// live buffer; `Failed` when the file is too big, binary, or an unsupported encoding — the view
 /// then shows the reason in place of the buffer, never mojibake.
+///
+/// `Loading` carries how far the read has got (§121) rather than that living in a field of its own
+/// beside the status. A field would be able to hold a share for a load that is not running, which is
+/// the shape §111 went out of its way to remove from the save side: there is no such state here to
+/// get into, and so none to remember to clear.
 #[derive(Debug, Clone)]
 pub enum EditorStatus {
-	Loading,
+	Loading(crate::viewer::LoadProgress),
 	Ready,
 	Failed(String),
 }
@@ -596,7 +601,7 @@ impl Editor {
 			encoding: Encoding::UTF8_NO_BOM,
 			content: text_editor::Content::new(),
 			original: Vec::new(),
-			status: EditorStatus::Loading,
+			status: EditorStatus::Loading(crate::viewer::LoadProgress::NOTHING_YET),
 			flight: SaveFlight::Idle,
 			notice: None,
 			save_as: None,
@@ -630,6 +635,26 @@ impl Editor {
 	/// The load failed (too big, unreadable, unsupported): show the reason in place of the buffer.
 	pub fn load_failed(&mut self, reason: String) {
 		self.status = EditorStatus::Failed(reason);
+	}
+
+	/// Note how far the read has got (§121), for the tab strip's bar and the body's byte count.
+	///
+	/// Ignored unless the tab is still loading. A progress event can outlive the read it describes —
+	/// the reader sends one per chunk and the terminal reply follows the last of them — so this must
+	/// not be able to drag a `Ready` editor back into `Loading` and blank the buffer that just arrived.
+	pub fn set_progress(&mut self, progress: crate::viewer::LoadProgress) {
+		if matches!(self.status, EditorStatus::Loading(_)) {
+			self.status = EditorStatus::Loading(progress);
+		}
+	}
+
+	/// How far the read has got, while one is running (§121). `None` once the file is open or has
+	/// failed, which is what stops the tab strip drawing a bar for a tab that is merely being edited.
+	pub fn load_progress(&self) -> Option<crate::viewer::LoadProgress> {
+		match self.status {
+			EditorStatus::Loading(progress) => Some(progress),
+			EditorStatus::Ready | EditorStatus::Failed(_) => None,
+		}
 	}
 
 	/// Apply one editor action to the buffer (§32). An editing action refreshes the changed-line

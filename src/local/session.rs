@@ -29,6 +29,7 @@
 // would be waiting for a consequence of the decision to be made before making it. `pty::Pty::exit` is
 // the branch that matters, and `pty`'s module note has the whole story.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -110,6 +111,10 @@ pub async fn run(
 	let mut conflicts: Option<mpsc::Sender<ConflictChoice>> = None;
 	let mut cancel: Option<Arc<AtomicBool>> = None;
 
+	// The cancel flags for the viewer reads in flight, keyed by the tab that asked (§121). The
+	// remote session loop keeps the same map for the same reason — see the `FileLoad` arm below.
+	let mut viewer_cancels: HashMap<u64, Arc<AtomicBool>> = HashMap::new();
+
 	loop {
 		tokio::select! {
 					// Output first, always. `select!` picks at random among the branches that are ready, so
@@ -174,8 +179,22 @@ pub async fn run(
 							Some(SessionMsg::MakeDir(path)) => fs::make_dir(&events, path),
 							Some(SessionMsg::Delete(paths)) => fs::remove(&events, paths),
 							Some(SessionMsg::RenameDir { from, to }) => fs::rename(&events, from, to),
+							// A viewer read gets its own cancel flag, keyed by the tab (§121) — NOT the single
+							// slot `arm` hands the transfers below. That slot is right for a transfer because
+							// only one runs at a time; any number of viewer tabs can be opening files at once,
+							// so a close has to reach the read that was closed and no other. Stale entries are
+							// pruned by strong count on insert: a finished read has dropped its `Arc`, and
+							// nothing else tells this loop that it ended.
 							Some(SessionMsg::FileLoad { viewer_id, path, limit, .. }) => {
-								fs::load(&events, viewer_id, path, limit);
+								viewer_cancels.retain(|_, flag| Arc::strong_count(flag) > 1);
+								let flag = Arc::new(AtomicBool::new(false));
+								viewer_cancels.insert(viewer_id, flag.clone());
+								fs::load(&events, viewer_id, path, limit, flag);
+							}
+							Some(SessionMsg::CancelFileLoad { viewer_id }) => {
+								if let Some(flag) = viewer_cancels.remove(&viewer_id) {
+									flag.store(true, Ordering::Relaxed);
+								}
 							}
 							Some(SessionMsg::EditSave { viewer_id, path, bytes, .. }) => {
 								fs::save(&events, viewer_id, path, bytes);

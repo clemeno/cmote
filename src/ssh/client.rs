@@ -14,6 +14,7 @@
 // Accept/Reject. That answer arrives as another SshCommand — so `run()` has to
 // stay free to receive it. Spawning the session keeps the command loop live.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -182,6 +183,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 				path,
 				limit,
 			},
+			SshCommand::CancelFileLoad { viewer_id } => SessionMsg::CancelFileLoad { viewer_id },
 			SshCommand::EditSave {
 				identity,
 				viewer_id,
@@ -290,6 +292,9 @@ pub(crate) enum SessionMsg {
 		path: String,
 		limit: u64,
 	},
+	/// Stop a viewer read still in flight, because its tab was closed (§121). Named by viewer, not
+	/// "the current read": several tabs can be loading at once.
+	CancelFileLoad { viewer_id: u64 },
 	/// Write the editor's buffer back to the remote, atomically (§32), as the account that opened it.
 	EditSave {
 		identity: u64,
@@ -523,6 +528,18 @@ async fn stream(
 	// transfer already ended simply never gets read. `None` when nothing is transferring.
 	let mut cancel: Option<Arc<AtomicBool>> = None;
 
+	// The cancel flags for the viewer reads in flight, keyed by the VIEWER tab that asked (§121).
+	//
+	// A map rather than the single slot above, and that difference is the whole reason it exists:
+	// only one transfer runs at a time, but any number of editor and preview tabs can be opening
+	// files at once, so a close has to stop the read that was closed and no other.
+	//
+	// Nothing tells this loop when a read FINISHES — the spawned task reports straight to the GUI —
+	// so entries are pruned on insert instead, by strong count. Each live read holds the only other
+	// `Arc`, so a count of one means that read is over and its flag is dead. That keeps the map the
+	// size of the reads actually in flight without a completion message existing solely to tidy up.
+	let mut viewer_cancels: HashMap<u64, Arc<AtomicBool>> = HashMap::new();
+
 	loop {
 		tokio::select! {
 			// Something arrived on one of the session's shells (§45). Which one is in the message;
@@ -671,8 +688,22 @@ async fn stream(
 					// as root must be read and saved as root, whichever account the panes have moved on
 					// to while it was being edited.
 					Some(SessionMsg::FileLoad { identity, viewer_id, path, limit }) => {
+						// Drop the flags of reads that have already ended (see `viewer_cancels`), then
+						// make this read's own. Re-opening in the same tab replaces its flag, which is
+						// right: the previous read for that tab is over or being abandoned either way.
+						viewer_cancels.retain(|_, flag| Arc::strong_count(flag) > 1);
+						let flag = Arc::new(AtomicBool::new(false));
+						viewer_cancels.insert(viewer_id, flag.clone());
 						let backend = accounts.files_as(session, identity).await;
-						edit::load(backend, events, viewer_id, path, limit).await;
+						edit::load(backend, events, viewer_id, path, limit, flag).await;
+					}
+					// The tab that asked for a read has been closed (§121). Setting its flag is all
+					// this does: the reader notices between chunks and reports the outcome itself, so
+					// there is no task to await and nothing here can block on a slow server.
+					Some(SessionMsg::CancelFileLoad { viewer_id }) => {
+						if let Some(flag) = viewer_cancels.remove(&viewer_id) {
+							flag.store(true, Ordering::Relaxed);
+						}
 					}
 					Some(SessionMsg::EditSave { identity, viewer_id, path, bytes }) => {
 						let backend = accounts.files_as(session, identity).await;

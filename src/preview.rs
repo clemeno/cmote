@@ -143,9 +143,12 @@ fn unsupported_name(format: image::ImageFormat) -> String {
 
 /// Where a preview tab is in its lifecycle (§53) — the same three states the editor has, for the
 /// same reason: the view shows a spinner, a picture, or a sentence, and never a half of one.
+///
+/// `Loading` carries how far the read has got (§121), exactly as `EditorStatus::Loading` does and
+/// for the same reason: a share held beside the status could describe a load that is not running.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewStatus {
-	Loading,
+	Loading(crate::viewer::LoadProgress),
 	Ready,
 	Failed(String),
 }
@@ -191,7 +194,7 @@ impl Preview {
 		Self {
 			session,
 			path,
-			status: PreviewStatus::Loading,
+			status: PreviewStatus::Loading(crate::viewer::LoadProgress::NOTHING_YET),
 			picture: None,
 		}
 	}
@@ -215,6 +218,22 @@ impl Preview {
 	pub fn load_failed(&mut self, reason: String) {
 		self.picture = None;
 		self.status = PreviewStatus::Failed(reason);
+	}
+
+	/// Note how far the read has got (§121). Ignored unless the tab is still loading, so a progress
+	/// event that arrives behind its own `FileLoaded` cannot blank a picture that is already up.
+	pub fn set_progress(&mut self, progress: crate::viewer::LoadProgress) {
+		if matches!(self.status, PreviewStatus::Loading(_)) {
+			self.status = PreviewStatus::Loading(progress);
+		}
+	}
+
+	/// How far the read has got, while one is running (§121).
+	pub fn load_progress(&self) -> Option<crate::viewer::LoadProgress> {
+		match self.status {
+			PreviewStatus::Loading(progress) => Some(progress),
+			PreviewStatus::Ready | PreviewStatus::Failed(_) => None,
+		}
 	}
 }
 

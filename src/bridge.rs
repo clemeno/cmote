@@ -300,6 +300,13 @@ pub enum SshCommand {
 		path: String,
 		limit: u64,
 	},
+	/// Stop a read that is still in flight (§121) — the user closed the viewer tab that asked for it.
+	///
+	/// Unlike a transfer's cancel, which cancels THE transfer because only one runs at a time, this
+	/// names its viewer: several tabs can be opening files at once, and a close must stop the one
+	/// that was closed. The reader notices between chunks and reports `FileLoadFailed`; a cancel that
+	/// arrives after the read already finished is a no-op, so a race costs nothing.
+	CancelFileLoad { viewer_id: u64 },
 	/// Write the editor's buffer back to the remote (§32). `viewer_id` routes the reply; `path` is
 	/// the destination (a Save As names a new one); `bytes` are already encoded as the file was
 	/// opened (BOM and all — the GUI side owns the encoding). Written atomically: a temp sibling
@@ -477,9 +484,24 @@ pub enum SshEvent {
 		path: String,
 		bytes: Vec<u8>,
 	},
+	/// How far a viewer's read has got (§121), so the tab strip can show it. Sent as the buffer
+	/// grows, then once more at the end; the terminal `FileLoaded` / `FileLoadFailed` still decides
+	/// when the wait is over, so a dropped progress event costs nothing but a stale bar.
+	///
+	/// `total` is `None` when the server would not report a size — the same gap `read_file` already
+	/// has to handle, carried up rather than flattened into a fake number.
+	FileLoadProgress {
+		viewer_id: u64,
+		read: u64,
+		total: Option<u64>,
+	},
 	/// The load failed (§32, §53): the file is over the ceiling the command carried, could not be
 	/// read, or the sftp channel would not open. The viewer tab shows the reason in place of its
 	/// content.
+	///
+	/// A load the USER cancelled arrives here too (§121), with the reason saying so. It is a failure
+	/// in the sense the viewer cares about — no bytes — and a separate event would mean a second arm
+	/// on every match for a state that shows the same thing.
 	FileLoadFailed { viewer_id: u64, reason: String },
 	/// The editor's buffer was saved to `path` (§32); the tab clears its dirty marks and, on a
 	/// Save As, is now editing the new file.
@@ -584,6 +606,7 @@ impl SshEvent {
 	pub fn viewer_target(&self) -> Option<u64> {
 		match self {
 			Self::FileLoaded { viewer_id, .. }
+			| Self::FileLoadProgress { viewer_id, .. }
 			| Self::FileLoadFailed { viewer_id, .. }
 			| Self::EditSaved { viewer_id, .. }
 			| Self::EditSaveFailed { viewer_id, .. } => Some(*viewer_id),

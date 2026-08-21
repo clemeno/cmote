@@ -77,6 +77,7 @@ mod term; // VT/ANSI terminal emulator wrapping the engine, behind a small surfa
 mod transfer; // the one transfer slot and everything queued behind it (§16, §17, §19, §21, §29)
 mod ui; // view helpers: the home list, the connect form and the terminal grid (§10)
 mod vault; // opt-in, portable, master-passphrase-encrypted store for remembered secrets (§16)
+mod viewer; // how far a viewer tab's one bounded file read has got, shared by editor and preview (§121)
 
 // `main` returns `iced::Result` so any startup error propagates with a clean
 // process exit code.

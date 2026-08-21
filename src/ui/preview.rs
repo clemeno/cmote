@@ -47,7 +47,17 @@ const INITIAL_FIT: ContentFit = ContentFit::ScaleDown;
 /// The whole picture screen (§53): the toolbar, then whichever of the three states the tab is in.
 pub fn view(preview: &Preview, tab_id: u64) -> Element<'_, Message> {
 	let body: Element<'_, Message> = match &preview.status {
-		PreviewStatus::Loading => centered(text("Loading…").size(15).color(MUTED_FG).into()),
+		// The same wording and the same number the editor shows (§121) — one sentence for one wait,
+		// whichever kind of viewer is doing the waiting.
+		PreviewStatus::Loading(progress) => centered(
+			text(match progress.read {
+				0 => "Loading…".to_owned(),
+				_ => format!("Loading… {}", progress.label()),
+			})
+			.size(15)
+			.color(MUTED_FG)
+			.into(),
+		),
 		PreviewStatus::Failed(reason) => failed_body(reason, tab_id),
 		// `Ready` without a picture cannot happen — `set_loaded` writes both in one move — but the
 		// view refuses to assume it: a missing picture reads as still loading rather than panicking.

@@ -24,6 +24,8 @@
 //     the same thing it does for a remote whose server volunteered no attributes (§20).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::mpsc;
 
@@ -212,11 +214,29 @@ pub async fn report_zone(events: &mpsc::Sender<SshEvent>) {
 	let _ = events.send(SshEvent::Zone(zone())).await;
 }
 
+/// How much a local viewer read pulls between progress reports. The sftp reader's chunk (§121), for
+/// no deeper reason than that the two should report at the same granularity — a bar that steps
+/// differently depending on which machine the file is on would be a difference with no meaning.
+const READ_CHUNK: usize = 64 * 1024;
+
 /// Read a whole file for a viewer tab (§32, §53), refusing one over `limit` off its metadata before a
 /// byte is read — the same order the remote path uses, so a huge file costs a stat and not a read.
-pub fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, limit: u64) {
+///
+/// Reads in chunks rather than with one `std::fs::read`, so it can report progress and notice a
+/// cancel (§121). On an internal disk that is invisible — the whole 8 MiB ceiling comes off an SSD in
+/// a few milliseconds, well under one frame. It earns its keep on the case that does not look local
+/// at all: a mapped drive or a UNC path, where a "local" file is really a file over SMB and can take
+/// as long as any remote one.
+pub fn load(
+	events: &mpsc::Sender<SshEvent>,
+	viewer_id: u64,
+	pane: String,
+	limit: u64,
+	cancel: Arc<AtomicBool>,
+) {
 	let events = events.clone();
 	spawn(async move {
+		let reporter = events.clone();
 		let read = blocking(&pane, move |native| {
 			let meta = native
 				.metadata()
@@ -233,7 +253,7 @@ pub fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, limit
 					crate::human::bytes(limit)
 				));
 			}
-			std::fs::read(native).map_err(|error| format!("Could not read the file: {error}"))
+			read_reporting(native, meta.len(), viewer_id, &reporter, &cancel)
 		})
 		.await;
 		let event = match read {
@@ -246,6 +266,51 @@ pub fn load(events: &mpsc::Sender<SshEvent>, viewer_id: u64, pane: String, limit
 		};
 		let _ = events.send(event).await;
 	});
+}
+
+/// The chunked read itself, on the blocking thread (§121): pull `READ_CHUNK` at a time, report how
+/// far it has got, and stop if the tab that asked has been closed.
+///
+/// `blocking_send` rather than `send`, because this runs on a `spawn_blocking` thread with no
+/// executor to await on — which is exactly the case tokio provides it for. A full channel parks this
+/// thread, which is the correct backpressure: there is no point reading ahead of a GUI that cannot
+/// keep up with being told about it.
+///
+/// The size is passed in rather than re-stat'ed so the denominator the bar draws against is the SAME
+/// number the refusal above was judged on. A file that grows while it is being read therefore reads
+/// as 100% for its last few chunks, which is a better lie than a bar that slides backwards.
+fn read_reporting(
+	native: &Path,
+	total: u64,
+	viewer_id: u64,
+	events: &mpsc::Sender<SshEvent>,
+	cancel: &AtomicBool,
+) -> Result<Vec<u8>, String> {
+	use std::io::Read;
+
+	let mut file =
+		std::fs::File::open(native).map_err(|error| format!("Could not read the file: {error}"))?;
+	// The stat's size as the capacity: right in the ordinary case, and merely a hint if the file
+	// changed, since the vector grows regardless.
+	let mut bytes = Vec::with_capacity(usize::try_from(total).unwrap_or(0));
+	let mut chunk = vec![0u8; READ_CHUNK];
+	loop {
+		if cancel.load(Ordering::Relaxed) {
+			return Err(crate::ssh::edit::CANCELLED.to_owned());
+		}
+		let read = file
+			.read(&mut chunk)
+			.map_err(|error| format!("Could not read the file: {error}"))?;
+		if read == 0 {
+			return Ok(bytes);
+		}
+		bytes.extend_from_slice(&chunk[..read]);
+		let _ = events.blocking_send(SshEvent::FileLoadProgress {
+			viewer_id,
+			read: bytes.len() as u64,
+			total: Some(total),
+		});
+	}
 }
 
 /// Write the editor's buffer back (§32), atomically: a temp sibling then a rename over the target, so

@@ -1345,6 +1345,21 @@ impl App {
 	/// Drop the tab at `index` of the region `pane`, bringing forward the tab the user was on before
 	/// this one (§26, §37) — or closing the region itself if that was its last tab (§48).
 	fn remove_tab(&mut self, pane: pane_grid::Pane, index: usize) -> iced::Task<Message> {
+		// A viewer closed mid-read: stop the read (§121). Done HERE and not in `take_tab`, which is
+		// the shared bookkeeping for a close and a MOVE (§52) — a tab dragged to another region is
+		// still waiting for its file, and cancelling that would turn a drag into a failed open.
+		//
+		// The cancel goes down the PARENT session's channel, because a viewer has none of its own.
+		// Read the pair before the mutable borrow below, since sending needs `self` again.
+		if let Some((parent, viewer_id)) = self
+			.regions
+			.get(pane)
+			.and_then(|region| region.tabs.get(index))
+			.and_then(Tab::loading_read)
+			&& let Some(session) = self.tab_mut(parent)
+		{
+			session.send_command(SshCommand::CancelFileLoad { viewer_id });
+		}
 		let Some(region) = self.regions.get_mut(pane) else {
 			return iced::Task::none();
 		};
@@ -2409,7 +2424,7 @@ impl Viewer {
 		match self {
 			Self::Editor(editor) => editor.mark_parent_gone(),
 			Self::Picture(picture) => {
-				if matches!(picture.status, crate::preview::PreviewStatus::Loading) {
+				if matches!(picture.status, crate::preview::PreviewStatus::Loading(_)) {
 					picture.load_failed(
 						"The session this file was opened from closed before it finished loading."
 							.to_owned(),
@@ -3591,14 +3606,47 @@ impl Tab {
 		}
 	}
 
-	/// What this tab's remote command reports about its progress (§54), for the bar along the bottom
-	/// of its chip. A tab with no terminal — the home list, the connect form, a viewer — reports
-	/// nothing, and so does a live shell whose commands never send OSC 9;4, which is most of them.
+	/// What this tab reports about work in flight (§54, §121), for the bar along the bottom of its
+	/// chip. A live shell reports what its commands sent via OSC 9;4, which for most shells is
+	/// nothing; a VIEWER tab reports how much of its file has arrived.
+	///
+	/// The two cannot collide — a tab is a session or a viewer, never both — so they share the bar
+	/// rather than each getting its own strip of a 30-pixel chip. What the bar means is the same in
+	/// both cases ("this tab is busy, this far through"), which is the test for whether sharing a
+	/// channel is reuse or a pun.
 	fn command_progress(&self) -> term::progress::Progress {
+		if let Some(progress) = self.load_progress() {
+			return progress.as_progress();
+		}
 		match self.terminal.as_ref() {
 			Some(terminal) => terminal.progress(),
 			None => term::progress::Progress::None,
 		}
+	}
+
+	/// How far this tab's file read has got, if it is a viewer still loading one (§121).
+	fn load_progress(&self) -> Option<crate::viewer::LoadProgress> {
+		match self.viewer.as_ref()? {
+			Viewer::Editor(editor) => editor.load_progress(),
+			Viewer::Picture(picture) => picture.load_progress(),
+		}
+	}
+
+	/// The read this tab is waiting on, as `(parent session id, this tab's id)` (§121) — what a close
+	/// needs in order to cancel it. `None` for anything that is not a viewer mid-load, and for a
+	/// viewer whose parent session has already gone, since there is nothing left to send down.
+	fn loading_read(&self) -> Option<(u64, u64)> {
+		self.load_progress()?;
+		let parent = match self.viewer.as_ref()? {
+			Viewer::Editor(editor) => {
+				if editor.parent_gone {
+					return None;
+				}
+				editor.session
+			}
+			Viewer::Picture(picture) => picture.session,
+		};
+		Some((parent, self.id))
 	}
 
 	/// The branch this tab's remote shell announced (§55), for the pill on its chip. `None` on a tab
@@ -3807,6 +3855,9 @@ impl Tab {
 					Err(reason) => picture.load_failed(reason),
 				}
 			}
+			SshEvent::FileLoadProgress { read, total, .. } => {
+				picture.set_progress(crate::viewer::LoadProgress { read, total });
+			}
 			SshEvent::FileLoadFailed { reason, .. } => picture.load_failed(reason),
 			// A preview never asked for a save, so a save reply cannot be for it.
 			_ => {}
@@ -3835,6 +3886,9 @@ impl Tab {
 					"This file is not text in a supported encoding (UTF-8 or UTF-16).".to_owned(),
 				),
 			},
+			SshEvent::FileLoadProgress { read, total, .. } => {
+				editor.set_progress(crate::viewer::LoadProgress { read, total });
+			}
 			SshEvent::FileLoadFailed { reason, .. } => editor.load_failed(reason),
 			SshEvent::EditSaved { path, .. } => {
 				editor.path = path;
@@ -5183,6 +5237,7 @@ impl Tab {
 			// An editor's load/save replies are routed by `App` straight to the editor tab that asked
 			// (`on_viewer_event`, §32), so a session's own event stream never delivers them here.
 			SshEvent::FileLoaded { .. }
+			| SshEvent::FileLoadProgress { .. }
 			| SshEvent::FileLoadFailed { .. }
 			| SshEvent::EditSaved { .. }
 			| SshEvent::EditSaveFailed { .. } => {}
@@ -13186,6 +13241,147 @@ mod tests {
 		}
 	}
 
+	/// A progress event for a viewer reaches that viewer's status AND its chip's bar (§121) — the
+	/// whole point of the event, since the tab strip is where a background load is visible at all.
+	#[test]
+	fn a_reads_progress_reaches_the_tab_strips_bar() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/notes.txt");
+
+		// Nothing reported yet: the size is unknown, so the bar pulses rather than sitting at 0%.
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the viewer");
+		assert_eq!(
+			tab.command_progress(),
+			term::progress::Progress::Indeterminate,
+			"a read that has not reported has no share to show"
+		);
+
+		let _task = app.route_ssh(
+			session,
+			SshEvent::FileLoadProgress {
+				viewer_id: id,
+				read: 256,
+				total: Some(1024),
+			},
+		);
+
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the viewer");
+		assert_eq!(
+			tab.command_progress(),
+			term::progress::Progress::Working(25),
+			"a quarter read is a quarter of a bar"
+		);
+	}
+
+	/// A viewer's bar goes away when its file is open (§121). Without this the chip would keep a
+	/// full bar for the whole life of the tab, saying "busy" about a file that is merely being read.
+	#[test]
+	fn the_bar_leaves_when_the_file_has_arrived() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/notes.txt");
+
+		let _task = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/notes.txt".to_owned(),
+				bytes: b"alpha\nbeta\n".to_vec(),
+			},
+		);
+
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the viewer");
+		assert_eq!(
+			tab.command_progress(),
+			term::progress::Progress::None,
+			"an open file is not work in flight"
+		);
+	}
+
+	/// A progress event can arrive BEHIND the `FileLoaded` it belongs to — the reader sends one per
+	/// chunk and they queue — so it must not be able to drag a loaded editor back into `Loading` and
+	/// blank the buffer that just arrived (§121).
+	#[test]
+	fn a_late_progress_event_cannot_unload_a_file_that_arrived() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/notes.txt");
+
+		let _loaded = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/notes.txt".to_owned(),
+				bytes: b"alpha\nbeta\n".to_vec(),
+			},
+		);
+		// The straggler, naming a read that is over.
+		let _late = app.route_ssh(
+			session,
+			SshEvent::FileLoadProgress {
+				viewer_id: id,
+				read: 4,
+				total: Some(11),
+			},
+		);
+
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the viewer");
+		let editor = tab.editor().expect("an editor");
+		assert!(
+			matches!(editor.status, crate::editor::EditorStatus::Ready),
+			"the file is open; a stale chunk count does not reopen the wait"
+		);
+		assert_eq!(editor.content.text(), "alpha\nbeta\n");
+	}
+
+	/// Closing a viewer that is still reading tells the session to stop reading (§121). Otherwise the
+	/// server keeps sending a file to a tab that no longer exists.
+	#[test]
+	fn closing_a_viewer_mid_read_cancels_the_read() {
+		let (mut app, session, mut rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/big.log");
+		let _sent = drain(&mut rx);
+
+		let _task = app.force_close(id);
+
+		let cancels: Vec<u64> = drain(&mut rx)
+			.into_iter()
+			.filter_map(|command| match command {
+				SshCommand::CancelFileLoad { viewer_id } => Some(viewer_id),
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			cancels,
+			vec![id],
+			"the closed tab's own read, named by its id"
+		);
+	}
+
+	/// Closing a viewer whose file is already open cancels nothing (§121) — there is no read to stop,
+	/// and a cancel naming a finished read would be noise on the channel.
+	#[test]
+	fn closing_a_loaded_viewer_cancels_nothing() {
+		let (mut app, session, mut rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/notes.txt");
+		let _loaded = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/notes.txt".to_owned(),
+				bytes: b"alpha\n".to_vec(),
+			},
+		);
+		let _sent = drain(&mut rx);
+
+		let _task = app.force_close(id);
+
+		assert!(
+			!drain(&mut rx)
+				.iter()
+				.any(|command| matches!(command, SshCommand::CancelFileLoad { .. })),
+			"nothing is in flight, so nothing is cancelled"
+		);
+	}
+
 	/// The double-click that used to hand a `.png` to a text editor now opens a picture instead
 	/// (§53) — and the file that always belonged in the editor still gets there.
 	#[test]
@@ -13346,10 +13542,10 @@ mod tests {
 	fn a_preview_still_loading_when_its_session_ends_is_told_so() {
 		let (mut app, session, _rx) = app_with_session();
 		let id = open_file(&mut app, session, "/srv/shot.png");
-		assert_eq!(
+		assert!(matches!(
 			preview_of(&app, id).status,
-			crate::preview::PreviewStatus::Loading
-		);
+			crate::preview::PreviewStatus::Loading(_)
+		));
 
 		app.orphan_viewers(session);
 		let crate::preview::PreviewStatus::Failed(reason) = &preview_of(&app, id).status else {

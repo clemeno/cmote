@@ -181,7 +181,18 @@ fn palette(theme: EditorTheme) -> Palette {
 pub fn view(editor: &Editor, tab_id: u64) -> Element<'_, Message> {
 	let p = palette(editor.theme);
 	let body: Element<'_, Message> = match &editor.status {
-		EditorStatus::Loading => centered(text("Loading…").size(15).color(p.muted).into()),
+		// The bytes so far, once any have arrived (§121). "Loading…" alone on a file coming down a slow
+		// link says nothing about whether anything is happening; the count is the same number the tab
+		// strip's bar draws, in the one place there is room to spell it.
+		EditorStatus::Loading(progress) => centered(
+			text(match progress.read {
+				0 => "Loading…".to_owned(),
+				_ => format!("Loading… {}", progress.label()),
+			})
+			.size(15)
+			.color(p.muted)
+			.into(),
+		),
 		EditorStatus::Failed(reason) => failed_body(reason, tab_id, &p),
 		EditorStatus::Ready => buffer_body(editor, &p),
 	};

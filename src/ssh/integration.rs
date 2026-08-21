@@ -194,8 +194,8 @@ async fn read_text(backend: &AsuserFiles, path: &str) -> Result<String> {
 	let bytes = match backend {
 		// A shell config file is text, so it is read under the TEXT ceiling (§53) — the same one the
 		// editor opens it with, since Install writes back what this read showed.
-		AsuserFiles::Sftp(sftp) => edit::read_file(sftp, path, edit::MAX_SIZE).await?,
-		AsuserFiles::Shell(runner) => shellfs::read_all(runner, path, edit::MAX_SIZE).await?,
+		AsuserFiles::Sftp(sftp) => edit::read_file(sftp, path, edit::MAX_SIZE, None).await?,
+		AsuserFiles::Shell(runner) => shellfs::read_all(runner, path, edit::MAX_SIZE, None).await?,
 		AsuserFiles::Denied(reason) => bail!("{reason}"),
 	};
 	String::from_utf8(bytes).with_context(|| format!("{path} is not text cmote can edit safely"))

@@ -15,6 +15,9 @@
 // on the GUI side (`editor`, `preview`), so this layer never needs to know a file's charset or
 // whether it is a picture at all.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Context, Result, bail};
 use russh_sftp::client::SftpSession;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,22 +42,71 @@ const READ_CHUNK: usize = 64 * 1024;
 /// SAME directory as the file so the rename is a metadata move on one filesystem, never a copy.
 const TEMP_SUFFIX: &str = "~cmote.tmp";
 
+/// What a viewer's read reports as it goes, and what stops it (§121).
+///
+/// Bundled into one value rather than threaded as three parameters because `read_file` has a SECOND
+/// caller — `ssh::integration` reads a config file through the same bounded reader — which has no
+/// tab to report to and no user to cancel it. One `Option<&Report>` says "this read is somebody's,
+/// or it is nobody's" in one place, and keeps the cap enforced by exactly one loop (§109's lesson:
+/// two spellings of one rule are two things to keep true).
+pub(crate) struct Report<'a> {
+	pub events: &'a mpsc::Sender<SshEvent>,
+	pub viewer_id: u64,
+	/// Set when the viewer tab was closed. Polled between chunks, so a cancel lands within one
+	/// `READ_CHUNK` rather than at the end of the file.
+	pub cancel: &'a AtomicBool,
+}
+
+impl Report<'_> {
+	/// Tell the tab how far the read has got. Failure to send is ignored on purpose: the GUI having
+	/// gone away is not a reason to abandon a read that is about to report its real outcome anyway.
+	pub(crate) async fn progress(&self, read: u64, total: Option<u64>) {
+		let _ = self
+			.events
+			.send(SshEvent::FileLoadProgress {
+				viewer_id: self.viewer_id,
+				read,
+				total,
+			})
+			.await;
+	}
+
+	/// Whether the user has closed the tab this read was for.
+	pub(crate) fn cancelled(&self) -> bool {
+		self.cancel.load(Ordering::Relaxed)
+	}
+}
+
+/// The reason a cancelled read reports back (§121). It reaches `FileLoadFailed` like any other
+/// non-outcome, but the tab it names has usually gone by then — the wording is for the case where it
+/// has not, which is a close that raced the last chunk.
+pub(crate) const CANCELLED: &str = "Cancelled.";
+
 /// Open an sftp channel and read a whole remote file for a VIEWER tab (§32, §53), reporting
 /// `FileLoaded` with its bytes or `FileLoadFailed` with a reason. `viewer_id` is echoed back so the
 /// reply routes to the tab that asked, not the session tab whose channel carried it, and `limit` is
 /// that viewer's ceiling — the editor's and the preview's differ (§53).
+///
+/// `cancel` is the tab's own flag (§121), set when it is closed. It is per-viewer rather than a
+/// single slot like a transfer's, because two tabs can be opening two files at the same time.
 pub async fn load(
 	backend: AsuserFiles,
 	events: &mpsc::Sender<SshEvent>,
 	viewer_id: u64,
 	path: String,
 	limit: u64,
+	cancel: Arc<AtomicBool>,
 ) {
 	let events = events.clone();
 	match backend {
 		AsuserFiles::Sftp(sftp) => {
 			tokio::spawn(async move {
-				let outcome = read_file(&sftp, &path, limit).await;
+				let report = Report {
+					events: &events,
+					viewer_id,
+					cancel: &cancel,
+				};
+				let outcome = read_file(&sftp, &path, limit, Some(&report)).await;
 				let _ = sftp.close().await;
 				report_load(outcome, viewer_id, path, &events).await;
 			});
@@ -62,7 +114,12 @@ pub async fn load(
 		// Same file, read with `cat` under the elevation instead (§46).
 		AsuserFiles::Shell(runner) => {
 			tokio::spawn(async move {
-				let outcome = shellfs::read_all(&runner, &path, limit).await;
+				let report = Report {
+					events: &events,
+					viewer_id,
+					cancel: &cancel,
+				};
+				let outcome = shellfs::read_all(&runner, &path, limit, Some(&report)).await;
 				report_load(outcome, viewer_id, path, &events).await;
 			});
 		}
@@ -111,9 +168,21 @@ async fn report_load(
 /// down with the request (§53). Shared with `ssh::integration` (§17), which reads a config file the
 /// same bounded way — one reader, so no two callers can disagree about HOW the cap is enforced,
 /// only about where it sits.
-pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Result<Vec<u8>> {
-	if let Ok(meta) = sftp.metadata(path.to_owned()).await
-		&& let Some(size) = meta.size
+pub(crate) async fn read_file(
+	sftp: &SftpSession,
+	path: &str,
+	limit: u64,
+	report: Option<&Report<'_>>,
+) -> Result<Vec<u8>> {
+	// The size, when the server gives one: it decides the refusal below AND becomes the denominator
+	// the tab strip draws against (§121). A server that reports none leaves the bar indeterminate,
+	// which is honest — and is why the cap is checked a second time as the buffer grows.
+	let total = sftp
+		.metadata(path.to_owned())
+		.await
+		.ok()
+		.and_then(|meta| meta.size);
+	if let Some(size) = total
 		&& size > limit
 	{
 		bail!(
@@ -130,6 +199,13 @@ pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Res
 	let mut buffer = Vec::new();
 	let mut chunk = vec![0u8; READ_CHUNK];
 	loop {
+		// Before the read, so a tab closed while the first chunk is in flight still stops here rather
+		// than pulling the whole file for nobody.
+		if let Some(report) = report
+			&& report.cancelled()
+		{
+			bail!("{CANCELLED}");
+		}
 		let read = file.read(&mut chunk).await.context("read failed")?;
 		if read == 0 {
 			break;
@@ -140,6 +216,9 @@ pub(crate) async fn read_file(sftp: &SftpSession, path: &str, limit: u64) -> Res
 				"This file is over the {} limit.",
 				crate::human::bytes(limit)
 			);
+		}
+		if let Some(report) = report {
+			report.progress(buffer.len() as u64, total).await;
 		}
 	}
 	Ok(buffer)

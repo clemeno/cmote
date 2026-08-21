@@ -216,26 +216,44 @@ pub async fn free_name(runner: &impl Exec, dir: &str, name: &str) -> String {
 /// Read a whole remote file into memory, for a viewer tab (§32, §53). Refuses one over `limit`
 /// before reading a byte, from the size the remote itself reports, and again as the bytes arrive
 /// in case that size was a lie.
-pub async fn read_all(runner: &Runner, path: &str, limit: u64) -> Result<Vec<u8>> {
-	match size(runner, path).await {
+///
+/// `report` is the viewer's progress-and-cancel channel (§121), or `None` for a read nobody is
+/// waiting on. Unlike the sftp path this one ALWAYS knows the size — `size()` failing is already a
+/// hard error here, because a `cat` with no stat gives no way to refuse an oversized file up front —
+/// so the bar this path feeds is never indeterminate.
+pub async fn read_all(
+	runner: &Runner,
+	path: &str,
+	limit: u64,
+	report: Option<&crate::ssh::edit::Report<'_>>,
+) -> Result<Vec<u8>> {
+	let total = match size(runner, path).await {
 		Some(bytes) if bytes > limit => bail!(
 			"the file is {} — larger than the {} cmote will open",
 			crate::human::bytes(bytes),
 			crate::human::bytes(limit)
 		),
-		Some(_) => {}
+		Some(bytes) => bytes,
 		None => bail!("could not read the file"),
-	}
+	};
 	let mut channel = open_read(runner, path, 0).await?;
 	let mut bytes: Vec<u8> = Vec::new();
 	let mut stderr = String::new();
 	let mut status = None;
 	while let Some(message) = channel.wait().await {
+		if let Some(report) = report
+			&& report.cancelled()
+		{
+			bail!("{}", crate::ssh::edit::CANCELLED);
+		}
 		match message {
 			ChannelMsg::Data { data } => {
 				bytes.extend_from_slice(&data);
 				if bytes.len() as u64 > limit {
 					bail!("the file grew past the size cmote will open");
+				}
+				if let Some(report) = report {
+					report.progress(bytes.len() as u64, Some(total)).await;
 				}
 			}
 			ChannelMsg::ExtendedData { data, .. } => {
