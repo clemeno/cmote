@@ -443,7 +443,11 @@ fn decode_png(bytes: &'static [u8]) -> Option<Drawing> {
 		return None;
 	}
 	let mut bgra = Vec::with_capacity(buffer.len());
-	for pixel in buffer[..info.buffer_size()].chunks_exact(4) {
+	// `as_chunks::<4>` rather than `chunks_exact(4)`: it hands back `&[[u8; 4]]`, so each `pixel`
+	// below is an array of a known length and the four indexes are checked once, here, instead of
+	// four times at runtime. `.0` drops the remainder, which is empty — RGBA8 makes `buffer_size()`
+	// a multiple of four, and the guard above is what establishes the format is RGBA8.
+	for pixel in buffer[..info.buffer_size()].as_chunks::<4>().0 {
 		// B, G, R, A — the byte order of a little-endian 0xAARRGGBB pixel, which is what the DIB
 		// below is declared to hold. The PNG hands them over as R, G, B, A.
 		bgra.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
@@ -909,7 +913,13 @@ mod tests {
 		assert_eq!(half.bgra.len(), (half.width * half.height * 4) as usize);
 		// The shape survives: a hand that came out blank or came out solid would both pass a size
 		// check and fail on screen.
-		let covered = half.bgra.chunks_exact(4).filter(|p| p[3] > 128).count();
+		let covered = half
+			.bgra
+			.as_chunks::<4>()
+			.0
+			.iter()
+			.filter(|p| p[3] > 128)
+			.count();
 		assert!(covered > 100, "there is still a hand in there");
 		assert!(
 			covered < (half.width * half.height) as usize,
@@ -943,7 +953,13 @@ mod tests {
 		};
 		// Something is drawn and something is not: a hand that filled its whole square would have no
 		// shape, and one that filled none of it would be invisible.
-		let opaque = drawing.bgra.chunks_exact(4).filter(|p| p[3] > 0).count();
+		let opaque = drawing
+			.bgra
+			.as_chunks::<4>()
+			.0
+			.iter()
+			.filter(|p| p[3] > 0)
+			.count();
 		assert!(opaque > 100, "the hand covers something");
 		assert!(
 			opaque < (drawing.width * drawing.height) as usize,

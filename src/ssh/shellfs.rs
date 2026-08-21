@@ -799,19 +799,35 @@ impl Script {
 	}
 }
 
+/// Neither of these is an `async fn`, though the trait would allow it and `Runner`'s impl is one.
+/// The reason is that neither has anything to await: the reply is already in hand. Spelling them as
+/// `-> impl Future` returning `future::ready` says exactly that, and it is what the trait declares
+/// anyway (§113).
+///
+/// The difference is worth knowing, because it is a real one. An `async fn` body does not begin
+/// until the future is first polled, so `record` would run at the `.await`; written this way the
+/// body runs at the CALL and only the answer is deferred. Every test here awaits immediately, so
+/// the recorded order is the same either way — but a test that built a future and dropped it
+/// unawaited would see the command recorded, where before it would not.
 #[cfg(test)]
 impl Exec for Script {
-	async fn stdout(&self, snippet: &str) -> Result<String> {
+	fn stdout(&self, snippet: &str) -> impl Future<Output = Result<String>> + Send {
+		// Imported here rather than at module scope: this is the file's only use of it, and the
+		// impl is `#[cfg(test)]`, so up there it would be an unused import in the real build (§113).
+		use anyhow::anyhow;
+
 		self.record(snippet);
-		match &self.reply {
+		// `Err(anyhow!(..))` rather than `bail!`: that macro expands to a `return`, which would try
+		// to return an error where the signature now promises a future.
+		std::future::ready(match &self.reply {
 			Some(reply) => Ok(reply.clone()),
-			None => bail!("the remote refused"),
-		}
+			None => Err(anyhow!("the remote refused")),
+		})
 	}
 
-	async fn succeeds(&self, snippet: &str) -> bool {
+	fn succeeds(&self, snippet: &str) -> impl Future<Output = bool> + Send {
 		self.record(snippet);
-		self.reply.is_some()
+		std::future::ready(self.reply.is_some())
 	}
 }
 

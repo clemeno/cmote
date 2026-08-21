@@ -398,7 +398,10 @@ fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
 		return None;
 	}
 	let mut out = Vec::with_capacity(hex.len() / 2);
-	for pair in hex.chunks_exact(2) {
+	// `as_chunks::<2>().0` — a `&[[u8; 2]]`, so the two indexes below are bounds-checked once here
+	// rather than per digit. The remainder is empty: the guard above refuses an odd length outright,
+	// which it must, because dropping a trailing half-byte would decode `54E` as if it were `54`.
+	for pair in hex.as_chunks::<2>().0 {
 		out.push((hex_digit(pair[0])? << 4) | hex_digit(pair[1])?);
 	}
 	Some(out)

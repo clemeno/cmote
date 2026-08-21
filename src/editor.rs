@@ -143,12 +143,14 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> Option<String> {
 	if !bytes.len().is_multiple_of(2) {
 		return None;
 	}
-	let units = bytes.chunks_exact(2).map(|pair| {
-		let two = [pair[0], pair[1]];
+	// `as_chunks::<2>` hands back `&[[u8; 2]]`, which is the exact type `from_?e_bytes` wants — so
+	// each pair goes straight in, with no array rebuilt by hand from two indexes. `.0` drops the
+	// remainder, which the length guard above has already established is empty.
+	let units = bytes.as_chunks::<2>().0.iter().map(|pair| {
 		if little_endian {
-			u16::from_le_bytes(two)
+			u16::from_le_bytes(*pair)
 		} else {
-			u16::from_be_bytes(two)
+			u16::from_be_bytes(*pair)
 		}
 	});
 	char::decode_utf16(units)
