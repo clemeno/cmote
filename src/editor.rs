@@ -23,6 +23,33 @@ const LCS_BAND_CAP: usize = 1000;
 /// follow; it never renders (iced lays the glyphs out itself, so this need only be close, not exact).
 const TAB_WIDTH: usize = 8;
 
+/// How much text goes into one insert when a loaded file's buffer is built (§121).
+///
+/// This number is MEASURED, not chosen, and it is the whole of why opening a big file no longer
+/// freezes the window. Two facts about iced 0.14 sit behind it:
+///
+/// * `Content::with_text` calls cosmic-text's `set_text` with `Shaping::Advanced`, which shapes
+///   EVERY line up front — about 0.5 ms per KiB, so nearly four seconds at the 8 MiB ceiling, all of
+///   it on the GUI thread. A paste defers shaping to layout, and layout only ever shapes what is on
+///   screen.
+/// * A paste is QUADRATIC in the length of the one insert. So the chunk is not a nicety; it is the
+///   trick. Pasting a whole 8 MiB file in one go is far WORSE than what it replaces.
+///
+/// At the 8 MiB ceiling, release build:
+///
+/// ```text
+///   with_text            3918 ms     chunks of  32 KiB     193 ms
+///   one whole paste    130251 ms     chunks of   8 KiB      65 ms
+///   chunks of 128 KiB     746 ms     chunks of   4 KiB      53 ms
+///                                    chunks of   2 KiB      84 ms  <- call overhead takes over
+/// ```
+///
+/// 8 KiB rather than the 12 ms faster 4 KiB: half the calls for a difference no one can perceive,
+/// and 65 ms at the absolute ceiling is already inside a handful of frames. Note the shape of the
+/// curve — being too LARGE is unbounded, being too small costs a few ms — so if this is ever
+/// retuned, err downward.
+const PASTE_CHUNK: usize = 8 * 1024;
+
 /// The display-column width of a line (§32): a tab advances to the next `TAB_WIDTH` stop, every other
 /// character counts as one column. `ponytail:` a double-width CJK glyph counts as one, so a CJK-heavy
 /// line's width is under-estimated (the horizontal extent is a hair short there, never long) — ASCII
@@ -588,8 +615,11 @@ impl Editor {
 
 	/// Fill the buffer once the decoded text and its encoding arrive (§32). The freshly loaded text
 	/// is the baseline, so nothing is marked changed and the editor is clean.
+	///
+	/// The buffer is built by `content_of`, not `Content::with_text`: this runs on the GUI thread, and
+	/// `with_text` shaped the whole file eagerly — 98% of a four-second freeze at the ceiling (§121).
 	pub fn set_loaded(&mut self, text: &str, encoding: Encoding) {
-		self.content = text_editor::Content::with_text(text);
+		self.content = content_of(text);
 		self.encoding = encoding;
 		self.original = lines_of(&self.content);
 		self.status = EditorStatus::Ready;
@@ -1032,6 +1062,50 @@ impl Editor {
 	}
 }
 
+/// Cut `text` into pieces of at most `chunk` bytes for `content_of` (§121).
+///
+/// Deliberately NOT line-aligned. Aligning to the next newline reads tidier and would be free on
+/// ordinary source, but a minified script is one line of megabytes — the exact file that would then
+/// arrive as a single paste, which is the pathological case `PASTE_CHUNK` exists to avoid. Cutting
+/// mid-line costs nothing: an insert is an insert, and the buffer is identical either way (the tests
+/// below pin that against `with_text` for CRLF, no trailing newline, and one long line).
+///
+/// The walk back to a character boundary moves three bytes at worst, so no piece can come out empty
+/// and no multi-byte character can be split across two pastes.
+fn paste_chunks(text: &str, chunk: usize) -> Vec<&str> {
+	let mut pieces = Vec::new();
+	let mut at = 0;
+	while at < text.len() {
+		let mut end = (at + chunk).min(text.len());
+		while !text.is_char_boundary(end) {
+			end -= 1;
+		}
+		pieces.push(&text[at..end]);
+		at = end;
+	}
+	pieces
+}
+
+/// Build the buffer for a freshly loaded file (§121) — chunked pastes rather than
+/// `Content::with_text`, for the reasons measured on `PASTE_CHUNK`.
+///
+/// The cursor is put back to the start afterwards. The pastes walk it to the end of the buffer, and
+/// `with_text` left it at line 0, so without this a file would open scrolled to its last line — a
+/// plain regression, and the kind that only shows on a file long enough to scroll.
+fn content_of(text: &str) -> text_editor::Content {
+	let mut content = text_editor::Content::new();
+	for piece in paste_chunks(text, PASTE_CHUNK) {
+		content.perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+			std::sync::Arc::new(piece.to_owned()),
+		)));
+	}
+	content.move_to(text_editor::Cursor {
+		position: text_editor::Position { line: 0, column: 0 },
+		selection: None,
+	});
+	content
+}
+
 /// The buffer's lines as owned strings, endings dropped (§32). The diff and the dirty check compare
 /// text, not endings — iced never changes an ending on its own, so an ending shift is not an edit.
 fn lines_of(content: &text_editor::Content) -> Vec<String> {
@@ -1066,6 +1140,87 @@ fn join_with_endings(lines: &[String], endings: &[text_editor::LineEnding]) -> S
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Every line of a buffer with its ending, so two buffers can be compared on the thing that
+	/// matters — `lines_of` drops endings, and an ending shifted by a chunk boundary is exactly the
+	/// bug worth catching.
+	fn lines_and_endings(content: &text_editor::Content) -> Vec<(String, String)> {
+		content
+			.lines()
+			.map(|line| (line.text.into_owned(), line.ending.as_str().to_owned()))
+			.collect()
+	}
+
+	/// The chunked build has to produce the SAME buffer `with_text` produced, whatever the chunk
+	/// boundary lands in the middle of (§121). Every case here is one that a naive split gets wrong:
+	/// a boundary inside a CRLF pair, a file with no trailing newline, one line longer than a chunk,
+	/// and multi-byte characters straddling the cut.
+	#[test]
+	fn a_chunked_build_is_the_buffer_with_text_would_have_made() {
+		for (what, text) in [
+			("empty", String::new()),
+			("one line, no ending", "no trailing newline".to_owned()),
+			("lf", "alpha\nbeta\ngamma\n".to_owned()),
+			("crlf", "alpha\r\nbeta\r\ngamma\r\n".to_owned()),
+			("mixed endings", "alpha\r\nbeta\ngamma\rdelta".to_owned()),
+			("bare cr", "alpha\rbeta\r".to_owned()),
+			// Longer than one chunk, so the cut really does land inside the content.
+			("many lines", "0123456789\n".repeat(4096)),
+			// One line of 40 KiB: five chunks with no newline to align to.
+			("one long line", "x".repeat(40 * 1024)),
+			// Multi-byte characters at an odd stride, so cuts land inside them.
+			("multi-byte", "\u{1F600}\u{00E9}\u{4E2D}".repeat(4096)),
+			("crlf, no trailing", "alpha\r\nbeta".to_owned()),
+		] {
+			// Arrange / Act
+			let chunked = content_of(&text);
+			let whole = text_editor::Content::with_text(&text);
+			// Assert
+			assert_eq!(
+				lines_and_endings(&chunked),
+				lines_and_endings(&whole),
+				"chunked build differs from with_text for {what}"
+			);
+		}
+	}
+
+	/// The pastes leave the cursor at the end of the buffer, so `content_of` puts it back — otherwise
+	/// a long file opens scrolled to its last line (§121).
+	#[test]
+	fn a_freshly_built_buffer_has_its_cursor_at_the_start() {
+		// Arrange
+		let text = "0123456789\n".repeat(4096);
+		// Act
+		let content = content_of(&text);
+		// Assert
+		let cursor = content.cursor();
+		assert_eq!(
+			(
+				cursor.position.line,
+				cursor.position.column,
+				cursor.selection
+			),
+			(0, 0, None),
+			"a loaded file must open at its first line, not its last"
+		);
+	}
+
+	/// A chunk can never split a character, and never come out empty (§121) — the two ways the walk
+	/// back to a boundary could go wrong.
+	#[test]
+	fn chunks_rejoin_into_the_text_they_came_from() {
+		// Arrange — 4-byte, 3-byte and 2-byte characters, so a fixed stride lands inside all of them.
+		let text = "\u{1F600}a\u{4E2D}b\u{00E9}c".repeat(500);
+		// Act
+		let pieces = paste_chunks(&text, 7);
+		// Assert
+		assert!(
+			pieces.iter().all(|piece| !piece.is_empty()),
+			"a chunk walked back past its own start"
+		);
+		assert!(pieces.len() > 1, "the test text must actually be split");
+		assert_eq!(pieces.concat(), text, "the chunks lost or moved bytes");
+	}
 
 	#[test]
 	fn utf8_without_bom_is_the_default() {
