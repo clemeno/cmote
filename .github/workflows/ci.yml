@@ -52,7 +52,15 @@ jobs:
       # that doesn't touch dependencies re-uses the previous compile.
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets -- -D warnings
+      # `!cancelled()` so a clippy failure cannot HIDE a test failure (PLAN §115).
+      # Steps stop at the first failure by default, and that is exactly how a broken
+      # test went unseen for 118 commits: the clippy step ahead of it was red, the job
+      # exited there, and `cargo test` never ran at all on that target. Both checks
+      # now report on every run. Not `always()`: this workflow sets
+      # `cancel-in-progress`, and a superseded run should stop rather than spend
+      # minutes testing a commit nobody is waiting on.
       - run: cargo test
+        if: ${{ !cancelled() }}
 
   # ── macOS (the second target) ─────────────────────────────────────────────
   # GitHub's macOS runners are Apple Silicon (aarch64), but cmote ships for Intel
@@ -72,7 +80,9 @@ jobs:
           targets: x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --target x86_64-apple-darwin -- -D warnings
+      # See the windows job: this is the very step the masking happened on (§115).
       - run: cargo test
+        if: ${{ !cancelled() }}
 
   # ── Supply chain ────────────────────────────────────────────────────────────
   # The dependency tree is audited from the committed Cargo.lock, which is

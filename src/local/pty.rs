@@ -32,7 +32,10 @@
 //     answers as a matter of course, because the engine replies to DSR (§23) and `app` sends whatever
 //     `Terminal::process` hands back straight down the input path. Nothing here had to be added for
 //     it, but it is load-bearing, so the test at the bottom of this file asserts the exchange happens
-//     rather than leaving it to be rediscovered.
+//     rather than leaving it to be rediscovered. **It is a ConPTY behaviour and not a pty one**: a
+//     Unix pty puts no such question, so that test expects the exchange on Windows and expects its
+//     ABSENCE elsewhere (§115). Asserting it unconditionally is what made it fail on macOS from the
+//     day it was written.
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -428,13 +431,22 @@ mod tests {
 
 		assert!(
 			ended,
-			"the child's exit was observed — waiting on the output stream instead hangs, because the \
-			 ConPTY holds it open until the master is dropped: {seen:?}"
+			"the child's exit was observed — on Windows, waiting on the output stream instead hangs, \
+			 because the ConPTY holds it open until the master is dropped: {seen:?}"
 		);
-		assert!(
+		// Whether anything was answered is a PLATFORM fact, and the two platforms differ, so the
+		// expected value is `cfg!(windows)` rather than `true` (§115). On Windows the cursor query is
+		// not optional: `portable-pty` builds the ConPTY with `PSUEDOCONSOLE_INHERIT_CURSOR`, so it
+		// asks and then waits, and nothing the child printed arrives until cmote replies — the whole
+		// reason this test drives a real `Terminal`. A Unix pty asks nothing at all, so the reply path
+		// above is exercised and stays silent, and `false` is the correct answer there rather than a
+		// weaker one. Asserting it in both directions is deliberate: it means a mac pty that STARTED
+		// putting queries would be caught here instead of quietly changing what this test covers.
+		assert_eq!(
 			answered,
-			"the ConPTY asked where the cursor is and cmote answered — without this the child's output \
-			 never arrives at all: {seen:?}"
+			cfg!(windows),
+			"the ConPTY's cursor query was answered on Windows, and no query was put on a Unix pty: \
+			 {seen:?}"
 		);
 		assert!(
 			seen.contains(MARKER),
