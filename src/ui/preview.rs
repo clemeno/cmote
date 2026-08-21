@@ -49,9 +49,14 @@ pub fn view(preview: &Preview, tab_id: u64) -> Element<'_, Message> {
 	let body: Element<'_, Message> = match &preview.status {
 		// The same wording and the same number the editor shows (§121) — one sentence for one wait,
 		// whichever kind of viewer is doing the waiting.
+		// Three things one status has to say (§121): nothing has arrived yet, this much has, and the
+		// file is all here and being turned into pixels. The third is told apart by the read having
+		// reached its own total rather than by a fourth status — the decode is a `Task` the model never
+		// sees start or finish, so a state for it would be one the model could not honestly maintain.
 		PreviewStatus::Loading(progress) => centered(
-			text(match progress.read {
-				0 => "Loading…".to_owned(),
+			text(match (progress.read, progress.total) {
+				(0, _) => "Loading…".to_owned(),
+				(read, Some(total)) if read >= total => "Decoding…".to_owned(),
 				_ => format!("Loading… {}", progress.label()),
 			})
 			.size(15)

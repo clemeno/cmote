@@ -713,6 +713,24 @@ impl App {
 				self.pending_editor_close = None;
 				iced::Task::none()
 			}
+			// A picture finished decoding off the thread pool (§121). The tab may have been closed
+			// while it ran, or have moved on; `viewer_mut` answering `None`, or a picture that is no
+			// longer loading, is the ordinary way that ends — so neither is treated as an error.
+			Message::PictureDecoded {
+				viewer_id,
+				bytes,
+				decoded,
+			} => {
+				if let Some(picture) = self.viewer_mut(viewer_id).and_then(Viewer::picture_mut)
+					&& picture.load_progress().is_some()
+				{
+					match decoded {
+						Ok(image) => picture.set_loaded(image, bytes),
+						Err(reason) => picture.load_failed(reason),
+					}
+				}
+				iced::Task::none()
+			}
 			Message::EditorCloseNow(id) => self.force_close(id),
 			Message::EditorThemeSelected(theme) => self.set_editor_theme(pane, theme),
 			// The quit flow (§30): the OS window's × or the last tab's close raises the request;
@@ -3444,6 +3462,21 @@ pub enum Message {
 	/// Close editor tab `id` now, unconditionally (§32): the auto-close once its "Save & close"
 	/// finished writing.
 	EditorCloseNow(u64),
+	/// A picture finished decoding, off the GUI thread (§121).
+	///
+	/// The decode used to run inline where `FileLoaded` arrived, which held the window for up to
+	/// ~280 ms on a 32-megapixel PNG — the largest `preview::MAX_ALLOC` lets through. Bounded, but
+	/// seventeen dropped frames is a stutter, and it is the preview's half of the same complaint that
+	/// `Content::with_text` was the editor's.
+	///
+	/// `bytes` is the FILE's size, carried across the decode rather than re-derived from it: the
+	/// toolbar shows the number the files pane showed, not the decoded pixels', which is a bigger
+	/// number the user has no way to recognise.
+	PictureDecoded {
+		viewer_id: u64,
+		bytes: u64,
+		decoded: Result<crate::preview::Decoded, String>,
+	},
 	/// The active editor's toolbar picked a colour scheme (§32). Handled by `App` — it sets the
 	/// active editor's theme AND records the choice against the file's extension, so the memory is
 	/// App-wide, not trapped in one tab.
@@ -3835,12 +3868,18 @@ impl Tab {
 	/// than at draw time — once, into a renderer handle — so a repaint never re-runs a decoder, and
 	/// a file that turns out not to be a picture it can draw says so in place of the image.
 	///
-	/// `ponytail:` that decode runs on the GUI thread, so a big picture holds the window for the
-	/// length of it. It is bounded on both ends — 32 MiB in, 8192 per side out (§53) — so the worst
-	/// case is a fraction of a second on a file the user asked for and is waiting on anyway, not an
-	/// unbounded hang. Moving it off-thread is an async task plus a message and a route home; worth
-	/// doing if a real picture is ever felt to stutter, and not before.
+	/// The decode itself goes to a task rather than running here (§121). It used to run inline, with
+	/// a `ponytail:` saying that was bounded and only worth moving if a real picture ever stuttered —
+	/// so it was measured: ~280 ms for the largest picture `MAX_ALLOC` admits (about 32 megapixels),
+	/// ~180 ms for a 30-megapixel JPEG, ~75 ms for an ordinary phone photograph. Seventeen dropped
+	/// frames is a stutter, so it moved. iced's default executor is a thread pool, which is what makes
+	/// this a `Task::perform` and not a new thread.
+	///
+	/// The tab stays `Loading` across the decode, which is honest — the wait is not over — and the
+	/// view says "Decoding…" once the read is complete, so the two halves of the wait are told apart
+	/// without a fourth status to keep in step.
 	fn on_preview_event(&mut self, event: SshEvent) -> iced::Task<Message> {
+		let viewer_id = self.id;
 		let Some(picture) = self.viewer.as_mut().and_then(Viewer::picture_mut) else {
 			return iced::Task::none();
 		};
@@ -3850,10 +3889,20 @@ impl Tab {
 				// pane showed, so it is the one the toolbar repeats back — not the decoded pixels',
 				// which would be a bigger number the user has no way to recognise.
 				let size = bytes.len() as u64;
-				match crate::preview::decode_image(&bytes) {
-					Ok(decoded) => picture.set_loaded(decoded, size),
-					Err(reason) => picture.load_failed(reason),
-				}
+				// The bar reaches its end here: everything has been read, and what is left is the
+				// decode. Without this the chip would sit at whatever the last chunk reported.
+				picture.set_progress(crate::viewer::LoadProgress {
+					read: size,
+					total: Some(size),
+				});
+				return iced::Task::perform(
+					async move { crate::preview::decode_image(&bytes) },
+					move |decoded| Message::PictureDecoded {
+						viewer_id,
+						bytes: size,
+						decoded,
+					},
+				);
 			}
 			SshEvent::FileLoadProgress { read, total, .. } => {
 				picture.set_progress(crate::viewer::LoadProgress { read, total });
@@ -4278,6 +4327,8 @@ impl Tab {
 			| Message::EditorCloseCancelled
 			| Message::EditorCloseNow(_)
 			| Message::EditorThemeSelected(_)
+			// The decode reply is routed by viewer id, which only `App` can resolve (§121).
+			| Message::PictureDecoded { .. }
 			// Splitting the window is `App`'s job too (§48): a tab has no idea it sits in a region,
 			// and `In` is the wrapper `App` puts round these on the way OUT of `view` — a tab is
 			// handed the message already unwrapped, so it never sees one.
@@ -13233,6 +13284,34 @@ mod tests {
 		(app, id, rx)
 	}
 
+	/// Deliver a picture's bytes to its tab the way the runtime does since §121: the read's reply,
+	/// then the decode's.
+	///
+	/// The decode is a `Task` now, so `FileLoaded` alone leaves the tab mid-wait — these two steps
+	/// are what a test has to do to stand in for the thread pool. Doing the decode HERE, with the
+	/// real `decode_image`, is what keeps the tests about the model's response rather than about a
+	/// stubbed decoder.
+	fn deliver_picture(app: &mut App, session: u64, id: u64, path: &str, bytes: Vec<u8>) {
+		let size = bytes.len() as u64;
+		let decoded = crate::preview::decode_image(&bytes);
+		let _read = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: path.to_owned(),
+				bytes,
+			},
+		);
+		let _decode = app.update_in(
+			app.focus,
+			Message::PictureDecoded {
+				viewer_id: id,
+				bytes: size,
+				decoded,
+			},
+		);
+	}
+
 	/// The picture tab with this id (§53).
 	fn preview_of(app: &App, id: u64) -> &crate::preview::Preview {
 		match app.tabs().find(|tab| tab.id == id).map(|tab| &tab.viewer) {
@@ -13483,13 +13562,7 @@ mod tests {
 		let id = open_file(&mut app, session, "/srv/mislabelled.jpg");
 		let bytes = png(5, 3);
 		let size = bytes.len() as u64;
-		if let Some(tab) = app.tab_mut(id) {
-			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
-				viewer_id: id,
-				path: "/srv/mislabelled.jpg".to_owned(),
-				bytes,
-			});
-		}
+		deliver_picture(&mut app, session, id, "/srv/mislabelled.jpg", bytes);
 
 		let preview = preview_of(&app, id);
 		assert_eq!(preview.status, crate::preview::PreviewStatus::Ready);
@@ -13499,18 +13572,138 @@ mod tests {
 		assert_eq!(picture.bytes, size, "the FILE's size, not the pixels'");
 	}
 
+	/// The bytes arriving is no longer the end of the wait (§121): the decode runs on the thread pool,
+	/// so the tab stays `Loading` — with its bar at the end, since everything HAS been read — until
+	/// the decode reply comes back.
+	#[test]
+	fn a_pictures_bytes_do_not_become_a_picture_until_the_decode_returns() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		let bytes = png(4, 4);
+		let size = bytes.len() as u64;
+
+		// Only the READ's reply. The decode's is what the pool would send afterwards.
+		let _read = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/shot.png".to_owned(),
+				bytes,
+			},
+		);
+
+		let preview = preview_of(&app, id);
+		assert_eq!(
+			preview.status,
+			crate::preview::PreviewStatus::Loading(crate::viewer::LoadProgress {
+				read: size,
+				total: Some(size),
+			}),
+			"read in full, still decoding"
+		);
+		assert!(
+			preview.picture.is_none(),
+			"nothing to draw until the decode lands"
+		);
+		// And the chip says so: a full bar, not an absent one.
+		let tab = app.tabs().find(|tab| tab.id == id).expect("the viewer");
+		assert_eq!(
+			tab.command_progress(),
+			term::progress::Progress::Working(100)
+		);
+	}
+
+	/// A decode can come back after its tab has gone — it ran on a pool thread while the user closed
+	/// the tab (§121). The reply is dropped, not treated as an error and not able to resurrect
+	/// anything.
+	#[test]
+	fn a_decode_that_returns_to_a_closed_tab_is_dropped() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		let bytes = png(4, 4);
+		let size = bytes.len() as u64;
+		let decoded = crate::preview::decode_image(&bytes);
+		let before = app.tabs().count();
+
+		let _closed = app.force_close(id);
+		let _late = app.update_in(
+			app.focus,
+			Message::PictureDecoded {
+				viewer_id: id,
+				bytes: size,
+				decoded,
+			},
+		);
+
+		assert_eq!(
+			app.tabs().count(),
+			before - 1,
+			"the tab stayed closed and nothing was rebuilt for it"
+		);
+		assert!(
+			!app.tabs().any(|tab| tab.id == id),
+			"a decode cannot bring a closed viewer back"
+		);
+	}
+
+	/// A decode returning to a tab that is still THERE but no longer waiting must not overwrite what
+	/// happened while it ran (§121).
+	///
+	/// The case that makes this real: the parent session dies mid-decode, so the tab is already
+	/// showing "the session closed before it finished loading" — and then the pool comes back with a
+	/// perfectly good picture. Drawing it would put an image on screen for a session that is gone, and
+	/// silently replace a message the user needs. This is the guard the closed-tab test does NOT
+	/// cover, because a closed tab is caught earlier by having no viewer at all.
+	#[test]
+	fn a_decode_cannot_overwrite_the_failure_that_landed_while_it_ran() {
+		let (mut app, session, _rx) = app_with_session();
+		let id = open_file(&mut app, session, "/srv/shot.png");
+		let bytes = png(4, 4);
+		let size = bytes.len() as u64;
+		let decoded = crate::preview::decode_image(&bytes);
+		assert!(decoded.is_ok(), "the decode itself succeeds");
+
+		// Read done, decode in flight on the pool.
+		let _read = app.route_ssh(
+			session,
+			SshEvent::FileLoaded {
+				viewer_id: id,
+				path: "/srv/shot.png".to_owned(),
+				bytes,
+			},
+		);
+		// The session dies while the pool is busy.
+		app.orphan_viewers(session);
+		// And only now does the decode come back.
+		let _late = app.update_in(
+			app.focus,
+			Message::PictureDecoded {
+				viewer_id: id,
+				bytes: size,
+				decoded,
+			},
+		);
+
+		let preview = preview_of(&app, id);
+		assert!(
+			matches!(preview.status, crate::preview::PreviewStatus::Failed(_)),
+			"the session's death is what the tab still has to report, not a picture"
+		);
+		assert!(preview.picture.is_none(), "and there is nothing to draw");
+	}
+
 	/// A file that is not a picture cmote can draw says so where the picture would have been (§53).
 	#[test]
 	fn a_file_that_is_not_a_picture_shows_the_reason_in_place_of_the_image() {
 		let (mut app, session, _rx) = app_with_session();
 		let id = open_file(&mut app, session, "/srv/broken.png");
-		if let Some(tab) = app.tab_mut(id) {
-			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
-				viewer_id: id,
-				path: "/srv/broken.png".to_owned(),
-				bytes: b"this is not a picture".to_vec(),
-			});
-		}
+		deliver_picture(
+			&mut app,
+			session,
+			id,
+			"/srv/broken.png",
+			b"this is not a picture".to_vec(),
+		);
 		let preview = preview_of(&app, id);
 		assert!(matches!(
 			preview.status,
@@ -13560,13 +13753,7 @@ mod tests {
 	fn a_preview_that_already_has_its_picture_outlives_its_session() {
 		let (mut app, session, _rx) = app_with_session();
 		let id = open_file(&mut app, session, "/srv/shot.png");
-		if let Some(tab) = app.tab_mut(id) {
-			let _task = tab.on_viewer_event(SshEvent::FileLoaded {
-				viewer_id: id,
-				path: "/srv/shot.png".to_owned(),
-				bytes: png(2, 2),
-			});
-		}
+		deliver_picture(&mut app, session, id, "/srv/shot.png", png(2, 2));
 
 		app.orphan_viewers(session);
 		assert_eq!(
