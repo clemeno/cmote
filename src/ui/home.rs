@@ -320,6 +320,9 @@ fn target_list<'a>(
 	});
 
 	scrollable(column(rows).spacing(2))
+		// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
+		.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
+		.style(crate::ui::scrollbar::style)
 		.height(Length::Fill)
 		.into()
 }

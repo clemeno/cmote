@@ -16,6 +16,7 @@ pub mod home; // the home screen: saved connection targets (§14)
 pub mod menu; // shared right-click context-menu chrome: panel / items / dismiss layer (§10)
 pub mod preview; // the in-tab picture viewer: toolbar, the image on its ground, the refusal (§53)
 pub mod richcopy; // serialise a selection to styled HTML for a rich Ctrl+C (§10)
+pub mod scrollbar; // one scrollbar look, shared by the terminal's own bar and every pane's (§118)
 pub mod selection; // mouse text selection over the grid
 pub mod snackbar; // the copy-confirmation toast (§10)
 pub mod split; // the window cut into side-by-side / stacked regions, and their dividers (§48)

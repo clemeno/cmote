@@ -13492,3 +13492,86 @@ fix: it fails on the no-selection case first, with the offending content quoted 
   and written down here so the next person to notice knows it was seen.
 - **No visible-whitespace rendering.** A blank is what a tab looks like. Drawing tabs as arrows is a
   feature, not a fix, and nothing has asked for it.
+
+## §118 — One scrollbar per window
+
+There were two scrollbars in cmote, and only one of them had been designed. §23 gave the terminal a
+thin translucent thumb in the grid's right padding gutter with no track behind it, and §116 made that
+thumb grabbable. The four `scrollable`s — the folder tree (§18), the files pane (§19), the home
+screen's target list (§14) and the editor's buffer (§32) — were all still on iced's default: ten
+pixels wide instead of four, a visible rail behind the scroller, a different corner radius. Put the
+tree beside the terminal and they did not look like the same application.
+
+So `ui::scrollbar` now owns the look, once, and both kinds read it from there.
+
+### What is shared is the appearance, not the mechanism
+
+The mechanism cannot be shared, and it is worth being explicit about why rather than leaving the split
+looking like a half-finished job:
+
+- **The terminal's bar is quads the grid paints itself.** It has to be: the scroll position lives in
+  the emulator's display offset rather than in a widget, and the grid is one widget for the whole
+  screen (§9). `scrollbar_thumb` and `scrollbar_offset` stay in `ui::grid` because they speak in rows,
+  history and viewport offsets — terminal words.
+- **A pane's bar is iced's**, inside a `scrollable`, and iced computes the thumb from the content
+  height. Nothing in this project can reach into that arithmetic.
+
+What the module holds is therefore four numbers, a `Scrollbar` geometry and a `scrollable::Style`. The
+style is built ON TOP of `scrollable::default` rather than from nothing, so the parts this project has
+no opinion about — the container, the gap between two rails, the autoscroll overlay — keep following
+the theme instead of being frozen at whatever they happened to be on the day.
+
+### The lane, asserted rather than eyeballed
+
+iced sizes a scrollbar's lane as `width.max(scroller_width) + 2 * margin`. With `WIDTH` 4 and `INSET`
+1 that is 6, which is exactly `ui::terminal::GRID_PADDING` — the gutter the terminal's own bar sits in.
+That agreement is the whole reason the two bars sit the same distance from their surface's edge, and it
+is the kind of fact that holds by coincidence until someone nudges a constant. So there is a test on
+it, and the failure message prints both numbers.
+
+### Two things it deliberately does not do
+
+**No hover or drag feedback.** iced's default brightens under the pointer; this style is one colour in
+every `Status`. That is not an omission — the terminal's bar is one colour whether or not it is being
+dragged, so a pane's that lit up would no longer be the same bar. Adding the feedback is a fine idea
+and it belongs to both surfaces at once, which means it starts in this module. The test loops over all
+three statuses precisely so that "the look does not change with status" is pinned as a decision rather
+than left as an accident of a single-status check.
+
+**`MIN_THUMB` reaches only the terminal.** iced's minimum scroller length is a hard-coded `.max(2.0)`
+in `iced_widget::scrollable`, not a knob. So the 16-pixel floor that keeps the terminal's thumb
+findable over ten thousand lines of scrollback cannot be given to a pane, and a pane scrolling a very
+long list gets a smaller thumb than the terminal would in the same situation. A real difference, named
+in the module note, and not one this module can close.
+
+### One thing checked before assuming it
+
+Whether the colour could be shared at all. A translucent light grey is right on a dark surface and
+invisible on a light one, and this app is not uniformly dark by policy — the editor's palette is
+theme-driven (§32). So every surface that carries a `scrollable` was read first: `explorer::PANEL_BG`
+is `#252525`, the home screen has a standing comment saying it was made dark deliberately after a
+light palette made the list unreadable, and BOTH editor themes are dark (`Default`, and `Cme`'s
+`#1a2a30`). There is no light surface, so one colour does work — and it is translucent rather than flat
+so it lands correctly on each of those different darks by construction rather than by a colour per
+surface. Had there been a light theme this would have needed a second colour and a decision about which
+surface owns it.
+
+### Files
+
+- `src/ui/scrollbar.rs` — new: the four numbers, `bar()`, `style()`, and the two tests.
+- `src/ui/grid.rs` — its four `const`s deleted; it reads `scrollbar::WIDTH` and friends by their own
+  names rather than aliasing them, since two names for one thing is what §108 is about.
+- `src/ui/explorer.rs`, `src/ui/files.rs`, `src/ui/home.rs` — `.direction(Vertical(bar()))` and
+  `.style(scrollbar::style)`.
+- `src/ui/editor.rs` — the same on both axes of its `Both` scrollable, which is the one place the
+  horizontal rail is visible at all.
+
+### Not done
+
+- **Not verified by a run.** Both tests were probed by breaking them (the track assertion, and the
+  lane arithmetic), but what a style function returns is not what a window looks like. Four surfaces
+  changed appearance and only an eye can confirm that — §13's manual category.
+- **No hover/drag feedback, and no `MIN_THUMB` for panes.** Both above, both deliberate.
+- **The dialogs and the forward table were not audited for scrollables.** Four is what `grep` found
+  today; a `scrollable` added later gets iced's default unless whoever adds it knows about this module.
+  Nothing enforces that, and a lint for it would be a lint about one project's taste.

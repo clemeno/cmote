@@ -28,7 +28,7 @@
 // keeps the cursor column on screen after a move — the last long-line gap closed.
 
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::scrollable::Direction;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
 	button, column, container, mouse_area, pin, row, scrollable, stack, text, text_editor,
@@ -386,10 +386,14 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 		.id(BUFFER_SCROLL_ID)
 		.width(Length::Fill)
 		.height(Length::Fill)
+		// The terminal's own bar on both axes, not iced's default (§118) — one scrollbar look per
+		// window. `Both` is what §32 needs here, so this is the one place the horizontal rail is
+		// visible at all, and it is styled from the same four numbers as the vertical one.
 		.direction(Direction::Both {
-			vertical: Scrollbar::default(),
-			horizontal: Scrollbar::default(),
+			vertical: crate::ui::scrollbar::bar(),
+			horizontal: crate::ui::scrollbar::bar(),
 		})
+		.style(crate::ui::scrollbar::style)
 		.on_scroll(|viewport| {
 			Message::Editor(EditorMessage::Scrolled {
 				offset_x: viewport.absolute_offset().x,

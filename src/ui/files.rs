@@ -567,6 +567,9 @@ fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 	// Reported so the popup can be placed against a scrolled grid, and so keyboard
 	// navigation knows what is already on screen before it scrolls (§20).
 	.on_scroll(|viewport| Message::Files(FilesMessage::Scrolled(viewport.absolute_offset().y)))
+	// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
+	.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
+	.style(crate::ui::scrollbar::style)
 	.width(Length::Fill)
 	.height(Length::Fill)
 	.into()

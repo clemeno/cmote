@@ -273,6 +273,9 @@ fn tree_view(explorer: &Explorer) -> Element<'_, Message> {
 		.on_scroll(|viewport| {
 			Message::Explorer(ExplorerMessage::Scrolled(viewport.absolute_offset().y))
 		})
+		// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
+		.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
+		.style(crate::ui::scrollbar::style)
 		.width(Length::Fill)
 		.height(Length::Fill)
 		.into()

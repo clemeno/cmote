@@ -35,6 +35,7 @@ use crate::term::screen::{
 	Cell, Color as CellColor, CursorShape, Link, MouseMode, Screen, UnderlineStyle,
 };
 use crate::term::search::SearchHighlight;
+use crate::ui::scrollbar;
 use crate::ui::selection::{ScreenSpot, Selection};
 use crate::ui::terminal::{CELL_HEIGHT, CELL_WIDTH, FONT_SIZE, GRID_PADDING, cell_under};
 use iced::advanced::Renderer as _;
@@ -124,18 +125,18 @@ const CURSOR_OUTLINE_THICKNESS: f32 = 1.0;
 /// delta is converted by the cell height instead, so it scrolls a line per cell of travel.
 const WHEEL_LINES: f32 = 3.0;
 
-/// The scroll indicator (§23): a thin thumb hugging the grid's right edge, drawn only while the
-/// viewport is scrolled back into history and gone the moment it returns to the live bottom —
-/// "auto-hiding" without an animation timer, which cmote does not run. It is a read-only mark,
-/// not a control: scrolling stays on the wheel and the Shift+PageUp/PageDown/Home/End keys. The
-/// bar is `SCROLLBAR_WIDTH` wide, inset `SCROLLBAR_INSET` from the right edge so it sits in the grid's
-/// own padding gutter and never over a cell; its thumb is never shorter than `SCROLLBAR_MIN_THUMB`
-/// so a deep history still shows a visible mark, and it draws in a translucent light so the text
-/// underneath stays readable.
-const SCROLLBAR_WIDTH: f32 = 4.0;
-const SCROLLBAR_INSET: f32 = 1.0;
-const SCROLLBAR_MIN_THUMB: f32 = 16.0;
-const SCROLLBAR_THUMB_COLOR: Color = Color::from_rgba(0.82, 0.82, 0.82, 0.55);
+// The scrollbar (§23, §116): a thin thumb hugging the grid's right edge, drawn whenever there is
+// history to move through, and grabbable — press and drag it, or press the bare track to jump there.
+// `scrollbar::WIDTH` wide, inset `scrollbar::INSET` from the right edge so it sits in the grid's own
+// padding gutter and never over a cell; its thumb is never shorter than `scrollbar::MIN_THUMB` so a
+// deep history still shows a findable mark, and it draws in a translucent light so the text
+// underneath stays readable.
+//
+// Those numbers used to be four `const`s here. They are `ui::scrollbar`'s now (§118), because every
+// pane's `scrollable` styles itself from the same ones and one window should have one scrollbar.
+// What is still this file's is the GEOMETRY — `scrollbar_thumb` and its inverse, which speak in rows,
+// history and viewport offsets, words only the terminal has. `MIN_THUMB` is likewise the terminal's
+// alone in practice: iced hard-codes its own minimum scroller length, so a pane cannot be told it.
 
 /// The prompt tick (§34): a small mark drawn in the LEFT padding gutter beside every shell
 /// prompt on screen, from the OSC 133 marks (`Terminal::prompt_rows`). It mirrors the scroll
@@ -528,11 +529,11 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			renderer.fill_quad(
 				Quad {
 					bounds: thumb,
-					border: Border::default().rounded(SCROLLBAR_WIDTH / 2.0),
+					border: Border::default().rounded(scrollbar::radius()),
 					shadow: iced::Shadow::default(),
 					snap: false,
 				},
-				Background::Color(SCROLLBAR_THUMB_COLOR),
+				Background::Color(scrollbar::THUMB),
 			);
 		}
 
@@ -1159,7 +1160,7 @@ fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
 /// to indicate at all (§23). Split from the draw so the geometry, the part that can be wrong, is
 /// testable without a renderer (as with `corner_parts`). The thumb tracks the text area, not the
 /// padding: its height is the viewport's share of the whole document (`rows` of screen plus `history`
-/// of scrollback), floored at `SCROLLBAR_MIN_THUMB` so a deep history still shows a visible mark, and
+/// of scrollback), floored at `scrollbar::MIN_THUMB` so a deep history still shows a visible mark, and
 /// its top runs from the track's top at the oldest retained line (`offset == history`) down toward the
 /// bottom as the view returns to the live tail — clamped so that minimum height can never push it off
 /// the end.
@@ -1188,9 +1189,9 @@ fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> O
 	let thumb_top = track.y + position * span.max(0.0);
 
 	Some(Rectangle {
-		x: bounds.x + bounds.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
+		x: bounds.x + bounds.width - scrollbar::WIDTH - scrollbar::INSET,
 		y: thumb_top,
-		width: SCROLLBAR_WIDTH,
+		width: scrollbar::WIDTH,
 		height: thumb_height,
 	})
 }
@@ -1206,17 +1207,17 @@ fn document_lines(rows: u16, history: u16) -> f32 {
 /// something visible and capped so it can never exceed the track it slides in.
 fn scrollbar_thumb_height(rows: u16, history: u16, track_height: f32) -> f32 {
 	(track_height * f32::from(rows) / document_lines(rows, history))
-		.max(SCROLLBAR_MIN_THUMB)
+		.max(scrollbar::MIN_THUMB)
 		.min(track_height)
 }
 
 /// The rectangle a press is tested against to start a drag (§116), and the track the thumb slides in.
 ///
-/// **Wider than the thumb is painted, deliberately.** The thumb is `SCROLLBAR_WIDTH` (4px) so it reads
+/// **Wider than the thumb is painted, deliberately.** The thumb is `scrollbar::WIDTH` (4px) so it reads
 /// as an indicator rather than furniture, and a 4-pixel grab target is a target you miss. The zone is
 /// the whole right padding gutter instead, which is the same rule the left gutter's prompt ticks use —
 /// a 3px tick inside a 6px gutter, and the press tests the gutter (§34). The gutter is `GRID_PADDING`
-/// and the paint is `SCROLLBAR_WIDTH + SCROLLBAR_INSET` from the edge, so the zone contains the thumb
+/// and the paint is `scrollbar::WIDTH + scrollbar::INSET` from the edge, so the zone contains the thumb
 /// with room either side and still touches no cell.
 fn scrollbar_track(bounds: Rectangle, rows: u16) -> Rectangle {
 	Rectangle {
@@ -1246,7 +1247,7 @@ fn scrollbar_offset(bounds: Rectangle, rows: u16, history: u16, thumb_top: f32) 
 	let thumb_height = scrollbar_thumb_height(rows, history, track.height);
 	let span = track.height - thumb_height;
 	// A thumb that fills its track has nowhere to slide, so every press means the live bottom rather
-	// than a division by zero. Reachable: the height is floored at `SCROLLBAR_MIN_THUMB`, so a grid
+	// than a division by zero. Reachable: the height is floored at `scrollbar::MIN_THUMB`, so a grid
 	// only a few rows tall has a thumb as tall as its track.
 	if span <= 0.0 {
 		return 0;
@@ -2334,7 +2335,7 @@ mod tests {
 
 	#[test]
 	fn a_thumb_that_fills_its_track_reads_as_the_live_bottom() {
-		// A grid only a few rows tall has a thumb floored to SCROLLBAR_MIN_THUMB, which can be as tall
+		// A grid only a few rows tall has a thumb floored to scrollbar::MIN_THUMB, which can be as tall
 		// as the track — leaving no span to slide in. That is a division by zero waiting to happen, so
 		// it answers the live bottom instead (§116).
 		let bounds = Rectangle {
@@ -2373,7 +2374,7 @@ mod tests {
 		// At the oldest retained line (offset == history) the thumb is pinned to the track top.
 		let top = scrollbar_thumb(bounds, 24, 100, 100).unwrap();
 		close(top.y, track_top);
-		close(top.x, bounds.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET);
+		close(top.x, bounds.width - scrollbar::WIDTH - scrollbar::INSET);
 
 		// Returning toward the live tail slides the thumb down the track, monotonically.
 		let middle = scrollbar_thumb(bounds, 24, 100, 50).unwrap();
@@ -2383,7 +2384,7 @@ mod tests {
 		// However deep the history, the thumb stays inside the track and never shorter than the
 		// floor that keeps it visible.
 		let deep = scrollbar_thumb(bounds, 24, 5000, 2500).unwrap();
-		close(deep.height, SCROLLBAR_MIN_THUMB);
+		close(deep.height, scrollbar::MIN_THUMB);
 		assert!(deep.y >= track_top - 0.01);
 		assert!(deep.y + deep.height <= track_bottom + 0.01);
 	}
