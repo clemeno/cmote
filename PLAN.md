@@ -13204,3 +13204,88 @@ function that uses it, exactly as `Component` was in §113.
   does nothing about `x86_64-apple-darwin`, which still has exactly one reader.
 - **Nothing checks that the gate's first step was actually run.** It is a line in `AGENTS.md`, the same
   standing as the other four.
+
+## §115 — What the red step was hiding
+
+§113 fixed the macOS clippy step, so for the first time the macOS job got as far as its second step
+and ran `cargo test`. One test failed:
+
+```
+test local::pty::tests::a_real_child_runs_on_a_real_pty_and_its_exit_is_observed ... FAILED
+```
+
+`git log -S` puts that test in **`82f3af9`, §103** — the *same commit* whose unused imports broke the
+clippy step. Steps stop at the first failure, so the job exited 101 at clippy and never reached the
+tests. **This test has therefore never passed on macOS, not once, and nothing could have said so**:
+the one runner that would have told us was stopped one step short of finding out, by a fault in the
+same commit.
+
+That is the shape worth keeping. §113 and §114 were both a *compiler* unable to see something.
+This is different and worse: fixing a red step does not turn a job green, it moves the job forward to
+whatever the red step was standing in front of. A first green run after a long red one is not a
+verdict, it is the first look.
+
+### Third axis: the gate runs the host's tests
+
+The gate is one target wide (§113) and one toolchain version narrow (§114), and this is the third:
+**`cargo test` runs the host's tests.** 1494 of them here, 1482 on the mac runner — the difference
+being the `#[cfg(windows)]` ones. Those 1482 have exactly one reader, and lints and tests are not the
+same kind of evidence. A lint is an opinion about source; a failing test is the program behaving
+differently. Everything §113 said about reading the macOS job applies here with more force.
+
+### A ConPTY fact asserted as a pty fact
+
+The bug itself is small and its shape is the familiar one. The test asserted:
+
+```rust
+assert!(answered, "the ConPTY asked where the cursor is and cmote answered — ...");
+```
+
+`answered` is true when the emulator had something to reply to. On Windows that is not optional and
+the module note says why: `portable-pty` builds the ConPTY with `PSUEDOCONSOLE_INHERIT_CURSOR`, so it
+sends `CSI 6 n` and withholds every byte the child prints until it is answered — a version of this
+test that only read bytes hung for twenty seconds and saw four bytes. But that is a **ConPTY**
+behaviour, not a pty one. A Unix pty asks nothing, `/bin/sh -c 'echo …'` prints and exits, the
+emulator has nothing to reply to, and an assertion whose own failure message names a Windows object
+fails on a Mac.
+
+The fix asserts the platform fact instead of one platform's half of it:
+
+```rust
+assert_eq!(answered, cfg!(windows), "…");
+```
+
+Both directions on purpose. Expecting `false` off Windows is not a weaker assertion than skipping the
+check — it pins that a Unix pty puts no query, so a pty that ever *started* putting one is caught here
+rather than quietly changing what this test covers. `cfg!` rather than `#[cfg]` for the reason
+`local::path`'s traversal test uses it: both arms compile on both platforms, so neither can rot
+unseen, and no import or variable is left unused (§113).
+
+Probed per the prove-it rule, by inverting the expectation on Windows: `left: true, right: false`. So
+`answered` really is `true` here, the assertion is live rather than vacuous, and the macOS failure is
+its exact mirror.
+
+### The masking, fixed where it happened
+
+A red step hiding every step behind it is a property of the workflow, not of this bug, and it will do
+it again. Both `cargo test` steps now carry `if: ${{ !cancelled() }}`, so clippy and the tests report
+on every run and a lint error can never again stand in front of a behaviour failure. Not `always()`:
+this workflow sets `cancel-in-progress`, and a superseded run should stop rather than spend minutes
+testing a commit nobody is waiting on.
+
+### Files
+
+- `src/local/pty.rs` — the assertion, and the module note's fourth bullet, which promised the exchange
+  was asserted unconditionally.
+- `.github/workflows/ci.yml` — `if: ${{ !cancelled() }}` on both `cargo test` steps.
+
+### Not done
+
+- **This fix is not verified on the platform that failed.** Same status §113 shipped with, and for the
+  same reason: no darwin toolchain here. The Windows arm is verified and unchanged, the macOS arm is
+  argued from what a Unix pty does.
+- **It is not known whether this was the only macOS test failure.** The CI log available was truncated
+  mid-run, and that run was the first `cargo test` this target has had in over 118 commits. One failure
+  is what could be seen; it is not established to be one failure.
+- **`echoing_shell` covers `windows` and `target_os = "macos"` and nothing else.** Correct for what
+  cmote ships, and a third unix would find the fixture has no arm at all rather than a poor one.

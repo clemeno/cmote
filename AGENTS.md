@@ -50,10 +50,19 @@ commit that fails the gate fails CI, but a commit that PASSES the gate can still
 
 Two consequences, both learned the hard way in §113:
 
-* **Read the macOS job.** It is the ONLY reader of half the `cfg` in this repo, so its result is
-  not a formality — it is the only evidence that exists. In §113 it had been red since §103 and
-  stayed red for 118 commits across several pushes, because a green local gate was being read as
-  "the commit is fine" and the one job that disagreed was never opened.
+* **Read the macOS job.** It is the ONLY reader of half the `cfg` in this repo, and the only reader
+  of the 1482 tests that run there, so its result is not a formality — it is the only evidence that
+  exists. In §113 it had been red since §103 and stayed red for 118 commits across several pushes,
+  because a green local gate was being read as "the commit is fine" and the one job that disagreed
+  was never opened.
+* **A step that goes green reveals the next step; it does not clear the job.** §113 fixed the macOS
+  clippy step, and the `cargo test` step behind it — which had never once run on that target — failed
+  immediately, on a test broken in the same commit (§115). Both `cargo test` steps now carry
+  `if: ${{ !cancelled() }}` so a lint error cannot hide a behaviour failure again, but the habit is
+  the real fix: after a red job goes green, read the whole run, not the step you fixed.
+* **A platform fact belongs on both arms.** `assert_eq!(x, cfg!(windows))` beats asserting one
+  platform's half and hoping (§115). Both arms compile everywhere, so neither can rot unseen, and
+  expecting the absence is a real assertion rather than a skipped one.
 * **A change that touches a `cfg` pair is not verified locally, and cannot be.** Cross-checking
   is impossible on this machine — `ring`'s build script runs `cc` for the target and there is no
   darwin C toolchain here, so `rustup target add x86_64-apple-darwin` gets you a `std` and then
