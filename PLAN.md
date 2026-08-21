@@ -13739,13 +13739,21 @@ under-claim `covered()` documents in §52, erring the other way for one stationa
 - `PLAN.md` §119 — its "no hand for the panes" item marked done, with the over-strong reason called
   out.
 
+### Checked by hand
+
+Five surfaces change cursor and no test draws one, so §13's manual category owned the last question:
+does the hand appear over the right six pixels of four panes. Run on 2026-08-21 — it does, on all of
+them, and the grab/grabbing pair reads the same as the tab headers §51 took it from. That is the whole
+of §116 through §120 confirmed on a real window: the drag, the selection, the shared look, and now the
+cursor.
+
+The manual check stays manual. What it covers is the one thing the tests deliberately do not reach —
+the mapping from a claim held in `cursor` to a bitmap the OS actually paints — and the two defects
+found on the way here (the shared name, the corner overlap) were both caught by tests, so the hand
+check is confirmation rather than the safety net.
+
 ### Not done
 
-- **Not verified by a run.** Five surfaces now change cursor. The lane arithmetic and the claim
-  lifecycle are tested, and the two things that were actually wrong on the way here — the shared name
-  and the corner overlap — were both caught by tests rather than by reading. But no test draws a
-  cursor, so whether the hand appears over the right six pixels of four panes is §13's manual
-  category.
 - **`lanes()` can drift from iced silently on an upgrade.** It mirrors private arithmetic; nothing
   makes iced tell us it changed. The mitigation is that it is pure and pinned to explicit numbers, so
   a drift shows up as a failing test rather than as a cursor that is subtly wrong — but only if the
