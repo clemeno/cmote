@@ -285,6 +285,13 @@ pub enum ScrollMotion {
 	/// All the way to the oldest retained line, or back to the live bottom.
 	Top,
 	Bottom,
+	/// Straight TO a viewport offset — 0 the live bottom, `history_size()` the oldest retained line,
+	/// clamped to that range (§116). The one absolute motion, and the scrollbar drag is what needs it:
+	/// a thumb follows the pointer, so what it knows is where the view should BE, not how far to move.
+	/// Every other motion here is relative because every other caller is (a wheel notch, a page, a
+	/// key), and expressing a drag as a delta would mean the UI tracking the offset itself and
+	/// drifting from the engine's own clamping the first time it hit an end.
+	To(u16),
 }
 
 /// Where a command's output sits in the DOCUMENT (§34, §40), as the caller needs it to build a text
@@ -1685,6 +1692,16 @@ impl Terminal {
 			ScrollMotion::PageDown => Scroll::PageDown,
 			ScrollMotion::Top => Scroll::Top,
 			ScrollMotion::Bottom => Scroll::Bottom,
+			// The engine has no absolute motion, so an absolute target becomes the delta that reaches
+			// it from wherever the view sits NOW — read here rather than passed in, so the caller never
+			// holds a stale offset. The subtraction is done in the line-number domain for the reason
+			// `jump_prompt` gives: both are `usize` viewport offsets, and a scroll DOWN (target below
+			// the current offset) would wrap if they were subtracted as such.
+			ScrollMotion::To(target) => {
+				let grid = self.term.grid();
+				let target = as_line_number(usize::from(target).min(grid.history_size()));
+				Scroll::Delta(target - as_line_number(grid.display_offset()))
+			}
 		};
 		self.term.scroll_display(scroll);
 	}
@@ -3126,6 +3143,40 @@ mod tests {
 		terminal.scroll(ScrollMotion::Bottom);
 		assert_eq!(terminal.screen().display_offset(), 0);
 		assert_eq!(read(&terminal, 2, 0, 3).trim(), "six");
+	}
+
+	#[test]
+	fn an_absolute_scroll_lands_on_the_offset_it_names_from_either_side() {
+		// `ScrollMotion::To` is the scrollbar drag's motion (§116). The engine has no absolute scroll,
+		// so this is a delta computed against wherever the view is now — which means it has to be
+		// right when the target is ABOVE the current offset and when it is below, and the subtraction
+		// is on `usize`s, where the downward case is the one that would wrap.
+		let mut terminal = Terminal::new(3, 8);
+		terminal.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix");
+		assert_eq!(terminal.screen().history_size(), 3);
+
+		// Up from the live bottom, then further up, then back DOWN past where it started.
+		terminal.scroll(ScrollMotion::To(1));
+		assert_eq!(terminal.screen().display_offset(), 1);
+		terminal.scroll(ScrollMotion::To(3));
+		assert_eq!(terminal.screen().display_offset(), 3);
+		assert_eq!(read(&terminal, 0, 0, 3).trim(), "one");
+		terminal.scroll(ScrollMotion::To(1));
+		assert_eq!(terminal.screen().display_offset(), 1);
+		terminal.scroll(ScrollMotion::To(0));
+		assert_eq!(terminal.screen().display_offset(), 0);
+		assert_eq!(read(&terminal, 2, 0, 3).trim(), "six");
+
+		// Naming the same offset twice is a no-op rather than a doubled delta — a drag republishes
+		// its offset on every pointer move, so most of what this sees is the offset it is already at.
+		terminal.scroll(ScrollMotion::To(2));
+		terminal.scroll(ScrollMotion::To(2));
+		assert_eq!(terminal.screen().display_offset(), 2);
+
+		// Past the oldest retained line clamps there instead of running off, which is what a drag
+		// dragged off the top of the track asks for.
+		terminal.scroll(ScrollMotion::To(u16::MAX));
+		assert_eq!(terminal.screen().display_offset(), 3);
 	}
 
 	#[test]

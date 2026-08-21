@@ -231,13 +231,22 @@ pub fn grid<'a>(
 }
 
 /// What the widget remembers between events: the modifiers (they arrive on their own
-/// event, not on the mouse ones), which button the remote program believes is down, and
-/// the last cell a move was reported for, so dragging inside one cell stays quiet.
+/// event, not on the mouse ones), which button the remote program believes is down, the
+/// last cell a move was reported for, so dragging inside one cell stays quiet, and the
+/// scrollbar grip while the bar is being dragged.
 #[derive(Debug, Default)]
 struct GridState {
 	modifiers: Modifiers,
 	held: Option<report::Button>,
 	last: Option<ScreenSpot>,
+	/// Where inside the thumb the pointer caught it, in pixels from the thumb's top — `Some` for
+	/// exactly as long as the button is down on the bar (§116).
+	///
+	/// The GRIP is what is stored, rather than the offset the drag started at, and that is what makes
+	/// the bar feel attached: the thumb stays under the same part of itself for the whole drag. Storing
+	/// the pointer's own y and treating it as the thumb's top would snap the thumb's top to the pointer
+	/// the instant it moved, jumping the view by up to a thumb's height before the drag even began.
+	scroll_grip: Option<f32>,
 }
 
 impl Grid<'_> {
@@ -265,6 +274,93 @@ impl Grid<'_> {
 			Point::new(position.x - bounds.x, position.y - bounds.y),
 		);
 		link_at(self.screen, cell)
+	}
+
+	/// Drive the scrollbar with the pointer (§116), returning whether the event was the bar's — in
+	/// which case the caller is done with it.
+	///
+	/// This runs BEFORE both of the other things a press can mean, and that ordering is the design.
+	/// Above the widget a `mouse_area` starts a text selection; inside it, a mouse-aware program gets
+	/// a report. A press on the bar is neither: the bar is chrome in the padding gutter, not a cell,
+	/// and it is cmote's own view control rather than anything the remote should hear about. So a press
+	/// it claims is captured and neither path sees it.
+	///
+	/// A full-screen program does not have to be special-cased here. The alternate screen retains no
+	/// history, so `history_size()` is 0, so there is no thumb, so nothing is claimed and a click in
+	/// `vim`'s right-hand column reaches `vim` exactly as it did before.
+	fn scroll_drag(
+		&self,
+		state: &mut GridState,
+		pointer: &mouse::Event,
+		bounds: Rectangle,
+		cursor: mouse::Cursor,
+		shell: &mut Shell<'_, Message>,
+	) -> bool {
+		let (rows, _) = self.screen.size();
+		let history = self.screen.history_size();
+		match pointer {
+			mouse::Event::ButtonPressed(mouse::Button::Left) => {
+				let Some(position) = cursor.position() else {
+					return false;
+				};
+				let Some(thumb) =
+					scrollbar_thumb(bounds, rows, history, self.screen.display_offset())
+				else {
+					return false;
+				};
+				if !scrollbar_track(bounds, rows).contains(position) {
+					return false;
+				}
+				// On the thumb: keep hold of the point that was caught. Off it, on the bare track: the
+				// view JUMPS there, and the grip becomes the thumb's middle so the thumb centres under
+				// the pointer and the drag carries on from it — which is what makes a click on the
+				// track and a drag from it the same gesture rather than two.
+				let grip = if position.y >= thumb.y && position.y < thumb.y + thumb.height {
+					position.y - thumb.y
+				} else {
+					thumb.height / 2.0
+				};
+				state.scroll_grip = Some(grip);
+				shell.publish(Message::TerminalScrollTo(scrollbar_offset(
+					bounds,
+					rows,
+					history,
+					position.y - grip,
+				)));
+				shell.capture_event();
+				true
+			}
+			mouse::Event::CursorMoved { .. } => {
+				let Some(grip) = state.scroll_grip else {
+					return false;
+				};
+				let Some(position) = cursor.position() else {
+					return false;
+				};
+				// No bounds test on the move, on purpose: a drag that wanders off the bar sideways, or
+				// past either end, keeps scrolling and pins at the end it ran out at — the offset is
+				// clamped, not dropped. Letting go of the drag because the pointer strayed a few pixels
+				// is the thing that makes a scrollbar feel broken.
+				shell.publish(Message::TerminalScrollTo(scrollbar_offset(
+					bounds,
+					rows,
+					history,
+					position.y - grip,
+				)));
+				shell.capture_event();
+				true
+			}
+			mouse::Event::ButtonReleased(mouse::Button::Left) => {
+				// Wherever the release lands — the release belongs to the press that started on the
+				// bar, the same rule the mouse-report path applies to a button it saw go down.
+				if state.scroll_grip.take().is_none() {
+					return false;
+				}
+				shell.capture_event();
+				true
+			}
+			_ => false,
+		}
 	}
 }
 
@@ -508,6 +604,15 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 				}
 				return;
 			}
+		}
+
+		// The scrollbar, which is grabbable (§116). Tried before everything below it: a press in the
+		// right padding gutter is the bar's, whether or not a program has asked for the mouse, and it
+		// belongs to neither the selection above nor the report below. Nothing is claimed unless there
+		// is history to move through, so this is inert on the alternate screen and inert in a session
+		// with no scrollback yet.
+		if self.scroll_drag(state, pointer, layout.bounds(), cursor, shell) {
+			return;
 		}
 
 		// No mouse protocol on, or Shift held: the pointer is the user's, for selecting
@@ -1050,32 +1155,37 @@ fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
 	(lines != 0).then_some(lines)
 }
 
-/// The scroll indicator's thumb rectangle for a grid of `bounds`, or `None` when nothing should
-/// be drawn — at the live bottom (`offset == 0`) or with no history to indicate (§23). Split from
-/// the draw so the geometry, the part that can be wrong, is testable without a renderer (as with
-/// `corner_parts`). The thumb tracks the text area, not the padding: its height is the viewport's
-/// share of the whole document (`rows` of screen plus `history` of scrollback), floored at
-/// `SCROLLBAR_MIN_THUMB` so a deep history still shows a visible mark, and its top runs from the
-/// track's top at the oldest retained line (`offset == history`) down toward the bottom as the
-/// view returns to the live tail — clamped so that minimum height can never push it off the end.
+/// The scroll indicator's thumb rectangle for a grid of `bounds`, or `None` when there is no history
+/// to indicate at all (§23). Split from the draw so the geometry, the part that can be wrong, is
+/// testable without a renderer (as with `corner_parts`). The thumb tracks the text area, not the
+/// padding: its height is the viewport's share of the whole document (`rows` of screen plus `history`
+/// of scrollback), floored at `SCROLLBAR_MIN_THUMB` so a deep history still shows a visible mark, and
+/// its top runs from the track's top at the oldest retained line (`offset == history`) down toward the
+/// bottom as the view returns to the live tail — clamped so that minimum height can never push it off
+/// the end.
+///
+/// **It is drawn at the live bottom too, which it was not until §116.** §23 showed nothing there on
+/// purpose: as a pure indicator it had nothing to say when the view was already at the tail. Once the
+/// bar became something to GRAB, that silence was the whole problem — a bar you can only grab after
+/// you have already scrolled by some other means is not a way to start scrolling. So the only `None`
+/// left is a session with no scrollback, where there is genuinely nothing to move to.
 fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> Option<Rectangle> {
-	if offset == 0 || history == 0 {
+	if history == 0 {
 		return None;
 	}
-	let rows = f32::from(rows);
-	let history = f32::from(history);
-	let offset = f32::from(offset);
-	let document = history + rows;
-
-	let track_top = bounds.y + GRID_PADDING;
-	let track_height = rows * CELL_HEIGHT;
-	let thumb_height = (track_height * rows / document)
-		.max(SCROLLBAR_MIN_THUMB)
-		.min(track_height);
-	// 0 at the oldest line, growing toward 1 as the view returns to the bottom.
-	let position = (history - offset) / document;
-	let max_top = track_top + track_height - thumb_height;
-	let thumb_top = (track_top + position * track_height).min(max_top);
+	let track = scrollbar_track(bounds, rows);
+	let thumb_height = scrollbar_thumb_height(rows, history, track.height);
+	// The thumb slides over the track LESS its own height, and the position scales onto that span
+	// rather than onto the whole track. Until §116 it scaled onto the track and was then clamped at
+	// the bottom, which drew the same picture within a pixel or two for a shallow history and made a
+	// DRAG come apart for a deep one: past the clamp a range of offsets all mapped to the same
+	// bottom-most thumb, so the bar stopped following the pointer while the view kept moving. Scaling
+	// onto the span is what makes `scrollbar_offset` below an exact inverse instead of an approximate
+	// one, and the two are only correct together.
+	let span = track.height - thumb_height;
+	// 0 at the oldest retained line, 1 at the live tail.
+	let position = f32::from(history - offset.min(history)) / f32::from(history);
+	let thumb_top = track.y + position * span.max(0.0);
 
 	Some(Rectangle {
 		x: bounds.x + bounds.width - SCROLLBAR_WIDTH - SCROLLBAR_INSET,
@@ -1083,6 +1193,74 @@ fn scrollbar_thumb(bounds: Rectangle, rows: u16, history: u16, offset: u16) -> O
 		width: SCROLLBAR_WIDTH,
 		height: thumb_height,
 	})
+}
+
+/// How tall the whole document is in lines — the visible screen plus everything retained above it.
+/// One function because the thumb's height, its position and the inverse below must all divide by the
+/// same number or the bar and the pointer disagree.
+fn document_lines(rows: u16, history: u16) -> f32 {
+	f32::from(rows) + f32::from(history)
+}
+
+/// The thumb's height: the viewport's share of the document, floored so a deep history still leaves
+/// something visible and capped so it can never exceed the track it slides in.
+fn scrollbar_thumb_height(rows: u16, history: u16, track_height: f32) -> f32 {
+	(track_height * f32::from(rows) / document_lines(rows, history))
+		.max(SCROLLBAR_MIN_THUMB)
+		.min(track_height)
+}
+
+/// The rectangle a press is tested against to start a drag (§116), and the track the thumb slides in.
+///
+/// **Wider than the thumb is painted, deliberately.** The thumb is `SCROLLBAR_WIDTH` (4px) so it reads
+/// as an indicator rather than furniture, and a 4-pixel grab target is a target you miss. The zone is
+/// the whole right padding gutter instead, which is the same rule the left gutter's prompt ticks use —
+/// a 3px tick inside a 6px gutter, and the press tests the gutter (§34). The gutter is `GRID_PADDING`
+/// and the paint is `SCROLLBAR_WIDTH + SCROLLBAR_INSET` from the edge, so the zone contains the thumb
+/// with room either side and still touches no cell.
+fn scrollbar_track(bounds: Rectangle, rows: u16) -> Rectangle {
+	Rectangle {
+		x: bounds.x + bounds.width - GRID_PADDING,
+		y: bounds.y + GRID_PADDING,
+		width: GRID_PADDING,
+		height: f32::from(rows) * CELL_HEIGHT,
+	}
+}
+
+/// The inverse of `scrollbar_thumb` (§116): the viewport offset that would put the thumb's TOP at
+/// `thumb_top`, clamped into `0..=history`.
+///
+/// A drag knows where the thumb should be and needs the offset that means, which is the forward
+/// mapping read backwards — `position = (history - offset) / document` solved for `offset`. Pure and
+/// paired with the forward function on purpose: the two are only correct together, so the tests assert
+/// the round trip rather than either one's arithmetic in isolation.
+///
+/// Note it takes the thumb's top and not the pointer: a grab holds the thumb wherever it was caught,
+/// so the caller subtracts that grip before asking. Handing the pointer straight in would teleport the
+/// thumb's top to the pointer on the first pixel of every drag.
+fn scrollbar_offset(bounds: Rectangle, rows: u16, history: u16, thumb_top: f32) -> u16 {
+	if history == 0 {
+		return 0;
+	}
+	let track = scrollbar_track(bounds, rows);
+	let thumb_height = scrollbar_thumb_height(rows, history, track.height);
+	let span = track.height - thumb_height;
+	// A thumb that fills its track has nowhere to slide, so every press means the live bottom rather
+	// than a division by zero. Reachable: the height is floored at `SCROLLBAR_MIN_THUMB`, so a grid
+	// only a few rows tall has a thumb as tall as its track.
+	if span <= 0.0 {
+		return 0;
+	}
+	// The forward mapping's `position`, read backwards: 0 at the track top (oldest), 1 at the span's
+	// end (live tail).
+	let position = ((thumb_top - track.y) / span).clamp(0.0, 1.0);
+	// Through `lines_scrolled` rather than a cast of our own: it is already the one place a pixel
+	// measurement becomes a line count for §23's scrolling, and it ROUNDS. A truncating cast would
+	// read the top half of every line as the line below it, so the bar would feel one row behind the
+	// pointer all the way down.
+	let lines = crate::ui::lines_scrolled(f32::from(history) * (1.0 - position));
+	u16::try_from(lines.clamp(0, i32::from(history)))
+		.expect("clamped into 0..=history, a u16, on the line above")
 }
 
 /// The prompt tick's rectangle for a `row` of the grid `bounds` (§34): a short bar in the left
@@ -1956,9 +2134,11 @@ mod tests {
 	}
 
 	#[test]
-	fn the_scroll_indicator_hides_at_the_live_bottom_and_with_no_history() {
-		// Nothing to indicate at the live tail (offset 0) or before any line has scrolled off
-		// (history 0), so no thumb is drawn — "auto-hiding" without a timer (§23).
+	fn the_scroll_bar_shows_whenever_there_is_history_to_move_through() {
+		// Before any line has scrolled off there is nowhere to go, so no bar (§23). But once there IS
+		// history the bar is drawn even at the live tail, which is the §116 change and the whole point
+		// of it: a bar that only appeared after you had scrolled by other means could not be the thing
+		// you scroll WITH.
 		let bounds = Rectangle {
 			x: 0.0,
 			y: 0.0,
@@ -1966,9 +2146,123 @@ mod tests {
 			height: 400.0,
 		};
 		assert!(scrollbar_thumb(bounds, 24, 0, 0).is_none());
-		assert!(scrollbar_thumb(bounds, 24, 100, 0).is_none());
-		// Scrolled up at all, with history to show: a thumb appears.
+		assert!(scrollbar_thumb(bounds, 24, 100, 0).is_some());
 		assert!(scrollbar_thumb(bounds, 24, 100, 1).is_some());
+		// And at the tail it is parked at the very bottom of the span it slides in, so it reads as
+		// "nothing below this" without needing to disappear to say so.
+		let parked = scrollbar_thumb(bounds, 24, 100, 0).unwrap();
+		let track = scrollbar_track(bounds, 24);
+		assert!(
+			(parked.y + parked.height - (track.y + track.height)).abs() < 0.01,
+			"parked at the track's bottom edge, got {parked:?} in {track:?}"
+		);
+	}
+
+	#[test]
+	fn the_grab_zone_is_the_whole_gutter_and_contains_the_painted_thumb() {
+		// The paint is 4px so it reads as an indicator; the press target is the 6px gutter, because a
+		// 4px target is one you miss (§116). The zone must contain the thumb — otherwise there are
+		// pixels that look grabbable and are not — and must not reach the first cell, which begins one
+		// GRID_PADDING in from the left and ends one GRID_PADDING short of the right edge.
+		let bounds = Rectangle {
+			x: 17.0,
+			y: 9.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let track = scrollbar_track(bounds, 24);
+		let thumb = scrollbar_thumb(bounds, 24, 100, 50).unwrap();
+		assert!(track.x <= thumb.x, "the zone starts left of the paint");
+		assert!(
+			thumb.x + thumb.width <= track.x + track.width,
+			"and ends right of it"
+		);
+		// The right edge of the text area, which the zone must not cross back over.
+		assert!((track.x - (bounds.x + bounds.width - GRID_PADDING)).abs() < 0.01);
+		// Vertically the zone is the text rows, matching the span the thumb travels.
+		assert!(track.y >= bounds.y + GRID_PADDING - 0.01);
+		assert!((track.height - 24.0 * CELL_HEIGHT).abs() < 0.01);
+	}
+
+	#[test]
+	fn a_press_maps_back_to_the_offset_the_thumb_was_drawn_for() {
+		// `scrollbar_offset` is `scrollbar_thumb` read backwards, and the two are only correct
+		// together (§116) — so the assertion is the ROUND TRIP rather than either one's arithmetic.
+		// A drag hands back the thumb's top; drawing that offset must put the thumb where the drag
+		// asked for it.
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		for (history, offset) in [
+			(100_u16, 0_u16),
+			(100, 1),
+			(100, 50),
+			(100, 99),
+			(100, 100),
+			// A deep history is the case the pre-§116 mapping got wrong: it clamped instead of
+			// scaling, so a range of offsets all drew at the same bottom-most thumb and the round
+			// trip could not hold.
+			(5000, 0),
+			(5000, 2500),
+			(5000, 5000),
+			(1, 0),
+			(1, 1),
+		] {
+			let thumb = scrollbar_thumb(bounds, 24, history, offset).unwrap();
+			assert_eq!(
+				scrollbar_offset(bounds, 24, history, thumb.y),
+				offset,
+				"history {history}, offset {offset}, thumb at {}",
+				thumb.y
+			);
+		}
+	}
+
+	#[test]
+	fn a_drag_past_either_end_pins_rather_than_wrapping() {
+		// A drag is not bounds-tested on the move, so the pointer routinely runs off both ends of the
+		// track (§116). Off the top is the oldest retained line and off the bottom is the live tail —
+		// never a wrap round to the other end, which is what an unclamped subtraction would give.
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let track = scrollbar_track(bounds, 24);
+		assert_eq!(scrollbar_offset(bounds, 24, 100, track.y - 500.0), 100);
+		assert_eq!(
+			scrollbar_offset(bounds, 24, 100, track.y + track.height + 500.0),
+			0
+		);
+		// Far outside in both directions, and with a degenerate history, still answers in range.
+		assert_eq!(scrollbar_offset(bounds, 24, 0, track.y), 0);
+		assert_eq!(scrollbar_offset(bounds, 24, 1, f32::NEG_INFINITY), 1);
+		assert_eq!(scrollbar_offset(bounds, 24, 1, f32::INFINITY), 0);
+	}
+
+	#[test]
+	fn a_thumb_that_fills_its_track_reads_as_the_live_bottom() {
+		// A grid only a few rows tall has a thumb floored to SCROLLBAR_MIN_THUMB, which can be as tall
+		// as the track — leaving no span to slide in. That is a division by zero waiting to happen, so
+		// it answers the live bottom instead (§116).
+		let bounds = Rectangle {
+			x: 0.0,
+			y: 0.0,
+			width: 200.0,
+			height: 400.0,
+		};
+		let rows = 1;
+		let track = scrollbar_track(bounds, rows);
+		assert!(
+			scrollbar_thumb_height(rows, 500, track.height) >= track.height,
+			"the floor really does fill this track, or the case under test is not the case"
+		);
+		assert_eq!(scrollbar_offset(bounds, rows, 500, track.y), 0);
+		assert_eq!(scrollbar_offset(bounds, rows, 500, track.y + 1000.0), 0);
 	}
 
 	#[test]

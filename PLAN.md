@@ -36,7 +36,7 @@ terminal engine from `vt100` to `alacritty_terminal` — a full VT implementatio
 unblocks the DEC line-drawing charset, the rich SGR set (dim / italic / strikethrough /
 conceal, every underline style + underline colour), origin-mode-correct cursor reports, the
 OSC colour and pixel-size query replies, the remote-set window title, the DECSCUSR cursor
-shape, focus reporting, and 10 000 lines of scrollback with a scroll indicator, §23; it also
+shape, focus reporting, and 10 000 lines of scrollback with a draggable scrollbar, §23/§116; it also
 follows OSC 8 hyperlinks — a Ctrl-hover underline reveals one, then Ctrl+click or a right-click
 Open link / Copy link opens it, the scheme gated to http/https/mailto, §24; and speaks the kitty
 keyboard protocol — the `CSI u` encoding
@@ -622,10 +622,12 @@ Turning a raw byte stream into a screen.
   display offset, and `Terminal::scroll` (a cmote-owned `ScrollMotion`) moves the viewport. The
   wheel scrolls it whenever no mouse-aware program wants the wheel, Shift+PageUp/PageDown page and
   Shift+Home/End jump to the ends, and every keystroke snaps back to the live bottom; new output
-  leaves a scrolled-back view stationary. A thin, read-only **scroll indicator** rides the grid's
-  right padding gutter while the view is scrolled up and vanishes at the live bottom; its thumb
-  reports position and history depth (`screen::history_size`), sized as the viewport's share of
-  the whole document with a floor so a deep history still shows a mark. Selecting across the
+  leaves a scrolled-back view stationary. A thin **scrollbar** rides the grid's right padding gutter
+  whenever there is history; its thumb reports position and history depth (`screen::history_size`),
+  sized as the viewport's share of the whole document with a floor so a deep history still shows a
+  mark. Since §116 it is also GRABBABLE — press and drag it to move the view, press the bare track to
+  jump there — which is what turned it from an indicator into a control and put a thumb at the live
+  bottom, where §23 drew none. Selecting across the
   scrolled view already works (extract reads the same offset the grid draws). §23 is complete.
 - **Security note**: rendering untrusted server bytes is safe here — the engine
   *interprets* escapes into grid state; it never executes anything. We deliberately do
@@ -1333,8 +1335,8 @@ their C-family languages. `rustfmt.toml` + a `clippy` gate in CI enforce it.
   blink is dropped. Focus reporting (DECSET `?1004`) is answered too (§23 Stage 7): a program that
   turns it on hears `CSI I` / `CSI O` when the shell gains or loses focus. And **scrollback** is now
   on (§23 Stage 8): `SCROLLBACK = 10 000`, the wheel and Shift+PageUp/PageDown/Home/End scroll the
-  history, typing snaps back to the live bottom, and a thin, read-only **scroll indicator** in the
-  grid's right gutter shows position and depth while the view is scrolled up. That was the last §23
+  history, typing snaps back to the live bottom, and a thin **scrollbar** in the grid's right gutter
+  shows position and depth — read-only until §116 made it draggable. That was the last §23
   follow-up, so §23 (the engine swap and everything it unblocked) is complete. Two further
 terminal features then shipped on top of the swap, each a small addition beside the engine
 rather than a change to it: **OSC 8 hyperlinks** (§24) — the engine records the
@@ -2663,6 +2665,9 @@ leak that would spread the swap across the GUI. So the work is staged:
   history still shows a mark, and it slides from the track's top at the oldest line down toward the
   live tail. Scrolling stays on the wheel and keys — the thumb reports, it does not control. The
   geometry is a pure `scrollbar_thumb` (testable without a renderer, as with `corner_parts`).
+  **Two of those sentences are no longer true: see §116**, which made the bar draggable and therefore
+  had to draw it at the live bottom as well. The auto-hide was right for an indicator and wrong for a
+  control.
 - **§23 is complete:** the engine swap and every capability it unblocked (Stages 1–8) have landed.
 
 ### Security stays put
@@ -13289,3 +13294,122 @@ testing a commit nobody is waiting on.
   is what could be seen; it is not established to be one failure.
 - **`echoing_shell` covers `windows` and `target_os = "macos"` and nothing else.** Correct for what
   cmote ships, and a third unix would find the fixture has no arm at all rather than a poor one.
+
+## §116 — The scrollbar becomes a control
+
+§23 shipped a scroll *indicator*: a thin thumb in the grid's right padding gutter that reported where
+the view sat and how deep the history was, moved by the wheel and the keys, and drew nothing at all at
+the live bottom. This makes it grabbable — press and drag the thumb to move the view, press the bare
+track to jump there and carry on dragging from it, release to stop.
+
+Two things about the old design had to change, and both were right before and wrong now.
+
+### An auto-hiding control cannot be grabbed
+
+`scrollbar_thumb` returned `None` at `offset == 0`, and §23 called that "auto-hiding without an
+animation timer". As an indicator that was exactly right: at the live tail there is nothing to report.
+As a control it is the whole problem — a bar that appears only after you have scrolled by some other
+means cannot be the thing you scroll WITH, so the gesture would have been "wheel a little, then you
+may drag". The only `None` left is a session with no scrollback at all, where there is genuinely
+nowhere to go.
+
+That is a deliberate reversal of a §23 decision, not an oversight in it, and the paragraph in §23 that
+still describes the auto-hide now says so.
+
+### The mapping had to become invertible, and was not
+
+This is the part worth reading. A drag needs the *inverse* of the thumb geometry: the pointer says
+where the thumb should be, and the code has to answer with the offset that means. The forward mapping
+scaled the position by the whole track height and then CLAMPED the result to the track's bottom:
+
+```rust
+let position = (history - offset) / (history + rows);   // fraction of the DOCUMENT
+let thumb_top = (track_top + position * track_height).min(max_top);
+```
+
+For a shallow history the clamp is an equality and the picture is right, which is why it survived
+review as an indicator. For a deep one it is not: past the clamp a whole RANGE of offsets all draw the
+same bottom-most thumb, so the mapping stops being injective and no inverse exists. Left alone, a drag
+down a long history would move the view while the thumb sat pinned at the bottom, not following the
+pointer — the exact thing that makes a scrollbar feel broken.
+
+So the forward mapping now scales onto the span the thumb can actually occupy, which is the track less
+the thumb's own height, and takes its fraction of the *scrollable range* rather than of the document:
+
+```rust
+let position = (history - offset) / history;            // fraction of the RANGE
+let thumb_top = track_top + position * (track_height - thumb_height);
+```
+
+The thumb's height still carries the document's depth — that is what it is for — and now
+`scrollbar_offset` is an exact inverse rather than an approximate one. The two are only correct
+together, so the test asserts the ROUND TRIP over a table of depths and offsets rather than either
+one's arithmetic. Probed by restoring the old forward mapping: at history 5000, offset 2500 came back
+as 2391, 109 lines adrift, which is the drift a user would have felt as lag.
+
+### Where the press is answered, and why there
+
+Inside the `Grid` widget, before both of the other things a press can mean. Above the widget a
+`mouse_area` starts a text selection; inside it, a mouse-aware program gets a report. A press on the
+bar is neither — it is chrome in the padding gutter rather than a cell, and it is cmote's own view
+control rather than anything the remote should hear about — so the widget claims it and captures it,
+and neither path sees it. This is the same shape the wheel branch above it already had.
+
+A full-screen program needs no special case, which is the nice part. The alternate screen retains no
+history, so `history_size()` is 0, so there is no thumb, so nothing is claimed: a click in `vim`'s
+right-hand column reaches `vim` exactly as before.
+
+Three smaller decisions:
+
+* **The grab zone is the whole 6px gutter, not the 4px paint.** The thumb is thin so it reads as an
+  indicator; a 4-pixel target is a target you miss. This is the rule the left gutter's prompt ticks
+  already use — a 3px tick, and the press tests the gutter (§34).
+* **A drag is not bounds-tested on the move.** Wander off the bar sideways or past either end and it
+  keeps scrolling, pinning at the end it ran out at. Dropping a drag because the pointer strayed a few
+  pixels is the other thing that makes a scrollbar feel broken.
+* **The grip is stored, not the starting offset.** The thumb stays under the same part of itself for
+  the whole drag. Treating the pointer's y as the thumb's top would jump the view by up to a thumb's
+  height on the first pixel of movement.
+
+### `ScrollMotion::To`, the first absolute motion
+
+Every other motion in `ScrollMotion` is relative because every other caller is: a wheel notch, a page,
+a key. A drag is not — what it knows is where the view should BE. The engine has no absolute scroll, so
+`To` reads the current offset and issues the delta that reaches the target, clamped to the retained
+history. Doing that inside `term/` rather than in the UI is the point: the alternative is the widget
+keeping its own copy of the offset, which would drift from the engine's clamping the first time a drag
+ran off an end. The subtraction is in the line-number domain for the reason `jump_prompt` already
+gives — both are `usize` offsets, and a scroll DOWN would wrap.
+
+### No hand cursor, deliberately
+
+`cursor.rs` says every grabbable surface should wear the §51 hand, "the point of a shared affordance is
+that the user learns it once", and lists two — the tab chip and the dialog header. The scrollbar is now
+a third draggable thing and does NOT wear it, because the rule is about affordance and not about
+mousedown: those two are objects you pick up and put somewhere else, and CSS's `grab` means exactly
+that. A scrollbar is a slider — it goes nowhere, and no browser or terminal shows a hand over one. A
+hand here would promise the wrong gesture.
+
+### Files
+
+- `src/ui/grid.rs` — the invertible geometry (`scrollbar_thumb`, `scrollbar_offset`,
+  `scrollbar_track`, `scrollbar_thumb_height`, `document_lines`), `GridState::scroll_grip`, and
+  `scroll_drag` wired ahead of the report path.
+- `src/term/mod.rs` — `ScrollMotion::To`.
+- `src/app.rs` — `Message::TerminalScrollTo` and `on_terminal_scroll_to`.
+- `PLAN.md` §23 and the two overviews, `TERMINAL_COMPATIBILITY_PLAN.md` — five places called the bar
+  read-only or said it vanishes at the bottom.
+
+### Not done
+
+- **The widget plumbing is not verified by a run.** The geometry, the clamping and the handler's
+  contract are all unit-tested, and the round trip and the no-side-effects assertions were both probed
+  by breaking them. What no test here covers is iced's own event ordering — that capturing the press
+  really does keep the `mouse_area` above from starting a selection. That needs a window, a local shell
+  and a hand on a mouse, which is §13's manual category.
+- **No wheel-over-the-bar special case.** A wheel while the pointer is on the bar scrolls as it does
+  anywhere else on the grid, which is what every terminal does; it is only worth noting because a drag
+  and a wheel now share a surface.
+- **No page-jump on a track press.** A press on the bare track jumps straight to that position, which
+  is what was asked for. The other convention — page up or down by one screen per click, holding to
+  repeat — needs a timer, and cmote runs no animation timer (§23).

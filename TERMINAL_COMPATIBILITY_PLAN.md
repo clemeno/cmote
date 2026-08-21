@@ -275,9 +275,13 @@ So the gaps read against a known floor. As of v3.0 (§23) cmote:
   also **composites inline sixel images** over the cells they reserve — decoded in-house, anchored to a
   document line so a picture rides the scrollback, drawn on the alternate screen too (its own page, with
   its own lifetime), and advertised to programs through DA1's attribute 4 and XTSMGRAPHICS.
-- **Keeps 10 000 lines of scrollback** with a thin, read-only scroll indicator (§23 Stage 8):
+- **Keeps 10 000 lines of scrollback** with a thin scrollbar in the right gutter (§23 Stage 8):
   the wheel and Shift+PageUp/PageDown/Home/End scroll the history, and typing snaps back to the
-  live bottom. The alternate screen keeps no history, so scrolling is inert there by design. That
+  live bottom. The bar is **draggable** since §116 — press and drag the thumb, or press the bare
+  track to jump — so it is a control and not only an indicator; a press there is captured, so it
+  reaches neither the text selection nor a mouse-aware program's reports.
+  The alternate screen keeps no history, so scrolling is inert there by design — and with no history
+  there is no thumb, so the bar takes no press away from a full-screen program either. That
   history is **searchable** (§35): Ctrl+Shift+F floats a find bar over the grid, and each hit is
   revealed (centred when off-screen) and turned into an ordinary selection, so Copy takes it
   (`term::search`). **Every hit on the visible screen is washed** in a second highlight colour (§39),

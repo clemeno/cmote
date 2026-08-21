@@ -3078,6 +3078,13 @@ pub enum Message {
 	/// positive up into history. Raised by the grid only when no mouse-aware program wants the
 	/// wheel, so it never competes with the mouse report above.
 	TerminalScroll(i32),
+	/// The scrollbar was dragged (§116); the payload is the viewport offset to move TO — 0 the live
+	/// bottom, `history_size()` the oldest retained line. Absolute rather than a delta because the
+	/// thumb follows the pointer: what a drag knows is where the view should be, and a delta would
+	/// mean the widget keeping its own copy of the offset and drifting from the engine's clamping.
+	/// Raised for the press, every move under it and nothing else, so a drag that runs off an end
+	/// simply repeats the offset it clamped to.
+	TerminalScrollTo(u16),
 	/// Copy the current selection to the system clipboard.
 	CopyPressed,
 	// --- scrollback find bar (§35) ---
@@ -4000,6 +4007,7 @@ impl Tab {
 			Message::GridRightPressed => self.menu = Some(self.pointer),
 			Message::MouseReport(bytes) => self.on_mouse_report(bytes),
 			Message::TerminalScroll(lines) => self.on_terminal_scroll(lines),
+			Message::TerminalScrollTo(offset) => self.on_terminal_scroll_to(offset),
 			Message::CopyPressed => {
 				self.on_terminal_command();
 				return self.on_copy_rich();
@@ -7285,6 +7293,20 @@ impl Tab {
 	fn on_terminal_scroll(&mut self, lines: i32) {
 		if let Some(terminal) = self.terminal.as_mut() {
 			terminal.scroll(term::ScrollMotion::Lines(lines));
+		}
+	}
+
+	/// Park the scrollback at an absolute offset, because the scrollbar was dragged there (§116). The
+	/// grid resolved the pointer into an offset — it owns the bar's geometry — so there is nothing to
+	/// decide here beyond passing it on; `ScrollMotion::To` clamps against the engine's own history.
+	///
+	/// Like the wheel, this changes only what the user is looking at: nothing is sent to the remote,
+	/// the focus stays where it is, and no selection is started or moved. That last one is the reason
+	/// the grid CAPTURES the press — a press that also reached the selection path would drag a
+	/// selection across the screen behind the bar.
+	fn on_terminal_scroll_to(&mut self, offset: u16) {
+		if let Some(terminal) = self.terminal.as_mut() {
+			terminal.scroll(term::ScrollMotion::To(offset));
 		}
 	}
 
@@ -10659,6 +10681,45 @@ mod tests {
 		let _ = app.on_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
 		assert_eq!(offset(&app), 0, "snapped back to the bottom");
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"\r"[..]));
+	}
+
+	/// A scrollbar drag parks the view at the offset it names and does NOTHING else (§116). The
+	/// geometry is the grid's and the clamping is the engine's, both tested where they live; what is
+	/// asserted here is the handler's whole contract — that dragging the bar is purely a view change.
+	/// Each of these would be a real bug: a drag that stole the keyboard, that cleared or moved a
+	/// selection made before it, or that sent a byte to the remote because it went through the input
+	/// path. The last matters most: scrolling is local (§23), and a bar that typed at the shell would
+	/// be a remote-visible side effect of looking at history.
+	#[test]
+	fn dragging_the_scrollbar_parks_the_view_and_touches_nothing_else() {
+		let (mut app, mut rx) = app_with_terminal(16);
+		with_history(&mut app);
+		// A selection and a focus that must both survive the drag.
+		let anchor = ui::selection::ScreenSpot { row: 0, col: 0 };
+		let selection =
+			ui::selection::Selection::new(anchor.to_doc(app.terminal.as_ref().unwrap().screen()));
+		app.selection = Some(selection);
+		app.focus = Focus::Files;
+
+		app.on_terminal_scroll_to(4);
+		assert_eq!(offset(&app), 4, "parked where the drag asked");
+		// A drag republishes on every pointer move, so the same offset arriving twice must be inert
+		// rather than moving twice as far.
+		app.on_terminal_scroll_to(4);
+		assert_eq!(offset(&app), 4);
+		// Down again, through zero, and off the far end — the engine clamps, nothing wraps.
+		app.on_terminal_scroll_to(0);
+		assert_eq!(offset(&app), 0, "back at the live bottom");
+		app.on_terminal_scroll_to(u16::MAX);
+		let history = app.terminal.as_ref().unwrap().screen().history_size();
+		assert_eq!(offset(&app), history, "pinned at the oldest retained line");
+
+		assert_eq!(app.selection, Some(selection), "the selection is untouched");
+		assert_eq!(app.focus, Focus::Files, "and the keyboard stayed put");
+		assert!(
+			next_input(&mut rx).is_none(),
+			"scrolling is local — nothing reaches the remote"
+		);
 	}
 
 	/// Ctrl+Shift+Up / Ctrl+Shift+Down move cmote's view between shell prompts, from the OSC 133
