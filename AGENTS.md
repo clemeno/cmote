@@ -123,10 +123,34 @@ cursor bitmaps (`*.png`) are marked `binary` and must never be rewritten.
 AAA structure, descriptive names, 80% target on logic; anything needing a live server is manual
 (§13). `cargo test` is the number of record.
 
+**Measure before designing the fix.** "This is slow" names a symptom, not a line. Time the parts, in
+`--release`, before choosing what to move or rewrite — a throwaway `#[test]` that prints elapsed
+milliseconds is enough, and it is deleted afterwards.
+
+§121 is the cautionary case and every number in it was a surprise. A four-second freeze on opening a
+file was 98% one call, and the plan going in — move the pure work to a worker thread — addressed
+**21 ms of 4005**. The obvious simplification, one paste instead of many, was 33× *worse* than what it
+replaced. A `ponytail:` that had estimated an image decode at "a fraction of a second" was three to
+five times low. None of that is visible from reading the code, and all of it changed what got built.
+
+The habit generalises past performance: when a sentence in a comment or in PLAN.md states a cost, and
+the work depends on that cost, re-measure it rather than inherit it.
+
 **Prove-it discipline.** A test that passes on first run has not been shown to work — it has
 been shown to pass. Break the code on purpose, watch the test fail, record what it said, then
 restore. A test that cannot fail still reports its area as covered, which is worse than no test
 (§106, §107).
+
+**Break the LINE, not the area.** "It went red when I broke something" is not the claim; the claim is
+that it goes red when *this guard* is removed. §121 shipped a test named for a late reply arriving at a
+closed tab which passed with its guard deleted — a closed tab is caught one line earlier by having no
+viewer at all, so the test was true to its own name and no evidence whatsoever for the line beside it.
+Probe each new test against the specific line it is there to protect, one at a time. Two guards on
+consecutive lines need two probes.
+
+**Never revert with `git checkout --` while a probe is in flight.** It reverts to HEAD, which is the
+whole uncommitted change and not the one line just broken. Either commit before probing or put the
+line back the way it was taken out. This cost a full re-application of §121's first commit.
 
 **The load stress, and when to reach for it.** A test that waits for something it only *hopes* will
 arrive passes on an idle machine and fails on a busy one, so repeating the suite proves nothing —

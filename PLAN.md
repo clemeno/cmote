@@ -6172,11 +6172,11 @@ account the pane happened to be showing.
   hidden, there is nowhere to drag to — and wakes up only once someone has zoomed past the body.
 - **Decoded once, on arrival**, into an iced image handle held on the model — the same trade
   `term::graphics` makes for the sixel images (§41). The alternative is keeping the pixels and
-  rebuilding a handle every frame, which re-uploads the texture on every paint. `ponytail:` that
-  decode runs on the GUI thread, so a big picture holds the window for the length of it — bounded on
-  both ends (32 MiB in, 8192 per side out), so the worst case is a fraction of a second on a file
-  the user asked for and is already waiting on. Moving it off-thread is an async task plus a message
-  and a route home; worth doing if a real picture is ever felt to stutter, and not before.
+  rebuilding a handle every frame, which re-uploads the texture on every paint. The decode used to run
+  ON the GUI thread here, with a `ponytail:` guessing the cost was "a fraction of a second" and saying
+  it was worth moving only if a picture were ever felt to stutter. **§121 measured it and moved it**:
+  280 ms for the largest picture the caps admit, which is seventeen dropped frames. It runs on iced's
+  thread pool now and comes home as `Message::PictureDecoded`.
 - **The toolbar reports what the file IS**: format, pixel dimensions, and the size of the FILE — not
   of the decoded pixels, which would be a bigger number the user has no way to recognise.
 - **A preview still loading when its session ends is failed, not left spinning.** The read it is
@@ -13760,3 +13760,180 @@ check is confirmation rather than the safety net.
   numbers are re-read against the new version when the dependency moves.
 - **Still no hover or drag feedback on the bars themselves** (§118), and `MIN_THUMB` still reaches only
   the terminal. Both unchanged and both deliberate.
+
+## §121 — Opening a file stops holding the window
+
+The ask was: loading a file in the editor should block that tab, not the whole app, and its tab
+header should say it is working. Both halves turned out to be about something other than what they
+sounded like.
+
+### The I/O was never the problem
+
+`ssh::edit::load` and `local::fs::load` both already spawned. So "the load blocks the app" was not the
+network or the disk — those had been off-thread since §32 and §103. Everything below came out of
+measuring where the time actually went, which is the only reason the fix is small.
+
+### 98% of a four-second freeze was one line
+
+At the 8 MiB editor ceiling, release build, inside `Editor::set_loaded`:
+
+```text
+  decode_text            2 ms
+  Content::with_text  3918 ms   <- 98%
+  lines_of              11 ms
+  changed_flags          1 ms
+  display_columns        7 ms
+  set_loaded TOTAL    4005 ms
+```
+
+`iced::widget::text_editor::Content::with_text` hands cosmic-text `Shaping::Advanced`, which shapes
+every line in the file up front. Pasting the same text defers shaping to layout, and layout only ever
+shapes what is on screen — so the identical buffer costs 65 ms instead of 3918.
+
+This is worth stating plainly because the plan going in was to move the *pure* work off-thread
+(decode, line split, diff, width scan). That work is **21 ms of 4005**. A whole design had been
+sketched for a 0.5% improvement, and only the measurement stopped it being built.
+
+### The chunk is the fix, not a detail
+
+A paste is quadratic in the length of ONE insert, so the obvious simplification — swap `with_text`
+for a single paste — is 33× WORSE than what it replaces:
+
+```text
+  with_text            3918 ms     chunks of  32 KiB     193 ms
+  one whole paste    130251 ms     chunks of   8 KiB      65 ms
+  chunks of 128 KiB     746 ms     chunks of   4 KiB      53 ms
+                                   chunks of   2 KiB      84 ms  <- call overhead takes over
+```
+
+`PASTE_CHUNK` is 8 KiB, and the numbers live on the constant because the curve is **asymmetric**: too
+large is unbounded, too small costs a few ms. Anyone retuning it should err downward.
+
+Two things a paste does that `with_text` did not, both found by tests rather than by reading:
+
+* **The cursor ends at EOF.** A long file would have opened scrolled to its last line. The probe put
+  it beyond doubt — `left: (4096, 0, None)`.
+* **The cut can land inside a CRLF pair or a multi-byte character.** Pinned against `with_text` for
+  ten shapes of input; the probe that shrank the chunk to 3 bytes failed with `differs from with_text
+  for crlf`.
+
+Chunks are deliberately NOT line-aligned. Aligning reads tidier and is free on ordinary source, but a
+minified script is one line of megabytes — precisely the file that would then arrive as a single
+paste, which is the case being avoided.
+
+### The wait that IS long, and the bar that shows it
+
+With the parse at 65 ms, the only real wait left is the read, which is unbounded and reported nothing.
+So the progress asked for hangs off the read, not the parse: `read_file` already knew `meta.size` and
+already looped in 64 KiB chunks, so bytes-read over total was a number sitting there unused.
+
+* **The chip draws it on §54's existing bar.** A tab is a session or a viewer, never both, so the two
+  cannot collide — and the bar means the same thing in each case ("busy, this far through"), which is
+  the test for whether sharing a channel is reuse or a pun. No timer, so §54's refusal to animate
+  stands.
+* **`Loading` carries the progress**, rather than a field beside the status. A field could describe a
+  load that is not running — the state §111 went out of its way to remove from the save side.
+* **`total` stays an `Option` all the way up.** A server that will not report a size is a case
+  `read_file` already had to handle; flattening it into a fake 0 or 100 would have invented a number.
+  Unknown size draws the indeterminate pulse.
+* **`read_file` keeps ONE loop.** The reporting rides as `Option<&Report>` because `ssh::integration`
+  reads a config file through the same bounded reader, and §109 already paid for what two copies of
+  one rule cost.
+
+### Cancelling, and why one slot was not enough
+
+Closing a viewer mid-read cancels it. The flag is `Arc<AtomicBool>` polled between chunks, which is
+`ssh::download`'s own pattern — but held in a **map keyed by viewer**, where a transfer's is a single
+`Option`. That difference is the whole reason it exists: only one transfer runs at a time, and any
+number of viewer tabs can be opening files at once.
+
+Nothing tells either session loop when a read FINISHES — the spawned task reports straight to the GUI
+— so entries are pruned on insert by `Arc::strong_count`. A live read holds the only other handle, so
+a count of one means that read is over. No completion message exists solely to tidy up.
+
+The cancel lives in `remove_tab`, **not** `take_tab`. The two share a close's bookkeeping with a MOVE
+(§52), and a tab dragged into another region is still waiting for its file — cancelling there would
+turn a drag into a failed open.
+
+### The preview's own version of the same thing
+
+§53 left the image decode on the GUI thread behind a `ponytail:` that guessed "a fraction of a second"
+and said to move it only if a picture were ever felt to stutter. Measured:
+
+```text
+  1920x1080  PNG   1.8 MiB    18 ms
+  4032x3024  JPEG  1.5 MiB    74 ms     an ordinary phone photograph
+  6500x5000  JPEG  4.1 MiB   194 ms
+  6500x5000  PNG  28.8 MiB   280 ms     about the largest MAX_ALLOC admits
+```
+
+8000×6000 is refused outright — 192 MB of RGBA is past `MAX_ALLOC` — so the worst case that actually
+decodes is ~32 megapixels, not the 32 MiB file ceiling. The bound was real; the guess at what it cost
+was three to five times low. 280 ms is seventeen dropped frames, so it moved to a `Task::perform`.
+A task and not a thread because iced's default features already include `thread-pool`.
+
+The layering `ssh/edit.rs` set is untouched: the bytes still cross the bridge raw, and sniffing them is
+still the GUI side's job.
+
+**The tab stays `Loading` across the decode**, with its bar at the end since everything HAS been read,
+and the body says "Decoding…" once read reaches total. The two halves of the wait are told apart in
+the VIEW rather than by a fourth status — the decode is a task the model never sees start or finish,
+so a state for it would be one the model could not honestly maintain.
+
+Two late-reply cases are guarded. A decode returning to a closed tab is caught by there being no
+viewer. A decode returning after the parent session died — and already put "the session closed before
+it finished loading" on screen — is caught by `load_progress().is_some()`, and that is the one that
+matters: without it a dead session's tab would quietly show a picture.
+
+### A test that passed for the wrong reason
+
+The closed-tab test passed with the `load_progress` guard removed, because a closed tab is caught one
+line earlier by having no viewer at all. The test was honest about its own name and useless as
+evidence for the guard beside it. The session-died test is what actually covers it.
+
+Same shape as §117's failed hand-trace, one layer along: **a green test says nothing about the line
+you believe it is protecting until you have watched that line's removal turn it red.** Probing every
+new test caught this one; probing them one at a time is what made it visible.
+
+### Files
+
+- `src/editor.rs` — `PASTE_CHUNK` with the sweep on it, `paste_chunks`, `content_of`, and
+  `set_loaded` no longer calling `with_text`. `EditorStatus::Loading` gains its payload.
+- `src/viewer.rs` (new) — `LoadProgress`: the share, the `Progress` it draws as, the label, and the
+  `u128` arithmetic.
+- `src/preview.rs` — `PreviewStatus::Loading` gains the same payload, plus `set_progress`.
+- `src/bridge.rs` — `SshEvent::FileLoadProgress`, `SshCommand::CancelFileLoad`, and the routing.
+- `src/ssh/edit.rs` — `Report`, `CANCELLED`, and `read_file` reporting and polling.
+- `src/ssh/shellfs.rs`, `src/ssh/integration.rs` — the elevated `cat` path, and the one caller that
+  passes `None`.
+- `src/ssh/client.rs`, `src/local/session.rs` — the per-viewer flag maps.
+- `src/local/fs.rs` — `read_reporting`, so a "local" file on a mapped drive reports too.
+- `src/app.rs` — `Message::PictureDecoded`, the chip's progress, `loading_read`, and the cancel on
+  close.
+- `src/ui/editor.rs`, `src/ui/preview.rs` — the byte count, and "Decoding…".
+
+### Not done
+
+- **The 65 ms is still on the GUI thread, and cannot move.** `Content` is built through
+  `iced_graphics`, whose `with_text` and every paste take the process-wide
+  `text::font_system().write()` lock. A worker holding it for a whole file would stall the renderer on
+  its next text layout — the same frozen window, reached by a different line. Chunking is what makes
+  that lock a series of short holds instead of one long one; there is no version of this that gets the
+  work off the thread entirely while iced owns the font system.
+- **No frame-by-frame scheduler.** One was designed and then not built, because the measurement made
+  it pointless: spreading 65 ms over 1025 chunks at one per frame would be seventeen seconds of
+  invented slowness. If `MAX_SIZE` is ever raised a long way, this is the thing to revisit — and the
+  numbers above are what to revisit it against.
+- **The chunk sweep is one corpus.** Uniform 70-column lines. The 46× win is not in doubt, but the
+  exact sweet spot could sit elsewhere for very long lines or CJK-heavy text, both of which shape
+  differently. `PASTE_CHUNK` is one constant with the data beside it, so re-measuring is cheap.
+- **`local::fs::load` reports, but a local read is usually over first.** 8 MiB off an SSD is a few
+  milliseconds, so the bar will not be seen. It is there for the case that does not look local at all
+  — a mapped drive or a UNC path, where the file is really over SMB.
+- **A cancel lands within one chunk, not instantly.** 64 KiB on the sftp path, one `cat` write on the
+  shell path. A close therefore returns before the server has stopped talking, which is invisible and
+  correct — but it is not a hard stop.
+- **Nothing shows a decode's progress**, only that one is happening. `image` decodes in one call with
+  no callback, so the honest options were the full bar it has or a fake one.
+- **The tab strip itself is not measured.** The bar and the label are §13's manual category: no test
+  draws a chip. What IS tested is every number behind them.
