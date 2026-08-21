@@ -584,6 +584,21 @@ mod tests {
 	}
 
 	#[test]
+	fn extract_keeps_the_tab_the_grid_draws_as_a_blank() {
+		// The engine stores the TAB in the first cell it skipped (`put_tab`), and copying a region
+		// gives that tab back — which is what keeps a paste of columnar output (`du`, `ls -l`) lined
+		// up instead of collapsed to one space.
+		//
+		// The counterpart to §117, and the reason that fix is draw-only: the GRID must not hand a
+		// control character to the text shaper (it would displace every glyph after it in the run),
+		// but the character has to stay in the cell for everything that READS the grid rather than
+		// painting it. This test is the half that would catch a "fix" applied one layer too deep.
+		let terminal = screen_with(1, 24, "23\t./trans_3");
+		let selection = Selection::new(spot(0, 0)).with_head(spot(0, 16));
+		assert_eq!(selection.extract(terminal.screen()), "23\t     ./trans_3");
+	}
+
+	#[test]
 	fn empty_selection_extracts_nothing() {
 		let terminal = screen_with(1, 10, "hi");
 		let selection = Selection::new(spot(0, 0));

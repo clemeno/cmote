@@ -1416,6 +1416,21 @@ fn match_mask(matches: &[SearchHighlight], rows: u16, cols: u16) -> Vec<bool> {
 	mask
 }
 
+/// Whether a cell's contents carry a control character, in which case the grid draws a blank in its
+/// place (§117).
+///
+/// `any` rather than a test of the whole string: a cell holds a grapheme cluster, so in principle a
+/// base character could arrive with a control among its marks, and one control anywhere in the string
+/// is enough to wreck the advance of everything after it.
+///
+/// The one that really happens is `\t`, which the engine stores on purpose. Deciding this by category
+/// rather than by naming that one character is the point — every C0 and C1 code is something the
+/// terminal is supposed to have ACTED on rather than drawn, so a cell holding any of them is a cell
+/// whose glyph is not a glyph.
+fn holds_control(contents: &str) -> bool {
+	contents.chars().any(char::is_control)
+}
+
 /// Pack one screen row into runs (§9). Walks the row left to right, growing a run while
 /// cells are narrow, ASCII, and share a style; anything else is sealed into a run of its
 /// own so its width cannot leak into its neighbours — a wide cell claims two columns, a
@@ -1459,7 +1474,18 @@ fn plan_runs(
 			.as_ref()
 			.is_some_and(super::super::term::screen::Cell::is_wide);
 		let glyph = match &cell {
-			Some(cell) if cell.has_contents() => cell.contents().to_string(),
+			// A cell can legitimately HOLD a control character, and one does: the engine writes the
+			// TAB into the first cell it skipped over (`put_tab`) so that copying the region gets a
+			// real tab back — which `Selection::extract` reads, and which is what keeps a paste of
+			// `du` output aligned. It must never reach the shaper, though. A tab is one CELL to the
+			// grid and a jump to the next tab STOP to cosmic-text, so a `\t` inside a run's content
+			// silently displaces every glyph after it in that run — and since the selection decides
+			// where runs begin and end, selecting a substring moved characters that should have
+			// stayed put (§117). Drawn as the blank the cell occupies; the character is still in the
+			// cell for anything that reads the grid rather than paints it.
+			Some(cell) if cell.has_contents() && !holds_control(cell.contents()) => {
+				cell.contents().to_string()
+			}
 			_ => " ".to_string(),
 		};
 		let seals = is_wide || !glyph.is_ascii();
@@ -1836,6 +1862,68 @@ mod tests {
 		assert_eq!(runs[1].style.bg, SELECTION_BG);
 		assert_ne!(runs[0].style.bg, SELECTION_BG);
 		assert_ne!(runs[2].style.bg, SELECTION_BG);
+	}
+
+	/// A tab is stored IN a cell by the engine (`put_tab`, so copy gets a real tab back) and must
+	/// never reach the text shaper: to the grid it is one cell, to cosmic-text it is a jump to the
+	/// next tab stop, so it displaces every glyph after it in its run (§117).
+	///
+	/// The bug this pins was reported as "selecting a substring moves the characters", and that is
+	/// exactly how it presented: the selection decides where runs split, so it decides which
+	/// characters end up sharing a run with the tab and therefore which ones move. `du --inodes`
+	/// output — `COUNT<TAB>PATH` — is where it was found.
+	#[test]
+	fn a_tab_in_a_cell_never_reaches_the_shaper_however_the_selection_falls() {
+		let mut terminal = Terminal::new(1, 24);
+		terminal.process(b"23\t./trans_3");
+		// The tab is really there in the grid, or this test is not testing what it says it is.
+		assert_eq!(terminal.screen().cell(0, 2).unwrap().contents(), "\t");
+
+		// No selection, and then every substring selection of the path. Each one puts the run
+		// boundary somewhere different, which is what made the old bug come and go.
+		let mut cases: Vec<Option<(u16, u16)>> = vec![None];
+		for start in 0..15_u16 {
+			for end in start..15 {
+				cases.push(Some((start, end)));
+			}
+		}
+		for case in cases {
+			let selection = case.map(|(start, end)| {
+				Selection::new(DocSpot {
+					line: 0,
+					col: start,
+				})
+				.with_head(DocSpot { line: 0, col: end })
+			});
+			let marks = Marks {
+				selection: selection.as_ref(),
+				..Marks::default()
+			};
+			let runs = plan_runs(terminal.screen(), 0, 24, false, 0, marks, None);
+			for run in &runs {
+				assert!(
+					!run.content.chars().any(char::is_control),
+					"a control character reached a run: {:?} at col {} (selection {case:?})",
+					run.content,
+					run.col
+				);
+			}
+			// And the path is still drawn where the grid says it is, whatever the selection did to
+			// the run boundaries. Column 8 is where `.` sits — the tab at column 2 advanced the
+			// cursor to the next stop, leaving columns 3..=7 blank.
+			let path: String = runs
+				.iter()
+				.flat_map(|run| {
+					run.content
+						.chars()
+						.enumerate()
+						.map(move |(index, glyph)| (usize::from(run.col) + index, glyph))
+				})
+				.filter(|(column, _)| (8..=16).contains(column))
+				.map(|(_, glyph)| glyph)
+				.collect();
+			assert_eq!(path, "./trans_3", "selection {case:?}");
+		}
 	}
 
 	/// Which grid column a run draws `glyph` at: the run's own start plus how far into its content

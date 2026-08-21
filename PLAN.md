@@ -13413,3 +13413,82 @@ hand here would promise the wrong gesture.
 - **No page-jump on a track press.** A press on the bare track jumps straight to that position, which
   is what was asked for. The other convention — page up or down by one screen per click, holding to
   repeat — needs a timer, and cmote runs no animation timer (§23).
+
+## §117 — The tab that moved the text when you selected it
+
+Reported as: selecting a substring of a line moves the characters instead of leaving them in place.
+The line was `du --inodes -d 1` output — `COUNT<TAB>PATH`.
+
+The cause is one character in the wrong hands. `alacritty_terminal::put_tab` performs the tab AND
+**stores it**: the `\t` goes into the first cell the cursor skipped over, so that copying the region
+gets a real tab back rather than a run of spaces. That is deliberate and worth keeping — it is what
+makes a paste of columnar output (`du`, `ls -l`) stay lined up.
+
+`plan_runs` then read that cell's contents like any other glyph. A tab is ASCII, so it did not seal
+its run; it joined the neighbouring text and travelled into `fill_text` as part of the content string.
+To the grid that cell is one column. To cosmic-text a `\t` is *a jump to the next tab stop*. So every
+glyph after it in the same run was drawn some multiple of eight columns away from where the grid
+believed it was.
+
+### Why selecting was what made it visible
+
+Because the selection is what decides where runs split. Measured on the reported line, with the path
+at columns 8..=16:
+
+| selection | the run holding the tab | drawn wrong |
+|---|---|---|
+| none | `"23\t     ./trans_3       "` | the whole path |
+| cols 11..=14 | `"23\t     ./t"` | `./t` only — `rans` and `_3` are in later runs and land correctly |
+| cols 6..=14 | `"23\t   "` | nothing visible: the tab's run holds only blanks after it |
+| cols 8..=10 | `"23\t     "` | nothing visible, same reason |
+
+So the bug was always there, and dragging across the line moved the boundary that decided which
+characters shared a run with the tab. Some selections hid it completely, which is exactly the shape
+that gets reported as "selecting moves the text".
+
+### The fix, and the layer it belongs at
+
+`plan_runs` draws a blank for any cell whose contents hold a control character. The character stays in
+the cell for everything that READS the grid rather than paints it, which is the half that had to keep
+working: `Selection::extract` reads `cell.contents()`, so copy still yields the tab.
+
+By category rather than by naming `\t`. Every C0 and C1 code is something a terminal is supposed to
+have acted on instead of drawn, so a cell holding one is a cell whose glyph is not a glyph. `\t` is
+the one that actually occurs today; a second one arriving should not be a second bug.
+
+### How it was found, and what that says about the tests
+
+Not by reading the code. `plan_runs` was traced by hand against the reported line first and came out
+**correct** — every run's `col`, `cols` and `content` were right, which is why the existing tests
+(`packed_runs_cover_every_grid_column_exactly_once`,
+`a_selection_breaks_into_its_own_highlighted_run`) all passed and kept passing. The column arithmetic
+was never wrong. What was wrong was an assumption one layer below it: that a run's content string
+advances by one cell per character.
+
+It took a scratch probe that printed the actual runs to see `"23\t     ./t"`. The lesson worth keeping
+is that the invariant the renderer needs was not the invariant being asserted — "the runs cover every
+column exactly once" is true of a run containing a tab.
+
+So the new test asserts the missing one: **no run's content contains a control character**, over the
+reported line with no selection and with each of the 120 substring selections of it, plus that the
+path still reads `./trans_3` at columns 8..=16 whichever way the runs fall. Probed by reverting the
+fix: it fails on the no-selection case first, with the offending content quoted in the message.
+
+### Files
+
+- `src/ui/grid.rs` — `holds_control`, the glyph resolution in `plan_runs`, and the regression test.
+- `src/ui/selection.rs` — `extract_keeps_the_tab_the_grid_draws_as_a_blank`, the counterpart that
+  would catch this fix being applied one layer too deep.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — the C0 table's HT row now says the character is stored as well as
+  performed, and what each side of that means.
+
+### Not done
+
+- **A copied tab brings the skipped blanks with it.** `extract` on the reported line gives
+  `"23\t     ./trans_3"` — the tab AND the five blank cells it jumped over — because every cell in the
+  span is read and only the first holds the tab. Pasting that into a shell gives a tab and then five
+  spaces. It is alacritty's storage model showing through rather than a new fault, it is pre-existing,
+  and collapsing it would be a change to what COPY means rather than to what is drawn. Left as it is
+  and written down here so the next person to notice knows it was seen.
+- **No visible-whitespace rendering.** A blank is what a tab looks like. Drawing tabs as arrows is a
+  feature, not a fix, and nothing has asked for it.

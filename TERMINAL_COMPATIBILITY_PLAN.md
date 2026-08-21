@@ -1640,7 +1640,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | **xterm modifyOtherKeys** — query, the other six resources | ❌ | XTMODKEYS carries seven resources and cmote tracks one; a query for any of the rest draws silence, the reply being an XTMODKEYS control with no way to say 'not mine' (§61, §68) |
 | ENQ answerback | 🤷 | a lone `0x05` asks the terminal to type a configured string back into the shell (part 6, §36) |
 | BEL | 🛑 | `0x07` rings the bell — a sound, or a visual flash of the window (part 6, §63) |
-| BS / HT / LF / CR | ✅ | backspace, tab to the next stop, linefeed, and carriage return |
+| BS / HT / LF / CR | ✅ | backspace, tab to the next stop, linefeed, and carriage return. HT is stored as well as performed: the engine writes the `\t` into the first cell it skipped so a COPY of columnar output gets a real tab back, and `ui::grid` draws that cell as the blank it is — a control character handed to the text shaper would jump to its own tab stop and displace the rest of its run (§117) |
 | SO / SI | ✅ | the charset shift — SO locks G1 into GL and SI locks G0 back |
 
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
