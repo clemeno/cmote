@@ -13016,6 +13016,9 @@ parameter naming another would be answered with the only one there is, which is 
 
 ## §113 — The half of the tree the gate never reads
 
+> Read with §114. "One target wide" is one of the gate's two narrow axes; the other is that it runs
+> whatever compiler was last installed here, while CI follows stable.
+
 The macOS CI job was red. Not newly red: red since §103, for **118 commits and several pushes**, while
 the local gate ran green every time and every commit went out believing it.
 
@@ -13109,3 +13112,95 @@ by a run.** That is the honest status of this commit, and CI is what closes it.
 - **The `cfg` pairs were not audited beyond the nine.** Nine is what the compiler named; the tree has
   around sixty `cfg` attributes, and the ones whose macOS arm happens to lint clean today are clean by
   luck, not by check.
+
+## §114 — And one toolchain behind
+
+§113 ended on "the gate is one target wide", and one day later the **Windows** job went red — the job
+that runs the same `cargo clippy --all-targets -- -D warnings` the gate runs, on the same target, with
+no cross-compile anywhere near it. Seven errors, on two lints that do not exist in the clippy on this
+machine.
+
+| | version |
+|---|---|
+| local | clippy 0.1.97 / rustc 1.97.1 (2026-07-14) |
+| CI (`dtolnay/rust-toolchain@stable`) | rustc 1.98.0 (2026-08-18, channel 2026-08-20) |
+
+So the gate is narrow along a **second** axis, and this one is worse in a way, because nothing about
+it is visible: `@stable` in CI floats and follows the release train, while the local toolchain is
+pinned to whenever somebody last typed `rustup update`. The two drift apart silently, the gap widens
+until it is bridged by hand, and a lint that shipped in stable **the day before** turns a green gate
+into a red push.
+
+Note what this is not. §113 was rot — code wrong since §103 and reported for four days. This is the
+opposite: every one of these seven sites was clean when it was written, and stable moved under them.
+No commit here did anything wrong, which is exactly why no amount of care at commit time would have
+caught it.
+
+### The fix is a fifth gate step, not a pin
+
+The obvious answer is a `rust-toolchain.toml` pinning both sides to one version. It is the wrong one
+for this project. Pinning makes the two compilers identical, but it converts "a new lint arrived" from
+an event into a chore, and this is a tree that runs `clippy::pedantic` on purpose (§111) and wants the
+new lints on the day they ship. Freezing the compiler to keep CI quiet would be buying green by
+turning the alarm off.
+
+The other direction gets both. `rustup update stable` joins the gate as its first step:
+
+```
+rustup update stable      # ← §114
+cargo check --all-targets
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
+
+It is a no-op when already current, it costs seconds when it is not, and it closes the gap by
+construction rather than by remembering. CI keeps floating, so a new lint still arrives immediately —
+it just arrives *locally first*.
+
+**The residual risk, named:** a stable release landing between the local gate run and the CI run. The
+window is a six-week cadence against a run that takes minutes, and the failure mode is a red CI job,
+which §113 already established as a thing that gets read. That is a small enough hole to leave open
+knowingly; it is not a hole to leave undescribed.
+
+### Both lints turned out to be right
+
+Worth saying, because appeasing a linter and being taught something by one look identical in a diff:
+
+- **`chunks_exact_to_as_chunks`**, five sites. `as_chunks::<N>()` hands back `&[[u8; N]]` instead of
+  `&[u8]`, so the indexes that follow are bounds-checked once, at the split, rather than on every
+  access the optimiser cannot see through. At `editor.rs`'s UTF-16 decode it deleted code outright: a
+  `&[u8; 2]` is exactly what `u16::from_le_bytes` wants, so the array that was being rebuilt by hand
+  from two indexes is gone. Each site gained a line saying why the discarded remainder is empty —
+  every one of them already had the length guard that makes it so, and at `hex_decode` that guard is
+  load-bearing, because silently dropping a trailing half-byte would decode `54E` as `54`.
+- **`unused_async_trait_impl`**, twice, on `Script` — the `Exec` test double (§46). Both methods were
+  `async fn` with nothing to await, and saying so in the signature is more honest than hiding it. It
+  also surfaced a distinction worth knowing: an `async fn` body does not start until the first poll,
+  so `record` used to run at the `.await`; written as `-> impl Future` returning `future::ready`, the
+  body runs at the **call** and only the answer is deferred. Every test here awaits immediately so the
+  recorded order is unchanged, but the two are not the same function and now the signature says which.
+
+One correction the lint's own suggested diff got wrong: it kept `bail!`, which expands to a `return`
+and cannot appear where the signature promises a future. `Err(anyhow!(…))` is the same value without
+the control flow.
+
+And a footnote that is really §113 repeating itself inside one commit: importing `anyhow!` at module
+scope failed immediately, because its only use is inside a `#[cfg(test)]` impl. Moved to the one
+function that uses it, exactly as `Component` was in §113.
+
+### Files
+
+- `src/cursor.rs`, `src/editor.rs`, `src/term/query.rs` — five `as_chunks::<N>()`.
+- `src/ssh/shellfs.rs` — `Script`'s two `Exec` methods, and the note on eager body vs deferred answer.
+- `AGENTS.md` — the version axis, and `rustup update stable` as the gate's first step.
+
+### Not done
+
+- **CI is not pinned, on purpose** — see above. If a floating `@stable` ever breaks a release build
+  rather than a lint run, that trade is worth reopening; a lint break is cheap and a build break is
+  not.
+- **The gate still cannot see the other target.** §114 fixes the version axis only. `rustup update`
+  does nothing about `x86_64-apple-darwin`, which still has exactly one reader.
+- **Nothing checks that the gate's first step was actually run.** It is a line in `AGENTS.md`, the same
+  standing as the other four.

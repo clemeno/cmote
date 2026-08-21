@@ -18,9 +18,10 @@ most surprising lines are surprising on purpose and the section says why.
 
 ## The green gate
 
-Before **any** commit, all four, in this order:
+Before **any** commit, all five, in this order:
 
 ```
+rustup update stable
 cargo check --all-targets
 cargo test
 cargo clippy --all-targets -- -D warnings
@@ -30,6 +31,14 @@ cargo fmt --check
 CI (`.github/workflows/ci.yml`) runs the same three that apply to it, plus `cargo deny` and
 `cargo audit` for the dependency tree, and repeats clippy and the tests for
 `x86_64-apple-darwin`.
+
+**`rustup update` is the first step for a reason (§114).** CI uses `dtolnay/rust-toolchain@stable`,
+which floats with the release train; the toolchain here is pinned to whenever it was last updated by
+hand. Let those drift and a lint that shipped in stable yesterday turns a green gate into a red push,
+on the host target, with no `cfg` involved — which is how §114 happened. Updating first is a no-op
+when current and costs seconds when it is not. **CI is deliberately not pinned to a version**: this
+tree runs `clippy::pedantic` on purpose and wants new lints the day they ship, so the answer is to
+see them locally first, not to freeze the compiler.
 
 **The gate is one target wide, and that is its blind spot.** It runs for the host, so it lints
 only the `cfg` the host selects. Every `#[cfg(target_os = "macos")]` and `#[cfg(not(windows))]`
