@@ -14984,3 +14984,113 @@ while `AppScreen` went 32 → 304.
   *screen*'s, and they are cleared together by `abandon_attempt`. That is the same shape
   `HomeScreen` and `ConnectFlow` just fixed, one level over: an `Attempt` type is the obvious next
   question after `Terminal`, and it is candidate 3 of the architecture review, not this series.
+
+## §133 — The last screen is not a screen, and the two reasons it resisted
+
+§130 said the series would finish with `AppScreen::Terminal(Session)` and named the risk it expected:
+§45's `Workspace` swap. That was not the obstacle. Two others were, and both only appeared once the
+change was written — so this section records them rather than the refactor, because the refactor
+should not be re-attempted in that shape.
+
+**No code changed.** Two attempts were made and both reverted; the tree is where §132 left it.
+1 556 tests, green gate.
+
+### Attempt one: all 24 fields, and the second test for belonging
+
+The plan was §131's rule applied to whatever the terminal screen touches: 24 fields off `Tab`, with
+the on-screen identity's view as a `Workspace` so the account swap becomes one line. It compiled to
+**772 errors**, and the distribution said why:
+
+| file | errors |
+|---|---|
+| `app/mod.rs` | 442 |
+| `app/browse.rs` | 176 |
+| `app/accounts.rs` | 85 |
+| `app/forwards.rs` | 44 |
+
+`browse.rs` was the tell. Nineteen of its twenty-six methods touch a pane **and** something on the
+tab — `send_command`, `send_fetches`, `open_modal`, which need `command_tx`, `dialog_body` and `card`.
+Rust cannot split a borrow through a method, so `self.panes.pane.step(…)` becomes
+`self.panes_mut()?.pane.step(…)` at every one of ~290 sites, and hoisted `let`s wherever two of them
+share an expression.
+
+And it buys **nothing**. That is the part worth writing down. §131's test — is the field destroyed and
+rebuilt at the transition? — says yes for `panes`, so it should move. But the reason carrying a field
+pays is that a *tag could contradict it*, and nothing tags `panes`: a `Panes` on a tab with no session
+is an unused default, not a bug waiting to happen. There is no second value to disagree with.
+
+**So there is a second test, and it is the one this series had not needed yet:** *is the field reached
+without also reaching `Tab`?* `HomeScreen`'s three fields are read by `view` and `keyboard_claim` and
+nothing else. `ConnectFlow`'s two are read by `view`, `subscription` and `on_form_key`. `panes` is
+touched by nineteen methods that also send commands and open dialogs. The first three slices were easy
+because their state was **only** the screen's; this one's is not.
+
+Re-scoped to the fifteen fields that pass both tests — the session's identity (`endpoint`, `local`),
+its shell and views (`work`, `identities`, `identity`, `next_identity`), and the four session-lifetime
+flags (`eof_probe`, `resume_cwd`, `shell_focus_reported`, and the state) — the same compile gave
+**browse.rs 176 → 8** and **forwards.rs 44 → 0**. That confirms the split rather than assuming it.
+
+### Attempt two: the blocker, which is structural
+
+The narrowed version got far enough to hit the real problem, and it is not about borrows.
+
+A session's own credential questions are drawn on **another screen**. `open_prompt` sets
+`AppScreen::Connect`, because §7 and §8 render a host key, a key passphrase and a
+keyboard-interactive challenge as `form_with_dialog` — a dialog over the *dimmed connect form*. So the
+sequence is:
+
+1. `dial` sets the endpoint and moves to the session screen;
+2. `SshEvent::HostKey` arrives → `open_prompt` → the screen is now `Connect`;
+3. the user accepts → `authenticating` → back to the session screen;
+4. `Connected` arrives and reads the endpoint set in step 1.
+
+Under a `Tab::connection` field that round trip is invisible. With the session held *inside*
+`AppScreen`, **step 2 destroys it** — and the endpoint `Connected` needs is gone before it is asked
+for. Not a detail to work around: it is what §132's own doc records about `Prompt`, that all six
+questions are one thing shown over one form, seen from the other side.
+
+So `AppScreen::Session(Session)` is wrong, and so was §130's `Terminal(Session)`. **A session outlives
+the screen that shows it**, because part of getting one open is drawn somewhere else.
+
+### What is actually true about the last 24 fields
+
+Everything §132's *Not done* said, plus this. The session is not a screen; it spans `Connecting`,
+`Terminal` *and* the `Connect` detours a handshake makes through it, and it ends into either `Home` or
+`Connect` depending on which of two teardown arms runs.
+
+Two shapes remain, and they are not the same size:
+
+* **A `Session` field.** `Tab::session: Option<Session>`, independent of `screen`. Groups the fifteen
+  fields, and collapses the seven-call teardown that `Disconnected` and `Error` each run by hand into
+  dropping one value — after `abandon_transfers` has lifted `unfinished` out, which must outlive it
+  (§16). Cheap, and a real improvement. But it keeps a tag beside a state: `screen` and
+  `session.is_some()` can still disagree, so it does **not** give what §130–§132 gave.
+* **Split `Prompt` by who is asking.** The FORM's question (the vault's master passphrase, asked
+  before anything is dialed) is not the HANDSHAKE's (host key, passphrase, interactive, asked by a
+  session that already exists). The second group belongs in
+  `SessionState::Dialing { status, asking }`, rendered from the session arm — `Tab::form` is on the
+  tab, so the backdrop is available there. That gets the property, and it is a redesign of the
+  connect/handshake boundary rather than a move: it partly reopens §132, which argued the six prompts
+  are one thing.
+
+The second is the right answer and it is **not a slice**. It wants its own decision, which is why this
+section stops at recording the finding.
+
+### One thing verified in passing
+
+`dial` builds its pending target with `show_hidden: self.panes.show_hidden()`, under a comment calling
+it a placeholder the stored preference overrides. Checked: `targets::upsert_on_connect` takes
+host / port / user / auth / key / cert and nothing else, and a brand-new target gets
+`shown_by_default()`. The placeholder is never read, exactly as claimed — so if the panes ever do move,
+that line can become the default without a behaviour question attached.
+
+### Not done
+
+- **The `Prompt` split, if it is wanted.** The measurements above are the input to that decision, not
+  a plan for it.
+- **§45's `Workspace` swap** was never reached. It remains the thing to do *inside* whichever shape
+  wins: `Session` holding the live view as a `Workspace` makes `exchange` a swap of one value instead
+  of nine, and removes the hazard its own doc names — *"a field left out of it would leak one
+  account's state into another's pane."*
+- **The series stands at three of four.** §130, §131 and §132 removed reachable bad states and are
+  independent of this. `Tab` is 44 fields; it was 50.
