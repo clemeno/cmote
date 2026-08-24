@@ -2214,7 +2214,7 @@ impl App {
 			AppScreen::Connect if active.prompt.is_none() => {
 				subs.push(iced::keyboard::listen().map(Message::FormKey));
 			}
-			AppScreen::Home => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			AppScreen::Home(_) => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
 			// What a viewer listens for depends on what it is holding, so it is asked (§32, §53).
 			// The editor wants its shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W) while typing goes
 			// to the widget. A picture has nothing to type into, so it listens for one thing: the
@@ -2251,13 +2251,19 @@ impl App {
 	clippy::large_enum_variant,
 	reason = "one per `Tab`, which is 7 688 bytes; it replaced fields of 336 with 304 — see above"
 )]
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub enum AppScreen {
 	/// The home screen: the list of saved connection targets (§14). This is where we
 	/// start; picking a target pre-fills the connect form, "New connection" opens a
 	/// blank one.
-	#[default]
-	Home,
+	///
+	/// It carries what the screen is DOING (§131) and not what the tab remembers about the list —
+	/// see [`HomeScreen`] for where that line falls and why it is not where it looks.
+	///
+	/// This is the default, but `#[derive(Default)]` cannot say so any more: the attribute only goes
+	/// on unit variants. So `Default` is written out below, which costs four lines and is the same
+	/// four lines the derive was generating.
+	Home(HomeScreen),
 	/// The connection form (host / port / user / auth), reached from the home screen.
 	Connect,
 	/// Handshake and authentication in progress; `status` is a human-readable
@@ -2284,6 +2290,45 @@ pub enum AppScreen {
 	/// have drawn). Carrying it makes both unsayable, and it is the same argument [`Viewer`] itself
 	/// won against the pair of `Option`s it replaced (§53) — one level up.
 	Viewer(Viewer),
+}
+
+impl Default for AppScreen {
+	/// A tab starts on the home list (§14), with nothing open on it.
+	fn default() -> Self {
+		Self::Home(HomeScreen::default())
+	}
+}
+
+/// What the home screen is DOING right now (§14, §131): its right-click menu, its inline rename, its
+/// delete confirmation. Three transient facts, each of which means nothing off this screen — and
+/// which the screen was already destroying and rebuilding by hand.
+///
+/// `go_home` used to open with three assignments, `home_menu_open = false`, `home_rename = None`,
+/// `confirm_delete = false`, and five other methods cleared the menu on their way off the screen.
+/// Those eight lines were a constructor written out longhand: entering the screen means a fresh one
+/// of these, and leaving it means dropping it. `AppScreen::Home(HomeScreen::default())` says both.
+///
+/// **What is deliberately NOT here**, and this is the section's real finding: `home_filter` and
+/// `home_selected` stayed on [`Tab`]. They look exactly like the three above — same `home_` prefix,
+/// same screen, drawn by the same `view` — and they behave completely differently. `go_home`'s own
+/// doc says it keeps the selection *"so the list re-opens on the last-used row"*, and the
+/// `Connected` arm WRITES `home_selected` from the `Connecting` screen, so that a session's target
+/// is pre-selected for a later return. A field that outlives the screen, and is set while another
+/// screen shows, is a fact about the tab.
+///
+/// So the test for whether a field belongs in a variant is not "which screen reads it" — all five
+/// of these are read by one `view` arm — but **is it destroyed and rebuilt at the transition**. Three
+/// of the five were, in longhand. Two were explicitly not.
+#[derive(Debug, Default)]
+pub struct HomeScreen {
+	/// Whether the right-click menu is open (it acts on `Tab::home_selected`).
+	menu_open: bool,
+	/// The in-progress inline rename, if any (§14).
+	rename: Option<ui::home::RenameState>,
+	/// Whether the delete confirmation is open for `Tab::home_selected` (§14). Deleting a target is
+	/// not undoable, so — like Disconnect — the menu item and the Delete key only raise this
+	/// prompt; the removal happens on an explicit confirm.
+	confirm_delete: bool,
 }
 
 /// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
@@ -2611,15 +2656,12 @@ pub struct Tab {
 	/// The endpoint key (`user@host:port`) of the highlighted target on the home
 	/// screen, if any. Drives the row highlight and is what the right-click menu and
 	/// the F2/Enter/Delete shortcuts act on.
+	///
+	/// Here and not in [`HomeScreen`] (§131), unlike the menu / rename / confirmation that read it:
+	/// it outlives the screen on purpose. `go_home` keeps it so the list re-opens on the last-used
+	/// row, and the `Connected` arm SETS it from the `Connecting` screen, so a session's target is
+	/// already picked out for a return that may be much later.
 	home_selected: Option<String>,
-	/// Whether the home screen's right-click menu is open (it acts on `home_selected`).
-	home_menu_open: bool,
-	/// Whether the delete confirmation is open for `home_selected` (§14). Deleting a
-	/// target is not undoable, so — like Disconnect — the menu item and the Delete key
-	/// only raise this prompt; the removal happens on an explicit confirm.
-	confirm_delete: bool,
-	/// The in-progress inline rename on the home screen, if any (§14).
-	home_rename: Option<ui::home::RenameState>,
 	/// The target (no secret) captured when a connect is dialed, saved to `targets`
 	/// once the session actually opens (§14). `None` between attempts so a failed or
 	/// abandoned connect never persists a target.
@@ -3638,6 +3680,33 @@ impl Tab {
 		}
 	}
 
+	/// What the home screen is doing, if it is the screen showing (§14, §131). Same derived
+	/// `Option` as [`Tab::viewer`]: `None` means this tab is elsewhere, which is the only reason a
+	/// menu or a rename could fail to be there.
+	///
+	/// `home_screen` and not `home`, because [`Tab::home`] is already the constructor for a tab that
+	/// STARTS on this screen. Two different things, and the compiler said so.
+	///
+	/// `#[cfg(test)]`, and that is the interesting part: there is no production READER. Every one of
+	/// them — `view`, `keyboard_claim` — was already matching on `self.screen`, so carrying the state
+	/// in the variant means they bind it out of the pattern they were writing anyway. An accessor is
+	/// only wanted where something needs to ask without knowing, and after §131 nothing does.
+	#[cfg(test)]
+	pub(super) fn home_screen(&self) -> Option<&HomeScreen> {
+		match &self.screen {
+			AppScreen::Home(home) => Some(home),
+			_ => None,
+		}
+	}
+
+	/// The home screen's state, mutably — the twin of [`Tab::home_screen`].
+	pub(super) fn home_screen_mut(&mut self) -> Option<&mut HomeScreen> {
+		match &mut self.screen {
+			AppScreen::Home(home) => Some(home),
+			_ => None,
+		}
+	}
+
 	/// The buffer this tab is editing, if it is editing one (§32).
 	fn editor(&self) -> Option<&crate::editor::Editor> {
 		self.viewer().and_then(Viewer::editor)
@@ -3686,7 +3755,7 @@ impl Tab {
 					None => endpoint,
 				}
 			}
-			AppScreen::Home => "Home".to_owned(),
+			AppScreen::Home(_) => "Home".to_owned(),
 			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
 			// only an editor can have (§32, §53). Both halves of that are the viewer's own.
 			AppScreen::Viewer(viewer) => viewer.label(),
@@ -4048,7 +4117,9 @@ impl Tab {
 			// nothing to fill in, and no host key or credential, because there is no other machine.
 			Message::HomeLocalPressed(shell) => return self.dial_local(shell),
 			Message::HomeTargetClicked(key) => {
-				self.home_menu_open = false;
+				if let Some(home) = self.home_screen_mut() {
+					home.menu_open = false;
+				}
 				// First click selects (so F2 / rename / delete have a target); clicking
 				// the already-selected row again opens it — the "pick pre-fills the form"
 				// action, kept distinct from selection so both can coexist (§14).
@@ -4059,17 +4130,31 @@ impl Tab {
 			}
 			Message::HomeTargetRightClicked(key) => {
 				self.home_selected = Some(key);
-				self.home_menu_open = true;
+				if let Some(home) = self.home_screen_mut() {
+					home.menu_open = true;
+				}
 			}
-			Message::HomeMenuDismissed => self.home_menu_open = false,
+			// Each of these three reaches the home screen's own state, and reaches it through the
+			// screen (§131): a message for a screen that is no longer showing lands nowhere, which
+			// is what the field's `Option`-ness used to leave to chance. `Message`s do arrive late —
+			// that is why `HomeRenameEdited` was already guarded.
+			Message::HomeMenuDismissed => {
+				if let Some(home) = self.home_screen_mut() {
+					home.menu_open = false;
+				}
+			}
 			Message::HomeMenuOpen => return self.open_selected_target(),
 			Message::HomeMenuRename => return self.start_rename(),
 			Message::HomeMenuDelete => self.ask_delete_selected_target(),
 			Message::HomeDeleteConfirmed => self.delete_selected_target(),
-			Message::HomeDeleteCancelled => self.confirm_delete = false,
+			Message::HomeDeleteCancelled => {
+				if let Some(home) = self.home_screen_mut() {
+					home.confirm_delete = false;
+				}
+			}
 			Message::HomeFilterEdited(pattern) => self.on_home_filter(pattern),
 			Message::HomeRenameEdited(value) => {
-				if let Some(rename) = self.home_rename.as_mut() {
+				if let Some(rename) = self.home_screen_mut().and_then(|home| home.rename.as_mut()) {
 					rename.text = value;
 				}
 			}
@@ -5404,12 +5489,15 @@ impl Tab {
 	/// Pure, and it reads only what is already on the tab, so "who has the keyboard" can be asked
 	/// without a window and without pressing anything.
 	fn keyboard_claim(&self) -> Option<KeyboardClaim> {
-		match self.screen {
-			AppScreen::Home => {
-				if self.confirm_delete {
+		match &self.screen {
+			// The two home claimants come straight out of the variant (§131): this method was
+			// already matching on the screen to know which claimants can exist at all, so carrying
+			// their state in it means the answer is read off the thing that was already being asked.
+			AppScreen::Home(home) => {
+				if home.confirm_delete {
 					return Some(KeyboardClaim::DeleteTarget);
 				}
-				if self.home_rename.is_some() {
+				if home.rename.is_some() {
 					return Some(KeyboardClaim::TargetRename);
 				}
 				None
@@ -5443,8 +5531,18 @@ impl Tab {
 	/// one key safe for all seven.
 	fn dismiss(&mut self, claim: KeyboardClaim) {
 		match claim {
-			KeyboardClaim::DeleteTarget => self.confirm_delete = false,
-			KeyboardClaim::TargetRename => self.home_rename = None,
+			// Both of these are only ever claimed from the home screen, so `home_mut` is `Some`
+			// whenever they are dismissed (§131) — the `if let` states that rather than assuming it.
+			KeyboardClaim::DeleteTarget => {
+				if let Some(home) = self.home_screen_mut() {
+					home.confirm_delete = false;
+				}
+			}
+			KeyboardClaim::TargetRename => {
+				if let Some(home) = self.home_screen_mut() {
+					home.rename = None;
+				}
+			}
 			KeyboardClaim::Modal => self.modal = None,
 			KeyboardClaim::Transfers => self.transfers.escape(),
 			KeyboardClaim::TreeRename => self.panes.tree.cancel_rename(),
@@ -6483,14 +6581,14 @@ impl Tab {
 		match &self.screen {
 			// The shared target list is read through a short-lived borrow; `home::view` clones
 			// every name it needs, so nothing in the returned element outlives the borrow (§26).
-			AppScreen::Home => ui::home::view(
+			AppScreen::Home(home) => ui::home::view(
 				self.targets.borrow().items(),
 				ui::home::View {
 					filter: &self.home_filter,
 					selected: self.home_selected.as_deref(),
-					rename: self.home_rename.as_ref(),
-					menu_open: self.home_menu_open,
-					confirm_delete: self.confirm_delete,
+					rename: home.rename.as_ref(),
+					menu_open: home.menu_open,
+					confirm_delete: home.confirm_delete,
 					dialog_body: &self.dialog_body,
 					card,
 					// The shells this machine can open (§103), searched once per run and kept — see
@@ -7587,7 +7685,7 @@ mod tests {
 			"and the shell left, which is what ends the session — no kill was involved"
 		);
 		assert!(
-			matches!(tab.screen, AppScreen::Home) && tab.connection.is_none(),
+			matches!(tab.screen, AppScreen::Home(_)) && tab.connection.is_none(),
 			"the tab landed on the home screen, where a second Ctrl+D closes it (§30)"
 		);
 	}
@@ -7672,7 +7770,7 @@ mod tests {
 			"the tab has forgotten it had a session"
 		);
 		assert!(
-			matches!(app.screen, AppScreen::Home),
+			matches!(app.screen, AppScreen::Home(_)),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
 		);
 	}
@@ -8784,7 +8882,7 @@ mod tests {
 		assert_eq!(strip(&app).len(), 2);
 		assert_eq!(on_screen(&app), 1, "the new tab is the active one");
 		assert_ne!(strip(&app)[0].id, strip(&app)[1].id, "ids are never reused");
-		assert!(matches!(strip(&app)[1].screen, AppScreen::Home));
+		assert!(matches!(strip(&app)[1].screen, AppScreen::Home(_)));
 	}
 
 	#[test]
@@ -10078,7 +10176,7 @@ mod tests {
 		assert_ne!(app.focus, first, "the fresh region takes the keyboard");
 		// A fresh application layout: one tab, and it is sitting on the saved-target list.
 		assert_eq!(strip(&app).len(), 1);
-		assert!(matches!(strip(&app)[0].screen, AppScreen::Home));
+		assert!(matches!(strip(&app)[0].screen, AppScreen::Home(_)));
 		// Tab ids stay app-wide, so the new region's tab cannot collide with the old region's (§26).
 		let ids: Vec<u64> = app.tabs().map(|tab| tab.id).collect();
 		assert_eq!(ids.len(), 2);

@@ -35,13 +35,13 @@ impl Tab {
 	/// linger once we leave it (§12). The saved-target selection is kept so the list
 	/// re-opens on the last-used row.
 	pub(super) fn go_home(&mut self) -> iced::Task<Message> {
-		self.screen = AppScreen::Home;
+		// A fresh `HomeScreen` IS the "closes any open menu / rename" above (§131). This used to be
+		// three assignments under the screen change, which is the same thing said twice — once by
+		// the screen and once by hand, with nothing keeping the two in step.
+		self.screen = AppScreen::Home(super::HomeScreen::default());
 		// Whatever the connect flow was asking is abandoned with the connect itself, and the
 		// buffers it was holding go with it (§12).
 		self.prompt = None;
-		self.home_menu_open = false;
-		self.home_rename = None;
-		self.confirm_delete = false;
 		// Leaving for the list abandons any connect in flight, so what it was carrying goes with
 		// it — the unsaved target and, above all, the secret it captured (§12, §14, §16).
 		self.abandon_attempt();
@@ -58,7 +58,7 @@ impl Tab {
 	/// Open a blank connect form for a brand-new connection (§14): reset every field,
 	/// focus the first, and switch to the form.
 	pub(super) fn open_form_new(&mut self) -> iced::Task<Message> {
-		self.home_menu_open = false;
+		// No menu to close: `go_to_form` leaves this screen, and the menu was part of it (§131).
 		self.form = ui::connect::ConnectForm::default();
 		self.go_to_form()
 	}
@@ -69,7 +69,8 @@ impl Tab {
 	/// the master-passphrase prompt first if the vault is not yet open. A stale/missing
 	/// selection is a no-op.
 	pub(super) fn open_selected_target(&mut self) -> iced::Task<Message> {
-		self.home_menu_open = false;
+		// Every path out of here leaves this screen — `seed_form` sets `Connect` before it opens the
+		// vault prompt, and `go_to_form` is the other exit — so the menu goes with it (§131).
 		let Some(key) = self.home_selected.clone() else {
 			return iced::Task::none();
 		};
@@ -99,7 +100,9 @@ impl Tab {
 		if !still_shown {
 			self.home_selected = None;
 			// The context menu is anchored to the selected row, so it cannot outlive it.
-			self.home_menu_open = false;
+			if let Some(home) = self.home_screen_mut() {
+				home.menu_open = false;
+			}
 		}
 	}
 
@@ -107,7 +110,6 @@ impl Tab {
 	/// current name and focus the field so the user types straight away. No selection
 	/// (or a stale one) is a no-op.
 	pub(super) fn start_rename(&mut self) -> iced::Task<Message> {
-		self.home_menu_open = false;
 		let Some(key) = self.home_selected.clone() else {
 			return iced::Task::none();
 		};
@@ -119,14 +121,21 @@ impl Tab {
 		else {
 			return iced::Task::none();
 		};
-		self.home_rename = Some(ui::home::RenameState { key, text: name });
+		// One `if let` for the menu and the rename together, because they are one screen's state
+		// now (§131) — and it is also the guard that says a rename cannot be started from anywhere
+		// but the list, which used to be true only because nothing tried.
+		let Some(home) = self.home_screen_mut() else {
+			return iced::Task::none();
+		};
+		home.menu_open = false;
+		home.rename = Some(ui::home::RenameState { key, text: name });
 		iced::widget::operation::focus(ui::home::RENAME_INPUT_ID)
 	}
 
 	/// Commit the in-progress rename (§14): apply it (which re-sorts the list) and save.
 	/// A blank name is rejected by the store, so committing one just discards the edit.
 	pub(super) fn commit_rename(&mut self) {
-		if let Some(rename) = self.home_rename.take() {
+		if let Some(rename) = self.home_screen_mut().and_then(|home| home.rename.take()) {
 			// Two borrows of the one shared cell must not overlap (a mut + a shared borrow is a
 			// RefCell panic), so the rename's `borrow_mut` ends on its own line before `save`
 			// takes a fresh shared borrow (§26).
@@ -141,7 +150,6 @@ impl Tab {
 	/// deleting does *and* which target it hits — the list is only a click away from the
 	/// wrong row — then opens the confirmation. No selection (or a stale one) is a no-op.
 	pub(super) fn ask_delete_selected_target(&mut self) {
-		self.home_menu_open = false;
 		let Some(key) = self.home_selected.clone() else {
 			return;
 		};
@@ -154,8 +162,12 @@ impl Tab {
 			return;
 		};
 		let body = format!("{}\n\n{}  ({key})", ui::home::DELETE_DIALOG_BODY, name);
+		// Before the borrow below: `set_dialog_body` takes `&mut self` too (§131).
 		self.set_dialog_body(&body);
-		self.confirm_delete = true;
+		if let Some(home) = self.home_screen_mut() {
+			home.menu_open = false;
+			home.confirm_delete = true;
+		}
 	}
 
 	/// Delete the selected target (§14) and save — only reached from a confirmed prompt.
@@ -164,8 +176,10 @@ impl Tab {
 	/// is locked the encrypted entry is left orphaned in `secrets.age` — harmless (it is
 	/// unreachable without its target and still encrypted) and pruned only when next unlocked.
 	pub(super) fn delete_selected_target(&mut self) {
-		self.home_menu_open = false;
-		self.confirm_delete = false;
+		if let Some(home) = self.home_screen_mut() {
+			home.menu_open = false;
+			home.confirm_delete = false;
+		}
 		if let Some(key) = self.home_selected.take() {
 			if let Some(vault) = self.vault.borrow_mut().as_mut()
 				&& let Err(error) = vault.forget(&key)
@@ -259,10 +273,13 @@ mod tests {
 	#[test]
 	fn the_home_screen_has_claimants_of_its_own() {
 		let mut app = Tab::default();
-		assert!(matches!(app.screen, AppScreen::Home));
+		assert!(matches!(app.screen, AppScreen::Home(_)));
 		assert_eq!(app.keyboard_claim(), None);
 
-		app.home_rename = Some(ui::home::RenameState {
+		// Arranged through the screen (§131), which is the only place this state exists — a test
+		// that had to reach a `Tab` field for it could arrange a rename on a terminal tab, and did
+		// not have to mean anything by it.
+		app.home_screen_mut().expect("the home screen").rename = Some(ui::home::RenameState {
 			key: "one".to_owned(),
 			text: "one".to_owned(),
 		});
@@ -270,8 +287,65 @@ mod tests {
 
 		// The delete confirmation outranks the rename: a stray Enter must not open a connection
 		// from behind the modal.
-		app.confirm_delete = true;
+		app.home_screen_mut()
+			.expect("the home screen")
+			.confirm_delete = true;
 		assert_eq!(app.keyboard_claim(), Some(KeyboardClaim::DeleteTarget));
+	}
+
+	/// Going off the list to the FORM ends the rename that was open on it (§131) — and this is the
+	/// state that used to survive the trip. `open_form_new` closed the menu by hand and said nothing
+	/// about the rename, so a `Tab` sat on the connect screen still holding one: harmless, because
+	/// only `ui::home::view` ever drew it, and unrepresentable now rather than harmless.
+	///
+	/// Not asserted by reading a field back, because there is no field to read: `home_screen()`
+	/// answering `None` IS the claim.
+	#[test]
+	fn a_rename_does_not_survive_the_trip_to_the_form() {
+		let mut tab = tab_with_targets();
+		tab.home_selected = Some("root@web-01:22".to_owned());
+		let _focus = tab.start_rename();
+		assert!(
+			tab.home_screen().expect("the home screen").rename.is_some(),
+			"a rename is in progress"
+		);
+
+		// Off to the form, which is not a "cancel the rename" path anywhere in the code.
+		let _focus = tab.open_form_new();
+
+		assert!(
+			tab.home_screen().is_none(),
+			"there is nowhere for the rename to have survived"
+		);
+	}
+
+	/// `go_home` puts a FRESH list up: whatever was open on the last one is gone, and the selection
+	/// is not (§14, §131). Its doc has always promised both halves; since §131 the first half is the
+	/// screen being rebuilt rather than three assignments underneath it.
+	///
+	/// Called from the home screen on purpose — that is the case where the rebuild is the only thing
+	/// doing the clearing, since arriving from another screen would have dropped the state anyway.
+	#[test]
+	fn going_home_from_home_puts_a_fresh_list_up() {
+		let mut tab = tab_with_targets();
+		tab.home_selected = Some("root@web-01:22".to_owned());
+		let _focus = tab.start_rename();
+		tab.home_screen_mut().expect("the home screen").menu_open = true;
+		tab.home_screen_mut()
+			.expect("the home screen")
+			.confirm_delete = true;
+
+		let _task = tab.go_home();
+
+		let home = tab.home_screen().expect("still the home screen");
+		assert!(home.rename.is_none(), "the rename is over");
+		assert!(!home.menu_open, "and the menu is closed");
+		assert!(!home.confirm_delete, "and the confirmation is gone");
+		assert_eq!(
+			tab.home_selected.as_deref(),
+			Some("root@web-01:22"),
+			"but the selection is kept, so the list re-opens on the last-used row"
+		);
 	}
 
 	/// Typing a pattern the selected row still matches leaves the selection alone — a list that
@@ -294,7 +368,7 @@ mod tests {
 	fn a_filter_that_hides_the_selection_drops_it() {
 		let mut tab = tab_with_targets();
 		tab.home_selected = Some("root@web-01:22".to_owned());
-		tab.home_menu_open = true;
+		tab.home_screen_mut().expect("the home screen").menu_open = true;
 
 		tab.on_home_filter("db".to_owned());
 
@@ -302,7 +376,10 @@ mod tests {
 			tab.home_selected, None,
 			"the hidden row is no longer selected"
 		);
-		assert!(!tab.home_menu_open, "and its context menu went with it");
+		assert!(
+			!tab.home_screen().expect("the home screen").menu_open,
+			"and its context menu went with it"
+		);
 	}
 
 	/// The pattern is matched against the endpoint as well as the name, so a target still called

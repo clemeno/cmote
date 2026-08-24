@@ -14742,3 +14742,113 @@ an `#[expect]` with the numbers in its reason, which is what §111 asks of every
   numbers are the honest ones: this series stopped being about line count at §129's wall.
 - **§129's field count was wrong and is corrected above.** It said 48; `Tab` had 50. Counted this
   time rather than recalled, which is the only way that number has ever been right.
+
+## §131 — The home screen, and the test for whether a field belongs to one
+
+§130's next slice, and the one that found the rule. `AppScreen::Home(HomeScreen)`, three fields off
+`Tab`, and — more useful than the move — an answer to the question §130 left implicit: *given a
+screen, which of its fields belong in its variant?*
+
+### Not "which screen reads it"
+
+Five fields carried the home screen's state, all five with the same shape, all five drawn by the same
+`view` arm:
+
+| field | into `HomeScreen`? |
+|---|---|
+| `home_menu_open` | yes |
+| `home_rename` | yes |
+| `confirm_delete` | yes |
+| `home_filter` | **no** |
+| `home_selected` | **no** |
+
+The first guess — "everything the home screen uses" — is wrong, and the code says so in two places
+that were already written down. `go_home`'s doc: *"The saved-target selection is kept so the list
+re-opens on the last-used row."* And the `Connected` arm, which is on the `Connecting` screen, does
+this:
+
+```rust
+self.settle_remembered_secret(&arrival.key);
+self.home_selected = Some(arrival.key);
+```
+
+A field written from another screen, so that a return visit hours later lands on the right row, is not
+the home screen's state. It is the tab's memory of the list, and it outliving the screen is the point
+of it.
+
+**The test is: is the field destroyed and rebuilt at the transition?** Three of the five were —
+in longhand. `go_home` opened with `home_menu_open = false`, `home_rename = None`,
+`confirm_delete = false`, and five more methods cleared the menu on their way off the screen: eight
+lines that were a constructor written out by hand. `AppScreen::Home(HomeScreen::default())` is those
+eight lines, said once, by the thing that already knew the screen was changing. The other two were
+explicitly, deliberately not cleared — and now they are the two still on `Tab`, with the reason in
+their doc.
+
+That test is what the remaining slices get to use instead of a guess.
+
+### One state removed, and it was reachable
+
+`open_form_new` closed the menu by hand and said nothing about the rename. So a tab could sit on the
+connect form still holding a `home_rename` — reachable, not hypothetical: start a rename, press New
+connection. Nothing went wrong, because only `ui::home::view` ever read it and that arm was not
+drawing. It is unrepresentable now instead of harmless, and there is a test:
+`a_rename_does_not_survive_the_trip_to_the_form`, whose assertion is that `home_screen()` answers
+`None` — there is nowhere left for it to have survived.
+
+### The prove-it caught the first version of the test
+
+Worth recording, because the failure mode was invisible and the test *passed*.
+
+The first attempt asserted the rename was gone after `open_form_new` **and then** that a following
+`go_home` put a clean list up. Breaking `go_home` on purpose — carrying the old `HomeScreen` across
+instead of building a fresh one — and the test still passed. Those last three assertions were
+**vacuous**: leaving for the form had already dropped the state, so `go_home` arriving from `Connect`
+got a default no matter what it did.
+
+Split into two tests, each calling from the screen where its claim is the only thing doing the work,
+the same break fails on `"the rename is over"`. A passing test that cannot fail reports its area as
+covered (`CONTEXT.md`: **Prove-it**), and this one would have reported `go_home` as covered while
+testing the transition instead.
+
+### `#[default]` and the two names
+
+Two things the compiler had opinions about, both worth a line:
+
+* **`#[derive(Default)]` cannot survive this.** `#[default]` only goes on unit variants, so `Default`
+  for `AppScreen` is written out — four lines, the same four the derive was generating. Every screen
+  that gains a payload from here on keeps them.
+* **`Tab::home` was already taken**, by the constructor for a tab that starts on this screen. So the
+  accessors are `home_screen` / `home_screen_mut`. Two different things wearing one name is exactly
+  what `CONTEXT.md` exists to prevent, and here the compiler enforced it first.
+
+`Tab::home_screen` is `#[cfg(test)]`, which is the more interesting half: **there is no production
+reader**. `view` and `keyboard_claim` were both already matching on `self.screen`, so they bind the
+state out of the pattern they were writing anyway. An accessor is only wanted where something needs to
+ask without knowing which screen it is on, and after this slice nothing does.
+
+### Files
+
+- `src/app/mod.rs` — `AppScreen::Home(HomeScreen)`, a hand-written `Default`, the new `HomeScreen`
+  struct, three fields gone from `Tab`, and `keyboard_claim` reading its two home claimants out of
+  the variant it was already matching.
+- `src/app/home.rs` — `go_home` rebuilds the screen instead of clearing it; four methods reach the
+  state through `home_screen_mut`; three that were only clearing the menu on their way off the screen
+  no longer clear anything. Two new tests.
+- `PLAN.md` — this section.
+
+226 insertions, 51 deletions across the two. `Tab` is down to **46 fields** and `mod.rs` is 11 124
+lines. 1 555 tests, up 2.
+
+### Not done
+
+- **`Connect` and `Terminal` remain**, and `Connect` is next. It has the harder version of this
+  section's question: `form`'s doc says it *"survives navigating to an error screen and back without
+  losing what the user typed"*, which by the rule above puts it on `Tab` — but the prompt over it, the
+  pending target and the captured secret are all destroyed at the transition. That is a 2/5 split
+  again, and the interesting part is where `pending_connect` falls, since a duplicate arms it *before*
+  the screen it fires on exists (§52).
+- **`AppScreen::Connecting { status }`** is still its own screen. The `Connect` slice is where that
+  gets decided, and it now has a rule to decide with: if the form state survives the transition into
+  it, `Connecting` is a state of `Connect` rather than a screen beside it.
+- **`Terminal(Session)` still has §45's `Workspace` decision in front of it**, unchanged from what
+  §130 recorded.
