@@ -22,11 +22,10 @@ impl Tab {
 	/// aligned (§10). Used by the paths that keep the user on the form to retry
 	/// (error Back, passphrase cancel) — a full return to the list uses `go_home`.
 	pub(super) fn go_to_form(&mut self) -> iced::Task<Message> {
-		self.screen = AppScreen::Connect;
-		// Nothing is being asked any more, which is what puts the form's own keyboard ring back on
-		// (§7): the ring and the prompt are never both live.
-		self.prompt = None;
-		self.form_focus = ui::connect::FormStop::Host;
+		// A fresh `ConnectFlow` is both of the lines this used to carry (§132): nothing being asked
+		// — which is what puts the form's own keyboard ring back on (§7), since the ring and the
+		// prompt are never both live — and the ring back at the first field.
+		self.screen = AppScreen::Connect(super::ConnectFlow::default());
 		self.apply_form_focus()
 	}
 
@@ -40,8 +39,8 @@ impl Tab {
 		// the screen and once by hand, with nothing keeping the two in step.
 		self.screen = AppScreen::Home(super::HomeScreen::default());
 		// Whatever the connect flow was asking is abandoned with the connect itself, and the
-		// buffers it was holding go with it (§12).
-		self.prompt = None;
+		// buffers it was holding go with it (§12) — which the line above now does, since §132 put
+		// the prompt inside the screen this one replaces.
 		// Leaving for the list abandons any connect in flight, so what it was carrying goes with
 		// it — the unsaved target and, above all, the secret it captured (§12, §14, §16).
 		self.abandon_attempt();

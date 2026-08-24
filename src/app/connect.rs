@@ -211,7 +211,7 @@ impl Tab {
 			creating,
 			pending,
 			..
-		}) = self.prompt.take()
+		}) = self.take_prompt()
 		else {
 			return iced::Task::none();
 		};
@@ -245,13 +245,24 @@ impl Tab {
 	/// rebuilt rather than edited in place, so the rejected passphrase is dropped rather than
 	/// left in the buffer the next attempt types over.
 	fn reask_vault(&mut self, creating: bool, pending: VaultPending) -> iced::Task<Message> {
-		self.prompt = Some(Prompt::Vault {
-			input: String::new(),
-			confirm: String::new(),
-			creating,
-			failed: true,
-			pending,
-		});
+		// Through `open_prompt`, which is what puts it on the connect screen (§132) — this used to
+		// assign the field and rely on being there already. The body is the one already showing,
+		// re-seeded, since a re-ask says the same thing plus a hint the view adds from `failed`.
+		let body = if creating {
+			ui::VAULT_CREATE_BODY
+		} else {
+			ui::VAULT_UNLOCK_BODY
+		};
+		self.open_prompt(
+			Prompt::Vault {
+				input: String::new(),
+				confirm: String::new(),
+				creating,
+				failed: true,
+				pending,
+			},
+			body,
+		);
 		iced::widget::operation::focus(ui::VAULT_INPUT_ID)
 	}
 
@@ -282,11 +293,13 @@ impl Tab {
 	/// Cancelling never stores anything — the deferred connect and the pre-fill are simply
 	/// abandoned; the user can still type the secret by hand.
 	pub(super) fn on_vault_cancelled(&mut self) -> iced::Task<Message> {
-		self.prompt = None;
+		// The prompt goes and the form it was over stays, keeping the ring where it was — the flow
+		// is not ending, a question over it is (§132). This used to clear a field and then set the
+		// screen it was already on.
+		self.clear_prompt();
 		// The connect this prompt was blocking is abandoned with it, and the secret it captured
 		// goes too (§12, §16).
 		self.abandon_attempt();
-		self.screen = AppScreen::Connect;
 		iced::Task::none()
 	}
 
@@ -309,7 +322,9 @@ impl Tab {
 	/// prompts reach it, and a copy that forgot to close the prompt would leave the dialog on screen
 	/// over a connection that had already moved on.
 	fn authenticating(&mut self) {
-		self.prompt = None;
+		// Leaving the connect screen IS closing the question (§132): the whole flow goes, so the
+		// dialog cannot be left on screen over a connection that has already moved on. That was the
+		// `prompt = None` this used to open with, and the reason the doc above gives for it.
 		self.screen = AppScreen::Connecting {
 			status: "authenticating…".to_owned(),
 		};
@@ -331,7 +346,7 @@ impl Tab {
 	pub(super) fn on_passphrase_submitted(&mut self) {
 		// Taking the prompt takes the typed text with it and moves it straight into a `Secret`, so
 		// no plain copy is left behind whether the send succeeds or not (§12).
-		let Some(Prompt::Passphrase(input)) = self.prompt.take() else {
+		let Some(Prompt::Passphrase(input)) = self.take_prompt() else {
 			return;
 		};
 		if self.send_command(SshCommand::Passphrase(Secret::new(input))) {
@@ -351,7 +366,7 @@ impl Tab {
 	/// The vault prompt is NOT one of these: it is asked BEFORE anything is dialed, so there is no
 	/// handshake to tear down — see `on_vault_cancelled`.
 	pub(super) fn on_credential_cancelled(&mut self) -> iced::Task<Message> {
-		self.prompt = None;
+		// `go_to_form` below rebuilds the flow, so the discarded text goes with the old one (§132).
 		self.send_command(SshCommand::Disconnect);
 		self.abandon_attempt();
 		self.go_to_form()
@@ -364,7 +379,7 @@ impl Tab {
 	pub(super) fn on_interactive_submitted(&mut self) -> iced::Task<Message> {
 		// Taking the prompt takes the answers with it and moves each straight into a `Secret`, so
 		// no plain copy of an OTP or password is left behind (§12).
-		let Some(Prompt::Interactive { answers, .. }) = self.prompt.take() else {
+		let Some(Prompt::Interactive { answers, .. }) = self.take_prompt() else {
 			return iced::Task::none();
 		};
 		let answers: Vec<Secret> = answers.into_iter().map(Secret::new).collect();
@@ -441,8 +456,8 @@ impl Tab {
 				}
 			} else {
 				// Vault locked: show the (now populated) form as the backdrop and prompt to
-				// unlock; the pre-fill resumes on success.
-				self.screen = AppScreen::Connect;
+				// unlock; the pre-fill resumes on success. `open_prompt` is what moves the screen
+				// now (§132) — this used to set it on the line before.
 				return Some(self.open_vault_modal(VaultPending::Prefill(key.to_owned())));
 			}
 		}
@@ -511,7 +526,7 @@ impl Tab {
 	/// input so no field keeps the caret behind the highlight ring (§10).
 	pub(super) fn apply_form_focus(&self) -> iced::Task<Message> {
 		let id = self
-			.form_focus
+			.form_focus()
 			.input_id(self.form.shape())
 			.unwrap_or(ui::connect::NO_FOCUS_ID);
 		iced::widget::operation::focus(id)
@@ -532,7 +547,7 @@ impl Tab {
 		// that opened the prompt has returned — so a key pressed in the same frame the dialog
 		// appeared still arrives here. Without this, Enter could press the Connect button under a
 		// host-key dialog.
-		if self.prompt.is_some() {
+		if self.prompt().is_some() {
 			return iced::Task::none();
 		}
 
@@ -543,15 +558,19 @@ impl Tab {
 		match key {
 			iced::keyboard::Key::Named(Named::Tab) => {
 				let shape = self.form.shape();
-				self.form_focus = if modifiers.shift() {
-					self.form_focus.previous(shape)
-				} else {
-					self.form_focus.next(shape)
-				};
+				// The ring moves inside the flow (§132). The shape is read first, because it comes
+				// off `self.form` and the flow is borrowed mutably to step the stop.
+				if let Some(flow) = self.connect_flow_mut() {
+					flow.focus = if modifiers.shift() {
+						flow.focus.previous(shape)
+					} else {
+						flow.focus.next(shape)
+					};
+				}
 				self.apply_form_focus()
 			}
 			iced::keyboard::Key::Named(named @ (Named::Enter | Named::Space)) => {
-				if self.form_focus.input_id(self.form.shape()).is_some() {
+				if self.form_focus().input_id(self.form.shape()).is_some() {
 					// A text stop: Enter submits the form (the field has no submit of its
 					// own), Space types a space and is left to the field.
 					if named == Named::Enter {
@@ -559,7 +578,7 @@ impl Tab {
 					} else {
 						iced::Task::none()
 					}
-				} else if let Some(message) = self.form_focus.activation(self.form.shape()) {
+				} else if let Some(message) = self.form_focus().activation(self.form.shape()) {
 					// A radio/button stop turns the key into its own activation message.
 					iced::Task::done(message)
 				} else {
@@ -611,7 +630,7 @@ impl Tab {
 		on_dismiss: Message,
 	) -> Element<'a, Message> {
 		iced::widget::stack![
-			ui::connect::view(&self.form, self.form_focus),
+			ui::connect::view(&self.form, self.form_focus()),
 			ui::dialog::backdrop(on_dismiss),
 			dialog,
 		]
@@ -686,8 +705,16 @@ mod tests {
 	fn an_unknown_host_key_is_trusted_only_by_an_explicit_choice() {
 		let (mut app, mut rx) = app_with_terminal(16);
 		let _ = app.on_ssh_event(SshEvent::HostKey("SHA256:aaaa".to_owned()));
-		assert!(matches!(app.prompt, Some(Prompt::HostKey)));
-		assert!(matches!(app.screen, AppScreen::Connect));
+		// One pattern for both halves since §132: a host-key question exists only as part of the
+		// connect screen, so "the prompt is up" and "the screen shows it" are one claim. The four
+		// `on_ssh_event` arms that open a prompt used to set the screen on the next line by hand.
+		assert!(matches!(
+			app.screen,
+			AppScreen::Connect(ConnectFlow {
+				prompt: Some(Prompt::HostKey),
+				..
+			})
+		));
 		assert!(
 			next_command(&mut rx).is_none(),
 			"asking is not answering: nothing goes back until the user chooses"
@@ -717,7 +744,7 @@ mod tests {
 			stored: "SHA256:old".to_owned(),
 			presented: "SHA256:new".to_owned(),
 		});
-		assert!(matches!(app.prompt, Some(Prompt::HostKeyChanged)));
+		assert!(matches!(app.prompt(), Some(Prompt::HostKeyChanged)));
 		assert!(next_command(&mut rx).is_none());
 
 		// Both fingerprints are in the copyable body, so the user can compare them out of band.
@@ -728,7 +755,7 @@ mod tests {
 		// Enter there would press Connect (§10).
 		let _ = app.on_form_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
 		assert!(next_command(&mut rx).is_none());
-		assert!(matches!(app.prompt, Some(Prompt::HostKeyChanged)));
+		assert!(matches!(app.prompt(), Some(Prompt::HostKeyChanged)));
 
 		// Replacing the pinned key is the deliberate act, and only then does the handshake go on.
 		let _ = app.update(Message::ReplaceHostKey);
@@ -736,8 +763,58 @@ mod tests {
 			next_command(&mut rx),
 			Some(SshCommand::HostKeyResponse(HostKeyChoice::Pin))
 		));
+		// Two assertions where one would now do, kept because they say different things about the
+		// same fact: the handshake moved on, and no dialog is left over it. Since §132 the second
+		// FOLLOWS from the first — `authenticating` closes the question by leaving the screen that
+		// holds it, rather than by clearing a field and hoping the two stay in step.
 		assert!(matches!(app.screen, AppScreen::Connecting { .. }));
-		assert!(app.prompt.is_none(), "the question is answered and gone");
+		assert!(app.prompt().is_none(), "the question is answered and gone");
+	}
+
+	/// A question asked OVER the form leaves the form's focus ring where it was (§10, §132): the
+	/// flow is not ending, a dialog is opening on top of it. So dismissing the dialog puts the user
+	/// back on the field they were on, not at the top of the form.
+	///
+	/// This is the one behaviour §132 had to choose rather than preserve. `form_focus` used to be a
+	/// `Tab` field, so it survived everything by default — including the transitions where surviving
+	/// was an accident. Inside `ConnectFlow` it survives exactly where the flow does, and this pins
+	/// which of those cases is which.
+	#[test]
+	fn a_dialog_over_the_form_leaves_the_focus_ring_alone() {
+		use iced::keyboard::Modifiers;
+		use iced::keyboard::key::{Code, Named};
+
+		let mut app = Tab::default();
+		let _focus = app.go_to_form();
+		app.form.host = "web-01".to_owned();
+		app.form.user = "root".to_owned();
+		// Two Tabs along the ring, so the stop is not the default one and the test can tell.
+		for _ in 0..2 {
+			let _focus = app.on_form_key(key_press(Named::Tab, Code::Tab, Modifiers::empty()));
+		}
+		let before = app.form_focus();
+		assert_ne!(
+			before,
+			ui::connect::FormStop::default(),
+			"the ring has moved off the first field"
+		);
+
+		// A vault prompt over the form, then dismissed.
+		let _focus = app.open_vault_modal(VaultPending::Prefill("root@web-01:22".to_owned()));
+		assert!(matches!(app.prompt(), Some(Prompt::Vault { .. })));
+		assert_eq!(
+			app.form_focus(),
+			before,
+			"the ring is where it was while the question is up"
+		);
+
+		let _task = app.on_vault_cancelled();
+		assert!(app.prompt().is_none(), "the question is gone");
+		assert_eq!(
+			app.form_focus(),
+			before,
+			"and the ring is still where the user left it"
+		);
 	}
 
 	/// A wrong master passphrase re-asks with the hint and EMPTY fields (§16, §12): the rejected
@@ -746,18 +823,23 @@ mod tests {
 	#[test]
 	fn a_refused_vault_passphrase_re_asks_empty_and_keeps_what_it_was_blocking() {
 		// Create mode with a mismatched confirmation — no vault file is touched, so this needs no disk.
+		// Arranged as a SCREEN since §132: a prompt with no connect screen under it is not a state
+		// this test could set up any more, which is the point of the section.
 		let mut app = Tab {
-			prompt: Some(Prompt::Vault {
-				input: "one".to_owned(),
-				confirm: "two".to_owned(),
-				creating: true,
-				failed: false,
-				pending: VaultPending::Prefill("u@h:22".to_owned()),
+			screen: AppScreen::Connect(ConnectFlow {
+				prompt: Some(Prompt::Vault {
+					input: "one".to_owned(),
+					confirm: "two".to_owned(),
+					creating: true,
+					failed: false,
+					pending: VaultPending::Prefill("u@h:22".to_owned()),
+				}),
+				..ConnectFlow::default()
 			}),
 			..Tab::default()
 		};
 		let _ = app.on_vault_submitted();
-		match &app.prompt {
+		match app.prompt() {
 			Some(Prompt::Vault {
 				input,
 				confirm,

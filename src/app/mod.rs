@@ -2211,7 +2211,7 @@ impl App {
 			// dialog and let Enter press the Connect button under it. This is the one place that
 			// rule is stated; it used to be implicit in the six `AppScreen` variants that each had no
 			// keyboard subscription of their own.
-			AppScreen::Connect if active.prompt.is_none() => {
+			AppScreen::Connect(flow) if flow.prompt.is_none() => {
 				subs.push(iced::keyboard::listen().map(Message::FormKey));
 			}
 			AppScreen::Home(_) => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
@@ -2226,7 +2226,7 @@ impl App {
 			AppScreen::Viewer(Viewer::Picture(_)) => {
 				subs.push(iced::keyboard::listen().map(Message::PreviewKey));
 			}
-			AppScreen::Connect | AppScreen::Connecting { .. } => {}
+			AppScreen::Connect(_) | AppScreen::Connecting { .. } => {}
 		}
 
 		iced::Subscription::batch(subs)
@@ -2237,20 +2237,21 @@ impl App {
 /// This is the small state machine from PLAN §10 — every transition happens in `update`.
 ///
 /// Since §130 a variant may carry its screen's own state, so that the tag and the state cannot
-/// disagree. `Viewer` is the first: see its doc for the argument, which is the one [`Viewer`],
-/// [`Modal`] and `Prompt` each already won at a smaller scale.
-// `Viewer` is 304 bytes and the next-largest variant is 24, which is exactly the shape
-// `large_enum_variant` looks for — and here boxing it would make things worse, measurably. There is
-// no bulk `AppScreen` anywhere: one lives per `Tab`, and `Tab` is 7 688 bytes. The two fields this
-// variant replaced came to 336 (a 32-byte tag plus a 304-byte `Option<Viewer>`, which is 304 rather
-// than 312 because the two-variant enum leaves a niche for the `None`); what is left is 304. So the
-// enum grew and the struct did not. A `Box` would buy back 272 bytes of 7 688 in exchange for an
-// allocation per file opened and a deref at every access — and the same trade gets worse, not
-// better, as the remaining screens move their state in here.
-#[expect(
-	clippy::large_enum_variant,
-	reason = "one per `Tab`, which is 7 688 bytes; it replaced fields of 336 with 304 — see above"
-)]
+/// disagree. `Viewer` came first, then [`HomeScreen`] (§131) and [`ConnectFlow`] (§132): see each
+/// one's doc for what it does and does not carry, and why. It is the argument [`Viewer`], [`Modal`]
+/// and [`Prompt`] each already won at a smaller scale, applied to the screen itself.
+// On size, because §130 had to argue with `large_enum_variant` here and §132 does not.
+//
+// The enum is 304 bytes, all of it `Viewer`; `ConnectFlow` is 208, `HomeScreen` 56. §130 carried an
+// `#[expect(clippy::large_enum_variant)]` because at that point the second-largest variant was 24
+// and the lint fired; two slices later the spread is 304 against 208 and it does not, so the
+// expectation is gone rather than left to rot.
+//
+// The reasoning it recorded still holds and is worth keeping, because the next slice will need it:
+// there is no bulk `AppScreen` anywhere — one per `Tab` — and every byte the enum gains is a byte
+// some `Tab` field gave up. `Tab` was 7 688 before §130 and is 7 440 now, while the enum went 32 →
+// 304. Boxing a variant would buy back a few hundred bytes of seven thousand in exchange for an
+// allocation and a deref on a path that draws every frame.
 #[derive(Debug)]
 pub enum AppScreen {
 	/// The home screen: the list of saved connection targets (§14). This is where we
@@ -2265,7 +2266,11 @@ pub enum AppScreen {
 	/// four lines the derive was generating.
 	Home(HomeScreen),
 	/// The connection form (host / port / user / auth), reached from the home screen.
-	Connect,
+	///
+	/// It carries the focus ring's stop and whatever question is being asked over the form (§132) —
+	/// but NOT the form's contents, which are on [`Tab`] because they survive the trip to a dialog
+	/// and back. See [`ConnectFlow`].
+	Connect(ConnectFlow),
 	/// Handshake and authentication in progress; `status` is a human-readable
 	/// step for the UI ("connecting", "verifying host key", "authenticating").
 	Connecting { status: String },
@@ -2297,6 +2302,40 @@ impl Default for AppScreen {
 	fn default() -> Self {
 		Self::Home(HomeScreen::default())
 	}
+}
+
+/// What the connect screen is holding while it shows (§7, §8, §16, §132): where the focus ring is,
+/// and the question being asked over the form, if one is.
+///
+/// Both are destroyed and rebuilt at the transition, which is §131's test for belonging here.
+/// `go_to_form` was setting them by hand — `prompt = None` and `form_focus = Host` — and four arms of
+/// `on_ssh_event` were opening a prompt and then setting the screen to `Connect` on the very next
+/// line, four times, because a prompt has nowhere else to be shown. `open_prompt` now does both at
+/// once and is the only place that pact is written.
+///
+/// **`Tab::form` is deliberately not here.** Its doc has always said why: it *"survives navigating to
+/// an error screen and back without losing what the user typed"*. Same for `pending_target`,
+/// `pending_remember` and `passphrase_failed`, each of which outlives this screen on purpose — the
+/// flag is set as an answer goes down the wire and read when the re-ask builds the next prompt, which
+/// is a round trip through `Connecting`. And `pending_connect` is armed by a duplicate *before* this
+/// screen exists at all (§52). Five fields that look like the connect flow's and are the tab's.
+#[derive(Debug, Default)]
+pub struct ConnectFlow {
+	/// The form's current keyboard-focus stop (§10). iced can only focus text inputs, so this
+	/// bespoke ring also covers the radios and the Connect button: Tab / Shift+Tab move it,
+	/// Enter/Space activate it, and the view highlights the active radio/button. Text stops
+	/// additionally take native focus so typing lands there.
+	focus: ui::connect::FormStop,
+	/// The question the flow is holding over the form, `None` when it is holding none (§7, §8, §16).
+	/// Each variant carries what answering it needs — the passphrase being typed, the interactive
+	/// challenge and its answers, the vault's two fields and what its unlock resumes — so nothing is
+	/// read from a field that might be left over from an earlier prompt.
+	///
+	/// While it is `Some` the form's own keyboard ring is off (see `subscription`): the prompt's
+	/// fields type through the widget tree, and Tab / Enter belong to them. As six `AppScreen`
+	/// variants that was six places that each had to remember; as a field beside the screen it was
+	/// one place that had to be kept in step with the screen; here it is neither.
+	prompt: Option<Prompt>,
 }
 
 /// What the home screen is DOING right now (§14, §131): its right-click menu, its inline rename, its
@@ -2343,8 +2382,10 @@ pub struct HomeScreen {
 /// Each variant carries what answering it needs, so the answer is read off the thing that asked.
 /// The two host-key variants carry nothing: their message is already in the selectable dialog body,
 /// and the CHOICE goes back down the wire, so there is nothing to hold on this side (§8).
+/// `pub` for the same reason [`Viewer`] is: since §132 it is part of [`ConnectFlow`], which
+/// [`AppScreen`] carries. `app` is a private module, so this reaches no further than the crate.
 #[derive(Debug)]
-enum Prompt {
+pub enum Prompt {
 	/// First contact with an unknown host: the server's fingerprint is shown and the user must
 	/// accept or reject before the handshake continues (§8).
 	HostKey,
@@ -2669,11 +2710,6 @@ pub struct Tab {
 	/// The connect form's field contents. Lives here so it survives navigating
 	/// to an error screen and back without losing what the user typed.
 	pub form: ui::connect::ConnectForm,
-	/// The connect form's current keyboard-focus stop (§10). iced can only focus text
-	/// inputs, so this bespoke ring also covers the radios and the Connect button: Tab /
-	/// Shift+Tab move it, Enter/Space activate it, and the view highlights the active
-	/// radio/button. Text stops additionally take native focus so typing lands there.
-	form_focus: ui::connect::FormStop,
 	/// Channel to the SSH task. `None` until the worker starts and delivers it
 	/// via `SshEvent::Ready`; `update` sends `SshCommand`s through it.
 	command_tx: Option<mpsc::Sender<SshCommand>>,
@@ -2690,15 +2726,6 @@ pub struct Tab {
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
 	terminal: Option<term::Terminal>,
-	/// The question the connect flow is holding over the form, `None` when it is holding none
-	/// (§7, §8, §16). Each variant carries what answering it needs — the passphrase being typed,
-	/// the interactive challenge and its answers, the vault's two fields and what its unlock
-	/// resumes — so nothing is read from a field that might be left over from an earlier prompt.
-	///
-	/// While it is `Some` the form's own keyboard ring is off (see `subscription`): the prompt's
-	/// fields type through the widget tree, and Tab / Enter belong to them. As six `AppScreen`
-	/// variants that was six places that each had to remember.
-	prompt: Option<Prompt>,
 	/// Whether a passphrase has already been submitted this connection. The SSH task
 	/// re-emits `NeedPassphrase` for both the first ask and a wrong-passphrase re-ask,
 	/// so this flag is how the passphrase prompt knows to show its "incorrect" hint:
@@ -2982,8 +3009,10 @@ struct PendingElevation {
 /// interrupt two flows, so it records which to return to once the vault is open: continuing a
 /// connection set to remember its secret, or pre-filling the form from a secret already stored
 /// for a target the user opened.
+/// `pub` for the same reason [`Prompt`] is: it is carried by `Prompt::Vault`, which since §132 is
+/// part of [`ConnectFlow`] and so of [`AppScreen`]. Still crate-local — `app` is a private module.
 #[derive(Debug)]
-enum VaultPending {
+pub enum VaultPending {
 	/// Continue dialing this connection; its secret is stored on a successful connect.
 	Connect(bridge::ConnectParams),
 	/// Pre-fill the connect form's masked field from the stored secret for this endpoint.
@@ -3707,6 +3736,58 @@ impl Tab {
 		}
 	}
 
+	/// The connect flow, if the connect screen is the one showing (§7, §132).
+	pub(super) fn connect_flow(&self) -> Option<&ConnectFlow> {
+		match &self.screen {
+			AppScreen::Connect(flow) => Some(flow),
+			_ => None,
+		}
+	}
+
+	/// The connect flow, mutably — the twin of [`Tab::connect_flow`].
+	pub(super) fn connect_flow_mut(&mut self) -> Option<&mut ConnectFlow> {
+		match &mut self.screen {
+			AppScreen::Connect(flow) => Some(flow),
+			_ => None,
+		}
+	}
+
+	/// The question the connect flow is asking, if any (§7, §8, §16).
+	///
+	/// Two `Option`s deep and flattened to one on purpose: "no prompt because this tab is not on the
+	/// connect screen" and "no prompt because it is not asking anything" are the same answer to every
+	/// caller — there is nothing to answer either way. The callers that need to tell them apart are
+	/// the ones already matching on the screen.
+	pub(super) fn prompt(&self) -> Option<&Prompt> {
+		self.connect_flow()?.prompt.as_ref()
+	}
+
+	/// The question being asked, mutably — how the prompts' own field edits reach their buffers.
+	pub(super) fn prompt_mut(&mut self) -> Option<&mut Prompt> {
+		self.connect_flow_mut()?.prompt.as_mut()
+	}
+
+	/// Take the question, leaving the flow asking nothing (§7, §12). The answer paths use this so the
+	/// typed text moves straight into a `Secret` and no plain copy is left behind.
+	pub(super) fn take_prompt(&mut self) -> Option<Prompt> {
+		self.connect_flow_mut()?.prompt.take()
+	}
+
+	/// Where the connect form's focus ring is sitting (§10). The first field when there is no flow to
+	/// ask, which no caller reaches: both readers draw the form, and the form is only drawn from
+	/// inside the `Connect` arm.
+	pub(super) fn form_focus(&self) -> ui::connect::FormStop {
+		self.connect_flow()
+			.map_or_else(Default::default, |flow| flow.focus)
+	}
+
+	/// Stop asking, whatever was being asked, and leave the form showing (§7).
+	pub(super) fn clear_prompt(&mut self) {
+		if let Some(flow) = self.connect_flow_mut() {
+			flow.prompt = None;
+		}
+	}
+
 	/// The buffer this tab is editing, if it is editing one (§32).
 	fn editor(&self) -> Option<&crate::editor::Editor> {
 		self.viewer().and_then(Viewer::editor)
@@ -3762,7 +3843,7 @@ impl Tab {
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
 			// without being opened.
-			AppScreen::Connect => match self.prompt {
+			AppScreen::Connect(flow) => match flow.prompt {
 				Some(Prompt::Failed) => "Error".to_owned(),
 				_ => "New connection".to_owned(),
 			},
@@ -4214,7 +4295,7 @@ impl Tab {
 			// with the prompt closed there is no buffer to type into, which is the point of the
 			// buffers living inside it.
 			Message::PassphraseChanged(value) => {
-				if let Some(Prompt::Passphrase(input)) = &mut self.prompt {
+				if let Some(Prompt::Passphrase(input)) = self.prompt_mut() {
 					*input = value;
 				}
 			}
@@ -4225,7 +4306,7 @@ impl Tab {
 				return self.on_credential_cancelled();
 			}
 			Message::InteractiveAnswerChanged(index, value) => {
-				if let Some(Prompt::Interactive { answers, .. }) = &mut self.prompt
+				if let Some(Prompt::Interactive { answers, .. }) = self.prompt_mut()
 					&& let Some(slot) = answers.get_mut(index)
 				{
 					*slot = value;
@@ -4242,12 +4323,12 @@ impl Tab {
 				self.form.elevate_on_connect = !self.form.elevate_on_connect;
 			}
 			Message::VaultInputChanged(value) => {
-				if let Some(Prompt::Vault { input, .. }) = &mut self.prompt {
+				if let Some(Prompt::Vault { input, .. }) = self.prompt_mut() {
 					*input = value;
 				}
 			}
 			Message::VaultConfirmChanged(value) => {
-				if let Some(Prompt::Vault { confirm, .. }) = &mut self.prompt {
+				if let Some(Prompt::Vault { confirm, .. }) = self.prompt_mut() {
 					*confirm = value;
 				}
 			}
@@ -4744,11 +4825,11 @@ impl Tab {
 	/// body so the user can copy the failure text (§10, §12). Central so every error
 	/// path (validation, a dead worker channel, a session failure) stays consistent.
 	fn show_error(&mut self, message: &str) {
-		self.open_prompt(Prompt::Failed, message);
 		// A failure is shown over the connect FORM, wherever it came from — a validation slip on
 		// the form, a dead worker channel, a session that dropped — so Back leaves the user
-		// somewhere they can retry from rather than on a dead terminal screen (§10).
-		self.screen = AppScreen::Connect;
+		// somewhere they can retry from rather than on a dead terminal screen (§10). That screen
+		// change is `open_prompt`'s job since §132; this used to set it again on the next line.
+		self.open_prompt(Prompt::Failed, message);
 	}
 
 	/// Open a prompt over the connect form (§7, §8, §16), the mirror of `open_modal` on the
@@ -4756,7 +4837,22 @@ impl Tab {
 	/// the card is centred fresh rather than inheriting the last prompt's position.
 	fn open_prompt(&mut self, prompt: Prompt, body: &str) {
 		self.set_dialog_body(body);
-		self.prompt = Some(prompt);
+		// The screen goes with it, and this is the ONE place that says so (§132). A prompt is drawn
+		// by `form_with_dialog` and nowhere else, so a prompt that is not on the connect screen
+		// cannot be seen — which is why all six callers set the screen too, four of them on the very
+		// next line and `show_error` with a comment about it.
+		//
+		// The focus ring keeps its stop when there is already a flow to keep it from: a question
+		// opening OVER the form does not end the form. Arriving from `Connecting` there is no flow,
+		// so it starts at the first field — unobservable, since every exit from those four prompts
+		// either goes through `go_to_form` (which sets the same stop) or leaves this screen entirely.
+		let focus = self
+			.connect_flow()
+			.map_or_else(Default::default, |flow| flow.focus);
+		self.screen = AppScreen::Connect(ConnectFlow {
+			focus,
+			prompt: Some(prompt),
+		});
 	}
 
 	/// React to an event from the SSH task. Returns a `Task` for any follow-up
@@ -4788,7 +4884,6 @@ impl Tab {
 				// selected and copied for out-of-band comparison (§8, §10).
 				let body = format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY);
 				self.open_prompt(Prompt::HostKey, &body);
-				self.screen = AppScreen::Connect;
 			}
 			SshEvent::HostKeyChanged { stored, presented } => {
 				// Seed the selectable body with the warning plus BOTH fingerprints, each labelled
@@ -4799,7 +4894,6 @@ impl Tab {
 					ui::HOST_KEY_CHANGED_DIALOG_BODY
 				);
 				self.open_prompt(Prompt::HostKeyChanged, &body);
-				self.screen = AppScreen::Connect;
 			}
 			SshEvent::NeedPassphrase => {
 				// A fresh, empty buffer each time we ask — including a re-ask after a wrong
@@ -4808,7 +4902,6 @@ impl Tab {
 					Prompt::Passphrase(String::new()),
 					ui::PASSPHRASE_DIALOG_BODY,
 				);
-				self.screen = AppScreen::Connect;
 				// Focus the field so the user can type at once — the re-ask path
 				// lands here too, refocusing on every prompt (§7).
 				return iced::widget::operation::focus(ui::PASSPHRASE_INPUT_ID);
@@ -4838,7 +4931,6 @@ impl Tab {
 					},
 					&body,
 				);
-				self.screen = AppScreen::Connect;
 				return iced::widget::operation::focus(ui::interactive_field_id(0));
 			}
 			SshEvent::Connected => {
@@ -6604,8 +6696,8 @@ impl Tab {
 			// it, floating over the (dimmed) form rather than replacing it, so the page stays in
 			// view behind it (§10). The second argument to `form_with_dialog` is what a click on
 			// the BACKDROP does, and every one of them is the safe answer: reject, cancel, back.
-			AppScreen::Connect => match &self.prompt {
-				None => ui::connect::view(&self.form, self.form_focus),
+			AppScreen::Connect(flow) => match &flow.prompt {
+				None => ui::connect::view(&self.form, flow.focus),
 				Some(Prompt::HostKey) => self.form_with_dialog(
 					ui::host_key_view(&self.dialog_body, card),
 					Message::RejectHostKey,
@@ -7408,17 +7500,17 @@ mod tests {
 		let (mut app, mut rx) = app_with_terminal(16);
 		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
 		let _ = app.update(Message::PassphraseChanged("hunter2".to_owned()));
-		assert!(matches!(&app.prompt, Some(Prompt::Passphrase(input)) if input == "hunter2"));
+		assert!(matches!(app.prompt(), Some(Prompt::Passphrase(input)) if input == "hunter2"));
 
 		let _ = app.update(Message::PassphraseCancelled);
-		assert!(app.prompt.is_none());
+		assert!(app.prompt().is_none());
 		assert!(matches!(
 			next_command(&mut rx),
 			Some(SshCommand::Disconnect)
 		));
 		// And the next prompt starts empty rather than showing the abandoned attempt.
 		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
-		assert!(matches!(&app.prompt, Some(Prompt::Passphrase(input)) if input.is_empty()));
+		assert!(matches!(app.prompt(), Some(Prompt::Passphrase(input)) if input.is_empty()));
 	}
 
 	/// A dialog belongs to the session it asked about (§10, §18). A delete confirmation holding one
@@ -10863,7 +10955,7 @@ mod tests {
 			("h", "u")
 		);
 		assert!(
-			matches!(copy.screen, AppScreen::Connect),
+			matches!(copy.screen, AppScreen::Connect(_)),
 			"the password was never remembered, so the copy stops at the form with everything else \
 			 already filled in rather than spending an attempt on an empty field"
 		);
@@ -10926,7 +11018,7 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 
 		let _ = copy.open_copy_of("u@h:22", Some("/srv".to_owned()));
-		assert!(matches!(copy.screen, AppScreen::Connect));
+		assert!(matches!(copy.screen, AppScreen::Connect(_)));
 		assert_eq!(copy.form.host, "h");
 		assert!(rx.try_recv().is_err(), "nothing was dialed");
 		assert_eq!(
@@ -10953,12 +11045,12 @@ mod tests {
 		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(copy.pending_connect, "armed, waiting for a channel to use");
 		assert!(
-			matches!(copy.screen, AppScreen::Connect),
+			matches!(copy.screen, AppScreen::Connect(_)),
 			"the pre-filled form is what shows in the meantime, and what is left behind if no \
 			 worker ever arrives"
 		);
 		assert!(
-			copy.prompt.is_none(),
+			copy.prompt().is_none(),
 			"and above all not an error dialog about a worker that was never late"
 		);
 

@@ -14852,3 +14852,135 @@ lines. 1 555 tests, up 2.
   it, `Connecting` is a state of `Connect` rather than a screen beside it.
 - **`Terminal(Session)` still has §45's `Workspace` decision in front of it**, unchanged from what
   §130 recorded.
+
+## §132 — The connect flow, and the pact that was written four times
+
+`AppScreen::Connect(ConnectFlow)`. Two fields of the connect screen's seven move in; the other five
+stay, and §131's rule is what says which — a field belongs to the screen if it is destroyed and
+rebuilt at the transition.
+
+| field | into `ConnectFlow`? | why |
+|---|---|---|
+| `form_focus` | yes | `go_to_form` sets it to the first field on every entry |
+| `prompt` | yes | `go_to_form` and `go_home` clear it; four `on_ssh_event` arms set it *with* the screen |
+| `form` | no | its own doc: *"survives navigating to an error screen and back without losing what the user typed"* |
+| `passphrase_failed` | no | set as an answer goes down the wire, read when the re-ask builds the next prompt — a round trip through `Connecting` |
+| `pending_target` | no | captured at the dial, consumed by `Connected`, two screens later |
+| `pending_remember` | no | the same, and it is a secret, so where it dies matters (§12, §16) |
+| `pending_connect` | no | armed by a duplicate *before* this screen exists at all (§52) |
+
+Five of seven look like the connect flow's state and are the tab's. That is a better ratio than §131's
+and for the same reason: the connect journey is long, it crosses screens, and most of what it carries
+has to cross with it.
+
+### The pact, four times
+
+`prompt` earns its place with something stronger than the rule. A prompt is drawn by
+`form_with_dialog` and nowhere else, so a prompt that is not on the connect screen cannot be seen.
+Every caller knew it:
+
+```rust
+self.open_prompt(Prompt::HostKey, &body);
+self.screen = AppScreen::Connect;          // ← and three more just like it
+```
+
+Four arms of `on_ssh_event` set the screen on the line after opening the prompt. `show_error` set it
+too, with a comment explaining that a failure belongs over the form *"wherever it came from"*.
+`seed_form` set it on the line before. `on_vault_cancelled` set the screen it was already on. That is
+seven sites keeping one rule, and `open_prompt` is now the only one that states it — it takes the
+screen with the prompt, because the two were never separable.
+
+`authenticating` goes the other way and loses a line: it used to clear the prompt and then move to
+`Connecting`. Leaving the screen *is* closing the question now, which is exactly what its doc already
+claimed the pairing was for — *"a copy that forgot to close the prompt would leave the dialog on
+screen over a connection that had already moved on."*
+
+### The one behaviour choice
+
+Everything else in §130–§132 preserves behaviour. This one had to pick.
+
+`form_focus` was a `Tab` field, so it survived every transition, including the ones where surviving
+was an accident rather than a decision. Inside `ConnectFlow` it survives exactly as long as the flow
+does — so the question is what happens when a prompt opens.
+
+**A question asked over the form keeps the ring where it was.** The flow is not ending; a dialog is
+opening on top of it. So dismissing a vault prompt puts the user back on the field they were on.
+`open_prompt` reads the current stop when there is a flow to read it from.
+
+Arriving from `Connecting` — the four host-key / credential prompts — there is no flow, so the ring
+starts at the first field where it used to keep a stale stop from before the dial. That difference is
+**unobservable**: every exit from those four prompts either goes through `go_to_form`, which sets the
+first field anyway, or leaves the connect screen entirely. Checked rather than assumed, one path at a
+time.
+
+`a_dialog_over_the_form_leaves_the_focus_ring_alone` pins the decision, and making `open_prompt` reset
+the ring instead fails it on *"the ring is where it was while the question is up"*.
+
+### Two prove-its, one of them on an old test
+
+The four-site pact is under test, and the test was already there. `an_unknown_host_key_is_trusted_only_by_an_explicit_choice` starts from `app_with_terminal`, which sits on
+the **terminal** screen, so the host-key event has to move it. Its two assertions —
+`prompt` is `Some(HostKey)`, `screen` is `Connect` — collapse into one pattern:
+
+```rust
+matches!(app.screen, AppScreen::Connect(ConnectFlow { prompt: Some(Prompt::HostKey), .. }))
+```
+
+Making `open_prompt` set the prompt without the screen fails it. Which is the point: the assertion
+that used to be two facts held together by hand is one fact the type states.
+
+The same collapse happens at the end of the host-key-changed test, where `screen` is `Connecting` and
+`prompt()` is `None` — the second now *follows* from the first. Both assertions are kept, with a
+comment saying why one implies the other, because they read as different claims even though they no
+longer are.
+
+### `pub`, three more times
+
+`Prompt` and `VaultPending` became `pub`, for the reason `Viewer` did in §130: they are reachable
+through a `pub` enum now. `app` is a private module, so all three are crate-local either way, and the
+`pub` is bookkeeping rather than exposure. Worth noting only because it will happen once more when
+`Terminal` takes its payload.
+
+### `large_enum_variant` retires
+
+§130 carried an `#[expect(clippy::large_enum_variant)]` with the byte counts in its reason. Two slices
+later the expectation is **unfulfilled** — clippy said so, and `-D warnings` made it an error, which
+is exactly what `#[expect]` is for over `#[allow]` (§111). `ConnectFlow` is 208 bytes against
+`Viewer`'s 304, so the spread no longer trips the lint and the attribute is gone rather than left to
+rot.
+
+The reasoning it recorded is kept as a comment, because the `Terminal` slice will need it: every byte
+the enum gains is a byte a `Tab` field gave up. `Tab` was **7 688** before §130 and is **7 440** now,
+while `AppScreen` went 32 → 304.
+
+### Files
+
+- `src/app/mod.rs` — `AppScreen::Connect(ConnectFlow)`, the new struct, two fields off `Tab`, seven
+  accessors (`connect_flow`, `connect_flow_mut`, `prompt`, `prompt_mut`, `take_prompt`,
+  `clear_prompt`, `form_focus`), `open_prompt` taking the screen with it, `show_error` losing its
+  redundant line, the four `on_ssh_event` arms losing theirs.
+- `src/app/connect.rs` — `authenticating` and `on_vault_cancelled` shorter by a line each,
+  `reask_vault` going through `open_prompt`, the focus ring moving inside the flow, one new test.
+- `src/app/home.rs` — `go_to_form` is one line where it was three.
+- `PLAN.md` — this section.
+
+273 insertions, 100 deletions. `Tab` is down to **44 fields**, `mod.rs` is 11 216 lines, 1 556 tests.
+
+### Not done
+
+- **`Terminal(Session)` is the last one and the only hard one.** 21 fields, and §45's `Workspace`
+  decision still in front of it: the doc says the on-screen identity's fields stay on `Tab` so that
+  *"nothing in the thousands of lines that touch `self.terminal` has to learn about identities"*.
+  §131's rule does not settle this one, because `terminal` is destroyed at the transition *and*
+  `Workspace` is a second axis the other three screens did not have. It wants its own section and
+  probably its own decision first.
+- **`AppScreen::Connecting { status }` stays a screen.** §131 said the `Connect` slice would decide
+  it, with the rule: if the form state survives the transition into it, `Connecting` is a state of
+  `Connect` rather than a screen beside it. It does survive — `form` is on `Tab` — and so
+  `Connecting` needs to carry nothing, which is precisely why folding it in would buy nothing either.
+  It is a screen with one string, and that is what it should be.
+- **Three fields still make a pact `open_prompt` cannot enforce.** `pending_target`,
+  `pending_remember` and `pending_connect` are the connect attempt's state, not the connect
+  *screen*'s, and they are cleared together by `abandon_attempt`. That is the same shape
+  `HomeScreen` and `ConnectFlow` just fixed, one level over: an `Attempt` type is the obvious next
+  question after `Terminal`, and it is candidate 3 of the architecture review, not this series.
