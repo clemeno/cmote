@@ -14550,3 +14550,68 @@ else. `browse` says what the methods are for without colliding with either.
   a 12 900-line one, which was the point.
 - **No new tests, and none was wanted** — the same reasoning as §126, plus the line-multiset check
   above, which is a stronger statement about a move than any new test could make.
+
+## §129 — The connect flow, and the half of the home screen §126 left
+
+§126 split the home screen in half and said so: `home.rs` took the saved-target list, and "the
+connect form's own methods … are the other half of `home.rs`'s screen and were left so this slice
+stayed one screen wide". This takes that half, and takes the credentials with it, because they are
+the same journey — a connect is not open until the handshake has stopped asking.
+
+`src/app/connect.rs` holds 23 methods and 8 tests — 861 lines. `app/mod.rs` is 10 985, down 819.
+
+### One file, because it is one journey
+
+The form and the credential prompts read like two clusters and are not. `on_connect_pressed`
+validates, captures the secret to remember, and *may not dial at all* — if the vault is locked it
+opens the master-passphrase prompt with the whole connect parked behind it, and `resume_vault_pending`
+is what finishes the job later. Splitting the form from the vault would have put the two halves of
+that one decision in two files.
+
+So the file is the journey: `on_connect_pressed` → `dial` (or `dial_local`, §103) → whatever the
+handshake asks for — a host key to trust (§8), a key passphrase (§7), keyboard-interactive answers,
+the vault's master passphrase (§16) — and `abandon_attempt` for when none of it worked.
+
+`seed_form` and `open_copy_of` come too: both fill the form in, one from a saved target and one from a
+session being copied, and both hand off to the same validate-and-dial path.
+
+### What did not come
+
+* `keyboard_claim` and `dismiss` looked like credential-prompt methods and are not: they route the
+  keyboard and the Escape key for every claimant on the tab, prompt or pane or dialog (§10, §20).
+* The `open_copy_of` tests stayed. They are in the chip-menu block, about moving and copying a tab
+  between regions (§48), and the copy's dial is only how they check it arrived.
+* `pick_download_target` and friends stayed in `mod.rs`; they belong to the transfer path, not this one.
+
+### The same pure-move check as §128
+
+1 553 tests, unchanged. The line-multiset check reports 16 removed and 56 added:
+
+* the 16 removed are the signature lines that gained `pub(super)`, and 16 of the added are those
+  same signatures with it;
+* 7 more are rustfmt's: `pub(super) ` pushed `dial_local` and `open_copy_of` past the line width, so
+  each signature is now spread over its parameters. A formatting consequence of the visibility
+  change, not an edit.
+* the remaining 33 are the new file's own header, `use super::{…}`, test module and braces, plus the
+  `mod connect;` line in `mod.rs`.
+
+### Files
+
+- `src/app/connect.rs` — new; 23 `impl Tab` methods and 8 tests.
+- `src/app/mod.rs` — those 23 methods removed, `mod connect;` added, 16 of them now `pub(super)`.
+- `PLAN.md` — this section.
+
+### Not done
+
+- **`app/mod.rs` is 10 985 lines**, from 14 811 four sections ago. The three remaining big dispatchers
+  are `Tab::update` (461 lines), `on_ssh_event` (415) and `on_key` (257), and none of them is a
+  *cluster* — each is one match over the whole `Message` enum, so a slice of one is a slice of
+  everything. That is the wall this line of refactoring hits, and getting past it means asking whether
+  `Tab` should be several types, which is a design question and not a move.
+- **The clusters that are still clusters** are smaller than the four already taken: the find bar and
+  the selection (`open_term_find`, `term_find_step`, `rescan_find`, `reveal_match`,
+  `select_command_output`, 141 lines), the viewer tabs, and the transfer queue. Each is a file's worth,
+  none is 1 000 lines.
+- **`Tab` still has 173 methods and 48 fields**, 89 of the methods in `mod.rs` and 84 spread over the
+  five siblings. Six files instead of one has made that visible rather than smaller, which was §126's
+  stated point and is still the honest status.
