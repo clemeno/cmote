@@ -1399,11 +1399,13 @@ report-all, associated text), superseding modifyOtherKeys when an editor enables
   → "Run anyway") and macOS Gatekeeper (right-click → **Open** the first time). Reversing this
   means saying so explicitly; nothing else here is waiting on it.
 - **GNU toolchain build** — only if a fully MSVC-CRT-free static exe is ever required.
-- **Apple Silicon (`aarch64-apple-darwin`) build** — the whole stack is
-  architecture-agnostic; add the target (and a universal binary via `lipo`) when an ARM
-  Mac needs it. v1 targets Intel Sequoia as asked. Note that CI already runs the full test
-  suite *natively on an aarch64 runner* (§13), so ARM portability is continuously proven —
-  what is missing is a shipped artifact, not the port.
+- **Apple Silicon (`aarch64-apple-darwin`) build** — *done (§127)*. It was already true that
+  the port needed nothing: CI has run the full test suite *natively on an aarch64 runner*
+  since §13, so what was missing was the shipped artifact and never the code. The release
+  now builds both darwin targets, `lipo`-fuses them, and bundles the **universal** binary as
+  one `cmote.app` — so a Mac of either kind runs its own slice natively and neither goes
+  through Rosetta. One download rather than two, because choosing is a question a user
+  should not be asked. See §127 for why there is no second clippy step for the new target.
 
 ---
 
@@ -14408,3 +14410,65 @@ the vault. A cluster is only worth cutting if the cut is along a seam that was a
 - **No new tests, and none was wanted.** The evidence for a pure move is the existing suite, and
   1 553 tests passing before and after is that evidence. A refactor that needs new tests to prove it
   did not change behaviour has changed behaviour.
+
+## §127 — The Mac it already ran on, shipped
+
+§16 listed the Apple Silicon build as deferred and then explained why it was barely deferred at
+all: *"CI already runs the full test suite natively on an aarch64 runner, so ARM portability is
+continuously proven — what is missing is a shipped artifact, not the port."* That has been true since
+§13. This section ships the artifact.
+
+### One universal bundle, not two downloads
+
+The release workflow's macOS job now builds **both** darwin targets — `aarch64-apple-darwin`
+natively, since the runners are Apple Silicon, and `x86_64-apple-darwin` by the same cross-compile CI
+has been doing all along — then `lipo -create`s the two Mach-Os into one binary and hands *that* to
+`bundle-macos.sh`. The bundler needed no change: it already took `BIN` from the environment, for the
+cross-compiled Intel build, and the fused binary goes in the same way.
+
+**A universal binary rather than two artifacts**, because the choice between them is one a user
+should not be asked to make. A Mac given the wrong slice still runs it — under Rosetta, slower, for no
+reason — and the failure is invisible: nothing about a slow terminal says "you downloaded the other
+architecture". The cost is one file roughly twice the size, which for a portable app of a few
+megabytes is not a cost.
+
+The fuse is checked rather than assumed: `lipo -create` given ONE input succeeds and writes a
+single-architecture file. That would ship as "universal" and work on exactly half the Macs it claims,
+so the step asserts both `x86_64` and `arm64` come back out of `lipo -archs`.
+
+### The clippy step that is deliberately not there
+
+§113 and §114 both cost a red macOS job, so the reflex is to add a clippy pass for every target that
+ships. Here that would buy nothing, and the reason is checkable instead of hopeful: **the tree
+contains no `target_arch`, `target_pointer_width` or `target_endian` `cfg` at all.** The two darwin
+targets therefore select exactly the same source — `cfg(target_os = "macos")` is what the tree
+branches on — so clippy against `x86_64-apple-darwin` lints every line the aarch64 build has, and a
+second pass would lint them again and charge the minutes.
+
+That is written into `ci.yml` beside the job, with what makes it stop being true: the first
+arch-conditional in the tree is when the step becomes worth adding. Between the Intel clippy and the
+native aarch64 `cargo test`, both slices of the shipped bundle are compiled on every push either way.
+
+### Files
+
+- `.github/workflows/release.yml` — the second target, the `lipo` fuse, its two assertions, and the
+  artifact's new name.
+- `.github/workflows/ci.yml` — why there is no aarch64 clippy step.
+- `README.md` — the requirements, the artifact list, and the CI note.
+- `PLAN.md` — §16's Apple Silicon entry, now *done*.
+
+### Not done
+
+- **Nothing here has been run.** A workflow change cannot be exercised locally, and this repo's
+  release pipeline is tag-triggered. `workflow_dispatch` exists for exactly this — it builds and
+  packages both targets without publishing — so the way to verify this is a manual run before the next
+  tag, and until then the honest status is "read carefully, not observed". That is the same category
+  §113's nine `cfg` fixes were in, and the same answer: CI is what closes it.
+- **The artifact's name changed**, from `…-x86_64-apple-darwin.app.zip` to
+  `…-universal-apple-darwin.app.zip`. Old releases keep their old names; nothing points at the newest
+  by a fixed URL, so there is nothing to break, but a script somebody wrote by hand would notice.
+- **The bundle is still not signed or notarized**, and still will not be (§16). A universal binary
+  changes nothing about that: the first launch wants right-click → **Open** on both kinds of Mac.
+- **`Cargo.toml` names no `aarch64` anything**, because there is nothing to name — no
+  target-specific dependency, no feature, no build flag. If that ever changes, the release job is
+  where it shows up first.

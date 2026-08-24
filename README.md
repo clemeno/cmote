@@ -554,8 +554,10 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
   Studio Build Tools with the VC++ x64 tools and the Windows SDK — the default MSVC
   linker). No NASM or C compiler: the `ring` crypto backend ships pre-generated
   assembly for this target (§2).
-- **macOS Sequoia (Intel)** — target `x86_64-apple-darwin` and the **Xcode Command
-  Line Tools** (`clang`), which compile `ring`'s crypto from source. No NASM (§2).
+- **macOS Sequoia** — targets `x86_64-apple-darwin` and `aarch64-apple-darwin`, and the
+  **Xcode Command Line Tools** (`clang`), which compile `ring`'s crypto from source. No
+  NASM (§2). A local `cargo build --release` builds for whichever Mac you are on; the
+  release bundle is **universal** and runs natively on both (§127).
 - No external SSH library on either target — the SSH stack is pure Rust (§12).
 
 ## Build and run
@@ -595,7 +597,10 @@ which builds the optimized binary on both targets and attaches these to a **draf
 Release:
 
 - `cmote-<version>-x86_64-pc-windows-msvc.exe` — the portable Windows binary.
-- `cmote-<version>-x86_64-apple-darwin.app.zip` — the macOS Intel `cmote.app`, zipped.
+- `cmote-<version>-universal-apple-darwin.app.zip` — the macOS `cmote.app`, zipped. One
+  bundle for both kinds of Mac: the two darwin slices are `lipo`-fused into a universal
+  binary, so an Intel Mac and an Apple Silicon Mac each run their own code natively and
+  neither goes through Rosetta (§127).
 - `SHA256SUMS` — a SHA-256 for each, so a download can be verified (`sha256sum -c
   SHA256SUMS`, or `shasum -a 256 -c SHA256SUMS` on macOS).
 
@@ -678,7 +683,9 @@ cargo clippy --all-targets -- -D warnings
 **CI** (`.github/workflows/ci.yml`) runs these same gates on every push and pull
 request to `main`, on **both** targets — `cargo fmt --check` plus `cargo clippy -D
 warnings` and `cargo test` on Windows (`x86_64-pc-windows-msvc`) and macOS
-(clippy against the Intel target `x86_64-apple-darwin`, tests native on the runner).
+(clippy against the Intel target `x86_64-apple-darwin`, tests native on the runner — which
+between them compile both slices of the universal bundle; there is no arch-conditional code in
+the tree, so a second clippy pass would lint the same lines, §127).
 It also audits the dependency tree: `cargo audit` for RustSec advisories and
 `cargo deny` (see `deny.toml`) for the license allow-list, banned crates (no
 `aws-lc-*` — keeps the NASM-free portable build, §12), and trusted sources.

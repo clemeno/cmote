@@ -63,12 +63,18 @@ jobs:
         if: ${{ !cancelled() }}
 
   # ── macOS (the second target) ─────────────────────────────────────────────
-  # GitHub's macOS runners are Apple Silicon (aarch64), but cmote ships for Intel
-  # (`x86_64-apple-darwin`, PLAN §1). So we clippy *against the Intel target*
-  # (cross-compile — proves the shipped target builds clean, ring included) and
-  # run the tests natively on the aarch64 host (the logic under test is
-  # architecture-agnostic, PLAN §15, so a native run validates it without needing
-  # Rosetta to execute an x86_64 test binary).
+  # GitHub's macOS runners are Apple Silicon (aarch64), and since §127 cmote ships
+  # a UNIVERSAL bundle — both darwin slices in one binary. So we clippy *against
+  # the Intel target* (cross-compile — proves the shipped target builds clean, ring
+  # included) and run the tests natively on the aarch64 host, which between them
+  # compile both slices.
+  #
+  # There is deliberately no second clippy step for `aarch64-apple-darwin`, and the
+  # reason is checkable rather than a hope: the tree contains no `target_arch`,
+  # `target_pointer_width` or `target_endian` `cfg` at all, so the two darwin
+  # targets select exactly the same source. Clippy would lint the same lines twice
+  # and cost the minutes to do it. If an arch-conditional ever appears, this
+  # paragraph is what stops being true and the step is what to add (§127).
   macos:
     name: clippy (x86_64-apple-darwin) + test
     runs-on: macos-latest

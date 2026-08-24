@@ -1,8 +1,9 @@
 # Release build — cuts the downloadable, portable binaries for a tagged version
 # (PLAN §16, "Release pipeline"). CI (`ci.yml`) keeps `main` green but deliberately
 # ships nothing; THIS workflow is the publishing half: on a version tag it builds the
-# optimized binary for both supported targets, packages each the way its OS expects
-# (a bare portable `cmote.exe` on Windows, a Finder-launchable `cmote.app` on macOS),
+# optimized binary for every supported target, packages each the way its OS expects
+# (a bare portable `cmote.exe` on Windows, a Finder-launchable `cmote.app` on macOS —
+# universal since §127, so one bundle runs natively on Intel and Apple Silicon),
 # checksums them, and attaches the lot to a DRAFT GitHub Release for a human to review
 # and publish.
 #
@@ -60,33 +61,54 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # ── macOS app bundle (Intel) ──────────────────────────────────────────────
-  # The runners are Apple Silicon, but cmote ships for Intel (PLAN §1), so we
-  # cross-compile `x86_64-apple-darwin` exactly as CI does, then wrap the Mach-O
-  # in `cmote.app` (bundle-macos.sh) so Finder launches it as a GUI app rather
-  # than opening a Terminal on the bare binary (README, PLAN §11). `ditto` zips
-  # the bundle the macOS way, preserving its structure.
+  # ── macOS app bundle (universal) ──────────────────────────────────────────
+  # ONE bundle that runs natively on both kinds of Mac (PLAN §127). The runners
+  # are Apple Silicon, so `aarch64-apple-darwin` builds natively and
+  # `x86_64-apple-darwin` cross-compiles exactly as CI has been proving all
+  # along; `lipo` then glues the two Mach-Os into one universal binary, and
+  # `bundle-macos.sh` wraps THAT in `cmote.app` so Finder launches it as a GUI
+  # app rather than opening a Terminal on the bare binary (README, PLAN §11).
+  # `ditto` zips the bundle the macOS way, preserving its structure.
+  #
+  # A universal binary rather than two downloads: the whole choice a user faces
+  # here is one they should not have to make, and a Mac that runs the wrong slice
+  # under Rosetta is slower for no reason. The cost is one file about twice the
+  # size, which for a portable app measured in single-digit megabytes is nothing.
   macos:
-    name: build (x86_64-apple-darwin)
+    name: build (universal-apple-darwin)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-apple-darwin
+          targets: x86_64-apple-darwin, aarch64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target x86_64-apple-darwin
+      - run: cargo build --release --locked --target aarch64-apple-darwin
+      - name: Fuse the two slices into one universal binary
+        shell: bash
+        run: |
+          mkdir -p target/universal
+          lipo -create -output target/universal/cmote \
+            target/x86_64-apple-darwin/release/cmote \
+            target/aarch64-apple-darwin/release/cmote
+          # Fail loudly if either slice went missing: `lipo -create` on one input
+          # succeeds and writes a single-architecture file, which would ship as
+          # "universal" and work on exactly half the Macs it claims.
+          lipo -archs target/universal/cmote | tee /dev/stderr \
+            | grep -qw x86_64
+          lipo -archs target/universal/cmote | grep -qw arm64
       - name: Wrap the binary in cmote.app and zip it
         shell: bash
         env:
-          # Point the bundler at the cross-compiled binary — its default is the
-          # native `target/release/cmote`, which a --target build does not write.
-          BIN: target/x86_64-apple-darwin/release/cmote
+          # Point the bundler at the fused binary — its default is the native
+          # `target/release/cmote`, which a --target build does not write.
+          BIN: target/universal/cmote
         run: |
           ./bundle-macos.sh
           mkdir -p dist
           ditto -c -k --keepParent target/release/cmote.app \
-            "dist/cmote-${GITHUB_REF_NAME}-x86_64-apple-darwin.app.zip"
+            "dist/cmote-${GITHUB_REF_NAME}-universal-apple-darwin.app.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos
