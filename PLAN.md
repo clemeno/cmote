@@ -14472,3 +14472,81 @@ native aarch64 `cargo test`, both slices of the shipped bundle are compiled on e
 - **`Cargo.toml` names no `aarch64` anything**, because there is nothing to name — no
   target-specific dependency, no feature, no build flag. If that ever changes, the release job is
   where it shows up first.
+
+## §128 — The next slice: the browser strip
+
+§126 cut `app.rs` from 14 811 lines to 12 882 and named where the next slices were. This is the first
+of them, and it takes the two panes.
+
+`src/app/browse.rs` holds 22 methods and 4 tests — 1 113 lines. `app/mod.rs` is 11 804, down 1 078.
+
+### What moved
+
+Everything the tab does *for* the browser strip (`CONTEXT.md`: **Browser strip**, **Pane**), which is
+one cluster whether it reads as one from the method names or not:
+
+* the two dispatchers, `on_explorer` (§18) and `on_files` (§19) — 165 and 268 lines, two of the five
+  §126 named;
+* the keys each pane answers while it holds the focus, `on_tree_key` and `on_files_key` (§20);
+* the geometry that follows from the tree taking its width off the pane — `files_width`,
+  `scroll_files_into_view`, `scroll_tree_into_view`;
+* the selection work a pointer or a menu asks for — `apply_band`, `action_targets`,
+  `resolve_selected_link` (§21);
+* the errands a row's action turns into — `browse_to`, `on_sync`, `on_reveal`, `move_shell_to`,
+  `list_dirs`, `list_files`, `refresh_remote_dir`, `on_deleted`, and the four halves of the new-folder
+  and delete dialogs.
+
+The four tests that moved with them are the ones about *this* wiring: the three Reveal tests (§19,
+§22) and `shift_click_and_shift_arrow_reach_the_selection` (§21). The pane tests that stayed did so
+because the pane is only how they get at something else — three dialog tests use `begin_delete` or
+`begin_new_folder` to open a dialog and are about the keyboard claim, not about deleting.
+
+### The move is provably a move
+
+`cargo test` reports the same 1 553 tests, as in §126. But a test count is evidence a behaviour did
+not change, not evidence a *line* did not, so this slice was checked the stronger way: the multiset of
+non-blank lines in `HEAD:src/app/mod.rs` against the multiset in the new `mod.rs` plus `browse.rs`.
+
+The difference is 15 lines removed and 48 added, and every one of them is accounted for:
+
+* the 15 removed are the 15 signature lines that gained `pub(super)`, and the 15 of the 48 added are
+  those same signatures with it;
+* the other 33 are the new file's own — 17 lines of header comment, 5 of `use super::{…}`, 7 of test
+  module (its `#[cfg(test)]`, its `mod` line, its three-line comment and its two `use` lines),
+  `impl Tab {`, two closing braces, and the `mod browse;` line in `mod.rs`.
+
+No body changed, no doc comment changed, nothing was dropped and nothing was duplicated. That is the
+check worth having for a refactor of this shape, and it is cheap: a `collections.Counter` on two files
+against one.
+
+### Naming it `browse` and not `panes`
+
+`crate::panes` is already a module, and `self.panes` is the field these 22 methods work on, so a child
+module called `panes` would have made `panes::` mean one thing in this file and another everywhere
+else. `browse` says what the methods are for without colliding with either.
+
+### Files
+
+- `src/app/browse.rs` — new; 22 `impl Tab` methods and 4 tests.
+- `src/app/mod.rs` — those 22 methods removed, `mod browse;` added, 15 of them now `pub(super)`.
+- `PLAN.md` — this section.
+
+### Not done
+
+- **`app/mod.rs` is still 11 804 lines.** Three of §126's five dispatchers remain — `update` (~460),
+  `on_ssh_event` (~410), `on_key` (~260) — and so does the 530-line `Message` enum, for the reason
+  §126 gave. The connect form's own methods (`seed_form`, `ready_to_dial`, `on_form_key`, `dial`,
+  `dial_local`, `on_connect_pressed`, `form_with_dialog`) are the clearest next cluster: they are the
+  other half of `home.rs`'s screen. After them, the credential cluster (`open_vault_modal` and the
+  eight methods around it) and the find/selection cluster (`open_term_find`, `term_find_step`,
+  `rescan_find`, `reveal_match`, `select_command_output`) each look like one file.
+- **`send_fetches`, `reread_panes` and `refit_grid` stayed**, though all three read as pane work. They
+  are called from the reconnect path, from `accounts.rs` and from the window-resize path as well, so
+  they belong to more than this cluster; a private method in `app` is visible to `app::browse` anyway,
+  so leaving them cost nothing. If a later slice takes the reconnect path, that is where they go.
+- **Nothing was redesigned, again on purpose.** `on_files` is still a 268-line dispatch and
+  `on_explorer` a 165-line one; both still carry the `#[expect(clippy::too_many_lines)]` they had. The
+  question of whether either should be several handlers is now askable in a 1 100-line file instead of
+  a 12 900-line one, which was the point.
+- **No new tests, and none was wanted** — the same reasoning as §126, plus the line-multiset check
+  above, which is a stronger statement about a move than any new test could make.
