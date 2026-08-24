@@ -40,7 +40,7 @@ each of them a query answered in full and a set refused on purpose. Each is now 
 **§65 then audited every remaining partial row against the crates**, split seven more the same way,
 re-marked `BEL` as the 🛑 it always was, and found one real gap behind a comfortable-looking mark: cmote
 never drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight
-bytes (mode 2026, and part 7). **§66 split the last two and retired the partial class**: every row in part 8 now states
+bytes (mode 2026, and part 7) — **driven since §122**, over every tab rather than the visible one. **§66 split the last two and retired the partial class**: every row in part 8 now states
 one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
 gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
 **§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
@@ -737,10 +737,16 @@ short, and since §41 nothing left in it is high value:
   route, and the first where what had to be checked was not a sequence's semantics but a *sibling
   crate's* — one of the three reasons on the record (`none` is in the vocabulary) was simply false about
   `cursor_icon`. See PLAN §77.
-- **Synchronized output `?2026`** — the **vte parser batches** the run between `?2026h` and
-  `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU), but `alacritty_terminal`'s mode handler is a no-op
-  (`SyncUpdate => ()`) and DECRQM reports it reset. cmote already paints atomically from the grid
-  each frame, so the visible effect is nil either way. `[community]`, low pri.
+- **Synchronized output `?2026`** — **done (§122)**, and it was the last item on this list with an
+  argument for building rather than a reason not to. The **vte parser batches** the run between
+  `?2026h` and `?2026l` (`vte-0.15.0/src/ansi.rs` BSU/ESU) while `alacritty_terminal`'s mode handler
+  is a no-op (`SyncUpdate => ()`) and DECRQM reports it reset — so the batching half was always
+  right, and cmote paints atomically from the grid anyway. What was missing is the **abort
+  timeout**: the 150 ms `vte` allows an unclosed bracket is stored as an `Instant` and never compared
+  to the clock by the crate, so a remote that opened one and went quiet held the visible screen at
+  its pre-BSU state indefinitely. cmote now drives it — `Terminal::held_update_expiry` reports the
+  instant, `release_held_update` applies the frame once it passes, and an `iced::window::frames()`
+  subscription runs only while some terminal in the window is holding one. `[community]`.
 
 ---
 
@@ -1153,6 +1159,15 @@ length refusing. The fix is small and has a shape already in the codebase: an `i
 subscription while an update is pending, the way `SnackbarTick` and `QuitTick` are driven, calling
 `stop_sync` once the instant passes. Not taken in §65, which was an audit.
 
+*[**§122 took it, in almost exactly that shape, and found one thing the sketch above had wrong.** The
+clock cannot go through `broadcast` the way `SnackbarTick` does: that reaches each region's on-screen tab,
+and a held frame's whole hazard is the tab you are NOT looking at — a background shell is still being fed
+(§26), so it can be mid-frame, and nothing on screen would hint that the tab you switch to is showing a
+screen from a minute ago. So the walk is over every tab, and over every parked identity's terminal
+(§45), and the replies each release produces go back by that identity's own route. The rest went as
+predicted: two methods on `Terminal`, one frame subscription behind one condition, and the release fed
+through the gate because held bytes reach the engine exactly as live ones do. PLAN §122.]*
+
 **§66 retired the partial class and inherited two small gaps from it.** Splitting the last two partial rows —
 DECRQSS and XTGETTCAP — meant deciding what their declined halves are, and neither is a refusal: cmote
 answers honestly ("not reported", "unknown") because it has no reporting code, not because a policy says
@@ -1188,10 +1203,12 @@ and kitty graphics — iTerm2's inline images left for the 🛑 column in §70) 
 practice, or a whole protocol's worth of work — **no item of real UX value remains anywhere in this
 document.**
 
-*[That list has been overtaken twice over: the rectangular ops shipped in §58 and the margins in §102.
-Both were on it as things "left", and both turned out to be movable — which is the reading of this
-paragraph worth keeping. It was right that nothing here was blocking a user; it was wrong to let that
-double as a reason not to re-price the items.]*
+*[That list has been overtaken three times over: the rectangular ops shipped in §58, the margins in
+§102, and synchronized output's abort timeout in §122. All three were on it as things "left", and all
+three turned out to be movable — which is the reading of this paragraph worth keeping. It was right that
+nothing here was blocking a user; it was wrong to let that double as a reason not to re-price the items.
+What is left of part 5 after §122 is blink, double-height lines and kitty graphics: two the engine drops
+outright, and one whole protocol.]*
 
 **One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
 crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
@@ -1259,9 +1276,10 @@ picture's cells become ordinary scrollback that scrolls, evicts and reflows like
 
 Every `[engine-limit]` item that carried real UX value is now shipped, and it was shipped **without
 touching the engine** — the same beside-the-engine tactic, one more time. What remains there (blink,
-double-height lines, left/right margins, rectangular ops, synchronized output, kitty graphics) is legacy,
+double-height lines, kitty graphics) is legacy,
 invisible in practice, or a protocol nobody here has asked for; iTerm2's inline images were on this list
-until §70 moved them to the other column. For "support *any* documented app UX",
+until §70 moved them to the other column, the rectangular ops shipped in §58, the margins in §102, and
+synchronized output's abort timeout in §122. For "support *any* documented app UX",
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
 refused with its reason written down.
 
@@ -1611,7 +1629,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 1049 | Alternate screen | ✅ | the alternate screen: the cursor is saved and a cleared page swapped in. No scrollback there, by design |
 | 2004 | Bracketed paste | ✅ | bracketed paste — a paste arrives wrapped in `CSI 200~` and `CSI 201~`, with an injection scrub |
 | 2026 (batching) | Synchronized output | ✅ | synchronized output: BSU holds the visible screen still and ESU flushes the buffered stream inside one advance, so a frame is atomic (§65) |
-| 2026 (abort timeout) | Synchronized output | ❌ | the 150 ms bound on a stuck update, which the application must drive; a remote that sends BSU and goes quiet holds the screen until ESU or 2 MiB (§65, part 7) |
+| 2026 (abort timeout) | Synchronized output | ✅ | the 150 ms bound on a stuck update, which the application must drive because `vte` stores the instant and never reads it: a frame clock runs while any terminal in the window holds a bracket, and the frame is applied once its expiry passes (§122) |
 | 2027 | Grapheme clustering | ❌ | grapheme clustering — a cluster occupies one cell rather than each code point taking its own |
 | 2031 | Colour-scheme reporting | ❌ | the **unsolicited** half of dark/light reporting: with it set the terminal sends `CSI ? 997 ; 1 n` / `; 2 n` every time its scheme changes. Not in the engine's mode list, so DECRQM answers `0`, not recognised — the truth rather than a shortfall, cmote's scheme having no way to change. A program told `0` polls instead, and the question it polls with is answered (the `? 996 n` row) (§98) |
 | 2034 | Semantic block reporting | 🤷 | arms contour's semantic-block query and mints the token that authenticates it. Refused with the query itself — a mode whose only effect is to enable a refused reply has nothing else left to do (§98) |
@@ -1968,6 +1986,14 @@ Audited file:line anchors behind the claims above, for later re-checking.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
   crate source.
+- **The synchronized-update timeout is set and never read** (`vte-0.15.0/src/ansi.rs`, read for
+  §122). `SYNC_UPDATE_TIMEOUT` is 150 ms (`:36`) and `SYNC_BUFFER_SIZE` 2 MiB (`:39`);
+  `StdSyncHandler::set_timeout` stores `Instant::now() + duration` (`:459`) and `pending_timeout`
+  answers `self.timeout.is_some()` (`:469`) — no comparison to the clock anywhere in the crate.
+  `Processor::advance` (`:298`) branches on `pending_timeout()` alone, so a bracket ends at its ESU,
+  at 2 MiB (`advance_sync`, `:364`), or when the application calls `stop_sync` (`:314`). That last
+  one is the whole reason §122 exists, and `sync_timeout()` (`:292`, then `:451`) is how the instant
+  is read back out.
 - **Every DCS is a no-op, and that is what let §41 in.** `vte-0.15.0/src/ansi.rs`'s
   `hook` (`:1311`), `put` (`:1319`) and `unhook` (`:1324`) are debug logs with no body, so a sixel
   payload is followed to its terminator and dropped — it cannot reach the grid, and cmote can scan the

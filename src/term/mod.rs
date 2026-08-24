@@ -81,6 +81,7 @@ pub mod sixel; // decodes a sixel image's payload into pixels (§41)
 mod tabs; // reads DECST8C, the tab-stop reset the engine parses and drops (§74)
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::Term;
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
@@ -424,6 +425,23 @@ impl Terminal {
 		self.parser.advance(&mut gate, bytes);
 	}
 
+	/// Let go of the bytes the parser has been HOLDING for a synchronized update (§122).
+	///
+	/// The parser's other entry point, and it sits here beside `advance` for the reason that one's
+	/// comment gives: held bytes reach the engine exactly as live ones do — a DECSTBM that was
+	/// buffered moves the scrolling region just as one off the wire does — so they pass the same
+	/// gate. `stop_sync` re-parses the buffer through the handler it is given and then reports
+	/// mode 2026 off, so the gate sees the whole release, including its end.
+	fn release_buffered(&mut self) {
+		let mut gate = gate::Gate::new(
+			&mut self.term,
+			&mut self.region,
+			&mut self.margins,
+			&self.replies,
+		);
+		self.parser.stop_sync(&mut gate);
+	}
+
 	/// Feed a chunk of raw output from the shell, and return the bytes to send BACK to it as
 	/// replies to any status/identity queries it carried (§9, §23) — usually empty. The
 	/// engine applies every escape sequence and glyph to the grid; partial sequences split
@@ -623,6 +641,53 @@ impl Terminal {
 		// Last, amend the engine's own DA1 answer if this chunk asked for one: cmote draws sixels, so
 		// its device attributes have to say so (§41). Nothing else in `out` is touched.
 		query::with_sixel_attribute(out)
+	}
+
+	/// When the update this terminal is HOLDING stops being honoured, or `None` when it holds none
+	/// (§122).
+	///
+	/// A program brackets one frame's worth of output with `CSI ? 2026 h` … `CSI ? 2026 l` so the
+	/// screen is never seen half-drawn. `vte` implements that by buffering every byte in between and
+	/// applying the lot at the closing `l`, and it bounds a bracket that never closes with a 150 ms
+	/// timeout — but that timeout is **the application's to drive**: `Processor::set_timeout` stores
+	/// the instant and nothing in the crate ever compares it to the clock. A remote that opens a
+	/// bracket and then goes quiet therefore holds cmote's visible screen at its pre-BSU state for
+	/// as long as it likes, which is a remote-triggered effect on cmote's own window — the class
+	/// `TERMINAL_COMPATIBILITY_PLAN.md`'s part 6 spends its length refusing.
+	///
+	/// This is the read half of the answer, and `release_held_update` is the other. It reports the
+	/// instant rather than a bool because the caller's job is to keep a clock running while one
+	/// exists, and `Some` in the future is exactly as much reason to tick as `Some` in the past.
+	pub fn held_update_expiry(&self) -> Option<Instant> {
+		self.parser.sync_timeout().sync_timeout()
+	}
+
+	/// Apply a held update whose expiry has passed, and return the replies its bytes asked for —
+	/// the same bytes `process` returns, to be sent back to the shell the same way (§122).
+	///
+	/// `None` means there was nothing to do: no bracket open, or one still inside its 150 ms. The
+	/// clock is read HERE rather than by the caller so that one place owns the comparison, which is
+	/// also what lets the caller's condition stay the plain "is one open?" of `held_update_expiry`.
+	///
+	/// Only the ENGINE side of `process` is repeated below, because only the engine side was
+	/// deferred: every scanner beside it read these bytes as they arrived, off the raw chunk, and
+	/// buffering happens after that. So there is no second scan here and nothing is counted twice.
+	pub fn release_held_update(&mut self) -> Option<Vec<u8>> {
+		if self.held_update_expiry()? > Instant::now() {
+			return None;
+		}
+		self.release_buffered();
+		// The released bytes could have carried a swap on or off the alternate screen, and could
+		// have written over the cells a picture had reserved there — the same two things `process`
+		// reconciles at the end of a chunk, for the same reason (§41).
+		self.sync_alternate();
+		self.retire_covered_images();
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		let out = std::mem::take(&mut buffer.bytes);
+		drop(buffer);
+		// A buffered DA1 is answered by the engine at the moment of release, so its answer needs the
+		// same sixel amendment `process` gives one that arrived unbracketed (§41).
+		Some(query::with_sixel_attribute(out))
 	}
 
 	/// Act on something the image scanner found, at the point in the stream it sits (§41).
@@ -5904,6 +5969,105 @@ mod tests {
 			terminal.process(b"\x1b[7;1;1;1;1;2*y"),
 			b"\x1bP7!~FF7D\x1b\\".to_vec(),
 			"and for the real ones once the mode is off"
+		);
+	}
+
+	/// How long a held frame is given before cmote applies it anyway (§122). `vte`'s own constant,
+	/// which it does not export, so the tests below sleep past a copy of it. A little over, because
+	/// a sleep may only ever be longer than asked.
+	const HELD_FRAME_SLEEP: std::time::Duration = std::time::Duration::from_millis(200);
+
+	/// A closed bracket needs nothing from the clock: `vte` applies the frame at the ESU, and there
+	/// is no expiry left to drive.
+	///
+	/// This one guards no line of cmote's — it states the PREMISE the rest of the section rests on,
+	/// which is that the ordinary case was already right and only the unclosed bracket needed
+	/// answering. Worth having and worth labelling: a reader counting green tests here should know
+	/// that three of the four cover the new code and this one covers the crate underneath it.
+	#[test]
+	fn a_closed_bracket_puts_its_frame_on_screen_at_once() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"\x1b[?2026hDONE\x1b[?2026l");
+		assert_eq!(read(&terminal, 0, 0, 4), "DONE");
+		assert_eq!(
+			terminal.held_update_expiry(),
+			None,
+			"nothing is being held once the bracket closes"
+		);
+	}
+
+	/// A bracket that never closes holds the screen — that is the feature — and the hold is what
+	/// carries an expiry. Inside its 150 ms a release is refused, so a frame clock that ticks early
+	/// cannot tear a frame in half.
+	#[test]
+	fn an_open_bracket_holds_its_frame_and_refuses_an_early_release() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"OLD");
+		terminal.process(b"\x1b[H\x1b[?2026hNEW");
+		assert_eq!(read(&terminal, 0, 0, 3), "OLD", "the pre-BSU screen stands");
+		assert!(
+			terminal.held_update_expiry().is_some(),
+			"and the hold is visible to the caller, so a clock gets asked for"
+		);
+		assert_eq!(
+			terminal.release_held_update(),
+			None,
+			"a tick inside the 150 ms releases nothing"
+		);
+		assert_eq!(read(&terminal, 0, 0, 3), "OLD");
+	}
+
+	/// The point of the whole section: once the expiry passes, the held frame goes to the screen
+	/// without the remote sending another byte, and the hold is over.
+	///
+	/// The sleep is the one kind of wait AGENTS.md allows — the event is certain rather than hoped
+	/// for. It is a monotonic deadline, and a busy machine can only make `Instant::now()` later than
+	/// the test needs, never earlier.
+	#[test]
+	fn a_held_frame_reaches_the_screen_once_its_expiry_passes() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"OLD");
+		terminal.process(b"\x1b[H\x1b[?2026hNEW");
+		std::thread::sleep(HELD_FRAME_SLEEP);
+		assert_eq!(
+			terminal.release_held_update(),
+			Some(Vec::new()),
+			"released, and this frame asked no questions"
+		);
+		assert_eq!(read(&terminal, 0, 0, 3), "NEW");
+		assert_eq!(
+			terminal.held_update_expiry(),
+			None,
+			"the hold is over, so the clock is no longer needed"
+		);
+	}
+
+	/// A query inside a held frame is answered at RELEASE, not at the chunk that carried it — the
+	/// engine has not seen it yet. That is why the release returns bytes at all, and why they go
+	/// back to the shell by the same route `process`'s do: the program that asked is blocked
+	/// reading its own stdin until they arrive (§23).
+	///
+	/// DA1 is the one to test, because its answer is also the one cmote amends on the way out (§41):
+	/// a held reply has to get the sixel attribute exactly as an unheld one does.
+	#[test]
+	fn a_query_held_inside_a_frame_is_answered_when_the_frame_is_released() {
+		let mut terminal = Terminal::new(2, 8);
+		assert_eq!(
+			terminal.process(b"\x1b[?2026h\x1b[c"),
+			b"".to_vec(),
+			"the chunk carrying it draws nothing — the engine has not read it"
+		);
+		std::thread::sleep(HELD_FRAME_SLEEP);
+		let replies = terminal
+			.release_held_update()
+			.expect("the expiry has passed");
+		assert!(
+			replies.starts_with(b"\x1b[?"),
+			"a device-attributes reply, not an empty release: {replies:?}"
+		);
+		assert!(
+			replies.ends_with(b";4c"),
+			"and amended to advertise sixel, like any other DA1 (§41): {replies:?}"
 		);
 	}
 }

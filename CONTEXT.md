@@ -132,6 +132,12 @@ The shared machine a scanner uses to find a sequence's payload and its end (§10
 One thing `process` must do part-way through a chunk, ordered by the byte offset it sits at —
 so a mark and an image land in the order the stream put them (§34, §41, §55).
 
+**Held update**:
+The frame `vte` is buffering while a program has mode 2026 open — written to the terminal but not
+yet on screen (§122). It is *held*, never "synchronized": `sync_alternate` is a different thing
+entirely.
+_Avoid_: sync, for this
+
 **Screen spot**:
 A position in viewport coordinates: row 0 is the top visible line.
 

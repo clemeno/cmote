@@ -13937,3 +13937,94 @@ new test caught this one; probing them one at a time is what made it visible.
   no callback, so the honest options were the full bar it has or a fake one.
 - **The tab strip itself is not measured.** The bar and the label are §13's manual category: no test
   draws a chip. What IS tested is every number behind them.
+
+## §122 — The frame a remote could hold for ever
+
+`CSI ? 2026 h` … `CSI ? 2026 l` is the synchronized-update bracket: a program says "do not draw
+until I close this", writes a whole frame, and closes it, so a full-screen redraw is never seen
+half-finished. `vte` implements it by buffering every byte in between and applying the lot at the
+closing `l`.
+
+§65 found the hole and did not take it, because §65 was an audit: **the 150 ms `vte` allows an
+unclosed bracket is the application's to drive.** `StdSyncHandler::set_timeout` stores an `Instant`
+and nothing in the crate ever compares it to the clock — `advance` asks only `pending_timeout()`,
+which is `self.timeout.is_some()`. So a bracket expires when the remote closes it, or when the
+buffer reaches 2 MiB, and never because time passed.
+
+The consequence is small and it is real: a remote that sends the opening bracket and then stops
+writing holds cmote's visible screen at its pre-BSU state indefinitely. Nothing leaks, the session is
+unharmed, and the shell still takes input — it is a stuck picture, not a stuck client. But it is a
+**remote-triggered effect on cmote's own window**, which is the class
+`TERMINAL_COMPATIBILITY_PLAN.md`'s part 6 spends its whole length refusing, and it was the only item
+on that document's ceiling list with an argument for building rather than a reason not to.
+
+### Two methods, and the clock is the caller's
+
+`Terminal::held_update_expiry` reports the instant, and `Terminal::release_held_update` applies the
+frame if that instant has passed and answers `None` if it has not. Three things about that split are
+deliberate:
+
+* **The expiry is reported as an instant, not as a bool.** The caller's job is to keep a clock
+  running while a frame is held, and `Some` in the future is exactly as much reason to tick as `Some`
+  in the past. A `holding_a_frame() -> bool` would have needed a second method the moment anything
+  wanted to know how long was left.
+* **The comparison to `Instant::now()` lives in `release_held_update`, not in the caller.** One place
+  owns it, which is what lets the subscription's condition stay the plain "is one open?" — and it is
+  why a tick arriving inside the grace releases nothing rather than tearing a frame in half.
+* **The release goes through the gate** (`release_buffered`, sitting beside `advance` for the reason
+  `advance`'s own comment gives). Held bytes reach the engine exactly as live ones do: a buffered
+  DECSTBM moves the scrolling region just as one off the wire does, so it passes the same mirror
+  (§102). `stop_sync` re-parses the buffer through the handler it is given and then reports mode 2026
+  off, so the gate sees the whole release including its end.
+
+Only the ENGINE half of `process` is repeated in the release, and that is not an omission: every
+scanner beside the engine read those bytes as they arrived, off the raw chunk, because buffering
+happens after that. So there is no second scan and nothing is counted twice. What IS repeated is the
+tail — `sync_alternate`, the covered-image sweep, the reply drain, and the sixel amendment on a
+buffered DA1 — because each of those describes the state after bytes have been applied, and the
+release is when these bytes are applied.
+
+### The clock reaches further than the other three
+
+`SnackbarTick`, `TermFindRescan` and `FileDropSettled` all go through `broadcast`, which hands a
+message to each region's **on-screen** tab. That is right for all three: a toast, a find bar and a
+drop are things you are looking at.
+
+A held frame is the opposite. A background tab's shell is still running and still being fed (§26), so
+it can be mid-frame too — and its held frame is the more dangerous of the two, because nothing on
+screen hints that the tab you are about to switch to is showing a screen from a minute ago. So
+`HeldUpdateExpired` does not `broadcast`: `App::release_held_updates` walks `tabs_mut()`, and
+`Tab::holds_update` answers for the visible terminal **and** every parked identity's (§45).
+
+The two halves of a tab's release then send by different routes, which is why that method is written
+out rather than looped: the visible identity's replies go down the typing path, and a parked
+identity's are addressed to that shell by name. Same split `SshEvent::Output` already makes, for the
+same reason — a program blocked reading its own stdin is not helped by an answer sent to whichever
+account happens to be on screen.
+
+### Files
+
+- `src/term/mod.rs` — `held_update_expiry`, `release_held_update`, and `release_buffered` beside
+  `advance`.
+- `src/app.rs` — `Message::HeldUpdateExpired`, the `frames()` subscription behind
+  `Tab::holds_update`, `App::release_held_updates`, and `Tab::release_held_updates`.
+
+### Not done
+
+- **A mark or a picture inside a held frame anchors to the wrong line.** `process` splits its advance
+  at each OSC 133 mark (§34) and each inline image (§41) so the cursor is read exactly where the
+  event sits — but inside a bracket the split advances are all buffered, so the cursor read is the
+  pre-BSU one. Nothing is lost and nothing crashes; a prompt mark can land a line or two out. Left
+  because the fix is to teach the scanners about a mode they currently cannot see, and because a
+  program that brackets its shell-integration marks is hypothetical: the marks are emitted by the
+  shell's prompt, and the bracket by a full-screen application, and those are not the same writer.
+- **The subscription line itself is not tested.** `self.tabs().any(Tab::holds_update)` is §13's
+  manual category — `subscription` returns iced's own opaque `Subscription`, which nothing here can
+  read back. What IS tested is the condition (`holds_update`, both halves) and the effect
+  (`release_held_updates`, both routes), so the untested part is the wiring between two proven ends.
+- **`vte`'s 150 ms is copied into two test constants, not read from the crate.** It is a private
+  `const` with no accessor, so both test modules that have to outwait it say how long by, under one
+  name and with a note pointing at the other (§108). If upstream ever raises it, the tests get
+  slower rather than wrong.
+- **2 MiB still ends a bracket too.** That is `vte`'s other bound and it is untouched here; a remote
+  pushing that much inside one bracket has its frame applied by the crate, not by this clock.

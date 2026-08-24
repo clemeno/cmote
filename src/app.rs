@@ -560,6 +560,11 @@ impl App {
 			// asked for one, not to whichever region happens to hold the keyboard.
 			Message::SnackbarTick => self.broadcast(&Message::SnackbarTick),
 			Message::TermFindRescan => self.broadcast(&Message::TermFindRescan),
+			// This clock reaches further than the two above it (§122). `broadcast` hands a message to
+			// each region's ON-SCREEN tab, which is right for a toast and for a find bar — both are
+			// things you can see. A held frame is the opposite: the tab you cannot see is the one
+			// whose held frame would sit there unnoticed until you came back to it.
+			Message::HeldUpdateExpired => self.release_held_updates(),
 			// The split gestures (§48). `Split` itself arrives wrapped — it is a strip button, so it
 			// names its own region — and is handled in `update_in`; these three do not.
 			Message::SplitSized {
@@ -797,6 +802,21 @@ impl App {
 			.iter_mut()
 			.map(|(_, region)| region.active_mut().update(message.clone()))
 			.collect();
+		iced::Task::batch(tasks)
+	}
+
+	/// A frame tick while some terminal is holding a synchronized update (§122): let go of every
+	/// held frame whose 150 ms has run out.
+	///
+	/// EVERY tab is asked, not just the on-screen ones, which is why this is not a `broadcast`. A
+	/// tab in the background is still being fed by its shell (§26), so it can be holding a frame
+	/// too — and its held frame is the more dangerous of the two, because nothing on screen hints
+	/// that the tab you are about to switch to is showing a screen from a minute ago. The decision
+	/// about WHETHER a given frame is due belongs to the terminal itself (`release_held_update`), so
+	/// this walk is unconditional and cheap: a terminal holding nothing answers `None`.
+	fn release_held_updates(&mut self) -> iced::Task<Message> {
+		let tasks: Vec<iced::Task<Message>> =
+			self.tabs_mut().map(Tab::release_held_updates).collect();
 		iced::Task::batch(tasks)
 	}
 
@@ -2165,6 +2185,14 @@ impl App {
 		if on_screen().any(|tab| tab.transfers.settling()) {
 			subs.push(iced::window::frames().map(|_instant| Message::FileDropSettled));
 		}
+		// A terminal is holding a synchronized update (§122): tick so the 150 ms it is allowed is
+		// actually measured against a clock, since `vte` sets that deadline and never reads it. Asked
+		// over EVERY tab rather than the on-screen ones — the clock's whole job here is to unstick a
+		// screen nobody is looking at yet — which is also why this condition is a tab method instead
+		// of the `on_screen()` helper the three clocks above share.
+		if self.tabs().any(Tab::holds_update) {
+			subs.push(iced::window::frames().map(|_instant| Message::HeldUpdateExpired));
+		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		let active = self.active();
 		match active.screen {
@@ -3143,6 +3171,13 @@ pub enum Message {
 	/// — the query is the bar's own — and, like `SnackbarTick`, is only subscribed to while there is
 	/// something to do, so a bar over an idle shell costs no frames at all.
 	TermFindRescan,
+	/// A window-frame tick raised while SOME terminal is holding a synchronized update (§122):
+	/// re-check the 150 ms a held frame is allowed and let it go once that has passed. Carries no
+	/// payload — every terminal in the window is asked, because a background tab's held frame is
+	/// exactly the one whose staleness would go unnoticed until it was switched to. Like the two
+	/// ticks above it is subscribed to only while an update is actually being held, so an ordinary
+	/// shell pays nothing for it.
+	HeldUpdateExpired,
 	/// Open an OSC 8 hyperlink from the terminal's context menu (§24). Carries the URI, so
 	/// the menu item stands alone; the Ctrl+click path opens straight from `on_grid_pressed`
 	/// and raises no message.
@@ -4313,6 +4348,9 @@ impl Tab {
 			| Message::TabMenuDismissed
 			| Message::TabMoveTo(_)
 			| Message::TabDuplicateTo(_)
+			// The held-frame clock reaches every tab rather than the on-screen one (§122), so `App`
+			// walks the tabs itself and calls the method; the message stops there.
+			| Message::HeldUpdateExpired
 			// The quit flow is `App`'s job too (§30) — a tab never sees these.
 			| Message::QuitRequested
 			| Message::QuitConfirmed
@@ -4780,6 +4818,60 @@ impl Tab {
 			self.show_error("SSH worker is not ready yet.");
 			false
 		}
+	}
+
+	/// Whether any terminal in this tab is holding a synchronized update (§122) — the question the
+	/// subscription list asks to decide whether a frame clock is needed at all.
+	///
+	/// The parked identities are counted as well as the visible one, for the reason
+	/// `App::release_held_updates` gives: a background shell can be mid-frame too, and no clock
+	/// means its frame is held until the next byte arrives to push it out.
+	fn holds_update(&self) -> bool {
+		let visible = self
+			.terminal
+			.as_ref()
+			.and_then(term::Terminal::held_update_expiry);
+		visible.is_some()
+			|| self.identities.iter().any(|entry| {
+				entry
+					.work
+					.terminal
+					.as_ref()
+					.is_some_and(|terminal| terminal.held_update_expiry().is_some())
+			})
+	}
+
+	/// Let go of this tab's held frames whose 150 ms has run out (§122), sending back whatever
+	/// replies the released bytes asked for.
+	///
+	/// The two halves send by different routes, and that is the whole reason this is written out
+	/// rather than looped: the visible identity's replies go down the typing path, and a parked
+	/// identity's are addressed to THAT shell by name — the same split `SshEvent::Output` makes for
+	/// a live chunk (§45), and for the same reason. A program blocked reading its own stdin is not
+	/// helped by an answer sent to the account that happens to be on screen.
+	fn release_held_updates(&mut self) -> iced::Task<Message> {
+		if let Some(replies) = self
+			.terminal
+			.as_mut()
+			.and_then(term::Terminal::release_held_update)
+			&& !replies.is_empty()
+		{
+			self.send_command(SshCommand::Input(replies));
+		}
+		// Collected before any is sent: `send_command` needs `self` whole, and the walk above it
+		// holds `self.identities` mutably.
+		let parked: Vec<(u64, Vec<u8>)> = self
+			.identities
+			.iter_mut()
+			.filter_map(|entry| {
+				let replies = entry.work.terminal.as_mut()?.release_held_update()?;
+				(!replies.is_empty()).then_some((entry.id, replies))
+			})
+			.collect();
+		for (identity, bytes) in parked {
+			self.send_command(SshCommand::Reply { identity, bytes });
+		}
+		iced::Task::none()
 	}
 
 	/// Carry out what a nudge to the transfer queue asked for (§17): send its commands, seed the
@@ -14807,5 +14899,122 @@ mod tests {
 			copy.carry_cwd, None,
 			"and spent either way, so it cannot resurface"
 		);
+	}
+
+	// --- §122: the frame clock over a held synchronized update ---
+
+	// Long enough that the 150 ms `vte` gives a held frame has certainly passed. A monotonic
+	// deadline, so a busy machine only ever makes this MORE true (§122). The same fact under the
+	// same name in `term`'s tests — the grace is `vte`'s and it exports no constant for it, so the
+	// two modules that have to outwait it each say how long by.
+	const HELD_FRAME_SLEEP: std::time::Duration = std::time::Duration::from_millis(200);
+
+	/// The condition the subscription list reads. A shell mid-frame is what asks for a clock; an
+	/// ordinary one must not, or every session in the window would tick for ever.
+	#[test]
+	fn only_a_tab_holding_a_frame_asks_for_a_clock() {
+		let (mut app, _rx) = app_with_terminal(8);
+		let _task = app.on_ssh_event(shell_output(b"hello"));
+		assert!(!app.holds_update(), "an ordinary chunk holds nothing");
+
+		let _task = app.on_ssh_event(shell_output(b"\x1b[?2026hheld"));
+		assert!(app.holds_update(), "an open bracket does");
+
+		let _task = app.on_ssh_event(shell_output(b"\x1b[?2026l"));
+		assert!(!app.holds_update(), "and the closing byte ends it");
+	}
+
+	/// The half that is easy to get wrong: a PARKED identity's shell can be mid-frame too (§45), and
+	/// it is the one whose held screen nothing on screen would hint at. `broadcast` would not reach
+	/// it, which is why `release_held_updates` walks the tabs itself.
+	#[test]
+	fn a_parked_identity_holding_a_frame_asks_for_a_clock_too() {
+		let (mut app, _rx) = app_with_login_identity();
+		let id = elevate_to(&mut app);
+		// Output for an account that is NOT on screen goes to its parked emulator and stops there.
+		let _task = app.on_ssh_event(SshEvent::Output {
+			identity: if app.identity == id {
+				bridge::LOGIN_IDENTITY
+			} else {
+				id
+			},
+			bytes: b"\x1b[?2026hheld".to_vec(),
+		});
+		assert!(
+			app.holds_update(),
+			"the tab answers for every terminal it owns, not just the visible one"
+		);
+	}
+
+	/// The parked half of the release, which is the one with a route of its own: a background
+	/// shell's answer is addressed to THAT shell by name, not sent down the typing path, because the
+	/// typing path goes to whichever account is on screen (§45).
+	#[test]
+	fn a_parked_identity_s_reply_is_addressed_to_its_own_shell() {
+		let (mut app, mut rx) = app_with_login_identity();
+		let id = elevate_to(&mut app);
+		let parked = if app.identity == id {
+			bridge::LOGIN_IDENTITY
+		} else {
+			id
+		};
+		let _task = app.on_ssh_event(SshEvent::Output {
+			identity: parked,
+			bytes: b"\x1b[?2026h\x1b[c".to_vec(),
+		});
+		while rx.try_recv().is_ok() {
+			// Drain whatever the elevation itself queued, so what is read below is this frame's.
+		}
+
+		std::thread::sleep(HELD_FRAME_SLEEP);
+		let _task = app.release_held_updates();
+		match rx.try_recv() {
+			Ok(SshCommand::Reply { identity, bytes }) => {
+				assert_eq!(identity, parked, "answered to the shell that asked");
+				assert!(
+					bytes.ends_with(b";4c"),
+					"and it is the DA1 reply: {bytes:?}"
+				);
+			}
+			other => panic!("expected a reply addressed to the parked shell, got {other:?}"),
+		}
+	}
+
+	/// A query the shell sent inside a held frame is answered when the frame is released, and the
+	/// answer goes back down the typing path — the same route `process`'s replies take, because the
+	/// program that asked is blocked reading its stdin until they arrive (§23).
+	#[test]
+	fn a_released_frame_sends_its_replies_back_to_the_shell() {
+		let (mut app, mut rx) = app_with_terminal(8);
+		let _task = app.on_ssh_event(shell_output(b"\x1b[?2026h\x1b[c"));
+		assert_eq!(
+			next_input(&mut rx),
+			None,
+			"nothing goes back while the frame is held — the engine has not read the query"
+		);
+
+		std::thread::sleep(HELD_FRAME_SLEEP);
+		let _task = app.release_held_updates();
+		let reply = next_input(&mut rx).expect("the held device-attributes query is answered");
+		assert!(
+			reply.starts_with(b"\x1b[?") && reply.ends_with(b";4c"),
+			"a DA1 reply, sixel-amended like any other (§41): {reply:?}"
+		);
+		assert!(
+			!app.holds_update(),
+			"and the clock is no longer asked for, so the ticking stops on its own"
+		);
+	}
+
+	/// A tick that arrives INSIDE the 150 ms must do nothing at all: a frame torn in half is the
+	/// very thing the bracket exists to prevent. `frames()` fires every frame, so this is the common
+	/// case rather than an edge one.
+	#[test]
+	fn a_tick_inside_the_grace_releases_nothing() {
+		let (mut app, mut rx) = app_with_terminal(8);
+		let _task = app.on_ssh_event(shell_output(b"\x1b[?2026h\x1b[c"));
+		let _task = app.release_held_updates();
+		assert_eq!(next_input(&mut rx), None, "still held");
+		assert!(app.holds_update(), "so the clock is still wanted");
 	}
 }
