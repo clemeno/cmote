@@ -63,6 +63,13 @@ Two consequences, both learned the hard way in §113:
 * **A platform fact belongs on both arms.** `assert_eq!(x, cfg!(windows))` beats asserting one
   platform's half and hoping (§115). Both arms compile everywhere, so neither can rot unseen, and
   expecting the absence is a real assertion rather than a skipped one.
+* **A shared function citing one platform's hazard is a `cfg` pair nobody wrote (§124).** The
+  audit of all 71 arms found every pair consistent and one real bug in code with *no* arms:
+  `local::path`'s component whitelist refused `\` and `:` everywhere, on two reasons the module note
+  states as Windows' own, and on macOS that made a file the panes had listed refuse to open. Reach
+  for `cfg!(windows)` — the macro — rather than a `#[cfg]` pair whenever the difference is a value
+  and not an API: both arms then compile and lint everywhere, and the test can assert the difference
+  as `== cfg!(windows)` instead of asserting one half.
 * **A change that touches a `cfg` pair is not verified locally, and cannot be.** Cross-checking
   is impossible on this machine — `ring`'s build script runs `cc` for the target and there is no
   darwin C toolchain here, so `rustup target add x86_64-apple-darwin` gets you a `std` and then

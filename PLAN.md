@@ -14123,3 +14123,109 @@ up** — and it reads exactly like a note that has.
   seam, so if cmote ever grows an animation timer, DECSCUSR's report and the drawing both change
   together — which is the right coupling, but it does mean the request itself is not recoverable
   today.
+
+## §124 — Reading every `cfg` arm, and the bug that was in neither
+
+§113's *Not done* left three admissions about the macOS half of this tree: `local::path`'s arm has
+almost no test of its own, nothing prevents the next `cfg`-pair drift, and the pairs were never
+audited past the nine the compiler had named. This section takes all three. The audit found the pairs
+in better shape than the note feared and a real bug where nobody was looking — **not in either arm of
+a pair, but in shared code encoding one platform's hazard as if it were everyone's.**
+
+### The count, and what the arms actually look like
+
+71 `#[cfg]` attributes outside `#[cfg(test)]` itself: 39 `windows`, 12 `target_os = "macos"`, 5
+`not(windows)`, 6 `unix` / `not(unix)`, 8 `any(windows, test)`, and a three-way in `paths.rs`. Beside
+them, 16 uses of the `cfg!(windows)` **macro**, which is the shape that cannot rot — both arms
+compile everywhere and the gate lints both.
+
+Every pair was read, and the check that matters is not "does each have a twin" but **"is every
+single-arm item referenced only from same-arm code?"**, because that is the one failure the local
+gate cannot see and the compiler on the other platform would. It holds everywhere:
+
+* **`local/shells.rs`** — seven Windows-only helpers (`windows_powershell`, `cmd`, `git_bash`,
+  `git_bash_path`, `recorded_git_roots`, `registry_string`, `wide`) and every call site is inside
+  `#[cfg(windows)] candidates()`, inside another Windows-only helper, or inside a Windows-gated test.
+* **`cursor.rs`** — `COVERAGE` is `#[cfg(windows)]` where the art around it is `any(windows, test)`,
+  which looks like an inconsistency and is deliberate (§80): the only reader is `scaled`, inside the
+  Win32 seam, so under test on macOS there is nothing to reference it.
+* **`taskbar.rs`** — the two entry points carry the pair *inside the body*, with `let _ = arg;` on the
+  non-Windows side, so the signature is shared and the whole Win32 module is absent over there.
+* **`local/fs.rs`, `ssh/upload.rs`** — the three `#[expect(clippy::unnecessary_wraps)]` pairs §113
+  added are still correctly paired, and `zone()` is asserted on both arms by a property test.
+* **`paths.rs`** — the only three-way, and its third arm exists, which is why nothing here has ever
+  broken on a platform cmote does not target.
+
+### The bug the pairs could not have contained
+
+`local::path::is_plain_component` is the whitelist every component of a pane path passes through
+before it reaches the filesystem — the security boundary's own gate. It is **shared** code, and it
+refused four things: an empty component, `.`, `..`, a `/`, a `\` and a `:`. The module note gives
+each refusal a reason, and two of those reasons are Windows':
+
+> a `:` anywhere but in the drive — on NTFS that names an alternate data stream
+> a `\` inside a component — it is a separator on this platform
+
+On macOS neither is true. Both characters are ordinary in a file name, and the consequence is
+visible: `to_posix` does not vet components, so a file called `a:b` is **listed** in the pane, and
+`to_native` then refuses it — "`/Users/cme/a:b` is not a path on this machine." A row on screen that
+cannot be opened, on the platform whose arm nobody had a test for.
+
+The fix is a `cfg!(windows)` guard on exactly the two Windows hazards, and the shape of the fix is the
+point: as a `#[cfg]` pair it would have gone back into the blind spot, and as a `cfg!` the test can
+assert the difference as `== cfg!(windows)` — §115's rule — instead of asserting one half and hoping
+about the other.
+
+**The failure mode is worth naming, because §113's note does not have it.** It listed "an arm that
+rots unseen"; this is the opposite — code with no arms at all, which is *why* nobody thought to check
+it against the other platform. A shared function whose comment cites one platform's filesystem is a
+`cfg` pair that was never written.
+
+### The tests that now run on both arms
+
+Five of `local::path`'s tests were `#[cfg(windows)]`, including the round trip — so the security
+boundary's macOS pair had no round-trip test at all. What is shared now:
+
+* **`the_translation_round_trips`** takes its sample from `examples()`, a `cfg!`-selected list, and
+  asserts the same property either way. One test, not two, so it cannot be green on Windows while the
+  macOS arm is broken.
+* **`an_unrooted_pane_path_is_refused`** and **`a_relative_native_path_has_no_pane_path`** — the same
+  refusal reached by different routes on each platform (no drive first / no leading `/`, and no
+  `Prefix` / `is_absolute`).
+* **`a_name_that_is_not_utf8_has_no_pane_path`** — the `to_str()?` in each half of `to_posix`, with
+  each arm building the only kind of unreadable name its own OS allows: an unpaired UTF-16 surrogate,
+  or a stray `0xFF` byte.
+* **`the_virtual_root_exists_exactly_where_the_drives_do`** — three `== cfg!(windows)` equalities, so
+  the virtual root, its `None` and the drive list cannot drift apart on the platform nobody is
+  looking at.
+* **`the_windows_only_hazards_are_refused_only_on_windows`** — the fix above, plus the round trip of
+  a name containing both characters, which is the property that was broken.
+
+The `/C:` scheme's own tests stay `#[cfg(windows)]`, and that is right: `/C:` is not a path on macOS
+and a test asserting it there would be asserting nothing.
+
+### Files
+
+- `src/local/path.rs` — the `cfg!(windows)` split in `is_plain_component`, the module note's two
+  refusals re-labelled, `examples()`, and five shared tests where there were two Windows-only ones.
+- `AGENTS.md` — the third consequence, which is this section's finding.
+
+### Not done
+
+- **The new tests' macOS arms are unprobed.** Every one was probed on Windows by breaking the line it
+  guards — the whitelist's Windows clause, and `to_posix`'s `to_str()?`, each watched to go red — but
+  the macOS halves cannot be run here at all, so their evidence is CI's. That is a smaller gap than
+  the one before it (there was nothing to go red), and it is not zero.
+- **`a_real_local_shell_answers_ctrl_d_by_leaving` stays `#[cfg(windows)]`.** Everything its body
+  touches is platform-neutral, so it *could* compile on both arms as a runtime skip — but it would
+  then RUN on a macOS runner, because `pwsh` is in that catalogue and `Pwsh::quits_on_eof()` is false.
+  Its subject is a measured Windows fact (`docs/ctrl-d-on-windows-consoles.md`); pwsh's Ctrl+D
+  behaviour on macOS is a different program's, nobody has measured it, and a test that turns CI red on
+  a guess is worse than one that does not compile there.
+- **The macOS `local::fs` time zone is still UTC**, and that is §103's own `ponytail:`, unchanged here.
+  The audit confirms it is a stated gap with a test that holds on both arms, not drift.
+- **Nothing NEW prevents the next drift.** What changed is that three of the arms in the security
+  boundary now have assertions that would fail loudly in the one job that reads them. The structural
+  answer — compiling both arms everywhere — is unavailable while `std::path` is itself `cfg`-selected:
+  the Windows arm's behaviour depends on the platform's own `Path` parser, so dual-compiling it would
+  buy compile coverage and hand a future reader a function that behaves differently from its name.

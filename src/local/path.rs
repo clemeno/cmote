@@ -25,10 +25,13 @@
 //
 //   * a `..` or `.` component — the panes never build one, so its presence means the path came from
 //     somewhere else, and a traversal is not worth being tolerant about even among a user's own files;
-//   * a `:` anywhere but in the drive — on NTFS that names an alternate data stream, so `notes.txt`
-//     and `notes.txt:hidden` are different files and only one of them is the one on screen;
-//   * a `\` inside a component — it is a separator on this platform, so a name carrying one would
-//     silently address a different depth than the one that was clicked;
+//   * (Windows only) a `:` anywhere but in the drive — on NTFS that names an alternate data stream,
+//     so `notes.txt` and `notes.txt:hidden` are different files and only one of them is the one on
+//     screen;
+//   * (Windows only) a `\` inside a component — it is a separator there, so a name carrying one
+//     would silently address a different depth than the one that was clicked. Neither of these two
+//     is a hazard on macOS, where both characters are ordinary in a file name, and refusing them
+//     there made a listed file unopenable (§124);
 //   * a first component that is not a drive — `/etc` is not a place on Windows, and answering as if
 //     it were would put the panes somewhere they cannot be.
 
@@ -175,16 +178,26 @@ fn is_drive(part: &str) -> bool {
 
 /// Whether a component is a plain file name — safe to push onto a native path.
 ///
-/// The four refusals are the module note's list. It is deliberately a whitelist of shape rather than
-/// a blacklist of characters: everything the panes produce passes, and everything else is refused
-/// without cmote having to have thought of it.
+/// The refusals are the module note's list, and they split by platform because two of the four
+/// hazards are Windows' own (§124). It is deliberately a whitelist of shape rather than a blacklist
+/// of characters: everything the panes produce passes, and everything else is refused without cmote
+/// having to have thought of it.
+///
+/// **The split is a fix, not a relaxation.** `\` and `:` are refused because on Windows one is a
+/// separator and the other opens an alternate data stream — both stated in the module note as
+/// Windows facts. On macOS neither is true: both are ordinary characters in a file name, and
+/// refusing them made a file the panes had LISTED impossible to open, because `to_posix` does not
+/// vet components and `to_native` did. A listed row that answers "not a path on this machine" is a
+/// visible bug, and it was invisible here because it needed the macOS arm to show up.
+///
+/// `cfg!` rather than a `#[cfg]` pair on purpose: both arms then compile and are linted everywhere,
+/// and the test below can assert the platform difference as `== cfg!(windows)` instead of asserting
+/// one half and hoping about the other (§115).
 fn is_plain_component(part: &str) -> bool {
-	!part.is_empty()
-		&& part != "."
-		&& part != ".."
-		&& !part.contains('\\')
-		&& !part.contains(':')
-		&& !part.contains('/')
+	let ordinary = !part.is_empty() && part != "." && part != ".." && !part.contains('/');
+	// The two Windows-only hazards. `/` above is refused on both, being the separator either way.
+	let windows_safe = !cfg!(windows) || (!part.contains('\\') && !part.contains(':'));
+	ordinary && windows_safe
 }
 
 /// Where a local session's file panes open: the user's own folder, as a pane path.
@@ -217,14 +230,24 @@ pub(super) fn native_home() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-	use super::{home, is_plain_component, is_virtual_root, to_native};
-	// The `/C:` scheme's own tests only run where drive letters are paths, so they are
-	// `#[cfg(windows)]` and what only they use is imported only there (§113). The gap that leaves is
-	// real and recorded there too: the macOS half of `to_posix` has no test of its own.
-	#[cfg(windows)]
-	use super::to_posix;
-	#[cfg(windows)]
 	use std::path::{Path, PathBuf};
+
+	use super::{drives, home, is_plain_component, is_virtual_root, to_native, to_posix};
+
+	/// The pane paths THIS platform can hold, for the tests that must hold on both arms (§124).
+	///
+	/// The two dialects have nothing in common to test with — `/C:` is meaningless on macOS and
+	/// `/etc` is not a place on Windows — so the shared tests below take their sample from here and
+	/// assert the same PROPERTY of it either way. That is the difference between a test that covers
+	/// both arms and two tests that each cover one: this one cannot be green on Windows while the
+	/// macOS arm is broken, because there is only one of it (§115).
+	fn examples() -> [&'static str; 4] {
+		if cfg!(windows) {
+			["/C:", "/C:/Users", "/C:/Users/cme/Documents", "/D:/data"]
+		} else {
+			["/", "/Users", "/Users/cme/Documents", "/etc"]
+		}
+	}
 
 	#[cfg(windows)]
 	#[test]
@@ -242,16 +265,70 @@ mod tests {
 		assert!(!is_virtual_root("/C:"));
 	}
 
-	#[cfg(windows)]
+	/// Every path the panes hold came back from the filesystem through `to_posix`, and every path they
+	/// send goes out through `to_native`. If the two disagreed anywhere, a folder would list under one
+	/// name and refuse to open under it.
+	///
+	/// Runs on both arms since §124. It was `#[cfg(windows)]` and its sample was the `/C:` scheme
+	/// spelled out, which left the macOS pair — the security boundary of the local file layer — with
+	/// no round-trip test at all.
 	#[test]
 	fn the_translation_round_trips() {
-		// Every path the panes hold came back from the filesystem through `to_posix`, and every path
-		// they send goes out through `to_native`. If the two disagreed anywhere, a folder would list
-		// under one name and refuse to open under it.
-		for pane in ["/C:", "/C:/Users", "/C:/Users/cme/Documents", "/D:/data"] {
+		for pane in examples() {
 			let native = to_native(pane).expect("translates");
 			assert_eq!(to_posix(&native).as_deref(), Some(pane), "{pane}");
 		}
+	}
+
+	/// A pane path that is not rooted is not a location at all, on either platform, and the refusal
+	/// happens for a different reason on each: no drive can be its first component on Windows, no
+	/// leading `/` on macOS. One assertion, both arms, so neither can rot unseen (§115).
+	#[test]
+	fn an_unrooted_pane_path_is_refused() {
+		assert_eq!(to_native(""), None);
+		assert_eq!(to_native("Users/cme"), None);
+		assert_eq!(to_native("etc"), None);
+	}
+
+	/// A relative native path has no place in the panes either way — refused before the prefix check
+	/// on Windows, by `is_absolute` on macOS.
+	#[test]
+	fn a_relative_native_path_has_no_pane_path() {
+		assert_eq!(to_posix(Path::new("Users")), None);
+		assert_eq!(to_posix(Path::new("")), None);
+	}
+
+	/// A name the platform will hand back but Rust cannot read as UTF-8 stops here rather than
+	/// reaching the panes, which hold `String`s. Both arms build one the only way their own OS allows
+	/// — an unpaired surrogate on Windows, a stray byte on macOS — and both must answer `None`, which
+	/// is the `to_str()?` in each half of `to_posix` (§124).
+	#[test]
+	fn a_name_that_is_not_utf8_has_no_pane_path() {
+		#[cfg(windows)]
+		let native = {
+			use std::os::windows::ffi::OsStringExt;
+			// `C:\` followed by a lone high surrogate: a real Windows name, not valid UTF-16.
+			PathBuf::from(std::ffi::OsString::from_wide(&[
+				0x0043, 0x003A, 0x005C, 0xD800,
+			]))
+		};
+		#[cfg(target_os = "macos")]
+		let native = {
+			use std::os::unix::ffi::OsStrExt;
+			// `/` followed by a byte no UTF-8 sequence starts with: a real POSIX name.
+			PathBuf::from(std::ffi::OsStr::from_bytes(&[b'/', 0xFF]))
+		};
+		assert_eq!(to_posix(&native), None);
+	}
+
+	/// The virtual root and its drive list are one decision seen from two sides: `/` is a place with
+	/// no native path exactly where there are drives to list instead. Asserted as one equality so the
+	/// two halves cannot drift apart on the platform nobody is looking at.
+	#[test]
+	fn the_virtual_root_exists_exactly_where_the_drives_do() {
+		assert_eq!(is_virtual_root("/"), cfg!(windows));
+		assert_eq!(to_native("/").is_none(), cfg!(windows));
+		assert_eq!(!drives().is_empty(), cfg!(windows));
 	}
 
 	#[cfg(windows)]
@@ -271,8 +348,6 @@ mod tests {
 		// It has no drive letter, so there is nothing to be the first component. Refused rather than
 		// half-translated — the panes would show a path that cannot be reopened.
 		assert_eq!(to_posix(Path::new(r"\\server\share\file")), None);
-		// And a relative path is not a location the panes can hold at all.
-		assert_eq!(to_posix(Path::new(r"Users\cme")), None);
 	}
 
 	#[test]
@@ -291,13 +366,31 @@ mod tests {
 		}
 	}
 
+	/// The two refusals that belong to Windows alone, asserted on both arms as one equality (§115,
+	/// §124).
+	///
+	/// On NTFS `notes.txt` and `notes.txt:hidden` are two files, and only one of them is the row that
+	/// was clicked; a backslash is a separator there, so a name carrying one addresses a different
+	/// depth. On macOS both characters are ordinary in a file name, and refusing them made a file the
+	/// panes had listed refuse to open — which is what the `== cfg!(windows)` form here would have
+	/// caught the day it was written.
 	#[test]
-	fn an_alternate_data_stream_is_a_different_file_and_is_refused() {
-		// On NTFS `notes.txt` and `notes.txt:hidden` are two files. Only one of them is the row that
-		// was clicked, and a colon slipping through would let a write land in the other.
-		assert!(!is_plain_component("notes.txt:hidden"));
-		// A backslash is a separator here, so a name carrying one would address a different depth.
-		assert!(!is_plain_component(r"a\b"));
+	fn the_windows_only_hazards_are_refused_only_on_windows() {
+		assert_eq!(!is_plain_component("notes.txt:hidden"), cfg!(windows));
+		assert_eq!(!is_plain_component(r"a\b"), cfg!(windows));
+		// And on macOS such a name survives the whole round trip, which is the property that was
+		// broken: a listed row has to be openable.
+		if !cfg!(windows) {
+			let pane = "/Users/cme/a:b\\c";
+			let native = to_native(pane).expect("an ordinary macOS name translates");
+			assert_eq!(to_posix(&native).as_deref(), Some(pane));
+		}
+	}
+
+	#[test]
+	fn a_name_with_a_separator_in_it_is_refused_everywhere() {
+		// `/` is the separator on both platforms, so this refusal has no arms.
+		assert!(!is_plain_component("a/b"));
 		// Everything ordinary passes — including spaces, dots and non-ASCII, which are all legal.
 		for name in ["notes.txt", "My Documents", ".gitconfig", "café", "a-b_c.1"] {
 			assert!(is_plain_component(name), "{name} is an ordinary name");
