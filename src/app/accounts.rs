@@ -579,7 +579,7 @@ mod tests {
 		assert!(!saved.remember_password, "nothing was asked to be kept");
 
 		// sudo asks, in its own words, and the dialog puts exactly that question.
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: None,
@@ -655,7 +655,7 @@ mod tests {
 			Some(SshCommand::Elevate { identity, .. }) => identity,
 			other => panic!("expected an elevation, got {other:?}"),
 		};
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: None,
@@ -702,7 +702,7 @@ mod tests {
 		// The password, then a second factor — both under cmote's own marker, which is exactly why
 		// the wording cannot be what tells them apart.
 		for _ in 0..2 {
-			let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+			let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 				identity,
 				label: crate::elevate::MARKER.to_owned(),
 				refusal: None,
@@ -744,7 +744,7 @@ mod tests {
 			Some(SshCommand::Elevate { identity, .. }) => identity,
 			other => panic!("expected an elevation, got {other:?}"),
 		};
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: None,
@@ -812,7 +812,7 @@ mod tests {
 		};
 		// No dialog: nobody asked for one, and the stored password answers the question by itself.
 		assert!(app.modal.is_none(), "nothing was put in the user's way");
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: None,
@@ -847,7 +847,7 @@ mod tests {
 			Some(SshCommand::Elevate { identity, .. }) => identity,
 			other => panic!("expected an elevation, got {other:?}"),
 		};
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: None,
@@ -860,7 +860,7 @@ mod tests {
 			"the stored password is tried first"
 		);
 		// Refused: the same question comes back with the program's words about the last answer.
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: crate::elevate::MARKER.to_owned(),
 			refusal: Some("Sorry, try again.".to_owned()),
@@ -963,7 +963,7 @@ mod tests {
 			Some(SshCommand::Elevate { identity, .. }) => identity,
 			other => panic!("expected an elevation, got {other:?}"),
 		};
-		let _focus = app.on_ssh_event(SshEvent::ElevatePrompt {
+		let _focus = app.on_ssh_event(SshEvent::ElevateChallenge {
 			identity,
 			label: "Verification code:".to_owned(),
 			refusal: None,

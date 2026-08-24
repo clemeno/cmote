@@ -23,6 +23,12 @@ One SSH connection and every shell running on it (§45).
 _Avoid_: channel — a session used to be one channel, and stopped being one when elevation
 arrived
 
+**Phase**:
+Which of a session's two parts it is in: dialing while the handshake is in flight, live once a shell
+is open (§134). Never runs backwards.
+_Avoid_: state, for this — what a target remembers about where the last session left off (§22) is a
+different thing entirely
+
 **Local session**:
 A session against a shell on this machine instead of over SSH (§103). Same shape, no network.
 
@@ -44,11 +50,45 @@ that logged in
 **Shell**:
 The remote program a session talks to on one channel.
 
+**Workspace**:
+One identity's own view of the machine: its grid, its scrollback, its selection, its find bar (§45).
+What makes switching accounts a swap — the identity on screen holds the live one, each parked
+identity holds its own.
+
 **Grid**:
 The matrix of cells the terminal shows (§9).
 
 **Tab**:
-One session, editor or files view, opened in the tab strip (§26).
+One thing open in the tab strip (§26): a session, or a file open for viewing. What it is showing at
+any one moment is its **Tab content**.
+
+**Tab content**:
+Which of the four things a tab is showing — the home screen, the connect form, a session, or a
+viewer — together with whatever that one thing is holding while it shows (§10, §130, §134).
+_Avoid_: screen, for this — that is the terminal's (see **Screen**)
+
+**Home screen**:
+The tab content that lists the saved targets, and the one a tab starts on (§14). `HomeScreen` is what
+it is DOING while it shows: its right-click menu, its inline rename, its delete confirmation.
+
+**Connect form**:
+The tab content that asks for host, port, user and auth kind (§7). `ConnectFlow` is what it is holding
+while it shows: the focus ring's stop, and the **Prompt** over it, if there is one.
+
+**Viewer**:
+A remote file open for reading on a tab of its own — text (§32) or a picture (§53). Not a session: its
+load rides the parent session's channel.
+
+**Prompt**:
+A question the connect form asks — the vault's master passphrase, or a failure notice (§12, §16).
+Asked by the FORM, so always either before there is a session or after one has gone.
+_Avoid_: prompt for the shell's own, which is a **Prompt mark**; or for an elevation's password
+question, which is a **Challenge**
+
+**Challenge**:
+A question asked by a session that already exists: the four the handshake can stop on (§7, §8) and the
+ones `sudo` puts while elevating (§45). Held by the thing waiting on the answer, which is why
+answering one never moves a tab off its content (§134).
 
 **Tab strip**:
 The row of tabs above the grid.
@@ -100,6 +140,7 @@ name that would change under another engine.
 **Screen**:
 cmote's read-only view of the engine's grid, so nothing outside `term/` touches the engine
 itself (§9).
+_Avoid_: screen for a page of the window — a tab shows **Tab content**, not a screen
 
 **Gate**:
 The one place that sits between the parser and the engine, standing in the engine's place so
@@ -131,6 +172,11 @@ The shared machine a scanner uses to find a sequence's payload and its end (§10
 **Interruption**:
 One thing `process` must do part-way through a chunk, ordered by the byte offset it sits at —
 so a mark and an image land in the order the stream put them (§34, §41, §55).
+
+**Prompt mark**:
+Where a shell says its own prompt begins, announced with OSC 133 (§34). The oldest of the three
+things this project called a prompt, and the reason the other two are qualified.
+_Avoid_: prompt, unqualified — that is the connect form's (see **Prompt**)
 
 **Held update**:
 The frame `vte` is buffering while a program has mode 2026 open — written to the terminal but not

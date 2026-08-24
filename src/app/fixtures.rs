@@ -20,8 +20,8 @@ use iced::widget::pane_grid;
 use tokio::sync::mpsc;
 
 use super::{
-	App, AppScreen, AuthKind, Focus, Identity, Message, Region, Session, SessionState, SshCommand,
-	SshEvent, Tab, Workspace, bridge, term, ui,
+	App, AuthKind, Focus, Identity, Message, Region, Session, SessionPhase, SshCommand, SshEvent,
+	Tab, TabContent, Workspace, bridge, term, ui,
 };
 
 // An `App` with a live emulator and an open command channel, so `send_command` succeeds
@@ -38,7 +38,7 @@ pub(super) fn app_with_terminal(rx_cap: usize) -> (Tab, mpsc::Receiver<SshComman
 	session.work.terminal = Some(term::Terminal::new(24, 80));
 	let app = Tab {
 		command_tx: Some(tx),
-		screen: AppScreen::Session(session),
+		content: TabContent::Session(session),
 		window_focused: true,
 		focus: Focus::Terminal,
 		..Tab::default()
@@ -57,7 +57,7 @@ pub(super) fn dialing_tab(endpoint: &str, cap: usize) -> (Tab, mpsc::Receiver<Ss
 	let (tx, rx) = mpsc::channel(cap);
 	let app = Tab {
 		command_tx: Some(tx),
-		screen: AppScreen::Session(Session::dialing(
+		content: TabContent::Session(Session::dialing(
 			endpoint.to_owned(),
 			None,
 			"connecting…".to_owned(),
@@ -76,7 +76,7 @@ pub(super) fn live_session(
 	local: Option<crate::local::shells::ShellKind>,
 ) -> Session {
 	let mut session = Session::dialing(endpoint.to_owned(), local, String::new());
-	session.state = SessionState::Live;
+	session.phase = SessionPhase::Live;
 	session
 }
 

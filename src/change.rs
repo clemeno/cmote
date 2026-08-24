@@ -1,7 +1,7 @@
 // change.rs — a value that may be absent for two different reasons (PLAN §111).
 //
 // Two places in cmote had written this as `Option<Option<T>>` and then spent eight lines of doc
-// comment explaining which nesting level meant what: `targets::SessionState`'s remembered sort (§22)
+// comment explaining which nesting level meant what: `targets::LeftOff`'s remembered sort (§22)
 // and `term::iterm`'s user variable (§55). Both needed the SAME three answers, and the outer/inner
 // spelling gets them backwards as easily as right — `Some(None)` and `None` sit one keystroke apart
 // and mean opposite things, and nothing but the prose says which is which.

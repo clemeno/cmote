@@ -15270,3 +15270,150 @@ precisely so `-D warnings` tells us when they stop being true (§111).
   today's method bodies, not a law: if `open_modal` and `send_command` ever move behind a seam that
   does not need all of `Tab`, the borrow objection goes away and `panes` becomes a fair question
   again.
+
+## §135 — Three words that meant more than one thing each
+
+§130–§134 moved a great deal of state and named some new types on the way. A two-axis code review of
+§122–§134 (standards, and whether each § tells the truth about the code) found sixteen things. This
+section answers the naming half: **three words were each doing more than one job**, and one of them
+broke AGENTS.md's rule outright — *one name means one thing crate-wide* (§108).
+
+The tell, in every case, was the same: a **qualification written only to disambiguate**. When a name
+needs a prefix or a path to say which one you meant, the compiler is doing what a name should.
+
+### `screen` — two senses, one file
+
+`CONTEXT.md` has defined **Screen** since §9 as the terminal's read-only view of the engine's grid.
+§130 then added `AppScreen`, "which screen the window is showing" — a page of UI. Both senses were
+live in `src/app/mod.rs`, some three thousand lines apart:
+
+```rust
+match &active.screen { … }                        // the page a tab shows
+terminal.screen().size() != (rows, cols)          // the engine's grid
+```
+
+The `App` prefix was the only thing keeping them apart, and it was invisible at the use site: the
+field was plain `screen`.
+
+**`AppScreen` → `TabContent`, and the field `Tab::screen` → `Tab::content`.** A tab shows one of four
+things at a time, so it is the tab's *content*; `screen` now means exactly one thing crate-wide.
+
+**Not `Page`**, which was the first candidate and is also taken — `CONTEXT.md`'s **Narrowed** entry
+says *"a band spanning the whole page is not a band"* (§102). Renaming into a second collision is not
+a rename. This is the argument for looking a word up before choosing it, made against myself.
+
+### `SessionState` — the same name, twice, in one crate
+
+Two types, and this is the hard violation:
+
+| type | what it is |
+|---|---|
+| `app::SessionState` (§134) | dialing, or live — which part of its life a session is in |
+| `targets::SessionState` (§22) | what a TARGET remembers about where the last session left off |
+
+`src/app/mod.rs` used both, and wrote `crate::targets::SessionState` out longhand at **eight** sites
+purely to tell them apart.
+
+**Both renamed**, because both names were wrong rather than merely clashing:
+
+* `app::SessionState` → **`SessionPhase`**, field `state` → `phase`. Two values in a fixed order,
+  dialing then live, never back — a phase, not a state.
+* `targets::SessionState` → **`LeftOff`**. It is not a session's state at all, and `CONTEXT.md`'s
+  **Target** entry already had the phrase: *"where the last session left off"*. The glossary named
+  this correctly long before the type did, which is the strongest argument for keeping one.
+
+`Resume` was unavailable — `panes::restore` already returns one.
+
+### `prompt` — three senses, and §134's own rule settles it
+
+The review flagged two. There were three, and the oldest is the one nobody had noticed:
+
+| use | what it is |
+|---|---|
+| `app::Prompt` | a question the connect FORM asks — vault passphrase, failure notice |
+| **prompt mark** | where a shell says its own prompt begins, via OSC 133 (§34) |
+| `SshEvent::ElevatePrompt` | `sudo` asking for a password mid-elevation (§45) |
+
+The third is the interesting one, because §134 had already written the rule that classifies it: *a
+question asked by something that already EXISTS belongs to that thing*. An elevation's password
+question is put by a session that is running. That makes it a **Challenge**, not a prompt — the same
+category as the four handshake questions §134 moved into `SessionPhase::Dialing`.
+
+**`SshEvent::ElevatePrompt` → `ElevateChallenge`.** `Prompt` keeps the bare word for the form's own
+question; the shell's is a **prompt mark**, which is what `term/`'s comments have called it all along.
+So the rename wrote down existing usage rather than inventing any.
+
+### The renames
+
+| was | is | sites |
+|---|---|---|
+| `AppScreen` | `TabContent` | 75 |
+| `Tab::screen` | `Tab::content` | 97 |
+| `app::SessionState` | `SessionPhase` | 21 |
+| `Session::state` | `Session::phase` | 10 |
+| `targets::SessionState` | `targets::LeftOff` | 43 |
+| `SshEvent::ElevatePrompt` | `ElevateChallenge` | 15 |
+
+Four historical references were rewritten by the sweep and put back by hand: `AppScreen::Connecting`,
+`::Editor`, `::Preview` and `::Terminal` are named in "this used to be" prose, and the type really was
+called `AppScreen` then. A rename that edits history is a rename that has lied.
+
+### The glossary caught up, and had been wrong
+
+`CONTEXT.md` gained nine entries — **Tab content**, **Home screen**, **Connect form**, **Viewer**,
+**Prompt**, **Challenge**, **Phase**, **Workspace**, **Prompt mark** — and five `_Avoid_` lines, four
+of them pushing back on the bare words `screen` and `prompt`. The pattern is the file's own: **Scroll
+region**
+has said *"_Avoid_: region, unqualified — that is the window's"* since §102.
+
+**And the existing `Tab` entry was wrong.** It read *"One session, editor or files view, opened in the
+tab strip"*. A files view is not a tab — the browser strip lives inside a session — and the home
+screen, the connect form and the viewer were all missing. The entry that should have said what
+`AppScreen`'s variants were named after described three things, one of them fictional. The review did
+not catch this; reading the file in order to add to it did.
+
+`Workspace` was the other gap: two type docs call it "one identity's own view of the machine" and no
+entry defined it.
+
+### The `exchange` comment the review caught
+
+§134 claimed it had deleted *"the comment that made `exchange` dangerous"*. It had not: `Workspace`'s
+doc still described `Tab::exchange` in the present tense, named `self.terminal` as a field, and told
+the reader the on-screen identity keeps its state "in `Tab`'s own fields" — three claims §134 itself
+falsified. Rewritten here, because a glossary entry cannot be written against a doc that lies. The
+hazard is now recorded as history: it existed *because* the live view was scattered across `Tab`, and
+gathering it into `Workspace` is what removed it.
+
+### Files
+
+- `src/app/mod.rs` — `TabContent`, `SessionPhase`, `Tab::content`, `Session::phase`; the docs for all
+  four renamed types; `Workspace`'s doc corrected.
+- `src/targets.rs`, `src/panes.rs`, `src/change.rs` — `LeftOff`.
+- `src/bridge.rs`, `src/ssh/shell.rs`, `src/ui/elevate.rs` — `ElevateChallenge`.
+- `src/app/accounts.rs`, `src/app/browse.rs`, `src/app/connect.rs`, `src/app/fixtures.rs`,
+  `src/app/home.rs` — the renames.
+- `CONTEXT.md` — nine entries, two `_Avoid_` lines, and the `Tab` entry fixed.
+- `PLAN.md` — this section.
+
+275 insertions, 192 deletions across 13 files, plus this section. `CONTEXT.md` is 216 lines, from 170.
+1 556 tests, unchanged — no behaviour moved.
+
+### Not done
+
+- **The review's other eleven findings are still open.** Four stale comments naming deleted fields
+  (`self.identities` and `connection` in the teardown's comments, `open_prompt`'s "all six callers"),
+  a doc comment attached one line too high in `src/ui/grid.rs`, `form_focus`'s body inlined at a
+  second site, `report_focus` looking the session up three times, `Session::proceeding` not guarding
+  on `Dialing` where its two siblings do, the duplicated `dragged/hovered/idle` cascade, and five
+  wrong or stale numbers in §122–§134 (`app.rs` was 15 020 lines at the split, not 14 811; `Terminal`
+  was 24 fields, not 21; §134's teardown block shows a call the third copy does not make; §127 left
+  `x86_64-apple-darwin` standing at PLAN.md:1079; two *Files* lists omit files). None is a naming
+  question, so none belongs here.
+- **`HomeScreen` and `ConnectFlow` keep their names.** *Home screen* is a defined two-word term now,
+  the way **Screen spot** and **Browser strip** are, so the struct is not a collision. But it is a
+  head word shared with a term that means something else, which is the shape this section spent a
+  thousand words on. If it reads wrong later, `HomeState` and `ConnectState` are there.
+- **`app` is still a private module holding nine `pub` types.** `pub` on `TabContent`, `Session`,
+  `Workspace`, `Prompt`, `Challenge` and the rest means "reachable from `app`'s children", not
+  "public" — a second thing one keyword is being asked to say, and the next one of these worth
+  pulling on.

@@ -37,7 +37,7 @@
 use crate::change::Change;
 use crate::explorer::{self, Explorer};
 use crate::files::{Entry, Files};
-use crate::targets::SessionState;
+use crate::targets::LeftOff;
 
 /// The largest share of the window either pane may take, as a fraction. A splitter drag is clamped
 /// to it and so is a restored size (§22), so a remembered layout from a bigger window cannot open a
@@ -212,8 +212,8 @@ impl Panes {
 	/// The pair's half of a session snapshot (§22): the `.*` filter, both pane sizes, and the
 	/// pane's directory and sort. `terminal_path` is the caller's to fill, because the shell's
 	/// directory is not the panes' business.
-	pub fn capture(&self) -> SessionState {
-		SessionState {
+	pub fn capture(&self) -> LeftOff {
+		LeftOff {
 			terminal_path: None,
 			files_path: self.pane.path().map(str::to_owned),
 			show_hidden: Some(self.tree.show_hidden()),
@@ -232,7 +232,7 @@ impl Panes {
 	/// and the reveal in the right order against a shell this module knows nothing about. Each size
 	/// is clamped to the same window fraction a splitter drag is, and applied only once the window
 	/// size is known, so a restore before the first resize event cannot pin a pane to its minimum.
-	pub fn restore(&mut self, session: SessionState, window: iced::Size) -> Resume {
+	pub fn restore(&mut self, session: LeftOff, window: iced::Size) -> Resume {
 		if let Some(show_hidden) = session.show_hidden {
 			self.tree.set_hidden(show_hidden);
 		}
@@ -424,10 +424,10 @@ mod tests {
 	#[test]
 	fn a_restored_size_is_clamped_like_a_drag() {
 		let mut panes = Panes::default();
-		let huge = SessionState {
+		let huge = LeftOff {
 			explorer_width: Some(5_000.0),
 			files_height: Some(5_000.0),
-			..SessionState::default()
+			..LeftOff::default()
 		};
 		let window = iced::Size::new(1000.0, 800.0);
 		let _ = panes.restore(huge, window);
@@ -449,10 +449,10 @@ mod tests {
 		let width = panes.tree.width();
 		let height = panes.pane.height();
 		let _ = panes.restore(
-			SessionState {
+			LeftOff {
 				explorer_width: Some(400.0),
 				files_height: Some(300.0),
-				..SessionState::default()
+				..LeftOff::default()
 			},
 			iced::Size::new(0.0, 0.0),
 		);

@@ -163,8 +163,13 @@ impl Elevation {
 /// that announced no cwd) never erases a good one an earlier session recorded. Adding another
 /// remembered value is one field here, one on `Target`, and one line each in capture / restore /
 /// `set_session`.
+///
+/// **Was `SessionState`, which is what it is not** (§135). It is not a session's state — `app`'s
+/// `SessionPhase` holds that — but what a TARGET remembers about the last one, and
+/// `CONTEXT.md`'s **Target** entry already had the phrase for it: *"where the last session left off"*.
+/// The glossary named this correctly before the type did.
 #[derive(Debug, Default, Clone)]
-pub struct SessionState {
+pub struct LeftOff {
 	pub terminal_path: Option<String>,
 	pub files_path: Option<String>,
 	pub show_hidden: Option<bool>,
@@ -210,8 +215,8 @@ impl Target {
 	/// This target's remembered session state (§22), read out for the next connection to
 	/// restore. `show_hidden` is always known (it is a plain flag), so it comes back as
 	/// `Some`; the rest are as absent or present as they were stored.
-	pub fn session(&self) -> SessionState {
-		SessionState {
+	pub fn session(&self) -> LeftOff {
+		LeftOff {
 			terminal_path: self.terminal_path.clone(),
 			files_path: self.files_path.clone(),
 			show_hidden: Some(self.show_hidden),
@@ -535,7 +540,7 @@ impl Targets {
 	/// could not determine a value (a shell that announced no cwd) preserves whatever an
 	/// earlier session wrote rather than clearing it. Returns whether anything actually moved,
 	/// so the caller only rewrites the file when it did.
-	pub fn set_session(&mut self, endpoint: &str, session: SessionState) -> bool {
+	pub fn set_session(&mut self, endpoint: &str, session: LeftOff) -> bool {
 		let Some(target) = self.items.iter_mut().find(|t| t.endpoint() == endpoint) else {
 			return false;
 		};
@@ -782,11 +787,11 @@ mod tests {
 	}
 
 	// A snapshot carrying just the two paths, the common capture.
-	fn paths(terminal: &str, files: &str) -> SessionState {
-		SessionState {
+	fn paths(terminal: &str, files: &str) -> LeftOff {
+		LeftOff {
 			terminal_path: Some(terminal.to_owned()),
 			files_path: Some(files.to_owned()),
-			..SessionState::default()
+			..LeftOff::default()
 		}
 	}
 
@@ -926,9 +931,9 @@ mod tests {
 
 		// A later session whose shell never announced a cwd (`None`) moves only the pane —
 		// the known-good terminal path must survive rather than be cleared.
-		let only_pane = SessionState {
+		let only_pane = LeftOff {
 			files_path: Some("/tmp".to_owned()),
-			..SessionState::default()
+			..LeftOff::default()
 		};
 		assert!(targets.set_session("u@h:1", only_pane.clone()));
 		let target = targets.find("u@h:1").unwrap();
@@ -955,12 +960,12 @@ mod tests {
 		targets.upsert_on_connect("example.com", 22, "root", AuthKind::Password, None, None);
 		targets.set_session(
 			"root@example.com:22",
-			SessionState {
+			LeftOff {
 				terminal_path: Some("/srv".to_owned()),
 				files_path: Some("/srv/www".to_owned()),
 				explorer_width: Some(320.0),
 				files_height: Some(260.0),
-				..SessionState::default()
+				..LeftOff::default()
 			},
 		);
 
@@ -981,7 +986,7 @@ mod tests {
 		targets.upsert_on_connect("h", 1, "u", AuthKind::Password, None, None);
 		targets.set_session(
 			"u@h:1",
-			SessionState {
+			LeftOff {
 				terminal_path: Some("/opt".to_owned()),
 				files_path: Some("/opt/app".to_owned()),
 				show_hidden: Some(false),
@@ -1001,7 +1006,7 @@ mod tests {
 		assert_eq!(session.sort_dir, Change::Set(SortDir::Descending));
 
 		// A snapshot that says nothing about anything changes nothing and skips the write.
-		assert!(!targets.set_session("u@h:1", SessionState::default()));
+		assert!(!targets.set_session("u@h:1", LeftOff::default()));
 	}
 
 	#[test]
@@ -1012,9 +1017,9 @@ mod tests {
 		targets.upsert_on_connect("h", 2, "u", AuthKind::Password, None, None);
 
 		// Act: hide dotfiles on the first one only, through the one snapshot setter.
-		let hide = SessionState {
+		let hide = LeftOff {
 			show_hidden: Some(false),
-			..SessionState::default()
+			..LeftOff::default()
 		};
 		assert!(targets.set_session("u@h:1", hide.clone()));
 
@@ -1037,10 +1042,10 @@ mod tests {
 		assert_eq!(targets.find("u@h:1").unwrap().sort_dir, None);
 
 		// Act: sort the first one by size, descending, through the one snapshot setter.
-		let by_size_desc = SessionState {
+		let by_size_desc = LeftOff {
 			sort: Change::Set(SortKey::Size),
 			sort_dir: Change::Set(SortDir::Descending),
-			..SessionState::default()
+			..LeftOff::default()
 		};
 		assert!(targets.set_session("u@h:1", by_size_desc.clone()));
 
@@ -1056,10 +1061,10 @@ mod tests {
 
 		// Clearing the sort back to the default order is a real change (`Change::Clear`), not "leave
 		// it alone" (`Change::Keep`): a session that cleared its sort must be remembered as cleared.
-		let cleared = SessionState {
+		let cleared = LeftOff {
 			sort: Change::Clear,
 			sort_dir: Change::Clear,
-			..SessionState::default()
+			..LeftOff::default()
 		};
 		assert!(targets.set_session("u@h:1", cleared));
 		assert_eq!(targets.find("u@h:1").unwrap().sort, None);
@@ -1069,9 +1074,9 @@ mod tests {
 		// sorted by that key, ascending (an unset direction sorts ascending in the pane).
 		targets.set_session(
 			"u@h:1",
-			SessionState {
+			LeftOff {
 				sort: Change::Set(SortKey::Extension),
-				..SessionState::default()
+				..LeftOff::default()
 			},
 		);
 		targets.save_to(&path).expect("save");

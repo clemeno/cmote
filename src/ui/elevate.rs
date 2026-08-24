@@ -13,7 +13,7 @@
 //   2. ASKS who to become, and how: `sudo` or `su`, an account name, and the two questions that
 //      decide what is remembered afterwards.
 //   3. ANSWERS the credential conversation. sudo's questions arrive one at a time through
-//      `SshEvent::ElevatePrompt`, and the dialog puts the remote's own wording to the user — so a
+//      `SshEvent::ElevateChallenge`, and the dialog puts the remote's own wording to the user — so a
 //      second factor asks for a code in the machine's words rather than in cmote's guess at them.
 //
 // The two checkboxes are the whole of §47's configuration, and they are not the same question:

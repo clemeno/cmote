@@ -961,10 +961,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::targets::SessionState {
+			crate::targets::LeftOff {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::targets::SessionState::default()
+				..crate::targets::LeftOff::default()
 			},
 		);
 		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());

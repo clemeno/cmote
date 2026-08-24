@@ -200,13 +200,13 @@ pub enum SshCommand {
 	/// No new SSH authentication happens — this is a program run on the existing connection, which
 	/// holds its own conversation (a password, perhaps a one-time code) on its own channel. Until
 	/// that conversation ends the channel's output is NOT terminal output: it is answered through
-	/// `ElevateAnswer` and reported through `ElevatePrompt`.
+	/// `ElevateAnswer` and reported through `ElevateChallenge`.
 	Elevate {
 		identity: u64,
 		kind: crate::elevate::ElevateKind,
 		user: String,
 	},
-	/// One answer to an `ElevatePrompt` (§45), written to that shell's channel followed by a
+	/// One answer to an `ElevateChallenge` (§45), written to that shell's channel followed by a
 	/// newline. Rides in a `Secret` so a sudo password or a one-time code is redacted in logs and
 	/// wiped on drop (§12), exactly like the answers to an SSH keyboard-interactive request.
 	ElevateAnswer { identity: u64, secret: Secret },
@@ -428,7 +428,13 @@ pub enum SshEvent {
 	/// when it printed no such thing. The GUI cannot tell them apart from the wording alone: sudo
 	/// dresses every standard prompt in the stack in its own `-p` text, so a password and a second
 	/// factor can arrive under one label.
-	ElevatePrompt {
+	///
+	/// **A challenge and not a prompt** (§135). Was `ElevatePrompt`, which made *prompt* mean three
+	/// things: this, the connect form's own question (`app::Prompt`), and the mark a shell puts where
+	/// its prompt begins (§34, and the oldest of the three). §134 drew the line that settles it — a
+	/// question asked by something that already EXISTS belongs to that thing — and this is asked by a
+	/// session, mid-elevation, exactly like the four in `app::Challenge`. Three senses, three words.
+	ElevateChallenge {
 		identity: u64,
 		label: String,
 		refusal: Option<String>,

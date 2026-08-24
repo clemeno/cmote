@@ -14,7 +14,7 @@
 // a plain `fn` is used only here. The connect FORM's own methods are still in `mod.rs`: they are the
 // other half of this screen and a later slice's work.
 
-use super::{AppScreen, Message, Tab, is_close_tab, ui};
+use super::{Message, Tab, TabContent, is_close_tab, ui};
 
 impl Tab {
 	/// Return to the connect form: reset the keyboard focus to the first field and
@@ -25,7 +25,7 @@ impl Tab {
 		// A fresh `ConnectFlow` is both of the lines this used to carry (§132): nothing being asked
 		// — which is what puts the form's own keyboard ring back on (§7), since the ring and the
 		// prompt are never both live — and the ring back at the first field.
-		self.screen = AppScreen::Connect(super::ConnectFlow::default());
+		self.content = TabContent::Connect(super::ConnectFlow::default());
 		self.apply_form_focus()
 	}
 
@@ -37,7 +37,7 @@ impl Tab {
 		// A fresh `HomeScreen` IS the "closes any open menu / rename" above (§131). This used to be
 		// three assignments under the screen change, which is the same thing said twice — once by
 		// the screen and once by hand, with nothing keeping the two in step.
-		self.screen = AppScreen::Home(super::HomeScreen::default());
+		self.content = TabContent::Home(super::HomeScreen::default());
 		// Whatever the connect flow was asking is abandoned with the connect itself, and the
 		// buffers it was holding go with it (§12) — which the line above now does, since §132 put
 		// the prompt inside the screen this one replaces.
@@ -272,7 +272,7 @@ mod tests {
 	#[test]
 	fn the_home_screen_has_claimants_of_its_own() {
 		let mut app = Tab::default();
-		assert!(matches!(app.screen, AppScreen::Home(_)));
+		assert!(matches!(app.content, TabContent::Home(_)));
 		assert_eq!(app.keyboard_claim(), None);
 
 		// Arranged through the screen (§131), which is the only place this state exists — a test

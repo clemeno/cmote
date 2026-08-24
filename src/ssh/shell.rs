@@ -274,7 +274,7 @@ impl Shells {
 				elevate::Step::Nothing => After::Nothing,
 				elevate::Step::Ask { label, refusal } => {
 					let _ = events
-						.send(SshEvent::ElevatePrompt {
+						.send(SshEvent::ElevateChallenge {
 							identity,
 							label,
 							refusal,

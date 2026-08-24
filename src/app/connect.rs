@@ -17,8 +17,8 @@
 // methods the rest of `app` calls; a plain `fn` is used only here.
 
 use super::{
-	AppScreen, AuthKind, Carry, Challenge, Element, HostKeyChoice, Message, Prompt, Secret,
-	SshCommand, Tab, VaultPending, bridge, explorer, extract_secret, ui,
+	AuthKind, Carry, Challenge, Element, HostKeyChoice, Message, Prompt, Secret, SshCommand, Tab,
+	TabContent, VaultPending, bridge, explorer, extract_secret, ui,
 };
 
 impl Tab {
@@ -113,7 +113,7 @@ impl Tab {
 			// The session begins HERE (§134), which is the one thing `dial` and `dial_local` both do
 			// and neither used to say: they set `connection`, and then a screen, and the two agreeing
 			// was a convention. One value now.
-			self.screen = AppScreen::Session(super::Session::dialing(endpoint, None, status));
+			self.content = TabContent::Session(super::Session::dialing(endpoint, None, status));
 		} else {
 			// The command never left, so there is no attempt for either capture to belong to.
 			self.abandon_attempt();
@@ -155,7 +155,8 @@ impl Tab {
 		let endpoint = shell.endpoint();
 		let kind = shell.kind;
 		if self.send_command(SshCommand::ConnectLocal(shell)) {
-			self.screen = AppScreen::Session(super::Session::dialing(endpoint, Some(kind), status));
+			self.content =
+				TabContent::Session(super::Session::dialing(endpoint, Some(kind), status));
 		}
 		iced::Task::none()
 	}
@@ -712,7 +713,7 @@ mod tests {
 		// `on_ssh_event` arms that open a prompt used to set the screen on the next line by hand.
 		assert!(matches!(app.asking(), Some(Challenge::HostKey)));
 		assert!(
-			matches!(app.screen, AppScreen::Session(_)),
+			matches!(app.content, TabContent::Session(_)),
 			"and the session it is being asked about is still the screen (§134) — this is the 			 round trip that made §133's shape impossible"
 		);
 		assert!(
@@ -737,8 +738,8 @@ mod tests {
 		);
 		assert!(
 			!matches!(
-				app.session().map(|session| &session.state),
-				Some(SessionState::Dialing { status, .. }) if status == "authenticating…"
+				app.session().map(|session| &session.phase),
+				Some(SessionPhase::Dialing { status, .. }) if status == "authenticating…"
 			),
 			"a refusal does not read as a connection in progress"
 		);
@@ -780,7 +781,7 @@ mod tests {
 		// same fact: the handshake moved on, and no dialog is left over it. Since §132 the second
 		// FOLLOWS from the first — `authenticating` closes the question by leaving the screen that
 		// holds it, rather than by clearing a field and hoping the two stay in step.
-		assert!(matches!(app.screen, AppScreen::Session(_)));
+		assert!(matches!(app.content, TabContent::Session(_)));
 		assert!(app.prompt().is_none(), "the question is answered and gone");
 	}
 
@@ -839,7 +840,7 @@ mod tests {
 		// Arranged as a SCREEN since §132: a prompt with no connect screen under it is not a state
 		// this test could set up any more, which is the point of the section.
 		let mut app = Tab {
-			screen: AppScreen::Connect(ConnectFlow {
+			content: TabContent::Connect(ConnectFlow {
 				prompt: Some(Prompt::Vault {
 					input: "one".to_owned(),
 					confirm: "two".to_owned(),
@@ -908,10 +909,10 @@ mod tests {
 			let mut targets = tab.targets.borrow_mut();
 			targets.set_session(
 				endpoint,
-				crate::targets::SessionState {
+				crate::targets::LeftOff {
 					files_path: Some("/srv/data".to_owned()),
 					show_hidden: Some(true),
-					..crate::targets::SessionState::default()
+					..crate::targets::LeftOff::default()
 				},
 			);
 			targets.set_forwards(

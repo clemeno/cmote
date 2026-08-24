@@ -2202,51 +2202,58 @@ impl App {
 		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		let active = self.active();
-		match &active.screen {
+		match &active.content {
 			// A LIVE session takes the keyboard for its shell; one still dialing takes none, and its
 			// challenge dialog's fields type through the widget tree just as the form's prompts do
 			// (§7, §134). Two arms where `Terminal` and `Connecting` used to be two variants.
-			AppScreen::Session(session) if session.is_live() => {
+			TabContent::Session(session) if session.is_live() => {
 				subs.push(iced::keyboard::listen().map(Message::Key));
 			}
 			// The form's own focus ring (Tab / Shift+Tab / Enter / Space, §10) — but ONLY while
 			// nothing is being asked over it (§7, §8, §16). A prompt's fields type through the
 			// widget tree, so leaving the ring live would move the highlight around behind the
 			// dialog and let Enter press the Connect button under it. This is the one place that
-			// rule is stated; it used to be implicit in the six `AppScreen` variants that each had no
+			// rule is stated; it used to be implicit in the six `TabContent` variants that each had no
 			// keyboard subscription of their own.
-			AppScreen::Connect(flow) if flow.prompt.is_none() => {
+			TabContent::Connect(flow) if flow.prompt.is_none() => {
 				subs.push(iced::keyboard::listen().map(Message::FormKey));
 			}
-			AppScreen::Home(_) => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
+			TabContent::Home(_) => subs.push(iced::keyboard::listen().map(Message::HomeKey)),
 			// What a viewer listens for depends on what it is holding, so it is asked (§32, §53).
 			// The editor wants its shortcut keys (Ctrl+S / Ctrl+Shift+S / Ctrl+W) while typing goes
 			// to the widget. A picture has nothing to type into, so it listens for one thing: the
 			// key that closes it — without which it would be the only tab in the app a keyboard
 			// cannot dismiss, which reads as a bug rather than as a design.
-			AppScreen::Viewer(Viewer::Editor(_)) => {
+			TabContent::Viewer(Viewer::Editor(_)) => {
 				subs.push(iced::keyboard::listen().map(Message::EditorKey));
 			}
-			AppScreen::Viewer(Viewer::Picture(_)) => {
+			TabContent::Viewer(Viewer::Picture(_)) => {
 				subs.push(iced::keyboard::listen().map(Message::PreviewKey));
 			}
-			AppScreen::Connect(_) | AppScreen::Session(_) => {}
+			TabContent::Connect(_) | TabContent::Session(_) => {}
 		}
 
 		iced::Subscription::batch(subs)
 	}
 }
 
-/// Which screen the single window is currently showing, AND what that screen is showing it with.
-/// This is the small state machine from PLAN §10 — every transition happens in `update`.
+/// What one tab is showing, AND what it is showing it with (`CONTEXT.md`: **Tab content**). This is
+/// the small state machine from PLAN §10 — every transition happens in `update`.
 ///
-/// Since §130 a variant may carry its screen's own state, so that the tag and the state cannot
-/// disagree. `Viewer` came first, then [`HomeScreen`] (§131) and [`ConnectFlow`] (§132): see each
-/// one's doc for what it does and does not carry, and why. It is the argument [`Viewer`], [`Modal`]
-/// and [`Prompt`] each already won at a smaller scale, applied to the screen itself.
+/// Since §130 a variant may carry its own state, so that the tag and the state cannot disagree.
+/// `Viewer` came first, then [`HomeScreen`] (§131) and [`ConnectFlow`] (§132): see each one's doc for
+/// what it does and does not carry, and why. It is the argument [`Viewer`], [`Modal`] and [`Prompt`]
+/// each already won at a smaller scale, applied one level up.
+///
+/// **Was `AppScreen`, and the rename is the point** (§135). `CONTEXT.md` defines **Screen** as the
+/// terminal's read-only view of the engine's grid (§9), and `src/app/mod.rs` had both senses in one
+/// file: `active.screen` and `terminal.screen()`, some three thousand lines apart. Two senses, and
+/// the `App` prefix was the only thing keeping them apart — which is a prefix doing a glossary's job.
+/// A tab shows one of these at a time, so it is the tab's CONTENT; the word screen now means exactly
+/// one thing crate-wide (§108).
 // On size, and this is the third time the lint has had an opinion, so here is the whole arithmetic.
 //
-// `AppScreen` is 5 016 bytes, all of it `Session`; `ConnectFlow` is 208, `HomeScreen` 56, `Viewer`
+// `TabContent` is 5 016 bytes, all of it `Session`; `ConnectFlow` is 208, `HomeScreen` 56, `Viewer`
 // 304. §130 expected the lint (spread 304 against 24), §132 retired the expectation (304 against
 // 208, no longer enough to fire), and §134 reinstates it — because `Session` carries a `Workspace`,
 // and a `Workspace` carries a `term::Terminal`, which is 4 696 bytes on its own.
@@ -2254,7 +2261,7 @@ impl App {
 // Boxing is still the wrong answer, and the numbers say so more plainly than before: every byte the
 // enum gained is a byte a `Tab` field gave up. `Tab` was **7 688** bytes before §130 and is **7 216**
 // now — it SHRANK by 472 while the enum went 32 → 5 016, because the terminal moved out of a field
-// and into the variant that implies it. There is no bulk `AppScreen` anywhere (one per `Tab`, a
+// and into the variant that implies it. There is no bulk `TabContent` anywhere (one per `Tab`, a
 // handful of tabs per window), and a `Box` would buy back a few kilobytes of seven in exchange for an
 // allocation per session and a deref on the path that draws every frame.
 #[expect(
@@ -2262,7 +2269,7 @@ impl App {
 	reason = "`Session` holds the 4 696-byte terminal that `Tab` used to; `Tab` shrank — see above"
 )]
 #[derive(Debug)]
-pub enum AppScreen {
+pub enum TabContent {
 	/// The home screen: the list of saved connection targets (§14). This is where we
 	/// start; picking a target pre-fills the connect form, "New connection" opens a
 	/// blank one.
@@ -2312,7 +2319,7 @@ pub enum AppScreen {
 	Viewer(Viewer),
 }
 
-impl Default for AppScreen {
+impl Default for TabContent {
 	/// A tab starts on the home list (§14), with nothing open on it.
 	fn default() -> Self {
 		Self::Home(HomeScreen::default())
@@ -2347,7 +2354,7 @@ pub struct ConnectFlow {
 	/// read from a field that might be left over from an earlier prompt.
 	///
 	/// While it is `Some` the form's own keyboard ring is off (see `subscription`): the prompt's
-	/// fields type through the widget tree, and Tab / Enter belong to them. As six `AppScreen`
+	/// fields type through the widget tree, and Tab / Enter belong to them. As six `TabContent`
 	/// variants that was six places that each had to remember; as a field beside the screen it was
 	/// one place that had to be kept in step with the screen; here it is neither.
 	prompt: Option<Prompt>,
@@ -2360,7 +2367,7 @@ pub struct ConnectFlow {
 /// `go_home` used to open with three assignments, `home_menu_open = false`, `home_rename = None`,
 /// `confirm_delete = false`, and five other methods cleared the menu on their way off the screen.
 /// Those eight lines were a constructor written out longhand: entering the screen means a fresh one
-/// of these, and leaving it means dropping it. `AppScreen::Home(HomeScreen::default())` says both.
+/// of these, and leaving it means dropping it. `TabContent::Home(HomeScreen::default())` says both.
 ///
 /// **What is deliberately NOT here**, and this is the section's real finding: `home_filter` and
 /// `home_selected` stayed on [`Tab`]. They look exactly like the three above — same `home_` prefix,
@@ -2385,12 +2392,19 @@ pub struct HomeScreen {
 	confirm_delete: bool,
 }
 
-/// The question the connect FORM is holding, over its own (dimmed) self (§12, §16).
+/// The question the connect FORM is holding, over its own (dimmed) self (§12, §16, `CONTEXT.md`:
+/// **Prompt**).
 ///
-/// These were six `AppScreen` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
+/// Not to be confused with a **prompt mark** — where a shell says its own prompt begins, via OSC 133
+/// (§34) — which is the older and more entrenched sense of the word inside `term/`. §135 kept the bare
+/// word here and qualified that one, and moved the third sense out from under it entirely:
+/// `SshEvent::ElevatePrompt` is now `ElevateChallenge`, because `sudo` asking for a password is a
+/// question put by a session that already exists.
+///
+/// These were six `TabContent` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
 /// `NeedPassphrase`, `Interactive`, `VaultUnlock`, `Error` — but they were never separate screens:
 /// every one of them renders `form_with_dialog(…)`, the connect form with a dialog over it. Calling
-/// them screens cost a real thing, which is that `AppScreen::Connect`'s keyboard subscription was the
+/// them screens cost a real thing, which is that `TabContent::Connect`'s keyboard subscription was the
 /// only place the form's own Tab / Enter ring was live. Six variants that each had to remember to
 /// switch it off; one `Option` that says it once.
 ///
@@ -2403,12 +2417,12 @@ pub struct HomeScreen {
 /// * the HANDSHAKE asks the other four — see [`Challenge`] — and it can only ask them because a
 ///   session already exists to be asking on behalf of.
 ///
-/// That was not a distinction worth drawing until §133 tried to put the session inside `AppScreen`
+/// That was not a distinction worth drawing until §133 tried to put the session inside `TabContent`
 /// and found it could not: `open_prompt` moved the screen to `Connect` mid-handshake, which would
 /// have thrown the session away between the dial and `Connected`. Four questions asked by something
 /// that already exists belong to that thing.
 ///
-/// `pub` for the same reason [`Viewer`] is: it is part of [`ConnectFlow`], which [`AppScreen`]
+/// `pub` for the same reason [`Viewer`] is: it is part of [`ConnectFlow`], which [`TabContent`]
 /// carries. `app` is a private module, so this reaches no further than the crate.
 #[derive(Debug)]
 pub enum Prompt {
@@ -2440,11 +2454,12 @@ pub enum Prompt {
 	Failed,
 }
 
-/// The question the HANDSHAKE is holding, over the dimmed connect form (§7, §8).
+/// The question the HANDSHAKE is holding, over the dimmed connect form (§7, §8, `CONTEXT.md`:
+/// **Challenge**).
 ///
 /// Split out of [`Prompt`] in §134. Every one of these is asked by a session that already exists —
 /// `dial` has sent the `Connect` and the far side has stopped to ask something — so they live in
-/// [`SessionState::Dialing`] and answering one never moves the screen. What they LOOK like is
+/// [`SessionPhase::Dialing`] and answering one never moves the screen. What they LOOK like is
 /// unchanged: `form_with_dialog`, the same dimmed form with the same card over it, because that is
 /// still the right place to show them. Where they LIVE is what changed.
 ///
@@ -2517,18 +2532,22 @@ pub struct Identity {
 	/// is in the list (so a failure has something to report against) but cannot be switched to.
 	ready: bool,
 	/// This identity's view of the machine while it is NOT on screen. The one on screen keeps its
-	/// state in `Tab`'s own fields instead, so it is `Workspace::default()` here.
+	/// state in [`Session::work`] instead, so it is `Workspace::default()` here.
 	work: Workspace,
 }
 
-/// One identity's own view of the machine (§45): everything on the terminal side of a tab that
-/// belongs to the account rather than to the connection.
+/// One identity's own view of the machine (§45, `CONTEXT.md`: **Workspace**): everything on the
+/// terminal side of a tab that belongs to the account rather than to the connection.
 ///
-/// This exists so switching accounts can be a SWAP. The fields live on `Tab` for whichever identity
-/// is on screen — untouched, so every path that reads `self.terminal` or `self.selection` carries on
-/// exactly as it did — and the ones off screen are held here. `Tab::exchange` moves a whole view in
-/// and the live one out in a single step, which is also the one place that has to be complete: a
-/// field left out of it would leak one account's state into another's pane.
+/// This exists so switching accounts can be a SWAP. Whichever identity is on screen keeps its view in
+/// [`Session::work`]; the ones off screen hold theirs in `Identity::work`, and `switch_identity`
+/// exchanges the two with a single `mem::swap`.
+///
+/// That swap USED to be `Tab::exchange`, seven `mem::swap`s over seven `Tab` fields, and its own doc
+/// called itself *"the one place that has to be COMPLETE: a field left out of it would leak one
+/// account's state into another's pane"* — a hazard that existed only because the live view was
+/// scattered across `Tab` rather than gathered here. §134 gathered it and the hazard went with it: one
+/// swap of one value cannot be incomplete.
 ///
 /// What is deliberately NOT here: the folder tree, the files pane and the transfers. Those all run
 /// over sftp, which the SSH server starts as the account the session LOGGED IN as — `sudo` in a
@@ -2547,14 +2566,20 @@ pub struct Workspace {
 	search_stale: bool,
 }
 
-/// Which of a session's two states it is in (§134).
+/// Which of a session's two phases it is in (§134, `CONTEXT.md`: **Phase**).
 ///
 /// A session exists from the moment `dial` sends the command until a teardown drops it, and for the
 /// first part of that there is no shell yet. That used to be `AppScreen::Connecting { status }`, a
-/// screen of its own; it is a *state* because the endpoint and the local-shell kind already exist
-/// while it holds — `dial` sets them on the line before it.
+/// screen of its own; it belongs to the session because the endpoint and the local-shell kind already
+/// exist while it holds — `dial` sets them on the line before it.
+///
+/// **Was `SessionState`, and so was something else** (§135). `targets::LeftOff` was called
+/// `SessionState` too, and `src/app/mod.rs` used both — one bare, one written out as
+/// `crate::targets::SessionState` at eight sites purely to tell them apart. A qualification written
+/// only to disambiguate is the compiler doing what a name should. *Phase* is also the truer word: two
+/// values in a fixed order, dialing then live, never back.
 #[derive(Debug)]
-pub enum SessionState {
+pub enum SessionPhase {
 	/// The handshake is in flight, and possibly stopped to ask something.
 	Dialing {
 		/// The human-readable step the screen shows ("connecting to host:22…",
@@ -2564,8 +2589,8 @@ pub enum SessionState {
 		/// `None` while the handshake is simply proceeding.
 		///
 		/// HERE, and that is the whole of what §134 unblocked. These four questions used to move the
-		/// screen to `AppScreen::Connect`, which is why §133 could not put a session inside
-		/// `AppScreen` at all: the host-key dialog would have destroyed the session that was waiting
+		/// screen to `TabContent::Connect`, which is why §133 could not put a session inside
+		/// `TabContent` at all: the host-key dialog would have destroyed the session that was waiting
 		/// for the answer. Asked by the session, held by the session.
 		asking: Option<Challenge>,
 	},
@@ -2576,9 +2601,9 @@ pub enum SessionState {
 /// One session on this tab (`CONTEXT.md`: **Session**, §134): what it is connected to, what the
 /// handshake is waiting on, and the accounts and views that belong to it.
 ///
-/// Held by [`AppScreen::Session`], so a session exists exactly while that screen shows. That is the
+/// Held by [`TabContent::Session`], so a session exists exactly while that screen shows. That is the
 /// point of it: `connection: Option<String>`, `terminal: Option<term::Terminal>` and the *pair* of
-/// `AppScreen` variants were three values that had to agree about one fact, and both teardown arms
+/// `TabContent` variants were three values that had to agree about one fact, and both teardown arms
 /// had to put all three back by hand.
 ///
 /// **What is deliberately NOT here, and why the line falls where it does.** §131's test — is the
@@ -2596,8 +2621,8 @@ pub enum SessionState {
 /// That is the difference between the fields here and those. These a tag could contradict.
 #[derive(Debug)]
 pub struct Session {
-	/// Dialing, or live — see [`SessionState`].
-	state: SessionState,
+	/// Dialing, or live — see [`SessionPhase`].
+	phase: SessionPhase,
 	/// The `user@host:port` of this session, shown in the terminal's status bar (§10). Holds no
 	/// secret, so it is safe in `Debug`. Was `Tab::connection`, whose `Some`-ness meant "there is a
 	/// session"; being here says that instead.
@@ -2616,7 +2641,7 @@ pub struct Session {
 	local: Option<crate::local::shells::ShellKind>,
 	/// The on-screen identity's view of the machine (§45): its grid, its scrollback, its selection,
 	/// its find bar. The same [`Workspace`] the parked identities hold, which is what makes switching
-	/// accounts a swap — see `exchange`.
+	/// accounts a swap — see [`Workspace`] and `accounts::switch_identity`.
 	work: Workspace,
 	/// The accounts this session is currently a shell for (§45), in the order they were opened —
 	/// the one it authenticated as first, then each one elevated into. Empty until the shell opens.
@@ -2663,7 +2688,7 @@ impl Session {
 		status: String,
 	) -> Self {
 		Self {
-			state: SessionState::Dialing {
+			phase: SessionPhase::Dialing {
 				status,
 				asking: None,
 			},
@@ -2683,22 +2708,22 @@ impl Session {
 	/// Whether a shell is open and its grid on screen. What `matches!(screen, AppScreen::Terminal)`
 	/// and `self.terminal.is_some()` were both asking, with nothing keeping the two answers in step.
 	fn is_live(&self) -> bool {
-		matches!(self.state, SessionState::Live)
+		matches!(self.phase, SessionPhase::Live)
 	}
 
 	/// What the handshake is waiting on, if it has stopped to ask (§7, §8). `None` once live — a
 	/// session with a shell open is past being asked anything.
 	fn asking(&self) -> Option<&Challenge> {
-		match &self.state {
-			SessionState::Dialing { asking, .. } => asking.as_ref(),
-			SessionState::Live => None,
+		match &self.phase {
+			SessionPhase::Dialing { asking, .. } => asking.as_ref(),
+			SessionPhase::Live => None,
 		}
 	}
 
 	/// Ask the user something on the handshake's behalf (§7, §8). A no-op once live, which cannot
 	/// happen: every caller is an `on_ssh_event` arm that only fires before `Connected`.
 	fn ask(&mut self, challenge: Challenge) {
-		if let SessionState::Dialing { asking, .. } = &mut self.state {
+		if let SessionPhase::Dialing { asking, .. } = &mut self.phase {
 			*asking = Some(challenge);
 		}
 	}
@@ -2706,9 +2731,9 @@ impl Session {
 	/// Take back whatever was being asked (§7, §12), so the typed text moves out with it rather than
 	/// being left in a buffer.
 	fn take_asked(&mut self) -> Option<Challenge> {
-		match &mut self.state {
-			SessionState::Dialing { asking, .. } => asking.take(),
-			SessionState::Live => None,
+		match &mut self.phase {
+			SessionPhase::Dialing { asking, .. } => asking.take(),
+			SessionPhase::Live => None,
 		}
 	}
 
@@ -2716,7 +2741,7 @@ impl Session {
 	/// it is one fact — three answer paths reach it, and one that forgot to clear the question would
 	/// leave the dialog over a handshake that had already gone past it.
 	fn proceeding(&mut self, step: &str) {
-		self.state = SessionState::Dialing {
+		self.phase = SessionPhase::Dialing {
 			status: step.to_owned(),
 			asking: None,
 		};
@@ -2740,7 +2765,7 @@ impl Session {
 /// What the two DO share is stated once, below: a viewer is parented to a session, and a viewer is
 /// open on a path. Those two facts drive most of the call sites, and neither needs to know which
 /// kind it is holding to ask for them.
-/// `pub` only because [`AppScreen`] is, and since §130 this is one of its variants' payload — the
+/// `pub` only because [`TabContent`] is, and since §130 this is one of its variants' payload — the
 /// same reason [`Modal`] carries it. `app` is a private module, so this reaches no further than the
 /// crate either way.
 #[derive(Debug)]
@@ -2856,7 +2881,7 @@ struct Arrival {
 	/// The target's key in the saved list — what pre-selects its row for a return to the home list.
 	key: String,
 	/// The session this endpoint was last left in (§22), if it has been connected to before.
-	session: Option<crate::targets::SessionState>,
+	session: Option<crate::targets::LeftOff>,
 	/// The port forwards saved against it (§27), to be re-established once the shell is up.
 	forwards: Vec<crate::forward::ForwardSpec>,
 }
@@ -2913,7 +2938,7 @@ pub struct Tab {
 	/// tab's own SSH worker subscription and routes that session's events back to this tab.
 	id: u64,
 	/// Which screen is visible.
-	pub screen: AppScreen,
+	pub content: TabContent,
 	/// The saved connection targets shown on the home screen (§14, §26). A shared clone of the
 	/// ONE app-wide list (loaded from disk at startup, kept sorted, re-saved on any change): a
 	/// rename or delete in one tab's home screen is seen by every other, and there is a single
@@ -3154,7 +3179,7 @@ struct PendingElevation {
 /// connection set to remember its secret, or pre-filling the form from a secret already stored
 /// for a target the user opened.
 /// `pub` for the same reason [`Prompt`] is: it is carried by `Prompt::Vault`, which since §132 is
-/// part of [`ConnectFlow`] and so of [`AppScreen`]. Still crate-local — `app` is a private module.
+/// part of [`ConnectFlow`] and so of [`TabContent`]. Still crate-local — `app` is a private module.
 #[derive(Debug)]
 pub enum VaultPending {
 	/// Continue dialing this connection; its secret is stored on a successful connect.
@@ -3795,7 +3820,7 @@ impl Tab {
 	) -> Self {
 		Self {
 			id,
-			screen: AppScreen::Viewer(Viewer::Editor(crate::editor::Editor::loading(
+			content: TabContent::Viewer(Viewer::Editor(crate::editor::Editor::loading(
 				session, identity, path, theme,
 			))),
 			window_size,
@@ -3811,7 +3836,7 @@ impl Tab {
 	fn new_preview(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
 		Self {
 			id,
-			screen: AppScreen::Viewer(Viewer::Picture(crate::preview::Preview::loading(
+			content: TabContent::Viewer(Viewer::Picture(crate::preview::Preview::loading(
 				session, path,
 			))),
 			window_size,
@@ -3824,7 +3849,7 @@ impl Tab {
 	/// session. The property that matters is the one they share: no connection of its own, so no SSH
 	/// worker is started for it.
 	fn is_viewer(&self) -> bool {
-		matches!(self.screen, AppScreen::Viewer(_))
+		matches!(self.content, TabContent::Viewer(_))
 	}
 
 	/// What this tab is VIEWING, when it is showing a remote file rather than running a session
@@ -3832,20 +3857,20 @@ impl Tab {
 	///
 	/// This reads the screen (§130) rather than a field beside it, so the `Option` is DERIVED: it is
 	/// `None` because this tab is on another screen, which is the only reason it could ever have
-	/// been `None`. Callers that are already matching on `self.screen` bind the viewer straight out
+	/// been `None`. Callers that are already matching on `self.content` bind the viewer straight out
 	/// of the variant and never come here; this is for the ones that only want to know whether there
 	/// is one — the chip's label, the progress bar, the load router.
 	fn viewer(&self) -> Option<&Viewer> {
-		match &self.screen {
-			AppScreen::Viewer(viewer) => Some(viewer),
+		match &self.content {
+			TabContent::Viewer(viewer) => Some(viewer),
 			_ => None,
 		}
 	}
 
 	/// The viewer, mutably — the twin of [`Tab::viewer`].
 	fn viewer_mut(&mut self) -> Option<&mut Viewer> {
-		match &mut self.screen {
-			AppScreen::Viewer(viewer) => Some(viewer),
+		match &mut self.content {
+			TabContent::Viewer(viewer) => Some(viewer),
 			_ => None,
 		}
 	}
@@ -3858,21 +3883,21 @@ impl Tab {
 	/// STARTS on this screen. Two different things, and the compiler said so.
 	///
 	/// `#[cfg(test)]`, and that is the interesting part: there is no production READER. Every one of
-	/// them — `view`, `keyboard_claim` — was already matching on `self.screen`, so carrying the state
+	/// them — `view`, `keyboard_claim` — was already matching on `self.content`, so carrying the state
 	/// in the variant means they bind it out of the pattern they were writing anyway. An accessor is
 	/// only wanted where something needs to ask without knowing, and after §131 nothing does.
 	#[cfg(test)]
 	pub(super) fn home_screen(&self) -> Option<&HomeScreen> {
-		match &self.screen {
-			AppScreen::Home(home) => Some(home),
+		match &self.content {
+			TabContent::Home(home) => Some(home),
 			_ => None,
 		}
 	}
 
 	/// The home screen's state, mutably — the twin of [`Tab::home_screen`].
 	pub(super) fn home_screen_mut(&mut self) -> Option<&mut HomeScreen> {
-		match &mut self.screen {
-			AppScreen::Home(home) => Some(home),
+		match &mut self.content {
+			TabContent::Home(home) => Some(home),
 			_ => None,
 		}
 	}
@@ -3880,16 +3905,16 @@ impl Tab {
 	/// This tab's session, if it has one (§134) — dialing or live. `None` on the home list, the bare
 	/// connect form and a viewer tab, which is the whole of what `connection.is_some()` used to mean.
 	pub(super) fn session(&self) -> Option<&Session> {
-		match &self.screen {
-			AppScreen::Session(session) => Some(session),
+		match &self.content {
+			TabContent::Session(session) => Some(session),
 			_ => None,
 		}
 	}
 
 	/// The session, mutably — the twin of [`Tab::session`].
 	pub(super) fn session_mut(&mut self) -> Option<&mut Session> {
-		match &mut self.screen {
-			AppScreen::Session(session) => Some(session),
+		match &mut self.content {
+			TabContent::Session(session) => Some(session),
 			_ => None,
 		}
 	}
@@ -4091,9 +4116,9 @@ impl Tab {
 	/// What the handshake is waiting on, mutably — how a challenge's own field edits reach its
 	/// buffers, the way [`Tab::prompt_mut`] does for the form's two questions.
 	pub(super) fn asking_mut(&mut self) -> Option<&mut Challenge> {
-		match &mut self.session_mut()?.state {
-			SessionState::Dialing { asking, .. } => asking.as_mut(),
-			SessionState::Live => None,
+		match &mut self.session_mut()?.phase {
+			SessionPhase::Dialing { asking, .. } => asking.as_mut(),
+			SessionPhase::Live => None,
 		}
 	}
 
@@ -4120,16 +4145,16 @@ impl Tab {
 
 	/// The connect flow, if the connect screen is the one showing (§7, §132).
 	pub(super) fn connect_flow(&self) -> Option<&ConnectFlow> {
-		match &self.screen {
-			AppScreen::Connect(flow) => Some(flow),
+		match &self.content {
+			TabContent::Connect(flow) => Some(flow),
 			_ => None,
 		}
 	}
 
 	/// The connect flow, mutably — the twin of [`Tab::connect_flow`].
 	pub(super) fn connect_flow_mut(&mut self) -> Option<&mut ConnectFlow> {
-		match &mut self.screen {
-			AppScreen::Connect(flow) => Some(flow),
+		match &mut self.content {
+			TabContent::Connect(flow) => Some(flow),
 			_ => None,
 		}
 	}
@@ -4197,8 +4222,8 @@ impl Tab {
 	/// open (or dialing), otherwise a word for the screen it is sitting on. Names the session so a
 	/// user with several open can tell them apart.
 	fn strip_label(&self) -> String {
-		match &self.screen {
-			AppScreen::Session(session) => {
+		match &self.content {
+			TabContent::Session(session) => {
 				let endpoint = session.endpoint.clone();
 				// The icon name the remote set for this tab, if it set one (OSC 1, §69) — `vim`, a
 				// build, a tmux window. It is what tells two shells on the SAME host apart, which
@@ -4215,14 +4240,14 @@ impl Tab {
 					None => endpoint,
 				}
 			}
-			AppScreen::Home(_) => "Home".to_owned(),
+			TabContent::Home(_) => "Home".to_owned(),
 			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
 			// only an editor can have (§32, §53). Both halves of that are the viewer's own.
-			AppScreen::Viewer(viewer) => viewer.label(),
+			TabContent::Viewer(viewer) => viewer.label(),
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
 			// without being opened.
-			AppScreen::Connect(flow) => match flow.prompt {
+			TabContent::Connect(flow) => match flow.prompt {
 				Some(Prompt::Failed) => "Error".to_owned(),
 				_ => "New connection".to_owned(),
 			},
@@ -4528,7 +4553,7 @@ impl Tab {
 	/// A preview tab takes the same two load replies and none of the save ones, so it is answered
 	/// first and separately rather than by threading an `Option` through the editor's arms.
 	fn on_viewer_event(&mut self, event: SshEvent) -> iced::Task<Message> {
-		if matches!(self.screen, AppScreen::Viewer(Viewer::Picture(_))) {
+		if matches!(self.content, TabContent::Viewer(Viewer::Picture(_))) {
 			return self.on_preview_event(event);
 		}
 		let id = self.id;
@@ -5228,7 +5253,7 @@ impl Tab {
 		let focus = self
 			.connect_flow()
 			.map_or_else(Default::default, |flow| flow.focus);
-		self.screen = AppScreen::Connect(ConnectFlow {
+		self.content = TabContent::Connect(ConnectFlow {
 			focus,
 			prompt: Some(prompt),
 		});
@@ -5350,7 +5375,7 @@ impl Tab {
 				// to have run and the sixth not: `screen = Terminal` with no `terminal`, or a
 				// terminal with an empty identity list, were both writable before.
 				if let Some(session) = self.session_mut() {
-					session.state = SessionState::Live;
+					session.phase = SessionPhase::Live;
 					session.work.terminal = Some(new_emulator());
 					session.identities = vec![Identity {
 						id: bridge::LOGIN_IDENTITY,
@@ -5654,7 +5679,7 @@ impl Tab {
 			// A credential question from an elevating shell (§45), answered again since §47: into the
 			// dialog if it is open, and into a dialog opened for it if it is not — which is what a
 			// hands-free elevation from a stored preference looks like.
-			SshEvent::ElevatePrompt {
+			SshEvent::ElevateChallenge {
 				identity,
 				label,
 				refusal,
@@ -5970,11 +5995,11 @@ impl Tab {
 	/// Pure, and it reads only what is already on the tab, so "who has the keyboard" can be asked
 	/// without a window and without pressing anything.
 	fn keyboard_claim(&self) -> Option<KeyboardClaim> {
-		match &self.screen {
+		match &self.content {
 			// The two home claimants come straight out of the variant (§131): this method was
 			// already matching on the screen to know which claimants can exist at all, so carrying
 			// their state in it means the answer is read off the thing that was already being asked.
-			AppScreen::Home(home) => {
+			TabContent::Home(home) => {
 				if home.confirm_delete {
 					return Some(KeyboardClaim::DeleteTarget);
 				}
@@ -5986,7 +6011,7 @@ impl Tab {
 			// A LIVE session's claimants. One still dialing has its challenge dialog instead, whose
 			// fields type through the widget tree (§7, §134) — the same arrangement the form's own
 			// prompts have, and the reason neither is listed here.
-			AppScreen::Session(session) if session.is_live() => {
+			TabContent::Session(session) if session.is_live() => {
 				if self.modal.is_some() {
 					return Some(KeyboardClaim::Modal);
 				}
@@ -6994,8 +7019,8 @@ impl Tab {
 	/// another value is one field here (and one on `Target`). The shell cwd is `None` on a
 	/// server that announces none (§17); `set_session` treats a `None` as "leave it", so a
 	/// silent session never erases what an earlier one recorded.
-	fn capture_session(&self) -> crate::targets::SessionState {
-		crate::targets::SessionState {
+	fn capture_session(&self) -> crate::targets::LeftOff {
+		crate::targets::LeftOff {
 			// The panes' whole half of the snapshot, from the pair that owns it.
 			terminal_path: self
 				.terminal()
@@ -7035,7 +7060,7 @@ impl Tab {
 	/// so a restore before the first resize event cannot shrink a pane to its minimum.
 	fn restore_session(
 		&mut self,
-		session: crate::targets::SessionState,
+		session: crate::targets::LeftOff,
 	) -> (Option<String>, Option<String>) {
 		let resume = self.panes.restore(session, self.window_size);
 		(resume.terminal, resume.pane)
@@ -7076,10 +7101,10 @@ impl Tab {
 		// The one floating card every dialog on this screen is placed by (§10) — only one is ever
 		// open at a time, so one card serves them all; the arms that draw no dialog ignore it.
 		let card = self.card;
-		match &self.screen {
+		match &self.content {
 			// The shared target list is read through a short-lived borrow; `home::view` clones
 			// every name it needs, so nothing in the returned element outlives the borrow (§26).
-			AppScreen::Home(home) => ui::home::view(
+			TabContent::Home(home) => ui::home::view(
 				self.targets.borrow().items(),
 				ui::home::View {
 					filter: &self.home_filter,
@@ -7102,7 +7127,7 @@ impl Tab {
 			// it, floating over the (dimmed) form rather than replacing it, so the page stays in
 			// view behind it (§10). The second argument to `form_with_dialog` is what a click on
 			// the BACKDROP does, and every one of them is the safe answer: reject, cancel, back.
-			AppScreen::Connect(flow) => match &flow.prompt {
+			TabContent::Connect(flow) => match &flow.prompt {
 				None => ui::connect::view(&self.form, flow.focus),
 				Some(Prompt::Vault {
 					input,
@@ -7122,11 +7147,11 @@ impl Tab {
 			// A session still DIALING (§134): the status step, or — if the far side has stopped to
 			// ask — the same dimmed form with the same card over it that the form's own prompts get.
 			// Where the challenge lives changed; what it looks like did not (§7, §8).
-			AppScreen::Session(session) if !session.is_live() => match session.asking() {
-				None => match &session.state {
-					SessionState::Dialing { status, .. } => text(status).into(),
+			TabContent::Session(session) if !session.is_live() => match session.asking() {
+				None => match &session.phase {
+					SessionPhase::Dialing { status, .. } => text(status).into(),
 					// Unreachable: this arm is guarded on NOT live.
-					SessionState::Live => text("").into(),
+					SessionPhase::Live => text("").into(),
 				},
 				Some(Challenge::HostKey) => self.form_with_dialog(
 					ui::host_key_view(&self.dialog_body, card),
@@ -7147,7 +7172,7 @@ impl Tab {
 					Message::InteractiveCancelled,
 				),
 			},
-			AppScreen::Session(session) => match &session.work.terminal {
+			TabContent::Session(session) => match &session.work.terminal {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
@@ -7207,8 +7232,8 @@ impl Tab {
 			// where this screen showed and `Tab::viewer` was `None`, which nothing ever produced and
 			// nothing could have drawn. §130 moved the viewer into the variant, so the state is gone
 			// and so is the sentence that stood in for it.
-			AppScreen::Viewer(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
-			AppScreen::Viewer(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
+			TabContent::Viewer(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
+			TabContent::Viewer(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
 		}
 	}
 }
@@ -8212,7 +8237,7 @@ mod tests {
 			"and the shell left, which is what ends the session — no kill was involved"
 		);
 		assert!(
-			matches!(tab.screen, AppScreen::Home(_)) && tab.connection().is_none(),
+			matches!(tab.content, TabContent::Home(_)) && tab.connection().is_none(),
 			"the tab landed on the home screen, where a second Ctrl+D closes it (§30)"
 		);
 	}
@@ -8297,7 +8322,7 @@ mod tests {
 			"the tab has forgotten it had a session"
 		);
 		assert!(
-			matches!(app.screen, AppScreen::Home(_)),
+			matches!(app.content, TabContent::Home(_)),
 			"landing on the home screen, where a second Ctrl+D closes the tab (§30)"
 		);
 	}
@@ -9199,10 +9224,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::targets::SessionState {
+			crate::targets::LeftOff {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::targets::SessionState::default()
+				..crate::targets::LeftOff::default()
 			},
 		);
 		app.set_endpoint("u@h:22".to_owned());
@@ -9261,10 +9286,10 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 		app.targets.borrow_mut().set_session(
 			"u@h:22",
-			crate::targets::SessionState {
+			crate::targets::LeftOff {
 				terminal_path: Some("/var/log".to_owned()),
 				files_path: Some("/etc".to_owned()),
-				..crate::targets::SessionState::default()
+				..crate::targets::LeftOff::default()
 			},
 		);
 		app.set_endpoint("u@h:22".to_owned());
@@ -9331,7 +9356,7 @@ mod tests {
 		// Reconnecting to the same endpoint offers to finish it, and says why it is asking. A new
 		// SESSION, because the last one went with the disconnect (§134) — writing an endpoint onto
 		// the tab is no longer a thing that can happen, which is the point.
-		app.screen = AppScreen::Session(Session::dialing(
+		app.content = TabContent::Session(Session::dialing(
 			"u@h:22".to_owned(),
 			None,
 			"connecting…".to_owned(),
@@ -9407,7 +9432,7 @@ mod tests {
 		assert_eq!(strip(&app).len(), 2);
 		assert_eq!(on_screen(&app), 1, "the new tab is the active one");
 		assert_ne!(strip(&app)[0].id, strip(&app)[1].id, "ids are never reused");
-		assert!(matches!(strip(&app)[1].screen, AppScreen::Home(_)));
+		assert!(matches!(strip(&app)[1].content, TabContent::Home(_)));
 	}
 
 	#[test]
@@ -10194,14 +10219,14 @@ mod tests {
 		// pattern now makes both claims — a `Viewer` screen holding a `Picture` is the only way to
 		// say either of them.
 		assert!(
-			matches!(tab.screen, AppScreen::Viewer(Viewer::Picture(_))),
+			matches!(tab.content, TabContent::Viewer(Viewer::Picture(_))),
 			"a picture opens a picture, on the viewer screen"
 		);
 
 		let notes = open_file(&mut app, session, "/srv/notes.txt");
 		let tab = app.tabs().find(|tab| tab.id == notes).expect("the tab");
 		assert!(
-			matches!(tab.screen, AppScreen::Viewer(Viewer::Editor(_))),
+			matches!(tab.content, TabContent::Viewer(Viewer::Editor(_))),
 			"text still opens the editor"
 		);
 	}
@@ -10228,7 +10253,7 @@ mod tests {
 		assert_eq!(picture.path(), "/srv/shot.png");
 	}
 
-	/// The chip's label, which used to be two `AppScreen` arms each unwrapping its own field (§32,
+	/// The chip's label, which used to be two `TabContent` arms each unwrapping its own field (§32,
 	/// §53).
 	#[test]
 	fn only_an_editor_can_wear_the_unsaved_dot() {
@@ -10700,7 +10725,7 @@ mod tests {
 		assert_ne!(app.focus, first, "the fresh region takes the keyboard");
 		// A fresh application layout: one tab, and it is sitting on the saved-target list.
 		assert_eq!(strip(&app).len(), 1);
-		assert!(matches!(strip(&app)[0].screen, AppScreen::Home(_)));
+		assert!(matches!(strip(&app)[0].content, TabContent::Home(_)));
 		// Tab ids stay app-wide, so the new region's tab cannot collide with the old region's (§26).
 		let ids: Vec<u64> = app.tabs().map(|tab| tab.id).collect();
 		assert_eq!(ids.len(), 2);
@@ -11385,7 +11410,7 @@ mod tests {
 			("h", "u")
 		);
 		assert!(
-			matches!(copy.screen, AppScreen::Connect(_)),
+			matches!(copy.content, TabContent::Connect(_)),
 			"the password was never remembered, so the copy stops at the form with everything else \
 			 already filled in rather than spending an attempt on an empty field"
 		);
@@ -11408,7 +11433,7 @@ mod tests {
 
 		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(
-			matches!(copy.screen, AppScreen::Session(_)),
+			matches!(copy.content, TabContent::Session(_)),
 			"dialed without asking anything"
 		);
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
@@ -11448,7 +11473,7 @@ mod tests {
 			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
 
 		let _ = copy.open_copy_of("u@h:22", Some("/srv".to_owned()));
-		assert!(matches!(copy.screen, AppScreen::Connect(_)));
+		assert!(matches!(copy.content, TabContent::Connect(_)));
 		assert_eq!(copy.form.host, "h");
 		assert!(rx.try_recv().is_err(), "nothing was dialed");
 		assert_eq!(
@@ -11475,7 +11500,7 @@ mod tests {
 		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(copy.pending_connect, "armed, waiting for a channel to use");
 		assert!(
-			matches!(copy.screen, AppScreen::Connect(_)),
+			matches!(copy.content, TabContent::Connect(_)),
 			"the pre-filled form is what shows in the meantime, and what is left behind if no \
 			 worker ever arrives"
 		);
@@ -11488,7 +11513,7 @@ mod tests {
 		let (tx, mut rx) = mpsc::channel(64);
 		let _ = copy.on_ssh_event(SshEvent::Ready(tx));
 		assert!(!copy.pending_connect, "spent");
-		assert!(matches!(copy.screen, AppScreen::Session(_)));
+		assert!(matches!(copy.content, TabContent::Session(_)));
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
 		assert_eq!(
 			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),
