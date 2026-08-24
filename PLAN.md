@@ -14322,3 +14322,89 @@ pointer is inside, so without it a program's shape would follow the mouse across
 - **Neither bar widens its target for a pointer.** The lane cmote hands iced is 6px and the terminal's
   hit test is the same lane, so the two agree about where the bar is — but a 4px bar could reasonably
   want a fatter grab zone than it draws, and neither surface offers one.
+
+## §126 — Cutting up the 14 800-line file
+
+`app.rs` was 14 811 lines: 9 400 of code and 5 400 of tests, in one file, holding `App`, `Tab`,
+`Message` and every method either of them has. It is the biggest thing in the tree by a factor of
+two and a half over the next file, and the house rule it breaks says 800.
+
+This section starts the split, and starts it in a way the next slice can follow.
+
+### One directory, several `impl Tab` blocks
+
+`src/app.rs` became `src/app/mod.rs`, and three clusters moved into siblings:
+
+| file | what it holds | lines |
+|---|---|---|
+| `app/accounts.rs` | more than one account on one connection (§45, §46, §47) | 1273 |
+| `app/forwards.rs` | the tunnels a session carries (§27) | 410 |
+| `app/home.rs` | the saved-target screen a session starts from (§14, §49) | 339 |
+| `app/fixtures.rs` | the test fixtures more than one of them needs | 226 |
+
+`app/mod.rs` is 12 882 lines, down 1 929. That is a start and not a finish, and the honest reading is
+that the remaining 12 900 is what the next slices are for — `on_key`, `on_ssh_event`, `update`,
+`on_explorer` and `on_files` are the five big dispatchers and none of them moved.
+
+**Every method that moved is still an `impl Tab` method.** Rust lets a type's `impl` blocks live in
+several files of the same module tree, and a private field is visible to the defining module *and its
+descendants* — so `app/accounts.rs` reaches `Tab`'s private fields exactly as `app/mod.rs` does. No
+accessors were added, no field's visibility changed, no method's body changed. `cargo test` reports
+the same 1 553 tests passing, which is the whole evidence a pure move can offer and the reason it was
+done as a pure move.
+
+### What the split actually costs
+
+**Visibility runs one way.** A method declared in a child module is invisible to its parent, so the
+ones `mod.rs` calls had to become `pub(super)` — 13 in `accounts`, 8 in `forwards`, 10 in `home`. That
+is not a formality, it is the useful part: in each file `pub(super) fn` now reads "the rest of `app`
+calls this" and a plain `fn` reads "only this file does". The private-by-default surface that a single
+file gave for free is now written down.
+
+**Test fixtures had to find a home.** In one file, "shared" meant nothing — every fixture sat beside
+every test. Split, a fixture used by the accounts tests and by the held-frame ones (§122) cannot live
+in either, because sibling modules cannot see each other's items. So `app/fixtures.rs` holds the ones
+that cross — `app_with_terminal`, `app_with_login_identity`, `elevate_to`, `tab_with_targets`,
+`next_command`, `drain`, `key_press` and five more — as `#[cfg(test)] pub(super)`, which reads right:
+visible to everything under `app` and nothing outside it. A fixture only one module uses stays in that
+module.
+
+### How the clusters were chosen
+
+By what a section number covers, not by what a method's name starts with. Each of the three is one
+PLAN section's worth of behaviour, which is why the file headers can say what the file is for in a
+sentence and point at the module that owns the arithmetic beside it:
+
+* **accounts** — `crate::targets` owns what an elevation is remembered as; this owns running one.
+* **forwards** — `crate::forward` owns what a spec means and whether two collide; this owns the
+  channel and the dialog.
+* **home** — `crate::targets` owns the list, its file format and its filtering; this owns the screen.
+
+That split already existed — it is the one `send_fetches` makes for the panes, and the reason
+`crate::forward` is testable with no session anywhere near it. Cutting along it is what keeps each new
+file describable.
+
+Three methods that look like they belong were deliberately left: `reread_panes`, `adopt_target` and
+`settle_remembered_secret` sit next to the account switch and are about the panes, the target list and
+the vault. A cluster is only worth cutting if the cut is along a seam that was already there.
+
+### Files
+
+- `src/app.rs` → `src/app/mod.rs`, plus `accounts.rs`, `forwards.rs`, `home.rs`, `fixtures.rs`.
+- The `include_bytes!` font paths gained a `../`, which is the whole of what moving the file cost.
+
+### Not done
+
+- **`app/mod.rs` is still 12 882 lines.** The five big dispatchers are untouched, and they are where
+  the next slices are: `update` (~460 lines), `on_ssh_event` (~410), `on_key` (~260), `on_explorer`
+  (~175) and `on_files` (~265), plus the connect form's own methods, which are the other half of
+  `home.rs`'s screen and were left so this slice stayed one screen wide.
+- **The `Message` enum did not move and probably cannot.** It is 530 lines and every module matches on
+  it; splitting it into per-topic enums would mean a wrapper variant per topic and a `match` that
+  forwards, which is machinery in place of a list.
+- **Nothing was redesigned, on purpose.** This is a move, so a method that was awkward in one file is
+  equally awkward in four. The point was to make the file readable enough that the next question — is
+  `Tab` doing too much? — can be asked at all.
+- **No new tests, and none was wanted.** The evidence for a pure move is the existing suite, and
+  1 553 tests passing before and after is that evidence. A refactor that needs new tests to prove it
+  did not change behaviour has changed behaviour.
