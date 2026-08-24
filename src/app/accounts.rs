@@ -40,8 +40,7 @@ impl Tab {
 			return iced::widget::operation::focus(ui::elevate::ANSWER_INPUT_ID);
 		}
 		let saved = self
-			.connection
-			.as_deref()
+			.connection()
 			.and_then(|endpoint| self.targets.borrow().find(endpoint).cloned())
 			.and_then(|target| target.elevate);
 		let form = saved.as_ref().map_or_else(
@@ -69,7 +68,7 @@ impl Tab {
 	/// see [`Identity`] for why it is not stored twice.
 	pub(super) fn account_rows(&self) -> Vec<ui::elevate::AccountRow> {
 		let login = self.login_account();
-		self.identities
+		self.identities()
 			.iter()
 			.map(|identity| ui::elevate::AccountRow {
 				identity: identity.id,
@@ -77,7 +76,7 @@ impl Tab {
 					Some(account) => account.clone(),
 					None => login.clone(),
 				},
-				selected: identity.id == self.identity,
+				selected: identity.id == self.identity(),
 				closable: identity.id != bridge::LOGIN_IDENTITY,
 			})
 			.collect()
@@ -87,8 +86,7 @@ impl Tab {
 	/// the `@`, falling back to a plain word when there is no session — which the dialog cannot be
 	/// open without, so the fallback is for the type rather than for the screen.
 	fn login_account(&self) -> String {
-		self.connection
-			.as_deref()
+		self.connection()
 			.and_then(|endpoint| endpoint.split('@').next())
 			.unwrap_or("login")
 			.to_owned()
@@ -97,9 +95,9 @@ impl Tab {
 	/// The account whose terminal is on screen, for the status bar's button (§47). `None` for the
 	/// login identity, which the bar's centred endpoint already names.
 	pub(super) fn showing_account(&self) -> Option<&str> {
-		self.identities
+		self.identities()
 			.iter()
-			.find(|identity| identity.id == self.identity)
+			.find(|identity| identity.id == self.identity())
 			.and_then(|identity| identity.account.as_deref())
 	}
 
@@ -150,7 +148,7 @@ impl Tab {
 		remember: bool,
 		automatic: bool,
 	) {
-		let identity = self.next_identity;
+		let identity = self.next_identity();
 		if !self.send_command(SshCommand::Elevate {
 			identity,
 			kind,
@@ -158,15 +156,18 @@ impl Tab {
 		}) {
 			return;
 		}
-		self.next_identity += 1;
-		// Listed straight away, and NOT ready: a shell still elevating cannot be switched to, but it
-		// has to be in the list for a failure to be reported against (§45).
-		self.identities.push(Identity {
-			id: identity,
-			account: Some(account.to_owned()),
-			ready: false,
-			work: Workspace::default(),
-		});
+		// One borrow for both, after the send (§134).
+		if let Some(session) = self.session_mut() {
+			session.next_identity += 1;
+			// Listed straight away, and NOT ready: a shell still elevating cannot be switched to, but
+			// it has to be in the list for a failure to be reported against (§45).
+			session.identities.push(Identity {
+				id: identity,
+				account: Some(account.to_owned()),
+				ready: false,
+				work: Workspace::default(),
+			});
+		}
 		self.pending_elevation = Some(PendingElevation {
 			identity,
 			account: account.to_owned(),
@@ -273,7 +274,7 @@ impl Tab {
 		if pending.identity != identity || !pending.remember {
 			return None;
 		}
-		let endpoint = self.connection.as_deref()?;
+		let endpoint = self.connection()?;
 		let key = crate::vault::elevation_key(endpoint, &pending.account);
 		self.vault.borrow().as_ref()?.get(&key).cloned()
 	}
@@ -292,7 +293,7 @@ impl Tab {
 		let Some(pending) = self.pending_elevation.take() else {
 			return;
 		};
-		let Some(endpoint) = self.connection.clone() else {
+		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
 		};
 		let key = crate::vault::elevation_key(&endpoint, &pending.account);
@@ -331,7 +332,7 @@ impl Tab {
 		kind: crate::elevate::ElevateKind,
 		on_connect: bool,
 	) {
-		let Some(endpoint) = self.connection.clone() else {
+		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
 		};
 		let moved = self
@@ -361,8 +362,7 @@ impl Tab {
 	/// one that says only "remember this account" rather than "do it every time".
 	pub(super) fn elevate_on_connect(&mut self) {
 		let saved = self
-			.connection
-			.as_deref()
+			.connection()
 			.and_then(|endpoint| self.targets.borrow().find(endpoint).cloned())
 			.and_then(|target| target.elevate);
 		let Some(saved) = saved else { return };
@@ -382,11 +382,17 @@ impl Tab {
 	/// it was when it was parked: a resize while it was away reached its pty (every shell is
 	/// reflowed, §45) but not its emulator, and this is what brings the two back into step.
 	pub(super) fn switch_identity(&mut self, to: u64) -> iced::Task<Message> {
-		if to == self.identity {
+		// One borrow for the whole swap (§134): the identities and the live view are both the
+		// session's now, so this reads as the list operation it always was. The borrow ends before
+		// `send_command` below, which is the tab's.
+		let Some(session) = self.session_mut() else {
+			return iced::Task::none();
+		};
+		if to == session.identity {
 			return iced::Task::none();
 		}
 		// An identity still elevating has no terminal to show; its shell does not exist yet.
-		if !self
+		if !session
 			.identities
 			.iter()
 			.any(|identity| identity.id == to && identity.ready)
@@ -397,15 +403,16 @@ impl Tab {
 		// identity is listed the moment the shell opens — but checking before anything moves means a
 		// list that somehow disagreed would leave the view alone rather than drop a whole terminal on
 		// the floor.
-		if !self
+		let leaving = session.identity;
+		if !session
 			.identities
 			.iter()
-			.any(|identity| identity.id == self.identity)
+			.any(|identity| identity.id == leaving)
 		{
 			return iced::Task::none();
 		}
 		// Taken out of the list first so the swap borrows nothing that is still inside it.
-		let mut incoming = match self
+		let mut incoming = match session
 			.identities
 			.iter_mut()
 			.find(|identity| identity.id == to)
@@ -413,16 +420,20 @@ impl Tab {
 			Some(identity) => std::mem::take(&mut identity.work),
 			None => return iced::Task::none(),
 		};
-		self.exchange(&mut incoming);
-		let leaving = self.identity;
-		if let Some(identity) = self
+		// The swap, in one line (§134). It used to be `exchange`, seven `mem::swap`s whose doc called
+		// itself *"the one place that has to be COMPLETE: every field of `Workspace` is exchanged
+		// here, and a field added there without a line here would leak one account's state into
+		// another's pane."* The live view is a `Workspace` now, exactly like the parked ones, so
+		// there is no list to keep complete and no way to leave a field out of it.
+		std::mem::swap(&mut session.work, &mut incoming);
+		if let Some(identity) = session
 			.identities
 			.iter_mut()
 			.find(|identity| identity.id == leaving)
 		{
 			identity.work = incoming;
 		}
-		self.identity = to;
+		session.identity = to;
 		self.send_command(SshCommand::SelectIdentity(to));
 		// The file panes follow the same switch (§46) — and are announced AFTER `SelectIdentity`, on
 		// the same ordered channel, so the listings cannot be answered by the account being left.
@@ -431,22 +442,6 @@ impl Tab {
 		// selection, a drag in flight, a click tally. They are all parked with it and the arriving
 		// view brings its own.
 		fit_terminal()
-	}
-
-	/// Swap the live terminal-side view with `other` (§45).
-	///
-	/// The one place that has to be COMPLETE: every field of `Workspace` is exchanged here, and a
-	/// field added there without a line here would leak one account's state into another's pane. It
-	/// is a swap rather than two moves so the caller ends up holding what was on screen, which is
-	/// exactly what has to be parked.
-	fn exchange(&mut self, other: &mut Workspace) {
-		std::mem::swap(&mut self.terminal, &mut other.terminal);
-		std::mem::swap(&mut self.selection, &mut other.selection);
-		std::mem::swap(&mut self.selecting, &mut other.selecting);
-		std::mem::swap(&mut self.hover_cell, &mut other.hover_cell);
-		std::mem::swap(&mut self.clicks, &mut other.clicks);
-		std::mem::swap(&mut self.search, &mut other.search);
-		std::mem::swap(&mut self.search_stale, &mut other.search_stale);
 	}
 
 	/// An elevated shell is through its conversation (§45): it now has a terminal of its own, so
@@ -467,11 +462,12 @@ impl Tab {
 				self.modal = None;
 			}
 		}
-		let Some(entry) = self
-			.identities
-			.iter_mut()
-			.find(|entry| entry.id == identity)
-		else {
+		let Some(entry) = self.session_mut().and_then(|session| {
+			session
+				.identities
+				.iter_mut()
+				.find(|entry| entry.id == identity)
+		}) else {
 			return iced::Task::none();
 		};
 		entry.ready = true;
@@ -499,10 +495,12 @@ impl Tab {
 		reason: Option<String>,
 	) -> iced::Task<Message> {
 		let mut task = iced::Task::none();
-		if identity == self.identity {
+		if identity == self.identity() {
 			task = self.switch_identity(bridge::LOGIN_IDENTITY);
 		}
-		self.identities.retain(|entry| entry.id != identity);
+		if let Some(session) = self.session_mut() {
+			session.identities.retain(|entry| entry.id != identity);
+		}
 		let Some(reason) = reason else {
 			return task; // an ordinary `exit` at an elevated prompt
 		};
@@ -534,14 +532,6 @@ impl Tab {
 		// Nothing open to say it in: a toast says why without stealing the keyboard (§10).
 		self.toast(reason);
 		task
-	}
-
-	/// The session has ended, so every account it was a shell for has ended with it (§45): the list
-	/// and the parked views.
-	pub(super) fn forget_identities(&mut self) {
-		self.identities.clear();
-		self.identity = bridge::LOGIN_IDENTITY;
-		self.next_identity = 1;
 	}
 }
 
@@ -576,7 +566,7 @@ mod tests {
 		// Listed at once and not ready: a shell still elevating cannot be switched to, but a failure
 		// has to have something to be reported against (§45).
 		assert!(
-			app.identities
+			app.identities()
 				.iter()
 				.any(|entry| entry.id == identity && !entry.ready),
 			"the elevating identity is listed"
@@ -622,7 +612,7 @@ mod tests {
 			identity,
 			factors: 1,
 		});
-		assert_eq!(app.identity, identity, "root's terminal is on screen");
+		assert_eq!(app.identity(), identity, "root's terminal is on screen");
 		assert!(app.modal.is_none(), "the dialog is done asking");
 		assert_eq!(app.showing_account(), Some("root"), "and the bar names it");
 	}
@@ -936,7 +926,7 @@ mod tests {
 
 		// Switching back to the login account, by clicking its name.
 		let _task = app.update(Message::IdentitySelected(bridge::LOGIN_IDENTITY));
-		assert_eq!(app.identity, bridge::LOGIN_IDENTITY);
+		assert_eq!(app.identity(), bridge::LOGIN_IDENTITY);
 		assert_eq!(app.showing_account(), None, "so the bar stops naming one");
 
 		// And closing root: EOF on its channel. Drained rather than taken one at a time, because a
@@ -951,7 +941,7 @@ mod tests {
 		assert_eq!(closed, vec![root], "the close goes down the wire");
 		// The list entry stays until the session says the shell has ended — a shell that refuses to
 		// die must not vanish from the dialog.
-		assert!(app.identities.iter().any(|entry| entry.id == root));
+		assert!(app.identities().iter().any(|entry| entry.id == root));
 		// The login identity is not closable this way, whatever asks.
 		let _task = app.update(Message::IdentityClosed(bridge::LOGIN_IDENTITY));
 		let mut after = Vec::new();
@@ -1005,7 +995,7 @@ mod tests {
 		}
 		// Becoming root puts root's shell on screen, and that same switch moves the panes.
 		let root = elevate_to(&mut app);
-		assert_eq!(app.identity, root);
+		assert_eq!(app.identity(), root);
 
 		let sent = drain(&mut rx);
 		// The account is announced BEFORE the listings, on the one ordered channel, so a listing can
@@ -1108,30 +1098,28 @@ mod tests {
 		let _ = app.on_ssh_event(shell_output(b"i am cme\r\n"));
 		let _focus = app.open_term_find();
 		app.term_find_query("cme".to_owned());
-		assert_eq!(app.search.as_ref().unwrap().count(), 1);
+		assert_eq!(app.search().unwrap().count(), 1);
 
 		let root = elevate_to(&mut app);
-		assert_eq!(app.identity, root, "the new account comes forward");
+		assert_eq!(app.identity(), root, "the new account comes forward");
 		assert!(
-			app.search.is_none(),
+			app.search().is_none(),
 			"root's view has its own find bar, which is shut"
 		);
 		assert!(
-			app.terminal.as_ref().unwrap().find("i am cme").is_empty(),
+			app.terminal().unwrap().find("i am cme").is_empty(),
 			"and its own scrollback, which is empty"
 		);
 
 		// Back to the login account: everything that was parked is on screen again.
 		let _task = app.switch_identity(bridge::LOGIN_IDENTITY);
-		assert_eq!(app.identity, bridge::LOGIN_IDENTITY);
+		assert_eq!(app.identity(), bridge::LOGIN_IDENTITY);
 		assert!(
-			!app.terminal.as_ref().unwrap().find("i am cme").is_empty(),
+			!app.terminal().unwrap().find("i am cme").is_empty(),
 			"cme's scrollback survived the round trip"
 		);
 		assert_eq!(
-			app.search
-				.as_ref()
-				.map(super::super::term::search::Search::count),
+			app.search().map(super::super::term::search::Search::count),
 			Some(1),
 			"and so did its find bar, query and all"
 		);
@@ -1148,15 +1136,11 @@ mod tests {
 		// cme's shell keeps talking while root's is on screen.
 		let _ = app.on_ssh_event(shell_output(b"still building\r\n"));
 		assert!(
-			app.terminal
-				.as_ref()
-				.unwrap()
-				.find("still building")
-				.is_empty(),
+			app.terminal().unwrap().find("still building").is_empty(),
 			"root's grid is not where cme's output belongs"
 		);
 		let parked = app
-			.identities
+			.identities()
 			.iter()
 			.find(|identity| identity.id == bridge::LOGIN_IDENTITY)
 			.and_then(|identity| identity.work.terminal.as_ref())
@@ -1165,7 +1149,7 @@ mod tests {
 			!parked.find("still building").is_empty(),
 			"it went into cme's own scrollback"
 		);
-		assert_eq!(app.identity, root, "and the view never moved");
+		assert_eq!(app.identity(), root, "and the view never moved");
 	}
 
 	/// A query from a parked account is still answered — its program is blocked until it is
@@ -1207,9 +1191,9 @@ mod tests {
 	#[test]
 	fn the_greeting_an_elevation_ends_with_is_not_lost_to_the_order_it_arrives_in() {
 		let (mut app, _rx) = app_with_login_identity();
-		let root = app.next_identity;
-		app.next_identity += 1;
-		app.identities.push(Identity {
+		let root = app.next_identity();
+		app.set_identity(app.identity(), app.next_identity() + 1);
+		app.identities_mut().expect("a session").push(Identity {
 			id: root,
 			account: Some("root".to_owned()),
 			ready: false,
@@ -1225,10 +1209,9 @@ mod tests {
 			identity: root,
 			factors: 1,
 		});
-		assert_eq!(app.identity, root, "and it is brought forward");
+		assert_eq!(app.identity(), root, "and it is brought forward");
 		assert!(
-			!app.terminal
-				.as_ref()
+			!app.terminal()
 				.expect("root has a terminal")
 				.find("root@rec")
 				.is_empty(),
@@ -1248,16 +1231,13 @@ mod tests {
 			identity: root,
 			reason: None,
 		});
-		assert_eq!(app.identity, bridge::LOGIN_IDENTITY);
+		assert_eq!(app.identity(), bridge::LOGIN_IDENTITY);
 		assert!(
-			!app.terminal.as_ref().unwrap().find("i am cme").is_empty(),
+			!app.terminal().unwrap().find("i am cme").is_empty(),
 			"back to cme's own scrollback, where it was left"
 		);
-		assert_eq!(app.identities.len(), 1);
-		assert!(
-			matches!(app.screen, AppScreen::Terminal),
-			"the session is still up"
-		);
+		assert_eq!(app.identities().len(), 1);
+		assert!(app.is_live(), "the session is still up");
 	}
 
 	/// The session ending takes every identity with it (§45): they were shells on that connection.
@@ -1267,7 +1247,7 @@ mod tests {
 		let _root = elevate_to(&mut app);
 
 		let _task = app.on_ssh_event(SshEvent::Disconnected);
-		assert!(app.identities.is_empty());
-		assert_eq!(app.identity, bridge::LOGIN_IDENTITY);
+		assert!(app.identities().is_empty());
+		assert_eq!(app.identity(), bridge::LOGIN_IDENTITY);
 	}
 }

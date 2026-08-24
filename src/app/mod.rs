@@ -1505,10 +1505,9 @@ impl App {
 		if !tab.is_live() {
 			return None;
 		}
-		let endpoint = tab.connection.clone()?;
+		let endpoint = tab.connection()?.to_owned();
 		let cwd = tab
-			.terminal
-			.as_ref()
+			.terminal()
 			.and_then(term::Terminal::cwd)
 			.map(str::to_owned);
 		Some((endpoint, cwd))
@@ -1692,7 +1691,7 @@ impl App {
 		let identity = self
 			.tabs()
 			.find(|tab| tab.id == session)
-			.map_or(bridge::LOGIN_IDENTITY, |tab| tab.identity);
+			.map_or(bridge::LOGIN_IDENTITY, Tab::identity);
 		let picture = crate::preview::opens_preview(&path);
 		let mut tab = if picture {
 			Tab::new_preview(id, session, path.clone(), size)
@@ -2183,7 +2182,7 @@ impl App {
 		// tab's bar is not visible, and its flag is still set when the user comes back to it, which is
 		// when this subscription appears and the scan happens. Same shape as the toast above: the
 		// clock exists only while there is work for it.
-		if on_screen().any(|tab| tab.search_stale) {
+		if on_screen().any(Tab::search_stale) {
 			subs.push(iced::window::frames().map(|_instant| Message::TermFindRescan));
 		}
 		// A drop has landed and its paths are still arriving, one event each (§29): tick once so the
@@ -2204,7 +2203,12 @@ impl App {
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		let active = self.active();
 		match &active.screen {
-			AppScreen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
+			// A LIVE session takes the keyboard for its shell; one still dialing takes none, and its
+			// challenge dialog's fields type through the widget tree just as the form's prompts do
+			// (§7, §134). Two arms where `Terminal` and `Connecting` used to be two variants.
+			AppScreen::Session(session) if session.is_live() => {
+				subs.push(iced::keyboard::listen().map(Message::Key));
+			}
 			// The form's own focus ring (Tab / Shift+Tab / Enter / Space, §10) — but ONLY while
 			// nothing is being asked over it (§7, §8, §16). A prompt's fields type through the
 			// widget tree, so leaving the ring live would move the highlight around behind the
@@ -2226,7 +2230,7 @@ impl App {
 			AppScreen::Viewer(Viewer::Picture(_)) => {
 				subs.push(iced::keyboard::listen().map(Message::PreviewKey));
 			}
-			AppScreen::Connect(_) | AppScreen::Connecting { .. } => {}
+			AppScreen::Connect(_) | AppScreen::Session(_) => {}
 		}
 
 		iced::Subscription::batch(subs)
@@ -2240,18 +2244,23 @@ impl App {
 /// disagree. `Viewer` came first, then [`HomeScreen`] (§131) and [`ConnectFlow`] (§132): see each
 /// one's doc for what it does and does not carry, and why. It is the argument [`Viewer`], [`Modal`]
 /// and [`Prompt`] each already won at a smaller scale, applied to the screen itself.
-// On size, because §130 had to argue with `large_enum_variant` here and §132 does not.
+// On size, and this is the third time the lint has had an opinion, so here is the whole arithmetic.
 //
-// The enum is 304 bytes, all of it `Viewer`; `ConnectFlow` is 208, `HomeScreen` 56. §130 carried an
-// `#[expect(clippy::large_enum_variant)]` because at that point the second-largest variant was 24
-// and the lint fired; two slices later the spread is 304 against 208 and it does not, so the
-// expectation is gone rather than left to rot.
+// `AppScreen` is 5 016 bytes, all of it `Session`; `ConnectFlow` is 208, `HomeScreen` 56, `Viewer`
+// 304. §130 expected the lint (spread 304 against 24), §132 retired the expectation (304 against
+// 208, no longer enough to fire), and §134 reinstates it — because `Session` carries a `Workspace`,
+// and a `Workspace` carries a `term::Terminal`, which is 4 696 bytes on its own.
 //
-// The reasoning it recorded still holds and is worth keeping, because the next slice will need it:
-// there is no bulk `AppScreen` anywhere — one per `Tab` — and every byte the enum gains is a byte
-// some `Tab` field gave up. `Tab` was 7 688 before §130 and is 7 440 now, while the enum went 32 →
-// 304. Boxing a variant would buy back a few hundred bytes of seven thousand in exchange for an
-// allocation and a deref on a path that draws every frame.
+// Boxing is still the wrong answer, and the numbers say so more plainly than before: every byte the
+// enum gained is a byte a `Tab` field gave up. `Tab` was **7 688** bytes before §130 and is **7 216**
+// now — it SHRANK by 472 while the enum went 32 → 5 016, because the terminal moved out of a field
+// and into the variant that implies it. There is no bulk `AppScreen` anywhere (one per `Tab`, a
+// handful of tabs per window), and a `Box` would buy back a few kilobytes of seven in exchange for an
+// allocation per session and a deref on the path that draws every frame.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "`Session` holds the 4 696-byte terminal that `Tab` used to; `Tab` shrank — see above"
+)]
 #[derive(Debug)]
 pub enum AppScreen {
 	/// The home screen: the list of saved connection targets (§14). This is where we
@@ -2271,11 +2280,17 @@ pub enum AppScreen {
 	/// but NOT the form's contents, which are on [`Tab`] because they survive the trip to a dialog
 	/// and back. See [`ConnectFlow`].
 	Connect(ConnectFlow),
-	/// Handshake and authentication in progress; `status` is a human-readable
-	/// step for the UI ("connecting", "verifying host key", "authenticating").
-	Connecting { status: String },
-	/// A live shell: the vt100 grid fills the window.
-	Terminal,
+	/// A session on this tab (`CONTEXT.md`: **Session**) — dialing, or live with a grid on screen.
+	///
+	/// **One variant where there were two.** `Connecting { status }` and `Terminal` were separate
+	/// screens, and §130's plan said this slice would be `Terminal(Session)` with `Connecting` beside
+	/// it. That is the wrong shape, for a reason the code states twice: `dial` sets the endpoint and
+	/// *then* moves to `Connecting`, so a session starts one screen early; and the two teardown arms
+	/// of `on_ssh_event` end a session by leaving for *different* screens — `Disconnected` goes home,
+	/// `Error` shows the failure over the form. Something that begins before `Terminal` and can end
+	/// into either of two other screens is not the `Terminal` screen's state. It is a session, and
+	/// dialing is its first state rather than a screen of its own (§134).
+	Session(Session),
 	/// A remote file open for viewing — a text editor (§32) or a picture (§53). This tab is NOT a
 	/// session: it has no connection of its own, and its load (and its saves, if it has any) ride
 	/// the parent session's channel.
@@ -2370,7 +2385,7 @@ pub struct HomeScreen {
 	confirm_delete: bool,
 }
 
-/// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
+/// The question the connect FORM is holding, over its own (dimmed) self (§12, §16).
 ///
 /// These were six `AppScreen` variants of their own — `ConfirmHostKey`, `HostKeyChanged`,
 /// `NeedPassphrase`, `Interactive`, `VaultUnlock`, `Error` — but they were never separate screens:
@@ -2379,33 +2394,31 @@ pub struct HomeScreen {
 /// only place the form's own Tab / Enter ring was live. Six variants that each had to remember to
 /// switch it off; one `Option` that says it once.
 ///
-/// Each variant carries what answering it needs, so the answer is read off the thing that asked.
-/// The two host-key variants carry nothing: their message is already in the selectable dialog body,
-/// and the CHOICE goes back down the wire, so there is nothing to hold on this side (§8).
-/// `pub` for the same reason [`Viewer`] is: since §132 it is part of [`ConnectFlow`], which
-/// [`AppScreen`] carries. `app` is a private module, so this reaches no further than the crate.
+/// **Now two, because the other four were never this screen's** (§134). §132 argued the six are one
+/// thing on the grounds that they all draw the same way, and drawing the same way turned out to be
+/// the only thing they share. The split is by **who is asking**:
+///
+/// * the FORM asks these two — the vault's master passphrase, wanted *before* anything is dialed,
+///   and the failure notice, which is what is left *after* a session has gone;
+/// * the HANDSHAKE asks the other four — see [`Challenge`] — and it can only ask them because a
+///   session already exists to be asking on behalf of.
+///
+/// That was not a distinction worth drawing until §133 tried to put the session inside `AppScreen`
+/// and found it could not: `open_prompt` moved the screen to `Connect` mid-handshake, which would
+/// have thrown the session away between the dial and `Connected`. Four questions asked by something
+/// that already exists belong to that thing.
+///
+/// `pub` for the same reason [`Viewer`] is: it is part of [`ConnectFlow`], which [`AppScreen`]
+/// carries. `app` is a private module, so this reaches no further than the crate.
 #[derive(Debug)]
 pub enum Prompt {
-	/// First contact with an unknown host: the server's fingerprint is shown and the user must
-	/// accept or reject before the handshake continues (§8).
-	HostKey,
-	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
-	/// man-in-the-middle. The loud override dialog shows both fingerprints and offers reject /
-	/// trust once / replace. Dismissing REJECTS, whichever way it is dismissed.
-	HostKeyChanged,
-	/// The chosen private key is encrypted (§7): the passphrase being typed. Moved into a `Secret`
-	/// on submit and this buffer dropped with the prompt, so no plain copy is kept (§12).
-	Passphrase(String),
-	/// The server posed a keyboard-interactive challenge (§7): 2FA / OTP or any
-	/// challenge-response scheme. `fields` is the request, one per prompt with its echo hint, and
-	/// `answers` the user's in-progress replies in the same order — moved into `Secret`s on submit.
-	Interactive {
-		fields: Vec<bridge::InteractivePrompt>,
-		answers: Vec<String>,
-	},
 	/// The master-passphrase prompt for the portable secret vault (§16): CREATE it (first time,
 	/// typed twice) or UNLOCK it. `pending` is what a successful unlock resumes, held here rather
 	/// than beside the prompt so a dismissed prompt cannot leave a deferred connect behind.
+	///
+	/// The form's, not the handshake's, and the timing is what says so: it is asked *before* the
+	/// dial, because the connect cannot proceed until there is somewhere to put the secret it means
+	/// to remember.
 	Vault {
 		input: String,
 		confirm: String,
@@ -2419,7 +2432,44 @@ pub enum Prompt {
 	},
 	/// A failure. The generic, non-leaking message (§12) is in the selectable dialog body so it can
 	/// be copied; this variant just says the failure dialog is what is showing.
+	///
+	/// Also the form's, and for the mirror-image reason to `Vault`'s: it is what shows once a session
+	/// is over — a validation slip that never dialed, a dead worker channel, a handshake refused, a
+	/// shell that dropped. Reaching it always ENDS a session, which is why it moves the screen here
+	/// while the four in [`Challenge`] do not (§10).
 	Failed,
+}
+
+/// The question the HANDSHAKE is holding, over the dimmed connect form (§7, §8).
+///
+/// Split out of [`Prompt`] in §134. Every one of these is asked by a session that already exists —
+/// `dial` has sent the `Connect` and the far side has stopped to ask something — so they live in
+/// [`SessionState::Dialing`] and answering one never moves the screen. What they LOOK like is
+/// unchanged: `form_with_dialog`, the same dimmed form with the same card over it, because that is
+/// still the right place to show them. Where they LIVE is what changed.
+///
+/// Each variant carries what answering it needs, so the answer is read off the thing that asked.
+/// The two host-key variants carry nothing: their message is already in the selectable dialog body,
+/// and the CHOICE goes back down the wire, so there is nothing to hold on this side (§8).
+#[derive(Debug)]
+pub enum Challenge {
+	/// First contact with an unknown host: the server's fingerprint is shown and the user must
+	/// accept or reject before the handshake continues (§8).
+	HostKey,
+	/// The server's host key does NOT match the one pinned for it (§8) — key rotation, or a
+	/// man-in-the-middle. The loud override dialog shows both fingerprints and offers reject /
+	/// trust once / replace. Dismissing REJECTS, whichever way it is dismissed.
+	HostKeyChanged,
+	/// The chosen private key is encrypted (§7): the passphrase being typed. Moved into a `Secret`
+	/// on submit and this buffer dropped with the challenge, so no plain copy is kept (§12).
+	Passphrase(String),
+	/// The server posed a keyboard-interactive challenge (§7): 2FA / OTP or any
+	/// challenge-response scheme. `fields` is the request, one per prompt with its echo hint, and
+	/// `answers` the user's in-progress replies in the same order — moved into `Secret`s on submit.
+	Interactive {
+		fields: Vec<bridge::InteractivePrompt>,
+		answers: Vec<String>,
+	},
 }
 
 /// Which part of the terminal screen the keyboard is talking to (§20).
@@ -2453,8 +2503,9 @@ pub enum Focus {
 /// because the accounts dialog lists these by name and the bar's button names the one on screen —
 /// and neither of those is the endpoint. The endpoint says who the session AUTHENTICATED as; after
 /// an elevation that is no longer who is typing.
+/// `pub` since §134, for the same reason [`Workspace`] is: it is part of [`Session`].
 #[derive(Debug, Default)]
-struct Identity {
+pub struct Identity {
 	/// The number the SSH task knows this shell by. `bridge::LOGIN_IDENTITY` for the account the
 	/// session authenticated as; counted up from 1 for each elevation.
 	id: u64,
@@ -2483,8 +2534,10 @@ struct Identity {
 /// over sftp, which the SSH server starts as the account the session LOGGED IN as — `sudo` in a
 /// shell cannot reach them (§45). They are one view, shared by every identity, until §46 gives the
 /// file layer its own elevation; splitting them now would only pretend they differ.
+/// `pub` since §134: it is [`Session`]'s live view and appears in `Tab`'s accessors. Still
+/// crate-local — `app` is a private module.
 #[derive(Debug, Default)]
-struct Workspace {
+pub struct Workspace {
 	terminal: Option<term::Terminal>,
 	selection: Option<ui::selection::Selection>,
 	selecting: bool,
@@ -2492,6 +2545,182 @@ struct Workspace {
 	clicks: ui::selection::Clicks<ui::selection::ScreenSpot>,
 	search: Option<term::search::Search>,
 	search_stale: bool,
+}
+
+/// Which of a session's two states it is in (§134).
+///
+/// A session exists from the moment `dial` sends the command until a teardown drops it, and for the
+/// first part of that there is no shell yet. That used to be `AppScreen::Connecting { status }`, a
+/// screen of its own; it is a *state* because the endpoint and the local-shell kind already exist
+/// while it holds — `dial` sets them on the line before it.
+#[derive(Debug)]
+pub enum SessionState {
+	/// The handshake is in flight, and possibly stopped to ask something.
+	Dialing {
+		/// The human-readable step the screen shows ("connecting to host:22…",
+		/// "authenticating…", "starting Git Bash…").
+		status: String,
+		/// What the far side is waiting on, if it has stopped to ask (§7, §8) — see [`Challenge`].
+		/// `None` while the handshake is simply proceeding.
+		///
+		/// HERE, and that is the whole of what §134 unblocked. These four questions used to move the
+		/// screen to `AppScreen::Connect`, which is why §133 could not put a session inside
+		/// `AppScreen` at all: the host-key dialog would have destroyed the session that was waiting
+		/// for the answer. Asked by the session, held by the session.
+		asking: Option<Challenge>,
+	},
+	/// A shell is open and its grid is on screen. The terminal is in `Session::work`.
+	Live,
+}
+
+/// One session on this tab (`CONTEXT.md`: **Session**, §134): what it is connected to, what the
+/// handshake is waiting on, and the accounts and views that belong to it.
+///
+/// Held by [`AppScreen::Session`], so a session exists exactly while that screen shows. That is the
+/// point of it: `connection: Option<String>`, `terminal: Option<term::Terminal>` and the *pair* of
+/// `AppScreen` variants were three values that had to agree about one fact, and both teardown arms
+/// had to put all three back by hand.
+///
+/// **What is deliberately NOT here, and why the line falls where it does.** §131's test — is the
+/// field destroyed and rebuilt at the transition? — says `panes`, `transfers`, `forwards`, `modal`,
+/// `focus`, `pointer`, `menu` and `pending_elevation` should move in too. They stayed, on a second
+/// test that only showed up when the first was tried (§133): **can the field be reached without also
+/// reaching `Tab`?**
+///
+/// Nineteen of `app/browse.rs`'s twenty-six methods touch a pane *and* something on the tab —
+/// `send_command`, `send_fetches`, `open_modal`, which need `command_tx`, `dialog_body` and `card`.
+/// Rust cannot split a borrow through a method, so all ~290 of those sites would become
+/// `self.panes_mut()?`, and buy nothing: a `Panes` on a tab with no session is an unused default, not
+/// a bug waiting to happen. Nothing tags it, so nothing can disagree with it.
+///
+/// That is the difference between the fields here and those. These a tag could contradict.
+#[derive(Debug)]
+pub struct Session {
+	/// Dialing, or live — see [`SessionState`].
+	state: SessionState,
+	/// The `user@host:port` of this session, shown in the terminal's status bar (§10). Holds no
+	/// secret, so it is safe in `Debug`. Was `Tab::connection`, whose `Some`-ness meant "there is a
+	/// session"; being here says that instead.
+	endpoint: String,
+	/// Which local shell this is, or `None` for an SSH session (§103).
+	///
+	/// It exists for the two features that are meaningless without a remote — the tunnels manager
+	/// (§27) and shell integration (§17) — whose buttons are not offered while it is `Some`. The
+	/// session task refuses both with their reason anyway, so this is about not asking rather than
+	/// about safety: a button that can only ever answer "not here" is a button that should not be
+	/// there.
+	///
+	/// It holds the KIND and not a `bool` because the kind is the thing worth knowing: it is what
+	/// `endpoint` was built from, and the next thing to want it (an icon on the tab chip, a per-shell
+	/// default directory) will want the kind rather than the fact.
+	local: Option<crate::local::shells::ShellKind>,
+	/// The on-screen identity's view of the machine (§45): its grid, its scrollback, its selection,
+	/// its find bar. The same [`Workspace`] the parked identities hold, which is what makes switching
+	/// accounts a swap — see `exchange`.
+	work: Workspace,
+	/// The accounts this session is currently a shell for (§45), in the order they were opened —
+	/// the one it authenticated as first, then each one elevated into. Empty until the shell opens.
+	///
+	/// Every entry but the one on screen carries its own parked `Workspace`: its grid, its
+	/// scrollback, its selection and its find bar. So switching accounts is not re-purposing one
+	/// terminal, it is putting a different one in front of the user — a build left running as `cme`
+	/// keeps filling `cme`'s scrollback while root's shell is on screen, and switching back finds it
+	/// where it was.
+	identities: Vec<Identity>,
+	/// Which of `identities` is on screen. Its workspace is `work` above.
+	identity: u64,
+	/// The number the next elevated identity gets (§45). Never reused within a session, so a late
+	/// event for a shell that has gone can never be mistaken for one about its replacement.
+	next_identity: u64,
+	/// A Ctrl+D sent to a local shell that may not act on it, and what has come back since (§104).
+	///
+	/// `Some` from the moment the byte goes out until the shell's answer has been weighed. The answer
+	/// is accumulated rather than judged chunk by chunk, because a nineteen-byte reply is free to
+	/// arrive as two reads and half an echo is not an echo.
+	eof_probe: Option<Vec<u8>>,
+	/// The shell cwd a reconnect is waiting to settle at (§22), or `None` when not resuming.
+	/// Set on connect when a remembered terminal path is replayed as a `cd`: until the shell
+	/// announces this exact directory, the files pane is pinned to its own remembered path so
+	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
+	/// reaches it, or when the user moves the shell themselves.
+	resume_cwd: Option<String>,
+	/// The last shell-focus state cmote told the remote, for focus reporting (§23). Only a
+	/// change from this reaches the wire, so a steady state is never re-sent and a program that
+	/// enables `?1004` hears nothing until focus actually moves. Starts `true` — the state a program
+	/// assumes on enabling the mode — which is also what "re-baselined at each session start" means
+	/// now, since a session start is one of these being built.
+	shell_focus_reported: bool,
+}
+
+impl Session {
+	/// A session that has just been dialed (§134): the endpoint is known, the status line says what
+	/// is happening, nothing is being asked yet and there is no shell. `dial` and `dial_local` build
+	/// one and nothing else does — the same rule as "only the dial sets `connection`", stated by the
+	/// type instead of by two call sites.
+	fn dialing(
+		endpoint: String,
+		local: Option<crate::local::shells::ShellKind>,
+		status: String,
+	) -> Self {
+		Self {
+			state: SessionState::Dialing {
+				status,
+				asking: None,
+			},
+			endpoint,
+			local,
+			work: Workspace::default(),
+			identities: Vec::new(),
+			identity: 0,
+			next_identity: 0,
+			eof_probe: None,
+			resume_cwd: None,
+			// The state a program assumes on enabling `?1004` (§23).
+			shell_focus_reported: true,
+		}
+	}
+
+	/// Whether a shell is open and its grid on screen. What `matches!(screen, AppScreen::Terminal)`
+	/// and `self.terminal.is_some()` were both asking, with nothing keeping the two answers in step.
+	fn is_live(&self) -> bool {
+		matches!(self.state, SessionState::Live)
+	}
+
+	/// What the handshake is waiting on, if it has stopped to ask (§7, §8). `None` once live — a
+	/// session with a shell open is past being asked anything.
+	fn asking(&self) -> Option<&Challenge> {
+		match &self.state {
+			SessionState::Dialing { asking, .. } => asking.as_ref(),
+			SessionState::Live => None,
+		}
+	}
+
+	/// Ask the user something on the handshake's behalf (§7, §8). A no-op once live, which cannot
+	/// happen: every caller is an `on_ssh_event` arm that only fires before `Connected`.
+	fn ask(&mut self, challenge: Challenge) {
+		if let SessionState::Dialing { asking, .. } = &mut self.state {
+			*asking = Some(challenge);
+		}
+	}
+
+	/// Take back whatever was being asked (§7, §12), so the typed text moves out with it rather than
+	/// being left in a buffer.
+	fn take_asked(&mut self) -> Option<Challenge> {
+		match &mut self.state {
+			SessionState::Dialing { asking, .. } => asking.take(),
+			SessionState::Live => None,
+		}
+	}
+
+	/// The handshake moved on: say what it is doing now and stop asking (§7, §8). One method because
+	/// it is one fact — three answer paths reach it, and one that forgot to clear the question would
+	/// leave the dialog over a handshake that had already gone past it.
+	fn proceeding(&mut self, step: &str) {
+		self.state = SessionState::Dialing {
+			status: step.to_owned(),
+			asking: None,
+		};
+	}
 }
 
 /// What a VIEWER tab is showing (§32, §53): a text buffer, or a picture.
@@ -2673,10 +2902,11 @@ enum KeyboardClaim {
 /// tab is one of these, fully independent: a tab can sit at the home list while another runs a
 /// shell. Everything here is per-tab EXCEPT the two `Rc<RefCell<…>>` fields, which are shared
 /// clones of the single app-wide target list and secret vault (see `App`).
-#[expect(
-	clippy::struct_excessive_bools,
-	reason = "eight unrelated facts about six subsystems, not one state in disguise — see §111"
-)]
+// `struct_excessive_bools` used to be `#[expect]`ed here, for "eight unrelated facts about six
+// subsystems, not one state in disguise". Three of the eight are left — `pending_connect`,
+// `passphrase_failed`, `window_focused` — because the rest went into the screens that own them
+// (§131, §132, §134). The lint stopped firing, `-D warnings` said so, and the expectation is gone
+// rather than left to rot (§111).
 #[derive(Debug, Default)]
 pub struct Tab {
 	/// This tab's stable identity, handed out by `App` and never reused (§26). It keys the
@@ -2722,90 +2952,15 @@ pub struct Tab {
 	/// tried, and got "SSH worker is not ready yet" for its trouble. The pre-filled form is what
 	/// shows in the meantime, which is also the honest fallback if a worker never arrives.
 	pending_connect: bool,
-	/// The terminal emulator, alive only while a shell is open. `Some` from
-	/// `Connected` until `Disconnected`; output bytes are fed into it and the
-	/// Terminal screen renders its grid.
-	terminal: Option<term::Terminal>,
 	/// Whether a passphrase has already been submitted this connection. The SSH task
 	/// re-emits `NeedPassphrase` for both the first ask and a wrong-passphrase re-ask,
 	/// so this flag is how the passphrase prompt knows to show its "incorrect" hint:
 	/// if it is set when the prompt appears, the previous attempt was rejected (§7).
 	/// Reset at the start of each connection attempt.
 	///
-	/// It is HERE rather than in `Prompt::Passphrase` because it outlives the prompt: the flag is
+	/// It is HERE rather than in `Challenge::Passphrase` because it outlives the prompt: the flag is
 	/// set as the answer goes down the wire, and read when the re-ask builds the next prompt.
 	passphrase_failed: bool,
-	/// The `user@host:port` of the current session, shown in the terminal's status
-	/// bar (§10). Set when a connection is dialed and cleared when it ends. Holds no
-	/// secret, so it is safe in `Debug`.
-	connection: Option<String>,
-	/// Which local shell this tab is running, or `None` for an SSH session (§103).
-	///
-	/// Set beside `connection` when a Local bar button is pressed and cleared with it. It exists for
-	/// the two features that are meaningless without a remote — the tunnels manager (§27) and shell
-	/// integration (§17) — whose buttons are not offered while it is `Some`. The session task refuses
-	/// both with their reason anyway, so this is about not asking rather than about safety: a button
-	/// that can only ever answer "not here" is a button that should not be there.
-	///
-	/// It holds the KIND and not a `bool` because the kind is the thing worth knowing: it is what
-	/// `connection` was built from, and the next thing to want it (an icon on the tab chip, a per-shell
-	/// default directory) will want the kind rather than the fact.
-	local: Option<crate::local::shells::ShellKind>,
-	/// A Ctrl+D sent to a local shell that may not act on it, and what has come back since (§104).
-	///
-	/// `Some` from the moment the byte goes out until the shell's answer has been weighed. The answer is
-	/// accumulated rather than judged chunk by chunk, because a nineteen-byte reply is free to arrive as
-	/// two reads and half an echo is not an echo.
-	eof_probe: Option<Vec<u8>>,
-	/// The active text selection over the terminal grid, if any (§10). Drives both
-	/// the on-screen highlight and what Copy puts on the clipboard; `None` when
-	/// nothing is selected.
-	selection: Option<ui::selection::Selection>,
-	/// True while the left mouse button is held on the grid — a drag in progress.
-	/// `on_move` fires on any hover, so this flag is how a drag is told from a plain
-	/// move (only a drag extends the selection).
-	selecting: bool,
-	/// The grid cell currently under the pointer (§10). Updated on every pointer
-	/// move so a press can anchor the selection here.
-	hover_cell: ui::selection::ScreenSpot,
-	/// The multi-click tally over the grid (§42): how many presses in a row landed on one cell, so a
-	/// press knows whether it is a plain click, a word (double) or a line (triple). `mouse_area`
-	/// reports presses one at a time and counts nothing itself.
-	clicks: ui::selection::Clicks<ui::selection::ScreenSpot>,
-	/// The scrollback find bar's state while it is open, `None` when closed (§35). Holds the query
-	/// and the match list; the current match is shown as an ordinary `selection`, so the highlight
-	/// and Copy paths need no notion of searching at all. While it is `Some` the bar owns the
-	/// keyboard, so nothing typed into it also reaches the remote.
-	search: Option<term::search::Search>,
-	/// Output has landed since the find bar's match list was built, so the list describes a document
-	/// that no longer exists (§44). Two things go wrong at once: the fresh output can hold hits the
-	/// bar has never seen, and — once the scrollback is at its cap (§23) — every line that scrolls
-	/// off renumbers the ones above it, so a stored match's absolute line (§40) points one line
-	/// further from its text with each one.
-	///
-	/// It is a FLAG rather than a re-scan on the spot because a scan walks every retained line
-	/// (`Terminal::find`), and a flood of output arrives as dozens of chunks per frame: scanning per
-	/// chunk would spend the frame searching instead of drawing. Set by the output path, read one
-	/// window frame later, and cleared by whatever rebuilds the list — which is also what stops the
-	/// frame clock, exactly as the toast's dwell does (§10).
-	search_stale: bool,
-	/// The accounts this session is currently a shell for (§45), in the order they were opened —
-	/// the one it authenticated as first, then each one elevated into. Empty until the shell opens.
-	///
-	/// Every entry but the one on screen carries its own parked `Workspace`: its grid, its
-	/// scrollback, its selection and its find bar. So switching accounts is not re-purposing one
-	/// terminal, it is putting a different one in front of the user — a build left running as `cme`
-	/// keeps filling `cme`'s scrollback while root's shell is on screen, and switching back finds it
-	/// where it was.
-	identities: Vec<Identity>,
-	/// Which of `identities` is on screen. Its workspace is the LIVE one — the `terminal`,
-	/// `selection`, `search` fields above — which is why those fields stay where they are and only
-	/// the ones off screen are parked; nothing in the thousands of lines that touch `self.terminal`
-	/// has to learn about identities.
-	identity: u64,
-	/// The number the next elevated identity gets (§45). Never reused within a session, so a late
-	/// event for a shell that has gone can never be mistaken for one about its replacement.
-	next_identity: u64,
 	/// The last pointer position, local to the grid, used to place the right-click
 	/// context menu — a right-press carries no coordinates of its own (§10).
 	pointer: iced::Point,
@@ -2870,11 +3025,6 @@ pub struct Tab {
 	/// means for focus reporting — the other half is `focus == Focus::Terminal`. Started `true`
 	/// by `new` (a window opens focused); the first `Unfocused` event corrects it if not.
 	window_focused: bool,
-	/// The last shell-focus state cmote told the remote, for focus reporting (§23). Only a
-	/// change from this reaches the wire, so a steady state is never re-sent and a program that
-	/// enables `?1004` hears nothing until focus actually moves. Started `true` — the state a
-	/// program assumes on enabling the mode — and re-baselined to `true` at each session start.
-	shell_focus_reported: bool,
 	/// Which modifier keys are down right now (§21). Tracked from the keyboard
 	/// subscription because a mouse press reports none of its own, and Ctrl+click,
 	/// Shift+click and Ctrl+drag all need to know.
@@ -2890,12 +3040,6 @@ pub struct Tab {
 	/// the user asked for a copy of THIS shell, standing where it is standing now, not for another
 	/// visit to wherever this target was left last time.
 	carry_cwd: Option<Carry>,
-	/// The shell cwd a reconnect is waiting to settle at (§22), or `None` when not resuming.
-	/// Set on connect when a remembered terminal path is replayed as a `cd`: until the shell
-	/// announces this exact directory, the files pane is pinned to its own remembered path so
-	/// the login-then-`cd` announcements do not drag it off. Cleared the moment the shell
-	/// reaches it, or when the user moves the shell themselves.
-	resume_cwd: Option<String>,
 	/// The unlocked secret vault (§16, §26), or `None` until the user unlocks it. A shared clone
 	/// of the ONE app-wide vault: unlocking it in any tab unlocks it for all, so a return visit in
 	/// another tab needs no re-prompt. Held so repeated stores/reads need no re-prompt; dropped
@@ -3633,7 +3777,6 @@ impl Tab {
 			// A window opens focused, and a program that enables focus reporting assumes the
 			// same (§23); both are corrected by the first real change if the platform disagrees.
 			window_focused: true,
-			shell_focus_reported: true,
 			..Self::default()
 		}
 	}
@@ -3657,7 +3800,6 @@ impl Tab {
 			))),
 			window_size,
 			window_focused: true,
-			shell_focus_reported: true,
 			..Self::default()
 		}
 	}
@@ -3674,7 +3816,6 @@ impl Tab {
 			))),
 			window_size,
 			window_focused: true,
-			shell_focus_reported: true,
 			..Self::default()
 		}
 	}
@@ -3733,6 +3874,247 @@ impl Tab {
 		match &mut self.screen {
 			AppScreen::Home(home) => Some(home),
 			_ => None,
+		}
+	}
+
+	/// This tab's session, if it has one (§134) — dialing or live. `None` on the home list, the bare
+	/// connect form and a viewer tab, which is the whole of what `connection.is_some()` used to mean.
+	pub(super) fn session(&self) -> Option<&Session> {
+		match &self.screen {
+			AppScreen::Session(session) => Some(session),
+			_ => None,
+		}
+	}
+
+	/// The session, mutably — the twin of [`Tab::session`].
+	pub(super) fn session_mut(&mut self) -> Option<&mut Session> {
+		match &mut self.screen {
+			AppScreen::Session(session) => Some(session),
+			_ => None,
+		}
+	}
+
+	/// The on-screen identity's view of the machine (§45), if there is a session.
+	pub(super) fn work(&self) -> Option<&Workspace> {
+		Some(&self.session()?.work)
+	}
+
+	/// That view, mutably — the twin of [`Tab::work`].
+	pub(super) fn work_mut(&mut self) -> Option<&mut Workspace> {
+		Some(&mut self.session_mut()?.work)
+	}
+
+	/// The terminal emulator, alive only while a shell is open (§9, §23).
+	///
+	/// Two `Option`s flattened to one, as [`Tab::prompt`] does: "no terminal because this tab has no
+	/// session" and "no terminal because the session is still dialing" are the same answer to every
+	/// caller. The few that must tell them apart ask the session.
+	pub(super) fn terminal(&self) -> Option<&term::Terminal> {
+		self.work()?.terminal.as_ref()
+	}
+
+	/// The terminal, mutably — the twin of [`Tab::terminal`].
+	pub(super) fn terminal_mut(&mut self) -> Option<&mut term::Terminal> {
+		self.work_mut()?.terminal.as_mut()
+	}
+
+	// The live view's four scalars, as get/set pairs. This is where §134's cost landed, and it is
+	// worth saying where the line is: an accessor pair per field is exactly the noise that kept
+	// `panes` OUT of `Session` (see that type's doc). It is accepted here because these are `Copy`
+	// scalars rather than a module with an API of its own, there are ~40 sites rather than ~290, and
+	// the grid path interleaves them with `send_command` and `set_focus` statement by statement — so
+	// the alternative is not a plain rename but an `if let Some(work)` around every second line.
+
+	/// The active text selection over the grid, if any (§10).
+	pub(super) fn selection(&self) -> Option<ui::selection::Selection> {
+		self.work()?.selection
+	}
+
+	/// Set (or clear) the selection.
+	pub(super) fn set_selection(&mut self, selection: Option<ui::selection::Selection>) {
+		if let Some(work) = self.work_mut() {
+			work.selection = selection;
+		}
+	}
+
+	/// Whether a drag is in progress over the grid (§10).
+	pub(super) fn selecting(&self) -> bool {
+		self.work().is_some_and(|work| work.selecting)
+	}
+
+	/// Say whether a drag is in progress.
+	pub(super) fn set_selecting(&mut self, dragging: bool) {
+		if let Some(work) = self.work_mut() {
+			work.selecting = dragging;
+		}
+	}
+
+	/// The grid cell under the pointer (§10). The origin without a session, which no caller reaches:
+	/// there is no grid to be over.
+	pub(super) fn hover_cell(&self) -> ui::selection::ScreenSpot {
+		self.work()
+			.map_or_else(ui::selection::ScreenSpot::default, |work| work.hover_cell)
+	}
+
+	/// The scrollback find bar's state while it is open (§35).
+	pub(super) fn search(&self) -> Option<&term::search::Search> {
+		self.work()?.search.as_ref()
+	}
+
+	/// The find bar, mutably.
+	pub(super) fn search_mut(&mut self) -> Option<&mut term::search::Search> {
+		self.work_mut()?.search.as_mut()
+	}
+
+	/// Close the find bar (§35). The current match stays selected, so it can still be copied.
+	pub(super) fn close_find(&mut self) {
+		if let Some(work) = self.work_mut() {
+			work.search = None;
+		}
+	}
+
+	/// Open the find bar on a fresh search, or replace the one that is open (§35).
+	pub(super) fn set_search(&mut self, search: Option<term::search::Search>) {
+		if let Some(work) = self.work_mut() {
+			work.search = search;
+		}
+	}
+
+	/// Whether output has landed since the find bar's match list was built (§44).
+	pub(super) fn search_stale(&self) -> bool {
+		self.work().is_some_and(|work| work.search_stale)
+	}
+
+	/// Say whether the match list now describes an older document (§44).
+	pub(super) fn set_search_stale(&mut self, stale: bool) {
+		if let Some(work) = self.work_mut() {
+			work.search_stale = stale;
+		}
+	}
+
+	// Arrangement setters for the tests, `#[cfg(test)]` because production never wants them: a
+	// session's endpoint and shell kind are fixed when `dial` builds it, and the live view's own
+	// fields are written through the paths above. They exist so a test can say what it is arranging
+	// in one line, the way it did when these were `Tab` fields.
+
+	/// Point this tab's session at another endpoint (§10).
+	#[cfg(test)]
+	pub(super) fn set_endpoint(&mut self, endpoint: String) {
+		if let Some(session) = self.session_mut() {
+			session.endpoint = endpoint;
+		}
+	}
+
+	/// Make this tab's session a local one, or a remote one (§103).
+	#[cfg(test)]
+	pub(super) fn set_local(&mut self, local: Option<crate::local::shells::ShellKind>) {
+		if let Some(session) = self.session_mut() {
+			session.local = local;
+		}
+	}
+
+	/// Put the pointer over a grid cell (§10).
+	#[cfg(test)]
+	pub(super) fn set_hover_cell(&mut self, cell: ui::selection::ScreenSpot) {
+		if let Some(work) = self.work_mut() {
+			work.hover_cell = cell;
+		}
+	}
+
+	/// The identity list, mutably, for the tests that arrange one.
+	#[cfg(test)]
+	pub(super) fn identities_mut(&mut self) -> Option<&mut Vec<Identity>> {
+		Some(&mut self.session_mut()?.identities)
+	}
+
+	/// Say which identity is on screen, and what the next one gets (§45).
+	#[cfg(test)]
+	pub(super) fn set_identity(&mut self, on_screen: u64, next: u64) {
+		if let Some(session) = self.session_mut() {
+			session.identity = on_screen;
+			session.next_identity = next;
+		}
+	}
+
+	/// The multi-click tally over the grid, mutably (§42) — a press both reads and updates it.
+	pub(super) fn clicks_mut(
+		&mut self,
+	) -> Option<&mut ui::selection::Clicks<ui::selection::ScreenSpot>> {
+		Some(&mut self.work_mut()?.clicks)
+	}
+
+	/// The endpoint of this tab's session (§10), or `None` when it has none. What `Tab::connection`
+	/// was, with its `Option` now saying only one thing.
+	pub(super) fn connection(&self) -> Option<&str> {
+		Some(self.session()?.endpoint.as_str())
+	}
+
+	/// Which local shell this tab is running (§103) — `None` for SSH, and `None` for no session.
+	pub(super) fn local(&self) -> Option<crate::local::shells::ShellKind> {
+		self.session()?.local
+	}
+
+	/// The accounts this session has a shell for (§45), or nothing at all without a session — which
+	/// reads the same to every caller, since a tab with no session has no accounts either.
+	pub(super) fn identities(&self) -> &[Identity] {
+		self.session().map_or(&[], |session| &session.identities)
+	}
+
+	/// Which identity is on screen (§45). `bridge::LOGIN_IDENTITY` without a session, which no caller
+	/// reaches — they are all on the terminal screen, comparing against a list that would be empty.
+	pub(super) fn identity(&self) -> u64 {
+		self.session()
+			.map_or(bridge::LOGIN_IDENTITY, |session| session.identity)
+	}
+
+	/// The number the next elevated identity gets (§45).
+	pub(super) fn next_identity(&self) -> u64 {
+		self.session().map_or(0, |session| session.next_identity)
+	}
+
+	/// The cwd a reconnect is still waiting to settle at (§22), if it is.
+	pub(super) fn resume_cwd(&self) -> Option<&str> {
+		self.session()?.resume_cwd.as_deref()
+	}
+
+	/// What the handshake is waiting on, if this tab's session has stopped to ask (§7, §8) — the
+	/// twin of [`Tab::prompt`] for the other four questions.
+	///
+	/// `#[cfg(test)]`, for the same reason `home_screen` is (§131): the only production reader is
+	/// `view`, and it is already matching on the screen, so it binds the challenge out of the
+	/// pattern it was writing anyway.
+	#[cfg(test)]
+	pub(super) fn asking(&self) -> Option<&Challenge> {
+		self.session()?.asking()
+	}
+
+	/// What the handshake is waiting on, mutably — how a challenge's own field edits reach its
+	/// buffers, the way [`Tab::prompt_mut`] does for the form's two questions.
+	pub(super) fn asking_mut(&mut self) -> Option<&mut Challenge> {
+		match &mut self.session_mut()?.state {
+			SessionState::Dialing { asking, .. } => asking.as_mut(),
+			SessionState::Live => None,
+		}
+	}
+
+	/// Take back the challenge, leaving the handshake asking nothing (§7, §12) — the answer paths use
+	/// this so the typed text moves straight into a `Secret`.
+	pub(super) fn take_asked(&mut self) -> Option<Challenge> {
+		self.session_mut()?.take_asked()
+	}
+
+	/// Put a handshake question up (§7, §8): seed the selectable body and hand the challenge to the
+	/// session that is waiting on it.
+	///
+	/// The twin of [`Tab::open_prompt`], and the difference between the two is the whole of §134.
+	/// `open_prompt` moves the SCREEN, because the form's two questions belong to the connect screen
+	/// and reaching either of them means no session is running. This one moves nothing: the session
+	/// asking is already the screen, so a host-key dialog cannot throw away the handshake it is
+	/// asking about.
+	fn ask_challenge(&mut self, challenge: Challenge, body: &str) {
+		self.set_dialog_body(body);
+		if let Some(session) = self.session_mut() {
+			session.ask(challenge);
 		}
 	}
 
@@ -3816,11 +4198,8 @@ impl Tab {
 	/// user with several open can tell them apart.
 	fn strip_label(&self) -> String {
 		match &self.screen {
-			AppScreen::Terminal | AppScreen::Connecting { .. } => {
-				let endpoint = self
-					.connection
-					.clone()
-					.unwrap_or_else(|| "session".to_owned());
+			AppScreen::Session(session) => {
+				let endpoint = session.endpoint.clone();
 				// The icon name the remote set for this tab, if it set one (OSC 1, §69) — `vim`, a
 				// build, a tmux window. It is what tells two shells on the SAME host apart, which
 				// the endpoint alone cannot do.
@@ -3831,7 +4210,7 @@ impl Tab {
 				// could rename its own chip could dress a staging box as production. Already
 				// stripped of control characters and capped by `term::icon`, so this line draws it
 				// and does not police it.
-				match self.terminal.as_ref().and_then(term::Terminal::icon_name) {
+				match self.terminal().and_then(term::Terminal::icon_name) {
 					Some(icon) => format!("{endpoint} — {icon}"),
 					None => endpoint,
 				}
@@ -3855,7 +4234,7 @@ impl Tab {
 	/// failed. `None` when the tab runs no shell, or when the shell has announced no integration
 	/// (no command has finished and none is running) — so the chip shows no dot at all.
 	fn prompt_status(&self) -> Option<ui::tabs::TabStatus> {
-		let terminal = self.terminal.as_ref()?;
+		let terminal = self.terminal()?;
 		match terminal.command_state() {
 			term::osc133::CommandState::Running => Some(ui::tabs::TabStatus::Running),
 			// At a prompt or idle: the last command's exit code is what the dot reports, if one has
@@ -3879,7 +4258,7 @@ impl Tab {
 		if let Some(progress) = self.load_progress() {
 			return progress.as_progress();
 		}
-		match self.terminal.as_ref() {
+		match self.terminal() {
 			Some(terminal) => terminal.progress(),
 			None => term::progress::Progress::None,
 		}
@@ -3914,13 +4293,13 @@ impl Tab {
 	/// with no terminal, and on every shell that does not set iTerm2's `gitBranch` user variable —
 	/// which is most of them, so most chips carry no pill.
 	fn branch(&self) -> Option<String> {
-		self.terminal.as_ref()?.branch().map(str::to_owned)
+		self.terminal()?.branch().map(str::to_owned)
 	}
 
 	/// Whether this tab holds a live shell (§26). Closing one is confirmed like a Disconnect;
 	/// closing a tab still at the home list or the connect form just drops it.
 	fn is_live(&self) -> bool {
-		matches!(self.screen, AppScreen::Terminal)
+		self.session().is_some_and(Session::is_live)
 	}
 
 	/// Whether this tab is an editor with unsaved edits (§32). Its "×" is confirmed like a live
@@ -4295,7 +4674,7 @@ impl Tab {
 			// with the prompt closed there is no buffer to type into, which is the point of the
 			// buffers living inside it.
 			Message::PassphraseChanged(value) => {
-				if let Some(Prompt::Passphrase(input)) = self.prompt_mut() {
+				if let Some(Challenge::Passphrase(input)) = self.asking_mut() {
 					*input = value;
 				}
 			}
@@ -4306,7 +4685,7 @@ impl Tab {
 				return self.on_credential_cancelled();
 			}
 			Message::InteractiveAnswerChanged(index, value) => {
-				if let Some(Prompt::Interactive { answers, .. }) = self.prompt_mut()
+				if let Some(Challenge::Interactive { answers, .. }) = self.asking_mut()
 					&& let Some(slot) = answers.get_mut(index)
 				{
 					*slot = value;
@@ -4340,7 +4719,7 @@ impl Tab {
 			// OS file drops (§29): a drag over the window lights the pane as the drop target, and a
 			// drop uploads the file into it. Only a live session can be a target, so a hover with no
 			// shell open lights nothing.
-			Message::FileHovered => self.transfers.hover(self.terminal.is_some()),
+			Message::FileHovered => self.transfers.hover(self.terminal().is_some()),
 			Message::FileDropLeft => self.transfers.hover(false),
 			// One event per PATH, so nothing is decided here: the paths gather and the next frame
 			// reads the whole drop at once (§29).
@@ -4349,7 +4728,7 @@ impl Tab {
 				// The pane's directory is where a drop lands (§29); taken as an owned string so the
 				// queue can be borrowed mutably to settle into it.
 				let dir = self.panes.pane.path().map(str::to_owned);
-				let effects = self.transfers.settle(self.terminal.is_some(), dir.as_deref());
+				let effects = self.transfers.settle(self.terminal().is_some(), dir.as_deref());
 				return self.apply(effects);
 			}
 			Message::DisconnectPressed => self.on_disconnect_pressed(),
@@ -4371,7 +4750,11 @@ impl Tab {
 				return self.on_copy_rich();
 			}
 			Message::TermFindOpen => return self.open_term_find(),
-			Message::TermFindClose => self.search = None,
+			Message::TermFindClose => {
+				if let Some(work) = self.work_mut() {
+					work.search = None;
+				}
+			}
 			Message::TermFindQuery(query) => self.term_find_query(query),
 			Message::TermFindStep(newer) => self.term_find_step(newer),
 			// A frame tick with output waiting under the bar (§44). Re-scanning clears the flag, which
@@ -4420,8 +4803,7 @@ impl Tab {
 				// Started from the status bar, which names no folder: the shell's own cwd is the
 				// destination, and the confirmation lets it be corrected before anything is sent.
 				let dir = self
-					.terminal
-					.as_ref()
+					.terminal()
 					.and_then(term::Terminal::cwd)
 					.unwrap_or_default()
 					.to_owned();
@@ -4433,8 +4815,7 @@ impl Tab {
 				// The grid's right-click "Upload…": pick files for the shell's own directory.
 				self.on_terminal_command();
 				let dir = self
-					.terminal
-					.as_ref()
+					.terminal()
 					.and_then(term::Terminal::cwd)
 					.unwrap_or_default()
 					.to_owned();
@@ -4687,12 +5068,9 @@ impl Tab {
 	/// `App::release_held_updates` gives: a background shell can be mid-frame too, and no clock
 	/// means its frame is held until the next byte arrives to push it out.
 	fn holds_update(&self) -> bool {
-		let visible = self
-			.terminal
-			.as_ref()
-			.and_then(term::Terminal::held_update_expiry);
+		let visible = self.terminal().and_then(term::Terminal::held_update_expiry);
 		visible.is_some()
-			|| self.identities.iter().any(|entry| {
+			|| self.identities().iter().any(|entry| {
 				entry
 					.work
 					.terminal
@@ -4711,8 +5089,7 @@ impl Tab {
 	/// helped by an answer sent to the account that happens to be on screen.
 	fn release_held_updates(&mut self) -> iced::Task<Message> {
 		if let Some(replies) = self
-			.terminal
-			.as_mut()
+			.terminal_mut()
 			.and_then(term::Terminal::release_held_update)
 			&& !replies.is_empty()
 		{
@@ -4721,7 +5098,9 @@ impl Tab {
 		// Collected before any is sent: `send_command` needs `self` whole, and the walk above it
 		// holds `self.identities` mutably.
 		let parked: Vec<(u64, Vec<u8>)> = self
-			.identities
+			.session_mut()
+			.map(|session| session.identities.as_mut_slice())
+			.unwrap_or_default()
 			.iter_mut()
 			.filter_map(|entry| {
 				let replies = entry.work.terminal.as_mut()?.release_held_update()?;
@@ -4777,7 +5156,7 @@ impl Tab {
 	/// It reads `connection` and so must run BEFORE the teardown clears it — the endpoint is what
 	/// stops the offer being made to the next machine this tab visits.
 	fn abandon_transfers(&mut self) {
-		let Some(endpoint) = self.connection.clone() else {
+		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
 		};
 		// Only ever overwritten by a real one: a session that ended with nothing moving must not
@@ -4797,7 +5176,7 @@ impl Tab {
 		let Some(unfinished) = self.unfinished.take() else {
 			return;
 		};
-		let endpoint = self.connection.clone().unwrap_or_default();
+		let endpoint = self.connection().map(str::to_owned).unwrap_or_default();
 		self.transfers.adopt(unfinished, &endpoint);
 	}
 
@@ -4873,9 +5252,11 @@ impl Tab {
 					return self.on_connect_pressed();
 				}
 			}
+			// The far side is working on it. A status line, not a screen change (§134): the session
+			// is already the screen, and it is already dialing.
 			SshEvent::Connecting => {
-				self.screen = AppScreen::Connecting {
-					status: "connecting…".to_string(),
+				if let Some(session) = self.session_mut() {
+					session.proceeding("connecting…");
 				}
 			}
 			SshEvent::HostKey(fingerprint) => {
@@ -4883,7 +5264,7 @@ impl Tab {
 				// its own line, so the whole message — the fingerprint included — can be
 				// selected and copied for out-of-band comparison (§8, §10).
 				let body = format!("{}\n\n{fingerprint}", ui::HOST_KEY_DIALOG_BODY);
-				self.open_prompt(Prompt::HostKey, &body);
+				self.ask_challenge(Challenge::HostKey, &body);
 			}
 			SshEvent::HostKeyChanged { stored, presented } => {
 				// Seed the selectable body with the warning plus BOTH fingerprints, each labelled
@@ -4893,13 +5274,13 @@ impl Tab {
 					"{}\n\nStored (trusted before):\n{stored}\n\nPresented (sent now):\n{presented}",
 					ui::HOST_KEY_CHANGED_DIALOG_BODY
 				);
-				self.open_prompt(Prompt::HostKeyChanged, &body);
+				self.ask_challenge(Challenge::HostKeyChanged, &body);
 			}
 			SshEvent::NeedPassphrase => {
 				// A fresh, empty buffer each time we ask — including a re-ask after a wrong
 				// passphrase — so a stale attempt is never resent (§7, §12).
-				self.open_prompt(
-					Prompt::Passphrase(String::new()),
+				self.ask_challenge(
+					Challenge::Passphrase(String::new()),
 					ui::PASSPHRASE_DIALOG_BODY,
 				);
 				// Focus the field so the user can type at once — the re-ask path
@@ -4924,8 +5305,8 @@ impl Tab {
 				// Start every field blank, one per prompt, and show the dialog. The server only
 				// sends a request with at least one prompt here (an empty, message-only request
 				// is answered by the SSH task itself), so focusing the first field is always apt.
-				self.open_prompt(
-					Prompt::Interactive {
+				self.ask_challenge(
+					Challenge::Interactive {
 						answers: vec![String::new(); prompts.len()],
 						fields: prompts,
 					},
@@ -4956,25 +5337,32 @@ impl Tab {
 				// A shell is open: spin up an emulator at the pty size we asked for,
 				// show the terminal, then immediately refit it to the real window
 				// rather than waiting for the first resize event.
-				self.terminal = Some(new_emulator());
 				self.clear_grid_interaction();
 				// After the clear, never before: `clear_grid_interaction` empties the queue this
 				// puts the resume offer back into (§16).
 				self.adopt_unfinished();
-				self.screen = AppScreen::Terminal;
-				// This shell is the session's first identity (§45): the account it authenticated as.
-				// It is the one that can never be elevated away or closed, and the one every other
-				// identity falls back to.
-				self.identities = vec![Identity {
-					id: bridge::LOGIN_IDENTITY,
-					// The login account's name is the endpoint's own `user@`, so it is not stored
-					// again here (§47).
-					account: None,
-					ready: true,
-					work: Workspace::default(),
-				}];
-				self.identity = bridge::LOGIN_IDENTITY;
-				self.next_identity = 1;
+				// The session goes LIVE, in one borrow (§134): an emulator at the pty size we asked
+				// for, and this shell listed as the session's first identity (§45) — the account it
+				// authenticated as, the one that can never be elevated away or closed, and the one
+				// every other identity falls back to.
+				//
+				// One statement where there were six, and it is no longer possible for five of them
+				// to have run and the sixth not: `screen = Terminal` with no `terminal`, or a
+				// terminal with an empty identity list, were both writable before.
+				if let Some(session) = self.session_mut() {
+					session.state = SessionState::Live;
+					session.work.terminal = Some(new_emulator());
+					session.identities = vec![Identity {
+						id: bridge::LOGIN_IDENTITY,
+						// The login account's name is the endpoint's own `user@`, so it is not
+						// stored again here (§47).
+						account: None,
+						ready: true,
+						work: Workspace::default(),
+					}];
+					session.identity = bridge::LOGIN_IDENTITY;
+					session.next_identity = 1;
+				}
 				// And, if this target remembers one, the elevation it remembers (§47). Here because
 				// this is the first moment a program can be run on the connection at all.
 				self.elevate_on_connect();
@@ -4988,7 +5376,7 @@ impl Tab {
 				// way; kept only when THIS is the connection it was made for, since the form it
 				// rode in on could have been pointed at another machine in between.
 				if let Some(carried) = self.carry_cwd.take()
-					&& self.connection.as_deref() == Some(carried.endpoint.as_str())
+					&& self.connection() == Some(carried.endpoint.as_str())
 				{
 					resume_terminal = Some(carried.cwd);
 				}
@@ -5012,7 +5400,9 @@ impl Tab {
 				if let Some(cwd) = resume_terminal {
 					let line = format!("cd {}\r", explorer::shell_quote(&cwd));
 					self.send_command(SshCommand::Input(line.into_bytes()));
-					self.resume_cwd = Some(cwd);
+					if let Some(session) = self.session_mut() {
+						session.resume_cwd = Some(cwd);
+					}
 				}
 
 				// Re-establish the forwards this target saved (§27), now the connection is up.
@@ -5028,13 +5418,15 @@ impl Tab {
 			// sent is still answered, because the program that sent it is blocked reading its stdin
 			// until it is (§23) — and answered to THAT shell by name, not down the typing path,
 			// which goes to whichever identity is selected.
-			SshEvent::Output { identity, bytes } if identity != self.identity => {
+			SshEvent::Output { identity, bytes } if identity != self.identity() => {
 				// An emulator is made here if that account has none yet, rather than the bytes being
 				// dropped: an elevation's last words — the greeting and the first prompt, flushed as the
 				// program hands the channel to the shell — can arrive before `IdentityReady` has been
 				// acted on, and dropping them left a freshly elevated terminal blank (§45).
 				let replies = self
-					.identities
+					.session_mut()
+					.map(|session| session.identities.as_mut_slice())
+					.unwrap_or_default()
 					.iter_mut()
 					.find(|entry| entry.id == identity)
 					.map(|entry| {
@@ -5067,7 +5459,7 @@ impl Tab {
 				// channel, the same path a keystroke takes. The same bytes may carry a cwd
 				// announcement, so read the (possibly new) directory out before the borrow
 				// ends and let the tree follow it (§18).
-				let (cwd, replies) = match self.terminal.as_mut() {
+				let (cwd, replies) = match self.terminal_mut() {
 					Some(terminal) => {
 						let replies = terminal.process(&bytes);
 						(terminal.cwd().map(str::to_owned), replies)
@@ -5082,12 +5474,13 @@ impl Tab {
 				// retained line and this arm runs once per chunk of output, so a frame tick collapses a
 				// burst of them into one. An empty query has no list to invalidate, and a closed bar has
 				// no list at all — neither starts the clock.
-				if self
-					.search
-					.as_ref()
-					.is_some_and(|search| !search.query.is_empty())
+				if let Some(work) = self.work_mut()
+					&& work
+						.search
+						.as_ref()
+						.is_some_and(|search| !search.query.is_empty())
 				{
-					self.search_stale = true;
+					work.search_stale = true;
 				}
 				// That chunk may have turned focus reporting on or off (§23); reconcile the
 				// remote to the shell's true focus, so a program enabling `?1004` while a side
@@ -5109,11 +5502,13 @@ impl Tab {
 					// every folder along both — to end up somewhere the pane had deliberately not
 					// gone. A session is meant to open with the two panes agreeing, and one of
 					// them was leaving before the user ever saw it there.
-					match self.resume_cwd.as_deref() {
-						Some(target) if target == cwd.as_str() => {
+					match self.resume_cwd().map(str::to_owned) {
+						Some(target) if target == cwd => {
 							self.panes.tree.set_revealed(&cwd);
 							self.panes.pane.set_followed(&cwd);
-							self.resume_cwd = None;
+							if let Some(session) = self.session_mut() {
+								session.resume_cwd = None;
+							}
 						}
 						Some(_) => {}
 						None => {
@@ -5226,10 +5621,11 @@ impl Tab {
 				// what the offer is matched against.
 				self.abandon_transfers();
 				self.abandon_attempt();
-				self.terminal = None;
-				self.forget_connection();
+				// And then the session itself, which `go_home` drops with the screen (§134). Those
+				// four calls — `terminal = None`, `forget_connection`, `forget_identities`, and the
+				// half of `clear_grid_interaction` that touched the live view — were this line
+				// written out, in an order that mattered, in two arms that had to agree.
 				self.clear_grid_interaction();
-				self.forget_identities();
 				return self.go_home();
 			}
 			SshEvent::Error(message) => {
@@ -5242,10 +5638,10 @@ impl Tab {
 				// A refused handshake is the commonest way an attempt dies: whatever it captured on
 				// the promise of succeeding goes now, secret first (§12, §16).
 				self.abandon_attempt();
-				self.terminal = None;
-				self.forget_connection();
+				// `show_error` leaves for the connect screen, which drops the session (§134) — the
+				// same teardown as `Disconnected`'s, into a different screen, which is exactly why a
+				// session could never have been the `Terminal` screen's state.
 				self.clear_grid_interaction();
-				self.forget_identities();
 				self.show_error(&message);
 			}
 			// An editor's load/save replies are routed by `App` straight to the editor tab that asked
@@ -5279,7 +5675,7 @@ impl Tab {
 		// tree sits under it (§18) — so the same call serves a window resize and the pane's own
 		// resize (§19).
 		let (rows, cols) = ui::terminal::grid_size(size, self.panes.pane.reserved());
-		let changed = match self.terminal.as_mut() {
+		let changed = match self.terminal_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
 				terminal.resize(rows, cols);
 				true
@@ -5314,18 +5710,25 @@ impl Tab {
 	/// `refresh` keeps the current match by identity wherever it survived. The revealed match's own
 	/// highlight goes with the selection above — the next step puts it back.
 	fn on_grid_reflowed(&mut self) {
-		self.selection = None;
-		self.selecting = false;
-		// The tally counts presses that land on ONE cell (§42), and that cell now shows different
-		// text — so the next press there starts a fresh count instead of expanding a word the user
-		// never clicked on once.
-		self.clicks = ui::selection::Clicks::default();
-		if let Some(terminal) = self.terminal.as_ref() {
-			// The pointer has not moved, but the cell under it has: resolve it again from the last known
-			// position against the new grid, exactly as a move would (§10). Without this a press that
-			// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
-			// the shrunken grid no longer has.
-			self.hover_cell = ui::terminal::cell_under(&terminal.screen(), self.pointer);
+		// The pointer has not moved, but the cell under it has: resolve it again from the last known
+		// position against the new grid, exactly as a move would (§10). Without this a press that
+		// arrives before the next mouse-move — a keyboard resize, a window snap — anchors at a row
+		// the shrunken grid no longer has. Read before the borrow below, since the pointer is the
+		// tab's and the grid is the session's.
+		let pointer = self.pointer;
+		let hover = self
+			.terminal()
+			.map(|terminal| ui::terminal::cell_under(&terminal.screen(), pointer));
+		if let Some(work) = self.work_mut() {
+			work.selection = None;
+			work.selecting = false;
+			// The tally counts presses that land on ONE cell (§42), and that cell now shows different
+			// text — so the next press there starts a fresh count instead of expanding a word the
+			// user never clicked on once.
+			work.clicks = ui::selection::Clicks::default();
+			if let Some(hover) = hover {
+				work.hover_cell = hover;
+			}
 		}
 		self.rescan_find();
 	}
@@ -5351,8 +5754,8 @@ impl Tab {
 		// Before the emulator is dropped on the next line: `end_session` reads the grid to decide whether
 		// typing at this shell is safe (§104), so the order of these two is not cosmetic.
 		self.end_session();
-		self.terminal = None;
-		self.forget_connection();
+		// The third copy of the teardown, and the last (§134): `go_home` drops the session, so the
+		// emulator, the endpoint and the eof probe go with it.
 		self.clear_grid_interaction();
 		self.go_home()
 	}
@@ -5378,7 +5781,7 @@ impl Tab {
 	/// the word as input, which it answers with an error and cmote follows with the kill — noisy in the
 	/// scrollback nobody reads, and no worse than before.
 	fn end_session(&mut self) {
-		if self.local.is_some() && !self.on_alternate_screen() {
+		if self.local().is_some() && !self.on_alternate_screen() {
 			self.send_command(SshCommand::Input(crate::local::shells::quit_sequence()));
 		}
 		self.send_command(SshCommand::Disconnect);
@@ -5409,7 +5812,10 @@ impl Tab {
 	/// means the session stays — the safe direction, since every wrong answer here should read as "Ctrl+D did
 	/// nothing" and never as "the session ended by itself".
 	fn judge_eof(&mut self, bytes: &[u8]) -> bool {
-		let Some(heard) = self.eof_probe.as_mut() else {
+		let Some(session) = self.session_mut() else {
+			return false;
+		};
+		let Some(heard) = session.eof_probe.as_mut() else {
 			return false;
 		};
 		heard.extend_from_slice(bytes);
@@ -5417,11 +5823,11 @@ impl Tab {
 			.windows(EOF_ECHO.len())
 			.any(|window| window == EOF_ECHO)
 		{
-			self.eof_probe = None;
+			session.eof_probe = None;
 			return true;
 		}
 		if heard.len() >= EOF_ANSWER_CAP {
-			self.eof_probe = None;
+			session.eof_probe = None;
 		}
 		false
 	}
@@ -5453,24 +5859,8 @@ impl Tab {
 	/// Whether a full-screen program currently owns the grid (§104). No terminal at all counts as "no",
 	/// which is the same answer for the purpose here: nothing is holding the keyboard.
 	fn on_alternate_screen(&self) -> bool {
-		self.terminal
-			.as_ref()
+		self.terminal()
 			.is_some_and(|terminal| terminal.screen().is_alternate())
-	}
-
-	/// Forget which session this tab was showing (§10, §103): the label the status bar reads and, with
-	/// it, which KIND of session it was.
-	///
-	/// One method rather than two assignments at each of the three endings, because the two are one
-	/// fact — a tab with no connection is not a local one either — and an ending that cleared only the
-	/// label would leave a `local` flag behind, hiding the Tunnels button on the next session this tab
-	/// opens to a real server.
-	fn forget_connection(&mut self) {
-		self.connection = None;
-		self.local = None;
-		// A Ctrl+D whose answer never came is answered by the session ending (§104). Left behind, it
-		// would weigh the FIRST chunk of the next session's output on this tab and could end that one.
-		self.eof_probe = None;
 	}
 
 	/// Open the shell-integration dialog and ask the server what it is looking at (§17).
@@ -5488,8 +5878,7 @@ impl Tab {
 		// `user@host:port`, which is the only place the GUI still holds the login name once the
 		// form has been left — and a username cannot contain an `@`, so the first one splits it.
 		let user = self
-			.connection
-			.as_deref()
+			.connection()
 			.and_then(|endpoint| endpoint.split_once('@'))
 			.map(|(user, _)| user.to_owned())
 			.unwrap_or_default();
@@ -5594,7 +5983,10 @@ impl Tab {
 				}
 				None
 			}
-			AppScreen::Terminal => {
+			// A LIVE session's claimants. One still dialing has its challenge dialog instead, whose
+			// fields type through the widget tree (§7, §134) — the same arrangement the form's own
+			// prompts have, and the reason neither is listed here.
+			AppScreen::Session(session) if session.is_live() => {
 				if self.modal.is_some() {
 					return Some(KeyboardClaim::Modal);
 				}
@@ -5607,7 +5999,7 @@ impl Tab {
 				if self.panes.pane.editing().is_some() {
 					return Some(KeyboardClaim::PaneRename);
 				}
-				if self.search.is_some() {
+				if self.search().is_some() {
 					return Some(KeyboardClaim::Find);
 				}
 				None
@@ -5640,7 +6032,7 @@ impl Tab {
 			KeyboardClaim::TreeRename => self.panes.tree.cancel_rename(),
 			KeyboardClaim::PaneRename => self.panes.pane.cancel_rename(),
 			// The current match stays selected when the bar closes, so it can still be copied.
-			KeyboardClaim::Find => self.search = None,
+			KeyboardClaim::Find => self.close_find(),
 		}
 	}
 
@@ -5812,11 +6204,14 @@ impl Tab {
 						return self.on_copy();
 					}
 					if self
-						.selection
+						.work()
+						.and_then(|work| work.selection)
 						.is_some_and(|selection| !selection.is_empty())
 					{
 						let task = self.on_copy_rich();
-						self.selection = None;
+						if let Some(work) = self.work_mut() {
+							work.selection = None;
+						}
 						return task;
 					}
 					// no selection: fall through so Ctrl+C reaches the shell as the interrupt
@@ -5863,12 +6258,14 @@ impl Tab {
 			&& !modifiers.shift()
 			&& !modifiers.alt()
 			&& !modifiers.logo()
-			&& self.local.is_some_and(|kind| !kind.quits_on_eof())
+			&& self.local().is_some_and(|kind| !kind.quits_on_eof())
 			&& !self.on_alternate_screen()
 			&& matches!(&key, iced::keyboard::Key::Character(character) if character.as_str() == "d")
 		{
 			// Armed, and then deliberately NOT returned from: the encoder below sends the byte.
-			self.eof_probe = Some(Vec::new());
+			if let Some(session) = self.session_mut() {
+				session.eof_probe = Some(Vec::new());
+			}
 		}
 
 		// Ctrl+Shift+Up / Ctrl+Shift+Down jump the scrollback to the previous / next shell prompt
@@ -5879,7 +6276,7 @@ impl Tab {
 			&& modifiers.shift()
 			&& let iced::keyboard::Key::Named(named) = &key
 			&& let Some(direction) = prompt_jump(*named)
-			&& let Some(terminal) = self.terminal.as_mut()
+			&& let Some(terminal) = self.terminal_mut()
 		{
 			terminal.jump_prompt(direction);
 			return iced::Task::none();
@@ -5892,7 +6289,7 @@ impl Tab {
 		if modifiers.shift()
 			&& let iced::keyboard::Key::Named(named) = &key
 			&& let Some(motion) = scroll_motion(*named)
-			&& let Some(terminal) = self.terminal.as_mut()
+			&& let Some(terminal) = self.terminal_mut()
 		{
 			terminal.scroll(motion);
 			return iced::Task::none();
@@ -5923,8 +6320,7 @@ impl Tab {
 		// that mode, so cmote scans the stream for it (§9). DECCKM, DECKPAM and the kitty flags, by
 		// contrast, the engine does track, so they come off the screen seam (§25, §36).
 		let modes = self
-			.terminal
-			.as_ref()
+			.terminal()
 			.map(|terminal| term::keymap::Modes {
 				application_cursor: terminal.screen().application_cursor(),
 				application_keypad: terminal.screen().application_keypad(),
@@ -5934,7 +6330,7 @@ impl Tab {
 			.unwrap_or_default();
 
 		if let Some(bytes) = term::keymap::encode(key, physical, text, modifiers, modes, event) {
-			if let Some(terminal) = self.terminal.as_mut() {
+			if let Some(terminal) = self.terminal_mut() {
 				terminal.scroll(term::ScrollMotion::Bottom);
 			}
 			self.send_command(SshCommand::Input(bytes));
@@ -6031,17 +6427,22 @@ impl Tab {
 	/// runs after each chunk of shell output, a program that toggles `?1004` mid-session is
 	/// reconciled to the true state on its next output rather than left believing the wrong one.
 	fn report_focus(&mut self) {
-		let Some(terminal) = self.terminal.as_ref() else {
+		let Some(terminal) = self.terminal() else {
 			return;
 		};
 		if !terminal.screen().focus_reporting() {
 			return;
 		}
 		let focused = self.window_focused && self.focus == Focus::Terminal;
-		if focused == self.shell_focus_reported {
+		let Some(session) = self.session() else {
+			return;
+		};
+		if focused == session.shell_focus_reported {
 			return;
 		}
-		self.shell_focus_reported = focused;
+		if let Some(session) = self.session_mut() {
+			session.shell_focus_reported = focused;
+		}
 		let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
 		self.send_command(SshCommand::Input(report.to_vec()));
 	}
@@ -6051,7 +6452,7 @@ impl Tab {
 	/// progress — extend the selection's head to that cell.
 	fn on_grid_moved(&mut self, point: iced::Point) {
 		self.pointer = point;
-		let Some(terminal) = self.terminal.as_ref() else {
+		let Some(terminal) = self.terminal() else {
 			return;
 		};
 		let screen = terminal.screen();
@@ -6060,11 +6461,13 @@ impl Tab {
 		// still to hand: the pointer is over a screen row, but what it selects is the line that row is
 		// showing — so the selection keeps covering that text however the scrollback then moves.
 		let head = hovered.to_doc(screen);
-		self.hover_cell = hovered;
-		if self.selecting
-			&& let Some(selection) = self.selection
+		if let Some(work) = self.work_mut() {
+			work.hover_cell = hovered;
+		}
+		if self.selecting()
+			&& let Some(selection) = self.selection()
 		{
-			self.selection = Some(selection.with_head(head));
+			self.set_selection(Some(selection.with_head(head)));
 		}
 	}
 
@@ -6075,27 +6478,27 @@ impl Tab {
 		// The find bar closes on a click-away too, like the menus (§35). It holds the keyboard while
 		// it is open, and a press on the grid takes the focus off its field — so leaving it up would
 		// leave every keystroke swallowed by a field that no longer has the cursor.
-		self.search = None;
+		self.close_find();
 		// A click on the grid is also how the keyboard comes back to the shell (§20).
 		self.set_focus(Focus::Terminal);
 		// Any press on the grid ends a walk back through the commands (§34): the next Ctrl+Shift+O
 		// starts from the newest again. The gutter branch below re-parks it on the tick that was
 		// clicked, so a click on a prompt still says "carry on back from HERE".
-		if let Some(terminal) = self.terminal.as_mut() {
+		if let Some(terminal) = self.terminal_mut() {
 			terminal.restart_output_walk();
 		}
-		let Some(terminal) = self.terminal.as_ref() else {
+		let Some(terminal) = self.terminal() else {
 			return;
 		};
 		// The cell pressed on, as the document position it is showing (§40) — resolved before any of
 		// the branches below, so the one place a mouse selection is anchored reads the viewport once.
-		let anchor = self.hover_cell.to_doc(terminal.screen());
+		let anchor = self.hover_cell().to_doc(terminal.screen());
 		// A click on a prompt tick in the left padding gutter selects that command's output (§34)
 		// instead of starting a text selection. The ticks live inside `GRID_PADDING`; a press there
 		// on a row whose prompt has a finished command resolves to it, and anything else — the gutter
 		// beside a plain row — falls through to the ordinary selection below.
 		if self.pointer.x < ui::terminal::GRID_PADDING
-			&& self.select_output_at_gutter(self.hover_cell.row)
+			&& self.select_output_at_gutter(self.hover_cell().row)
 		{
 			return;
 		}
@@ -6104,7 +6507,7 @@ impl Tab {
 		// A cell with no link falls through to the ordinary selection, so Ctrl+click on
 		// unlinked text still just selects.
 		if self.modifiers.control()
-			&& let Some(uri) = self.link_at(self.hover_cell)
+			&& let Some(uri) = self.link_at(self.hover_cell())
 		{
 			self.follow_link(&uri);
 			return;
@@ -6113,12 +6516,16 @@ impl Tab {
 		// The count is kept here because `mouse_area` reports each press on its own; the expansion
 		// itself is `ui::selection`'s, and what it hands back is an ordinary selection — so the grid
 		// highlights it and Copy copies it with no further wiring, the same route §34 took.
-		let click = self
-			.clicks
-			.press(self.hover_cell, std::time::Instant::now());
+		let cell = self.hover_cell();
+		let Some(click) = self
+			.clicks_mut()
+			.map(|clicks| clicks.press(cell, std::time::Instant::now()))
+		else {
+			return;
+		};
 		// The screen is borrowed again here rather than kept from above: the gutter branch needs `self`
 		// mutably, so holding one borrow across both is what the borrow checker (rightly) refuses.
-		let expanded = self.terminal.as_ref().and_then(|terminal| match click {
+		let expanded = self.terminal().and_then(|terminal| match click {
 			ui::selection::Click::Single => None,
 			ui::selection::Click::Double => {
 				ui::selection::Selection::word(terminal.screen(), anchor)
@@ -6128,24 +6535,23 @@ impl Tab {
 			}
 		});
 		if let Some(selection) = expanded {
-			self.selection = Some(selection);
+			self.set_selection(Some(selection));
 			// And NO drag from here. The pointer is already sitting on the word, so the next mouse-move
 			// would extend a selection anchored at the press cell — collapsing the span the double
 			// click just made on the first stray pixel of movement. `ponytail:` dragging on from a
 			// double click therefore does nothing rather than extending word by word, as xterm does.
-			self.selecting = false;
+			self.set_selecting(false);
 			return;
 		}
-		self.selection = Some(ui::selection::Selection::new(anchor));
-		self.selecting = true;
+		self.set_selection(Some(ui::selection::Selection::new(anchor)));
+		self.set_selecting(true);
 	}
 
 	/// The URI of the OSC 8 hyperlink on a grid cell, if any (§24). `None` with no session,
 	/// an out-of-bounds cell, or a cell that is not part of a link. Returned owned so the
 	/// short-lived screen borrow is dropped before the caller acts on it.
 	fn link_at(&self, cell: ui::selection::ScreenSpot) -> Option<String> {
-		self.terminal
-			.as_ref()?
+		self.terminal()?
 			.screen()
 			.cell(cell.row, cell.col)?
 			.hyperlink()
@@ -6182,7 +6588,7 @@ impl Tab {
 	/// there the engine keeps no history, so the motion clamps to nothing. Scrolling is a purely
 	/// local view change: nothing is sent to the remote, and the focus is left where it is.
 	fn on_terminal_scroll(&mut self, lines: i32) {
-		if let Some(terminal) = self.terminal.as_mut() {
+		if let Some(terminal) = self.terminal_mut() {
 			terminal.scroll(term::ScrollMotion::Lines(lines));
 		}
 	}
@@ -6196,7 +6602,7 @@ impl Tab {
 	/// the grid CAPTURES the press — a press that also reached the selection path would drag a
 	/// selection across the screen behind the bar.
 	fn on_terminal_scroll_to(&mut self, offset: u16) {
-		if let Some(terminal) = self.terminal.as_mut() {
+		if let Some(terminal) = self.terminal_mut() {
 			terminal.scroll(term::ScrollMotion::To(offset));
 		}
 	}
@@ -6204,9 +6610,12 @@ impl Tab {
 	/// Finish a drag (§10). A press-release with no movement leaves an empty
 	/// selection (anchor == head), which we clear so a plain click deselects.
 	fn on_grid_released(&mut self) {
-		self.selecting = false;
-		if self.selection.is_some_and(|selection| selection.is_empty()) {
-			self.selection = None;
+		self.set_selecting(false);
+		if self
+			.selection()
+			.is_some_and(|selection| selection.is_empty())
+		{
+			self.set_selection(None);
 		}
 	}
 
@@ -6218,7 +6627,7 @@ impl Tab {
 	/// copies. A no-op when no command has finished, and at the oldest one held — the selection stays
 	/// where it is rather than wrapping round to the newest.
 	fn select_command_output(&mut self) {
-		if let Some(terminal) = self.terminal.as_mut()
+		if let Some(terminal) = self.terminal_mut()
 			&& let Some(span) = terminal.select_output_back()
 		{
 			self.set_output_selection(span);
@@ -6229,7 +6638,7 @@ impl Tab {
 	/// whether a command was found there — so a gutter press on a row with no finished command falls
 	/// through to an ordinary text selection.
 	fn select_output_at_gutter(&mut self, row: u16) -> bool {
-		let Some(terminal) = self.terminal.as_mut() else {
+		let Some(terminal) = self.terminal_mut() else {
 			return false;
 		};
 		let Some(span) = terminal.select_output_at_row(row) else {
@@ -6255,8 +6664,8 @@ impl Tab {
 		};
 		// A RANGE, not a drag (§42): an output exactly one cell long — a command that printed a single
 		// character — would otherwise read as "nothing selected" and be neither highlighted nor copyable.
-		self.selection = Some(ui::selection::Selection::spanning(start, head));
-		self.selecting = false;
+		self.set_selection(Some(ui::selection::Selection::spanning(start, head)));
+		self.set_selecting(false);
 		self.menu = None;
 	}
 
@@ -6264,8 +6673,8 @@ impl Tab {
 	/// only refocused (and its query kept), so pressing the shortcut a second time puts the cursor
 	/// back in the field instead of doing nothing the user has to reach for the mouse to fix.
 	fn open_term_find(&mut self) -> iced::Task<Message> {
-		if self.search.is_none() {
-			self.search = Some(term::search::Search::default());
+		if self.search().is_none() {
+			self.set_search(Some(term::search::Search::default()));
 		}
 		iced::widget::operation::focus(ui::terminal::SEARCH_INPUT_ID)
 	}
@@ -6278,12 +6687,12 @@ impl Tab {
 	fn term_find_query(&mut self, query: String) {
 		// The list built below describes the document as it is right now, so a re-scan left pending by
 		// output that landed a moment ago (§44) has nothing left to do.
-		self.search_stale = false;
-		let matches = match self.terminal.as_ref() {
+		self.set_search_stale(false);
+		let matches = match self.terminal() {
 			Some(terminal) => terminal.find(&query),
 			None => Vec::new(),
 		};
-		let Some(search) = self.search.as_mut() else {
+		let Some(search) = self.search_mut() else {
 			return;
 		};
 		search.query = query;
@@ -6298,7 +6707,7 @@ impl Tab {
 	/// one hit even when the list grew underneath it.
 	fn term_find_step(&mut self, newer: bool) {
 		self.rescan_find();
-		let Some(search) = self.search.as_mut() else {
+		let Some(search) = self.search_mut() else {
 			return;
 		};
 		let found = search.step(newer);
@@ -6316,15 +6725,15 @@ impl Tab {
 	fn rescan_find(&mut self) {
 		// Cleared first and unconditionally, because this is what stops the frame clock (§44): a tick
 		// that finds nothing to do — the bar closed in the same batch — still has to end the ticking.
-		self.search_stale = false;
-		let Some(query) = self.search.as_ref().map(|search| search.query.clone()) else {
+		self.set_search_stale(false);
+		let Some(query) = self.search().map(|search| search.query.clone()) else {
 			return;
 		};
-		let matches = match self.terminal.as_ref() {
+		let matches = match self.terminal() {
 			Some(terminal) => terminal.find(&query),
 			None => Vec::new(),
 		};
-		if let Some(search) = self.search.as_mut() {
+		if let Some(search) = self.search_mut() {
 			search.refresh(matches);
 		}
 	}
@@ -6418,7 +6827,7 @@ impl Tab {
 	/// scrolled past the retained history cannot be shown, and leaves the view and the selection as
 	/// they were.
 	fn reveal_match(&mut self, found: Option<term::search::SearchMatch>) {
-		let (Some(found), Some(terminal)) = (found, self.terminal.as_mut()) else {
+		let (Some(found), Some(terminal)) = (found, self.terminal_mut()) else {
 			return;
 		};
 		if !terminal.reveal_line(found.line) {
@@ -6434,8 +6843,8 @@ impl Tab {
 		};
 		// A RANGE, not a drag (§42): a ONE-CHARACTER query matches a single cell, and as a drag that
 		// would read as "nothing selected" — the hit would be revealed and then not highlighted.
-		self.selection = Some(ui::selection::Selection::spanning(start, head));
-		self.selecting = false;
+		self.set_selection(Some(ui::selection::Selection::spanning(start, head)));
+		self.set_selecting(false);
 		self.menu = None;
 	}
 
@@ -6445,7 +6854,7 @@ impl Tab {
 	/// an empty extract) is a no-op.
 	fn on_copy(&mut self) -> iced::Task<Message> {
 		self.menu = None;
-		let (Some(selection), Some(terminal)) = (self.selection, self.terminal.as_ref()) else {
+		let (Some(selection), Some(terminal)) = (self.selection(), self.terminal()) else {
 			return iced::Task::none();
 		};
 		let text = selection.extract(terminal.screen());
@@ -6463,7 +6872,7 @@ impl Tab {
 	/// back to iced's plain-text write so a copy is never silently lost.
 	fn on_copy_rich(&mut self) -> iced::Task<Message> {
 		self.menu = None;
-		let (Some(selection), Some(terminal)) = (self.selection, self.terminal.as_ref()) else {
+		let (Some(selection), Some(terminal)) = (self.selection(), self.terminal()) else {
 			return iced::Task::none();
 		};
 		let plain = selection.extract(terminal.screen());
@@ -6515,14 +6924,14 @@ impl Tab {
 		let Some(text) = text else {
 			return;
 		};
-		let Some(terminal) = self.terminal.as_ref() else {
+		let Some(terminal) = self.terminal() else {
 			return;
 		};
 		let bracketed = terminal.screen().bracketed_paste();
 		let bytes = term::keymap::encode_paste(&text, bracketed);
 		// A paste is input too, so it returns the view to the live bottom the way a keystroke
 		// does (§23) — the pasted text lands where it echoes, not above a scrolled-up viewport.
-		if let Some(terminal) = self.terminal.as_mut() {
+		if let Some(terminal) = self.terminal_mut() {
 			terminal.scroll(term::ScrollMotion::Bottom);
 		}
 		self.send_command(SshCommand::Input(bytes));
@@ -6534,12 +6943,12 @@ impl Tab {
 	/// highlight, a half-finished drag, an open overlay, a file picked for the previous
 	/// session, one server's directories) carries across sessions (§10, §17, §18).
 	fn clear_grid_interaction(&mut self) {
-		self.selection = None;
-		self.selecting = false;
 		self.menu = None;
-		// A find bar left open across a session change would be searching a scrollback that no
-		// longer exists, and would go on swallowing the keyboard (§35) — so it closes with the rest.
-		self.search = None;
+		// The live VIEW is not cleared here any more (§134): the selection, the drag, the click
+		// tally and the find bar are `Session::work`, which a fresh session builds empty and a
+		// teardown drops whole. A find bar left open across a session change would be searching a
+		// scrollback that no longer exists and would go on swallowing the keyboard (§35); it cannot
+		// now outlive the scrollback it was searching.
 		// Whichever dialog was open belongs to the session it was asked about (§10, §18, §27). One
 		// line, and it covers the two the three hand-written clears here used to forget: a delete
 		// confirmation left holding one server's paths, and a "new folder" dialog left naming one
@@ -6565,8 +6974,6 @@ impl Tab {
 		// the new session's remote starts out believing the shell is focused (§23), so the
 		// reported baseline is reset to match — the window's own focus is left as it is.
 		self.focus = Focus::Terminal;
-		self.shell_focus_reported = true;
-		self.resume_cwd = None;
 		// The carried directory is deliberately NOT cleared here (§52): this runs on the way INTO a
 		// session as well as out of one, and a copy's whole point is to be spent by the connect that
 		// is opening. It is taken by that connect, and what it is not spent on it is matched
@@ -6591,8 +6998,7 @@ impl Tab {
 		crate::targets::SessionState {
 			// The panes' whole half of the snapshot, from the pair that owns it.
 			terminal_path: self
-				.terminal
-				.as_ref()
+				.terminal()
 				.and_then(term::Terminal::cwd)
 				.map(str::to_owned),
 			..self.panes.capture()
@@ -6607,10 +7013,10 @@ impl Tab {
 	/// tell an aborted attempt from a real session. `set_session` reports whether anything
 	/// actually moved, so an unchanged snapshot skips the disk write.
 	fn persist_session(&mut self) {
-		if self.terminal.is_none() {
+		if self.terminal().is_none() {
 			return;
 		}
-		let Some(endpoint) = self.connection.clone() else {
+		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
 		};
 		let session = self.capture_session();
@@ -6646,15 +7052,15 @@ impl Tab {
 	/// carries the session and — as soon as the shell announces one — the remote working
 	/// directory, so the directory is visible without stealing room from the grid.
 	fn title(&self) -> String {
-		let connected = matches!(self.screen, AppScreen::Terminal);
-		let (true, Some(endpoint)) = (connected, self.connection.as_deref()) else {
+		let connected = self.is_live();
+		let (true, Some(endpoint)) = (connected, self.connection()) else {
 			return "cmote".to_owned();
 		};
 		// The third slot describes what the shell is doing: the remote-set window title if a
 		// program set one (§23), otherwise the working directory it announced (§17). The endpoint
 		// always stays, so a window is identifiable by host even while a program owns the title.
 		// An empty title (a program cleared it) counts as none, so the cwd shows through again.
-		let terminal = self.terminal.as_ref();
+		let terminal = self.terminal();
 		let detail = terminal
 			.and_then(term::Terminal::title)
 			.filter(|title| !title.is_empty())
@@ -6698,24 +7104,6 @@ impl Tab {
 			// the BACKDROP does, and every one of them is the safe answer: reject, cancel, back.
 			AppScreen::Connect(flow) => match &flow.prompt {
 				None => ui::connect::view(&self.form, flow.focus),
-				Some(Prompt::HostKey) => self.form_with_dialog(
-					ui::host_key_view(&self.dialog_body, card),
-					Message::RejectHostKey,
-				),
-				// Dismissing the mismatch override REJECTS — the safe default — so a backdrop
-				// click, the ✕ and Esc all refuse a changed key rather than trusting it (§8).
-				Some(Prompt::HostKeyChanged) => self.form_with_dialog(
-					ui::host_key_changed_view(&self.dialog_body, card),
-					Message::RejectHostKey,
-				),
-				Some(Prompt::Passphrase(input)) => self.form_with_dialog(
-					ui::passphrase_view(input, self.passphrase_failed, &self.dialog_body, card),
-					Message::PassphraseCancelled,
-				),
-				Some(Prompt::Interactive { fields, answers }) => self.form_with_dialog(
-					ui::interactive_view(fields, answers, &self.dialog_body, card),
-					Message::InteractiveCancelled,
-				),
 				Some(Prompt::Vault {
 					input,
 					confirm,
@@ -6731,24 +7119,53 @@ impl Tab {
 					Message::BackPressed,
 				),
 			},
-			AppScreen::Connecting { status } => text(status).into(),
-			AppScreen::Terminal => match &self.terminal {
+			// A session still DIALING (§134): the status step, or — if the far side has stopped to
+			// ask — the same dimmed form with the same card over it that the form's own prompts get.
+			// Where the challenge lives changed; what it looks like did not (§7, §8).
+			AppScreen::Session(session) if !session.is_live() => match session.asking() {
+				None => match &session.state {
+					SessionState::Dialing { status, .. } => text(status).into(),
+					// Unreachable: this arm is guarded on NOT live.
+					SessionState::Live => text("").into(),
+				},
+				Some(Challenge::HostKey) => self.form_with_dialog(
+					ui::host_key_view(&self.dialog_body, card),
+					Message::RejectHostKey,
+				),
+				// Dismissing the mismatch override REJECTS — the safe default — so a backdrop
+				// click, the ✕ and Esc all refuse a changed key rather than trusting it (§8).
+				Some(Challenge::HostKeyChanged) => self.form_with_dialog(
+					ui::host_key_changed_view(&self.dialog_body, card),
+					Message::RejectHostKey,
+				),
+				Some(Challenge::Passphrase(input)) => self.form_with_dialog(
+					ui::passphrase_view(input, self.passphrase_failed, &self.dialog_body, card),
+					Message::PassphraseCancelled,
+				),
+				Some(Challenge::Interactive { fields, answers }) => self.form_with_dialog(
+					ui::interactive_view(fields, answers, &self.dialog_body, card),
+					Message::InteractiveCancelled,
+				),
+			},
+			AppScreen::Session(session) => match &session.work.terminal {
 				Some(terminal) => {
 					let base = ui::terminal::view(
 						terminal,
 						ui::terminal::UiTerminalSession {
-							endpoint: self.connection.as_deref().unwrap_or(""),
-							local: self.local.is_some(),
+							endpoint: self.connection().unwrap_or(""),
+							local: self.local().is_some(),
 							account: self.showing_account(),
 						},
-						self.selection.as_ref(),
+						// From the session directly, not through `self.selection()`: that accessor
+						// returns the `Copy` value, and `ui::terminal::view` borrows for the frame.
+						session.work.selection.as_ref(),
 						self.menu,
 						ui::terminal::Modals {
 							open: self.modal.as_ref(),
 							forwards: &self.forwards,
 							// Built for the frame rather than kept on the tab: see `Modals`.
 							accounts: self.account_rows(),
-							search: self.search.as_ref(),
+							search: session.work.search.as_ref(),
 							body: &self.dialog_body,
 							card,
 						},
@@ -7250,7 +7667,7 @@ mod tests {
 	#[test]
 	fn focus_reporting_answers_window_and_pane_changes() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.terminal.as_mut().unwrap().process(b"\x1b[?1004h");
+		app.terminal_mut().unwrap().process(b"\x1b[?1004h");
 
 		// The window loses, then regains, OS focus.
 		app.on_window_focus(false);
@@ -7307,7 +7724,7 @@ mod tests {
 		installed: bool,
 	) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.connection = Some("root@sybille-rec:22".to_owned());
+		app.set_endpoint("root@sybille-rec:22".to_owned());
 		let _ = app.update(Message::IntegrationPressed);
 		let _ = next_command(&mut rx); // the probe itself, asserted on in its own test
 		let _ = app.on_ssh_event(SshEvent::IntegrationProbed {
@@ -7324,7 +7741,7 @@ mod tests {
 	#[test]
 	fn the_shell_integration_dialog_asks_about_the_login_account() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.connection = Some("rocky@gw-test:22".to_owned());
+		app.set_endpoint("rocky@gw-test:22".to_owned());
 		let _ = app.update(Message::IntegrationPressed);
 		assert!(matches!(
 			app.modal,
@@ -7404,7 +7821,7 @@ mod tests {
 		use crate::integration::IntegrationShell;
 
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.connection = Some("root@sybille-rec:22".to_owned());
+		app.set_endpoint("root@sybille-rec:22".to_owned());
 		let _ = app.update(Message::IntegrationPressed);
 		let _ = next_command(&mut rx);
 		let _ = app.update(Message::IntegrationClosed);
@@ -7425,7 +7842,6 @@ mod tests {
 		use crate::integration::IntegrationShell;
 
 		let (mut app, _rx) = probed(Some(IntegrationShell::Bash), "/root/.bashrc", false);
-		app.screen = AppScreen::Terminal;
 		let _ = app.on_ssh_event(SshEvent::IntegrationFailed(
 			"could not open /root/.bashrc: permission denied".to_owned(),
 		));
@@ -7433,11 +7849,8 @@ mod tests {
 			app.modal,
 			Some(Modal::Integration(Integration::Done))
 		));
-		assert!(app.terminal.is_some(), "the shell is still there");
-		assert!(
-			matches!(app.screen, AppScreen::Terminal),
-			"and still on screen"
-		);
+		assert!(app.terminal().is_some(), "the shell is still there");
+		assert!(app.is_live(), "and still on screen");
 	}
 
 	/// Who holds the keyboard when several things could (§10, §17, §18, §35). This is the assertion
@@ -7497,20 +7910,42 @@ mod tests {
 	/// is no buffer left on the tab for a later prompt to inherit, or for a Debug dump to find.
 	#[test]
 	fn dismissing_a_prompt_drops_what_was_typed_into_it() {
-		let (mut app, mut rx) = app_with_terminal(16);
+		// Mid-dial: a passphrase is asked of a handshake, and a handshake belongs to a session that
+		// has no shell yet (§134). This used to run against a LIVE fixture, which the old shape
+		// allowed because the prompt was a `Tab` field with no opinion about the screen.
+		let (mut app, mut rx) = dialing_tab("cme@rec:22", 16);
 		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
 		let _ = app.update(Message::PassphraseChanged("hunter2".to_owned()));
-		assert!(matches!(app.prompt(), Some(Prompt::Passphrase(input)) if input == "hunter2"));
+		assert!(matches!(app.asking(), Some(Challenge::Passphrase(input)) if input == "hunter2"));
 
 		let _ = app.update(Message::PassphraseCancelled);
-		assert!(app.prompt().is_none());
 		assert!(matches!(
 			next_command(&mut rx),
 			Some(SshCommand::Disconnect)
 		));
-		// And the next prompt starts empty rather than showing the abandoned attempt.
+		// Cancelling ends the SESSION, not just the question (§134) — the `Disconnect` above is what
+		// makes that true, and leaving the session screen is what carries the typed text away.
+		assert!(
+			app.session().is_none(),
+			"there is no handshake left to answer"
+		);
+		assert!(app.asking().is_none(), "so there is no question either");
+
+		// A late re-ask from the handshake that is being torn down lands nowhere, which is the
+		// improvement §134 came with rather than a claim it had to make: before, the same event
+		// re-opened the prompt for a connect the user had just cancelled, because the buffer was a
+		// `Tab` field with no opinion about whether a session was still there to answer for.
 		let _ = app.on_ssh_event(SshEvent::NeedPassphrase);
-		assert!(matches!(app.prompt(), Some(Prompt::Passphrase(input)) if input.is_empty()));
+		assert!(
+			app.asking().is_none(),
+			"a cancelled connect is not re-asked"
+		);
+
+		// And a FRESH dial's first ask starts empty rather than showing the abandoned attempt,
+		// which is what this test has always been about.
+		let (mut next, _rx) = dialing_tab("cme@rec:22", 16);
+		let _ = next.on_ssh_event(SshEvent::NeedPassphrase);
+		assert!(matches!(next.asking(), Some(Challenge::Passphrase(input)) if input.is_empty()));
 	}
 
 	/// A dialog belongs to the session it asked about (§10, §18). A delete confirmation holding one
@@ -7644,8 +8079,8 @@ mod tests {
 	// A local session on a shell that may ignore EOF, ready for a Ctrl+D (§104).
 	fn local_shell_tab(kind: crate::local::shells::ShellKind) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut app, rx) = app_with_terminal(16);
-		app.connection = Some(format!("local — {}", kind.slug()));
-		app.local = Some(kind);
+		app.set_endpoint(format!("local — {}", kind.slug()));
+		app.set_local(Some(kind));
 		(app, rx)
 	}
 
@@ -7692,8 +8127,8 @@ mod tests {
 			return;
 		};
 		let (mut tab, mut commands) = app_with_terminal(256);
-		tab.local = Some(shell.kind);
-		tab.connection = Some(shell.endpoint());
+		tab.set_local(Some(shell.kind));
+		tab.set_endpoint(shell.endpoint());
 
 		let (event_tx, mut events) = mpsc::channel::<SshEvent>(256);
 		let (to_session, from_tab) = mpsc::channel::<crate::ssh::client::SessionMsg>(64);
@@ -7777,7 +8212,7 @@ mod tests {
 			"and the shell left, which is what ends the session — no kill was involved"
 		);
 		assert!(
-			matches!(tab.screen, AppScreen::Home(_)) && tab.connection.is_none(),
+			matches!(tab.screen, AppScreen::Home(_)) && tab.connection().is_none(),
 			"the tab landed on the home screen, where a second Ctrl+D closes it (§30)"
 		);
 	}
@@ -7799,11 +8234,11 @@ mod tests {
 			"the byte goes down the channel like any other keystroke"
 		);
 		assert!(
-			app.eof_probe.is_some(),
+			app.session().is_some_and(|s| s.eof_probe.is_some()),
 			"and cmote is listening for an answer"
 		);
 		assert!(
-			app.connection.is_some() && app.terminal.is_some(),
+			app.connection().is_some() && app.terminal().is_some(),
 			"nothing has been torn down on a guess"
 		);
 	}
@@ -7826,7 +8261,7 @@ mod tests {
 
 		let _ = app.on_ssh_event(shell_output(b"\x1b[?25l"));
 		assert!(
-			app.eof_probe.is_some(),
+			app.session().is_some_and(|s| s.eof_probe.is_some()),
 			"the first read carries no echo and must not settle it"
 		);
 		assert!(
@@ -7847,18 +8282,18 @@ mod tests {
 			"and nothing else: no Disconnect, so no kill — the shell leaves because it was asked to"
 		);
 		assert!(
-			app.connection.is_some() && app.terminal.is_some(),
+			app.connection().is_some() && app.terminal().is_some(),
 			"the session is still up until the shell actually goes"
 		);
 		assert!(
-			app.eof_probe.is_none(),
+			app.session().is_none_or(|s| s.eof_probe.is_none()),
 			"the question is settled either way"
 		);
 
 		// And when it goes, the ordinary hangup path lands the tab where §30 wants it.
 		let _ = app.on_ssh_event(SshEvent::Disconnected);
 		assert!(
-			app.connection.is_none() && app.local.is_none() && app.terminal.is_none(),
+			app.connection().is_none() && app.local().is_none() && app.terminal().is_none(),
 			"the tab has forgotten it had a session"
 		);
 		assert!(
@@ -7887,7 +8322,7 @@ mod tests {
 			let _ = app.on_ssh_event(shell_output(answer));
 
 			assert!(
-				app.connection.is_some() && app.terminal.is_some(),
+				app.connection().is_some() && app.terminal().is_some(),
 				"the byte did its job, so the session is none of cmote's business ({spent})"
 			);
 			assert!(
@@ -7895,7 +8330,7 @@ mod tests {
 				"and nothing was sent on the strength of it ({spent})"
 			);
 			assert_eq!(
-				app.eof_probe.is_none(),
+				app.session().is_none_or(|s| s.eof_probe.is_none()),
 				spent,
 				"the probe lives exactly as long as its budget, no further ({spent})"
 			);
@@ -7952,11 +8387,10 @@ mod tests {
 		];
 		for (local, alternate, asked) in cases {
 			let (mut app, mut rx) = app_with_terminal(16);
-			app.connection = Some("somewhere".to_owned());
-			app.local = local;
+			app.set_endpoint("somewhere".to_owned());
+			app.set_local(local);
 			if alternate {
-				app.terminal
-					.as_mut()
+				app.terminal_mut()
 					.expect("the fixture's emulator")
 					.process(b"\x1b[?1049h");
 			}
@@ -7991,8 +8425,8 @@ mod tests {
 	fn ctrl_d_is_left_to_every_shell_that_answers_it() {
 		for local in [Some(crate::local::shells::ShellKind::GitBash), None] {
 			let (mut app, mut rx) = app_with_terminal(16);
-			app.connection = Some("root@web-01:22".to_owned());
-			app.local = local;
+			app.set_endpoint("root@web-01:22".to_owned());
+			app.set_local(local);
 
 			let _ = app.on_key(ctrl_d());
 
@@ -8002,13 +8436,13 @@ mod tests {
 				"EOF goes down the channel as it always has ({local:?})"
 			);
 			assert!(
-				app.eof_probe.is_none(),
+				app.session().is_none_or(|s| s.eof_probe.is_none()),
 				"and nothing is listening for an echo ({local:?})"
 			);
 			// Even an answer that looks exactly like an echo decides nothing here.
 			let _ = app.on_ssh_event(shell_output(b"\x1b[93m^D"));
 			assert!(
-				app.connection.is_some() && app.terminal.is_some(),
+				app.connection().is_some() && app.terminal().is_some(),
 				"the session is still up: the shell decides, not cmote ({local:?})"
 			);
 		}
@@ -8034,11 +8468,10 @@ mod tests {
 		];
 		for (alternate, modifiers, why) in cases {
 			let (mut app, mut rx) = app_with_terminal(16);
-			app.connection = Some("local — pwsh".to_owned());
-			app.local = Some(crate::local::shells::ShellKind::Pwsh);
+			app.set_endpoint("local — pwsh".to_owned());
+			app.set_local(Some(crate::local::shells::ShellKind::Pwsh));
 			if alternate {
-				app.terminal
-					.as_mut()
+				app.terminal_mut()
 					.expect("the fixture's emulator")
 					.process(b"\x1b[?1049h");
 			}
@@ -8055,13 +8488,13 @@ mod tests {
 				"the byte reaches the shell ({why})"
 			);
 			assert!(
-				app.eof_probe.is_none(),
+				app.session().is_none_or(|s| s.eof_probe.is_none()),
 				"and nothing is listening for an echo ({why})"
 			);
 			// So even the shell's own echo, arriving here, is just output.
 			let _ = app.on_ssh_event(shell_output(b"\x1b[93m^D"));
 			assert!(
-				app.connection.is_some(),
+				app.connection().is_some(),
 				"and the session is untouched ({why})"
 			);
 		}
@@ -8089,12 +8522,12 @@ mod tests {
 	// Forty lines of output over the 24-row screen, so there is history to scroll into.
 	fn with_history(app: &mut Tab) {
 		let output: Vec<u8> = (0..40).flat_map(|_| b"x\r\n".to_vec()).collect();
-		app.terminal.as_mut().unwrap().process(&output);
+		app.terminal_mut().unwrap().process(&output);
 	}
 
 	// The current scrollback offset off the live emulator.
 	fn offset(app: &Tab) -> u16 {
-		app.terminal.as_ref().unwrap().screen().display_offset()
+		app.terminal().unwrap().screen().display_offset()
 	}
 
 	/// Typing while scrolled back into history snaps the view to the live bottom, and the key
@@ -8129,8 +8562,8 @@ mod tests {
 		// A selection and a focus that must both survive the drag.
 		let anchor = ui::selection::ScreenSpot { row: 0, col: 0 };
 		let selection =
-			ui::selection::Selection::new(anchor.to_doc(app.terminal.as_ref().unwrap().screen()));
-		app.selection = Some(selection);
+			ui::selection::Selection::new(anchor.to_doc(app.terminal().unwrap().screen()));
+		app.set_selection(Some(selection));
 		app.focus = Focus::Files;
 
 		app.on_terminal_scroll_to(4);
@@ -8143,10 +8576,14 @@ mod tests {
 		app.on_terminal_scroll_to(0);
 		assert_eq!(offset(&app), 0, "back at the live bottom");
 		app.on_terminal_scroll_to(u16::MAX);
-		let history = app.terminal.as_ref().unwrap().screen().history_size();
+		let history = app.terminal().unwrap().screen().history_size();
 		assert_eq!(offset(&app), history, "pinned at the oldest retained line");
 
-		assert_eq!(app.selection, Some(selection), "the selection is untouched");
+		assert_eq!(
+			app.selection(),
+			Some(selection),
+			"the selection is untouched"
+		);
 		assert_eq!(app.focus, Focus::Files, "and the keyboard stayed put");
 		assert!(
 			next_input(&mut rx).is_none(),
@@ -8164,7 +8601,7 @@ mod tests {
 		use iced::keyboard::key::{Code, Named};
 
 		let (mut app, mut rx) = app_with_terminal(16);
-		let terminal = app.terminal.as_mut().unwrap();
+		let terminal = app.terminal_mut().unwrap();
 		// A first prompt, then enough output to push it up into history, then a second prompt.
 		terminal.process(b"\x1b]133;A\x07first$ \r\n");
 		let filler: Vec<u8> = (0..30).flat_map(|_| b"output\r\n".to_vec()).collect();
@@ -8195,7 +8632,7 @@ mod tests {
 		use iced::keyboard::{Key, Location, Modifiers};
 
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.terminal.as_mut().unwrap().process(
+		app.terminal_mut().unwrap().process(
 			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07",
 		);
 
@@ -8211,9 +8648,9 @@ mod tests {
 		};
 		let _ = app.on_key(press);
 
-		let selection = app.selection.expect("the command's output is selected");
+		let selection = app.selection().expect("the command's output is selected");
 		assert!(!selection.is_empty());
-		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		let text = selection.extract(app.terminal().unwrap().screen());
 		assert_eq!(text, "alpha\nbeta");
 		// The keybind is cmote's own view action — nothing reached the shell.
 		assert_eq!(next_input(&mut rx), None);
@@ -8227,7 +8664,7 @@ mod tests {
 	fn ctrl_shift_o_selects_output_taller_than_the_screen() {
 		let (mut app, _rx) = app_with_terminal(16);
 		{
-			let terminal = app.terminal.as_mut().unwrap();
+			let terminal = app.terminal_mut().unwrap();
 			terminal.process(b"\x1b]133;A\x07$ \x1b]133;B\x07seq\r\n\x1b]133;C\x07");
 			// Forty lines of output on a 24-row screen: most of it is up in the history by the time
 			// the command finishes.
@@ -8240,8 +8677,8 @@ mod tests {
 
 		app.select_command_output();
 
-		let selection = app.selection.expect("the command's output is selected");
-		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		let selection = app.selection().expect("the command's output is selected");
+		let text = selection.extract(app.terminal().unwrap().screen());
 		let lines: Vec<&str> = text.lines().collect();
 		assert_eq!(
 			lines.len(),
@@ -8260,7 +8697,7 @@ mod tests {
 	fn a_drag_selects_the_lines_it_covered_not_the_rows_it_covered() {
 		let (mut app, _rx) = app_with_terminal(16);
 		{
-			let terminal = app.terminal.as_mut().unwrap();
+			let terminal = app.terminal_mut().unwrap();
 			let output: Vec<u8> = (0..60)
 				.flat_map(|n| format!("line {n}\r\n").into_bytes())
 				.collect();
@@ -8281,8 +8718,8 @@ mod tests {
 		app.on_grid_moved(point(0, 6));
 		app.on_grid_released();
 
-		let selection = app.selection.expect("the drag selected a run of cells");
-		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		let selection = app.selection().expect("the drag selected a run of cells");
+		let text = selection.extract(app.terminal().unwrap().screen());
 		assert!(
 			text.starts_with("line "),
 			"a numbered line was dragged over"
@@ -8292,10 +8729,7 @@ mod tests {
 		// exactly the text it was dragged over.
 		app.on_terminal_scroll(-20);
 		assert_eq!(offset(&app), 0, "returned to the live bottom");
-		assert_eq!(
-			selection.extract(app.terminal.as_ref().unwrap().screen()),
-			text
-		);
+		assert_eq!(selection.extract(app.terminal().unwrap().screen()), text);
 	}
 
 	/// Clicking a prompt tick in the left gutter selects that command's output (§34) — the other
@@ -8304,20 +8738,20 @@ mod tests {
 	#[test]
 	fn clicking_a_prompt_tick_selects_that_commands_output() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.terminal.as_mut().unwrap().process(
+		app.terminal_mut().unwrap().process(
 			b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07alpha\r\nbeta\r\n\x1b]133;D;0\x07",
 		);
 
 		// The prompt sits on viewport row 0; a gutter press there (x < GRID_PADDING) selects it.
 		app.pointer = iced::Point::new(1.0, 1.0);
-		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 0 };
+		app.set_hover_cell(ui::selection::ScreenSpot { row: 0, col: 0 });
 		app.on_grid_pressed();
 
-		let selection = app.selection.expect("the tick click selected the output");
-		let text = selection.extract(app.terminal.as_ref().unwrap().screen());
+		let selection = app.selection().expect("the tick click selected the output");
+		let text = selection.extract(app.terminal().unwrap().screen());
 		assert_eq!(text, "alpha\nbeta");
 		assert!(
-			!app.selecting,
+			!app.selecting(),
 			"a tick click is a discrete action, not a drag"
 		);
 	}
@@ -8328,29 +8762,29 @@ mod tests {
 	#[test]
 	fn a_double_click_selects_a_word_and_a_triple_the_line() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.terminal.as_mut().unwrap().process(b"cat /etc/hosts");
+		app.terminal_mut().unwrap().process(b"cat /etc/hosts");
 
 		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
 		app.pointer = iced::Point::new(50.0, 5.0);
-		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 6 };
+		app.set_hover_cell(ui::selection::ScreenSpot { row: 0, col: 6 });
 
 		// One press selects nothing on its own …
 		app.on_grid_pressed();
-		let selection = app.selection.expect("a press anchors a selection");
+		let selection = app.selection().expect("a press anchors a selection");
 		assert!(selection.is_empty(), "a bare click selects nothing");
-		assert!(app.selecting, "and it does begin a drag");
+		assert!(app.selecting(), "and it does begin a drag");
 
 		// … a second on the same cell takes the word …
 		app.on_grid_pressed();
-		let screen = app.terminal.as_ref().unwrap().screen();
-		let selection = app.selection.expect("the double click selected a word");
+		let screen = app.terminal().unwrap().screen();
+		let selection = app.selection().expect("the double click selected a word");
 		assert_eq!(selection.extract(screen), "/etc/hosts");
-		assert!(!app.selecting, "a word selection is not a drag");
+		assert!(!app.selecting(), "a word selection is not a drag");
 
 		// … and a third the whole line.
 		app.on_grid_pressed();
-		let screen = app.terminal.as_ref().unwrap().screen();
-		let selection = app.selection.expect("the triple click selected a line");
+		let screen = app.terminal().unwrap().screen();
+		let selection = app.selection().expect("the triple click selected a line");
 		assert_eq!(selection.extract(screen), "cat /etc/hosts");
 	}
 
@@ -8366,32 +8800,32 @@ mod tests {
 		// here have to allow for it or the reflow lands on a one-row grid.
 		let reserved = app.panes.pane.reserved();
 		app.window_size = ui::terminal::window_size(80, 24, reserved);
-		app.terminal.as_mut().unwrap().process(b"hello world");
+		app.terminal_mut().unwrap().process(b"hello world");
 
 		// A find bar with a hit, and a selection of the user's own over the same line.
 		let _focus = app.open_term_find();
 		app.term_find_query("hello".to_owned());
 		assert!(
-			app.search.as_ref().unwrap().current().is_some(),
+			app.search().unwrap().current().is_some(),
 			"the query matched before the resize"
 		);
-		app.selection = Some(ui::selection::Selection::spanning(
+		app.set_selection(Some(ui::selection::Selection::spanning(
 			ui::selection::DocSpot { line: 0, col: 0 },
 			ui::selection::DocSpot { line: 0, col: 4 },
-		));
-		app.selecting = true;
+		)));
+		app.set_selecting(true);
 
 		// The window narrows to 60 columns, which is what reflows the grid.
 		app.on_window_resized(ui::terminal::window_size(60, 24, reserved));
 
 		assert_eq!(
-			app.terminal.as_ref().unwrap().screen().size(),
+			app.terminal().unwrap().screen().size(),
 			(24, 60),
 			"the grid did reflow, or this test proves nothing"
 		);
-		assert!(app.selection.is_none(), "the stale selection is dropped");
-		assert!(!app.selecting, "and any drag with it");
-		let search = app.search.as_ref().expect("the find bar stays open");
+		assert!(app.selection().is_none(), "the stale selection is dropped");
+		assert!(!app.selecting(), "and any drag with it");
+		let search = app.search().expect("the find bar stays open");
 		assert_eq!(search.query, "hello", "with its query");
 		assert!(
 			search.current().is_some(),
@@ -8407,11 +8841,11 @@ mod tests {
 		let (mut app, _rx) = app_with_terminal(16);
 		let reserved = app.panes.pane.reserved();
 		app.window_size = ui::terminal::window_size(80, 24, reserved);
-		app.terminal.as_mut().unwrap().process(b"cat /etc/hosts");
+		app.terminal_mut().unwrap().process(b"cat /etc/hosts");
 
 		// Clear of the left gutter, so this is an ordinary grid press and not a prompt tick (§34).
 		app.pointer = iced::Point::new(50.0, 5.0);
-		app.hover_cell = ui::selection::ScreenSpot { row: 0, col: 6 };
+		app.set_hover_cell(ui::selection::ScreenSpot { row: 0, col: 6 });
 		app.on_grid_pressed();
 
 		app.on_window_resized(ui::terminal::window_size(60, 24, reserved));
@@ -8419,14 +8853,14 @@ mod tests {
 		// The pointer never moved, so the tally's cell is the one this press lands on — the second
 		// press would take the word if the resize had not reset the count.
 		assert_eq!(
-			app.hover_cell,
+			app.hover_cell(),
 			ui::selection::ScreenSpot { row: 0, col: 6 },
 			"the hovered cell is resolved again against the new grid"
 		);
 		app.on_grid_pressed();
-		let selection = app.selection.expect("a press anchors a selection");
+		let selection = app.selection().expect("a press anchors a selection");
 		assert!(selection.is_empty(), "a plain click, not a word");
-		assert!(app.selecting, "and it begins a drag");
+		assert!(app.selecting(), "and it begins a drag");
 	}
 
 	/// Ctrl+Shift+F opens the scrollback find bar, and while it is open the bar owns the keyboard
@@ -8462,7 +8896,7 @@ mod tests {
 			Modifiers::CTRL | Modifiers::SHIFT,
 			None,
 		));
-		assert!(app.search.is_some(), "the find bar opened");
+		assert!(app.search().is_some(), "the find bar opened");
 		assert_eq!(next_input(&mut rx), None, "the shortcut is cmote's own");
 
 		// A plain keystroke now belongs to the bar's field (which types through the widget tree),
@@ -8478,7 +8912,7 @@ mod tests {
 
 		// Esc closes the bar, and the very same keystroke reaches the shell again.
 		let _ = app.on_key(key_press(Named::Escape, Code::Escape, Modifiers::empty()));
-		assert!(app.search.is_none(), "Esc closed the find bar");
+		assert!(app.search().is_none(), "Esc closed the find bar");
 		let _ = app.on_key(x);
 		assert_eq!(next_input(&mut rx).as_deref(), Some(&b"x"[..]));
 
@@ -8490,9 +8924,12 @@ mod tests {
 			Modifiers::CTRL | Modifiers::SHIFT,
 			None,
 		));
-		assert!(app.search.is_some(), "reopened");
+		assert!(app.search().is_some(), "reopened");
 		app.on_grid_pressed();
-		assert!(app.search.is_none(), "a grid press dismissed the find bar");
+		assert!(
+			app.search().is_none(),
+			"a grid press dismissed the find bar"
+		);
 	}
 
 	/// A query scans the WHOLE scrollback, lands on the newest match and selects it, and stepping ↑
@@ -8502,7 +8939,7 @@ mod tests {
 	fn a_query_finds_the_newest_match_and_stepping_walks_back_into_history() {
 		let (mut app, _rx) = app_with_terminal(16);
 		{
-			let terminal = app.terminal.as_mut().unwrap();
+			let terminal = app.terminal_mut().unwrap();
 			// One hit far enough back to have scrolled off the 24-row screen, and one near the
 			// live bottom.
 			terminal.process(b"needle first\r\n");
@@ -8514,20 +8951,20 @@ mod tests {
 		let _ = app.open_term_find();
 		app.term_find_query("needle".to_owned());
 
-		let search = app.search.as_ref().expect("the bar is open");
+		let search = app.search().expect("the bar is open");
 		assert_eq!(search.count(), 2, "both hits found, history included");
 		assert_eq!(search.ordinal(), 2, "a new query lands on the newest match");
 		let newest = search.current().expect("a current match").line;
 		assert_eq!(offset(&app), 0, "the newest hit was already on screen");
 		let text = app
-			.selection
+			.selection()
 			.expect("the match is selected")
-			.extract(app.terminal.as_ref().unwrap().screen());
+			.extract(app.terminal().unwrap().screen());
 		assert_eq!(text, "needle");
 
 		// Step ↑ (older): the earlier hit left the screen long ago, so the view climbs to it.
 		app.term_find_step(false);
-		let search = app.search.as_ref().expect("the bar is still open");
+		let search = app.search().expect("the bar is still open");
 		assert_eq!(search.ordinal(), 1);
 		assert!(
 			search.current().expect("a current match").line < newest,
@@ -8535,9 +8972,9 @@ mod tests {
 		);
 		assert!(offset(&app) > 0, "the view climbed to show the older hit");
 		let text = app
-			.selection
+			.selection()
 			.expect("the older match is selected")
-			.extract(app.terminal.as_ref().unwrap().screen());
+			.extract(app.terminal().unwrap().screen());
 		assert_eq!(text, "needle");
 	}
 
@@ -8549,7 +8986,7 @@ mod tests {
 	fn the_renderer_is_given_every_hit_on_the_visible_screen() {
 		let (mut app, _rx) = app_with_terminal(16);
 		{
-			let terminal = app.terminal.as_mut().unwrap();
+			let terminal = app.terminal_mut().unwrap();
 			// One hit scrolled off the 24-row screen, then two within a couple of rows of the bottom.
 			terminal.process(b"needle offscreen\r\n");
 			let filler: Vec<u8> = (0..40).flat_map(|_| b"filler\r\n".to_vec()).collect();
@@ -8560,9 +8997,9 @@ mod tests {
 		let _ = app.open_term_find();
 		app.term_find_query("needle".to_owned());
 
-		let search = app.search.as_ref().expect("the bar is open");
+		let search = app.search().expect("the bar is open");
 		assert_eq!(search.count(), 3, "all three hits are in the bar's total");
-		let screen = app.terminal.as_ref().unwrap().screen();
+		let screen = app.terminal().unwrap().screen();
 		let visible = search.visible(
 			screen.history_size(),
 			screen.display_offset(),
@@ -8584,7 +9021,7 @@ mod tests {
 		// selection's colour over the wash rather than beside it. Both speak absolute lines (§40), so
 		// the check needs no mapping of its own.
 		let current = search.current().expect("a current match");
-		let selection = app.selection.expect("the current match is selected");
+		let selection = app.selection().expect("the current match is selected");
 		assert!(selection.contains(current.line, current.start_col));
 		assert!(selection.contains(current.line, current.end_col));
 	}
@@ -8596,40 +9033,40 @@ mod tests {
 	#[test]
 	fn output_under_an_open_find_bar_is_picked_up_on_the_next_frame() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.terminal.as_mut().unwrap().process(b"needle first\r\n");
+		app.terminal_mut().unwrap().process(b"needle first\r\n");
 
 		let _focus = app.open_term_find();
 		app.term_find_query("needle".to_owned());
 		assert_eq!(
-			app.search.as_ref().unwrap().count(),
+			app.search().unwrap().count(),
 			1,
 			"one hit when the query was typed"
 		);
 		assert!(
-			!app.search_stale,
+			!app.search_stale(),
 			"and the list is as fresh as the document"
 		);
 
 		// The shell prints a second hit. The chunk itself must not scan — a flood of them arrives per
 		// frame, and paying for a whole-document walk on each is what the flag exists to avoid.
 		let _ = app.on_ssh_event(shell_output(b"needle second\r\n"));
-		assert!(app.search_stale, "the chunk marked the list stale");
+		assert!(app.search_stale(), "the chunk marked the list stale");
 		assert_eq!(
-			app.search.as_ref().unwrap().count(),
+			app.search().unwrap().count(),
 			1,
 			"and did not scan on the spot"
 		);
 
 		// The frame tick the flag subscribed to.
 		app.rescan_find();
-		let search = app.search.as_ref().expect("the bar stays open");
+		let search = app.search().expect("the bar stays open");
 		assert_eq!(search.count(), 2, "the hit that arrived is in the count");
 		assert_eq!(
 			search.ordinal(),
 			1,
 			"and the current hit stayed put rather than jumping to it"
 		);
-		assert!(!app.search_stale, "which stops the frame clock again");
+		assert!(!app.search_stale(), "which stops the frame clock again");
 	}
 
 	/// A re-scan is not a step: it must not scroll, and it must not move the selection (§44). Output
@@ -8639,7 +9076,7 @@ mod tests {
 	fn a_rescan_leaves_the_viewport_and_the_selection_where_they_are() {
 		let (mut app, _rx) = app_with_terminal(16);
 		{
-			let terminal = app.terminal.as_mut().unwrap();
+			let terminal = app.terminal_mut().unwrap();
 			// One hit far enough back that reaching it has to scroll the 24-row screen.
 			terminal.process(b"needle first\r\n");
 			let filler: Vec<u8> = (0..40).flat_map(|_| b"filler\r\n".to_vec()).collect();
@@ -8657,14 +9094,14 @@ mod tests {
 		// The offset is read AFTER the output: the engine moves the viewport itself to keep the same
 		// text on screen as lines scroll off, and that is not what this test is about.
 		let parked = offset(&app);
-		let selected = app.selection;
+		let selected = app.selection();
 
 		app.rescan_find();
 
 		assert_eq!(offset(&app), parked, "the re-scan did not scroll");
-		assert_eq!(app.selection, selected, "nor moved the selection");
+		assert_eq!(app.selection(), selected, "nor moved the selection");
 		assert_eq!(
-			app.search.as_ref().unwrap().count(),
+			app.search().unwrap().count(),
 			3,
 			"it did pick the new hit up, though"
 		);
@@ -8678,11 +9115,11 @@ mod tests {
 		let (mut app, _rx) = app_with_terminal(16);
 
 		let _ = app.on_ssh_event(shell_output(b"hello\r\n"));
-		assert!(!app.search_stale, "no bar, so no list to invalidate");
+		assert!(!app.search_stale(), "no bar, so no list to invalidate");
 
 		let _focus = app.open_term_find();
 		let _ = app.on_ssh_event(shell_output(b"hello again\r\n"));
-		assert!(!app.search_stale, "an idle bar has nothing to re-scan");
+		assert!(!app.search_stale(), "an idle bar has nothing to re-scan");
 	}
 
 	#[test]
@@ -8752,11 +9189,8 @@ mod tests {
 		// A command channel so `send_command` (the `cd` and the listings) succeeds rather
 		// than tripping the "worker not ready" error; the receiver is kept alive so the
 		// channel stays open.
-		let (tx, _rx) = mpsc::channel(64);
-		let mut app = Tab {
-			command_tx: Some(tx),
-			..Tab::default()
-		};
+		// Mid-dial, the state a `Connected` arrives in (§134).
+		let (mut app, _rx) = dialing_tab("u@h:22", 64);
 
 		// A target connected to before, remembered at a shell directory and a *different*
 		// pane directory — the divergent case a tree-click peek leaves behind.
@@ -8771,7 +9205,7 @@ mod tests {
 				..crate::targets::SessionState::default()
 			},
 		);
-		app.connection = Some("u@h:22".to_owned());
+		app.set_endpoint("u@h:22".to_owned());
 		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
 
 		// One OSC 7 cwd announcement, as the shell emits on each prompt (§17).
@@ -8780,9 +9214,9 @@ mod tests {
 		// Connect: the pane opens at its remembered directory, and the shell is set to resume
 		// at its own — so the pane is pinned to `/etc` until the shell reaches `/var/log`.
 		let _ = app.on_ssh_event(SshEvent::Connected);
-		assert!(matches!(app.screen, AppScreen::Terminal));
+		assert!(app.is_live());
 		assert_eq!(app.panes.pane.path(), Some("/etc"));
-		assert_eq!(app.resume_cwd.as_deref(), Some("/var/log"));
+		assert_eq!(app.resume_cwd(), Some("/var/log"));
 
 		// The login prompt announces the login directory first. The pane must NOT follow it
 		// off `/etc` while the resume is still pending.
@@ -8792,17 +9226,13 @@ mod tests {
 			Some("/etc"),
 			"pinned through the login prompt"
 		);
-		assert_eq!(
-			app.resume_cwd.as_deref(),
-			Some("/var/log"),
-			"still settling"
-		);
+		assert_eq!(app.resume_cwd(), Some("/var/log"), "still settling");
 
 		// The replayed `cd` lands: the shell has settled, so the pin lifts — but the pane is
 		// left where the restore put it rather than dragged onto the shell's cwd.
 		let _ = app.on_ssh_event(announce("/var/log"));
 		assert_eq!(app.panes.pane.path(), Some("/etc"), "kept, not clobbered");
-		assert_eq!(app.resume_cwd, None, "no longer pinned");
+		assert_eq!(app.resume_cwd(), None, "no longer pinned");
 
 		// A real move afterwards follows normally: the pane tracks the shell again.
 		let _ = app.on_ssh_event(announce("/var/log/nginx"));
@@ -8823,11 +9253,8 @@ mod tests {
 	fn a_reconnect_pins_the_tree_as_well_as_the_pane() {
 		use crate::ui::connect::AuthKind;
 
-		let (tx, _rx) = mpsc::channel(64);
-		let mut app = Tab {
-			command_tx: Some(tx),
-			..Tab::default()
-		};
+		// Mid-dial, the state a `Connected` arrives in (§134).
+		let (mut app, _rx) = dialing_tab("u@h:22", 64);
 
 		app.targets
 			.borrow_mut()
@@ -8840,7 +9267,7 @@ mod tests {
 				..crate::targets::SessionState::default()
 			},
 		);
-		app.connection = Some("u@h:22".to_owned());
+		app.set_endpoint("u@h:22".to_owned());
 		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
 
 		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
@@ -8885,7 +9312,7 @@ mod tests {
 	#[test]
 	fn a_transfer_the_lost_connection_stopped_is_offered_by_the_next_session() {
 		let (mut app, mut rx) = app_with_terminal(16);
-		app.connection = Some("u@h:22".to_owned());
+		app.set_endpoint("u@h:22".to_owned());
 
 		// A folder coming down when the link dies. Started through the queue's own entrance, so
 		// the slot and the in-flight memory are set exactly as a real download sets them.
@@ -8901,8 +9328,14 @@ mod tests {
 		assert!(!app.transfers.can_resume(), "the queue kept nothing itself");
 		assert!(app.unfinished.is_some(), "the tab did");
 
-		// Reconnecting to the same endpoint offers to finish it, and says why it is asking.
-		app.connection = Some("u@h:22".to_owned());
+		// Reconnecting to the same endpoint offers to finish it, and says why it is asking. A new
+		// SESSION, because the last one went with the disconnect (§134) — writing an endpoint onto
+		// the tab is no longer a thing that can happen, which is the point.
+		app.screen = AppScreen::Session(Session::dialing(
+			"u@h:22".to_owned(),
+			None,
+			"connecting…".to_owned(),
+		));
 		let _task = app.on_ssh_event(SshEvent::Connected);
 		assert!(app.transfers.can_resume());
 		assert_eq!(
@@ -8936,14 +9369,14 @@ mod tests {
 	#[test]
 	fn an_unfinished_transfer_is_not_offered_to_a_different_server() {
 		let (mut app, _rx) = app_with_terminal(16);
-		app.connection = Some("u@h:22".to_owned());
+		app.set_endpoint("u@h:22".to_owned());
 		let effects = app
 			.transfers
 			.download_tree("/srv/logs".to_owned(), Some(PathBuf::from("/local")));
 		let _ = app.apply(effects);
 		let _task = app.on_ssh_event(SshEvent::Disconnected);
 
-		app.connection = Some("u@elsewhere:22".to_owned());
+		app.set_endpoint("u@elsewhere:22".to_owned());
 		let _task = app.on_ssh_event(SshEvent::Connected);
 		assert!(!app.transfers.can_resume());
 		assert_eq!(app.transfers.notice(), None);
@@ -9278,8 +9711,7 @@ mod tests {
 		// The alternate screen: no history over there, so no bar (§23).
 		strip_mut(&mut app)
 			.active_mut()
-			.terminal
-			.as_mut()
+			.terminal_mut()
 			.expect("the session's terminal")
 			.process(b"\x1b[?1049h");
 		let _ = app.view();
@@ -10694,12 +11126,11 @@ mod tests {
 		let mut app = tab_app();
 		// Two live sessions, one in each region, so the count the confirmation quotes and the drain
 		// list it builds both have to see past the focused region (§30, §48).
-		let (mut left, _left_rx) = app_with_terminal(4);
-		let (mut right, _right_rx) = app_with_terminal(4);
-		// `is_live` is "a shell is on screen", which is the terminal screen — the helper above builds
-		// the emulator and the channel but leaves the tab on its default screen.
-		left.screen = AppScreen::Terminal;
-		right.screen = AppScreen::Terminal;
+		let (left, _left_rx) = app_with_terminal(4);
+		let (right, _right_rx) = app_with_terminal(4);
+		// Both are already live: since §134 the helper builds a SESSION, so "the emulator exists"
+		// and "a shell is on screen" are one fact and the two lines that used to set the screen
+		// afterwards have nothing left to say.
 		let old = app.focus;
 		let _ = split(&mut app, ui::split::Way::Horizontal);
 		let fresh = app.focus;
@@ -10737,8 +11168,7 @@ mod tests {
 	fn live_tab(id: u64, endpoint: &str, cwd: &str) -> (Tab, mpsc::Receiver<SshCommand>) {
 		let (mut tab, rx) = app_with_terminal(32);
 		tab.id = id;
-		tab.screen = AppScreen::Terminal;
-		tab.connection = Some(endpoint.to_owned());
+		tab.set_endpoint(endpoint.to_owned());
 		// One OSC 7 announcement, which is how a shell says where it is (§17).
 		let _ = tab.on_ssh_event(shell_output(
 			format!("\x1b]7;file://host{cwd}\x07").as_bytes(),
@@ -10978,7 +11408,7 @@ mod tests {
 
 		let _ = copy.open_copy_of("u@h:22", Some("/srv/www".to_owned()));
 		assert!(
-			matches!(copy.screen, AppScreen::Connecting { .. }),
+			matches!(copy.screen, AppScreen::Session(_)),
 			"dialed without asking anything"
 		);
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
@@ -10986,7 +11416,7 @@ mod tests {
 		// The shell opens: the carried directory is replayed as a `cd` and pins the pane against the
 		// announcements that follow, exactly as a remembered one is (§22).
 		let _ = copy.on_ssh_event(SshEvent::Connected);
-		assert_eq!(copy.resume_cwd.as_deref(), Some("/srv/www"));
+		assert_eq!(copy.resume_cwd(), Some("/srv/www"));
 		assert_eq!(
 			copy.carry_cwd, None,
 			"spent, so the next session inherits nothing"
@@ -11058,7 +11488,7 @@ mod tests {
 		let (tx, mut rx) = mpsc::channel(64);
 		let _ = copy.on_ssh_event(SshEvent::Ready(tx));
 		assert!(!copy.pending_connect, "spent");
-		assert!(matches!(copy.screen, AppScreen::Connecting { .. }));
+		assert!(matches!(copy.screen, AppScreen::Session(_)));
 		assert!(matches!(rx.try_recv(), Ok(SshCommand::Connect(_))));
 		assert_eq!(
 			copy.carry_cwd.as_ref().map(|carry| carry.cwd.as_str()),
@@ -11088,7 +11518,8 @@ mod tests {
 		let _ = copy.on_connect_pressed();
 		let _ = copy.on_ssh_event(SshEvent::Connected);
 		assert_eq!(
-			copy.resume_cwd, None,
+			copy.resume_cwd(),
+			None,
 			"no `cd` into a directory from another filesystem"
 		);
 		assert_eq!(
@@ -11129,7 +11560,7 @@ mod tests {
 		let id = elevate_to(&mut app);
 		// Output for an account that is NOT on screen goes to its parked emulator and stops there.
 		let _task = app.on_ssh_event(SshEvent::Output {
-			identity: if app.identity == id {
+			identity: if app.identity() == id {
 				bridge::LOGIN_IDENTITY
 			} else {
 				id
@@ -11149,7 +11580,7 @@ mod tests {
 	fn a_parked_identity_s_reply_is_addressed_to_its_own_shell() {
 		let (mut app, mut rx) = app_with_login_identity();
 		let id = elevate_to(&mut app);
-		let parked = if app.identity == id {
+		let parked = if app.identity() == id {
 			bridge::LOGIN_IDENTITY
 		} else {
 			id

@@ -164,7 +164,7 @@ impl Tab {
 	/// them. Only meaningful with a live connection (the forwards belong to that target); the
 	/// specs are written whole, and `set_forwards` skips the disk write when nothing changed.
 	fn persist_forwards(&mut self) {
-		let Some(endpoint) = self.connection.clone() else {
+		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
 		};
 		let specs: Vec<crate::forward::ForwardSpec> = self

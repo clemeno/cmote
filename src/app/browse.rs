@@ -417,7 +417,7 @@ impl Tab {
 			ExplorerMessage::CopyRelative(path) => {
 				self.panes.tree.close_menu();
 				// The menu disables this item without a cwd, so this is belt and braces.
-				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
+				let Some(cwd) = self.terminal().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
 				};
 				let text = explorer::relative(cwd, &path);
@@ -473,8 +473,13 @@ impl Tab {
 	/// the name of the command. So the shell composes its own (`local::shells::ShellKind::cd`), and a path
 	/// that will not translate types nothing at all rather than a `cd` to somewhere invented.
 	fn move_shell_to(&mut self, path: &str) {
-		self.resume_cwd = None;
-		let command = match self.local {
+		// The pin is the session's, and so is the shell kind (§134) — one borrow, ending before the
+		// send below.
+		let Some(session) = self.session_mut() else {
+			return;
+		};
+		session.resume_cwd = None;
+		let command = match session.local {
 			Some(kind) => kind.cd(path),
 			None => Some(format!("cd {}", explorer::shell_quote(path))),
 		};
@@ -531,14 +536,15 @@ impl Tab {
 	/// spent in that case either, the pin included: there is no ask to outrank.
 	pub(super) fn on_reveal(&mut self) {
 		let Some(cwd) = self
-			.terminal
-			.as_ref()
+			.terminal()
 			.and_then(term::Terminal::cwd)
 			.map(str::to_owned)
 		else {
 			return;
 		};
-		self.resume_cwd = None;
+		if let Some(session) = self.session_mut() {
+			session.resume_cwd = None;
+		}
 		let fetches = self.panes.reveal(&cwd);
 		self.send_fetches(fetches);
 	}
@@ -749,7 +755,7 @@ impl Tab {
 			FilesMessage::CopyRelative(path) => {
 				self.panes.pane.close_menu();
 				// The menu disables this item without a cwd, so this is belt and braces.
-				let Some(cwd) = self.terminal.as_ref().and_then(term::Terminal::cwd) else {
+				let Some(cwd) = self.terminal().and_then(term::Terminal::cwd) else {
 					return iced::Task::none();
 				};
 				let cwd = cwd.to_owned();
@@ -945,11 +951,10 @@ mod tests {
 	fn reveal_during_a_resume_ends_the_pin_rather_than_stranding_the_panes() {
 		use crate::ui::connect::AuthKind;
 
-		let (tx, _rx) = mpsc::channel(64);
-		let mut app = Tab {
-			command_tx: Some(tx),
-			..Tab::default()
-		};
+		// Mid-dial, because that is the state a `Connected` arrives in (§134). This used to be a
+		// `Tab::default()` with a channel bolted on and an endpoint written into a field — a tab on
+		// the HOME screen holding a connection, which nothing rejected.
+		let (mut app, _rx) = dialing_tab("u@h:22", 64);
 
 		app.targets
 			.borrow_mut()
@@ -962,23 +967,18 @@ mod tests {
 				..crate::targets::SessionState::default()
 			},
 		);
-		app.connection = Some("u@h:22".to_owned());
 		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
 
 		let announce = |dir: &str| shell_output(format!("\x1b]7;file://host{dir}\x07").as_bytes());
 
 		let _ = app.on_ssh_event(SshEvent::Connected);
 		let _ = app.on_ssh_event(announce("/home/u"));
-		assert_eq!(
-			app.resume_cwd.as_deref(),
-			Some("/var/log"),
-			"still settling"
-		);
+		assert_eq!(app.resume_cwd(), Some("/var/log"), "still settling");
 
 		// The user asks for the panes to come to the shell, mid-resume.
 		let _task = app.update(Message::RevealPressed);
 		assert_eq!(app.panes.pane.path(), Some("/home/u"), "the panes came");
-		assert_eq!(app.resume_cwd, None, "and the pin is spent");
+		assert_eq!(app.resume_cwd(), None, "and the pin is spent");
 
 		// The replayed `cd` lands. It is a real move now, so both panes follow it — where
 		// before, the leftover pin read it as "already there" and left them behind.

@@ -15094,3 +15094,179 @@ that line can become the default without a behaviour question attached.
   account's state into another's pane."*
 - **The series stands at three of four.** §130, §131 and §132 removed reachable bad states and are
   independent of this. `Tab` is 44 fields; it was 50.
+
+## §134 — Splitting the question by who is asking, and the session that finishes the series
+
+§133 recorded a wall and named the way through it. This is that way.
+
+`AppScreen::Session(Session)` replaces **both** `Connecting { status }` and `Terminal`, and the
+session lives in the screen — which §133 showed was impossible until [`Prompt`] was split.
+
+### The split
+
+§132 argued the six prompts are one thing, on the grounds that all six render `form_with_dialog`.
+Drawing the same way turned out to be the only thing they share. The real division is **who is
+asking**:
+
+| question | asked by | when | lives in |
+|---|---|---|---|
+| the vault's master passphrase | the FORM | *before* anything is dialed | `ConnectFlow::prompt` |
+| the failure notice | the FORM | *after* a session has gone | `ConnectFlow::prompt` |
+| an unknown host key | the HANDSHAKE | mid-dial | `SessionState::Dialing::asking` |
+| a changed host key | the HANDSHAKE | mid-dial | " |
+| a key passphrase | the HANDSHAKE | mid-dial | " |
+| a keyboard-interactive challenge | the HANDSHAKE | mid-dial | " |
+
+The four handshake questions become [`Challenge`]. They are asked by a session that already exists,
+which is why they can live in it — and why putting them anywhere else made the session
+unrepresentable. §133's blocker in one line: `open_prompt` set `AppScreen::Connect`, so a host-key
+dialog threw away the session whose host key it was asking about.
+
+`open_prompt` still moves the screen, for the form's two — and that is now *correct* rather than
+incidental, because reaching either of them means no session is running. `ask_challenge` moves
+nothing. The two methods sit next to each other and the difference between them is this section.
+
+**What it looks like did not change.** A challenge still draws `form_with_dialog`: the same dimmed
+form, the same card. Only the arm it is drawn from moved, from `Connect` to `Session`.
+
+### The teardown, three times
+
+`Disconnected` and `Error` each ran the same seven calls by hand, in an order that mattered, and then
+left for **different screens** — home, and the failure over the form. `on_disconnect_confirmed` ran a
+third copy. All three are now:
+
+```rust
+self.persist_session();
+self.abandon_transfers();     // lifts `unfinished` out, which must outlive the session (§16)
+self.abandon_attempt();
+self.clear_grid_interaction();
+self.go_home()                // or `show_error`, which is the whole difference
+```
+
+`forget_connection` and `forget_identities` are gone — there is nothing left for them to forget.
+`clear_grid_interaction` lost the five lines that cleared the live view, because a fresh session
+builds one empty and a teardown drops one whole.
+
+### §45's swap, in one line
+
+`Session` holds the on-screen identity's view as a [`Workspace`] — the same type the parked
+identities hold. So `exchange` is gone, and with it the comment that made it dangerous:
+
+> The one place that has to be COMPLETE: every field of `Workspace` is exchanged here, and a field
+> added there without a line here would leak one account's state into another's pane.
+
+Seven `mem::swap`s become one:
+
+```rust
+std::mem::swap(&mut session.work, &mut incoming);
+```
+
+There is no list to keep complete, so there is no way to leave a field out of it. This is the §45
+question §130 flagged as the risk and §133 never reached.
+
+### Where the line fell, and the second test for it
+
+Fifteen fields moved. **Nine did not**, and §133's second test is why: *can the field be reached
+without also reaching `Tab`?* `panes`, `transfers`, `forwards`, `next_forward_id`, `modal`, `focus`,
+`pointer`, `menu` and `pending_elevation` are touched by methods that also need `command_tx`,
+`dialog_body` or `card` — nineteen of `browse.rs`'s twenty-six among them — and Rust cannot split a
+borrow through a method. Moving them buys nothing, because nothing tags them: a `Panes` on a tab with
+no session is an unused default, not a bug waiting to happen.
+
+Four more stayed for reasons their own docs already gave: `command_tx` (the worker is the TAB's and
+survives a disconnect), `unfinished` (*"the single thing that must outlive one"*), `carry_cwd` (set by
+the chip menu before any session exists, §52) and `window_focused` (a fact about the OS window).
+
+**The cost, stated plainly.** The live view's four scalars — `selection`, `selecting`, `hover_cell`,
+`search` — got get/set accessor pairs, which is the noise that kept `panes` out. It is accepted for
+them because they are `Copy` scalars rather than a module with an API, there are ~40 sites rather than
+~290, and the grid path interleaves them with `send_command` and `set_focus` statement by statement,
+so the alternative is an `if let Some(work)` around every second line rather than a rename.
+
+### Proving it
+
+**Three states, refused by the compiler:**
+
+```
+error[E0560]: struct `app::Tab` has no field named `connection`
+error[E0560]: struct `app::Tab` has no field named `terminal`
+error[E0599]: no variant … named `Terminal` found for enum `app::AppScreen`
+```
+
+`connection: Option<String>`, `terminal: Option<term::Terminal>` and the pair of `AppScreen` variants
+were **three values agreeing about one fact**, and the teardown put all three back by hand, twice.
+
+**And the round trip is under test.** Making `ask_challenge` move the screen — the pre-§134
+behaviour — fails three tests, including the host-key one that now asserts the session survives being
+asked about. That is §133's blocker, turned into a regression test.
+
+### Nine tests were arranging states that cannot exist
+
+Every failure this section caused was the same class, and the class is the point: tests that built a
+session by *writing fields on a session-less `Tab`*. `Tab { command_tx, ..Tab::default() }` — the home
+screen — followed by an endpoint written into a field and a `Connected` event. All nine passed before,
+because nothing checked that the screen agreed with the fields. `fixtures::dialing_tab` is what they
+say instead.
+
+Two of them were asserting things that turned out to be warts:
+
+* `dismissing_a_prompt_drops_what_was_typed_into_it` re-asked after a cancel and expected the prompt
+  to come *back*. Cancelling sends `Disconnect`, so the session is over; a late `NeedPassphrase` from
+  the handshake being torn down now lands nowhere instead of re-opening a prompt for a connect the
+  user had just cancelled. The test's actual subject — a fresh ask starts empty — is asserted on a
+  fresh dial.
+* `an_unknown_host_key_…` checked `!matches!(screen, AppScreen::Connecting { .. })` to mean "a refusal
+  did not move on to authenticating". With the session as the screen either way, it asserts what it
+  was always checking: the question still stands and the status never became `"authenticating…"`.
+
+### `large_enum_variant`, the third opinion
+
+§130 expected it, §132 retired the expectation, §134 reinstates it — `Session` carries a `Workspace`
+carries a `term::Terminal`, which is 4 696 bytes alone.
+
+| | bytes |
+|---|---|
+| `AppScreen` (all of it `Session`) | 5 016 |
+| `ConnectFlow` / `Viewer` / `HomeScreen` | 208 / 304 / 56 |
+| `Tab` **before §130** | 7 688 |
+| `Tab` **now** | 7 216 |
+
+Every byte the enum gained is a byte a `Tab` field gave up, and `Tab` came out **472 bytes smaller**.
+Boxing would buy back a few kilobytes of seven for an allocation per session and a deref on the path
+that draws every frame.
+
+`struct_excessive_bools` went the other way and is gone: three of `Tab`'s eight bools are left, the
+rest having moved into the screens that own them. Both are `#[expect]` rather than `#[allow]`
+precisely so `-D warnings` tells us when they stop being true (§111).
+
+### Files
+
+- `src/app/mod.rs` — `AppScreen::Session(Session)` in place of two variants; `Session`,
+  `SessionState`, `Challenge`; `Prompt` down to two variants; fifteen fields off `Tab`;
+  `ask_challenge` beside `open_prompt`; the teardown collapsed in three places;
+  `forget_connection` gone.
+- `src/app/accounts.rs` — `exchange` gone, the swap one line, the identity list reached through the
+  session.
+- `src/app/connect.rs` — `dial` and `dial_local` build the session; `authenticating` is
+  `Session::proceeding`; the two challenge answers come off the session.
+- `src/app/browse.rs`, `src/app/forwards.rs` — the pin and the shell kind through the session.
+- `src/app/fixtures.rs` — `dialing_tab` and `live_session`; `app_with_terminal` builds a session.
+- `PLAN.md` — this section.
+
+1 147 insertions, 685 deletions. `Tab` is **29 fields**, from 50 five sections ago; `mod.rs` is
+11 647 lines; 1 556 tests.
+
+### Not done
+
+- **`Tab` is 29 fields and the next question is not a screen.** `pending_target`,
+  `pending_remember`, `pending_connect` and `passphrase_failed` are the connect ATTEMPT's state,
+  cleared together by `abandon_attempt` — the same shape `HomeScreen`, `ConnectFlow` and `Session`
+  just took, one level over. That is candidate 3 of the architecture review, not this series.
+- **`Identity::work` is still an `Option`-shaped placeholder.** The on-screen identity's entry holds
+  `Workspace::default()` while its real view is in `Session::work`, so "empty iff this is the one on
+  screen" is a convention again — the exact shape §130–§134 removed four times. It is the last one
+  left and it wants the same treatment.
+- **The nine fields that stayed have not been re-argued.** The reason they stayed is a fact about
+  today's method bodies, not a law: if `open_modal` and `send_command` ever move behind a seam that
+  does not need all of `Tab`, the borrow objection goes away and `panes` becomes a fair question
+  again.

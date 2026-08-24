@@ -20,8 +20,8 @@ use iced::widget::pane_grid;
 use tokio::sync::mpsc;
 
 use super::{
-	App, AppScreen, AuthKind, Focus, Identity, Message, Region, SshCommand, SshEvent, Tab,
-	Workspace, bridge, term, ui,
+	App, AppScreen, AuthKind, Focus, Identity, Message, Region, Session, SessionState, SshCommand,
+	SshEvent, Tab, Workspace, bridge, term, ui,
 };
 
 // An `App` with a live emulator and an open command channel, so `send_command` succeeds
@@ -29,20 +29,55 @@ use super::{
 // shell — the baseline a program assumes — so a focus change is measured against it.
 pub(super) fn app_with_terminal(rx_cap: usize) -> (Tab, mpsc::Receiver<SshCommand>) {
 	let (tx, rx) = mpsc::channel(rx_cap);
+	// A tab with a live terminal is a tab with a live SESSION (§134) — one value, so the fixture can
+	// no longer set a terminal and forget the screen. It used to be able to, and its own comment
+	// recorded what that cost: the fixture sat at its `Home` default for a long time and nothing
+	// minded, because `on_key` only ever ran on the terminal screen in production and so never had
+	// to ask. `keyboard_claim` does ask.
+	let mut session = live_session("cme@rec:22", None);
+	session.work.terminal = Some(term::Terminal::new(24, 80));
 	let app = Tab {
 		command_tx: Some(tx),
-		terminal: Some(term::Terminal::new(24, 80)),
-		// A tab with a live terminal is ON the terminal screen — the fixture left this at its
-		// `Home` default for a long time and nothing minded, because `on_key` only ever ran on
-		// this screen in production and so never had to ask. `keyboard_claim` does ask, since
-		// which claimants exist at all is a property of the screen.
-		screen: AppScreen::Terminal,
+		screen: AppScreen::Session(session),
 		window_focused: true,
-		shell_focus_reported: true,
 		focus: Focus::Terminal,
 		..Tab::default()
 	};
 	(app, rx)
+}
+
+// A tab mid-DIAL: a session exists and there is no shell yet, which is the state `Connected`, a
+// host-key question and a passphrase ask all actually arrive in (§134).
+//
+// Before it, the tests that needed this wrote `connection = Some(…)` (and sometimes a terminal) on a
+// `Tab` still sitting on the home screen — an endpoint with no session, which is precisely the shape
+// §134 made unwritable. Nine of them, and every one passed, because nothing ever checked that the
+// screen agreed with the fields.
+pub(super) fn dialing_tab(endpoint: &str, cap: usize) -> (Tab, mpsc::Receiver<SshCommand>) {
+	let (tx, rx) = mpsc::channel(cap);
+	let app = Tab {
+		command_tx: Some(tx),
+		screen: AppScreen::Session(Session::dialing(
+			endpoint.to_owned(),
+			None,
+			"connecting…".to_owned(),
+		)),
+		window_focused: true,
+		..Tab::default()
+	};
+	(app, rx)
+}
+
+// A session that is already LIVE, for the fixtures that need one to hang state off (§134). Built
+// through `Session::dialing` and then flipped, rather than by naming every field: a fixture that
+// listed them would be a second constructor to keep in step with the real one.
+pub(super) fn live_session(
+	endpoint: &str,
+	local: Option<crate::local::shells::ShellKind>,
+) -> Session {
+	let mut session = Session::dialing(endpoint.to_owned(), local, String::new());
+	session.state = SessionState::Live;
+	session
 }
 
 // One chunk of output from the LOGIN shell (§45) — the identity every test's terminal is,
@@ -67,15 +102,16 @@ pub(super) fn next_input(rx: &mut mpsc::Receiver<SshCommand>) -> Option<Vec<u8>>
 // makes a switch possible at all.
 pub(super) fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 	let (mut app, rx) = app_with_terminal(32);
-	app.screen = AppScreen::Terminal;
-	app.identities = vec![Identity {
-		id: bridge::LOGIN_IDENTITY,
-		account: None,
-		ready: true,
-		work: Workspace::default(),
-	}];
-	app.identity = bridge::LOGIN_IDENTITY;
-	app.next_identity = 1;
+	if let Some(session) = app.session_mut() {
+		session.identities = vec![Identity {
+			id: bridge::LOGIN_IDENTITY,
+			account: None,
+			ready: true,
+			work: Workspace::default(),
+		}];
+		session.identity = bridge::LOGIN_IDENTITY;
+		session.next_identity = 1;
+	}
 	(app, rx)
 }
 
@@ -84,14 +120,16 @@ pub(super) fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 // used to list it, and then announced live. Returns the new identity's number, which is also on
 // screen when this returns.
 pub(super) fn elevate_to(app: &mut Tab) -> u64 {
-	let id = app.next_identity;
-	app.next_identity += 1;
-	app.identities.push(Identity {
-		id,
-		account: Some("root".to_owned()),
-		ready: false,
-		work: Workspace::default(),
-	});
+	let id = app.next_identity();
+	if let Some(session) = app.session_mut() {
+		session.next_identity += 1;
+		session.identities.push(Identity {
+			id,
+			account: Some("root".to_owned()),
+			ready: false,
+			work: Workspace::default(),
+		});
+	}
 	let _task = app.on_ssh_event(SshEvent::IdentityEnded {
 		identity: u64::MAX, // a stray event for nothing, to prove it disturbs nothing
 		reason: None,
@@ -107,8 +145,8 @@ pub(super) fn elevate_to(app: &mut Tab) -> u64 {
 // the preference and the password flag live on the TARGET, so a session with no target to write
 // to would exercise half of each path.
 pub(super) fn app_with_saved_target() -> (Tab, mpsc::Receiver<SshCommand>) {
-	let (mut app, rx) = app_with_login_identity();
-	app.connection = Some("cme@rec:22".to_owned());
+	let (app, rx) = app_with_login_identity();
+	// The endpoint is the session's now (§134), and `app_with_terminal` already dialed this one.
 	app.targets
 		.borrow_mut()
 		.upsert_on_connect("rec", 22, "cme", AuthKind::Password, None, None);

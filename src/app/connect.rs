@@ -17,8 +17,8 @@
 // methods the rest of `app` calls; a plain `fn` is used only here.
 
 use super::{
-	AppScreen, AuthKind, Carry, Element, HostKeyChoice, Message, Prompt, Secret, SshCommand, Tab,
-	VaultPending, bridge, explorer, extract_secret, ui,
+	AppScreen, AuthKind, Carry, Challenge, Element, HostKeyChoice, Message, Prompt, Secret,
+	SshCommand, Tab, VaultPending, bridge, explorer, extract_secret, ui,
 };
 
 impl Tab {
@@ -110,8 +110,10 @@ impl Tab {
 		// capture it now, before `params` moves into the command.
 		let endpoint = format!("{}@{}:{}", params.user, params.host, params.port);
 		if self.send_command(SshCommand::Connect(params)) {
-			self.connection = Some(endpoint);
-			self.screen = AppScreen::Connecting { status };
+			// The session begins HERE (§134), which is the one thing `dial` and `dial_local` both do
+			// and neither used to say: they set `connection`, and then a screen, and the two agreeing
+			// was a convention. One value now.
+			self.screen = AppScreen::Session(super::Session::dialing(endpoint, None, status));
 		} else {
 			// The command never left, so there is no attempt for either capture to belong to.
 			self.abandon_attempt();
@@ -127,7 +129,7 @@ impl Tab {
 	/// two clicks between the session and the first folder anyone wants. So the two panes start where
 	/// the shell already is.
 	pub(super) fn default_files_root(&self) -> String {
-		if self.local.is_some() {
+		if self.local().is_some() {
 			crate::local::path::home()
 		} else {
 			explorer::ROOT.to_owned()
@@ -153,9 +155,7 @@ impl Tab {
 		let endpoint = shell.endpoint();
 		let kind = shell.kind;
 		if self.send_command(SshCommand::ConnectLocal(shell)) {
-			self.connection = Some(endpoint);
-			self.local = Some(kind);
-			self.screen = AppScreen::Connecting { status };
+			self.screen = AppScreen::Session(super::Session::dialing(endpoint, Some(kind), status));
 		}
 		iced::Task::none()
 	}
@@ -322,12 +322,13 @@ impl Tab {
 	/// prompts reach it, and a copy that forgot to close the prompt would leave the dialog on screen
 	/// over a connection that had already moved on.
 	fn authenticating(&mut self) {
-		// Leaving the connect screen IS closing the question (§132): the whole flow goes, so the
-		// dialog cannot be left on screen over a connection that has already moved on. That was the
-		// `prompt = None` this used to open with, and the reason the doc above gives for it.
-		self.screen = AppScreen::Connecting {
-			status: "authenticating…".to_owned(),
-		};
+		// The session says what it is doing and stops asking, in one call (§134). It used to move the
+		// SCREEN, from `Connect` back to `Connecting` — which is what made §133 impossible, because
+		// the session had to survive that round trip and could not if it lived in the screen. Nothing
+		// moves now: the challenge was the session's all along.
+		if let Some(session) = self.session_mut() {
+			session.proceeding("authenticating…");
+		}
 	}
 
 	/// Relay the user's host-key choice to the SSH task (§8): reject, trust once, or pin. Any
@@ -346,7 +347,7 @@ impl Tab {
 	pub(super) fn on_passphrase_submitted(&mut self) {
 		// Taking the prompt takes the typed text with it and moves it straight into a `Secret`, so
 		// no plain copy is left behind whether the send succeeds or not (§12).
-		let Some(Prompt::Passphrase(input)) = self.take_prompt() else {
+		let Some(Challenge::Passphrase(input)) = self.take_asked() else {
 			return;
 		};
 		if self.send_command(SshCommand::Passphrase(Secret::new(input))) {
@@ -366,7 +367,8 @@ impl Tab {
 	/// The vault prompt is NOT one of these: it is asked BEFORE anything is dialed, so there is no
 	/// handshake to tear down — see `on_vault_cancelled`.
 	pub(super) fn on_credential_cancelled(&mut self) -> iced::Task<Message> {
-		// `go_to_form` below rebuilds the flow, so the discarded text goes with the old one (§132).
+		// `go_to_form` below leaves the session screen, so the challenge and its typed text go with
+		// the session that was asking (§134).
 		self.send_command(SshCommand::Disconnect);
 		self.abandon_attempt();
 		self.go_to_form()
@@ -379,7 +381,7 @@ impl Tab {
 	pub(super) fn on_interactive_submitted(&mut self) -> iced::Task<Message> {
 		// Taking the prompt takes the answers with it and moves each straight into a `Secret`, so
 		// no plain copy of an OTP or password is left behind (§12).
-		let Some(Prompt::Interactive { answers, .. }) = self.take_prompt() else {
+		let Some(Challenge::Interactive { answers, .. }) = self.take_asked() else {
 			return iced::Task::none();
 		};
 		let answers: Vec<Secret> = answers.into_iter().map(Secret::new).collect();
@@ -703,18 +705,16 @@ mod tests {
 	/// moving on to "authenticating", so a rejected server never looks like a connecting one.
 	#[test]
 	fn an_unknown_host_key_is_trusted_only_by_an_explicit_choice() {
-		let (mut app, mut rx) = app_with_terminal(16);
+		let (mut app, mut rx) = dialing_tab("cme@rec:22", 16);
 		let _ = app.on_ssh_event(SshEvent::HostKey("SHA256:aaaa".to_owned()));
 		// One pattern for both halves since §132: a host-key question exists only as part of the
 		// connect screen, so "the prompt is up" and "the screen shows it" are one claim. The four
 		// `on_ssh_event` arms that open a prompt used to set the screen on the next line by hand.
-		assert!(matches!(
-			app.screen,
-			AppScreen::Connect(ConnectFlow {
-				prompt: Some(Prompt::HostKey),
-				..
-			})
-		));
+		assert!(matches!(app.asking(), Some(Challenge::HostKey)));
+		assert!(
+			matches!(app.screen, AppScreen::Session(_)),
+			"and the session it is being asked about is still the screen (§134) — this is the 			 round trip that made §133's shape impossible"
+		);
 		assert!(
 			next_command(&mut rx).is_none(),
 			"asking is not answering: nothing goes back until the user chooses"
@@ -725,8 +725,21 @@ mod tests {
 			next_command(&mut rx),
 			Some(SshCommand::HostKeyResponse(HostKeyChoice::Reject))
 		));
+		// The handshake did NOT move on: the question still stands and the status never became
+		// "authenticating". This used to be `!matches!(screen, AppScreen::Connecting { .. })`,
+		// which said the same thing when a rejection left the screen on `Connect` — and cannot,
+		// now that the session is the screen either way (§134). What it was checking is that
+		// `on_host_key_decision` does not call `authenticating` on a refusal, so that is what it
+		// checks.
 		assert!(
-			!matches!(app.screen, AppScreen::Connecting { .. }),
+			matches!(app.asking(), Some(Challenge::HostKey)),
+			"a refusal leaves the question standing until the far side says the handshake is over"
+		);
+		assert!(
+			!matches!(
+				app.session().map(|session| &session.state),
+				Some(SessionState::Dialing { status, .. }) if status == "authenticating…"
+			),
 			"a refusal does not read as a connection in progress"
 		);
 	}
@@ -739,12 +752,12 @@ mod tests {
 		use iced::keyboard::Modifiers;
 		use iced::keyboard::key::{Code, Named};
 
-		let (mut app, mut rx) = app_with_terminal(16);
+		let (mut app, mut rx) = dialing_tab("cme@rec:22", 16);
 		let _ = app.on_ssh_event(SshEvent::HostKeyChanged {
 			stored: "SHA256:old".to_owned(),
 			presented: "SHA256:new".to_owned(),
 		});
-		assert!(matches!(app.prompt(), Some(Prompt::HostKeyChanged)));
+		assert!(matches!(app.asking(), Some(Challenge::HostKeyChanged)));
 		assert!(next_command(&mut rx).is_none());
 
 		// Both fingerprints are in the copyable body, so the user can compare them out of band.
@@ -755,7 +768,7 @@ mod tests {
 		// Enter there would press Connect (§10).
 		let _ = app.on_form_key(key_press(Named::Enter, Code::Enter, Modifiers::empty()));
 		assert!(next_command(&mut rx).is_none());
-		assert!(matches!(app.prompt(), Some(Prompt::HostKeyChanged)));
+		assert!(matches!(app.asking(), Some(Challenge::HostKeyChanged)));
 
 		// Replacing the pinned key is the deliberate act, and only then does the handshake go on.
 		let _ = app.update(Message::ReplaceHostKey);
@@ -767,7 +780,7 @@ mod tests {
 		// same fact: the handshake moved on, and no dialog is left over it. Since §132 the second
 		// FOLLOWS from the first — `authenticating` closes the question by leaving the screen that
 		// holds it, rather than by clearing a field and hoping the two stay in step.
-		assert!(matches!(app.screen, AppScreen::Connecting { .. }));
+		assert!(matches!(app.screen, AppScreen::Session(_)));
 		assert!(app.prompt().is_none(), "the question is answered and gone");
 	}
 
