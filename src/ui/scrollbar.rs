@@ -55,6 +55,43 @@ pub const MIN_THUMB: f32 = 16.0;
 /// right place on each of them by construction rather than by a colour per surface.
 pub const THUMB: Color = Color::from_rgba(0.82, 0.82, 0.82, 0.55);
 
+/// How a bar is being touched right now (§125) — the one vocabulary both surfaces answer in.
+///
+/// Neither surface's own state is usable by the other: a pane's comes from iced's
+/// `scrollable::Status`, which names four flags per axis, and the terminal's from a grip field and a
+/// hit test. So the shared thing is this, and each side maps its own facts onto it. Three values and
+/// not a pair of bools, because "hovered while dragged" is not a state — a drag holds the bar
+/// whether or not the pointer has strayed off it (§116).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Touch {
+	/// Nothing is on it.
+	Idle,
+	/// The pointer is over its lane.
+	Hovered,
+	/// It is being dragged, wherever the pointer has got to.
+	Dragged,
+}
+
+/// The thumb's colour for how it is being touched (§125).
+///
+/// Only the ALPHA moves, and that is what keeps one colour working over four different darks: the
+/// grey is chosen to blend, so brightening it by opacity stays in the right place on each surface,
+/// where a lighter grey would drift towards white on the darkest one and vanish on the lightest.
+///
+/// §118 said the look does not change with status and that a bar which brightened under the pointer
+/// "would no longer be the same bar" — true, and the answer is that BOTH bars brighten now. The
+/// decision this replaces was never "no feedback"; it was "not on one surface only".
+pub fn thumb(touch: Touch) -> Color {
+	Color {
+		a: match touch {
+			Touch::Idle => THUMB.a,
+			Touch::Hovered => 0.75,
+			Touch::Dragged => 0.95,
+		},
+		..THUMB
+	}
+}
+
 /// The thumb's corner radius — fully rounded, which for a bar `WIDTH` across is half of it.
 pub fn radius() -> f32 {
 	WIDTH / 2.0
@@ -78,25 +115,78 @@ pub fn bar() -> scrollable::Scrollbar {
 /// opinion about — the container, the gap between two rails, the autoscroll overlay — keep following
 /// the theme instead of being frozen here at whatever they happened to be.
 ///
-/// The look does not change with `status`, and that is the point rather than an omission: the
-/// terminal's bar is one colour whether or not it is being dragged, so a pane's that brightened under
-/// the pointer would no longer be the same bar. Adding hover and drag feedback is a fine idea and it
-/// belongs to BOTH surfaces at once, which means it starts here.
+/// Each rail reads its OWN axis out of `status` (§125). iced reports the two axes separately, and a
+/// style that took "hovered" to mean both would brighten the horizontal bar because the pointer was
+/// on the vertical one — only the editor's buffer has both, so it would have been a bug visible in
+/// exactly one place.
 pub fn style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
-	let rail = scrollable::Rail {
-		// No track. The terminal draws the thumb over whatever is behind it and nothing else, which is
-		// what keeps a bar this thin from reading as a groove cut down the edge of the pane.
+	scrollable::Style {
+		vertical_rail: rail(touch_of(status, Axis::Vertical)),
+		horizontal_rail: rail(touch_of(status, Axis::Horizontal)),
+		..scrollable::default(theme, status)
+	}
+}
+
+/// Which of a `scrollable`'s two bars is being asked about — private, because outside this file the
+/// two axes are `Axes`' named fields and never an index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Axis {
+	Vertical,
+	Horizontal,
+}
+
+/// One rail: the terminal's thumb at this touch, over no track.
+///
+/// No track at all. The terminal draws the thumb over whatever is behind it and nothing else, which
+/// is what keeps a bar this thin from reading as a groove cut down the edge of the pane.
+fn rail(touch: Touch) -> scrollable::Rail {
+	scrollable::Rail {
 		background: None,
 		border: Border::default(),
 		scroller: scrollable::Scroller {
-			background: THUMB.into(),
+			background: thumb(touch).into(),
 			border: Border::default().rounded(radius()),
 		},
+	}
+}
+
+/// One axis' [`Touch`], read out of iced's four-flags-per-axis `Status` (§125).
+///
+/// **The two flags cannot both be set here**, `Status` being one variant at a time, so the order of
+/// the branches below is not load-bearing and no test pretends otherwise — a probe that swapped them
+/// stayed green, which is how that was established. The precedence that IS real belongs to the
+/// terminal's bar, where the two facts are independent booleans: see `ui::grid::scrollbar_touch`.
+///
+/// What the branches do carry is the per-AXIS read, and the compiler holds that one: the pattern
+/// names both flags, so using one of them twice is a denied `unused_variables` rather than a wrong
+/// colour on the editor's horizontal bar. Both probes were tried; that is the one that would not
+/// build.
+fn touch_of(status: scrollable::Status, axis: Axis) -> Touch {
+	let (hovered, dragged) = match status {
+		scrollable::Status::Active { .. } => (false, false),
+		scrollable::Status::Hovered {
+			is_vertical_scrollbar_hovered,
+			is_horizontal_scrollbar_hovered,
+			..
+		} => match axis {
+			Axis::Vertical => (is_vertical_scrollbar_hovered, false),
+			Axis::Horizontal => (is_horizontal_scrollbar_hovered, false),
+		},
+		scrollable::Status::Dragged {
+			is_vertical_scrollbar_dragged,
+			is_horizontal_scrollbar_dragged,
+			..
+		} => match axis {
+			Axis::Vertical => (false, is_vertical_scrollbar_dragged),
+			Axis::Horizontal => (false, is_horizontal_scrollbar_dragged),
+		},
 	};
-	scrollable::Style {
-		vertical_rail: rail,
-		horizontal_rail: rail,
-		..scrollable::default(theme, status)
+	if dragged {
+		Touch::Dragged
+	} else if hovered {
+		Touch::Hovered
+	} else {
+		Touch::Idle
 	}
 }
 
@@ -135,7 +225,9 @@ impl Axes {
 /// `width + margin`, while the horizontal lane narrows by the vertical lane's FULL
 /// `width + 2 * margin`.
 ///
-/// Pure, so the part that can silently drift from iced is the part a test can hold onto.
+/// Pure, so the part that can silently drift from iced is the part a test can hold onto — and the
+/// release it was read against is pinned by `the_mirror_names_the_iced_release_it_was_read_from`
+/// below, so an upgrade cannot land quietly (§125).
 pub fn lanes(
 	bounds: Rectangle,
 	content: Rectangle,
@@ -558,38 +650,26 @@ mod tests {
 	}
 
 	/// Both rails carry the terminal's thumb and neither carries a track, in every status (§118).
-	/// Written as a loop over the statuses because "the look does not change with status" is the
-	/// decision this module made, so it is the thing to pin — a later edit that reaches for iced's
-	/// hover colour on one rail and not the other would pass a single-status check.
+	/// Written as a loop over the statuses because that is the decision this module made — the SHAPE
+	/// of the bar does not change with status, only its opacity (§125), so a later edit that reached
+	/// for iced's hover colour or gave one rail a groove would pass a single-status check.
 	#[test]
 	fn every_status_draws_the_terminals_thumb_over_no_track() {
 		let theme = Theme::Dark;
-		let statuses = [
-			scrollable::Status::Active {
-				is_horizontal_scrollbar_disabled: false,
-				is_vertical_scrollbar_disabled: false,
-			},
-			scrollable::Status::Hovered {
-				is_horizontal_scrollbar_hovered: true,
-				is_vertical_scrollbar_hovered: true,
-				is_horizontal_scrollbar_disabled: false,
-				is_vertical_scrollbar_disabled: false,
-			},
-			scrollable::Status::Dragged {
-				is_horizontal_scrollbar_dragged: true,
-				is_vertical_scrollbar_dragged: true,
-				is_horizontal_scrollbar_disabled: false,
-				is_vertical_scrollbar_disabled: false,
-			},
-		];
-		for status in statuses {
+		for status in [active(), hovered(true, true), dragged(true, true)] {
 			let style = style(&theme, status);
 			for rail in [style.vertical_rail, style.horizontal_rail] {
 				assert!(rail.background.is_none(), "no track, in {status:?}");
+				let iced::Background::Color(scroller) = rail.scroller.background else {
+					panic!("a flat colour, not a gradient, in {status:?}");
+				};
 				assert_eq!(
-					rail.scroller.background,
-					THUMB.into(),
-					"the terminal's thumb, in {status:?}"
+					scroller,
+					Color {
+						a: scroller.a,
+						..THUMB
+					},
+					"the terminal's grey, whatever the opacity, in {status:?}"
 				);
 				assert!(
 					(rail.scroller.border.radius.top_left - radius()).abs() < f32::EPSILON,
@@ -597,5 +677,106 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	fn active() -> scrollable::Status {
+		scrollable::Status::Active {
+			is_horizontal_scrollbar_disabled: false,
+			is_vertical_scrollbar_disabled: false,
+		}
+	}
+
+	fn hovered(vertical: bool, horizontal: bool) -> scrollable::Status {
+		scrollable::Status::Hovered {
+			is_horizontal_scrollbar_hovered: horizontal,
+			is_vertical_scrollbar_hovered: vertical,
+			is_horizontal_scrollbar_disabled: false,
+			is_vertical_scrollbar_disabled: false,
+		}
+	}
+
+	fn dragged(vertical: bool, horizontal: bool) -> scrollable::Status {
+		scrollable::Status::Dragged {
+			is_horizontal_scrollbar_dragged: horizontal,
+			is_vertical_scrollbar_dragged: vertical,
+			is_horizontal_scrollbar_disabled: false,
+			is_vertical_scrollbar_disabled: false,
+		}
+	}
+
+	/// A touched bar is more opaque and nothing else changes (§125): same grey, same radius, no
+	/// track. The alpha is what the surfaces underneath can all take — see `thumb`.
+	#[test]
+	fn touching_a_bar_only_changes_its_opacity() {
+		let idle = thumb(Touch::Idle);
+		let hover = thumb(Touch::Hovered);
+		let drag = thumb(Touch::Dragged);
+		for touched in [hover, drag] {
+			assert!(
+				(touched.r - idle.r).abs() < f32::EPSILON
+					&& (touched.g - idle.g).abs() < f32::EPSILON
+					&& (touched.b - idle.b).abs() < f32::EPSILON,
+				"the same grey"
+			);
+		}
+		assert!(idle.a < hover.a, "hover shows");
+		assert!(hover.a < drag.a, "and a drag shows more");
+		assert!(drag.a <= 1.0, "still translucent enough to blend");
+	}
+
+	/// Each rail answers for its OWN axis (§125). The editor's buffer is the only surface with both
+	/// bars, so a status read for the wrong axis would brighten a bar the pointer was nowhere near —
+	/// and would do it in exactly one place in the app.
+	#[test]
+	fn one_axis_being_touched_leaves_the_other_alone() {
+		assert_eq!(touch_of(active(), Axis::Vertical), Touch::Idle);
+		assert_eq!(
+			touch_of(hovered(true, false), Axis::Vertical),
+			Touch::Hovered
+		);
+		assert_eq!(
+			touch_of(hovered(true, false), Axis::Horizontal),
+			Touch::Idle
+		);
+		assert_eq!(
+			touch_of(dragged(false, true), Axis::Horizontal),
+			Touch::Dragged
+		);
+		assert_eq!(touch_of(dragged(false, true), Axis::Vertical), Touch::Idle);
+	}
+
+	/// The release `lanes` mirrors. `iced_widget`, not `iced`: the arithmetic being copied is
+	/// `Scrollbar::total_bounds` in that crate, and the two version-number together but are not the
+	/// same number (0.14.0 of `iced` pulls 0.14.2 of `iced_widget`).
+	const MIRRORED_FROM: &str = "0.14.2";
+
+	/// The guard on the one thing in this file that can go wrong without anybody touching it (§125).
+	///
+	/// `lanes` reproduces private arithmetic from `iced_widget::scrollable`. Nothing in cmote breaks
+	/// if that arithmetic changes — the hand simply appears over the wrong strip of pixels, which is
+	/// a bug you have to be looking for to see. The only moment it can happen is a dependency bump,
+	/// so the lockfile is read here and the version pinned: the bump fails this test, the message says
+	/// what to re-read, and the number is updated by whoever re-read it.
+	///
+	/// The lockfile rather than a `build.rs`-exported version, because cmote has no build script and
+	/// adding one for a string comparison would be a build step for every compile to catch a thing
+	/// that changes twice a year. It is committed (the release builds from it), so it is as
+	/// authoritative here as anywhere.
+	#[test]
+	fn the_mirror_names_the_iced_release_it_was_read_from() {
+		let lock = include_str!("../../Cargo.lock");
+		let version = lock
+			.split("\nname = \"iced_widget\"\n")
+			.nth(1)
+			.and_then(|rest| rest.lines().next())
+			.and_then(|line| line.strip_prefix("version = \""))
+			.and_then(|rest| rest.strip_suffix('"'))
+			.expect("Cargo.lock names iced_widget and its version");
+		assert_eq!(
+			version, MIRRORED_FROM,
+			"iced_widget moved from {MIRRORED_FROM} to {version}: re-read `Scrollbar::total_bounds` \
+			 in that crate against `lanes` here, then update MIRRORED_FROM. The two asymmetries \
+			 pinned by the tests above are the parts that matter (§120, §125)."
+		);
 	}
 }

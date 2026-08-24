@@ -334,6 +334,12 @@ pub fn view<'a>(
 		crate::cursor::drawn(crate::cursor::SCROLLBAR);
 	}
 
+	// The grid is the one widget a remote may choose the POINTER over (OSC 22, §77), and the shape
+	// goes INTO it rather than onto the `mouse_area` around it (§125). That is what keeps the scoping
+	// this feature was made cheap by — the shape still stops at the grid's edge, so the splitters, the
+	// tab strip and the dialogs keep saying what they always said — while letting the one widget that
+	// knows where its scrollbar is decide which claim wins over the gutter. The shape has already been
+	// through `term::pointer`'s allow-list, so there is nothing left to check here.
 	let grid = crate::ui::grid::grid(
 		screen,
 		selection,
@@ -341,6 +347,7 @@ pub fn view<'a>(
 		terminal.user_mark_rows(),
 		matches,
 		terminal.images(),
+		grid_interaction(terminal.pointer_shape()),
 	);
 
 	// It reacts to the mouse (§10): press-drag-release drives the text selection and a
@@ -353,16 +360,6 @@ pub fn view<'a>(
 		.on_move(Message::GridMoved)
 		.on_release(Message::GridReleased)
 		.on_right_press(Message::GridRightPressed);
-
-	// And it is the one widget a remote may choose the POINTER over (OSC 22, §77). This is the whole
-	// of the scoping that made the feature cheap: `mouse_area::interaction` applies while the pointer
-	// is inside THIS widget's bounds, so the shape stops at the grid's edge and the splitters, the
-	// tab strip and the dialogs keep saying what they have always said. The shape itself has already
-	// been through `term::pointer`'s allow-list, so there is nothing left to check here.
-	let interactive_grid = match grid_interaction(terminal.pointer_shape()) {
-		Some(interaction) => interactive_grid.interaction(interaction),
-		None => interactive_grid,
-	};
 
 	// Copy is only meaningful with a non-empty selection; the buttons/menu key off this.
 	let has_selection = selection.is_some_and(|selection| !selection.is_empty());

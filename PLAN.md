@@ -14229,3 +14229,96 @@ and a test asserting it there would be asserting nothing.
   answer — compiling both arms everywhere — is unavailable while `std::path` is itself `cfg`-selected:
   the Windows arm's behaviour depends on the platform's own `Path` parser, so dual-compiling it would
   buy compile coverage and hand a future reader a function that behaves differently from its name.
+
+## §125 — The three things left on the scrollbars
+
+§116 to §120 built the scrollbars and left three loose ends, each written down where it happened:
+`lanes` mirrors private iced arithmetic and can drift on an upgrade; the bars have no hover or drag
+feedback, and §118 said adding it "belongs to BOTH surfaces at once, which means it starts here"; and
+a remote's OSC 22 pointer shape reached the terminal's own gutter. All three are this section.
+
+### The mirror, and the only moment it can break
+
+`lanes` reproduces `iced_widget::scrollable`'s `total_bounds` — it has to, because that is the
+rectangle iced itself starts a drag on, so the hand must cover exactly those pixels (§120). Nothing in
+cmote *breaks* if iced changes it: the hand simply appears over a strip that does nothing, or fails to
+appear over one that works. That is a bug you have to be looking for.
+
+It can only happen at a dependency bump, so the guard reads the **lockfile**: a test pulls
+`iced_widget`'s version out of `Cargo.lock` with `include_str!` and compares it to the release the
+mirror was read against. The bump fails the test, the failure message names what to re-read, and
+whoever re-reads it moves the constant. `iced_widget` and not `iced`, because the arithmetic lives in
+that crate and the two version separately — `iced` 0.14.0 pulls `iced_widget` 0.14.2.
+
+No `build.rs`. Adding a build script to every compile, for a string comparison against a thing that
+moves twice a year, is the wrong trade; the lockfile is committed (the release builds from it) and is
+as authoritative here as anywhere.
+
+### The feedback, on both bars, from one function
+
+`scrollbar::Touch` — `Idle`, `Hovered`, `Dragged` — is the vocabulary, and `thumb(touch)` the colour.
+Each surface maps its own facts onto it, because neither surface's state is usable by the other: a
+pane's comes from iced's `Status` (four flags per axis) and the terminal's from a grip field and a hit
+test.
+
+**Only the alpha moves.** The grey was chosen to blend over four different darks — two editor themes,
+the panes, the terminal — so brightening by opacity stays in the right place on each, where a lighter
+grey would drift towards white on the darkest surface and vanish on the lightest.
+
+Two details that are decisions rather than details:
+
+* **Each rail reads its own axis.** iced reports the two separately, and a style that took "hovered"
+  to mean both would brighten the horizontal bar because the pointer was on the vertical one. Only the
+  editor's buffer has both, so that would have been a bug with exactly one home. The compiler holds
+  this one, which is better than a test: the `Status` pattern names both flags, so using one of them
+  twice is a denied `unused_variables`.
+* **A drag outranks a hover — and only on the terminal's side.** §116's drag deliberately survives the
+  pointer straying off the bar, so mid-drag the hover flag is not a fact about the bar any more. On
+  the pane side the same order is written and is *not* load-bearing: `scrollable::Status` is one
+  variant at a time, so the two flags cannot both be set. A probe swapping those branches stayed
+  green, which is how that was established and why the comment there says so instead of claiming a
+  guarantee it does not have.
+
+### The gutter is not the remote's page
+
+`ui::terminal` set the OSC 22 shape on the `mouse_area` wrapped around the grid. Reading
+`mouse_area::mouse_interaction` shows what that does: it substitutes its own interaction when the
+pointer is inside its bounds **and the content answered `Interaction::None`** — and `Interaction::None`
+is exactly what the grid answers over its own scrollbar on Windows, where `grab_interaction` returns
+`None` so that `cursor`'s `WM_SETCURSOR` seam can paint the bitmap.
+
+So a remote's chosen pointer was reaching the one strip of pixels that is cmote's own furniture, and
+which of the two got drawn depended on which mechanism painted last — the seam probably won, and
+"probably" is the problem. The shape now goes INTO the grid widget, and `interaction_over` decides all
+three claims in one place: the bar first, then the remote's shape if the pointer is on the grid at all,
+then nothing. Everything the old arrangement scoped is unchanged — the shape still stops at the grid's
+edge, so the splitters, the strip and the dialogs say what they always said — because `mouse_area`'s
+bounds and the grid's are the same rectangle.
+
+The `is_over` check moved with it, and it has to: `mouse_interaction` is called whether or not the
+pointer is inside, so without it a program's shape would follow the mouse across the whole window.
+
+### Files
+
+- `src/ui/scrollbar.rs` — `Touch`, `thumb`, `rail`, `touch_of`, the per-axis style, and the lockfile
+  guard.
+- `src/ui/grid.rs` — `scrollbar_touch`, the thumb drawn at its touch, `Grid::pointer`, and
+  `interaction_over` split out of `mouse_interaction` so the precedence is testable.
+- `src/ui/terminal.rs` — the shape passed into `grid()` instead of onto the `mouse_area`.
+
+### Not done
+
+- **Nothing here was seen on screen.** The colours, the brightening and the pointer over the gutter are
+  §13's manual category: no test draws a bar. What IS tested is every number and every precedence
+  behind them, and each of those was probed by breaking its own line — except the two that turned out
+  not to be lines at all (the axis read, which the compiler refuses, and `touch_of`'s branch order,
+  which cannot be reached).
+- **`MIN_THUMB` still applies to the terminal only.** iced hard-codes its own minimum scroller length,
+  so a pane scrolling a very long list gets a smaller thumb than the terminal would. §118 recorded
+  that and it is unchanged.
+- **The lockfile guard is a version string, not a diff.** It cannot tell a bump that changed
+  `total_bounds` from one that did not, so it will cry wolf on most upgrades. That is the trade: the
+  alternative is silence on the one upgrade that mattered.
+- **Neither bar widens its target for a pointer.** The lane cmote hands iced is 6px and the terminal's
+  hit test is the same lane, so the two agree about where the bar is — but a 4px bar could reasonably
+  want a fatter grab zone than it draws, and neither surface offers one.

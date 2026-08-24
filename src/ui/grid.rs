@@ -208,6 +208,17 @@ pub struct Grid<'a> {
 	/// Borrowed, not owned: the pixels belong to the emulator for the whole session, and a frame only
 	/// needs to know where they go.
 	images: &'a [Placement],
+	/// The pointer shape the remote asked for over its own grid (OSC 22, §77), already mapped to
+	/// iced's vocabulary by `ui::terminal::grid_interaction`, or `None` when it has asked for nothing.
+	///
+	/// It is HERE, and not on the `mouse_area` outside this widget, because the gutter is not the
+	/// remote's grid (§125). `mouse_area` applies its own interaction over its whole bounds — the
+	/// padding included — and only when the content answered `Interaction::None`, which on Windows is
+	/// exactly what this widget answers over its own scrollbar (`grab_interaction` returns `None`
+	/// there so the `WM_SETCURSOR` seam can paint the hand). So a remote's shape was reaching the one
+	/// strip of pixels that belongs to cmote, and which of the two got drawn depended on which
+	/// mechanism painted last. Deciding it in one place is the fix; the answer is that the bar wins.
+	pointer: Option<mouse::Interaction>,
 }
 
 /// Draw the emulator's current screen, highlighting `selection` if there is one, washing the find
@@ -220,6 +231,7 @@ pub fn grid<'a>(
 	user_marks: Vec<u16>,
 	matches: Vec<SearchHighlight>,
 	images: &'a [Placement],
+	pointer: Option<mouse::Interaction>,
 ) -> Grid<'a> {
 	Grid {
 		screen,
@@ -228,6 +240,7 @@ pub fn grid<'a>(
 		user_marks,
 		matches,
 		images,
+		pointer,
 	}
 }
 
@@ -299,6 +312,28 @@ impl Grid<'_> {
 	/// Whether the bar is under `cursor` right now — the grab zone, not the painted thumb, so the
 	/// answer matches what a press would actually do (§116). `false` with no history, since then
 	/// there is no bar at all.
+	/// Which claim on the pointer wins, given the three facts a frame has (§125).
+	///
+	/// Split out of `mouse_interaction` so the ORDER — the part that can be wrong — is testable
+	/// without a widget tree, the same split `scrollbar_thumb` and `corner_parts` already use.
+	///
+	/// `over` is whether the pointer is inside this widget at all. It has to be asked: this method is
+	/// called whether or not it is, and it is the check the `mouse_area` outside used to make for the
+	/// remote's shape (§77). Without it a program's chosen pointer would follow the mouse across the
+	/// tab strip and the dialogs.
+	fn interaction_over(&self, dragging: bool, on_bar: bool, over: bool) -> mouse::Interaction {
+		if dragging || on_bar {
+			// The bar is cmote's own furniture, so it beats whatever the remote asked for. WHO draws
+			// the hand is `grab_interaction`'s business (§51): `None` on Windows, precisely so iced is
+			// asked for nothing and `cursor`'s `WM_SETCURSOR` seam paints the bitmap.
+			return crate::cursor::grab_interaction(dragging).unwrap_or(mouse::Interaction::None);
+		}
+		if over {
+			return self.pointer.unwrap_or(mouse::Interaction::None);
+		}
+		mouse::Interaction::None
+	}
+
 	fn on_scrollbar(&self, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
 		let (rows, _) = self.screen.size();
 		self.screen.history_size() > 0
@@ -570,9 +605,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		});
 
 		// The scroll indicator on top of everything (§23): a thin thumb in the right padding
-		// gutter while the viewport is scrolled back, and nothing at the live bottom. Read-only —
-		// it reports where the view sits and how deep the history is, but the wheel and keys do the
-		// moving. Drawn outside the clip above: it lives in the padding, not among the cells.
+		// gutter while the viewport is scrolled back, and nothing at the live bottom. Draggable
+		// since §116, so it brightens under the pointer and brighter still while it is held
+		// (§125) — the same three opacities a pane's bar wears, from the same function. Drawn
+		// outside the clip above: it lives in the padding, not among the cells.
 		if let Some(thumb) = scrollbar_thumb(
 			bounds,
 			rows,
@@ -586,7 +622,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					shadow: iced::Shadow::default(),
 					snap: false,
 				},
-				Background::Color(scrollbar::THUMB),
+				Background::Color(scrollbar::thumb(scrollbar_touch(
+					state.scroll_grip.is_some(),
+					self.on_scrollbar(bounds, cursor),
+				))),
 			);
 		}
 
@@ -618,12 +657,16 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		}
 	}
 
-	/// The cursor over the grid: the two hands over the scrollbar, and nothing to say anywhere else
-	/// (§119).
+	/// The cursor over the grid: the two hands over the scrollbar, the remote's shape over the cells,
+	/// and nothing anywhere else (§119, §125).
 	///
-	/// `Interaction::None` off the bar rather than a shape of our own, because that is what the grid
-	/// has always answered — the text cursor over cells is `mouse_area`'s doing in `ui::terminal`, and
-	/// a remote's OSC 22 shape (§77) is set there too. This only speaks for the padding gutter.
+	/// **The bar wins.** Both claims are answered here since §125, in this order, because the gutter
+	/// the bar sits in is cmote's own furniture and not the page a remote is drawing — see the
+	/// `pointer` field for what the old arrangement did instead.
+	///
+	/// `Interaction::None` when a remote has asked for nothing, because that is what the grid has
+	/// always answered: the text cursor over cells is the `mouse_area`'s in `ui::terminal`, and
+	/// handing the question back is how it keeps deciding.
 	///
 	/// WHO draws the hand depends on the platform (§51), and that whole question is
 	/// `grab_interaction`'s: on Windows there are no hand cursors, so it answers `None` precisely so
@@ -641,11 +684,11 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		_renderer: &iced::Renderer,
 	) -> mouse::Interaction {
 		let state = tree.state.downcast_ref::<GridState>();
-		let dragging = state.scroll_grip.is_some();
-		if !dragging && !self.on_scrollbar(layout.bounds(), cursor) {
-			return mouse::Interaction::None;
-		}
-		crate::cursor::grab_interaction(dragging).unwrap_or(mouse::Interaction::None)
+		self.interaction_over(
+			state.scroll_grip.is_some(),
+			self.on_scrollbar(layout.bounds(), cursor),
+			cursor.is_over(layout.bounds()),
+		)
 	}
 
 	fn update(
@@ -1241,6 +1284,26 @@ fn wheel_lines(delta: mouse::ScrollDelta) -> Option<i32> {
 		mouse::ScrollDelta::Pixels { y, .. } => super::lines_scrolled(y / CELL_HEIGHT),
 	};
 	(lines != 0).then_some(lines)
+}
+
+/// How the terminal's bar is being touched, in the vocabulary both surfaces share (§125).
+///
+/// Free rather than a method because it holds no grid state: it is the mapping from this widget's
+/// two facts onto `scrollbar::Touch`, and out here the precedence is testable without a renderer or
+/// a widget tree — the same reason the geometry below is.
+///
+/// **A drag beats a hover, and that is not the same as "both".** §116's drag deliberately survives
+/// the pointer straying off the bar, so while one is in flight the hover flag is not a fact about
+/// the bar any more; the drag is. A pane's bar reaches the same answer from iced's own flags
+/// (`scrollbar::touch_of`), which is why the rule is written down in both places.
+fn scrollbar_touch(dragging: bool, hovering: bool) -> scrollbar::Touch {
+	if dragging {
+		scrollbar::Touch::Dragged
+	} else if hovering {
+		scrollbar::Touch::Hovered
+	} else {
+		scrollbar::Touch::Idle
+	}
 }
 
 /// The scroll indicator's thumb rectangle for a grid of `bounds`, or `None` when there is no history
@@ -2598,5 +2661,92 @@ mod tests {
 			.map(|run| run.content.as_str())
 			.collect();
 		assert_eq!(underlined, "site");
+	}
+	/// The bar's three opacities come from the two facts the widget has, and a drag outranks a hover
+	/// (§125). It has to: §116's drag survives the pointer straying off the bar, so mid-drag the
+	/// hover flag says nothing about the bar and the drag says everything.
+	#[test]
+	fn a_dragged_bar_reads_as_dragged_even_with_the_pointer_gone() {
+		assert_eq!(scrollbar_touch(false, false), scrollbar::Touch::Idle);
+		assert_eq!(scrollbar_touch(false, true), scrollbar::Touch::Hovered);
+		assert_eq!(scrollbar_touch(true, true), scrollbar::Touch::Dragged);
+		assert_eq!(
+			scrollbar_touch(true, false),
+			scrollbar::Touch::Dragged,
+			"the pointer left the lane; the bar is still being pulled"
+		);
+	}
+
+	/// The gutter is cmote's furniture, so the bar's hand beats a remote's OSC 22 shape (§77, §125).
+	/// Before §125 the shape sat on the `mouse_area` outside this widget, which applies over the
+	/// padding too and only when the content says `Interaction::None` — which is exactly what this
+	/// widget answers over its own bar on Windows, so the remote's shape was reaching the one strip of
+	/// pixels that is not its page.
+	#[test]
+	fn the_bars_hand_beats_the_shape_a_remote_asked_for() {
+		let terminal = crate::term::Terminal::new(4, 8);
+		let asked = mouse::Interaction::Crosshair;
+		let grid = grid(
+			terminal.screen(),
+			None,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			&[],
+			Some(asked),
+		);
+
+		// Over the cells: the remote's shape, exactly as before.
+		assert_eq!(grid.interaction_over(false, false, true), asked);
+		// Over the bar, and while dragging it: NOT the remote's shape. Asserted as "not that" rather
+		// than as an equality with `grab_interaction`'s own answer, which would be the test
+		// recomputing the expected value the way the code does — and would pass however the two
+		// claims were ordered. The shapes it may be are the hand's, or `None` on Windows once the
+		// bitmaps are installed, which is the answer that hands the paint to the `WM_SETCURSOR` seam
+		// (§51).
+		let over_bar = grid.interaction_over(false, true, true);
+		let held = grid.interaction_over(true, false, true);
+		assert_ne!(over_bar, asked, "the bar wins over what a remote asked for");
+		assert_ne!(held, asked, "and it keeps winning for the whole drag");
+		assert!(
+			matches!(
+				over_bar,
+				mouse::Interaction::None | mouse::Interaction::Grab
+			),
+			"an open hand or nothing at all, not {over_bar:?}"
+		);
+		assert!(
+			matches!(
+				held,
+				mouse::Interaction::None | mouse::Interaction::Grabbing
+			),
+			"a closed hand or nothing at all, not {held:?}"
+		);
+		// Off the widget entirely: nothing, so the shape cannot follow the pointer onto the strip or
+		// into a dialog.
+		assert_eq!(
+			grid.interaction_over(false, false, false),
+			mouse::Interaction::None
+		);
+	}
+
+	/// And with no OSC 22 in play the answer is what it always was: hand the question back, so the
+	/// `mouse_area`'s text cursor over the cells keeps deciding (§77).
+	#[test]
+	fn a_grid_no_remote_has_dressed_says_nothing_over_its_cells() {
+		let terminal = crate::term::Terminal::new(4, 8);
+		let grid = grid(
+			terminal.screen(),
+			None,
+			Vec::new(),
+			Vec::new(),
+			Vec::new(),
+			&[],
+			None,
+		);
+		assert_eq!(
+			grid.interaction_over(false, false, true),
+			mouse::Interaction::None
+		);
 	}
 }
