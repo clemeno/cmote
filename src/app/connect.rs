@@ -954,4 +954,40 @@ mod tests {
 			"nothing to resume to"
 		);
 	}
+
+	/// A stray `Connecting` cannot un-live a session (§136).
+	///
+	/// `Session::proceeding` is the one method that writes the phase without first looking at it —
+	/// `ask` and `take_asked`, its two siblings, both match on `Dialing` and do nothing otherwise. So
+	/// a `Connecting` arriving after `Connected` would hand a live session back to the dialing status
+	/// text, taking the grid off screen for a handshake that finished.
+	///
+	/// Nothing sends it twice today (`ssh::client` sends one, before the handshake), so this asserts
+	/// the TYPE's invariant rather than a bug seen in the wild — which is the point: "unreachable"
+	/// is a fact about today's callers, and the guard is what makes it a fact about the phase.
+	#[test]
+	fn a_stray_connecting_leaves_a_live_session_live() {
+		let (mut app, _rx) = app_with_terminal(16);
+		assert!(
+			matches!(
+				app.session().map(|session| &session.phase),
+				Some(SessionPhase::Live)
+			),
+			"the fixture arranges a session that is already live"
+		);
+
+		let _ = app.on_ssh_event(SshEvent::Connecting);
+
+		assert!(
+			matches!(
+				app.session().map(|session| &session.phase),
+				Some(SessionPhase::Live)
+			),
+			"a `Connecting` on a live session is ignored, not obeyed"
+		);
+		assert!(
+			app.terminal().is_some(),
+			"and the grid it was showing is still there"
+		);
+	}
 }

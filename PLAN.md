@@ -1076,8 +1076,10 @@ instead of burning minutes on it; and the token is `contents: read`, the least a
 that works.
 
 **The macOS arch split — why an aarch64 runner validates an Intel target.** GitHub's
-`macos-latest` is Apple Silicon, but cmote ships `x86_64-apple-darwin` (§1). That job
-therefore does two deliberately different things on two architectures:
+`macos-latest` is Apple Silicon, but cmote shipped `x86_64-apple-darwin` alone when this was
+written (§1) — §127 later made the Mac build universal, so both halves of the split below are
+shipped rather than just the Intel one. That job does two deliberately different things on two
+architectures:
 
 - **Cross-compiling to Intel from an ARM Mac is a first-class Apple case, not a
   workaround** — it is how universal binaries have always been made. The Xcode Command
@@ -14010,6 +14012,8 @@ account happens to be on screen.
   `advance`.
 - `src/app.rs` — `Message::HeldUpdateExpired`, the `frames()` subscription behind
   `Tab::holds_update`, `App::release_held_updates`, and `Tab::release_held_updates`.
+- `CONTEXT.md` — **Held update**, and the `_Avoid_` line that keeps it away from `sync_alternate`.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — mode 2026's row, and the evidence for it.
 
 ### Not done
 
@@ -14106,6 +14110,8 @@ up** — and it reads exactly like a note that has.
   `decrqss_reply`, and `RGB` in `known_capability` with `Tc`'s refusal written beside it.
 - `src/term/mod.rs` — `Terminal::decrqss_report`, which is where the live state is read, and
   `decscusr_param` beside `pen_sgr`.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — DECRQSS moved from ❌ to 🛑, which is what the body above
+  describes and the Files list did not say.
 
 ### Not done
 
@@ -14162,7 +14168,7 @@ gate cannot see and the compiler on the other platform would. It holds everywher
 
 `local::path::is_plain_component` is the whitelist every component of a pane path passes through
 before it reaches the filesystem — the security boundary's own gate. It is **shared** code, and it
-refused four things: an empty component, `.`, `..`, a `/`, a `\` and a `:`. The module note gives
+refused six things: an empty component, `.`, `..`, a `/`, a `\` and a `:`. The module note gives
 each refusal a reason, and two of those reasons are Windows':
 
 > a `:` anywhere but in the drive — on NTFS that names an alternate data stream
@@ -14327,9 +14333,14 @@ pointer is inside, so without it a program's shape would follow the mouse across
 
 ## §126 — Cutting up the 14 800-line file
 
-`app.rs` was 14 811 lines: 9 400 of code and 5 400 of tests, in one file, holding `App`, `Tab`,
+`app.rs` was 15 020 lines: 9 400 of code and 5 600 of tests, in one file, holding `App`, `Tab`,
 `Message` and every method either of them has. It is the biggest thing in the tree by a factor of
 two and a half over the next file, and the house rule it breaks says 800.
+
+> **Corrected in §136.** This section, and §128 and §129 after it, all said **14 811**. That was
+> `app.rs`'s size at §121 — the number was taken once and then quoted forward, and §122 had added 209
+> lines to the file in between. The heading keeps the round figure it shipped with; every count below
+> is the real one.
 
 This section starts the split, and starts it in a way the next slice can follow.
 
@@ -14344,7 +14355,7 @@ This section starts the split, and starts it in a way the next slice can follow.
 | `app/home.rs` | the saved-target screen a session starts from (§14, §49) | 339 |
 | `app/fixtures.rs` | the test fixtures more than one of them needs | 226 |
 
-`app/mod.rs` is 12 882 lines, down 1 929. That is a start and not a finish, and the honest reading is
+`app/mod.rs` is 12 882 lines, down 2 138. That is a start and not a finish, and the honest reading is
 that the remaining 12 900 is what the next slices are for — `on_key`, `on_ssh_event`, `update`,
 `on_explorer` and `on_files` are the five big dispatchers and none of them moved.
 
@@ -14475,7 +14486,7 @@ native aarch64 `cargo test`, both slices of the shipped bundle are compiled on e
 
 ## §128 — The next slice: the browser strip
 
-§126 cut `app.rs` from 14 811 lines to 12 882 and named where the next slices were. This is the first
+§126 cut `app.rs` from 15 020 lines to 12 882 and named where the next slices were. This is the first
 of them, and it takes the two panes.
 
 `src/app/browse.rs` holds 22 methods and 4 tests — 1 113 lines. `app/mod.rs` is 11 804, down 1 078.
@@ -14603,7 +14614,7 @@ session being copied, and both hand off to the same validate-and-dial path.
 
 ### Not done
 
-- **`app/mod.rs` is 10 985 lines**, from 14 811 four sections ago. The three remaining big dispatchers
+- **`app/mod.rs` is 10 985 lines**, from 15 020 four sections ago. The three remaining big dispatchers
   are `Tab::update` (461 lines), `on_ssh_event` (415) and `on_key` (257), and none of them is a
   *cluster* — each is one match over the whole `Message` enum, so a slice of one is a slice of
   everything. That is the wall this line of refactoring hits, and getting past it means asking whether
@@ -14726,7 +14737,7 @@ an `#[expect]` with the numbers in its reason, which is what §111 asks of every
 
 - **Three screens to go**, in this order and for this reason: `Home` (5 fields, and it transitions
   both ways with `Connect`), `Connect` (7 fields, and it must survive a trip to an error dialog and
-  back — that is what its `form` field's doc promises), then `Terminal` (21 fields, and the hard
+  back — that is what its `form` field's doc promises), then `Terminal` (24 fields, and the hard
   one). `Viewer` went first because a viewer tab never becomes another screen, so the slice needed no
   transition arithmetic at all: it is the proof the shape works before the shape gets expensive.
 - **`Terminal(Session)` has a decision in front of it that this slice did not have to make.** §45's
@@ -14968,7 +14979,7 @@ while `AppScreen` went 32 → 304.
 
 ### Not done
 
-- **`Terminal(Session)` is the last one and the only hard one.** 21 fields, and §45's `Workspace`
+- **`Terminal(Session)` is the last one and the only hard one.** 24 fields, and §45's `Workspace`
   decision still in front of it: the doc says the on-screen identity's fields stay on `Tab` so that
   *"nothing in the thousands of lines that touch `self.terminal` has to learn about identities"*.
   §131's rule does not settle this one, because `terminal` is destroyed at the transition *and*
@@ -15142,10 +15153,17 @@ third copy. All three are now:
 ```rust
 self.persist_session();
 self.abandon_transfers();     // lifts `unfinished` out, which must outlive the session (§16)
-self.abandon_attempt();
+self.abandon_attempt();       // `end_session()` in the third copy — see below
 self.clear_grid_interaction();
 self.go_home()                // or `show_error`, which is the whole difference
 ```
+
+**Two differences, not one** — §136 corrects this block, which showed all three as identical. The
+last line differs by design, and so does the third: `Disconnected` and `Error` REACT to a session
+that has already died, so they abandon the attempt that was in flight; `on_disconnect_confirmed`
+ASKS a session that is still alive to end, which is `end_session`, and which has to run before the
+emulator is dropped because it reads the grid to decide whether typing at that shell is safe (§104).
+Three copies of a shape, two of them identical.
 
 `forget_connection` and `forget_identities` are gone — there is nothing left for them to forget.
 `clear_grid_interaction` lost the five lines that cleared the live view, because a fresh session
@@ -15410,7 +15428,9 @@ ranked worst, committed one section after reading the report that ranked it.
 
 ### Not done
 
-- **The review's other eleven findings are still open.** Four stale comments naming deleted fields
+- **The review's other eleven findings are still open.** *(§136: ten are applied there, and the
+  eleventh — the duplicated `dragged/hovered/idle` cascade — turned out to be a false positive that
+  the code had already argued out in both docs.)* Four stale comments naming deleted fields
   (`self.identities` and `connection` in the teardown's comments, `open_prompt`'s "all six callers"),
   a doc comment attached one line too high in `src/ui/grid.rs`, `form_focus`'s body inlined at a
   second site, `report_focus` looking the session up three times, `Session::proceeding` not guarding
@@ -15427,3 +15447,132 @@ ranked worst, committed one section after reading the report that ranked it.
   `Workspace`, `Prompt`, `Challenge` and the rest means "reachable from `app`'s children", not
   "public" — a second thing one keyword is being asked to say, and the next one of these worth
   pulling on.
+
+## §136 — The sweep, and the finding the code had already answered
+
+§135 took the naming half of the code review of §122–§134. This takes the other eleven findings: ten
+are applied, one is refused. Only one of the ten changes behaviour, and it is the only one with a
+test — the rest are comments, counts and a lookup.
+
+### The doc comment that was orphaned twice
+
+The review reported one doc comment attached one line too high in `src/ui/grid.rs`. It was two, and
+neither §125 nor its author put the first one there:
+
+| § | what it did |
+|---|---|
+| §116 | wrote *"Drive the scrollbar with the pointer"* directly above `scroll_drag`. Correct. |
+| §119 | inserted `on_scrollbar` **between** that doc and `scroll_drag`, and appended its own doc under it with no blank line. `scroll_drag` lost its doc. |
+| §125 | inserted `interaction_over` above `on_scrollbar`. Both docs slid onto the new function. |
+
+So `interaction_over` carried three doc comments — one about draining a press, one about a hit test,
+one its own — and `scroll_drag` and `on_scrollbar` each carried none. Every step was a correct
+insertion at the wrong end of a doc block, and nothing catches it: a doc comment is attached to
+whatever follows it, and what follows it is exactly what an insertion changes.
+
+All three are back with their own function.
+
+### The one behaviour change: `proceeding` only while dialing
+
+`Session::proceeding` assigned the phase outright, while `ask` and `take_asked` — its two siblings,
+ten lines above — both match on `Dialing` and do nothing otherwise. So a `SshEvent::Connecting`
+arriving on a LIVE session would hand it back to the dialing status text and take its grid off
+screen.
+
+Nothing sends one twice: `ssh::client` sends `Connecting` once, before the handshake. That makes it
+unreachable, and "unreachable" is a fact about today's callers rather than about the phase — which is
+the whole reason to write the guard rather than a comment.
+
+**Prove-it.** The test went in first and failed on its second assertion, the first (the fixture really
+is live) having passed:
+
+```
+thread 'app::connect::tests::a_stray_connecting_leaves_a_live_session_live' panicked:
+a `Connecting` on a live session is ignored, not obeyed
+```
+
+Then the guard. `proceeding` now writes through the `Dialing` arm, so a live session ignores it.
+
+### The finding that was refused
+
+The review flagged `ui::grid::scrollbar_touch` and `ui::scrollbar::touch_of` as duplicated code — the
+same `dragged` / `hovered` / `idle` cascade in two files — and suggested one shared
+`Touch::of(dragging, hovering)`.
+
+**No**, and the two docs already say why, at length and with a probe behind each:
+
+* In the grid the two facts are **independent booleans**, because §116's drag deliberately survives
+  the pointer straying off the bar. The branch ORDER is real precedence: a drag beats a hover.
+* In `scrollbar` they come out of iced's `Status`, which is one variant at a time, so the two can
+  never both be set. The order there is not load-bearing, and its doc records the probe that
+  established it: *"a probe that swapped them stayed green"*.
+
+Two cascades that look identical and mean different things. Extracting the shape would give the
+second site a precedence rule it does not have, and would delete a distinction someone measured. The
+smell baseline is a heuristic and the repo's own documented reasoning overrides it — that is the rule
+the review ran under, applied to the review.
+
+### The counts, and how one wrong number spread
+
+`app.rs` was **15 020** lines when §126 split it, not 14 811. 14 811 was its size at §121; §122 then
+added 209 lines to the same file, and the number had already been written down. §126 quoted it, §128
+quoted §126, §129 quoted §128. One measurement taken once and carried forward through three sections
+while the thing it measured kept moving. The true reduction is **2 138**, not 1 929.
+
+The rest:
+
+| § | said | is |
+|---|---|---|
+| §124 | `is_plain_component` "refused four things" | six, and the same sentence lists all six |
+| §130, §132 | `Terminal` is 21 fields | 24 — fifteen moved into `Session`, nine stayed |
+| §134 | three teardown copies, identical | two are; the third calls `end_session`, on purpose |
+| §13 | cmote ships `x86_64-apple-darwin` | universal since §127 |
+| §122, §123 | *Files* lists | omitted `CONTEXT.md` and `TERMINAL_COMPATIBILITY_PLAN.md` |
+
+§134's teardown was the interesting one, because the difference it hid is a real distinction:
+`Disconnected` and `Error` REACT to a session that has already died, so they abandon the attempt that
+was in flight; `on_disconnect_confirmed` ASKS a live session to end, which is `end_session`, and which
+must run before the emulator is dropped because it reads the grid to decide whether typing at that
+shell is safe (§104).
+
+### The rest
+
+* Two comments named fields that §134 deleted — `self.identities` and `connection`. Both now name
+  what is actually read.
+* `open_prompt`'s comment still described six callers and four prompts. Since §134 it has two, and
+  both are the form's own question, which is why moving the content is now correct rather than
+  merely convenient. Rewritten to say that.
+* `form_focus`'s two-line body was inlined at a second site in the same file. It calls the method.
+* `report_focus` looked the session up three times — `terminal()`, `session()`, `session_mut()` — and
+  wrote through an `if let` that would silently skip. One `session_mut()`, after the two facts that
+  belong to the tab are read off `self`.
+* `fixtures.rs`'s two arrange steps used `if let Some(session)`. A fixture that quietly does nothing
+  leaves every test built on it asserting against a state it never set up, so both `expect` now.
+  That is the sharp end of the review's wider point about 34 such sites; the other 32 are reads or
+  writes whose miss is visible in the assertion, and they stay.
+
+### Files
+
+- `src/ui/grid.rs` — three doc comments returned to their own functions.
+- `src/app/mod.rs` — the `Dialing` guard on `proceeding`; `report_focus` down to one lookup;
+  `open_prompt`'s comment; two comments naming deleted fields; `form_focus` called rather than inlined.
+- `src/app/connect.rs` — `a_stray_connecting_leaves_a_live_session_live`.
+- `src/app/fixtures.rs` — `expect` on both arrange steps.
+- `PLAN.md` — this section; six corrections, touching §13, §122, §123, §124, §126, §128, §129, §130,
+  §132 and §134; and a pointer in §135.
+
+142 insertions, 76 deletions across 5 files, plus this section. **1 557 tests**, one more than §135.
+
+### Not done
+
+- **The other 32 silent-write sites stand.** `if let Some(session) = self.session_mut() { … }` is
+  what a nested `Option` costs at a call site, and the fixtures were the only ones where a miss is
+  invisible. Making the rest `expect` would trade a quiet miss for a panic in a GUI; making them
+  fallible would need the accessor to return a `Result` nobody would read. Left as the measured cost
+  of the seam §134 chose.
+- **`src/app/mod.rs` is still one file changing for many reasons.** The review's Divergent Change
+  verdict stands, and it named the next seams without needing new design: the `Message` enum, the
+  grid/selection block (`on_grid_*`, `term_find_*`, `reveal_match`), and the test module, which is
+  now bigger than most files in the tree.
+- **Nothing was done about `Identity::work`**, which §134 named and §135 left. It is still the last
+  placeholder pair: `Workspace::default()` standing in for "this identity is the one on screen".

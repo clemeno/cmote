@@ -297,21 +297,6 @@ impl Grid<'_> {
 		link_at(self.screen, cell)
 	}
 
-	/// Drive the scrollbar with the pointer (§116), returning whether the event was the bar's — in
-	/// which case the caller is done with it.
-	///
-	/// This runs BEFORE both of the other things a press can mean, and that ordering is the design.
-	/// Above the widget a `mouse_area` starts a text selection; inside it, a mouse-aware program gets
-	/// a report. A press on the bar is neither: the bar is chrome in the padding gutter, not a cell,
-	/// and it is cmote's own view control rather than anything the remote should hear about. So a press
-	/// it claims is captured and neither path sees it.
-	///
-	/// A full-screen program does not have to be special-cased here. The alternate screen retains no
-	/// history, so `history_size()` is 0, so there is no thumb, so nothing is claimed and a click in
-	/// `vim`'s right-hand column reaches `vim` exactly as it did before.
-	/// Whether the bar is under `cursor` right now — the grab zone, not the painted thumb, so the
-	/// answer matches what a press would actually do (§116). `false` with no history, since then
-	/// there is no bar at all.
 	/// Which claim on the pointer wins, given the three facts a frame has (§125).
 	///
 	/// Split out of `mouse_interaction` so the ORDER — the part that can be wrong — is testable
@@ -334,6 +319,9 @@ impl Grid<'_> {
 		mouse::Interaction::None
 	}
 
+	/// Whether the bar is under `cursor` right now — the grab zone, not the painted thumb, so the
+	/// answer matches what a press would actually do (§116). `false` with no history, since then
+	/// there is no bar at all.
 	fn on_scrollbar(&self, bounds: Rectangle, cursor: mouse::Cursor) -> bool {
 		let (rows, _) = self.screen.size();
 		self.screen.history_size() > 0
@@ -371,6 +359,18 @@ impl Grid<'_> {
 		});
 	}
 
+	/// Drive the scrollbar with the pointer (§116), returning whether the event was the bar's — in
+	/// which case the caller is done with it.
+	///
+	/// This runs BEFORE both of the other things a press can mean, and that ordering is the design.
+	/// Above the widget a `mouse_area` starts a text selection; inside it, a mouse-aware program gets
+	/// a report. A press on the bar is neither: the bar is chrome in the padding gutter, not a cell,
+	/// and it is cmote's own view control rather than anything the remote should hear about. So a press
+	/// it claims is captured and neither path sees it.
+	///
+	/// A full-screen program does not have to be special-cased here. The alternate screen retains no
+	/// history, so `history_size()` is 0, so there is no thumb, so nothing is claimed and a click in
+	/// `vim`'s right-hand column reaches `vim` exactly as it did before.
 	fn scroll_drag(
 		&self,
 		state: &mut GridState,

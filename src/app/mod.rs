@@ -2740,11 +2740,17 @@ impl Session {
 	/// The handshake moved on: say what it is doing now and stop asking (§7, §8). One method because
 	/// it is one fact — three answer paths reach it, and one that forgot to clear the question would
 	/// leave the dialog over a handshake that had already gone past it.
+	///
+	/// **Only while dialing** (§136), which is the guard its two siblings above always had. It used to
+	/// assign the phase outright, so a `Connecting` arriving after `Connected` would hand a LIVE
+	/// session back to the status text and take its grid off screen. Nothing sends one twice today,
+	/// which is a fact about `ssh::client` rather than about a session — and the difference between
+	/// those two is what a guard is for.
 	fn proceeding(&mut self, step: &str) {
-		self.phase = SessionPhase::Dialing {
-			status: step.to_owned(),
-			asking: None,
-		};
+		if let SessionPhase::Dialing { status, asking } = &mut self.phase {
+			step.clone_into(status);
+			*asking = None;
+		}
 	}
 }
 
@@ -5120,8 +5126,8 @@ impl Tab {
 		{
 			self.send_command(SshCommand::Input(replies));
 		}
-		// Collected before any is sent: `send_command` needs `self` whole, and the walk above it
-		// holds `self.identities` mutably.
+		// Collected before any is sent: `send_command` needs `self` whole, and the walk below holds
+		// the session mutably to reach its identities (§134).
 		let parked: Vec<(u64, Vec<u8>)> = self
 			.session_mut()
 			.map(|session| session.identities.as_mut_slice())
@@ -5178,8 +5184,8 @@ impl Tab {
 	/// deleted; leaving the server instead leaves the partial there, so offering to finish it beats
 	/// leaving a half file behind with nothing said about it.
 	///
-	/// It reads `connection` and so must run BEFORE the teardown clears it — the endpoint is what
-	/// stops the offer being made to the next machine this tab visits.
+	/// It reads the session's endpoint and so must run BEFORE the teardown drops the session (§134) —
+	/// the endpoint is what stops the offer being made to the next machine this tab visits.
 	fn abandon_transfers(&mut self) {
 		let Some(endpoint) = self.connection().map(str::to_owned) else {
 			return;
@@ -5236,23 +5242,25 @@ impl Tab {
 		self.open_prompt(Prompt::Failed, message);
 	}
 
-	/// Open a prompt over the connect form (§7, §8, §16), the mirror of `open_modal` on the
-	/// terminal screen: whatever was being asked is replaced, the selectable body is seeded, and
-	/// the card is centred fresh rather than inheriting the last prompt's position.
+	/// Open a prompt over the connect form (§12, §16), the mirror of `open_modal` over a session's
+	/// grid: whatever was being asked is replaced, the selectable body is seeded, and the card is
+	/// centred fresh rather than inheriting the last prompt's position.
 	fn open_prompt(&mut self, prompt: Prompt, body: &str) {
 		self.set_dialog_body(body);
-		// The screen goes with it, and this is the ONE place that says so (§132). A prompt is drawn
-		// by `form_with_dialog` and nowhere else, so a prompt that is not on the connect screen
-		// cannot be seen — which is why all six callers set the screen too, four of them on the very
-		// next line and `show_error` with a comment about it.
+		// The content goes with it, and this is the ONE place that says so (§132). A prompt is drawn
+		// by `form_with_dialog` and nowhere else, so a prompt that is not on the connect form cannot
+		// be seen.
+		//
+		// Since §134 that move is always RIGHT rather than merely convenient: both of `Prompt`'s
+		// variants are the form's own question, asked either before a session exists (the vault) or
+		// after one has gone (the failure). The handshake's four went the other way — `ask_challenge`
+		// moves nothing, because the session being asked about has to survive the asking.
 		//
 		// The focus ring keeps its stop when there is already a flow to keep it from: a question
-		// opening OVER the form does not end the form. Arriving from `Connecting` there is no flow,
-		// so it starts at the first field — unobservable, since every exit from those four prompts
-		// either goes through `go_to_form` (which sets the same stop) or leaves this screen entirely.
-		let focus = self
-			.connect_flow()
-			.map_or_else(Default::default, |flow| flow.focus);
+		// opening OVER the form does not end the form. That covers the vault, asked from the form
+		// itself. The failure arrives from a session instead, so there is no flow and the ring starts
+		// at the first field — which is what a form being re-presented after a dead session wants.
+		let focus = self.form_focus();
 		self.content = TabContent::Connect(ConnectFlow {
 			focus,
 			prompt: Some(prompt),
@@ -6452,22 +6460,21 @@ impl Tab {
 	/// runs after each chunk of shell output, a program that toggles `?1004` mid-session is
 	/// reconciled to the true state on its next output rather than left believing the wrong one.
 	fn report_focus(&mut self) {
-		let Some(terminal) = self.terminal() else {
-			return;
-		};
-		if !terminal.screen().focus_reporting() {
-			return;
-		}
+		// Read off `self` first, then take ONE borrow of the session: the answer needs the window and
+		// the pane focus, which are the tab's, and everything after it is the session's (§136).
 		let focused = self.window_focused && self.focus == Focus::Terminal;
-		let Some(session) = self.session() else {
+		let Some(session) = self.session_mut() else {
 			return;
 		};
-		if focused == session.shell_focus_reported {
+		let reporting = session
+			.work
+			.terminal
+			.as_ref()
+			.is_some_and(|terminal| terminal.screen().focus_reporting());
+		if !reporting || focused == session.shell_focus_reported {
 			return;
 		}
-		if let Some(session) = self.session_mut() {
-			session.shell_focus_reported = focused;
-		}
+		session.shell_focus_reported = focused;
 		let report: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
 		self.send_command(SshCommand::Input(report.to_vec()));
 	}

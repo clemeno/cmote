@@ -102,16 +102,20 @@ pub(super) fn next_input(rx: &mut mpsc::Receiver<SshCommand>) -> Option<Vec<u8>>
 // makes a switch possible at all.
 pub(super) fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 	let (mut app, rx) = app_with_terminal(32);
-	if let Some(session) = app.session_mut() {
-		session.identities = vec![Identity {
-			id: bridge::LOGIN_IDENTITY,
-			account: None,
-			ready: true,
-			work: Workspace::default(),
-		}];
-		session.identity = bridge::LOGIN_IDENTITY;
-		session.next_identity = 1;
-	}
+	// `expect`, not `if let` (§136): an ARRANGE step that quietly does nothing leaves every test
+	// built on it asserting against a state it never set up — a pass that means nothing, which is
+	// the failure Prove-it exists to catch.
+	let session = app
+		.session_mut()
+		.expect("app_with_terminal leaves a live session to arrange on");
+	session.identities = vec![Identity {
+		id: bridge::LOGIN_IDENTITY,
+		account: None,
+		ready: true,
+		work: Workspace::default(),
+	}];
+	session.identity = bridge::LOGIN_IDENTITY;
+	session.next_identity = 1;
 	(app, rx)
 }
 
@@ -121,15 +125,16 @@ pub(super) fn app_with_login_identity() -> (Tab, mpsc::Receiver<SshCommand>) {
 // screen when this returns.
 pub(super) fn elevate_to(app: &mut Tab) -> u64 {
 	let id = app.next_identity();
-	if let Some(session) = app.session_mut() {
-		session.next_identity += 1;
-		session.identities.push(Identity {
-			id,
-			account: Some("root".to_owned()),
-			ready: false,
-			work: Workspace::default(),
-		});
-	}
+	let session = app
+		.session_mut()
+		.expect("elevate_to arranges on a tab that already has a login identity");
+	session.next_identity += 1;
+	session.identities.push(Identity {
+		id,
+		account: Some("root".to_owned()),
+		ready: false,
+		work: Workspace::default(),
+	});
 	let _task = app.on_ssh_event(SshEvent::IdentityEnded {
 		identity: u64::MAX, // a stray event for nothing, to prove it disturbs nothing
 		reason: None,
