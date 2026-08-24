@@ -14612,6 +14612,133 @@ session being copied, and both hand off to the same validate-and-dial path.
   the selection (`open_term_find`, `term_find_step`, `rescan_find`, `reveal_match`,
   `select_command_output`, 141 lines), the viewer tabs, and the transfer queue. Each is a file's worth,
   none is 1 000 lines.
-- **`Tab` still has 173 methods and 48 fields**, 89 of the methods in `mod.rs` and 84 spread over the
+- **`Tab` still has 173 methods and 50 fields**, 89 of the methods in `mod.rs` and 84 spread over the
   five siblings. Six files instead of one has made that visible rather than smaller, which was §126's
   stated point and is still the honest status.
+
+## §130 — Answering §129's question: the screen owns its state
+
+§126 said the point of cutting up the file was *"to make the file readable enough that the next
+question — is `Tab` doing too much? — can be asked at all"*, and §129 asked it: *"getting past it
+means asking whether `Tab` should be several types, which is a design question and not a move."*
+
+This is the answer, and it is not "several types". It is that **`AppScreen` should carry the state of
+the screen it names.** The four sections before this one moved methods; this one moves *fields*, and
+it is the first of the four in the series that is deliberately **not** a pure move — it changes what
+a `Tab` can be.
+
+### The bug the type was inviting
+
+`AppScreen` said *which* screen a tab is on. A separate `Option` field said whether that screen's
+state exists. Nothing tied the two together, so both halves of the disagreement were legal values:
+
+```rust
+screen: AppScreen::Terminal,  viewer: Some(…)   // a viewer nothing would ever draw
+screen: AppScreen::Viewer,    viewer: None      // a screen with nothing to show
+```
+
+Neither was reachable in practice. Both had to be *answered* anyway, because the compiler could not
+be told they were impossible — `Tab::view` carried `None => text("opening…")` and `strip_label`
+carried `None => "file"`, two sentences standing in for two states that never existed. The `viewer`
+field's own doc had to say the invariant out loud: *"`Some` exactly while `screen` is
+`AppScreen::Viewer`"*. A sentence is what an invariant is when the type does not hold it.
+
+And the invariant's twin has already cost this project something. `app/fixtures.rs` records it about
+the same field pair one level down: *"the fixture left this at its `Home` default for a long time and
+nothing minded, because `on_key` only ever ran on this screen in production and so never had to
+ask."*
+
+So: `AppScreen::Viewer(Viewer)`, and the `viewer` field is gone. The two states above are now
+unsayable.
+
+### The same argument, three times already won
+
+This is not a new idea in this file, it is an old one applied one level up:
+
+* **`Viewer`** itself (§53) replaced *a pair of `Option` fields that modelled one thing* —
+  `editor` and `preview`, either of which could be `Some` while the other was too.
+* **`Modal`** replaced four independent fields where "only one at a time" was, in its own words,
+  *"a convention rather than a fact, and the convention had holes"* — three of the four were missing
+  from the keyboard guard, two from the session teardown.
+* **`Prompt`** replaced six `AppScreen` variants with one `Option`, because all six rendered the
+  same form with a dialog over it.
+
+Each time the fix was to make the invariant the type's. `Tab::screen` is where the argument had never
+been pointed.
+
+### Proving a state is gone
+
+The other four sections in this series leaned on a **line-multiset check** — the right instrument for
+a pure move, and no use at all here, since the point is that a line changed meaning. A passing suite
+is not the evidence either: 1 553 tests pass before and after, which is necessary and says nothing
+about states that no longer exist.
+
+What proves it is the compiler refusing to write them. Both halves were tried, and both are errors:
+
+```
+error[E0560]: struct `app::Tab` has no field named `viewer`
+error[E0308]: mismatched types — expected `AppScreen`, found enum constructor
+```
+
+That is the prove-it (`CONTEXT.md`: **Prove-it**), in the form this kind of change admits: not a test
+made to fail, but a state made unwritable.
+
+One test got *shorter* for the same reason, and its comment already predicted this section without
+knowing it. §53 had written: *"'And never a buffer as well' used to need its own assertion, because
+the two kinds were two `Option` fields and nothing stopped both being `Some`. One enum makes that
+unrepresentable, so matching the variant IS the whole claim."* The test still had a second
+`assert!(matches!(tab.screen, AppScreen::Viewer))` beside it, for exactly the reason §53 had removed
+the first one. Now one pattern makes both claims:
+
+```rust
+matches!(tab.screen, AppScreen::Viewer(Viewer::Picture(_)))
+```
+
+### `large_enum_variant`, and why boxing is the wrong answer
+
+Clippy objects, correctly on its own terms: the `Viewer` variant is 304 bytes and the next-largest is
+24. Its suggestion is `Box<Viewer>`. That was measured rather than argued about, and the measurement
+says no:
+
+| | bytes |
+|---|---|
+| `Tab` | 7 688 |
+| `AppScreen` (after) | 304 |
+| `AppScreen` + `Option<Viewer>` (before) | 336 |
+| `term::Terminal`, for scale | 4 696 |
+
+`Option<Viewer>` was 304 and not 312 because a two-variant enum leaves a niche for the `None`. So the
+two fields came to 336 and the one that replaces them is 304: **the enum grew and the struct did
+not.** There is no bulk `AppScreen` anywhere — one per `Tab`, and a window holds a handful of tabs. A
+`Box` would buy back 272 bytes of 7 688 in exchange for an allocation per file opened and a deref on
+every access, and that trade gets *worse* as the remaining screens move their state in here. So it is
+an `#[expect]` with the numbers in its reason, which is what §111 asks of every one of them.
+
+### Files
+
+- `src/app/mod.rs` — `AppScreen::Viewer` carries a `Viewer`; the `viewer` field is gone; `Tab::viewer`
+  and `Tab::viewer_mut` derive it from the screen for the callers that only want to know whether
+  there is one. 91 insertions, 50 deletions; of the 50 removed, 41 are code and 9 are comment.
+  **This section adds lines.** It is not a move, and the reasoning above is most of what it adds.
+- `PLAN.md` — this section.
+
+### Not done
+
+- **Three screens to go**, in this order and for this reason: `Home` (5 fields, and it transitions
+  both ways with `Connect`), `Connect` (7 fields, and it must survive a trip to an error dialog and
+  back — that is what its `form` field's doc promises), then `Terminal` (21 fields, and the hard
+  one). `Viewer` went first because a viewer tab never becomes another screen, so the slice needed no
+  transition arithmetic at all: it is the proof the shape works before the shape gets expensive.
+- **`Terminal(Session)` has a decision in front of it that this slice did not have to make.** §45's
+  `Workspace` doc is explicit that the on-screen identity's fields stay on `Tab` on purpose, so that
+  *"nothing in the thousands of lines that touch `self.terminal` has to learn about identities"*.
+  Moving `terminal` into the variant gives every one of those sites a hop. The way that pays for
+  itself is if `Session` *is* the live `Workspace`, making `exchange` a swap of one value instead of
+  nine — but that is a section's worth of thinking and is not assumed here.
+- **`AppScreen::Connecting { status }` was left as it is.** Whether it is a screen of its own or a
+  state inside `Connect` is a question for the `Connect` slice, which is when the answer starts
+  mattering.
+- **`Tab` is down one field, to 49**, and `mod.rs` is 11 026 lines — 41 *more* than §129 left. Both
+  numbers are the honest ones: this series stopped being about line count at §129's wall.
+- **§129's field count was wrong and is corrected above.** It said 48; `Tab` had 50. Counted this
+  time rather than recalled, which is the only way that number has ever been right.

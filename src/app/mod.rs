@@ -1808,7 +1808,7 @@ impl App {
 	/// the image is decoded and in memory, and it stays as good as it was a moment ago.
 	fn orphan_viewers(&mut self, id: u64) {
 		for tab in self.tabs_mut() {
-			if let Some(viewer) = tab.viewer.as_mut()
+			if let Some(viewer) = tab.viewer_mut()
 				&& viewer.session() == id
 			{
 				viewer.orphan();
@@ -1876,7 +1876,7 @@ impl App {
 	/// for it; callers that only need what the two share (the parent session, the path, "your
 	/// parent is gone") stop here, and that is most of them.
 	fn viewer_mut(&mut self, id: u64) -> Option<&mut Viewer> {
-		self.tab_mut(id).and_then(|tab| tab.viewer.as_mut())
+		self.tab_mut(id).and_then(Tab::viewer_mut)
 	}
 
 	/// The editor on the tab with this id, mutably (§32) — `None` when that tab is showing a
@@ -2203,7 +2203,7 @@ impl App {
 		}
 		// The keyboard, by contrast, has exactly one destination: the region that holds it (§48).
 		let active = self.active();
-		match active.screen {
+		match &active.screen {
 			AppScreen::Terminal => subs.push(iced::keyboard::listen().map(Message::Key)),
 			// The form's own focus ring (Tab / Shift+Tab / Enter / Space, §10) — but ONLY while
 			// nothing is being asked over it (§7, §8, §16). A prompt's fields type through the
@@ -2220,15 +2220,12 @@ impl App {
 			// to the widget. A picture has nothing to type into, so it listens for one thing: the
 			// key that closes it — without which it would be the only tab in the app a keyboard
 			// cannot dismiss, which reads as a bug rather than as a design.
-			AppScreen::Viewer => match &active.viewer {
-				Some(Viewer::Editor(_)) => {
-					subs.push(iced::keyboard::listen().map(Message::EditorKey));
-				}
-				Some(Viewer::Picture(_)) => {
-					subs.push(iced::keyboard::listen().map(Message::PreviewKey));
-				}
-				None => {}
-			},
+			AppScreen::Viewer(Viewer::Editor(_)) => {
+				subs.push(iced::keyboard::listen().map(Message::EditorKey));
+			}
+			AppScreen::Viewer(Viewer::Picture(_)) => {
+				subs.push(iced::keyboard::listen().map(Message::PreviewKey));
+			}
 			AppScreen::Connect | AppScreen::Connecting { .. } => {}
 		}
 
@@ -2236,8 +2233,24 @@ impl App {
 	}
 }
 
-/// Which screen the single window is currently showing. This is the small state
-/// machine from PLAN §10 — every transition happens in `update`.
+/// Which screen the single window is currently showing, AND what that screen is showing it with.
+/// This is the small state machine from PLAN §10 — every transition happens in `update`.
+///
+/// Since §130 a variant may carry its screen's own state, so that the tag and the state cannot
+/// disagree. `Viewer` is the first: see its doc for the argument, which is the one [`Viewer`],
+/// [`Modal`] and `Prompt` each already won at a smaller scale.
+// `Viewer` is 304 bytes and the next-largest variant is 24, which is exactly the shape
+// `large_enum_variant` looks for — and here boxing it would make things worse, measurably. There is
+// no bulk `AppScreen` anywhere: one lives per `Tab`, and `Tab` is 7 688 bytes. The two fields this
+// variant replaced came to 336 (a 32-byte tag plus a 304-byte `Option<Viewer>`, which is 304 rather
+// than 312 because the two-variant enum leaves a niche for the `None`); what is left is 304. So the
+// enum grew and the struct did not. A `Box` would buy back 272 bytes of 7 688 in exchange for an
+// allocation per file opened and a deref at every access — and the same trade gets worse, not
+// better, as the remaining screens move their state in here.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "one per `Tab`, which is 7 688 bytes; it replaced fields of 336 with 304 — see above"
+)]
 #[derive(Debug, Default)]
 pub enum AppScreen {
 	/// The home screen: the list of saved connection targets (§14). This is where we
@@ -2254,8 +2267,7 @@ pub enum AppScreen {
 	Terminal,
 	/// A remote file open for viewing — a text editor (§32) or a picture (§53). This tab is NOT a
 	/// session: it has no connection of its own, and its load (and its saves, if it has any) ride
-	/// the parent session's channel. WHICH of the two it is lives in `Tab::viewer`, which is `Some`
-	/// exactly while this screen shows.
+	/// the parent session's channel.
 	///
 	/// One variant and not two, because the kind is not a property of the screen: every place that
 	/// branched on `AppScreen::Editor` vs `AppScreen::Preview` immediately went on to unwrap the matching
@@ -2263,7 +2275,15 @@ pub enum AppScreen {
 	/// meant a `Tab` could be built claiming one kind while holding the other, and nothing rejected
 	/// it. The picture screen exists at all because a `.png` opened in a text editor can only ever
 	/// be refused, and "here is the picture" is the answer the double-click wanted.
-	Viewer,
+	///
+	/// The viewer is HERE, and that is §130's whole point. It used to be `Tab::viewer`, an
+	/// `Option` beside this tag, and the doc on it had to say "`Some` exactly while this screen
+	/// shows" — a sentence, which is what an invariant is when the type does not hold it. Two
+	/// values could disagree: a `Viewer` screen with no viewer (which `view` and `strip_label` each
+	/// had a fallback arm for), or a viewer parked on a `Terminal` tab (which nothing would ever
+	/// have drawn). Carrying it makes both unsayable, and it is the same argument [`Viewer`] itself
+	/// won against the pair of `Option`s it replaced (§53) — one level up.
+	Viewer(Viewer),
 }
 
 /// The question the connect flow is holding, over the (dimmed) form (§7, §8, §12, §16).
@@ -2405,8 +2425,11 @@ struct Workspace {
 /// What the two DO share is stated once, below: a viewer is parented to a session, and a viewer is
 /// open on a path. Those two facts drive most of the call sites, and neither needs to know which
 /// kind it is holding to ask for them.
+/// `pub` only because [`AppScreen`] is, and since §130 this is one of its variants' payload — the
+/// same reason [`Modal`] carries it. `app` is a private module, so this reaches no further than the
+/// crate either way.
 #[derive(Debug)]
-enum Viewer {
+pub enum Viewer {
 	Editor(crate::editor::Editor),
 	Picture(crate::preview::Preview),
 }
@@ -2625,12 +2648,6 @@ pub struct Tab {
 	/// `Connected` until `Disconnected`; output bytes are fed into it and the
 	/// Terminal screen renders its grid.
 	terminal: Option<term::Terminal>,
-	/// What this tab is VIEWING, when it is showing a remote file rather than running a session
-	/// (§32, §53) — a text buffer or a picture, see [`Viewer`]. `Some` exactly while `screen` is
-	/// `AppScreen::Viewer`, and that is now one invariant rather than the two it used to be: this was a
-	/// pair of `Option` fields, `editor` and `preview`, each paired with a `AppScreen` variant of its
-	/// own, so four values had to agree about a thing that is one thing.
-	viewer: Option<Viewer>,
 	/// The question the connect flow is holding over the form, `None` when it is holding none
 	/// (§7, §8, §16). Each variant carries what answering it needs — the passphrase being typed,
 	/// the interactive challenge and its answers, the vault's two fields and what its unlock
@@ -3564,8 +3581,7 @@ impl Tab {
 	) -> Self {
 		Self {
 			id,
-			screen: AppScreen::Viewer,
-			viewer: Some(Viewer::Editor(crate::editor::Editor::loading(
+			screen: AppScreen::Viewer(Viewer::Editor(crate::editor::Editor::loading(
 				session, identity, path, theme,
 			))),
 			window_size,
@@ -3582,8 +3598,7 @@ impl Tab {
 	fn new_preview(id: u64, session: u64, path: String, window_size: iced::Size) -> Self {
 		Self {
 			id,
-			screen: AppScreen::Viewer,
-			viewer: Some(Viewer::Picture(crate::preview::Preview::loading(
+			screen: AppScreen::Viewer(Viewer::Picture(crate::preview::Preview::loading(
 				session, path,
 			))),
 			window_size,
@@ -3597,17 +3612,40 @@ impl Tab {
 	/// session. The property that matters is the one they share: no connection of its own, so no SSH
 	/// worker is started for it.
 	fn is_viewer(&self) -> bool {
-		self.viewer.is_some()
+		matches!(self.screen, AppScreen::Viewer(_))
+	}
+
+	/// What this tab is VIEWING, when it is showing a remote file rather than running a session
+	/// (§32, §53) — a text buffer or a picture, see [`Viewer`].
+	///
+	/// This reads the screen (§130) rather than a field beside it, so the `Option` is DERIVED: it is
+	/// `None` because this tab is on another screen, which is the only reason it could ever have
+	/// been `None`. Callers that are already matching on `self.screen` bind the viewer straight out
+	/// of the variant and never come here; this is for the ones that only want to know whether there
+	/// is one — the chip's label, the progress bar, the load router.
+	fn viewer(&self) -> Option<&Viewer> {
+		match &self.screen {
+			AppScreen::Viewer(viewer) => Some(viewer),
+			_ => None,
+		}
+	}
+
+	/// The viewer, mutably — the twin of [`Tab::viewer`].
+	fn viewer_mut(&mut self) -> Option<&mut Viewer> {
+		match &mut self.screen {
+			AppScreen::Viewer(viewer) => Some(viewer),
+			_ => None,
+		}
 	}
 
 	/// The buffer this tab is editing, if it is editing one (§32).
 	fn editor(&self) -> Option<&crate::editor::Editor> {
-		self.viewer.as_ref().and_then(Viewer::editor)
+		self.viewer().and_then(Viewer::editor)
 	}
 
 	/// The buffer this tab is editing, mutably.
 	fn editor_mut(&mut self) -> Option<&mut crate::editor::Editor> {
-		self.viewer.as_mut().and_then(Viewer::editor_mut)
+		self.viewer_mut().and_then(Viewer::editor_mut)
 	}
 
 	/// Ask `App` to open `path` in a new viewer tab parented to THIS session (§32, §53). Raised by
@@ -3651,10 +3689,7 @@ impl Tab {
 			AppScreen::Home => "Home".to_owned(),
 			// A viewer tab is named by its file, with a dot when there are unsaved edits — which
 			// only an editor can have (§32, §53). Both halves of that are the viewer's own.
-			AppScreen::Viewer => match &self.viewer {
-				Some(viewer) => viewer.label(),
-				None => "file".to_owned(),
-			},
+			AppScreen::Viewer(viewer) => viewer.label(),
 			// The connect form and every prompt over it are one "new connection" in progress —
 			// except a failure, which is worth naming on the chip so a tab that fell over says so
 			// without being opened.
@@ -3702,7 +3737,7 @@ impl Tab {
 
 	/// How far this tab's file read has got, if it is a viewer still loading one (§121).
 	fn load_progress(&self) -> Option<crate::viewer::LoadProgress> {
-		match self.viewer.as_ref()? {
+		match self.viewer()? {
 			Viewer::Editor(editor) => editor.load_progress(),
 			Viewer::Picture(picture) => picture.load_progress(),
 		}
@@ -3713,7 +3748,7 @@ impl Tab {
 	/// viewer whose parent session has already gone, since there is nothing left to send down.
 	fn loading_read(&self) -> Option<(u64, u64)> {
 		self.load_progress()?;
-		let parent = match self.viewer.as_ref()? {
+		let parent = match self.viewer()? {
 			Viewer::Editor(editor) => {
 				if editor.parent_gone {
 					return None;
@@ -3923,7 +3958,7 @@ impl Tab {
 	/// without a fourth status to keep in step.
 	fn on_preview_event(&mut self, event: SshEvent) -> iced::Task<Message> {
 		let viewer_id = self.id;
-		let Some(picture) = self.viewer.as_mut().and_then(Viewer::picture_mut) else {
+		let Some(picture) = self.viewer_mut().and_then(Viewer::picture_mut) else {
 			return iced::Task::none();
 		};
 		match event {
@@ -3964,7 +3999,7 @@ impl Tab {
 	/// A preview tab takes the same two load replies and none of the save ones, so it is answered
 	/// first and separately rather than by threading an `Option` through the editor's arms.
 	fn on_viewer_event(&mut self, event: SshEvent) -> iced::Task<Message> {
-		if matches!(self.viewer, Some(Viewer::Picture(_))) {
+		if matches!(self.screen, AppScreen::Viewer(Viewer::Picture(_))) {
 			return self.on_preview_event(event);
 		}
 		let id = self.id;
@@ -6560,11 +6595,13 @@ impl Tab {
 			// comes from `ui::editor`; the picture's toolbar and zoomable image come from
 			// `ui::preview`. Both borrow what they draw in place, so neither the buffer nor the
 			// decoded pixels are copied per frame.
-			AppScreen::Viewer => match &self.viewer {
-				Some(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
-				Some(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
-				None => text("opening…").into(),
-			},
+			//
+			// There is no third arm. There used to be — `None => text("opening…")` — for the state
+			// where this screen showed and `Tab::viewer` was `None`, which nothing ever produced and
+			// nothing could have drawn. §130 moved the viewer into the variant, so the state is gone
+			// and so is the sentence that stood in for it.
+			AppScreen::Viewer(Viewer::Editor(editor)) => ui::editor::view(editor, self.id),
+			AppScreen::Viewer(Viewer::Picture(picture)) => ui::preview::view(picture, self.id),
 		}
 	}
 }
@@ -9371,8 +9408,8 @@ mod tests {
 
 	/// The picture tab with this id (§53).
 	fn preview_of(app: &App, id: u64) -> &crate::preview::Preview {
-		match app.tabs().find(|tab| tab.id == id).map(|tab| &tab.viewer) {
-			Some(Some(Viewer::Picture(picture))) => picture,
+		match app.tabs().find(|tab| tab.id == id).and_then(Tab::viewer) {
+			Some(Viewer::Picture(picture)) => picture,
 			_ => panic!("a preview tab"),
 		}
 	}
@@ -9529,16 +9566,20 @@ mod tests {
 		// "And never a buffer as well" used to need its own assertion, because the two kinds were
 		// two `Option` fields and nothing stopped both being `Some`. One enum makes that
 		// unrepresentable, so matching the variant IS the whole claim.
+		//
+		// "And the screen agrees" used to need one too, for the same reason one level up: the tag
+		// and the viewer were two fields. §130 carried the viewer into the tag, so this single
+		// pattern now makes both claims — a `Viewer` screen holding a `Picture` is the only way to
+		// say either of them.
 		assert!(
-			matches!(tab.viewer, Some(Viewer::Picture(_))),
-			"a picture opens a picture"
+			matches!(tab.screen, AppScreen::Viewer(Viewer::Picture(_))),
+			"a picture opens a picture, on the viewer screen"
 		);
-		assert!(matches!(tab.screen, AppScreen::Viewer));
 
 		let notes = open_file(&mut app, session, "/srv/notes.txt");
 		let tab = app.tabs().find(|tab| tab.id == notes).expect("the tab");
 		assert!(
-			matches!(tab.viewer, Some(Viewer::Editor(_))),
+			matches!(tab.screen, AppScreen::Viewer(Viewer::Editor(_))),
 			"text still opens the editor"
 		);
 	}
