@@ -606,15 +606,11 @@ impl Terminal {
 			match query {
 				// XTVERSION: cmote's fixed name and version.
 				query::Query::Version => out.extend_from_slice(&query::version_reply(VERSION)),
-				// DECRQSS for SGR: rebuild the current pen — exactly what the grid paints — as an
-				// SGR string and report it valid.
-				query::Query::Decrqss(query::Decrqss::Sgr) => {
-					let sgr = pen_sgr(&self.term.grid().cursor.template);
-					out.extend_from_slice(&query::decrqss_sgr_reply(&sgr));
-				}
-				// Every other DECRQSS setting: an honest "unsupported".
-				query::Query::Decrqss(query::Decrqss::Unsupported) => {
-					out.extend_from_slice(&query::decrqss_unsupported_reply());
+				// DECRQSS: report the setting from the live state that holds it (§33, §123). Each of
+				// these describes what the grid ACTUALLY does, which is the rule the SGR report set
+				// and the reason the cursor's report cannot echo a blink back (see `decscusr_param`).
+				query::Query::Decrqss(setting) => {
+					out.extend_from_slice(&self.decrqss_report(&setting));
 				}
 				// XTGETTCAP: answer each requested capability from cmote's small map of facts.
 				query::Query::Capabilities(names) => {
@@ -641,6 +637,55 @@ impl Terminal {
 		// Last, amend the engine's own DA1 answer if this chunk asked for one: cmote draws sixels, so
 		// its device attributes have to say so (§41). Nothing else in `out` is touched.
 		query::with_sixel_attribute(out)
+	}
+
+	/// Answer one DECRQSS request from the live state that holds the setting (§33, §123).
+	///
+	/// This is the one query family that needs the terminal rather than a static fact, which is why
+	/// it is a method here and not a function in `query`: that module parses and never touches the
+	/// engine. Each arm reads the state some other section already had to keep — §56's protection bit
+	/// on the pen, §102's mirrored scrolling region, §102's margins — so nothing new is tracked to
+	/// make these answerable. That was §66's finding about the mark it retired: the declined half of
+	/// "partial" was unwritten reporting code over state that already existed.
+	///
+	/// Every parameter is 1-based on the wire, because DEC counts lines and columns from 1 and a
+	/// report has to be a sequence the program could send back to get the same state.
+	fn decrqss_report(&self, setting: &query::Decrqss) -> Vec<u8> {
+		match setting {
+			query::Decrqss::Sgr => {
+				let sgr = pen_sgr(&self.term.grid().cursor.template);
+				query::decrqss_reply(&sgr, "m")
+			}
+			// The shape the grid draws, never the blink that was asked for (`decscusr_param`).
+			query::Decrqss::CursorStyle => decscusr_param(self.screen().cursor_shape())
+				.map_or_else(query::decrqss_unsupported_reply, |param| {
+					query::decrqss_reply(param, " q")
+				}),
+			// DECSCA rides the engine's own pen as a borrowed flag bit (§56), so the current
+			// attribute is read from the same template the SGR report is built from. `1` is
+			// protected; `0` is not, and is also what DECSCA's own `Ps` 2 means.
+			query::Decrqss::Protection => {
+				let protected =
+					protect::is_protected(self.term.grid().cursor.template.flags.bits());
+				query::decrqss_reply(if protected { "1" } else { "0" }, "\"q")
+			}
+			// The engine keeps DECSTBM private, so cmote reports its own mirror of it (§102) — the
+			// thing §66 called "one new seam getter" and which §102 went on to build for margins.
+			query::Decrqss::ScrollRegion => {
+				let top = self.region.first_row() + 1;
+				let bottom = self.region.last_row() + 1;
+				query::decrqss_reply(&format!("{top};{bottom}"), "r")
+			}
+			// Margins are cmote's own state, not the engine's (§102). With them off the page edges
+			// are the honest answer: DECSLRM's default IS the full width, and a program that reset
+			// them would get exactly this back.
+			query::Decrqss::Margins => {
+				let (_, cols) = self.screen().size();
+				let (left, right) = self.margins.band(cols as usize);
+				query::decrqss_reply(&format!("{};{}", left + 1, right + 1), "s")
+			}
+			query::Decrqss::Unsupported => query::decrqss_unsupported_reply(),
+		}
 	}
 
 	/// When the update this terminal is HOLDING stops being honoured, or `None` when it holds none
@@ -2575,6 +2620,26 @@ fn merged_pen(current: &Cell, saved: &Cell, mask: sgrstack::Mask) -> String {
 	pen_restore(flags, foreground, background, underline)
 }
 
+/// The DECSCUSR parameter that reproduces the cursor cmote is drawing, or `None` for a shape
+/// DECSCUSR cannot spell (§123).
+///
+/// Only the STEADY values are ever reported, and that is the point rather than a shortcut. cmote
+/// runs no animation timer, so a program that asked for a blinking bar with `CSI 5 SP q` is being
+/// shown a steady one — reporting 5 back would promise an animation that does not happen. Reporting
+/// 6 is the same rule the SGR report follows: say what the grid does.
+///
+/// `HollowBlock` and `Hidden` have no DECSCUSR parameter at all — `vte` reaches them only through
+/// `Handler::set_cursor_shape`, which nothing in cmote calls — so the honest answer for them is the
+/// unsupported one, not the nearest number.
+fn decscusr_param(shape: screen::CursorShape) -> Option<&'static str> {
+	match shape {
+		screen::CursorShape::Block => Some("2"),
+		screen::CursorShape::Underline => Some("4"),
+		screen::CursorShape::Bar => Some("6"),
+		screen::CursorShape::HollowBlock | screen::CursorShape::Hidden => None,
+	}
+}
+
 /// Rebuild the current SGR pen as a parameter string for a DECRQSS reply (§33). The pen is the
 /// template cell the engine stamps onto every glyph, so reading it back is authoritative — it is
 /// exactly what the grid paints, not a guess. The string always opens with `0` (a full reset) and
@@ -3323,12 +3388,93 @@ mod tests {
 
 	#[test]
 	fn an_unsupported_decrqss_query_is_answered_with_a_zero_status() {
-		// Scroll margins (`r`) are not exposed by the engine, so the honest reply is the invalid
-		// status `DCS 0 $ r ST` — enough to stop the program waiting, without lying about state.
+		// The conformance level (`" p`, DECSCL) is a setting cmote holds no state for, so the honest
+		// reply is the invalid status `DCS 0 $ r ST` — enough to stop the program waiting, without
+		// lying about state. This test used to use the scrolling region, which §123 made reportable.
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP$q\"p\x1b\\"),
+			b"\x1bP0$r\x1b\\".to_vec()
+		);
+	}
+
+	/// The cursor's shape, reported from what the grid draws (§123). A blinking request is answered
+	/// with its steady twin, because cmote runs no animation timer and reporting the blink back would
+	/// promise one.
+	#[test]
+	fn a_cursor_style_query_reports_the_shape_the_grid_draws() {
+		let mut terminal = Terminal::new(4, 8);
+		assert_eq!(
+			terminal.process(b"\x1bP$q q\x1b\\"),
+			b"\x1bP1$r2 q\x1b\\".to_vec(),
+			"the default block"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[4 q\x1bP$q q\x1b\\"),
+			b"\x1bP1$r4 q\x1b\\".to_vec(),
+			"a steady underline, as asked"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[5 q\x1bP$q q\x1b\\"),
+			b"\x1bP1$r6 q\x1b\\".to_vec(),
+			"a BLINKING bar was asked for; a steady bar is what is drawn, so 6 is reported"
+		);
+	}
+
+	/// DECSCA's current attribute, read off the pen bit §56 borrows. The pen is where protection
+	/// lives, so this reply moves with the very thing a selective erase consults.
+	#[test]
+	fn a_protection_query_reports_whether_the_pen_is_protecting() {
+		let mut terminal = Terminal::new(4, 8);
+		assert_eq!(
+			terminal.process(b"\x1bP$q\"q\x1b\\"),
+			b"\x1bP1$r0\"q\x1b\\".to_vec(),
+			"nothing is protected by default"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[1\"q\x1bP$q\"q\x1b\\"),
+			b"\x1bP1$r1\"q\x1b\\".to_vec(),
+			"armed"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[0\"q\x1bP$q\"q\x1b\\"),
+			b"\x1bP1$r0\"q\x1b\\".to_vec(),
+			"and disarmed again"
+		);
+	}
+
+	/// The scrolling region, from cmote's own mirror of it (§102) — the engine keeps DECSTBM
+	/// private, which is why the mirror exists and why this report can be given at all.
+	#[test]
+	fn a_scroll_region_query_reports_the_mirrored_region() {
 		let mut terminal = Terminal::new(10, 40);
 		assert_eq!(
 			terminal.process(b"\x1bP$qr\x1b\\"),
-			b"\x1bP0$r\x1b\\".to_vec()
+			b"\x1bP1$r1;10r\x1b\\".to_vec(),
+			"the whole page, 1-based as DEC counts lines"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[3;7r\x1bP$qr\x1b\\"),
+			b"\x1bP1$r3;7r\x1b\\".to_vec(),
+			"and what the program set, back exactly as it could send it again"
+		);
+	}
+
+	/// The margins, from cmote's own state (§102). With them off, the page edges are the honest
+	/// answer rather than a refusal: DECSLRM's default IS the full width.
+	#[test]
+	fn a_margins_query_reports_the_band() {
+		let mut terminal = Terminal::new(4, 20);
+		assert_eq!(
+			terminal.process(b"\x1bP$qs\x1b\\"),
+			b"\x1bP1$r1;20s\x1b\\".to_vec(),
+			"no margins set, so the band is the page"
+		);
+		// DECLRMM has to be on before DECSLRM does anything (§102).
+		assert_eq!(
+			terminal.process(b"\x1b[?69h\x1b[5;12s\x1bP$qs\x1b\\"),
+			b"\x1bP1$r5;12s\x1b\\".to_vec(),
+			"and the band once one is set"
 		);
 	}
 

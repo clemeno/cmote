@@ -26,8 +26,9 @@
 // A program that sends one waits for a reply; unanswered, it stalls until a timeout, and some
 // paste the unanswered bytes as literal garbage. So cmote sniffs these out of the stream itself —
 // exactly the tactic `cwd` and `modkeys` use for the sequences the engine ignores — and formats a
-// reply. The scanner only PARSES here (it holds no engine state); `term::mod` fills a DECRQSS SGR
-// reply from the live pen, because only that one needs to read the grid's current attributes.
+// reply. The scanner only PARSES here (it holds no engine state); `term::mod::decrqss_report` fills
+// every DECRQSS reply from live state, because each of those five settings is a thing the grid is
+// currently doing rather than a fact about cmote (§123).
 //
 // Any sequence can be split anywhere, even between the ESC and the `[`/`P`, because output arrives in
 // arbitrary chunks. Neither half of that framing is this module's any more: `csi::Framer` cuts out the
@@ -40,15 +41,30 @@
 /// (a sixel image), so the framer abandons it rather than accumulate without bound (§12).
 const MAX_DATA: usize = 256;
 
-/// A DECRQSS request, reduced to what cmote can answer (§33). `Sgr` is the one setting cmote reads
-/// back truthfully — the pen the grid actually paints with; every other setting (cursor shape,
-/// scroll margins, conformance level) is `Unsupported`, because cmote either renders it fixed
-/// (a block cursor drawn by inverting the cell) or the engine does not expose it. `Unsupported`
-/// still earns a reply — an honest `ps=0` that says "I do not report that", which stops the
-/// program waiting far more cheaply than a lie about state would cost in wrong behaviour.
+/// A DECRQSS request, reduced to what cmote can answer (§33, §123).
+///
+/// Each variant is a setting cmote holds live state for and can therefore report truthfully; the
+/// state itself is read by `term::mod`, because this module parses and never touches the engine.
+/// Everything else is `Unsupported` — an honest `Ps=0` that says "I do not report that", which stops
+/// the program waiting far more cheaply than a lie about state would cost in wrong behaviour.
+///
+/// §66 inherited three of these from the partial row it retired, on the finding that a mark reading
+/// "partial" had never been asked *which part*: the declined half was not a refusal, it was
+/// unwritten reporting code over state that already existed. `Margins` is the fourth, and it exists
+/// for the same reason one section later — §102 gave cmote the left and right margins, so the answer
+/// was sitting there too.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decrqss {
+	/// `m` — SGR, the pen the grid actually paints with.
 	Sgr,
+	/// `SP q` — DECSCUSR, the cursor's shape (§23).
+	CursorStyle,
+	/// `" q` — DECSCA, whether what is printed now is protected from a selective erase (§56).
+	Protection,
+	/// `r` — DECSTBM, the top and bottom lines of the scrolling region (§102).
+	ScrollRegion,
+	/// `s` — DECSLRM, the left and right margins (§102).
+	Margins,
 	Unsupported,
 }
 
@@ -65,7 +81,7 @@ pub struct Graphics {
 
 /// A completed query the scanner found in the stream (§33, §36, §41). Usually none arrive in a
 /// chunk; when one does, `term::mod` turns it into reply bytes — `Version`, `Capabilities`, `UnitId`
-/// and `Graphics` from static facts about cmote, `Decrqss(Sgr)` from the live pen.
+/// and `Graphics` from static facts about cmote, every `Decrqss` from live state (§123).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Query {
 	/// XTVERSION (`CSI > q`): answer with cmote's name and version.
@@ -140,12 +156,17 @@ fn asked_string(dcs: &super::dcs::Dcs<'_>) -> Option<Query> {
 		return None;
 	}
 	match dcs.intermediates() {
-		// DECRQSS. `m` is the SGR selector, the one setting cmote reports truthfully; anything else is
-		// answered unsupported (an honest `ps=0`).
-		[b'$'] => Some(Query::Decrqss(if dcs.payload() == b"m" {
-			Decrqss::Sgr
-		} else {
-			Decrqss::Unsupported
+		// DECRQSS. The payload is the queried sequence's own intermediates and final byte, so each
+		// arm below is spelled exactly as that sequence is: DECSCUSR is `CSI Ps SP q`, hence a space
+		// then `q`, and DECSCA is `CSI Ps " q`, hence a quote then `q` with no space between. Any
+		// selector cmote holds no state for is answered unsupported (an honest `Ps=0`).
+		[b'$'] => Some(Query::Decrqss(match dcs.payload() {
+			b"m" => Decrqss::Sgr,
+			b" q" => Decrqss::CursorStyle,
+			b"\"q" => Decrqss::Protection,
+			b"r" => Decrqss::ScrollRegion,
+			b"s" => Decrqss::Margins,
+			_ => Decrqss::Unsupported,
 		})),
 		// XTGETTCAP. The names are `;`-separated hex; keep them raw for `known_capability` to decode.
 		[b'+'] => Some(Query::Capabilities(
@@ -331,15 +352,21 @@ pub fn da3_reply(unit_id: &str) -> Vec<u8> {
 	reply
 }
 
-/// The valid DECRQSS reply for the SGR setting: `DCS 1 $ r <params> m ST` (§33). `params` is the
-/// current pen rebuilt as an SGR parameter string (e.g. `0` for a reset pen, `0;1;31` for bold
-/// red); the leading `1` marks the request valid and the trailing `m` echoes the setting's own
-/// final byte, as DECRQSS requires.
-pub fn decrqss_sgr_reply(params: &str) -> Vec<u8> {
-	let mut reply = Vec::with_capacity(params.len() + 8);
+/// The valid DECRQSS reply: `DCS 1 $ r <params> <selector> ST` (§33, §123). The leading `1` marks
+/// the request valid, `params` is the setting's current value as a parameter string (`0;1;31` for a
+/// bold red pen, `1;24` for a full-page scrolling region), and `selector` echoes the queried
+/// sequence's own intermediates and final byte, as DECRQSS requires — so an SGR report ends `m` and
+/// a DECSCUSR report ends with a space and a `q`.
+///
+/// One builder for all of them rather than one per setting: the only thing that differs between the
+/// five is those two strings, and a second function would have been the same bytes with a different
+/// tail hard-coded (§109).
+pub fn decrqss_reply(params: &str, selector: &str) -> Vec<u8> {
+	let mut reply = Vec::with_capacity(params.len() + selector.len() + 7);
 	reply.extend_from_slice(b"\x1bP1$r");
 	reply.extend_from_slice(params.as_bytes());
-	reply.extend_from_slice(b"m\x1b\\");
+	reply.extend_from_slice(selector.as_bytes());
+	reply.extend_from_slice(b"\x1b\\");
 	reply
 }
 
@@ -379,14 +406,28 @@ pub fn gettcap_reply(names: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// The value cmote reports for a terminfo/termcap capability name, or `None` for one it does not
-/// advertise (§33). Only two are stated, because only two are facts cmote can give truthfully: the
-/// terminal name it requested for the remote pty (`TN`, `xterm-256color`) and its colour count
-/// (`Co`/`colors`, 256). Truecolor and the rest are left unknown — their wire values are ambiguous
-/// and 24-bit SGR works whether or not a capability query confirms it.
+/// advertise (§33, §123). Three are stated, because three are facts cmote can give truthfully: the
+/// terminal name it requested for the remote pty (`TN`, `xterm-256color`), its colour count
+/// (`Co`/`colors`, 256), and its direct-colour depth (`RGB`, 8 bits a channel).
+///
+/// **`RGB` is the third special name XTGETTCAP defines**, alongside `TN` and `Co`, and its type is
+/// the thing §66's "their wire values are ambiguous" had not looked up. ncurses' `user_caps(5)`
+/// defines `RGB` as boolean, numeric *or* string, and says what a numeric one means: the bits per
+/// channel that `setaf`/`setab` take. So the numeric form is the one that fits this reply grammar —
+/// which has a value slot and no way to spell a bare boolean — and `8` is the truth about cmote,
+/// whose SGR 38;2 / 48;2 path takes a full byte per channel.
+///
+/// **`Tc` is deliberately not here, and that is a decision rather than an omission.** It is tmux's
+/// own extension: it appears in neither xterm's list of XTGETTCAP special names nor ncurses'
+/// recognised user capabilities, and it is a pure boolean — a flag whose presence is the whole
+/// message. This grammar answers a recognised name as `<NAME>=<VALUE>`, so answering `Tc` would mean
+/// inventing a value the capability does not define, on the authority of nobody. A program that
+/// wants to know whether cmote takes 24-bit colour has `RGB` to ask, and it is answered.
 fn known_capability(name: &[u8]) -> Option<&'static [u8]> {
 	match name {
 		b"TN" => Some(b"xterm-256color"),
 		b"Co" | b"colors" => Some(b"256"),
+		b"RGB" => Some(b"8"),
 		_ => None,
 	}
 }
@@ -568,20 +609,41 @@ mod tests {
 		assert_eq!(scan(b"\x1bP$qm\x1b\\"), vec![Query::Decrqss(Decrqss::Sgr)]);
 	}
 
+	/// The four selectors §123 added, each recognised by the exact spelling of the sequence it asks
+	/// about — the space in DECSCUSR's and the quote in DECSCA's are part of the selector, not
+	/// padding to be trimmed.
 	#[test]
-	fn other_decrqss_requests_are_unsupported() {
-		// Cursor shape (`SP q`), scroll margins (`r`), conformance (`"p`): cmote renders them fixed
-		// or cannot read them, so each is honestly reported unsupported rather than guessed at.
+	fn the_reportable_decrqss_selectors_are_told_apart() {
 		assert_eq!(
 			scan(b"\x1bP$q q\x1b\\"),
-			vec![Query::Decrqss(Decrqss::Unsupported)]
+			vec![Query::Decrqss(Decrqss::CursorStyle)],
+			"DECSCUSR is `CSI Ps SP q`"
+		);
+		assert_eq!(
+			scan(b"\x1bP$q\"q\x1b\\"),
+			vec![Query::Decrqss(Decrqss::Protection)],
+			"DECSCA is `CSI Ps \" q`, with no space"
 		);
 		assert_eq!(
 			scan(b"\x1bP$qr\x1b\\"),
+			vec![Query::Decrqss(Decrqss::ScrollRegion)]
+		);
+		assert_eq!(
+			scan(b"\x1bP$qs\x1b\\"),
+			vec![Query::Decrqss(Decrqss::Margins)]
+		);
+	}
+
+	#[test]
+	fn other_decrqss_requests_are_unsupported() {
+		// Conformance level (`"p`, DECSCL): cmote holds no state for it, so it is honestly reported
+		// unsupported rather than guessed at. Same for a selector that is not a setting at all.
+		assert_eq!(
+			scan(b"\x1bP$q\"p\x1b\\"),
 			vec![Query::Decrqss(Decrqss::Unsupported)]
 		);
 		assert_eq!(
-			scan(b"\x1bP$q\"p\x1b\\"),
+			scan(b"\x1bP$qZ\x1b\\"),
 			vec![Query::Decrqss(Decrqss::Unsupported)]
 		);
 	}
@@ -648,11 +710,22 @@ mod tests {
 	#[test]
 	fn the_sgr_reply_frames_the_parameters() {
 		// A reset pen reports `0`; the reply is `DCS 1 $ r 0 m ST`.
-		assert_eq!(decrqss_sgr_reply("0"), b"\x1bP1$r0m\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("0", "m"), b"\x1bP1$r0m\x1b\\".to_vec());
 		assert_eq!(
-			decrqss_sgr_reply("0;1;31"),
+			decrqss_reply("0;1;31", "m"),
 			b"\x1bP1$r0;1;31m\x1b\\".to_vec()
 		);
+	}
+
+	/// The selector is echoed verbatim, intermediates included — which is the part a per-setting
+	/// builder would have hard-coded five times (§123). DECSCUSR's space and DECSCA's quote are the
+	/// two that would be easy to lose.
+	#[test]
+	fn a_reply_echoes_the_selector_it_was_asked_about() {
+		assert_eq!(decrqss_reply("2", " q"), b"\x1bP1$r2 q\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("1", "\"q"), b"\x1bP1$r1\"q\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("1;24", "r"), b"\x1bP1$r1;24r\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("1;80", "s"), b"\x1bP1$r1;80s\x1b\\".to_vec());
 	}
 
 	#[test]
@@ -677,6 +750,32 @@ mod tests {
 		assert_eq!(
 			gettcap_reply(&[b"436F".to_vec()]),
 			b"\x1bP1+r436F=323536\x1b\\".to_vec()
+		);
+	}
+
+	/// The third special name XTGETTCAP defines, and the one §66 left unanswered on a claim about
+	/// ambiguity that turned out to be checkable (§123). ncurses' `user_caps(5)` says a NUMERIC `RGB`
+	/// is the bits per channel, and this reply grammar has a value slot, so the numeric form is the
+	/// one that fits: 8, which is what cmote's SGR 38;2 actually takes.
+	#[test]
+	fn the_direct_colour_depth_is_answered() {
+		// `RGB` (524742) -> `8` (38).
+		assert_eq!(
+			gettcap_reply(&[b"524742".to_vec()]),
+			b"\x1bP1+r524742=38\x1b\\".to_vec()
+		);
+	}
+
+	/// `Tc` is refused, and this test is the refusal rather than a gap being recorded (§123). It is
+	/// tmux's own extension — in neither xterm's special-name list nor ncurses' recognised user
+	/// capabilities — and it is a pure boolean, which this grammar has no way to spell. Answering it
+	/// would mean inventing a value on nobody's authority; `RGB` is the question that has an answer.
+	#[test]
+	fn the_tmux_truecolor_flag_is_not_answered() {
+		// `Tc` (5463) -> `DCS 0 + r 5463 ST`, the same honest "unknown" any other name gets.
+		assert_eq!(
+			gettcap_reply(&[b"5463".to_vec()]),
+			b"\x1bP0+r5463\x1b\\".to_vec()
 		);
 	}
 

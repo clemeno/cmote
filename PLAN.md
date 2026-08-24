@@ -14028,3 +14028,98 @@ account happens to be on screen.
   slower rather than wrong.
 - **2 MiB still ends a bracket too.** That is `vte`'s other bound and it is untouched here; a remote
   pushing that much inside one bracket has its frame applied by the crate, not by this clock.
+
+## §123 — Answering the settings, and the flag with nobody behind it
+
+§66 retired the matrix's *partial* mark and, in splitting the last two rows that wore it, left four
+named items of work: DECRQSS could report three more selectors, and XTGETTCAP could state two more
+capabilities. This section takes all of them. Three of the four landed as written, one came free, and
+one turned out to be a refusal rather than a gap — which is the interesting half.
+
+### DECRQSS: five settings, all read live
+
+`DCS $ q <sel> ST` asks "what is setting `<sel>` right now?", and the reply echoes the selector back:
+`DCS 1 $ r <params><sel> ST`. cmote answered exactly one selector, `m`, and everything else got the
+honest `DCS 0 $ r ST`. It now answers five, and every one is read from state that already existed:
+
+| selector | setting | where the answer comes from |
+|---|---|---|
+| `m` | SGR | the engine's pen template (§33) |
+| `SP q` | DECSCUSR | `Screen::cursor_shape` (§23) |
+| `" q` | DECSCA | the protection bit §56 borrows on that same pen |
+| `r` | DECSTBM | cmote's mirror of the region the engine keeps private (§102) |
+| `s` | DECSLRM | the margins (§102) |
+
+The fourth row is the one §66 did not know about, because §102 had not happened yet. Margins are
+cmote's own state rather than the engine's, so DECSLRM's report was sitting there the moment they
+shipped — and a reader who saw DECSTBM reported and DECSLRM not would rightly have asked why.
+
+**Every report describes what the grid DOES, not what was asked for.** That rule came from the SGR
+report and it decides two of the new ones:
+
+* **A blinking cursor is reported steady.** `CSI 5 SP q` asks for a blinking bar; cmote runs no
+  animation timer (§23), draws a steady bar, and therefore reports `6`. Reporting `5` back would
+  promise an animation that does not happen. This is not a shortcut — `Screen::cursor_shape` does not
+  carry blink at all, so the steady value is the only thing there is to say.
+* **Two shapes have no answer.** `HollowBlock` and `Hidden` are reachable in `vte` only through
+  `Handler::set_cursor_shape`, which nothing in cmote calls, and no DECSCUSR parameter selects them.
+  So they get the unsupported reply rather than the nearest number. The arm is unreachable today; it
+  is written because "unreachable" is a claim about cmote's callers, not about the type.
+
+Everything is 1-based on the wire, because DEC counts lines and columns from 1 and a status report has
+to be a sequence the program could send straight back to reproduce the state.
+
+One builder replaced the SGR-specific one: `decrqss_reply(params, selector)`. Five near-identical
+functions differing in a hard-coded tail is what §109 is about, and the selector is data here — it is
+literally the bytes the request carried.
+
+### XTGETTCAP: one capability, and one refusal
+
+`RGB` was the easy one once it was looked up, and the looking up is the point. The code comment had
+said truecolor is "left unknown — their wire values are ambiguous", and §66's paragraph had said `Tc`
+and `RGB` were "the two capabilities a shell actually asks about, cmote's 24-bit SGR being real".
+Both sentences were arguing from the feature. Neither had read what the capability *is*.
+
+ncurses' `user_caps(5)` says `RGB` may be boolean, numeric or string, and that a **numeric** one is
+the bits per channel that `setaf`/`setab` take. XTGETTCAP's reply grammar answers a recognised name as
+`<NAME>=<VALUE>` — a value slot and no way to spell a bare boolean — so the numeric form is the one
+that fits, and `8` is the truth about cmote, whose `SGR 38;2` path takes a full byte per channel. The
+ambiguity was real and was settled by one line of somebody else's documentation.
+
+**`Tc` is refused, and that is the finding.** It is tmux's own extension: absent from xterm's list of
+XTGETTCAP special names (`TN`, `Co`/`colors`, `RGB`) and absent from ncurses' recognised user
+capabilities. It is also a pure boolean — a flag whose *presence* is the entire message. In a grammar
+that has no boolean form, answering it means inventing both a value and an authority. So it stays
+`DCS 0 + r 5463 ST`, and the matrix row moved from ❌ to 🛑: not "we have not got round to it" but
+"there is nothing here to be right about". A program that wants to know whether cmote takes 24-bit
+colour has `RGB` to ask, and now gets `8`.
+
+This is §70's lesson one column over. §70 corrected a row whose *reason* had expired; this corrects
+two rows whose reason had never been checked. **A note pleading ambiguity is a note nobody has looked
+up** — and it reads exactly like a note that has.
+
+### Files
+
+- `src/term/query.rs` — the four new `Decrqss` variants and their selector spellings, the generalised
+  `decrqss_reply`, and `RGB` in `known_capability` with `Tc`'s refusal written beside it.
+- `src/term/mod.rs` — `Terminal::decrqss_report`, which is where the live state is read, and
+  `decscusr_param` beside `pen_sgr`.
+
+### Not done
+
+- **DECSCL, the conformance level, is still unreported.** cmote holds no state for it — it parses one
+  dialect and says so in `TERM`, XTVERSION and XTGETTCAP alike (§78, §96) — so there is nothing to
+  read back. It is the selector the "unsupported" test now uses, which is the right way round: the
+  honest reply needs a case that genuinely has no answer.
+- **XTGETTCAP still answers no real terminfo names.** `kb`, `ku` and the rest are echoed back unknown,
+  and closing that means carrying a terminfo database. `keymap` knows the byte sequences, but "the
+  bytes cmote sends for Up" and "the terminfo string for `kcuu1`" are two claims, and a table mapping
+  the second onto the first is the work nobody has asked for.
+- **DECRQPSR (`Ps $ w`) is still ❌**, and it is the next one of these. DECCIR and DECTABSR both
+  describe state cmote holds — the cursor DECXCPR already reports, and `term/tabs.rs`'s own stop table
+  — but §98 left open whether that envelope has an "I do not report that" form, and answering half of
+  a report is worse than answering none.
+- **The blink a program asked for is not remembered anywhere.** `Screen::cursor_shape` drops it at the
+  seam, so if cmote ever grows an animation timer, DECSCUSR's report and the drawing both change
+  together — which is the right coupling, but it does mean the request itself is not recoverable
+  today.

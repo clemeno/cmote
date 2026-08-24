@@ -1179,6 +1179,18 @@ cursor "renders fixed" has been stale since §60 shipped the shapes. **XTGETTCAP
 and neither is urgent — a program that gets an honest "no" behaves correctly today, which is why they sat
 unnoticed under a mark that said "partial" and meant "unexamined".
 
+*[**§123 took both, and only one of the four items above survived contact with its source.** DECRQSS went
+as written — the three selectors were exactly where §66 said, and a fourth came free, because §102 had
+since given cmote the margins DECSLRM reports. The one it got wrong is `Tc`. "The two capabilities a shell
+actually asks about, cmote's 24-bit SGR being real" is true about the SGR and wrong about the query: `Tc` is
+tmux's own extension, absent from xterm's special-name list AND from ncurses' recognised user capabilities,
+and it is a **boolean** in a reply grammar whose recognised form is `<NAME>=<VALUE>`. There is no value to
+send, so answering it means inventing one on nobody's authority — it is a 🛑, not the ❌ this paragraph
+assumed. `RGB` is the one that had an answer all along, and the "ambiguous wire value" the code comment had
+pleaded is settled in one line of ncurses' `user_caps(5)`: a numeric `RGB` is the bits per channel, so `8`.
+The lesson is §70's, one column over — a note pleading ambiguity is a note nobody has looked up. PLAN
+§123.]*
+
 **§67 is the same discipline applied to ✅ itself.** "Full" was the one mark that asked a reader to
 believe a row rather than check it, so it now reads *supported* and the note carries the extent. The sweep
 cost nothing and paid for itself: one supported sequence had no row at all (`1005`, the UTF-8 mouse
@@ -1571,10 +1583,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| DCS $ q m (DECRQSS — SGR) | Report the pen | ✅ | `DCS $ q m ST` asks what the pen currently is; answered `DCS 1 $ r <params> m ST`, rebuilt from the live pen so it matches what the grid paints — opening with `0` and listing only what is set (§33, `term/query.rs`) |
-| DCS $ q (DECRQSS — any other setting) | Report another setting | ❌ | the same request for another setting — DECSCA, DECSCUSR, DECSTBM and the rest; answered `DCS 0 $ r ST`, the standard's 'I do not report that', which lets the sender move on (§66) |
-| DCS + q `TN` / `Co` (XTGETTCAP) | Report a capability | ✅ | `DCS + q <hex-name> ST` asks for a terminfo capability; `TN` answers `xterm-256color`, the name requested for the remote pty, and `Co` / `colors` answer `256`, hex both ways (§33, `term/query.rs`) |
-| DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | the same request for any other capability; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back (§66) |
+| DCS $ q (DECRQSS — the five reported settings) | Report a setting | ✅ | `DCS $ q <sel> ST` asks what a setting currently is; answered `DCS 1 $ r <params><sel> ST` from live state, never from a stored copy of the request. `m` (SGR) rebuilds the pen the grid paints with, opening `0` and listing only what is set; `SP q` (DECSCUSR) reports the shape being DRAWN, so a blink request is answered with its steady twin because cmote runs no animation timer; `" q` (DECSCA) reads the protection bit §56 borrows on the pen; `r` (DECSTBM) reads cmote's own mirror of the region the engine keeps private; `s` (DECSLRM) reads the margins §102 gave it (§33, §66, §102, §123, `term/query.rs`, `term/mod.rs::decrqss_report`) |
+| DCS $ q (DECRQSS — any other setting) | Report another setting | ❌ | the same request for a setting cmote holds no state for — DECSCL's conformance level, and anything not in the row above; answered `DCS 0 $ r ST`, the standard's 'I do not report that', which lets the sender move on (§66, §123) |
+| DCS + q `TN` / `Co` / `RGB` (XTGETTCAP) | Report a capability | ✅ | `DCS + q <hex-name> ST` asks for a terminfo capability; `TN` answers `xterm-256color`, the name requested for the remote pty, `Co` / `colors` answer `256`, and `RGB` answers `8` — the numeric form ncurses' `user_caps(5)` defines as bits per channel, which is what cmote's SGR 38;2 path takes. Hex both ways (§33, §123, `term/query.rs`) |
+| DCS + q `Tc` (XTGETTCAP — tmux's truecolor flag) | Report a capability | 🛑 | tmux's own extension, in neither xterm's list of XTGETTCAP special names nor ncurses' recognised user capabilities — and a pure **boolean**, which this reply grammar cannot spell: a recognised name is answered `<NAME>=<VALUE>`, so answering `Tc` means inventing a value on nobody's authority. `RGB` is the question with an answer, and it is answered (§123) |
+| DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | the same request for any other capability, including the real terminfo key names; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back. A full answer needs a terminfo database cmote does not carry (§66, §123) |
 | CSI > q (XTVERSION) | Terminal version | ✅ | asks for the terminal's name and version; answered `cmote(<ver>)` (§33, `term/query.rs`) |
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | the reply half of DA3 — the terminal's unit id, a constant `00434D45` (§36, `term/query.rs`) |
 | DCS … q | Sixel graphics | ✅ | sixel graphics, a bitmap written six pixels at a time; decoded in-house and composited over the grid, anchored to an absolute document line and reserving its cells, with its own page on the alternate screen (§41, `term/sixel.rs`, `term/graphics.rs`) |
@@ -1664,7 +1677,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
-query the engine dropped (XTVERSION, DECRQSS SGR, XTGETTCAP, DA3), and — since §56 — the VT220
+query the engine dropped (XTVERSION, DECRQSS — five settings since §123 — XTGETTCAP, DA3), and — since §56 — the VT220
 protected-cell erase it dropped as well, and — since §58, §59 and §60 — the whole VT420 rectangular
 family, checksum query included, and — since §72 — **DECSTR**, the soft reset every `tput init` opens
 with and no arm in `vte` ever heard. The **deliberate** part of what is missing used to be most of the ❌
@@ -2249,6 +2262,22 @@ This is that gap closed, one vendor at a time — and two of them could not be c
   page documents **no OSC 777 at all**. The attribution in this table and in `term/notify.rs` is
   folklore — the sequence is real and widely emitted, but "urxvt's" is a claim neither has a citation
   for.
+
+### ncurses' own capability list (`invisible-island.net/ncurses/man/user_caps.5.html`, read for §123)
+
+One page settled a question two sections had left as "ambiguous", which is the whole reason it is
+recorded here rather than paraphrased in a row.
+
+- **`RGB` is boolean, numeric OR string**, and each form means something different: it "asserts that the
+  `set_a_foreground` (`setaf`) and `set_a_background` (`setab`) capabilities employ *direct colors*". A
+  **numeric** one "tells ncurses what result to add to red, green, and blue" — the bits per channel; a
+  string form gives the three channels' bit counts slash-separated; a boolean one makes ncurses derive
+  the bits from `max_colors`. XTGETTCAP's reply grammar has a value slot and no boolean spelling, so the
+  numeric form is the only one that fits it: cmote answers `8`.
+- **`Tc` is not in this list at all.** It is not an ncurses-recognised user capability and it is not one
+  of xterm's XTGETTCAP special names (`TN`, `Co`/`colors`, `RGB`) either — it is tmux's own extension,
+  read from terminfo rather than asked for over the wire. That absence, plus its being a bare boolean,
+  is what makes it a 🛑 in part 8 rather than a gap.
 
 ### The sequence catalogues (read for §98)
 
