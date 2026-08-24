@@ -2432,12 +2432,12 @@ header so both panes name the same place.
 
 ### One snapshot, remembered per target
 
-- **`SessionState` is the one place that names what persists per target** (§14): the two
+- **`LeftOff` is the one place that names what persists per target** (§14): the two
   paths (`terminal_path`, `files_path`), the `.*` filter, and the two pane sizes
   (`explorer_width`, `files_height`). It is a transfer struct; `Target` keeps the fields flat
   (so the JSON stays flat and a pre-v2.2 `targets.json` loads unchanged), all optional and
   omitted when absent. Target metadata, never a secret — §12 is untouched. Adding another
-  remembered value is one field on `SessionState` and `Target`, one line each in capture /
+  remembered value is one field on `LeftOff` and `Target`, one line each in capture /
   restore / `set_session`.
 - **The pane sizes stay per target; the WINDOW size does not.** The tree width and pane
   height belong to a connection — one server's files want a tall pane, another a wide tree —
@@ -4815,7 +4815,7 @@ Two rules replace the inference, and neither looks at the wording:
 - **A refusal is what the program SAID.** `elevate::refusal` reads the lines printed between the last
   answer and the next question, and reports the remote's own line when one of them reads as a rejection
   ("Sorry, try again.", "Authentication failure"). A further factor prints no such thing. It rides the
-  `ElevatePrompt` event, so the GUI is told rather than guessing, and the dialog shows the remote's words
+  `ElevateChallenge` event, so the GUI is told rather than guessing, and the dialog shows the remote's words
   rather than a canned sentence — "Sorry, try again." and "user cme is not allowed to execute…" ask
   completely different things of the user. Matching nothing shows nothing, which is the safe direction.
 - **Only the FIRST FACTOR of an elevation is a password.** The cache answers that one and no later one,
@@ -5067,7 +5067,7 @@ retires §45's four controls:
    showing is plain text rather than a dead button. The login account has no ✕ — ending it is what
    Disconnect does, and a second way to end a session is a way to end one by accident.
 2. **Who to become**: `sudo` or `su`, an account, and the two checkboxes.
-3. **The credential conversation.** sudo's questions arrive one at a time as `ElevatePrompt` and the
+3. **The credential conversation.** sudo's questions arrive one at a time as `ElevateChallenge` and the
    dialog puts the remote's OWN wording to the user, with its words about the previous answer above
    it when there were any — which is the only thing that tells "wrong password, try again" from "now
    the second factor", since sudo dresses every prompt in its stack in cmote's `-p` text (§45).
@@ -12250,7 +12250,7 @@ the interesting ones.
 
 **`option_option` — three sites, and one of them was a security property.** `Option<Option<T>>` is a
 tri-state written in a way that reads wrong as easily as right: `None` and `Some(None)` sit one
-keystroke apart and mean opposite things. Both places using it — `SessionState`'s remembered sort (§22)
+keystroke apart and mean opposite things. Both places using it — `LeftOff`'s remembered sort (§22)
 and `iterm`'s user variable (§55) — had paid for that in prose, eight lines of doc comment each
 explaining which nesting level was which. In `iterm` the distinction is not a nicety: `Keep` is "we
 ignored this payload" and `Clear` is "the shell said the value is empty", and a remote that could
@@ -15097,6 +15097,10 @@ that line can become the default without a behaviour question attached.
 
 ## §134 — Splitting the question by who is asking, and the session that finishes the series
 
+> **Names below were changed by §135.** `AppScreen` is now `TabContent`, `Tab::screen` is
+> `Tab::content`, and `SessionState` is `SessionPhase` — three words that each meant more than one
+> thing. This section is left in the vocabulary it was written in; §135 is the record of why.
+
 §133 recorded a wall and named the way through it. This is that way.
 
 `AppScreen::Session(Session)` replaces **both** `Connecting { status }` and `Terminal`, and the
@@ -15392,8 +15396,14 @@ gathering it into `Workspace` is what removed it.
 - `src/bridge.rs`, `src/ssh/shell.rs`, `src/ui/elevate.rs` — `ElevateChallenge`.
 - `src/app/accounts.rs`, `src/app/browse.rs`, `src/app/connect.rs`, `src/app/fixtures.rs`,
   `src/app/home.rs` — the renames.
-- `CONTEXT.md` — nine entries, two `_Avoid_` lines, and the `Tab` entry fixed.
-- `PLAN.md` — this section.
+- `CONTEXT.md` — nine entries, five `_Avoid_` lines, and the `Tab` entry fixed.
+- `PLAN.md` — this section; five lines in four earlier §s that named a renamed type in the PRESENT
+  tense (`SessionState` in §22 twice and §111, `ElevatePrompt` in §45 and §47); and a pointer at the
+  head of §134, whose prose is left in the vocabulary it was written in.
+
+Those five are worth naming rather than fixing quietly: the sweep renamed the code and left four §s
+asserting, in the present tense, that types exist which do not. That is exactly the defect the review
+ranked worst, committed one section after reading the report that ranked it.
 
 275 insertions, 192 deletions across 13 files, plus this section. `CONTEXT.md` is 216 lines, from 170.
 1 556 tests, unchanged — no behaviour moved.
