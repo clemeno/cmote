@@ -15576,3 +15576,117 @@ shell is safe (§104).
   now bigger than most files in the tree.
 - **Nothing was done about `Identity::work`**, which §134 named and §135 left. It is still the last
   placeholder pair: `Workspace::default()` standing in for "this identity is the one on screen".
+
+## §137 — The find band that measured itself, and took the file with it
+
+A one-line bug with a two-file explanation. Open a file in the editor, press Ctrl+F, type anything
+that matches: the buffer goes blank. Not scrolled, not blanked by a colour — the text is not drawn at
+all. Clear the query and it comes back. Close the find bar and it comes back. Find a string that does
+**not** match and it never leaves.
+
+That last one is the tell. The band is drawn only when there is a current match:
+
+```rust
+match editor.find_match_line() {
+	Some(line) if line < line_count => stack![line_band(…), editor_element].into(),
+	_ => editor_element,
+}
+```
+
+No match, no `stack`, no bug. So the fault is not in the search, the selection or the scroll — it is
+in the `stack` that only exists when a match does.
+
+### What `Stack` actually promises
+
+iced's `Stack` does not lay its layers out independently. Its **base layer** is measured first, and
+every other layer is then measured against that result as a hard maximum (`iced_widget-0.14.2`,
+`stack.rs`):
+
+```rust
+let base = self.children[self.base_layer].as_widget_mut().layout(…, &limits);
+let size  = limits.resolve(self.width, self.height, base.size());
+let limits = layout::Limits::new(Size::ZERO, size);   // every other layer gets THIS
+```
+
+`stack![a, b]` makes `a` the base. So the band was measuring the text, not the other way round.
+
+### Why the band measured zero
+
+It would still have been harmless under ordinary limits, because the band is `Length::Fill` and
+`Fill` normally resolves to the parent's maximum. But the buffer lives inside the `Direction::Both`
+scrollable §32 built for it, and a scrollable that scrolls an axis hands its content **infinite** max
+on that axis — which would be useless to a `Fill`, so iced 0.14 marks those limits *compressed*, and
+under compression `Fill` resolves to the widget's **intrinsic** size instead
+(`iced_core-0.14.0`, `layout/limits.rs`):
+
+```rust
+Length::Fill | Length::FillPortion(_) if !self.compression.width => self.max.width,
+…
+_ => intrinsic_size.width.min(self.max.width).max(self.min.width),
+```
+
+The band's intrinsic width is its widest child, and its children are three empty containers. Zero.
+
+Both halves are individually reasonable. Together they read:
+
+| step | width |
+|---|---|
+| scrollable hands the stack compressed, infinite limits | ∞, compressed |
+| base layer = the band: `Fill` under compression → intrinsic | **0** |
+| stack size = base size | **0** |
+| every other layer capped at the stack's size | max width **0** |
+| the `text_editor`, `.width(Fixed(content_px))` → `amount.min(max.width)` | **0** |
+
+A zero-wide buffer draws nothing. The file was never gone; it was one pixel column wide, behind a
+gutter that is not in the scrollable at all and so kept its numbers — which is exactly what the bug
+looked like on screen.
+
+**Prove-it.** Neither half is visible from reading our code, so the numbers were taken before the fix
+was chosen — a throwaway `#[test]` replaying the same `Limits` chain, then deleted:
+
+```
+OLD stack size = Size { width: 0.0, height: 2000.0 }, editor = Size { width: 0.0, height: 2000.0 }
+NEW stack size = Size { width: 647.8, height: 2000.0 }, band = Size { width: 647.8, height: 2000.0 }
+```
+
+647.8 is `content_width(80)`. The first line is the bug, in the one number that matters.
+
+### The fix is which layer is the base
+
+`Stack::push_under` exists for exactly this: it inserts a layer at index 0 **and moves `base_layer`
+with it**, so the added layer draws first and measures last.
+
+```rust
+stack![editor_element].push_under(line_band(line_count, line, p.match_line))
+```
+
+Now the buffer is the base. Its size is its own content width — the fixed width §32 gives it so it
+never scrolls itself — and the band is measured against `Limits::new(ZERO, editor_size)`, which is
+**not** compressed, so its `Fill` resolves to the maximum and lands on the content width it wanted
+all along. The band still washes the whole line at any horizontal offset, and still draws beneath the
+glyphs, because `push_under` only changed which layer is asked how big it is.
+
+The rule worth keeping, since this tree stacks in five places: **a `Stack`'s base layer must be the
+layer that knows its own size.** A decoration measured off the thing it decorates goes under; the
+content goes on the base. Every other `stack!` here already happens to satisfy it — `ui/tabs.rs`
+puts the cell first, `ui/dialog.rs` the positioned card, `ui/editor.rs`'s Save As the whole screen —
+so this was the one place the order was written the other way, and the only one under a compressed
+scrollable, which is why it was the only one that broke.
+
+### Files
+
+- `src/ui/editor.rs` — `push_under` in `buffer_body`, and the two comments that record why: one at
+  the call site, one on `line_band` saying it is only ever an under layer.
+- `PLAN.md` — this section.
+
+**1 557 tests**, unchanged: no test moved, because this tree has no view-layout tests and the
+mechanism is iced's, not ours. The evidence is the probe above — the two `Limits` chains, run — plus
+iced's own two files quoted here. **The window itself has not been driven since the change**; the
+last step, opening a file and pressing Ctrl+F, is the user's.
+
+### Not done
+
+- **No regression test.** A test that would have caught this has to run iced's layout with a real
+  text-measuring renderer, which is a harness this tree does not have and would not use twice. The
+  cheaper guard is the rule stated above plus the comment at the call site; the honest note is that
+  reversing those two arguments again is still a silent bug.

@@ -382,11 +382,22 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	// focused). It rides BEHIND the text in a `stack` so the glyphs draw over it, and is content-wide so
 	// it washes the whole line at any horizontal offset. Three fixed spacers, not one widget per line —
 	// the band is a single row, wherever it sits. The gutter lights the match row separately (§32).
+	//
+	// `push_under`, NOT `stack![band, editor]` — and that is the whole of §137. A `Stack`'s BASE layer
+	// dictates the size, and every other layer is then laid out with the base's size as its MAXIMUM. The
+	// band is `Length::Fill` over empty containers, which under a normal parent resolves to the parent's
+	// width; but a `Direction::Both` scrollable lays its content out with COMPRESSED limits (infinite
+	// max, "fluid lengths resolve to their intrinsic size"), and the band's intrinsic width is zero. So
+	// with the band as the base layer the stack measured zero wide, the editor above it was clamped to
+	// that maximum, and the whole file vanished the instant a search found a match. Making the editor
+	// the base inverts it: the buffer's own content width is the stack's size, the band is laid out
+	// against that as an uncompressed maximum, and its `Fill` lands exactly on the content width it
+	// wanted all along. `push_under` inserts at index 0 — so it still DRAWS first, beneath the glyphs.
 	let line_count = editor.content.line_count().max(1);
 	let text_layer: Element<'a, Message> = match editor.find_match_line() {
-		Some(line) if line < line_count => {
-			stack![line_band(line_count, line, p.match_line), editor_element].into()
-		}
+		Some(line) if line < line_count => stack![editor_element]
+			.push_under(line_band(line_count, line, p.match_line))
+			.into(),
 		_ => editor_element,
 	};
 
@@ -449,6 +460,11 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 /// from three fixed spacers (the lines above, the band itself, the lines below), so it is three
 /// widgets whatever the file's length, and its total height is `count × LINE_HEIGHT`, matching the
 /// gutter and the text exactly so the band lands on its line by construction.
+///
+/// It is only ever an UNDER layer of the buffer's stack (§137). That is what makes its `Length::Fill`
+/// mean "as wide as the text": an under layer is measured against the base layer's size, so the width
+/// it fills is the buffer's content width. Used as the base layer it measures its own empty children
+/// instead — zero — and takes the text down with it.
 fn line_band<'a>(count: usize, line: usize, color: Color) -> Element<'a, Message> {
 	let above = super::pixels(line, LINE_HEIGHT);
 	let below = super::pixels(count.saturating_sub(line + 1), LINE_HEIGHT);
