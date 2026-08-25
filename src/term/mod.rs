@@ -63,6 +63,7 @@ mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear 
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
+pub mod lineattr; // reads the double-height and double-width line attributes the engine drops — DECDHL, DECDWL, DECSWL (§146)
 mod locator; // reads DEC's own mouse protocol, which the engine drops — and answers the one of its three sequences that asks a question (§140)
 mod margins; // holds the left and right margins a program sets, and the arithmetic they imply (§102)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
@@ -416,6 +417,8 @@ impl Terminal {
 			stops: tabs::Stops::new(cols as usize),
 			presentation: presentation::Presentation::default(),
 			controls: c1::Controls::default(),
+			lines: lineattr::LineAttributes::default(),
+			sizes: lineattr::LineSizes::default(),
 		}
 	}
 
@@ -537,6 +540,10 @@ impl Terminal {
 		// scanners above share: this one changes how the OTHER answers in the chunk are spelled, so it
 		// has to be applied between them rather than to all of them at once.
 		let controls = self.controls.feed(bytes);
+		// The line attributes the engine drops (§146). Interruption-fed like the character path, and
+		// for the same reason: a chunk that sets a line double-width and then moves the cursor down
+		// and sets another must attach each to the line the cursor was on when it arrived.
+		let line_attributes = self.lines.feed(bytes);
 		Scanned {
 			marks,
 			images,
@@ -553,6 +560,7 @@ impl Terminal {
 			charsets,
 			presentations,
 			controls,
+			line_attributes,
 		}
 	}
 
@@ -668,6 +676,7 @@ impl Terminal {
 					},
 					Interruption::Presentation(request) => self.answer_presentation(request),
 					Interruption::Controls(eight_bit) => self.set_control_form(eight_bit),
+					Interruption::LineAttribute(attribute) => self.set_line_size(attribute),
 				}
 			}
 			self.advance(&bytes[start..]);
@@ -912,6 +921,8 @@ impl Terminal {
 			// collide with paths set on the main screen (§76). Both directions of the swap clear them,
 			// exactly as the pictures above are cleared and for the same reason.
 			self.paths.clear();
+			// And the line sizes, which are keyed the same way and go stale the same way (§146).
+			self.sizes.clear();
 			// And the pointer goes back to cmote (§77). The swap is exactly the moment a full-screen
 			// program starts or ends, so this is where a hand left hovering over a TUI's buttons
 			// would otherwise be inherited by the shell prompt the user quit back to — or by the
@@ -938,7 +949,7 @@ impl Terminal {
 		}
 		// The screen borrows the engine and the store is borrowed mutably, so they are taken as
 		// separate fields rather than through `self.screen()`, which would borrow all of `self`.
-		let screen = screen::Screen::new(&self.term, &self.paths);
+		let screen = screen::Screen::new(&self.term, &self.paths, &self.sizes);
 		self.graphics
 			.retire_covered_alternate(|placement| is_covered(&screen, placement));
 	}
@@ -1345,8 +1356,31 @@ impl Terminal {
 			}
 			// RIS drops the history, which renumbers every line: a remembered index would then name
 			// different text. The engine performs the reset itself; forgetting is cmote's share.
-			scp::ScpRequest::Reset => self.paths.clear(),
+			scp::ScpRequest::Reset => {
+				self.paths.clear();
+				// RIS drops the history for the line sizes too, and they are remembered by the same
+				// absolute line number (§146). This arm is reached through `scp`'s own RIS scan rather
+				// than through a second one, which is the arrangement §111 built the shared escape
+				// grammar for — but it is worth naming, because a reader looking for where a hard reset
+				// forgets a line's size will not find it under `lineattr`.
+				self.sizes.clear();
+			}
 		}
+	}
+
+	/// Give the line the cursor is on a size — DECDHL, DECDWL or DECSWL (§146).
+	///
+	/// Nothing is written to the grid, exactly as nothing is written for a character path: the size is
+	/// a rule the renderer applies when it derives a frame, which keeps the engine the only writer of
+	/// its own state (§71, §73, §76) and keeps the scrollback, the search, the selection and a copy
+	/// all reading the text the host sent.
+	///
+	/// The line is resolved the same way SCP's is — the history size plus the cursor's row — so a
+	/// double-width line and a right-to-left one cannot disagree about which line they are on.
+	fn set_line_size(&mut self, attribute: lineattr::LineAttribute) {
+		let history = self.term.grid().history_size() as u64;
+		let (row, _) = self.screen().cursor_position();
+		self.sizes.set(history + u64::from(row), attribute);
 	}
 
 	/// Arm or disarm DECSCA by setting cmote's borrowed flag bit on the engine's PEN (§56).
@@ -1945,6 +1979,7 @@ impl Terminal {
 		self.prompts.renumber(|line| moved.map(line));
 		self.graphics.renumber(|line| moved.map(line));
 		self.paths.renumber(|line| moved.map(line));
+		self.sizes.renumber(|line| moved.map(line));
 	}
 
 	/// The remote shell's working directory, if it has announced one (§17). `None`
@@ -2080,7 +2115,7 @@ impl Terminal {
 	/// The current screen, as cmote's engine-agnostic view (§9, §16, §23). The rest of the
 	/// app reads the grid only through this, so the engine stays behind `term/`.
 	pub fn screen(&self) -> screen::Screen<'_> {
-		screen::Screen::new(&self.term, &self.paths)
+		screen::Screen::new(&self.term, &self.paths, &self.sizes)
 	}
 
 	/// The inline images the page ON SHOW is holding, oldest first (§41). Each names the absolute
@@ -2487,6 +2522,15 @@ pub struct Terminal {
 	/// has to REPORT where the stops are, needs a copy that is written wherever the engine is told.
 	/// `term/tabs.rs` names all four writers; three are the gate's and the fourth is `resize` below.
 	stops: tabs::Stops,
+	/// Reads the line attributes the engine drops — DECDHL, DECDWL and DECSWL (§146). Fed by the
+	/// interruption advance for SCP's reason: the sequence names no line of its own, it acts on the
+	/// one the cursor is on, so the engine has to be at the sequence before the cursor is read.
+	lines: lineattr::LineAttributes,
+	/// Which document lines are drawn at double width or as half of a double-height line (§146). Held
+	/// beside the engine, which has no notion of a line's size and does not need one: the grid stays
+	/// in the order the host sent and the size is a rule the RENDERER applies, exactly as the
+	/// character path above is (§71, §73, §76).
+	sizes: lineattr::LineSizes,
 	/// Reads S7C1T and S8C1T, the two sequences that choose whether cmote's own replies are written
 	/// with 7-bit or 8-bit C1 controls (§145). `vte` has no arm for the space intermediate at all, so
 	/// like every other scanner here it reads them beside the stream. Fed by the interruption advance
@@ -2563,6 +2607,10 @@ enum Interruption {
 	/// every answer already in it belongs to the form that was in force when it was written, and every
 	/// answer after this one belongs to the new one.
 	Controls(bool),
+	/// A line attribute — DECDHL, DECDWL or DECSWL (§146). Applied like the character path and for the
+	/// same reason: it names no line of its own, so the cursor has to be where the sequence is before
+	/// the line it belongs to can be read.
+	LineAttribute(lineattr::LineAttribute),
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -2589,6 +2637,7 @@ struct Scanned {
 	charsets: Vec<(usize, charset::CharsetRequest)>,
 	presentations: Vec<(usize, presentation::PresentationRequest)>,
 	controls: Vec<(usize, bool)>,
+	line_attributes: Vec<(usize, lineattr::LineAttribute)>,
 }
 
 impl Scanned {
@@ -2610,6 +2659,7 @@ impl Scanned {
 			&& self.charsets.is_empty()
 			&& self.presentations.is_empty()
 			&& self.controls.is_empty()
+			&& self.line_attributes.is_empty()
 	}
 
 	/// How many interruptions the chunk carried in all — the exact capacity the merged list needs.
@@ -2634,6 +2684,7 @@ impl Scanned {
 			+ self.charsets.len()
 			+ self.presentations.len()
 			+ self.controls.len()
+			+ self.line_attributes.len()
 	}
 }
 
@@ -2642,6 +2693,23 @@ impl Scanned {
 /// at the very same offset keep the order they were scanned in — which is the only sensible
 /// tie-break, since no scanner can see another's.
 fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
+	/// Fold one scanner's findings into the merged list, each `(offset, found)` pair becoming an
+	/// [`Interruption`] of the named kind.
+	///
+	/// A macro rather than sixteen written-out `extend` calls, and the reason is the same one
+	/// `gate.rs`'s `forward!` gives: what can be got wrong here is pairing a list with the WRONG
+	/// variant, and every line looking identical is what makes that hard to see. Written this way the
+	/// pairing is the whole of each line. The four scanners whose findings are not `(offset, T)` pairs
+	/// stay written out below — a macro arm each would be a shape used once.
+	macro_rules! merge {
+		($merged:ident, $($list:ident => $variant:expr),* $(,)?) => {
+			$(
+				$merged.extend(
+					$list.into_iter().map(|(offset, found)| (offset, $variant(found))),
+				);
+			)*
+		};
+	}
 	let mut merged: Vec<(usize, Interruption)> = Vec::with_capacity(scanned.len());
 	let Scanned {
 		marks,
@@ -2659,17 +2727,26 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		charsets,
 		presentations,
 		controls,
+		line_attributes,
 	} = scanned;
-	merged.extend(
-		marks
-			.into_iter()
-			.map(|(offset, mark)| (offset, Interruption::Prompt(mark))),
-	);
-	merged.extend(
-		images
-			.into_iter()
-			.map(|(offset, event)| (offset, Interruption::Graphics(event))),
-	);
+	merge! {
+		merged,
+		marks => Interruption::Prompt,
+		images => Interruption::Graphics,
+		protections => Interruption::Protect,
+		rectangles => Interruption::Rect,
+		cursor_requests => Interruption::Dsr,
+		saved_modes => Interruption::SaveModes,
+		paths => Interruption::Path,
+		sgr_stack => Interruption::SgrStack,
+		charsets => Interruption::Charset,
+		presentations => Interruption::Presentation,
+		controls => Interruption::Controls,
+		line_attributes => Interruption::LineAttribute,
+	}
+	// The four that are not `(offset, T)` pairs. A bookmark carries a report that is matched rather
+	// than wrapped, a cancel keeps its offset INSIDE the request (§57), and the tab reset and the
+	// locator question carry nothing at all — their offset is the whole event.
 	merged.extend(bookmarks.into_iter().map(|(offset, report)| {
 		let interruption = match report {
 			iterm::Report::Mark => Interruption::UserMark,
@@ -2677,19 +2754,9 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		(offset, interruption)
 	}));
 	merged.extend(
-		protections
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Protect(request))),
-	);
-	merged.extend(
 		cancels
 			.into_iter()
 			.map(|request| (request.offset, Interruption::Margins(request))),
-	);
-	merged.extend(
-		rectangles
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Rect(request))),
 	);
 	merged.extend(
 		tab_resets
@@ -2697,44 +2764,9 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 			.map(|offset| (offset, Interruption::TabStops)),
 	);
 	merged.extend(
-		cursor_requests
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Dsr(request))),
-	);
-	merged.extend(
 		locator_requests
 			.into_iter()
 			.map(|offset| (offset, Interruption::LocatorPosition)),
-	);
-	merged.extend(
-		saved_modes
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::SaveModes(request))),
-	);
-	merged.extend(
-		paths
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Path(request))),
-	);
-	merged.extend(
-		sgr_stack
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::SgrStack(request))),
-	);
-	merged.extend(
-		charsets
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Charset(request))),
-	);
-	merged.extend(
-		presentations
-			.into_iter()
-			.map(|(offset, request)| (offset, Interruption::Presentation(request))),
-	);
-	merged.extend(
-		controls
-			.into_iter()
-			.map(|(offset, eight_bit)| (offset, Interruption::Controls(eight_bit))),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -7033,6 +7065,101 @@ mod tests {
 			terminal.process(b"[2$w"),
 			b"P2$u5/25/33\\".to_vec(),
 			"the hand-set stop kept, and the new columns given the default every eight"
+		);
+	}
+
+	// --- §146: the double-height and double-width lines ----------------------------------------
+
+	/// The size a line is drawn at, as the renderer asks for it.
+	fn size_of(terminal: &Terminal, row: u16) -> lineattr::LineAttribute {
+		terminal.screen().row_size(row)
+	}
+
+	/// Each of the four sequences, on the line the cursor is on.
+	#[test]
+	fn a_line_attribute_lands_on_the_line_the_cursor_is_on() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"\x1b#6wide\r\n\x1b#3top\r\n\x1b#4bottom");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::DoubleWidth);
+		assert_eq!(size_of(&terminal, 1), lineattr::LineAttribute::DoubleTop);
+		assert_eq!(size_of(&terminal, 2), lineattr::LineAttribute::DoubleBottom);
+		assert_eq!(
+			size_of(&terminal, 3),
+			lineattr::LineAttribute::Single,
+			"and no other line"
+		);
+	}
+
+	/// DECSWL puts a line back, which is the only way a program has of undoing one.
+	#[test]
+	fn a_single_width_attribute_puts_a_line_back() {
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"\x1b#6wide");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::DoubleWidth);
+		terminal.process(b"\r\x1b#5");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::Single);
+	}
+
+	/// The text is untouched by the attribute — the grid holds what the host sent, whatever size it
+	/// is shown at, so the scrollback, the search, the selection and a copy all read it unchanged
+	/// (§71, §73, §76).
+	#[test]
+	fn a_line_attribute_writes_nothing_to_the_grid() {
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"\x1b#3TITLE");
+		assert_eq!(read(&terminal, 0, 0, 5), "TITLE");
+	}
+
+	/// The attribute travels with its LINE as the viewport scrolls, which is what keying it by
+	/// absolute document line buys (§40, §76).
+	#[test]
+	fn a_line_keeps_its_size_as_the_viewport_scrolls_under_it() {
+		let mut terminal = Terminal::new(3, 20);
+		terminal.process(b"\x1b#3TITLE\r\n");
+		for line in 0..10 {
+			terminal.process(format!("line {line}\r\n").as_bytes());
+		}
+		terminal.scroll(ScrollMotion::Top);
+		assert_eq!(
+			size_of(&terminal, 0),
+			lineattr::LineAttribute::DoubleTop,
+			"the title is back on screen, and still double height"
+		);
+	}
+
+	/// The near miss the scanner is built around, end to end: `ESC # 8` is DECALN, which the ENGINE
+	/// performs. It must fill the page with `E` and leave the line ordinary.
+	#[test]
+	fn the_alignment_test_still_fills_the_screen_and_sets_no_size() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"\x1b#8");
+		assert_eq!(read(&terminal, 0, 0, 8), "EEEEEEEE");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::Single);
+	}
+
+	/// A hard reset drops the history, which renumbers every line — a remembered number would then
+	/// name different text (§76's reason, and the same one).
+	#[test]
+	fn a_hard_reset_forgets_every_line_size() {
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"\x1b#6wide\x1bc");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::Single);
+	}
+
+	/// And so does a swap on or off the alternate screen, which restarts numbering against a page
+	/// that keeps no history.
+	#[test]
+	fn the_alternate_screen_swap_forgets_every_line_size() {
+		let mut terminal = Terminal::new(2, 20);
+		terminal.process(b"\x1b#6wide");
+		terminal.process(b"\x1b[?1049h");
+		assert_eq!(size_of(&terminal, 0), lineattr::LineAttribute::Single);
+		terminal.process(b"\x1b#3tall");
+		terminal.process(b"\x1b[?1049l");
+		assert_eq!(
+			size_of(&terminal, 0),
+			lineattr::LineAttribute::Single,
+			"and the program's own sizes do not follow it out"
 		);
 	}
 

@@ -237,6 +237,11 @@ pub struct Screen<'a> {
 	/// direction — and handed over here because this is the one view the renderer and the pointer
 	/// path both read, which is what keeps them agreeing about where a column went.
 	paths: &'a super::scp::Paths,
+	/// Which document lines are drawn double width, or as half of a double-height line (§146). Held
+	/// beside the engine for the same reason the paths above are — the engine has no notion of a
+	/// line's size — and handed over here because this is the one view the renderer and the pointer
+	/// path both read, which is what keeps them agreeing about which column a click landed on.
+	sizes: &'a super::lineattr::LineSizes,
 }
 
 /// A count out of the engine, as cmote's own `u16` geometry (§111).
@@ -257,8 +262,16 @@ pub(super) fn as_dimension<T: TryInto<u16>>(count: T) -> u16 {
 impl<'a> Screen<'a> {
 	/// Wrap the engine's terminal. Built by `Terminal::screen`; the engine type is the one
 	/// thing that changed when the emulator was swapped (§16, §23).
-	pub(crate) fn new(engine: &'a Engine, paths: &'a super::scp::Paths) -> Self {
-		Self { engine, paths }
+	pub(crate) fn new(
+		engine: &'a Engine,
+		paths: &'a super::scp::Paths,
+		sizes: &'a super::lineattr::LineSizes,
+	) -> Self {
+		Self {
+			engine,
+			paths,
+			sizes,
+		}
 	}
 
 	/// The grid size as `(rows, cols)`.
@@ -482,6 +495,19 @@ impl<'a> Screen<'a> {
 	/// and the frame under it cannot disagree about which line they are talking about.
 	pub fn row_is_rtl(&self, row: u16) -> bool {
 		self.paths.is_rtl(self.line_at(row))
+	}
+
+	/// The size this DOCUMENT line is drawn at (§146). Asked by line, like the character path above,
+	/// because a line keeps its size as the viewport scrolls under it.
+	pub fn line_size(&self, line: u64) -> super::lineattr::LineAttribute {
+		self.sizes.of(line)
+	}
+
+	/// The same question about a viewport ROW, for the pointer path — the other half of the pair
+	/// `row_is_rtl` is one of, and needed for the same reason: a click on a double-width line lands on
+	/// a column half as far along as the pixels say.
+	pub fn row_size(&self, row: u16) -> super::lineattr::LineAttribute {
+		self.sizes.of(self.line_at(row))
 	}
 
 	/// The cell at `(row, col)`, or `None` when it is out of bounds. `row`/`col` are in the

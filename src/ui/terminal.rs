@@ -1261,13 +1261,19 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> ScreenSpot {
 pub fn cell_under(screen: &Screen<'_>, point: Point) -> ScreenSpot {
 	let (rows, cols) = screen.size();
 	let cell = cell_at(point, rows, cols);
+	// A double-width line's cells are twice as wide, so the column a pointer landed on is half as far
+	// along as the pixels say — and the line only HAS half as many columns, which is the same fact
+	// (§146). This has to happen before the mirror below, because the mirror is across the columns the
+	// line actually shows.
+	let visible = cols / screen.row_size(cell.row).columns();
+	let col = cell.col / screen.row_size(cell.row).columns();
 	if screen.row_is_rtl(cell.row) {
 		ScreenSpot {
 			row: cell.row,
-			col: crate::term::scp::flip(cell.col, cols),
+			col: crate::term::scp::flip(col, visible),
 		}
 	} else {
-		cell
+		ScreenSpot { row: cell.row, col }
 	}
 }
 
@@ -1411,6 +1417,28 @@ mod tests {
 
 		// And the identity holds on every other line, which never left data order.
 		let second_row = Point::new(GRID_PADDING + 0.5, GRID_PADDING + CELL_HEIGHT + 0.5);
+		assert_eq!(cell_under(&screen, second_row), cell_at(second_row, 4, 10));
+	}
+
+	/// The pointer's half of a line's SIZE (§146). A double-width line's cells are twice as wide, so
+	/// the column under the pointer is half as far along as the pixels say — and pinned for the same
+	/// reason as the mirror above: getting the drawing right and the pointer wrong looks correct until
+	/// something is selected.
+	#[test]
+	fn a_click_on_a_double_width_line_names_the_column_the_glyph_is_in() {
+		let mut terminal = crate::term::Terminal::new(4, 10);
+		terminal.process(b"#6abc");
+		let screen = terminal.screen();
+		// Cell 1 of a double-width line is drawn over pixel columns 2 and 3.
+		for pixel in [2.0, 3.0] {
+			let point = Point::new(GRID_PADDING + pixel * CELL_WIDTH + 0.5, GRID_PADDING + 0.5);
+			assert_eq!(cell_under(&screen, point).col, 1, "pixel column {pixel}");
+		}
+		// And the row below never asked for anything, so it is `cell_at` and nothing else.
+		let second_row = Point::new(
+			GRID_PADDING + 4.0 * CELL_WIDTH + 0.5,
+			GRID_PADDING + CELL_HEIGHT + 0.5,
+		);
 		assert_eq!(cell_under(&screen, second_row), cell_at(second_row, 4, 10));
 	}
 

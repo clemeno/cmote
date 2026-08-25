@@ -16821,3 +16821,108 @@ at its.
 - **The UTF-8 collision is not detected.** cmote does not notice that a program has asked for bytes its
   own reader will mangle, and does not warn. There is nothing useful it could do: the request is legal
   and the consequence is on the far side of the pty.
+
+## §146 — Double height and double width, and the one axis iced has no scale for
+
+`ESC # 3` and `ESC # 4` are DECDHL, the top and bottom halves of a double-height line; `ESC # 5` is
+DECSWL, back to normal; `ESC # 6` is DECDWL, double width and single height. The row:
+
+> DECDHL, DECDWL and DECSWL — a line drawn double height (top and bottom halves), double width, or
+> back to single (part 5)
+
+A line attribute, in DEC's own words. It belongs to the LINE the cursor is on and says nothing about
+the characters in it: the same bytes are on the grid either way, and what changes is how wide and how
+tall they are drawn. A double-height line is written **twice** by the program — once with `ESC # 3`
+on the upper row and once with `ESC # 4` on the lower — and the terminal draws the top half of the
+glyphs on one and the bottom half on the other.
+
+`vte` has one arm for the `#` intermediate, `('8', [b'#'])` for DECALN, and sends `3` through `6` to
+`unhandled!()`.
+
+### It is a rendering rule, which is what makes it buildable
+
+§76 drew this line first, for the character path: "the grid stays in the order the host sent, and the
+mirroring is a rule the RENDERER applies when it derives a frame from it". The same holds here.
+Nothing is written to the grid, so the scrollback, the search, the selection and a copy all go on
+reading the text the host sent, and the engine stays the only writer of its own state (§71, §73).
+
+So the state is a map keyed by ABSOLUTE DOCUMENT LINE (§40), exactly as `scp::Paths` is and for the
+same reason: a line keeps its attribute as the viewport scrolls under it. It is bounded the same way
+too (§12), cleared on the same two events — a hard reset and either direction of the alternate-screen
+swap, both of which renumber the document — and renumbered by UNSCROLL through the same `remap`
+(§101).
+
+### What is exact, and what is not — measured, not guessed
+
+**DECDHL is exact.** A double-height line is double height AND double width — both axes by the same
+factor — so it is a UNIFORM scale of two, and iced can express exactly that. The text is drawn at
+twice the font size with twice the line height, the lower half from a row higher up, and the row's own
+clip takes the half that belongs in it. Nothing is approximated.
+
+**DECDWL is not, and this is the measurement.** Double width with single height is an *anisotropic*
+scale, and iced 0.14 has no way to express one for text:
+
+* `Transformation::scale` takes a single factor (`iced_core/src/transformation.rs`), and the only
+  other constructors are `translate`, `orthographic` and `IDENTITY`.
+* The wgpu text pipeline reduces whatever transformation is in force to
+  `scale: transformation.scale_factor() * layer_transformation.scale_factor()` before handing it to
+  glyphon (`iced_wgpu/src/text.rs:625-626`) — one number, both axes.
+
+So a DECDWL line is drawn with its CELLS twice as wide and its glyphs at the normal size, one cell per
+draw. The layout is right — half as many columns are shown, and a program that puts a double-width
+title over single-width lines gets its columns lining up — and the glyphs are not fattened.
+
+**That was chosen over the two alternatives rather than fallen into.** Drawing at 2× and clipping to
+one row cuts every glyph in half, which is unreadable. Ignoring the sequence puts the title at the
+full width the program did not ask for, which breaks the layout — and the layout is the thing programs
+actually depend on here, since a banner that should occupy forty columns occupying eighty is a
+misaligned screen rather than merely a plain-looking one.
+
+### Only the visible columns are planned
+
+A double-width line HAS half as many columns; the rest of its cells are on the grid and are not
+displayed, which is what the sequence means. So the run planner walks `cols / 2` on such a line rather
+than planning runs the renderer would then clip.
+
+That is the truthful walk, and it is also what keeps the right-to-left mirror exact: SCP mirrors a
+line across the columns it SHOWS, and a run that ran past the half would flip onto a column the
+arithmetic has to clamp. The pointer path halves before its own flip for the same reason, which is
+what keeps a click and the frame under it agreeing about which column was hit.
+
+### The test that was measuring nothing
+
+The first draft of the mirror test wrote four plain characters on a double-width right-to-left line
+and asserted where `a` landed. It passed against **both** answers, and the reason is in `column_of`'s
+own note two hundred lines away: an unstyled run shares one span with the blanks after it, that span
+covers the whole line, and a spanning run flips to column 0 whatever width the mirror is given.
+
+Colouring the four characters gives them a run of their own, and the assertion then separates 11 from
+23. This is §106's prove-it rule catching a test rather than a line: it went green on the first run,
+and the probe is what said it was green for no reason.
+
+### Files
+
+* `src/term/lineattr.rs` — new. The four attributes, the per-line map, and the scanner.
+* `src/term/mod.rs` — the scanner, its interruption, `set_line_size`, and the three lifecycle points
+  the map shares with the character paths.
+* `src/term/screen.rs` — `line_size` and `row_size`, the pair `line_is_rtl` / `row_is_rtl` already is.
+* `src/ui/grid.rs` — the size per row, the double-size drawing, `draw_wide_cells`, the cursor's width,
+  and the visible-column walk.
+* `src/ui/terminal.rs` — the pointer's half.
+
+### Not done
+
+- **The glyphs on a DECDWL line are not fattened**, per the measurement above. It is the one
+  divergence in this section and it needs an anisotropic text scale iced does not have.
+- **The cursor is not clamped to the visible half.** On a real VT a double-width line's cursor cannot
+  go past column 39 of 80; here the engine owns the cursor and knows nothing about the line's size, so
+  a program that writes past the half puts text on the grid that is not displayed. That matches what a
+  VT does with the TEXT (it is not displayed either) and diverges on where the cursor ends up.
+- **The find bar's match wash and the selection fill travel with their cells** — they are computed in
+  data columns and drawn by the same runs — but a selection DRAG across a double-width line resolves
+  through `cell_under`, so it is right, while a selection that spans a double-width line and a single
+  one has no visual discontinuity to show for it.
+- **Autowrap does not halve.** A double-width line wraps at the page edge rather than at the half,
+  because wrapping is the engine's and the engine has no notion of the size.
+- **No live session.** Exercised through `Terminal::process` and the run planner; no remote program
+  was asked to draw a banner.

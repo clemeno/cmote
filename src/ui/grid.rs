@@ -29,6 +29,7 @@
 use crate::app::Message;
 use crate::palette;
 use crate::term::graphics::Placement;
+use crate::term::lineattr::LineAttribute;
 use crate::term::mouse as report;
 use crate::term::scp;
 use crate::term::screen::{
@@ -539,6 +540,10 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 		renderer.with_layer(visible, |renderer| {
 			for row in 0..rows {
 				let top = origin.y + f32::from(row) * CELL_HEIGHT;
+				// What size this line is drawn at (§146). A line attribute is a rule the RENDERER
+				// applies — the grid holds the text the host sent, whatever size it is shown at — so
+				// this is the one place the question is asked, once per row.
+				let size = self.screen.line_size(top_line + u64::from(row));
 				// A glyph is clipped to its own row, never to its own cell: a fallback
 				// glyph a shade too wide should lean on its neighbour rather than lose a
 				// slice of itself, and either way the next cell still starts where it must.
@@ -557,7 +562,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					marks,
 					link_hover.as_ref(),
 				) {
-					draw_run(renderer, run, origin.x, top, row_bounds);
+					draw_run(renderer, run, origin.x, top, row_bounds, size);
 				}
 			}
 
@@ -591,13 +596,17 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 
 			// A shaped (non-block) cursor sits on top of its cell's glyph, once, after the grid.
 			if let Some(shape) = cursor_shape.filter(|shape| *shape != CursorShape::Block) {
+				// The cursor is as wide as one of ITS line's cells (§146). Without this a bar or a
+				// hollow block on a double-width line would sit over the left half of the cell it is
+				// on, which is the one place the cursor would say the line was ordinary.
+				let width = CELL_WIDTH * cell_scale(self.screen.row_size(cursor_display_row));
 				draw_cursor(
 					renderer,
 					shape,
 					Rectangle {
-						x: origin.x + f32::from(cursor_col) * CELL_WIDTH,
+						x: origin.x + f32::from(cursor_col) * width,
 						y: origin.y + f32::from(cursor_display_row) * CELL_HEIGHT,
-						width: CELL_WIDTH,
+						width,
 						height: CELL_HEIGHT,
 					},
 				);
@@ -840,9 +849,28 @@ fn draw_run(
 	grid_left: f32,
 	top: f32,
 	row_bounds: Rectangle,
+	size: LineAttribute,
 ) {
-	let left = grid_left + f32::from(run.col) * CELL_WIDTH;
-	let width = f32::from(run.cols) * CELL_WIDTH;
+	// A double-width run is drawn one cell at a time; see `draw_wide_cells` for why.
+	if size == LineAttribute::DoubleWidth && run.cols > 1 && run.content.is_ascii() {
+		draw_wide_cells(renderer, &run, grid_left, top, row_bounds);
+		return;
+	}
+	// One cell of a double line covers two columns of the page (§146). Everything below is written in
+	// terms of this, so a single-width line is the same code with a scale of 1 and pays nothing.
+	let cell_width = CELL_WIDTH * cell_scale(size);
+	let left = grid_left + f32::from(run.col) * cell_width;
+	let width = f32::from(run.cols) * cell_width;
+	// A double-width line shows half as many columns, and the rest of it is simply not displayed —
+	// which is what the sequence means, not a limitation. The quads below are not clipped by
+	// `row_bounds` the way the text is (they go into the widget's own layer), so a run that starts
+	// past the right edge is dropped here and one that straddles it is cut, rather than painting into
+	// the padding gutter cmote's scrollbar lives in.
+	let page_right = row_bounds.x + row_bounds.width;
+	if left >= page_right {
+		return;
+	}
+	let width = width.min(page_right - left);
 	let bounds = Rectangle {
 		x: left,
 		y: top,
@@ -901,13 +929,30 @@ fn draw_run(
 	// a sealed one-column run room to shape). It paints nothing extra: the content is fixed, so
 	// the empty tail draws nothing, and everything is still clipped to `row_bounds` and pinned
 	// at `left` by the left alignment, so no glyph moves.
-	let text_bounds_width = width + CELL_WIDTH;
+	let text_bounds_width = width + cell_width;
+	// A DOUBLE-HEIGHT line is a uniform scale of two on both axes, which is exactly what iced can
+	// express: the glyphs are drawn at twice the size with twice the line height, the lower half from
+	// a row higher up, and the row's own clip takes the half that belongs here (§146).
+	//
+	// A double-WIDTH line is not, and this is where that stops. It is drawn one cell at a time by the
+	// branch at the top of this function; by the time control reaches here such a run is one cell.
+	let (font_size, line_height, text_top) = if size.is_tall() {
+		let height = CELL_HEIGHT * 2.0;
+		let top = if size.is_lower_half() {
+			top - CELL_HEIGHT
+		} else {
+			top
+		};
+		(FONT_SIZE * 2.0, height, top)
+	} else {
+		(FONT_SIZE, CELL_HEIGHT, top)
+	};
 	renderer.fill_text(
 		text::Text {
 			content: run.content,
-			bounds: Size::new(text_bounds_width, CELL_HEIGHT),
-			size: Pixels(FONT_SIZE),
-			line_height: text::LineHeight::Absolute(Pixels(CELL_HEIGHT)),
+			bounds: Size::new(text_bounds_width, line_height),
+			size: Pixels(font_size),
+			line_height: text::LineHeight::Absolute(Pixels(line_height)),
 			// The face for this run. Upright cells draw from Fira Mono, italic cells from IBM
 			// Plex Mono (Fira Mono has none, §23); the weight and style pick the exact face.
 			// Each MUST match a bundled face, because cosmic-text — with the whole system font
@@ -937,10 +982,56 @@ fn draw_run(
 			shaping,
 			wrapping: text::Wrapping::None,
 		},
-		Point::new(left, top),
+		Point::new(left, text_top),
 		run.style.fg,
 		row_bounds,
 	);
+}
+
+/// Draw a double-WIDTH run one cell at a time (§146) — the one approximation in that section.
+///
+/// Double width with single height is an ANISOTROPIC scale, and iced 0.14 has none for text:
+/// `Transformation::scale` takes a single factor (`iced_core/src/transformation.rs`), and the wgpu
+/// pipeline reduces whatever transformation is in force to one `scale` before handing it to glyphon
+/// (`iced_wgpu/src/text.rs:625-626`). So the CELLS are twice as wide and the glyphs are not — which
+/// means each glyph has to be placed in its own double-wide box, rather than letting a run's glyphs
+/// run together at the left of one.
+///
+/// Splitting by `char` is exact here for the reason [`mirror`] gives: a cell that is not plain ASCII
+/// SEALS its run, so a run of more than one cell is one-byte-one-cell ASCII. A grapheme cluster is
+/// never split, because it can only ever be a run of its own. The caller tests both halves of that
+/// before calling.
+fn draw_wide_cells(
+	renderer: &mut iced::Renderer,
+	run: &Run,
+	grid_left: f32,
+	top: f32,
+	row_bounds: Rectangle,
+) {
+	for (index, character) in run.content.chars().enumerate() {
+		let Ok(offset) = u16::try_from(index) else {
+			break;
+		};
+		let cell = Run {
+			content: character.to_string(),
+			style: run.style,
+			col: run.col + offset,
+			cols: 1,
+		};
+		draw_run(
+			renderer,
+			cell,
+			grid_left,
+			top,
+			row_bounds,
+			LineAttribute::DoubleWidth,
+		);
+	}
+}
+
+/// How many page columns one cell of a line covers, as the pixel arithmetic wants it (§146).
+fn cell_scale(size: LineAttribute) -> f32 {
+	f32::from(size.columns())
 }
 
 /// Draw the cursor as a shape overlaid on its cell (§23). Only the shapes that sit *on top*
@@ -1608,8 +1699,14 @@ fn plan_runs(
 	// coordinates so that scrolling moves it with its text; resolving that here — once per row, not
 	// once per cell — is the whole cost of the projection on the drawing side.
 	let line = marks.top_line + u64::from(row);
+	// How many columns this line SHOWS (§146). A double-width line has half as many: its other cells
+	// are on the grid and are not displayed, which is what the sequence means. Planning only the
+	// visible ones is what keeps the mirror below exact — a run that ran past the half would flip onto
+	// a column the arithmetic has to clamp — and it is the truthful walk besides, since everything
+	// downstream of a run is about pixels.
+	let visible = cols / screen.line_size(line).columns();
 
-	for col in 0..cols {
+	for col in 0..visible {
 		let cell = screen.cell(row, col);
 
 		// The trailing half of a wide glyph: its column was already claimed by the lead
@@ -1699,7 +1796,11 @@ fn plan_runs(
 	// selection fill, the match wash and the link underline all came out of data coordinates and
 	// travel with their cells.
 	if screen.line_is_rtl(line) {
-		mirror(&mut runs, cols);
+		// Across the columns the line actually SHOWS, which on a double-width line is half of them
+		// (§146). Mirroring across the full width and then scaling by two would put the text off the
+		// page — and the pointer path applies the same halving before its own flip, which is what
+		// keeps a click and the frame under it agreeing.
+		mirror(&mut runs, visible);
 	}
 	runs
 }
@@ -2075,6 +2176,34 @@ mod tests {
 				.collect();
 			assert_eq!(path, "./trans_3", "selection {case:?}");
 		}
+	}
+
+	/// A double-width line shows half as many columns, so a right-to-left one is mirrored across THAT
+	/// half and not across the page (§146). Mirroring across the full width and then scaling by two
+	/// would put the text off the page entirely — and the pointer path halves before its own flip, so
+	/// the two would then disagree about which column was clicked.
+	#[test]
+	fn a_right_to_left_double_width_line_is_mirrored_across_the_columns_it_shows() {
+		let mut terminal = Terminal::new(1, 24);
+		// SCP right-to-left, DECDWL on the same line, then four RED characters — coloured so the text
+		// gets a run of its OWN. Without that it shares one run with the blanks after it, that run
+		// spans the whole line, and a spanning run flips to column 0 whatever width the mirror is
+		// given: the case `column_of`'s own note warns about, and the first draft of this test fell
+		// into it and passed against both answers.
+		terminal.process(b"\x1b[2 k\x1b#6\x1b[31mabcd\x1b[m");
+		let runs = plan_runs(terminal.screen(), 0, 24, false, 0, Marks::default(), None);
+		let a = runs
+			.iter()
+			.find(|run| run.content.contains('a'))
+			.expect("the text is on the line");
+		// Twelve visible columns, so the run over data columns 0..=3 starts at 8 and its characters
+		// reverse inside it, putting `a` — column 0 of the data — at column 11. Across
+		// twenty-four it would be 23.
+		assert_eq!(
+			column_of(a, 'a'),
+			11,
+			"mirrored across twelve columns, not twenty-four"
+		);
 	}
 
 	/// Which grid column a run draws `glyph` at: the run's own start plus how far into its content
