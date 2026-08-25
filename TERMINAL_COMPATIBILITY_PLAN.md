@@ -1659,13 +1659,14 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 1 | Application cursor keys | ✅ | DECCKM — the arrow keys send `SS3 A`–`SS3 D` in place of `CSI A`–`CSI D` |
 | 3 (side effects) | DECCOLM's clear | ✅ | DECCOLM's other half: the scrolling region is reset and the screen cleared — what the sequence is actually used for |
 | 3 (column resize) | 132 / 80 columns | 🤷 | DECCOLM proper, which switches the page between 132 and 80 columns (part 6, §65) |
-| 5 (DECSCNM) | Global reverse video | ❌ | reverse video over the whole screen at once |
+| 5 (DECSCNM) | Global reverse video | ✅ | reverse video over the whole screen at once — a RENDERING rule, so the grid is untouched and turning the mode off puts the page back with nothing to unwind, exactly as the character path and the line sizes are (§76, §146). Swapped by XOR against SGR 7 and the cursor, so an even number of them cancels the way a real terminal's do; the rich copy swaps with it; cmote's own chrome — the selection fill, the find bar's wash — does not (§39, §40, §149, `palette.rs`, `term/decmodes.rs`) |
 | 6 | Origin mode | ✅ | DECOM — row 1 becomes the scrolling region's top and the cursor cannot leave the region |
 | 7 | Auto-wrap | ✅ | DECAWM — a glyph printed in the last column wraps to the next line instead of overwriting |
 | 12 (the mode) | Blinking cursor — tracked | ✅ | the blinking-cursor mode as a tracked bit — set, reset, and reported back by DECRQM |
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | the same mode as something drawn; cmote runs no animation timer, so the cursor is steady whatever DECRQM reports (§65) |
 | 25 | Show / hide cursor | ✅ | DECTCEM — whether the cursor is drawn at all |
-| 45 | Reverse wrap | ❌ | reverse wrap — a backspace in column 1 moves to the end of the line above |
+| 45 (XTREVWRAP) | Reverse wrap | ✅ | reverse wraparound: a BACKSPACE at the leftmost column backs up to the rightmost column of the previous line — the xterm manual page's own sentence on the `reverseWrap` resource, and the extent honoured. ctlseqs names the mode and says nothing about its behaviour, so the four things it leaves open are answered by the narrowest reading: CUB does not wrap, the top of the page stops it, the line above need not be a wrapped one, and DECAWM is not coupled to it. The edges are the margins' when a band is set (§102, §149, `term/decmodes.rs`) |
+| 1045 (XTREVWRAP2) | Extended reverse wrap | ❌ | xterm's *extended* reverse wraparound, a second mode beside 45 — whose existence is the evidence that 45 alone is the restricted form. Not implemented: it is defined as widening behaviour that no source read for §149 states, so there is nothing to widen it from. Named here because §149 found it and the table had no row for it (§149) |
 | 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (part 5, §73, §102, `term/margins.rs`, `term/gatediff.rs`) |
 | 80 (behaviour) | Sixel scrolling | ✅ | what sixel scrolling mode governs: cmote always scrolls, the modern default and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | DECSDM as a mode — setting it asks a sixel not to scroll the page (§65) |
@@ -1998,7 +1999,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `ESC 7` and `CSI s` share and `restore_cursor_position` (`:1626`) reads back. Mode 69 is absent from
   `NamedPrivateMode` (`ansi.rs:938-968`), so DECSET 69 is ignored (`set_mode`'s `Unknown` arm,
   `term/mod.rs:2100`) and DECRQM answers `ModeState::NotSupported` = 0 (`report_private_mode`,
-  `:2087`). The cancel byte cmote feeds instead: 0x18 in `State::CsiParam` falls to the catch-all
+  `:2087`). **That enum names fifteen modes and is the whole list**, which is why every private mode
+  cmote holds itself takes the same route through the gate: 69 (§102), 2048 (§148), and 5 and 45
+  (§149) are all `Unknown` to the engine, so claiming one there is the only way its DECRQM can be
+  answered truthfully. The cancel byte cmote feeds instead: 0x18 in `State::CsiParam` falls to the catch-all
   `_ => self.anywhere(...)` (`vte-0.15.0/src/lib.rs:252`), and `anywhere` runs `execute(byte)` and sets
   `State::Ground` — no `csi_dispatch` — while `execute` (`ansi.rs:1296`) has no CAN arm, only the
   `debug!` fallback. `advance_ground` calls `reset_params()` on the next ESC (`lib.rs:605`), so the

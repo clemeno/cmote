@@ -17169,3 +17169,139 @@ and the row's note now says where the blocker actually is.
   are real changes a program asked to hear about.
 - **No live session.** Exercised through `Terminal::process` and `Terminal::resize`; no remote program
   was observed setting the mode.
+
+## §149 — Reverse video over the whole page, and the backspace that backs up a line
+
+Two VT100-era DEC private modes from part 8's ❌ column. Neither is in the engine's
+`NamedPrivateMode`, so both arrive as `PrivateMode::Unknown(n)` and are dropped — DECRQM included,
+which would answer "not recognised" for a mode cmote implements.
+
+> | 5 (DECSCNM) | Global reverse video | ❌ | reverse video over the whole screen at once |
+> | 45 | Reverse wrap | ❌ | reverse wrap — a backspace in column 1 moves to the end of the line above |
+
+### They are a table, and the other two modes of cmote's own are not
+
+cmote holds four private modes now, in three places, which looks like drift and is not:
+
+* **69** (DECLRMM) lives in `term/margins.rs`, because turning it on brings a whole geometry with it —
+  a left and a right column, a backstop, a deferred wrap — and the bit is the smallest part of what
+  that module holds (§102).
+* **2048** (in-band resize) lives on `ReplyBuffer`, because the four numbers its notification is built
+  from are already there (§148).
+* **5** and **45** carry no other state at all. The operations wanted of them are table operations —
+  set one, read one back for DECRQM and XTSAVE, clear them all on RIS — so they *are* a table, and a
+  fifth mode of this kind is a line rather than a design.
+
+`DecModes::set` returns whether the mode was one of ours, and that return value is what keeps the gate
+honest: `false` means "not mine" and the sequence forwards to the engine exactly as it always did. A
+mode is claimed in one place, and a mode not in the table cannot be swallowed by accident.
+
+The routing that came free is worth noting, because it is the third time it has: DECRQM and
+XTSAVE/XTRESTORE both work with no code of their own. `Terminal::private_mode` reads the same table,
+and a restore feeds `CSI ? 5 h` back through `advance`, which runs the gate — one route in, one route
+out (§141).
+
+### DECSCNM is a rendering rule, and the third one
+
+The grid is not touched. No attribute is written, no cell moves; `Screen::reverse_video` reports the
+bit and `ui/grid.rs` swaps as it paints. That is exactly the arrangement §76 made for the character
+path and §146 for the line sizes, and it buys the same thing: turning the mode off puts the page back
+with no state to unwind, and the test asserts precisely that.
+
+**Three swaps, XORed rather than applied in turn.** SGR 7 on the cell, DECSCNM over the page, and the
+cursor. An even number cancels — which is not a trick but the definition: a real terminal draws its
+cursor as the inverse of what is under it, so a cursor over already-inverted text on an
+already-reversed page comes out reading like ordinary text. Three separate `if`s would have got that
+wrong twice.
+
+**The page's own two colours are one pair, read from one place.** Three sites here need it — the
+backdrop quad painted behind the whole grid, the style of a cell the session does not hold, and the
+test in `draw_run` for whether a run needs a quad at all — and two of them reading the constants while
+the third reads them swapped is exactly how a reversed page ends up reversed *in patches*. That last
+one is the subtle one: `draw_run` skips the background quad when the run's background equals the
+backdrop, and under DECSCNM the backdrop is the foreground colour.
+
+The swap itself went into `palette.rs` rather than into `ui/grid.rs`, because the **rich copy** draws
+the page background too. A copy reproduces what the user is looking at — that is the premise of a rich
+copy and the reason SGR 7 has been honoured there since the file was written — so a reversed page
+copies reversed, and "reversed" must not mean one thing on screen and another on the clipboard.
+
+**What DECSCNM does not invert: cmote's own chrome.** The selection fill and the find bar's match wash
+are applied *after* the swap, so they keep their colours. That fell out of the existing order rather
+than being arranged, and it is right by the rule this project already keeps: the chrome is cmote's,
+not the program's (§39, §40).
+
+### Reverse wraparound, and the four things no source says
+
+xterm's ctlseqs names the mode and stops: *"Ps = 4 5 -> Reverse-wraparound mode (XTREVWRAP), xterm"* is
+the entire entry, with nothing about behaviour. The definition is in the **xterm manual page**, on the
+`reverseWrap` resource:
+
+> "This allows the cursor to back up from the leftmost column of one line to the rightmost column of
+> the previous line."
+
+That sentence is what cmote implements, and nothing beyond it. Four questions it leaves open, each
+answered by the narrowest reading rather than by a guess:
+
+* **Which motions.** "Back up" is a backspace, and the resource exists for editing long shell command
+  lines, where BS is what the shell sends. **CUB is left alone.** xterm is reported to wrap every
+  leftward motion under this mode; that behaviour appears in no document read here, it is said to
+  disagree with vttest, and another implementation refused it outright. A cursor that moves where no
+  source says it should is the divergence §102 exists to prevent.
+* **Past the top.** There is no "previous line" above the first, so the cursor stays. xterm has a
+  *second* mode for the wider behaviour — **1045**, Extended Reverse-wraparound — which is itself the
+  evidence that 45 alone is the restricted form. 1045 is not implemented and now has a row of its own.
+* **Whether the line above must be a wrapped one.** The sentence puts no condition on it, so neither
+  does this. The alternative is safer and is not what the source says.
+* **DECAWM.** Not coupled. xterm is reported to fix a `need_wrap` corner only when both are on; that is
+  a statement about xterm's flag, not about what the mode means.
+
+The two edges are the **margins'** when a band is set and the page's otherwise — `backstop` for the
+left, `band` for the right, the same two answers every other motion in the gate already uses. `right`
+alone would have been wrong and the probe caught it: with no margins that accessor reads 0, and backing
+up to column 0 of the line above is not "the rightmost column".
+
+#### The guard that no test could see, and the page that can see it
+
+A wrap owed means the cursor is sitting on the last cell written rather than past the edge, so the
+backspace that follows is not a backspace "from the leftmost column" at all. The guard for it looked
+redundant, and the probe agreed: breaking its line left every test green.
+
+It is not redundant. On an ordinary page a wrap is owed at the RIGHT edge and the reverse wrap fires at
+the LEFT one, so the column test rules it out first — but **on a page one column wide the two edges are
+the same column**. Printing into it leaves a wrap owed exactly where a backspace would otherwise back
+up a line, so without the guard every backspace would walk the cursor up the page instead of erasing.
+
+That page is reachable rather than a contrivance: `ui::terminal::grid_size` clamps with `.max(1)`, so a
+window dragged to its narrowest really does hand the emulator one column. A one-column *band* cannot do
+it — `Margins::set` refuses `left >= right`, which DEC requires — so the page is the only door, and the
+test now says so.
+
+### Files
+
+* `src/term/decmodes.rs` — new. The table, and the record of what the sources do and do not say.
+* `src/term/gate.rs` — `claim_mode`, `reverse_wrap_backspace`, `report_mode_value` (which mode 69's own
+  DECRQM answer now shares), the reverse-wrap arm at the top of `backspace`, and the RIS.
+* `src/term/mod.rs` — the `modes` field, both `Gate::new` call sites, `Screen::new`, and the two modes
+  in `private_mode`.
+* `src/term/screen.rs` — `reverse_video`, beside `line_size` and `line_is_rtl`, the two other rules
+  about how the page is drawn.
+* `src/palette.rs` — `page_colors`, the swap itself, stated once for the renderer and the rich copy.
+* `src/ui/grid.rs` — the backdrop, the XOR, the unheld cell, and `backdrop` threaded into `draw_run`.
+* `src/ui/richcopy.rs` — the same swap on the way to the clipboard, including the `<pre>` block's own
+  colours so a default cell still emits no markup.
+
+### Not done
+
+- **Mode 1045, Extended Reverse-wraparound, is not implemented** and has a new row saying so. It is the
+  mode that would answer three of the four open questions above by widening them, and it needs a source
+  that states what it widens.
+- **CUB does not reverse wrap**, deliberately and as argued above. If a program is ever found relying on
+  xterm's wider behaviour, this is the paragraph to re-read — not the code to quietly change.
+- **The scrolling region is not consulted.** A backspace at the left edge of the region's top row backs
+  up out of the region, because a backspace does not scroll and the manual page says "the previous
+  line" without qualification.
+- **DECSCNM does not reach the inline images.** A sixel's pixels are the program's own and are drawn
+  from its palette (§41); inverting them would be cmote repainting a picture it was handed.
+- **No live session.** Exercised through `Terminal::process`, the run planner and the rich copy; no
+  remote program was observed setting either mode.

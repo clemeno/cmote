@@ -13,6 +13,23 @@
 pub const DEFAULT_FG: (u8, u8, u8) = (0xd0, 0xd0, 0xd0);
 pub const DEFAULT_BG: (u8, u8, u8) = (0x1e, 0x1e, 0x1e);
 
+/// The page's own two colours, swapped while DECSCNM is on (§149).
+///
+/// Here rather than in either module that needs it, and for this file's founding reason one turn
+/// further round: the renderer and the RICH COPY both draw the page's own background, and a rule
+/// about which colour that is has to be stated once or the two eventually disagree. It is three
+/// lines; what it buys is that "reversed" cannot mean one thing on screen and another on the
+/// clipboard.
+///
+/// The mode itself is `term/decmodes.rs`'s. This is only the consequence.
+pub fn page_colors(reversed: bool) -> ((u8, u8, u8), (u8, u8, u8)) {
+	if reversed {
+		(DEFAULT_BG, DEFAULT_FG)
+	} else {
+		(DEFAULT_FG, DEFAULT_BG)
+	}
+}
+
 /// The 16 base ANSI colours (indices 0-15): the 8 standard colours then their bright variants.
 /// Values follow the common xterm palette.
 const ANSI_16: [(u8, u8, u8); 16] = [

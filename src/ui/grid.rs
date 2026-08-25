@@ -496,9 +496,12 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			return;
 		};
 
-		// The backdrop, once, behind everything: every cell that keeps the default
-		// background then costs no quad of its own.
-		renderer.fill_quad(fill(bounds), Background::Color(DEFAULT_BG));
+		// The backdrop, once, behind everything: every cell that keeps the page background then costs
+		// no quad of its own. Under DECSCNM the page background is the FOREGROUND colour (§149), so
+		// this is where the whole-screen swap is actually painted — the per-cell swap below only has to
+		// agree with it.
+		let (_, backdrop) = page_colors(self.screen.reverse_video());
+		renderer.fill_quad(fill(bounds), Background::Color(backdrop));
 
 		let (rows, cols) = self.screen.size();
 		// The Ctrl-hover link affordance (§24): while Ctrl is held and the pointer is over an
@@ -562,7 +565,7 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 					marks,
 					link_hover.as_ref(),
 				) {
-					draw_run(renderer, run, origin.x, top, row_bounds, size);
+					draw_run(renderer, run, origin.x, top, row_bounds, size, backdrop);
 				}
 			}
 
@@ -850,10 +853,11 @@ fn draw_run(
 	top: f32,
 	row_bounds: Rectangle,
 	size: LineAttribute,
+	backdrop: Color,
 ) {
 	// A double-width run is drawn one cell at a time; see `draw_wide_cells` for why.
 	if size == LineAttribute::DoubleWidth && run.cols > 1 && run.content.is_ascii() {
-		draw_wide_cells(renderer, &run, grid_left, top, row_bounds);
+		draw_wide_cells(renderer, &run, grid_left, top, row_bounds, backdrop);
 		return;
 	}
 	// One cell of a double line covers two columns of the page (§146). Everything below is written in
@@ -878,8 +882,10 @@ fn draw_run(
 		height: CELL_HEIGHT,
 	};
 
-	// The backdrop already covers every default-background cell.
-	if run.style.bg != DEFAULT_BG {
+	// The backdrop already covers every cell that keeps the page background — which is the FOREGROUND
+	// colour while DECSCNM is on, so the comparison is against what was painted rather than against the
+	// constant (§149).
+	if run.style.bg != backdrop {
 		renderer.fill_quad(fill(bounds), Background::Color(run.style.bg));
 	}
 	draw_underline(
@@ -1007,6 +1013,7 @@ fn draw_wide_cells(
 	grid_left: f32,
 	top: f32,
 	row_bounds: Rectangle,
+	backdrop: Color,
 ) {
 	for (index, character) in run.content.chars().enumerate() {
 		let Ok(offset) = u16::try_from(index) else {
@@ -1025,8 +1032,23 @@ fn draw_wide_cells(
 			top,
 			row_bounds,
 			LineAttribute::DoubleWidth,
+			backdrop,
 		);
 	}
+}
+
+/// The page's own foreground and background as iced colours, swapped while DECSCNM is on (§149).
+///
+/// Three places here need the pair and all three must agree: the backdrop quad painted behind the
+/// whole grid, the style of a cell the session does not hold, and the test in `draw_run` for whether
+/// a run needs a quad of its own at all. Two of them reading the constants directly and one reading
+/// them swapped is how a reversed page ends up reversed in patches.
+///
+/// The swap itself is `palette::page_colors`, because the rich copy draws the same page background
+/// and the two must not disagree about what "reversed" means; this is the conversion, not the rule.
+fn page_colors(reversed: bool) -> (Color, Color) {
+	let (fg, bg) = palette::page_colors(reversed);
+	(rgb(fg), rgb(bg))
 }
 
 /// How many page columns one cell of a line covers, as the pixel arithmetic wants it (§146).
@@ -1758,6 +1780,7 @@ fn plan_runs(
 				matched: is_match,
 				link_hover: is_link_hover,
 			},
+			screen.reverse_video(),
 		);
 
 		// Extend only when this cell joins freely AND the open run is an unsealed run of
@@ -1853,16 +1876,20 @@ struct CellMarks {
 /// the final background so it holds its cell but shows nothing. Because `CellStyle` is the
 /// run-grouping key, either fill (and any per-cell attribute) breaks its run off from its
 /// neighbours (§10, §39).
-fn cell_style(cell: Option<&Cell>, marks: CellMarks) -> CellStyle {
+fn cell_style(cell: Option<&Cell>, marks: CellMarks, reversed: bool) -> CellStyle {
 	let Some(cell) = cell else {
+		// A cell the session does not hold — past the last column of a short line, or off a line the
+		// scrollback has evicted. It is drawn in the page's own colours, so DECSCNM has to reach it too:
+		// a reversed page whose empty half stayed dark would be reversed in patches (§149).
+		let (fg, bg) = page_colors(reversed);
 		return CellStyle {
-			fg: DEFAULT_FG,
-			bg: DEFAULT_BG,
+			fg,
+			bg,
 			bold: false,
 			italic: false,
 			strikeout: false,
 			underline: UnderlineStyle::None,
-			underline_color: DEFAULT_FG,
+			underline_color: fg,
 		};
 	};
 
@@ -1876,7 +1903,12 @@ fn cell_style(cell: Option<&Cell>, marks: CellMarks) -> CellStyle {
 	// fallback to the foreground is applied after the swap, below, so it follows inverse too.
 	let explicit_underline = cell.underline_color().map(|color| to_iced_color(color, fg));
 
-	if cell.inverse() ^ marks.cursor {
+	// Three swaps, XORed rather than applied in turn, so an even number of them cancels: SGR 7 on the
+	// cell, DECSCNM over the whole page (§149), and the cursor. That cancelling is the point — a real
+	// terminal draws its cursor as the inverse of what is under it, so a cursor over already-inverted
+	// text on an already-reversed page comes out reading the same as ordinary text, which is what all
+	// three of these mean together.
+	if cell.inverse() ^ reversed ^ marks.cursor {
 		std::mem::swap(&mut fg, &mut bg);
 	}
 	// The find bar's matches (§39): a wash under every hit on screen. Applied BEFORE the selection,
@@ -2365,6 +2397,77 @@ mod tests {
 		// the clip against the grid is what leaves only the visible slice.
 		let (pixels, _) = image_bounds(&placement, origin, 9);
 		assert_px!(pixels.y, 20.0 - 2.0 * CELL_HEIGHT);
+	}
+
+	/// DECSCNM swaps the whole page's ink and paper, and does it as a RENDERING rule: the grid is not
+	/// touched, so the same cells plan the swapped colours while the mode is on and the original ones
+	/// the moment it is off (§149).
+	#[test]
+	fn reverse_video_swaps_the_page_and_puts_it_back() {
+		let mut terminal = Terminal::new(1, 3);
+		terminal.process(b"abc");
+		let marks = Marks {
+			selection: None,
+			top_line: 0,
+			matches: &[],
+		};
+		let plain = plan_runs(terminal.screen(), 0, 3, false, 0, marks, None);
+		assert_eq!(plain[0].style.fg, DEFAULT_FG);
+		assert_eq!(plain[0].style.bg, DEFAULT_BG);
+
+		terminal.process(b"\x1b[?5h");
+		let reversed = plan_runs(terminal.screen(), 0, 3, false, 0, marks, None);
+		assert_eq!(reversed[0].content, "abc", "the same text");
+		assert_eq!(reversed[0].style.fg, DEFAULT_BG, "and the colours swapped");
+		assert_eq!(reversed[0].style.bg, DEFAULT_FG);
+
+		terminal.process(b"\x1b[?5l");
+		let back = plan_runs(terminal.screen(), 0, 3, false, 0, marks, None);
+		assert_eq!(
+			back[0].style.fg, DEFAULT_FG,
+			"nothing was written to unwind"
+		);
+		assert_eq!(back[0].style.bg, DEFAULT_BG);
+	}
+
+	/// The three swaps XOR, so an even number of them cancels. A cell already carrying SGR 7 on a
+	/// reversed page reads as ordinary text — which is what a real terminal shows, and what a chain of
+	/// three separate `if`s would have got wrong (§149).
+	#[test]
+	fn an_inverse_cell_on_a_reversed_page_reads_as_ordinary_text() {
+		let mut terminal = Terminal::new(1, 3);
+		terminal.process(b"\x1b[7mabc");
+		let marks = Marks {
+			selection: None,
+			top_line: 0,
+			matches: &[],
+		};
+		let inverse = plan_runs(terminal.screen(), 0, 3, false, 0, marks, None);
+		assert_eq!(inverse[0].style.fg, DEFAULT_BG, "SGR 7 alone: swapped");
+
+		terminal.process(b"\x1b[?5h");
+		let both = plan_runs(terminal.screen(), 0, 3, false, 0, marks, None);
+		assert_eq!(both[0].style.fg, DEFAULT_FG, "SGR 7 and DECSCNM: cancelled");
+		assert_eq!(both[0].style.bg, DEFAULT_BG);
+	}
+
+	/// The page's own colours are one pair, read from one place, so the backdrop painted behind the
+	/// grid and a cell the session does not hold cannot disagree — which is how a reversed page ends up
+	/// reversed in patches (§149).
+	#[test]
+	fn the_page_colours_are_one_pair() {
+		assert_eq!(page_colors(false), (DEFAULT_FG, DEFAULT_BG));
+		assert_eq!(page_colors(true), (DEFAULT_BG, DEFAULT_FG));
+		// A cell the session does not hold takes the same pair, which is what keeps the empty half of a
+		// short line the same colour as the rest of the page.
+		let marks = CellMarks {
+			cursor: false,
+			selected: false,
+			matched: false,
+			link_hover: false,
+		};
+		let empty = cell_style(None, marks, true);
+		assert_eq!((empty.fg, empty.bg), page_colors(true));
 	}
 
 	#[test]

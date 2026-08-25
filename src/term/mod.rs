@@ -52,6 +52,7 @@ mod charset; // holds the four character-set slots and the shifts that invoke th
 mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 mod dcs; // frames the DCS control strings and escape sequences out of the stream, once, for the scanners that read them (§111)
+mod decmodes; // holds the two DEC private modes the engine has no bit for — DECSCNM and reverse wraparound (§149)
 #[cfg(test)]
 mod differential; // drives the engine's own parser beside cmote's scanners and compares them (§106)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
@@ -422,6 +423,7 @@ impl Terminal {
 			lines: lineattr::LineAttributes::default(),
 			sizes: lineattr::LineSizes::default(),
 			window: window::WindowReports::default(),
+			modes: decmodes::DecModes::default(),
 		}
 	}
 
@@ -441,6 +443,7 @@ impl Terminal {
 			&mut self.margins,
 			&mut self.charsets,
 			&mut self.stops,
+			&mut self.modes,
 			&self.replies,
 		);
 		self.parser.advance(&mut gate, bytes);
@@ -460,6 +463,7 @@ impl Terminal {
 			&mut self.margins,
 			&mut self.charsets,
 			&mut self.stops,
+			&mut self.modes,
 			&self.replies,
 		);
 		self.parser.stop_sync(&mut gate);
@@ -975,7 +979,7 @@ impl Terminal {
 		}
 		// The screen borrows the engine and the store is borrowed mutably, so they are taken as
 		// separate fields rather than through `self.screen()`, which would borrow all of `self`.
-		let screen = screen::Screen::new(&self.term, &self.paths, &self.sizes);
+		let screen = screen::Screen::new(&self.term, &self.paths, &self.sizes, self.modes);
 		self.graphics
 			.retire_covered_alternate(|placement| is_covered(&screen, placement));
 	}
@@ -1337,6 +1341,12 @@ impl Terminal {
 					.expect("reply buffer mutex poisoned")
 					.resize_reports,
 			);
+		}
+		// DECSCNM and reverse wraparound, the third and fourth (§149). Answered from the same table the
+		// gate writes, and restored the same way — the fed `CSI ? 5 h` runs through the gate, which is
+		// the table's only writer, so a restore needs no special case here either.
+		if let Some(value) = self.modes.get(mode) {
+			return Some(value);
 		}
 		self.screen().private_mode(mode)
 	}
@@ -2186,7 +2196,7 @@ impl Terminal {
 	/// The current screen, as cmote's engine-agnostic view (§9, §16, §23). The rest of the
 	/// app reads the grid only through this, so the engine stays behind `term/`.
 	pub fn screen(&self) -> screen::Screen<'_> {
-		screen::Screen::new(&self.term, &self.paths, &self.sizes)
+		screen::Screen::new(&self.term, &self.paths, &self.sizes, self.modes)
 	}
 
 	/// The inline images the page ON SHOW is holding, oldest first (§41). Each names the absolute
@@ -2618,6 +2628,12 @@ pub struct Terminal {
 	/// breath. Answered after the chunk, cmote's reply would always land second whatever order the
 	/// questions were asked in.
 	window: window::WindowReports,
+	/// The two DEC private modes the engine has no bit for — DECSCNM and reverse wraparound (§149).
+	/// Written by the gate, which is where the engine is told; read by the gate for the wrap and by the
+	/// RENDERER, through `Screen`, for the reverse video. That second reader is why it lives here rather
+	/// than on the reply buffer as mode 2048 does: a bit consulted for every cell of every frame must
+	/// not be behind a mutex (§148, `term/decmodes.rs`).
+	modes: decmodes::DecModes,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
@@ -3779,6 +3795,142 @@ mod tests {
 		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
 		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
 		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
+	}
+
+	// --- DECSCNM and reverse wraparound (§149) -----------------------------------------------------
+
+	#[test]
+	fn reverse_video_answers_its_own_decrqm_and_writes_nothing_to_the_grid() {
+		// DECSCNM is a rule the RENDERER applies, so the mode moves and the cells do not — the same
+		// arrangement as the character path (§76) and the line sizes (§146).
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"ab");
+		assert_eq!(terminal.process(b"\x1b[?5$p"), b"\x1b[?5;2$y".to_vec());
+		assert!(!terminal.screen().reverse_video());
+		terminal.process(b"\x1b[?5h");
+		assert_eq!(terminal.process(b"\x1b[?5$p"), b"\x1b[?5;1$y".to_vec());
+		assert!(terminal.screen().reverse_video());
+		// The cell is untouched: same glyph, and no inverse attribute was written onto it.
+		let cell = terminal.screen().cell(0, 0).expect("a cell");
+		assert_eq!(cell.contents(), "a");
+		assert!(!cell.inverse());
+	}
+
+	#[test]
+	fn a_hard_reset_clears_the_reverse_modes() {
+		// RIS puts them back; DECSTR does not, because neither is on DEC's published soft-reset list
+		// and §72 was careful not to widen the one DEC wrote (§149).
+		let mut terminal = Terminal::new(2, 4);
+		terminal.process(b"\x1b[?5h\x1b[?45h");
+		terminal.process(b"\x1b[!p");
+		assert!(terminal.screen().reverse_video(), "DECSTR left it alone");
+		terminal.process(b"\x1bc");
+		assert!(!terminal.screen().reverse_video());
+		assert_eq!(terminal.process(b"\x1b[?45$p"), b"\x1b[?45;2$y".to_vec());
+	}
+
+	#[test]
+	fn a_backspace_at_the_left_edge_backs_up_a_line() {
+		// XTREVWRAP, in the xterm manual page's own words: "this allows the cursor to back up from the
+		// leftmost column of one line to the rightmost column of the previous line" (§149).
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?45h");
+		// Row 1, column 0 — reached without printing, so no wrap is owed.
+		terminal.process(b"\x1b[2;1H");
+		assert_eq!(terminal.screen().cursor_position(), (1, 0));
+		terminal.process(b"\x08");
+		assert_eq!(terminal.screen().cursor_position(), (0, 4));
+	}
+
+	#[test]
+	fn a_backspace_at_the_left_edge_stays_put_unless_asked_for() {
+		// The mode is off by default, and off it is the ordinary backspace: column 0 is the floor.
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[2;1H\x08");
+		assert_eq!(terminal.screen().cursor_position(), (1, 0));
+	}
+
+	#[test]
+	fn reverse_wrap_stops_at_the_top_of_the_page() {
+		// There is no previous line above the first. xterm has a SECOND mode for the wider behaviour
+		// (1045, Extended Reverse-wraparound) and cmote does not implement it (§149).
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?45h\x1b[1;1H\x08");
+		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+	}
+
+	#[test]
+	fn a_backspace_with_a_wrap_owed_does_not_back_up_a_line() {
+		// Filling the last column leaves the cursor ON it with a wrap owed rather than past the edge, so
+		// the backspace that follows is not a backspace "from the leftmost column" at all and the
+		// reverse wrap must not fire (§149).
+		//
+		// Where it leaves the cursor is the ORDINARY backspace's business and is asserted only as "still
+		// on this row": the engine and the gate answer that differently — the engine steps left and
+		// clears the wrap, the gate's margin-aware path cancels the wrap and stays put (§102) — and this
+		// test is about the mode, not about that older split.
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?45h\x1b[2;1Habcde");
+		assert_eq!(terminal.screen().cursor_position(), (1, 4));
+		terminal.process(b"\x08");
+		let (row, _) = terminal.screen().cursor_position();
+		assert_eq!(row, 1, "a wrap was owed, so nothing backed up a line");
+	}
+
+	/// The one shape where the wrap-owed guard is the ONLY thing standing in the way, found by breaking
+	/// its line and watching nothing go red (§149).
+	///
+	/// On an ordinary page the guard looks redundant: a wrap is owed at the RIGHT edge and the reverse
+	/// wrap fires at the LEFT one, so the column test rules it out first. On a page ONE COLUMN WIDE the
+	/// two edges are the same column, and printing into it leaves a wrap owed exactly where a backspace
+	/// would otherwise back up a line — so without the guard, every backspace would walk the cursor up
+	/// the page instead of erasing.
+	///
+	/// It is a reachable page and not a contrivance: `ui::terminal::grid_size` clamps with `.max(1)`, so
+	/// a window dragged to its narrowest really does hand the emulator one column. A one-column BAND
+	/// cannot do it — `Margins::set` refuses `left >= right`, which DEC requires — so the page is the
+	/// only door.
+	#[test]
+	fn a_one_column_page_owes_its_wrap_at_the_left_edge_too() {
+		let mut terminal = Terminal::new(3, 1);
+		terminal.process(b"\x1b[?45h\x1b[2;1Ha");
+		assert_eq!(
+			terminal.screen().cursor_position(),
+			(1, 0),
+			"held, wrap owed"
+		);
+		terminal.process(b"\x08");
+		let (row, _) = terminal.screen().cursor_position();
+		assert_eq!(
+			row, 1,
+			"the owed wrap is not a backspace from the left edge"
+		);
+	}
+
+	#[test]
+	fn reverse_wrap_backs_up_to_the_right_margin_of_a_band() {
+		// The two edges are the MARGINS' when a band is set, which is what every other motion in the
+		// gate already does — a reverse wrap that landed on the page edge would put the cursor outside
+		// the band the program is writing in (§102, §149).
+		let mut terminal = margined(3, 20, 5, 12);
+		terminal.process(b"\x1b[?45h\x1b[2;5H");
+		assert_eq!(terminal.screen().cursor_position(), (1, 4));
+		terminal.process(b"\x08");
+		assert_eq!(
+			terminal.screen().cursor_position(),
+			(0, 11),
+			"the right margin"
+		);
+	}
+
+	#[test]
+	fn cursor_left_does_not_reverse_wrap() {
+		// The deliberate divergence, and the reason it is deliberate: the manual page's sentence is
+		// about backing UP, xterm's wider behaviour is in no document read here, and a cursor that moves
+		// where no source says it should is what §102 exists to prevent (§149, `term/decmodes.rs`).
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?45h\x1b[2;1H\x1b[D");
+		assert_eq!(terminal.screen().cursor_position(), (1, 0));
 	}
 
 	#[test]
@@ -5313,6 +5465,22 @@ mod tests {
 			REPORT_10_BY_40.to_vec(),
 			"and the restore turned it back on, with the size that goes with it"
 		);
+	}
+
+	/// The two modes §149 added round-trip the same way, and they are the ones that show the routing is
+	/// general rather than a special case per mode: `private_mode` reads one table and a restore feeds
+	/// a sequence the gate is the only actor for.
+	#[test]
+	fn the_reverse_modes_round_trip_through_cmotes_own_table() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?5h\x1b[?45h");
+		terminal.process(b"\x1b[?5;45s\x1b[?5l\x1b[?45l");
+		assert_eq!(terminal.process(b"\x1b[?5$p"), b"\x1b[?5;2$y".to_vec());
+		assert_eq!(terminal.process(b"\x1b[?45$p"), b"\x1b[?45;2$y".to_vec());
+		terminal.process(b"\x1b[?5;45r");
+		assert_eq!(terminal.process(b"\x1b[?5$p"), b"\x1b[?5;1$y".to_vec());
+		assert_eq!(terminal.process(b"\x1b[?45$p"), b"\x1b[?45;1$y".to_vec());
+		assert!(terminal.screen().reverse_video());
 	}
 
 	/// The store is bounded by what can be read, not by what a stream sends — the §12 property stated

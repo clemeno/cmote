@@ -42,6 +42,10 @@ struct Style {
 /// where the two rows are one logical line the terminal folded and are joined with nothing (§42),
 /// exactly as the plain-text copy does.
 pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
+	// DECSCNM, read before the screen is consumed (§149). A copy reproduces what the user is LOOKING
+	// at — that is the whole premise of a rich copy, and the reason SGR 7 has been honoured here since
+	// this file was written — so a page drawn reversed copies reversed.
+	let reversed = screen.reverse_video();
 	let rows = selection.selected_rows(screen);
 	if rows.is_empty() {
 		return String::new();
@@ -49,10 +53,11 @@ pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 
 	// The <pre> carries the terminal's default colours and a monospaced family, so a default
 	// cell needs no markup and the whole block reads as the terminal shows it.
+	let (ink, paper) = palette::page_colors(reversed);
 	let mut html = format!(
 		"<pre style=\"font-family:'Courier New',monospace;color:{};background-color:{};\">",
-		hex_color(palette::DEFAULT_FG),
-		hex_color(palette::DEFAULT_BG),
+		hex_color(ink),
+		hex_color(paper),
 	);
 
 	for (index, row) in rows.iter().enumerate() {
@@ -60,7 +65,7 @@ pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 		if index > 0 && !rows[index - 1].wrapped {
 			html.push('\n');
 		}
-		emit_row(&mut html, &row.cells);
+		emit_row(&mut html, &row.cells, reversed);
 	}
 
 	html.push_str("</pre>");
@@ -68,12 +73,12 @@ pub fn to_html(selection: &Selection, screen: Screen<'_>) -> String {
 }
 
 /// Append one row's cells to `html`, merging neighbours that share a style into a single span.
-fn emit_row(html: &mut String, cells: &[Cell]) {
+fn emit_row(html: &mut String, cells: &[Cell], reversed: bool) {
 	let mut run = String::new();
 	let mut run_style: Option<Style> = None;
 
 	for cell in cells {
-		let style = style_of(cell);
+		let style = style_of(cell, reversed);
 		// A blank cell (no glyph) still occupies a column, so it copies as a space — keeping the
 		// layout, and its style, exactly as the grid shows it.
 		let glyph = if cell.has_contents() {
@@ -84,22 +89,22 @@ fn emit_row(html: &mut String, cells: &[Cell]) {
 
 		// Flush the run in progress when the style changes, then start a new one on this cell.
 		if run_style.as_ref() != Some(&style) {
-			flush_run(html, &run, run_style.as_ref());
+			flush_run(html, &run, run_style.as_ref(), reversed);
 			run.clear();
 			run_style = Some(style);
 		}
 		escape_into(&mut run, glyph);
 	}
-	flush_run(html, &run, run_style.as_ref());
+	flush_run(html, &run, run_style.as_ref(), reversed);
 }
 
 /// Write one finished run: the escaped text wrapped in a <span> when its style differs from the
 /// <pre> default, or bare text when it does not (the common case, so the HTML stays lean).
-fn flush_run(html: &mut String, run: &str, style: Option<&Style>) {
+fn flush_run(html: &mut String, run: &str, style: Option<&Style>, reversed: bool) {
 	if run.is_empty() {
 		return;
 	}
-	match style.map(style_css) {
+	match style.map(|style| style_css(style, reversed)) {
 		Some(css) if !css.is_empty() => {
 			html.push_str("<span style=\"");
 			html.push_str(&css);
@@ -115,10 +120,10 @@ fn flush_run(html: &mut String, run: &str, style: Option<&Style>) {
 /// foreground and background; faint (dim) fades the foreground halfway to the background, the way
 /// the grid renders it; conceal paints the glyph in its own background so copied-as-shown text
 /// stays invisible (the plain-text fallback still carries the real characters).
-fn style_of(cell: &Cell) -> Style {
+fn style_of(cell: &Cell, reversed: bool) -> Style {
 	let mut fg = to_rgb(cell.fgcolor(), palette::DEFAULT_FG);
 	let mut bg = to_rgb(cell.bgcolor(), palette::DEFAULT_BG);
-	if cell.inverse() {
+	if cell.inverse() ^ reversed {
 		std::mem::swap(&mut fg, &mut bg);
 	}
 	if cell.dim() {
@@ -139,15 +144,19 @@ fn style_of(cell: &Cell) -> Style {
 
 /// The CSS for a style, empty when it is exactly the <pre> default (so the caller can skip the
 /// span). Only the properties that differ from the default are emitted.
-fn style_css(style: &Style) -> String {
+fn style_css(style: &Style, reversed: bool) -> String {
 	let mut css = String::new();
 	// `write!` rather than `push_str(&format!(…))`: it formats straight into `css` instead of
 	// building a throwaway `String` first. Writing to a `String` cannot fail, so the `Result` is
 	// discarded — `fmt::Write` returns one only because the trait also covers fallible sinks.
-	if style.fg != palette::DEFAULT_FG {
+	// Against the PAGE colours rather than the constants, because DECSCNM moves what the <pre> itself
+	// carries (§149) — compared against the constants, every cell of a reversed page would differ from
+	// the default and the whole block would come out one span per run for no gain.
+	let (ink, paper) = palette::page_colors(reversed);
+	if style.fg != ink {
 		let _ = write!(css, "color:{};", hex_color(style.fg));
 	}
-	if style.bg != palette::DEFAULT_BG {
+	if style.bg != paper {
 		let _ = write!(css, "background-color:{};", hex_color(style.bg));
 	}
 	if style.bold {

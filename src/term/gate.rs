@@ -72,6 +72,7 @@ use alacritty_terminal::vte::ansi::{
 use unicode_width::UnicodeWidthChar;
 
 use super::charset::{Charset, Charsets};
+use super::decmodes::DecModes;
 use super::margins::Margins;
 use super::region::ScrollRegion;
 use super::tabs::Stops;
@@ -125,6 +126,10 @@ pub struct Gate<'a> {
 	/// writers are here, because three of them are places the ENGINE is told: HTS, TBC and the RIS that
 	/// rebuilds the table from inside `Term::reset_state`.
 	stops: &'a mut Stops,
+	/// The two DEC private modes the engine has no bit for — DECSCNM and reverse wraparound (§149).
+	/// The gate is their only writer, because the gate is where the engine is told; the reverse wrap is
+	/// read here too, by `backspace`, and the reverse video only by the renderer (`term/decmodes.rs`).
+	modes: &'a mut DecModes,
 	/// Where a reply goes. The engine writes its own answers through its event listener into this
 	/// same buffer, so an answer the gate writes lands in the stream in the order it was asked for
 	/// rather than in a second queue that would have to be kept in step (§33).
@@ -139,6 +144,7 @@ impl<'a> Gate<'a> {
 		margins: &'a mut Margins,
 		charsets: &'a mut Charsets,
 		stops: &'a mut Stops,
+		modes: &'a mut DecModes,
 		replies: &'a Arc<Mutex<ReplyBuffer>>,
 	) -> Self {
 		Self {
@@ -147,6 +153,7 @@ impl<'a> Gate<'a> {
 			margins,
 			charsets,
 			stops,
+			modes,
 			replies,
 		}
 	}
@@ -452,13 +459,78 @@ impl<'a> Gate<'a> {
 	/// a program acts on: a program told the mode is unknown will not ask for margins, and one told
 	/// it is reset when it is set will place text in the wrong columns.
 	fn report_margin_mode(&mut self) {
-		let value = if self.margins.enabled() { 1 } else { 2 };
-		let reply = format!("\x1b[?{LEFT_RIGHT_MARGIN_MODE};{value}$y");
+		let enabled = self.margins.enabled();
+		self.report_mode_value(LEFT_RIGHT_MARGIN_MODE, enabled);
+	}
+
+	/// The DECRQM report for one mode cmote holds itself: `CSI ? Ps ; Pv $ y`, `1` set and `2` reset
+	/// (§102, §149).
+	///
+	/// One builder for all of them rather than one per mode. The three that use it — 69, 5 and 45 —
+	/// differ only in the number, and a second copy of this format string would be a second place for
+	/// the `$y` to be got wrong (the same argument `query::decrqss_reply` makes about its five).
+	fn report_mode_value(&mut self, mode: u16, set: bool) {
+		let value = if set { 1 } else { 2 };
+		let reply = format!("\x1b[?{mode};{value}$y");
 		self.replies
 			.lock()
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(reply.as_bytes());
+	}
+
+	/// Take a DECSET or DECRST for one of the modes in cmote's own table, or say it is not ours (§149).
+	///
+	/// The `bool` is the gate's instruction: `true` means the sequence has been dealt with and must NOT
+	/// be forwarded, `false` that the engine is still the one that knows what it means. Keeping the
+	/// decision inside `DecModes::set` rather than as a `matches!` here is what makes adding a third
+	/// mode of this kind a line in one file instead of an edit in three places that have to agree.
+	fn claim_mode(&mut self, mode: PrivateMode, on: bool) -> bool {
+		let PrivateMode::Unknown(number) = mode else {
+			return false;
+		};
+		self.modes.set(number, on)
+	}
+
+	/// XTREVWRAP — a backspace at the leftmost column backs up to the rightmost column of the line
+	/// above (§149). `true` when it did, and the ordinary backspace is then not run.
+	///
+	/// The xterm manual page's sentence, and nothing beyond it: "this allows the cursor to back up from
+	/// the leftmost column of one line to the rightmost column of the previous line". `term/decmodes.rs`
+	/// lists the four things no source read here says, and why each is answered by the narrowest
+	/// reading — including why CUB is left alone.
+	///
+	/// Three things stop it, in order:
+	///
+	///   * the mode being off, which is the fast path every ordinary session takes;
+	///   * a WRAP OWED, which means the cursor is sitting on the last cell written rather than past the
+	///     edge — a backspace there cancels the wrap and stays put, and that is not a backspace "from
+	///     the leftmost column" at all. Both holders of the flag are consulted, because which one has it
+	///     depends on whether the margins are narrowed (§102);
+	///   * the top of the page, because there is no previous line to back up to. xterm has a second mode
+	///     for the wider behaviour (1045) and cmote does not implement it.
+	///
+	/// The two edges are the MARGINS' when a band is set and the page's otherwise, which is what
+	/// `backstop` and `right` already answer for every other motion in this file.
+	fn reverse_wrap_backspace(&mut self) -> bool {
+		if !self.modes.reverse_wrap() {
+			return false;
+		}
+		if self.term.grid().cursor.input_needs_wrap || self.margins.pending_wrap() {
+			return false;
+		}
+		let left = self.margins.backstop(self.column(), self.cols());
+		if self.column() != left || self.row() == 0 {
+			return false;
+		}
+		// `band` rather than `right`, because the right MARGIN is only a real column while a band is
+		// set — with no margins it reads 0, and backing up to column 0 of the line above is not what
+		// "the rightmost column" means. `band` answers the whole page in that case, which is exactly
+		// the rule DECIC and DECDC already need it for.
+		let (_, right) = self.margins.band(self.cols());
+		self.set_row(self.row() - 1);
+		self.set_column(right);
+		true
 	}
 
 	/// Turn in-band resize notifications on or off, and send the first one (§148).
@@ -568,6 +640,10 @@ impl Handler for Gate<'_> {
 		// above: the mode is nobody's DECSTR list, and §72 was careful not to widen the published one.
 		// No report is sent on the way out, for `unset_private_mode`'s reason.
 		buffer.resize_reports = super::inband::DEFAULT_ENABLED;
+		drop(buffer);
+		// And the two modes cmote holds itself go back to off (§149). RIS again, for the same reason:
+		// neither is on DEC's published DECSTR list.
+		self.modes.reset();
 	}
 
 	/// Print one character, breaking the line at the RIGHT MARGIN instead of at the screen edge.
@@ -735,8 +811,11 @@ impl Handler for Gate<'_> {
 		}
 	}
 
-	/// BS — back one column, stopping at the left margin.
+	/// BS — back one column, stopping at the left margin, or backing up a line under XTREVWRAP (§149).
 	fn backspace(&mut self) {
+		if self.reverse_wrap_backspace() {
+			return;
+		}
 		if !self.narrowed() {
 			self.term.backspace();
 			return;
@@ -897,6 +976,9 @@ impl Handler for Gate<'_> {
 			self.enable_resize_reports(true);
 			return;
 		}
+		if self.claim_mode(mode, true) {
+			return;
+		}
 		self.term.set_private_mode(mode);
 		self.follow_screen();
 	}
@@ -913,6 +995,9 @@ impl Handler for Gate<'_> {
 		}
 		if matches!(mode, PrivateMode::Unknown(super::inband::MODE)) {
 			self.enable_resize_reports(false);
+			return;
+		}
+		if self.claim_mode(mode, false) {
 			return;
 		}
 		self.term.unset_private_mode(mode);
@@ -972,6 +1057,12 @@ impl Handler for Gate<'_> {
 		}
 		if matches!(mode, PrivateMode::Unknown(super::inband::MODE)) {
 			self.report_resize_mode();
+			return;
+		}
+		if let PrivateMode::Unknown(number) = mode
+			&& let Some(value) = self.modes.get(number)
+		{
+			self.report_mode_value(number, value);
 			return;
 		}
 		self.term.report_private_mode(mode);

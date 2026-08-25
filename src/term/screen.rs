@@ -242,6 +242,11 @@ pub struct Screen<'a> {
 	/// line's size — and handed over here because this is the one view the renderer and the pointer
 	/// path both read, which is what keeps them agreeing about which column a click landed on.
 	sizes: &'a super::lineattr::LineSizes,
+	/// The two DEC private modes the engine has no bit for (§149). Only one of them is read through
+	/// this view — DECSCNM, which the renderer applies to every cell — and it is here for the reason
+	/// the two fields above are: this is the one view the renderer reads, so a rule about how the page
+	/// is DRAWN belongs beside the other two rules about how the page is drawn.
+	modes: super::decmodes::DecModes,
 }
 
 /// A count out of the engine, as cmote's own `u16` geometry (§111).
@@ -266,12 +271,24 @@ impl<'a> Screen<'a> {
 		engine: &'a Engine,
 		paths: &'a super::scp::Paths,
 		sizes: &'a super::lineattr::LineSizes,
+		modes: super::decmodes::DecModes,
 	) -> Self {
 		Self {
 			engine,
 			paths,
 			sizes,
+			modes,
 		}
+	}
+
+	/// DECSCNM — whether the whole page is drawn with its foreground and background swapped (§149).
+	///
+	/// A rule the RENDERER applies, not a change to the grid. Nothing in the engine's cells moves and
+	/// no attribute is written, exactly as the character path (§76) and the line sizes (§146) leave the
+	/// grid in the order and the size the host sent — so turning the mode off puts the page back with
+	/// no state to unwind.
+	pub fn reverse_video(&self) -> bool {
+		self.modes.reverse_video()
 	}
 
 	/// The grid size as `(rows, cols)`.
