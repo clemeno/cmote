@@ -442,6 +442,20 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   rather than beside it, since the gate is where the mode is held. It reports nothing but cmote's own
   state, so §71's second-source rule has nothing to catch: there is no other way to learn it.
 
+- **DECRQM for the four other modes cmote holds itself** — `2048` (§148), `5`, `45`, `9` and `1016`
+  (§149, §150). Every one of them is absent from `NamedPrivateMode` for mode 69's reason, so every one
+  of them would draw the same `0`, and the answer is the same one: the gate holds the mode, so the gate
+  answers for it, through one shared builder. The cost of getting it wrong differs per mode and is
+  worth naming for 2048 in particular — a program told the resize mode is unknown falls back to
+  SIGWINCH, which is the very thing it asked for the mode *because it cannot receive*.
+
+- **The cell size** (`CSI 16 t`) → `CSI 6 ; height ; width t` (§147). The only reply in this list
+  answered where the question SAT rather than after the chunk, and not because it could go stale — it
+  cannot — but because its sibling `CSI 14 t` is answered by the ENGINE mid-advance, and a program that
+  asks both reads the two replies by position. It is built from the same pair `CSI 14 t` multiplies, so
+  the two cannot disagree; the four window questions beside it are refused, on the rule at the top of
+  this list.
+
 There is also one reply cmote does not *originate* but **amends**: the engine writes DA1 as `CSI ? 6 c`,
 and attribute **4** is how a terminal says it draws sixels — which is what chafa's auto mode, `lsix` and
 ranger's previewer read at startup. Since §41 cmote rewrites that reply on its way out
@@ -588,7 +602,11 @@ short, and since §41 nothing left in it is high value:
   `terminal_attribute` has no arm for either and its cell `Flags` hold no blink bit, so the attribute
   never reaches the grid (§36, moved here from part 4). Showing it would take a per-cell scanner beside
   the engine (as `modkeys` is) *plus* the repaint timer cmote deliberately does not run. `[ECMA-48]`,
-  low value.
+  low value. **§151 priced the first half of that and it is worse than "no bit":** the flag word is a
+  `u16` with fifteen bits named and the sixteenth already borrowed for §56's protection, so the store
+  would have to be a per-cell map beside the engine — dropped on every reflow, the way §34's marks and
+  §41's images are, and unbounded in remote input the way a per-LINE map is not (§12). The overline
+  (SGR 53) sits beside it in part 8 and fails one layer earlier, in `vte`'s SGR table.
 - **~~Double-width / double-height lines~~ (DECDWL / DECDHL, `ESC#3-6`) — SHIPPED in §146.** The
   engine really does not represent them — there is no `DoubleHeight` or `DECDHL` symbol in the crate —
   and that turned out not to matter, because a line's SIZE is not something the engine has to know:
@@ -1250,6 +1268,17 @@ graphics. The pattern is now four for four, and the lesson is the one this parag
 learn: "the engine does not represent it" prices an item as engine work, and for everything on this
 list so far it was not.]*
 
+*[**§151 broke the run, and the break is worth more than the streak was.** Blink was priced properly
+for the first time and the answer is that the beside-the-engine tactic really does not reach it. Every
+one of the four above worked because the thing being kept beside the engine was keyed by LINE — a
+character path, a line size, a picture's anchor — or was not per-cell state at all. Blink is per CELL,
+and per-cell state has exactly one cheap home: the engine's own 16-bit flag word, which names fifteen
+bits and had its sixteenth borrowed by §56. A map beside it would be dropped on every reflow and
+unbounded in remote input (§12). So the four-for-four reading stands with a boundary drawn under it:
+"the engine does not represent it" is not a price, but "the engine has no room for it" is — and telling
+the two apart takes counting the bits, which is what nobody had done. What is left of part 5 is still
+blink and kitty graphics, and neither is a mispricing now.]*
+
 **One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
 crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
 `Osc52::OnlyCopy` — chosen upstream as *"a compromise between entirely disabling it (the most secure)
@@ -1730,7 +1759,11 @@ behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticin
 cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the palette stack (`CSI # P / # Q`, §84), kitty's colour-by-name (`OSC 21`), and the
 two DECSET modes nothing can turn on (`3`, `80`) — each one dead in `vte` or in a `Handler` default
-before cmote sees a byte. §75 added the **character path** (SCP) to that list and §76 took it back off;
+before cmote sees a byte. **§151 added the overline (SGR 53) to that column**, and the way it got there
+is the sharpest example of what the mark means: `vte`'s SGR table has no arm for the parameter, so it
+falls to `_ => None` and is skipped while the run around it is dispatched. The blink beside it in the
+same run DOES reach cmote and stays ❌, which is two marks for what had been one row's worth of
+"missing cell attributes". §75 added the **character path** (SCP) to that list and §76 took it back off;
 §77 then took off the **remote pointer shape** (OSC 22), which had sat there since §54. That is the one
 thing about 🤷 worth watching: it is the mark most likely to be a conclusion rather than a finding,
 because nothing fails while it is wrong — three sections in a row now, and both times the entry had
@@ -1745,7 +1778,11 @@ semantic-block query. A column that quadruples on one reading was never six rows
 *known*, and the same caution now applies to the other three. That leaves the plain ❌ column, worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
 §70), blink (the engine drops
-it), the newer private modes (2027 / 2031 / 2048), left-right margins, and — since §98 — the
+it — and §151 measured *why*: the per-cell flag word is a `u16` with fifteen bits named and the
+sixteenth already borrowed by §56, so the gap is a bit that does not exist), ~~the newer private modes
+(2027 / 2031 / 2048)~~ — **2048 SHIPPED in §148**, 2031 stays a gap whose blocker is the fixed colour
+scheme rather than the row, and 2027 stays one whose blocker is a missing engine METHOD rather than a
+bit (§151) — left-right margins, and — since §98 — the
 **horizontal-scroll family**, SL / SR, DECBI / DECFI and DECIC / DECDC, which read as one piece of
 absent machinery wearing six names. **§100 built it and moved two of them**: SL and SR are supported,
 and what it cost was forty lines beside the rectangles, because the hard half — writing cells into the
@@ -1856,6 +1893,15 @@ fullscreen — read as cmote holding its window against a remote; in fact `vte`'
 14 / 18 / 22 / 23 and drops every other parameter to `unhandled!()`, so no `Handler` method for window
 manipulation exists to leave at a default. **ENQ answerback** read as a refusal too, and it is one — but
 `vte`'s `execute` has no `0x05` arm, so what refuses it is that nobody ever wrote the reply.
+
+*[**§147 took the other half of that same `unhandled!()` and found a 🛑 where the commands are a 🤷.**
+The window QUESTIONS — 11, 13, 15 and 19 — die in the same arm, so by the mechanism alone they read
+like the commands beside them. They are not: a scanner beside the stream reaches every one of them, and
+`term/window.rs` answers exactly one — `CSI 16 t`, the cell size, which is a fact about the terminal —
+and declines four that name where the window sits, whether it is minimised and how large the display
+is. So the mark turns on whether cmote *could* have acted, not on where the sequence dies, and this is
+the pair that shows the difference: same arm, same `unhandled!()`, one 🤷 and one 🛑, because the
+commands cannot be performed from a scanner and the questions can be answered from one.]*
 
 The mark also earned its keep in the other direction, by making one row *harder* than its old tag. **OSC
 52 write** was the single refusal on this page the engine actively handed over: `alacritty_terminal`'s

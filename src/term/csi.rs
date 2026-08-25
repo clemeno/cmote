@@ -1,19 +1,26 @@
 // term/csi.rs — the facts every CSI scanner has to agree with the engine about.
 //
-// TWELVE modules in this directory scan CSI sequences beside the stream, each for its own reason, and
+// FOURTEEN modules in this directory scan CSI sequences beside the stream, each for its own reason, and
 // every one of them used to carry its own copy of the grammar. §106's architecture review put that
 // duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all of them
 // read [`Framer`] now and keep only the part that is theirs — deciding what a sequence MEANS.
 //
 // The ten §111 migrated, in that order: `tabs`, `dsr`, `scp`, `protect`, `sgrstack`, `modkeys`,
-// `rect`, `cancel`, `graphics`, `query`. `locator` is the eleventh and `savemodes` the twelfth, and
-// both were written ON the framer rather than moved onto it (§140, §141) — which is the migration's
-// real dividend, since what each had to supply was one predicate and no grammar at all.
+// `rect`, `cancel`, `graphics`, `query`. `locator` is the eleventh and `savemodes` the twelfth,
+// `presentation` the thirteenth (§143) and `window` the fourteenth (§147) — and all four were written
+// ON the framer rather than moved onto it, which is the migration's real dividend: what each had to
+// supply was one predicate and no grammar at all.
 //
-// The number is worth spelling out because it was got wrong twice in §111's own prose — nine while
-// the migration ran, then "eleven" once it was over, which counted `differential` as a scanner when it
-// is the test harness that drives them. Both counts were written from memory. The check that settles
-// it is `framer: super::csi::Framer` — one per scanner, and nothing else in this directory holds one.
+// The number is worth spelling out because it keeps going stale. §111's own prose got it wrong twice —
+// nine while the migration ran, then "eleven" once it was over, which counted `differential` as a
+// scanner when it is the test harness that drives them — and this line then said TWELVE through two
+// more arrivals until §151's sweep counted again. The check that settles it is
+// `framer: super::csi::Framer` — one per scanner, and nothing else in this directory holds one.
+//
+// The stale count was not the whole of what that sweep found. `presentation` had never been added to
+// `differential`'s shape sweep either, so §143's scanner ran for eight sections without the net that
+// catches a scanner acting on a sequence the parser threw away. It is in it now, and `w` went into the
+// sweep's final bytes with it.
 //
 // What that bought was not the line count. Defects came out of the migrations, one at a time, because
 // the shared grammar had to take the STRICTEST rule of its callers rather than the laxest — two rules

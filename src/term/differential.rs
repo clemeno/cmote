@@ -272,7 +272,11 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// `CSI Pt ; Pb r` with no marker is the scrolling region, which the engine really acts on. `t`
 	/// joined with `window` (§147), and it is the one final byte here the ENGINE answers on some
 	/// parameters and drops on others — which is exactly the near miss that scanner is built around.
-	const FINALS: &[u8] = b"smqpJKWk{}zncS|rt";
+	/// `w` joined with `presentation` (§143's scanner, added to this sweep by §151's count, which is how
+	/// it came to light that it had never been in it): DECRQPSR is `CSI Ps $ w` and DECEFR — the locator
+	/// family's fourth member — is `CSI … ' w`, so the two differ only in an intermediate this space
+	/// already walks.
+	const FINALS: &[u8] = b"smqpJKWk{}zncS|rtw";
 
 	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
 	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
@@ -740,10 +744,10 @@ mod tests {
 		// without anyone thinking of the case.
 		//
 		// Every CSI scanner in the directory, each asked only "did you act on this at all" — the single
-		// question all thirteen can answer in common. FOURTEEN entries for thirteen scanners: `protect` is
+		// question all fourteen can answer in common. FIFTEEN entries for fourteen scanners: `protect` is
 		// listed twice because its verdict depends on whether the pen is armed, and both states have to be
 		// swept.
-		let scanners: [DifferentialClaim; 14] = [
+		let scanners: [DifferentialClaim; 15] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -813,13 +817,22 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// §143's scanner, and it should have been here since §143. It was found missing by counting
+			// the CSI scanners for §151 and comparing that number against this list — which is the only
+			// way a scanner absent from a sweep CAN be found, since nothing fails while it is missing.
+			// `w` went into the shape space with it.
+			("presentation", b"", |bytes| {
+				!super::super::presentation::Presentation::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		let shapes = shapes();
 		assert_eq!(
 			shapes.len(),
-			11475,
-			"5 markers x 9 intermediates x 5 params x 17 finals x 3 orders"
+			12150,
+			"5 markers x 9 intermediates x 5 params x 18 finals x 3 orders"
 		);
 		// Collected rather than asserted case by case: the first failure is never the whole story, and an
 		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".

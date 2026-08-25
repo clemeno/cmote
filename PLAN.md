@@ -17532,15 +17532,49 @@ recognised a cluster, there is no engine call that appends a WIDE character to t
 So this gap is upstream too, and of the three it is the one most likely to close on a version bump —
 which is what the test is for.
 
+### The scanner that had never been in the sweep
+
+Counting bits led to counting scanners, and counting scanners found something worse than a stale
+number.
+
+`term/csi.rs`'s header says how many modules hold a `csi::Framer`, and says why the number is written
+down: §111's own prose got it wrong twice, so the header names the check that settles it. It said
+**TWELVE**. The check says **fourteen** — `presentation` arrived in §143 and `window` in §147, and
+neither updated the line that exists to be updated.
+
+Comparing that count against `differential`'s shape sweep is what mattered. The sweep lists every CSI
+scanner and asserts that none of them acts on a sequence the parser threw away — §106's net, and the
+one that catches "cmote is the only terminal in the world obeying that spelling". **`presentation` was
+not in it**, and had not been since §143.
+
+Nothing was wrong. Loosening its classifier and re-running showed the entry is live — 162 shapes caught
+— so the scanner passes the sweep and always would have. What was missing was the *net*, for eight
+sections, on a scanner that answers a question with a reply.
+
+**The only way to find a scanner absent from a sweep is to count.** Nothing fails while it is missing;
+that is what "missing from a net" means. So the count in `csi.rs` is not a tidiness note, it is the
+input to this check, and it now says which sections added the last two — which is the same discipline
+`gatediff`'s `every_gate_arm_is_in_the_sweep` gets for free by being a test. This list does not have
+that guard, and the header now says so.
+
 ### Files
 
 * `src/term/mod.rs` — three tests and no shipping code. The flag-word measurement, the SGR-run
   survival property, and the six columns a family emoji occupies today.
+* `src/term/csi.rs` — the count, corrected, with the two sections that made it stale named.
+* `src/term/differential.rs` — `presentation` added to the shape sweep, and `w` to the sweep's final
+  bytes so it has something to be swept over.
 
 ### Not done
 
-- **Nothing is implemented.** This section is a decision and a set of measurements; all three rows stay
-  gaps, one of them re-marked as a refusal that cmote is never offered.
+- **Nothing is implemented for the three rows.** They stay gaps, one of them re-marked as a refusal
+  that cmote is never offered. What code this section touched is the sweep above, which is not one of
+  them.
+- **`differential`'s scanner list has no guard of its own.** `gatediff` fails the build when a gate arm
+  is missing from ITS sweep; this list is a `const` array that a new scanner has to be added to by hand,
+  and §143 shows what happens when nobody does. A guard would need a way to enumerate the scanners,
+  which Rust does not offer over a directory of structs — so the count in `csi.rs` is the check, and
+  keeping it right is the discipline.
 - **SGR 25 (blink off) is accepted and does nothing**, because it arrives as `Attr::CancelBlink` and
   cancels a bit that was never set. It is harmless and needs no row of its own — there is nothing to
   cancel and no state to get wrong.
