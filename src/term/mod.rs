@@ -46,6 +46,7 @@
 // the program never asked it to overwrite. So `cancel` finds that final byte and `process` feeds the
 // engine a CAN in place of it (§57).
 
+mod c1; // chooses whether cmote's own replies use 7-bit or 8-bit C1 controls — S7C1T / S8C1T (§145)
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
 mod charset; // holds the four character-set slots and the shifts that invoke them, which the engine has only two of (§143)
 mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
@@ -414,6 +415,7 @@ impl Terminal {
 			charsets: charset::Charsets::default(),
 			stops: tabs::Stops::new(cols as usize),
 			presentation: presentation::Presentation::default(),
+			controls: c1::Controls::default(),
 		}
 	}
 
@@ -531,6 +533,10 @@ impl Terminal {
 		// DECXCPR's reason: the cursor information report describes the cursor, and a cursor is only
 		// what it was where the question sat.
 		let presentations = self.presentation.feed(bytes);
+		// S7C1T and S8C1T, which the engine drops (§145). Interruption-fed for a reason none of the
+		// scanners above share: this one changes how the OTHER answers in the chunk are spelled, so it
+		// has to be applied between them rather than to all of them at once.
+		let controls = self.controls.feed(bytes);
 		Scanned {
 			marks,
 			images,
@@ -546,6 +552,7 @@ impl Terminal {
 			sgr_stack,
 			charsets,
 			presentations,
+			controls,
 		}
 	}
 
@@ -660,6 +667,7 @@ impl Terminal {
 						}
 					},
 					Interruption::Presentation(request) => self.answer_presentation(request),
+					Interruption::Controls(eight_bit) => self.set_control_form(eight_bit),
 				}
 			}
 			self.advance(&bytes[start..]);
@@ -671,7 +679,12 @@ impl Terminal {
 			self.retire_covered_images();
 		}
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
-		let mut out = std::mem::take(&mut buffer.bytes);
+		let mut out = buffer.take();
+		// The form to write the replies BELOW in — the ones built after the chunk rather than during
+		// it. Read here, with the lock already held, and applied to the tail once they are all in
+		// (§145). Everything `take` handed over is already sealed.
+		let eight_bit = buffer.eight_bit_controls;
+		let sealed = out.len();
 		drop(buffer);
 		for query in queries {
 			match query {
@@ -713,9 +726,13 @@ impl Terminal {
 		// the other cmote-originated replies rather than the engine's, which is where it belongs:
 		// the engine parsed the question and dropped it.
 		out.extend_from_slice(&modkeys_reply);
-		// Last, amend the engine's own DA1 answer if this chunk asked for one: cmote draws sixels, so
-		// its device attributes have to say so (§41). Nothing else in `out` is touched.
-		query::with_sixel_attribute(out)
+		// Last, put the replies built above into the C1 form the host asked for (§145). Only the TAIL:
+		// everything in front of `sealed` came out of the buffer already encoded, in whatever form was
+		// in force where it was written, which is what lets a chunk switch half way through.
+		let tail = c1::encode(&out[sealed..], eight_bit);
+		out.truncate(sealed);
+		out.extend_from_slice(&tail);
+		out
 	}
 
 	/// Answer one DECRQSS request from the live state that holds the setting (§33, §123).
@@ -807,11 +824,10 @@ impl Terminal {
 		self.sync_alternate();
 		self.retire_covered_images();
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
-		let out = std::mem::take(&mut buffer.bytes);
-		drop(buffer);
-		// A buffered DA1 is answered by the engine at the moment of release, so its answer needs the
-		// same sixel amendment `process` gives one that arrived unbracketed (§41).
-		Some(query::with_sixel_attribute(out))
+		// A buffered DA1 is answered by the engine at the moment of release, and gains its sixel
+		// amendment as it arrives at the listener (§41, §145) — so there is nothing left to do here
+		// but seal the buffer in the C1 form in force and hand it over.
+		Some(buffer.take())
 	}
 
 	/// Act on something the image scanner found, at the point in the stream it sits (§41).
@@ -1175,6 +1191,21 @@ impl Terminal {
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(&reply);
+	}
+
+	/// S7C1T or S8C1T — write cmote's own replies with 7-bit or 8-bit C1 controls from here on (§145).
+	///
+	/// The buffer is SEALED before the flag moves, and that is the whole of what makes a mid-chunk
+	/// switch correct: every answer already in it was formed under the old setting and is entitled to
+	/// it, and the watermark `seal` leaves behind is what keeps the final pass from rewriting them.
+	///
+	/// Nothing else changes. This governs the spelling of a reply and not what cmote can read — both
+	/// forms of every C1 control are understood on the way in, always, by the engine's parser and by
+	/// every scanner in this directory.
+	fn set_control_form(&mut self, eight_bit: bool) {
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		buffer.seal();
+		buffer.eight_bit_controls = eight_bit;
 	}
 
 	/// Answer DECRQLP — "where is the locator?" — with the protocol's own word for there not being one
@@ -2456,6 +2487,11 @@ pub struct Terminal {
 	/// has to REPORT where the stops are, needs a copy that is written wherever the engine is told.
 	/// `term/tabs.rs` names all four writers; three are the gate's and the fourth is `resize` below.
 	stops: tabs::Stops,
+	/// Reads S7C1T and S8C1T, the two sequences that choose whether cmote's own replies are written
+	/// with 7-bit or 8-bit C1 controls (§145). `vte` has no arm for the space intermediate at all, so
+	/// like every other scanner here it reads them beside the stream. Fed by the interruption advance
+	/// because the switch has to land between the replies either side of it.
+	controls: c1::Controls,
 	/// Reads DECRQPSR, the presentation-state request the engine drops — the cursor information report
 	/// and the tab-stop report (§143). Fed by the interruption advance because DECCIR describes the
 	/// cursor, and a cursor is only what it was where the question sat.
@@ -2522,6 +2558,11 @@ enum Interruption {
 	/// interruption in this list that produces a REPLY, and it is here for DECXCPR's reason: DECCIR
 	/// describes the cursor, so it has to be answered with the engine advanced exactly to the question.
 	Presentation(presentation::PresentationRequest),
+	/// S7C1T or S8C1T — which form cmote's own replies are written in from here on (§145). `true` is
+	/// 8-bit. It has to be applied here rather than after the chunk because it SEALS the reply buffer:
+	/// every answer already in it belongs to the form that was in force when it was written, and every
+	/// answer after this one belongs to the new one.
+	Controls(bool),
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -2547,6 +2588,7 @@ struct Scanned {
 	sgr_stack: Vec<(usize, sgrstack::SgrStackRequest)>,
 	charsets: Vec<(usize, charset::CharsetRequest)>,
 	presentations: Vec<(usize, presentation::PresentationRequest)>,
+	controls: Vec<(usize, bool)>,
 }
 
 impl Scanned {
@@ -2567,6 +2609,7 @@ impl Scanned {
 			&& self.sgr_stack.is_empty()
 			&& self.charsets.is_empty()
 			&& self.presentations.is_empty()
+			&& self.controls.is_empty()
 	}
 
 	/// How many interruptions the chunk carried in all — the exact capacity the merged list needs.
@@ -2590,6 +2633,7 @@ impl Scanned {
 			+ self.sgr_stack.len()
 			+ self.charsets.len()
 			+ self.presentations.len()
+			+ self.controls.len()
 	}
 }
 
@@ -2614,6 +2658,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		sgr_stack,
 		charsets,
 		presentations,
+		controls,
 	} = scanned;
 	merged.extend(
 		marks
@@ -2686,6 +2731,11 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 			.into_iter()
 			.map(|(offset, request)| (offset, Interruption::Presentation(request))),
 	);
+	merged.extend(
+		controls
+			.into_iter()
+			.map(|(offset, eight_bit)| (offset, Interruption::Controls(eight_bit))),
+	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
 }
@@ -2726,6 +2776,39 @@ struct ReplyBuffer {
 	cell_width: u16,
 	cell_height: u16,
 	title: Option<String>,
+	/// S8C1T — whether cmote writes its C1 controls as single bytes rather than as `ESC` pairs
+	/// (§145). It lives HERE, on the buffer, rather than beside the other scanner state, because this
+	/// is the one place every reply in the program passes through: the engine's own answers arrive
+	/// through the listener below, cmote's arrive from `Terminal` and from the gate, and all of them
+	/// end up in `bytes`.
+	eight_bit_controls: bool,
+	/// How many leading bytes of `bytes` are already in their final form.
+	///
+	/// A chunk can change the setting half way through, and the replies formed before the change
+	/// belong to the old form. `seal` encodes everything past this mark and moves it forward; without
+	/// it, the final pass over the buffer would retroactively rewrite answers the program had already
+	/// been promised in the other spelling (`term/c1.rs`).
+	encoded: usize,
+}
+
+impl ReplyBuffer {
+	/// Put everything not yet encoded into the form in force, and mark it done (§145).
+	///
+	/// Called at exactly two moments: when the setting changes, and when the buffer is drained. Both
+	/// are "the form that applies to what is in here is now known".
+	fn seal(&mut self) {
+		let sealed = c1::encode(&self.bytes[self.encoded..], self.eight_bit_controls);
+		self.bytes.truncate(self.encoded);
+		self.bytes.extend_from_slice(&sealed);
+		self.encoded = self.bytes.len();
+	}
+
+	/// Take the sealed bytes, leaving the buffer empty and the watermark with them.
+	fn take(&mut self) -> Vec<u8> {
+		self.seal();
+		self.encoded = 0;
+		std::mem::take(&mut self.bytes)
+	}
 }
 
 /// The engine's event sink. The engine reports everything the emulation layer cannot handle
@@ -2746,8 +2829,18 @@ impl EventListener for Replies {
 		let mut buffer = self.0.lock().expect("reply buffer mutex poisoned");
 		match event {
 			// A reply the engine already formatted whole (DSR / DA / DECRQM / cursor-position
-			// report, the character-cell size CSI 18t): its bytes go back verbatim.
-			Event::PtyWrite(text) => buffer.bytes.extend_from_slice(text.as_bytes()),
+			// report, the character-cell size CSI 18t). Its bytes go back as they came, with one
+			// amendment: a DA1 gains the sixel attribute (§41).
+			//
+			// Amended HERE since §145, where the reply is known to be one reply, rather than over
+			// the drained buffer as it was. Two reasons, and the second is the forcing one: scanning
+			// a concatenation for a prefix is looser than scanning one sequence, and the drained
+			// buffer may by then be in the 8-bit C1 form, where `ESC [ ?` is a single 0x9b and the
+			// amender would not find the DA1 at all.
+			Event::PtyWrite(text) => {
+				let reply = query::with_sixel_attribute(text.as_bytes().to_vec());
+				buffer.bytes.extend_from_slice(&reply);
+			}
 			// "What colour is X?" — OSC 10 / 11 / 12 (foreground / background / cursor) or OSC
 			// 4;n (palette slot n). The engine gives us the slot and a closure that frames the
 			// reply; we resolve the slot against cmote's own scheme so the answer is exactly what
@@ -6940,6 +7033,108 @@ mod tests {
 			terminal.process(b"[2$w"),
 			b"P2$u5/25/33\\".to_vec(),
 			"the hand-set stop kept, and the new columns given the default every eight"
+		);
+	}
+
+	// --- §145: 7 / 8-bit control output --------------------------------------------------------
+
+	/// The default is the two-byte form, and the switch is one sequence away in each direction.
+	#[test]
+	fn the_reply_form_follows_the_switch() {
+		let mut terminal = Terminal::new(6, 20);
+		assert_eq!(
+			terminal.process(b"\x1b[\"v"),
+			b"\x1b[6;20;1;1;1\"w".to_vec(),
+			"7-bit at power-up"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b G\x1b[\"v"),
+			vec![
+				0x9b, b'6', b';', b'2', b'0', b';', b'1', b';', b'1', b';', b'1', b'"', b'w'
+			],
+			"S8C1T: the CSI is one byte"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b F\x1b[\"v"),
+			b"\x1b[6;20;1;1;1\"w".to_vec(),
+			"and S7C1T puts it back"
+		);
+	}
+
+	/// A control STRING loses both of its escapes — the DCS that opens it and the ST that closes it.
+	#[test]
+	fn a_control_string_reply_is_converted_at_both_ends() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"\x1b G\x1b[2$w");
+		assert_eq!(reply.first(), Some(&0x90), "DCS as one byte");
+		assert_eq!(reply.last(), Some(&0x9c), "ST as one byte");
+		assert!(!reply.contains(&0x1b), "and no escape left anywhere");
+	}
+
+	/// The engine's OWN replies go through the same seal, which is what putting the flag on the reply
+	/// buffer buys: cmote does not have to know which answers it wrote and which the engine did.
+	#[test]
+	fn the_engines_own_replies_are_converted_too() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"\x1b G\x1b[6n");
+		assert_eq!(reply, vec![0x9b, b'1', b';', b'1', b'R'], "a cursor report");
+	}
+
+	/// The sixel amendment survives the conversion, because it is made where the DA1 ARRIVES rather
+	/// than over the drained buffer (§41, §145). Over the buffer it would be looking for `ESC [ ?` in
+	/// bytes that no longer contain an escape.
+	#[test]
+	fn a_device_attributes_reply_keeps_its_sixel_attribute_in_the_eight_bit_form() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"\x1b G\x1b[c");
+		assert_eq!(reply.first(), Some(&0x9b), "the CSI is one byte");
+		assert!(
+			reply.ends_with(b";4c"),
+			"and the sixel attribute is still on it: {reply:?}"
+		);
+	}
+
+	/// The watermark, which is what a mid-chunk switch needs: an answer formed before the switch keeps
+	/// the form it was promised, and one formed after it gets the new one. Without the seal the final
+	/// pass would rewrite the whole buffer and retroactively change the first answer.
+	#[test]
+	fn a_switch_half_way_through_a_chunk_leaves_the_earlier_answers_alone() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"\x1b[6n\x1b G\x1b[6n");
+		assert_eq!(
+			reply,
+			[b"\x1b[1;1R".to_vec(), vec![0x9b, b'1', b';', b'1', b'R'],].concat(),
+			"7-bit then 8-bit, in one chunk"
+		);
+	}
+
+	/// And the other way: an 8-bit answer stays 8-bit when the chunk switches back to 7.
+	#[test]
+	fn a_switch_back_leaves_the_eight_bit_answers_alone() {
+		let mut terminal = Terminal::new(6, 20);
+		terminal.process(b"\x1b G");
+		let reply = terminal.process(b"\x1b[6n\x1b F\x1b[6n");
+		assert_eq!(
+			reply,
+			[vec![0x9b, b'1', b';', b'1', b'R'], b"\x1b[1;1R".to_vec(),].concat()
+		);
+	}
+
+	/// RIS puts the form back to 7-bit, which is the power-on state. DECSTR does NOT — DEC's published
+	/// list does not name this setting, and §72 was careful not to widen it.
+	#[test]
+	fn a_hard_reset_puts_the_reply_form_back_and_a_soft_one_does_not() {
+		let mut terminal = Terminal::new(6, 20);
+		terminal.process(b"\x1b G");
+		assert_eq!(
+			terminal.process(b"\x1b[!p\x1b[6n").first(),
+			Some(&0x9b),
+			"a soft reset leaves it alone"
+		);
+		assert_eq!(
+			terminal.process(b"\x1bc\x1b[6n"),
+			b"\x1b[1;1R".to_vec(),
+			"a hard reset puts it back"
 		);
 	}
 

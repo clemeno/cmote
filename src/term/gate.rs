@@ -523,6 +523,13 @@ impl Handler for Gate<'_> {
 		// (`Term::reset_state` assigns `TabStops::new(self.columns())`) is a fact about the engine's
 		// insides that surfaces only here (§143).
 		self.stops.reset(self.cols());
+		// And the reply form goes back to 7-bit, which is the power-on state (§145). RIS only — DEC's
+		// published DECSTR list does not name this setting, and §72 was careful not to widen that list.
+		// The buffer is sealed first for the reason `Terminal::set_control_form` gives: a reply already
+		// in it was formed under the old setting and is entitled to keep it.
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		buffer.seal();
+		buffer.eight_bit_controls = super::c1::DEFAULT_EIGHT_BIT;
 	}
 
 	/// Print one character, breaking the line at the RIGHT MARGIN instead of at the screen edge.

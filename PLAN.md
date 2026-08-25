@@ -16701,3 +16701,123 @@ moves on every printed character; a geometry does not move at all while a chunk 
   this section would need re-reading.
 - **No live session.** Answered and tested through `Terminal::process`; no remote program was
   observed asking.
+
+## §145 — Seven bits or eight, and the watermark that makes a mid-chunk switch honest
+
+`ESC SP F` and `ESC SP G` — S7C1T and S8C1T. The row:
+
+> S7C1T / S8C1T choose whether the terminal's own replies use 7-bit or 8-bit C1 controls
+
+That is the whole of it, and it is worth being exact about how small it is. Every C1 control has two
+spellings: `CSI` is `ESC [` or the single byte 0x9b, `DCS` is `ESC P` or 0x90, `ST` is `ESC \` or
+0x9c. A terminal READS both, always — `vte` does, and so does every scanner in `term/` — and this
+pair chooses which one it WRITES. From ctlseqs, the whole of what they govern is "its responses to
+queries". So nothing here changes what cmote understands; it changes the bytes of an answer.
+
+`vte` has no `esc_dispatch` arm for the space intermediate at all, so both sequences are found beside
+the stream like everything else in this directory.
+
+### Why implement it, given nothing modern asks
+
+Because the answer to "will you?" is the sequence's own, and an unanswered switch is worse than a
+refused one. A program that sends S8C1T and then parses a reply looking for 0x9b gets an `ESC [` it
+does not match, and waits. That is `term/query.rs`'s founding argument applied one level up: not
+"answer the question" but "be the terminal you said you were".
+
+### The hazard is the requester's, and it is stated rather than guarded against
+
+The single-byte C1 controls are **not valid UTF-8**. cmote decodes UTF-8 always (§67) and so, usually,
+does whatever is reading on the other end of the pty. A program that asks for 8-bit controls and then
+reads its terminal's replies through a UTF-8 decoder will see replacement characters where the
+introducer was.
+
+That is a consequence of the request, not of this implementation — the sequence exists precisely to
+ask for those bytes — and a terminal's job is to answer what it was asked. It is one sequence to undo
+and cmote powers up in the 7-bit form, so nothing arrives in this state by accident. Refusing would
+have been the other defensible answer; answering is the one that keeps cmote from lying by omission
+about which form it speaks.
+
+### The rewrite is over a RUN, and the assumption under it is checked
+
+`c1::encode` replaces every `ESC` followed by one of seven **door** bytes with the single byte that
+means the same thing, across the whole run of replies it is given. It does not parse the replies to
+find their introducers.
+
+That is only safe because no reply cmote sends carries an ESC inside a payload — the only
+payload-bearing replies are DECRQSS (a sequence's parameters and final byte), XTGETTCAP (hex and `=`)
+and the OSC colour answers (`rgb:` and hex digits), and none of those alphabets contains one. A test
+holds every reply builder in the crate to it, and **the first draft of that test was wrong in a way
+worth recording**: it asserted "nothing between the first escape and the last is an escape", which
+assumes a builder returns ONE sequence. `gettcap_reply` given three names answers with three
+concatenated DCS strings. The assertion is now "every ESC in a reply is followed by a door", which is
+exactly the property the rewrite relies on — and it is also why `encode` walks a run rather than
+looking at its ends.
+
+The doors are a **list** and not a subtraction, and that is the other thing the tests pin. The rule is
+mechanical — a C1 at `0x80 + n` is written `ESC` then `0x40 + n` — but what belongs in the table is
+not every value the arithmetic allows: `ESC 7` is DECSC, and `0x37 + 0x40` is `0x77`, the letter `w`.
+A blind rewrite would turn a saved cursor into a glyph.
+
+### The watermark, which is the only real design here
+
+A chunk can change the setting half way through, and the replies formed before the change belong to
+the old form. So the reply buffer carries a mark of how many leading bytes are already in their final
+form, and it is SEALED — everything past the mark encoded, in the form in force — at exactly two
+moments: when the setting changes, and when the buffer is drained.
+
+`encode` is idempotent (a converted introducer has no ESC left to find), so the mark is not there to
+prevent double conversion. It is there to prevent the opposite: a 7-bit prefix followed by a switch to
+8-bit would otherwise be converted whole by the final pass, **retroactively rewriting answers the
+program had already been promised in the other spelling**. Both directions are tested, in one chunk
+each.
+
+The flag lives on the reply buffer rather than beside the other scanner state because that buffer is
+the one place every answer in the program passes through: the engine's own arrive at the listener,
+cmote's arrive from `Terminal` and from the gate, and all of them end up in the same `Vec`. Nothing
+has to know which answers it wrote and which the engine did.
+
+### One thing had to move, and it is a better place for it
+
+`query::with_sixel_attribute` adds the sixel capability to the engine's DA1 answer (§41), and it used
+to scan the whole DRAINED buffer for `ESC [ ?`. In the 8-bit form that prefix is a single 0x9b and the
+amender would not find the DA1 at all — the attribute would silently stop being advertised for exactly
+the programs that had asked for 8-bit controls.
+
+So the amendment moved to the listener, where the reply arrives as **one reply**. That is strictly more
+precise than scanning a concatenation for a prefix, and it is checked by a probe: putting it back the
+old way turns the test red.
+
+### RIS resets it and DECSTR does not
+
+DEC's published DECSTR list does not name this setting, and §72 was careful not to widen that list, so
+the soft reset leaves it alone. RIS puts it back to 7-bit, which is what "power-on state" means. Both
+halves are one test.
+
+### One divergence, stated
+
+The replies `term/query.rs` builds are formed AFTER the chunk, so they are sealed in the setting as the
+chunk LEFT it rather than as it stood where the question sat. `CSI c` then `ESC SP G` in one write
+therefore answers in 8-bit where xterm would answer in 7. It is the same trade §33 took for DECRQSS
+reading the pen as the chunk left it, and it needs a program that switches the form *after* asking
+rather than before. The replies formed DURING the chunk — the cursor reports, DECCIR, the locator
+answers — are all exact, because they are written at their own interruption and the switch is written
+at its.
+
+### Files
+
+* `src/term/c1.rs` — new. The scanner, the door table, and `encode`.
+* `src/term/mod.rs` — the flag and the watermark on `ReplyBuffer`, `seal` / `take`, the interruption,
+  `set_control_form`, the sixel amendment moved into the listener, and the tail encode in `process`.
+* `src/term/gate.rs` — RIS.
+
+### Not done
+
+- **No live session.** No remote program was observed asking for 8-bit controls; everything here was
+  exercised through `Terminal::process`.
+- **The ANSI conformance levels are still refused.** `ESC SP L` / `M` / `N` sit under the same
+  intermediate and choose which level of the standard the terminal claims — DECSCL's territory, and
+  refused for DECSCL's reasons (part 6). The scanner names them so the refusal is a decision rather
+  than a final byte nobody thought about.
+- **The UTF-8 collision is not detected.** cmote does not notice that a program has asked for bytes its
+  own reader will mangle, and does not warn. There is nothing useful it could do: the request is legal
+  and the consequence is on the far side of the pty.
