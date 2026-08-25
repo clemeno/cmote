@@ -2,17 +2,25 @@
 //
 // `alacritty_terminal` answers the queries that touch the grid itself — DSR, DA, DECRQM,
 // cursor-position and text-area reports — and cmote drains those replies straight through
-// (`term::mod`). Five queries it does NOT answer: its VT parser treats every DCS string as a
+// (`term::mod`). Six queries it does NOT answer: its VT parser treats every DCS string as a
 // no-op (its `hook`/`put`/`unhook` just log at debug level), it has no CSI arm for the version
-// request or for the graphics-capability one, and its device-attributes handler covers only the
-// primary and secondary forms (the `=` intermediate falls to a debug log), so all five fall on the
-// floor:
+// request, the graphics-capability one or the displayed-extent one, and its device-attributes
+// handler covers only the primary and secondary forms (the `=` intermediate falls to a debug log),
+// so all six fall on the floor:
 //
 //   CSI > q            XTVERSION  — "what terminal are you, and which version?"
 //   DCS $ q <sel> ST   DECRQSS    — "what is setting <sel> right now?" (Request Status String)
 //   DCS + q <hex> ST   XTGETTCAP  — "what is your value for terminfo capability <hex>?"
 //   CSI = c            DA3        — "what is your unit id?" (DECRQTSR / tertiary attributes, §36)
 //   CSI ? Pi;Pa;Pv S   XTSMGRAPHICS — "how big a picture, and how many colours?" (§41)
+//   CSI " v            DECRQDE    — "how much of the page is on screen, and where?" (§144)
+//
+// DECRQDE is the odd one of the six in one respect worth stating: every other query here is answered
+// from a fact about CMOTE, and this one is answered from the GRID. It is still answered after the
+// chunk rather than from an interruption, because the grid's SIZE is not something a byte stream
+// changes — only a resize moves it, and a resize arrives from the window and not from the wire. The
+// cursor reports that DO have to be answered mid-chunk live in `term/dsr.rs` and
+// `term/presentation.rs` for exactly the reason this one does not (§82, §143).
 //
 // The graphics one is what makes inline images (§41) usable rather than merely supported: a program
 // deciding HOW to show a picture asks how many colour registers and how large an image the terminal
@@ -95,6 +103,8 @@ pub enum Query {
 	UnitId,
 	/// XTSMGRAPHICS (`CSI ? Pi ; Pa ; Pv S`): answer with cmote's graphics limits (§41).
 	Graphics(Graphics),
+	/// DECRQDE (`CSI " v`): answer with how much of the page is on screen (§144).
+	DisplayedExtent,
 }
 
 /// The query sniffer (§33). Feed it every byte of shell output; it returns any identity queries
@@ -204,7 +214,18 @@ fn graphics_request(csi: &super::csi::Csi<'_>) -> Option<Graphics> {
 /// behind any of these three, so cmote is the only actor and refusing an undefined spelling costs
 /// nothing (`Csi::sub_parameters`).
 fn asked(csi: &super::csi::Csi<'_>) -> Option<Query> {
-	if !csi.intermediates().is_empty() || csi.sub_parameters() {
+	if csi.sub_parameters() {
+		return None;
+	}
+	// DECRQDE, the one query here that carries an intermediate (§144). Checked before the three
+	// marker forms rather than folded in with them, because it is the other shape: no marker, a `"`,
+	// and a final byte whose OTHER spellings belong to somebody else — `CSI Pt;Pl;Pb;Pr $ v` is
+	// DECCRA, which `term/rect.rs` performs, and `CSI " q` and `CSI " p` are DECSCA and DECSCL. All
+	// three parts have to match together, which is §56's near-miss rule.
+	if (csi.marker(), csi.intermediates(), csi.final_byte()) == (None, &b"\""[..], b'v') {
+		return default_params(csi).then_some(Query::DisplayedExtent);
+	}
+	if !csi.intermediates().is_empty() {
 		return None;
 	}
 	match (csi.marker(), csi.final_byte()) {
@@ -224,9 +245,10 @@ fn asked(csi: &super::csi::Csi<'_>) -> Option<Query> {
 
 /// Whether the parameter run is the *default* one — absent, or a single zero.
 ///
-/// Both private queries that use it (XTVERSION `CSI > q`, DA3 `CSI = c`) are defined only in that
-/// form, so a non-zero parameter on the same final byte is a different private sequence and the
-/// scanner stays silent rather than answer a question it was not asked.
+/// The three queries that use it (XTVERSION `CSI > q`, DA3 `CSI = c`, DECRQDE `CSI " v`) are defined
+/// only in that form — DEC's page for DECRQDE writes it with no parameter at all — so a non-zero
+/// parameter on the same final byte is a different sequence and the scanner stays silent rather than
+/// answer a question it was not asked.
 ///
 /// A second parameter disqualifies it even when both are zero, which is what `param_count` is for:
 /// `CSI > 0 ; 0 q` names two, and neither query takes two. The hand-rolled test this replaces said the
@@ -255,6 +277,27 @@ pub fn graphics_reply(request: &Graphics, registers: u16, geometry: (u16, u16)) 
 		2 => format!("\x1b[?2;{status};{width};{height}S").into_bytes(),
 		item => format!("\x1b[?{item};1S").into_bytes(),
 	}
+}
+
+/// DECRPDE, the answer to DECRQDE: `CSI Ph ; Pw ; Pml ; Pmt ; Pmp " w` (§144).
+///
+/// DEC's own parameter list, which the audit row recorded as unread (§98): `Ph` is "the number of
+/// lines of the current page displayed excluding the status line", `Pw` the columns, `Pml` "the column
+/// number displayed in the left-most column", `Pmt` "the line number displayed in the top line" and
+/// `Pmp` "the page number displayed".
+///
+/// The question is about a page LARGER than the screen. A VT420 could hold a page of up to 144 lines
+/// and show 24 of them, and DECRQDE asks which 24. cmote's page is exactly the screen — one page, no
+/// panning — so `Ph` and `Pw` are the grid and the other three are 1.
+///
+/// **`Pmt` is 1 even when the user has scrolled back, and that is a decision.** The scrollback is not
+/// part of the page; it is history the engine keeps below it, and the viewport's position in it is a
+/// fact about what the USER is looking at. Reporting it would hand a remote a number it has no
+/// business reading and that changes under a wheel it cannot see — twice wrong, on §36's rule that a
+/// reply names the program and never the person using it. A program that wants the text area in the
+/// spelling programs actually use has `CSI 18 t`, which the engine answers.
+pub fn displayed_extent_reply(rows: u16, cols: u16) -> Vec<u8> {
+	format!("[{rows};{cols};1;1;1\"w").into_bytes()
 }
 
 /// Add the sixel capability to a DA1 reply the ENGINE wrote (§41).
@@ -908,5 +951,48 @@ mod tests {
 			gettcap_reply(&[b"544e".to_vec()]),
 			b"\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\".to_vec()
 		);
+	}
+
+	// --- DECRQDE (§144) ---------------------------------------------------------------------------
+
+	#[test]
+	fn the_displayed_extent_request_is_recognised() {
+		assert_eq!(scan(b"[\"v"), vec![Query::DisplayedExtent]);
+		assert_eq!(scan(b"[0\"v"), vec![Query::DisplayedExtent], "or a zero");
+	}
+
+	/// All three parts together, which is §56's near-miss rule — and it earns its keep here, because
+	/// every one of these near misses is a real sequence somebody else in this directory performs.
+	#[test]
+	fn the_near_misses_of_the_displayed_extent_request() {
+		// DECCRA, the rectangular copy `term/rect.rs` performs: same final byte, a `$` intermediate.
+		assert!(scan(b"[1;1;2;2;1;3;3;1$v").is_empty());
+		// DECSCA and DECSCL: same intermediate, another final byte each.
+		assert!(scan(b"[1\"q").is_empty());
+		assert!(scan(b"[61\"p").is_empty());
+		// No intermediate at all is not this sequence.
+		assert!(scan(b"[v").is_empty());
+		// And a private marker makes it somebody else's private sequence.
+		for marker in *b"?<=>" {
+			let request = [b"[".as_slice(), &[marker], b"\"v"].concat();
+			assert!(scan(&request).is_empty());
+		}
+	}
+
+	/// DEC writes DECRQDE with no parameter, so a value it never defined is a different sequence —
+	/// the same rule XTVERSION and DA3 keep on their own final bytes.
+	#[test]
+	fn a_parameter_dec_never_defined_is_not_a_displayed_extent_request() {
+		assert!(scan(b"[1\"v").is_empty());
+		assert!(scan(b"[0;0\"v").is_empty(), "and two of them is not one");
+	}
+
+	/// DEC's own parameter order, which the audit row recorded as unread: lines, columns, then the
+	/// left-most column, the top line and the page — the last three all 1 on a terminal whose page is
+	/// exactly its screen.
+	#[test]
+	fn the_displayed_extent_reply_is_the_grid_and_three_ones() {
+		assert_eq!(displayed_extent_reply(24, 80), b"[24;80;1;1;1\"w".to_vec());
+		assert_eq!(displayed_extent_reply(6, 20), b"[6;20;1;1;1\"w".to_vec());
 	}
 }

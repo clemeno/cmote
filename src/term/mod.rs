@@ -699,6 +699,14 @@ impl Terminal {
 						(sixel::MAX_WIDTH, sixel::MAX_HEIGHT),
 					));
 				}
+				// DECRQDE: how much of the page is on screen (§144). Answered after the chunk with the
+				// other identity queries rather than from an interruption, and it can be: the grid's
+				// size is not something a byte stream changes. Only a RESIZE moves it, and a resize
+				// arrives from the window, not from the wire.
+				query::Query::DisplayedExtent => {
+					let (rows, cols) = self.screen().size();
+					out.extend_from_slice(&query::displayed_extent_reply(rows, cols));
+				}
 			}
 		}
 		// The XTQMODKEYS answer, already built by the tracker that owns the level (§61). It joins
@@ -6933,6 +6941,54 @@ mod tests {
 			b"P2$u5/25/33\\".to_vec(),
 			"the hand-set stop kept, and the new columns given the default every eight"
 		);
+	}
+
+	// --- §144: DECRQDE ------------------------------------------------------------------------
+
+	/// The whole sequence end to end: cmote answers with the grid it is actually drawing.
+	#[test]
+	fn the_displayed_extent_report_answers_with_the_grid() {
+		let mut terminal = Terminal::new(6, 20);
+		assert_eq!(terminal.process(b"[\"v"), b"[6;20;1;1;1\"w".to_vec());
+		terminal.resize(30, 100);
+		assert_eq!(
+			terminal.process(b"[\"v"),
+			b"[30;100;1;1;1\"w".to_vec(),
+			"and it follows the window"
+		);
+	}
+
+	/// **The decision in this report** (§144, §36): the top line is 1 even when the user has scrolled
+	/// back. The scrollback is not part of the page — it is history the engine keeps below it — and
+	/// where the viewport is parked in it is a fact about what the USER is looking at, which changes
+	/// under a wheel the remote cannot see. A reply names the program, never the person using it.
+	#[test]
+	fn the_displayed_extent_report_does_not_name_where_the_user_has_scrolled_to() {
+		let mut terminal = Terminal::new(4, 20);
+		for line in 0..40 {
+			terminal.process(
+				format!(
+					"line {line}
+"
+				)
+				.as_bytes(),
+			);
+		}
+		terminal.scroll(ScrollMotion::Top);
+		assert!(
+			terminal.screen().display_offset() > 0,
+			"the viewport really is parked in the scrollback"
+		);
+		assert_eq!(terminal.process(b"[\"v"), b"[4;20;1;1;1\"w".to_vec());
+	}
+
+	/// Answered in stream order with the other identity queries, which is what a program that asks
+	/// two questions in one write depends on.
+	#[test]
+	fn the_displayed_extent_report_keeps_its_place_among_the_other_answers() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"[\"v[=c");
+		assert_eq!(reply, b"[6;20;1;1;1\"wP!|00434D45\\".to_vec());
 	}
 
 	/// DEC defines Ps 0 as "Error. Request ignored" and nothing past 2, and there is no "I do not

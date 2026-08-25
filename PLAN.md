@@ -16630,3 +16630,74 @@ decision somebody made.
   identity, which costs one branch per printed character in a crate cmote does not maintain. Nothing to
   do about it from here, and it is written down so the next reader is not surprised to find two
   mechanisms.
+
+## §144 — The displayed extent, and the one number it will not report
+
+`CSI " v` — DECRQDE, "how much of the current page is on screen, and where?" — answered by DECRPDE.
+The row:
+
+> A gap, and an answerable one: cmote holds the numbers, and `CSI 18 t` already reports the text area
+> in the spelling programs actually use. The reply's own parameter list was not read (§98).
+
+Both halves settled here: the parameter list is read, and the answer is smaller than it looks.
+
+### The parameter list, read
+
+`CSI Ph ; Pw ; Pml ; Pmt ; Pmp " w`, from DEC's own page:
+
+* **Ph** — "the number of lines of the current page displayed excluding the status line"
+* **Pw** — "the number of columns of the current page displayed"
+* **Pml** — "the column number displayed in the left-most column"
+* **Pmt** — "the line number displayed in the top line"
+* **Pmp** — "the page number displayed"
+
+DECRQDE itself is written with **no parameter at all**, which is what `default_params` enforces —
+the same rule XTVERSION and DA3 already keep on their own final bytes, and the same reason: a value
+DEC never defined on that final byte is a different sequence, and answering it would be cmote
+inventing a dialect (§54).
+
+### The question is about a page bigger than the screen, and cmote has not got one
+
+That is the whole of why this is three constants and two reads. A VT420 held a page of up to 144
+lines and showed 24 of them; DECRQDE asks *which* 24, so the interesting parameters are `Pml` and
+`Pmt` — where the window sits over the page. cmote's page **is** the screen. One page, no panning.
+So `Ph` and `Pw` are the grid and the other three are 1.
+
+### Pmt is 1 even when the user has scrolled back, and that is the decision
+
+The tempting reading is that the scrollback makes cmote's document taller than its screen, so `Pmt`
+should be the viewport's position in it. It should not, on two grounds that point the same way.
+
+The scrollback is not part of the page — it is history the engine keeps *below* it, which is why
+DECRQCRA's page parameter is ignored (§60) and why the page-positioning family has nowhere to go.
+And where the viewport is parked is a fact about **what the user is looking at**. It changes under a
+wheel the remote cannot see, and reporting it would hand a host a number about the person at the
+keyboard rather than about the program — §36's rule, the one that keeps `CSI ? 26 n` refused because
+it would report the keyboard's language.
+
+So the answer is fixed, and the test that pins it scrolls to the top of a filled scrollback first.
+
+### Why it is answered after the chunk
+
+Every other query in `term/query.rs` is answered from a fact about cmote — a version string, a unit
+id, a fixed graphics limit — and this one is answered from the **grid**. That looks like it belongs
+with the cursor reports, which have to be answered mid-chunk from an interruption (§82, §143).
+
+It does not, and the distinction is worth keeping: the grid's SIZE is not something a byte stream
+changes. Only a resize moves it, and a resize arrives from the window, not from the wire. A cursor
+moves on every printed character; a geometry does not move at all while a chunk is being read.
+
+### Files
+
+* `src/term/query.rs` — a sixth `Query` variant, the intermediate-carrying arm in `asked` (the only
+  one of the six with an intermediate, which is why it is checked before the three marker forms
+  rather than folded in with them), and `displayed_extent_reply`.
+* `src/term/mod.rs` — one arm in the reply loop.
+
+### Not done
+
+- **`Pmp` is 1 and there is nothing behind it.** cmote is a one-page terminal by construction; if a
+  page family were ever built (NP, PP, PPA — all 🤷 in part 8) this parameter would become real and
+  this section would need re-reading.
+- **No live session.** Answered and tested through `Terminal::process`; no remote program was
+  observed asking.
