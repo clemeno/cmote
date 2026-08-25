@@ -415,6 +415,15 @@ same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
   `CSI ? 57 ; 0 n` "cannot identify" (§93). The two members of that same DEC-private family that are
   answered rather than refused, because a reply stating an **absence** advertises nothing.
 
+- **The locator's third door** (`CSI Ps ' |`, DECRQLP) → `CSI 0 & w`, DECLRP with event code 0
+  (§140). The same absence in the locator protocol's own vocabulary rather than DSR's: ctlseqs
+  defines `Pe = 0` as "locator unavailable" and defines it to carry no position, no button mask and
+  no page, so the empty answer is the protocol's, not cmote's invention. Answered through the
+  interruption advance although it is a **constant**, so that a DECXCPR and a DECRQLP written in one
+  breath come back in the order they were asked. Its two sibling sequences, DECELR and DECSLE, are
+  read by the same scanner and deliberately answer nothing — see part 6 for why cmote declines to
+  become a locator it could not keep exclusive with the engine's own mouse modes.
+
 - **The colour scheme** (`CSI ? 996 n`) → `CSI ? 997 ; 1 n`, dark (§98). The newest reply here and the
   only one whose sequence is nobody's standard: contour's, adopted by ghostty, kitty and GNOME's vte,
   and asked by neovim, helix, zellij and tmux. Answered from a **constant** — the scheme is fixed (part 6)
@@ -1530,9 +1539,10 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 6n | Cursor position report | ✅ | DSR 6 (CPR) asks where the cursor is; answered `CSI <row> ; <col> R`, one-based, from the live cursor |
 | ? 6 n | Extended cursor position (DECXCPR) | ✅ | DECXCPR, the DEC-private spelling of the same question; answered `CSI ? <row> ; <col> R`, one-based and with **no page parameter**, which is xterm's form and the reply cmote sends. Answered where the question sits in the stream, from the cursor the ANSI spelling reports — so both report the absolute row, ignoring origin mode (§74, §82, `term/dsr.rs`) |
 | ? 15 / 25 / 26 / 75 / 85 n | Printer / UDK lock / keyboard status / data integrity / multi-session | 🛑 | the DEC-private status reports: a printer (`CSI ? 10/11 n`, ready or not), a user-defined-key store's lock (`? 20/21 n`), the keyboard (`CSI ? 27 ; Pl ; … n`, whose first parameter is its **language** — `1` North American), data integrity (`? 70 n`) and a multi-session controller (`? 83 n`). Equipment cmote does not have, and `26` would name the user's machine (part 6, §36, §82, `term/dsr.rs`, §84) |
-| ? 55 / 56 n | Locator status / type | ✅ | ask whether a DEC locator is present and what type it is. Answered with xterm's own negatives — `CSI ? 53 n` "no locator" and `CSI ? 57 ; 0 n` "cannot identify" — which is the whole extent: the DEC locator protocol itself is not implemented and has no row. They are the two members of the family that are answered rather than refused, because they **advertise nothing**: a reply that states an absence is the one a terminal without the equipment can make truthfully, and silence would leave the sender waiting out a timeout to learn the same thing (§82, §84, §93, `term/dsr.rs`) |
+| ? 55 / 56 n | Locator status / type | ✅ | ask whether a DEC locator is present and what type it is. Answered with xterm's own negatives — `CSI ? 53 n` "no locator" and `CSI ? 57 ; 0 n` "cannot identify". They are the two members of the DSR family that are answered rather than refused, because they **advertise nothing**: a reply that states an absence is the one a terminal without the equipment can make truthfully, and silence would leave the sender waiting out a timeout to learn the same thing. This note read "which is the whole extent: the DEC locator protocol itself is not implemented and has no row" until §140, which gave the protocol its two rows below and made DECRQLP a third door onto the same absence (§82, §84, §93, §140, `term/dsr.rs`) |
 | ? 996 n | Colour scheme — dark or light | ✅ | asks whether the terminal's scheme is dark or light; answered `CSI ? 997 ; 1 n`, dark, from a constant — cmote's scheme is fixed (part 6) and its background is `#1e1e1e`. **The one reply cmote sends in a sequence xterm does not define**, which narrows §96's half-rule rather than excepting it: a reply must not name the program or the machine (§36), and this names neither. Nor is it a new disclosure — `OSC 11 ; ?` is xterm's own spelling of the same fact and cmote answers it, so this is one writer with two doors (§71). Implemented by contour, ghostty, kitty and GNOME's vte; asked by neovim, helix, zellij and tmux, each of which paints for a guessed background when nobody answers (§93, §98, `term/dsr.rs`) |
-| ' z / ' { / ' \| (DECELR / DECSLE / DECRQLP) | DEC locator protocol | ❌ | DECELR enables locator reports, DECSLE picks which events fire one, DECRQLP asks for the pointer's position — DEC's own mouse protocol, whose two *status* questions cmote answers with the honest negative above and whose body §93 left with no row at all. A **gap** and not a refusal: cmote reports mouse events already, in xterm's spelling (modes 1000–1006), and nothing has asked for DEC's (§93, §98) |
+| ' \| (DECRQLP) | Locator position request | ✅ | asks where the locator is, once. Answered `CSI 0 & w` — DECLRP with **event code 0**, which ctlseqs defines as "locator unavailable - no other parameters sent" and which therefore carries no position, no button mask and no page. That is the protocol's **own word** for the fact the two rows above state in DSR's spelling, so all **three doors** onto "there is no locator" answer alike where two of them did before. It passes §93's test by the same margin the other two do: a reply stating an **absence** advertises nothing, and silence would leave the sender waiting out its own timeout to learn it. Unconditional, because cmote has no locator under any mode — the answer cannot depend on DECELR, so there is no state here to get wrong (§93, §140, `term/locator.rs`) |
+| ' z / ' { / ' w (DECELR / DECSLE / DECEFR) | DEC locator — the settings | 🛑 | DECELR arms the locator and picks the unit its coordinates are counted in, DECSLE picks which button transitions send a report, DECEFR sets the filter rectangle DECSLE `0` cancels. **Read and deliberately inert** since §140: a terminal with no locator has nothing to arm, no coordinate to count and no transition to select, so recording what they said would build state whose every reader is unreachable. The refusal is the interesting half, because cmote **has** a mouse and reports it in xterm's spelling (modes 1000–1006) — so "no locator" is a choice about protocols, not a fact about hardware. xterm holds **one** `send_mouse_pos`, in which DECELR and `CSI ? 1000 h` overwrite each other and the two protocols can never both be live; in cmote the xterm modes are the **engine's** and DECELR would be cmote's, and neither can clear the other without becoming a second writer of engine state (part 6, §71, §73). A locator built here could therefore run at the same time as mode 1006, and a program that set both would read two protocols' reports interleaved where xterm sends one — a divergence in the byte stream it READS, which is worse than an absence it can detect with the row above (§93, §140, `term/locator.rs`) |
 | ? 62 n | Macro space (DECMSR) | 🛑 | DECMSR reports the space left in the terminal's macro store, answering `CSI Pn * {` (part 6, §82, §84) |
 | ? 63 n | Memory checksum (DECCKSR) | 🛑 | DECCKSR checksums the terminal's own memory — macros and user-defined keys — and answers in the `DCS Pt ! ~ xxxx ST` envelope DECRQCRA uses for a rectangle of the screen (part 6, §82, §84) |
 | c / > c | Primary / secondary DA | ✅ | DA1 and DA2 — what the terminal is and what firmware it claims; cmote amends the engine's DA1 with attribute **4**, sixels (§41, `term/query.rs`) |
@@ -2099,6 +2109,22 @@ Quoted where a row's wording now rests on it.
   (DECMSR). The response is `CSI Pn * {`" — **no unit is given**, and the matrix claimed "units of 16
   bytes" until §84 removed it. Memory checksum "The response is `DCS Pt ! ~ x x x x ST`", which is the
   envelope `term/rect.rs` writes for DECRQCRA.
+- **The DEC locator protocol** (§140, read from the text build). The four sequences: "`CSI Ps ; Pu ' z`
+  Enable Locator Reporting (DECELR)", whose first parameter is `0` disabled / `1` enabled / `2`
+  "enabled for one report, then disabled" and whose second "specifies the coordinate unit for locator
+  reports" — `0` or omitted defaulting to character cells, `1` "device physical pixels", `2` character
+  cells; "`CSI Pm ' {` Select Locator Events (DECSLE)", taking a **list**, where `0` is "only respond
+  to explicit host requests (DECRQLP). This is default. It also cancels any filter rectangle" and
+  `1`–`4` turn button-down and button-up transitions on and off; "`CSI Ps ' |` Request Locator
+  Position (DECRQLP)", where "Ps = 0, 1 or omitted → transmit a single DECLRP locator report" and **no
+  other value is defined**; and "`CSI Pt ; Pl ; Pb ; Pr ' w` Enable Filter Rectangle (DECEFR), VT420
+  and up". The report they produce is `CSI Pe ; Pb ; Pr ; Pc ; Pp & w`, "Parameters are
+  [event;button;row;column;page]", and the event code cmote sends is the first of eleven:
+  **"Pe = 0 ← locator unavailable - no other parameters sent"** — the rest naming a host request (`1`),
+  the four buttons' down and up transitions (`2`–`9`) and "locator outside filter rectangle" (`10`).
+  What the document does **not** say is what xterm sends for a DECRQLP when the locator is disabled or
+  when it is built without `OPT_DEC_LOCATOR`; xterm's source was not read, and §140's answer is
+  unconditional precisely because it does not depend on the part that is unknown.
 - **XTSMGRAPHICS' parameter order** is `CSI ? Pi ; Pa ; Pv S` — `Pi` the item (1 colour registers, 2
   Sixel geometry, 3 ReGIS) and `Pa` the **second** parameter (1 read, 2 reset, 3 set, 4 read maximum).
   The matrix spelled its two rows `? Pi;Pa;1 S` and `? Pi;Pa;3 S`, as though the action were third, from

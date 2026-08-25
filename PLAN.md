@@ -15947,3 +15947,158 @@ goes to the pack), and the existing icon-category and MIME table tests each gain
 - **Per-extension theme memory is still per-suffix.** `extension_key` buckets `.js` and `.cjs`
   separately, so choosing CME for one does not choose it for the other. Left as it is: merging the
   buckets would mean an alias table in a second place, and the choice is one click.
+
+## §140 — The locator protocol, answered by a terminal that has none
+
+§93 sent the two locator *questions* their honest negatives and left the protocol itself with no row
+at all, disclosing it under *Not done*:
+
+> **The locator protocol itself is still absent** — DECELR, DECSLE, DECRQLP, the locator reports. The
+> row that moved is the two *questions*, and answering them honestly is what a terminal without the
+> protocol should do. There is no row for the protocol, and nobody has asked for one.
+
+Somebody has now. This section reads the protocol's four sequences, answers the one of them that asks
+a question, and writes down why cmote declines to become a locator.
+
+### What was measured first
+
+Two things, before any design.
+
+**The polarity of the two negatives already being sent.** `dsr.rs` answers `CSI ? 55 n` with
+`CSI ? 53 n` and calls it "no locator", and a reversed reading of that pair would have made cmote
+claim a locator it does not have and then go silent on every request — the worst combination
+available. The compatibility matrix's own Evidence section, recorded when §84 read ctlseqs, says
+`CSI ? 50 n` is "Locator available" and `CSI ? 53 n` is "No Locator". A fresh read of ctlseqs agrees
+verbatim. **The existing answers were right**, and the doubt cost one fetch.
+
+**Whether the engine touches any of it.** `vte`'s `csi_dispatch` matches on `(action, intermediates)`
+(`ansi.rs:1558`) and carries no arm for `('z', [b'\''])`, `('{', [b'\''])` or `('|', [b'\''])` — the
+only `z`, `{` and `|` in the file are the DEC special graphics glyphs at `:1243-1245`, a different
+table entirely. So all four locator sequences are framed, logged through `unhandled!()` and dropped.
+The familiar shape: a sequence with nothing behind it.
+
+### The split, and why it is not half a protocol
+
+Three of the four sequences are **settings**. DECELR arms the locator and picks the unit its
+coordinates are counted in; DECSLE picks which button transitions send a report; DECEFR sets the
+filter rectangle DECSLE `0` cancels. None has a reply, and none has an effect observable from outside
+a terminal that *has* a locator. With no locator there is nothing to arm, no coordinate to count and
+no transition to select — so recording what they said would build state whose every reader is
+unreachable, which is a second copy of the protocol's vocabulary kept only to be looked at in a
+debugger. They are read, understood, and deliberately inert.
+
+One of the four is a **question**, and an unanswered question stalls its sender — `query.rs`'s
+founding argument, and the one §93 used next door. The protocol supplies its own word for the answer:
+
+>     CSI Pe ; Pb ; Pr ; Pc ; Pp & w
+>     Parameters are [event;button;row;column;page].
+>     Valid values for the event:
+>       Pe = 0  <- locator unavailable - no other parameters sent.
+
+`Pe = 0` is not a near-enough reading of somebody else's field. It is the event code DEC defined for
+exactly this state, defined to carry nothing after it — no position, no button mask, no page. So the
+reply states an **absence** and advertises nothing, which is the test §93 set for the two negatives
+beside it, met here by the same margin.
+
+Which makes this the **whole** protocol as a terminal without the device implements it, rather than a
+part of one. A program that probes learns the truth promptly through any of three doors, where before
+it learned it through two and hung on the third.
+
+### Why cmote does not simply become a locator
+
+It has a mouse. §9's reports go out in xterm's spelling, modes 1000–1006, so "no locator" is a choice
+about protocols and not a fact about hardware — and the choice needs its reason on the record.
+
+**xterm holds one variable for this.** `send_mouse_pos` is a single mode, and `DEC_LOCATOR` is one of
+its values beside `VT200_MOUSE` and `ANY_EVENT_MOUSE`: DECELR overwrites whatever `CSI ? 1000 h` set,
+and `CSI ? 1000 h` overwrites DECELR. The two protocols can never both be live.
+
+Cmote cannot reproduce that. The xterm modes belong to the **engine** — `Screen::mouse_mode` reads the
+engine's own mode flags — while DECELR would belong to cmote, and neither can clear the other without
+cmote becoming a second writer of engine state, which §71 and §73 both refused to become. A locator
+built here could therefore run *at the same time* as mode 1006, and a program that set both would read
+two protocols' reports interleaved where xterm sends one.
+
+That is the decisive point, and it is not a matter of taste: it is a divergence in the byte stream a
+program **reads**. An absence is something a program can detect — with the very question this section
+answers — and route around. Two interleaved report streams are something it cannot detect at all.
+
+A second cost would only be paid after the first: `ui/grid.rs` gates every pointer event on the
+engine's `MouseMode`, so unsolicited reports on button transitions would need a new channel carrying
+the pointer's cell into `Terminal`, in a stack that has kept the terminal a reader of the byte stream
+and nothing else.
+
+### What ctlseqs does not say
+
+The document gives `Pe = 0` its meaning but never says what xterm sends for a DECRQLP when the locator
+is **disabled** by DECELR, nor what it does with the sequence when built without `OPT_DEC_LOCATOR` —
+where, by the same document's account of DSR 55, it reports "No Locator". xterm's source was not read.
+
+cmote answers every DECRQLP alike, and the reason it can is that its answer does not depend on the
+part that is unknown: there is no locator here under any mode, so `Pe = 0` is true before DECELR,
+after it, and after `DECELR 0` turns it off again. A conditional would be a state machine built to
+reproduce a behaviour nobody here has observed.
+
+### Interruption-fed, though the answer is a constant
+
+`locator.rs` reports offsets and `term/mod.rs` answers inside the interruption loop, exactly as `dsr`
+does — even though a constant would read the same answered after the chunk, the way XTVERSION is.
+
+The reason is **ordering**, and it is the one thing a chunk of constants can still get wrong. A cursor
+report cannot wait for the end of a chunk (§82), so DECXCPR is answered mid-stream; a locator report
+answered after the chunk would overtake every DECXCPR written after it. Two seam tests assert both
+orders — one alone passes just as well with the answers appended in a fixed sequence — and a third
+puts text between two requests, so the cursor report in the middle is read where it sat.
+
+### The eleventh scanner, and the first written on the framer
+
+`csi.rs`'s header counted ten CSI scanners and said the check that settles the number is
+`framer: super::csi::Framer`, one per scanner. It is eleven now. `locator` is the first written **on**
+the shared grammar rather than migrated onto it, which is §111's real dividend: what this module had
+to supply was one predicate and no grammar at all — no ESC door, no parameter accumulator, no
+chunk-boundary state, no read-through rule.
+
+It joins the differential sweep with the same entry the other ten have, and that took widening the
+shape space: `|` went into `FINALS` and `'` into `INTERMEDIATES`, so the sweep grew from 6 720 shapes
+to 8 100. The intermediate is the half that matters — `z` and `{` were already in `FINALS` for `rect`
+and `sgrstack`, and **DECELR and DECERA differ only in the intermediate**, so a sweep blind to `'`
+could not tell one scanner claiming another's sequence from a scanner minding its own.
+
+### Files
+
+- `src/term/locator.rs` — new. The scanner, the one predicate, the reply constant, eleven tests.
+- `src/term/mod.rs` — the module line, the scanner field, `Interruption::LocatorPosition`, the
+  `Scanned` field and its three merge sites, the feed, `answer_locator`, three seam tests.
+- `src/term/differential.rs` — the new scanner registered in both sweeps; `'` and `|` added to the
+  shape space; three prose counts corrected (seven → eight, eleven → twelve, 6 720 → 8 100).
+- `src/term/csi.rs` — ten scanners → eleven, and what the eleventh's arrival demonstrates.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — the ❌ row split in two; the `? 55 / 56 n` row's stale claim
+  corrected; the reply added to part 3's list; the locator's ctlseqs quotes added to Evidence.
+- `PLAN.md` — this section.
+
+**1 575 tests**, fourteen added: eleven in `locator.rs` and three at the seam.
+
+The row splits **❌ → ✅ + 🛑**, which is §62's and §64's move rather than a new one: one mark was
+covering two opposite answers. So the matrix gains a row: 215 → **216 rows: ✅ 120 · ❌ 27 · 🛑 42 ·
+🤷 27**. Counted from the matrix rather than carried forward, since the last few sections stopped
+quoting a tally and the arithmetic had drifted — the running total was last written down at §106 as
+214, and the four marks add up to 216 today.
+
+### Not done
+
+- **The locator reports themselves are not sent**, and that is the refusal above rather than a gap
+  left for later. Sending them means becoming a locator, and the exclusivity argument says cmote
+  cannot do that correctly while the engine owns modes 1000–1006. If the engine ever exposes its mouse
+  mode as something cmote can *write*, the argument changes and this is worth reopening; nothing else
+  about it does.
+- **DECEFR has no behaviour beyond being ignored.** It is named in the new 🛑 row and tested as not
+  being a position request, which is all a terminal with no locator can do with a filter rectangle.
+  Its `Pe = 10` report — "locator outside filter rectangle" — is unreachable for the same reason.
+- **xterm's source was still not read**, so the two questions above stay open: what a real xterm sends
+  for DECRQLP with the locator disabled, and what it does when the option is compiled out. Neither can
+  change cmote's answer, which is why they were not worth blocking on — but they are the kind of thing
+  that would settle whether cmote's unconditional reply is *identical* to xterm's or merely correct.
+- **`CSI 0 & w` is sent to a program that never enabled the locator**, which is §93's disclosure one
+  door over: it is true, it advertises nothing, and a careless caller could still read "locator
+  unavailable" as "no pointing device", when cmote is reporting the mouse in xterm's spelling all the
+  while. The protocols are different and the answer is correct.

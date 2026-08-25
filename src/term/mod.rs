@@ -61,6 +61,7 @@ mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear 
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
+mod locator; // reads DEC's own mouse protocol, which the engine drops — and answers the one of its three sequences that asks a question (§140)
 mod margins; // holds the left and right margins a program sets, and the arithmetic they imply (§102)
 pub mod modkeys; // tracks the remote's xterm modifyOtherKeys mode for the key encoder (§9)
 pub mod mouse; // maps pointer events to the reports a mouse-aware program expects
@@ -394,6 +395,7 @@ impl Terminal {
 			rectangles: rect::Rectangles::default(),
 			tabs: tabs::Tabs::default(),
 			dsr: dsr::Dsr::default(),
+			locator: locator::Locator::default(),
 			sgr_stack: sgrstack::SgrStack::default(),
 			saved_pens: Vec::new(),
 			dropped_pushes: 0,
@@ -513,6 +515,12 @@ impl Terminal {
 		// answer is only true at the point in the stream the question sat. `term/query.rs` may collect
 		// its queries and reply after the chunk because a version string and a unit id do not move.
 		let cursor_requests = self.dsr.feed(bytes);
+		// DECRQLP, the DEC locator's one question, which reaches no arm in the parser either (§140).
+		// Its answer is a constant — cmote has no locator under any mode — so unlike the cursor above it
+		// would read the same after the chunk. It is interruption-fed anyway, so that the two questions
+		// come back in the order they were asked; the protocol's other two sequences are read by this
+		// scanner and produce nothing, which is what a terminal with nothing to arm has to say.
+		let locator_requests = self.locator.feed(bytes);
 		// The character path (§76), and the RIS that empties the store of them. Interruption-fed like the
 		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
 		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
@@ -530,6 +538,7 @@ impl Terminal {
 			rectangles,
 			tab_resets,
 			cursor_requests,
+			locator_requests,
 			paths,
 			sgr_stack,
 		};
@@ -587,6 +596,7 @@ impl Terminal {
 					Interruption::Rect(request) => self.apply_rectangle(request),
 					Interruption::TabStops => self.set_default_tabs(),
 					Interruption::Dsr(request) => self.answer_dsr(request),
+					Interruption::LocatorPosition => self.answer_locator(),
 					Interruption::Path(request) => self.select_character_path(request),
 					Interruption::SgrStack(request) => self.apply_sgr_stack(request),
 				}
@@ -1032,6 +1042,26 @@ impl Terminal {
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(&reply);
+	}
+
+	/// Answer DECRQLP — "where is the locator?" — with the protocol's own word for there not being one
+	/// (§140).
+	///
+	/// Nothing is read to build this. `locator::UNAVAILABLE` is DECLRP with event code 0, which ctlseqs
+	/// defines as "locator unavailable" and defines to carry no position, no button mask and no page —
+	/// so the answer does not depend on the grid, the cursor, the pointer or any mode, and there is no
+	/// state here to get wrong. That is the same shape as the two locator negatives `answer_dsr` sends
+	/// next door (§93), and `term/locator.rs` holds the argument for why cmote answers this way rather
+	/// than becoming a locator it could not keep exclusive with the engine's own mouse modes.
+	///
+	/// The reply goes into the buffer the engine's own replies land in, at the point in the stream the
+	/// question sat, exactly as DECXCPR's does.
+	fn answer_locator(&self) {
+		self.replies
+			.lock()
+			.expect("reply buffer mutex poisoned")
+			.bytes
+			.extend_from_slice(locator::UNAVAILABLE);
 	}
 
 	/// Carry out one push or pop of the video-attribute stack (§85), with the engine advanced to the
@@ -2161,6 +2191,14 @@ pub struct Terminal {
 	/// report where the cursor ENDED UP rather than where the question was asked. The other nine values
 	/// of `CSI ? Ps n` are refused by the same scanner, on an allow-list one value wide.
 	dsr: dsr::Dsr,
+	/// Finds DECRQLP, the DEC locator's one question, which `vte` has no arm for either — its
+	/// `csi_dispatch` matches on `(action, intermediates)` and holds nothing for the `'` family (§140).
+	/// Fed by the interruption advance although its answer is a CONSTANT, for the reason §93 gave the two
+	/// locator negatives beside it: one route through one scanner is easier to keep right than two, and
+	/// the ordering against DECXCPR then falls out for free. The protocol's other two sequences —
+	/// DECELR and DECSLE — are read by this same scanner and deliberately answered with nothing; see
+	/// `term/locator.rs` for why a terminal without a locator has nothing to arm.
+	locator: locator::Locator,
 	/// Finds XTPUSHSGR / XTPOPSGR, which `vte` has no arm for either — `csi_dispatch` never matches a
 	/// `#` intermediate at all (§84, §85). Fed by the interruption advance for DECXCPR's reason: the pen a push
 	/// saves is the pen where the push was WRITTEN, not where the chunk ended.
@@ -2241,6 +2279,11 @@ enum Interruption {
 	/// exactly to the question. The two locator answers are constants and ride along because they
 	/// come out of the same scanner.
 	Dsr(dsr::DsrRequest),
+	/// DECRQLP, the DEC locator's "where is the pointer?" (§140). Carries nothing, like `TabStops`: the
+	/// sequence has one meaning and the reply is a constant, so the offset is the whole event. It is
+	/// here rather than answered after the chunk so that a program writing DECXCPR and DECRQLP in one
+	/// breath reads the two answers back in the order it asked for them.
+	LocatorPosition,
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::ScpRequest),
 	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
@@ -2266,6 +2309,7 @@ struct Scanned {
 	rectangles: Vec<(usize, rect::RectRequest)>,
 	tab_resets: Vec<usize>,
 	cursor_requests: Vec<(usize, dsr::DsrRequest)>,
+	locator_requests: Vec<usize>,
 	paths: Vec<(usize, scp::ScpRequest)>,
 	sgr_stack: Vec<(usize, sgrstack::SgrStackRequest)>,
 }
@@ -2282,6 +2326,7 @@ impl Scanned {
 			&& self.rectangles.is_empty()
 			&& self.tab_resets.is_empty()
 			&& self.cursor_requests.is_empty()
+			&& self.locator_requests.is_empty()
 			&& self.paths.is_empty()
 			&& self.sgr_stack.is_empty()
 	}
@@ -2301,6 +2346,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		rectangles,
 		tab_resets,
 		cursor_requests,
+		locator_requests,
 		paths,
 		sgr_stack,
 	} = scanned;
@@ -2313,6 +2359,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 			+ rectangles.len()
 			+ tab_resets.len()
 			+ cursor_requests.len()
+			+ locator_requests.len()
 			+ paths.len()
 			+ sgr_stack.len(),
 	);
@@ -2356,6 +2403,11 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		cursor_requests
 			.into_iter()
 			.map(|(offset, request)| (offset, Interruption::Dsr(request))),
+	);
+	merged.extend(
+		locator_requests
+			.into_iter()
+			.map(|offset| (offset, Interruption::LocatorPosition)),
 	);
 	merged.extend(
 		paths
@@ -4389,6 +4441,54 @@ mod tests {
 		let both = terminal.process(b"\x1b[?56n\x1b[?55n");
 		assert_eq!(both, b"\x1b[?57;0n\x1b[?53n".to_vec());
 		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
+	}
+
+	/// The protocol those two questions are ABOUT (§140). DECRQLP asks where the locator is and gets
+	/// DECLRP event code 0, "locator unavailable" — the protocol's own word for the same fact the two
+	/// negatives above state. The other two sequences are settings, and a terminal with no locator has
+	/// nothing to arm and no events to select, so they are read and answered with silence.
+	#[test]
+	fn the_locator_protocol_answers_only_the_question_of_the_three() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b['|"), b"\x1b[0&w".to_vec());
+		assert_eq!(terminal.process(b"\x1b[0'|"), b"\x1b[0&w".to_vec());
+		assert_eq!(terminal.process(b"\x1b[1'|"), b"\x1b[0&w".to_vec());
+		// DECELR and DECSLE: no reply, and — the half a scanner cannot check for itself — no glyph
+		// either, because the engine drops the bytes rather than printing them.
+		assert!(terminal.process(b"\x1b[1;2'z").is_empty(), "DECELR");
+		assert!(terminal.process(b"\x1b[1;3'{").is_empty(), "DECSLE");
+		assert!(terminal.process(b"\x1b[1;1;9;9'w").is_empty(), "DECEFR");
+		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
+	}
+
+	/// Why the locator request rides the interruption advance even though its answer is a CONSTANT: the
+	/// replies have to come back in the order the questions were written. A cursor report cannot wait
+	/// for the end of a chunk (§82), so it is answered mid-stream, and a locator report answered after
+	/// the chunk would overtake every DECXCPR that followed it. Both orders are asserted, because one
+	/// order alone passes just as well with the two answers appended in a fixed sequence.
+	#[test]
+	fn a_cursor_report_and_a_locator_report_come_back_in_the_order_they_were_asked() {
+		let mut terminal = Terminal::new(10, 40);
+		// The cursor is at the origin, so DECXCPR is `CSI ? 1 ; 1 R`.
+		assert_eq!(
+			terminal.process(b"\x1b[?6n\x1b['|"),
+			b"\x1b[?1;1R\x1b[0&w".to_vec()
+		);
+		assert_eq!(
+			terminal.process(b"\x1b['|\x1b[?6n"),
+			b"\x1b[0&w\x1b[?1;1R".to_vec()
+		);
+	}
+
+	/// The cursor report between two locator reports is read where it SAT, which is the property the
+	/// split advance exists for — and the one thing a chunk carrying only constants could not show.
+	/// `abc` moves the cursor three columns before the second question is asked.
+	#[test]
+	fn a_locator_report_does_not_disturb_where_a_cursor_report_is_read() {
+		let mut terminal = Terminal::new(10, 40);
+		let replies = terminal.process(b"\x1b['|abc\x1b[?6n\x1b['|");
+		assert_eq!(replies, b"\x1b[0&w\x1b[?1;4R\x1b[0&w".to_vec());
+		assert_eq!(read(&terminal, 0, 0, 3), "abc", "and the text still landed");
 	}
 
 	/// The fourth question on the allow-list (§98), and the only one whose sequence is not xterm's.

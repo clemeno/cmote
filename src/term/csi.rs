@@ -1,16 +1,19 @@
 // term/csi.rs — the facts every CSI scanner has to agree with the engine about.
 //
-// TEN modules in this directory scan CSI sequences beside the stream, each for its own reason, and
+// ELEVEN modules in this directory scan CSI sequences beside the stream, each for its own reason, and
 // every one of them used to carry its own copy of the grammar. §106's architecture review put that
-// duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all ten
+// duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all of them
 // read [`Framer`] now and keep only the part that is theirs — deciding what a sequence MEANS.
 //
-// The ten, in the order they migrated: `tabs`, `dsr`, `scp`, `protect`, `sgrstack`, `modkeys`, `rect`,
-// `cancel`, `graphics`, `query`. The number is worth spelling out because it was got wrong twice in
-// §111's own prose — nine while the migration ran, then "eleven" once it was over, which counted
-// `differential` as a scanner when it is the test harness that drives them. Both counts were written
-// from memory. The check that settles it is `framer: super::csi::Framer` — one per scanner, and
-// nothing else in this directory holds one.
+// The ten §111 migrated, in that order: `tabs`, `dsr`, `scp`, `protect`, `sgrstack`, `modkeys`,
+// `rect`, `cancel`, `graphics`, `query`. `locator` is the eleventh and the first written ON the
+// framer rather than moved onto it (§140) — which is the migration's real dividend, since what that
+// module had to supply was one predicate and no grammar at all.
+//
+// The number is worth spelling out because it was got wrong twice in §111's own prose — nine while
+// the migration ran, then "eleven" once it was over, which counted `differential` as a scanner when it
+// is the test harness that drives them. Both counts were written from memory. The check that settles
+// it is `framer: super::csi::Framer` — one per scanner, and nothing else in this directory holds one.
 //
 // What that bought was not the line count. Defects came out of the migrations, one at a time, because
 // the shared grammar had to take the STRICTEST rule of its callers rather than the laxest — two rules

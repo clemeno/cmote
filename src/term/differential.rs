@@ -256,12 +256,16 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// Including runs of two and three, which is past the engine's `MAX_INTERMEDIATES` of 2 once the
 	/// private marker is counted against it as the engine does — the case cmote's own limit of 4 lets
 	/// through, and the one this sweep is here to keep honest.
-	const INTERMEDIATES: [&[u8]; 8] = [b"", b" ", b"\"", b"#", b"$", b"!", b" \"", b"\"$#"];
+	const INTERMEDIATES: [&[u8]; 9] = [b"", b" ", b"\"", b"#", b"$", b"!", b"'", b" \"", b"\"$#"];
 	const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
 	/// Every final byte any scanner in this directory watches for. `c` and `S` joined when `query` did
 	/// (§111): they are DA3 and XTSMGRAPHICS, two of the three private CSI forms it answers, and a
-	/// sweep that never spelled them could not have caught it acting on one alone.
-	const FINALS: &[u8] = b"smqpJKWk{}zncS";
+	/// sweep that never spelled them could not have caught it acting on one alone. `|` joined with
+	/// `locator` (§140), and the `'` above with it — `z` and `{` were already here for `rect` and
+	/// `sgrstack`, which is exactly why the intermediate had to come too: DECELR and DECERA differ only
+	/// in it, and a sweep blind to `'` could not tell one scanner claiming another's sequence from a
+	/// scanner minding its own.
+	const FINALS: &[u8] = b"smqpJKWk{}zncS|";
 
 	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
 	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
@@ -607,7 +611,7 @@ mod tests {
 
 	#[test]
 	fn the_scanners_with_no_engine_arm_read_through_a_stray_byte_too() {
-		// The seven CSI scanners whose sequences the engine has no live arm for, and the reason this test is
+		// The eight CSI scanners whose sequences the engine has no live arm for, and the reason this test is
 		// here rather than in each of them: the rule they are being held to is the ENGINE's
 		// (`csi::passes_through`), and the only thing that makes it their business is that they shadow the
 		// same byte stream. (The other three — `cancel`, `protect`, `graphics` — watch sequences the engine
@@ -628,7 +632,7 @@ mod tests {
 			bytes
 		};
 
-		let claims: [ClaimAt; 7] = [
+		let claims: [ClaimAt; 8] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
 			}),
@@ -658,6 +662,15 @@ mod tests {
 			}),
 			("rect, DECERA", b"\x1b[2;3;5;7$z", 4, |bytes| {
 				!super::super::rect::Rectangles::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			// DECRQLP, the DEC locator's one question (§140). The eighth, and it belongs to this list by
+			// the same test as the seven above: `vte` frames the `'` family and `ansi.rs` has no arm for
+			// any of it, so there is no engine verdict to compare against and self-consistency is what
+			// can be asserted.
+			("locator, DECRQLP", b"\x1b[0'|", 3, |bytes| {
+				!super::super::locator::Locator::default()
 					.feed(bytes)
 					.is_empty()
 			}),
@@ -703,9 +716,9 @@ mod tests {
 		// without anyone thinking of the case.
 		//
 		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
-		// all ten can answer in common. ELEVEN entries for ten scanners: `protect` is listed twice
+		// all eleven can answer in common. TWELVE entries for eleven scanners: `protect` is listed twice
 		// because its verdict depends on whether the pen is armed, and both states have to be swept.
-		let scanners: [DifferentialClaim; 11] = [
+		let scanners: [DifferentialClaim; 12] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -752,13 +765,21 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// The newest (§140), and the one that widened the sweep to reach it: `|` and the `'`
+			// intermediate went into `shapes` with this entry, so the shape space now walks the family
+			// whose other three members cmote reads and deliberately declines to act on.
+			("locator", b"", |bytes| {
+				!super::super::locator::Locator::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		let shapes = shapes();
 		assert_eq!(
 			shapes.len(),
-			6720,
-			"5 markers x 8 intermediates x 4 params x 14 finals x 3 orders"
+			8100,
+			"5 markers x 9 intermediates x 4 params x 15 finals x 3 orders"
 		);
 		// Collected rather than asserted case by case: the first failure is never the whole story, and an
 		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".
