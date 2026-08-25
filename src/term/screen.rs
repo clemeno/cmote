@@ -29,23 +29,30 @@ pub enum Color {
 }
 
 /// Which xterm mouse protocol the remote program turned on (§9), or `None` when it has not
-/// asked for the mouse. The engine does not implement X10 (`?9`, press-only), so that mode
-/// never appears — the three reporting modes below are mutually exclusive.
+/// asked for the mouse. The three the ENGINE holds are resolved most-specific-first, and `X10` —
+/// cmote's own since §150, because `NamedPrivateMode` has no `9` — sits below all three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseMode {
 	None,
+	/// `CSI ? 9 h` — the original protocol: a report on button PRESS only, and no modifier bits
+	/// (§150). Bottom of the ladder, so a program that also asked for one of the engine's three gets
+	/// that one.
+	X10,
 	PressRelease,
 	ButtonMotion,
 	AnyMotion,
 }
 
 /// How a mouse report is encoded on the wire (§9): the classic single-byte form, its UTF-8
-/// widening, or SGR.
+/// widening, SGR, or SGR with pixel coordinates (§150).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseEncoding {
 	Default,
 	Utf8,
 	Sgr,
+	/// `CSI ? 1016 h` — the SGR reports with pixels in place of cells (§150). cmote's own, and the
+	/// most specific of the four, so it sits at the TOP of the ladder below.
+	SgrPixels,
 }
 
 /// The underline a cell asks for (§9, §23). A remote turns these on through the extended SGR
@@ -405,8 +412,9 @@ impl<'a> Screen<'a> {
 		self.engine.mode().contains(TermMode::FOCUS_IN_OUT)
 	}
 
-	/// Which mouse protocol the remote program turned on (§9). The three reporting modes are
-	/// mutually exclusive in the engine, so the most specific one set wins.
+	/// Which mouse protocol the remote program turned on (§9, §150). A ladder, most specific first:
+	/// the engine's three flags are independent rather than exclusive, so a program that set two gets
+	/// the one that says more, and X10 — cmote's own — reports only when none of the three is on.
 	pub fn mouse_mode(&self) -> MouseMode {
 		let mode = self.engine.mode();
 		if mode.contains(TermMode::MOUSE_MOTION) {
@@ -415,15 +423,21 @@ impl<'a> Screen<'a> {
 			MouseMode::ButtonMotion
 		} else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
 			MouseMode::PressRelease
+		} else if self.modes.x10_mouse() {
+			MouseMode::X10
 		} else {
 			MouseMode::None
 		}
 	}
 
-	/// How mouse reports are encoded (§9).
+	/// How mouse reports are encoded (§9, §150). The same ladder, and mode 1016 is at the top of it:
+	/// SGR-Pixels is SGR's own reports with pixels in place of cells, so a program that asked for both
+	/// asked for the more specific of the two.
 	pub fn mouse_encoding(&self) -> MouseEncoding {
 		let mode = self.engine.mode();
-		if mode.contains(TermMode::SGR_MOUSE) {
+		if self.modes.pixel_mouse() {
+			MouseEncoding::SgrPixels
+		} else if mode.contains(TermMode::SGR_MOUSE) {
 			MouseEncoding::Sgr
 		} else if mode.contains(TermMode::UTF8_MOUSE) {
 			MouseEncoding::Utf8

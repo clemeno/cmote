@@ -1673,9 +1673,10 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 1000 / 1002 / 1003 | Mouse: normal / btn / any | ✅ | mouse reporting: presses and releases, the same plus drag, or all motion. Left, middle, right and the vertical wheel are encoded; the extra buttons and the horizontal wheel are not (`term/mouse.rs`) |
 | 1004 | Focus events | ✅ | the terminal sends `CSI I` and `CSI O` as the window takes and loses focus |
 | 1006 | SGR mouse | ✅ | the SGR mouse encoding, `CSI < b ; col ; row M` / `m` — a release keeps its button and the coordinates are unbounded |
-| 1005 | UTF-8 mouse | ✅ | the UTF-8 mouse encoding, which widens the classic one's coordinates; tracked on the seam, `1006` taking precedence when both are set (§67) |
+| 1005 | UTF-8 mouse | ✅ | the UTF-8 mouse encoding, which widens the classic one's coordinates; tracked on the seam, `1006` taking precedence when both are set — and `1016` over both since §150 (§67, §150) |
+| 1015 | urxvt mouse | ❌ | urxvt's own encoding — the classic three fields as decimal parameters on a `CSI … M`, so it lifts the 223 ceiling the way SGR does without SGR's press/release split. The one member of this family the table did not name until §150, which found it while reading the DECSET list whole and did not build it |
 | 1007 | Alt-scroll | ✅ | the wheel sends arrow keys while the alternate screen is up |
-| 1016 | SGR-pixel mouse | ❌ | the SGR-pixel mouse encoding, which reports pixels rather than cells |
+| 1016 | SGR-pixel mouse | ✅ | the SGR reports with **pixels in place of cells** — same button field, same `M`/`m` split, one-based from the top-left of the text area. cmote's own mode, sitting at the top of the encoding ladder, so a program that also set 1006 gets the more specific of the two. **The coordinate convention is reasoned rather than quoted**: every reachable source says only "Enable SGR Mouse PixelMode, xterm", and §150 names the inference in writing rather than presenting it as read (§150, `term/mouse.rs`) |
 | 1049 | Alternate screen | ✅ | the alternate screen: the cursor is saved and a cleared page swapped in. No scrollback there, by design |
 | 2004 | Bracketed paste | ✅ | bracketed paste — a paste arrives wrapped in `CSI 200~` and `CSI 201~`, with an injection scrub |
 | 2026 (batching) | Synchronized output | ✅ | synchronized output: BSU holds the visible screen still and ESU flushes the buffered stream inside one advance, so a frame is atomic (§65) |
@@ -1685,7 +1686,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 2034 | Semantic block reporting | 🤷 | arms contour's semantic-block query and mints the token that authenticates it. Refused with the query itself — a mode whose only effect is to enable a refused reply has nothing else left to do (§98) |
 | 2048 | In-band resize | ✅ | in-band resize notification, for a program that cannot see SIGWINCH: `CSI 48 ; rows ; cols ; height ; width t` on every size change, and once the moment the mode is FIRST set, which the specification requires and is the only way a program learns the size it is starting from. Cells then pixels, each pair height before width; the pixels are the same cell size the two `t` queries above report, so the three cannot disagree. Off at power-up and put back by RIS — not by DECSTR, which is on nobody's published list. cmote's own mode: the engine has never heard of 2048, so the gate keeps it, answers its DECRQM, and lets XTSAVE read it (§102, §141, §145, §148, `term/inband.rs`) |
 | 4 | Insert / replace (IRM) | ✅ | IRM — a printed glyph pushes the rest of the line right rather than overwriting it. An ANSI mode, not a `?` private one, hence out of the run above |
-| 9 | X10 mouse (press-only) | ❌ | the X10 mouse encoding, presses only |
+| 9 | X10 mouse (press-only) | ✅ | the original protocol: `CSI M Cb Cx Cy`, each field biased by 32, on **button press only** and with **no modifier bits** — both from XFree86's untruncated copy of ctlseqs, which is where §150 read the Mouse Tracking section this document's usual source cuts off before. cmote's own mode, at the bottom of the mode ladder: a program that also set one of the engine's three gets that one, which diverges from xterm's single-variable model on purpose (§9, §150, `term/mouse.rs`) |
 | 20 | Newline mode (LNM) | ✅ | LNM — a linefeed also returns the carriage. An ANSI mode, not a `?` private one |
 
 ### Graphics, window ops, keyboard, C0
@@ -2191,6 +2192,16 @@ Quoted where a row's wording now rests on it.
   the FONT, and the cursor-shape payload the matrix had on that code is another terminal's convention
   `vte` parses on the same number. §88 split the row. `OSC 8`, `104` and `110`–`112` are still past
   where even the text build is returned, and rest on `vte`.
+- **The Mouse Tracking section is past the cut in both builds, and XFree86's copy is not** (§150). The
+  DECSET list arrives whole — which is how `Ps = 9` and `Ps = 1 0 1 6` were readable at all — and the
+  section that says what either mode DOES was truncated in every fetch of `ctlseqs.html` and
+  `ctlseqs.txt` alike. `xfree86.org/current/ctlseqs.html` is an older revision of the same document,
+  returned in full, and it settled X10 outright: **"X10 compatibility mode sends an escape sequence only
+  on button press"**; **"xterm sends CSI M *Cb Cx Cy* (6 characters). *Cb* is button−1"**; **"encode
+  numeric parameters in a single character as *value*+32"**; and, in the X11 paragraph below it,
+  **"Modifier key (shift, ctrl, meta) information is *also* sent"** — the *also* being what says X10
+  carries none. Being older, it has nothing on 1016, whose coordinate convention is therefore reasoned
+  rather than quoted, and labelled as such in its row.
 - **OSC 8's own specification** (Egmont Koblinger's, the document VTE and iTerm2 implement): the
   sequence is `OSC 8 ; params ; URI ST` and is closed with `OSC 8 ; ; ST`; "params is an optional list
   of key=value assignments, separated by the `:` character", of which only `id` is defined — "character

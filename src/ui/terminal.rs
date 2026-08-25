@@ -1247,6 +1247,23 @@ pub fn cell_at(point: Point, rows: u16, cols: u16) -> ScreenSpot {
 	}
 }
 
+/// A pointer position as pixels from the top-left of the TEXT AREA, for the pixel mouse encoding
+/// (§150). `point` is relative to the widget, as `cell_at` takes it.
+///
+/// The same two subtractions `cell_at` makes before it divides, kept beside it so the pixel a report
+/// carries and the cell it carries cannot be measured from different corners. Clamped at zero for the
+/// padding gutter, which is not part of the text area but is inside the widget — a pointer there is
+/// reported on the edge cell rather than at a negative coordinate, which is what `cell_at` already
+/// does with the same pixels.
+///
+/// Zero-based here; the protocol's shift to one-based is `term::mouse`'s, in the one place that knows
+/// about it.
+pub fn pixel_at(point: Point) -> (u16, u16) {
+	let x = (point.x - GRID_PADDING).max(0.0);
+	let y = (point.y - GRID_PADDING).max(0.0);
+	(super::cell_index(x, 1.0), super::cell_index(y, 1.0))
+}
+
 /// The grid cell under a pointer position, in the coordinates the rest of cmote works in (§76).
 ///
 /// `cell_at` above answers in PRESENTATION columns — where the glyph is on screen. Everything
@@ -1395,6 +1412,33 @@ mod tests {
 		// Far past the grid clamps to the last cell, never off the grid.
 		let clamped = cell_at(Point::new(100_000.0, 100_000.0), 24, 80);
 		assert_eq!((clamped.row, clamped.col), (23, 79));
+	}
+
+	/// `pixel_at` measures from the SAME corner `cell_at` divides from, which is what keeps a mouse
+	/// report's pixel and its cell describing one point (§150).
+	#[test]
+	fn pixel_at_measures_from_the_text_areas_own_corner() {
+		// The padded top-left is pixel (0, 0), not (GRID_PADDING, GRID_PADDING).
+		assert_eq!(pixel_at(Point::new(GRID_PADDING, GRID_PADDING)), (0, 0));
+		assert_eq!(
+			pixel_at(Point::new(GRID_PADDING + 73.0, GRID_PADDING + 68.0)),
+			(73, 68)
+		);
+		// The padding gutter is inside the widget and outside the text area: clamped rather than
+		// negative, which is what `cell_at` does with the very same pixels.
+		assert_eq!(pixel_at(Point::new(0.0, 0.0)), (0, 0));
+		// And the two agree about where a cell begins: the top-left corner of cell (1, 1).
+		let corner = Point::new(GRID_PADDING + CELL_WIDTH, GRID_PADDING + CELL_HEIGHT);
+		let cell = cell_at(corner, 24, 80);
+		let (x, y) = pixel_at(corner);
+		assert_eq!((cell.row, cell.col), (1, 1));
+		assert_eq!(
+			(x, y),
+			(
+				crate::ui::cell_index(CELL_WIDTH, 1.0),
+				crate::ui::cell_index(CELL_HEIGHT, 1.0)
+			)
+		);
 	}
 
 	/// The pointer's half of the character path (§76). `cell_at` above answers in presentation

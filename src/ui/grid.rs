@@ -771,10 +771,12 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			return;
 		};
 		let inside = bounds.contains(position);
-		let cell = cell_under(
-			&self.screen,
-			Point::new(position.x - bounds.x, position.y - bounds.y),
-		);
+		// The pointer in the widget's own coordinates, resolved twice from the ONE point: to a cell for
+		// everything downstream, and to a pixel for the SGR-Pixels encoding (§150). Both from the same
+		// `local`, so a report can never carry a cell measured at one moment and a pixel at another.
+		let local = Point::new(position.x - bounds.x, position.y - bounds.y);
+		let cell = cell_under(&self.screen, local);
+		let (pointer_x, pointer_y) = super::terminal::pixel_at(local);
 
 		let pointer_event = match pointer {
 			mouse::Event::ButtonPressed(button) => {
@@ -822,8 +824,12 @@ impl Widget<Message, Theme, iced::Renderer> for Grid<'_> {
 			mode,
 			self.screen.mouse_encoding(),
 			pointer_event,
-			cell.row,
-			cell.col,
+			report::Position {
+				row: cell.row,
+				col: cell.col,
+				x: pointer_x,
+				y: pointer_y,
+			},
 			state.modifiers,
 		) else {
 			return;

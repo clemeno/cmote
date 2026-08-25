@@ -3934,6 +3934,85 @@ mod tests {
 	}
 
 	#[test]
+	fn the_x10_mouse_mode_sits_below_the_engines_three() {
+		// The engine holds three independent mouse flags and `mouse_mode` resolves them by priority
+		// (§9); X10 is cmote's own and joins the bottom of that same ladder. xterm keeps ONE variable
+		// and would let a later `CSI ? 9 h` overwrite `1000`; cmote cannot copy that without writing
+		// engine state from the gate, and the ladder is where this family is already resolved (§150).
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.screen().mouse_mode(), screen::MouseMode::None);
+		terminal.process(b"\x1b[?9h");
+		assert_eq!(terminal.screen().mouse_mode(), screen::MouseMode::X10);
+		terminal.process(b"\x1b[?1000h");
+		assert_eq!(
+			terminal.screen().mouse_mode(),
+			screen::MouseMode::PressRelease,
+			"the engine's mode wins while it is set"
+		);
+		terminal.process(b"\x1b[?1000l");
+		assert_eq!(
+			terminal.screen().mouse_mode(),
+			screen::MouseMode::X10,
+			"and X10 is still there underneath it"
+		);
+		terminal.process(b"\x1b[?9l");
+		assert_eq!(terminal.screen().mouse_mode(), screen::MouseMode::None);
+	}
+
+	#[test]
+	fn the_pixel_mouse_mode_sits_above_the_engines_encodings() {
+		// The other end of the same ladder: SGR-Pixels is SGR's reports with pixels in place of cells,
+		// so a program that asked for both asked for the more specific of the two (§150).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?1000h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Default
+		);
+		terminal.process(b"\x1b[?1006h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Sgr
+		);
+		terminal.process(b"\x1b[?1016h");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::SgrPixels
+		);
+		terminal.process(b"\x1b[?1016l");
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Sgr,
+			"and the engine's is still there underneath it"
+		);
+	}
+
+	#[test]
+	fn the_two_mouse_modes_answer_their_own_decrqm() {
+		// Neither is in the engine's `NamedPrivateMode`, so its answer would be `0` — not recognised —
+		// for two modes cmote implements (§150).
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(terminal.process(b"\x1b[?9$p"), b"\x1b[?9;2$y".to_vec());
+		assert_eq!(
+			terminal.process(b"\x1b[?1016$p"),
+			b"\x1b[?1016;2$y".to_vec()
+		);
+		terminal.process(b"\x1b[?9h\x1b[?1016h");
+		assert_eq!(terminal.process(b"\x1b[?9$p"), b"\x1b[?9;1$y".to_vec());
+		assert_eq!(
+			terminal.process(b"\x1b[?1016$p"),
+			b"\x1b[?1016;1$y".to_vec()
+		);
+		// And a hard reset takes both back down with the rest of the table.
+		terminal.process(b"\x1bc");
+		assert_eq!(terminal.screen().mouse_mode(), screen::MouseMode::None);
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Default
+		);
+	}
+
+	#[test]
 	fn the_window_questions_about_the_user_draw_no_reply() {
 		// §36 and §147. Where the window sits, whether it is minimised and how large the display is are
 		// facts about the person at the keyboard, not about the terminal — and 11 has a second problem
@@ -5380,8 +5459,8 @@ mod tests {
 	fn a_mode_the_seam_cannot_read_is_neither_saved_nor_restored() {
 		let mut terminal = Terminal::new(10, 40);
 		terminal.process(b"hello");
-		terminal.process(b"\x1b[?3;2026;9s");
-		terminal.process(b"\x1b[?3;2026;9r");
+		terminal.process(b"\x1b[?3;2026;1010s");
+		terminal.process(b"\x1b[?3;2026;1010r");
 		assert_eq!(
 			read(&terminal, 0, 0, 5),
 			"hello",
@@ -5392,9 +5471,15 @@ mod tests {
 			"DECCOLM has no bit"
 		);
 		assert!(terminal.saved_modes.restore(2026).is_none(), "the parser's");
+		// xterm's "scroll to the bottom on tty output", which neither the engine nor cmote models.
+		//
+		// This example was mode 9 until §150, which gave cmote the X10 mouse protocol and so made that
+		// mode readable. The RULE did not move — a mode nothing can read is still neither saved nor
+		// restored — only the mode that illustrates it, which is what a test naming a specific number
+		// signs up for.
 		assert!(
-			terminal.saved_modes.restore(9).is_none(),
-			"unknown to the engine"
+			terminal.saved_modes.restore(1010).is_none(),
+			"unknown to the engine and to cmote"
 		);
 	}
 
