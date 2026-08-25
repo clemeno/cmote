@@ -17446,3 +17446,106 @@ green through anything.
   the edge was not readable either.
 - **No live session.** Exercised through `Terminal::process` and `mouse::encode`; no remote program was
   observed setting either mode.
+
+## §151 — The three that cost a bit cmote has not got
+
+Three ❌ rows that look like ordinary gaps and are not. **Nothing is built here.** What this section
+does is measure the price of each, which turned out to be the same price twice and a different one the
+third time — and the measuring corrected a mark and separated two rows the audit had lumped together.
+
+> | 5 / 6 | Slow / rapid blink | ❌ | the text flashes, slowly or fast; the engine carries no cell flag for it |
+> | 53 | Overline | ❌ | a line above the text |
+> | 2027 | Grapheme clustering | ❌ | a cluster occupies one cell rather than each code point taking its own |
+
+### The flag word is full, and that is the measurement
+
+`alacritty_terminal::term::cell::Flags` is a **`u16`**. It names fifteen bits — INVERSE, BOLD, ITALIC,
+UNDERLINE, WRAPLINE, WIDE_CHAR, WIDE_CHAR_SPACER, DIM, HIDDEN, STRIKEOUT, LEADING_WIDE_CHAR_SPACER,
+DOUBLE_UNDERLINE, UNDERCURL, DOTTED_UNDERLINE, DASHED_UNDERLINE — bits 0 to 14.
+
+**§56 took bit 15.** DECSCA protection rides in the engine's own flag word precisely so that it
+survives every print, scroll, insert, delete and reflow without the engine or the renderer noticing,
+and `term/mod.rs` carries a `const` assertion that the engine has not claimed that bit since.
+
+So the trick that made selective erase possible cannot be played twice. **There is no sixteenth bit**,
+and blink and overline each need one. A test asserts the word is full and names this section in its
+failure message, so a future engine that frees a bit or widens the word says so out loud — that is the
+opposite of what a build assertion should catch, which is why it is a test and not a `const`.
+
+### What a parallel grid would cost, since that is the obvious alternative
+
+Keep the attribute beside the engine, keyed by cell, the way §76 keys character paths and §146 keys
+line sizes by absolute document line. Two things break it, and the second is decisive.
+
+**Reflow.** `Term::resize` re-wraps the scrollback internally, with no sequence on the wire and no
+`Handler` method to watch. §34's prompt marks and §41's images are *dropped* on every resize for
+exactly this reason, and `Terminal::resize` says so. A per-cell attribute store would have to be
+dropped too, so a program's blinking text would silently stop blinking the moment the user dragged the
+window.
+
+**Size.** A per-LINE map holds one entry per line. A per-CELL map holds up to rows × columns for the
+page and grows without bound over the scrollback — and every entry is written by remote output. That
+is §12's refusal in a new costume: a program that turns blink on and floods the stream would make cmote
+allocate an entry per character, and the ceiling would be the scrollback cap rather than anything this
+feature justifies.
+
+Between them: the feature is a decoration, and the price is a store that is unbounded in remote input
+and wrong after every resize.
+
+### The two attributes fail at different layers, and the audit had them as one
+
+This is the correction the measuring turned up.
+
+**Blink reaches cmote.** `vte`'s SGR table has `[5] => Some(Attr::BlinkSlow)` and
+`[6] => Some(Attr::BlinkFast)`, so `terminal_attribute` is called, the gate forwards it, and
+`Term::terminal_attribute` falls to `_ => debug!("Term got unhandled attr")`. cmote is offered it and
+has nowhere to put it. That is a **gap** — ❌ — and what would close it is upstream.
+
+**Overline never reaches cmote at all.** There is no `[53]` arm; the parameter falls to `_ => None`
+and the loop `continue`s. `terminal_attribute` is never called with it, so cmote is never offered it
+and pays nothing to decline it. By this document's own legend that is **🤷**, and the row was carrying
+❌.
+
+Both are pinned by one test, on the property a program actually depends on: an SGR run carrying either
+still applies everything else, so `CSI 1 ; 5 ; 31 m` is bold red in cmote exactly as it is in a
+terminal that blinks. `vte` skips a parameter it does not know and carries on; the engine logs an
+attribute it has no arm for and carries on. A careless attempt at either attribute is what would break
+that, and the attempt would be caught anyway — a probe that made the gate swallow `Attr::BlinkSlow`
+failed `gatediff`'s `every_gate_arm_is_in_the_sweep` before it reached a single behaviour test, which
+is §102's guard doing exactly what it was built for.
+
+### Mode 2027 is a missing METHOD, not a missing bit
+
+The third row is a different shape and was worth measuring rather than assuming.
+
+`Term::input` decides a character's width with `unicode_width` and appends only **zero-width**
+followers to the cell before them (`CellExtra::zerowidth`). A ZWJ sequence whose parts are themselves
+wide therefore gets a cell each. Measured, not guessed — the family emoji `U+1F468 ZWJ U+1F469 ZWJ
+U+1F467` lands as **three wide cells across six columns**, each carrying its own joiner, and the test
+records it.
+
+Grapheme segmentation in front of `Handler::input` is the easy half and cmote is already standing
+there — the gate maps character sets on that very line (§143). The hard half has no door: having
+recognised a cluster, there is no engine call that appends a WIDE character to the preceding cell.
+`input` is the only way in and it decides per character.
+
+So this gap is upstream too, and of the three it is the one most likely to close on a version bump —
+which is what the test is for.
+
+### Files
+
+* `src/term/mod.rs` — three tests and no shipping code. The flag-word measurement, the SGR-run
+  survival property, and the six columns a family emoji occupies today.
+
+### Not done
+
+- **Nothing is implemented.** This section is a decision and a set of measurements; all three rows stay
+  gaps, one of them re-marked as a refusal that cmote is never offered.
+- **SGR 25 (blink off) is accepted and does nothing**, because it arrives as `Attr::CancelBlink` and
+  cancels a bit that was never set. It is harmless and needs no row of its own — there is nothing to
+  cancel and no state to get wrong.
+- **SGR 55 (no overline) dies where 53 does**, in the same `_ => None`. Not given a row: a pair where
+  neither half reaches the terminal is one fact, and the 53 row now says which layer eats them.
+- **The blink row is left ❌ rather than becoming a refusal**, deliberately. Nothing in cmote refuses
+  it; the engine has nowhere to put it. ❌ is this document's mark for a gap that could still land, and
+  what would make it land — a wider flag word — is a change upstream rather than a decision here.

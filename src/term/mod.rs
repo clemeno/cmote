@@ -4012,6 +4012,87 @@ mod tests {
 		);
 	}
 
+	// --- The three attributes cmote has no bit for (§151) -------------------------------------------
+
+	/// The measurement §151 turns on: the engine's per-cell flag word is a `u16`, it names bits 0–14,
+	/// and §56 borrowed bit 15 for DECSCA protection. **There is no sixteenth bit.**
+	///
+	/// A test rather than a `const` assertion, and deliberately: a build assertion must fail on a
+	/// HARMFUL change, and a future engine that frees a bit or widens the word would be the opposite —
+	/// it would mean blink or overline had somewhere to go. So this goes red instead, and the section it
+	/// names is where to look (`protect::PROTECTED_BIT` keeps the build assertion that matters, which is
+	/// the engine CLAIMING bit 15).
+	#[test]
+	fn the_cell_flag_word_is_full() {
+		assert_eq!(
+			Flags::all().bits() | protect::PROTECTED_BIT,
+			u16::MAX,
+			"a bit came free — see PLAN §151, which refused blink and overline for want of one"
+		);
+		assert_eq!(
+			Flags::all().bits(),
+			!protect::PROTECTED_BIT,
+			"and the engine holds every OTHER bit, so the one cmote borrowed is the only one going"
+		);
+	}
+
+	/// SGR 5 and 6 REACH cmote and have nowhere to go; SGR 53 never reaches it at all. The two failures
+	/// are at different layers and the audit had them as one kind of gap (§151).
+	///
+	/// What both must not do is disturb the run they arrive in. `vte` skips a parameter it does not know
+	/// and carries on with the rest, and the engine logs an attribute it has no arm for and carries on
+	/// too — so `CSI 1 ; 5 ; 31 m` is bold red in cmote exactly as it is in a terminal that blinks. That
+	/// is the property a program actually depends on, and it is the one a careless attempt at either
+	/// attribute would break.
+	#[test]
+	fn an_sgr_run_carrying_an_attribute_cmote_has_no_bit_for_still_applies_the_rest() {
+		let runs: [(&[u8], &str); 4] = [
+			(b"\x1b[1;5;31mx", "slow blink"),
+			(b"\x1b[1;6;31mx", "rapid blink"),
+			(b"\x1b[1;53;31mx", "overline"),
+			(b"\x1b[1;5;53;6;31mx", "all three at once"),
+		];
+		for (sequence, what) in runs {
+			let mut terminal = Terminal::new(2, 4);
+			terminal.process(sequence);
+			let cell = terminal.screen().cell(0, 0).expect("a cell");
+			assert!(cell.bold(), "{what}: the bold before it survived");
+			assert_eq!(
+				cell.fgcolor(),
+				screen::Color::Indexed(1),
+				"{what}: and the red after it"
+			);
+		}
+	}
+
+	/// Mode 2027 asks for a grapheme CLUSTER to occupy one cell. This records what cmote does without
+	/// it, which is the measurement §151 refuses on: the engine gives every part of a ZWJ sequence that
+	/// is itself wide a cell of its own, because `Term::input` decides width per CHARACTER and appends
+	/// only ZERO-width followers to the cell before them.
+	///
+	/// A family emoji is therefore three wide cells across six columns rather than one cluster. The
+	/// missing piece is an engine API to append a WIDE character to the preceding cell, which is not a
+	/// bit cmote can borrow — it is a method that does not exist.
+	#[test]
+	fn a_wide_grapheme_cluster_takes_a_cell_for_each_of_its_parts() {
+		let mut terminal = Terminal::new(2, 10);
+		terminal.process("\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}".as_bytes());
+		// Three lead cells, each wide, each carrying its own joiner; three spacers between them.
+		for col in [0, 2, 4] {
+			let cell = terminal.screen().cell(0, col).expect("a lead cell");
+			assert!(cell.is_wide(), "column {col} leads a wide cell");
+		}
+		for col in [1, 3, 5] {
+			let cell = terminal.screen().cell(0, col).expect("a spacer");
+			assert!(cell.is_wide_continuation(), "column {col} is a spacer");
+		}
+		assert_eq!(
+			terminal.screen().cursor_position(),
+			(0, 6),
+			"six columns for one cluster — which is what mode 2027 exists to change"
+		);
+	}
+
 	#[test]
 	fn the_window_questions_about_the_user_draw_no_reply() {
 		// §36 and §147. Where the window sits, whether it is minimised and how large the display is are
