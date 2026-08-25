@@ -1,14 +1,14 @@
 // term/csi.rs — the facts every CSI scanner has to agree with the engine about.
 //
-// ELEVEN modules in this directory scan CSI sequences beside the stream, each for its own reason, and
+// TWELVE modules in this directory scan CSI sequences beside the stream, each for its own reason, and
 // every one of them used to carry its own copy of the grammar. §106's architecture review put that
 // duplication first, as "give the CSI family the floor OSC already has", and §111 did it: all of them
 // read [`Framer`] now and keep only the part that is theirs — deciding what a sequence MEANS.
 //
 // The ten §111 migrated, in that order: `tabs`, `dsr`, `scp`, `protect`, `sgrstack`, `modkeys`,
-// `rect`, `cancel`, `graphics`, `query`. `locator` is the eleventh and the first written ON the
-// framer rather than moved onto it (§140) — which is the migration's real dividend, since what that
-// module had to supply was one predicate and no grammar at all.
+// `rect`, `cancel`, `graphics`, `query`. `locator` is the eleventh and `savemodes` the twelfth, and
+// both were written ON the framer rather than moved onto it (§140, §141) — which is the migration's
+// real dividend, since what each had to supply was one predicate and no grammar at all.
 //
 // The number is worth spelling out because it was got wrong twice in §111's own prose — nine while
 // the migration ran, then "eleven" once it was over, which counted `differential` as a scanner when it

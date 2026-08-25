@@ -402,6 +402,59 @@ impl<'a> Screen<'a> {
 		}
 	}
 
+	/// Whether DEC private mode `mode` is set right now, or `None` when this seam cannot say (§141).
+	///
+	/// Written for XTSAVE, which has to record what a mode is before a program changes it. It is a
+	/// READER and never a writer: everything that puts a mode back does it by feeding the engine the
+	/// `CSI ? Ps h` / `l` the engine already handles, so the engine stays the only writer of its own
+	/// mode word (§71, §73) — the route §72, §74 and §85 all take.
+	///
+	/// `None` is the honest answer for three kinds of mode, and the distinction is the whole point of
+	/// the return type: a mode this cannot read is one XTSAVE must not pretend to have saved.
+	///
+	///   * **Modes the engine does not model as a flag.** `3` (DECCOLM) runs `deccolm()` and erases the
+	///     page rather than leaving a bit behind; `2026` (synchronised update) is handled inside the
+	///     parser and reaches `set_private_mode` as a no-op. There is no bit to read for either.
+	///   * **Every mode the engine has never heard of.** `47`, `1047`, `1048`, `9`, `2031` and the rest
+	///     reach `PrivateMode::Unknown` and are ignored there, so there is nothing to read and nothing
+	///     a restore could put back.
+	///
+	/// **`12` is answered even though it is not a flag**, and the reason is that another door onto it is
+	/// already open: the engine reports the blinking-cursor mode for DECRQM out of `cursor_style`, and
+	/// the matrix marks that row ✅ as "a tracked bit — set, reset, and reported back by DECRQM". A
+	/// terminal that reports a mode through one spelling and calls it unreadable through another is two
+	/// answers to one question (§71), so this reads the same field DECRQM does. It says nothing about
+	/// the cursor being DRAWN blinking — cmote runs no animation timer and never will (§65); the mode is
+	/// tracked, and that is exactly what a save and a restore move.
+	///
+	/// **Mode 69 is not here**, though cmote can both read and write it: it is cmote's own (§102,
+	/// `term/margins.rs`) and the engine knows nothing about it, so it is answered one level up where
+	/// the margins live. This function is about the ENGINE's modes, and mixing the two would make the
+	/// seam a place cmote's own state hides behind the engine's.
+	pub fn private_mode(&self, mode: u16) -> Option<bool> {
+		if mode == 12 {
+			return Some(self.engine.cursor_style().blinking);
+		}
+		let flag = match mode {
+			1 => TermMode::APP_CURSOR,
+			6 => TermMode::ORIGIN,
+			7 => TermMode::LINE_WRAP,
+			25 => TermMode::SHOW_CURSOR,
+			1000 => TermMode::MOUSE_REPORT_CLICK,
+			1002 => TermMode::MOUSE_DRAG,
+			1003 => TermMode::MOUSE_MOTION,
+			1004 => TermMode::FOCUS_IN_OUT,
+			1005 => TermMode::UTF8_MOUSE,
+			1006 => TermMode::SGR_MOUSE,
+			1007 => TermMode::ALTERNATE_SCROLL,
+			1042 => TermMode::URGENCY_HINTS,
+			1049 => TermMode::ALT_SCREEN,
+			2004 => TermMode::BRACKETED_PASTE,
+			_ => return None,
+		};
+		Some(self.engine.mode().contains(flag))
+	}
+
 	/// The ABSOLUTE document line viewport row `row` is showing right now (§40). Line 0 is the
 	/// oldest line the engine still retains and `history_size` is the top of the live screen, so the
 	/// whole document is `0 ..= history_size + screen_lines - 1` — the same scrollback-stable

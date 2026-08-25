@@ -74,6 +74,7 @@ mod protect; // reads the selective-erase sequences the engine drops — DECSCA,
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
 mod rect; // reads the VT420 rectangular bounds operations the engine drops — DECERA, DECSERA, DECFRA, DECCRA (§58), DECCARA, DECRARA, DECSACE (§59)
 mod region; // mirrors the engine's private vertical scrolling region, so cmote can read back what DECSTBM set (§102)
+mod savemodes; // reads XTSAVE / XTRESTORE, the private modes a program saves and puts back (§141)
 pub mod scp; // reads SCP, the direction a line's characters are laid down in (§76)
 pub mod screen; // the engine-agnostic view of the screen the app reads through (§9, §16, §23)
 pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
@@ -396,6 +397,8 @@ impl Terminal {
 			tabs: tabs::Tabs::default(),
 			dsr: dsr::Dsr::default(),
 			locator: locator::Locator::default(),
+			savemodes: savemodes::SaveModes::default(),
+			saved_modes: savemodes::Saved::default(),
 			sgr_stack: sgrstack::SgrStack::default(),
 			saved_pens: Vec::new(),
 			dropped_pushes: 0,
@@ -444,42 +447,17 @@ impl Terminal {
 		self.parser.stop_sync(&mut gate);
 	}
 
-	/// Feed a chunk of raw output from the shell, and return the bytes to send BACK to it as
-	/// replies to any status/identity queries it carried (§9, §23) — usually empty. The
-	/// engine applies every escape sequence and glyph to the grid; partial sequences split
-	/// across chunks are buffered internally, so any chunk boundary is safe. It answers the
-	/// host queries itself (DSR, DA, DECRQM, cursor-position reports), handing each reply to
-	/// our listener as an `Event::PtyWrite`, which accumulates in `replies`; we drain it here.
-	/// A cursor-position report is emitted at the moment the query is parsed, so it reflects
-	/// the cursor where the query sat — the engine gets that right where the old hand-rolled
-	/// answerer had to split the feed to. The same bytes also feed the cwd tracker (§17), which
-	/// reads the stream as it came off the wire for the working directory the shell announces, and
-	/// the OSC 133 prompt-mark scanner (§34) and the inline-image scanner (§41) — for both of which
-	/// `process` DOES split the advance, so each mark is applied at the grid line the cursor is on
-	/// when it arrives and each picture is placed where the stream put it.
-	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
-		self.cwd.feed(bytes);
-		// The modifyOtherKeys level, and any question about it (§9, §61). The question is answered
-		// by the tracker itself, at the point in the stream it sits, because the tracker is the one
-		// thing that holds the answer — so the bytes come back here already formatted.
-		let modkeys_reply = self.modkeys.feed(bytes);
-		// The progress a remote command reports (§54). Like the cwd, it is a latest-value reading
-		// with no position on the grid, so it needs no split in the advance below — only the order
-		// the reports arrive in, which its own scanner keeps.
-		self.progress.feed(bytes);
-		// The icon name a program set for its tab (OSC 1, §69). Another latest-value reading with no
-		// position on the grid, so it needs no split either — and `vte` has no arm for the code, so
-		// this scanner is the only thing in cmote that ever sees it.
-		self.icon.feed(bytes);
-		// The mouse pointer shape a remote asks for over its own grid (OSC 22, §77). A third
-		// latest-value reading with no place on the grid, so no split either — and like the icon
-		// name, nothing else in the stack ever sees it: `vte` parses the sequence and hands it to a
-		// `Handler` method left at its empty default body, which the engine never overrides.
-		self.pointer.feed(bytes);
-		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
-		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
-		// for the usual flow where a program sets attributes and then queries in the same write.
-		let queries = self.queries.feed(bytes);
+	/// Run every scanner that reports a POSITION in the chunk, and collect what each of them found.
+	///
+	/// Split out of `process` in §141, when that function had grown one scanner at a time until it
+	/// tripped the line limit. The seam is a real one and not just a place to cut: everything in here
+	/// reports an OFFSET into the chunk, and everything left behind is either a latest-value reading with
+	/// no place on the grid (the cwd, the progress, the icon, the pointer shape) or the reply plumbing.
+	///
+	/// Nothing here touches the engine. The scanners only read the byte stream, so the whole chunk is
+	/// scanned before the engine is advanced by a single byte — which is exactly what lets the
+	/// interruption loop below walk every scanner's findings in one merged stream order.
+	fn scan_interruptions(&mut self, bytes: &[u8]) -> Scanned {
 		// OSC 133 shell-integration marks (§34) and inline images (§41): the engine ignores both, so
 		// scan them out and apply each at the point in the stream it sits. A prompt-start anchors to a
 		// grid line and an image anchors to the cursor's line and column, so the engine is advanced up
@@ -521,6 +499,10 @@ impl Terminal {
 		// come back in the order they were asked; the protocol's other two sequences are read by this
 		// scanner and produce nothing, which is what a terminal with nothing to arm has to say.
 		let locator_requests = self.locator.feed(bytes);
+		// XTSAVE / XTRESTORE, the private modes a program remembers and puts back (§141). Interruption-fed
+		// in both directions — see the field's note — and the only scanner here whose two halves need the
+		// split for different reasons.
+		let saved_modes = self.savemodes.feed(bytes);
 		// The character path (§76), and the RIS that empties the store of them. Interruption-fed like the
 		// prompt marks and for the same reason: SCP names no line of its own, it acts on the one the
 		// cursor is on, so the engine has to be where the sequence is before the cursor is read.
@@ -529,7 +511,7 @@ impl Terminal {
 		// a push must read the pen as it stood where the push was written, and a pop must restore it
 		// there — a chunk that pushes, paints itself red and pops would otherwise save the red.
 		let sgr_stack = self.sgr_stack.feed(bytes);
-		let scanned = Scanned {
+		Scanned {
 			marks,
 			images,
 			bookmarks,
@@ -539,9 +521,49 @@ impl Terminal {
 			tab_resets,
 			cursor_requests,
 			locator_requests,
+			saved_modes,
 			paths,
 			sgr_stack,
-		};
+		}
+	}
+
+	/// Feed a chunk of raw output from the shell, and return the bytes to send BACK to it as
+	/// replies to any status/identity queries it carried (§9, §23) — usually empty. The
+	/// engine applies every escape sequence and glyph to the grid; partial sequences split
+	/// across chunks are buffered internally, so any chunk boundary is safe. It answers the
+	/// host queries itself (DSR, DA, DECRQM, cursor-position reports), handing each reply to
+	/// our listener as an `Event::PtyWrite`, which accumulates in `replies`; we drain it here.
+	/// A cursor-position report is emitted at the moment the query is parsed, so it reflects
+	/// the cursor where the query sat — the engine gets that right where the old hand-rolled
+	/// answerer had to split the feed to. The same bytes also feed the cwd tracker (§17), which
+	/// reads the stream as it came off the wire for the working directory the shell announces, and
+	/// the OSC 133 prompt-mark scanner (§34) and the inline-image scanner (§41) — for both of which
+	/// `process` DOES split the advance, so each mark is applied at the grid line the cursor is on
+	/// when it arrives and each picture is placed where the stream put it.
+	pub fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
+		self.cwd.feed(bytes);
+		// The modifyOtherKeys level, and any question about it (§9, §61). The question is answered
+		// by the tracker itself, at the point in the stream it sits, because the tracker is the one
+		// thing that holds the answer — so the bytes come back here already formatted.
+		let modkeys_reply = self.modkeys.feed(bytes);
+		// The progress a remote command reports (§54). Like the cwd, it is a latest-value reading
+		// with no position on the grid, so it needs no split in the advance below — only the order
+		// the reports arrive in, which its own scanner keeps.
+		self.progress.feed(bytes);
+		// The icon name a program set for its tab (OSC 1, §69). Another latest-value reading with no
+		// position on the grid, so it needs no split either — and `vte` has no arm for the code, so
+		// this scanner is the only thing in cmote that ever sees it.
+		self.icon.feed(bytes);
+		// The mouse pointer shape a remote asks for over its own grid (OSC 22, §77). A third
+		// latest-value reading with no place on the grid, so no split either — and like the icon
+		// name, nothing else in the stack ever sees it: `vte` parses the sequence and hands it to a
+		// `Handler` method left at its empty default body, which the engine never overrides.
+		self.pointer.feed(bytes);
+		// Sniff the identity queries the engine drops (§33). Parse them BEFORE advancing, but reply
+		// AFTER: a DECRQSS SGR report then reflects the pen as this chunk left it, which is right
+		// for the usual flow where a program sets attributes and then queries in the same write.
+		let queries = self.queries.feed(bytes);
+		let scanned = self.scan_interruptions(bytes);
 		// Whether this chunk put a picture on the alternate page — the one thing that makes the
 		// covered-cell sweep below sit the chunk out (see `retire_covered_images`).
 		let mut placed_on_alternate = false;
@@ -597,6 +619,7 @@ impl Terminal {
 					Interruption::TabStops => self.set_default_tabs(),
 					Interruption::Dsr(request) => self.answer_dsr(request),
 					Interruption::LocatorPosition => self.answer_locator(),
+					Interruption::SaveModes(request) => self.apply_saved_modes(&request),
 					Interruption::Path(request) => self.select_character_path(request),
 					Interruption::SgrStack(request) => self.apply_sgr_stack(request),
 				}
@@ -1062,6 +1085,53 @@ impl Terminal {
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(locator::UNAVAILABLE);
+	}
+
+	/// Carry out one XTSAVE or XTRESTORE — remember what some private modes are, or put them back
+	/// (§141), with the engine advanced to the sequence that carried it.
+	///
+	/// **A save READS and a restore FEEDS**, and neither writes engine state. The value saved comes
+	/// from `private_mode` below, which is a reader over the engine's own mode word; the value restored
+	/// goes back as `CSI ? Ps h` or `CSI ? Ps l`, sequences the engine already implements. So the
+	/// engine stays the only writer of its own modes (§71, §73) — the route §72 took for the soft
+	/// reset, §74 for the tab stops and §85 for the pen.
+	///
+	/// A mode the seam cannot read is not saved, and a mode that was never saved is not restored. Both
+	/// silences are deliberate and `term/savemodes.rs` holds the argument: guessing at either would put
+	/// a mode somewhere no program asked for, which is the stuck state this exists to prevent.
+	///
+	/// The modes are walked in the order the sequence wrote them, because the engine's mouse protocols
+	/// are mutually exclusive — setting `1003` clears `1000` and `1002` — so the last one fed is the
+	/// one that stands, exactly as it would be for a program writing the same `h` sequences itself.
+	fn apply_saved_modes(&mut self, request: &savemodes::SaveModesRequest) {
+		for &mode in &request.modes {
+			if request.restore {
+				let Some(value) = self.saved_modes.restore(mode) else {
+					continue;
+				};
+				let feed = savemodes::mode_feed(mode, value);
+				self.advance(&feed);
+			} else if let Some(value) = self.private_mode(mode) {
+				self.saved_modes.save(mode, value);
+			}
+		}
+	}
+
+	/// Whether DEC private mode `mode` is set, across both places cmote can answer for one (§141).
+	///
+	/// `Screen::private_mode` reads the ENGINE's mode word and says `None` for anything it does not
+	/// model as a flag. Mode 69 is the one cmote holds itself — the engine has never heard of DECLRMM,
+	/// so the gate keeps it and `term/margins.rs` is its only home (§102) — and it is answered here
+	/// rather than inside the seam, so that cmote's own state does not end up hiding behind the
+	/// engine's.
+	///
+	/// Restoring 69 needs no special case to match: the fed `CSI ? 69 h` goes through `advance`, which
+	/// runs the gate, and the gate is what holds the mode. One route in, one route out.
+	fn private_mode(&self, mode: u16) -> Option<bool> {
+		if mode == gate::LEFT_RIGHT_MARGIN_MODE {
+			return Some(self.margins.enabled());
+		}
+		self.screen().private_mode(mode)
 	}
 
 	/// Carry out one push or pop of the video-attribute stack (§85), with the engine advanced to the
@@ -2203,6 +2273,17 @@ pub struct Terminal {
 	/// `#` intermediate at all (§84, §85). Fed by the interruption advance for DECXCPR's reason: the pen a push
 	/// saves is the pen where the push was WRITTEN, not where the chunk ended.
 	sgr_stack: sgrstack::SgrStack,
+	/// Finds XTSAVE / XTRESTORE, which `vte` dispatches and `ansi.rs` has no arm for — the private
+	/// marker counts as an intermediate there, so `('s', [b'?'])` and `('r', [b'?'])` match nothing
+	/// (§141). Fed by the interruption advance in BOTH directions: a save reads the modes as they stand
+	/// where the sequence was written, and a restore feeds the engine mode changes that have to land at
+	/// that same point rather than after the chunk.
+	savemodes: savemodes::SaveModes,
+	/// What those saves remembered, one slot per mode. A record of what a mode WAS, replayed only by
+	/// feeding the engine `CSI ? Ps h` / `l` — never consulted to answer what a mode IS, which is what
+	/// would have made it a second source (§71, §85, §141). Bounded by the modes `Screen::private_mode`
+	/// answers for, so no stream can grow it (§12).
+	saved_modes: savemodes::Saved,
 	/// The pens that stack has saved, innermost last, each with the mask of what its push named. Ten
 	/// deep, as xterm's is (`sgrstack::DEPTH`), which is the whole of what a remote can make cmote hold
 	/// here. Cleared by nothing: a stack outlives a chunk by definition, and a program that never pops
@@ -2284,6 +2365,11 @@ enum Interruption {
 	/// here rather than answered after the chunk so that a program writing DECXCPR and DECRQLP in one
 	/// breath reads the two answers back in the order it asked for them.
 	LocatorPosition,
+	/// An XTSAVE or XTRESTORE — the private modes a program remembers and puts back (§141). Applied on
+	/// the far side of its sequence like the tab-stop reset, and it is here rather than after the chunk
+	/// for two different reasons at once: a save READS state that the rest of the chunk may change, and a
+	/// restore FEEDS the engine bytes that must land where the sequence sat.
+	SaveModes(savemodes::SaveModesRequest),
 	/// A character path for the line the cursor is on, or the RIS that forgets them all (§76).
 	Path(scp::ScpRequest),
 	/// A push or pop of the video-attribute stack (§85). Applied on the far side of its sequence, and
@@ -2310,6 +2396,7 @@ struct Scanned {
 	tab_resets: Vec<usize>,
 	cursor_requests: Vec<(usize, dsr::DsrRequest)>,
 	locator_requests: Vec<usize>,
+	saved_modes: Vec<(usize, savemodes::SaveModesRequest)>,
 	paths: Vec<(usize, scp::ScpRequest)>,
 	sgr_stack: Vec<(usize, sgrstack::SgrStackRequest)>,
 }
@@ -2327,6 +2414,7 @@ impl Scanned {
 			&& self.tab_resets.is_empty()
 			&& self.cursor_requests.is_empty()
 			&& self.locator_requests.is_empty()
+			&& self.saved_modes.is_empty()
 			&& self.paths.is_empty()
 			&& self.sgr_stack.is_empty()
 	}
@@ -2347,6 +2435,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		tab_resets,
 		cursor_requests,
 		locator_requests,
+		saved_modes,
 		paths,
 		sgr_stack,
 	} = scanned;
@@ -2360,6 +2449,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 			+ tab_resets.len()
 			+ cursor_requests.len()
 			+ locator_requests.len()
+			+ saved_modes.len()
 			+ paths.len()
 			+ sgr_stack.len(),
 	);
@@ -2408,6 +2498,11 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		locator_requests
 			.into_iter()
 			.map(|offset| (offset, Interruption::LocatorPosition)),
+	);
+	merged.extend(
+		saved_modes
+			.into_iter()
+			.map(|(offset, request)| (offset, Interruption::SaveModes(request))),
 	);
 	merged.extend(
 		paths
@@ -4441,6 +4536,182 @@ mod tests {
 		let both = terminal.process(b"\x1b[?56n\x1b[?55n");
 		assert_eq!(both, b"\x1b[?57;0n\x1b[?53n".to_vec());
 		assert_eq!(read(&terminal, 0, 0, 40), "", "and none of it printed");
+	}
+
+	/// The case the compatibility row named as the harm of not having XTSAVE (§141): "a program that
+	/// saves `? 25`, hides the cursor and restores gets no restore, so the cursor stays hidden after it
+	/// exits". Exactly that sequence, and the cursor comes back.
+	#[test]
+	fn a_saved_cursor_mode_is_put_back_by_the_restore() {
+		let mut terminal = Terminal::new(10, 40);
+		assert!(!terminal.screen().hide_cursor(), "shown to begin with");
+		terminal.process(b"\x1b[?25s\x1b[?25l");
+		assert!(terminal.screen().hide_cursor(), "the program hid it");
+		terminal.process(b"\x1b[?25r");
+		assert!(
+			!terminal.screen().hide_cursor(),
+			"and the restore brought it back"
+		);
+	}
+
+	/// The property the split advance exists for, and the one a chunk of constants could not show. The
+	/// save sits AFTER the hide in the same write, so it has to record "hidden" — a scanner that
+	/// collected its requests and applied them at the end of the chunk would record the same thing by
+	/// luck, so the second half is what settles it: the save sits BEFORE the hide, and must record
+	/// "shown" even though the chunk ends with the cursor hidden.
+	#[test]
+	fn a_save_records_the_mode_as_it_stood_where_the_sequence_sat() {
+		let mut terminal = Terminal::new(10, 40);
+		// Save after the hide: the saved value is "hidden", so a restore leaves it hidden.
+		terminal.process(b"\x1b[?25l\x1b[?25s");
+		terminal.process(b"\x1b[?25h\x1b[?25r");
+		assert!(
+			terminal.screen().hide_cursor(),
+			"saved hidden, restored hidden"
+		);
+
+		// Save BEFORE the hide, in one write. The chunk ends hidden; the save must still be "shown".
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?25s\x1b[?25l");
+		terminal.process(b"\x1b[?25r");
+		assert!(
+			!terminal.screen().hide_cursor(),
+			"the save was written before the hide, so it recorded shown"
+		);
+	}
+
+	/// `Pm` is a list, and the whole list round-trips. The mouse modes are the realistic case — a
+	/// program saves the three it is about to change and puts them back on the way out.
+	#[test]
+	fn a_list_of_modes_round_trips_together() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?1006h\x1b[?1002h");
+		assert_eq!(
+			terminal.screen().mouse_mode(),
+			screen::MouseMode::ButtonMotion
+		);
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Sgr
+		);
+		terminal.process(b"\x1b[?1002;1006;2004s");
+		// The program changes all of them, then puts them back.
+		terminal.process(b"\x1b[?1002l\x1b[?1006l\x1b[?2004h");
+		assert_eq!(terminal.screen().mouse_mode(), screen::MouseMode::None);
+		terminal.process(b"\x1b[?1002;1006;2004r");
+		assert_eq!(
+			terminal.screen().mouse_mode(),
+			screen::MouseMode::ButtonMotion
+		);
+		assert_eq!(
+			terminal.screen().mouse_encoding(),
+			screen::MouseEncoding::Sgr
+		);
+	}
+
+	/// A mode that was never saved is not restored — deliberately NOT xterm's zeroed array, which
+	/// would read an unpaired restore as "reset". Guessing here would let two sequences no program
+	/// paired turn the cursor off, which is the stuck state XTSAVE exists to prevent, reached from the
+	/// other direction.
+	#[test]
+	fn restoring_a_mode_that_was_never_saved_changes_nothing() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?25l");
+		assert!(terminal.screen().hide_cursor());
+		terminal.process(b"\x1b[?25r");
+		assert!(
+			terminal.screen().hide_cursor(),
+			"nothing was saved, so nothing is put back"
+		);
+	}
+
+	/// A mode the seam cannot read is not saved, so its restore has nothing to feed. `3` (DECCOLM)
+	/// erases the page rather than leaving a flag, and a restore that guessed at it would erase the
+	/// page on the way past — which is why `private_mode` answers `None` rather than a default.
+	#[test]
+	fn a_mode_the_seam_cannot_read_is_neither_saved_nor_restored() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"hello");
+		terminal.process(b"\x1b[?3;2026;9s");
+		terminal.process(b"\x1b[?3;2026;9r");
+		assert_eq!(
+			read(&terminal, 0, 0, 5),
+			"hello",
+			"no restore ran, so nothing erased the page"
+		);
+		assert!(
+			terminal.saved_modes.restore(3).is_none(),
+			"DECCOLM has no bit"
+		);
+		assert!(terminal.saved_modes.restore(2026).is_none(), "the parser's");
+		assert!(
+			terminal.saved_modes.restore(9).is_none(),
+			"unknown to the engine"
+		);
+	}
+
+	/// Mode 12 is the one mode the engine keeps somewhere other than its mode word, and it is saved
+	/// anyway — because DECRQM already reports it, and a terminal that answers a mode through one
+	/// spelling while calling it unreadable through another is two answers to one question (§71).
+	///
+	/// What moves is the TRACKED bit, which is all a save and a restore ever move. The cursor still
+	/// draws steady either way: cmote runs no animation timer (§65), and this changes nothing about
+	/// that.
+	#[test]
+	fn the_blinking_cursor_mode_is_saved_because_another_door_already_reports_it() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?12h");
+		assert_eq!(terminal.process(b"\x1b[?12$p"), b"\x1b[?12;1$y".to_vec());
+		terminal.process(b"\x1b[?12s\x1b[?12l");
+		assert_eq!(
+			terminal.process(b"\x1b[?12$p"),
+			b"\x1b[?12;2$y".to_vec(),
+			"the program turned it off"
+		);
+		terminal.process(b"\x1b[?12r");
+		assert_eq!(
+			terminal.process(b"\x1b[?12$p"),
+			b"\x1b[?12;1$y".to_vec(),
+			"and the restore agrees with the door DECRQM opens"
+		);
+	}
+
+	/// Mode 69 is cmote's own — the engine has never heard of DECLRMM — so it is the one mode whose
+	/// save reads cmote's state and whose restore feeds a sequence only the gate acts on. One route in
+	/// and one route out, with no special case in the restore.
+	#[test]
+	fn the_margin_mode_round_trips_through_cmotes_own_state() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.process(b"\x1b[?69h");
+		terminal.process(b"\x1b[?69s\x1b[?69l");
+		assert_eq!(
+			terminal.process(b"\x1b[?69$p"),
+			b"\x1b[?69;2$y".to_vec(),
+			"the program turned it off"
+		);
+		terminal.process(b"\x1b[?69r");
+		assert_eq!(
+			terminal.process(b"\x1b[?69$p"),
+			b"\x1b[?69;1$y".to_vec(),
+			"and the restore turned it back on"
+		);
+	}
+
+	/// The store is bounded by what can be read, not by what a stream sends — the §12 property stated
+	/// as a test rather than trusted to the comment beside the type. A thousand parameters cannot make
+	/// it hold more than the modes `private_mode` answers for.
+	#[test]
+	fn a_flood_of_modes_cannot_grow_the_store() {
+		let mut terminal = Terminal::new(10, 40);
+		let modes: Vec<String> = (0..2000).map(|mode| mode.to_string()).collect();
+		let request = format!("\x1b[?{}s", modes.join(";"));
+		terminal.process(request.as_bytes());
+		// Far fewer than the parameters sent, and capped by the framer's own limit besides.
+		assert!(
+			terminal.saved_modes.len() <= 16,
+			"stored {} modes",
+			terminal.saved_modes.len()
+		);
 	}
 
 	/// The protocol those two questions are ABOUT (§140). DECRQLP asks where the locator is and gets

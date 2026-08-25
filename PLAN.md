@@ -16102,3 +16102,140 @@ quoting a tally and the arithmetic had drifted — the running total was last wr
   door over: it is true, it advertises nothing, and a careless caller could still read "locator
   unavailable" as "no pointing device", when cmote is reporting the mouse in xterm's spelling all the
   while. The protocols are different and the answer is correct.
+
+## §141 — XTSAVE and XTRESTORE, and a blocker that was two things at once
+
+`CSI ? Pm s` remembers what each named DEC-private mode is set to; `CSI ? Pm r` puts them back. The
+politeness protocol a full-screen program uses around a mode it is about to change, and the row that
+named its own harm:
+
+> A **gap** with a named risk: a program that saves `? 25`, hides the cursor and restores gets no
+> restore, so the cursor stays hidden after it exits — a stuck state of exactly the shape §72's soft
+> reset exists to prevent.
+
+### The blocker, read again
+
+The row and two *Not done* lists all said the same thing, and §106's put it most strongly:
+
+> **XTSAVE / XTRESTORE is not a scanner problem** … Restoring an arbitrary private mode means holding
+> a copy of the engine's mode state, which makes cmote a second source for it — §71's rule, and the
+> reason the row's own note calls the cost understated.
+
+That is two claims wearing one coat, and they are not equally true.
+
+**The §71 half is too strong.** What §71 and §73 refuse is a second *writer* — cmote reaching into the
+engine's mode word and setting bits, so that two pieces of code decide what a mode is. Nothing here
+does that. A restore FEEDS the engine `CSI ? Ps h` or `CSI ? Ps l`, sequences the engine already
+implements and this matrix already marks ✅, so the engine remains the only writer of its own modes.
+That is precisely the route §72 took for the soft reset, §74 for the tab stops and §85 for the pen.
+
+And a saved *copy* is not a second source. §85 settled that already: `saved_pens` holds the engine's
+template cell as it stood at each push, and nothing calls it a second opinion about what the pen is
+NOW. A saved mode is the same object — a record of what a mode WAS, consulted only to be replayed
+through the engine. The one question that could make it a second source is DECRQM, and DECRQM is
+answered from the live mode (§60), never from here.
+
+**The other half was true, and small.** The row's own note ended "which the engine's seam does not
+expose" — and that was a fact about *cmote's* seam, not the engine's. `Term::mode()` is public.
+`Screen` simply had no reader over it. Writing that reader is most of this section.
+
+The lesson is not that §71 was wrong. It is that a rule invoked from memory, three sections running,
+had stopped being checked against what the rule actually says — and the check took one grep.
+
+### What can be saved is what can be read
+
+A mode is saveable exactly when `Screen::private_mode` answers `Some` for it, plus mode 69. Deriving
+the set from the reader rather than writing a second list is deliberate: two lists are two things to
+keep in step, and the one that drifted would be the one that quietly saved a mode nothing could put
+back.
+
+That covers `1`, `6`, `7`, `12`, `25`, `1000`–`1007`, `1042`, `1049`, `2004` and `69`. What is left out
+is left out because there is nothing to read: `3` (DECCOLM) runs `deccolm()` and erases the page rather
+than leaving a bit behind, `2026` is handled inside the parser and reaches `set_private_mode` as a
+no-op, and every mode the engine never heard of arrives as `PrivateMode::Unknown` and is ignored there.
+
+**Mode 12 nearly went in that second list, and catching it is the part worth recording.** The
+blinking cursor is the one mode the engine keeps somewhere other than its mode word, so the first cut
+of the reader answered `None` for it, with a tidy justification: cmote runs no animation timer, so the
+seam deliberately carries no blink (§65). The matrix says otherwise two rows apart — **"12 (the mode) |
+Blinking cursor — tracked | ✅ | set, reset, and reported back by DECRQM"**. The engine reports it out
+of `cursor_style`, which is public, and cmote already calls that method for the cursor's shape.
+
+A terminal that reports a mode through one spelling and calls it unreadable through another is two
+answers to one question, which is the §71 objection this section spent its first half narrowing —
+arriving by the back door. Mode 12 is read from the same field DECRQM reads. What moves is the tracked
+bit, which is all a save and a restore ever move; the cursor still draws steady, and §65 is untouched.
+
+### A mode never saved is not restored
+
+xterm keeps its saved values in an array that starts zeroed, so a restore of a mode nobody saved reads
+as "reset" there. cmote does nothing instead.
+
+This is a divergence chosen rather than inherited, and the reason is the row's own risk read backwards.
+ctlseqs says "the value of Ps previously saved is restored", and where no value was previously saved
+there is nothing to restore. Guessing "reset" would let two sequences no program ever paired turn the
+cursor off — the same stuck state this section exists to prevent, reached from the other direction.
+
+### Both halves need the split advance, for different reasons
+
+The scanner is interruption-fed in both directions, and the two directions want it for opposite halves
+of the same property:
+
+- a **save** READS the modes as they stand where the sequence was written. A chunk that hides the
+  cursor and then saves must record "hidden"; one that saves and then hides must record "shown".
+- a **restore** FEEDS the engine mode changes, which have to land where the sequence sat rather than
+  after the chunk — otherwise a program that restores and then prints has its printing happen first.
+
+The second seam test is the one that settles it, because the first passes by luck: a scanner that
+collected everything and applied it at the end of the chunk would record "hidden" correctly and
+"shown" wrongly, so both orders are asserted.
+
+### `process` was extracted, and it had earned it
+
+Adding the twelfth scanner pushed `process` to 102 lines against the pedantic limit of 100. The limit
+was right and the fix is not a shorter comment: that function had been growing one scanner at a time
+since §34, and the seam was already there to be cut on. `scan_interruptions` now holds everything that
+reports an OFFSET into the chunk, and `process` keeps the latest-value readings that have no place on
+the grid (cwd, progress, icon, pointer shape), the advance, and the reply plumbing.
+
+Nothing in the extracted half touches the engine, which is the property that makes it one function:
+the whole chunk is scanned before the engine is advanced by a single byte.
+
+### Files
+
+- `src/term/savemodes.rs` — new. The scanner, the store, the fed mode change, twelve tests.
+- `src/term/screen.rs` — `private_mode`, the reader over the engine's mode word, with mode 12 read
+  from `cursor_style` where DECRQM reads it.
+- `src/term/mod.rs` — the module line, the scanner and store fields, `Interruption::SaveModes`, the
+  `Scanned` field and its merge sites, `apply_saved_modes`, `private_mode` for mode 69,
+  `scan_interruptions` extracted from `process`, eight seam tests.
+- `src/term/gate.rs` — `LEFT_RIGHT_MARGIN_MODE` made `pub(super)` rather than spelling 69 twice.
+- `src/term/differential.rs` — registered in both sweeps; `r` added to the shape space (8 100 → 8 640);
+  three prose counts corrected.
+- `src/term/csi.rs` — eleven scanners → twelve.
+- `TERMINAL_COMPATIBILITY_PLAN.md` — the row rewritten ❌ → ✅.
+- `PLAN.md` — this section.
+
+**1 595 tests**, twenty added: twelve in `savemodes.rs` and eight at the seam.
+
+The row moves **❌ → ✅**. 216 rows: **✅ 121 · ❌ 26 · 🛑 42 · 🤷 27**.
+
+### Not done
+
+- **The GUI was not driven.** This is byte-stream behaviour and the seam tests cover it, but no live
+  program has been watched saving and restoring its modes over a real session.
+- **Mode 1049 is saved and restored like any other**, which means a restore can swap the screen and
+  clear the alternate page. That is not new capability — `CSI ? 1049 h` is a sequence any remote can
+  already send, and this is a second spelling of it — but it is the one mode here whose restore is
+  visible as more than a setting, and it is worth knowing before somebody reports it as a bug.
+- **The mouse modes' mutual exclusion is the engine's and is not modelled here.** Setting `1003`
+  clears `1000` and `1002`, so restoring a list of them replays the same overwriting a program would
+  get writing those `h` sequences itself. Consistent, but it means restoring `1000;1002;1003` does not
+  return three independent bits — it returns whatever the last one fed leaves standing.
+- **xterm's own save/restore was not read.** ctlseqs describes both sequences and says the values are
+  DECSET's, which is what the implementation rests on; `savemodes.c`'s actual behaviour for the modes
+  with side effects — 1049 above, and DECCOLM, which cmote does not save at all — is unverified.
+- **`? 2026` cannot be saved**, and unlike the others that is arguably right rather than a gap: a
+  synchronised update is a bracket a program opens and closes within one chunk, not a setting that
+  outlives the sequence that set it. Recorded because "the engine has no bit" is the reason given, and
+  that reason would stop applying if the parser ever exposed one.

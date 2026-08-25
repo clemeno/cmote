@@ -80,7 +80,11 @@ use super::{Engine, ReplyBuffer};
 /// Absent from the engine's `NamedPrivateMode`, so it arrives as an `Unknown` and would otherwise be
 /// ignored — including by the DECRQM answer, which would report "not recognised" for a mode cmote
 /// now implements.
-const LEFT_RIGHT_MARGIN_MODE: u16 = 69;
+///
+/// Visible to the rest of `term` since §141, where XTSAVE has to ask "is this a mode cmote can read?"
+/// and 69 is the one such mode the engine cannot answer for. A second constant spelling the same
+/// number would be a second place for it to drift.
+pub(super) const LEFT_RIGHT_MARGIN_MODE: u16 = 69;
 
 /// Write one `Handler` method that hands its arguments straight to the engine.
 ///

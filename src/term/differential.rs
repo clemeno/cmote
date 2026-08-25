@@ -264,8 +264,9 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// `locator` (§140), and the `'` above with it — `z` and `{` were already here for `rect` and
 	/// `sgrstack`, which is exactly why the intermediate had to come too: DECELR and DECERA differ only
 	/// in it, and a sweep blind to `'` could not tell one scanner claiming another's sequence from a
-	/// scanner minding its own.
-	const FINALS: &[u8] = b"smqpJKWk{}zncS|";
+	/// scanner minding its own. `r` joined with `savemodes` (§141), where the near miss is DECSTBM —
+	/// `CSI Pt ; Pb r` with no marker is the scrolling region, which the engine really acts on.
+	const FINALS: &[u8] = b"smqpJKWk{}zncS|r";
 
 	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
 	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
@@ -611,7 +612,7 @@ mod tests {
 
 	#[test]
 	fn the_scanners_with_no_engine_arm_read_through_a_stray_byte_too() {
-		// The eight CSI scanners whose sequences the engine has no live arm for, and the reason this test is
+		// The nine CSI scanners whose sequences the engine has no live arm for, and the reason this test is
 		// here rather than in each of them: the rule they are being held to is the ENGINE's
 		// (`csi::passes_through`), and the only thing that makes it their business is that they shadow the
 		// same byte stream. (The other three — `cancel`, `protect`, `graphics` — watch sequences the engine
@@ -632,7 +633,7 @@ mod tests {
 			bytes
 		};
 
-		let claims: [ClaimAt; 8] = [
+		let claims: [ClaimAt; 9] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
 			}),
@@ -671,6 +672,14 @@ mod tests {
 			// can be asserted.
 			("locator, DECRQLP", b"\x1b[0'|", 3, |bytes| {
 				!super::super::locator::Locator::default()
+					.feed(bytes)
+					.is_empty()
+			}),
+			// XTSAVE (§141). The SAVE form rather than the restore, because the two differ only in their
+			// final byte and one entry can carry only one sequence — and a save is the half that READS
+			// state, so a scanner that lost it would silently record nothing to put back.
+			("savemodes, XTSAVE", b"\x1b[?25s", 3, |bytes| {
+				!super::super::savemodes::SaveModes::default()
 					.feed(bytes)
 					.is_empty()
 			}),
@@ -716,9 +725,9 @@ mod tests {
 		// without anyone thinking of the case.
 		//
 		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
-		// all eleven can answer in common. TWELVE entries for eleven scanners: `protect` is listed twice
+		// all twelve can answer in common. THIRTEEN entries for twelve scanners: `protect` is listed twice
 		// because its verdict depends on whether the pen is armed, and both states have to be swept.
-		let scanners: [DifferentialClaim; 12] = [
+		let scanners: [DifferentialClaim; 13] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -773,13 +782,20 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// §141, and the entry that put `r` into the shape space: DECSTBM wears the same final byte
+			// with no marker, and the engine really acts on it.
+			("savemodes", b"", |bytes| {
+				!super::super::savemodes::SaveModes::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		let shapes = shapes();
 		assert_eq!(
 			shapes.len(),
-			8100,
-			"5 markers x 9 intermediates x 4 params x 15 finals x 3 orders"
+			8640,
+			"5 markers x 9 intermediates x 4 params x 16 finals x 3 orders"
 		);
 		// Collected rather than asserted case by case: the first failure is never the whole story, and an
 		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".
