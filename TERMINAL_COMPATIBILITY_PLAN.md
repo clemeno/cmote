@@ -589,8 +589,15 @@ short, and since §41 nothing left in it is high value:
   never reaches the grid (§36, moved here from part 4). Showing it would take a per-cell scanner beside
   the engine (as `modkeys` is) *plus* the repaint timer cmote deliberately does not run. `[ECMA-48]`,
   low value.
-- **Double-width / double-height lines** (DECDWL / DECDHL, `ESC#3-6`) — not represented
-  (single wide glyphs are; whole-line doubling is not). `[DEC]`.
+- **~~Double-width / double-height lines~~ (DECDWL / DECDHL, `ESC#3-6`) — SHIPPED in §146.** The
+  engine really does not represent them — there is no `DoubleHeight` or `DECDHL` symbol in the crate —
+  and that turned out not to matter, because a line's SIZE is not something the engine has to know:
+  the grid holds the text the host sent and the size is a rule the renderer applies, which is §76's
+  arrangement for the character path applied to the other axis. DECDHL is exact (both axes by the same
+  factor is a uniform scale, which iced can express); DECDWL's glyphs are not fattened, because double
+  width with single height is anisotropic and iced 0.14 has no such scale for text — measured at
+  `iced_wgpu/src/text.rs:625-626`, where whatever transformation is in force is reduced to one number.
+  The row in part 8 carries the full account. `[DEC]`.
 - **~~Left / right margins~~ (DECSLRM, VT420) — SHIPPED in §102.** Read this bullet as the record of
   a verdict that was reversed, because the reversal turned on a single sentence being wrong.
 
@@ -1231,6 +1238,13 @@ nothing here was blocking a user; it was wrong to let that double as a reason no
 What is left of part 5 after §122 is blink, double-height lines and kitty graphics: two the engine drops
 outright, and one whole protocol.]*
 
+*[And a fourth time, for the same reason: **the double-height lines shipped in §146**, on the same
+beside-the-engine tactic — the engine has no notion of a line's size and does not need one, because
+the size is a rendering rule and not grid state (§76). What is left of part 5 is blink and kitty
+graphics. The pattern is now four for four, and the lesson is the one this paragraph keeps having to
+learn: "the engine does not represent it" prices an item as engine work, and for everything on this
+list so far it was not.]*
+
 **One line of hardening surfaced in §62 and was taken in §63.** Re-deriving every refusal from the
 crates showed that cmote had been leaving `alacritty_terminal`'s `config.osc52` at its default,
 `Osc52::OnlyCopy` — chosen upstream as *"a compromise between entirely disabling it (the most secure)
@@ -1302,7 +1316,8 @@ invisible in practice, or a protocol nobody here has asked for; iTerm2's inline 
 until §70 moved them to the other column, the rectangular ops shipped in §58, the margins in §102, and
 synchronized output's abort timeout in §122. For "support *any* documented app UX",
 there is no outstanding ceiling-raiser left; every item this document ever listed is either shipped or
-refused with its reason written down.
+refused with its reason written down. *[§146 took the double-height lines off that list too, leaving
+blink and kitty graphics.]*
 
 *[§102 read this paragraph as a warning rather than a summary. "No outstanding ceiling-raiser left" was
 true of USER-visible features and was quietly doing duty as "nothing left worth costing" — and the
@@ -1405,7 +1420,13 @@ declines others gets a row for each, rather than one mark averaging them — `OS
 more (✅/🛑 for `SetUserVar` and mode 12, ✅/🤷 for modes 3 and 80, ✅/❌ for `CSI ! p`, the locking shifts
 and mode 2026), and §66 split the last two, DECRQSS and XTGETTCAP. **§72 rejoined one of them** — `CSI ! p`
 became ✅ on both halves, and a split whose halves agree is a row saying one thing in two places, which the
-rule is against for the same reason it is against the reverse. That is why there is no "partial" mark
+rule is against for the same reason it is against the reverse. **§143 met that edge twice and did NOT
+rejoin**, which is worth recording as the rule's boundary rather than an exception to it: both of §65's
+charset splits are now ✅ on both halves, and neither is one fact in two rows. `ESC ( B` / `0` against
+the other finals is the two sets `vte` DISPATCHES against the eleven it drops — two doors, argued
+differently — and SI / SO against the other locking shifts is the two that reach GL and are live
+against three that reach GR, where nothing can ever land because cmote is UTF-8 only (§67). Same mark,
+different fact. The rule is about a row that cannot be CHECKED, and each of these four can. That is why there is no "partial" mark
 here: a row saying two things at once cannot be checked, and every finding this document has recorded came
 from checking one. Sections below that speak of a row having been "partial" are describing what it used to
 carry, not a mark still in use — the symbol itself is gone from this document, so it cannot be copied into
@@ -2008,7 +2029,9 @@ Audited file:line anchors behind the claims above, for later re-checking.
   refusal of the margins build.
 - **No graphics, no double-height lines, no left/right margins, no `?2026`** — no `Sixel`,
   `graphics`, `DoubleHeight`/`DECDHL`, `left_right_margin`, or synchronized-update symbols in the
-  crate source.
+  crate source. Still true of the crate, and no longer true of cmote: all four are implemented beside
+  it (§41, §146, §102, §122), which is what makes this bullet worth keeping — it is the measurement
+  that priced each of them as engine work, and each time the price was wrong.
 - **The synchronized-update timeout is set and never read** (`vte-0.15.0/src/ansi.rs`, read for
   §122). `SYNC_UPDATE_TIMEOUT` is 150 ms (`:36`) and `SYNC_BUFFER_SIZE` 2 MiB (`:39`);
   `StdSyncHandler::set_timeout` stores `Instant::now() + duration` (`:459`) and `pending_timeout`
