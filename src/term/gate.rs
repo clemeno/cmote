@@ -461,6 +461,40 @@ impl<'a> Gate<'a> {
 			.extend_from_slice(reply.as_bytes());
 	}
 
+	/// Turn in-band resize notifications on or off, and send the first one (§148).
+	///
+	/// **The report on the way in is the specification's, not a convenience**: "when first enabled, the
+	/// terminal MUST send a report of the current size". A program that sets the mode has no other way
+	/// to learn the size it is starting from — SIGWINCH is what it could not receive — so without this
+	/// it would sit at the default until the user happened to drag the window.
+	///
+	/// *First* enabled, and that word is load-bearing: the report goes out on the TRANSITION and not on
+	/// every `CSI ? 2048 h`. A program that re-asserts the mode it already holds is not surprised by a
+	/// size it did not ask for, and the sequence stays idempotent, which is what a program re-asserting
+	/// its modes after a restore is entitled to (§141).
+	fn enable_resize_reports(&mut self, on: bool) {
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		let first = on && !buffer.resize_reports;
+		buffer.resize_reports = on;
+		if first {
+			let report = buffer.resize_report();
+			buffer.bytes.extend_from_slice(&report);
+		}
+	}
+
+	/// Answer a DECRQM about mode 2048, which the engine would report as "not recognised" (§148).
+	///
+	/// Mode 69's answer one function up, for its reason: once cmote implements a mode, the engine's `0`
+	/// is a lie a program acts on. Here it would be the more expensive kind — a program told the mode is
+	/// unknown falls back to SIGWINCH, which is the very thing it asked for the mode because it cannot
+	/// receive.
+	fn report_resize_mode(&mut self) {
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		let value = if buffer.resize_reports { 1 } else { 2 };
+		let reply = format!("\x1b[?{};{value}$y", super::inband::MODE);
+		buffer.bytes.extend_from_slice(reply.as_bytes());
+	}
+
 	/// Put cmote's character-set banks on whichever screen the engine is now showing (§143).
 	///
 	/// Read from the engine's own mode flag rather than from the sequence that changed it, which is
@@ -530,6 +564,10 @@ impl Handler for Gate<'_> {
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.seal();
 		buffer.eight_bit_controls = super::c1::DEFAULT_EIGHT_BIT;
+		// And the resize notifications go quiet (§148). RIS only, on the same reasoning as the line
+		// above: the mode is nobody's DECSTR list, and §72 was careful not to widen the published one.
+		// No report is sent on the way out, for `unset_private_mode`'s reason.
+		buffer.resize_reports = super::inband::DEFAULT_ENABLED;
 	}
 
 	/// Print one character, breaking the line at the RIGHT MARGIN instead of at the screen edge.
@@ -844,25 +882,37 @@ impl Handler for Gate<'_> {
 		self.charsets.restore();
 	}
 
-	/// DECSET. Mode 69 is DECLRMM, which turns the margins on (§102).
+	/// DECSET. Two modes are cmote's own: 69 is DECLRMM, which turns the margins on (§102), and 2048
+	/// turns in-band resize notifications on (§148).
 	///
-	/// The engine has no name for 69 and would drop it, which is why the sequence is answered here
-	/// and not forwarded: there is nothing on the far side of this call that knows what it means.
+	/// The engine has no name for either and would drop both, which is why they are answered here and
+	/// not forwarded: there is nothing on the far side of this call that knows what they mean.
 	fn set_private_mode(&mut self, mode: PrivateMode) {
 		if matches!(mode, PrivateMode::Unknown(LEFT_RIGHT_MARGIN_MODE)) {
 			let cols = self.cols();
 			self.margins.enable(true, cols);
 			return;
 		}
+		if matches!(mode, PrivateMode::Unknown(super::inband::MODE)) {
+			self.enable_resize_reports(true);
+			return;
+		}
 		self.term.set_private_mode(mode);
 		self.follow_screen();
 	}
 
-	/// DECRST. Turning DECLRMM off throws the band away with it.
+	/// DECRST. Turning DECLRMM off throws the band away with it; turning 2048 off simply stops the
+	/// notifications, and sends nothing on the way out — the specification asks for a report when the
+	/// mode is switched on and says nothing about switching it off, and a size volunteered to a program
+	/// that has just said it does not want them would be the exact thing the mode exists to stop.
 	fn unset_private_mode(&mut self, mode: PrivateMode) {
 		if matches!(mode, PrivateMode::Unknown(LEFT_RIGHT_MARGIN_MODE)) {
 			let cols = self.cols();
 			self.margins.enable(false, cols);
+			return;
+		}
+		if matches!(mode, PrivateMode::Unknown(super::inband::MODE)) {
+			self.enable_resize_reports(false);
 			return;
 		}
 		self.term.unset_private_mode(mode);
@@ -918,6 +968,10 @@ impl Handler for Gate<'_> {
 	fn report_private_mode(&mut self, mode: PrivateMode) {
 		if matches!(mode, PrivateMode::Unknown(LEFT_RIGHT_MARGIN_MODE)) {
 			self.report_margin_mode();
+			return;
+		}
+		if matches!(mode, PrivateMode::Unknown(super::inband::MODE)) {
+			self.report_resize_mode();
 			return;
 		}
 		self.term.report_private_mode(mode);

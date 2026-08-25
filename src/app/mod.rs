@@ -5708,18 +5708,27 @@ impl Tab {
 		// tree sits under it (§18) — so the same call serves a window resize and the pane's own
 		// resize (§19).
 		let (rows, cols) = ui::terminal::grid_size(size, self.panes.pane.reserved());
-		let changed = match self.terminal_mut() {
+		// The in-band resize notification, if a program asked for one (§148). It comes back from the
+		// resize itself rather than from the next `process`, because a resize is not a chunk of output
+		// and there may be no more output for hours — a program blocked on its own stdin waiting to hear
+		// about the new size would wait exactly that long.
+		let (changed, notification) = match self.terminal_mut() {
 			Some(terminal) if terminal.screen().size() != (rows, cols) => {
-				terminal.resize(rows, cols);
-				true
+				(true, terminal.resize(rows, cols))
 			}
-			_ => false,
+			_ => (false, Vec::new()),
 		};
 		if changed {
 			// The grid the user was pointing at, selecting in and searching through is not the grid
 			// that exists now (§43).
 			self.on_grid_reflowed();
 			self.send_command(SshCommand::Resize { cols, rows });
+		}
+		if !notification.is_empty() {
+			// The same channel a keystroke and a query reply take — sent AFTER the pty is told its new
+			// size, so a program that reads the notification and immediately asks the pty about itself
+			// is told the same thing twice rather than two different things once.
+			self.send_command(SshCommand::Input(notification));
 		}
 	}
 

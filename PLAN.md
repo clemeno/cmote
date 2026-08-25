@@ -17042,3 +17042,130 @@ is stronger than it was.
   simply does not claim them, and the test says so.
 - **No live session.** Exercised through `Terminal::process`; no remote program was observed asking
   for a cell size.
+
+## §148 — The size a program asks to be told about, and the one it can never be told
+
+Two DECSET modes from part 8's ❌ column, both about a terminal volunteering something rather than
+answering a question. One is now built and one is left where it is, and the pair is worth taking
+together because the second is what the first's argument tests against.
+
+### Mode 2048 — in-band resize notification
+
+> `| 2048 | In-band resize | ❌ | in-band resize notification — CSI 48 ; … on every size change, for a program that cannot see SIGWINCH |`
+
+A resize normally reaches a program as SIGWINCH, a signal delivered to the process group on the far
+side of a pty. That works for a program running directly under the shell and fails for everything
+that is not: one behind another multiplexer, one reading a pipe, one on a platform with no such
+signal. The mode says *write it on the same channel as everything else*.
+
+The specification (`gist.github.com/rockorager/e695fb2924d36b2bcf1fff4a3704bd83`) is short, and two
+of its sentences decide code:
+
+* **"When first enabled, the terminal MUST send a report of the current size."**
+* **"If a terminal is not capable of reporting pixel sizes, it must report them as 0."**
+
+`CSI 48 ; rows ; cols ; height ; width t`. Cells first, then pixels, each pair height before width —
+the same trap `CSI 16 t`'s reply carries one section back (§147), and the reason both builders take
+named arguments rather than four bare numbers.
+
+#### The flag lives on the reply buffer, and that is the whole design
+
+`ReplyBuffer` already carries the grid size and one cell's pixel size, put there so the engine's
+event listener can resolve a colour or size answer without reaching back into the engine. **Those
+four numbers are exactly the report.** So the mode's bit went there too, and `resize_report` is a
+method on the buffer that reads all four *in one expression under one lock* — because a report built
+from a `rows`/`cols` pair read at one moment and a cell size read at another would describe a window
+that never existed.
+
+§145 put the 7-bit/8-bit control form on the same buffer, on the argument that every reply in the
+program passes through it. This is that argument one step further along: everything the reply is
+*made of* is already there.
+
+It pays immediately. A resize notification is a reply like any other, so it goes out through `take`
+and is sealed into whatever C1 form the program asked for — a program that asked for 8-bit controls
+and then read `ESC [` where it expected `0x9b` would be a program cmote had lied to. That fell out of
+the placement rather than being arranged.
+
+#### The gate owns the mode, because mode 69 already showed how
+
+`alacritty_terminal` has no name for 2048; it arrives as `PrivateMode::Unknown(2048)` and would be
+ignored, DECRQM included. That is DECLRMM's situation exactly (§102) and it gets DECLRMM's answer:
+the gate claims the sequence and does not forward it, so there is one writer and the engine is never
+asked to hold a bit it has never heard of. DECRQM is answered here too, and for a sharper version of
+§102's reason — a program told "not recognised" falls back to SIGWINCH, which is the very thing it
+asked for the mode *because it cannot receive*.
+
+XTSAVE and XTRESTORE come free. `Terminal::private_mode` answers for 2048 as it already does for 69,
+and a restore feeds `CSI ? 2048 h` back through `advance`, which runs the gate. One route in, one
+route out, no special case (§141).
+
+#### *First* enabled is load-bearing
+
+The report goes out on the **transition**, not on every `CSI ? 2048 h`. A program re-asserting a mode
+it already holds is not handed a size it did not just ask for, and the sequence stays idempotent —
+which is what a program restoring its modes is entitled to. Turning the mode *off* sends nothing:
+the specification asks for a report when it is switched on and says nothing about switching it off,
+and a size volunteered to a program that has just said it does not want them is the exact thing the
+mode exists to stop.
+
+RIS puts the mode back to off, as it does the control form (§145). DECSTR does not — the mode is on
+nobody's published soft-reset list, and §72 was careful not to widen the one DEC wrote.
+
+#### `Terminal::resize` returns bytes now, and that is a new kind of reply
+
+Every reply in `term/` until now has been an answer to a question in the byte stream. This one is
+not: the question was asked once, with `CSI ? 2048 h`, and the answer arrives whenever the user drags
+a window. So `resize` returns the notification and `app::on_window_resized` sends it on the channel a
+keystroke takes.
+
+It could **not** wait for the next `process`. A resize is not a chunk of output and there may be no
+more output for hours — a program blocked on its own stdin waiting to hear about the new size would
+wait exactly that long, which is the failure the mode exists to prevent, reintroduced one layer down.
+
+The notification is sent *after* `SshCommand::Resize`, so a program that reads it and immediately
+asks the pty about itself is told the same thing twice rather than two different things once.
+
+### Mode 2031 — colour-scheme reporting, and why it stays a gap
+
+> the **unsolicited** half of dark/light reporting: with it set the terminal sends `CSI ? 997 ; 1 n` /
+> `; 2 n` every time its scheme changes.
+
+Read again beside 2048, because the two are the same shape — a mode that turns unsolicited reports
+on — and it would have been easy to do both at once.
+
+**It would be a promise with nothing behind it.** cmote's colour scheme is fixed (§6): `palette.rs`
+is a const table, `report_color` resolves every query through it, and the renderer paints from it
+with no terminal to ask. There is no event that could ever fire this notification.
+
+And claiming the mode would make a program **worse off**. DECRQM answers `0` for it today — *not
+recognised*, which is the truth — and a program told that polls `CSI ? 996 n` instead, which cmote
+answers (§98). A program told `2` would set the mode, stop polling, and wait for ever.
+
+So the mark stays ❌ rather than becoming a refusal, and that is the right mark by this document's own
+definition: ❌ is a gap that could still land. **The gap is not this row.** The day cmote's scheme can
+change — a light theme, a follow-the-system setting — this mode becomes real work and a good idea,
+and the row's note now says where the blocker actually is.
+
+### Files
+
+* `src/term/inband.rs` — new. Two constants, the report builder, and the tests. No state: it is a
+  grammar, and the state it would have held is on the buffer for the reason above.
+* `src/term/mod.rs` — `resize_reports` on `ReplyBuffer`, `resize_report` beside `seal` and `take`,
+  the notification in `resize`, and 2048 in `private_mode`.
+* `src/term/gate.rs` — the two mode arms, `enable_resize_reports`, `report_resize_mode`, and the RIS.
+* `src/app/mod.rs` — `on_window_resized` forwards what the resize returned.
+
+### Not done
+
+- **The app's forwarding is not covered by a test.** Everything below `Terminal::resize` is —
+  including that the bytes come back and that they are sealed into the control form in force — but the
+  `SshCommand::Input` that carries them needs a live session to observe. It is four lines and one
+  `if`, and it is the only part of this section a reader has to check by eye.
+- **A cell-size change does not notify.** `set_cell_pixels` is called once, at construction, from
+  constants; cmote has no runtime font-size change to notify about. If one is ever added, it becomes
+  the second writer of the pixel half of the report and will have to fire one.
+- **Nothing is coalesced.** A drag that fires ten resizes sends ten notifications, because
+  `on_window_resized` already suppresses the ones that do not change the cell count and what is left
+  are real changes a program asked to hear about.
+- **No live session.** Exercised through `Terminal::process` and `Terminal::resize`; no remote program
+  was observed setting the mode.

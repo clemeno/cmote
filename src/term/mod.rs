@@ -60,6 +60,7 @@ mod gate; // the one place cmote sits between the parser and the engine, so a de
 mod gatediff; // drives a second, ungated engine beside cmote's and compares the grids they produce (§102, §106)
 pub mod graphics; // finds the inline images the engine drops, and anchors them to the document (§41)
 mod icon; // reads the icon name a remote sets, OSC 1, for the tab chip to wear (§69)
+mod inband; // builds the resize notification a program asks to be told about with mode 2048 (§148)
 pub mod iterm; // reads the parts of iTerm2's OSC 1337 namespace cmote honours — an allow-list (§55)
 pub mod keymap; // maps GUI key events to the bytes a terminal sends
 pub mod kitty; // encodes key events in the kitty keyboard protocol's CSI u form (§25)
@@ -1325,6 +1326,18 @@ impl Terminal {
 		if mode == gate::LEFT_RIGHT_MARGIN_MODE {
 			return Some(self.margins.enabled());
 		}
+		// Mode 2048 is the second one cmote holds itself (§148), and it is answered here for 69's
+		// reason. Restoring it needs no special case either: the fed `CSI ? 2048 h` goes through
+		// `advance`, which runs the gate, and a restore to ON therefore sends the first report — which
+		// is right, because a program that restores the mode is a program that wants to be told the size.
+		if mode == inband::MODE {
+			return Some(
+				self.replies
+					.lock()
+					.expect("reply buffer mutex poisoned")
+					.resize_reports,
+			);
+		}
 		self.screen().private_mode(mode)
 	}
 
@@ -2076,7 +2089,13 @@ impl Terminal {
 	/// Resize the grid when the window changes (§9). This only reflows our local
 	/// view; the remote pty is told separately via `SshCommand::Resize`, so the
 	/// two are kept in step by the caller (`app::on_window_resized`).
-	pub fn resize(&mut self, rows: u16, cols: u16) {
+	///
+	/// Returns the bytes to send back to the shell, which are empty unless a program has asked for
+	/// in-band resize notification (§148). That is the one reply in this file that is not an answer to
+	/// a question in the byte stream — the question was asked once, with `CSI ? 2048 h`, and this is
+	/// the terminal keeping its side of it. The caller sends them on the same channel a keystroke takes,
+	/// exactly as it sends what `process` returns.
+	pub fn resize(&mut self, rows: u16, cols: u16) -> Vec<u8> {
 		self.term.resize(GridSize {
 			rows: rows as usize,
 			cols: cols as usize,
@@ -2112,6 +2131,16 @@ impl Terminal {
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
+		// The in-band notification, built under the same lock that just moved the numbers it is made of
+		// (§148). `take` rather than an append, because this reply is not going into a chunk's answer —
+		// there is no chunk. The buffer is empty between chunks, so what comes back is the notification
+		// and whatever a previous chunk left unclaimed, sealed into the C1 form in force (§145).
+		if !buffer.resize_reports {
+			return Vec::new();
+		}
+		let report = buffer.resize_report();
+		buffer.bytes.extend_from_slice(&report);
+		buffer.take()
 	}
 
 	/// Move the scrollback viewport (§23). The engine owns both the retained history and the
@@ -2878,6 +2907,14 @@ struct ReplyBuffer {
 	/// through the listener below, cmote's arrive from `Terminal` and from the gate, and all of them
 	/// end up in `bytes`.
 	eight_bit_controls: bool,
+	/// Mode 2048 — whether the terminal volunteers its size on every change (§148).
+	///
+	/// Here, beside the four numbers a notification is MADE of, which is one step past the reason
+	/// `eight_bit_controls` above gives for living here. The two writers are the gate (the mode
+	/// sequences, and the RIS that puts it back) and nothing else; the one reader is `Terminal::resize`,
+	/// which already takes this lock to update `rows` and `cols` and so builds the report under the same
+	/// lock that changed the numbers in it.
+	resize_reports: bool,
 	/// How many leading bytes of `bytes` are already in their final form.
 	///
 	/// A chunk can change the setting half way through, and the replies formed before the change
@@ -2897,6 +2934,16 @@ impl ReplyBuffer {
 		self.bytes.truncate(self.encoded);
 		self.bytes.extend_from_slice(&sealed);
 		self.encoded = self.bytes.len();
+	}
+
+	/// The in-band resize notification for the size this buffer is currently holding (§148).
+	///
+	/// A method here rather than four field reads at each of the two call sites, because the four have
+	/// to be taken TOGETHER: a report built from `rows` and `cols` read at one moment and a cell size
+	/// read at another would describe a window that never existed. Holding one lock and reading them in
+	/// one expression is what makes that unrepresentable.
+	fn resize_report(&self) -> Vec<u8> {
+		inband::report(self.rows, self.cols, self.cell_width, self.cell_height)
 	}
 
 	/// Take the sealed bytes, leaving the buffer empty and the watermark with them.
@@ -3619,6 +3666,119 @@ mod tests {
 			b"\x1b[6;17;8t\x1b[4;170;320t".to_vec(),
 			"asked cell first — and answered cell first"
 		);
+	}
+
+	/// The in-band resize notification for a 10 x 40 grid of 8 x 17 pixel cells (§148) — the shape every
+	/// test below expects, spelled once so a change to the format cannot be half-applied across them.
+	const REPORT_10_BY_40: &[u8] = b"\x1b[48;10;40;170;320t";
+
+	#[test]
+	fn enabling_the_resize_mode_reports_the_size_at_once() {
+		// "When first enabled, the terminal MUST send a report of the current size" (§148). A program
+		// that sets this mode has no other way to learn the size it is starting from — SIGWINCH is what
+		// it could not receive — so without this it sits at whatever it assumed until the user drags the
+		// window.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
+	}
+
+	#[test]
+	fn re_enabling_the_resize_mode_says_nothing() {
+		// *First* enabled. The report goes out on the TRANSITION, so a program re-asserting a mode it
+		// already holds is not handed a size it did not just ask for (§148).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
+		assert!(terminal.process(b"\x1b[?2048h").is_empty());
+		// And off, then on again, is a transition — so it reports.
+		assert!(terminal.process(b"\x1b[?2048l").is_empty());
+		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
+	}
+
+	#[test]
+	fn a_resize_notifies_only_a_program_that_asked_to_be_told() {
+		// The mode's whole purpose, and the property that makes it safe to have at all: a terminal that
+		// volunteered its size unasked would be writing bytes into a stream the program parses as its
+		// own input (§148).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert!(terminal.resize(20, 60).is_empty(), "nobody asked");
+		assert_eq!(
+			terminal.process(b"\x1b[?2048h"),
+			b"\x1b[48;20;60;340;480t".to_vec(),
+			"the size it is starting from is the one it has NOW"
+		);
+		assert_eq!(
+			terminal.resize(10, 40),
+			REPORT_10_BY_40.to_vec(),
+			"and every change after that"
+		);
+		assert!(terminal.process(b"\x1b[?2048l").is_empty());
+		assert!(terminal.resize(20, 60).is_empty(), "asked to stop");
+	}
+
+	#[test]
+	fn the_resize_mode_answers_its_own_decrqm() {
+		// The engine has never heard of 2048, so its answer would be `0` — "not recognised" — which is a
+		// lie a program acts on by falling back to the very signal it cannot receive (§148, §102).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(
+			terminal.process(b"\x1b[?2048$p"),
+			b"\x1b[?2048;2$y".to_vec(),
+			"recognised, and reset"
+		);
+		terminal.process(b"\x1b[?2048h");
+		assert_eq!(
+			terminal.process(b"\x1b[?2048$p"),
+			b"\x1b[?2048;1$y".to_vec()
+		);
+	}
+
+	#[test]
+	fn a_hard_reset_stops_the_resize_notifications() {
+		// RIS puts the mode back to its power-up state, as it does the C1 control form (§145). DECSTR
+		// does NOT: the mode is on nobody's published soft-reset list, and §72 was careful not to widen
+		// the one DEC wrote (§148).
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		terminal.process(b"\x1b[?2048h");
+		assert!(terminal.process(b"\x1b[!p").is_empty(), "DECSTR is silent");
+		assert_eq!(
+			terminal.resize(20, 60),
+			b"\x1b[48;20;60;340;480t".to_vec(),
+			"and left the mode alone"
+		);
+		terminal.process(b"\x1bc");
+		assert!(terminal.resize(10, 40).is_empty(), "RIS turned it off");
+	}
+
+	#[test]
+	fn the_resize_notification_is_written_in_the_control_form_in_force() {
+		// A resize report is a reply like any other, so it goes out through the same buffer and takes
+		// the C1 form the program asked for (§145, §148). It has to: a program that asked for 8-bit
+		// controls and then reads `ESC [` where it expects 0x9b is a program cmote lied to.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		terminal.process(b"\x1b G");
+		assert_eq!(
+			terminal.process(b"\x1b[?2048h"),
+			b"\x9b48;10;40;170;320t".to_vec()
+		);
+		assert_eq!(terminal.resize(20, 60), b"\x9b48;20;60;340;480t".to_vec());
+	}
+
+	#[test]
+	fn the_two_pixel_size_answers_and_the_notification_agree() {
+		// Three spellings of one pair (§147, §148). `CSI 14 t` multiplies it by the grid, `CSI 16 t`
+		// states it, and the notification carries both — all three off the numbers `set_cell_pixels`
+		// wrote, so none of them can disagree with the others.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
+		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
+		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
 	}
 
 	#[test]
@@ -5130,6 +5290,28 @@ mod tests {
 			terminal.process(b"\x1b[?69$p"),
 			b"\x1b[?69;1$y".to_vec(),
 			"and the restore turned it back on"
+		);
+	}
+
+	/// Mode 2048 is the second mode cmote holds itself (§148), and it round-trips the same way — with
+	/// one difference worth pinning: a restore to ON sends the first report, because the fed
+	/// `CSI ? 2048 h` goes through the gate exactly as a program's would, and a program that restores
+	/// the mode is a program that wants to be told the size.
+	#[test]
+	fn the_resize_mode_round_trips_and_the_restore_reports() {
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[?2048h"), REPORT_10_BY_40.to_vec());
+		assert!(terminal.process(b"\x1b[?2048s\x1b[?2048l").is_empty());
+		assert_eq!(
+			terminal.process(b"\x1b[?2048$p"),
+			b"\x1b[?2048;2$y".to_vec(),
+			"the program turned it off"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[?2048r"),
+			REPORT_10_BY_40.to_vec(),
+			"and the restore turned it back on, with the size that goes with it"
 		);
 	}
 
