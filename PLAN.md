@@ -15690,3 +15690,169 @@ last step, opening a file and pressing Ctrl+F, is the user's.
   text-measuring renderer, which is a harness this tree does not have and would not use twice. The
   cheaper guard is the rule stated above plus the comment at the call site; the honest note is that
   reversing those two arguments again is still a silent bug.
+
+## §138 — Inverting the match, in two halves because iced only offers one
+
+The ask was one sentence: on the exact substring a search matched, swap the text colour and the
+background. Every editor does it. iced's text pipeline does not — not in one piece.
+
+### The wall
+
+`text_editor` colours text through a `Highlighter`, and everything a highlighter can say about a span
+is this type (`iced_core-0.14.0/src/text/highlighter.rs`):
+
+```rust
+/// The format of some text.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Format<Font> {
+    /// The [`Color`] of the text.
+    pub color: Option<Color>,
+    /// The `Font` of the text.
+    pub font: Option<Font>,
+}
+```
+
+A colour and a font. There is no background field, and there is none further down either: the format
+becomes a `cosmic_text::Attrs` with `color_opt` set and nothing else. A `text_editor` paints exactly
+one background — its own, across the whole widget — plus the selection rectangle, which it draws only
+while the widget is focused. So "background of this substring" is not a thing iced can be asked for.
+
+### The split
+
+Which is fine, because half the answer was already in the tree. §137 established that a `Stack` can
+carry a layer UNDER the buffer, laid out against the buffer's own content width, and `line_band`
+already uses it to wash the current match's whole line. An opaque rectangle at a known x, y, width and
+height is precisely what an under layer is good at.
+
+So the inversion is two halves that meet on the glyphs:
+
+- **the ground** — `match_boxes` in `ui/editor.rs` paints an opaque block, in the palette's `fg`,
+  behind each visible hit's exact columns;
+- **the ink** — `ui/syntax.rs` recolours those same bytes to the palette's `buffer_bg`.
+
+Together: text colour and background swapped, on the substring and nowhere else. Neither half is an
+inversion on its own — the block alone would bury the glyphs in their own colour, and the ink alone
+would make them vanish into the background.
+
+### What makes the ink land without splitting a single syntect range
+
+The obvious worry is overlap. syntect hands out one span per scope run; a match sits anywhere across
+them, often mid-run. Splitting each scope range at the match boundaries by hand would be fiddly and
+easy to get wrong at the edges.
+
+It is not necessary. Follow what iced does with each span
+(`iced_graphics-0.14.*/src/text/editor.rs`):
+
+```rust
+for (range, highlight) in highlighter.highlight_line(line.text()) {
+    let format = format_highlight(&highlight);
+    if format.color.is_some() || format.font.is_some() {
+        list.add_span(range, &cosmic_text::Attrs { color_opt: ..., ... });
+```
+
+and then what `add_span` is (`cosmic-text-0.15.0/src/attrs.rs`):
+
+```rust
+pub fn add_span(&mut self, range: Range<usize>, attrs: &Attrs) {
+    //do not support 1..1 or 2..1 even if by accident.
+    if range.is_empty() {
+        return;
+    }
+    self.spans.insert(range, AttrsOwned::new(attrs));
+}
+```
+
+`self.spans` is a `RangeMap`, and `RangeMap::insert` OVERWRITES whatever the new range overlaps. So
+span order is precedence, last one wins. `highlight_line` therefore just chains: syntect's spans
+first, the match's ranges appended after. The grammar keeps every byte the search did not claim, the
+search takes every byte it did, and no range is cut by hand anywhere.
+
+### One rule for what a match is
+
+Three things now have to agree on where a hit starts and ends: the bar's `3 / 12`, the block behind
+the text, and the ink on top of it. Three loops would be three chances to disagree — a block sitting
+where no hit is, or a hit the ink missed. So the search is one function, `editor::line_matches`,
+`pub(crate)` for exactly this reason: `find_matches` runs it down the buffer for the bar, and the
+highlighter runs it on each line it is fed. The highlighter is handed the QUERY, not a list of
+offsets, so there is no second copy of the answer to drift.
+
+### Byte offsets are not columns, and the view must not be the one to find out
+
+A hit's `byte_start` is what iced selects with; a block's left edge is a display COLUMN times
+`CHAR_ADVANCE`. Converting one to the other means walking the line expanding tabs — and the view runs
+every frame. So `EditorMatch` now carries `col_start` / `col_end`, computed once when the search runs,
+by `display_columns_at`: one traversal of the line resolving every ascending offset on it, rather than
+one `display_columns` call per prefix, which would be quadratic on a line with hundreds of hits.
+
+### The blocks are virtualised, exactly as the gutter is
+
+A one-letter query in a large file has tens of thousands of hits. A container per hit would make each
+keystroke cost more than the search. `match_boxes` takes the same `visible_lines` window the gutter
+uses and asks for only the hits inside it — `Find::spans_between`, two `partition_point` calls, since
+the match list is in document order and therefore sorted by line. Everything off screen is spacer
+height, so the column still sums to `count × LINE_HEIGHT` and each block lands on its line by the same
+arithmetic the gutter and the band already agree on.
+
+### The stack is three layers now, and always three
+
+Paint order is child order, and `push_under` inserts at index 0. So the blocks are pushed FIRST and
+the band SECOND — leaving `[band, blocks, editor]`, painting wash, then block, then glyphs. The other
+way round the translucent wash would tint the opaque block it is meant to lie under.
+
+The layers are always present, an empty one standing in when there is nothing to draw. iced diffs a
+child's state by its position among its siblings, so a `text_editor` that changed index when the find
+bar opened would have its state — the highlighter with it — thrown away on that frame.
+
+### What it costs, plainly
+
+The query has to be part of `SyntaxSettings`, because that is the only value iced compares to decide
+whether to re-run the highlighter. iced answers a settings change with `change_line(0)`, and because
+§32 lays the buffer out at its full content HEIGHT, iced's "last visible line" is the last line of the
+file, not of the viewport. So a keystroke in the find field re-parses the whole buffer.
+
+Nothing at a source file's size. A stall approaching the 8 MiB ceiling. There is no way around it from
+out here — `change_line(0)` is iced's call, not ours. The one thing that was avoidable was making the
+Default scheme pay for a feature it was not using, so it builds no highlighter at all until a query is
+live, and then uses syntect's do-nothing `Plain Text` grammar.
+
+### Why the glyphs are recoloured and not redrawn
+
+There is a shorter-looking route: draw the substring again, in the inverted colours, in an opaque box
+on TOP of the buffer. It was rejected, and the reason is the same number both routes depend on —
+`CHAR_ADVANCE`, which is `FONT_SIZE * 0.6`, an assumption about Fira Mono and not a measurement of it.
+
+If it is off by a fraction, a block drifts a pixel from the glyphs it sits behind: barely visible, and
+no worse than the drift `content_width` and the cursor-follow already live with. Redrawn glyphs
+drifting a pixel from the real ones underneath is ghosting — the same word printed twice, slightly
+apart. So: let iced place every glyph exactly once, and only change its colour.
+
+### Files
+
+- `src/editor.rs` — `line_matches` split out of `find_matches` as the one search rule; `EditorMatch`
+  made public and given `col_start` / `col_end`; `display_columns_at` and `column_advance`;
+  `Find::spans_between`; `Editor::find_spans_between` and `Editor::find_query`.
+- `src/ui/syntax.rs` — `SyntaxSettings` gains `query` and `inverted`; `SyntaxHighlight` becomes an
+  enum (`Scope` | `Match`); `highlight_line` chains the match spans after the grammar's; `PLAIN_TEXT`.
+- `src/ui/editor.rs` — `match_boxes`, `blocks_row`, `empty_layer`; the highlighter now runs under
+  either scheme while a search is live; the buffer's stack is a fixed three layers.
+- `PLAN.md` — this section.
+
+**1 560 tests**, three added, all on the arithmetic rather than the pixels: a tabbed line's hit
+reporting the columns the tab pushed it to, `display_columns_at` resolving a whole ascending set in
+one walk (including an offset past the line's end), and `spans_between` windowing a sorted match list
+without panicking on an empty or inverted window.
+
+### Not done
+
+- **Nothing tests that the block lands on the glyphs.** That needs iced's layout run with a real
+  text-measuring renderer — the same harness §137 wanted and this tree still does not have. What is
+  tested is everything upstream of the pixel: which bytes match, which columns those bytes are at, and
+  which hits are in the window. The `CHAR_ADVANCE` assumption is checked by eye, as it always has been.
+- **No horizontal virtualisation.** The window culls by LINE only. A single line carrying thousands of
+  hits spread across ten thousand columns materialises all of them, even the ones scrolled far off to
+  the right. It has not been worth the extra arithmetic; if it ever is, `scroll_x` and `view_width` are
+  already reported and would cull it the same way.
+- **The current match is not distinguished from the others.** Every hit gets the same inverted pair;
+  which one is current is still said by the line band and the gutter, as before. A second colour pair
+  would have to stay readable against `buffer_bg` ink under both schemes, and that is a colour decision
+  to make when it is asked for, not a guess to bake in now.

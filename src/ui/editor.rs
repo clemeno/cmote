@@ -355,27 +355,44 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 
 	// CME turns on syntax highlighting (§32): syntect parses each line and our CME-derived theme
 	// colours the scopes. A token the CME theme leaves alone keeps the buffer's own `value` colour,
-	// so the highlight sits over the flat scheme rather than replacing it. Default stays plain.
-	let editor_element: Element<'a, Message> = if matches!(editor.theme, EditorTheme::Cme) {
-		editor_widget
-			.highlight_with::<crate::ui::syntax::Highlighter>(
-				crate::ui::syntax::SyntaxSettings {
-					// Widen past the bare extension so a whole-name file (Makefile, .bashrc) or an
-					// extensionless shebang script highlights too (§32); the resolved grammar NAME is the
-					// identity, so a normal file's highlighter is not rebuilt when its first line is edited.
-					grammar: crate::ui::syntax::resolve_syntax(
-						crate::editor::file_name(&editor.path),
-						&editor.first_line(),
-					)
-					.name
-					.clone(),
-				},
-				|highlight, _theme| highlight.to_format(),
-			)
-			.into()
-	} else {
-		editor_widget.into()
-	};
+	// so the highlight sits over the flat scheme rather than replacing it.
+	//
+	// A live search turns the highlighter on under EITHER scheme (§138), because it is the only place a
+	// matched glyph's ink can be set: iced's `Format` carries a colour and a font, and no per-span
+	// background exists anywhere in its text pipeline — so the inversion is half here (the ink) and half
+	// in `match_boxes` below (the block behind it). With no query and no CME, Default stays plain and
+	// pays nothing, exactly as before.
+	let query = editor.find_query();
+	let editor_element: Element<'a, Message> =
+		if matches!(editor.theme, EditorTheme::Cme) || !query.is_empty() {
+			let grammar = match editor.theme {
+				// Widen past the bare extension so a whole-name file (Makefile, .bashrc) or an extensionless
+				// shebang script highlights too (§32); the resolved grammar NAME is the identity, so a normal
+				// file's highlighter is not rebuilt when its first line is edited.
+				EditorTheme::Cme => crate::ui::syntax::resolve_syntax(
+					crate::editor::file_name(&editor.path),
+					&editor.first_line(),
+				)
+				.name
+				.clone(),
+				// Default colours no scopes at all, so searching under it runs syntect's do-nothing grammar:
+				// the parse is a formality and the only spans that come out are the search's own.
+				EditorTheme::Default => crate::ui::syntax::PLAIN_TEXT.to_owned(),
+			};
+			editor_widget
+				.highlight_with::<crate::ui::syntax::Highlighter>(
+					crate::ui::syntax::SyntaxSettings {
+						grammar,
+						query: query.to_owned(),
+						// The buffer's own ground colour, so a matched glyph reads inverted against the block.
+						inverted: bg,
+					},
+					|highlight, _theme| highlight.to_format(),
+				)
+				.into()
+		} else {
+			editor_widget.into()
+		};
 
 	// A translucent band behind the current find match's line (§32), so the match is visible even while
 	// the find field holds focus (iced paints the buffer's own selection only when the buffer itself is
@@ -393,13 +410,30 @@ fn buffer_body<'a>(editor: &'a Editor, p: &Palette) -> Element<'a, Message> {
 	// the base inverts it: the buffer's own content width is the stack's size, the band is laid out
 	// against that as an uncompressed maximum, and its `Fill` lands exactly on the content width it
 	// wanted all along. `push_under` inserts at index 0 — so it still DRAWS first, beneath the glyphs.
+	//
+	// Two under layers now, not one (§138): the wash across the current match's whole LINE, and an
+	// opaque block behind each visible match's exact substring. Order matters and reads backwards —
+	// `push_under` inserts at index 0 and `draw` walks the children in order — so the blocks are pushed
+	// FIRST and the band SECOND, leaving [band, blocks, editor] and a paint order of wash, then block,
+	// then glyphs. Pushed the other way the translucent wash would tint the opaque block it is meant to
+	// lie under.
+	//
+	// Always THREE layers, an empty one standing in for a layer with nothing to draw, so the
+	// `text_editor` never changes index among its siblings. iced diffs a child's state by position, so
+	// an editor that shifted when the find bar opened would have its state — the highlighter with it —
+	// thrown away and rebuilt on that frame.
 	let line_count = editor.content.line_count().max(1);
-	let text_layer: Element<'a, Message> = match editor.find_match_line() {
-		Some(line) if line < line_count => stack![editor_element]
-			.push_under(line_band(line_count, line, p.match_line))
-			.into(),
-		_ => editor_element,
-	};
+	let text_layer: Element<'a, Message> = stack![editor_element]
+		.push_under(match_boxes(editor, line_count, fg).unwrap_or_else(empty_layer))
+		.push_under(
+			editor
+				.find_match_line()
+				.filter(|line| *line < line_count)
+				.map_or_else(empty_layer, |line| {
+					line_band(line_count, line, p.match_line)
+				}),
+		)
+		.into();
 
 	// The `Both` scrollable moves the text on both axes (§32) and reports its offset and visible size —
 	// the four numbers that let `App` follow the cursor's line AND column without reading the widget's
@@ -480,6 +514,92 @@ fn line_band<'a>(count: usize, line: usize, color: Color) -> Element<'a, Message
 	column![fixed_spacer(above), band, fixed_spacer(below)]
 		.width(Length::Fill)
 		.into()
+}
+
+/// A stack layer that occupies its slot and draws nothing (§138) — what stands in for the band or the
+/// match blocks when there is no search running, so the buffer's stack keeps a fixed three layers.
+fn empty_layer<'a>() -> Element<'a, Message> {
+	container(text("")).into()
+}
+
+/// An opaque block behind each visible find match's exact substring (§138) — the half of the inversion
+/// iced cannot do itself. A `text_editor`'s highlighter sets a span's colour and font and NOTHING
+/// else: `Format` has no background field, and no per-span background exists anywhere in iced's text
+/// pipeline. So the inversion is split — the ink on the glyphs is `ui::syntax`'s job, and the ground
+/// under them is this one's. The two agree because both ask `editor::line_matches` what a match is.
+///
+/// Virtualised exactly as the gutter is, and for the same reason: a one-letter query in a large file
+/// has tens of thousands of hits, and a container per hit would make each keystroke cost far more than
+/// the search itself. Only the hits on visible lines are materialised; every other line is spacer
+/// height, so the column still sums to `count × LINE_HEIGHT` and each block lands on its own line by
+/// construction — the same arithmetic the gutter and the band already agree on.
+///
+/// `None` when nothing on screen matches, so the caller can drop an empty layer into the slot instead.
+///
+/// Like `line_band`, this is only ever an UNDER layer (§137): its `Length::Fill` column is measured
+/// against the base layer's size, which is the buffer's content width. Used as the base it would
+/// measure its own empty spacers — zero — and take the text down with it.
+fn match_boxes<'a>(editor: &'a Editor, count: usize, color: Color) -> Option<Element<'a, Message>> {
+	let (first, last) = visible_lines(editor.scroll(), editor.view_height(), count);
+	let spans = editor.find_spans_between(first, last);
+	if spans.is_empty() {
+		return None;
+	}
+
+	let mut rows: Vec<Element<'a, Message>> = Vec::new();
+	// The first line the column has not yet accounted for, and the first span not yet drawn. The spans
+	// arrive in document order, so both only ever move forward and the runs below never overlap.
+	let mut done = 0;
+	let mut at = 0;
+	while at < spans.len() {
+		let line = spans[at].line;
+		let run = spans[at..].iter().take_while(|s| s.line == line).count();
+		// The unmatched lines since the last drawn row, collapsed to one spacer.
+		rows.push(fixed_spacer(super::pixels(line - done, LINE_HEIGHT)));
+		rows.push(blocks_row(&spans[at..at + run], color));
+		done = line + 1;
+		at += run;
+	}
+	// And the lines below the last matched one, likewise collapsed, so the total height is the buffer's.
+	rows.push(fixed_spacer(super::pixels(count - done, LINE_HEIGHT)));
+
+	Some(column(rows).width(Length::Fill).into())
+}
+
+/// One matched line's blocks (§138): alternating gaps and fills laid left to right, so a line with
+/// several hits costs two widgets per hit and needs no absolute positioning. The first gap is the
+/// hit's own x within the buffer (`col_x`, which folds in the text's left padding); every later gap is
+/// measured from where the previous block ended, which is why the spans must be in column order — they
+/// are, being document-ordered within a line.
+fn blocks_row<'a>(spans: &[crate::editor::EditorMatch], color: Color) -> Element<'a, Message> {
+	let mut cells: Vec<Element<'a, Message>> = Vec::with_capacity(spans.len() * 2);
+	let mut col = 0;
+	for (index, span) in spans.iter().enumerate() {
+		let gap = if index == 0 {
+			col_x(span.col_start)
+		} else {
+			super::pixels(span.col_start.saturating_sub(col), CHAR_ADVANCE)
+		};
+		cells.push(
+			container(text(""))
+				.width(Length::Fixed(gap))
+				.height(Length::Fixed(LINE_HEIGHT))
+				.into(),
+		);
+		let width = super::pixels(span.col_end.saturating_sub(span.col_start), CHAR_ADVANCE);
+		cells.push(
+			container(text(""))
+				.width(Length::Fixed(width))
+				.height(Length::Fixed(LINE_HEIGHT))
+				.style(move |_theme| container::Style {
+					background: Some(color.into()),
+					..container::Style::default()
+				})
+				.into(),
+		);
+		col = span.col_end;
+	}
+	row(cells).height(Length::Fixed(LINE_HEIGHT)).into()
 }
 
 /// The find / replace bar (§32): a query field with a live match count and prev / next steppers, a

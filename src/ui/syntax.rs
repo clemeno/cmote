@@ -1,9 +1,19 @@
-// ui/syntax.rs — syntax highlighting for the editor's CME theme (PLAN §32).
+// ui/syntax.rs — the editor's text colouring: syntax under the CME theme, and find matches under
+// either (PLAN §32, §138).
 //
-// The editor highlights only under the CME scheme (§32): a file reads much as it does in the user's
-// VS Code, colours and all. This is an iced `Highlighter` — the trait `text_editor::highlight_with`
-// drives — backed by `syntect`, the Sublime-grammar highlighting engine, with the syntax set from
-// `two-face` (a big grammar pack, so TypeScript / PHP / TOML and the rest are covered).
+// The editor's SCOPE colouring runs only under the CME scheme (§32): a file reads much as it does in
+// the user's VS Code, colours and all. This is an iced `Highlighter` — the trait
+// `text_editor::highlight_with` drives — backed by `syntect`, the Sublime-grammar highlighting
+// engine, with the syntax set from `two-face` (a big grammar pack, so TypeScript / PHP / TOML and the
+// rest are covered).
+//
+// It also carries the find match's INK (§138), and that part runs under both schemes, because this is
+// the only place in iced where the colour of particular glyphs can be set: a `Format` is a colour and
+// a font and nothing more, so the inverted read of a search hit is half here and half in
+// `ui::editor`'s `match_boxes`, which paints the block behind. Under the Default scheme, where no
+// scope is coloured, a running search highlights with syntect's do-nothing `PLAIN_TEXT` grammar, so
+// the parse yields nothing and the search's own spans are all that come out; with no search, Default
+// does not build a highlighter at all and pays nothing.
 //
 // The design is iced's own `iced_highlighter` ported almost verbatim, with ONE change that is the
 // whole point of doing it by hand: the theme. iced's built-in highlighter can only pick from a fixed
@@ -45,6 +55,11 @@ static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_no_
 /// (§32). `'static`, so a `syntect::Highlighter` can borrow it for the program's life.
 static CME_THEME: LazyLock<Theme> = LazyLock::new(cme_theme);
 
+/// The name of syntect's do-nothing grammar (§138) — what the Default scheme highlights with while a
+/// search is running, so the find match's inverted ink is available under a scheme that colours no
+/// scopes at all. `find_syntax_plain_text` resolves to exactly this name.
+pub const PLAIN_TEXT: &str = "Plain Text";
+
 /// What identifies a highlighter run to iced (§32): the NAME of the resolved grammar (`"Rust"`,
 /// `"Makefile"`, `"Git Ignore"`, `"Plain Text"`). The view resolves the file's grammar once — widening
 /// past the bare extension to whole names and shebangs (`resolve_syntax`) — and passes its name here,
@@ -53,10 +68,27 @@ static CME_THEME: LazyLock<Theme> = LazyLock::new(cme_theme);
 /// line is edited: its name resolves by extension, so the shebang never enters the identity. The theme
 /// is always CME, so it is not part of the identity; a change of grammar — a Save As to a new type, or
 /// an edited shebang on an extensionless file — is what makes iced rebuild.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// The find query joins the identity (§138) because the highlighter is the only way to recolour the
+/// glyphs of a match: `Format` carries a colour and a font and NOTHING else — there is no per-span
+/// background anywhere in iced's text pipeline — so the inversion is split, the block behind the text
+/// drawn by the view and the ink on top of it set here. A changed query must therefore re-run the
+/// highlighter, and Settings is the only lever iced offers for that. It is not a cheap lever: iced
+/// answers a Settings change with `change_line(0)`, and because the buffer is laid out at its full
+/// content height (§32) iced's "last visible line" is the last line of the FILE — so every keystroke
+/// in the find field re-parses the whole buffer. Nothing at a source file's size; a stall at the
+/// 8 MiB ceiling. There is no way around it from out here — `change_line(0)` is iced's call.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SyntaxSettings {
 	/// The resolved grammar's name (`SyntaxReference::name`), from `resolve_syntax`.
 	pub grammar: String,
+	/// The find bar's query, or `""` when the bar is closed or idle (§138). Re-found line by line here
+	/// rather than passed in as offsets, so the spans this recolours cannot drift out of step with the
+	/// blocks the view draws — both call `editor::line_matches`.
+	pub query: String,
+	/// The colour a matched glyph takes (§138) — the buffer's own background, so the text reads
+	/// inverted against the block the view paints behind it.
+	pub inverted: Color,
 }
 
 /// Resolve the grammar for a file, widening past the bare extension so a whole-name file (`Makefile`,
@@ -101,24 +133,39 @@ fn by_first_line(first_line: &str) -> Option<&'static SyntaxReference> {
 	SYNTAXES.find_syntax_by_first_line(first_line)
 }
 
-/// One highlighted span's style (§32): a `syntect` style modifier (a foreground colour, maybe a font
-/// style). Wrapping it lets `to_format` turn it into what iced paints, exactly as iced's own does.
+/// One highlighted span's style — either what the grammar says, or what the search says (§32, §138).
 #[derive(Debug)]
-pub struct SyntaxHighlight(StyleModifier);
+pub enum SyntaxHighlight {
+	/// A `syntect` scope's style modifier: a foreground colour, maybe a font style. Wrapping it lets
+	/// `to_format` turn it into what iced paints, exactly as iced's own does (§32).
+	Scope(StyleModifier),
+	/// A find match's ink (§138) — the buffer's own background colour, so the glyphs read inverted
+	/// against the block the view paints behind them. An iced colour rather than a `syntect` one
+	/// because it never came from the theme: it is the palette's, straight through, with no round trip
+	/// through eight-bit channels to lose anything in.
+	Match(Color),
+}
 
 impl SyntaxHighlight {
 	/// The span's colour, or `None` to keep the buffer's plain colour — the CME theme leaves many
-	/// scopes uncoloured, and those must not be forced to a colour (§32).
+	/// scopes uncoloured, and those must not be forced to a colour (§32). A match always has one.
 	fn color(&self) -> Option<Color> {
-		self.0
-			.foreground
-			.map(|color| Color::from_rgba8(color.r, color.g, color.b, f32::from(color.a) / 255.0))
+		match self {
+			Self::Scope(style) => style
+				.foreground
+				.map(|c| Color::from_rgba8(c.r, c.g, c.b, f32::from(c.a) / 255.0)),
+			Self::Match(color) => Some(*color),
+		}
 	}
 
 	/// The span's font, for a bold / italic scope (§32). The CME token set is colour-only, so this is
-	/// almost always `None` — but ported faithfully so a themed bold/italic would take effect.
+	/// almost always `None` — but ported faithfully so a themed bold/italic would take effect. A match
+	/// changes the ink and nothing else, so it never restyles the face.
 	fn font(&self) -> Option<Font> {
-		self.0.font_style.and_then(|style| {
+		let Self::Scope(modifier) = self else {
+			return None;
+		};
+		modifier.font_style.and_then(|style| {
 			let bold = style.contains(highlighting::FontStyle::BOLD);
 			let italic = style.contains(highlighting::FontStyle::ITALIC);
 			if bold || italic {
@@ -162,6 +209,11 @@ pub struct Highlighter {
 	caches: Vec<(ParseState, ScopeStack)>,
 	/// The next line `highlight_line` will process.
 	current_line: usize,
+	/// The find bar's query, re-found on each line to recolour its hits (§138). Empty means no search
+	/// is running, and `line_matches` then returns nothing without even lowering the line.
+	query: String,
+	/// The ink a matched glyph takes (§138) — the buffer's background, for the inverted read.
+	inverted: Color,
 }
 
 impl highlighter::Highlighter for Highlighter {
@@ -184,6 +236,8 @@ impl highlighter::Highlighter for Highlighter {
 			colours,
 			caches: vec![(parser, stack)],
 			current_line: 0,
+			query: settings.query.clone(),
+			inverted: settings.inverted,
 		}
 	}
 
@@ -192,7 +246,10 @@ impl highlighter::Highlighter for Highlighter {
 			.find_syntax_by_name(&new_settings.grammar)
 			.unwrap_or_else(|| SYNTAXES.find_syntax_plain_text());
 		self.colours = highlighting::Highlighter::new(&CME_THEME);
-		// Restart from the top with the new grammar.
+		self.query.clone_from(&new_settings.query);
+		self.inverted = new_settings.inverted;
+		// Restart from the top with the new grammar — and with the new query, which is the whole reason
+		// a keystroke in the find field reaches this far (§138).
 		self.change_line(0);
 	}
 
@@ -222,9 +279,22 @@ impl highlighter::Highlighter for Highlighter {
 		}
 		self.current_line += 1;
 
+		// The find hits on this line, collected BEFORE the mutable borrow of `caches` below — owned, so
+		// the returned iterator does not have to keep `query` borrowed alongside it (§138).
+		let hits: Vec<(Range<usize>, SyntaxHighlight)> =
+			crate::editor::line_matches(line, &self.query)
+				.into_iter()
+				.map(|span| (span, SyntaxHighlight::Match(self.inverted)))
+				.collect();
+
 		let (parser, stack) = self.caches.last_mut().expect("caches must not be empty");
 		let ops = parser.parse_line(line, &SYNTAXES).unwrap_or_default();
-		Box::new(scope_iterator(ops, line, stack, &self.colours))
+		// The hits come AFTER the grammar's spans, and that ordering is the whole mechanism (§138):
+		// iced feeds each span to cosmic-text's `AttrsList::add_span`, which is a `RangeMap::insert`, so
+		// a later span OVERWRITES whatever earlier ones covered the same bytes. Appending the match
+		// ranges last therefore wins over the scope colour underneath them without splitting a single
+		// syntect range by hand — the grammar keeps every byte the search did not claim.
+		Box::new(scope_iterator(ops, line, stack, &self.colours).chain(hits))
 	}
 
 	fn current_line(&self) -> usize {
@@ -253,7 +323,7 @@ fn scope_iterator<'a>(
 		} else {
 			Some((
 				range,
-				SyntaxHighlight(highlighter.style_mod_for_stack(&stack.scopes)),
+				SyntaxHighlight::Scope(highlighter.style_mod_for_stack(&stack.scopes)),
 			))
 		}
 	})

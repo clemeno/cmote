@@ -10,6 +10,8 @@
 // UTF, assume UTF-8-without-BOM when there is none, refuse what cannot be decoded, and on save
 // persist EXACTLY as opened — never convert behind the user's back.
 
+use std::ops::Range;
+
 use iced::widget::text_editor;
 
 /// The largest edit band we will diff with an exact (quadratic) LCS before falling back to marking
@@ -57,13 +59,41 @@ const PASTE_CHUNK: usize = 8 * 1024;
 pub fn display_columns(text: &str) -> usize {
 	let mut cols = 0;
 	for ch in text.chars() {
-		if ch == '\t' {
-			cols += TAB_WIDTH - (cols % TAB_WIDTH);
-		} else {
-			cols += 1;
-		}
+		cols += column_advance(ch, cols);
 	}
 	cols
+}
+
+/// How many display columns `ch` occupies when it starts at column `cols` (§32) — one for an ordinary
+/// character, or the jump to the next tab stop for a tab. Factored out because two walks need the same
+/// rule: the whole-line width above, and the per-offset walk below (§138).
+fn column_advance(ch: char, cols: usize) -> usize {
+	if ch == '\t' {
+		TAB_WIDTH - (cols % TAB_WIDTH)
+	} else {
+		1
+	}
+}
+
+/// The display column each byte offset in `offsets` sits at, in ONE pass over `text` (§138).
+///
+/// `offsets` must be ascending — they are, being match boundaries in document order — which is what
+/// makes this one traversal rather than one per offset. A one-letter query on a long line has hundreds
+/// of hits, and asking `display_columns` for each prefix separately would be quadratic in the line.
+/// An offset at or past the line's end lands on the line's final column.
+fn display_columns_at(text: &str, offsets: &[usize]) -> Vec<usize> {
+	let mut out = Vec::with_capacity(offsets.len());
+	let mut cols = 0;
+	for (byte, ch) in text.char_indices() {
+		while out.len() < offsets.len() && offsets[out.len()] <= byte {
+			out.push(cols);
+		}
+		cols += column_advance(ch, cols);
+	}
+	while out.len() < offsets.len() {
+		out.push(cols);
+	}
+	out
 }
 
 /// The BOMs we recognise. A leading byte-order mark decides the encoding; everything else is read
@@ -303,39 +333,79 @@ fn lcs_kept(original: &[String], current: &[String]) -> Vec<bool> {
 /// One search hit (§32): the line it is on and the byte range within that line's text. Byte offsets,
 /// not character offsets, because iced places the cursor and the selection by BYTE index within a
 /// line (`Position::column` is a byte index) — so a match found here can be selected verbatim.
+///
+/// `pub` because the buffer draws an inverted block behind every visible hit (§138), and the block's
+/// left edge and width come from exactly these two offsets.
+/// It also carries the hit's DISPLAY columns, computed here rather than in the view. The view needs
+/// them to place the block — a column times the character advance is its left edge — and the only way
+/// to get one from a byte offset is to walk the line expanding tabs. Doing that in the view would mean
+/// re-walking every visible line on every frame; doing it here means once, when the search runs (§138).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct EditorMatch {
-	line: usize,
-	byte_start: usize,
-	byte_end: usize,
+pub struct EditorMatch {
+	/// The zero-based line the hit is on.
+	pub line: usize,
+	/// The byte offset of the hit's first byte within that line's text.
+	pub byte_start: usize,
+	/// The byte offset one past the hit's last byte.
+	pub byte_end: usize,
+	/// Display columns before the hit, tabs expanded — the block's left edge.
+	pub col_start: usize,
+	/// Display columns before the hit's end — so `col_end - col_start` is the block's width.
+	pub col_end: usize,
 }
 
-/// Every occurrence of `query` across `lines`, in document order (§32). The search is ASCII
-/// case-insensitive: both sides are lowered with `to_ascii_lowercase`, which touches only `A`–`Z`
-/// and so preserves every byte offset — the offsets found in the lowered copy are valid in the
-/// original. (A non-ASCII case pair like `é`/`É` therefore stays distinct; a narrow, predictable
-/// rule, the same spirit as the encoding set.) An empty query matches nothing.
-fn find_matches(lines: &[String], query: &str) -> Vec<EditorMatch> {
+/// Every occurrence of `query` within ONE line's text, as byte ranges in document order (§32). The
+/// search is ASCII case-insensitive: both sides are lowered with `to_ascii_lowercase`, which touches
+/// only `A`–`Z` and so preserves every byte offset — the offsets found in the lowered copy are valid
+/// in the original. (A non-ASCII case pair like `é`/`É` therefore stays distinct; a narrow,
+/// predictable rule, the same spirit as the encoding set.) An empty query matches nothing.
+///
+/// Its own function, and `pub(crate)`, because THREE places must agree on what "a match" is (§138):
+/// the find bar's count, the inverted block the buffer paints behind each hit, and the highlighter
+/// that recolours the glyphs inside that block. A second implementation of this loop anywhere would
+/// be a way for the count, the block and the ink to disagree — the block sitting where no hit is.
+pub(crate) fn line_matches(text: &str, query: &str) -> Vec<Range<usize>> {
 	let mut out = Vec::new();
 	if query.is_empty() {
 		return out;
 	}
 	let needle = query.to_ascii_lowercase();
+	let hay = text.to_ascii_lowercase();
+	let mut from = 0;
+	// `find` respects UTF-8 boundaries, and `from` only ever lands on a match end (a boundary), so the
+	// slice below is always valid. Matches do not overlap — each search resumes past the last.
+	while let Some(rel) = hay[from..].find(&needle) {
+		let start = from + rel;
+		let end = start + needle.len();
+		out.push(start..end);
+		from = end;
+	}
+	out
+}
+
+/// Every occurrence of `query` across `lines`, in document order (§32) — `line_matches` run down the
+/// buffer, so the bar's count is the same rule the buffer paints with.
+fn find_matches(lines: &[String], query: &str) -> Vec<EditorMatch> {
+	let mut out = Vec::new();
 	for (line, text) in lines.iter().enumerate() {
-		let hay = text.to_ascii_lowercase();
-		let mut from = 0;
-		// `find` respects UTF-8 boundaries, and `from` only ever lands on a match end (a boundary), so
-		// the slice below is always valid. Matches do not overlap — each search resumes past the last.
-		while let Some(rel) = hay[from..].find(&needle) {
-			let byte_start = from + rel;
-			let byte_end = byte_start + needle.len();
-			out.push(EditorMatch {
-				line,
-				byte_start,
-				byte_end,
-			});
-			from = byte_end;
+		let spans = line_matches(text, query);
+		if spans.is_empty() {
+			continue;
 		}
+		// Every boundary of every hit on this line, flattened and ascending, so one walk of the line
+		// resolves them all to display columns (§138).
+		let bounds: Vec<usize> = spans
+			.iter()
+			.flat_map(|span| [span.start, span.end])
+			.collect();
+		let cols = display_columns_at(text, &bounds);
+		out.extend(spans.iter().enumerate().map(|(i, span)| EditorMatch {
+			line,
+			byte_start: span.start,
+			byte_end: span.end,
+			col_start: cols[i * 2],
+			col_end: cols[i * 2 + 1],
+		}));
 	}
 	out
 }
@@ -391,6 +461,20 @@ impl Find {
 	/// gutter number and the buffer band highlight.
 	pub fn current_line(&self) -> Option<usize> {
 		self.matches.get(self.current).map(|m| m.line)
+	}
+
+	/// The matches falling on lines `first..last` (§138) — the window the buffer paints an inverted
+	/// block behind, one per hit.
+	///
+	/// Two binary searches, not a scan, and that is the point: `matches` is in document order, so it is
+	/// sorted by line, and the view asks this question every frame. A one-letter query in a big file has
+	/// tens of thousands of hits, and the view must never walk them all to draw the fifty on screen.
+	pub fn spans_between(&self, first: usize, last: usize) -> &[EditorMatch] {
+		let from = self.matches.partition_point(|m| m.line < first);
+		let to = self.matches.partition_point(|m| m.line < last);
+		// `partition_point` is monotone in its predicate, so `from <= to` whenever `first <= last`; the
+		// `max` covers a caller that hands them the other way round rather than panicking on the slice.
+		&self.matches[from..to.max(from)]
 	}
 }
 
@@ -789,6 +873,21 @@ impl Editor {
 	/// the buffer is focused, so the selection alone would be invisible during a search.
 	pub fn find_match_line(&self) -> Option<usize> {
 		self.find.as_ref().and_then(Find::current_line)
+	}
+
+	/// The find matches on lines `first..last`, or nothing when the bar is closed (§138) — the hits the
+	/// buffer draws an inverted block behind. Line-windowed because the view only ever draws what is on
+	/// screen, exactly as the gutter does.
+	pub fn find_spans_between(&self, first: usize, last: usize) -> &[EditorMatch] {
+		self.find
+			.as_ref()
+			.map_or(&[][..], |find| find.spans_between(first, last))
+	}
+
+	/// The find bar's query, or `""` when the bar is closed (§138). The buffer hands this to the
+	/// highlighter, which re-finds it line by line to recolour the matched glyphs.
+	pub fn find_query(&self) -> &str {
+		self.find.as_ref().map_or("", |find| find.query.as_str())
 	}
 
 	/// Open the find bar (§32), keeping any query it already held, and select its current match so
@@ -1409,26 +1508,86 @@ mod tests {
 		// Act
 		let hits = find_matches(&lines, "to");
 		// Assert — order is line then byte offset; "To", "to", and the "to" inside "auto" all match.
+		// These lines are pure ASCII with no tabs, so each hit's display columns equal its byte offsets.
 		assert_eq!(
 			hits,
 			vec![
 				EditorMatch {
 					line: 0,
 					byte_start: 0,
-					byte_end: 2
+					byte_end: 2,
+					col_start: 0,
+					col_end: 2,
 				},
 				EditorMatch {
 					line: 0,
 					byte_start: 13,
-					byte_end: 15
+					byte_end: 15,
+					col_start: 13,
+					col_end: 15,
 				},
 				EditorMatch {
 					line: 2,
 					byte_start: 2,
-					byte_end: 4
+					byte_end: 4,
+					col_start: 2,
+					col_end: 4,
 				},
 			]
 		);
+	}
+
+	#[test]
+	fn a_matched_span_reports_the_display_columns_a_tab_pushes_it_to() {
+		// A leading tab is 8 columns wide, so the hit's bytes and its columns part company — and it is
+		// the COLUMNS the buffer multiplies by the character advance to place the inverted block (§138).
+		let hits = find_matches(&lines(&["\tneedle"]), "needle");
+		assert_eq!(hits.len(), 1);
+		assert_eq!((hits[0].byte_start, hits[0].byte_end), (1, 7));
+		assert_eq!((hits[0].col_start, hits[0].col_end), (8, 14));
+		// Two hits on one line, the second past a mid-line tab: 'a' at 0, tab to 8, 'a' at 8.
+		let hits = find_matches(&lines(&["a\ta"]), "a");
+		assert_eq!(
+			hits.iter()
+				.map(|m| (m.col_start, m.col_end))
+				.collect::<Vec<_>>(),
+			vec![(0, 1), (8, 9)]
+		);
+	}
+
+	#[test]
+	fn display_columns_at_resolves_every_offset_in_one_walk() {
+		// Ascending offsets, tabs expanded, and an offset AT the end of the line lands on its width.
+		assert_eq!(
+			display_columns_at("ab\tcd", &[0, 2, 3, 5]),
+			vec![0, 2, 8, 10]
+		);
+		// An offset past the end is clamped to the line's width rather than panicking.
+		assert_eq!(display_columns_at("ab", &[99]), vec![2]);
+		// Nothing asked for, nothing walked.
+		assert!(display_columns_at("ab\tcd", &[]).is_empty());
+	}
+
+	#[test]
+	fn spans_between_windows_the_matches_to_the_visible_lines() {
+		// Arrange — one hit on each of lines 0, 1, 3 and 4.
+		let find = Find {
+			matches: find_matches(&lines(&["x", "x", "", "x", "x"]), "x"),
+			..Default::default()
+		};
+		// Act / Assert — the window is half-open, exactly as `visible_lines` reports it.
+		assert_eq!(
+			find.spans_between(1, 4)
+				.iter()
+				.map(|m| m.line)
+				.collect::<Vec<_>>(),
+			vec![1, 3]
+		);
+		// A window with no hits in it is empty, not the whole list.
+		assert!(find.spans_between(2, 3).is_empty());
+		// And an empty or inverted window cannot panic on the slice.
+		assert!(find.spans_between(2, 2).is_empty());
+		assert!(find.spans_between(4, 1).is_empty());
 	}
 
 	#[test]
