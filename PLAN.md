@@ -15856,3 +15856,94 @@ without panicking on an empty or inverted window.
   which one is current is still said by the line band and the gutter, as before. A second colour pair
   would have to stay readable against `buffer_bg` ink under both schemes, and that is a colour decision
   to make when it is asked for, not a guess to bake in now.
+
+## §139 — `.cjs` and `.mjs` are JavaScript, and three tables had to be told
+
+A `.cjs` or `.mjs` file opened in the editor uncoloured, wore the neutral icon in the files pane, and
+copied as `application/octet-stream`. All three from the same cause, and none of them a decision
+anyone made.
+
+### What the pack actually knows
+
+Measured before touching anything, with a throwaway probe over the grammar set (deleted after):
+
+```text
+a.js  -> JavaScript
+a.cjs -> Plain Text
+a.mjs -> Plain Text
+a.jsx -> Plain Text
+a.ts  -> TypeScript
+a.mts -> TypeScript
+a.cts -> TypeScript
+
+js grammar extensions = Some(["js", "htc"])
+```
+
+There it is. The Sublime JavaScript grammar registers two extensions, `js` and `htc`, and neither of
+Node's module-system suffixes is one of them. TypeScript's grammar, by contrast, already covers `mts`
+and `cts` itself — so the gap was JavaScript's alone, and nothing in cmote had to change for the
+TypeScript pair.
+
+`.cjs` and `.mjs` are not dialects. The suffix picks a module system for Node's loader; the syntax is
+identical. So the fix is an alias, not a grammar.
+
+### The alias step
+
+`resolve_syntax` is a chain of "first hit wins, most specific first" — whole name, then extension,
+then shebang, then plain text. The alias goes inside the extension step, and specifically AFTER the
+pack has been asked directly:
+
+```rust
+const EXTENSION_ALIASES: &[(&str, &str)] = &[("cjs", "js"), ("mjs", "js")];
+
+SYNTAXES.find_syntax_by_token(extension).or_else(|| by_alias(extension))
+```
+
+Two properties fall out of that ordering, and both are the point:
+
+- **The pack always wins.** If a future grammar pack learns `cjs` itself, its answer is used and the
+  alias never fires. An alias consulted first would shadow the better answer forever.
+- **The alias borrows, it does not name.** It looks `js` up in the pack rather than hard-coding a
+  grammar name, so `.cjs` resolves to *whatever* the pack calls JavaScript — and to the SAME
+  `SyntaxReference` a plain `.js` file gets. That matters beyond tidiness: the grammar's name is the
+  highlighter's identity (§32), so `.js` and `.cjs` share one, and nothing is rebuilt moving between
+  them.
+
+The alias is also matched with `eq_ignore_ascii_case`, which the pack's own extension lookup does not
+do — it compares the token verbatim. So `.MJS` resolves where `.RS` still would not. That
+inconsistency is real and left alone: widening the pack's own lookup is a separate change with a
+larger blast radius than this one asked for.
+
+### The other two tables
+
+The editor was the reported symptom, but `files.rs` holds two more extension tables that name `js`,
+and a file that is JavaScript in one place and not in the others is exactly the kind of drift the
+comment on `IMAGE` already warns about:
+
+- `CODE` — the icon category. `.cjs` / `.mjs` now sit beside `js`, so they wear the code icon.
+- `MIME` — `text/javascript` for both, so a copy or a drag names the type instead of falling to
+  `application/octet-stream`.
+
+### Files
+
+- `src/ui/syntax.rs` — `EXTENSION_ALIASES`, `by_alias`, and `by_extension` restructured to try the
+  pack first and the alias second.
+- `src/files.rs` — `cjs` / `mjs` added to `CODE` and to `MIME`.
+- `PLAN.md` — this section.
+
+**1 561 tests**, one added and two extended: the new one pins all four properties of the alias (both
+suffixes resolve, case is ignored, the answer is identical to `.js`'s, and a known extension still
+goes to the pack), and the existing icon-category and MIME table tests each gained the two names.
+
+### Not done
+
+- **`.jsx` still falls to plain text.** The probe above found it, and it is NOT the same case: JSX is
+  JavaScript with XML embedded in it, so aliasing it to the JavaScript grammar would mis-colour every
+  tag rather than leave them plain. It wants a real JSX grammar, which the two-face pack does not
+  appear to carry. Noted here so the next person does not rediscover it — `files.rs` already lists
+  `jsx` under `CODE` and `MIME`, so only the highlighting is missing.
+- **`.mts` / `.cts` have no icon.** The grammar pack resolves them, so they highlight; `CODE` does not
+  list them, so they get the neutral icon. One line each whenever it is worth a commit.
+- **Per-extension theme memory is still per-suffix.** `extension_key` buckets `.js` and `.cjs`
+  separately, so choosing CME for one does not choose it for the other. Left as it is: merging the
+  buckets would mean an alias table in a second place, and the choice is one click.

@@ -124,10 +124,12 @@ pub enum Category {
 pub(crate) const IMAGE: &[&str] = &[
 	"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg", "ico", "tif", "tiff", "heic",
 ];
+// `cjs` / `mjs` sit beside `js` (§139): Node's module-system suffixes are the same language, so they
+// wear the same icon.
 const CODE: &[&str] = &[
-	"rs", "c", "h", "cpp", "hpp", "cc", "java", "py", "js", "ts", "tsx", "jsx", "go", "rb", "php",
-	"sh", "bash", "zsh", "fish", "pl", "lua", "sql", "html", "css", "scss", "json", "yaml", "yml",
-	"toml", "xml", "ini", "conf", "cfg", "kt", "swift", "cs", "vim", "mk", "cmake",
+	"rs", "c", "h", "cpp", "hpp", "cc", "java", "py", "js", "cjs", "mjs", "ts", "tsx", "jsx", "go",
+	"rb", "php", "sh", "bash", "zsh", "fish", "pl", "lua", "sql", "html", "css", "scss", "json",
+	"yaml", "yml", "toml", "xml", "ini", "conf", "cfg", "kt", "swift", "cs", "vim", "mk", "cmake",
 ];
 const ARCHIVE: &[&str] = &[
 	"zip", "gz", "tgz", "bz2", "xz", "zst", "tar", "7z", "rar", "jar", "deb", "rpm", "iso",
@@ -1421,6 +1423,9 @@ const MIME: &[(&str, &str)] = &[
 	("java", "text/x-java"),
 	("py", "text/x-python"),
 	("js", "text/javascript"),
+	// Node's module-system suffixes are the same language and so the same type (§139).
+	("cjs", "text/javascript"),
+	("mjs", "text/javascript"),
 	("jsx", "text/javascript"),
 	("ts", "text/x-typescript"),
 	("tsx", "text/x-typescript"),
@@ -2028,6 +2033,9 @@ mod tests {
 			("README", FilesKind::File, Category::Plain),
 			// A leading dot is not an extension: `.bashrc` is a name, not a "bashrc" file.
 			(".bashrc", FilesKind::File, Category::Plain),
+			// Node's module-system suffixes wear the code icon, as `.js` does (§139).
+			("server.cjs", FilesKind::File, Category::Code),
+			("server.mjs", FilesKind::File, Category::Code),
 		];
 		for (name, kind, expected) in cases {
 			assert_eq!(category(&entry(name, kind)), expected, "{name}");
@@ -2043,6 +2051,9 @@ mod tests {
 			("mystery.qqq", OCTET_STREAM),
 			("README", OCTET_STREAM),
 			(".bashrc", OCTET_STREAM), // a name, not a "bashrc" file
+			// Node's module-system suffixes are the same language as `.js`, so the same type (§139).
+			("server.cjs", "text/javascript"),
+			("server.mjs", "text/javascript"),
 		];
 		for (name, expected) in cases {
 			assert_eq!(mime(name), expected, "{name}");

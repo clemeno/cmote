@@ -114,14 +114,40 @@ fn by_whole_name(name: &str) -> Option<&'static SyntaxReference> {
 	SYNTAXES.find_syntax_by_extension(name)
 }
 
+/// Extensions the grammar pack does not know, and the token to look up in their place (§139).
+///
+/// Node's module-system suffixes are the whole of this table today. `.cjs` and `.mjs` ARE JavaScript,
+/// byte for byte the same language — the suffix picks a module system for Node's loader, it does not
+/// change the syntax — but the Sublime JavaScript grammar registers only `js` and `htc`, so both files
+/// dropped to plain text and opened uncoloured. An alias, not a second grammar: whatever the pack says
+/// JavaScript looks like is exactly what these get, now and after any pack update.
+///
+/// Consulted only AFTER the pack has been asked directly, so a future pack that learns one of these
+/// extensions itself wins over the alias rather than being shadowed by it.
+const EXTENSION_ALIASES: &[(&str, &str)] = &[("cjs", "js"), ("mjs", "js")];
+
 /// The grammar for the file's extension (§32) — the ordinary case (`main.rs` → Rust). The extension is
 /// the text after the LAST dot, and only when that dot is not the name's first character, so a dot-file
-/// like `.bashrc` has no extension here (the whole-name step catches it instead).
+/// like `.bashrc` has no extension here (the whole-name step catches it instead). An extension the pack
+/// does not know gets one more chance through `EXTENSION_ALIASES` (§139).
 fn by_extension(name: &str) -> Option<&'static SyntaxReference> {
-	match name.rfind('.') {
-		Some(dot) if dot > 0 => SYNTAXES.find_syntax_by_token(&name[dot + 1..]),
-		_ => None,
-	}
+	let extension = match name.rfind('.') {
+		Some(dot) if dot > 0 => &name[dot + 1..],
+		_ => return None,
+	};
+	SYNTAXES
+		.find_syntax_by_token(extension)
+		.or_else(|| by_alias(extension))
+}
+
+/// The grammar an aliased extension borrows (§139). Matched without regard to case, so `.MJS` resolves
+/// as `.mjs` does — the alias table is the one place here that can promise that, since syntect's own
+/// extension lookup compares the token verbatim.
+fn by_alias(extension: &str) -> Option<&'static SyntaxReference> {
+	EXTENSION_ALIASES
+		.iter()
+		.find(|(from, _)| from.eq_ignore_ascii_case(extension))
+		.and_then(|(_, to)| SYNTAXES.find_syntax_by_token(to))
 }
 
 /// The grammar a first line's shebang or mode-line names (§32) — `#!/bin/sh` → bash. An empty line
@@ -507,6 +533,24 @@ mod tests {
 		// A dot-file (no extension in our sense) resolves by its whole name.
 		assert_eq!(resolve_syntax(".gitignore", "").name, "Git Ignore");
 		assert!(resolve_syntax(".bashrc", "").name.contains("bash"));
+	}
+
+	#[test]
+	fn nodes_module_suffixes_resolve_as_javascript() {
+		// The grammar pack registers only `js` and `htc` for JavaScript, so both of Node's module-system
+		// suffixes used to open uncoloured (§139). They are the same language and now resolve to it.
+		assert_eq!(resolve_syntax("server.cjs", "").name, "JavaScript");
+		assert_eq!(resolve_syntax("server.mjs", "").name, "JavaScript");
+		// The alias is matched without regard to case, unlike the pack's own extension lookup.
+		assert_eq!(resolve_syntax("SERVER.MJS", "").name, "JavaScript");
+		// It borrows the pack's answer rather than naming a grammar of its own, so it is the same
+		// grammar a plain `.js` file gets — one identity, so the highlighter is not rebuilt between them.
+		assert_eq!(
+			resolve_syntax("server.cjs", "").name,
+			resolve_syntax("server.js", "").name
+		);
+		// And it is a LAST resort: an extension the pack knows is still answered by the pack.
+		assert_eq!(resolve_syntax("main.rs", "").name, "Rust");
 	}
 
 	#[test]
