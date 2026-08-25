@@ -493,6 +493,19 @@ fn gate_arms() -> Vec<GateArm> {
 		("set_private_mode", b"\x1b[?69h"),
 		("unset_private_mode", b"\x1b[?69l"),
 		("report_private_mode", b"\x1b[?69$p"),
+		// The two charset arms (§143). Both stopped being forwards in §143 — cmote maps the character
+		// itself and hands the engine the RESULT — so the property this sweep tests is the one that
+		// matters most about that change: the grid must come out identical to a bare engine's, because
+		// the engine's own table and cmote's are the same table read at a different layer. The streams
+		// draw with the set rather than merely designating it, so a mapping that stopped happening
+		// would be visible as `qqq` where `───` belongs.
+		("configure_charset", b"\x1b(0qqq"),
+		("set_active_charset", b"\x1b)0\x0eqqq"),
+		// The two tab arms (§143), which ARE still forwards and now mirror on the way past. Each stream
+		// clears the stops, sets one by hand and tabs onto it, so the arm is reached with something to
+		// show for it rather than only in the mirror the oracle cannot see.
+		("set_horizontal_tabstop", b"\x1b[3g\x1b[5G\x1bH\r\tX"),
+		("clear_tabs", b"\x1b[3g\r\tX"),
 	]
 }
 
@@ -701,8 +714,8 @@ mod tests {
 		let streams = generated_streams();
 		assert_eq!(
 			streams.len(),
-			26 * 4 * 8,
-			"26 reachable arms x 4 regions x 8 arrivals (5 parked, 3 with a wrap owed)"
+			30 * 4 * 8,
+			"30 reachable arms x 4 regions x 8 arrivals (5 parked, 3 with a wrap owed)"
 		);
 		let mut disagreed = Vec::new();
 		for (name, stream) in &streams {

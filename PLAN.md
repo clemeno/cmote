@@ -16408,3 +16408,225 @@ needs no NASM and no C compiler.
   rather than an oversight.
 - **No release build.** `--release` is for shipping (§11) and nothing here is being shipped; the
   profile's `lto` and `codegen-units = 1` were not exercised against the new graph.
+
+## §143 — The character sets, the shifts that invoke them, and the report that names them
+
+Four rows of the audit, and they turn out to be one feature:
+
+> | ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ |
+> | ESC N / ESC O | Single shift G2 / G3 | ❌ |
+> | LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ |
+> | Ps $ w (DECRQPSR) | Report presentation state | ❌ |
+
+The first three are the same mechanism with three doors, and the fourth is the report that names its
+state — which is why it is here and not in a section of its own. See below for the moment that
+settled that: the build would not compile without it.
+
+### The engine has two sets, and no seam to add a third
+
+`vte`'s `StandardCharset` is an enum with exactly two members, `Ascii` and
+`SpecialCharacterAndLineDrawing` (`ansi.rs:1202-1206`). Its `esc_dispatch` matches `B` and `0`
+against the four slot intermediates and sends every other final to `unhandled!()` (`:1800-1812`).
+`alacritty_terminal` keeps the four designations on its grid cursor, the GL invocation on the `Term`,
+and maps each printed character in `Term::input` (`term/mod.rs:985`).
+
+So there is nothing to extend. A set the engine cannot name cannot go in its slots, and there is no
+arm anywhere to invoke G2 with — which is exactly what the third row said: "G2 and G3 can be
+designated and never invoked (§65)".
+
+The state therefore moves to cmote whole. `term/charset.rs` holds the four slots, GL, GR and any
+pending single shift; `Gate::input` maps the character before the engine sees it; and the gate stops
+forwarding `configure_charset` and `set_active_charset`, so the engine's own slots stay ASCII for the
+life of the session and its `map` is the identity. **One writer, not two** (§71, §73) — the thing that
+would have made this a second source is forwarding as well as recording, and that is the one thing the
+gate does not do.
+
+The DEC line-drawing set is **not** re-implemented on the way past. `Charset::map` calls
+`StandardCharset::SpecialCharacterAndLineDrawing.map` for it, so the one set that already worked keeps
+working from the same table it always did, and a crate bump moves both together or neither.
+
+### Two doors, and which is which
+
+The rule is the directory's own: **the gate takes what `vte` dispatches, a scanner takes what it
+drops.**
+
+* `ESC ( B`, `ESC ( 0` in all four slot spellings, and SI / SO, reach `Handler` methods. Those are the
+  gate's.
+* Every other final, both single shifts and the five other locking shifts reach nothing at all. Those
+  are the scanner's, found beside the stream on the shared escape grammar §111 built.
+
+Keeping the first group at the gate is not tidiness, and it is worth stating because the split looks
+arbitrary until you try to move it: **the soft reset is synthesised.** §72 spells DECSTR out as
+sequences and feeds them through `Terminal::advance`, which runs the parser and the gate and *no
+scanner at all*. Move the `B` and `0` designations to the scanner and `\E(B\E)B\E*B\E+B\017` in
+`SOFT_RESET` resets nothing.
+
+The same fact has a second consequence, in the other direction. GR cannot be reset by a sequence: the
+only spellings that reach it are LS1R, LS2R and LS3R, all three of which are ones `vte` drops — so a
+synthesised `ESC ~` would reach exactly the nothing a remote's does. That one item of DECSTR is
+therefore written directly, before the string is fed, and it has to be before: the string ends in the
+`ESC 7` that saves the cursor, and since this section a saved cursor carries the character sets.
+
+### GR is written and never read, and that is what pulled DECRQPSR in
+
+cmote decodes UTF-8 always (§67). What arrives at `Gate::input` is a `char`, not a byte in a half, so
+**nothing can ever land in GR** — a stream that meant to use the right half writes a byte past 0x7f
+and `vte` reads it as UTF-8. LS1R, LS2R and LS3R change a number no printed character is read through.
+
+That is a real question about whether to implement them at all, and the answer is DECCIR. The cursor
+information report names the slot in GR as one of its ten fields, and a terminal that answered that
+field from a constant while quietly ignoring the three sequences that set it would be reporting a
+state it had refused to keep.
+
+**The build made the argument concrete.** `[lints] warnings = "deny"` makes an unread field a compile
+error, so a charsets-only section literally would not build: `Bank::gr` had no reader. That is the
+rule working exactly as intended — it said, in the form of an error, "you have written state nothing
+consumes", and the honest fix was not to delete GR but to ship the report that reads it. Hence one
+section covering four rows.
+
+LS2 and LS3 lock into **GL** and are fully live, which is the half the audit row was actually about.
+
+### Which sets, and why the rest are refused
+
+Twelve national replacement sets and JIS-Roman: UK, Dutch, Finnish, French, French Canadian, German,
+Italian, Norwegian/Danish, Portuguese, Spanish, Swedish, Swiss. Every one is a handful of
+substitutions inside ASCII, so a wrong entry is one wrong glyph and a reader can check the table
+against the source in a minute.
+
+Sources, both read rather than remembered: xterm's ctlseqs for which final byte selects which set, and
+the position-by-position tables of DEC's national replacement sets. Where the two disagreed the
+substitutions were checked a second time against xterm's `charsets.h`. That is what settled
+**Norwegian/Danish**, which is documented in two versions — a ten-position table and a six-position
+one. xterm carries a single table and it is the ten-position one, so that is what is here.
+
+The big sets are **refused**, not pending: DEC Supplemental (`<`, `%5`), DEC Technical (`>`), DEC
+Greek / Hebrew / Turkish / Cyrillic, and JIS-Katakana. Each is a full 94-glyph table, several of them
+of symbols with no obvious Unicode counterpart, and none was read from a primary source here. A table
+of ninety-four glyphs written from memory is not a character set; it is ninety-four chances to put the
+wrong glyph on somebody's screen with nothing to notice it by. An unrecognised final leaves the slot
+exactly as it was, which is what a terminal without the set does anyway — so a program that designates
+DEC Technical goes on getting ASCII, which is what it got before this section.
+
+### Two banks, because that is what was already there
+
+The engine keeps its designations on the grid cursor and swaps whole grids on the alternate-screen
+swap, so a full-screen program's designations have always been its own. A single global table in cmote
+would have been a **regression**, and a visible one: a program that left G1 on line drawing under SO
+would hand the shell a screen of box corners.
+
+So `Charsets` holds a bank per screen, each with its own DECSC slot — which is the engine's
+arrangement again, since `saved_cursor` lives on the grid too. The gate follows the swap by reading
+the engine's own `ALT_SCREEN` flag rather than watching for a sequence, so all three spellings (47,
+1047, 1049) and anything a later engine adds move it.
+
+### The tab stops needed a mirror
+
+DECTABSR has to report where the tab stops are, and `Term::tabs` is a private field of a private type
+with no accessor and no reply arm. That is `term/region.rs`'s situation word for word and it gets the
+same answer: a mirror, written wherever the engine is **told**.
+
+Four writers, all four observable:
+
+* HTS and TBC arrive as `Handler` calls, so the gate mirrors them on the way past.
+* RIS rebuilds the engine's table inside `Term::reset_state`, with no sequence to watch — caught at the
+  gate, because the gate is where the engine is told to reset.
+* A resize rebuilds it inside `Term::resize`, with no sequence and no `Handler` call at all;
+  `Terminal::resize` corrects the mirror there, exactly as it corrects the scrolling region.
+* DECST8C feeds the engine TBC, HTS and CUF (§74), which are `Handler` calls like any other — so the
+  walk lands in the mirror for free rather than needing a fifth writer.
+
+The resize rule is the one worth reading twice, and it is copied rather than invented:
+`TabStops::resize` **grows** the vector, keeping every stop a program set and giving each column
+*added* the default every eight. Putting a fresh table back instead would wipe a program's own stops
+the first time the user dragged the window wider — a mirror inventing a change the engine never made.
+
+`Handler::set_tabs` (`CSI Ps W`) is deliberately **not** a writer: the engine leaves that method at its
+empty default, so its own table does not move either (§74). A mirror that acted on it would be the
+only thing in the program that thought the stops had moved.
+
+### What DECRQPSR reports, field by field
+
+Read off the VT510 manual rather than remembered. `CSI Ps $ w` with `Ps = 0` is "Error. Request
+ignored", `1` is DECCIR and `2` is DECTABSR — **and there is no "I do not report that" form**, which
+settles the question the audit row left open (DECRQSS has one, §66; this family does not). So an
+unrecognised request is answered with silence, and the silence is the standard's answer rather than
+cmote declining to speak.
+
+DECCIR is `DCS 1 $ u Pr ; Pc ; Pp ; Srend ; Satt ; Sflag ; Pgl ; Pgr ; Scss ; Sdesig ST`. The four
+S-fields are single characters built the same way — bit 8 clear, bit 7 set, bit 6 an extension
+indicator, then the flags — which is a base of 0x40 with flags added on.
+
+* **Pr, Pc** are the cursor DECXCPR reports (§82): one-based and **absolute**, ignoring origin mode,
+  which is the convention §74 settled for cmote's other cursor report. One cursor, one convention —
+  and Sflag carries DECOM, so a reader that wants the origin-relative row has been told everything it
+  needs.
+* **Pp** is 1. cmote is a one-page terminal; DECRQCRA's page parameter is ignored for the same reason
+  (§60).
+* **Srend** is bold, underline and reverse off the pen. Any of the engine's five underline styles
+  answers yes to the one underline bit DEC has, which is the reading DECRQSS already takes for a curly
+  underline (§123).
+* **Satt** is DECSCA, read from the bit §56 borrows on the pen.
+* **Sflag** is origin mode, the two single shifts, and a wrap owed — the last read from *both* holders,
+  because with a right margin short of the page edge the engine's `input_needs_wrap` never fires and
+  cmote's own deferred wrap does (§102).
+* **Pgl, Pgr, Sdesig** are the charset state above. Sdesig reports the spelling that was **designated**,
+  which is why a set with two finals (`C` and `5` are both Finland) keeps both entries rather than
+  being canonicalised to one.
+* **Scss** is 0x40 always. Every set cmote can designate is a 94-column set, because every 96-column
+  set is one of the designations refused above — so the bits are constant, and they are a constant with
+  a reason rather than a loop that can only answer one thing.
+
+**The one flag that cannot be true** is Srend's blink bit: the engine's flag word has no bit for it
+(§59), so it is always 0. The same honest hole DECRQCRA's checksum has for the same attribute, and it
+is asserted as a test rather than left in prose — "always 0" is the kind of claim that quietly stops
+being true when somebody adds a blink flag and forgets this report.
+
+DECTABSR is `DCS 2 $ u D...D ST`, the stops `/`-separated and one-based; the manual's own example is
+reproduced as a test. A page with every stop cleared reports an **empty** data string rather than
+nothing at all — the program asked, the answer is "none", and silence would leave it waiting out a
+timeout to learn the same thing (§93).
+
+### The offset side is arbitrary here, and saying so is the point
+
+Every scanner in this directory reports an offset, and for most of them which SIDE of the sequence it
+names is a real decision: `graphics` needs the ESC because an erase past it destroys what the question
+is about (§41), and eight others need one past because the engine is about to dispatch something.
+
+Neither applies to the charset sequences. The engine has no arm for any of them and they print
+nothing, so `past` and `start` produce identical grids — which the probe confirmed: breaking `past()`
+into `start()` left the test green. What the test *does* protect is that the request is applied **where
+it sat** rather than at the end of the chunk, which is the property that matters; breaking the offset
+to 0 turns `[[\E(K[[` from `[[ÄÄ` into `ÄÄÄÄ`.
+
+It is one past because that is what the scanners around it do. A lone exception would read as a
+decision somebody made.
+
+### Files
+
+* `src/term/charset.rs` — new. The four slots, GL / GR, the single shifts, the thirteen tables, and
+  the scanner for the spellings `vte` drops.
+* `src/term/presentation.rs` — new. The DECRQPSR scanner and the two reports.
+* `src/term/tabs.rs` — the tab-stop mirror (`Stops`) beside the DECST8C scanner that was already there.
+* `src/term/gate.rs` — `input` maps; `configure_charset` and `set_active_charset` stop forwarding;
+  `set_horizontal_tabstop` and `clear_tabs` stop being macro forwards and mirror on the way past;
+  DECSC / DECRC carry the sets; RIS resets both; the private-mode arms follow the screen swap.
+* `src/term/mod.rs` — the two new scanners, their interruptions, `answer_presentation`, the tab mirror
+  on resize, and the one direct charset write in `soft_reset`.
+* `src/term/gatediff.rs` — four new arms in the generated sweep, and the count that guards it.
+
+### Not done
+
+- **No live session.** Everything here was exercised through `Terminal::process`, which is the whole
+  byte path, but no remote shell was asked to designate a national set.
+- **The refused sets stay refused**, and a terminal that draws DEC Technical is a different piece of
+  work: a 94-glyph table read from a primary source, not this one.
+- **GR is still unreachable**, and will stay so for as long as cmote is UTF-8 only. It is reported and
+  it is settable and nothing is read through it.
+- **DECNRCM is not implemented.** DEC gates the national sets behind that mode (`CSI ? 42 h`); cmote
+  honours a designation whichever way the mode stands, which is what xterm does when built without
+  `OPT_NRC_MODES`. The mode itself is unmodelled, so DECRQM answers "not recognised" for it — an
+  honest answer, and a program that checks before designating will not designate.
+- **The engine's own charset state is now dead weight.** Its four slots stay ASCII and its `map` is the
+  identity, which costs one branch per printed character in a crate cmote does not maintain. Nothing to
+  do about it from here, and it is written down so the next reader is not surprised to find two
+  mechanisms.

@@ -71,8 +71,10 @@ use alacritty_terminal::vte::ansi::{
 };
 use unicode_width::UnicodeWidthChar;
 
+use super::charset::{Charset, Charsets};
 use super::margins::Margins;
 use super::region::ScrollRegion;
+use super::tabs::Stops;
 use super::{Engine, ReplyBuffer};
 
 /// DECLRMM, the private mode that turns the left and right margins on (§102).
@@ -114,6 +116,15 @@ pub struct Gate<'a> {
 	region: &'a mut ScrollRegion,
 	/// The left and right margins and the deferred wrap that comes with them (`term/margins.rs`).
 	margins: &'a mut Margins,
+	/// The four character-set slots and the halves that invoke them (`term/charset.rs`, §143). The
+	/// gate is one of this state's two doors — it takes the designations and shifts `vte` dispatches,
+	/// and a scanner beside the stream takes the ones it drops — and it is the only place the state is
+	/// READ, because reading it is what printing a character does.
+	charsets: &'a mut Charsets,
+	/// cmote's mirror of the engine's private tab-stop table (`term/tabs.rs`, §143). Three of its four
+	/// writers are here, because three of them are places the ENGINE is told: HTS, TBC and the RIS that
+	/// rebuilds the table from inside `Term::reset_state`.
+	stops: &'a mut Stops,
 	/// Where a reply goes. The engine writes its own answers through its event listener into this
 	/// same buffer, so an answer the gate writes lands in the stream in the order it was asked for
 	/// rather than in a second queue that would have to be kept in step (§33).
@@ -126,12 +137,16 @@ impl<'a> Gate<'a> {
 		term: &'a mut Engine,
 		region: &'a mut ScrollRegion,
 		margins: &'a mut Margins,
+		charsets: &'a mut Charsets,
+		stops: &'a mut Stops,
 		replies: &'a Arc<Mutex<ReplyBuffer>>,
 	) -> Self {
 		Self {
 			term,
 			region,
 			margins,
+			charsets,
+			stops,
 			replies,
 		}
 	}
@@ -445,6 +460,33 @@ impl<'a> Gate<'a> {
 			.bytes
 			.extend_from_slice(reply.as_bytes());
 	}
+
+	/// Put cmote's character-set banks on whichever screen the engine is now showing (§143).
+	///
+	/// Read from the engine's own mode flag rather than from the sequence that changed it, which is
+	/// what makes this right for all three spellings of the swap — 47, 1047 and 1049 — and for
+	/// whatever a later engine adds beside them. The engine keeps its own designations on the grid
+	/// cursor and swaps whole grids with them, so a bank per screen is the arrangement being replaced
+	/// rather than a new idea (`term/charset.rs`).
+	fn follow_screen(&mut self) {
+		self.charsets
+			.set_alternate(self.term.mode().contains(TermMode::ALT_SCREEN));
+	}
+}
+
+/// The slot number the engine's `CharsetIndex` names — `G0` is 0, `G3` is 3 (§143).
+///
+/// Written out rather than cast, because `CharsetIndex` is an ordinary enum with no documented
+/// discriminants: `as usize` would compile today and go on compiling if a later crate reordered the
+/// variants or put another one in front of `G0`, and the only symptom would be a designation landing
+/// in the wrong slot.
+fn slot_of(index: CharsetIndex) -> usize {
+	match index {
+		CharsetIndex::G0 => 0,
+		CharsetIndex::G1 => 1,
+		CharsetIndex::G2 => 2,
+		CharsetIndex::G3 => 3,
+	}
 }
 
 // The forwarding table and the handful of methods cmote answers itself. The `deny` is the whole
@@ -472,6 +514,15 @@ impl Handler for Gate<'_> {
 		self.term.reset_state();
 		self.region.reset(self.term.screen_lines());
 		self.margins.reset();
+		// The character sets go back to ASCII in all four slots, on BOTH screens (§143) — a hard reset
+		// leaves nothing behind, and the engine has just rebuilt its own grids for the same reason.
+		self.charsets.reset();
+		self.follow_screen();
+		// The tab stops likewise. This is the second of the two reset paths a scanner beside the stream
+		// could never have seen: `ESC c` says nothing about tab stops, and that it rebuilds the table
+		// (`Term::reset_state` assigns `TabStops::new(self.columns())`) is a fact about the engine's
+		// insides that surfaces only here (§143).
+		self.stops.reset(self.cols());
 	}
 
 	/// Print one character, breaking the line at the RIGHT MARGIN instead of at the screen edge.
@@ -488,6 +539,12 @@ impl Handler for Gate<'_> {
 	/// wraps to column 0 rather than to the left margin. Either way the flag has to become cmote's:
 	/// `hold_at_right_margin` takes it over after every glyph.
 	fn input(&mut self, c: char) {
+		// The character sets, before anything else looks at the character (§143). This has to be the
+		// first line of the printing path and not a step inside one of the branches below, because
+		// every branch prints: a substitution made after the margin arithmetic would be a substitution
+		// half the calls never reached. The engine's own slots stay ASCII for the life of the session,
+		// so `Term::input` maps nothing after this and there is exactly one substitution per glyph.
+		let c = self.charsets.map(c);
 		if !self.narrowed() {
 			self.term.input(c);
 			return;
@@ -761,9 +818,15 @@ impl Handler for Gate<'_> {
 		self.scroll_band(self.row(), self.region.last_row(), lines, true);
 	}
 
-	/// DECSC and `CSI s` — the deferred wrap rides along with the cursor it belongs to.
+	/// DECSC and `CSI s` — the deferred wrap rides along with the cursor it belongs to, and so do the
+	/// character sets (§143).
+	///
+	/// The sets are DEC's own definition of the saved cursor rather than an extension of it: `ESC 7`
+	/// is documented to save the character sets with the position and the pen, and the engine was
+	/// already doing it for the two sets it had, by keeping them on the grid cursor it saves.
 	fn save_cursor_position(&mut self) {
 		self.margins.save();
+		self.charsets.save();
 		self.term.save_cursor_position();
 	}
 
@@ -771,6 +834,7 @@ impl Handler for Gate<'_> {
 	fn restore_cursor_position(&mut self) {
 		self.term.restore_cursor_position();
 		self.margins.restore();
+		self.charsets.restore();
 	}
 
 	/// DECSET. Mode 69 is DECLRMM, which turns the margins on (§102).
@@ -784,6 +848,7 @@ impl Handler for Gate<'_> {
 			return;
 		}
 		self.term.set_private_mode(mode);
+		self.follow_screen();
 	}
 
 	/// DECRST. Turning DECLRMM off throws the band away with it.
@@ -794,6 +859,52 @@ impl Handler for Gate<'_> {
 			return;
 		}
 		self.term.unset_private_mode(mode);
+		self.follow_screen();
+	}
+
+	/// SCS for the two sets `vte` knows — `ESC ( B` and `ESC ( 0`, in all four slot spellings (§143).
+	///
+	/// NOT forwarded. The engine's four slots stay ASCII for the life of the session, and the
+	/// substitution is made in `input` above from cmote's own table: forwarding as well would map
+	/// every line-drawing glyph twice, and leaving the state in two places would be the second writer
+	/// §71 and §73 refuse.
+	///
+	/// The other finals — the twelve national sets and everything cmote refuses — never reach here at
+	/// all, because `vte` sends them to `unhandled!()`. They are `term/charset.rs`'s, found beside the
+	/// stream. Two doors, one state, and this one is here for a reason of its own: the soft reset (§72)
+	/// is synthesised and fed through the parser, so its `\E(B\E)B\E*B\E+B` reaches the gate and no
+	/// scanner. A gate that stopped listening would leave DECSTR unable to reset the character sets.
+	fn configure_charset(&mut self, index: CharsetIndex, charset: StandardCharset) {
+		let charset = match charset {
+			StandardCharset::Ascii => Charset::Ascii,
+			StandardCharset::SpecialCharacterAndLineDrawing => Charset::LineDrawing,
+		};
+		self.charsets.designate(slot_of(index), charset);
+	}
+
+	/// SI and SO — LS0 and LS1, the two locking shifts `vte` dispatches (§143). Not forwarded, for the
+	/// reason above; the other five locking shifts reach no arm at all and are the scanner's.
+	fn set_active_charset(&mut self, index: CharsetIndex) {
+		self.charsets.lock(slot_of(index), false);
+	}
+
+	/// HTS — a tab stop at the cursor's column, mirrored on the way past (§143).
+	///
+	/// The mirror is written from the gate's own reading of the cursor column, which is the same one
+	/// the engine indexes its table with (`self.grid.cursor.point.column`). Forwarded either way: the
+	/// engine still owns the table that the tabbing is done against.
+	fn set_horizontal_tabstop(&mut self) {
+		self.stops.set(self.column());
+		self.term.set_horizontal_tabstop();
+	}
+
+	/// TBC — clear the stop at the cursor (`CSI 0 g`) or every stop (`CSI 3 g`), mirrored likewise.
+	fn clear_tabs(&mut self, mode: TabulationClearMode) {
+		match mode {
+			TabulationClearMode::Current => self.stops.clear(self.column()),
+			TabulationClearMode::All => self.stops.clear_all(),
+		}
+		self.term.clear_tabs(mode);
 	}
 
 	/// DECRQM. The engine would answer "not recognised" for a mode cmote implements (§102).
@@ -815,23 +926,21 @@ impl Handler for Gate<'_> {
 		device_status(argument: usize),
 		bell(),
 		substitute(),
-		set_horizontal_tabstop(),
 		erase_chars(count: usize),
 		move_backward_tabs(count: u16),
 		move_forward_tabs(count: u16),
 		clear_line(mode: LineClearMode),
 		clear_screen(mode: ClearMode),
-		clear_tabs(mode: TabulationClearMode),
-		set_tabs(interval: u16),
 		terminal_attribute(attribute: Attr),
 		set_mode(mode: Mode),
 		unset_mode(mode: Mode),
 		report_mode(mode: Mode),
 		set_keypad_application_mode(),
 		unset_keypad_application_mode(),
-		set_active_charset(index: CharsetIndex),
-		configure_charset(index: CharsetIndex, charset: StandardCharset),
 		set_color(index: usize, color: Rgb),
+		// `CSI Ps W` — and NOT a writer of the tab-stop mirror, deliberately: the engine leaves this
+		// method at its empty default, so its own table does not move either (§74, §143).
+		set_tabs(interval: u16),
 		dynamic_color_sequence(prefix: String, index: usize, terminator: &str),
 		reset_color(index: usize),
 		clipboard_store(clipboard: u8, payload: &[u8]),

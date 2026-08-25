@@ -1564,7 +1564,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Ps p (DECSSCLS) | Scroll speed | 🤷 | "set scroll speed", in contour's index; what its values mean was not read. cmote scrolls in one step and runs no animation timer — the same absence that keeps the cursor from blinking — so there is no speed here to set (§65, §98) |
 | Ps " p (DECSCL) | Conformance level | 🤷 | sets which VT level the terminal parses as — VT100, VT220 and up — and on xterm performs a **hard reset** along the way. cmote parses one dialect and says so in `TERM`, XTVERSION and XTGETTCAP alike; a remote switching it would be choosing how the user's screen is read, with a screen clear thrown in (§78, §96, §98) |
 | Ps " v (DECRQDE) | Report the displayed extent | ❌ | asks how much of the page is visible and where, answered by DECRPDE. A gap, and an answerable one: cmote holds the numbers, and `CSI 18 t` already reports the text area in the spelling programs actually use. The reply's own parameter list was not read (§98) |
-| Ps $ w (DECRQPSR) | Report presentation state | ❌ | asks for the cursor information report (DECCIR — position, pen, charsets, flags) or the tab-stop report (DECTABSR), each answered in a `DCS … $ u ST` envelope. A gap; both describe state cmote holds, DECCIR from the same cursor DECXCPR reads and DECTABSR from `term/tabs.rs`'s own table. Whether the envelope has a "I do not report that" form, as DECRQSS's does, was not established (§66, §98) |
+| Ps $ w (DECRQPSR) | Report presentation state | ✅ | asks for the cursor information report (DECCIR — position, pen, charsets, flags) or the tab-stop report (DECTABSR), each answered in a `DCS … $ u ST` envelope. Both answered since §143. DECCIR reports the cursor DECXCPR reads — one-based and **absolute**, ignoring origin mode, which is §74's convention for cmote's other cursor report, with DECOM carried in its own flag byte so a reader can still work out the origin-relative row. Its ten fields come from the pen (bold, underline, reverse — **blink is always 0**, the engine having no bit for it, §59), the protection bit §56 borrows, origin mode, a wrap owed read from **both** holders (§102's margins own it when the band is narrowed), and the character-set state §143 built — which is why that state and this report arrived together, GR being written by three sequences and read by nothing else in the program. DECTABSR reads a **mirror** of the engine's private tab table, kept for the same reason `term/region.rs` mirrors the scrolling region and written at all four points the engine is told (HTS, TBC, RIS, resize); a page with every stop cleared answers an EMPTY data string rather than nothing, because the program asked. **The question this row left open is settled**: there is no "I do not report that" form in this family the way there is in DECRQSS — DEC defines `Ps = 0` as "Error. Request ignored" — so an unrecognised request is answered with silence, and the silence is the standard's (§66, §98, §143, `term/presentation.rs`) |
 | # { / # } (and `# p` / `# q`) | Video-attribute stack (XTPUSHSGR / XTPOPSGR) | ✅ | push the current video attributes onto a stack and pop them back; `Pm` names which to save in SGR's own numbering, with `30` / `31` for the two colours, and no parameter at all saves them all. Ten levels, as xterm has it — an eleventh push is dropped, and so is the pop that matches it, so the levels below stay paired. cmote's own scanner (`term/sgrstack.rs`, §85), which reads the pen where the push sat and restores it by feeding the engine that pen spelled in SGR — never by writing the template itself (§71, §73). Underline substyles and the underline colour ride the round trip, which the DECRQSS reply cannot report; blink does not, the engine having no flag for it, and the OSC 8 link is not an attribute and does not travel. **RIS empties the stack** — DECSTR does not, on the same split DECSACE has, and neither does the alternate-screen swap (§86) |
 
 ### ESC — single sequences
@@ -1580,11 +1580,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | ESC = — the numpad digits | Keypad application mode | 🛑 | the digits' half of application keypad mode, which would send `SS3 p`–`SS3 y` in place of NumLock's own output — the user's switch, not a remote's (part 2, §36, `term/keymap.rs`) |
 | ESC 6 / ESC 9 (DECBI / DECFI) | Back / forward index | ✅ | the horizontal twins of RI and IND: one column back or forward, and AT the margin the band slides sideways under the cursor instead — DEC's own words, "if the cursor is at the left margin, all screen data within the margins moves one column to the right". The margin meant is the left/right one, so with a band set the columns outside it stand still, and every row of the scrolling region moves (§102's wall, since a sideways scroll is a scrolling operation). The column pushed past the far margin is gone and the one that arrives carries the pen's background. The cursor half is asked of the ENGINE in its own spelling — CUB and CUF, which the gate already bounds by the margins — so cmote does not become a second writer of the cursor for the sake of two bytes (§71). The scroll half is `shift_band_columns_at`, the same band arithmetic DECIC and DECDC use, at the left margin rather than at the cursor. What had kept these unbuilt was the SCANNER: `vte` dispatches `ESC 6` and `ESC 9` to nothing at all (`ansi.rs:1799-1821`, they fall to `unhandled!`), so they needed an escape-sequence machine of their own — until §111 gave the directory one and this cost two match arms (§98, §100, §102, §111, §112, `term/rect.rs`) |
 | ESC #8 (DECALN) | Screen alignment test | ✅ | fills the screen with `E` and homes the cursor — the alignment test |
-| ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. G2 and G3 can be designated and nothing here can invoke them |
-| ESC ( / ) / * / + — any other final | Designate another 94-charset | ❌ | the other 94-character sets — UK, Dutch, Finnish and the rest — which nothing here would draw either |
-| ESC N / ESC O | Single shift G2 / G3 | ❌ | SS2 / SS3 invoke G2 or G3 for the next character only |
-| SI / SO (LS0 / LS1) | Locking shift G0 / G1 | ✅ | LS0 and LS1 lock G0 or G1 into GL — the two spellings anything in practice uses |
-| LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ❌ | the other locking shifts, which lock G1–G3 into GL or GR. With SS2 / SS3 missing too, G2 and G3 can be designated and never invoked (§65) |
+| ESC ( / ) / * / + — `B` and `0` | Designate ASCII / DEC line drawing | ✅ | SCS designates a 94-character set into G0–G3, one intermediate per slot; `B` is ASCII and `0` DEC line drawing. The two `vte` dispatches, and since §143 the gate records them in cmote's own table instead of forwarding them — forwarding as well would have been the second writer §71 and §73 refuse. The designations ride the saved cursor (DECSC / DECRC) and a bank per screen, which is the engine's own arrangement kept rather than a new one: its slots live on the grid cursor and swap with the grid, so a program that left G1 on line drawing has never handed the shell a screen of box corners. "G2 and G3 can be designated and nothing here can invoke them" was true until §143 (§143, `term/charset.rs`) |
+| ESC ( / ) / * / + — any other final | Designate another 94-charset | ✅ | the other 94-character sets. Twelve national replacement sets and JIS-Roman since §143 — UK, Dutch, Finnish, French, French Canadian, German, Italian, Norwegian/Danish, Portuguese, Spanish, Swedish, Swiss — each a handful of substitutions inside ASCII, from xterm's ctlseqs for the final bytes and DEC's own position tables for the glyphs, cross-checked against xterm's `charsets.h` where the two disagreed. `vte` sends every final but `B` and `0` to `unhandled!()`, so cmote took the whole mechanism over: the engine's four slots stay ASCII for the life of the session and every substitution is made in `Gate::input`, which is ONE writer rather than two (§71, §73). The line-drawing set is not re-implemented — `Charset::map` calls the engine's own table for it. **The big sets are refused, not pending**: DEC Supplemental (`<`, `%5`), DEC Technical (`>`), DEC Greek / Hebrew / Turkish / Cyrillic and JIS-Katakana are each a full 94-glyph table read from no primary source here, and an unrecognised final leaves the slot as it was — which is what a terminal without the set does anyway (§65, §143, `term/charset.rs`) |
+| ESC N / ESC O | Single shift G2 / G3 | ✅ | SS2 / SS3 invoke G2 or G3 for the next character only, and since §143 they do. Consumed by ANY character including a zero-width combining one — DEC defines the shift as lasting for the next graphic character and a combining mark is one, so a shift that survived a character would be a shift that survived the wrong one. Reported in DECCIR's `Sflag`, which has a bit for each, so the two have to be told apart rather than counted (§65, §143, `term/charset.rs`) |
+| SI / SO (LS0 / LS1) | Locking shift G0 / G1 | ✅ | LS0 and LS1 lock G0 or G1 into GL — the two spellings anything in practice uses, and the two `vte` dispatches. Since §143 they write cmote's own charset state rather than the engine's, through the GATE: the rule the directory keeps is that the gate takes what `vte` dispatches and a scanner takes what it drops, and it is not tidiness here — the soft reset is SYNTHESISED and fed through a path that runs no scanner, so `\E(B\E)B\E*B\E+B\017` in `SOFT_RESET` would reset nothing if the gate stopped listening (§72, §143) |
+| LS2 / LS3 / LS1R / LS2R / LS3R | The other locking shifts | ✅ | the other locking shifts, which lock G1–G3 into GL or GR. The row's complaint is closed: G2 and G3 are invocable since §143, by LS2 / LS3 and by the single shifts above. **The two halves are not equally live, and the split is worth stating.** LS2 and LS3 lock into GL and change what is drawn. LS1R, LS2R and LS3R lock into GR, and **nothing can ever land in GR**: cmote decodes UTF-8 always (§67), so what reaches `Gate::input` is a `char` and not a byte in a half — a stream that meant to use the right half writes a byte past 0x7f and `vte` reads it as UTF-8. They are implemented anyway because DECCIR names the slot in GR as one of its ten fields, and a terminal that answered that field from a constant while ignoring the three sequences that set it would be reporting a state it had refused to keep. That is also why GR's power-on value is G1 rather than G0: there is no LS0R, so G1 is the lowest slot GR can ever name (§65, §143, `term/charset.rs`) |
 | ESC #3–6 | Double-height / width lines | ❌ | DECDHL, DECDWL and DECSWL — a line drawn double height (top and bottom halves), double width, or back to single (part 5) |
 | ESC SP F / G | 7 / 8-bit control output | ❌ | S7C1T / S8C1T choose whether the terminal's own replies use 7-bit or 8-bit C1 controls |
 | ESC % G | UTF-8 charset | ✅ | selects UTF-8 as the encoding — supported in the sense that the parser decodes UTF-8 always, the sequence itself reaching nothing, which is equally why `ESC % @` back to ISO-8859-1 has nowhere to go (§67) |
@@ -2029,7 +2029,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   / SUB / **SI** / **SO** and drops the rest to a `debug!` — so `SI`/`SO` are the only locking shifts
   that exist, and `bell()` (`term/mod.rs:1437`) really does raise `Event::Bell`. `esc_dispatch`
   (`ansi.rs:1773`) designates charsets for G0-G3 through the `(`/`)`/`*`/`+` intermediates and has **no
-  arm** for `n`, `o`, `~`, `}` or `|`. `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for
+  arm** for `n`, `o`, `~`, `}` or `|` — nor for `N` or `O`, nor for any designation final but `B` and
+  `0`. All of that is still true of `vte`, and since **§143** none of it is true of cmote: the seven
+  spellings the parser drops are read beside the stream and the whole charset mechanism moved out of
+  the engine, so `SI`/`SO` are no longer the only locking shifts that exist here. `csi_dispatch` has `('p', [b'$'])` and `('p', [b'?', b'$'])` for
   DECRQM and **none for `('p', [b'!'])`**, so DECSTR reached nothing until §72 fed it back in as sequences
   the engine does have arms for — and the two DECRQM arms are why the scanner matches marker and
   intermediates as well as the final byte, a mode question being one keystroke away from a reset.
@@ -2213,6 +2216,43 @@ that predates xterm, and the one §84 said it had not read.
   attributes, blanks, uninitialised cells and 8-bit masking. It had no row until §94.
 - **DECRQM's reply values**: `0` not recognised, `1` set, `2` reset, `3` permanently set,
   `4` permanently reset.
+- **DECRQPSR, DECCIR and DECTABSR** (read for §143). `CSI Ps $ w` takes `0` "Error. Request ignored",
+  `1` for the cursor information report and `2` for the tab stop report — **and the family has no
+  "I do not report that" form**, which is the question §98 left open on that row: DECRQSS has one
+  (§66), this does not, so an unrecognised request is answered with silence and the silence is DEC's.
+  DECCIR is `DCS 1 $ u Pr ; Pc ; Pp ; Srend ; Satt ; Sflag ; Pgl ; Pgr ; Scss ; Sdesig ST`, and all
+  four S-fields are built alike: "Bit 8 — always 0", "Bit 7 — always 1", "Bit 6 — extension
+  indicator", then the flags, which is a base of 0x40 with flags added on. Srend's four are bold,
+  underline, blink and reverse; Satt's one is selective erase; Sflag's four are origin mode, SS2, SS3
+  and a pending autowrap. Scss's four say which slot holds a 96-character set. Sdesig is "a string of
+  intermediate and final characters indicating the character sets designated as G0 through G3", and
+  the page's own example is `B0%5%5`. DECTABSR is `DCS 2 $ u D...D ST` with the example
+  `9/17/25/33/41/49/57/65/73` — one-based columns, `/`-separated.
+- **DECRPDE's parameter list**, which §98 recorded as unread: `CSI Ph ; Pw ; Pml ; Pmt ; Pmp " w`,
+  where Ph is "the number of lines of the current page displayed excluding the status line", Pw the
+  columns, Pml "the column number displayed in the left-most column", Pmt "the line number displayed
+  in the top line" and Pmp "the page number displayed". DECRQDE itself is `CSI " v` with no parameter.
+- **DECSTR's charset line says only "Default settings"** for "G0, G1, G2, G3, GL, GR" and never says
+  what those are. §143 needed a value for GR and this is where the trail ends, so the choice is
+  argued from elsewhere: there is no LS0R, so G1 is the lowest slot GR can ever name.
+
+### The national replacement character sets (read for §143)
+
+The twelve NRCS tables are not in ctlseqs — it names which final byte selects which set and stops
+there — so the substitutions came from DEC's own position-by-position tables, cross-checked against
+xterm's `charsets.h` wherever the first reading looked ambiguous. Three findings worth keeping:
+
+- **Norwegian/Danish is documented in two versions**, a ten-position table (`@` → `Ä`, `[\]` → `ÆØÅ`,
+  `^` → `Ü`, `` ` `` → `ä`, `{|}` → `æøå`, `~` → `ü`) and a six-position one with only the `ÆØÅ` /
+  `æøå` pairs. xterm carries a **single** `map_NRCS_Norwegian_Danish` and it is the ten-position one,
+  which is what settled cmote's. All three of its finals — `` ` ``, `E` and `6` — select it.
+- **Several sets have two final bytes** (`C`/`5` Finland, `R`/`f` France, `Q`/`9` French Canada,
+  `H`/`7` Sweden, and Norway/Denmark's three). DECCIR's `Sdesig` reports the spelling that was
+  *designated*, so the two cannot be canonicalised to one — which is why cmote's table has an entry
+  per spelling sharing one set of substitutions.
+- **Dutch is the odd one**: it puts a plain `|` at 0x5d, so one of its replacements is an ASCII
+  character standing in a different column. A first reading of a secondary source had that entry and
+  `ƒ` one position apart from where they belong; the second reading is the one in the table.
 
 ### The vendor extensions (each terminal's own documentation, read for §89)
 

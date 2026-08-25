@@ -47,6 +47,7 @@
 // engine a CAN in place of it (§57).
 
 mod cancel; // stops the one sequence the engine would read as something else — DECSLRM (§57)
+mod charset; // holds the four character-set slots and the shifts that invoke them, which the engine has only two of (§143)
 mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 mod dcs; // frames the DCS control strings and escape sequences out of the stream, once, for the scanners that read them (§111)
@@ -69,6 +70,7 @@ mod notify; // names the desktop-notification spellings cmote refuses, so the re
 mod osc; // frames OSC strings out of the stream for the scanners below, and sanitises what they keep (§17, §34, §54, §55, §69)
 pub mod osc133; // reads the shell-integration prompt marks the engine ignores (§34)
 pub mod pointer; // reads the mouse pointer shape a remote asks for, OSC 22 — an allow-list (§77)
+mod presentation; // answers DECRQPSR — the cursor information report and the tab stop report (§143)
 pub mod progress; // reads the progress a remote command reports, OSC 9;4 (§54)
 mod protect; // reads the selective-erase sequences the engine drops — DECSCA, DECSED, DECSEL (§56)
 mod query; // answers the identity queries the engine drops — XTVERSION, DECRQSS, XTGETTCAP, DA3, XTSMGRAPHICS (§33, §36, §41)
@@ -408,6 +410,10 @@ impl Terminal {
 			on_alternate: false,
 			region: region::ScrollRegion::full(rows as usize),
 			margins: margins::Margins::default(),
+			designations: charset::Designations::default(),
+			charsets: charset::Charsets::default(),
+			stops: tabs::Stops::new(cols as usize),
+			presentation: presentation::Presentation::default(),
 		}
 	}
 
@@ -425,6 +431,8 @@ impl Terminal {
 			&mut self.term,
 			&mut self.region,
 			&mut self.margins,
+			&mut self.charsets,
+			&mut self.stops,
 			&self.replies,
 		);
 		self.parser.advance(&mut gate, bytes);
@@ -442,6 +450,8 @@ impl Terminal {
 			&mut self.term,
 			&mut self.region,
 			&mut self.margins,
+			&mut self.charsets,
+			&mut self.stops,
 			&self.replies,
 		);
 		self.parser.stop_sync(&mut gate);
@@ -511,6 +521,16 @@ impl Terminal {
 		// a push must read the pen as it stood where the push was written, and a pop must restore it
 		// there — a chunk that pushes, paints itself red and pops would otherwise save the red.
 		let sgr_stack = self.sgr_stack.feed(bytes);
+		// The character-set designations and shifts the engine drops (§143). Interruption-fed for the
+		// sharpest version of the reason the tab-stop reset is: a designation says how the characters
+		// AFTER it are to be read, so one applied at the end of the chunk would have mapped the whole
+		// of its own text through the set it replaced. Which side of the sequence the offset names is
+		// the one thing here that does NOT matter; `term/charset.rs` says why.
+		let charsets = self.designations.feed(bytes);
+		// DECRQPSR, the presentation-state request the engine drops (§143). Interruption-fed for
+		// DECXCPR's reason: the cursor information report describes the cursor, and a cursor is only
+		// what it was where the question sat.
+		let presentations = self.presentation.feed(bytes);
 		Scanned {
 			marks,
 			images,
@@ -524,6 +544,8 @@ impl Terminal {
 			saved_modes,
 			paths,
 			sgr_stack,
+			charsets,
+			presentations,
 		}
 	}
 
@@ -622,6 +644,22 @@ impl Terminal {
 					Interruption::SaveModes(request) => self.apply_saved_modes(&request),
 					Interruption::Path(request) => self.select_character_path(request),
 					Interruption::SgrStack(request) => self.apply_sgr_stack(request),
+					// Written straight into cmote's own charset state rather than fed back as a
+					// sequence (§72's route), because there is nothing downstream to feed: these are
+					// the spellings `vte` drops, so a synthesised `ESC n` would reach the same nothing
+					// the remote's did.
+					Interruption::Charset(request) => match request {
+						charset::CharsetRequest::Designate { slot, charset } => {
+							self.charsets.designate(slot, charset);
+						}
+						charset::CharsetRequest::Lock { slot, right } => {
+							self.charsets.lock(slot, right);
+						}
+						charset::CharsetRequest::SingleShift(slot) => {
+							self.charsets.single_shift(slot);
+						}
+					},
+					Interruption::Presentation(request) => self.answer_presentation(request),
 				}
 			}
 			self.advance(&bytes[start..]);
@@ -991,6 +1029,15 @@ impl Terminal {
 		// Read before anything moves. A cursor waiting to wrap sits one past the last column, and
 		// CUP clamps it back onto the grid, which is where the next glyph would have gone regardless.
 		let (row, col) = self.screen().cursor_position();
+		// The character sets, BEFORE the string is fed (§143). Before, because the string ends in the
+		// `ESC 7` that saves the cursor — and since §143 a saved cursor carries the character sets, so
+		// resetting them afterwards would leave the saved copy holding the state this reset just threw
+		// away. What the string cannot reach is GR and a pending single shift: no sequence the parser
+		// dispatches names either, and LS1R is one of the spellings `vte` drops, so a synthesised
+		// `ESC ~` would reach exactly the nothing a remote's does. The four designations and the SI ARE
+		// in the string and stay there, redundantly and deliberately — they go through the gate, which
+		// is the door a remote's own reset uses, so the string goes on proving that door works.
+		self.charsets.soft_reset();
 		let mut feed = SOFT_RESET.to_vec();
 		feed.extend_from_slice(format!("\x1b[{};{}H", row + 1, col + 1).as_bytes());
 		self.advance(&feed);
@@ -1059,6 +1106,61 @@ impl Terminal {
 			// Also a constant, and for a reason worth keeping in sight: cmote's colour scheme is
 			// fixed (§6), so "dark" cannot go stale between the question and the answer (§98).
 			dsr::DsrRequest::ColorScheme => dsr::DARK_SCHEME.to_vec(),
+		};
+		self.replies
+			.lock()
+			.expect("reply buffer mutex poisoned")
+			.bytes
+			.extend_from_slice(&reply);
+	}
+
+	/// Answer a DECRQPSR — the cursor information report or the tab stop report (§143).
+	///
+	/// Both are assembled here rather than in `term/presentation.rs` for the reason every report in
+	/// this file is: the module is the grammar and the envelope, which are testable without a
+	/// terminal, and the STATE is only readable from here. So this function's whole job is to read
+	/// eight facts off the engine and one off cmote's own mirrors, and hand them over.
+	///
+	/// The cursor is the one DECXCPR reports (§82): absolute, ignoring origin mode. That is the
+	/// convention §74 settled for cmote's other cursor report and it is kept here so the two cannot
+	/// disagree — and DECCIR carries DECOM in its own flag byte, so a program that wants the
+	/// origin-relative row has been told everything it needs to work it out.
+	fn answer_presentation(&mut self, request: presentation::PresentationRequest) {
+		let reply = match request {
+			presentation::PresentationRequest::Cursor => {
+				let (row, column) = self.screen().cursor_position();
+				let cursor = &self.term.grid().cursor;
+				let flags = cursor.template.flags;
+				let state = presentation::CursorState {
+					row: row as usize,
+					column: column as usize,
+					rendition: presentation::Rendition {
+						bold: flags.contains(Flags::BOLD),
+						// Any underline style answers yes. DEC has one underline bit and the engine
+						// has five styles, so the honest reading of "is the pen underlining?" is the
+						// one the DECRQSS report takes for a curly underline (§123).
+						underline: flags.intersects(
+							Flags::UNDERLINE
+								| Flags::DOUBLE_UNDERLINE
+								| Flags::UNDERCURL | Flags::DOTTED_UNDERLINE
+								| Flags::DASHED_UNDERLINE,
+						),
+						reverse: flags.contains(Flags::INVERSE),
+					},
+					protected: protect::is_protected(flags.bits()),
+					modes: presentation::Modes {
+						origin: self.term.mode().contains(TermMode::ORIGIN),
+						// Both holders of the deferred wrap, because which one has it depends on
+						// whether the margins are narrowed: with a right margin short of the page
+						// edge the engine's flag never fires and cmote's does (§102).
+						pending_wrap: cursor.input_needs_wrap || self.margins.pending_wrap(),
+					},
+				};
+				presentation::cursor_report(state, &self.charsets)
+			}
+			presentation::PresentationRequest::TabStops => {
+				presentation::tab_stop_report(self.stops.columns())
+			}
 		};
 		self.replies
 			.lock()
@@ -1884,6 +1986,13 @@ impl Terminal {
 		// that is now 30 columns wide, and reflow makes it worse than arbitrary: the text those
 		// columns held has moved. xterm drops margins on resize for the same reason.
 		self.margins.reset();
+		// The tab stops are the region's case a second time, with one difference worth reading twice:
+		// the engine does NOT throw its table away here, it GROWS it, keeping every stop a program set
+		// and giving each new column the default every eight (§143, `Term::resize`). So the mirror
+		// grows too — putting a fresh table back instead would wipe a program's own stops the first
+		// time the user dragged the window wider, which is a mirror inventing a change the engine never
+		// made. Fourth and last of `term/tabs.rs`'s writers, and the only one that is not the gate's.
+		self.stops.resize(cols as usize);
 		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
 		buffer.rows = rows;
 		buffer.cols = cols;
@@ -2324,6 +2433,25 @@ pub struct Terminal {
 	/// Unlike the region this is not a mirror of anything — the engine has no margins, so cmote is
 	/// their only holder and the gate performs every operation they change.
 	margins: margins::Margins,
+	/// Reads the charset sequences the engine drops — every SCS final but `B` and `0`, the two single
+	/// shifts and the three right-half locking shifts (§143). Fed by the interruption advance with
+	/// one-past offsets, because a designation's whole content is that it governs the text AFTER it.
+	designations: charset::Designations,
+	/// Which set is in each of the four slots, and which slot each half of the code space names
+	/// (§143). Not a mirror: since §143 the engine's own slots stay ASCII for the life of the session
+	/// and every substitution is made in the gate, so this is the only holder and there is one writer
+	/// (§71, §73). Written from two doors — the gate for what `vte` dispatches, the scanner above for
+	/// what it drops — and read on the printing path by `Gate::input`.
+	charsets: charset::Charsets,
+	/// The engine's private tab-stop table, mirrored (§143). The engine implements tab stops fully and
+	/// then keeps the table to itself, exactly as it does the scrolling region — so DECTABSR, which
+	/// has to REPORT where the stops are, needs a copy that is written wherever the engine is told.
+	/// `term/tabs.rs` names all four writers; three are the gate's and the fourth is `resize` below.
+	stops: tabs::Stops,
+	/// Reads DECRQPSR, the presentation-state request the engine drops — the cursor information report
+	/// and the tab-stop report (§143). Fed by the interruption advance because DECCIR describes the
+	/// cursor, and a cursor is only what it was where the question sat.
+	presentation: presentation::Presentation,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
@@ -2376,6 +2504,16 @@ enum Interruption {
 	/// the only interruption whose effect is carried out by FEEDING the engine — a pop is spelled back as the
 	/// SGR that restores the pen, so the engine stays the only writer of its own template (§71, §73).
 	SgrStack(sgrstack::SgrStackRequest),
+	/// A character-set designation or a shift that invokes one (§143). Applied on the far side of its
+	/// sequence, like the tab-stop reset — though for this family the SIDE is arbitrary and the POINT
+	/// in the stream is not: a designation says how the characters after it are read, so one applied
+	/// at the end of the chunk would map the very text it was written for through the set it replaced.
+	/// `term/charset.rs` says why neither side can be told from the other.
+	Charset(charset::CharsetRequest),
+	/// A DECRQPSR — the cursor information report or the tab stop report (§143). The second
+	/// interruption in this list that produces a REPLY, and it is here for DECXCPR's reason: DECCIR
+	/// describes the cursor, so it has to be answered with the engine advanced exactly to the question.
+	Presentation(presentation::PresentationRequest),
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -2399,6 +2537,8 @@ struct Scanned {
 	saved_modes: Vec<(usize, savemodes::SaveModesRequest)>,
 	paths: Vec<(usize, scp::ScpRequest)>,
 	sgr_stack: Vec<(usize, sgrstack::SgrStackRequest)>,
+	charsets: Vec<(usize, charset::CharsetRequest)>,
+	presentations: Vec<(usize, presentation::PresentationRequest)>,
 }
 
 impl Scanned {
@@ -2417,6 +2557,31 @@ impl Scanned {
 			&& self.saved_modes.is_empty()
 			&& self.paths.is_empty()
 			&& self.sgr_stack.is_empty()
+			&& self.charsets.is_empty()
+			&& self.presentations.is_empty()
+	}
+
+	/// How many interruptions the chunk carried in all — the exact capacity the merged list needs.
+	///
+	/// Beside `is_empty` rather than spelled out at the one call site, and for its reason: a sum of a
+	/// dozen lengths written inline is a dozen more lines that have to be edited in step with the
+	/// fields, and the compiler cannot tell a forgotten term from a deliberate one. Here the two run
+	/// off the same list of fields and a missing entry is visible by reading twelve lines, not sixty.
+	fn len(&self) -> usize {
+		self.marks.len()
+			+ self.images.len()
+			+ self.bookmarks.len()
+			+ self.protections.len()
+			+ self.cancels.len()
+			+ self.rectangles.len()
+			+ self.tab_resets.len()
+			+ self.cursor_requests.len()
+			+ self.locator_requests.len()
+			+ self.saved_modes.len()
+			+ self.paths.len()
+			+ self.sgr_stack.len()
+			+ self.charsets.len()
+			+ self.presentations.len()
 	}
 }
 
@@ -2425,6 +2590,7 @@ impl Scanned {
 /// at the very same offset keep the order they were scanned in — which is the only sensible
 /// tie-break, since no scanner can see another's.
 fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
+	let mut merged: Vec<(usize, Interruption)> = Vec::with_capacity(scanned.len());
 	let Scanned {
 		marks,
 		images,
@@ -2438,21 +2604,9 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		saved_modes,
 		paths,
 		sgr_stack,
+		charsets,
+		presentations,
 	} = scanned;
-	let mut merged: Vec<(usize, Interruption)> = Vec::with_capacity(
-		marks.len()
-			+ images.len()
-			+ bookmarks.len()
-			+ protections.len()
-			+ cancels.len()
-			+ rectangles.len()
-			+ tab_resets.len()
-			+ cursor_requests.len()
-			+ locator_requests.len()
-			+ saved_modes.len()
-			+ paths.len()
-			+ sgr_stack.len(),
-	);
 	merged.extend(
 		marks
 			.into_iter()
@@ -2513,6 +2667,16 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		sgr_stack
 			.into_iter()
 			.map(|(offset, request)| (offset, Interruption::SgrStack(request))),
+	);
+	merged.extend(
+		charsets
+			.into_iter()
+			.map(|(offset, request)| (offset, Interruption::Charset(request))),
+	);
+	merged.extend(
+		presentations
+			.into_iter()
+			.map(|(offset, request)| (offset, Interruption::Presentation(request))),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -6586,5 +6750,199 @@ mod tests {
 			replies.ends_with(b";4c"),
 			"and amended to advertise sixel, like any other DA1 (§41): {replies:?}"
 		);
+	}
+
+	// --- §143: the character sets, end to end through the real emulator -------------------------
+
+	/// A national set designated over the wire replaces its own positions and nothing else. The whole
+	/// point of §143: before it, `ESC ( K` reached `unhandled!()` and the text came out as ASCII.
+	#[test]
+	fn a_national_set_designated_over_the_wire_replaces_its_positions() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"(K[a~");
+		assert_eq!(read(&terminal, 0, 0, 3), "Äaß");
+	}
+
+	/// The ordering property the interruption offset exists for. A designation governs the text AFTER
+	/// it, so the two characters in front of it must come out untouched — which is exactly what would
+	/// break if the request were applied at the end of the chunk instead of where it sat.
+	#[test]
+	fn a_designation_governs_only_the_text_after_it() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"[[(K[[");
+		assert_eq!(read(&terminal, 0, 0, 4), "[[ÄÄ");
+	}
+
+	/// The audit row §143 answers (§65): G2 could be designated and never invoked. LS2 invokes it, and
+	/// it stays invoked.
+	#[test]
+	fn a_locking_shift_puts_g2_in_the_left_half() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"*Kn[[");
+		assert_eq!(read(&terminal, 0, 0, 2), "ÄÄ");
+	}
+
+	/// And a single shift invokes it for exactly one character, which is the other half of the same row.
+	#[test]
+	fn a_single_shift_reaches_exactly_one_character() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"*KN[[");
+		assert_eq!(read(&terminal, 0, 0, 2), "Ä[");
+	}
+
+	/// The one set that worked before §143 still works after it. cmote does the mapping now instead of
+	/// the engine, from the engine's own table — so a regression here would be the takeover having cost
+	/// something rather than added to it.
+	#[test]
+	fn line_drawing_still_draws_after_the_takeover() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"(0qqq");
+		assert_eq!(read(&terminal, 0, 0, 3), "───");
+	}
+
+	/// RIS puts every slot back to ASCII. The engine rebuilds its own state inside `reset_state` with
+	/// nothing on the wire to say so, which is why this is the gate's job and not a scanner's.
+	#[test]
+	fn a_hard_reset_puts_the_character_sets_back() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"(Kc[");
+		assert_eq!(read(&terminal, 0, 0, 1), "[");
+	}
+
+	/// And so does the soft reset, whose long spelling cmote synthesises (§72) — a path no scanner ever
+	/// sees, which is why the four designations in `SOFT_RESET` have to reach the GATE.
+	#[test]
+	fn a_soft_reset_puts_a_national_set_back() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"(K[!p[");
+		assert_eq!(read(&terminal, 0, 0, 1), "[");
+	}
+
+	/// The half of the soft reset that no sequence in `SOFT_RESET` can carry: GR is cmote's alone, no
+	/// sequence the parser dispatches names it, and LS1R is one of the spellings `vte` drops — so a
+	/// synthesised `ESC ~` would reach exactly the nothing a remote's does. Hence the direct write in
+	/// `soft_reset`, and hence this test, which is the only thing that can tell it was made.
+	#[test]
+	fn a_soft_reset_puts_the_right_half_back() {
+		let mut terminal = Terminal::new(4, 20);
+		let reply = terminal.process(b"}[1$w");
+		let reply = String::from_utf8(reply).expect("the report is ASCII");
+		assert!(reply.contains(";0;2;@;"), "LS2R put G2 in GR: {reply:?}");
+		let reply = terminal.process(b"[!p[1$w");
+		let reply = String::from_utf8(reply).expect("the report is ASCII");
+		assert!(
+			reply.contains(";0;1;@;"),
+			"and the reset put G1 back: {reply:?}"
+		);
+	}
+
+	/// A full-screen program's designations belong to its own page. The engine has always kept them
+	/// there — they ride the grid cursor and swap with the grid — so a single global table in cmote
+	/// would have been a REGRESSION, and a visible one: a program that left G1 on line drawing under
+	/// SO would hand the shell a screen of box corners.
+	#[test]
+	fn the_alternate_screen_gets_its_own_character_sets() {
+		let mut terminal = Terminal::new(4, 20);
+		terminal.process(b"[?1049h(0q");
+		assert_eq!(read(&terminal, 0, 0, 1), "─", "the program's own page");
+		terminal.process(b"[?1049lq");
+		assert_eq!(
+			read(&terminal, 0, 0, 1),
+			"q",
+			"the shell's never heard of it"
+		);
+	}
+
+	/// A saved cursor carries the character sets, which is DEC's own definition of the item.
+	#[test]
+	fn a_saved_cursor_carries_the_character_sets() {
+		let mut terminal = Terminal::new(2, 8);
+		terminal.process(b"(K7(B8[");
+		assert_eq!(read(&terminal, 0, 0, 1), "Ä", "the designation came back");
+	}
+
+	// --- §143: DECRQPSR ------------------------------------------------------------------------
+
+	/// DECCIR reports the cursor where the QUESTION sat, not where the chunk ended — the property the
+	/// interruption advance exists for, and the one a report answered after the chunk would get wrong.
+	#[test]
+	fn the_cursor_information_report_answers_from_where_the_question_sat() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"[3;5H[1$wthen more text");
+		let reply = String::from_utf8(reply).expect("the report is ASCII");
+		assert!(
+			reply.starts_with("P1$u3;5;1;"),
+			"the cursor as it stood at the question: {reply:?}"
+		);
+		assert!(reply.ends_with("\\"), "and in a DCS envelope: {reply:?}");
+	}
+
+	/// The three charset fields come from the state §143 built, which is why the two arrived together:
+	/// GR is written by LS2R and read by nothing else in the program.
+	#[test]
+	fn the_cursor_report_names_the_sets_that_are_designated_and_invoked() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b")0}[1$w");
+		let reply = String::from_utf8(reply).expect("the report is ASCII");
+		assert!(
+			reply.ends_with(";1;2;@;B0BB\\"),
+			"Pgl 1, Pgr 2, 94-column sets, and G1 holding line drawing: {reply:?}"
+		);
+	}
+
+	/// The pen rides the report too — bold and a curly underline both land on DEC's own bits, the curl
+	/// reported as a plain underline for the reason the DECRQSS report gives (§123).
+	#[test]
+	fn the_cursor_report_carries_the_pen() {
+		let mut terminal = Terminal::new(6, 20);
+		let reply = terminal.process(b"[1;4:3m[1$w");
+		let reply = String::from_utf8(reply).expect("the report is ASCII");
+		assert!(
+			reply.contains(";1;C;@;"),
+			"Srend 0x40 | bold | underline: {reply:?}"
+		);
+	}
+
+	/// DECTABSR reads the mirror, and the mirror is written wherever the engine is told — here by the
+	/// TBC and HTS a program writes by hand.
+	#[test]
+	fn the_tab_stop_report_follows_the_stops_a_program_sets() {
+		let mut terminal = Terminal::new(6, 20);
+		assert_eq!(
+			terminal.process(b"[2$w"),
+			b"P2$u1/9/17\\".to_vec(),
+			"the power-on stops, every eight columns from the left edge"
+		);
+		assert_eq!(
+			terminal.process(b"[3g[5GH[2$w"),
+			b"P2$u5\\".to_vec(),
+			"cleared, then one set by hand"
+		);
+	}
+
+	/// A resize GROWS the engine's table and keeps the stops a program set, so the mirror must grow
+	/// too. Putting a fresh table back instead would wipe a program's own stops the first time the
+	/// user dragged the window wider.
+	#[test]
+	fn the_tab_stop_report_survives_a_resize() {
+		let mut terminal = Terminal::new(6, 20);
+		terminal.process(b"[3g[5GH");
+		terminal.resize(6, 40);
+		assert_eq!(
+			terminal.process(b"[2$w"),
+			b"P2$u5/25/33\\".to_vec(),
+			"the hand-set stop kept, and the new columns given the default every eight"
+		);
+	}
+
+	/// DEC defines Ps 0 as "Error. Request ignored" and nothing past 2, and there is no "I do not
+	/// report that" form in this family the way there is in DECRQSS (§66). So the answer is silence,
+	/// and it is the standard's answer rather than cmote declining to speak.
+	#[test]
+	fn a_presentation_request_dec_does_not_define_draws_no_reply() {
+		let mut terminal = Terminal::new(6, 20);
+		assert_eq!(terminal.process(b"[0$w"), b"".to_vec());
+		assert_eq!(terminal.process(b"[$w"), b"".to_vec());
+		assert_eq!(terminal.process(b"[9$w"), b"".to_vec());
 	}
 }
