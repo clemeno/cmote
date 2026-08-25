@@ -16926,3 +16926,119 @@ and the probe is what said it was green for no reason.
   because wrapping is the engine's and the engine has no notion of the size.
 - **No live session.** Exercised through `Terminal::process` and the run planner; no remote program
   was asked to draw a banner.
+
+## §147 — The one window question that is about the terminal, and the four that are about the user
+
+`CSI Ps t` is xterm's window-operation family: one final byte carrying two dozen unrelated verbs,
+half of them commands to the window manager and half of them questions about the window. The parser
+dispatches exactly four (`vte-0.15.0/src/ansi.rs:1739-1745`) — 14 and 18, the text area in pixels and
+in characters, and 22 and 23, the title stack — and sends every other value to `unhandled!()`. So
+five questions fall on the floor, and the audit carried two rows for them:
+
+> | Window / position / state reports (CSI 11 / 13 t) | ❌ | ask whether the window is iconified and where it sits on the desktop |
+> | Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels … a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71, §84) |
+
+One of them is now answered and the other is refused, and the line between them is a single sentence.
+
+### 16 is a fact about the terminal. 11, 13, 15 and 19 are facts about the person using it
+
+That is §36's rule and it decides all five without a second argument.
+
+A cell's pixel size is a property of the font cmote renders with. A program asks it to size a picture
+(§41), to place a sixel exactly, or to work out how many pixels a box-drawing character spans; the
+answer says nothing whatever about the machine cmote is running on.
+
+The other four say only that:
+
+| | asks | reply |
+|---|---|---|
+| `CSI 11 t` | are you iconified? | `CSI 1 t` / `CSI 2 t` |
+| `CSI 13 t` | where is your window on the desktop? | `CSI 3 ; x ; y t` |
+| `CSI 15 t` | how big is the display, in pixels? | `CSI 5 ; height ; width t` |
+| `CSI 19 t` | and in characters? | `CSI 9 ; height ; width t` |
+
+Where a window sits, whether it has been minimised, and how large the display is are facts that
+change under a mouse the remote cannot see, differ per monitor, and together fingerprint a desktop —
+for the cost of five bytes on a wire the user never looks at. The same rule that keeps `CSI ? 26 n`
+refused because it would report the keyboard's language (§36), and that keeps DECRQDE's `Pmt` at 1
+even when the user has scrolled back (§144).
+
+**A faked answer was considered and refused.** `CSI 3 ; 0 ; 0 t` would unblock a program without
+telling it anything true. This directory does not do that: `graphics_reply` refuses a *set* and
+returns the real limit rather than pretending the set worked (§41), and `Tc` is answered unknown
+rather than given a value the capability does not define (§123). A refusal is a stall the sender can
+detect; a lie is not.
+
+### The second argument, which is cmote's own, and it applies to 11 alone
+
+Set the privacy question aside entirely and `CSI 11 t` still has **no true answer here**.
+
+cmote's window holds tabs and splits (§19, §101), and any one terminal is one pane of one tab. A pane
+in a background tab is not iconified and is exactly as invisible as one in a minimised window. So
+`CSI 1 t` — the reply that means "I am on screen" — would be wrong for a case the question has no
+code for, and it is the answer a program acts on by *stopping*: a curses application told it is
+iconified may stop redrawing until told otherwise. A wrong answer about visibility is worse than
+silence, because silence makes it draw anyway.
+
+### Why this one query is an interruption, when the other six are not
+
+Every query `term/query.rs` sniffs is answered **after** the chunk, on the argument §144 wrote down:
+the answer is a fixed fact, so it cannot go stale between the question and the reply and the point in
+the stream does not matter. The cell size passes that test too — only the GUI moves it, and it moves
+it between chunks, never inside one.
+
+It is answered mid-stream anyway, because of something none of the other six has: **a sibling the
+engine answers**.
+
+`CSI 14 t` and `CSI 16 t` are the pair a program uses to work out a cell — 14 gives the text area in
+pixels, 18 gives it in cells, 16 gives the quotient directly — and they are routinely written in one
+breath. The engine answers 14 the instant it parses it, into the shared reply buffer. An answer to 16
+assembled after the chunk would land *after* that one however the two were ordered, so a program that
+sent `CSI 16 t` then `CSI 14 t` and read two replies by position would assign each to the other.
+
+So the general rule is not "a fixed fact may be answered late" but the narrower one this makes
+explicit: **a fixed fact may be answered late unless something else answers in the same stream.**
+Six queries qualify; this one does not. The test that pins it asks the pair in both orders.
+
+### What this took away from §71's argument, and why the refusal still stands
+
+The `CSI 16 t` row used to carry a supporting clause for a *different* decision: refusing iTerm2's
+`ReportCellSize` (§71) "is not a vendor singled out" *because* the standard spelling went unanswered
+too. That clause is now false, and it was a weak one to begin with — a refusal that needs a second
+refusal to look even-handed is a refusal that has not stated its own reason.
+
+§71's real reason never depended on it. `ReportCellSize` is asked in order to size an inline image
+for iTerm2's `File=` protocol, which cmote refuses (§70); a reply is an advertisement, and answering
+precisely and then dropping the picture is worse for the sender than staying quiet, because silence
+is what lets it fall back. `term/iterm.rs` is an allow-list applied twice and only `gitBranch`
+survives it. The test that pins the refusal now answers the standard question in **both** its
+spellings on the lines below it, so the demonstration that this is a decision rather than ignorance
+is stronger than it was.
+
+### Files
+
+* `src/term/window.rs` — new. The scanner, the allow-list of one, the four refusals as tests, and
+  `cell_size_reply`.
+* `src/term/mod.rs` — the `window` field, `Interruption::CellSize`, the `Scanned` list, and
+  `answer_cell_size`, which takes the lock once and reads the same `cell_width`/`cell_height` pair
+  the engine's own `CSI 14 t` answer is built from. Plus `answer_queries`, lifted whole out of
+  `process` with nothing changed, because the new interruption pushed that function past what the
+  house rule allows.
+* `src/term/differential.rs` — `t` in the shape space's final bytes and `16` in its parameter runs.
+  Both were needed together, and the pairing is the point: the final byte alone would have swept a
+  value this scanner never claims, and the value alone a byte it never watches. The sweep is 11,475
+  shapes now, and `t` is the only final byte in it the engine answers on some parameters and drops on
+  others.
+
+### Not done
+
+- **The reply is zero before the GUI has measured.** `set_cell_pixels` runs before any output
+  arrives, so the window is a test's concern rather than a session's — and `CSI 14 t` has said zero
+  in that same window since §9. One source, one gap, stated twice.
+- **`CSI 15 t` and `CSI 19 t` were not in the audit at all.** They are named here, refused with 11
+  and 13, and they get rows of their own in part 8 — three questions that had never been written down
+  and one that had.
+- **The ten commands (`CSI 1–10 t`) stay part 6's refusal.** Nothing here changes them; the scanner
+  simply does not claim them, and the test says so.
+- **No live session.** Exercised through `Terminal::process`; no remote program was observed asking
+  for a cell size.

@@ -257,7 +257,11 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// private marker is counted against it as the engine does — the case cmote's own limit of 4 lets
 	/// through, and the one this sweep is here to keep honest.
 	const INTERMEDIATES: [&[u8]; 9] = [b"", b" ", b"\"", b"#", b"$", b"!", b"'", b" \"", b"\"$#"];
-	const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
+	/// `16` joined with `window` (§147), and it is the only two-digit value here on purpose: that
+	/// scanner's whole allow-list is ONE number on a final byte carrying two dozen other verbs, so a
+	/// sweep whose parameter run could never BE that number would have walked past it claiming nothing
+	/// and passing vacuously.
+	const PARAMS: [&[u8]; 5] = [b"", b"1", b"16", b"1;2", b"1:2"];
 	/// Every final byte any scanner in this directory watches for. `c` and `S` joined when `query` did
 	/// (§111): they are DA3 and XTSMGRAPHICS, two of the three private CSI forms it answers, and a
 	/// sweep that never spelled them could not have caught it acting on one alone. `|` joined with
@@ -265,8 +269,10 @@ fn shapes() -> Vec<(String, Vec<u8>)> {
 	/// `sgrstack`, which is exactly why the intermediate had to come too: DECELR and DECERA differ only
 	/// in it, and a sweep blind to `'` could not tell one scanner claiming another's sequence from a
 	/// scanner minding its own. `r` joined with `savemodes` (§141), where the near miss is DECSTBM —
-	/// `CSI Pt ; Pb r` with no marker is the scrolling region, which the engine really acts on.
-	const FINALS: &[u8] = b"smqpJKWk{}zncS|r";
+	/// `CSI Pt ; Pb r` with no marker is the scrolling region, which the engine really acts on. `t`
+	/// joined with `window` (§147), and it is the one final byte here the ENGINE answers on some
+	/// parameters and drops on others — which is exactly the near miss that scanner is built around.
+	const FINALS: &[u8] = b"smqpJKWk{}zncS|rt";
 
 	/// Where the parts are put relative to each other. The first is the only WELL-FORMED order; the other
 	/// two are the ones the engine refuses, and they have to be generated deliberately because a generator
@@ -633,7 +639,7 @@ mod tests {
 			bytes
 		};
 
-		let claims: [ClaimAt; 9] = [
+		let claims: [ClaimAt; 10] = [
 			("dsr, DECXCPR", b"\x1b[?6n", 3, |bytes| {
 				!super::super::dsr::Dsr::default().feed(bytes).is_empty()
 			}),
@@ -683,6 +689,15 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// The cell-size question (§147). The tenth, and the only entry here whose FINAL BYTE the
+			// engine does have arms behind — four of them, on other parameters. The rule being tested is
+			// the same one: a stray byte the engine reads through must not change what cmote makes of the
+			// sequence, or the two disagree about which verb the `t` was carrying.
+			("window, CSI 16 t", b"\x1b[16t", 3, |bytes| {
+				!super::super::window::WindowReports::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		for (what, sequence, at, claimed) in claims {
@@ -724,10 +739,11 @@ mod tests {
 		// one of those (a parameter byte after an intermediate) and this is the net that would have caught it
 		// without anyone thinking of the case.
 		//
-		// Every scanner in the directory, each asked only "did you act on this at all" — the single question
-		// all twelve can answer in common. THIRTEEN entries for twelve scanners: `protect` is listed twice
-		// because its verdict depends on whether the pen is armed, and both states have to be swept.
-		let scanners: [DifferentialClaim; 13] = [
+		// Every CSI scanner in the directory, each asked only "did you act on this at all" — the single
+		// question all thirteen can answer in common. FOURTEEN entries for thirteen scanners: `protect` is
+		// listed twice because its verdict depends on whether the pen is armed, and both states have to be
+		// swept.
+		let scanners: [DifferentialClaim; 14] = [
 			("cancel", b"", |bytes| {
 				!Cancel::default().feed(bytes).is_empty()
 			}),
@@ -789,13 +805,21 @@ mod tests {
 					.feed(bytes)
 					.is_empty()
 			}),
+			// §147, and the entry that put `t` AND the two-digit parameter into the shape space. Both
+			// were needed together: the final byte alone would have swept a value this scanner never
+			// claims, and the value alone would have swept a byte it never watches.
+			("window", b"", |bytes| {
+				!super::super::window::WindowReports::default()
+					.feed(bytes)
+					.is_empty()
+			}),
 		];
 
 		let shapes = shapes();
 		assert_eq!(
 			shapes.len(),
-			8640,
-			"5 markers x 9 intermediates x 4 params x 16 finals x 3 orders"
+			11475,
+			"5 markers x 9 intermediates x 5 params x 17 finals x 3 orders"
 		);
 		// Collected rather than asserted case by case: the first failure is never the whole story, and an
 		// inventory is what tells "one scanner has a bug" from "the rule is wrong everywhere".

@@ -85,6 +85,7 @@ pub mod search; // finds text anywhere in the scrollback for the find bar (§35)
 mod sgrstack; // reads XTPUSHSGR / XTPOPSGR, the video-attribute stack the engine never sees (§85)
 pub mod sixel; // decodes a sixel image's payload into pixels (§41)
 mod tabs; // reads DECST8C, the tab-stop reset the engine parses and drops (§74)
+mod window; // answers the one window-op question that is a fact about the terminal, and refuses the four that are not (§147)
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -419,6 +420,7 @@ impl Terminal {
 			controls: c1::Controls::default(),
 			lines: lineattr::LineAttributes::default(),
 			sizes: lineattr::LineSizes::default(),
+			window: window::WindowReports::default(),
 		}
 	}
 
@@ -544,6 +546,11 @@ impl Terminal {
 		// for the same reason: a chunk that sets a line double-width and then moves the cursor down
 		// and sets another must attach each to the line the cursor was on when it arrived.
 		let line_attributes = self.lines.feed(bytes);
+		// `CSI 16 t`, the cell-size question the engine drops (§147). Interruption-fed for a reason that
+		// is neither the cursor's nor the tab stops': the answer is a fixed fact and could not go stale,
+		// but the ENGINE answers `CSI 14 t` mid-advance and the two are asked in one breath. A reply
+		// built after the chunk would land second however the questions were ordered.
+		let cell_sizes = self.window.feed(bytes);
 		Scanned {
 			marks,
 			images,
@@ -561,6 +568,7 @@ impl Terminal {
 			presentations,
 			controls,
 			line_attributes,
+			cell_sizes,
 		}
 	}
 
@@ -677,6 +685,7 @@ impl Terminal {
 					Interruption::Presentation(request) => self.answer_presentation(request),
 					Interruption::Controls(eight_bit) => self.set_control_form(eight_bit),
 					Interruption::LineAttribute(attribute) => self.set_line_size(attribute),
+					Interruption::CellSize => self.answer_cell_size(),
 				}
 			}
 			self.advance(&bytes[start..]);
@@ -695,6 +704,33 @@ impl Terminal {
 		let eight_bit = buffer.eight_bit_controls;
 		let sealed = out.len();
 		drop(buffer);
+		self.answer_queries(queries, &mut out);
+		// The XTQMODKEYS answer, already built by the tracker that owns the level (§61). It joins
+		// the other cmote-originated replies rather than the engine's, which is where it belongs:
+		// the engine parsed the question and dropped it.
+		out.extend_from_slice(&modkeys_reply);
+		// Last, put the replies built above into the C1 form the host asked for (§145). Only the TAIL:
+		// everything in front of `sealed` came out of the buffer already encoded, in whatever form was
+		// in force where it was written, which is what lets a chunk switch half way through.
+		let tail = c1::encode(&out[sealed..], eight_bit);
+		out.truncate(sealed);
+		out.extend_from_slice(&tail);
+		out
+	}
+
+	/// Append the answers to the identity queries a chunk carried (§33, §36, §41, §144).
+	///
+	/// The replies built AFTER the chunk rather than during it, which is what these six have in common:
+	/// every one is answered from a fact that a byte stream cannot move — cmote's name, its unit id, the
+	/// limits its decoder enforces, the size of its grid, and the five settings DECRQSS reports, each of
+	/// which is read as the chunk left it because that is what a program setting attributes and then
+	/// asking about them means. The questions whose answer would go stale are interruptions instead
+	/// (`Interruption::Dsr`, `::Presentation`, `::CellSize`).
+	///
+	/// Lifted out of `process` in §147 with nothing changed. It was the largest self-contained block
+	/// there, and `process` had grown past what one function should hold once the cell-size question
+	/// joined it — which is `[lints]` catching a house rule rather than a bug.
+	fn answer_queries(&self, queries: Vec<query::Query>, out: &mut Vec<u8>) {
 		for query in queries {
 			match query {
 				// XTVERSION: cmote's fixed name and version.
@@ -731,17 +767,6 @@ impl Terminal {
 				}
 			}
 		}
-		// The XTQMODKEYS answer, already built by the tracker that owns the level (§61). It joins
-		// the other cmote-originated replies rather than the engine's, which is where it belongs:
-		// the engine parsed the question and dropped it.
-		out.extend_from_slice(&modkeys_reply);
-		// Last, put the replies built above into the C1 form the host asked for (§145). Only the TAIL:
-		// everything in front of `sealed` came out of the buffer already encoded, in whatever form was
-		// in force where it was written, which is what lets a chunk switch half way through.
-		let tail = c1::encode(&out[sealed..], eight_bit);
-		out.truncate(sealed);
-		out.extend_from_slice(&tail);
-		out
 	}
 
 	/// Answer one DECRQSS request from the live state that holds the setting (§33, §123).
@@ -1237,6 +1262,23 @@ impl Terminal {
 			.expect("reply buffer mutex poisoned")
 			.bytes
 			.extend_from_slice(locator::UNAVAILABLE);
+	}
+
+	/// Answer `CSI 16 t` — "how big is one character cell?" — from the pixel size the GUI measured
+	/// (§147).
+	///
+	/// The numbers come off the reply buffer rather than from a field of their own, and that is the
+	/// point: they are the SAME pair the engine multiplies for its `CSI 14 t` answer, put there by
+	/// `set_cell_pixels`. A program that asks both questions is told two things that cannot disagree,
+	/// because there is one place the fact lives.
+	///
+	/// One lock, held across the read and the write, so nothing can move the cell size between the two.
+	/// Nothing does today — only the GUI writes it, on the same thread — but the pair being read and the
+	/// bytes being appended are the same buffer, so taking it twice would be two locks for no reason.
+	fn answer_cell_size(&self) {
+		let mut buffer = self.replies.lock().expect("reply buffer mutex poisoned");
+		let reply = window::cell_size_reply(buffer.cell_width, buffer.cell_height);
+		buffer.bytes.extend_from_slice(&reply);
 	}
 
 	/// Carry out one XTSAVE or XTRESTORE — remember what some private modes are, or put them back
@@ -2540,6 +2582,13 @@ pub struct Terminal {
 	/// and the tab-stop report (§143). Fed by the interruption advance because DECCIR describes the
 	/// cursor, and a cursor is only what it was where the question sat.
 	presentation: presentation::Presentation,
+	/// Reads the window-op questions the engine drops, and finds the one cmote answers — `CSI 16 t`,
+	/// "how big is one cell?" (§147). Fed by the interruption advance for a reason no other scanner
+	/// here has: the cell size is a fixed fact, so its answer could not go stale, but its SIBLING
+	/// `CSI 14 t` is answered by the engine mid-advance, and the two are routinely written in one
+	/// breath. Answered after the chunk, cmote's reply would always land second whatever order the
+	/// questions were asked in.
+	window: window::WindowReports,
 }
 
 /// One thing `process` has to do part-way through a chunk (§34, §41, §55). Each scanner reports the
@@ -2611,6 +2660,12 @@ enum Interruption {
 	/// same reason: it names no line of its own, so the cursor has to be where the sequence is before
 	/// the line it belongs to can be read.
 	LineAttribute(lineattr::LineAttribute),
+	/// `CSI 16 t`, the cell-size question (§147). Carries nothing — the sequence has one meaning and
+	/// the answer comes from the pixel size the GUI measured — so the offset is the whole event, as it
+	/// is for the tab-stop reset and the locator question. The third interruption in this list that
+	/// produces a REPLY, and the only one whose reason for being here is a sibling question the ENGINE
+	/// answers rather than state that moves.
+	CellSize,
 }
 
 /// Everything one chunk's scanners found, before it is merged into stream order.
@@ -2638,6 +2693,7 @@ struct Scanned {
 	presentations: Vec<(usize, presentation::PresentationRequest)>,
 	controls: Vec<(usize, bool)>,
 	line_attributes: Vec<(usize, lineattr::LineAttribute)>,
+	cell_sizes: Vec<usize>,
 }
 
 impl Scanned {
@@ -2660,6 +2716,7 @@ impl Scanned {
 			&& self.presentations.is_empty()
 			&& self.controls.is_empty()
 			&& self.line_attributes.is_empty()
+			&& self.cell_sizes.is_empty()
 	}
 
 	/// How many interruptions the chunk carried in all — the exact capacity the merged list needs.
@@ -2685,6 +2742,7 @@ impl Scanned {
 			+ self.presentations.len()
 			+ self.controls.len()
 			+ self.line_attributes.len()
+			+ self.cell_sizes.len()
 	}
 }
 
@@ -2728,6 +2786,7 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		presentations,
 		controls,
 		line_attributes,
+		cell_sizes,
 	} = scanned;
 	merge! {
 		merged,
@@ -2744,9 +2803,9 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		controls => Interruption::Controls,
 		line_attributes => Interruption::LineAttribute,
 	}
-	// The four that are not `(offset, T)` pairs. A bookmark carries a report that is matched rather
-	// than wrapped, a cancel keeps its offset INSIDE the request (§57), and the tab reset and the
-	// locator question carry nothing at all — their offset is the whole event.
+	// The five that are not `(offset, T)` pairs. A bookmark carries a report that is matched rather
+	// than wrapped, a cancel keeps its offset INSIDE the request (§57), and the tab reset, the locator
+	// question and the cell-size question carry nothing at all — their offset is the whole event.
 	merged.extend(bookmarks.into_iter().map(|(offset, report)| {
 		let interruption = match report {
 			iterm::Report::Mark => Interruption::UserMark,
@@ -2767,6 +2826,11 @@ fn interruptions(scanned: Scanned) -> Vec<(usize, Interruption)> {
 		locator_requests
 			.into_iter()
 			.map(|offset| (offset, Interruption::LocatorPosition)),
+	);
+	merged.extend(
+		cell_sizes
+			.into_iter()
+			.map(|offset| (offset, Interruption::CellSize)),
 	);
 	merged.sort_by_key(|(offset, _)| *offset);
 	merged
@@ -3500,12 +3564,87 @@ mod tests {
 		// fall back.
 		//
 		// The silence has to be shown to be a DECISION rather than ignorance, so the same terminal
-		// answers the standard form of the same question on the next line, from numbers it plainly
+		// answers the standard form of the same question on the next two lines, from numbers it plainly
 		// holds. 8 x 17 pixel cells over a 10 x 40 grid.
+		//
+		// §147 made that demonstration sharper and took an argument away at the same time. The audit
+		// row for `CSI 16 t` used to carry the standard spelling's own absence as a reason this refusal
+		// was not a vendor being singled out; now that the standard spelling is answered in BOTH its
+		// forms, the refusal stands on its own foot — which is where §71 always put it. The question is
+		// refused because of the protocol it opens, not because cmote will not say how big a cell is.
 		let mut terminal = Terminal::new(10, 40);
 		terminal.set_cell_pixels(8, 17);
 		assert!(terminal.process(b"\x1b]1337;ReportCellSize\x07").is_empty());
 		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
+		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
+	}
+
+	#[test]
+	fn the_cell_size_question_is_answered_from_the_measured_cell() {
+		// `CSI 16 t` "how big is one cell?" -> `CSI 6 ; height ; width t`, from the pair the GUI handed
+		// to `set_cell_pixels` (§147). Height first, which is xterm's order on this reply and the
+		// opposite of the order the two are usually said in.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
+	}
+
+	#[test]
+	fn the_two_cell_size_questions_cannot_disagree() {
+		// One source, two spellings (§147). The engine multiplies the measured cell by the grid for
+		// `CSI 14 t`; cmote states the cell itself for `CSI 16 t`. Both come off the same pair, so the
+		// quotient of the first is the second — which is what a program asking both is entitled to.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(terminal.process(b"\x1b[14t"), b"\x1b[4;170;320t".to_vec());
+		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
+		// 170 / 10 rows = 17 high, 320 / 40 cols = 8 wide.
+	}
+
+	#[test]
+	fn the_cell_size_answer_lands_where_the_question_sat() {
+		// The whole reason this one query is an interruption rather than a reply built after the chunk
+		// (§147). Its sibling `CSI 14 t` is answered by the ENGINE the instant it is parsed, so an
+		// answer assembled after the chunk would land second however the two were ordered — and a
+		// program reading two replies by position would assign each to the other.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		assert_eq!(
+			terminal.process(b"\x1b[14t\x1b[16t"),
+			b"\x1b[4;170;320t\x1b[6;17;8t".to_vec(),
+			"asked area first"
+		);
+		assert_eq!(
+			terminal.process(b"\x1b[16t\x1b[14t"),
+			b"\x1b[6;17;8t\x1b[4;170;320t".to_vec(),
+			"asked cell first — and answered cell first"
+		);
+	}
+
+	#[test]
+	fn the_window_questions_about_the_user_draw_no_reply() {
+		// §36 and §147. Where the window sits, whether it is minimised and how large the display is are
+		// facts about the person at the keyboard, not about the terminal — and 11 has a second problem
+		// on top: this terminal is one pane of one tab, so "am I iconified?" has no true answer to give.
+		//
+		// The silence is a decision, so the same terminal answers the one window-op question that IS
+		// about the terminal on the last line.
+		let mut terminal = Terminal::new(10, 40);
+		terminal.set_cell_pixels(8, 17);
+		for question in [
+			&b"\x1b[11t"[..],
+			b"\x1b[13t",
+			b"\x1b[13;2t",
+			b"\x1b[15t",
+			b"\x1b[19t",
+		] {
+			assert!(
+				terminal.process(question).is_empty(),
+				"{} names the user, not the terminal",
+				String::from_utf8_lossy(question)
+			);
+		}
+		assert_eq!(terminal.process(b"\x1b[16t"), b"\x1b[6;17;8t".to_vec());
 	}
 
 	#[test]

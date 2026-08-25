@@ -990,8 +990,13 @@ then dropping the picture is a worse outcome for the sender than silence, which 
 to a protocol cmote does draw. This is the same standard the rest of the document already holds itself
 to — §41 refuses an oversized sixel outright rather than clipping it, because "a refusal draws nothing;
 a clip would silently misreport what the host sent", and XTMODKEYS answers only its own resource because
-"there is no way to say *not mine* except by not answering". And the vendor key is not being singled out:
-`CSI 16t` is the standard spelling of the same question, and cmote answers that no more than this one.
+"there is no way to say *not mine* except by not answering". **This paragraph used to end with a
+supporting clause that §147 took away**: the vendor key was "not being singled out" because `CSI 16 t`,
+the standard spelling of the same question, went unanswered too. That is no longer true — `CSI 16 t` is
+answered, and `CSI 14 t` was already — and the clause was weak to begin with, because a refusal that
+needs a second refusal to look even-handed has not stated its own reason. The reason above never
+depended on it: what is refused is the door into `File=`, not the arithmetic. The test that pins the
+refusal now answers the standard question in **both** its spellings on the lines below it.
 
 Both are **🛑** on the mechanism that refuses every unlisted key — the allow-list — and both are now
 pinned by name, which is the point of doing it at all. A refusal with a threat behind it defends itself;
@@ -1692,9 +1697,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | iTerm2 inline images (OSC 1337) | 🛑 | the OSC-framed inline image, on a framer cmote already runs; the OSC table's `iTerm 1337 File` row carries it (§70) |
 | Graphics capability report | ✅ | XTSMGRAPHICS' read — 256 colour registers, 4096×4096 and 4 Mpx, the decoder's real limits. The set action has its own row in the CSI table (§41, `term/query.rs`) |
 | Window iconify / move / resize / raise / maximize / fullscreen (CSI 1–10 t) | 🤷 | `CSI 1–10 t` lets a remote iconify, move, resize, raise, maximize or fullscreen the window cmote owns (part 6) |
-| Window / position / state reports (CSI 11 / 13 t) | ❌ | ask whether the window is iconified and where it sits on the desktop |
+| Window state report (CSI 11 t) | 🛑 | asks whether the window is iconified; `CSI 1 t` for no, `CSI 2 t` for yes. Refused twice over: it names the person rather than the program (§36), and a terminal that is one pane of one tab has no true answer to give — a pane in a background tab is not iconified and is exactly as invisible (§147, `term/window.rs`) |
+| Window position report (CSI 13 t) | 🛑 | asks where the window sits on the desktop; `CSI 3 ; x ; y t`, and `CSI 13 ; 2 t` for the text area's own corner. Refused on §36's rule, and a `0 ; 0` would be a lie where a refusal is a stall the sender can detect (§147, `term/window.rs`) |
+| Screen size reports (CSI 15 / 19 t) | 🛑 | ask how large the whole display is, in pixels and in characters. Refused with the two rows above and for their first reason: a monitor's size is a fact about the desk cmote sits on. Neither had a row here before §147 (§36, §147, `term/window.rs`) |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the text area's size, asked in pixels and in characters |
-| Cell size (CSI 16 t) | ❌ | one cell's height and width in pixels, whose reply is `CSI 6 ; height ; width t` — a **gap**: cmote holds the numbers and nothing scans for the question, which is why refusing iTerm's `ReportCellSize` is not a vendor singled out (§71, §84) |
+| Cell size (CSI 16 t) | ✅ | one cell's height and width in pixels, answered `CSI 6 ; height ; width t` from the same pair the row above is built from, so the two cannot disagree. Answered where the question SAT rather than after the chunk — alone among cmote's sniffed queries, because its sibling `CSI 14 t` is answered by the engine mid-advance and a program asking both reads the replies by position (§147, `term/window.rs`) |
 | Title stack (CSI 22 / 23 t) | ✅ | push and pop the window title; the `; 0` / `; 1` / `; 2` that would name icon or window title alone is ignored, and the stack is capped at 4096 (§67) |
 | **Kitty keyboard protocol** | ✅ | CSI-u key reporting over a flag stack — disambiguated keys, event types and associated text (§25, `term/kitty.rs`) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
@@ -2102,8 +2109,10 @@ Audited file:line anchors behind the claims above, for later re-checking.
   `8`, `10`–`12`, `22`, `50`, `52`, `104`, `110`–`112` and **nothing else**, so kitty's `OSC 21`, plain
   `OSC 9`, kitty's `99` and urxvt's `777` all reach no handler (§78, §79). **XTWINOPS** is one arm,
   `('t', [])` (`ansi.rs:1739`), matching **14 / 18 / 22 / 23** and sending every other parameter to
-  `unhandled!()` — which is why `CSI 1–10 t` has nothing to refuse and `CSI 16 t` is a gap in the parser
-  rather than in cmote (§71). **Both `#` stacks** have no arm at all: the only `b'#'` in the file is
+  `unhandled!()` — which is why `CSI 1–10 t` has nothing to refuse, and why `CSI 11 / 13 / 15 / 16 / 19 t`
+  fell to a scanner beside the stream when §147 came to them (§71, §147). That one arm is also why `t` is
+  the only final byte in `differential`'s shape sweep that the engine answers on some parameters and drops
+  on others, which is the near miss `term/window.rs` is built around. **Both `#` stacks** have no arm at all: the only `b'#'` in the file is
   `esc_dispatch`'s `(b'8', [b'#'])`, DECALN (`:1814`), so `csi_dispatch` never sees a `#` intermediate
   and the palette stack (`CSI # P` / `# Q`) and the video-attribute stack (`CSI # {` / `# }`, aliased
   `# p` / `# q`) fall through whole — two different sequences the matrix had as one until §84. The
@@ -2157,6 +2166,15 @@ Quoted where a row's wording now rests on it.
   §41 until §84. `query.rs`'s `graphics_request` reads item then action, so the code was right and only
   the row was wrong — and it answers action **2** with a status 0 as well, which no row had said.
 - **`CSI 16 t`** — "Report xterm character cell size in pixels. Result is `CSI 6 ; height ; width t`".
+  **Height before width**, which is the opposite of the order the two are usually said in and the one
+  thing about this reply that is easy to get backwards; the test that pins it says so in its name (§147).
+- **The other four window questions**, read for §147 and written down here because three of them had
+  never had a row. `Ps = 11` reports the window state, "if the xterm window is non-iconified, it returns
+  `CSI 1 t`; if it is iconified, it returns `CSI 2 t`". `Ps = 13` reports the window position as
+  `CSI 3 ; x ; y t`, with `Ps = 13 ; 2` reporting the text area's own corner. `Ps = 15` reports the
+  **screen** size in pixels as `CSI 5 ; height ; width t` and `Ps = 19` the same in characters as
+  `CSI 9 ; height ; width t`. All four are refused: they describe the desk cmote sits on rather than the
+  terminal (§36), and 11 has no true answer to give from a pane of a tabbed window at all.
 - **The OSC list reads from the plain-text build, not the HTML one** (§87, §88). Every fetch of
   `ctlseqs.html` returns it truncated part-way through `Ps = 4` — "Change Color Number *c* to the color
   specif" — which is where §87 stopped. `ctlseqs.txt` reaches further and settled four rows:
