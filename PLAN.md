@@ -16239,3 +16239,172 @@ The row moves **❌ → ✅**. 216 rows: **✅ 121 · ❌ 26 · 🛑 42 · 🤷 
   synchronised update is a bracket a program opens and closes within one chunk, not a setting that
   outlives the sequence that set it. Recorded because "the engine has no bit" is the reason given, and
   that reason would stop applying if the parser ever exposed one.
+
+## §142 — Updating everything, and the three that would not move
+
+`cargo update` is a two-word instruction with a long tail. The sweep itself was uneventful: 67
+packages moved a patch or a minor, 11 new transitive entries arrived behind them, none left, and the
+gate stayed green without a line of cmote changing. What took the work was the short list cargo kept
+repeating underneath it — three crates it could see a newer version of and would not take — and one
+direct dependency whose new minor changed a signature in the most security-sensitive function in the
+program.
+
+### russh 0.62 → 0.63, and the one thing it asked
+
+The whole break was a single error:
+
+```
+error[E0053]: method `check_server_key` has an incompatible type for trait
+   --> src\ssh\client.rs:801:22
+    |
+801 |         server_public_key: &PublicKey,
+    |                            ^^^^^^^^^^ expected `PublicKeyOrCertificate`, found `russh::keys::PublicKey`
+```
+
+0.63 added OpenSSH host-certificate support, and the callback widened to carry what a server actually
+presents. Not a second argument — an enum — because a certificate REPLACES the key rather than
+arriving beside it. russh says so at the call site, and the reasoning is the same one §71 keeps
+making about two answers to one question:
+
+> A certificate replaces the key check rather than adding to it. The key inside a certificate is not
+> something the client was ever told to trust — asking about it as well would invite an
+> implementation to answer yes to the wrong question.
+
+### The certificate is refused, and the tempting answer is the wrong one
+
+cmote's host-key gate is TOFU (§8): the fingerprint is shown, the user consents, the key is pinned in
+`known_hosts`, and a later mismatch is a security event the user has to resolve by hand. A
+certificate is a different trust model. It is believed because a named certificate authority signed
+it, within a validity window, for a list of principals — and cmote holds no list of authorities to
+check any of that against. There is nothing here that could verify one.
+
+The tempting answer is to reach inside, take the certificate's public key, and pin that. It would
+compile, it would connect, and it would be wrong twice over. That key was never the thing the client
+was told to trust — the certificate was — so pinning it answers a question nobody asked. And the
+fingerprint the dialog shows the user to compare against what their sysadmin told them would be the
+fingerprint of the wrong object. A user who checks carefully would be checking the wrong number,
+which is worse than not checking at all.
+
+So the arm returns `Ok(false)` with an `SshEvent::Error` that says what happened. That is the same
+shape as every other refusal in this file: a negative the caller can see, never a silent success.
+
+### The arm cannot currently be reached, and is written out anyway
+
+A server can only present a certificate if the client advertised a `*-cert-v01@openssh.com` host-key
+algorithm. In russh those live in `Preferred::host_key_certificates`, which is a list separate from
+`key` and — in russh's own words — "empty by default, and only used by the client … so turning it on
+is the caller's decision, never a default." cmote never sets it. No server can hand cmote a
+certificate to refuse.
+
+Which is an argument for a `_ =>` catch-all, and exactly why there isn't one. A `_` is what quietly
+starts accepting a certificate the day that default changes, or the day somebody sets the field for
+an unrelated reason. The `let … else` names the variant it wants and refuses everything else, so the
+refusal is a decision on the record rather than a gap nobody noticed.
+
+### age 0.12 cannot be resolved, which is not the same as not wanted
+
+`age 0.12.1` is out, and taking it fails to build — in a crate that is not ours:
+
+```
+error: could not compile `ml-kem` (lib) due to 18 previous errors
+```
+
+The chain is worth writing down, because "the dependency is out of date" is what the tooling will go
+on saying. age 0.12 adds post-quantum recipients and takes `ml-kem 0.2`; russh takes `ml-kem 0.3`;
+both depend on `kem`, which cargo therefore unifies to one version, `0.3.0`. But `ml-kem 0.2.1` was
+published against `kem 0.3.0-pre.0` and does not compile against the 0.3.0 that shipped — the trait
+it implements changed between the pre-release and the release. Pinning `kem` back is refused from the
+other side:
+
+```
+error: failed to select a version for the requirement `kem = "^0.3"`
+candidate versions found which didn't match: 0.3.0-pre.0
+required by package `ml-kem v0.3.2`
+```
+
+There is no feature to turn it off: `ml-kem` is a hard dependency of age 0.12, not an optional one.
+And cmote seals `secrets.age` with scrypt and a passphrase (§16) — the post-quantum recipient type is
+weight and parser surface for something the vault never uses. So age holds at 0.11 until it moves to
+`ml-kem 0.3`, and the hold is recorded in `Cargo.toml` beside the dependency so the next sweep does
+not spend the same hour rediscovering it.
+
+One knock-on is worth naming because it shows up on every build: `cargo build`'s
+future-incompatibility note about `proc-macro-error2` comes from age 0.11's `i18n-embed-fl`. It is
+upstream's to fix, and age 0.12 already has.
+
+### base64 0.23 is held, and the reason the line exists is the reason not to move it
+
+`base64` is in `Cargo.toml` for one call — decoding the value of `OSC 1337 ; SetUserVar=` (§55) — and
+its note argues it is free: "the SAME crate, at the same version, that `alacritty_terminal` already
+pulls in, so naming it here adds nothing to the dependency graph and nothing to compile."
+
+That argument is what forbids the bump. `alacritty_terminal 0.26` and `plist 1.10` (via
+`two-face`/`syntect`) both require `^0.22.0`. Asking for 0.23 here would not upgrade them; it would
+add a second base64 to compile and link beside the one already there — turning a free dependency into
+a paid one, for an API cmote uses one method of and which did not change. It moves when
+alacritty_terminal moves.
+
+### generic-array is pinned by someone else
+
+The third name on cargo's list resolves in one command and needs no judgement at all:
+
+```
+error: failed to select a version for the requirement `generic-array = "=0.14.7"`
+candidate versions found which didn't match: 0.14.9
+required by package `crypto-common v0.1.7`
+```
+
+An exact `=` pin two crates deep in the RustCrypto stack age uses. Nothing to decide.
+
+### What cargo-deny says, before and after
+
+`cargo deny check` reports `advisories FAILED, bans ok, licenses ok, sources ok` — and reported
+exactly that, with the same six advisories, on the tree before the update. It was checked by
+stashing the change and running it again rather than assumed: five `unmaintained` (`bincode`,
+`ttf-parser`, `paste`, `proc-macro-error2`, `yaml-rust`) and one `vulnerability` (RUSTSEC's Marvin
+Attack advisory against `rsa`, which arrives through russh's `rsa` feature). The update neither
+introduced nor cleared one. CI runs `cargo deny check licenses`, which passes; the advisories are a
+standing item, not this section's.
+
+### §11 still holds
+
+Checked rather than assumed, since a resolver sweep is exactly how a C toolchain gets in: there is no
+`aws-lc-rs` in the graph, and the only `cc` is `ring`'s build dependency, which is where it already
+was. russh still builds on `ring` with `default-features = false`, and the portable single-exe build
+needs no NASM and no C compiler.
+
+### Files
+
+- `Cargo.lock` — the sweep. 67 version bumps, 11 new transitive packages, none removed.
+- `Cargo.toml` — `russh` 0.62.4 → 0.63.1 and `russh-sftp` 2.3.0 → 2.4.0, each raised to what is now
+  resolved and tested rather than left lagging. Three new comment blocks: why age holds at 0.11, why
+  base64 holds at 0.22, and what russh 0.63 asked for. Two direct dependencies also moved inside
+  their existing requirements without a manifest edit — `open` 5.4.0 → 5.4.2 and `two-face` 0.5.1 →
+  0.5.2.
+- `src/ssh/client.rs` — `check_server_key` takes `&PublicKeyOrCertificate`, destructures the
+  `PublicKey` variant into the function the rest of the body already had, and refuses the
+  `Certificate` variant with an error the user sees.
+
+### Not done
+
+- **No test covers the certificate refusal.** `ssh/client.rs` has no test module and never has: the
+  handler only exists inside a live handshake, and a certificate cannot be produced without a CA, a
+  signing step and a server configured to present one. The arm rests on reading russh's source, which
+  is a weaker footing than the rest of this file's claims and is recorded as such.
+- **No live SSH session was opened.** The gate is `cargo check --all-targets`, `cargo test` (1595,
+  unchanged — this section adds no tests), `cargo clippy --all-targets -- -D warnings` and
+  `cargo fmt --check`, all green. russh 0.63 changed one signature that cmote had to answer; whether
+  it changed behaviour cmote depends on and does not test — rekey, agent auth, channel teardown — was
+  not established by running it.
+- **russh 0.63's changelog was not read end to end.** The upgrade was driven by the compiler: what
+  broke was fixed, and what did not break was assumed unchanged. That is the normal way to take a
+  minor version and it is also how a silent behaviour change gets through.
+- **The six advisories are untouched.** Four of the five `unmaintained` ones are somebody else's
+  transitive choice with no upgrade available — `bincode` and `yaml-rust` through `syntect` under
+  two-face, `ttf-parser` through `fontdb`/`cosmic-text` and `paste` through `metal` (macOS only),
+  both under iced. The fifth, `proc-macro-error2`, clears when age 0.12 becomes reachable.
+  The `rsa` timing advisory is the one with teeth, and it is russh's `rsa` feature — which cmote turns
+  on deliberately, for RSA key auth. Left as it stands, and named here so it is a known position
+  rather than an oversight.
+- **No release build.** `--release` is for shipping (§11) and nothing here is being shipped; the
+  profile's `lto` and `codegen-units = 1` were not exercised against the new graph.

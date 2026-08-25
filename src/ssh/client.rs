@@ -23,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use russh::Channel;
 use russh::client;
-use russh::keys::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 
@@ -798,8 +798,36 @@ impl client::Handler for Handler {
 	/// authentication. Returning `Ok(false)` refuses the connection.
 	async fn check_server_key(
 		&mut self,
-		server_public_key: &PublicKey,
+		server_public_key: &PublicKeyOrCertificate,
 	) -> Result<bool, Self::Error> {
+		// russh 0.63 widened this callback: what a server presents is either a bare host key or
+		// an OpenSSH host CERTIFICATE, and a certificate REPLACES the key rather than arriving
+		// beside it. cmote pins keys. A certificate is a different trust model — it is believed
+		// because a named certificate authority signed it, and cmote holds no list of authorities
+		// to check that signature against. The key wrapped inside one is not an answer either: it
+		// was never the thing the client was told to trust, so pinning it would be answering a
+		// question nobody asked, and the fingerprint the user compared would be of the wrong key.
+		//
+		// Unreachable as things stand. The `*-cert-v01@openssh.com` host-key algorithms are only
+		// advertised when `Preferred::host_key_certificates` is non-empty; it is empty by default
+		// and cmote never sets it, so no server can present a certificate in the first place. The
+		// arm is written out anyway rather than left to a `_`, because a `_` is what would quietly
+		// start accepting one the day that changes.
+		let PublicKeyOrCertificate::PublicKey {
+			key: server_public_key,
+			..
+		} = server_public_key
+		else {
+			let _ = self
+				.events
+				.send(SshEvent::Error(
+					"The server identified itself with a certificate, which cmote does not trust."
+						.to_string(),
+				))
+				.await;
+			return Ok(false);
+		};
+
 		let verdict =
 			match hostkey::verify(&self.host, self.port, server_public_key, &self.known_hosts) {
 				Ok(verdict) => verdict,

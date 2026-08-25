@@ -51,6 +51,18 @@ pedantic = "deny"
 # plugin / ssh extras: the vault is a binary blob decrypted by passphrase, so only the core
 # format is needed. Its `secrecy` re-export (`age::secrecy`) carries the master passphrase into
 # the API without a plaintext copy lingering.
+#
+# HELD at 0.11 while 0.12.1 is out (PLAN §142), and not by preference — 0.12 cannot be RESOLVED
+# alongside russh. age 0.12 adds post-quantum recipients and so takes `ml-kem 0.2`, russh takes
+# `ml-kem 0.3`, and both depend on the same `kem` crate, which cargo therefore unifies to one
+# version. `ml-kem 0.2.1` was published against `kem 0.3.0-pre.0` and does not compile against the
+# 0.3.0 that shipped, so the unified graph fails to build in a crate that is not ours; pinning `kem`
+# back to the pre-release is refused because `ml-kem 0.3`'s `^0.3` does not match a pre-release.
+# There is no feature to turn the post-quantum path off — `ml-kem` is a hard dependency of age 0.12,
+# and cmote seals with scrypt alone, so it would be weight and parser surface for a recipient type
+# the vault never uses. Revisit when age moves to `ml-kem 0.3`. One knock-on: age 0.11's
+# `i18n-embed-fl` pulls `proc-macro-error2`, which is what `cargo build`'s future-incompatibility
+# note is about — upstream's to fix, and 0.12 already has.
 age = { version = "0.11", default-features = false }
 # The VT/ANSI terminal engine (PLAN §9, §16). Replaces `vt100`, whose small subset was
 # the compatibility ceiling: alacritty_terminal is a full VT implementation — DEC
@@ -70,6 +82,13 @@ anyhow = "1.0.104"
 # precedent below. Pure Rust, so the no-C-toolchain portable build holds (§11). Taken rather than
 # hand-rolled because the input is remote-controlled: a decoder is exactly the kind of small,
 # fiddly, boundary-condition-heavy code that should not be written twice in the world.
+#
+# HELD at 0.22 while 0.23.1 is out (PLAN §142), because the reason this line exists is the reason
+# not to move it. `alacritty_terminal` and `plist` (via `two-face`/`syntect`) both require `^0.22.0`,
+# so asking for 0.23 here would not upgrade them — it would add a SECOND base64 to compile and link
+# beside the one already there, which is precisely the cost the paragraph above claims this
+# dependency does not have. cmote calls `STANDARD.decode`, unchanged across the two. It moves when
+# alacritty_terminal moves.
 base64 = "0.22"
 # How many columns a character occupies, for the one decision cmote has to make BEFORE the engine
 # makes it: whether a glyph still fits before the right margin, or the line has to break first
@@ -163,10 +182,16 @@ portable-pty = "0.9"
 # a C toolchain + NASM to build). We use `ring` instead: it ships pre-generated
 # assembly for x86_64-pc-windows-msvc, so it builds without NASM and keeps the
 # portable single-exe goal (PLAN §11). `flate2` = compression, `rsa` = RSA keys.
-russh = { version = "0.62.4", default-features = false, features = ["ring", "flate2", "rsa"] }
+#
+# 0.63 (PLAN §142) changed one thing cmote had to answer: `check_server_key` now receives a
+# `PublicKeyOrCertificate` rather than a `PublicKey`, because a server holding an OpenSSH host
+# certificate presents it INSTEAD of a bare key. cmote refuses the certificate arm — see
+# `ssh::client::Handler::check_server_key` for why pinning the key inside one would be the wrong
+# answer, and why the arm cannot currently be reached at all.
+russh = { version = "0.63.1", default-features = false, features = ["ring", "flate2", "rsa"] }
 # The sftp subsystem, used to upload a local file over its own channel (PLAN §17). It
 # rides on russh's `ChannelStream`, so it adds a protocol — not a second SSH stack.
-russh-sftp = "2.3.0"
+russh-sftp = "2.4.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # `fs` = async local file I/O, so streaming an upload never blocks a runtime worker.
