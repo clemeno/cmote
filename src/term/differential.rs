@@ -1064,7 +1064,9 @@ mod tests {
 		const MARKERS: [Option<u8>; 3] = [None, Some(b'?'), Some(b'>')];
 		const INTERMEDIATES: [&[u8]; 5] = [b"", b"$", b"+", b" ", b"$#"];
 		const PARAMS: [&[u8]; 4] = [b"", b"1", b"1;2", b"1:2"];
-		const FINALS: &[u8] = b"q|r";
+		// `t` since §154: `DCS t` is the introducer a tmux passthrough wrapper opens with, and it is a
+		// shape cmote now has a written reading of — so the sweep has to hold both sides to it.
+		const FINALS: &[u8] = b"q|rt";
 
 		let mut out = Vec::new();
 		for marker in MARKERS {
@@ -1104,8 +1106,8 @@ mod tests {
 		let shapes = string_shapes();
 		assert_eq!(
 			shapes.len(),
-			180,
-			"3 markers x 5 intermediates x 4 params x 3 finals"
+			240,
+			"3 markers x 5 intermediates x 4 params x 4 finals"
 		);
 		for (shape, bytes) in shapes {
 			let engine = engine(&bytes);

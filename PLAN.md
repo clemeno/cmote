@@ -17797,3 +17797,105 @@ is also false.
 One `|` in a match arm, and three tests: the terminfo spelling answered, the pair answered together,
 and a real capability answered unknown. The refusal is now a test rather than a sentence, which is the
 difference between 🛑 and ❌ in this document.
+
+## §154 — The wrapper that was already transparent
+
+The third row on the list, carrying ❌ with a note that describes the sequence and says nothing about
+cmote:
+
+> | DCS tmux; … | tmux passthrough | ❌ | tmux's passthrough, which wraps a sequence meant for the terminal beyond tmux |
+
+**Nothing is built here either, and this time it is because the feature already works.** The section
+is a measurement, a decision not to touch it, and a test so that the accident stops being one.
+
+### What was measured
+
+A probe, before any design: feed `Terminal::process` a wrapped sequence and look at what came out.
+
+    \x1bPtmux;\x1b\x1b]0;hijacked\x07\x1b\\      →  title = Some("hijacked")
+    \x1bPtmux;\x1b\x1b[31mRED\x1b\x1b[0m\x1b\\   →  "RED" on row 0
+    \x1bPtmux;\x1b\x1b[>q\x1b\\                  →  \x1bP>|cmote(4.0.0)\x1b\\
+    \x1bPtmux;\x1b\x1b[2J\x1b\\plain             →  cleared, then "plain"
+
+Every one of them did the thing the payload asked for. The wrapper left no residue on the screen — no
+`mux;`, no stray terminator — and the reply came back on the ordinary route.
+
+### Why it works, off `vte`'s state table
+
+Three rules, none of them cmote's, compose into the whole feature.
+
+**`ESC P t` is a complete introducer.** `t` is 0x74, inside the 0x40–0x7e final-byte range, so the DCS
+introducer *ends* at the `t` and `mux;` is the string's **payload**. Nothing reads a DCS with final
+byte `t` — the engine's `hook`/`put`/`unhook` are no-op debug logs, `query` insists on final `q` with
+`$` or `+`, `graphics` on final `q` with none — so the four bytes of the wrapper's own name are
+consumed and dropped by every reader at once.
+
+**A DCS payload ends at its first ESC, which also opens the next sequence.** That is
+`advance_dcs_passthrough`, and it is the rule §111 built `dcs::Framer` around after finding two
+scanners that had only half of it. So the payload's first escape *is* the end of the wrapper.
+
+**A second ESC restarts the escape rather than nesting.** So `ESC ESC [` is `ESC [`.
+
+Put together: the wrapper is dropped, tmux's doubled escapes collapse to single ones for free, and
+what is left is the payload's own sequences arriving on the ordinary path — same gate, same scanners,
+same offsets, same refusals. cmote does not *implement* passthrough; it is transparent to it.
+
+### The half that had to be checked rather than reasoned
+
+A passthrough wrapper is, viewed unkindly, an **obfuscation**: a second spelling for every sequence.
+If any of cmote's refusals read the plain spelling and missed the wrapped one, a remote would have a
+door around them.
+
+So the probe was repeated against the scanners that sit *beside* the stream rather than behind the
+gate, and against the refusals:
+
+    progress (OSC 9;4) wrapped   →  Working(30)          seen
+    cwd (OSC 7) wrapped          →  Some("C:/tmp")       seen
+    OSC 52 read wrapped          →  no reply             refused
+    OSC 9 notification wrapped   →  no reply             refused
+
+All four behave exactly as they do unwrapped, and for a reason that is structural rather than lucky:
+every scanner reads the **raw chunk**, so it sees the payload's bytes at their real offsets whatever
+opened the sequence before them. The wrapper buys a remote nothing at all.
+
+That is now a test, and it has teeth: a probe that broke `osc::Framer`'s `ESC ESC` arm — one line, the
+rule that makes a doubled escape collapse — failed
+`a_tmux_passthrough_wrapper_is_transparent_and_hides_nothing_from_the_refusals` alongside `osc`'s own
+unit test for it.
+
+### The two ways cmote is not tmux
+
+Both measured, both stated in the row rather than fixed.
+
+**cmote un-doubles nothing.** tmux requires the payload's escapes doubled and halves them again; here
+the halving is `vte`'s escape state, which reaches the same sequence from either spelling. So a
+payload that forgot to double is understood by cmote and would not be by tmux. That is leniency in the
+direction that cannot hurt: an emitter targeting tmux always doubles.
+
+**A payload that opens with plain text is swallowed.** Until its first ESC the payload is still the
+DCS's, so `DCS tmux; hello ST` prints nothing where tmux would print `hello`. Every real passthrough
+payload opens with an escape — the whole point of the wrapper is to carry a sequence — which is what
+makes this a divergence worth writing down rather than one worth fixing. Fixing it means recognising
+the wrapper and re-injecting its payload, which means **suppressing bytes on their way in**, and cmote
+does that nowhere: `with_sixel_attribute` amends a reply cmote is about to *send* precisely to avoid
+cutting bytes out of an inbound stream a program is mid-sequence in.
+
+### Why a deliberate unwrapper would be worse than the accident
+
+Worth stating, because "implement it properly" is the obvious next thought.
+
+An unwrapper would have to hold the payload to its terminator and then feed it back through the
+engine — a second entrance to the parser, with its own bound to defend (§12), its own offsets to keep
+in step with the interruption merge, and its own re-entrancy problem in a gate that is built per
+advance. Every one of those is a place the two doors could come to disagree, which is the failure this
+document has recorded most often (§70, §82, §128). The accident has none of them because there is only
+ever one door.
+
+**The mark becomes ✅**, on the same reading `ESC % G` carries: supported in the sense that what the
+sequence asks for is what happens, with the note saying by what mechanism.
+
+### The sweep
+
+`differential`'s DCS shape sweep gained `t` as a fourth final byte — 180 shapes to 240 — because
+`DCS t` is now an introducer this document has a written reading of, and both sides have to be held to
+it. Nothing diverged.

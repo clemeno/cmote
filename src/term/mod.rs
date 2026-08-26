@@ -3430,6 +3430,85 @@ mod tests {
 		assert_eq!(read(&terminal, 0, 0, 5), "after");
 	}
 
+	/// tmux's passthrough (`DCS tmux; <payload> ST`) is **transparent here, and cmote implements none
+	/// of it** (§154). This test is the pin on an accident, so a change that turns the accident off
+	/// says so.
+	///
+	/// Why it works, read off `vte`'s state table rather than guessed. `ESC P t` is a complete DCS
+	/// introducer — `t` is a final byte — so `mux;` is the string's PAYLOAD, and every DCS payload is a
+	/// no-op debug log in the engine and unclaimed by every scanner here (nothing reads final byte
+	/// `t`). The payload then ends at its first ESC, which unhooks the string and opens the next
+	/// sequence; a second ESC restarts the escape rather than nesting. So the wrapper is dropped, its
+	/// doubled escapes collapse to single ones, and what is left is the payload's own sequences on the
+	/// ordinary path — the same gate, the same scanners, the same refusals.
+	///
+	/// The last of those is the half worth asserting hardest: a wrapper is an obfuscation, and if any
+	/// refusal read the plain spelling and missed the wrapped one, this is where that would show.
+	#[test]
+	fn a_tmux_passthrough_wrapper_is_transparent_and_hides_nothing_from_the_refusals() {
+		// The engine's own work: a title, and a pen with text under it.
+		let mut terminal = Terminal::new(4, 40);
+		terminal.process(b"\x1bPtmux;\x1b\x1b]0;wrapped\x07\x1b\\");
+		assert_eq!(terminal.title().as_deref(), Some("wrapped"));
+		terminal.process(b"\x1bPtmux;\x1b\x1b[31mRED\x1b\x1b[0m\x1b\\");
+		assert_eq!(read(&terminal, 0, 0, 3), "RED", "and `mux;` never printed");
+		// An OSC ended by a DOUBLED ST, which is the form a real emitter sends — the first ESC ends
+		// the OSC and the wrapper's own terminator arrives as a stray one.
+		let mut osc = Terminal::new(4, 40);
+		osc.process(b"\x1bPtmux;\x1b\x1b]0;st-form\x1b\x1b\\\x1b\\");
+		assert_eq!(osc.title().as_deref(), Some("st-form"));
+		// A query inside the wrapper is answered, which says the scanners BESIDE the stream see
+		// through it too, not just the engine.
+		let mut asked = Terminal::new(4, 40);
+		assert_eq!(
+			asked.process(b"\x1bPtmux;\x1b\x1b[>q\x1b\\"),
+			query::version_reply(VERSION)
+		);
+		// Two more scanners, one of them stateful: the progress report and the working directory.
+		let mut scanned = Terminal::new(4, 40);
+		scanned.process(b"\x1bPtmux;\x1b\x1b]9;4;1;30\x07\x1b\\");
+		scanned.process(b"\x1bPtmux;\x1b\x1b]7;file:///C:/tmp\x07\x1b\\");
+		assert_eq!(scanned.progress(), progress::Progress::Working(30));
+		assert_eq!(scanned.cwd(), Some("C:/tmp"));
+		// And the refusals hold. A clipboard READ and a desktop notification draw nothing wrapped, as
+		// they draw nothing plain — the wrapper buys a remote no second door.
+		let mut refused = Terminal::new(4, 40);
+		assert!(
+			refused
+				.process(b"\x1bPtmux;\x1b\x1b]52;c;?\x07\x1b\\")
+				.is_empty(),
+			"OSC 52 is refused inside the wrapper too"
+		);
+		assert!(
+			refused
+				.process(b"\x1bPtmux;\x1b\x1b]9;Build finished\x07\x1b\\")
+				.is_empty()
+		);
+	}
+
+	/// The two places cmote's transparency is not tmux's, measured rather than assumed (§154).
+	#[test]
+	fn the_two_ways_the_passthrough_wrapper_is_not_tmuxs() {
+		// One: tmux DOUBLES the payload's escapes and halves them again. cmote halves nothing — a
+		// doubled ESC collapses in the engine's escape state, which is why both spellings arrive at
+		// the same sequence. So an emitter that forgot to double is understood here and would not be
+		// by tmux.
+		let mut single = Terminal::new(4, 40);
+		single.process(b"\x1bPtmux;\x1b[31mRED\x1b\\");
+		assert_eq!(read(&single, 0, 0, 3), "RED");
+		// Two: a payload that opens with PLAIN TEXT is swallowed, because until its first ESC it is
+		// still the DCS payload. tmux would print it. Every real passthrough payload opens with an
+		// escape, which is what makes this a divergence worth writing down rather than one worth
+		// fixing — and fixing it means suppressing bytes on their way IN, which cmote does nowhere.
+		let mut text = Terminal::new(4, 40);
+		text.process(b"\x1bPtmux;hello\x1b\\after");
+		assert_eq!(
+			read(&text, 0, 0, 5),
+			"after",
+			"`hello` was payload; `after` is the first thing past the terminator"
+		);
+	}
+
 	#[test]
 	fn a_desktop_notification_gets_nothing_in_any_of_its_three_spellings() {
 		// §79. ConEmu's `9;<text>`, urxvt's `777;notify;…` and kitty's `99;…` are one refused
