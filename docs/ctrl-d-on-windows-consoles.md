@@ -190,7 +190,12 @@ end up on that input line without the user meaning them to: a command they start
 their mind about, and — on this path — the `^D` the shell itself just echoed there. Ctrl+C discards
 both and gives a fresh prompt, which is what a person does before typing `exit`.
 
-### [src/app.rs](../src/app.rs) — all of the policy
+### [src/app/mod.rs](../src/app/mod.rs) — all of the policy
+
+*This file was `src/app.rs` when §104 wrote it. §126 cut the 14 800-line file into a directory and
+§128–§129 took two more slices out, so the siblings are now `accounts.rs`, `forwards.rs`, `home.rs`,
+`fixtures.rs`, `browse.rs` and `connect.rs`. None of the Ctrl+D policy moved: every constant and
+every guard below is still in `mod.rs` itself.*
 
 Three constants:
 
@@ -429,7 +434,7 @@ an SSH channel gives the far side a hangup it can act on. A local session has no
 
 ## The tests
 
-In [src/app.rs](../src/app.rs)'s test module, on helpers `local_shell_tab(kind)` and `ctrl_d()`:
+In [src/app/mod.rs](../src/app/mod.rs)'s test module, on helpers `local_shell_tab(kind)` and `ctrl_d()`:
 
 | test | what it pins |
 |---|---|
@@ -488,7 +493,7 @@ seconds. A test that hangs is not a test.
 |---|---|
 | add a shell to the catalogue | `Kind` in [shells.rs](../src/local/shells.rs), and say which side of `quits_on_eof` it falls on — nothing infers it from the name |
 | change what "leave now" means for a shell | `QUIT_COMMAND` / `quit_sequence` in [shells.rs](../src/local/shells.rs). One word covers all six today; a shell that needed its own would turn these into methods, the way `cd` already is |
-| widen or narrow the listening window | `EOF_ANSWER_CAP` in [app.rs](../src/app.rs) — read its doc first, it is a security bound as much as a budget |
-| change which press is watched | the arming block in `on_key`, [app.rs](../src/app.rs). Keep it matching the logical character: the byte comes from `control_byte` |
+| widen or narrow the listening window | `EOF_ANSWER_CAP` in [app/mod.rs](../src/app/mod.rs) — read its doc first, it is a security bound as much as a budget |
+| change which press is watched | the arming block in `on_key`, [app/mod.rs](../src/app/mod.rs). Keep it matching the logical character: the byte comes from `control_byte` |
 | give the shell longer to leave | `GOODBYE` in [session.rs](../src/local/session.rs) — the compile-time assertion against `QUIT_DRAIN_TIMEOUT` will stop you overshooting the quit budget |
 | add a teardown site | call `Tab::end_session()`, never a bare `SshCommand::Disconnect`, and call it **before** dropping the emulator |

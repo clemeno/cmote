@@ -1790,7 +1790,12 @@ Good Image Protocol, whose first move is an advertisement (DA1 attribute `90`) c
 fourth, DECSCL's report, was never a gap. **The same four sections moved one row the other way**: the
 tmux passthrough wrapper is ✅ and cmote implements none of it, being transparent to it by three of
 `vte`'s own rules composing (§154) — which is the ✅ that says *what the sequence asks for is what
-happens*, the reading `ESC % G` has carried since §67. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
+happens*, the reading `ESC % G` has carried since §67. **§156 then swept every document in the tree
+and moved nothing here**, which is the result worth recording rather than the absence of one: all
+**41** `term/*.rs` modules have an entry, and every `.rs` path this document names either exists or
+is named as a crate's own or as deleted. The staleness §156 found was all in the documents that
+*stopped* being cited — the README, last written at §127 — and this one is touched by every section,
+which is what a row-per-sequence structure buys over prose. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the palette stack (`CSI # P / # Q`, §84), kitty's colour-by-name (`OSC 21`), and the
 two DECSET modes nothing can turn on (`3`, `80`) — each one dead in `vte` or in a `Handler` default
 before cmote sees a byte. **§151 added the overline (SGR 53) to that column**, and the way it got there

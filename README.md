@@ -162,6 +162,18 @@ references below (§n) point into it.
 - **The cursor takes the shape a program asks for** — a block, an underline, or a thin bar,
   whichever the remote picks with DECSCUSR (vim's insert-mode bar, say); drawn steady, since
   cmote runs no blink timer (§23).
+- **Banner lines come out big** — the VT100 line attributes a `setterm`, an installer or a
+  `figlet`-style banner reaches for: a **double-width** line, and the two halves of a
+  **double-height** one, drawn at twice the size rather than as the ordinary text most terminals
+  fall back to. Double-height is a uniform 2× and comes out exactly as specified; double-width asks
+  for two-wide-and-one-tall, which is a scale iced has no way to express in one axis only, so cmote
+  draws it as cells at twice the width with the glyph at its normal size — the layout the sequence
+  is for, without a distorted letter. A click still names the column the glyph is really in (§146).
+- **Reverse video over the whole page** — the mode an installer or a `setterm -inverse` flips to
+  swap the foreground and background of everything at once, and put it back. One more VT100-era mode
+  came with it: **reverse wraparound**, where a backspace in column 1 backs up to the end of the
+  line above rather than stopping dead. The engine names neither, so cmote holds both itself and
+  answers their DECRQM truthfully instead of "never heard of it" (§149).
 - **Pictures show up in the terminal** — a program that sends a **sixel** image (`img2sixel`,
   `chafa -f sixel`, gnuplot, timg, matplotlib's sixel backend, `lsix`) gets a real picture, not a
   screenful of garbage. It is drawn over the cells it reserves, so the prompt lands underneath it and
@@ -214,7 +226,12 @@ references below (§n) point into it.
 - **The mouse reaches the program that asked for it** — click a process in btop, a tab in
   tmux, a line in vim; the wheel scrolls what is under it. cmote forwards clicks, releases,
   drags and scrolls in the xterm protocols a program enables, and **holding Shift takes the
-  pointer back** for text selection and cmote's own right-click menu (§9).
+  pointer back** for text selection and cmote's own right-click menu (§9). Both ends of the range
+  are covered: the **original X10** protocol a program from 1985 still asks for — press only, no
+  modifiers — and **SGR-pixel** reporting, which answers in pixels rather than cells for a program
+  that draws finer than the character grid. A program that sets more than one gets the most
+  specific of them, so asking for a modern encoding as well as a fallback behaves the way it means
+  to (§150).
 - **Remote folder tree** — a 2D explorer of the remote filesystem in the bottom strip, to
   the right of the files pane (the terminal keeps the full width above), over **SFTP**
   (falling back to `ls` on a server with the subsystem disabled).
@@ -269,6 +286,23 @@ references below (§n) point into it.
   remembered per target** and restored on reconnect. Drag the splitter to resize the pane, or hide it with the
   status bar's **Files** button; the same `.*` checkbox hides dot-files here too (§19). Its splitter
   shows a **↕ resize cursor** and lights up on hover or drag, the same feedback the tree's does (§31).
+- **Edit remote files in a tab — properly, not just to look at them.** Double-clicking a text file
+  opens a real editor: a buffer with a **line-number gutter** that marks every line you changed, a
+  dirty dot in the toolbar, and **Ctrl+S** to write it back over SFTP. It saves in **exactly the
+  encoding it opened in** — a byte-order mark is put back if the file had one, the UTF is the file's
+  own, and a file with no BOM is taken as UTF-8; nothing is ever converted behind your back, and a
+  file that cannot be decoded is refused rather than mangled. **Ctrl+F** floats a find bar with a
+  live `3 / 12` count and prev/next steppers, **Ctrl+H** adds the replace row (Replace, or All), and
+  every match on screen is drawn **inverted** on its exact span while the current one's line carries
+  a band — so you see where you are and how the query is spread at once. Two themes: cmote's own dark panels, or
+  **CME** — a port of the Themer My Color Set Dark VS Code theme, under which the file is
+  **syntax-highlighted** from Sublime grammars, so TypeScript, PHP, TOML and the rest read much as
+  they do there. The theme is remembered **per file extension**, so `.rs` and `.md` can wear
+  different ones. Nothing is written until you ask, and nothing is lost when you forget: closing a
+  dirty tab raises a **three-way** prompt — **Save & close / Discard / Cancel** — and the write
+  itself is **atomic**, on its own SFTP channel, so the shell and any transfer in flight are
+  untouched and a half-written file is never left behind. A session that dropped before the save
+  says so in the toolbar rather than swallowing it (§32).
 - **The window reopens at the size you left it.** cmote remembers the window's width and height
   across restarts in a small `settings.json` beside the saved targets, so it comes back the size
   you last made it (the pane sizes are remembered separately, per target, above). The terminal
@@ -523,6 +557,23 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | ↑ button in the header | Show the parent directory |
 | Copy button in the header | Copy the path of the directory on show |
 
+**Text editor** (the tab a double-clicked text file opens)
+
+| Gesture | What it does |
+|---|---|
+| Type in the buffer | Edit the file. A **dirty dot** appears in the toolbar and the gutter marks every **changed line** |
+| **Ctrl+S** | Save, in **exactly the encoding the file arrived in** — a BOM is put back if there was one, and nothing is converted behind your back. Written **atomically**, on its own SFTP channel |
+| Closing a **dirty** tab | A three-way prompt: **Save & close / Discard / Cancel** |
+| **Ctrl+Shift+S** / **Save As…** | Save to another path |
+| **Ctrl+F** | Open the find bar and put the cursor in it |
+| **Ctrl+H** or **Ctrl+R** | Open the find bar *and* its replace row |
+| **Enter** in the query field | Step to the next match; the **‹** / **›** buttons walk both ways and the count reads `3 / 12`, or **No results** |
+| While the bar is open | **Every** match on screen is drawn **inverted** — text and background swapped, on the exact span and not a character more — and the **current** one's whole line carries a translucent band with its gutter number lit, so you can see both where you are and how the query is spread. Works under either theme |
+| **Enter** in the replacement field | Replace the current match — so find-and-replace needs no mouse. **All** replaces every one |
+| **Esc** | Close the find bar (from anywhere — the field has no close of its own). With the bar shut it does nothing, so it never closes the tab by surprise |
+| **Ctrl+W** / **Close** button | Close the tab |
+| **Theme** select in the toolbar | **Default** (cmote's own dark panels) or **CME** — a port of the Themer My Color Set Dark VS Code theme. Under CME the file is **syntax-highlighted** from Sublime grammars, so it reads much as it does there; the choice is remembered **per file extension** |
+
 **Picture preview** (the tab a double-clicked image opens)
 
 | Gesture | What it does |
@@ -549,7 +600,11 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 
 ## Requirements
 
-- **Rust** stable (developed against 1.91.0 on Windows, 1.97.1 on macOS).
+- **Rust** — current **stable**. The floor is whatever ships **edition 2024** (Rust 1.85), but
+  there is no pinned toolchain and no `rust-version` in `Cargo.toml` on purpose: CI builds with
+  `dtolnay/rust-toolchain@stable`, which floats with the release train, and this tree runs
+  `clippy::pedantic` and wants new lints the day they ship. So the practical requirement is a
+  toolchain no older than CI's, which means running `rustup update stable` before you build (§114).
 - **Windows 11** — target `x86_64-pc-windows-msvc` and the **MSVC** toolchain (Visual
   Studio Build Tools with the VC++ x64 tools and the Windows SDK — the default MSVC
   linker). No NASM or C compiler: the `ring` crypto backend ships pre-generated

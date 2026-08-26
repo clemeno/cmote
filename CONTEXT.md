@@ -76,8 +76,17 @@ The tab content that asks for host, port, user and auth kind (§7). `ConnectFlow
 while it shows: the focus ring's stop, and the **Prompt** over it, if there is one.
 
 **Viewer**:
-A remote file open for reading on a tab of its own — text (§32) or a picture (§53). Not a session: its
-load rides the parent session's channel.
+A remote file open on a tab of its own — text (§32) or a picture (§53). Not a session: its
+load rides the parent session's channel. Covers both, and only the picture half is read-only: the
+text half is the **Editor**, and `viewer.rs` is neither of them but the sliver of "how far has it
+read" the two share (§121).
+
+**Editor**:
+The text half of a viewer, which WRITES (§32): a buffer, a line-number gutter, a find bar, a theme
+per file extension, and a save that persists exactly as opened — BOM and charset included — rather
+than converting behind the user's back. `editor.rs` is its model, `ui/editor.rs` its view,
+`ssh/edit.rs` its network.
+_Avoid_: viewer, for this half alone — a picture is a viewer too and cannot be edited
 
 **Prompt**:
 A question the connect form asks — the vault's master passphrase, or a failure notice (§12, §16).
@@ -184,6 +193,13 @@ yet on screen (§122). It is *held*, never "synchronized": `sync_alternate` is a
 entirely.
 _Avoid_: sync, for this
 
+**Watermark**:
+How far along the reply buffer has already been encoded seven-bit or eight-bit and must not be
+rewritten (§145). A chunk may switch the control form part-way through, so `seal` encodes what has
+accumulated and moves the mark past it — an answer formed before the switch keeps the form it was
+promised, and the final pass touches only what came after.
+_Avoid_: sealed, as a noun — the mark is the thing, `seal` is what moves it
+
 **Screen spot**:
 A position in viewport coordinates: row 0 is the top visible line.
 
@@ -203,9 +219,11 @@ A numbered `PLAN.md` section. These are the project's ADRs — there is no `docs
 A marker on a deliberate shortcut, so that "simple" reads as intent rather than ignorance.
 
 **Green gate**:
-`cargo check --all-targets`, then `cargo test`, then
-`cargo clippy --all-targets -- -D warnings`, then `cargo fmt --check`. All four, before any
-commit.
+`rustup update stable`, then `cargo check --all-targets`, then `cargo test`, then
+`cargo clippy --all-targets -- -D warnings`, then `cargo fmt --check`. All five, before any
+commit. The update is first, not a courtesy: CI floats with the release train, so a toolchain
+left behind turns a lint that shipped yesterday into a red push (§114). `AGENTS.md` says why at
+length.
 
 **Prove-it**:
 Breaking the code on purpose to show that a passing test *can* fail, recorded beside the test.

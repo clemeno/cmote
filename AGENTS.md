@@ -29,8 +29,13 @@ cargo fmt --check
 ```
 
 CI (`.github/workflows/ci.yml`) runs the same three that apply to it, plus `cargo deny` and
-`cargo audit` for the dependency tree, and repeats clippy and the tests for
-`x86_64-apple-darwin`.
+`cargo audit` for the dependency tree, and repeats both on the mac — but not on one target.
+**Clippy is cross-compiled to `x86_64-apple-darwin` and the tests run natively on the aarch64
+runner**, which between them compile both slices of the universal bundle (§127). There is
+deliberately no second clippy pass for `aarch64-apple-darwin`: the tree contains no `target_arch`,
+`target_pointer_width` or `target_endian` `cfg` at all, so the two darwin targets select exactly
+the same source. That sentence is the one that stops being true if an arch-conditional ever
+appears, and the step is what to add.
 
 **`rustup update` is the first step for a reason (§114).** CI uses `dtolnay/rust-toolchain@stable`,
 which floats with the release train; the toolchain here is pinned to whenever it was last updated by
@@ -51,10 +56,13 @@ commit that fails the gate fails CI, but a commit that PASSES the gate can still
 Two consequences, both learned the hard way in §113:
 
 * **Read the macOS job.** It is the ONLY reader of half the `cfg` in this repo, and the only reader
-  of the 1482 tests that run there, so its result is not a formality — it is the only evidence that
+  of the tests that run there, so its result is not a formality — it is the only evidence that
   exists. In §113 it had been red since §103 and stayed red for 118 commits across several pushes,
   because a green local gate was being read as "the commit is fine" and the one job that disagreed
-  was never opened.
+  was never opened. **How many tests those are is the job's to report, not this file's**: the set is
+  the host's suite minus the `#[cfg(windows)]` ones plus the macOS ones, so no number written here
+  can be checked from here. One was: measured at §113, never revisited, and still being read as
+  current when §156 swept the docs.
 * **A step that goes green reveals the next step; it does not clear the job.** §113 fixed the macOS
   clippy step, and the `cargo test` step behind it — which had never once run on that target — failed
   immediately, on a test broken in the same commit (§115). Both `cargo test` steps now carry

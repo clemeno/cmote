@@ -17997,3 +17997,140 @@ That is not why GIP is refused — a protocol with no users can still be worth h
 carries plenty of rows for sequences nothing sends. It is recorded because the row read "a gap on the
 same footing as kitty's graphics protocol", and the footing is not the same: kitty's protocol has an
 implementation population and a client population, and GIP has one of each.
+
+## §156 — The sweep of every document, and the feature that had four words
+
+Four sections of terminal work in a row (§152–§155), each ending in a sweep of the two documents the
+work touched. This one sweeps the other four, on the ask "make sure they are all up-to-date with the
+project" — which is a different question from the one those sweeps were answering, and it found a
+different kind of answer.
+
+### What was checked, and how
+
+Six documents: `AGENTS.md`, `CLAUDE.md`, `CONTEXT.md`, `README.md`, `PLAN.md`,
+`TERMINAL_COMPATIBILITY_PLAN.md`, plus `docs/ctrl-d-on-windows-consoles.md`. Rather than read 23 000
+lines of prose looking for wrongness, the sweep went after the claims a machine can settle:
+
+* **Every `.rs` path named anywhere.** 157 of them, checked for existence.
+* **Every identifier the ctrl-d document names**, and every constant value it quotes.
+* **Every dependency version any document states**, against `Cargo.toml` and `Cargo.lock`.
+* **Every `src/term/*.rs` module**, against the compat plan — a module with no entry is a sequence
+  family nobody wrote down.
+* **The counts**: tests, `cfg` arms, scanners, shells, scrollback lines, allow-list sizes.
+* **The cross-document contradictions**: where two files answer the same question.
+
+Then, for the parts no grep reaches: which sections since each document's last commit shipped
+something that document is supposed to describe. `git log <last-touch>..HEAD -- src/ui/ src/app/`
+answers that in one line, and it is the only part of this sweep that needed judgement.
+
+### What was already right, which is most of it
+
+Worth recording, because a list of findings reads like a list of failures:
+
+* **All 157 paths resolve**, and the seven that do not are each correct. Three are not cmote's at
+  all — `alacritty_terminal`'s `grid/resize.rs` and `term/cell.rs`, `iced_core`'s `layout/limits.rs`,
+  all in Evidence entries about those crates. Two are recorded *as deleted* by the sentence naming
+  them (`term/compat.rs`, `term/answer.rs`, "deleted in the swap"). One is a throwaway that PLAN says
+  in the same breath was thrown away (`src/probe.rs`, §111). Only `src/app.rs` was a real break.
+* **All 41 `term/` modules appear in the compat plan.** That document has a row per sequence and an
+  Evidence entry per reader, and forty-one out of forty-one is what that structure buys.
+* **Every identifier and every constant in the ctrl-d document is exact** — `EOF_ANSWER_CAP` 64,
+  `QUIT_DRAIN_TIMEOUT` 2 s, `GOODBYE` 800 ms, `QUIT_COMMAND` `"exit"`, and "three of the six shells"
+  is still three of six.
+* **`AGENTS.md`'s "all 71 arms" is still exactly 71.**
+* **The two version claims that disagree with `Cargo.toml` are the docs doing their job.** `age 0.12`
+  and `base64 0.23` appear as §142 entries explaining *why* neither is taken. A sweep that flagged
+  those would be reading a reason as an error.
+
+### The rule that decides which numbers to sweep
+
+PLAN.md states a test count twenty times — 486, 1041, 1390, 553, 556, 575, 595 — and not one of them
+is stale, while `AGENTS.md`'s single "1482 tests" was. The difference is not the number, it is the
+sentence around it:
+
+> **A number in a journal entry is a measurement. A number in a standing document is a promise.**
+
+§133's "1 556 tests, green gate" is a fact about the evening §133 was written and stays true forever.
+`AGENTS.md`'s "the only reader of the 1482 tests that run there" is present tense, addressed to
+whoever is reading today, and went wrong the next time anybody added a test. Only the second kind
+needs a sweep, which is why PLAN.md — the largest document here by a factor of five — needed no
+correction at all.
+
+The macOS count has a second problem on top: it cannot be checked from this machine. The set is the
+host's suite minus the `#[cfg(windows)]` tests plus the macOS ones, and the only process that ever
+computes it is the job itself. So the fix is not a fresher number but no number — the same answer
+§152–§155 reached for the scanner count, one section earlier and for the same reason.
+
+### The shape of what was wrong
+
+Every stale claim was in a document that had **stopped being cited**.
+
+`TERMINAL_COMPATIBILITY_PLAN.md` and `PLAN.md` are touched by every section and were clean.
+`README.md` was last written at §127 and has had twenty-eight sections land on top of it.
+`docs/ctrl-d-on-windows-consoles.md` was written at §104 and links to a file §126 turned into a
+directory. `CONTEXT.md`'s **Viewer** entry was written when a viewer only read.
+
+That is not carelessness, it is structure. The compat plan has a **row per sequence**: a new sequence
+has an obvious place to go, and its absence is a visible hole in a table. The README has **prose**:
+a new feature has no slot, so its absence is invisible, and four consecutive sections could sweep the
+terminal documentation without the README ever entering the frame — because nothing pointed from the
+work to it.
+
+### The finding that is worth the whole sweep
+
+**The editor had four words.**
+
+§32 built a text editor: a buffer over a remote file, a line-number gutter marking changed lines, a
+dirty flag, a save that round-trips the file's own encoding and BOM rather than converting behind the
+user's back, an atomic write on its own SFTP channel, a three-way prompt on closing dirty, two
+themes, syntax highlighting from Sublime grammars under one of them remembered per file extension,
+and a find bar with a live count, prev/next steppers and a replace row — whose match §138 then made
+read **inverted**, on the exact span and not a character more.
+
+The README described all of that as: *"a text file lands in the in-tab editor"*.
+
+It had no feature bullet. The gestures section had a table for the terminal, the folder tree, the
+files pane, the picture preview and the home screen — and none for the editor, though the editor
+claims **six** keyboard bindings of its own (Ctrl+S, Ctrl+Shift+S, Ctrl+W, Ctrl+F, Ctrl+H / Ctrl+R,
+and an Escape that closes the find bar and deliberately does *not* close the tab). And the whole
+1 290-line document never cited **§32** once, which is the mechanical signal that would have caught
+it: a section that shipped a user-visible feature and is cited by no user-facing document.
+
+Three smaller versions of the same thing: §146's double-width and double-height lines, §149's
+whole-page reverse video and reverse wraparound, and §150's two ends of the mouse — X10 and
+SGR-pixel — all render or steer something a user sees, all shipped after §127, none mentioned.
+
+### The corrections
+
+* **`README.md`** — an editor feature bullet, an editor gestures table, the three terminal features
+  above, and a Rust requirement that cannot go stale: the floor is whatever ships edition 2024, and
+  the practical requirement is a toolchain no older than CI's, since CI floats (§114). The old line
+  named 1.91.0 and 1.97.1; stable is 1.98.0 today and will not be tomorrow.
+* **`CONTEXT.md`** — **Viewer** no longer says "for reading": it covers both halves and says only the
+  picture half is read-only. **Editor** is a term of its own, with the `editor.rs` / `ui/editor.rs` /
+  `ssh/edit.rs` split named and an _Avoid_ against using "viewer" for the writing half. **Watermark**
+  is defined (§145), a coined noun that had been load-bearing in `term/c1.rs` and `term/mod.rs`
+  without being in the one place a word is defined. And the **Green gate** entry said "All four" and
+  omitted `rustup update stable` — two documents, two answers to the same question, since §114.
+* **`AGENTS.md`** — the test count dropped for the reason above, and the CI sentence corrected: it
+  said clippy and the tests are both repeated "for `x86_64-apple-darwin`", and they are not. Clippy
+  is **cross-compiled** to the Intel target; the tests run **natively on the aarch64 runner**. §127
+  reasoned that split out in full and put the reasoning in `ci.yml`, where it has been correct the
+  whole time — `AGENTS.md` just never took the update.
+* **`CLAUDE.md`** — called `AGENTS.md` "the glossary" and then told the reader to start with
+  `CONTEXT.md` for the vocabulary, in the next sentence of a two-sentence file.
+* **`docs/ctrl-d-on-windows-consoles.md`** — four links to `../src/app.rs`, which §126 cut into a
+  directory and §128–§129 took two more slices out of. The policy did not move, so the document is
+  right about everything except where to find it; a note now says so, since a reader arriving from
+  §104 will have the old name in mind.
+
+### What this suggests keeping
+
+The check that would have caught the big one is cheap and mechanical: **a section that ships a
+user-visible feature should be cited by a user-facing document.** `grep -c "§32" README.md` returning
+`0` is the whole test, and it is the README's equivalent of the compat plan's empty row.
+
+Nothing is automated here — a CI job that fails because prose is thin would be a job people learn to
+ignore, which is §13's rule and the load stress's. But when a section touches `src/ui/` or
+`src/app/`, that is the moment the README is in scope, and it is worth asking before the commit
+rather than twenty-eight sections later.
