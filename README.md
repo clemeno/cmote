@@ -129,6 +129,38 @@ references below (§n) point into it.
   first contact shows the fingerprint for explicit accept/reject; a later key **change** opens
   a loud override dialog — both fingerprints (stored vs presented), a possible-MITM warning, and
   reject / trust-once / replace, defaulting to reject and never auto-trusting (§8, §28).
+- **Become another account on the same connection** — an SSH session authenticates once, as one
+  user, so becoming `root` is not a second login: it is a program (**`sudo`** or **`su`**) run on
+  the connection you already have, with a channel and a shell of its own (§45). The status bar's
+  **Account** button opens a dialog listing every account the session has; click one to switch,
+  **✕** to end an elevated one. The login account has no ✕ — ending it is what Disconnect does.
+  Each account keeps its **own terminal**: its own grid, scrollback, selection and find bar, so
+  switching is a swap rather than a reset and a background shell goes on running.
+- **sudo's questions are asked in a dialog, not in the grid.** The elevating channel runs the
+  elevation program and nothing else, so a password typed for it can never reach a shell, a running
+  command or your history — the classic hazard of typing `sudo` at a prompt that turned out to be
+  running something else. cmote names sudo's own prompt (`-p`), so the one question it can predict
+  is an exact match rather than a guess, and puts **the remote's own wording** for anything it did
+  not name — a PAM module's **second factor** asks for its code in the machine's words. A refusal is
+  shown as the program's own words (`Sorry, try again.`, `not in the sudoers file`) above the
+  question being put again, because "you got it wrong" and "now the second factor" look identical
+  otherwise: sudo dresses every standard prompt in its stack in cmote's `-p` text (§45).
+- **Elevate on connect, and optionally remember the password** — the connect form has a **Become**
+  field. Name an account there and two more controls appear, **sudo / su** and **Become it on
+  connect**; ticked, every session to that target starts the elevation itself the moment its shell
+  is live and lands you at that account's prompt with nothing to click. That preference is metadata
+  and rides in `targets.json` beside the forwards and the resume paths. The **password** is a
+  separate opt-in ("Remember the password") that lives only in the sealed vault, is kept only for an
+  elevation that actually **succeeded**, and is refused outright for an account that needed **more
+  than one factor** — a one-time code is not a password and is never stored as one (§47).
+- **The file panes follow the account you are on** — SFTP is a *subsystem*, started by sshd as the
+  account that authenticated, so no amount of `sudo` inside a shell can reach it. cmote runs the
+  server's own `sftp-server` binary under the elevation instead, and the tree, the files pane, every
+  transfer and the editor then read and write as that account (§46). A remote with no such binary
+  falls back to shell commands under the same `sudo`; where neither works the panes stay **empty and
+  say why** rather than quietly showing the login account's files. The password reaches `sudo` only
+  after it has been **refused for the want of one** — never on a guess, which would hand it to
+  whatever sudo had already started.
 - A full **VT terminal** — a complete VT engine (`alacritty_terminal`) whose grid cmote
   draws with iced — that reflows to the window size, forwarding the new pty size to the
   remote (§9, §23).
@@ -513,6 +545,20 @@ gets a keystroke; a click focuses what it lands on, and the ring shows where the
 | **Sync** in the status bar | `cd` the shell to the folder the pane is showing (disabled when they already agree) |
 | **Reveal** in the status bar | Jump the files pane and the folder tree to the folder the shell is in — nothing is typed at the shell (disabled when they already agree, when the strip is hidden, or when the shell has never announced its directory) |
 | **Files…** / **Upload** in the status bar | Pick local files, then send them into the shell's directory |
+
+**Accounts** (the dialog behind the status bar's **Account** button)
+
+| Gesture | What it does |
+|---|---|
+| **Account** button on the status bar | Open the dialog. Once a session has more than one account the button names the one on screen — `Account: root`. Absent on a **local** session: becoming another account is a program run on a *connection*, and there is none |
+| Click another account's name | Switch to it, once it is up. Its terminal comes forward with its own scrollback and selection; the one you left is parked and goes on running |
+| **✕** beside an account | End that account's shell. Only elevated accounts have one — the login account goes with the session |
+| **sudo** / **su** | Which program does it: `sudo` asks for **your own** password (what a sudoers-managed machine expects), `su` for the **target account's** |
+| Account field, then **Log in as…** | Become that account. The name is checked here and nowhere later: letters, digits and `_ - .` only |
+| **Do this on every connection to this target** | Remember the account, and start the elevation by itself next time the shell opens |
+| **Remember the password (encrypted vault)** | Keep the answer in `secrets.age` so the next one is hands-free. Only for an elevation that succeeded, and never for one that took a second factor |
+| A question arrives | The dialog shows it in the remote's own words with a masked field; **Enter** or **Send** answers it. A refusal appears above it in red |
+| **Esc**, the backdrop, or **Close** | Shut the dialog. It cancels nothing already sent — the elevation goes on, it just leaves an outstanding question unanswered |
 
 **Folder tree** (right of the files pane, in the bottom strip — the status bar's **Folders** button hides it; shown only alongside the files pane)
 

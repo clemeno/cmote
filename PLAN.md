@@ -18264,3 +18264,90 @@ is no feature bullet for becoming another account, no gestures row for the accou
 mention of the connect form's own **Become** field or its **Become it on connect** box — which is the
 exact control this section's report was about. Recorded and not fixed here, because the ask was the bug;
 it is the next thing that document owes.
+
+## §158 — The feature the README did not have, a hundred and eleven sections on
+
+§156 swept every document in the tree and left a rule behind it: **a section that ships something a
+user can see should be cited by a user-facing document**, and `grep -c "§32" README.md` returning `0`
+is the whole test. §157 fixed a bug in the accounts machinery, ran that rule against itself, and found
+the README describing none of the feature the bug was in. It recorded that and did not act on it,
+because the ask was the bug. This is the acting on it.
+
+### What the grep said
+
+Before this section, the README's only mentions of the accounts machinery were:
+
+| | hits | where |
+|---|---|---|
+| §45 | 1 | inside the **testing** narrative — what the test suite covers |
+| §46 | 2 | the same narrative, plus a hint about trying a transfer under an elevated pane |
+| §47 | **0** | nowhere at all |
+
+Not one of them is a description. A reader of that document could not have learned that a session can
+have more than one account, that the status bar has an **Account** button, that the connect form has a
+**Become** field, or that ticking **Become it on connect** is a thing cmote does. The three sections
+that built all of it were cited only as material for a paragraph about test coverage.
+
+### The gap is bigger than §156's
+
+§32's editor went **28** sections undescribed and that was the finding of the whole sweep. This one is
+worse by a factor of four, and the arithmetic is worth writing down rather than rounding off: §45 gave a
+session a set of shells but its UX was **withdrawn** in the same breath — there was no way to start an
+elevation from the app at all — so there was nothing for a user-facing document to describe until §47
+replaced it with the dialog. From §47 to here is **111 sections**.
+
+### What it cost, which is not tidiness
+
+§157's report was: *"Become root on connect does not work — we join with a prompt that is `whoami` →
+rocky."* That is the entire observation available to somebody who has no description to check the
+feature against. It named no button, no dialog, no state, because the document that would have supplied
+those words says nothing.
+
+The three questions that actually located the bug — what appeared on screen, what the accounts dialog
+lists, what ✕ does — were all questions the README could have answered in advance. Every one of them had
+to be asked and answered by hand instead, one round trip apiece. **That is the price of the gap, and it
+is a better argument for closing it than neatness is.**
+
+### What the README says now
+
+Four bullets, at the seam between "getting connected" and "the terminal", which is where an elevation
+falls: it happens after the host key and before anything is typed.
+
+* **Becoming another account** — one login, a program on the connection you already have, a shell and a
+  channel of its own; the Account button, switching, ✕, and the fact that each account keeps its own
+  grid, scrollback, selection and find bar, so switching is a swap and a background shell goes on
+  running.
+* **The conversation** — why it happens in a dialog and not in the grid (the elevating channel runs the
+  elevation program and nothing else, so a password typed for it cannot reach a shell or a history),
+  cmote naming sudo's prompt itself so the one predictable question is an exact match, the remote's own
+  wording for everything else, and the refusal shown above a repeated question — because sudo dresses
+  every standard prompt in its stack in cmote's own `-p` text, so "you got it wrong" and "now the second
+  factor" are otherwise the same screen.
+* **On connect, and the vault** — the **Become** field, the two controls that appear once an account is
+  named, the preference living in `targets.json` as metadata, and the password living only in
+  `secrets.age`, kept only for an elevation that succeeded and refused outright for one that took a
+  second factor.
+* **The file panes** — SFTP is a subsystem sshd starts as the account that authenticated, so cmote runs
+  the server's own `sftp-server` under the elevation; the shell fallback; empty panes that say why
+  rather than quietly showing the login account's files; and the password written only after sudo has
+  been refused for the want of one.
+
+And an **Accounts** gestures table, placed after the terminal's own, since the button that opens it is
+on the terminal's status bar. Nine rows, every label quoted as it is actually drawn — `Account: root`,
+`Do this on every connection to this target`, `Remember the password (encrypted vault)`, `Log in as…` —
+because a table whose wording is a paraphrase is a table that cannot be checked against the screen.
+
+The last row is the one that is easiest to get wrong from reading the code: **Esc, the backdrop or Close
+cancels nothing already sent**. The elevation goes on; what is lost is the answer to whatever question
+was outstanding. That is in `ui/terminal.rs` as a comment and was in no document.
+
+### The rule, run
+
+`grep -c` on the three sections now returns 3, 3 and 1, and the hits that matter are the ones outside the
+testing narrative. The check §156 proposed costs a second and would have caught this at §48.
+
+What it will not catch is a feature whose section is cited once, in a paragraph about something else —
+which is exactly the shape §45 and §46 were in. The count is a floor, not a proof, and the honest version
+of the rule is the one §156 already wrote: **when a section touches `src/ui/` or `src/app/`, that is the
+moment the README is in scope**, and the question is asked before the commit rather than a hundred
+sections later.
