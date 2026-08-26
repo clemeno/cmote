@@ -3486,6 +3486,41 @@ mod tests {
 		);
 	}
 
+	/// contour's Good Image Protocol (`DCS ! g <message> ST`) is refused, and the refusal is an
+	/// **advertisement cmote does not make** (§155).
+	///
+	/// The protocol's own feature detection is DA1 attribute **90**. cmote's DA1 says 6 and 4 — a
+	/// VT102 that draws sixels (§41) — so no program sends GIP here at all, and supporting it starts
+	/// with adding 90, which is the promise rather than the sequence. The other two prices are on the
+	/// section: a lifetime defined by counting the CELLS displaying an image, which needs per-cell
+	/// image identity the engine has no room for (§151), and a pool of remote-named images outliving
+	/// the command that sent them, which is the class part 6 refuses whole (§98).
+	///
+	/// What happens today is what this pins: the string is followed to its terminator and dropped by
+	/// every reader — `query` and `graphics` both insist on final byte `q`, and `! g` is neither — so
+	/// nothing is drawn, nothing is answered, and the text after it lands where it should.
+	#[test]
+	fn a_good_image_protocol_sequence_draws_nothing_and_is_never_advertised() {
+		let mut terminal = Terminal::new(4, 40);
+		// `o=s` is upload-and-render, the one command that needs no prior upload — the closest thing
+		// the protocol has to a sixel, and still nothing here.
+		assert!(
+			terminal
+				.process(b"\x1bP!go=s,f=2,c=2,r=1;\x00\x00\x00\x1b\\")
+				.is_empty()
+		);
+		terminal.process(b"after");
+		assert_eq!(
+			read(&terminal, 0, 0, 5),
+			"after",
+			"the wrapper was consumed whole, payload included"
+		);
+		// The query command (`o=q`) asks for the resource limits. Answering it would advertise.
+		assert!(terminal.process(b"\x1bP!go=q\x1b\\").is_empty());
+		// And the advertisement itself: DA1 names 6 and 4, never 90.
+		assert_eq!(terminal.process(b"\x1b[c"), b"\x1b[?6;4c".to_vec());
+	}
+
 	/// The two places cmote's transparency is not tmux's, measured rather than assumed (§154).
 	#[test]
 	fn the_two_ways_the_passthrough_wrapper_is_not_tmuxs() {

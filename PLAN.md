@@ -17899,3 +17899,101 @@ sequence asks for is what happens, with the note saying by what mechanism.
 `differential`'s DCS shape sweep gained `t` as a fourth final byte — 180 shapes to 240 — because
 `DCS t` is now an introducer this document has a written reading of, and both sides have to be held to
 it. Nothing diverged.
+
+## §155 — The image protocol whose first move is a promise
+
+The last row on the list:
+
+> | DCS … ! g (GIP) | Good Image Protocol | ❌ | contour's image protocol — upload, render, release, oneshot and query, in a DCS envelope. A **gap** on the same footing as kitty's graphics protocol: the decoder is no longer the price (§70), the protocol's own bookkeeping is (§41, §98) |
+
+"The protocol's own bookkeeping is" was written without reading the bookkeeping. Reading it turns a
+vague price into three specific ones, any one of which is decisive, and moves the mark to 🛑.
+
+### What the protocol is, from its own specification
+
+`DCS ! g <message> ST` — the `!` an intermediate and the `g` a final byte, chosen to occupy one DCS
+slot without colliding. The command is a field of the message: `o=u` upload, `o=r` render, `o=s`
+upload-and-render, `o=d` release, `o=q` query the resource limits. Formats are `1` auto, `2` RGB, `3`
+RGBA, `4` PNG. And:
+
+> Support for this specification is advertised via DA1 response code **`90`**.
+
+### The first price: cmote would have to promise it before anyone sent one
+
+**Nothing sends GIP to a terminal that does not advertise 90.** cmote's DA1 is the engine's `CSI ? 6 c`
+with §41's sixel attribute added: `CSI ? 6 ; 4 c`. There is no 90 in it and there never has been.
+
+So the row was never describing a sequence programs send and cmote drops. It was describing a
+sequence no program will ever send here, because the protocol's own gate is a number cmote does not
+say. **The first line of an implementation is not a decoder or a store — it is `;90` in the DA1
+reply**, and that byte is a promise about everything behind it.
+
+That reframes the whole row, and it is worth being clear about what it does and does not prove. It is
+not an argument that GIP is unimportant; it is the reason the other two prices cannot be paid in
+instalments. A program that reads 90 and sends `o=u` followed by `o=r` has already discarded its
+fallback. There is no honest partial here: DA1 attribute 90 says *this terminal implements this
+specification*, not *one fifth of it*. Contrast attribute **4**, which says exactly one thing — this
+terminal draws sixels — and which cmote says because it is true (§41).
+
+### The second price: the lifetime is counted in CELLS
+
+This is the one §151 had already measured, in a different costume.
+
+The specification defines an image's lifetime by reference counting, and the counting is per **screen
+cell**: the count starts at 1 on upload, **increments by the number of cells displaying fragments of
+the image**, decrements when those cells are overwritten or deleted, and the image becomes evictable
+at zero.
+
+So the terminal must know, for every cell on the page and in the scrollback, which image fragment it
+holds. That is per-cell image identity, and §151 measured what it costs here one section ago:
+
+* `alacritty_terminal`'s cell flag word is a full `u16` — fifteen bits named, the sixteenth taken by
+  §56's protection bit — so there is no room *in* the cell;
+* a map beside the engine is **dropped on every reflow**, because `Term::resize` re-wraps the
+  scrollback internally with no sequence on the wire and no `Handler` method to watch;
+* and a per-cell map is **unbounded in remote input**, which is §12's refusal in a new costume.
+
+§41 met this exact requirement and answered it differently, which is why sixel works: a picture is
+anchored to an **absolute document line** and reserves its cells by erasing them, so the cells
+underneath stay ordinary blanks. They scroll, reflow and evict as text does, and no cell has to
+remember anything. GIP's refcount cannot be satisfied that way — the count *is* the cell bookkeeping.
+
+**This argument is GIP's alone and does not transfer to kitty's row.** kitty's protocol manages
+lifetime with explicit delete commands over image and placement ids, not by counting cells, so its
+row's price is still what that row says it is. Stated because the two rows sit next to each other and
+the inference is tempting.
+
+### The third price: a pool of remote-named images
+
+`o=u` stores an image under a name the **remote** chose, and `o=d` releases it. Between those two the
+image is terminal state that outlives the command that created it, addressable by a name cmote did not
+pick.
+
+That is the class part 6 refuses whole, and the audit already names three members of it in one row:
+DECDMAC's macros, DECDLD's soft character set, DECUDK's key meanings — "the three sequences that let a
+host leave something **behind** in the terminal". A named image pool is the fourth.
+
+The refusal there is not about danger, and it is not here either: it is that cmote's model has one
+owner for what is on the screen. §41's images belong to the **document** — a line of it, at a column —
+and die with the line. A pooled image belongs to whoever uploaded it.
+
+### What the mark should be, and what happens today
+
+**🛑.** Three independent refusals, one of which — the advertisement — is performed by cmote's code
+every time it answers DA1, and is pinned by a test that asserts the reply names 6 and 4 and not 90.
+
+Today a GIP string is followed to its terminator and dropped by every reader: `query` insists on final
+byte `q` with `$` or `+`, `graphics` on final `q` with no intermediate, and `! g` is neither. So it
+draws nothing, answers nothing, and the text after it lands where it should — which is the second half
+of the test, because a sequence half-consumed would spill its payload onto the screen.
+
+### The population, for the record
+
+contour is the only implementer, behind a configuration key of its own (`good_image_protocol`), and
+the specification repository describes itself as *a formalization of a proposal*. Against that: sixel
+is emitted today by `img2sixel`, `chafa`, `timg`, `lsix`, gnuplot and matplotlib, and cmote draws it.
+
+That is not why GIP is refused — a protocol with no users can still be worth having, and the audit
+carries plenty of rows for sequences nothing sends. It is recorded because the row read "a gap on the
+same footing as kitty's graphics protocol", and the footing is not the same: kitty's protocol has an
+implementation population and a client population, and GIP has one of each.
