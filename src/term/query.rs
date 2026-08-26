@@ -486,9 +486,24 @@ pub fn gettcap_reply(names: &[Vec<u8>]) -> Vec<u8> {
 }
 
 /// The value cmote reports for a terminfo/termcap capability name, or `None` for one it does not
-/// advertise (§33, §123). Three are stated, because three are facts cmote can give truthfully: the
-/// terminal name it requested for the remote pty (`TN`, `xterm-256color`), its colour count
+/// advertise (§33, §123, §153). Three are stated, because three are facts cmote can give truthfully:
+/// the terminal name it requested for the remote pty (`TN`/`name`, `xterm-256color`), its colour count
 /// (`Co`/`colors`, 256), and its direct-colour depth (`RGB`, 8 bits a channel).
+///
+/// **Three is also the whole of xterm's special-name list**, which §153 read out rather than sampled:
+/// "`Co` for termcap colors (or `colors` for terminfo colors)", "`TN` for termcap name (or `name` for
+/// terminfo name)", "`RGB` for the ncurses direct-color extension". Two of the three have a termcap
+/// spelling and a terminfo one; `Co`/`colors` was paired from the start and `TN`/`name` was not, which
+/// is the one thing §153 found to build.
+///
+/// **Everything else in an XTGETTCAP request is a real capability name, and cmote answers none of
+/// them — deliberately.** xterm answers those out of a database: `xtermcap.c`'s `xtermcapString` reads
+/// `screen->tcap_fkeys`, filled by `loadTermcapStrings` from `tigetstr`/`tgetstr`. cmote has no local
+/// terminfo, and the entry it would be copying is named right here — `xterm-256color`, the TERM cmote
+/// asks the remote for and answers `TN` with. That entry is on the REMOTE, where the query came from,
+/// so a hard-coded copy of it would be a second copy of a database cmote does not own, able to
+/// disagree with the first the moment either moves. An honest "unknown" leaves the querier reading the
+/// entry it already has, which is the one cmote conforms to on purpose.
 ///
 /// **`RGB` is the third special name XTGETTCAP defines**, alongside `TN` and `Co`, and its type is
 /// the thing §66's "their wire values are ambiguous" had not looked up. ncurses' `user_caps(5)`
@@ -505,7 +520,7 @@ pub fn gettcap_reply(names: &[Vec<u8>]) -> Vec<u8> {
 /// wants to know whether cmote takes 24-bit colour has `RGB` to ask, and it is answered.
 fn known_capability(name: &[u8]) -> Option<&'static [u8]> {
 	match name {
-		b"TN" => Some(b"xterm-256color"),
+		b"TN" | b"name" => Some(b"xterm-256color"),
 		b"Co" | b"colors" => Some(b"256"),
 		b"RGB" => Some(b"8"),
 		_ => None,
@@ -945,6 +960,54 @@ mod tests {
 		assert_eq!(
 			gettcap_reply(&[b"5463".to_vec()]),
 			b"\x1bP0+r5463\x1b\\".to_vec()
+		);
+	}
+
+	/// The terminfo spelling of `TN`, which xterm's own list gives and §33 missed while pairing
+	/// `Co`/`colors` correctly (§153). The reply echoes the name that was ASKED, so `name` comes back
+	/// as `name` and not as `TN` — which is xterm's behaviour, and the reason `gettcap_reply`
+	/// re-encodes the decoded request rather than a canonical spelling of its own.
+	#[test]
+	fn the_terminfo_spelling_of_the_terminal_name_is_answered_too() {
+		// `name` (6E616D65) -> `xterm-256color`, the same value `TN` gets.
+		assert_eq!(
+			gettcap_reply(&[b"6E616D65".to_vec()]),
+			b"\x1bP1+r6E616D65=787465726D2D323536636F6C6F72\x1b\\".to_vec()
+		);
+		// And the pair is a pair: both spellings, one value, in one request.
+		assert_eq!(
+			gettcap_reply(&[b"544E".to_vec(), b"6E616D65".to_vec()]),
+			[
+				b"\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\".as_slice(),
+				b"\x1bP1+r6E616D65=787465726D2D323536636F6C6F72\x1b\\",
+			]
+			.concat()
+		);
+	}
+
+	/// A REAL capability name is answered unknown, and that is the decision §153 made rather than a
+	/// gap it left. xterm answers these from `tigetstr`/`tgetstr` — a database — and the entry cmote
+	/// would be copying is `xterm-256color`, which is on the remote that asked and which cmote names
+	/// in `TN` on purpose. A hard-coded copy could only disagree with it.
+	#[test]
+	fn a_real_terminfo_capability_is_answered_unknown() {
+		// `kcuu1` (6B63757531), the cursor-up key — the shape of request xterm exists to answer here.
+		assert_eq!(
+			gettcap_reply(&[b"6B63757531".to_vec()]),
+			b"\x1bP0+r6B63757531\x1b\\".to_vec()
+		);
+		// `Ms` (4D73), the OSC 52 clipboard capability. Unknown for a second reason as well: cmote
+		// refuses the remote clipboard outright, so advertising it would be a promise it breaks.
+		assert_eq!(
+			gettcap_reply(&[b"4D73".to_vec()]),
+			b"\x1bP0+r4D73\x1b\\".to_vec()
+		);
+		// `Smulx` (536D756C78) and `Setulc` (53657475 6C63): tmux's styled-underline extensions, in
+		// neither xterm's special-name list nor ncurses' recognised user capabilities — `Tc`'s
+		// position exactly (§123).
+		assert_eq!(
+			gettcap_reply(&[b"536D756C78".to_vec()]),
+			b"\x1bP0+r536D756C78\x1b\\".to_vec()
 		);
 	}
 

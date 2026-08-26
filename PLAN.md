@@ -17697,3 +17697,103 @@ that trimmed the intermediate as padding would have read every DECFRA-shaped sel
 
 Nine settings reported, and `decrqss_reply` gained not one line — which is what §109's "one builder
 for all of them" was buying and had not been asked to pay out until now.
+
+## §153 — The spelling that was missing, and the database cmote would be a second copy of
+
+The row beneath §152's, carrying ❌ since §66 split it off the partial mark:
+
+> | DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | the same request for any other capability, including the real terminfo key names; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back. A full answer needs a terminfo database cmote does not carry (§66, §123) |
+
+That note turns out to be **exactly right about the mechanism and wrong about the mark**. Verifying
+the mechanism is what found the one thing there was to build.
+
+### xterm answers from a database, and that is measured now rather than assumed
+
+`xtermcap.c`:
+
+    int
+    xtermcapString(XtermWidget xw, int keycode, unsigned mask)
+    {
+        ...
+        if ((which = firstTcapByCode(keycode, param)) >= 0) {
+            TScreen *screen = TScreenOf(xw);
+            if (loadTermcapStrings(screen)) {
+                ...
+                if ((fkey = screen->tcap_fkeys[which]) != NO_STRING) {
+
+`loadTermcapStrings` fills `tcap_fkeys` with `tigetstr` / `tgetstr`. So a key capability's value is a
+**static lookup in a terminfo or termcap entry** — not a string generated from the terminal's current
+DECCKM or keypad state. This mattered enough to look up because the opposite would have changed the
+answer: if xterm reported what it would *currently* send, cmote could report what its own
+`term/keymap.rs` would currently send, and the row would be a small build rather than a decision.
+
+It does not, and cmote cannot, because there is no terminfo on Windows to read.
+
+### The database cmote would be copying is named in its own reply
+
+This is the argument, and it is short.
+
+cmote asks the remote for `TERM=xterm-256color` and answers XTGETTCAP `TN` with that same string. The
+entry a hard-coded capability table would be transcribing is therefore **`xterm-256color`, on the
+remote, in the hands of the very program that sent the query**. A program asking cmote for `kcuu1` is
+asking cmote to read back a file it already has.
+
+Transcribing it into cmote would make a **second copy of a database cmote does not own**, and this
+document has a standing finding about second copies: they are a thing that can disagree with the
+first. §70 and §82 both corrected notes that had gone stale that way. Here the drift is not
+hypothetical — ncurses' `xterm-256color` entry is maintained by someone else and changes between
+releases, so the copy would be wrong on some machines the day it was written and on more of them every
+year.
+
+An honest `DCS 0 + r <NAME> ST` leaves the querier reading the entry it already has. That entry is the
+one cmote deliberately conforms to. **So the mark is 🛑, not ❌** — cmote's code performs this refusal
+and its tests pin it.
+
+### The one thing there was to build
+
+Reading `ctlseqs`' own text for the special names, entire:
+
+> *Co* for termcap colors (or *colors* for terminfo colors) … *TN* for termcap name (or *name* for
+> terminfo name) … *RGB* for the ncurses direct-color extension
+
+**Three special names, and two of them have two spellings.** `Co`/`colors` was paired from the
+start — §33 wrote `b"Co" | b"colors"` — and `TN`/`name` was not. A program asking in the terminfo
+spelling got "unknown" for a fact cmote states in the termcap spelling one line above.
+
+One arm. `b"TN" | b"name" => Some(b"xterm-256color")`. The reply echoes the name that was *asked*,
+because `gettcap_reply` re-encodes the decoded request rather than a canonical spelling of its own —
+so `name` comes back as `name`, which is what xterm does and what a program matching answers to
+questions by name requires.
+
+### The check that the refusal is not hiding an answerable subset
+
+§123 refused `Tc` on a two-part test: it is in neither xterm's list of special names nor ncurses'
+recognised user capabilities. That test was applied to one capability. §153 applied it to the rest,
+because a criterion used once is a criterion nobody has checked.
+
+`user_caps(5)` names six — `AX`, `E3`, `NQ`, `RGB`, `U8`, `XM` — plus the experimental `xm`, under
+"while the terminfo database may have other extensions, ncurses makes explicit checks for the
+following". There is **no second table** of the capabilities other applications use. So `Tc`, `Smulx`,
+`Setulc`, `Ms`, `Se`, `Ss`, `Sync` and the rest of tmux's vocabulary are all in `Tc`'s position
+exactly, and `RGB` remains the only one of the class with an answer — which it has.
+
+`Ms` is worth naming separately, because it is the one where answering would be worse than a copy that
+drifts. It is the OSC 52 clipboard capability, and cmote **refuses the remote clipboard outright**
+(part 6). Advertising `Ms` would be a promise cmote breaks on the next sequence.
+
+### Who actually asks, recorded so the next reader does not assume
+
+tmux does not. `tty_send_requests` sends DA1 (`CSI c`), DA2 (`CSI > c`), XTVERSION (`CSI > q`),
+`CSI ? 2026 $ p` for synchronized updates, and OSC 10 / 11 for the foreground and background — and no
+XTGETTCAP at all. tmux reads its capabilities out of terminfo like everything else, which is the same
+conclusion this section reaches from the other end.
+
+That is worth having written down because "tmux asks for `Tc`" is the folklore that put `Tc` in §66's
+list in the first place, and §123 refused it on the grammar without checking the premise. The premise
+is also false.
+
+### What it cost
+
+One `|` in a match arm, and three tests: the terminfo spelling answered, the pair answered together,
+and a real capability answered unknown. The refusal is now a test rather than a sentence, which is the
+difference between 🛑 and ❌ in this document.

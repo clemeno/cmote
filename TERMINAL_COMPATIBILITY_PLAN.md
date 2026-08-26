@@ -42,7 +42,9 @@ re-marked `BEL` as the 🛑 it always was, and found one real gap behind a comfo
 never drives `vte`'s synchronized-update timeout, so a remote can hold the visible screen still with eight
 bytes (mode 2026, and part 7) — **driven since §122**, over every tab rather than the visible one. **§66 split the last two and retired the partial class**: every row in part 8 now states
 one answer with one mechanism, and the two halves that had been hiding behind "honest" turned out to be
-gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps).
+gaps with small work behind them (DECRQSS's other selectors, XTGETTCAP's truecolor caps) — **§123 built
+four of the first and one of the second, §152 the remaining four selectors, and §153 found that the last
+of the capabilities was a refusal rather than a gap**.
 **§67 narrowed the last loose mark**: **✅** now means *supported*, not *full*, and a row has to say how
 much — an empty note being the explicit claim that nothing is withheld. Sweeping for rows that had been
 leaning on the reader found one supported sequence with no row at all (`1005`, UTF-8 mouse), one
@@ -1230,6 +1232,17 @@ pleaded is settled in one line of ncurses' `user_caps(5)`: a numeric `RGB` is th
 The lesson is §70's, one column over — a note pleading ambiguity is a note nobody has looked up. PLAN
 §123.]*
 
+*[**§152 and §153 finished both rows, and both had been worked from a sample.** §66 and §123 each named
+"three more selectors" and "two capabilities" without reading either list out. §152 read xterm's DECRQSS
+list entire — fifteen selectors and three extensions — and found **four** more answerable from state
+that already existed (DECSLPP, DECSCPP, DECSNLS off the grid, DECSACE off §59's scanner), plus two,
+DECSASD and DECSSDT, whose truthful `0` is refused because it is an invitation: a program told the
+status line exists writes to it, cmote ignores the set silently, and the text lands on the user's page.
+§153 read XTGETTCAP's list and found one spelling missing (`name`, the terminfo half of `TN`) and that
+the remainder is a **refusal**, not a gap — xterm answers key capabilities from `tigetstr`, and the
+entry cmote would transcribe is `xterm-256color`, sitting on the remote that asked. It also killed the
+folklore under §66's original sentence: tmux does not send XTGETTCAP at all. PLAN §152, §153.]*
+
 **§67 is the same discipline applied to ✅ itself.** "Full" was the one mark that asked a reader to
 believe a row rather than check it, so it now reads *supported* and the note carries the extent. The sweep
 cost nothing and paid for itself: one supported sequence had no row at all (`1005`, the UTF-8 mouse
@@ -1653,9 +1666,9 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | DCS $ q `$ }` / `$ ~` (DECRQSS — DECSASD / DECSSDT) | Report the status display | 🛑 | ask which display output goes to, and what type the status line is. `0` is **true** of both — cmote has no status line and never leaves the main display — and it is refused anyway, because it is an invitation: a program told the feature exists turns the status line on and writes to it, cmote ignores both sets silently (part 6), and the text lands on the user's page. A refused DECSCPP costs a resize that did not happen; a refused DECSASD costs the program's next paragraph written over the screen, which is why the geometry settings above are reported and these two are not (§152) |
 | DCS $ q `) {` / `, \|` / `, }` (DECRQSS — DECSTGLT / DECAC / DECATC) | Report a colour table setting | 🤷 | VT525-only colour-table settings, naming features cmote does not have at all; answered `DCS 0 $ r ST` (§152) |
 | DCS $ q `> Pm f` / `> Pm m` / `> Pm t` (DECRQSS — XTQFMTKEYS / XTQMODKEYS / XTSMTITLE) | Report an xterm resource | 🛑 | xterm's own three extensions, in DECRQSS's marker form. The one cmote holds state for is XTQMODKEYS, and **its question already has an answered spelling** — `CSI ? 4 m` → `CSI > 4 ; Pv m` since §61 — so a second reply format no source publishes would be invented for a fact already reachable. `Tc`'s refusal, one family over (§61, §123, §152) |
-| DCS + q `TN` / `Co` / `RGB` (XTGETTCAP) | Report a capability | ✅ | `DCS + q <hex-name> ST` asks for a terminfo capability; `TN` answers `xterm-256color`, the name requested for the remote pty, `Co` / `colors` answer `256`, and `RGB` answers `8` — the numeric form ncurses' `user_caps(5)` defines as bits per channel, which is what cmote's SGR 38;2 path takes. Hex both ways (§33, §123, `term/query.rs`) |
+| DCS + q `TN` / `name` / `Co` / `colors` / `RGB` (XTGETTCAP) | Report a capability | ✅ | `DCS + q <hex-name> ST` asks for a terminfo capability; `TN` and its terminfo spelling `name` answer `xterm-256color`, the name requested for the remote pty, `Co` / `colors` answer `256`, and `RGB` answers `8` — the numeric form ncurses' `user_caps(5)` defines as bits per channel, which is what cmote's SGR 38;2 path takes. **These are xterm's whole list of special names**, and two of the three have two spellings; `Co`/`colors` was paired from §33 and `TN`/`name` only from §153, so a program asking in the terminfo spelling got "unknown" for a fact stated one line above. The reply echoes the name that was *asked*. Hex both ways (§33, §123, §153, `term/query.rs`) |
 | DCS + q `Tc` (XTGETTCAP — tmux's truecolor flag) | Report a capability | 🛑 | tmux's own extension, in neither xterm's list of XTGETTCAP special names nor ncurses' recognised user capabilities — and a pure **boolean**, which this reply grammar cannot spell: a recognised name is answered `<NAME>=<VALUE>`, so answering `Tc` means inventing a value on nobody's authority. `RGB` is the question with an answer, and it is answered (§123) |
-| DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | the same request for any other capability, including the real terminfo key names; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back. A full answer needs a terminfo database cmote does not carry (§66, §123) |
+| DCS + q (XTGETTCAP — every other capability) | Report a capability | 🛑 | the same request for any other capability, including the real terminfo key names; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back. **Read ❌ until §153**, on the note that a full answer needs a terminfo database cmote does not carry — which is exactly right about the mechanism (xterm's `xtermcapString` reads `tcap_fkeys`, filled by `tigetstr`/`tgetstr` — a static lookup, not a string generated from the current DECCKM) and wrong about the mark. The entry cmote would be copying is **`xterm-256color`**, which cmote names in `TN` on purpose and which sits on the remote that asked; a hard-coded transcript of it would be a second copy of a database cmote does not own, wrong on some machines the day it was written. `Ms` is unknown for a second reason: it is the OSC 52 capability, and cmote refuses the remote clipboard (§66, §123, §153) |
 | CSI > q (XTVERSION) | Terminal version | ✅ | asks for the terminal's name and version; answered `cmote(<ver>)` (§33, `term/query.rs`) |
 | CSI = c (DA3 → DECRPTUI) | Tertiary device attributes | ✅ | the reply half of DA3 — the terminal's unit id, a constant `00434D45` (§36, `term/query.rs`) |
 | DCS … q | Sixel graphics | ✅ | sixel graphics, a bitmap written six pixels at a time; decoded in-house and composited over the grid, anchored to an absolute document line and reserving its cells, with its own page on the alternate screen (§41, `term/sixel.rs`, `term/graphics.rs`) |
