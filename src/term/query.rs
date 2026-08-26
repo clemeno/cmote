@@ -35,8 +35,8 @@
 // paste the unanswered bytes as literal garbage. So cmote sniffs these out of the stream itself —
 // exactly the tactic `cwd` and `modkeys` use for the sequences the engine ignores — and formats a
 // reply. The scanner only PARSES here (it holds no engine state); `term::mod::decrqss_report` fills
-// every DECRQSS reply from live state, because each of those five settings is a thing the grid is
-// currently doing rather than a fact about cmote (§123).
+// every DECRQSS reply from live state, because each of those nine settings is a thing the grid is
+// currently doing rather than a fact about cmote (§123, §152).
 //
 // Any sequence can be split anywhere, even between the ESC and the `[`/`P`, because output arrives in
 // arbitrary chunks. Neither half of that framing is this module's any more: `csi::Framer` cuts out the
@@ -60,7 +60,26 @@ const MAX_DATA: usize = 256;
 /// "partial" had never been asked *which part*: the declined half was not a refusal, it was
 /// unwritten reporting code over state that already existed. `Margins` is the fourth, and it exists
 /// for the same reason one section later — §102 gave cmote the left and right margins, so the answer
-/// was sitting there too.
+/// was sitting there too. §152 found four more the same way, by reading xterm's own selector list
+/// against what cmote already holds.
+///
+/// **What is NOT here, and why each one is missing** (§152). The list below is xterm's, entire, so a
+/// later reader can see that the remainder was looked at rather than overlooked:
+///
+///   * `" p` (DECSCL) — the conformance level. cmote parses one dialect and names it in `TERM`,
+///     XTVERSION and XTGETTCAP alike; it holds no VT level and cannot state one without inventing it.
+///   * `$ }` / `$ ~` (DECSASD / DECSSDT) — the status line. cmote has none, and `0` for both would be
+///     *true* and still wrong: a program reading a settable-looking default sends the set cmote
+///     silently refuses (part 6) and then writes its status text onto the user's page. The honest
+///     `Ps=0` stops it; a truthful report invites it. That asymmetry is the whole reason these two are
+///     apart from `t` / `$ |` / `* |` below, whose refused set costs a resize that did not happen.
+///   * `) {` (DECSTGLT), `, |` (DECAC), `, }` (DECATC) — VT525-only colour-table settings naming
+///     features cmote does not have.
+///   * `> Pm f` / `> Pm m` / `> Pm t` (XTQFMTKEYS / XTQMODKEYS / XTSMTITLE) — xterm's own extensions,
+///     in the marker form. The one of the three cmote holds state for is XTQMODKEYS, and its question
+///     already has an answered spelling here: `CSI ? 4 m` → `CSI > 4 ; Pv m` (§61). Answering it a
+///     second way means inventing a reply format no source states, for a fact already reachable —
+///     which is `Tc`'s refusal one family over (§123).
 #[derive(Debug, PartialEq, Eq)]
 pub enum Decrqss {
 	/// `m` — SGR, the pen the grid actually paints with.
@@ -73,6 +92,16 @@ pub enum Decrqss {
 	ScrollRegion,
 	/// `s` — DECSLRM, the left and right margins (§102).
 	Margins,
+	/// `t` — DECSLPP, how many lines the page holds (§152).
+	PageLines,
+	/// `$ |` — DECSCPP, how many columns the page holds (§152).
+	PageColumns,
+	/// `* |` — DECSNLS, how many lines the SCREEN holds. The same number as `PageLines` on a terminal
+	/// whose page is exactly its screen, and a separate variant because the selector it echoes back
+	/// differs — a program asking both is asking two questions (§152).
+	ScreenLines,
+	/// `* x` — DECSACE, which shape DECCARA and DECRARA act on (§59, §152).
+	AttributeExtent,
 	Unsupported,
 }
 
@@ -176,6 +205,13 @@ fn asked_string(dcs: &super::dcs::Dcs<'_>) -> Option<Query> {
 			b"\"q" => Decrqss::Protection,
 			b"r" => Decrqss::ScrollRegion,
 			b"s" => Decrqss::Margins,
+			// The four §152 added. DECSLPP shares its final byte with the window operations (`CSI 24 t`
+			// and up is the set), and the other three carry the intermediate of the sequence they ask
+			// about — `$ |`, `* |`, `* x` — which is the same echo rule the two above obey.
+			b"t" => Decrqss::PageLines,
+			b"$|" => Decrqss::PageColumns,
+			b"*|" => Decrqss::ScreenLines,
+			b"*x" => Decrqss::AttributeExtent,
 			_ => Decrqss::Unsupported,
 		})),
 		// XTGETTCAP. The names are `;`-separated hex; keep them raw for `known_capability` to decode.
@@ -402,8 +438,9 @@ pub fn da3_reply(unit_id: &str) -> Vec<u8> {
 /// a DECSCUSR report ends with a space and a `q`.
 ///
 /// One builder for all of them rather than one per setting: the only thing that differs between the
-/// five is those two strings, and a second function would have been the same bytes with a different
-/// tail hard-coded (§109).
+/// nine is those two strings, and a second function would have been the same bytes with a different
+/// tail hard-coded (§109). §152 added four settings and not one line here, which is what that
+/// argument was buying.
 pub fn decrqss_reply(params: &str, selector: &str) -> Vec<u8> {
 	let mut reply = Vec::with_capacity(params.len() + selector.len() + 7);
 	reply.extend_from_slice(b"\x1bP1$r");
@@ -677,6 +714,56 @@ mod tests {
 		);
 	}
 
+	/// The four §152 added, each spelled as the sequence it asks about — DECSLPP bare, and the other
+	/// three carrying that sequence's own intermediate. All four report state cmote already held.
+	#[test]
+	fn the_page_geometry_and_extent_selectors_are_told_apart() {
+		assert_eq!(
+			scan(b"\x1bP$qt\x1b\\"),
+			vec![Query::Decrqss(Decrqss::PageLines)],
+			"DECSLPP is `CSI Ps t`"
+		);
+		assert_eq!(
+			scan(b"\x1bP$q$|\x1b\\"),
+			vec![Query::Decrqss(Decrqss::PageColumns)],
+			"DECSCPP is `CSI Ps $ |`"
+		);
+		assert_eq!(
+			scan(b"\x1bP$q*|\x1b\\"),
+			vec![Query::Decrqss(Decrqss::ScreenLines)],
+			"DECSNLS is `CSI Ps * |`"
+		);
+		assert_eq!(
+			scan(b"\x1bP$q*x\x1b\\"),
+			vec![Query::Decrqss(Decrqss::AttributeExtent)],
+			"DECSACE is `CSI Ps * x`"
+		);
+	}
+
+	/// The near-miss rule inside a DECRQSS payload (§56, §152): the intermediate is half the selector,
+	/// so dropping it or swapping it names some other setting entirely. `* x` is DECSACE and `$ x` is
+	/// DECFRA, which is not a setting at all; `* |` is DECSNLS and `$ |` is DECSCPP.
+	#[test]
+	fn a_selector_with_the_wrong_intermediate_is_a_different_setting() {
+		assert_eq!(
+			scan(b"\x1bP$q$x\x1b\\"),
+			vec![Query::Decrqss(Decrqss::Unsupported)],
+			"DECFRA's spelling, and DECFRA is no setting"
+		);
+		assert_eq!(
+			scan(b"\x1bP$qx\x1b\\"),
+			vec![Query::Decrqss(Decrqss::Unsupported)],
+			"the intermediate is not padding to be trimmed"
+		);
+		assert_eq!(
+			scan(b"\x1bP$q|\x1b\\"),
+			vec![Query::Decrqss(Decrqss::Unsupported)]
+		);
+	}
+
+	/// The rest of xterm's selector list, pinned as unreported so the refusals are a test rather than
+	/// a paragraph (§152). Each has its reason on `Decrqss`; what this asserts is that cmote answers
+	/// the honest `Ps=0` to all of them rather than inventing a value.
 	#[test]
 	fn other_decrqss_requests_are_unsupported() {
 		// Conformance level (`"p`, DECSCL): cmote holds no state for it, so it is honestly reported
@@ -689,6 +776,40 @@ mod tests {
 			scan(b"\x1bP$qZ\x1b\\"),
 			vec![Query::Decrqss(Decrqss::Unsupported)]
 		);
+		// The status line (DECSASD, DECSSDT). `0` would be TRUE of both and is still refused: a
+		// program reading a settable-looking default sends the set cmote silently ignores, and then
+		// writes its status text onto the user's page.
+		for status in [&b"$}"[..], b"$~"] {
+			let request = [b"\x1bP$q".as_slice(), status, b"\x1b\\"].concat();
+			assert_eq!(
+				scan(&request),
+				vec![Query::Decrqss(Decrqss::Unsupported)],
+				"{}: cmote has no status line",
+				String::from_utf8_lossy(status)
+			);
+		}
+		// The VT525-only colour-table settings: DECSTGLT, DECAC, DECATC.
+		for vt525 in [&b"){"[..], b",|", b",}"] {
+			let request = [b"\x1bP$q".as_slice(), vt525, b"\x1b\\"].concat();
+			assert_eq!(
+				scan(&request),
+				vec![Query::Decrqss(Decrqss::Unsupported)],
+				"{}: a VT525 feature cmote does not have",
+				String::from_utf8_lossy(vt525)
+			);
+		}
+		// xterm's own three in the marker form. XTQMODKEYS is the one cmote holds state for, and its
+		// question has an answered spelling already — `CSI ? 4 m` (§61) — so a second reply format
+		// nobody publishes is exactly what `Tc` was refused for (§123).
+		for xterm in [&b">0f"[..], b">4m", b">0t"] {
+			let request = [b"\x1bP$q".as_slice(), xterm, b"\x1b\\"].concat();
+			assert_eq!(
+				scan(&request),
+				vec![Query::Decrqss(Decrqss::Unsupported)],
+				"{}: xterm's extension, not answered twice",
+				String::from_utf8_lossy(xterm)
+			);
+		}
 	}
 
 	#[test]
@@ -769,6 +890,11 @@ mod tests {
 		assert_eq!(decrqss_reply("1", "\"q"), b"\x1bP1$r1\"q\x1b\\".to_vec());
 		assert_eq!(decrqss_reply("1;24", "r"), b"\x1bP1$r1;24r\x1b\\".to_vec());
 		assert_eq!(decrqss_reply("1;80", "s"), b"\x1bP1$r1;80s\x1b\\".to_vec());
+		// The four §152 added, two of which echo an intermediate that is not a space or a quote.
+		assert_eq!(decrqss_reply("24", "t"), b"\x1bP1$r24t\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("80", "$|"), b"\x1bP1$r80$|\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("24", "*|"), b"\x1bP1$r24*|\x1b\\".to_vec());
+		assert_eq!(decrqss_reply("0", "*x"), b"\x1bP1$r0*x\x1b\\".to_vec());
 	}
 
 	#[test]

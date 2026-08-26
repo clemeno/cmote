@@ -1396,7 +1396,7 @@ had admitted — no I-beam over text — is paid back. See part 6 and §77.
 
 A per-sequence audit against the escape-sequence catalogues published at
 [vtdn.dev](https://vtdn.dev), [contour](https://contour-terminal.org/vt-sequence/) and
-[otty](https://docs.otty.sh/vt/) — the first alone until §98, which added the other two and found
+[otty](https://docs.otty.sh/vt/overview) — the first alone until §98, which added the other two and found
 thirty-four sequences this table had never named — so support is legible one line at a time rather
 than only as the "still-missing" lens of parts 2–6. Every ✅/❌/🛑/🤷 below was verified against the real sources — the
 engine crate (`alacritty_terminal-0.26.0`), its parser (`vte-0.15.0`), and cmote's own layer
@@ -1613,7 +1613,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | > Ps M (SETMARK) | Bookmark the cursor's line | ✅ | contour's CSI spelling of what iTerm's `OSC 1337 ; SetMark` does, which cmote already shipped (§55) — so this is a second door to one instruction, and it lands in `term/iterm.rs` beside the meaning rather than in a module of its own. All three parts of the sequence are matched together, and here that is not pedantry: `CSI Ps M` with no private marker is **DL**, delete lines, which the engine implements and every full-screen program uses — a tick in the gutter on every deleted line is what the marker test prevents (§56). `Ps` is contour's mark KIND and is not read: cmote has one kind, and `SetMark` carries no parameter at all. This was "a gap and a cheap one … left open because a scanner is real work"; §111 made a scanner one line (§55, §98, §111, §112, `term/iterm.rs`) |
 | Ps , ~ (DECPS) | Play a sound | 🤷 | DEC's tone generator — "controls the sound frequency or notes", the parameters unread here beyond that. BEL's refusal with a keyboard attached: sound leaves the tab, and where the bell is one ring this is a remote holding the speaker for as long as its parameters say (part 6, §63, §98) |
 | Ps * z (DECINVM) | Invoke a macro | 🤷 | runs a macro previously defined by `DCS … ! z` (DECDMAC) — a stored sequence a remote plays back by number. cmote refuses to report a macro store (DECMSR, DECCKSR) and has none; nothing that arrives over the wire becomes a stored program here (part 6, §82, §98) |
-| Ps $ \| / Ps * \| (DECSCPP / DECSNLS) | Columns / lines per page | 🤷 | set the page to 80 or 132 columns, or to a given number of lines — DECCOLM's argument in two more spellings, and a remote resizing the window the user sized (part 6, §65, §98) |
+| Ps $ \| / Ps * \| (DECSCPP / DECSNLS) | Columns / lines per page | 🤷 | set the page to 80 or 132 columns, or to a given number of lines — DECCOLM's argument in two more spellings, and a remote resizing the window the user sized. Their **report** halves are answered (§152): a refused set costs a resize that did not happen, which leaves every later report agreeing with what the program sees (part 6, §65, §98, §152) |
 | Ps $ } / Ps $ ~ (DECSASD / DECSSDT) | Status display | 🤷 | split a status line off the page (`$ ~` picks its type) and direct output into it (`$ }`). A second writable surface with its own cursor, which is neither in the engine nor in cmote's grid model; DECSTR's published list names DECSASD, and §72 sends nothing for it for this reason (§72, §94, §98) |
 | Ps U / Ps V / Ps SP P / Ps SP Q / Ps SP R | Page positioning (NP / PP / PPA / PPR / PPB) | 🤷 | move to the next page, the previous one, or an absolute / relative / backward page. cmote is a **one-page** terminal — DECRQCRA's page parameter is ignored for the same reason (§60) — so there is nowhere to go. The intermediates are as ECMA-48 defines them; the index this row came from omits them, and ECMA-48 itself is still unread here (§98) |
 | Ps p (DECSSCLS) | Scroll speed | 🤷 | "set scroll speed", in contour's index; what its values mean was not read. cmote scrolls in one step and runs no animation timer — the same absence that keeps the cursor from blinking — so there is no speed here to set (§65, §98) |
@@ -1648,8 +1648,11 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 
 | Code | Feature | Status | Note |
 |---|---|---|---|
-| DCS $ q (DECRQSS — the five reported settings) | Report a setting | ✅ | `DCS $ q <sel> ST` asks what a setting currently is; answered `DCS 1 $ r <params><sel> ST` from live state, never from a stored copy of the request. `m` (SGR) rebuilds the pen the grid paints with, opening `0` and listing only what is set; `SP q` (DECSCUSR) reports the shape being DRAWN, so a blink request is answered with its steady twin because cmote runs no animation timer; `" q` (DECSCA) reads the protection bit §56 borrows on the pen; `r` (DECSTBM) reads cmote's own mirror of the region the engine keeps private; `s` (DECSLRM) reads the margins §102 gave it (§33, §66, §102, §123, `term/query.rs`, `term/mod.rs::decrqss_report`) |
-| DCS $ q (DECRQSS — any other setting) | Report another setting | ❌ | the same request for a setting cmote holds no state for — DECSCL's conformance level, and anything not in the row above; answered `DCS 0 $ r ST`, the standard's 'I do not report that', which lets the sender move on (§66, §123) |
+| DCS $ q (DECRQSS — the nine reported settings) | Report a setting | ✅ | `DCS $ q <sel> ST` asks what a setting currently is; answered `DCS 1 $ r <params><sel> ST` from live state, never from a stored copy of the request. `m` (SGR) rebuilds the pen the grid paints with, opening `0` and listing only what is set; `SP q` (DECSCUSR) reports the shape being DRAWN, so a blink request is answered with its steady twin because cmote runs no animation timer; `" q` (DECSCA) reads the protection bit §56 borrows on the pen; `r` (DECSTBM) reads cmote's own mirror of the region the engine keeps private; `s` (DECSLRM) reads the margins §102 gave it; and since §152 `t` / `$ \|` / `* \|` (DECSLPP / DECSCPP / DECSNLS) read the grid — the same number twice for the lines, cmote's page being exactly its screen — and `* x` (DECSACE) reads the extent §59 stamps onto each attribute request. **A report is a sequence the program could send back to get the same state**, which decides the numbering both ways: a position is 1-based and a count is itself, and DECSACE's stream reports `0` rather than the `1` that may have set it (§33, §66, §102, §123, §152, `term/query.rs`, `term/mod.rs::decrqss_report`) |
+| DCS $ q `" p` (DECRQSS — DECSCL) | Report the conformance level | 🛑 | asks which VT level the terminal parses as. cmote parses one dialect and names it identically in `TERM`, XTVERSION and XTGETTCAP; it holds no VT level, so stating one means inventing it. The same fact the `CSI " p` row refuses from the other side (§78, §96, §98, §152) |
+| DCS $ q `$ }` / `$ ~` (DECRQSS — DECSASD / DECSSDT) | Report the status display | 🛑 | ask which display output goes to, and what type the status line is. `0` is **true** of both — cmote has no status line and never leaves the main display — and it is refused anyway, because it is an invitation: a program told the feature exists turns the status line on and writes to it, cmote ignores both sets silently (part 6), and the text lands on the user's page. A refused DECSCPP costs a resize that did not happen; a refused DECSASD costs the program's next paragraph written over the screen, which is why the geometry settings above are reported and these two are not (§152) |
+| DCS $ q `) {` / `, \|` / `, }` (DECRQSS — DECSTGLT / DECAC / DECATC) | Report a colour table setting | 🤷 | VT525-only colour-table settings, naming features cmote does not have at all; answered `DCS 0 $ r ST` (§152) |
+| DCS $ q `> Pm f` / `> Pm m` / `> Pm t` (DECRQSS — XTQFMTKEYS / XTQMODKEYS / XTSMTITLE) | Report an xterm resource | 🛑 | xterm's own three extensions, in DECRQSS's marker form. The one cmote holds state for is XTQMODKEYS, and **its question already has an answered spelling** — `CSI ? 4 m` → `CSI > 4 ; Pv m` since §61 — so a second reply format no source publishes would be invented for a fact already reachable. `Tc`'s refusal, one family over (§61, §123, §152) |
 | DCS + q `TN` / `Co` / `RGB` (XTGETTCAP) | Report a capability | ✅ | `DCS + q <hex-name> ST` asks for a terminfo capability; `TN` answers `xterm-256color`, the name requested for the remote pty, `Co` / `colors` answer `256`, and `RGB` answers `8` — the numeric form ncurses' `user_caps(5)` defines as bits per channel, which is what cmote's SGR 38;2 path takes. Hex both ways (§33, §123, `term/query.rs`) |
 | DCS + q `Tc` (XTGETTCAP — tmux's truecolor flag) | Report a capability | 🛑 | tmux's own extension, in neither xterm's list of XTGETTCAP special names nor ncurses' recognised user capabilities — and a pure **boolean**, which this reply grammar cannot spell: a recognised name is answered `<NAME>=<VALUE>`, so answering `Tc` means inventing a value on nobody's authority. `RGB` is the question with an answer, and it is answered (§123) |
 | DCS + q (XTGETTCAP — every other capability) | Report a capability | ❌ | the same request for any other capability, including the real terminfo key names; answered `DCS 0 + r <NAME> ST`, unknown, with the requested name echoed back. A full answer needs a terminfo database cmote does not carry (§66, §123) |
@@ -1733,6 +1736,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Screen size reports (CSI 15 / 19 t) | 🛑 | ask how large the whole display is, in pixels and in characters. Refused with the two rows above and for their first reason: a monitor's size is a fact about the desk cmote sits on. Neither had a row here before §147 (§36, §147, `term/window.rs`) |
 | Text area in pixels / chars (CSI 14t / 18t) | ✅ | the text area's size, asked in pixels and in characters |
 | Cell size (CSI 16 t) | ✅ | one cell's height and width in pixels, answered `CSI 6 ; height ; width t` from the same pair the row above is built from, so the two cannot disagree. Answered where the question SAT rather than after the chunk — alone among cmote's sniffed queries, because its sibling `CSI 14 t` is answered by the engine mid-advance and a program asking both reads the replies by position (§147, `term/window.rs`) |
+| Lines per page (CSI Ps t, Ps ≥ 24 — DECSLPP) | 🤷 | xterm reads `CSI Ps t` with `Ps` of 24 or more as DECSLPP, "set the page to `Ps` lines" — the resize family in the numbering of the window operations, and refused with them: the height is the user's. Its **report** half is answered, which is the split §152 drew (part 6, §147, §152) |
 | Title stack (CSI 22 / 23 t) | ✅ | push and pop the window title; the `; 0` / `; 1` / `; 2` that would name icon or window title alone is ignored, and the stack is capped at 4096 (§67) |
 | **Kitty keyboard protocol** | ✅ | CSI-u key reporting over a flag stack — disambiguated keys, event types and associated text (§25, `term/kitty.rs`) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
@@ -1746,7 +1750,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 **Shape of it.** The whole legacy VT100 / xterm core is ✅ — cursor motion, editing, SGR, full
 colour, alternate screen, mouse, bracketed paste, focus, DA1 / DA2 / DSR / DECRQM, DECSCUSR, REP, the
 kitty keyboard protocol, the application keypad, and — since §33, completed by §36 — every identity
-query the engine dropped (XTVERSION, DECRQSS — five settings since §123 — XTGETTCAP, DA3), and — since §56 — the VT220
+query the engine dropped (XTVERSION, DECRQSS — five settings since §123 and nine since §152 — XTGETTCAP, DA3), and — since §56 — the VT220
 protected-cell erase it dropped as well, and — since §58, §59 and §60 — the whole VT420 rectangular
 family, checksum query included, and — since §72 — **DECSTR**, the soft reset every `tput init` opens
 with and no arm in `vte` ever heard. The **deliberate** part of what is missing used to be most of the ❌
@@ -2226,6 +2230,29 @@ Quoted where a row's wording now rests on it.
   **screen** size in pixels as `CSI 5 ; height ; width t` and `Ps = 19` the same in characters as
   `CSI 9 ; height ; width t`. All four are refused: they describe the desk cmote sits on rather than the
   terminal (§36), and 11 has no true answer to give from a pane of a tabbed window at all.
+- **DECRQSS' selector list, entire** (§152). `ctlseqs`' `DCS $ q Pt ST` entry names fifteen selectors —
+  `m` SGR, `" p` DECSCL, `SP q` DECSCUSR, `" q` DECSCA, `r` DECSTBM, `s` DECSLRM, `t` DECSLPP,
+  `$ |` DECSCPP, `$ }` DECSASD, `$ ~` DECSSDT, `) {` DECSTGLT (VT525 only), `* x` DECSACE,
+  `* |` DECSNLS, `, |` DECAC (VT525 only), `, }` DECATC (VT525 only) — and three xterm extensions in
+  the marker form, `> Pm f` XTQFMTKEYS, `> Pm m` XTQMODKEYS and `> Pm t` XTSMTITLE. §66 and §123 each
+  worked from a *sample* of this list; §152 is the first section to read it out. Note that the
+  **XFree86 mirror is an older revision here** and gives only four selectors, which is the reverse of
+  §150's finding about the same two copies — the untruncated one is not always the current one.
+- **XTGETTCAP has exactly three special names**, and cmote answered two spellings of two of them.
+  `ctlseqs`: "*Co* for termcap colors (or *colors* for terminfo colors)", "*TN* for termcap name (or
+  *name* for terminfo name)", and "*RGB* for the ncurses direct-color extension". Everything else in
+  the request is "termcap or terminfo capability names for **special keyboard keys**" (§153).
+- **xterm answers a key capability out of a real database.** `xtermcap.c`'s `xtermcapString` reads
+  `screen->tcap_fkeys`, which `loadTermcapStrings` fills with `tigetstr` / `tgetstr` — a static
+  terminfo or termcap lookup, *not* a string generated from the terminal's current DECCKM or keypad
+  state. So the matrix's "a full answer needs a terminfo database cmote does not carry" was exactly
+  right about the mechanism, and §153 is about which database it would be a copy of.
+- **ncurses' recognised user capabilities are six**, from `user_caps(5)`: `AX` (boolean), `E3`
+  (string), `NQ` (boolean), `RGB` (boolean, numeric or string), `U8` (numeric), `XM` (string), plus the
+  experimental `xm`. The page says "while the terminfo database may have other extensions, ncurses
+  makes explicit checks for the following" — and there is **no second table** of the capabilities other
+  applications use, which is what §123 relied on when it refused `Tc` and what §153 re-checked before
+  refusing the rest (§123, §153).
 - **The OSC list reads from the plain-text build, not the HTML one** (§87, §88). Every fetch of
   `ctlseqs.html` returns it truncated part-way through `Ps = 4` — "Change Color Number *c* to the color
   specif" — which is where §87 stopped. `ctlseqs.txt` reaches further and settled four rows:

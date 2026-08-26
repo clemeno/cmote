@@ -17583,3 +17583,117 @@ that guard, and the header now says so.
 - **The blink row is left ❌ rather than becoming a refusal**, deliberately. Nothing in cmote refuses
   it; the engine has nowhere to put it. ❌ is this document's mark for a gap that could still land, and
   what would make it land — a wider flag word — is a change upstream rather than a decision here.
+
+## §152 — Four more settings that were already being kept, and the two that would be true and still wrong
+
+`TERMINAL_COMPATIBILITY_PLAN.md` carried this row, and it had been carrying it since §66 split the
+partial mark that used to cover it:
+
+> | DCS $ q (DECRQSS — any other setting) | Report another setting | ❌ | the same request for a setting cmote holds no state for — DECSCL's conformance level, and anything not in the row above; answered `DCS 0 $ r ST`, the standard's 'I do not report that', which lets the sender move on (§66, §123) |
+
+"Anything not in the row above" is the part that had never been read out loud. §66 asked *which part*
+of a partial row was declined and found three settings whose state already existed; §123 built them
+and a fourth. Neither section wrote down what the rest of the list **is**.
+
+### The list, read off the source rather than remembered
+
+xterm's `ctlseqs` gives DECRQSS fifteen selectors and three of its own extensions beside them:
+
+    m       SGR                      " p     DECSCL                   SP q    DECSCUSR
+    " q     DECSCA                   r       DECSTBM                  s       DECSLRM
+    t       DECSLPP                  $ |     DECSCPP                  $ }     DECSASD
+    $ ~     DECSSDT                  ) {     DECSTGLT (VT525)         * x     DECSACE
+    * |     DECSNLS                  , |     DECAC (VT525)            , }     DECATC (VT525)
+    > Pm f  XTQFMTKEYS               > Pm m  XTQMODKEYS               > Pm t  XTSMTITLE
+
+Five of those were answered. Reading the other thirteen against what cmote already holds turns up
+**four** with an answer sitting in a field some earlier section had to keep anyway — which is §66's
+finding for the third time, and this time the list was exhausted rather than sampled.
+
+**DECSLPP (`t`), DECSCPP (`$ |`), DECSNLS (`* |`) — the page's geometry.** All three come off
+`Screen::size`. DECSLPP and DECSNLS are the same number, because cmote's page **is** its screen: one
+page, no panning, which is the fact DECRQDE already reports as three ones (§144). They are still two
+settings and not one, because the reply echoes the selector and a program that asks both asked twice.
+
+**DECSACE (`* x`) — which shape DECCARA and DECRARA act on.** §59 built the mode and put it in
+`term/rect.rs`, where it is stamped onto each attribute request as it goes out. One getter, and the
+report is exact.
+
+Nothing new is tracked for any of the four. The whole of §152's state is `Rectangles::extent`, which
+returns a field that has existed since §59.
+
+### DECSACE has three values and two behaviours, and the report has to pick
+
+DEC's page gives `0` (the default) and `1` both meaning the wrapped stream, and `2` the rectangle.
+cmote's `RectExtent` therefore has **two** variants, which is the honest model of the mode and was
+right before this section needed to report it — but it means the `1` a program may have sent cannot
+come back out.
+
+The tie is broken by a rule that was already in the code and had never been stated as a rule:
+
+> **A report is a sequence the program could send back to get the same state.**
+
+`CSI 0 * x` sets the stream, so `0` is a correct answer to a terminal set by `CSI 1 * x`. It is also
+DEC's stated default, which is what a program comparing against a fresh terminal expects. Writing that
+rule down settled a second question the same day: the numbering. A **position** is 1-based, because
+DEC counts lines and columns from 1 — that is DECSTBM's report and DECSLRM's, and it is why the
+existing arms add one. A **count** is just itself, so DECSLPP reports 24 for a 24-line page and adds
+nothing. Two arms that look inconsistent are one rule applied to two kinds of number.
+
+### DECSASD and DECSSDT: `0` is true, and it is still refused
+
+These two are the decision in this section, and they are the reason it is not simply "answer
+everything answerable".
+
+`$ }` (DECSASD) reports which display output goes to — `0` main, `1` the status line. `$ ~` (DECSSDT)
+reports the status line's type, `0` being none. cmote has no status line and never leaves the main
+display, so **`0` is true of both**, measurable, and permanent.
+
+It is refused anyway, and the reason is what happens next. A program that reads `DCS 1 $ r 0 $ ~` has
+learned that this terminal implements DECSSDT and currently has its status line off — so it turns one
+on and writes to it. cmote refuses both sets **silently** (part 6: a second writable surface with its
+own cursor is in neither the engine nor cmote's grid model), so the status text lands on the user's
+page, in the middle of whatever was there. The honest `Ps=0` prevents exactly that: the program reads
+"not reported", concludes the feature is absent, and never sends the set.
+
+**The asymmetry against the three geometry settings is the whole line, and it is worth being exact
+about.** DECSCPP is refused as a *set* too (part 6, §65 — a remote resizing the window the user
+sized), and it is reported here regardless. The difference is what the refused set costs:
+
+* a refused DECSCPP is **a resize that did not happen**. The program's output is unaffected; it simply
+  gets 80 columns instead of the 132 it asked for, and every later report agrees with what it sees.
+* a refused DECSASD is **the program's next paragraph written onto the user's screen**. The failure is
+  not "the feature did nothing", it is corruption of a surface the program believes it left.
+
+So a truthful report is withheld where the truth is an invitation. That is a narrower rule than §60's
+"an invented answer is worse than a missing one" and it points the other way — here the answer would
+have been perfectly honest — which is why it needed writing down rather than deriving.
+
+### The other seven, each refused for a reason of its own
+
+* **DECSCL (`" p`)** — the conformance level. cmote parses one dialect and names it identically in
+  `TERM`, XTVERSION and XTGETTCAP; it holds no VT level, and stating one means inventing it. The
+  audit already refuses to *set* it (§78, §96, §98) and this is the same fact from the other side.
+* **DECSTGLT (`) {`), DECAC (`, |`), DECATC (`, }`)** — VT525-only colour-table settings, naming
+  features cmote does not have at all.
+* **XTQFMTKEYS, XTQMODKEYS, XTSMTITLE (`> Pm f`, `> Pm m`, `> Pm t`)** — xterm's own extensions, in
+  DECRQSS's marker form. The one of the three cmote holds state for is XTQMODKEYS, and **its question
+  already has an answered spelling**: `CSI ? 4 m` → `CSI > 4 ; Pv m`, since §61. Answering it a second
+  way means inventing a reply format no source states, for a fact already reachable — which is `Tc`'s
+  refusal one family over (§123, "`RGB` is the question with an answer, and it is answered").
+
+Each of those is a test rather than a paragraph. `other_decrqss_requests_are_unsupported` walks all
+seven spellings plus DECSCL and asserts the `Ps=0`, so the list above cannot drift from what the code
+does.
+
+### What it cost
+
+Four enum variants, four selector arms, four report arms, one getter. No new field, no gate arm, no
+scanner. The four selectors carry intermediates — `$ |`, `* |`, `* x` — which is where the one real
+hazard was: `* x` is DECSACE and `$ x` is DECFRA, one intermediate apart, and a payload comparison
+that trimmed the intermediate as padding would have read every DECFRA-shaped selector as the extent.
+§56's near-miss rule applies inside a DECRQSS payload exactly as it does to a CSI, and
+`a_selector_with_the_wrong_intermediate_is_a_different_setting` is where that is pinned.
+
+Nine settings reported, and `decrqss_reply` gained not one line — which is what §109's "one builder
+for all of them" was buying and had not been asked to pay out until now.

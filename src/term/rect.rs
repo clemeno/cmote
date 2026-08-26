@@ -365,6 +365,17 @@ pub struct Rectangles {
 }
 
 impl Rectangles {
+	/// Which shape DECSACE has selected right now (§152).
+	///
+	/// The one seam this scanner opens, and it exists for the reason §66 named and §102 built on: a
+	/// setting cmote already holds is a setting cmote can report, and DECRQSS `* x` asks for exactly
+	/// this one. Nothing else reads it — the extent travels WITH each attribute request rather than
+	/// being looked up when the request is applied (`feed`), which is what keeps a DECSACE and the
+	/// DECCARA after it in stream order.
+	pub fn extent(&self) -> RectExtent {
+		self.extent
+	}
+
 	/// Scan a chunk of shell output, returning what to do and where. Safe at any chunk boundary — the
 	/// state machine carries over between calls, so a sequence may be split anywhere, even between the
 	/// ESC and the `[`.

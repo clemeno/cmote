@@ -727,7 +727,7 @@ impl Terminal {
 	///
 	/// The replies built AFTER the chunk rather than during it, which is what these six have in common:
 	/// every one is answered from a fact that a byte stream cannot move — cmote's name, its unit id, the
-	/// limits its decoder enforces, the size of its grid, and the five settings DECRQSS reports, each of
+	/// limits its decoder enforces, the size of its grid, and the nine settings DECRQSS reports, each of
 	/// which is read as the chunk left it because that is what a program setting attributes and then
 	/// asking about them means. The questions whose answer would go stale are interruptions instead
 	/// (`Interruption::Dsr`, `::Presentation`, `::CellSize`).
@@ -779,12 +779,17 @@ impl Terminal {
 	/// This is the one query family that needs the terminal rather than a static fact, which is why
 	/// it is a method here and not a function in `query`: that module parses and never touches the
 	/// engine. Each arm reads the state some other section already had to keep — §56's protection bit
-	/// on the pen, §102's mirrored scrolling region, §102's margins — so nothing new is tracked to
-	/// make these answerable. That was §66's finding about the mark it retired: the declined half of
-	/// "partial" was unwritten reporting code over state that already existed.
+	/// on the pen, §102's mirrored scrolling region, §102's margins, §59's attribute extent — so
+	/// nothing new is tracked to make these answerable. That was §66's finding about the mark it
+	/// retired: the declined half of "partial" was unwritten reporting code over state that already
+	/// existed, and §152 found four more of it by reading xterm's selector list against what cmote
+	/// holds.
 	///
-	/// Every parameter is 1-based on the wire, because DEC counts lines and columns from 1 and a
-	/// report has to be a sequence the program could send back to get the same state.
+	/// **A report is a sequence the program could send back to get the same state**, which is the one
+	/// rule every arm here obeys and the reason none of them is a plain dump of a field. It decides
+	/// the numbering twice over: a POSITION is 1-based, because DEC counts lines and columns from 1
+	/// (DECSTBM, DECSLRM), while a COUNT is just itself (DECSLPP, DECSCPP, DECSNLS) — and it is why
+	/// DECSACE's stream reports as `0` rather than as the `1` that may have set it (§152).
 	fn decrqss_report(&self, setting: &query::Decrqss) -> Vec<u8> {
 		match setting {
 			query::Decrqss::Sgr => {
@@ -818,6 +823,39 @@ impl Terminal {
 				let (_, cols) = self.screen().size();
 				let (left, right) = self.margins.band(cols as usize);
 				query::decrqss_reply(&format!("{};{}", left + 1, right + 1), "s")
+			}
+			// The page's own geometry, in the three spellings DEC gave it (§152). cmote's page IS its
+			// screen — one page, no panning, which is the same fact DECRQDE reports as three ones
+			// (§144) — so DECSLPP and DECSNLS are one number asked twice, and the reply says so by
+			// echoing back the selector each of them used.
+			//
+			// No new information leaves on any of the three: the text area in characters is already
+			// answered by the engine at `CSI 18 t`, and by DECRQDE beside it. What a program gets here
+			// is the size the USER chose, which is what a terminal is for; §36's rule is about facts
+			// concerning the person, and the width of their window is not one.
+			query::Decrqss::PageLines => {
+				let (rows, _) = self.screen().size();
+				query::decrqss_reply(&rows.to_string(), "t")
+			}
+			query::Decrqss::PageColumns => {
+				let (_, cols) = self.screen().size();
+				query::decrqss_reply(&cols.to_string(), "$|")
+			}
+			query::Decrqss::ScreenLines => {
+				let (rows, _) = self.screen().size();
+				query::decrqss_reply(&rows.to_string(), "*|")
+			}
+			// DECSACE, off the scanner that holds it (§59, §152). DEC gives the setting three values
+			// and two behaviours — `0` and `1` both mean the wrapped stream — so cmote's enum has two
+			// states and the `1` spelling cannot come back out of it. `0` is reported for the stream
+			// because it is DEC's stated default, and because a program that sent `CSI 1 * x` gets a
+			// reply it can send straight back for the same state, which is what a report is for.
+			query::Decrqss::AttributeExtent => {
+				let extent = match self.rectangles.extent() {
+					rect::RectExtent::Stream => "0",
+					rect::RectExtent::Rectangle => "2",
+				};
+				query::decrqss_reply(extent, "*x")
 			}
 			query::Decrqss::Unsupported => query::decrqss_unsupported_reply(),
 		}
@@ -4450,6 +4488,96 @@ mod tests {
 		assert_eq!(
 			terminal.process(b"\x1bP$q\"p\x1b\\"),
 			b"\x1bP0$r\x1b\\".to_vec()
+		);
+	}
+
+	/// The page's geometry in DEC's three spellings (§152). All three come off the same grid, which
+	/// is what makes DECSLPP and DECSNLS one number asked twice — and the reply tells them apart by
+	/// echoing the selector, not the value.
+	#[test]
+	fn the_page_geometry_queries_report_the_grid() {
+		let mut terminal = Terminal::new(24, 80);
+		assert_eq!(
+			terminal.process(b"\x1bP$qt\x1b\\"),
+			b"\x1bP1$r24t\x1b\\".to_vec(),
+			"DECSLPP: lines per page"
+		);
+		assert_eq!(
+			terminal.process(b"\x1bP$q$|\x1b\\"),
+			b"\x1bP1$r80$|\x1b\\".to_vec(),
+			"DECSCPP: columns per page"
+		);
+		assert_eq!(
+			terminal.process(b"\x1bP$q*|\x1b\\"),
+			b"\x1bP1$r24*|\x1b\\".to_vec(),
+			"DECSNLS: lines per screen, which is the same page here"
+		);
+	}
+
+	/// And they follow a RESIZE, which is what makes them a report of live state rather than of a
+	/// constant chosen at construction — the property every other DECRQSS selector here has (§152).
+	#[test]
+	fn the_page_geometry_queries_follow_the_window() {
+		let mut terminal = Terminal::new(24, 80);
+		terminal.resize(30, 100);
+		assert_eq!(
+			terminal.process(b"\x1bP$qt\x1b\\"),
+			b"\x1bP1$r30t\x1b\\".to_vec()
+		);
+		assert_eq!(
+			terminal.process(b"\x1bP$q$|\x1b\\"),
+			b"\x1bP1$r100$|\x1b\\".to_vec()
+		);
+	}
+
+	/// DECSACE, read back off the scanner that holds it (§59, §152). DEC gives three values and two
+	/// behaviours, so `CSI 1 * x` reports back as `0` — the same state, in the spelling DEC calls the
+	/// default — and only the rectangle has a value of its own.
+	#[test]
+	fn an_attribute_extent_query_reports_the_shape_decsace_selected() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP$q*x\x1b\\"),
+			b"\x1bP1$r0*x\x1b\\".to_vec(),
+			"the power-on default is the wrapped stream"
+		);
+		terminal.process(b"\x1b[2*x");
+		assert_eq!(
+			terminal.process(b"\x1bP$q*x\x1b\\"),
+			b"\x1bP1$r2*x\x1b\\".to_vec()
+		);
+		terminal.process(b"\x1b[1*x");
+		assert_eq!(
+			terminal.process(b"\x1bP$q*x\x1b\\"),
+			b"\x1bP1$r0*x\x1b\\".to_vec(),
+			"`1` and `0` are one behaviour, and the reply is the one a program can send back"
+		);
+		// RIS resets DECSACE, and the report follows it — which is the half of §59's split that a
+		// report can now show (DECSTR does not reset it, and does not here either).
+		terminal.process(b"\x1b[2*x\x1bc");
+		assert_eq!(
+			terminal.process(b"\x1bP$q*x\x1b\\"),
+			b"\x1bP1$r0*x\x1b\\".to_vec()
+		);
+	}
+
+	/// The status-line settings stay unreported, and this test is the decision (§152). `0` would be
+	/// TRUE of both — cmote never leaves the main display and has no status line to leave it for —
+	/// and it is still refused, because a program reading a settable-looking default sends the set
+	/// cmote silently ignores and then writes its status text onto the user's page. The `Ps=0` stops
+	/// it; a truthful report invites it.
+	#[test]
+	fn the_status_line_settings_are_not_reported_even_though_zero_would_be_true() {
+		let mut terminal = Terminal::new(10, 40);
+		assert_eq!(
+			terminal.process(b"\x1bP$q$}\x1b\\"),
+			b"\x1bP0$r\x1b\\".to_vec(),
+			"DECSASD"
+		);
+		assert_eq!(
+			terminal.process(b"\x1bP$q$~\x1b\\"),
+			b"\x1bP0$r\x1b\\".to_vec(),
+			"DECSSDT"
 		);
 	}
 
