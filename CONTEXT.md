@@ -154,6 +154,13 @@ _Avoid_: *transfer* for this, which is the whole feature rather than one run of 
 `alacritty_terminal`'s `Term`, specialised to cmote's reply-collecting listener (§23). The one
 name that would change under another engine.
 
+**Contrast floor**:
+The 4.5:1 every ink slot of the palette clears against the page, and the rule `palette.rs` is
+chosen to satisfy rather than a property it happens to have (§159). A test holds it, so the
+sixteen hex values are a consequence and may be retuned — downwards past this, not.
+_Avoid_: *accessible* / *WCAG AA* as the name — the floor is borrowed from WCAG, but nothing here
+claims the conformance that word implies
+
 **Screen**:
 cmote's read-only view of the engine's grid, so nothing outside `term/` touches the engine
 itself (§9).

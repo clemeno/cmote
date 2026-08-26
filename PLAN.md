@@ -18351,3 +18351,123 @@ which is exactly the shape §45 and §46 were in. The count is a floor, not a pr
 of the rule is the one §156 already wrote: **when a section touches `src/ui/` or `src/app/`, that is the
 moment the README is in scope**, and the question is asked before the commit rather than a hundred
 sections later.
+
+## §159 — The blue that was 1.04:1, and a palette chosen instead of inherited
+
+A report: *"the blue text colour (dark) is not very readable on a black background."*
+
+It was not very readable. It was **1.04:1** against `DEFAULT_BG`, and the contrast scale starts at 1.0.
+
+### What was there
+
+`palette.rs`'s `ANSI_16` under a comment reading *"Values follow the common xterm palette"*, which was
+wrong twice over. It is not xterm's — xterm's standard colours are `0xcd` primaries and its blue is
+`#0000ee`. It is the **VGA/CGA** palette, `0x80` primaries, inherited from a hardware generation whose
+displays were not `#1e1e1e`.
+
+Against cmote's page, measured rather than eyeballed:
+
+| slot | was | ratio | | slot | was | ratio |
+|---|---|---|---|---|---|---|
+| red | `#800000` | 1.52 | | br.black | `#808080` | 4.22 |
+| green | `#008000` | 3.25 | | br.red | `#ff0000` | 4.17 |
+| yellow | `#808000` | 3.97 | | br.blue | `#0000ff` | 1.94 |
+| **blue** | `#000080` | **1.04** | | br.magenta | `#ff00ff` | 5.32 |
+| magenta | `#800080` | 1.77 | | white | `#c0c0c0` | 9.16 |
+| cyan | `#008080` | 3.49 | | br.green/yellow/cyan | | 12–16 |
+
+**Nine of the fifteen ink slots below 4.5:1, four below 3.0.** The report named blue because blue is
+the one that reaches zero, not because blue was the only one broken.
+
+### Why no navy could have been the fix
+
+The first instinct is to nudge blue — to xterm's `#0000ee`, or to Campbell's `#0037da`, since Campbell
+is what Windows Terminal ships and matching it would have been the conservative move. Measured, those
+are **1.77** and **2.03**. Neither clears anything.
+
+The reason is in the luminance weights: `0.2126 R + 0.7152 G + 0.0722 B`. Blue contributes a
+fourteenth of what green does, so a colour that is *only* blue cannot be bright however far the channel
+is pushed — `#0000ff`, the maximum, is 1.94. **Slot 4 legible means slot 4 is not a navy**, and there
+was no version of this fix that kept it one. Once that was settled the rest followed: a table half in
+VGA and half not reads as an accident, so all fifteen moved together.
+
+Two off-the-shelf palettes were measured and both were rejected on grounds the contrast numbers alone
+would not have shown. Tokyo Night fails once (bright black at 1.87, dim on purpose) but its bright
+magenta is byte-identical to its magenta — a program using both gets one colour. Gruvbox keeps its
+brights distinct but still leaves red, blue and magenta under the floor.
+
+### Two properties a contrast floor does not give you
+
+Legibility is a per-slot property and a palette is not a set of independent slots.
+
+**A bright must out-light its normal.** cmote draws SGR 1 as a heavier *font* and never as a colour
+change — that was asked and reaffirmed while this section was being written — so `30`–`37` and
+`90`–`97` are the only way a program has of asking for the pair. A palette whose bright equalled its
+normal would merge them silently, and no rendering test would notice, because both would still be
+legible.
+
+**Slot 7 must not be `DEFAULT_FG`.** The obvious lift for white was `0xd0`, which *is* `DEFAULT_FG`.
+That would have made `SGR 37` indistinguishable from "the terminal's own ink" — a slot spent saying
+nothing. White already cleared the floor at 9.16, so it is the one slot this section leaves alone, and
+the smallest diff was also the correct one.
+
+Both are now tests, next to the floor.
+
+### Black is exempt, and that is not laziness
+
+Slot 0 stays `#000000`, 1.26:1, and the floor starts at index 1. It is the colour a program paints a
+*background* with, or writes on top of one of the light slots with, and being darker than the page is
+its job. Lifting it to `#2a2a2a` would make `\e[30m` faintly legible at the price of black no longer
+being black — and would break `xterm_256(0) == (0, 0, 0)`, which §84's anchor test pins for a reason.
+
+### What was given up, said plainly
+
+Three slots — bright green, yellow and cyan — were changed with no contrast argument behind them and
+**lost** some: 12.15 → 10.20, 15.52 → 11.77, 13.30 → 11.67. A pure `#00ff00` beside a `#5fb85f` reads
+as a colour from a different table rather than as the same green turned up, and the bright row is only
+useful to a program if it works as a row. All three keep more than twice the floor, so the trade costs
+nothing that matters — but it is a preference dressed in no measurement, and the comment says so.
+
+### The rule, not the values
+
+The test is `every_ink_slot_is_legible_on_the_scheme_background`, and it computes the ratio rather than
+comparing sixteen pinned hexes. That is the difference between a test that notices this bug and one
+that merely records the last person's taste: **the hexes are a consequence and anybody may retune
+them, but not below the floor.** A pinned-value test would have passed happily on `#000080` for as long
+as nobody looked at the screen — which is exactly what happened for 159 sections.
+
+`the_formula_agrees_with_the_two_ratios_everybody_knows` anchors the measuring stick before anything is
+measured with it: black on white is the definition's maximum of 21:1, a colour on itself its minimum of
+1:1. Get the piecewise transfer curve or the weights wrong and one of those two moves.
+
+Prove-it: navy put back in slot 4 → *"slot 4 (0, 0, 128) is 1.04:1 on the page, under the 4.5:1
+floor"*. Bright blue set equal to blue → *"slot 12 must out-light slot 4"*. Both reverted.
+
+### What moved with it
+
+`palette.rs` is the one source of truth by construction (§9), so three call sites changed their
+expectations and none changed their code: `OSC 4;1` and `OSC 4;3` now answer `rgb:e2e2/6060/6b6b` and
+`rgb:d6d6/a0a0/2a2a`, and a rich copy of red text writes `color:#e2606b`. That the fix reached the query
+answerer and the clipboard without being told to is the whole return on §9 — a terminal that lied about
+its own palette would break the colour-scheme detection `OSC 11` exists for, and a paste that used the
+old table would disagree with the screen it came from.
+
+Rich copy also happens to be safe from the lightening, for a reason worth recording since it is not
+obvious: its `<pre>` carries the page's own background (§10), so a light palette lands on dark paper in
+Outlook exactly as it does on screen. Had the block inherited the document's white, this section would
+have had to choose between the screen and the clipboard.
+
+Sixel keeps its own VT340 default palette and is untouched — a sixel image's colours are the image's.
+
+### What to keep
+
+**An inherited default is a decision nobody has made yet.** This palette was copied in, given a comment
+that misidentified it, and never checked against the background it would be drawn on. The comment being
+wrong is the tell: nobody who had measured it would have called it xterm's.
+
+**A per-item floor does not make the set coherent.** Both of the properties that nearly went wrong here
+— bright versus normal, white versus default — are relations between slots, and a checklist applied one
+slot at a time cannot see either. Worth asking of any table: what is true of the *pairs*?
+
+**The complaint names the worst case, not the bug.** One slot was reported; nine were failing. Measuring
+the whole table before touching the reported one cost a minute and turned a colour tweak into a decision.

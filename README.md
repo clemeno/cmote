@@ -191,6 +191,15 @@ references below (§n) point into it.
   single, double, dotted, dashed and the curly one an editor draws under a spelling mistake,
   each in its own colour when the program sets one, plus **italic** — drawn from a bundled
   IBM Plex Mono face, since Fira Mono ships no italic of its own (§23).
+- **The sixteen ANSI colours are picked to be readable, not inherited** — every one of them
+  clears **4.5:1** against cmote's own page, checked by a test rather than by eye, so no program's
+  choice of colour can land on text you cannot see (§159). The palette most terminals still ship
+  is the old VGA one, whose blue is `#000080`: on a dark background that is **1.04:1**, and the
+  scale stops at 1.0. Each bright is genuinely lighter than its normal, so a program using both
+  `31` and `91` gets two distinct colours; `37` stays distinct from the default ink for the same
+  reason. Black is the one exemption — it is what a program paints a *background* with. cmote
+  answers `OSC 4` / `OSC 10` / `OSC 11` with these exact values and a rich copy pastes them, so
+  what a program is told, what you see and what you paste are one table (§9).
 - **The cursor takes the shape a program asks for** — a block, an underline, or a thin bar,
   whichever the remote picks with DECSCUSR (vim's insert-mode bar, say); drawn steady, since
   cmote runs no blink timer (§23).

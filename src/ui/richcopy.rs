@@ -253,9 +253,9 @@ mod tests {
 
 	#[test]
 	fn a_coloured_cell_gets_a_span_with_its_rgb() {
-		// SGR 31 = ANSI red (palette slot 1 = #800000). The run of red text is one span.
+		// SGR 31 = ANSI red (palette slot 1 = #e2606b since §159). The run of red text is one span.
 		let html = html_of(10, "\x1b[31mred\x1b[0m");
-		assert!(html.contains("<span style=\"color:#800000;\">red</span>"));
+		assert!(html.contains("<span style=\"color:#e2606b;\">red</span>"));
 	}
 
 	#[test]

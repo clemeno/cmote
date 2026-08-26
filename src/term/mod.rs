@@ -3693,12 +3693,12 @@ mod tests {
 
 	#[test]
 	fn a_palette_colour_query_reports_that_slot() {
-		// OSC 4;3 "what is palette slot 3?" -> ANSI yellow (0x808000), resolved through the
-		// same shared table the grid paints from, so the answer never disagrees with the screen.
+		// OSC 4;3 "what is palette slot 3?" -> ANSI yellow (0xd6a02a since §159), resolved through
+		// the same shared table the grid paints from, so the answer never disagrees with the screen.
 		let mut terminal = Terminal::new(10, 40);
 		assert_eq!(
 			terminal.process(b"\x1b]4;3;?\x07"),
-			b"\x1b]4;3;rgb:8080/8080/0000\x07".to_vec()
+			b"\x1b]4;3;rgb:d6d6/a0a0/2a2a\x07".to_vec()
 		);
 	}
 
@@ -3708,8 +3708,8 @@ mod tests {
 	#[test]
 	fn a_palette_query_may_ask_about_several_slots_at_once() {
 		let mut terminal = Terminal::new(10, 40);
-		let mut expected = b"\x1b]4;1;rgb:8080/0000/0000\x07".to_vec();
-		expected.extend_from_slice(b"\x1b]4;3;rgb:8080/8080/0000\x07");
+		let mut expected = b"\x1b]4;1;rgb:e2e2/6060/6b6b\x07".to_vec();
+		expected.extend_from_slice(b"\x1b]4;3;rgb:d6d6/a0a0/2a2a\x07");
 		assert_eq!(terminal.process(b"\x1b]4;1;?;3;?\x07"), expected);
 	}
 
@@ -3744,7 +3744,7 @@ mod tests {
 		assert!(terminal.term.colors()[3].is_some());
 		assert_eq!(
 			terminal.process(b"\x1b]4;3;?\x07"),
-			b"\x1b]4;3;rgb:8080/8080/0000\x07".to_vec()
+			b"\x1b]4;3;rgb:d6d6/a0a0/2a2a\x07".to_vec()
 		);
 	}
 
