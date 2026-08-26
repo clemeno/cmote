@@ -22,8 +22,12 @@
 // has no arm for the version request, its device-attributes handler covers only DA1 and DA2, and it
 // has none for the graphics-capability request — so cmote sniffs them out of the same stream and
 // answers them itself (`query`, §33, §36, §41): XTVERSION (`CSI > q`), DECRQSS (`DCS $ q … ST`),
-// XTGETTCAP (`DCS + q … ST`), DA3 (`CSI = c`) and XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`). Only DECRQSS's
-// SGR request needs live state; `process` fills it from the pen. The engine's OWN DA1 answer is then
+// XTGETTCAP (`DCS + q … ST`), DA3 (`CSI = c`) and XTSMGRAPHICS (`CSI ? Pi;Pa;Pv S`). DECRQSS is the
+// one that needs live state, and it needs it for all NINE of the settings it reports — the pen, the
+// cursor shape, the protection bit, the region, the margins, the page's lines and columns in DEC's
+// three spellings, and the attribute-change extent (`decrqss_report`, §123, §152). This line read
+// "only DECRQSS's SGR request needs live state" from §33 until §152, having survived §123 adding
+// four. The engine's OWN DA1 answer is then
 // amended on its way out to advertise sixel (`query::with_sixel_attribute`), because cmote draws
 // images the engine knows nothing about.
 //

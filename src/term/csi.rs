@@ -314,7 +314,7 @@ impl Csi<'_> {
 	/// Parameter `index` as a number, or `None` when it is absent or unreadable.
 	///
 	/// **It does not supply a default, and that is deliberate.** `Params`' own note used to say a
-	/// shared parser could not work because the ten scanners disagree about what an omitted parameter
+	/// shared parser could not work because the scanners disagree about what an omitted parameter
 	/// means — 0 for DECST8C, 1 for a cursor move, "not ours" for a sequence that requires the
 	/// parameter. That objection is about a parser that BAKES IN a default; this one reports absence
 	/// and leaves the choice where it was, so `param(0).unwrap_or(0)` and `param(0).unwrap_or(1)` are
@@ -479,7 +479,7 @@ impl Framer {
 					// it only there. `vte`'s escape state executes a C0 and STAYS in that state
 					// (`lib.rs:341`), ignores DEL and every byte past `0x7f` (`:381-383`), so `ESC` LF
 					// `[ 2 J` erases the screen. Dropping to ordinary text here read the `[` as a
-					// printable character and lost the sequence for all ten scanners at once (§111).
+					// printable character and lost the sequence for every scanner at once (§111).
 					byte if passes_through(byte) => {}
 					// CAN and SUB drop the escape back to GROUND, where a `[` starts nothing at all — so
 					// unlike the arm below, this really is the end of any reading.

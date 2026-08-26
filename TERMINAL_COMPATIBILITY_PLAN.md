@@ -375,13 +375,22 @@ the identity queries the engine drops are answered by cmote's own stream scanner
 same out-of-band tactic `cwd` / `modkeys` use for sequences the engine ignores:
 
 - **XTVERSION** (`CSI > q`) → `DCS > | cmote(<ver>) ST` — full, a truthful name and build version.
-- **XTGETTCAP** (`DCS + q <hex> ST`) → states only the two caps cmote can give truthfully —
-  terminal name `xterm-256color` and 256 colours — and answers every other capability an honest
-  unknown (`DCS 0 + r <name> ST`).
-- **DECRQSS** (`DCS $ q <sel> ST`) → reports **SGR** from the live pen (the exact attributes the
-  grid paints, rebuilt after the chunk advances so a set-then-query in one write is seen), and
-  every other setting an honest `ps=0` (`DCS 0 $ r ST`) rather than a lie about state cmote renders
-  fixed or cannot read.
+- **XTGETTCAP** (`DCS + q <hex> ST`) → states the three capabilities cmote can give truthfully, in
+  both of the spellings each of them has: terminal name (`TN` / `name`) `xterm-256color`, colour
+  count (`Co` / `colors`) 256, and direct-colour depth (`RGB`) 8 bits a channel. **Those three are
+  xterm's whole special-name list**; every other capability gets an honest unknown
+  (`DCS 0 + r <name> ST`), which since §153 is a refusal rather than a gap — the entry a table here
+  would transcribe is `xterm-256color`, sitting on the remote that asked. *(This paragraph read "the
+  two caps" from §33 until §153, having survived §123 adding `RGB` — see §153.)*
+- **DECRQSS** (`DCS $ q <sel> ST`) → reports **nine** settings from live state, never from a stored
+  copy of the request: SGR from the live pen (the exact attributes the grid paints, rebuilt after the
+  chunk advances so a set-then-query in one write is seen), the cursor shape, the protection bit, the
+  scrolling region, the margins, the page's lines and columns in DEC's three spellings, and the
+  attribute-change extent. Every other setting gets an honest `ps=0` (`DCS 0 $ r ST`) rather than a
+  lie about state cmote renders fixed or cannot read — and for two of them, DECSASD and DECSSDT, the
+  `0` would have been *true* and is refused anyway, because a program told the status line exists
+  writes to it (§152). *(This paragraph said "reports SGR, and every other setting an honest ps=0"
+  from §33 until §152, having survived §123 adding four more.)*
 - **DA3 tertiary attributes** (`CSI = c`) → `DCS ! | 00434D45 ST` (§36). The engine's
   `identify_terminal` handles the no-intermediate (DA1) and `>` (DA2) forms and drops the `=` one, so
   this fell to the scanner too. The eight hex digits are a **constant** — site `00`, id `434D45`
@@ -1773,7 +1782,15 @@ one since §54, kitty's `99` and urxvt's `777` since §79 — the dangerous
 half of iTerm's OSC 1337 namespace — **inline images among them since §70** — and a fixed colour scheme
 that makes every palette set and reset a no-op. Since §71 it also holds two refusals with **no danger
 behind them at all**, `CursorShape` and `ReportCellSize`, which is worth noticing about the mark: 🛑 says
-cmote's code performs the refusal, never that the thing refused was dangerous. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
+cmote's code performs the refusal, never that the thing refused was dangerous. **§152 through §155 put
+four more in the column, and three of them came out of ❌** — DECRQSS's status-line settings, where the
+truthful `0` is refused because it is an invitation; every XTGETTCAP capability past the three special
+names, because the entry a table here would transcribe belongs to the remote that asked; and contour's
+Good Image Protocol, whose first move is an advertisement (DA1 attribute `90`) cmote will not make. The
+fourth, DECSCL's report, was never a gap. **The same four sections moved one row the other way**: the
+tmux passthrough wrapper is ✅ and cmote implements none of it, being transparent to it by three of
+`vte`'s own rules composing (§154) — which is the ✅ that says *what the sequence asks for is what
+happens*, the reading `ESC % G` has carried since §67. **🤷** is what cmote would refuse and never gets the chance to: answerback, remote window
 control (`CSI 1–10 t`), the palette stack (`CSI # P / # Q`, §84), kitty's colour-by-name (`OSC 21`), and the
 two DECSET modes nothing can turn on (`3`, `80`) — each one dead in `vte` or in a `Handler` default
 before cmote sees a byte. **§151 added the overline (SGR 53) to that column**, and the way it got there
@@ -2936,8 +2953,10 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   the thing that would have stopped it reaching save-cursor, had stopped reading. Only CAN and SUB
   cancel a sequence, which is the same fact as cmote feeding CAN in place of a refused final byte.
 - **`term/csi.rs`** — the facts every CSI scanner has to agree with the ENGINE about (§106), and since
-  §111 the shared CSI framer itself, which `osc.rs` was the template for: **all ten** scanners under
-  `term/` read `csi::Framer` and keep only the part that is theirs, deciding what a sequence MEANS. A
+  §111 the shared CSI framer itself, which `osc.rs` was the template for: **every** scanner under
+  `term/` reads `csi::Framer` and keeps only the part that is theirs, deciding what a sequence MEANS.
+  (The count is deliberately not stated here — it has gone stale four times and now lives in one place,
+  the module header, with the check that settles it: `framer: super::csi::Framer`, one per scanner.) A
   scanner's limits are not a
   private choice: cmote and the engine read the same bytes, so wherever the two disagree about whether a
   sequence is well formed, one acts and the other does not — and two of those disagreements were live
@@ -2987,8 +3006,9 @@ the marks said but in which rows existed, and a catalogue only shows you the row
   intermediates × parameters × final byte × the ORDER of those parts. The sweeps found the last two
   defects, one of them only after an axis was added: the shape generator emitted the parts in the legal
   order alone, so it passed against the very guard it was written for until a malformed interleaving
-  was generated too. §111 grew it to **twenty-five** tests as the ten scanners
-  migrated: 6720 CSI shapes, a second 180-shape sweep over the DCS introducer, a payload compared
+  was generated too. §111 grew it to **twenty-five** tests as the first ten scanners
+  migrated: 6720 CSI shapes, a second sweep over the DCS introducer — 180 shapes then, 240 since §154
+  added the introducer a tmux passthrough opens with — a payload compared
   byte-for-byte against what the engine's own handler was given, and the ESC and ST rules that were
   wrong in all three framers — an ESC that terminates no control string still OPENS the next sequence
   for `vte`, which is why a payload cannot smuggle a CSI past a DCS-unaware framer, and why a second
