@@ -289,7 +289,31 @@ const REFUSAL_WORDS: [&str; 8] = [
 /// The characters a shell prompt ends with. Seeing one of these is how `ssh::shell` knows the
 /// conversation is over and the account's own shell is talking (§45) — after that, nothing on the
 /// channel is ever treated as a credential question again.
+///
+/// `$` for sh and bash, `#` for root, `%` for zsh and csh, `>` for fish and for a continuation.
+/// These four are unambiguous enough to end the conversation wherever they fall.
 const SHELL_ENDINGS: [char; 4] = ['$', '#', '%', '>'];
+
+/// The characters a DRESSED prompt ends with (§157) — a theme's own arrow, and the bracket a
+/// `[\u@\h \W]` prompt closes on when whoever wrote it put no `\$` after it.
+///
+/// That last one is not a curiosity. It is the prompt that left an elevation hanging for ever:
+/// root's shell had been sitting at `[root@host ~] ` since its first byte, `SHELL_ENDINGS` did not
+/// have `]`, so `Handshake` answered `Nothing` to every chunk and waited for a `sudo` that had
+/// already gone. Nothing was drawn, nothing failed, and the account stayed listed and never ready —
+/// which is the worst way for this to be wrong, because there is nothing on screen to read.
+///
+/// Kept apart from `SHELL_ENDINGS` because each of these turns up in ordinary prose too, so one is
+/// read as a prompt only under two conditions:
+///
+///   * it wears the trailing space a shell prompt conventionally has, so a line broken mid-sentence
+///     at a bracket is still a sentence, and
+///   * the line names no credential — `Duo passcode or option [1-3] ` ends with a bracket and a
+///     space, and reading that as root's shell would put the one-time code on a command line.
+///
+/// What that costs is a prompt ending on a bare `]` with no space after it, which stays unrecognised.
+/// A prompt and a broken sentence are indistinguishable there, and this is the direction to fail in.
+const DRESSED_ENDINGS: [char; 4] = [']', '❯', '➜', '»'];
 
 /// The credential question at the end of `buffer`, if that is what it is.
 ///
@@ -360,6 +384,10 @@ pub fn refusal(buffer: &str) -> Option<String> {
 /// Read the same way as `prompt`: only the text after the last newline is on screen. A shell's
 /// prompt ends in one of `SHELL_ENDINGS`, conventionally followed by a space, and — unlike a
 /// credential question — nothing about it is a question.
+///
+/// Or it ends in one of `DRESSED_ENDINGS`, which is the same statement made about the prompts that
+/// close on a bracket or a theme's arrow — with the two guards that set carries, because those
+/// characters end ordinary prose as well (§157).
 pub fn looks_like_shell(buffer: &str) -> bool {
 	let Some(tail) = buffer
 		.rsplit('\n')
@@ -368,9 +396,18 @@ pub fn looks_like_shell(buffer: &str) -> bool {
 	else {
 		return false;
 	};
-	let trimmed = sanitize_line(tail);
-	let trimmed = trimmed.trim_end();
-	trimmed.ends_with(SHELL_ENDINGS)
+	let label = sanitize_line(tail);
+	let trimmed = label.trim_end();
+	if trimmed.ends_with(SHELL_ENDINGS) {
+		return true;
+	}
+	// `trimmed.len() < label.len()` is the trailing space: something was there to trim. Both guards
+	// belong to the dressed set alone — the four above are read as prompts on their own.
+	if !trimmed.ends_with(DRESSED_ENDINGS) || trimmed.len() == label.len() {
+		return false;
+	}
+	let lowered = trimmed.to_lowercase();
+	!CREDENTIAL_WORDS.iter().any(|word| lowered.contains(word))
 }
 
 /// The last thing the program said, for the failure notice when an elevation channel dies (§45):
@@ -402,16 +439,44 @@ fn sanitize_line(line: &str) -> String {
 	let mut chars = line.chars();
 	while let Some(c) = chars.next() {
 		match c {
-			// An escape starts a sequence: swallow it and everything up to its terminator. CSI
-			// (`\x1b[`) ends at a byte in `@`..`~`; OSC (`\x1b]`) ends at BEL or the ST pair,
-			// and skipping to the first control byte covers both without a parser.
-			'\x1b' => {
-				for c in chars.by_ref() {
-					if c.is_ascii_alphabetic() || matches!(c, '\x07' | '~' | '\\') {
-						break;
+			// An escape starts a sequence, and WHICH sequence decides where it ends (§157). One
+			// rule for both was wrong, because the two that carry text do not end alike.
+			'\x1b' => match chars.next() {
+				// OSC (`\x1b]`) carries a STRING — a window title, a hyperlink — and ends at BEL
+				// or at ST (`\x1b\`). Its payload is ordinary text, so stopping at the first
+				// letter stops INSIDE it: `\x1b]0;root@host\x07` broke at the `r` of `root` and
+				// spilled `oot@host` into the label a dialog was about to show.
+				Some(']') => {
+					while let Some(c) = chars.next() {
+						match c {
+							'\x07' => break,
+							// ST is two characters, and a well-formed string carries no bare
+							// escape — so either way this one ends here.
+							'\x1b' => {
+								chars.next();
+								break;
+							}
+							_ => {}
+						}
 					}
 				}
-			}
+				// CSI (`\x1b[`) is parameters and intermediates ending at a FINAL byte in
+				// `@`..`~`. That range includes the letters, but also `@[\]^_{|}~`, so the test
+				// is the range: `\x1b[1@` (insert a blank) ended at nothing before.
+				Some('[') => {
+					for c in chars.by_ref() {
+						if matches!(c, '\u{40}'..='\u{7e}') {
+							break;
+						}
+					}
+				}
+				// A charset designation and its kind (`\x1b(B`) put one intermediate byte before
+				// the final one; every other escape is two characters and is already consumed.
+				Some('\u{20}'..='\u{2f}') => {
+					chars.next();
+				}
+				_ => {}
+			},
 			// Every other control byte is dropped outright; a tab becomes a space so words that
 			// were separated stay separated.
 			'\t' => out.push(' '),
@@ -593,6 +658,34 @@ mod handshake_tests {
 				factors: 1,
 			}
 		);
+	}
+
+	/// The elevation that hung for ever (§157), replayed byte for byte.
+	///
+	/// These are the two chunks a Rocky 9 box actually sent on the elevating channel, boundary
+	/// included: the window title on its own, then a prompt whose hostname is coloured and whose
+	/// `[\u@\h \W]` ends on the bracket, because nobody put a `\$` after it. Root's shell was
+	/// sitting there from the first byte and cmote answered `Nothing` to both, waited for a `sudo`
+	/// that had already gone, and left the account listed and never ready with nothing on screen.
+	///
+	/// Pinned as the REAL bytes rather than a tidied version: the escape sequences are half of what
+	/// went wrong, and a test that cleaned them up would have passed against the broken code.
+	#[test]
+	fn a_prompt_that_ends_on_its_bracket_is_still_a_shell() {
+		let mut handshake = Handshake::default();
+		assert_eq!(
+			handshake.on_bytes(b"\x1b]0;root@test:~\x07"),
+			Step::Nothing,
+			"a window title on its own says nothing either way"
+		);
+		let step =
+			handshake.on_bytes("[root@\x1b[32mtest.actv.maasgw.spiws.net\x1b[m ~] ".as_bytes());
+		let Step::Live { factors, .. } = step else {
+			panic!("root's shell has the channel, got {step:?}");
+		};
+		// Nothing was asked for: this account elevates without a password, so there is no factor to
+		// count and nothing for the file layer to be denied over (§46).
+		assert_eq!(factors, 0);
 	}
 
 	/// A mistyped password is the SAME factor asked again, so the corrected one is still the
@@ -825,6 +918,41 @@ mod tests {
 		// A credential question is not a shell prompt, whatever else it looks like.
 		assert!(!looks_like_shell("Verification code: "));
 		assert!(!looks_like_shell(MARKER));
+	}
+
+	#[test]
+	fn a_dressed_prompt_needs_its_space_and_no_credential_in_it() {
+		// The bracket that hung §157's elevation, and the two arrows a themed shell ends on.
+		assert!(looks_like_shell("[root@test ~] "));
+		assert!(looks_like_shell("❯ "));
+		assert!(looks_like_shell("~/src ➜ "));
+		// Without the trailing space it is prose, and prose is what sudo's own lecture is: a chunk
+		// that ends at a bracket must not end the conversation.
+		assert!(!looks_like_shell("[root@test ~]"));
+		assert!(!looks_like_shell("    #1) Respect the privacy of others."));
+		// And a question asked inside brackets is a question. This is the one that would cost
+		// something: read as root's shell, the code the user types next goes on a command line.
+		assert!(!looks_like_shell("Duo passcode or option [1-3] "));
+		assert!(!looks_like_shell("Enter your token [press ? for help] "));
+	}
+
+	#[test]
+	fn an_osc_string_is_swallowed_whole_and_not_up_to_its_first_letter() {
+		// A shell sets its window title on every prompt, and that title is ordinary text — so an
+		// escape read as ending at the first ASCII letter stopped inside `root` and spilled
+		// `oot@host` into the label a dialog was about to show (§157).
+		assert_eq!(
+			prompt("\x1b]0;root@host:~\x07Verification code: ").as_deref(),
+			Some("Verification code:")
+		);
+		// The same string terminated with ST (`\x1b\`) rather than BEL.
+		assert_eq!(
+			prompt("\x1b]0;root@host:~\x1b\\Password: ").as_deref(),
+			Some("Password:")
+		);
+		// And a CSI whose final byte is not a letter — `@` is one of eight such — now ends where it
+		// actually ends instead of swallowing the question after it.
+		assert_eq!(prompt("\x1b[1@Password: ").as_deref(), Some("Password:"));
 	}
 
 	#[test]

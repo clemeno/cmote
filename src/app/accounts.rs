@@ -544,6 +544,65 @@ mod tests {
 
 	// --- §47: the accounts dialog, the stored preference, and the remembered password ---
 
+	/// The connect form's own elevation fields, end to end (§47): filled in on a target that does not
+	/// exist yet, they are stored on the target the connect CREATES and acted on the moment its shell
+	/// is live — one press of Connect, no dialog.
+	///
+	/// Every other test of the hands-free path calls `elevate_on_connect` directly, which is the half
+	/// that was already known to work. This drives the other half: `ConnectPressed`, then the
+	/// `Connected` the session answers with, so the three steps between them are under test —
+	/// `upsert_on_connect` making the target, `adopt_target` writing the form's preference onto it,
+	/// and `elevate_on_connect` reading that preference back out through the session's own endpoint.
+	#[test]
+	fn the_connect_forms_elevation_runs_itself_on_the_first_connection() {
+		let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+		let mut app = Tab {
+			command_tx: Some(tx),
+			..Tab::default()
+		};
+		// Typed, not assigned: an edit that never reached the form would make every assertion below
+		// pass against a form the user did not fill in.
+		let _ = app.update(Message::HostChanged("rec".to_owned()));
+		let _ = app.update(Message::PortChanged("22".to_owned()));
+		let _ = app.update(Message::UserChanged("rocky".to_owned()));
+		let _ = app.update(Message::PasswordChanged("pw".to_owned()));
+		let _ = app.update(Message::FormElevateAccountChanged("root".to_owned()));
+		let _ = app.update(Message::FormElevateKindChanged(
+			crate::elevate::ElevateKind::Sudo,
+		));
+		let _ = app.update(Message::FormElevateOnConnectToggled);
+
+		let _ = app.update(Message::ConnectPressed);
+		assert!(
+			matches!(next_command(&mut rx), Some(SshCommand::Connect(_))),
+			"the connect goes out first"
+		);
+
+		// The session is up, which is the earliest a program can be run on it.
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		match drain(&mut rx).into_iter().next() {
+			Some(SshCommand::Elevate {
+				identity,
+				kind,
+				user,
+			}) => {
+				assert_eq!(identity, 1, "the first identity after the login shell");
+				assert_eq!(kind, crate::elevate::ElevateKind::Sudo);
+				assert_eq!(user, "root");
+			}
+			other => panic!("expected an elevation, got {other:?}"),
+		}
+		// And the target the connect created remembers it, so the next connection needs no form.
+		let saved = app
+			.targets
+			.borrow()
+			.find("rocky@rec:22")
+			.and_then(|target| target.elevate.clone())
+			.expect("the new target remembers what the form asked for");
+		assert_eq!(saved.account, "root");
+		assert!(saved.on_connect);
+	}
+
 	/// The whole of the ordinary path (§47): ask to become root, answer the question sudo asks, and
 	/// end up with root's terminal on screen — with what was asked for remembered on the target.
 	#[test]

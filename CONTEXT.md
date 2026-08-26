@@ -99,6 +99,14 @@ A question asked by a session that already exists: the four the handshake can st
 ones `sudo` puts while elevating (§45). Held by the thing waiting on the answer, which is why
 answering one never moves a tab off its content (§134).
 
+**Dressed prompt**:
+A shell prompt whose last character is not one of `$`, `#`, `%`, `>` — a theme's arrow, or the
+bracket a `[\u@\h \W]` prompt closes on when nobody put a `\$` after it (§157). Read as the end of an
+elevation's conversation only when it wears the trailing space a prompt conventionally has and names
+no credential, since those characters end ordinary prose too.
+_Avoid_: custom prompt — what matters is not that somebody wrote it but that its last character is
+ambiguous, which a `$` never is
+
 **Tab strip**:
 The row of tabs above the grid.
 _Avoid_: strip, on its own

@@ -379,6 +379,12 @@ impl Shells {
 	/// Close one elevated identity (§45): EOF on its channel ends the login shell running there,
 	/// and the reader task then reports it gone the same way an `exit` would.
 	///
+	/// Then the channel itself, because EOF is not enough (§157). A shell still ELEVATING is not
+	/// reading the channel at all — `sudo` takes its password from the controlling terminal, not
+	/// from stdin — so EOF reaches nobody, and the ✕ beside an elevation that had stalled did
+	/// nothing whatsoever. Closing is what makes the escape hatch work, and it is the right verb for
+	/// a button that means "end this account" rather than "no more input".
+	///
 	/// The login identity is refused — the session's own shell goes down with the session, through
 	/// `Disconnect`, and closing it here would leave a connection with no terminal at all.
 	pub async fn close(&mut self, identity: u64) {
@@ -387,6 +393,7 @@ impl Shells {
 		}
 		if let Some(shell) = self.by_identity.get(&identity) {
 			let _ = shell.write.eof().await;
+			let _ = shell.write.close().await;
 		}
 	}
 

@@ -18134,3 +18134,133 @@ Nothing is automated here — a CI job that fails because prose is thin would be
 ignore, which is §13's rule and the load stress's. But when a section touches `src/ui/` or
 `src/app/`, that is the moment the README is in scope, and it is worth asking before the commit
 rather than twenty-eight sections later.
+
+## §157 — The prompt that ended on a bracket, and the failure with nothing to read
+
+A report, in full: *"User rocky, Become root, with sudo, Become it on connect — does not work. When we
+Connect we join with a prompt that is `whoami` → rocky."* No error, no dialog, nothing on screen. The
+elevation simply did not happen.
+
+It had happened. Root's shell was open on its own channel and had been sitting at its prompt since its
+first byte. cmote was still waiting for `sudo` to say something.
+
+### The half that was already right, and how that was settled
+
+The first question is which side of the bridge broke, and it is worth settling before reading any code
+closely, because the answer halves the search. A test through the real path answered it:
+`ConnectPressed` on a form nobody had connected before, then the `Connected` the session answers with.
+
+```
+[Elevate { identity: 1, kind: Sudo, user: "root" }, ListDir("/"), ListFiles { … }]
+Elevation { kind: Sudo, account: "root", on_connect: true, remember_password: false }
+```
+
+The command goes out, and the target the connect CREATED remembers what the form asked for. So the GUI,
+`targets.json`, `adopt_target` and `elevate_on_connect` were all doing their jobs.
+
+That test is a keeper, and the reason it is worth having is that **it did not exist**. Every §47 test of
+the hands-free path calls `elevate_on_connect()` directly — the one step that was known to work — so the
+three between the button and the wire had no cover at all. Proving them right took four minutes and
+removed half the codebase from suspicion, which is the whole argument for writing it.
+
+### The measurement
+
+That left the conversation on the remote, which no test can reach and no amount of reading settles: the
+question is what a particular Rocky 9 box actually says, and only that box knows. So the answer came from
+a probe on the elevating channel — the program's own output, printed, never a byte cmote writes to it —
+and a debug build, which keeps its console for exactly this.
+
+```
+PROBE elevate: identity 1 as root via sudo
+PROBE elevate: identity 1 channel up, exec: sudo -p 'cmote-password:' -u 'root' -i
+PROBE elevate 1 <- "\u{1b}]0;root@test:~\u{7}"
+PROBE elevate 1: Nothing
+PROBE elevate 1 <- "[root@\u{1b}[32mtest.actv.maasgw.spiws.net\u{1b}[m ~] "
+PROBE elevate 1: Nothing
+```
+
+Two chunks, and the second one is root's shell prompt. `sudo` had asked for nothing — this account
+elevates without a password — and handed the channel straight over.
+
+### The bug
+
+`SHELL_ENDINGS` was `['$', '#', '%', '>']`. That prompt ends on `] `. Nobody put a `\$` after the
+`[\u@\h \W]`, so there is no `#` for cmote to see, and `looks_like_shell` said no. `prompt` said "not a
+question" — no colon. `Handshake` answered `Nothing`, and went on answering `Nothing` for as long as the
+session lived.
+
+### Why there was nothing to read
+
+A stuck elevation has four ways to end and three of them put something on screen:
+
+* the channel will not open — `IdentityEnded` with "The remote refused a second shell.";
+* `sudo` asks — a dialog with the question;
+* `sudo` dies (not in sudoers, no tty) — a dialog with the remote's own last words.
+
+The fourth is silence. The channel is fine, the program is fine, nothing failed and nothing is pending —
+so no event is sent, the account stays listed and never `ready`, and the terminal on screen is the login
+shell it always was. **It is the only failure in this feature that produces no artefact at all**, which is
+why a report of it can only say "does not work".
+
+The accounts dialog is what settled it from the outside: root was in the list. Listed means
+`start_elevation` ran; not on screen means no `IdentityReady`; still listed means no `IdentityEnded`. That
+is the fourth path and only the fourth path, and it named the file to open before any of it was read.
+
+### Two more, in the same six lines
+
+The probe was cheap and it paid for itself twice over.
+
+**`sanitize_line` read one escape rule where there are two.** It swallowed `\x1b` "up to the first ASCII
+letter", which is right for CSI and wrong for OSC — a window title is ordinary text, and it is full of
+letters. `\x1b]0;root@test:~\x07` broke at the `r` of `root` and spilled `oot@test:~` into the sanitized
+line. Harmless where it was found, since `looks_like_shell` only reads the ending; not harmless at all
+one function over, where `prompt` builds the label a dialog puts in front of the user. It is two rules
+now: OSC ends at BEL or ST, CSI ends at a final byte in `@`..`~` — a range that includes the letters but
+also `@[\]^_{|}~`, so `\x1b[1@` used to end at nothing and swallow the question after it.
+
+**The ✕ beside a stalled elevation did nothing.** `Shells::close` sent EOF, which ends a shell that is
+READING its channel. An elevation mid-conversation is not: `sudo` takes its password from the controlling
+terminal, so EOF reached nobody and the one escape hatch on screen was inert. It closes the channel now,
+which is the right verb for a button that means "end this account" rather than "no more input".
+
+### The direction to fail in
+
+Widening the vocabulary is not free, and `SHELL_ENDINGS` was narrow on purpose. Being too eager means
+declaring the conversation over while `sudo` is still asking, and the question then lands in the grid
+instead of a dialog.
+
+So the new characters are a second list rather than four more entries in the first. `DRESSED_ENDINGS`
+— `]`, `❯`, `➜`, `»` — are read as a prompt only under two conditions, and each buys off a specific way
+of being wrong:
+
+* **it wears the trailing space** a prompt conventionally has, so a chunk that ends mid-sentence at a
+  bracket is still a sentence. `sudo`'s own lecture numbers its points `#1)`, `#2)`, `#3)`.
+* **the line names no credential.** `Duo passcode or option [1-3] ` ends with a bracket and a space, and
+  reading that as root's shell would put the one-time code on a command line. This is the one that costs
+  something when it is wrong, so it is checked rather than argued about.
+
+What it does not cover is a prompt ending on a bare `]` with nothing after it. A prompt and a broken
+sentence are the same string there, and leaving it unrecognised is the direction to fail in.
+
+### What to keep
+
+**A question put to the user is a measurement, and a bad one costs the same as a bad probe.** Three were
+asked here. Two were sharp — "what appeared on screen" and "what does the accounts dialog list" —
+and between them they identified the fourth path exactly. The third was not: "click ✕ and see whether root
+disappears" was offered as proof that the channel existed, and it proves nothing, because EOF does not
+reach a `sudo` reading from a tty. The answer that came back was the right answer to a question that could
+not tell the two cases apart. A discriminator has to be checked against BOTH branches before it is asked,
+exactly like an assertion.
+
+**The untested step is the one between two tested ones.** `elevate_on_connect` had tests. The form had
+tests. `Connected` had tests. What nobody had run was the three of them in a row, and that is where a
+report like this one sends you first — so it is worth being able to rule it out in one command.
+
+**And the README still does not describe this feature.** §156 found the editor with four words and left
+a rule behind it: a section that ships something a user can see should be cited by a user-facing
+document. Grepping for the accounts machinery finds §45, §46 and §47 named only inside the README's
+*testing* narrative — what is covered, and a hint about trying a transfer under an elevated pane. There
+is no feature bullet for becoming another account, no gestures row for the accounts button, and no
+mention of the connect form's own **Become** field or its **Become it on connect** box — which is the
+exact control this section's report was about. Recorded and not fixed here, because the ask was the bug;
+it is the next thing that document owes.
