@@ -19182,3 +19182,78 @@ marked for what nobody had read.
 about a sequence.** Three reports that look inconsistent are, much more often, three views of one
 thing. This row wrote the inconsistency into a mark and made it the reason a decision could not be
 taken — and the disagreement did not survive one reading of the document all three were describing.
+
+## §165 — What a two-axis review found in §164
+
+§164 was reviewed against its own fixed point on two axes run as separate readers — **Standards**
+(does the diff obey the repo's documented rules and the Fowler smell baseline) and **Spec** (does the
+diff do what the marks and the section record claim). Ten findings, five each, and the split earned
+itself: **the worst finding on each axis was invisible to the other's brief.**
+
+### The one that changed behaviour
+
+**`k=r` was kept for a reason that fails in the exact case the field exists to handle.** §164 wrote,
+in the header and in the row:
+
+> `k=r` keeps its mark: a right prompt is drawn on the same line as the prompt it decorates, so its
+> anchor is the one already recorded there.
+
+True whenever the decorated prompt was itself **marked**. On a **continuation** line it is not —
+`k=s` suppressed it, which is the whole point of §97 — so a `k=r` arriving there is a repeat of
+nothing. It would tick the gutter and re-seat `pending`, filing the finished command against its last
+continuation line instead of its prompt. That is §97's harm exactly, readmitted through the field
+next to the one that keeps it out.
+
+§97's asymmetry does not rescue it, and seeing why is the useful part. *Losing an anchor is worse
+than gaining one* is a rule about an **unknown** kind, where a wrong guess costs one spare tick. A
+`k=r` is **known**, and gaining its mark costs the pending span too. The asymmetry was quoted at a
+case it does not describe.
+
+So the rule collapsed to something simpler and easier to keep right: **only the primary kind opens a
+prompt** — `k=i`, no `k=`, or a value from no source. The other three suppress.
+
+### The one that could not fail
+
+`a_redrawn_prompt_spelled_as_an_explicit_start_does_not_open_a_second_block` was written to pin the
+one report that made `P` look contradictory, and **it never sent a `133;P`**. It called
+`apply(Mark::PromptStart, ..)` twice and asserted the dedup. It passed with `P` deleted from the
+match arm.
+
+**The prove-it list already knew.** §164 listed six probes for seven claims, and the missing one is
+this letter's model half. A test that cannot fail leaves exactly that trace — a claim in the section
+with no line under it — and nothing else, because the suite stays green by construction. Rewritten to
+drive the scanner, so `feed(…).len() == 1` is the line and the model assertions are the claim.
+
+### What was defended
+
+The Spec axis called suppressing `k=c` scope creep, on the ground that `133;A;k=c` was previously a
+`PromptStart` and was not one of the ❌ entries the sweep was asked to answer. **Kept.** The sweep's
+entry was `P`, `k` is `P`'s own option, and the proposal spells the continuation kind *"`k=c` or
+`k=s`"*. Reading the second spelling of a value cmote already reads is answering the entry, not
+widening it — and until §164 that value was being handled as *unknown*, which is a guess that
+happened to be harmless rather than a decision.
+
+### What to keep
+
+**A general argument that fails on the specific case the feature is about is not a weaker argument —
+it is the wrong one.** `k=r`'s defence was true of right prompts in general and false of the one
+line this module exists to get right. The tell was that the sentence never mentioned continuations,
+in a paragraph whose neighbouring sentence is about nothing else.
+
+**A sweeping closing sentence is where the error hides.** *"cmote refuses both, structurally: every
+trailing field is dropped and `Mark` carries none"* — written to sound final, contradicted by the row
+two above it (`k=` is read) and by the type (`CommandEnd` carries the exit code). The narrow claim
+was true and would have been stronger: the only field read decides whether a mark is *made*, the only
+field carried is a number on a tab, and neither reaches the pty. **The generalisation was not a
+summary of the argument, it was a replacement for it.**
+
+**Counts written mid-section go stale by the end of it.** Four in §164: five prove-its over a list of
+six, "the row became six" for a row that became five plus a correction to a neighbour, "the three
+named ones" for four rows, and `Mark`'s doc comments still naming one letter each where three now
+produce `PromptStart`. Each was right when typed. §67's rule about notes carrying their extent
+applies to the section's own prose, not only to the matrix.
+
+**Two axes, and each found what the other could not.** Standards found the un-failable test by
+reading the diff against the repo's testing rule; Spec found `k=r` by reading the code against what
+the row claims. Neither brief would have surfaced the other's, which is the argument for not merging
+them into one reviewer with one prompt.
