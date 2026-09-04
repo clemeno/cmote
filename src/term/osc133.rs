@@ -71,7 +71,30 @@
 // proposal and absent here, which is a divergence worth naming rather than a fold worth hiding. It
 // would start to matter the day cmote showed the command line, and cmote refuses to (§71, §97).
 //
-// `L` has its own row in the matrix (§164).
+// `L` is REFUSED (§164), and it is the only one of the four that is not a mark. The proposal: "Do a
+// fresh-line: If the cursor is the initial column (left, assuming left-to-right writing), do
+// nothing. Otherwise, it does the equivalent of `"\r\n"`." Every other letter tells cmote something
+// ABOUT text the engine is already drawing. This one tells cmote to DRAW — and it arrives on a
+// channel whose declared job is saying where the prompt sits, which is the ground `click_events=1`
+// was refused on (§95), one level up: there a field, here the letter itself.
+//
+// The arrangement it would break is §34's own. This scanner observes and is a pure bytes -> marks
+// function with no engine in it; `term::mod` places what it finds once the engine has been advanced
+// to each offset; the engine draws. Honouring `L` makes the observer a writer — `Mark` gains a
+// variant naming an action rather than a phase, `apply` grows the cursor COLUMN it does not take,
+// and the OSC 133 path starts putting bytes on the grid beside the one that already does (§71, §73).
+//
+// The cost is stated rather than waved off: a stream that emits `133;L` and leans on it gets its
+// prompt on the current line where another terminal would break the line first. cmote does not do
+// the fresh-line on `A` either, which the proposal also specifies ("First do a fresh-line. Then
+// start a new command"), so this is one decision consistently applied and not a special case made
+// for `L`. Nothing reachable emits it: kitty's shell integration writes `A`, `C` and `D` only.
+//
+// The refusal is the letter list itself, which is an allow-list and drops what it does not name —
+// there is no arm for `L`, because an arm returning `None` beside a wildcard returning `None` is a
+// branch that never branches, and clippy's `match_same_arms` says so. What names `L` is the test,
+// which fails the day the letter is wired to a mark. That is where a reader should look for the
+// decision; this comment is where the argument for it lives.
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
@@ -766,8 +789,21 @@ mod tests {
 		// A letter the proposal does not define produces nothing rather than being guessed into the
 		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output, where
 		// no mark just leaves both as they were (§96, §164).
-		assert!(marks(b"\x1b]133;L\x07").is_empty());
 		assert!(marks(b"\x1b]133;Z\x07").is_empty());
+	}
+
+	#[test]
+	fn the_fresh_line_letter_is_refused_and_disturbs_nothing_around_it() {
+		// `L` asks the terminal to WRITE — "if the cursor is the initial column, do nothing; otherwise
+		// do the equivalent of `\r\n`" — and this scanner observes (§164). It produces no mark, and
+		// this test is what stops it quietly becoming one the next time the letter list is widened.
+		assert!(marks(b"\x1b]133;L\x07").is_empty());
+		// And the refusal is inert rather than disruptive: a stream that sprinkles `L` between the real
+		// marks reads exactly as the same stream without it. What the user loses is the line break the
+		// shell asked for, which is the cost the row names — not a mark, and not an offset.
+		let with_l = b"\x1b]133;L\x07\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		let without = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		assert_eq!(marks(with_l), marks(without));
 	}
 
 	#[test]
