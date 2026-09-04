@@ -20,7 +20,8 @@
 //   133 ; A ; k=s                 — a SECONDARY prompt (zsh's PS2) — READ, and it suppresses the
 //                                   mark, because a continuation prompt is not a new prompt (§97)
 //   133 ; A ; click_events=1      — asks the terminal to report mouse clicks in the prompt area
-//   133 ; A ; cl=m                — VS Code's hint that the prompt spans several lines
+//   133 ; A ; cl= | move-keys=    — asks the terminal to turn clicks in the input area into cursor
+//                                   motion, and to send the sender's chosen keys for it
 //   133 ; A ; special_key=1       — fish's own field on an ordinary prompt start; not a kind
 //   133 ; C ; cmdline= | cmdline_url=
 //                                 — the command line being run, shell-quoted (zsh) or
@@ -30,10 +31,20 @@
 // is marking where the prompt sits, which is a side door around the mouse modes (§10) and would make
 // a click inside the prompt behave unlike a click one line above it.
 //
-// `cl=m` and the command line are refused on one shared ground (§97): cmote can already SEE both.
-// The prompt's extent is the grid between `A` and `B`; the command line is the grid between `B` and
-// `C`. Taking the shell's word for either would put an assertion beside an observation cmote holds
-// itself, and §71's rule is that the two can then disagree — with the remote winning.
+// The command line is refused on the second-source ground (§97): cmote can already SEE it, being the
+// grid between `B` and `C`. Taking the shell's word for it would put an assertion beside an
+// observation cmote holds itself, and §71's rule is that the two can then disagree — with the remote
+// winning.
+//
+// `cl=` used to be refused on that same ground, this file having read it as a hint that the prompt
+// spans several lines. It is not (§164). The proposal makes it "a request from the application to
+// the terminal to translate clicks in the input area to cursor movement", the values saying how far
+// that motion may reach: `line` within one input line, `m` between lines using only left/right, `v`
+// the same with up/down, `w` the same with the application handling smart vertical movement. The `m`
+// is MOVEMENT, not multi-line. Honouring it means synthesising arrow keys to the pty on a click, and
+// its companion `move-keys=` names which bytes — "the defaults are the standard arrow-key sequences:
+// `CSI D` etc." So it belongs with `click_events=1` and is the sharper of the two: that one asks for
+// a click to be reported, this one asks for keystrokes to be invented for it (§10, §95).
 //
 // The four letters above are not the whole set, and until §164 this file said they could not be
 // read because "the reachable accounts of them disagree". The accounts are write-ups; the thing
@@ -744,10 +755,20 @@ mod tests {
 			marks(b"\x1b]133;C;cmdline_url=ls%20-la\x07"),
 			vec![Mark::OutputStart]
 		);
-		// `cl=m` on A is VS Code's hint that the prompt spans several lines. Ignoring it costs
-		// nothing: a prompt jump anchors on this mark's own line, which is the prompt's first line
-		// with or without the hint (§96).
+		// `cl=` on A asks the terminal to "translate clicks in the input area to cursor movement", its
+		// values saying how far that motion may reach — `line` within one input line, `m` between lines
+		// using only left/right, `v` the same with up/down, `w` the same with the application handling
+		// smart vertical movement. Until §164 this file read the `m` as "multi-line" and thought the
+		// field was a hint about the prompt's shape; it is a request to MANUFACTURE INPUT, and its
+		// companion `move-keys=` lets the sender pick the bytes — "the defaults are the standard
+		// arrow-key sequences: CSI D etc.". Refused for `click_events=1`'s reason and more sharply:
+		// that one asks for a click to be reported, this one asks for keystrokes to be invented for it.
 		assert_eq!(marks(b"\x1b]133;A;cl=m\x07"), vec![Mark::PromptStart]);
+		assert_eq!(marks(b"\x1b]133;A;cl=line\x07"), vec![Mark::PromptStart]);
+		assert_eq!(
+			marks(b"\x1b]133;A;cl=w;move-keys=OD,OC\x07"),
+			vec![Mark::PromptStart]
+		);
 	}
 
 	#[test]
