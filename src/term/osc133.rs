@@ -161,10 +161,11 @@ const MAX_PAYLOAD: usize = 512;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mark {
 	/// OSC 133;A — a new prompt is about to be drawn. Its grid line is the anchor a prompt jump
-	/// lands on (§34).
+	/// lands on (§34). Also `133;N` and `133;P` since §164, the proposal's other two prompt starts.
 	PromptStart,
 	/// OSC 133;B — the prompt is written and the user's input starts. Carried for completeness;
-	/// the state model treats the prompt as still active until output begins.
+	/// the state model treats the prompt as still active until output begins. Also `133;I` since
+	/// §164, which ends the prompt the same way and differs only in where the input does.
 	PromptEnd,
 	/// OSC 133;C — the user pressed Enter and the command's output begins: the command is running.
 	OutputStart,

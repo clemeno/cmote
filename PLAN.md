@@ -19117,7 +19117,7 @@ also specifies, so this is one decision applied twice and not a special case mad
 build. `parse`'s letter list is an allow-list, the construction `dsr.rs`, `iterm.rs`, `pointer.rs`
 and `modkeys.rs` are all 🛑 for, and a test now walks the whole alphabet minus the eight.
 
-Prove-it, five, each reverted:
+Prove-it, six, each reverted:
 
 ```
 N dropped from the prompt-start arm        → "the implicitly terminating spelling …" fails
@@ -19128,6 +19128,11 @@ L wired into the prompt-start arm          → "the fresh line letter is refused
 Q admitted to the prompt-start arm         → "133;Q produced a mark, so the letter list has
                                               stopped being an allow-list"
 ```
+
+(Six, and the count said five — §165 found it, along with the fact that the letter the seventh
+prove-it should have covered had no test that could fail. The message quoted on the last line was
+reworded in §165 too, a stray letter proving the list admits something undefined rather than that it
+has stopped being an allow-list.)
 
 The first draft refused `L` **by name**, with an arm of its own so a reader widening the match would
 meet the reason. Clippy's `match_same_arms` rejected it and was right: an arm returning `None` beside
