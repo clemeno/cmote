@@ -70,10 +70,21 @@
 // starting a command — which costs nothing here, because a redraw lands on the line the prompt is
 // already anchored at and `record` drops a repeat of the last line.
 //
-// Only a CONTINUATION is not a prompt start. `k=r` keeps its mark: a right prompt is drawn on the
-// same line as the prompt it decorates, so its anchor is the one already recorded there, and a
-// stream that somehow sent only the right half would still have marked a prompt. `k=c` joins the
-// `k=s` cmote already read, being the proposal's own second spelling of the same kind.
+// **Only the PRIMARY kind opens a prompt.** `k=c` joins the `k=s` cmote already read, being the
+// proposal's own second spelling of the same kind, and `k=r` is suppressed with them.
+//
+// §164 first kept `k=r`, on the reasoning that a right prompt is drawn on the same line as the
+// prompt it decorates, so its anchor is one `record` already holds. That is true only when the
+// decorated prompt was itself MARKED, and the case it misses is the one this file exists to get
+// right: on a CONTINUATION line the `k=s` mark was suppressed, so `record` holds nothing there — and
+// a `k=r` arriving on that line would tick the gutter and, worse, re-seat `pending`, filing the
+// finished command against its last continuation line instead of its prompt. That is §97's harm
+// exactly, let back in through the field beside the one that keeps it out.
+//
+// The asymmetry §97 states — losing an anchor is worse than gaining one — does not rescue it,
+// because that rule is about an UNKNOWN kind, where the only cost of a wrong guess is a spare tick.
+// A `k=r` is known, and gaining its mark costs the pending span as well. What suppressing it can
+// cost is a stream that marks its right prompt and not its left, which is not a shell.
 //
 // `I` is read since §164 as a prompt end, `B`'s sibling: "End of prompt and start of user input,
 // terminated by end-of-line." The two differ only in where the INPUT region ends — at the next `C`
@@ -223,11 +234,12 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 			// only adds one, and between two guesses the recoverable one wins.
 			//
 			// `k=c` is the proposal's own second spelling of the same kind — "prompts for continuation
-			// lines (`k=c` or `k=s`)" — and is suppressed with it since §164. The other two kinds are
-			// prompts and keep their mark: `k=i` is the primary one, and `k=r` is the right-side prompt,
-			// which shares its line with the prompt it decorates and so re-anchors a line `record`
-			// already holds.
-			if fields.any(|field| field == b"k=s" || field == b"k=c") {
+			// lines (`k=c` or `k=s`)" — and `k=r` is the right-side prompt, which decorates a line
+			// another mark is responsible for. Both are suppressed with `k=s`: only the PRIMARY kind
+			// opens a prompt, which is `k=i`, no `k=` at all, or a value from no source. The header
+			// carries why `k=r` cannot be kept — on a continuation line there is no mark for it to be a
+			// repeat OF, and it would re-seat `pending` on the line §97 exists to keep it off.
+			if fields.any(|field| matches!(field, b"k=s" | b"k=c" | b"k=r")) {
 				None
 			} else {
 				Some(Mark::PromptStart)
@@ -863,14 +875,13 @@ mod tests {
 		// actually defined on (§164). A bare one and the primary kind are prompt starts.
 		assert_eq!(marks(b"\x1b]133;P\x07"), vec![Mark::PromptStart]);
 		assert_eq!(marks(b"\x1b]133;P;k=i\x07"), vec![Mark::PromptStart]);
-		// A right-side prompt keeps its mark: it is drawn on the line the prompt it decorates already
-		// anchored, so the anchor is a repeat rather than a new place to jump to.
-		assert_eq!(marks(b"\x1b]133;P;k=r\x07"), vec![Mark::PromptStart]);
 		// Both spellings of the continuation kind are suppressed, on either letter — the field means
 		// the same thing wherever it rides.
 		assert!(marks(b"\x1b]133;P;k=c\x07").is_empty());
 		assert!(marks(b"\x1b]133;P;k=s\x07").is_empty());
 		assert!(marks(b"\x1b]133;A;k=c\x07").is_empty());
+		// And so is the right-side kind, which decorates a line another mark is responsible for.
+		assert!(marks(b"\x1b]133;P;k=r\x07").is_empty());
 		// An unrecognised kind still keeps the mark, which is §97's rule and unchanged: losing a jump
 		// anchor is worse than gaining one, so the recoverable guess wins.
 		assert_eq!(marks(b"\x1b]133;P;k=v\x07"), vec![Mark::PromptStart]);
@@ -885,6 +896,38 @@ mod tests {
 		let with_i = b"\x1b]133;A\x07$ \x1b]133;I\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
 		let with_b = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
 		assert_eq!(marks(with_i), marks(with_b));
+	}
+
+	#[test]
+	fn a_right_prompt_on_a_continuation_line_does_not_refile_the_command() {
+		// The case that made §164's first reading of `k=r` wrong. A right prompt decorates a line some
+		// other mark is responsible for — and on a CONTINUATION line that other mark was suppressed, so
+		// there is nothing for this one to be a repeat of. Marking it would tick the gutter and re-seat
+		// `pending`, filing the finished command against its last continuation line instead of its
+		// prompt, which is the harm §97 suppresses `k=s` to prevent.
+		let stream = b"\x1b]133;A\x07$ \x1b]133;B\x07for i in 1 2\r\n\
+			\x1b]133;A;k=s\x07> \x1b]133;P;k=r\x07 [rps2]\r\n\
+			\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		// The continuation line contributes nothing at all — neither its own mark nor its right half.
+		assert_eq!(
+			marks(stream),
+			vec![
+				Mark::PromptStart,
+				Mark::PromptEnd,
+				Mark::OutputStart,
+				Mark::CommandEnd(Some(0)),
+			]
+		);
+		// And the model agrees: one tick, on the prompt's line, with the command filed against it.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		for (_, mark) in prompts.feed(b"\x1b]133;A;k=s\x07\x1b]133;P;k=r\x07") {
+			prompts.apply(mark, 0, 1);
+		}
+		prompts.apply(Mark::OutputStart, 0, 2);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 4);
+		assert_eq!(prompts.visible_rows(0, 0, 24), vec![0]);
+		assert_eq!(prompts.output_at_prompt(0), Some((2, 4)));
 	}
 
 	#[test]
