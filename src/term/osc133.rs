@@ -50,7 +50,21 @@
 // `A` here, and the ARM says so rather than the model growing a variant that would behave
 // identically (§71's rule about one answer, one mechanism).
 //
-// `P`, `I` and `L` have their own rows in the matrix (§164).
+// `P` is read since §164 too, and it is the letter the `k=` field really belongs to. The proposal:
+// "Explicit start of prompt. Optional after an `A` or `N` command. The `k` (kind) option specifies
+// the type of prompt: regular primary prompt (`k=i` or default), right-side prompts (`k=r`), or
+// prompts for continuation lines (`k=c` or `k=s`)." So the three reports that looked like a
+// disagreement are one rule: `133;P;k=i` for PS1 and `133;P;k=s` for PS2 is the taxonomy applied,
+// and a fork using bare `133;P` for a REDRAW is using the one letter that starts a prompt without
+// starting a command — which costs nothing here, because a redraw lands on the line the prompt is
+// already anchored at and `record` drops a repeat of the last line.
+//
+// Only a CONTINUATION is not a prompt start. `k=r` keeps its mark: a right prompt is drawn on the
+// same line as the prompt it decorates, so its anchor is the one already recorded there, and a
+// stream that somehow sent only the right half would still have marked a prompt. `k=c` joins the
+// `k=s` cmote already read, being the proposal's own second spelling of the same kind.
+//
+// `I` and `L` have their own rows in the matrix (§164).
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
@@ -145,12 +159,12 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 	// The phase letter is the whole next field; a stray longer field (`133;AA`) is not a mark we
 	// know, so it must not be mistaken for `A`.
 	match fields.next() {
-		// `N` shares this arm rather than getting one of its own (§164): the proposal defines it as `A`
-		// plus an implicit termination of the previous command, and `apply` already terminates
-		// unconditionally because cmote holds no `aid` to match against. Sharing the arm also gives `N`
-		// the `k=` reading below, which is right — a letter that is "same as A" cannot read its own
-		// fields differently.
-		Some(b"A" | b"N") => {
+		// `N` and `P` share this arm rather than getting one each (§164). `N` is the proposal's `A` plus
+		// an implicit termination of the previous command, and `apply` already terminates
+		// unconditionally because cmote holds no `aid` to match against. `P` is its "explicit start of
+		// prompt", which is what this arm records. Sharing gives both the `k=` reading below, which is
+		// where that field is actually defined — the proposal puts `k` on `P`, and kitty puts it on `A`.
+		Some(b"A" | b"N" | b"P") => {
 			// `k=s` marks a SECONDARY prompt — zsh's PS2, the one drawn for each continuation line
 			// of a command still being typed (kitty's shell integration prepends this exact mark to
 			// PS2; PS1 carries no `k=` at all). It is the one trailing field cmote cannot afford to
@@ -166,7 +180,13 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 			// Matched on the exact value. An unknown `k=` keeps the old behaviour deliberately —
 			// mistaking a real prompt for a continuation would LOSE a jump anchor, where the reverse
 			// only adds one, and between two guesses the recoverable one wins.
-			if fields.any(|field| field == b"k=s") {
+			//
+			// `k=c` is the proposal's own second spelling of the same kind — "prompts for continuation
+			// lines (`k=c` or `k=s`)" — and is suppressed with it since §164. The other two kinds are
+			// prompts and keep their mark: `k=i` is the primary one, and `k=r` is the right-side prompt,
+			// which shares its line with the prompt it decorates and so re-anchors a line `record`
+			// already holds.
+			if fields.any(|field| field == b"k=s" || field == b"k=c") {
 				None
 			} else {
 				Some(Mark::PromptStart)
@@ -737,9 +757,42 @@ mod tests {
 		// A letter the proposal does not define produces nothing rather than being guessed into the
 		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output, where
 		// no mark just leaves both as they were (§96, §164).
-		assert!(marks(b"\x1b]133;P;k=v\x07").is_empty());
 		assert!(marks(b"\x1b]133;L\x07").is_empty());
 		assert!(marks(b"\x1b]133;Z\x07").is_empty());
+	}
+
+	#[test]
+	fn the_explicit_prompt_start_reads_its_kind_and_only_a_continuation_loses_its_mark() {
+		// `P` is the proposal's "explicit start of prompt", and the letter its `k` (kind) option is
+		// actually defined on (§164). A bare one and the primary kind are prompt starts.
+		assert_eq!(marks(b"\x1b]133;P\x07"), vec![Mark::PromptStart]);
+		assert_eq!(marks(b"\x1b]133;P;k=i\x07"), vec![Mark::PromptStart]);
+		// A right-side prompt keeps its mark: it is drawn on the line the prompt it decorates already
+		// anchored, so the anchor is a repeat rather than a new place to jump to.
+		assert_eq!(marks(b"\x1b]133;P;k=r\x07"), vec![Mark::PromptStart]);
+		// Both spellings of the continuation kind are suppressed, on either letter — the field means
+		// the same thing wherever it rides.
+		assert!(marks(b"\x1b]133;P;k=c\x07").is_empty());
+		assert!(marks(b"\x1b]133;P;k=s\x07").is_empty());
+		assert!(marks(b"\x1b]133;A;k=c\x07").is_empty());
+		// An unrecognised kind still keeps the mark, which is §97's rule and unchanged: losing a jump
+		// anchor is worse than gaining one, so the recoverable guess wins.
+		assert_eq!(marks(b"\x1b]133;P;k=v\x07"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn a_redrawn_prompt_spelled_as_an_explicit_start_does_not_open_a_second_block() {
+		// The Ghostty fork's use of `133;P` — a prompt REDRAW that must not open a new block — is the
+		// report that made this letter look like it contradicted the others (§164). It costs nothing
+		// here: a redraw lands on the line the prompt is already anchored at, so `record` drops it as a
+		// repeat and the command filed afterwards still runs from the original prompt line.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 2);
+		prompts.apply(Mark::PromptStart, 0, 2);
+		assert_eq!(prompts.visible_rows(0, 0, 24), vec![2]);
+		prompts.apply(Mark::OutputStart, 0, 3);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 5);
+		assert_eq!(prompts.output_at_prompt(2), Some((3, 5)));
 	}
 
 	#[test]
