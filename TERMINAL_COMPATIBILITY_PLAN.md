@@ -2010,6 +2010,27 @@ written by cmote's own code), while charset designation, the XTMODKEYS query's o
 stated in one line: a second half left inside a note is a decision nobody has had to make, and this
 document's entire audit history is what happens when those pile up.
 
+**§161 swept one table's ❌ column and found the four rows were four different things.** The DECSET
+list carried four unsupported modes and the sweep asked one question of each — can this be built, or
+is the mark a decision? **Two were built.** 1015 wanted a source xterm does not carry, the mode
+belonging to another terminal, so the definition is `urxvt(7)`'s and that page's worked example is the
+test's expected bytes. 1045 wanted a source §149 had looked for and not found — and *why* it was not
+found is worth more than the mode: §149 read the specifications, and this mode is defined only by
+xterm's change log and its `cursor.c`. **Two did not move, and neither is an omission.** 2027 is a
+missing engine method (§151), so ✅ would be a lie and 🛑 would claim a refusal no code here performs;
+2031 is the one row in this document where shipping the mode would leave a program measurably WORSE
+off, because DECRQM's honest `0` is what keeps it polling a question cmote answers (§148). So the
+column halved without a single mark changing meaning, and what the two that shipped have in common is
+that **the work was never the code — it was finding the sentence**. Note what the sweep did NOT
+produce: no 🛑. An unsupported column is exactly where the temptation to write one is strongest, and
+writing it on either row that stayed would be §79's failure again, a mark claiming somebody declined
+where nobody looked. **The sweep also corrected a shipped row**: the same `cursor.c` shows mode 45
+masked with `WRAPAROUND`, so both reverse wraps are now coupled to DECAWM where §149 had them free on
+a report rather than a reading. One divergence was found and deliberately left — xterm's 45 requires
+the line above to be a *wrapped* line and cmote's does not — because closing it changes what a shipped
+mode does, which is a decision for a section about mode 45 and not a by-product of a sweep. It is
+named in that row rather than kept here.
+
 ---
 
 ## Evidence

@@ -18599,3 +18599,180 @@ decided, and the only rule this section had to write down is *when to ask*.
 opened, not before, so every way it can go wrong — refused, malformed, never answered — lands on the
 session cmote shipped yesterday. A feature that degrades to the status quo needs no timeout, no
 retry and no error path in the GUI.
+
+
+## §161 — Four unsupported modes, four different answers
+
+A sweep with one instruction: take the DECSET / DECRST table's ❌ column, and for each row either
+build it or refuse it. Four rows. **Two were built, two were argued and left**, and the reason the
+count came out that way is the finding — the four looked alike in the column and were not alike at
+all underneath it.
+
+### What the column held
+
+> | 1045 (XTREVWRAP2) | Extended reverse wrap | ❌ |
+> | 1015 | urxvt mouse | ❌ |
+> | 2027 | Grapheme clustering | ❌ |
+> | 2031 | Colour-scheme reporting | ❌ |
+
+### 1015 — the definition was in another terminal's manual
+
+urxvt's mouse encoding: the classic three fields written as decimal parameters rather than as bytes,
+so the 223 coordinate ceiling is lifted. §150 found the row while reading the DECSET list whole and
+did not build it.
+
+xterm's ctlseqs gives it five words — *"Enable urxvt Mouse Mode"* — and the Mouse Tracking section
+that would say more is past the truncation §150 recorded, in both builds; XFree86's untruncated copy
+predates the mode. So the definition was read where the mode lives, `urxvt(7)`:
+
+> "If mode 1015 is active, urxvt sends the sequence `ESC [ <b>;<x>;<y> M` where the parameters are
+> provided as decimal numbers instead of octets and only `b` includes an offset of 32."
+>
+> "Shift-Button-1 press at top row, column 80.  `ESC [ 36 ; 80 ; 1 M`"
+
+**The worked example is what makes the sentence checkable**, and it is the test's expected bytes:
+shift (4) on button 1 (0) is 4, and 36 is that plus the 32 the classic form biases its byte by. So
+`b` is the classic button byte's value in decimal, and the coordinates carry no bias at all.
+
+Two consequences follow, both the classic form's rather than SGR's: the final byte is always `M`, so
+a release cannot name its button and says 3 as the one-byte form does; and there is no ceiling on the
+coordinates, which is the whole reason the mode exists.
+
+**The rung is the middle one**, by the rule the other three were placed by. SGR can say which button
+a release belongs to and this cannot, so 1006 outranks it; it writes decimal parameters with no
+ceiling of any kind, so it outranks the two byte-counting forms. xterm holds one `extend_coords`
+variable and would let the last mode set win; cmote resolves by rung, which is §150's stated
+divergence reached in one more spelling rather than a new one.
+
+Four lines in `term/decmodes.rs` and nothing at all in the gate — the second time that table has been
+tested by being added to.
+
+### 1045 — the source existed, in a kind of document this document had not read
+
+§149 left this one with an argument attached: *"it is defined as widening behaviour that no source
+read for §149 states, so there is nothing to widen it from."*
+
+Two sources state it. xterm's change log carries both halves as **adjacent bullets of one patch**,
+#380 (2023/05/09):
+
+> "disallow wrapping before the beginning of the screen, to the end of the screen, for cursor-back
+> sequences"
+>
+> "add private mode 1045 which imitates the original xterm cursor-back reverse wrapping mode 45"
+
+So 1045 is exactly the stop that patch added, lifted. `cursor.c`'s own comment says it from the other
+side: *"That was revised in 2023, using private mode 45 for movement within the current (wrapped)
+line, and 1045 for movement to 'any' line."*
+
+**Why §149 could not find it is worth more than the mode is.** §149 read the *specifications*, and
+ctlseqs gives this mode a line. It is defined by an implementation and by the log of the change that
+introduced it — a kind of source this document had not gone to before, and a weaker one, since what
+it states is what xterm DOES rather than what a terminal must do. The Evidence entry says that in
+those words rather than filing it beside a grammar.
+
+The code answers what the prose leaves open:
+
+```c
+int rev  = (((xw->flags & WRAP_MASK)  == WRAP_MASK)  != 0);   /* REVERSEWRAP  | WRAPAROUND */
+int rev2 = (((xw->flags & WRAP_MASK2) == WRAP_MASK2) != 0);   /* REVERSEWRAP2 | WRAPAROUND */
+...
+if (col < left) {
+    if (rev2) { col = right; if (row == top) row = bottom + 1; }
+    else if (!rev) { col = left; break; }
+    ld = NULL; --row;
+}
+```
+
+* **1045 does not need 45.** `rev2` is tested on its own and `else if (!rev)` is what stops the wrap,
+  so either mode alone enables it. The name says "extended"; the code says "second".
+* **It wraps to the bottom ROW**, `row = bottom + 1` then `--row`.
+* **Both are masked with `WRAPAROUND`** before they are read.
+
+### The correction that came with it
+
+That last one is about mode **45**, which is a ✅ row. §149 had it uncoupled from DECAWM on a report
+that xterm fixes a `need_wrap` corner when both are on; the code shows the coupling is not a corner
+fix but the whole enabling test. One line, and nothing changes for an ordinary session — DECAWM is on
+at power-up, and a program that turns it off gets no reverse wrap from xterm either.
+
+**One divergence was found and deliberately left.** xterm's 45 requires the line above to be a
+*wrapped* line (`!rev2 && !LineTstWrapped(ld)`) and cmote's does not, so cmote's 45 reaches as far as
+1045 does on every row but the first. Closing it changes what a shipped mode does, which is a decision
+for a section about mode 45 rather than a by-product of sweeping the unsupported column — and the
+engine's `Flags::WRAPLINE` is readable from the gate, so it is a decision and not a blocker. The row
+names it. §149's other divergence, CUB not wrapping, stands unchanged for its own reasons.
+
+**The row it wraps round TO is the page's last, not the scrolling region's bottom.** cmote's backspace
+does not consult the region at either end (§149); answering one edge from the region while the other
+comes from the page would be a rule nothing states.
+
+### 2027 — a missing method, and the mark is the honest one
+
+§151 measured this row rather than assuming it, so the sweep had nothing to re-derive. What it added
+is that **neither answer the sweep was offered is available**. 🛑 would claim cmote's code performs
+the refusal, and nothing here refuses grapheme clustering — the mode reaches `set_private_mode` as
+`Unknown(2027)` and is dropped, which is what happens to every mode nothing implements. ✅ would claim
+a cluster occupies one cell, and the measurement says otherwise: `Term::input` decides width per
+CHARACTER and appends only zero-width followers to the cell before them, so the family emoji is three
+wide cells across six columns, and a test records those six columns.
+
+The missing piece is a METHOD and not a bit — having recognised a cluster, there is no engine call
+that appends a WIDE character to the preceding cell. So ❌ is right: a gap that could still land, on
+somebody else's release.
+
+### 2031 — the one row where building it would be worse than not
+
+Possible, and wrong. Mode 2031 is a bit like every other bit in `term/decmodes.rs`; holding it would
+be one line and would bring a DECRQM answer, an XTSAVE slot and a place in the RIS with it.
+
+It would be a promise with nothing behind it (§6): `palette.rs` is a const table, and there is no
+event that could ever fire the notification the mode turns on. And the difference between that and an
+ordinary unimplemented mode is the whole of the row. **DECRQM answers `0` today** — not recognised,
+which is true — and a program told `0` polls `CSI ? 996 n` instead, which cmote answers. A program
+told `2` would set the mode, stop polling, and wait for ever. The gap leaves a working path open; the
+implementation would close it.
+
+### What is refused
+
+Nothing new is refused, and that is itself a result: a sweep of an unsupported column produced **no
+🛑**. The mark means cmote's code performs a refusal, and neither row that stayed has any code
+refusing it — writing 🛑 on either would be the exact failure §79 recorded, a mark claiming somebody
+declined when nobody looked.
+
+Prove-it, five, each breaking its own line:
+
+* the wrap-round arm disabled → *"round to the last row"* fails, `left: (0, 0)`
+* 1045 made to require 45 → *"needs no help from mode 45"* fails, `left: (1, 0)`
+* the DECAWM term dropped → *"autowrap is off, so nothing backed up a line"* fails, `left: (0, 4)`
+* the `+32` dropped from urxvt's button → the manual page's own example fails, `left: ESC [ 4 ; 80 ; 1 M`
+* the urxvt rung moved below 1005 → *"above the UTF-8 widening"* fails, `left: Utf8`
+
+The five older reverse-wrap tests stay green through the first three, which is what says the DECAWM
+correction did not widen anything.
+
+### What moved with it
+
+Three comments that counted the modes in `term/decmodes.rs` had gone stale at §150 and would have gone
+stale again here; `savemodes.rs`'s "fifteen today" had gone stale four times. None of them states a
+number now — the table is the count, which is §151's lesson applied to the one file that had not
+learned it.
+
+### What to keep
+
+**A row can be unsupported for four different reasons, and the column cannot say which.** These four
+sat under one mark: one wanted a source that existed, one wanted a source in a kind of document
+nobody had thought to read, one is blocked upstream, and one is better left unbuilt. The mark is
+honest for all four and useful for none of them; what makes the difference is the note, and two of
+these notes were arguments already written by §148 and §151. **The sweep's whole value was asking
+four times and getting four answers.**
+
+**"No source states it" is a claim about where you looked.** §149 was right that ctlseqs does not
+define 1045 and right to refuse to guess. What it had not done was look outside the specifications —
+and the change log entry that settles the mode is one line, in a document that has been public since
+2023. The lesson is not "read more"; it is that *no source says* should always name the sources
+consulted, so the next reader can see the shape of the hole.
+
+**Building a mode can make a program worse off.** 2031 is the counter-example to this document's
+usual arithmetic, where ✅ is better than ❌ and the only question is price. A terminal that claims a
+notification it can never send does not degrade to silence — it stops the program polling a question
+that has a real answer. Worth keeping in view the next time a mode looks like one line.
