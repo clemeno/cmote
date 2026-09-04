@@ -498,14 +498,38 @@ impl Files {
 	/// The selected entries in GRID order, with their paths (§21). Order matters to every
 	/// batch action — a list of copied names coming out in hash order would be nonsense —
 	/// and the rows are the only place that order exists.
+	///
+	/// Each path is built into ONE reused buffer rather than freshly allocated per row (§166), and
+	/// only a hit is cloned — so a lone selection in a crowded folder no longer allocates a string
+	/// for every entry it passes over.
+	///
+	/// `ponytail:` the walk itself is still one hash lookup per entry, which is what asking "which
+	/// of these are selected" costs when the selection is a set of paths and the rows are names.
+	/// That much is honest work. What is NOT is the details popup calling this to print three
+	/// numbers: after a Select All in a folder of 237,173 it materialises the whole selection as
+	/// owned paths on every frame, measured at 102 ms — the one path §166 left over. Fix it by
+	/// asking a cheaper question (how many, how many folders, how many bytes) rather than by
+	/// indexing the selection.
 	pub fn selected_rows(&self, show_hidden: bool) -> Vec<(String, &Entry)> {
 		let Some(directory) = self.path.as_deref() else {
 			return Vec::new();
 		};
+		let mut path = String::new();
 		self.rows(show_hidden)
 			.into_iter()
-			.map(|entry| (crate::explorer::join(directory, &entry.name), entry))
-			.filter(|(path, _)| self.selected.contains(path))
+			.filter_map(|entry| {
+				path.clear();
+				path.push_str(directory);
+				// `explorer::join`'s rule, spelled out because this builds in place rather than
+				// returning: the root already ends in its slash and must not gain a second.
+				if !directory.ends_with('/') {
+					path.push('/');
+				}
+				path.push_str(&entry.name);
+				self.selected
+					.contains(path.as_str())
+					.then(|| (path.clone(), entry))
+			})
 			.collect()
 	}
 
@@ -517,12 +541,36 @@ impl Files {
 		self.index_of(show_hidden, self.cursor.as_deref()?)
 	}
 
+	/// The same, against rows the caller already has (§166).
+	///
+	/// The view builds the rows once per frame and then needs this number as well; asking for it by
+	/// `show_hidden` would build them a second time, which is 3 ms of pointer-copying in a folder of
+	/// 237,173 for an answer it is holding. The split of concerns is unchanged — taking the cursor's
+	/// path apart is still the model's job, and it is the same `name_in` both spellings use.
+	pub fn selected_index_in(&self, rows: &[&Entry]) -> Option<usize> {
+		let name = self.name_in(self.cursor.as_deref()?)?;
+		rows.iter().position(|entry| entry.name == name)
+	}
+
 	/// Where a path sits among the rows on show, if it is among them at all.
 	fn index_of(&self, show_hidden: bool, path: &str) -> Option<usize> {
-		let directory = self.path.as_deref()?;
+		let name = self.name_in(path)?;
 		self.rows(show_hidden)
 			.iter()
-			.position(|entry| crate::explorer::join(directory, &entry.name) == path)
+			.position(|entry| entry.name == name)
+	}
+
+	/// The name `path` has inside the directory on show, or `None` when it is not in it (§166).
+	///
+	/// This is `explorer::join` run BACKWARDS, and running it that way round is the whole point: the
+	/// path is taken apart once instead of every row's being put together. Joining per row is the
+	/// same comparison, but it allocates a string for every entry in the directory — and the details
+	/// popup asks this question on every frame, which measured at 38 ms in a folder of 237,173.
+	fn name_in<'a>(&self, path: &'a str) -> Option<&'a str> {
+		let rest = path.strip_prefix(self.path.as_deref()?)?;
+		// The root already ends in its slash, so `join` adds none there and there is none to strip.
+		// A name can never contain one, so at most one is ever taken off.
+		Some(rest.strip_prefix('/').unwrap_or(rest))
 	}
 
 	/// Move the cursor `delta` rows through the grid (§20): ±1 for Tab and the left/right
@@ -1769,6 +1817,31 @@ mod tests {
 		empty.jump_to_edge(true, false, false);
 		empty.jump_to_edge(true, true, false);
 		assert_eq!(empty.cursor(), None);
+	}
+
+	#[test]
+	fn a_selection_at_the_root_is_found_without_doubling_its_slash() {
+		// `selected_rows` builds each path into one reused buffer rather than allocating per row
+		// (§166), which means it spells `explorer::join`'s rule out itself — and the root is the
+		// one directory that rule is about. A doubled slash makes `//a` and every lookup misses,
+		// which reads on screen as a selection the popup and the menu cannot see.
+		let mut files = Files::default();
+		let request = files.show("/").expect("a new directory needs listing");
+		files.chunk(
+			request,
+			vec![entry("a", FilesKind::File), entry("b", FilesKind::File)],
+			true,
+		);
+		files.select("/a");
+		files.extend_selection(true, "/b");
+		let chosen: Vec<String> = files
+			.selected_rows(true)
+			.into_iter()
+			.map(|(path, _)| path)
+			.collect();
+		assert_eq!(chosen, ["/a", "/b"]);
+		// And the same rule read backwards, which is what places the details popup.
+		assert_eq!(files.selected_index(true), Some(1));
 	}
 
 	#[test]

@@ -190,9 +190,14 @@ pub fn pane(
 	focused: bool,
 	drop_target: bool,
 ) -> Element<'_, Message> {
+	// Built ONCE and handed to both the grid and the popup (§166). It is only a vector of
+	// pointers, but in a folder of 237,173 it is 3 ms of them, and this used to be asked for three
+	// times a frame — once by the grid and twice by the popup.
+	let entries = files.rows(show_hidden);
+
 	let mut content = column![
 		header(files, show_hidden, width),
-		entry_grid(files, show_hidden)
+		entry_grid(files, &entries, width)
 	]
 	.spacing(0);
 	if let Some(notice) = files.notice() {
@@ -210,7 +215,7 @@ pub fn pane(
 	if let Some(band) = files.band() {
 		layers.push(band_layer(band.rect(), files, width));
 	}
-	if let Some(popup) = details(files, show_hidden, width) {
+	if let Some(popup) = details(files, &entries, show_hidden, width) {
 		layers.push(popup);
 	}
 
@@ -541,43 +546,104 @@ fn copy_details_button(description: String) -> Element<'static, Message> {
 	.into()
 }
 
-/// The scrollable icon grid. `Row::wrap` flows the cells and breaks the line whenever
-/// the next one would not fit, so the column count follows the window's width without
-/// this view ever being told what that width is.
-fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
+/// How many grid rows are built beyond the viewport, above and below (§166). A scroll offset
+/// reaches this view one message late, so a row of slack on each side is what keeps a fast drag
+/// from showing a band of empty pane for a frame. Two rather than one because a wheel notch moves
+/// further than a row.
+const OVERSCAN: usize = 2;
+
+/// The scrollable icon grid — only the rows the viewport can see (§166).
+///
+/// This used to be one `Row::wrap` over every entry, which let the layout find the column count on
+/// its own. That was fine until it was not: a folder of 237,173 entries built about 1.9 million
+/// widgets on EVERY frame, which measured at 710 ms per build in release — the pane took the best
+/// part of a second to appear and the window was unusable afterwards, because the whole tree was
+/// rebuilt for each redraw. Only about sixty of those cells are ever on screen.
+///
+/// So the rows are laid out explicitly instead: a spacer for everything scrolled off the top, the
+/// visible rows, a spacer for the rest. The spacers keep the scrollable's extent — and therefore the
+/// scrollbar and `row_top` — exactly what they were when every cell was built.
+///
+/// Making the wrap explicit costs this view the one thing it used to get for free (the column count
+/// follows the window without being told), and pays for it twice over: `columns(width)` was ALREADY
+/// the answer every other part of the pane worked from — `band_hits`, the popup's placement, the
+/// arrow keys — so the layout and the arithmetic can no longer disagree about where a cell is.
+fn entry_grid<'a>(files: &'a Files, entries: &[&Entry], width: f32) -> Element<'a, Message> {
 	let directory = files.path().unwrap_or(explorer::ROOT);
 	let editing = files.editing();
 
-	let cells = files
-		.rows(show_hidden)
-		.into_iter()
-		.map(|entry| cell(entry, directory, files, editing));
+	let columns = columns(width);
+	let total_rows = entries.len().div_ceil(columns);
+	let pitch = CELL_HEIGHT + CELL_SPACING;
+	let built = visible_rows(files.scroll(), grid_height(files), total_rows);
 
-	let bar = scrollable(
-		container(
-			row(cells)
-				.spacing(CELL_SPACING)
-				.width(Length::Fill)
-				.wrap()
-				.vertical_spacing(CELL_SPACING),
-		)
-		.padding(CELL_SPACING),
-	)
-	.id(GRID_ID)
-	// Reported so the popup can be placed against a scrolled grid, and so keyboard
-	// navigation knows what is already on screen before it scrolls (§20).
-	.on_scroll(|viewport| Message::Files(FilesMessage::Scrolled(viewport.absolute_offset().y)))
-	// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
-	.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
-	.style(crate::ui::scrollbar::style)
-	.width(Length::Fill)
-	.height(Length::Fill);
+	let mut stripes: Vec<Element<'_, Message>> = Vec::new();
+	if built.start > 0 {
+		stripes.push(spacer(super::pixels(built.start, pitch)));
+	}
+	for index in built.clone() {
+		let band = &entries[index * columns..((index + 1) * columns).min(entries.len())];
+		let cells = band
+			.iter()
+			.map(|entry| cell(entry, directory, files, editing));
+		// Each stripe is a whole pitch tall with its cells at the top, so the gap below a row is
+		// part of the row rather than a spacing the two spacers would have to account for.
+		stripes.push(
+			container(row(cells).spacing(CELL_SPACING))
+				.height(Length::Fixed(pitch))
+				.align_y(Vertical::Top)
+				.into(),
+		);
+	}
+	if built.end < total_rows {
+		stripes.push(spacer(super::pixels(total_rows - built.end, pitch)));
+	}
+
+	let bar = scrollable(container(column(stripes).spacing(0)).padding(CELL_SPACING))
+		.id(GRID_ID)
+		// Reported so the popup can be placed against a scrolled grid, and so keyboard
+		// navigation knows what is already on screen before it scrolls (§20).
+		.on_scroll(|viewport| Message::Files(FilesMessage::Scrolled(viewport.absolute_offset().y)))
+		// The terminal's own bar, not iced's default (§118) — one scrollbar look per window.
+		.direction(scrollable::Direction::Vertical(crate::ui::scrollbar::bar()))
+		.style(crate::ui::scrollbar::style)
+		.width(Length::Fill)
+		.height(Length::Fill);
 	// And the terminal's own hand over it (§120) — the cursor half of one shared component.
 	crate::ui::scrollbar::grabbable(
 		bar,
 		crate::ui::scrollbar::Axes::VERTICAL,
 		crate::cursor::SCROLLBAR_FILES,
 	)
+}
+
+/// Which grid rows the viewport covers, plus `OVERSCAN` rows of slack at each end (§166) — the
+/// half-open range `entry_grid` actually builds.
+///
+/// It is `row_top` run backwards, which is why the padding comes off `scroll` first: a row's top is
+/// `CELL_SPACING + row × pitch`, so subtracting the padding turns a pixel offset back into a row
+/// count. The bottom edge uses `cells_covering` rather than `cells`, because a row half over the
+/// edge is still a row the user can see; the top uses `cells`, because the row the offset lands
+/// INSIDE is the first one showing.
+///
+/// Both ends are clamped to `total_rows`, so a scroll offset left over from a longer listing asks
+/// for no rows rather than for rows that are not there.
+fn visible_rows(scroll: f32, height: f32, total_rows: usize) -> std::ops::Range<usize> {
+	let pitch = CELL_HEIGHT + CELL_SPACING;
+	let top = scroll - CELL_SPACING;
+	let first = super::cells(top, pitch)
+		.saturating_sub(OVERSCAN)
+		.min(total_rows);
+	let last = (super::cells_covering(top + height, pitch) + OVERSCAN).clamp(first, total_rows);
+	first..last
+}
+
+/// A blank stripe standing in for the grid rows that are not built (§166). It holds the
+/// scrollable's extent open, so the scrollbar's size and travel are the same as they would be if
+/// every cell existed — which is what lets the grid be virtual without the rest of the pane
+/// knowing it is.
+fn spacer<'a>(height: f32) -> Element<'a, Message> {
+	container(text("")).height(Length::Fixed(height)).into()
 }
 
 /// The details popup for the selection (§20): for one entry, its full name, where it points
@@ -591,10 +657,14 @@ fn entry_grid(files: &Files, show_hidden: bool) -> Element<'_, Message> {
 /// position is computed from the same geometry the grid is laid out with — the index, the
 /// column count and the scroll offset — and flipped to the cell's left when the card would
 /// hang off the right edge.
-fn details(files: &Files, show_hidden: bool, width: f32) -> Option<Element<'_, Message>> {
-	let index = files.selected_index(show_hidden)?;
-	let rows = files.rows(show_hidden);
-	let entry = *rows.get(index)?;
+fn details<'a>(
+	files: &'a Files,
+	entries: &[&Entry],
+	show_hidden: bool,
+	width: f32,
+) -> Option<Element<'a, Message>> {
+	let index = files.selected_index_in(entries)?;
+	let entry = *entries.get(index)?;
 
 	let lines = if files.selected_count() > 1 {
 		summary(files, show_hidden)
@@ -1293,6 +1363,50 @@ mod tests {
 		// In the gap between two rows: touching nothing selects nothing.
 		let gap = HEADER_HEIGHT + row_top(1) - CELL_SPACING / 2.0;
 		assert!(band_hits(band(0.0, gap, 1000.0, 0.0), columns, count, 0.0).is_empty());
+	}
+
+	#[test]
+	fn only_the_rows_on_screen_are_built_however_many_there_are() {
+		// A viewport five rows tall over a grid of a thousand: the window is a handful of rows and
+		// a little slack, never the thousand. This is the whole of §166 — a folder of 237,173
+		// entries built about 1.9 million widgets a frame, 710 ms of them, for the sixty cells
+		// anyone can see.
+		let height = 5.0 * (CELL_HEIGHT + CELL_SPACING);
+		let built = visible_rows(0.0, height, 1000);
+		assert_eq!(built.start, 0, "the top of an unscrolled grid is row zero");
+		assert_eq!(
+			built.end,
+			5 + OVERSCAN,
+			"five rows fit, and the slack is the only thing beyond them"
+		);
+
+		// Scrolled a long way down, the window MOVES with the offset instead of growing with the
+		// grid: a thousand-row folder costs the same handful of rows as a ten-row one. It is two
+		// rows wider than the unscrolled one only because row zero has no slack above it to take.
+		let scrolled = visible_rows(super::row_top(400), height, 1000);
+		assert_eq!(scrolled.start, 400 - OVERSCAN);
+		assert_eq!(scrolled.len(), 5 + 2 * OVERSCAN);
+		assert_eq!(built.len(), 5 + OVERSCAN);
+	}
+
+	#[test]
+	fn a_row_half_over_an_edge_is_still_built() {
+		// The bottom edge rounds UP: a viewport that ends in the middle of a row must still build
+		// that row, or the grid would show a strip of empty pane at the point the eye is drawn to.
+		// `cells` instead of `cells_covering` here is the mistake this pins.
+		let height = 4.5 * (CELL_HEIGHT + CELL_SPACING);
+		let built = visible_rows(0.0, height, 1000);
+		assert_eq!(built.end, 5 + OVERSCAN, "the half row at the bottom is in");
+	}
+
+	#[test]
+	fn a_scroll_left_over_from_a_longer_listing_asks_for_no_rows() {
+		// Leaving a huge directory for a small one can leave the offset pointing past the end for
+		// the frame before the scrollable resets. Both ends clamp, so the grid comes out empty
+		// rather than slicing entries that are not there.
+		let built = visible_rows(super::row_top(4000), 600.0, 3);
+		assert!(built.is_empty(), "nothing to build: {built:?}");
+		assert_eq!(built.start, 3, "and the spacer above it is the whole grid");
 	}
 
 	#[test]
