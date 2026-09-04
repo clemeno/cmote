@@ -832,7 +832,10 @@ mod tests {
 		// specified letters have their own tests above — including `L`, which is specified and refused;
 		// what is walked here is the rest of the alphabet, none of which any source gives a meaning.
 		// A letter nobody defines cannot be a gap: there is nothing to build, and what cmote does when
-		// one arrives is decide.
+		// one arrives is decide. It yields no mark rather than being guessed into the nearest phase —
+		// a wrong mark would move a prompt jump or mis-bound a command's output, where no mark leaves
+		// both as they were (§96). This absorbed a separate `133;Z` test §165 found it had made
+		// redundant.
 		for letter in b'A'..=b'Z' {
 			if SPECIFIED_LETTERS.contains(&letter) {
 				continue;
@@ -841,18 +844,10 @@ mod tests {
 			let stream = [b"\x1b]133;".as_slice(), &[letter], b"\x07"].concat();
 			assert!(
 				marks(&stream).is_empty(),
-				"133;{name} produced a mark, so the letter list has stopped being an allow-list — \
+				"133;{name} produced a mark, so the letter list now admits one no source defines — \
 				 see PLAN §164"
 			);
 		}
-	}
-
-	#[test]
-	fn an_unrecognised_phase_letter_yields_no_mark() {
-		// A letter the proposal does not define produces nothing rather than being guessed into the
-		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output, where
-		// no mark just leaves both as they were (§96, §164).
-		assert!(marks(b"\x1b]133;Z\x07").is_empty());
 	}
 
 	#[test]
@@ -936,9 +931,20 @@ mod tests {
 		// report that made this letter look like it contradicted the others (§164). It costs nothing
 		// here: a redraw lands on the line the prompt is already anchored at, so `record` drops it as a
 		// repeat and the command filed afterwards still runs from the original prompt line.
+		//
+		// Driven through the SCANNER rather than by handing `apply` a mark, which is what §165's review
+		// caught: the first draft called `apply(Mark::PromptStart, ..)` twice and passed with `P`
+		// deleted from the match arm, so it reported this letter as covered while testing nothing about
+		// it. The `feed` below is the line being broken (§106, §107).
 		let mut prompts = Prompts::default();
-		prompts.apply(Mark::PromptStart, 0, 2);
-		prompts.apply(Mark::PromptStart, 0, 2);
+		for (_, mark) in prompts.feed(b"\x1b]133;A\x07$ ") {
+			prompts.apply(mark, 0, 2);
+		}
+		let redraw = prompts.feed(b"\x1b]133;P\x07$ ");
+		assert_eq!(redraw.len(), 1, "the redraw was not read as a mark at all");
+		for (_, mark) in redraw {
+			prompts.apply(mark, 0, 2);
+		}
 		assert_eq!(prompts.visible_rows(0, 0, 24), vec![2]);
 		prompts.apply(Mark::OutputStart, 0, 3);
 		prompts.apply(Mark::CommandEnd(Some(0)), 0, 5);
