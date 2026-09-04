@@ -35,11 +35,22 @@
 // `C`. Taking the shell's word for either would put an assertion beside an observation cmote holds
 // itself, and §71's rule is that the two can then disagree — with the remote winning.
 //
-// There are also phase letters past the four: `N`, `P` and `L` are all emitted somewhere. They are
-// NOT implemented, and the reason is that the reachable accounts of them disagree — vtdn has Konsole
-// tracking the prompt as "A/N/P", one zsh write-up has `133;P;k=i` for PS1 and `133;P;k=s` for PS2,
-// and a Ghostty fork uses `133;P` for a prompt REDRAW that must not open a new block. An
-// unrecognised letter therefore yields no mark rather than a guess (§96, §97).
+// The four letters above are not the whole set, and until §164 this file said they could not be
+// read because "the reachable accounts of them disagree". The accounts are write-ups; the thing
+// they are write-ups OF is Per Bothner's semantic-prompts proposal, which §164 read, and it gives
+// every letter ONE meaning. The three "disagreeing" reports turned out to be three partial views of
+// it (§164).
+//
+// `N` is read since §164, as a prompt start. The proposal makes it "Same as `OSC "133;A"` but may
+// first implicitly terminate a previous command: If the options specify an `aid` and there is an
+// active (open) command with matching `aid`, finish the innermost such command ... If no `aid` is
+// specified, treat as an `aid` whose value is the empty string." cmote tracks no `aid`, so every
+// command it holds carries the empty one and the implicit termination is unconditional — which is
+// exactly what `Prompts::apply` already does for `A`, superseding any half-built command. So `N` is
+// `A` here, and the ARM says so rather than the model growing a variant that would behave
+// identically (§71's rule about one answer, one mechanism).
+//
+// `P`, `I` and `L` have their own rows in the matrix (§164).
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
@@ -134,7 +145,12 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 	// The phase letter is the whole next field; a stray longer field (`133;AA`) is not a mark we
 	// know, so it must not be mistaken for `A`.
 	match fields.next() {
-		Some(b"A") => {
+		// `N` shares this arm rather than getting one of its own (§164): the proposal defines it as `A`
+		// plus an implicit termination of the previous command, and `apply` already terminates
+		// unconditionally because cmote holds no `aid` to match against. Sharing the arm also gives `N`
+		// the `k=` reading below, which is right — a letter that is "same as A" cannot read its own
+		// fields differently.
+		Some(b"A" | b"N") => {
 			// `k=s` marks a SECONDARY prompt — zsh's PS2, the one drawn for each continuation line
 			// of a command still being typed (kitty's shell integration prepends this exact mark to
 			// PS2; PS1 carries no `k=` at all). It is the one trailing field cmote cannot afford to
@@ -718,14 +734,37 @@ mod tests {
 
 	#[test]
 	fn an_unrecognised_phase_letter_yields_no_mark() {
-		// The four letters are not the whole alphabet in use: vtdn records Konsole tracking the
-		// prompt as "A/N/P", and no source reachable from here gives `N` or `P` a syntax or a
-		// meaning. An unknown letter therefore produces nothing rather than being guessed into the
-		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output,
-		// where no mark just leaves both as they were (§96).
-		assert!(marks(b"\x1b]133;N\x07").is_empty());
+		// A letter the proposal does not define produces nothing rather than being guessed into the
+		// nearest phase — a wrong mark would move a prompt jump or mis-bound a command's output, where
+		// no mark just leaves both as they were (§96, §164).
 		assert!(marks(b"\x1b]133;P;k=v\x07").is_empty());
 		assert!(marks(b"\x1b]133;L\x07").is_empty());
+		assert!(marks(b"\x1b]133;Z\x07").is_empty());
+	}
+
+	#[test]
+	fn the_implicitly_terminating_spelling_of_a_prompt_start_is_a_prompt_start() {
+		// `N` is the proposal's "same as A but may first implicitly terminate a previous command",
+		// which is what Konsole emits and what this file used to call unreadable (§164). cmote holds no
+		// `aid`, so the termination is unconditional — and superseding a half-built command is already
+		// what a prompt start does here, which is why `N` needs no variant of its own.
+		assert_eq!(marks(b"\x1b]133;N\x07"), vec![Mark::PromptStart]);
+		// The fields are read the same way they are on `A`: a continuation prompt is still not a new
+		// prompt when the letter is `N`.
+		assert!(marks(b"\x1b]133;N;k=s\x07").is_empty());
+		// And the implicit termination is the one `apply` already performs: a command left half-built by
+		// a stream that never sent its `D` is superseded rather than filed. Lines 0 and 1 open a command
+		// that never ends; the prompt on line 4 abandons it; lines 5 and 6 are the command that does.
+		let mut prompts = Prompts::default();
+		prompts.apply(Mark::PromptStart, 0, 0);
+		prompts.apply(Mark::OutputStart, 0, 1);
+		prompts.apply(Mark::PromptStart, 0, 4);
+		prompts.apply(Mark::OutputStart, 0, 5);
+		prompts.apply(Mark::CommandEnd(Some(0)), 0, 6);
+		// The filed span is the SECOND command's, and it is the only one filed — the abandoned command
+		// took its half-built span with it rather than leaving a span from line 1 to line 6.
+		assert_eq!(prompts.walk_output(), Some((5, 6)));
+		assert_eq!(prompts.walk_output(), None);
 	}
 
 	#[test]
