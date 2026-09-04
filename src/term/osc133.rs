@@ -64,7 +64,14 @@
 // stream that somehow sent only the right half would still have marked a prompt. `k=c` joins the
 // `k=s` cmote already read, being the proposal's own second spelling of the same kind.
 //
-// `I` and `L` have their own rows in the matrix (§164).
+// `I` is read since §164 as a prompt end, `B`'s sibling: "End of prompt and start of user input,
+// terminated by end-of-line." The two differ only in where the INPUT region ends — at the next `C`
+// or prompt for `B`, at the line's end for `I` — and cmote reads no input region: `PromptEnd` moves
+// nothing, the phase being the prompt's until output begins. So the distinction is real in the
+// proposal and absent here, which is a divergence worth naming rather than a fold worth hiding. It
+// would start to matter the day cmote showed the command line, and cmote refuses to (§71, §97).
+//
+// `L` has its own row in the matrix (§164).
 //
 // From those four marks a terminal knows where every prompt sits, whether a command is running,
 // and how the last one ended — which is what powers "jump to the previous prompt" and a per-tab
@@ -192,7 +199,9 @@ fn parse(payload: &[u8]) -> Option<Mark> {
 				Some(Mark::PromptStart)
 			}
 		}
-		Some(b"B") => Some(Mark::PromptEnd),
+		// `I` shares `B`'s arm (§164): the proposal separates them by where the user's input ENDS, and
+		// cmote holds no input region for the two to end differently in.
+		Some(b"B" | b"I") => Some(Mark::PromptEnd),
 		Some(b"C") => Some(Mark::OutputStart),
 		Some(b"D") => {
 			// `133;D` may carry an exit code as its next field; a bare `133;D` or a non-numeric
@@ -778,6 +787,17 @@ mod tests {
 		// An unrecognised kind still keeps the mark, which is §97's rule and unchanged: losing a jump
 		// anchor is worse than gaining one, so the recoverable guess wins.
 		assert_eq!(marks(b"\x1b]133;P;k=v\x07"), vec![Mark::PromptStart]);
+	}
+
+	#[test]
+	fn the_line_terminated_spelling_of_a_prompt_end_is_a_prompt_end() {
+		// `I` is the proposal's "end of prompt and start of user input, terminated by end-of-line" —
+		// `B` with a different end to the input region, and cmote holds no input region for the two to
+		// differ in (§164). A whole cycle spelled with it reads exactly as one spelled with `B`.
+		assert_eq!(marks(b"\x1b]133;I\x07"), vec![Mark::PromptEnd]);
+		let with_i = b"\x1b]133;A\x07$ \x1b]133;I\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		let with_b = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07";
+		assert_eq!(marks(with_i), marks(with_b));
 	}
 
 	#[test]
