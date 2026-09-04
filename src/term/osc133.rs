@@ -14,11 +14,13 @@
 // (`contour-terminal.org/vt-extensions/osc-133-shell-integration/`, read for §95) and vtdn's
 // (`vtdn.dev/docs/osc/osc133/`, read for §96), plus kitty's own shell integration
 // (`sw.kovidgoyal.net/kitty/shell-integration/`, read for §97), which is not a write-up of the
-// protocol but the shell code that emits it. Between them they name five optional `key=value`
-// fields, and cmote reads exactly ONE:
+// protocol but the shell code that emits it, and since §164 the proposal itself. Between them they
+// name six optional `key=value` fields, and cmote reads exactly ONE — `k`, the prompt's kind:
 //
-//   133 ; A ; k=s                 — a SECONDARY prompt (zsh's PS2) — READ, and it suppresses the
-//                                   mark, because a continuation prompt is not a new prompt (§97)
+//   133 ; A|N|P ; k=              — the prompt's KIND — READ. `k=s` and `k=c` are a continuation
+//                                   prompt (zsh's PS2) and `k=r` a right-side one; each suppresses
+//                                   the mark, none of the three being a prompt start (§97, §165).
+//                                   `k=i`, no `k=` and a value from no source are prompt starts
 //   133 ; A ; click_events=1      — asks the terminal to report mouse clicks in the prompt area
 //   133 ; A ; cl= | move-keys=    — asks the terminal to turn clicks in the input area into cursor
 //                                   motion, and to send the sender's chosen keys for it
@@ -759,14 +761,15 @@ mod tests {
 
 	#[test]
 	fn the_named_parameters_are_read_as_nothing_but_their_mark() {
-		// Three optional fields are named between the two write-ups, and cmote answers each with
-		// the bare mark and nothing else (§95, §96).
+		// Four optional fields are named across the two write-ups and the proposal, and cmote answers
+		// each with the bare mark and nothing else (§95, §96, §164).
 		//
 		// `click_events=1` on A asks the terminal to "enable mouse click reporting for the prompt
 		// area" — a remote turning on input reporting through a payload whose declared job is saying
 		// where the prompt sits, and a side door around the mouse modes (§10). There is no path from
-		// this scanner to a mouse mode at all: `Mark` has four variants and none carries a field, so
-		// the refusal is structural. This test is what makes it deliberate rather than incidental.
+		// this scanner to a mouse mode at all: the one field `Mark` carries is `D`'s exit code, a
+		// number shown on a tab, so the refusal is structural. This test is what makes it deliberate
+		// rather than incidental.
 		assert_eq!(
 			marks(b"\x1b]133;A;click_events=1\x07"),
 			vec![Mark::PromptStart]
