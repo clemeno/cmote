@@ -459,6 +459,52 @@ pub fn probe_zone(runner: Runner, events: &mpsc::Sender<SshEvent>) {
 	});
 }
 
+/// Ask the server where the login shell stands, once per session (§160), so the panes can open
+/// there instead of at `/`. Reported as `LoginDir`; nothing at all when the remote will not say.
+///
+/// SFTP resolves `.`, which on a freshly opened session is the home directory — the server starts
+/// every sftp session there. The shell backend asks for `$HOME` (`shellfs::home`), the same answer
+/// by the other road. Both run on the browse channel the first listing opens anyway, which is why
+/// this takes a `Browse` rather than the `AsuserFiles` the shell-config errand uses (§17).
+///
+/// A path that is not absolute is dropped rather than reported. The tree is rooted at `/` and a
+/// remote that answered `C:\Users\…` has nowhere on it to hang — the same `ponytail:` the explorer's
+/// own `reveal` records, refused here so the pane cannot be sent somewhere the tree cannot follow.
+pub fn probe_login_dir(backend: Browse, events: &mpsc::Sender<SshEvent>) {
+	let events = events.clone();
+	match backend {
+		Browse::Sftp(sftp) => {
+			tokio::spawn(async move {
+				let Ok(name) = sftp.realpath(".".to_owned()).await else {
+					return;
+				};
+				if let Some(file) = name.files.first() {
+					report_login_dir(&events, file.filename.clone()).await;
+				}
+			});
+		}
+		Browse::Shell(runner) => {
+			tokio::spawn(async move {
+				if let Ok(home) = shellfs::home(&runner).await {
+					report_login_dir(&events, home).await;
+				}
+			});
+		}
+		// An account whose files cannot be reached at all has no directory to offer, and the
+		// listing that follows will report the refusal in its own words.
+		Browse::Denied(_) => {}
+	}
+}
+
+/// Send one login directory to the GUI, if it is a path the tree can hold.
+async fn report_login_dir(events: &mpsc::Sender<SshEvent>, path: String) {
+	let path = path.trim();
+	if !path.starts_with('/') {
+		return;
+	}
+	let _ = events.send(SshEvent::LoginDir(path.to_owned())).await;
+}
+
 /// The shell-backend listing for the tree: `ls` under whichever account this is (§46).
 async fn list_shell(runner: Runner, path: String, events: mpsc::Sender<SshEvent>) {
 	match shellfs::dirs(&runner, &path).await {
@@ -516,4 +562,40 @@ async fn fail_dir(events: &mpsc::Sender<SshEvent>, path: String, reason: String)
 async fn fail_files(events: &mpsc::Sender<SshEvent>, request: u64, reason: String) {
 	eprintln!("files listing failed: {reason}");
 	let _ = events.send(SshEvent::FilesFailed { request, reason }).await;
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// What the login-directory probe reports, and what it refuses to (§160). The two remote answers
+	/// are hard to reach — one needs an SFTP server, the other a shell — but the rule about what may
+	/// be reported at all is one function, and it is the one with a consequence: the tree is rooted
+	/// at `/`, so a path that is not absolute has nowhere on it to hang, and sending it would move
+	/// the files pane somewhere the tree could not follow.
+	#[tokio::test]
+	async fn only_an_absolute_path_is_reported_as_the_login_directory() {
+		let reported = |answer: &str| {
+			let answer = answer.to_owned();
+			async move {
+				let (tx, mut rx) = mpsc::channel(1);
+				report_login_dir(&tx, answer).await;
+				match rx.try_recv() {
+					Ok(SshEvent::LoginDir(path)) => Some(path),
+					_ => None,
+				}
+			}
+		};
+
+		// The ordinary answer, with the newline `pwd` and `$HOME` alike come back wearing.
+		assert_eq!(
+			reported("/home/u\n").await,
+			Some("/home/u".to_owned()),
+			"trimmed and passed on"
+		);
+		// A Windows remote answers with a drive, which is not a place on this tree (§17, §18).
+		assert_eq!(reported(r"C:\Users\CLEm").await, None, "no drive letters");
+		// And a remote that says nothing says nothing.
+		assert_eq!(reported("   ").await, None, "nor an empty answer");
+	}
 }

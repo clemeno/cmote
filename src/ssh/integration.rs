@@ -165,23 +165,20 @@ async fn edit_file(
 /// SFTP answers by resolving `.`, which for a freshly opened session IS the home directory: the
 /// server starts every sftp session there. The shell backend asks the shell for `$HOME` instead,
 /// which is the same answer by the other road.
+///
+/// The same question is asked again at connect, to open the file panes where the shell is standing
+/// rather than at `/` (§160) — down a channel that is already open, so it is `ssh::browse`'s own
+/// pair of one-liners rather than a call to this. What the two share is the shell half, which is
+/// `shellfs::home`.
 async fn remote_home(backend: &AsuserFiles) -> Result<String> {
 	match backend {
 		AsuserFiles::Sftp(sftp) => sftp
 			.canonicalize(".".to_owned())
 			.await
 			.context("could not work out the home directory on the server"),
-		AsuserFiles::Shell(runner) => {
-			let home = runner
-				.stdout("printf %s \"$HOME\"")
-				.await
-				.context("could not work out the home directory on the server")?;
-			let home = home.trim();
-			if home.is_empty() {
-				bail!("the server reported no home directory for this account");
-			}
-			Ok(home.to_owned())
-		}
+		AsuserFiles::Shell(runner) => shellfs::home(runner)
+			.await
+			.context("could not work out the home directory on the server"),
 		AsuserFiles::Denied(reason) => bail!("{reason}"),
 	}
 }

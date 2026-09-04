@@ -123,6 +123,21 @@ pub async fn read_link(runner: &impl Exec, path: &str) -> Option<String> {
 	(!target.is_empty()).then(|| target.to_owned())
 }
 
+/// The account's own home directory (§17, §160) — where its login shell stands at its first prompt.
+///
+/// `$HOME` rather than `pwd`: an exec channel starts in the home directory, but a profile is free to
+/// `cd` before anything else runs, and the answer wanted here is the account's own folder rather than
+/// wherever its dotfiles chose to stand. `printf %s` rather than `echo` so no newline is added to a
+/// value that is about to be treated as a path.
+pub async fn home(runner: &impl Exec) -> Result<String> {
+	let home = runner.stdout("printf %s \"$HOME\"").await?;
+	let home = home.trim();
+	if home.is_empty() {
+		bail!("the server reported no home directory for this account");
+	}
+	Ok(home.to_owned())
+}
+
 /// A file's size in bytes, or `None` when it cannot be read at all.
 ///
 /// `wc -c <` rather than `stat`: the redirect means the count is of the file's contents whatever the
@@ -961,6 +976,25 @@ mod backend_tests {
 		let free = free_name(&remote, "/srv", "notes.txt").await;
 		assert_eq!(free, "/srv/notes-1.txt");
 		assert_eq!(remote.only_command(), "[ -e '/srv/notes-1.txt' ]");
+	}
+
+	/// The home probe (§160) asks for `$HOME` and takes the answer whole, spaces included — a path
+	/// is one value, so nothing here splits it on whitespace the way the timezone probe does.
+	#[tokio::test]
+	async fn the_home_probe_reads_one_path_and_trims_nothing_out_of_it() {
+		let remote = Script::saying("/home/dr who\n");
+		let home = home(&remote).await.expect("the remote answered");
+
+		assert_eq!(remote.only_command(), "printf %s \"$HOME\"");
+		assert_eq!(home, "/home/dr who");
+	}
+
+	/// An account with no `$HOME` set is not an account whose home is the empty string: a remote
+	/// that answers nothing is refused, so the caller leaves the panes where they were (§160).
+	#[tokio::test]
+	async fn a_home_the_remote_will_not_name_is_an_error_not_an_empty_path() {
+		assert!(home(&Script::saying("  \n")).await.is_err());
+		assert!(home(&Script::refusing()).await.is_err());
 	}
 
 	/// An existence check that the remote will not answer reads as "not there" (§18) — the caller

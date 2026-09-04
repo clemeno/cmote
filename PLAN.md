@@ -18471,3 +18471,131 @@ slot at a time cannot see either. Worth asking of any table: what is true of the
 
 **The complaint names the worst case, not the bug.** One slot was reported; nine were failing. Measuring
 the whole table before touching the reported one cost a minute and turned a colour tweak into a decision.
+
+## §160 — The prompt said `~` and the panes said `/`
+
+A report: *"when we just login to a new remote, the prompt is at `~`, the open folder should be
+automatically sync to `~` instead of `/`."*
+
+### What was there
+
+`connect.rs`'s `default_files_root`, and its own comment said the whole thing out loud:
+
+> A REMOTE session opens at `/`, because that is the top of the server and **there is nothing better
+> to say about a machine cmote has just met**. A LOCAL one can do better: the shell is standing in
+> the user's own folder from its first prompt […] So the two panes start where the shell already is.
+
+The local half was right and the remote half was an assumption that had never been tested. cmote
+*could* say something better about a machine it had just met — it simply had not asked.
+
+### Why the cwd tracking that already existed did not cover this
+
+§17 follows the shell's own announcements: OSC 7, OSC 9;9, iTerm2's `CurrentDir=`. When one arrives,
+`panes.follow` opens the tree down to it and points the pane at it, and everything below is already
+built. On a machine with the announcer configured, the panes reach the home directory at the first
+prompt and this section would have nothing to fix.
+
+The catch is that **bash and zsh announce nothing unless somebody has configured them to** — which is
+exactly why §17 also ships the shell-integration installer. So the common case, a server nobody has
+touched, is the one where the panes sit at `/` forever: the shell never moves, a shell that never
+moves never announces, and there is no second chance coming.
+
+The fix is therefore not new machinery. It is one question, asked once: **where does the login shell
+stand?** The answer goes through `panes.follow`, the same door an announcement comes through, and
+inherits its rule for free. `SshEvent::LoginDir` is a cwd announcement that cmote asked for rather
+than waited for.
+
+### Where the answer comes from
+
+Both file backends already knew how (§17, `ssh/integration.rs::remote_home`), because the
+shell-integration errand has to find the account's home to know which dotfile to write:
+
+* **SFTP** resolves `.`. On a freshly opened sftp session that IS the home directory — the server
+  starts every one there — so `realpath(".")` is a single round trip and no shell is involved.
+* **The shell fallback** asks for `$HOME`. Not `pwd`: an exec channel does start in the home
+  directory, but a profile is free to `cd` before anything else runs, and the question is about the
+  account rather than about its dotfiles' taste.
+
+That second half is now `shellfs::home`, called by both this probe and the integration errand, which
+is what makes it testable at all — `Script` answers it out of a canned reply and records the command
+that went out, so the quoting and the parse are assertable without a server.
+
+**On the browse channel, not a channel of its own.** The integration errand opens an `AsuserFiles`
+per call and closes it after; this takes the `Browse` backend instead, the one the tree's first
+listing is about to open anyway and then keeps for the session. So the whole feature costs one round
+trip on an already-open channel rather than a channel setup, a handshake and a teardown.
+
+### Asked when there is nothing better, and not otherwise
+
+The guard is one line in the `Connected` arm, and each of its three clauses is a different rule:
+
+```rust
+let ask_login_dir =
+    resume_files.is_none() && resume_terminal.is_none() && self.local().is_none();
+```
+
+* **`resume_files.is_none()`** — a target that remembers where it was left wins (§22). Asking anyway
+  would buy a round trip whose answer had to be discarded, and worse: the answer would be free to
+  land on the panes a moment *after* the restore had put them right.
+* **`resume_terminal.is_none()`** — a remembered shell directory is replayed as a `cd`, and until it
+  settles both panes are pinned (§22). Rather than teach the new arm about the pin, it is simply not
+  asked while one can be armed, which is why `SshEvent::LoginDir` needs no pin check: a session with
+  a directory to resume to is a session that was never asked.
+* **`self.local().is_none()`** — `default_files_root` already knows a local shell's home without a
+  round trip (§103).
+
+### The listing that is not wasted
+
+The panes still open at `/` immediately and the probe moves them a round trip later. That reads like
+a flicker to pay for, and for the files pane it is one — but for the tree it costs nothing at all:
+revealing `/home/u` opens the chain `/` → `/home` → `/home/u`, so the root's own listing is the first
+thing the answer needs anyway.
+
+Keeping it that way is also what makes the feature **safe to fail**. A remote that will not answer,
+an sftp server that refuses `realpath`, a probe that never comes back at all — every one of them
+leaves the panes exactly where every session used to start. Waiting for the answer before listing
+anything would have made a hung side channel into two empty panes, which is a worse session than the
+one being fixed.
+
+### What is refused
+
+`report_login_dir` drops any answer that is not absolute. The tree is rooted at `/`
+(`explorer::ROOT`), and a remote answering `C:\Users\CLEm` has nowhere on that tree to hang — the
+same `ponytail:` `Explorer::reveal` already records, enforced one step earlier so the files pane
+cannot be sent somewhere the tree is unable to follow. An empty answer is refused for the same reason
+by `shellfs::home`: an account with no `$HOME` set does not have the empty string for a home.
+
+Prove-it, four of them, each breaking its own line:
+
+* probe asked unconditionally → *"nothing was asked"* fails on the remembered target
+* `LoginDir` arm made a no-op → *"the pane went"*, `left: Some("/")`, `right: Some("/home/u")`
+* the `starts_with('/')` guard removed → *"no drive letters"*, `left: Some("C:\\Users\\CLEm")`
+* the empty-`$HOME` check removed → `home(&Script::saying("  \n")).await.is_err()` fails
+
+### What moved with it
+
+Nothing on the way out did. The panes' half is `panes.follow`, already written for §19; the tree's
+chain-opening is `Explorer::reveal_if_new`, already written for §18; the "last move wins" rule that
+keeps a later `cd` from being ignored is `Files::follow`, already written for the same. The new code
+is a question, a guard and a report.
+
+The one place it shows through is the local session task, whose `SessionMsg` match had to name
+`ProbeLoginDir` in its do-nothing arm — a local session is never sent one, and the exhaustive match
+is what says so out loud instead of a catch-all quietly swallowing the next command somebody adds.
+
+### What to keep
+
+**"There is nothing better to say" is a claim, and claims can be tested.** The comment that justified
+`/` was honest about being an assumption, and it survived a hundred and forty sections because
+nobody asked whether it was still true. It never had been: both file backends could already answer
+the question, for a different errand, in a file two directories away.
+
+**A new answer is worth more if it arrives at an existing door.** `LoginDir` could have been an event
+with rules of its own — when it may move a pane, what happens if the user clicked first, what a
+second one means. Routing it through `panes.follow` gave it every one of those answers already
+decided, and the only rule this section had to write down is *when to ask*.
+
+**Make the new thing fail into the old behaviour.** The probe is asked after the panes have already
+opened, not before, so every way it can go wrong — refused, malformed, never answered — lands on the
+session cmote shipped yesterday. A feature that degrades to the status quo needs no timeout, no
+retry and no error path in the GUI.

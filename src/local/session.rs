@@ -277,10 +277,13 @@ pub async fn run(
 							// Nothing to do, and nothing to report. `SelectIdentity` and `CloseIdentity` name
 							// accounts a local session cannot have; `RemoveForward` names a forward that was
 							// refused when it was asked for; the two auth answers belong to a handshake that never
-							// happened. Each of them is the GUI being tidy, not the GUI being wrong.
+							// happened; `ProbeLoginDir` asks a server where the shell stands, which on this
+							// machine `default_files_root` already knows without a round trip (§160). Each of
+							// them is the GUI being tidy, not the GUI being wrong.
 							Some(SessionMsg::SelectIdentity(_) | SessionMsg::CloseIdentity(_) |
 		SessionMsg::RemoveForward(_) | SessionMsg::ElevateAnswer { .. } |
-		SessionMsg::Passphrase(_) | SessionMsg::Interactive(_)) => {}
+		SessionMsg::Passphrase(_) | SessionMsg::Interactive(_) |
+		SessionMsg::ProbeLoginDir) => {}
 
 							// Disconnect: the user confirmed one, the tab is closing, cmote is quitting. The GUI has
 							// typed the shell's own `exit` just before this wherever typing was safe (§104), so the

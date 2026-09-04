@@ -938,6 +938,80 @@ mod tests {
 	use super::super::fixtures::*;
 	use super::super::*;
 
+	/// A first connection asks the server where the login shell stands, and opens both panes there
+	/// (§160). The prompt reads `~` from its very first line; the panes read `/`, which on any
+	/// machine anybody uses is several clicks from the directory the shell was already in.
+	#[test]
+	fn a_first_connection_opens_the_panes_where_the_login_shell_stands() {
+		let (mut app, mut rx) = dialing_tab("u@h:22", 64);
+
+		// No saved target at all, so nothing is remembered and the root is the only opening move
+		// cmote can make on its own.
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		assert_eq!(app.panes.pane.path(), Some("/"), "the root, for now");
+		assert!(
+			drain(&mut rx)
+				.iter()
+				.any(|command| matches!(command, SshCommand::ProbeLoginDir)),
+			"the server was asked where the shell is"
+		);
+
+		// The answer comes back a round trip later and both panes go, exactly as they would for a
+		// cwd the shell had announced itself.
+		let _task = app.on_ssh_event(SshEvent::LoginDir("/home/u".to_owned()));
+		assert_eq!(app.panes.pane.path(), Some("/home/u"), "the pane went");
+		assert_eq!(
+			app.panes.tree.selected(),
+			Some("/home/u"),
+			"and the tree with it"
+		);
+		assert!(
+			drain(&mut rx).iter().any(
+				|command| matches!(command, SshCommand::ListFiles { path, .. } if path == "/home/u")
+			),
+			"and the listing for it was asked for"
+		);
+
+		// And the shell announcing that same directory at its first prompt is not a move, so
+		// nothing re-lists and nothing jumps.
+		let announced = shell_output(b"\x1b]7;file://host/home/u\x07");
+		let _task = app.on_ssh_event(announced);
+		assert!(
+			drain(&mut rx).is_empty(),
+			"the shell agreeing with the probe asks for nothing"
+		);
+	}
+
+	/// A target that remembers where it was left is never asked (§22, §160). The remembered
+	/// directory wins, so a probe here would buy a round trip whose answer had to be thrown away —
+	/// and, worse, would be free to land on the panes a moment after the restore put them right.
+	#[test]
+	fn a_remembered_directory_is_not_second_guessed_by_the_probe() {
+		use crate::ui::connect::AuthKind;
+
+		let (mut app, mut rx) = dialing_tab("u@h:22", 64);
+		app.targets
+			.borrow_mut()
+			.upsert_on_connect("h", 22, "u", AuthKind::Password, None, None);
+		app.targets.borrow_mut().set_session(
+			"u@h:22",
+			crate::targets::LeftOff {
+				files_path: Some("/etc".to_owned()),
+				..crate::targets::LeftOff::default()
+			},
+		);
+		app.pending_target = Some(app.targets.borrow().find("u@h:22").unwrap().clone());
+
+		let _task = app.on_ssh_event(SshEvent::Connected);
+		assert_eq!(app.panes.pane.path(), Some("/etc"), "the restore stands");
+		assert!(
+			!drain(&mut rx)
+				.iter()
+				.any(|command| matches!(command, SshCommand::ProbeLoginDir)),
+			"nothing was asked"
+		);
+	}
+
 	/// Reveal is an explicit ask, so it ends the resume pin (§19, §22) — the same rule
 	/// `move_shell_to` already follows, for the same reason: once the user has said where the
 	/// panes go, the pin protecting the restored view has nothing left to protect.

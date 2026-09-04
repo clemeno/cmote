@@ -5414,15 +5414,32 @@ impl Tab {
 					resume_terminal = Some(carried.cwd);
 				}
 
+				// With nothing remembered on either side, ask the server where the login shell
+				// stands and open the panes there when it answers (§160). A first connection used
+				// to land both panes on `/`, two clicks from the directory the prompt was already
+				// showing as `~`. Not asked when anything IS remembered — a remembered directory
+				// wins (§22), and while a replayed `cd` is settling the pin below is what holds the
+				// panes still — nor on a local session, where `default_files_root` knows the answer
+				// without a round trip.
+				let ask_login_dir =
+					resume_files.is_none() && resume_terminal.is_none() && self.local().is_none();
+
 				// Resume where the last session left off (§22), falling back to the root for a
 				// first connection or a shell that never announced a cwd — the previous
 				// behaviour. The pane opens at its own remembered directory; the tree opens the
 				// chain down to it and selects it, so both panes start on the resume point.
+				//
+				// This listing is not wasted while the probe above is in flight: revealing the login
+				// directory opens the chain from `/` down to it, so the root's own listing is the
+				// first thing that answer needs anyway.
 				let files_start = resume_files.unwrap_or_else(|| self.default_files_root());
 				let needed = self.panes.tree.reveal_if_new(&files_start);
 				self.list_dirs(needed);
 				if let Some(request) = self.panes.pane.show(&files_start) {
 					self.list_files(request);
+				}
+				if ask_login_dir {
+					self.send_command(SshCommand::ProbeLoginDir);
 				}
 
 				// Replay the remembered shell directory as a `cd` so the shell itself resumes
@@ -5563,6 +5580,19 @@ impl Tab {
 				done,
 			} => self.panes.pane.chunk(request, entries, done),
 			SshEvent::FilesFailed { request, reason } => self.panes.pane.failed(request, reason),
+			// Where the login shell stands, asked for on connect because nothing was remembered
+			// (§160). Followed rather than shown: this IS a cwd announcement — asked for rather
+			// than waited for — so it goes through the same door as the ones the shell sends, and
+			// inherits their rule. Last move wins, which within the round trip this took means
+			// this one; and once the shell starts announcing that same directory itself, `follow`
+			// recognises it as no move at all and the panes stay where the user has put them.
+			//
+			// No pin can be armed here: a session with a directory to resume to is a session that
+			// was never asked, which is the guard in the `Connected` arm above.
+			SshEvent::LoginDir(path) => {
+				let fetches = self.panes.follow(&path);
+				self.send_fetches(fetches);
+			}
 			// The server's own timezone and one resolved symlink, both for the details
 			// popup beside the selection (§20).
 			SshEvent::Zone(zone) => self.panes.pane.set_zone(zone),

@@ -36,6 +36,13 @@ A session against a shell on this machine instead of over SSH (§103). Same shap
 A login on the remote machine: the one the session authenticated as, plus each one elevated
 into (§45, §46).
 
+**Login directory**:
+Where the login account's shell stands at its first prompt — the account's own home on the remote
+(§160). Asked for once, on a first connection, so the file panes open there instead of at `/`; a
+target that remembers a directory of its own is never asked (§22).
+_Avoid_: *home*, unqualified — that is the **Home screen**, which is a tab content and has nothing
+to do with a machine; and *cwd*, which is where the shell is NOW rather than where it began
+
 **Identity**:
 One shell running as an account, known to the SSH task by number. An account can have several;
 each is a channel of its own (§45).

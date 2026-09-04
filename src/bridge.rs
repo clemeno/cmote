@@ -244,6 +244,13 @@ pub enum SshCommand {
 	/// clashes the task also proposes a free `name-1` alternative, so the "keep both" answer
 	/// has a server-checked destination to write to.
 	CheckUploads { dir: String, names: Vec<String> },
+	/// Ask where the login shell stands, so the file panes can open there (§160). Sent once, on
+	/// connect, and only when the target remembers no directory of its own — a remembered one wins
+	/// (§22), and a local session already knows the answer without asking.
+	///
+	/// Answered with `LoginDir`, or with nothing at all: a remote that will not say leaves the panes
+	/// at the root they opened on, which is where every session used to start.
+	ProbeLoginDir,
 	/// List the folders inside a remote directory, for the explorer tree (§18). One
 	/// command per folder the user opens — the tree is lazy, so nothing is walked.
 	ListDir(String),
@@ -558,6 +565,10 @@ pub enum SshEvent {
 	/// A files-pane listing failed (no permission, gone, the server refused). Carries the
 	/// request number so a failure for a directory the user has left is dropped (§19).
 	FilesFailed { request: u64, reason: String },
+	/// Where the login shell stands (§160), in answer to `ProbeLoginDir`: the login account's own
+	/// home directory, always absolute. Both panes follow it, exactly as they follow a cwd the shell
+	/// announces — because that is what it is, asked for rather than waited for.
+	LoginDir(String),
 	/// The remote machine's timezone (§20), from one `date` probe per session. Every mtime
 	/// in the pane is rendered against it, so it arrives once and applies to all of them.
 	Zone(crate::files::TimeZone),

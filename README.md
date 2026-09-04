@@ -349,6 +349,12 @@ references below (§n) point into it.
   you last made it (the pane sizes are remembered separately, per target, above). The terminal
   area is whatever is left — the window height minus the files pane and its handle — so the pty
   always matches what you see (§31).
+- **A new machine opens on your own folder, not on `/`** — the prompt says `~` from its first
+  line, so the panes start there too. cmote asks the server where the login shell stands (one
+  round trip on the channel the first listing opens anyway) and points the tree and the files
+  pane at it; a machine that will not say leaves them at the root, as before. It is asked **only
+  on a first connection**: once a target remembers where you left it, the remembered directory
+  wins and nothing is asked at all (§22, §160).
 - **Browsing never moves the console** — a click in the folder tree, a **double-click** on a
   folder in the grid, the pane's **up** button and **Enter** all point the *pane* somewhere
   else and leave the shell where it is, so you can look inside a directory without disturbing

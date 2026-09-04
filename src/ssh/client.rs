@@ -59,7 +59,7 @@ const CHANNEL_BOUND_FORWARD: usize = 64;
 /// through an alphabet.
 #[expect(
 	clippy::too_many_lines,
-	reason = "a 32-variant command-to-message table; the forwarding it used to repeat is now `forward`"
+	reason = "a 33-variant command-to-message table; the forwarding it used to repeat is now `forward`"
 )]
 pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<SshEvent>) {
 	let mut session: Option<SessionLink> = None;
@@ -166,6 +166,7 @@ pub async fn run(mut commands: mpsc::Receiver<SshCommand>, events: mpsc::Sender<
 			},
 			SshCommand::ResolveConflict(choice) => SessionMsg::ResolveConflict(choice),
 			SshCommand::CancelTransfer => SessionMsg::CancelTransfer,
+			SshCommand::ProbeLoginDir => SessionMsg::ProbeLoginDir,
 			SshCommand::ListDir(path) => SessionMsg::ListDir(path),
 			SshCommand::ListFiles { path, request } => SessionMsg::ListFiles { path, request },
 			SshCommand::ReadLink(path) => SessionMsg::ReadLink(path),
@@ -259,6 +260,8 @@ pub(crate) enum SessionMsg {
 	},
 	/// Check which of an upload batch's names already exist before it sends (§17).
 	CheckUploads { dir: String, names: Vec<String> },
+	/// Ask where the login shell stands, so the panes can open there rather than at `/` (§160).
+	ProbeLoginDir,
 	/// List the folders inside a remote directory, for the explorer tree (§18).
 	ListDir(String),
 	/// List every entry inside a remote directory, for the files pane (§19).
@@ -636,6 +639,13 @@ async fn stream(
 					// the terminal (§18, §19). Which ACCOUNT each one reads as is settled here,
 					// before the work starts (§46): `accounts` answers with the best backend that
 					// account has — its own sftp session, shell commands, or a reason it has neither.
+					// Where the panes should open (§160), asked once on connect. On the browse
+					// backend rather than a channel of its own: the first listing is about to open
+					// that one anyway, so the answer costs a single round trip.
+					Some(SessionMsg::ProbeLoginDir) => {
+						let backend = accounts.browse(session).await;
+						browse::probe_login_dir(backend, events);
+					}
 					Some(SessionMsg::ListDir(path)) => {
 						let backend = accounts.browse(session).await;
 						browse::list(backend, events, path).await;
