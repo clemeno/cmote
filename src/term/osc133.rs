@@ -70,6 +70,17 @@
 // starting a command — which costs nothing here, because a redraw lands on the line the prompt is
 // already anchored at and `record` drops a repeat of the last line.
 //
+// One divergence follows from the proposal's "optional after an `A` or `N`", and §165 states it
+// rather than building for it. A shell may send BOTH, and both land here as a prompt start, so if
+// the two sit on different rows the first leaves a spare tick that resolves to no command — `record`
+// only drops a repeat of the LAST line, and `apply` re-seats `pending` on the second. They sit on
+// different rows only when something moved the cursor between them, and the thing that would is the
+// fresh-line `A` specifies, which cmote does not perform (see `L` below): cmote's cursor does not
+// move, so the prompt draws where the `A` was marked and the `P` marks the same row. A shell that
+// writes its own `\r\n` between the two is the case that costs a tick. Modelling it means holding a
+// prompt phase across marks so a second start can be recognised as redundant, which is machinery for
+// a stream nobody has produced (§12's habit of not paying in advance).
+//
 // **Only the PRIMARY kind opens a prompt.** `k=c` joins the `k=s` cmote already read, being the
 // proposal's own second spelling of the same kind, and `k=r` is suppressed with them.
 //
