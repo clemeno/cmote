@@ -33,19 +33,39 @@
 // sees the sets and the questions in stream order, so the answer is the level as it stood where
 // the question sat, not as the rest of the chunk left it.
 //
-// ONLY RESOURCE 4 IS ANSWERED. XTMODKEYS carries seven resources (`modifyKeyboard`,
-// `modifyCursorKeys`, `modifyFunctionKeys`, `modifyKeypadKeys`, `modifyOtherKeys`,
-// `modifyModifierKeys`, `modifySpecialKeys`) and cmote holds state for exactly one of them. The
-// reply format IS an XTMODKEYS control, so there is no spelling of "I do not have that resource"
-// — an answer for resource 1 would be cmote asserting a level for a knob its key encoder does
-// not have. Silence for the other six is the honest reading, and the same call §60 made three
-// times over: an invented number is worse than a missing one. In practice the six are not asked;
-// resource 4 is the one editors probe.
+// ONLY RESOURCE 4 IS ANSWERED, AND THE OTHER SIX ARE REFUSED RATHER THAN MISSING (§61, §163).
+//
+// XTMODKEYS carries seven resources and ctlseqs numbers them 0, 1, 2, 3, 4, 6 and 7 — there is no
+// resource 5 — `modifyKeyboard`, `modifyCursorKeys`, `modifyFunctionKeys`, `modifyKeypadKeys`,
+// `modifyOtherKeys`, `modifyModifierKeys` and `modifySpecialKeys`. cmote holds state for exactly one.
+//
+// The reply format IS an XTMODKEYS control, so there is no spelling of "I do not have that resource":
+// an answer for resource 1 would be cmote asserting a level for a knob its key encoder does not have,
+// and a program that then SET that resource would be ignored while the next query kept reporting the
+// old number. So `report` below is an **allow-list one resource wide** and everything else draws
+// silence — the same construction `term/dsr.rs` uses to refuse `CSI ? 26 n` (§36, §82),
+// `term/iterm.rs` for OSC 1337 keys and `term/pointer.rs` for pointer shapes, and the same call §60
+// made three times over: an invented number is worse than a missing one.
+//
+// **That makes this a refusal cmote performs, not a gap**, which is what §163 corrected: the matrix
+// had read ❌ since §68 on the true observation that there is no way to say "not mine", and read past
+// what cmote does about it. Silence here is chosen, reached through a parse, and pinned by a test that
+// names all six. In practice the six are not asked; resource 4 is the one editors probe.
 
-/// The XTMODKEYS resource number for `modifyOtherKeys`. The same `CSI > Pp ; Pv m` shape also
-/// carries resources 0/1/2 (modifyKeyboard / modifyCursorKeys / modifyFunctionKeys), which cmote
-/// does not act on, so the resource is checked before the value is applied.
+/// The XTMODKEYS resource number for `modifyOtherKeys` — the one resource cmote holds.
+///
+/// The same `CSI > Pp ; Pv m` shape carries six others (0, 1, 2, 3, 6, 7 — ctlseqs skips 5), which
+/// cmote does not act on, so the resource is checked before the value is applied and again before a
+/// question about it is answered.
 const MODIFY_OTHER_KEYS: u16 = 4;
+
+/// Every resource XTMODKEYS carries EXCEPT cmote's own, for the test that pins the refusal (§163).
+///
+/// Written out rather than derived from a range because the numbering has a hole in it: ctlseqs
+/// defines 0, 1, 2, 3, 4, 6 and 7, and a `0..=7` loop would assert something about a resource number
+/// that does not exist. `term/dsr.rs` names all nine of its refused reports for the same reason.
+#[cfg(test)]
+const OTHER_RESOURCES: [u16; 6] = [0, 1, 2, 3, 6, 7];
 
 /// How aggressively the remote asked us to report modified "other" keys (§9). `Off` is the
 /// default and the state a well-behaved program restores on exit; `Level1` fills only the gaps
@@ -263,16 +283,45 @@ mod tests {
 		assert_eq!(ask(b"\x1b[?4m\x1b[>4;2m"), b"\x1b[>4;0m".to_vec());
 	}
 
+	/// The refusal, named resource by resource (§61, §163).
+	///
+	/// XTMODKEYS carries seven resources and cmote holds one. An answer for `modifyCursorKeys` would
+	/// be a level asserted for a knob the key encoder does not have — the invented number §60 refused
+	/// three times — and a program that then set it would be ignored while this kept reporting the
+	/// number it first invented. So the answer is an allow-list one resource wide, and this test is
+	/// what makes that a refusal rather than an oversight: all six are named, the way `term/dsr.rs`
+	/// names all nine of its refused reports.
 	#[test]
 	fn a_question_about_another_resource_goes_unanswered() {
-		// XTMODKEYS carries seven resources and cmote holds one. An answer for `modifyCursorKeys`
-		// would be a level asserted for a knob the key encoder does not have — the invented number
-		// §60 refused three times. An omitted parameter defaults to 0, `modifyKeyboard`, likewise
-		// not ours.
-		assert!(ask(b"\x1b[?0m").is_empty());
-		assert!(ask(b"\x1b[?1m").is_empty());
-		assert!(ask(b"\x1b[?2m").is_empty());
+		for resource in OTHER_RESOURCES {
+			let question = format!("\x1b[?{resource}m").into_bytes();
+			assert!(
+				ask(&question).is_empty(),
+				"resource {resource} is not cmote's to report"
+			);
+		}
+		// An omitted parameter defaults to 0, `modifyKeyboard`, likewise not ours.
 		assert!(ask(b"\x1b[?m").is_empty());
+		// And the one that IS ours still answers, so the allow-list is not simply silent.
+		assert_eq!(ask(b"\x1b[?4m"), b"\x1b[>4;0m".to_vec());
+	}
+
+	/// Setting one of the other six leaves cmote's own level alone — the write half of the same
+	/// allow-list (§163). `another_xtmodkeys_resource_is_ignored` above checks one resource; this
+	/// checks that none of the six can reach the level, at either value that would change it.
+	#[test]
+	fn setting_another_resource_never_moves_our_level() {
+		for resource in OTHER_RESOURCES {
+			for value in [1, 2] {
+				let mut modkeys = ModKeys::default();
+				modkeys.feed(format!("\x1b[>{resource};{value}m").as_bytes());
+				assert_eq!(
+					modkeys.level(),
+					ModifyOtherKeys::Off,
+					"resource {resource} set to {value} moved modifyOtherKeys"
+				);
+			}
+		}
 	}
 
 	#[test]

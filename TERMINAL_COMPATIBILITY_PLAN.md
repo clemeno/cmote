@@ -1772,7 +1772,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | **Kitty keyboard protocol** | ✅ | CSI-u key reporting over a flag stack — disambiguated keys, event types and associated text (§25, `term/kitty.rs`) |
 | **xterm modifyOtherKeys** — set (`CSI > 4 ; n m`) | ✅ | `CSI > 4 ; n m` picks how modified keys are encoded, `n` being `0`, `1` or `2` — an input-encoding hint rather than a screen operation (§9, `term/modkeys.rs`) |
 | **xterm modifyOtherKeys** — query (`CSI ? 4 m`), resource 4 | ✅ | asks resource 4 back; answered `CSI > 4 ; Pv m`, the **set** form, so a program can write the reply straight back, and answered where the question sits in the stream (§61) |
-| **xterm modifyOtherKeys** — query, the other six resources | ❌ | XTMODKEYS carries seven resources and cmote tracks one; a query for any of the rest draws silence, the reply being an XTMODKEYS control with no way to say 'not mine' (§61, §68) |
+| **xterm modifyOtherKeys** — query, the other six resources | 🛑 | XTMODKEYS carries seven resources — ctlseqs numbers them 0, 1, 2, 3, 4, 6, 7, with no 5 — and cmote tracks one. A query for any of the rest draws silence, the reply being an XTMODKEYS control with no way to say "not mine": an answer would assert a level for a knob the key encoder does not have, and a program that then SET it would be ignored while the next query reported the invented number back. **Read ❌ until §163**, on that true observation and past what cmote does with it: `report` is an **allow-list one resource wide**, reached through a full parse — the construction `term/dsr.rs` refuses `CSI ? 26 n` with (§36, §82), `term/iterm.rs` OSC 1337 keys and `term/pointer.rs` pointer shapes, all three 🛑. The set half is the same allow-list, and both are pinned by tests naming all six (§60, §61, §68, §163, `term/modkeys.rs`) |
 | ENQ answerback | 🤷 | a lone `0x05` asks the terminal to type a configured string back into the shell (part 6, §36) |
 | BEL | 🛑 | `0x07` rings the bell — a sound, or a visual flash of the window (part 6, §63) |
 | BS / HT / LF / CR | ✅ | backspace, tab to the next stop, linefeed, and carriage return. HT is stored as well as performed: the engine writes the `\t` into the first cell it skipped so a COPY of columnar output gets a real tab back, and `ui::grid` draws that cell as the blank it is — a control character handed to the text shaper would jump to its own tab stop and displace the rest of its run (§117) |
@@ -2018,10 +2018,14 @@ left them, on the grounds that they at least *said* their second half — which 
 argument every partial row had made before it. Splitting them cost seven pairs and forced seven decisions
 the notes had been dodging: `OSC 8`'s refused schemes, DECSCUSR's blink and XTSMGRAPHICS' set turn out to
 be refusals **cmote performs** (an allow-list, a seam that drops a flag the engine stored, a `status 3`
-written by cmote's own code), while charset designation, the XTMODKEYS query's other six resources and
-`OSC 0`'s icon-name half are gaps nobody had ever marked as such. That is the whole value of the rule
+written by cmote's own code), while charset designation, ~~the XTMODKEYS query's other six resources~~
+and `OSC 0`'s icon-name half are gaps nobody had ever marked as such. That is the whole value of the rule
 stated in one line: a second half left inside a note is a decision nobody has had to make, and this
-document's entire audit history is what happens when those pile up.
+document's entire audit history is what happens when those pile up. **§163 moved the XTMODKEYS half of
+that sentence to 🛑** — splitting the row was right and the mark that came out of it was not, because
+the split asked "is this answered?" and stopped there. `modkeys::report` is an allow-list one resource
+wide, exactly the construction the same paragraph credits `OSC 8`'s schemes with; §68 had the mechanism
+in front of it and read the row as a gap because the *reply format* has no way to say "not mine".
 
 **§161 swept one table's ❌ column and found the four rows were four different things.** The DECSET
 list carried four unsupported modes and the sweep asked one question of each — can this be built, or
