@@ -1719,8 +1719,8 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 12 (the mode) | Blinking cursor — tracked | ✅ | the blinking-cursor mode as a tracked bit — set, reset, and reported back by DECRQM |
 | 12 (the blink) | Blinking cursor — drawn | 🛑 | the same mode as something drawn; cmote runs no animation timer, so the cursor is steady whatever DECRQM reports (§65) |
 | 25 | Show / hide cursor | ✅ | DECTCEM — whether the cursor is drawn at all |
-| 45 (XTREVWRAP) | Reverse wrap | ✅ | reverse wraparound: a BACKSPACE at the leftmost column backs up to the rightmost column of the previous line — the xterm manual page's own sentence on the `reverseWrap` resource, and the extent honoured. ctlseqs names the mode and says nothing about its behaviour, so the four things it leaves open are answered by the narrowest reading: CUB does not wrap, the top of the page stops it, the line above need not be a wrapped one, and DECAWM is not coupled to it. The edges are the margins' when a band is set (§102, §149, `term/decmodes.rs`) |
-| 1045 (XTREVWRAP2) | Extended reverse wrap | ❌ | xterm's *extended* reverse wraparound, a second mode beside 45 — whose existence is the evidence that 45 alone is the restricted form. Not implemented: it is defined as widening behaviour that no source read for §149 states, so there is nothing to widen it from. Named here because §149 found it and the table had no row for it (§149) |
+| 45 (XTREVWRAP) | Reverse wrap | ✅ | reverse wraparound: a BACKSPACE at the leftmost column backs up to the rightmost column of the previous line — the xterm manual page's own sentence on the `reverseWrap` resource, and the extent honoured. ctlseqs names the mode and says nothing about its behaviour, so the four things it leaves open were answered by the narrowest reading — and §161 read xterm's own `cursor.c` and settled two of them. **DECAWM is coupled**, each mode being masked with `WRAPAROUND` before it is read; the top of the page stops this one, that being 1045's job. The other two stand as divergences named rather than closed: CUB does not wrap here, and cmote does not require the line above to be a WRAPPED one, which xterm's 45 does — so cmote's 45 reaches as far as 1045 does on every row but the first. The edges are the margins' when a band is set (§102, §149, §161, `term/decmodes.rs`) |
+| 1045 (XTREVWRAP2) | Extended reverse wrap | ✅ | xterm's *extended* reverse wraparound: the same backspace as 45, with the top of the page no longer stopping it — the first row's left edge carries round to the last row's right edge. A second mode beside 45 rather than a modifier on it, `cursor.c` testing the two flags separately, so either alone enables the wrap; and coupled to DECAWM as 45 now is. **Read ❌ until §161**, on a note that said no source states what it widens: two do, and the change log states it twice over by putting the stop and the mode that lifts it in one patch (§149, §161, `term/decmodes.rs`, `term/gate.rs`) |
 | 69 (DECLRMM) | Left / right margin | ✅ | enables the left and right margins DECSLRM sets. Absent from the engine's mode list, so it is held by the gate and never reaches the engine — and **DECRQM is answered here too**, `1` set or `2` reset, because the engine's own answer is `0`, "not recognised", which was true until §102 and is now a lie a program would act on. Setting the mode opens the band to the whole page and resetting it throws the band away, so a program can put margins down and pick them up again without the next one having to guess. RIS, a soft reset and every resize clear it. **This row used to be where the margin gap lived** (part 5, §73, §102, `term/margins.rs`, `term/gatediff.rs`) |
 | 80 (behaviour) | Sixel scrolling | ✅ | what sixel scrolling mode governs: cmote always scrolls, the modern default and what emitters assume (§41) |
 | 80 (the mode) | DECSDM | 🤷 | DECSDM as a mode — setting it asks a sixel not to scroll the page (§65) |
@@ -2321,13 +2321,25 @@ Quoted where a row's wording now rests on it.
   rather than quoted, and labelled as such in its row.
 - **Mode 1015 is defined by urxvt's manual page, not by xterm's** (§161). ctlseqs gives it one line —
   "*Ps* = 1 0 1 5 → Enable urxvt Mouse Mode" — and the Mouse Tracking section that would say more is
-  past the same cut, in the same two builds, that the bullet above records; XFree86's older copy
-  predates the mode entirely. `urxvt(7)` defines it, the mode being that terminal's: **"If mode 1015 is
-  active, urxvt sends the sequence `ESC [ <b>;<x>;<y> M` where the parameters are provided as decimal
-  numbers instead of octets and only `b` includes an offset of 32"**, with the worked example
-  **"Shift-Button-1 press at top row, column 80. `ESC [ 36 ; 80 ; 1 M`"**. The example is what makes
-  the sentence checkable — shift (4) on button 1 (0) plus the bias is 36 — and it is the test's
-  expected bytes.
+  past the same cut, in the same two builds, that §150 recorded above; XFree86's older copy predates
+  the mode entirely. `urxvt(7)` defines it, the mode being that terminal's: **"If mode 1015 is active,
+  urxvt sends the sequence `ESC [ <b>;<x>;<y> M` where the parameters are provided as decimal numbers
+  instead of octets and only `b` includes an offset of 32"**, with the worked example **"Shift-Button-1
+  press at top row, column 80. `ESC [ 36 ; 80 ; 1 M`"**. The example is what makes the sentence
+  checkable — shift (4) on button 1 (0) plus the bias is 36 — and it is the test's expected bytes.
+- **Mode 1045 is defined by xterm's change log and its source, neither of which §149 had read** (§161).
+  ctlseqs again gives one line, "Extended Reverse-wraparound mode (XTREVWRAP2)", which is why §149 left
+  the row unsupported. The change log carries both halves as adjacent bullets of **patch #380
+  (2023/05/09)**: **"disallow wrapping before the beginning of the screen, to the end of the screen,
+  for cursor-back sequences"**, then **"add private mode 1045 which imitates the original xterm
+  cursor-back reverse wrapping mode 45"** — so the mode is exactly the stop that patch added, lifted.
+  `cursor.c`'s own comment says it from the other side — **"That was revised in 2023, using private
+  mode 45 for movement within the current (wrapped) line, and 1045 for movement to 'any' line"** — and
+  its code answers the rest: `rev` and `rev2` are separate tests, each masked with `WRAPAROUND`, and
+  the wrap-round is `row = bottom + 1` followed by `--row`. **This is the first row in this document
+  settled from an implementation rather than a specification**, and it is worth naming as such: what
+  was read is what xterm DOES, which is the same standing the `vte` and engine reads have and a lower
+  one than a published grammar.
 - **OSC 8's own specification** (Egmont Koblinger's, the document VTE and iTerm2 implement): the
   sequence is `OSC 8 ; params ; URI ST` and is closed with `OSC 8 ; ; ST`; "params is an optional list
   of key=value assignments, separated by the `:` character", of which only `id` is defined — "character

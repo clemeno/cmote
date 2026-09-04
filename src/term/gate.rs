@@ -492,43 +492,59 @@ impl<'a> Gate<'a> {
 		self.modes.set(number, on)
 	}
 
-	/// XTREVWRAP — a backspace at the leftmost column backs up to the rightmost column of the line
-	/// above (§149). `true` when it did, and the ordinary backspace is then not run.
+	/// XTREVWRAP and XTREVWRAP2 — a backspace at the leftmost column backs up to the rightmost column
+	/// of the line above (§149, §161). `true` when it did, and the ordinary backspace is then not run.
 	///
 	/// The xterm manual page's sentence, and nothing beyond it: "this allows the cursor to back up from
 	/// the leftmost column of one line to the rightmost column of the previous line". `term/decmodes.rs`
-	/// lists the four things no source read here says, and why each is answered by the narrowest
-	/// reading — including why CUB is left alone.
+	/// lists the four things it does not say, and which source answers each — including why CUB is left
+	/// alone, and the one place cmote is knowingly wider than xterm.
 	///
-	/// Three things stop it, in order:
+	/// **Either mode alone turns it on**, which is xterm's own arrangement rather than a shorthand:
+	/// `cursor.c` tests its two flags separately and neither implies the other. What 1045 adds is the
+	/// last stop below.
 	///
-	///   * the mode being off, which is the fast path every ordinary session takes;
+	/// Four things stop it, in order:
+	///
+	///   * both modes being off, which is the fast path every ordinary session takes;
+	///   * **DECAWM being off** — xterm masks each mode with `WRAPAROUND` before either is read, so a
+	///     page that does not wrap forwards does not wrap backwards either (§161);
 	///   * a WRAP OWED, which means the cursor is sitting on the last cell written rather than past the
 	///     edge — a backspace there cancels the wrap and stays put, and that is not a backspace "from
 	///     the leftmost column" at all. Both holders of the flag are consulted, because which one has it
 	///     depends on whether the margins are narrowed (§102);
-	///   * the top of the page, because there is no previous line to back up to. xterm has a second mode
-	///     for the wider behaviour (1045) and cmote does not implement it.
+	///   * the top of the page — under 45 only. There is no previous line to back up to, so 45 stays
+	///     put and 1045 wraps to the last row, which is the whole of what "the original xterm
+	///     cursor-back reverse wrapping" restored (§161).
 	///
 	/// The two edges are the MARGINS' when a band is set and the page's otherwise, which is what
-	/// `backstop` and `right` already answer for every other motion in this file.
+	/// `backstop` and `right` already answer for every other motion in this file. The row it wraps
+	/// ROUND to is the page's last, not the scrolling region's bottom: cmote's backspace does not
+	/// consult the region at either end (§149), and answering one edge from the region while the other
+	/// comes from the page would be a rule nothing states.
 	fn reverse_wrap_backspace(&mut self) -> bool {
-		if !self.modes.reverse_wrap() {
+		let extended = self.modes.reverse_wrap_extended();
+		if !(self.modes.reverse_wrap() || extended) || !self.autowrap() {
 			return false;
 		}
 		if self.term.grid().cursor.input_needs_wrap || self.margins.pending_wrap() {
 			return false;
 		}
 		let left = self.margins.backstop(self.column(), self.cols());
-		if self.column() != left || self.row() == 0 {
+		if self.column() != left {
 			return false;
 		}
+		let row = match self.row() {
+			0 if extended => self.rows().saturating_sub(1),
+			0 => return false,
+			row => row - 1,
+		};
 		// `band` rather than `right`, because the right MARGIN is only a real column while a band is
 		// set — with no margins it reads 0, and backing up to column 0 of the line above is not what
 		// "the rightmost column" means. `band` answers the whole page in that case, which is exactly
 		// the rule DECIC and DECDC already need it for.
 		let (_, right) = self.margins.band(self.cols());
-		self.set_row(self.row() - 1);
+		self.set_row(row);
 		self.set_column(right);
 		true
 	}

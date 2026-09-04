@@ -56,7 +56,7 @@ mod charset; // holds the four character-set slots and the shifts that invoke th
 mod csi; // the limits every CSI scanner has to agree with the engine about (§106)
 pub mod cwd; // tracks the remote working directory announced by the shell (§17)
 mod dcs; // frames the DCS control strings and escape sequences out of the stream, once, for the scanners that read them (§111)
-mod decmodes; // holds the two DEC private modes the engine has no bit for — DECSCNM and reverse wraparound (§149)
+mod decmodes; // holds the DEC private modes the engine has no bit for — reverse video, the two reverse wraps and three mouse modes (§149, §150, §161)
 #[cfg(test)]
 mod differential; // drives the engine's own parser beside cmote's scanners and compares them (§106)
 mod dsr; // reads the DEC-private device status reports the engine drops — DECXCPR, and an allow-list over the rest (§82)
@@ -1384,9 +1384,10 @@ impl Terminal {
 					.resize_reports,
 			);
 		}
-		// DECSCNM and reverse wraparound, the third and fourth (§149). Answered from the same table the
-		// gate writes, and restored the same way — the fed `CSI ? 5 h` runs through the gate, which is
-		// the table's only writer, so a restore needs no special case here either.
+		// Everything in cmote's own mode table — reverse video, the two reverse wraps, the three mouse
+		// modes (§149, §150, §161). Answered from the same table the gate writes, and restored the same
+		// way: the fed `CSI ? 5 h` runs through the gate, which is the table's only writer, so a restore
+		// needs no special case here either. No count is written down, because the table is the count.
 		if let Some(value) = self.modes.get(mode) {
 			return Some(value);
 		}
@@ -2670,7 +2671,7 @@ pub struct Terminal {
 	/// breath. Answered after the chunk, cmote's reply would always land second whatever order the
 	/// questions were asked in.
 	window: window::WindowReports,
-	/// The two DEC private modes the engine has no bit for — DECSCNM and reverse wraparound (§149).
+	/// The DEC private modes the engine has no bit for (§149, §150, §161).
 	/// Written by the gate, which is where the engine is told; read by the gate for the wrap and by the
 	/// RENDERER, through `Screen`, for the reverse video. That second reader is why it lives here rather
 	/// than on the reply buffer as mode 2048 does: a bit consulted for every cell of every frame must
@@ -3977,12 +3978,17 @@ mod tests {
 		// RIS puts them back; DECSTR does not, because neither is on DEC's published soft-reset list
 		// and §72 was careful not to widen the one DEC wrote (§149).
 		let mut terminal = Terminal::new(2, 4);
-		terminal.process(b"\x1b[?5h\x1b[?45h");
+		terminal.process(b"\x1b[?5h\x1b[?45h\x1b[?1045h");
 		terminal.process(b"\x1b[!p");
 		assert!(terminal.screen().reverse_video(), "DECSTR left it alone");
 		terminal.process(b"\x1bc");
 		assert!(!terminal.screen().reverse_video());
 		assert_eq!(terminal.process(b"\x1b[?45$p"), b"\x1b[?45;2$y".to_vec());
+		// 1045 goes the same way, being a bit in the same table (§161).
+		assert_eq!(
+			terminal.process(b"\x1b[?1045$p"),
+			b"\x1b[?1045;2$y".to_vec()
+		);
 	}
 
 	#[test]
@@ -4008,11 +4014,60 @@ mod tests {
 
 	#[test]
 	fn reverse_wrap_stops_at_the_top_of_the_page() {
-		// There is no previous line above the first. xterm has a SECOND mode for the wider behaviour
-		// (1045, Extended Reverse-wraparound) and cmote does not implement it (§149).
+		// There is no previous line above the first, and 45 alone stays put there (§149). The wider
+		// behaviour is 1045's, and the test below is the same page with that mode set instead.
 		let mut terminal = Terminal::new(3, 5);
 		terminal.process(b"\x1b[?45h\x1b[1;1H\x08");
 		assert_eq!(terminal.screen().cursor_position(), (0, 0));
+	}
+
+	#[test]
+	fn extended_reverse_wrap_carries_the_backspace_round_to_the_last_row() {
+		// XTREVWRAP2 (§161). xterm's change log puts the two halves side by side under patch #380:
+		// "disallow wrapping before the beginning of the screen, to the end of the screen, for
+		// cursor-back sequences", and then "add private mode 1045 which imitates the original xterm
+		// cursor-back reverse wrapping mode 45". So 1045 is exactly the stop above, lifted.
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?1045h\x1b[1;1H\x08");
+		assert_eq!(
+			terminal.screen().cursor_position(),
+			(2, 4),
+			"round to the last row, rightmost column"
+		);
+	}
+
+	#[test]
+	fn extended_reverse_wrap_needs_no_help_from_mode_45() {
+		// `cursor.c` tests its two flags separately — `rev2` on its own enables the wrap and `else if
+		// (!rev)` is what stops it — so 1045 is a second mode rather than a modifier on the first
+		// (§161). Set alone, it backs up an ordinary line as well as wrapping round.
+		let mut terminal = Terminal::new(3, 5);
+		terminal.process(b"\x1b[?1045h\x1b[2;1H\x08");
+		assert_eq!(terminal.screen().cursor_position(), (0, 4));
+		// And DECRQM answers for it, which the engine would not: it has never heard of the mode.
+		assert_eq!(
+			terminal.process(b"\x1b[?1045$p"),
+			b"\x1b[?1045;1$y".to_vec()
+		);
+	}
+
+	#[test]
+	fn neither_reverse_wrap_fires_with_autowrap_off() {
+		// xterm masks each mode with `WRAPAROUND` before reading it — `WRAP_MASK` is
+		// `REVERSEWRAP | WRAPAROUND` — so a page that does not wrap forwards does not wrap backwards
+		// either. §149 had the two uncoupled, on a report about a `need_wrap` corner rather than on
+		// the code; this is the correction (§161).
+		for mode in [&b"\x1b[?45h"[..], &b"\x1b[?1045h"[..]] {
+			let mut terminal = Terminal::new(3, 5);
+			terminal.process(b"\x1b[?7l");
+			terminal.process(mode);
+			terminal.process(b"\x1b[2;1H\x08");
+			assert_eq!(
+				terminal.screen().cursor_position(),
+				(1, 0),
+				"autowrap is off, so nothing backed up a line"
+			);
+		}
 	}
 
 	#[test]

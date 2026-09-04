@@ -149,9 +149,11 @@ fn request(csi: &super::csi::Csi<'_>) -> Option<SaveModesRequest> {
 /// What XTSAVE remembered, one slot per mode, newest value winning (§141).
 ///
 /// A vector with a linear scan rather than a map, because the number of modes that can ever be in it
-/// is the number `Screen::private_mode` answers for plus one — fifteen today. A remote can send a
-/// thousand parameters and still not make this hold a sixteenth entry, which is the bound §12 asks
-/// for, stated as a property of the type rather than as a limit checked somewhere.
+/// is the number `Terminal::private_mode` answers for — the engine's flags, mode 69, mode 2048, and
+/// `term/decmodes.rs`'s own table. A remote can send a thousand parameters and still not make this
+/// hold one entry more, which is the bound §12 asks for, stated as a property of the type rather than
+/// as a limit checked somewhere. **No number is written here on purpose** (§161): the set grew four
+/// times without this line noticing, and the readers above are the count.
 #[derive(Debug, Default)]
 pub struct Saved {
 	entries: Vec<(u16, bool)>,

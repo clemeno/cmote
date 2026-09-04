@@ -1,11 +1,12 @@
 // term/decmodes.rs — the DEC private modes cmote holds because the engine has no bit for them
 // (PLAN §149).
 //
-//   CSI ? 5 h / l     DECSCNM   reverse video over the whole screen
-//   CSI ? 45 h / l    XTREVWRAP reverse wraparound — a backspace at the left edge backs up a line
-//   CSI ? 9 h / l               X10 mouse tracking — press only, no modifiers (§150)
-//   CSI ? 1015 h / l            urxvt mouse — the classic fields as decimal parameters (§161)
-//   CSI ? 1016 h / l            SGR-Pixels mouse — the SGR reports, in pixels (§150)
+//   CSI ? 5 h / l     DECSCNM    reverse video over the whole screen
+//   CSI ? 45 h / l    XTREVWRAP  reverse wraparound — a backspace at the left edge backs up a line
+//   CSI ? 1045 h / l  XTREVWRAP2 the same backspace, and the top of the page no longer stops it (§161)
+//   CSI ? 9 h / l                X10 mouse tracking — press only, no modifiers (§150)
+//   CSI ? 1015 h / l             urxvt mouse — the classic fields as decimal parameters (§161)
+//   CSI ? 1016 h / l             SGR-Pixels mouse — the SGR reports, in pixels (§150)
 //
 // `alacritty_terminal`'s `NamedPrivateMode` names fifteen modes and none of these is among them, so
 // each arrives at `Handler::set_private_mode` as `PrivateMode::Unknown(n)` and is dropped — DECRQM
@@ -13,7 +14,7 @@
 // situation (§102) and it gets mode 69's answer: the gate claims the sequence and does not forward
 // it, so there is one writer and the engine is never asked to hold a bit it has never heard of.
 //
-// WHY THESE FIVE ARE A TABLE AND THE OTHER TWO ARE NOT. cmote holds seven private modes of its own now
+// WHY THESE SIX ARE A TABLE AND THE OTHER TWO ARE NOT. cmote holds eight private modes of its own now
 // and they live in three places, which looks like an accident and is not:
 //
 //   * **69** (DECLRMM) lives in `term/margins.rs`, because turning it on brings a whole geometry with
@@ -21,11 +22,11 @@
 //     of what that module holds (§102).
 //   * **2048** (in-band resize) lives on `ReplyBuffer`, because the four numbers its notification is
 //     built from are already there and a second home would be a second thing to keep in step (§148).
-//   * **5**, **45**, **9**, **1015** and **1016** are *just bits*. None carries any other state, and
-//     the operations wanted of them are table operations: set one, read one back for DECRQM and
-//     XTSAVE, clear them all on RIS. So they are a table — and §150 was the test of that: adding the
-//     two mouse modes was four lines here and nothing at all in the gate. §161's third mouse mode was
-//     again nothing at all in the gate.
+//   * **5**, **45**, **1045**, **9**, **1015** and **1016** are *just bits*. None carries any other
+//     state, and the operations wanted of them are table operations: set one, read one back for DECRQM
+//     and XTSAVE, clear them all on RIS. So they are a table — and §150 was the test of that: adding
+//     the two mouse modes was four lines here and nothing at all in the gate. §161 added two more, and
+//     one of them — 1015 — was again nothing at all in the gate.
 //
 // THE THREE MOUSE MODES, AND WHY NONE OF THEM CLEARS ANYTHING (§150, §161).
 //
@@ -67,19 +68,53 @@
 //     reported to wrap every leftward motion under this mode; that behaviour is in no document read
 //     here, it is said to disagree with vttest, and another implementation refused it outright. A
 //     cursor that moves where no source says it should is the divergence §102 exists to prevent.
-//   * **Past the top.** There is no "previous line" above the first, so the cursor stays. xterm has a
-//     SECOND mode for the wider behaviour — 1045, "Extended Reverse-wraparound" — which is itself
-//     evidence that 45 alone is the restricted form.
+//   * **Past the top.** There is no "previous line" above the first, so under 45 the cursor stays.
+//     That is 1045's question and 1045 now answers it — the section below.
 //   * **Whether the line above must be a wrapped one.** The sentence puts no condition on it, so
-//     neither does this. The alternative reading is safer and is not what the source says.
-//   * **DECAWM.** The two are not coupled here. xterm is reported to fix a `need_wrap` corner only
-//     when both are on; that is a statement about xterm's flag, not about what the mode means.
+//     neither does this. §161 read xterm's own code and found that xterm DOES put one on 45; that
+//     divergence is recorded there rather than closed here, because it changes a shipped behaviour and
+//     a sweep of the unsupported column is not where that is decided.
+//   * **DECAWM.** Coupled, since §161 — the correction the section below is the source for. §149 had
+//     the two uncoupled on a report about xterm fixing a `need_wrap` corner when both are on; the code
+//     shows the coupling is not a corner fix but the whole enabling test.
+//
+// XTREVWRAP2 (1045), AND THE SOURCE §149 COULD NOT FIND (§161).
+//
+// §149 left 1045 alone because it "is defined as widening behaviour that no source read for §149
+// states, so there is nothing to widen it from". Two sources state it. xterm's change log carries both
+// halves as adjacent bullets under patch #380 (2023/05/09):
+//
+//   "disallow wrapping before the beginning of the screen, to the end of the screen, for cursor-back
+//    sequences"
+//   "add private mode 1045 which imitates the original xterm cursor-back reverse wrapping mode 45"
+//
+// 1045 restores exactly what the bullet above it took away. `cursor.c`'s own comment says it from the
+// other side — "this reverse wrapping allowed the cursor to wrap around to the end of the screen …
+// That was revised in 2023, using private mode 45 for movement within the current (wrapped) line, and
+// 1045 for movement to 'any' line" — and its code answers what is left:
+//
+//   int rev  = (((xw->flags & WRAP_MASK)  == WRAP_MASK)  != 0);   /* REVERSEWRAP  | WRAPAROUND */
+//   int rev2 = (((xw->flags & WRAP_MASK2) == WRAP_MASK2) != 0);   /* REVERSEWRAP2 | WRAPAROUND */
+//   ...
+//   if (col < left) {
+//       if (rev2) { col = right; if (row == top) row = bottom + 1; }
+//       else if (!rev) { col = left; break; }
+//       ld = NULL; --row;
+//   }
+//
+//   * **1045 does not need 45.** `rev2` is tested on its own and `else if (!rev)` is what stops the
+//     wrap, so either mode alone enables it. The name says "extended" and the code says "second".
+//   * **It wraps to the BOTTOM row.** `row = bottom + 1` and then `--row`.
+//   * **Both need DECAWM**, which is the bullet above.
 
 /// DECSCNM — reverse video over the whole screen.
 pub const REVERSE_VIDEO: u16 = 5;
 
 /// XTREVWRAP — reverse wraparound.
 pub const REVERSE_WRAP: u16 = 45;
+
+/// XTREVWRAP2 — the same wrap, with the top of the page no longer stopping it (§161).
+pub const REVERSE_WRAP_EXTENDED: u16 = 1045;
 
 /// X10 mouse tracking — the original protocol, press-only and with no modifier bits (§150).
 pub const X10_MOUSE: u16 = 9;
@@ -101,9 +136,10 @@ pub const PIXEL_MOUSE: u16 = 1016;
 /// §150's two mouse modes took the count to four bools in one struct — which clippy refuses, and
 /// rightly: four bools in a row is where a caller starts transposing them. Four bits under four names
 /// cannot be transposed at all.
-const HELD: [u16; 5] = [
+const HELD: [u16; 6] = [
 	REVERSE_VIDEO,
 	REVERSE_WRAP,
+	REVERSE_WRAP_EXTENDED,
 	X10_MOUSE,
 	URXVT_MOUSE,
 	PIXEL_MOUSE,
@@ -157,6 +193,11 @@ impl DecModes {
 	/// XTREVWRAP — whether a backspace at the left edge backs up to the line above.
 	pub fn reverse_wrap(self) -> bool {
 		self.holds(REVERSE_WRAP)
+	}
+
+	/// XTREVWRAP2 — the same wrap, and the top of the page does not stop it (§161).
+	pub fn reverse_wrap_extended(self) -> bool {
+		self.holds(REVERSE_WRAP_EXTENDED)
 	}
 
 	/// Mode 9 — whether X10 mouse tracking is on (§150).
@@ -220,6 +261,7 @@ mod tests {
 		// And nothing was written on the way past.
 		assert!(!modes.reverse_video());
 		assert!(!modes.reverse_wrap());
+		assert!(!modes.reverse_wrap_extended());
 		assert!(!modes.x10_mouse());
 		assert!(!modes.urxvt_mouse());
 		assert!(!modes.pixel_mouse());
@@ -235,6 +277,7 @@ mod tests {
 		let readers: [Reader; HELD.len()] = [
 			(REVERSE_VIDEO, DecModes::reverse_video),
 			(REVERSE_WRAP, DecModes::reverse_wrap),
+			(REVERSE_WRAP_EXTENDED, DecModes::reverse_wrap_extended),
 			(X10_MOUSE, DecModes::x10_mouse),
 			(URXVT_MOUSE, DecModes::urxvt_mouse),
 			(PIXEL_MOUSE, DecModes::pixel_mouse),
