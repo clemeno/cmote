@@ -18776,3 +18776,134 @@ consulted, so the next reader can see the shape of the hole.
 usual arithmetic, where ✅ is better than ❌ and the only question is price. A terminal that claims a
 notification it can never send does not degrade to silence — it stops the program polling a question
 that has a real answer. Worth keeping in view the next time a mode looks like one line.
+
+
+## §162 — Blink, and the price §151 did not put on the scale
+
+One row, swept the same way §161 swept four: build it, or refuse it.
+
+> | 5 / 6 | Slow / rapid blink | ❌ | the text flashes, slowly or fast … **the price is a bit, and there
+> is not one** |
+
+**It is refused, and the row moves ❌ → 🛑.** Nothing changes on screen. What changes is who declines,
+and that turns out to be the whole of what this row had wrong.
+
+### The measurement first, because the old note might have expired
+
+§151 priced this row on storage: the engine's per-cell flag word is a `u16`, `Flags` names bits 0–14,
+and §56 borrowed bit 15 for DECSCA protection, so there is no bit to put blink in. That argument
+expires the day upstream frees one — which is exactly why §151 left the mark at ❌ and wrote a test
+that goes red when the word stops being full.
+
+So it was re-measured rather than re-read. **`alacritty_terminal` 0.26.0 is still the latest release**
+(`cargo search`), the flag word is still full, and the test still passes. No version bump is waiting.
+
+The parallel-grid alternative is unchanged too and §151 priced it correctly: a per-cell store is
+dropped on every reflow (`Term::resize` re-wraps internally, with no sequence on the wire and no
+`Handler` method to watch — the same reason §34's marks and §41's images are dropped on resize) and it
+is unbounded in remote input, which is §12's refusal in a new costume.
+
+### The price that was not on the scale
+
+Blink needs two things and §151 weighed one. The second is a **repaint clock**, and cmote's position
+on that was already settled — twice, in this very table:
+
+> | 12 (the blink) | Blinking cursor — drawn | 🛑 | cmote runs no animation timer, so the cursor is
+> steady whatever DECRQM reports (§65) |
+>
+> | Ps SP q (DECSCUSR) — blink | Cursor style | 🛑 | cmote runs no animation timer and its seam carries
+> no blink, so the cursor is steady (§65) |
+
+`term/screen.rs` states it as policy rather than as circumstance — *"cmote runs no animation timer
+**and never will** (§65)"* — and part 6 has said since §65 that this is *"the same call part 4 makes
+for **SGR blink** and DECSCUSR's blinking shapes."*
+
+**So the document already argued this row as a refusal in its prose while marking it a gap in its
+column**, for eleven sections. That is the finding, and it is §79's failure shape exactly: the marks
+are where a conclusion hides, because nothing fails while one is wrong.
+
+Note what the timer is NOT: absent for want of a mechanism. `App::subscription` asks for
+`iced::window::frames()` in five places already — the quit drain, the snackbar's dwell, the find
+rescan, the file-drop settle, and mode 2026's held-update expiry (§122). Every one of them is armed by
+a cmote-side condition and disarmed when it clears. A blink clock would be armed by **remote content**
+and would stay armed for as long as a blinking cell is on screen, repainting the grid at the display's
+rate — on a portable client, and at a remote's choosing. That is §12's shape in CPU rather than in
+memory, and it is the reason the answer is not "add the timer".
+
+Between them the two prices settle the mark. The first could expire on somebody else's release; the
+second is cmote's own decision. **A feature that needs a decision reversed rather than a version
+bumped is not a gap**, and that sentence is the whole of why this row moves.
+
+### Earning the mark
+
+🛑 means cmote's code performs the refusal. Before this section it did not: the gate forwarded
+`Attr::BlinkSlow` and `Attr::BlinkFast` with every other attribute, and the ENGINE dropped them at
+`_ => debug!("Term got unhandled attr")`. Same screen, different claim — and §63 (the remote
+clipboard) and §79 (two of the three notification spellings) both moved a row for precisely this,
+because a refusal resting on the far side of a call happening to have no arm is one no test can see
+and one an engine bump can silently reverse.
+
+So `terminal_attribute` stops being a generated forward and becomes a hand-written arm that drops the
+two blinks by name and forwards the rest. **Blink is now refused at four doors**, and each says so
+where it sits:
+
+* `Gate::terminal_attribute` — `CSI 5 m` / `CSI 6 m`, the one a program actually reaches;
+* `RECT_ATTRIBUTES` — DECCARA's `5` / `25` and DECRARA's `5` (§59);
+* `CHECKSUM_ATTRIBUTES` — DECRQCRA's `0x40` weight, left off the list (§60);
+* `screen::CursorShape` — no blink to carry (§65).
+
+Three of those four were already cmote's own code. Only the SGR door was the engine's, which is why
+this row was the last of the family still marked as a gap.
+
+### What is refused, and how a refusal that changes nothing is tested
+
+The hard part of a no-op refusal is that behaviour cannot see it: a forwarded blink and a refused one
+leave the same cells. Two tests hold it between them, and they hold different things.
+
+**`gatediff` holds the forward.** Adding an arm to the gate forces an entry in `gate_arms()` — the
+list is read out of `gate.rs`'s source, so an arm nobody adds fails `every_gate_arm_is_in_the_sweep`
+— and the entry's stream is `CSI 1 m`, **bold rather than a blink, deliberately**. This arm's job is
+to forward everything except two attributes, so the stream held against the oracle engine has to be
+one that must REACH it; a blink there would compare nothing against nothing and pass for the wrong
+reason. The generated sweep then runs it at five cursor positions under four scrolling regions with
+three wrap-owed arrivals, and the glyph every stream ends with is what carries the attribute into the
+comparison.
+
+**A source-reading test holds the refusal.** `the_blink_refusal_is_an_arm_of_cmotes_own` asserts that
+`terminal_attribute` is among the hand-written arms. It checks the SHAPE rather than the effect, and
+says so in its own comment — which is the honest thing to write about a test of a mark.
+
+Prove-it, two:
+
+* the arm widened to drop `Attr::Bold` as well → the sweep fails on the trailing glyph,
+  `('Z', Flags(0x0))` against `('Z', Flags(BOLD))`, on every one of the 32 streams the arm generates
+* the arm moved back into the `forward!` block → *"SGR is forwarded wholesale again, so the blink
+  refusal has gone back to being the engine's"*
+
+§151's own test is unchanged and still green, which is the point of it: `CSI 1 ; 5 ; 31 m` is bold red
+here exactly as it is in a terminal that blinks. A careless refusal breaks that as surely as a careless
+attempt at the attribute would, and it now has two guards instead of one.
+
+### What moved with it
+
+`gatediff`'s stream count, 30 reachable arms to 31 — a number in an assertion, which is the kind that
+fails loudly and is therefore fine to write down. The three other blink doors gained a sentence naming
+the timer beside the missing bit, so no door argues half the case any more.
+
+### What to keep
+
+**A feature can have two prices, and finding the cheaper one first is how a row gets the wrong mark.**
+§151's measurement was right, careful, and load-bearing — the flag word IS full, and it wrote the test
+that watches for it. It stopped there because the first price was already decisive for *building* the
+feature. But the mark is not about whether the feature can be built today; it is about what would have
+to change for it to land. Two prices, and only the more expensive one decides that.
+
+**When the prose and the column disagree, the column is usually the stale one.** Part 6 has named SGR
+blink as sharing the cursor's refusal since §65. Part 8 called it a gap until now. Prose gets rewritten
+when somebody re-reads the argument; a mark gets rewritten only when somebody asks about that row. It
+is worth a sweep asking whether any other row's note already contradicts its own mark.
+
+**A refusal that changes nothing still has to be performed somewhere a test can point at.** This is the
+third time (§63, §79, now) that the fix for a mark was to move a drop from the engine's default into
+cmote's own code. The behaviour was already what the row claimed; what was missing was the claim being
+checkable. Two of those three were caught by re-reading, and none of them by anything failing.

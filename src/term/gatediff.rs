@@ -506,6 +506,12 @@ fn gate_arms() -> Vec<GateArm> {
 		// show for it rather than only in the mirror the oracle cannot see.
 		("set_horizontal_tabstop", b"\x1b[3g\x1b[5G\x1bH\r\tX"),
 		("clear_tabs", b"\x1b[3g\r\tX"),
+		// SGR (§161). BOLD rather than a blink, deliberately: this arm's whole job is to forward every
+		// attribute except the two blinks, so the stream held against the oracle has to be one that
+		// must REACH the engine. A blink here would compare nothing against nothing and pass for the
+		// wrong reason. The trailing glyph every generated stream ends with is what carries the
+		// attribute into the comparison.
+		("terminal_attribute", b"\x1b[1m"),
 	]
 }
 
@@ -705,6 +711,30 @@ mod tests {
 		);
 	}
 
+	/// The blink refusal is cmote's own, and this is the only place that can say so (§161).
+	///
+	/// **Behaviour cannot say it.** The engine has no arm for `Attr::BlinkSlow` either — it logs and
+	/// carries on — so a forwarded blink and a refused one leave exactly the same screen. What differs
+	/// is WHO declined, which is the whole of what 🛑 claims in the matrix and the reason §63 moved the
+	/// remote clipboard and §79 moved two notifications. A refusal nobody performs is one no test can
+	/// see, and this is the test that sees this one: `terminal_attribute` is a HAND-WRITTEN arm, and
+	/// putting it back in the `forward!` block would make this red.
+	///
+	/// It is worth being plain that this checks the SHAPE of the refusal rather than its effect. The
+	/// effect is pinned next door, by the sweep above — bold reaches the engine through this same arm
+	/// on every generated stream — and in `term/mod.rs`, where an SGR run carrying a blink still
+	/// applies everything else.
+	#[test]
+	fn the_blink_refusal_is_an_arm_of_cmotes_own() {
+		assert!(
+			hand_written_arms()
+				.iter()
+				.any(|arm| arm == "terminal_attribute"),
+			"SGR is forwarded wholesale again, so the blink refusal has gone back to being the \
+			 engine's — see PLAN §161"
+		);
+	}
+
 	#[test]
 	fn with_no_margins_the_gate_is_the_engine_for_every_arm() {
 		// The generated sweep §107 asked for: every hand-written gate arm, at five cursor positions,
@@ -714,8 +744,8 @@ mod tests {
 		let streams = generated_streams();
 		assert_eq!(
 			streams.len(),
-			30 * 4 * 8,
-			"30 reachable arms x 4 regions x 8 arrivals (5 parked, 3 with a wrap owed)"
+			31 * 4 * 8,
+			"31 reachable arms x 4 regions x 8 arrivals (5 parked, 3 with a wrap owed)"
 		);
 		let mut disagreed = Vec::new();
 		for (name, stream) in &streams {

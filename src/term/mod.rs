@@ -133,12 +133,13 @@ const _: () = assert!(
 /// those bits meet the engine's names — which keeps the grammar testable without a terminal and puts
 /// the translation where the engine types already live.
 ///
-/// **Blink is missing on purpose.** `alacritty_terminal`'s flag word has no bit for it: the fifteen
-/// it names cover inverse, bold, italic, dim, hidden, strikeout, five underline styles and the
-/// wide-character marks, and nothing blinks. So DECCARA's `5` / `25` and DECRARA's `5` are parsed,
-/// accepted and then quietly dropped here — the same call cmote already makes for DECSCUSR's
-/// blinking cursor shapes (§2), and the honest one while there is nothing to store it in. A program
-/// that asks for blink and underline together still gets its underline.
+/// **Blink is missing on purpose**, and this is one of the four doors it is refused at (§161). The
+/// engine's flag word has no bit for it: the fifteen it names cover inverse, bold, italic, dim,
+/// hidden, strikeout, five underline styles and the wide-character marks, and nothing blinks — and
+/// cmote runs no animation timer to draw it with either (§65). So DECCARA's `5` / `25` and DECRARA's
+/// `5` are parsed, accepted and then quietly dropped here, the same call `Gate::terminal_attribute`
+/// makes for `CSI 5 m` and `screen::CursorShape` for DECSCUSR's blinking shapes (§2). A program that
+/// asks for blink and underline together still gets its underline.
 const RECT_ATTRIBUTES: [(u8, Flags); 3] = [
 	(rect::BOLD, Flags::BOLD),
 	(rect::UNDERLINE, Flags::UNDERLINE),
@@ -157,7 +158,8 @@ const RECT_ATTRIBUTES: [(u8, Flags); 3] = [
 /// copied is written down in `term/rect.rs` rather than repeated here. DECSCA protection is the one
 /// missing from this list, because it does not live in `Flags`: it rides bit 15 and is read through
 /// `protect::is_protected`, weighing 0x04. Blink is missing because the engine has no bit for it at
-/// all (§59), so 0x40 can never land — the honest hole, in the same place as the last one.
+/// all (§59) and because cmote refuses to draw it (§65, §161), so 0x40 can never land — the honest
+/// hole, in the same place as the last one, and the third of blink's four doors.
 const CHECKSUM_ATTRIBUTES: [(Flags, u32); 4] = [
 	(Flags::HIDDEN, 0x08),
 	(Flags::UNDERLINE, 0x10),
@@ -4283,14 +4285,15 @@ mod tests {
 		);
 	}
 
-	/// SGR 5 and 6 REACH cmote and have nowhere to go; SGR 53 never reaches it at all. The two failures
-	/// are at different layers and the audit had them as one kind of gap (§151).
+	/// SGR 5 and 6 REACH cmote and are refused by it since §161; SGR 53 never reaches it at all. The two
+	/// failures are at different layers and the audit had them as one kind of gap (§151).
 	///
 	/// What both must not do is disturb the run they arrive in. `vte` skips a parameter it does not know
-	/// and carries on with the rest, and the engine logs an attribute it has no arm for and carries on
-	/// too — so `CSI 1 ; 5 ; 31 m` is bold red in cmote exactly as it is in a terminal that blinks. That
-	/// is the property a program actually depends on, and it is the one a careless attempt at either
-	/// attribute would break.
+	/// and carries on with the rest, and `Gate::terminal_attribute` drops the blink and forwards
+	/// everything else — so `CSI 1 ; 5 ; 31 m` is bold red in cmote exactly as it is in a terminal that
+	/// blinks. That is the property a program actually depends on, and it is the one a careless attempt
+	/// at either attribute would break — or a careless refusal, which is why `gatediff` sweeps bold
+	/// through that same arm.
 	#[test]
 	fn an_sgr_run_carrying_an_attribute_cmote_has_no_bit_for_still_applies_the_rest() {
 		let runs: [(&[u8], &str); 4] = [

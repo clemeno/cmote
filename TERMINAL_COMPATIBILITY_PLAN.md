@@ -854,6 +854,15 @@ animation timer, so the cursor is always steady — the same call part 4 makes f
 blinking shapes. The cost is admitted: a program that blinks the cursor to draw the eye gets a steady
 one, and DECRQM will tell it the mode is set, which is true of the mode and not of the screen.
 
+**Blinking TEXT** joined this list in §161, which is worth reading as a correction to a mark rather than
+as a new refusal — the sentence above had said "the same call part 4 makes for SGR blink" since §65,
+while part 8's row called it a gap. §151 priced the row on storage alone and stopped there: the engine's
+flag word is full, so there is nothing to put the attribute in. What it had not weighed is that the
+timer above is refused too, and a bit that came free on somebody else's release would therefore light
+nothing. A feature that needs a *decision* reversed rather than a version bumped is not a gap. So the
+gate now drops `Attr::BlinkSlow` and `Attr::BlinkFast` by name instead of handing them to an engine with
+no arm for either — identical on screen, and the difference is that a test can see who declined.
+
 **Remote colour *set* requests** — `OSC 4;n;<spec>`, `OSC 10 / 11 / 12` with a value, and the resets
 `OSC 104 / 110 / 111 / 112`. The theme is chrome the **user** chose and cmote owns, so a remote does not
 repaint it. Worth stating precisely what happens, because "ignored" is not quite it: the engine's
@@ -1694,7 +1703,7 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | 2 | Dim / faint | ✅ | faded toward the background |
 | 3 | Italic | ✅ | the italic face, from the bundled IBM Plex Mono family |
 | 4 | Underline | ✅ | a single line under the text |
-| 5 / 6 | Slow / rapid blink | ❌ | the text flashes, slowly or fast. It reaches cmote — `vte` turns both into `Attr::BlinkSlow` / `BlinkFast` and the gate forwards them — and the engine logs an attribute it has no arm for. **The price is a bit, and there is not one**: the per-cell flag word is a `u16`, the engine names bits 0–14, and §56 borrowed bit 15 for DECSCA protection. A test pins that the word is full and goes red the day it is not. The whole SGR run around it still applies, which is the property a program depends on (part 5, §36, §56, §151) |
+| 5 / 6 | Slow / rapid blink | 🛑 | the text flashes, slowly or fast. `vte` turns both into `Attr::BlinkSlow` / `BlinkFast`, and since §161 the **gate drops them by name** rather than forwarding them to an engine that had no arm for either. **Read ❌ until §161**, on the first of two prices: the per-cell flag word is a `u16` with the engine's fifteen bits and §56's borrowed sixteenth, so there is nowhere to store the attribute, and a map beside the grid is dropped on every reflow and unbounded in remote input (§12, §151). The second price is what makes this a refusal — **cmote runs no animation timer and never will** (§65), so a bit that came free would light nothing, and this is the same decision the two cursor-blink rows in this table already carry. Blink is refused at four doors now, this being the one an ordinary `CSI 5 m` reaches; the other three are DECCARA / DECRARA's `5`, DECRQCRA's `0x40` weight and `CursorShape`. The whole SGR run around it still applies (part 5, §36, §56, §65, §151, §161, `term/gate.rs`) |
 | 7 | Reverse video | ✅ | swaps the cell's foreground and background |
 | 8 | Hidden / conceal | ✅ | the text is not drawn; a copy still yields it |
 | 9 | Strikethrough | ✅ | a line through the text |
@@ -1816,9 +1825,13 @@ and selection colours, the page family, DEC's macros and status line, contour's 
 semantic-block query. A column that quadruples on one reading was never six rows long; it was six rows
 *known*, and the same caution now applies to the other three. That leaves the plain ❌ column, worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
-§70), blink (the engine drops
+§70), ~~blink (the engine drops
 it — and §151 measured *why*: the per-cell flag word is a `u16` with fifteen bits named and the
-sixteenth already borrowed by §56, so the gap is a bit that does not exist), ~~the newer private modes
+sixteenth already borrowed by §56, so the gap is a bit that does not exist)~~ — **§161 moved blink
+to 🛑**, having weighed the second price §151 had not: the bit could come free on somebody else's
+release, but the animation timer is cmote's own refusal and is already spent twice in the same table,
+so the feature cannot land without a decision being reversed rather than a version being bumped —
+~~the newer private modes
 (2027 / 2031 / 2048)~~ — **2048 SHIPPED in §148**, 2031 stays a gap whose blocker is the fixed colour
 scheme rather than the row, and 2027 stays one whose blocker is a missing engine METHOD rather than a
 bit (§151) — left-right margins, and — since §98 — the

@@ -1084,6 +1084,41 @@ impl Handler for Gate<'_> {
 		self.term.report_private_mode(mode);
 	}
 
+	/// SGR. Every attribute is forwarded except the two BLINKS, which are refused here (§65, §161).
+	///
+	/// This arm exists to move a refusal out of nobody's hands and into cmote's. Before §161 the two
+	/// blink attributes were forwarded like the rest and the engine dropped them at
+	/// `_ => debug!("Term got unhandled attr")`, which looks like the same outcome and is a different
+	/// claim: a refusal that rests on the far side of a call happening to have no arm for it is one no
+	/// test can see, and one an engine bump can silently reverse. §63 moved the remote clipboard for
+	/// exactly this reason and §79 moved two notifications; this is the same move on the last row that
+	/// needed it.
+	///
+	/// **Two prices, and the second is why this is a refusal rather than a gap.** Storage: the engine's
+	/// per-cell flag word is a `u16` with all sixteen bits taken — fifteen the engine's and bit 15
+	/// borrowed by §56 for DECSCA protection — so there is nowhere to put the attribute, and a map
+	/// beside the grid is dropped on every reflow and unbounded in remote input (§12, §151). Drawing:
+	/// cmote runs no animation timer and never will (§65), so even a bit that came free would light
+	/// nothing. The first price could expire on somebody else's release; the second is cmote's own
+	/// decision, already made twice in the same column for the blinking cursor (mode 12) and for
+	/// DECSCUSR's blinking shapes.
+	///
+	/// Blink is refused in three other places already and each says so where it sits: `RECT_ATTRIBUTES`
+	/// drops DECCARA's `5` / `25` and DECRARA's `5`, `CHECKSUM_ATTRIBUTES` leaves DECRQCRA's `0x40`
+	/// weight off the list, and `screen::CursorShape` carries no blink. This is the fourth door and the
+	/// only one a program reaches with an ordinary `CSI 5 m`.
+	///
+	/// **The rest of the run is untouched**, which is the property a program actually depends on: `CSI
+	/// 1 ; 5 ; 31 m` is bold red here exactly as it is in a terminal that blinks. A test pins that, and
+	/// `gatediff`'s sweep pins the forward — bold reaches the engine through this arm on every generated
+	/// stream, so an arm that dropped too much fails before any behaviour test does.
+	fn terminal_attribute(&mut self, attribute: Attr) {
+		if matches!(attribute, Attr::BlinkSlow | Attr::BlinkFast) {
+			return;
+		}
+		self.term.terminal_attribute(attribute);
+	}
+
 	forward! {
 		set_title(title: Option<String>),
 		set_cursor_style(style: Option<CursorStyle>),
@@ -1099,7 +1134,6 @@ impl Handler for Gate<'_> {
 		move_forward_tabs(count: u16),
 		clear_line(mode: LineClearMode),
 		clear_screen(mode: ClearMode),
-		terminal_attribute(attribute: Attr),
 		set_mode(mode: Mode),
 		unset_mode(mode: Mode),
 		report_mode(mode: Mode),
