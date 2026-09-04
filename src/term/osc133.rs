@@ -784,6 +784,36 @@ mod tests {
 		);
 	}
 
+	/// The eight phase letters the proposal defines (§164). Used to pin the width of the allow-list
+	/// `parse` is built on, by walking the rest of the alphabet and asserting none of them marks.
+	///
+	/// Derived-from rather than written out, which is the opposite choice from `term/modkeys.rs`'s
+	/// `OTHER_RESOURCES` and for the opposite reason: XTMODKEYS' numbering has a hole at 5, so a range
+	/// there would assert about a resource that does not exist, while here the refused set really is
+	/// the alphabet minus a list.
+	const SPECIFIED_LETTERS: &[u8] = b"ABCDILNP";
+
+	#[test]
+	fn every_letter_the_proposal_does_not_define_is_refused() {
+		// The letter list in `parse` is an allow-list, and this is what says how wide (§164). The eight
+		// specified letters have their own tests above — including `L`, which is specified and refused;
+		// what is walked here is the rest of the alphabet, none of which any source gives a meaning.
+		// A letter nobody defines cannot be a gap: there is nothing to build, and what cmote does when
+		// one arrives is decide.
+		for letter in b'A'..=b'Z' {
+			if SPECIFIED_LETTERS.contains(&letter) {
+				continue;
+			}
+			let name = char::from(letter);
+			let stream = [b"\x1b]133;".as_slice(), &[letter], b"\x07"].concat();
+			assert!(
+				marks(&stream).is_empty(),
+				"133;{name} produced a mark, so the letter list has stopped being an allow-list — \
+				 see PLAN §164"
+			);
+		}
+	}
+
 	#[test]
 	fn an_unrecognised_phase_letter_yields_no_mark() {
 		// A letter the proposal does not define produces nothing rather than being guessed into the
