@@ -596,13 +596,18 @@ short, and since §41 nothing left in it is high value:
   renderer draws it, and a build-time assertion fails the compile if a future engine version claims the
   bit. cmote then performs the erase itself, cell by cell, because the engine's own `CSI 2 J` scrolls
   the viewport into history rather than blanking it. See PLAN §56 and `term/protect.rs`.
-- **ReGIS / kitty graphics** — still ❌, but the reason has moved out of this section's premise. Nothing
-  about the engine blocks either. ReGIS is a vector language with no users worth the interpreter; kitty's
-  cost is its **protocol** — chunked transmission, image ids, placements, deletion commands, unicode
+- **ReGIS / kitty graphics** — the reason has moved out of this section's premise. Nothing about the
+  engine blocks either. ReGIS is a vector language with no users worth the interpreter; kitty's cost is
+  its **protocol** — chunked transmission, image ids, placements, deletion commands, unicode
   placeholders, animation — and not the decoder this bullet billed for until §70, since `f=24` / `f=32`
   are raw RGB/RGBA and need none. `[DEC]` / `[vendor]`. The placement, reservation, compositing and
   capability machinery §41 built is protocol-agnostic, so kitty would still be a scanner over that
-  machinery rather than a rethink — it is the scanner that is large.
+  machinery rather than a rethink — it is the scanner that is large. **§163 read kitty's own
+  specification and found this bullet was pricing four things as one**: the core is the gap this
+  sentence describes, but the unicode placeholders want per-cell image identity nothing here can hold
+  (§151, §155), and the file mediums and the animation are refusals rather than costs. Part 8 carries a
+  row each now. ReGIS keeps its one row and this bullet's price for it, re-checked in §163 and
+  unchanged.
 - **iTerm2 inline images (`OSC 1337 File=`)** — 🛑 since §70, and no longer in this section on cost.
   `image` has been a direct dependency since §53, so the decoder this bullet once charged for is already
   in the tree; what stops the sequence is `term/iterm.rs`, by allow-list and by payload cap. The decision
@@ -1757,7 +1762,10 @@ names a price has to be re-read whenever the price is paid somewhere else, and n
 | Feature | Status | Note |
 |---|---|---|
 | Sixel images | ✅ | the DCS `q` bitmap format, decoded and composited by cmote itself with no engine work (§41) |
-| Kitty graphics protocol / unicode placeholders / animation | ❌ | kitty's image protocol — an APC string carrying chunked transmission, image ids, placements, deletions, unicode placeholders and animation; `f=24`/`f=32` payloads are raw RGB and need no decoder at all (part 5, §41, §70) |
+| Kitty graphics — transmission and placement | ❌ | kitty's image protocol proper: an APC string carrying chunked base64 (`t=d`, `m=1`), image and placement ids, a placement, and the deletions that end one. A real gap and the one row of this family that could still land by the route sixel took — scan the APC beside the stream (§41), composite with the code already in the tree, anchor to an absolute document line. `f=24` / `f=32` payloads are raw RGB and need no decoder at all. **Read as one row with the two below until §163**, which split them because they are priced differently and only this one is a gap. What an implementation must not do first is ANSWER: detection is a query action, and the specification's own words for a reply are "the terminal emulator supports the protocol", so the `OK` is a promise about all of it — GIP's DA1 attribute `90` in a different spelling (§155). Unlike GIP the protocol has per-request error codes (`ENOENT`, `EINVAL`, `ETOODEEP`, `ECYCLE`, `ENOPARENT`), so a subset CAN decline individual requests once the core is real, which is why this stays a gap rather than becoming a refusal (part 5, §41, §70, §155, §163) |
+| Kitty graphics — unicode placeholders | ❌ | the virtual-placement half: a placement is referenced from the TEXT stream, by `U+10EEEE` cells whose diacritics encode which image and which row and column of it each cell shows. Priced apart from the row above in §163 and priced exactly as GIP's lifetime was (§155): it needs **per-cell image identity**, and the engine's per-cell flag word is full (§151), a map beside the grid is dropped on every reflow, and a per-cell map is unbounded in remote input (§12). §41 met the requirement differently and that is why sixel works — an image is anchored to a document line and reserves its cells, so no cell remembers anything. So this is the one part of the protocol cmote's grid model cannot hold, rather than the one nobody has written (§12, §41, §151, §155, §163) |
+| Kitty graphics — file / temp-file / shared-memory transmission (`t=f` / `t=t` / `t=s`) | 🤷 | the three mediums that are not the escape sequence: the payload names a **path on the user's own machine** and the terminal reads it — following symlinks, per the specification — and for `t=t` **deletes** it afterwards, for `t=s` **unlinks** the shared-memory object. A remote directing cmote to read and then remove a local file it names is the shape refused at every other door: iTerm's `OSC 1337 File=` (🛑, §70), `local::path::to_native` being the local layer's one-directional boundary, and shell programs resolved only from known locations and never from remote text. Refused in principle and by nothing in particular, because `vte` drops the whole APC string before cmote is offered a byte of it (§12, §70, §163) |
+| Kitty graphics — animation (`a=f`, `z=<ms>`) | 🤷 | frames composited onto a canvas and shown in sequence, the `z` key giving the gap **in milliseconds** before the next one. That is a repaint clock whose rate a remote chooses, and cmote runs no animation timer and never will — the decision §65 took for the cursor and §162 spent on SGR blink, where the same request arrives one attribute at a time. The five frame clocks `App::subscription` does arm are each armed by a cmote-side condition and disarmed when it clears; this one would be armed by remote content for as long as it kept sending frames. Refused in principle, and dropped upstream with the rest of the APC string (§65, §122, §162, §163) |
 | ReGIS | ❌ | DEC's vector graphics language, drawn by an interpreted command stream (part 5) |
 | iTerm2 inline images (OSC 1337) | 🛑 | the OSC-framed inline image, on a framer cmote already runs; the OSC table's `iTerm 1337 File` row carries it (§70) |
 | Graphics capability report | ✅ | XTSMGRAPHICS' read — 256 colour registers, 4096×4096 and 4 Mpx, the decoder's real limits. The set action has its own row in the CSI table (§41, `term/query.rs`) |
@@ -1825,7 +1833,10 @@ and selection colours, the page family, DEC's macros and status line, contour's 
 semantic-block query. A column that quadruples on one reading was never six rows long; it was six rows
 *known*, and the same caution now applies to the other three. That leaves the plain ❌ column, worth reading as the real list: the
 kitty graphics protocol (a protocol's worth of work, not the decoder this document charged it for until
-§70), ~~blink (the engine drops
+§70 — and **§163 split it into four rows**, of which two are gaps and two are refusals in principle: the
+core is buildable by sixel's own route, the unicode placeholders want per-cell image identity nothing
+here can hold, and the file mediums and the animation are decisions cmote has already taken at other
+doors), ~~blink (the engine drops
 it — and §151 measured *why*: the per-cell flag word is a `u16` with fifteen bits named and the
 sixteenth already borrowed by §56, so the gap is a bit that does not exist)~~ — **§161 moved blink
 to 🛑**, having weighed the second price §151 had not: the bit could come free on somebody else's
@@ -2378,6 +2389,18 @@ Quoted where a row's wording now rests on it.
   settled from an implementation rather than a specification**, and it is worth naming as such: what
   was read is what xterm DOES, which is the same standing the `vte` and engine reads have and a lower
   one than a published grammar.
+- **Kitty's graphics protocol, read for the first time in §163** — `sw.kovidgoyal.net/kitty/graphics-protocol/`.
+  Four rows rest on it and each quotes the sentence it turns on. **Detection**: a client sends a query
+  action and "if you get back a response to the graphics query, the terminal emulator supports the
+  protocol" — so the `OK` is a promise about the whole of it, which is GIP's DA1 attribute `90` in
+  another spelling (§155). **The mediums**: `t=d` is the escape sequence itself, `t=f` "a regular file
+  path" the terminal must read *following symlinks*, `t=t` a temporary file the terminal **deletes
+  after reading**, `t=s` a POSIX shared-memory object it **unlinks** — three of the four being a remote
+  naming a path on the user's machine. **Animation**: "the `z` key specifies gap in milliseconds before
+  showing next frame", which is a remote-chosen repaint rate. **Error codes** are per-request —
+  `ENOENT`, `EINVAL`, `ETOODEEP`, `ECYCLE`, `ENOPARENT`, replied "unless silenced" by `q=2` — and that
+  is the difference from GIP that keeps the core a gap: a subset can decline one request without
+  lying about the protocol, once there is a core to decline from.
 - **OSC 8's own specification** (Egmont Koblinger's, the document VTE and iTerm2 implement): the
   sequence is `OSC 8 ; params ; URI ST` and is closed with `OSC 8 ; ; ST`; "params is an optional list
   of key=value assignments, separated by the `:` character", of which only `id` is defined — "character
