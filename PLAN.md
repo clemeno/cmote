@@ -19042,3 +19042,138 @@ one sentence since it was written, and the sentence was right about the part it 
 source turned one row into four, moved two of them out of the gap column, and produced the one fact
 that distinguishes this protocol from the one §155 refused. The same lesson §98 recorded about prices
 quoted three times, met again on a feature nobody had re-read because nobody disputed it.
+
+## §164 — The OSC table's last gap, and a specification nobody had read
+
+The third sweep of the shape §161 ran, on the *OSC* table — which had exactly one ❌ left. One row,
+one question, and the answer was that the question had never been asked of the right document.
+
+> | 133 (any other phase letter) | Further prompt phases | ❌ |
+
+The note explained the mark like this: `N`, `P` and `L` are all emitted somewhere and **the reachable
+accounts disagree about what they mean** — vtdn reports Konsole tracking the prompt as "A/N/P", a zsh
+write-up uses `133;P;k=i` for `PS1` and `133;P;k=s` for `PS2`, and a Ghostty fork uses `133;P` for a
+prompt *redraw* that must not open a new block. *"Not a decision — a letter cannot be supported or
+refused until it means one thing."*
+
+Every one of those accounts is a **restatement**. The thing they restate is Per Bothner's
+semantic-prompts proposal, and reading it dissolves the disagreement in one paragraph.
+
+### What the proposal says
+
+Eight phase letters, each with one meaning:
+
+* **`N`** — *"Same as `OSC "133;A"` but may first implicitly terminate a previous command"*, keyed on
+  an `aid`, and *"if no `aid` is specified, treat as an `aid` whose value is the empty string"*.
+* **`P`** — *"Explicit start of prompt. Optional after an `A` or `N` command."* It carries the `k`
+  (kind) option: *"regular primary prompt (`k=i` or default), right-side prompts (`k=r`), or prompts
+  for continuation lines (`k=c` or `k=s`)"*.
+* **`I`** — *"End of prompt and start of user input, terminated by end-of-line"* — `B`'s sibling.
+* **`L`** — a *fresh-line*: *"If the cursor is the initial column ... do nothing. Otherwise, it does
+  the equivalent of `"\r\n"`."*
+
+The three reports now agree with each other. `133;P;k=i` for `PS1` and `133;P;k=s` for `PS2` is the
+kind taxonomy applied. Konsole's "A/N/P" is three spellings of one event. And a fork using bare
+`133;P` for a redraw is using the one letter that starts a **prompt** without starting a **command**
+— which is exactly what it is for.
+
+### What was built
+
+Three letters, and all three land on marks cmote already has, which is the measurement that mattered:
+
+* **`N`** shares `A`'s arm. The implicit termination is keyed on an `aid`; cmote holds none, so every
+  command it has carries the empty one and the termination is unconditional — which is what
+  `Prompts::apply` already does for `A`, superseding a half-built command rather than filing it. A
+  variant of its own would have behaved identically, so the arm says it instead.
+* **`P`** shares it too, and brings the `k=` reading with it — that field is defined on `P`, and
+  kitty puts it on `A`. **Only a continuation is not a prompt start**: `k=c` joins the `k=s` cmote
+  already suppressed, `k=i` keeps its mark as the primary prompt, and `k=r` keeps its as the
+  right-side one, which shares the line of the prompt it decorates and so re-anchors a line `record`
+  already holds. `k=c` had been read as an *unknown* kind until now — that is, as a prompt — which is
+  §97's rule choosing the recoverable guess, working exactly as designed and now retired in favour of
+  reading the value.
+* **`I`** shares `B`'s. The two differ only in where the user's **input region** ends, and cmote
+  holds no input region: `PromptEnd` moves nothing. The divergence is named rather than hidden — it
+  would start to matter the day cmote showed the command line, which §71 and §97 refuse.
+
+### What is refused
+
+**`L` — 🛑, and it is the only one of the four that is not a mark.** Every other letter tells cmote
+something *about* text the engine is already drawing. This one tells cmote to **draw**, on a channel
+whose declared job is saying where the prompt sits — the ground `click_events=1` is refused on (§95),
+one level up: there a field, here the letter itself.
+
+What it would break is §34's own arrangement: the scanner **observes**, and is a pure `bytes -> marks`
+function with no engine in it, which is what lets it be unit-tested without one; `term::mod` places
+what it finds once the engine has reached each offset; the engine draws. Honouring `L` makes the
+observer a writer — a `Mark` variant naming an action rather than a phase, `apply` grown the cursor
+**column** it does not take, and a second thing putting bytes on the grid (§71, §73).
+
+The cost is stated rather than waved off: a stream that leans on it gets its prompt on the current
+line where another terminal would break the line first. cmote does not perform the fresh-line `A`
+also specifies, so this is one decision applied twice and not a special case made for `L`.
+
+**The rest of the alphabet — 🛑.** A letter no source defines cannot be a gap: there is nothing to
+build. `parse`'s letter list is an allow-list, the construction `dsr.rs`, `iterm.rs`, `pointer.rs`
+and `modkeys.rs` are all 🛑 for, and a test now walks the whole alphabet minus the eight.
+
+Prove-it, five, each reverted:
+
+```
+N dropped from the prompt-start arm        → "the implicitly terminating spelling …" fails
+P dropped from the prompt-start arm        → "the explicit prompt start reads its kind …" fails
+k=c dropped from the kind filter           → the same test fails on its continuation half
+I dropped from the prompt-end arm          → "the line terminated spelling …" fails
+L wired into the prompt-start arm          → "the fresh line letter is refused …" fails
+Q admitted to the prompt-start arm         → "133;Q produced a mark, so the letter list has
+                                              stopped being an allow-list"
+```
+
+The first draft refused `L` **by name**, with an arm of its own so a reader widening the match would
+meet the reason. Clippy's `match_same_arms` rejected it and was right: an arm returning `None` beside
+a wildcard returning `None` is a branch that never branches. The refusal is the allow-list; what
+*names* the letter is a test — which is where a decision should be looked for anyway, a test failing
+where a comment does not.
+
+### What was corrected
+
+**`cl=` is not a hint about the prompt.** The row read *"multi-line prompt hint … VS Code's field on
+the prompt-start mark, saying the prompt runs over several lines"*, refused it as restating something
+cmote can already see, and concluded *"nothing would change if it were honoured"*. The proposal makes
+`cl=` *"a request from the application to the terminal to translate clicks in the input area to
+cursor movement"*, its values differing in reach — `line` within one input line, `m` between lines
+using only left/right, `v` the same with up/down, `w` the same with the application handling smart
+vertical movement. **The `m` is *movement*, not *multi-line***, which is presumably how the misreading
+happened. Honouring it means cmote synthesising arrow keys to the pty on a click, and the companion
+`move-keys=` lets the sender choose the bytes: *"the defaults are the standard arrow-key sequences:
+`CSI D` etc."*
+
+So the correct ground is not the second-source rule but §95's, and it is sharper there than the field
+already refused on it: `click_events=1` asks for a click to be **reported**, `cl=` asks for keystrokes
+to be **invented** for it. Ghostty ships the two as one feature. The mark does not move — cmote
+refuses both structurally, every trailing field dropped and `Mark` carrying none — but a 🛑 with the
+wrong reason invites the wrong person to revisit it.
+
+### What to keep
+
+**A restatement is not a specification, and the failure is undetectable from inside.** Contour's page
+and vtdn's are careful, useful documents; between them they gave §95 and §96 the terminator forms,
+the optional exit code and eleven implementers. They also gave this document a field's meaning
+inverted and a letter space described as contested. Nothing here could have caught either without the
+document they restate. The rule is not "distrust restatements" — it is that a row sourced at one
+remove is **provisional**, and should say so in the row.
+
+**A blocked primary source is a task, not a fact about the world.** §95 wrote down that the
+specification is Bothner's and that its host serves an access-control interstitial instead of the
+document. That is a correct, honest note — and it sat in Evidence for sixty-eight sections while the
+row it explained stayed ❌ through §161, §162 and §163 sweeping three other tables. The host is still
+blocked; a
+verbatim copy, cross-checked against an independent restatement and against what the emitters
+actually write, was enough. **The tell is a note that explains a mark by what the reader could not
+establish rather than by what the sequence does.** `L` is refused for what `L` does. The old row was
+marked for what nobody had read.
+
+**"The sources disagree" is a claim about the sources, and it needs the same evidence as a claim
+about a sequence.** Three reports that look inconsistent are, much more often, three views of one
+thing. This row wrote the inconsistency into a mark and made it the reason a decision could not be
+taken — and the disagreement did not survive one reading of the document all three were describing.

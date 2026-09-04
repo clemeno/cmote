@@ -2083,6 +2083,28 @@ rows out, and every one of the seven can now be checked on its own.
 
 ---
 
+**§164 swept the OSC table's last ❌ and found the row had never read the specification it was
+about.** One row, *"133 (any other phase letter)"*, marked ❌ under the note that *"a letter cannot be
+supported or refused until it means one thing"* and that the reachable accounts *"disagree about what
+they mean"*. They are restatements. The thing they restate — Per Bothner's semantic-prompts proposal
+— defines eight letters and gives each one meaning, and the three "disagreeing" reports turn out to
+be three partial views of `P`. So the row became six: `N`, `P` and `I` are ✅, each mapping onto a
+mark cmote already has; `L` is 🛑, the one letter of the family that is not a mark but a *write*; and
+the alphabet past the eight is 🛑, because a letter no source defines cannot be a gap — there is
+nothing to build, and `parse`'s letter list is an allow-list of the same construction the `dsr.rs`,
+`iterm.rs`, `pointer.rs` and `modkeys.rs` rows are all 🛑 for. A sixth row was corrected rather than
+answered: `cl=` is not a hint about the prompt's shape, it asks the terminal to manufacture arrow
+keys on a click, and its companion `move-keys=` lets the sender choose them.
+
+**The gap was known, recorded, and left open for sixty-eight sections.** §95 wrote down that the
+specification is Bothner's and that its host serves this reader an interstitial instead of the
+document; §96 read the two restatements and, finding them different, wrote *disagreement* into the
+mark. Nothing was hidden — the Evidence section says all of it — and the ❌ still outlived §161, §162
+and §163 sweeping three other tables. **A blocked primary source is a task, not a fact about the
+world**, and the
+tell is a note that explains a mark by what the *reader* could not establish rather than by what the
+sequence does.
+
 ## Evidence
 
 Audited file:line anchors behind the claims above, for later re-checking.
@@ -2592,6 +2614,27 @@ This is that gap closed, one vendor at a time — and two of them could not be c
   (Contour, foot, Ghostty, iTerm2, kitty, Konsole, VTE, WezTerm, Windows Terminal, tmux, cy) and
   thirteen that do not implement it — **Alacritty and xterm among them**, which is the citation §34's
   founding claim never had.
+- **Bothner's proposal itself, reached at last** (read for §164). The two bullets above are the whole
+  reason four rows sat unanswerable for sixty-eight sections: §95 established that the specification
+  exists and that its host will not serve it here, §96 settled for the restatements, and the ❌ row
+  those two produced said the sources *"disagree about what they mean"* when what disagreed was two
+  vendors' summaries of one document. **`gitlab.freedesktop.org` still answers a fetch with an
+  Anubis "Access Denied" interstitial**, and `web.archive.org` is not reachable from this tool either
+  — so the text was read from a **verbatim copy** and cross-checked two ways: against an independent
+  restatement of the same passages, and against the emitters (kitty's shell integration writes `A`,
+  `C` and `D` only; Ghostty ships `click-events` and `cl=line`). Where the copy and the checks agree
+  the rows quote them; where they did not reach, the rows say so. What it settles: **eight phase
+  letters**, `A` `B` `C` `D` `I` `L` `N` `P`, each with one meaning — `N` *"same as `OSC "133;A"` but
+  may first implicitly terminate a previous command"* keyed on an `aid` that defaults to the empty
+  string, `P` *"explicit start of prompt"* carrying the `k` (kind) option (`k=i` or default primary,
+  `k=r` right-side, `k=c` or `k=s` continuation), `I` *"end of prompt and start of user input,
+  terminated by end-of-line"*, and `L` a *fresh-line*, *"otherwise it does the equivalent of
+  `"\r\n"`"*. And it **corrects the bullet above**: vtdn's *"VS Code's `A ; cl=m` for a multi-line
+  prompt"* is not what that field is. `cl=` is *"a request from the application to the terminal to
+  translate clicks in the input area to cursor movement"* — `line`, `m`, `v`, `w` differing in how far
+  the motion may reach — with a companion `move-keys=` naming the bytes to send, *"the defaults are
+  the standard arrow-key sequences: `CSI D` etc."* A restatement is not a specification, and this is
+  the failure mode: it was wrong in a way nothing here could detect without the thing it restated.
 - **kitty's `unscroll`** (`sw.kovidgoyal.net/kitty/unscroll/`, read for §101) is the specification
   behind a row §98 attributed to the wrong terminal. Contour's own definition says so —
   `"Scroll Down with Scrollback Fill (kitty unscroll)"`, tagged `VTExtension::Unknown` — and kitty's
